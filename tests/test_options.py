@@ -154,6 +154,32 @@ class TestGex:
         assert g.zero_flip is None and g.top_levels == []
 
 
+class TestSkewTerm:
+    def test_skew_sign_from_iv_curve(self):
+        ks = np.linspace(90, 110, 41)
+        # крутой equity-скью: IV выше ниже спота -> RR отрицательный (медвежий)
+        iv = 0.2 * (1 - 1.5 * (ks - 100) / 100)
+        sk = O.risk_reversal_skew(ks, iv, iv, 100.0, otm=0.04)
+        assert sk is not None and sk["rr"] < 0 and sk["tilt"] == "медвежий"
+        # обратный наклон -> бычий
+        iv2 = 0.2 * (1 + 1.5 * (ks - 100) / 100)
+        sk2 = O.risk_reversal_skew(ks, iv2, iv2, 100.0, otm=0.04)
+        assert sk2["rr"] > 0 and sk2["tilt"] == "бычий"
+
+    def test_skew_none_on_bad_iv(self):
+        assert O.risk_reversal_skew([100, 101], [np.nan, np.nan],
+                                    [np.nan, np.nan], 100.0) is None
+
+    def test_term_shapes(self):
+        contango = O.term_structure([(2, 0.15), (9, 0.17), (30, 0.19)])
+        assert contango["shape"] == "контанго" and contango["slope"] > 0
+        backw = O.term_structure([(2, 0.25), (9, 0.20), (30, 0.18)])
+        assert backw["shape"] == "бэквордация" and backw["slope"] < 0
+        flat = O.term_structure([(2, 0.20), (30, 0.201)])
+        assert flat["shape"] == "плоская"
+        assert O.term_structure([(2, 0.2)]) is None
+
+
 class TestGammaPin:
     def test_magnet_is_positive_wall(self):
         ks = np.linspace(90, 110, 21)

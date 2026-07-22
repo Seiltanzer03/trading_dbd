@@ -125,6 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "tick": engine.tick_payload(),
             "ridge": engine.ridge_payload(),
             "journal": engine.journal.list_trades(),
+            "edge_track": engine.journal.edge_track(),
             "setups": _setups_payload(),
             "instruments": {c: {"yahoo": i.yahoo, "options_proxy": i.options_proxy}
                             for c, i in INSTRUMENTS.items()},

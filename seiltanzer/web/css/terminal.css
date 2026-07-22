@@ -367,6 +367,9 @@ html, body {
 }
 .journal-table td.notes { white-space: normal; max-width: 220px; color: var(--dim); }
 
+.edge-track { font-size: 11px; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+.edge-track b { font-weight: 600; }
+
 .setup-stats-block { margin-top: 16px; border-top: 1px solid var(--rule); padding-top: 10px; }
 .setup-grid {
   display: grid;

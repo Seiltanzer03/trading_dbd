@@ -39,6 +39,7 @@ async function boot() {
     S.ridge = st.ridge;
     S.setups = st.setups;
     S.journal = st.journal;
+    S.edge_track = st.edge_track;
     renderAll();
   } catch (e) {
     console.error('state fetch failed', e);
@@ -85,6 +86,7 @@ function renderAll() {
   onTick();
   renderJournal();
   renderSetupGrid();
+  renderEdgeTrack();
   ridge.setData(S.ridge, S.tick?.prob?.p);
 }
 
@@ -94,6 +96,7 @@ async function refreshJournalAndSetups() {
   S.setups = st.setups;
   S.ridge = st.ridge;
   S.tick = st.tick;
+  S.edge_track = st.edge_track;
   renderAll();
 }
 
@@ -408,15 +411,37 @@ function renderRidgeStats() {
     : `Поправка не применена: ${t.sigma.reason || 'нет данных'} — модель работает без опционной поправки (честнее, чем выдумывать).`;
 
   if (!os) {
-    ['rg-proxy', 'rg-expiry', 'rg-move', 'rg-p-take', 'rg-p-stop']
+    ['rg-proxy', 'rg-expiry', 'rg-move', 'rg-skew', 'rg-term', 'rg-p-take', 'rg-p-stop']
       .forEach((id) => { $('#' + id).textContent = '—'; });
     $('#rg-proxy').textContent = t.sigma.source === 'vol_index'
       ? 'ИНДЕКС ВОЛЫ' : '—';
     $('#rg-p-model').textContent = S.tick?.prob ? fmtPct(S.tick.prob.p) : '—';
     return;
   }
-  $('#rg-proxy').textContent = os.proxy + (os.demo ? ' ◆' : '');
+  $('#rg-proxy').textContent = os.proxy + (os.demo ? ' ◆' : '') + (os.experimental ? ' ⚠' : '');
+  $('#rg-proxy').dataset.tip = os.experimental
+    ? `⚠ ЭКСПЕРИМЕНТАЛЬНЫЙ ПРОКСИ ${os.proxy}: US-ETF на страну/валюту, трекинг неточный и опционы тонкие — плотность/скью/GEX/гамма для ${t.instrument} НИЗКОЙ НАДЁЖНОСТИ, используйте как грубый контекст.`
+    : `Опционная цепочка ETF-прокси ${os.proxy}. Страйки пересчитаны в шкалу инструмента пропорцией цена/спот_прокси (приближение).`;
   $('#rg-expiry').textContent = os.expiry;
+  // скью (risk-reversal)
+  const sk = os.skew;
+  if (sk) {
+    $('#rg-skew').textContent = `${(sk.rr * 100 >= 0 ? '+' : '')}${(sk.rr * 100).toFixed(1)}пп · ${sk.tilt}`;
+    $('#rg-skew').className = 'val ' + (sk.tilt === 'бычий' ? 'green' : sk.tilt === 'медвежий' ? 'red' : '');
+    $('#rg-skew').dataset.tip =
+      `Risk-reversal = IV(OTM call) − IV(OTM put) = ${fmtPct(sk.call_iv_otm, 1)} − ${fmtPct(sk.put_iv_otm, 1)} = ${(sk.rr * 100).toFixed(1)}пп.\n` +
+      `Уклон: ${sk.tilt}. Отрицательный = рынок платит за защиту от падения; положительный = спрос на рост.`;
+  } else { $('#rg-skew').textContent = '—'; $('#rg-skew').className = 'val'; }
+  // term-structure
+  const tm = os.term;
+  if (tm) {
+    $('#rg-term').textContent = `${tm.shape} (${(tm.slope * 100 >= 0 ? '+' : '')}${(tm.slope * 100).toFixed(1)}%)`;
+    $('#rg-term').dataset.tip =
+      `Наклон ATM-волы: ${(tm.slope * 100).toFixed(1)}% -> ${tm.shape}.\n` +
+      (tm.shape === 'бэквордация' ? 'Ближняя вола выше — near-term стресс/событие, движение ждут скоро.'
+       : tm.shape === 'контанго' ? 'Дальняя вола выше — спокойно сейчас, далёкие по времени цели ок.'
+       : 'Плоская — без выраженного ожидания.');
+  } else { $('#rg-term').textContent = '—'; }
   $('#rg-move').textContent = `${fmtPct(os.implied_move_frac)} / ${fmtPrice(os.implied_move_abs_instr)}`;
   $('#rg-move').dataset.tip =
     `Implied move до экспирации ${os.expiry}:\nATM straddle ${os.proxy} / спот = ${fmtPct(os.implied_move_frac)}\n` +
@@ -453,6 +478,25 @@ function renderJournal() {
       `<td class="notes">${(t.notes || '').slice(0, 120)}</td>`;
     tbody.appendChild(tr);
   }
+}
+
+function renderEdgeTrack() {
+  const et = S.edge_track;
+  const el = $('#edge-track');
+  if (!el) return;
+  if (!et || et.n === 0) {
+    el.textContent = 'ещё нет закрытых сделок с зафиксированным краем — накопится по мере торговли';
+    el.className = 'edge-track dim';
+    return;
+  }
+  const pos = et.pos_wr == null ? '—' : fmtPct(et.pos_wr);
+  const neg = et.neg_wr == null ? '—' : fmtPct(et.neg_wr);
+  const better = et.pos_wr != null && et.neg_wr != null && et.pos_wr > et.neg_wr;
+  el.innerHTML =
+    `<b>+КРАЙ:</b> ${pos} винрейт (${et.pos_n} сд.) &nbsp;·&nbsp; ` +
+    `<b>−/0 КРАЙ:</b> ${neg} винрейт (${et.neg_n} сд.) &nbsp;·&nbsp; ` +
+    `<span class="${better ? 'green' : 'dim'}">${better ? 'край предсказателен ✓' : 'пока без явного преимущества'}</span>`;
+  el.className = 'edge-track';
 }
 
 function renderSetupGrid() {

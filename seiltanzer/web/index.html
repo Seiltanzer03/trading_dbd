@@ -143,6 +143,10 @@
           data-tip="Реализованная вола инструмента: std лог-доходностей 20 дневных баров × √252. Источник: дневки Yahoo.">—</span></div>
         <div class="stat-row"><span class="lbl">ПОПРАВКА σ</span><span class="val" id="rg-ratio"
           data-tip="">—</span></div>
+        <div class="stat-row"><span class="lbl">СКЬЮ (RR)</span><span class="val" id="rg-skew"
+          data-tip="Risk-reversal: IV OTM-колла − IV OTM-пута (~4% OTM). Отрицательный = путы дороже, рынок платит за защиту от падения (медвежий уклон); положительный = спрос на рост (бычий). Сигнал направления рынка.">—</span></div>
+        <div class="stat-row"><span class="lbl">TERM ВОЛЫ</span><span class="val" id="rg-term"
+          data-tip="Term-structure: наклон ATM-волы по экспирациям. Контанго (дальняя выше) = спокойно сейчас; бэквордация (ближняя выше) = near-term стресс/событие, движение ждут скоро.">—</span></div>
         <div class="stat-sep"></div>
         <div class="stat-row"><span class="lbl">P(ЗА ТЕЙК) РЫНОК</span><span class="val" id="rg-p-take"
           data-tip="">—</span></div>
@@ -213,6 +217,11 @@
         </thead>
         <tbody></tbody>
       </table>
+      <div class="setup-stats-block">
+        <div class="lbl panel-mini-title">КРАЙ vs ФАКТ <span class="dim">СБЫВАЕТСЯ ЛИ ПЕРЕОЦЕНКА РЫНКА</span></div>
+        <div class="edge-track" id="edge-track"
+             data-tip="Из закрытых сделок: винрейт тех, где на входе был положительный край (рынок недооценивал сетап), против сделок с отрицательным/нулевым краем. Если +край даёт заметно выше винрейт — метрика реально предсказательна на ВАШИХ сделках.">—</div>
+      </div>
       <div class="setup-stats-block">
         <div class="lbl panel-mini-title">СТАТИСТИКА СЕТАПОВ <span class="dim">2α/(α+β) ПО ЖУРНАЛУ · КАЛИБРОВКА ПРИ ≥20</span></div>
         <div class="setup-grid" id="setup-grid"></div>

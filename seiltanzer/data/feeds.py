@@ -83,8 +83,9 @@ class DemoMarket:
             return None
         spot = self.prices[code]
         iv = 0.16 + 0.04 * math.sin(time.time() / 300.0)
+        iv_skew = 0.7 * math.sin(time.time() / 240.0)   # меандрирует бычий/медвежий
         return opt.synth_chain(spot, iv, t_years=2.0 / 365.0, n_strikes=41,
-                               width=0.06, oi_skew=0.5,
+                               width=0.06, oi_skew=0.5, iv_skew=iv_skew,
                                seed=int(time.time()) // 30)
 
 
@@ -256,8 +257,11 @@ class MarketData:
         if self.demo:
             raw = self.demo_market.chain(self.instrument_code)
             spot = self.demo_market.prices[self.instrument_code]
+            term = self._demo_term()
             try:
-                metrics = self._compute_chain_metrics(raw, spot, proxy, demo=True)
+                metrics = self._compute_chain_metrics(
+                    raw, spot, proxy, demo=True,
+                    experimental=self.instrument.proxy_experimental, term=term)
                 self.chain = {"metrics": metrics,
                               **_status_dict(True, "demo", time.time(),
                                              source="synthetic BS chain")}
@@ -303,7 +307,10 @@ class MarketData:
                 "spot": spot,
                 "expiry": expiry,
             }
-            metrics = self._compute_chain_metrics(raw, spot, proxy, demo=False)
+            term = self._fetch_term(t, expiries, spot)
+            metrics = self._compute_chain_metrics(
+                raw, spot, proxy, demo=False,
+                experimental=self.instrument.proxy_experimental, term=term)
             self.chain = {"metrics": metrics,
                           **_status_dict(True, "live", time.time(),
                                          source=f"yfinance {proxy} {expiry}")}
@@ -319,18 +326,24 @@ class MarketData:
                 self.chain = {"metrics": None, **_status_dict(error=str(e)[:200])}
 
     def _compute_chain_metrics(self, raw: dict, spot: float, proxy: str,
-                               demo: bool) -> dict:
+                               demo: bool, experimental: bool = False,
+                               term: dict | None = None) -> dict:
         im = opt.implied_move(raw["strikes"], raw["call_mid"], raw["put_mid"],
                               spot, raw["t_years"])
         density = opt.bl_density(raw["strikes"], raw["call_mid"], raw["t_years"])
         gex = opt.gex_profile(raw["strikes"], raw["call_oi"], raw["put_oi"],
                               raw["call_iv"], raw["put_iv"], spot, raw["t_years"])
+        skew = opt.risk_reversal_skew(raw["strikes"], raw["call_iv"],
+                                      raw["put_iv"], spot)
         return {
             "proxy": proxy,
             "demo": demo,
+            "experimental": experimental,
             "spot": spot,
             "expiry": raw.get("expiry", "demo+2d"),
             "t_years": raw["t_years"],
+            "skew": skew,
+            "term": term,
             "implied_move": {
                 "atm_strike": im.atm_strike,
                 "straddle": im.straddle,
@@ -355,6 +368,29 @@ class MarketData:
             },
         }
 
+    def _demo_term(self, phase: float = 0.0) -> dict | None:
+        """Синтетическая term-structure: контанго/бэквордация меандрируют во времени."""
+        base = 0.16
+        slope = 0.08 * math.sin(time.time() / 300.0 + phase)
+        pts = [(2, base), (9, base * (1 + slope * 0.5)), (30, base * (1 + slope))]
+        return opt.term_structure(pts)
+
+    def _fetch_term(self, ticker, expiries, spot: float) -> dict | None:
+        """ATM-IV ближайших ~3 экспираций -> term-structure (live)."""
+        pts = []
+        for exp in list(expiries)[:3]:
+            try:
+                calls = ticker.option_chain(exp).calls
+                idx = (calls["strike"] - spot).abs().idxmin()
+                iv = float(calls.loc[idx, "impliedVolatility"])
+                days = (dt.datetime.strptime(exp, "%Y-%m-%d")
+                        - dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)).days
+                if iv > 0:
+                    pts.append((max(days, 1), iv))
+            except Exception:  # noqa: BLE001
+                continue
+        return opt.term_structure(pts) if len(pts) >= 2 else None
+
     # ---------------------------------------------------------- demo seeding
 
     def _seed_demo_snapshots(self) -> None:
@@ -370,8 +406,11 @@ class MarketData:
                 wobble = 1.0 + 0.004 * math.sin(i * 1.3) + 0.002 * (i - 4)
                 spot = base * wobble
                 raw = opt.synth_chain(spot, 0.16 + 0.01 * math.cos(i), 2.0 / 365.0,
-                                      n_strikes=41, width=0.06, oi_skew=0.5, seed=i)
-                m = self._compute_chain_metrics(raw, spot, inst.options_proxy, demo=True)
+                                      n_strikes=41, width=0.06, oi_skew=0.5,
+                                      iv_skew=0.5 * math.sin(i * 0.8), seed=i)
+                m = self._compute_chain_metrics(
+                    raw, spot, inst.options_proxy, demo=True,
+                    experimental=inst.proxy_experimental, term=self._demo_term(i))
                 self.cache.add_chain_snapshot(inst.options_proxy, m,
                                               ts=now - (8 - i) * 600.0)
 

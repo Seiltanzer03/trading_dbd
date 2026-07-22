@@ -276,6 +276,58 @@ def gex_profile(strikes, call_oi, put_oi, call_iv, put_iv,
 
 # --------------------------------------------------------- синтетическая цепочка
 
+def term_structure(points) -> dict | None:
+    """Term-structure волы из ATM-IV нескольких экспираций.
+
+    points: список (days, atm_iv). slope = (IV_дальней − IV_ближней)/IV_ближней.
+      slope > 0 — КОНТАНГО (дальняя вола выше): рынок спокоен сейчас, ждёт
+        нормализации; далёкие цели по времени реальнее.
+      slope < 0 — БЭКВОРДАЦИЯ (ближняя выше): near-term стресс/событие —
+        ожидается движение скоро.
+    """
+    pts = [(float(d), float(v)) for d, v in points if v and v > 0]
+    if len(pts) < 2:
+        return None
+    pts.sort(key=lambda x: x[0])
+    near, far = pts[0][1], pts[-1][1]
+    slope = (far - near) / near if near > 0 else 0.0
+    thr = 0.03
+    shape = "контанго" if slope > thr else "бэквордация" if slope < -thr else "плоская"
+    return {"points": [{"days": d, "atm_iv": v} for d, v in pts],
+            "slope": slope, "shape": shape}
+
+
+def risk_reversal_skew(strikes, call_iv, put_iv, spot: float,
+                       otm: float = 0.04) -> dict | None:
+    """Скью опционов (risk-reversal) как сигнал направления рынка.
+
+    RR = IV(OTM call ~spot·(1+otm)) − IV(OTM put ~spot·(1−otm)).
+      RR < 0 — путы дороже: рынок платит за защиту от падения (медвежий уклон);
+      RR > 0 — коллы дороже: спрос на рост (бычий уклон).
+    Возвращает {rr, call_iv_otm, put_iv_otm, atm_iv, tilt, otm} или None.
+    """
+    k = np.asarray(strikes, dtype=float)
+    civ = np.asarray(call_iv, dtype=float)
+    piv = np.asarray(put_iv, dtype=float)
+    ok_c = np.isfinite(k) & np.isfinite(civ) & (civ > 0)
+    ok_p = np.isfinite(k) & np.isfinite(piv) & (piv > 0)
+    if ok_c.sum() < 3 or ok_p.sum() < 3 or spot <= 0:
+        return None
+    kc, ivc = k[ok_c], civ[ok_c]
+    kp, ivp = k[ok_p], piv[ok_p]
+    order_c, order_p = np.argsort(kc), np.argsort(kp)
+    kc, ivc = kc[order_c], ivc[order_c]
+    kp, ivp = kp[order_p], ivp[order_p]
+    call_otm = float(np.interp(spot * (1 + otm), kc, ivc))
+    put_otm = float(np.interp(spot * (1 - otm), kp, ivp))
+    atm = float(0.5 * (np.interp(spot, kc, ivc) + np.interp(spot, kp, ivp)))
+    rr = call_otm - put_otm
+    thr = 0.01  # 1 пункт волы
+    tilt = "бычий" if rr > thr else "медвежий" if rr < -thr else "нейтральный"
+    return {"rr": rr, "call_iv_otm": call_otm, "put_iv_otm": put_otm,
+            "atm_iv": atm, "tilt": tilt, "otm": otm}
+
+
 def gamma_pin(strikes_instr, net_gex, zero_flip_instr, price: float,
               entry: float, stop: float, take: float, direction: str) -> dict:
     """Гамма-пиннинг: куда дилерское гамма-позиционирование тянет цену.
@@ -340,11 +392,13 @@ def gamma_pin(strikes_instr, net_gex, zero_flip_instr, price: float,
 
 def synth_chain(spot: float, sigma: float, t_years: float,
                 n_strikes: int = 41, width: float = 0.12, r: float = 0.0,
-                oi_skew: float = 0.0, seed: int | None = None) -> dict:
+                oi_skew: float = 0.0, iv_skew: float = 0.0,
+                seed: int | None = None) -> dict:
     """Синтетическая цепочка Блэка–Шоулза для тестов и демо-режима.
 
-    oi_skew > 0 — путы концентрируются ниже спота, коллы выше (реалистичный кейс
-    для проверки zero-gamma flip).
+    oi_skew > 0 — путы концентрируются ниже спота, коллы выше (для zero-gamma flip).
+    iv_skew — наклон IV по страйку (equity-скью: >0 путы дороже коллов). 0 = плоско
+    (по умолчанию, чтобы не влиять на тесты implied_move/density).
     """
     rng = np.random.default_rng(seed)
     ks = np.linspace(spot * (1 - width), spot * (1 + width), n_strikes)
@@ -355,14 +409,18 @@ def synth_chain(spot: float, sigma: float, t_years: float,
     put_oi = base * (1.0 - oi_skew * np.clip((ks - spot) / (0.05 * spot), -2, 2))
     call_oi = np.clip(call_oi + rng.uniform(0, 30, n_strikes), 1, None)
     put_oi = np.clip(put_oi + rng.uniform(0, 30, n_strikes), 1, None)
+    # IV-кривая: наклон (скью) + лёгкая улыбка; ниже спота IV выше при iv_skew>0
+    m = (ks - spot) / spot
+    iv = sigma * (1.0 - iv_skew * m + 0.25 * m * m)
+    iv = np.clip(iv, 0.01, None)
     return {
         "strikes": ks,
         "call_mid": calls,
         "put_mid": puts,
         "call_oi": call_oi,
         "put_oi": put_oi,
-        "call_iv": np.full(n_strikes, sigma),
-        "put_iv": np.full(n_strikes, sigma),
+        "call_iv": iv,
+        "put_iv": iv,
         "t_years": t_years,
         "spot": spot,
     }

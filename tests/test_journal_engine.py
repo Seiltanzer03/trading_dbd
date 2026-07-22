@@ -159,27 +159,36 @@ class TestEngineDemo:
         ridge = engine.ridge_payload()
         assert ridge["available"] is True
 
-    def test_eurusd_sigma_from_vol_index(self, engine):
+    def test_eurusd_experimental_proxy(self, engine):
+        # EURUSD теперь имеет экспериментальный ETF-прокси FXE (помечен)
         engine.market.set_instrument("EURUSD")
         for fn in (engine.market.refresh_price, engine.market.refresh_daily,
                    engine.market.refresh_vols, engine.market.refresh_chain):
             fn()
-        sr = engine.market.sigma_ratio()
-        # цепочки нет, но σ берётся из индекса волы (^EVZ)
-        assert sr["applied"] is True and sr["source"] == "vol_index"
-        assert sr["sigma_implied"] is not None
+        m = engine.market.chain["metrics"]
+        assert m["proxy"] == "FXE" and m["experimental"] is True
+        assert engine.market.sigma_ratio()["applied"] is True
+
+    def test_ger40_experimental_proxy(self, engine):
+        # GER40 -> EWG (экспериментальный прокси); ридж доступен, но помечен
+        engine.market.set_instrument("GER40")
+        engine.market.refresh_price()
+        engine.market.refresh_chain()
+        m = engine.market.chain["metrics"]
+        assert m["proxy"] == "EWG" and m["experimental"] is True
+        assert engine.ridge_payload()["available"] is True
 
     def test_ridge_unavailable_for_no_options(self, engine):
-        engine.market.set_instrument("GER40")
+        # JPY100 остаётся без опционных данных (FXY инвертирован — исключён)
+        engine.market.set_instrument("JPY100")
         engine.market.refresh_price()
         engine.market.refresh_chain()
         ridge = engine.ridge_payload()
         assert ridge["available"] is False
-        assert "GER40" in ridge["reason"]
+        assert "JPY100" in ridge["reason"]
         tick = engine.tick_payload()
         assert tick["options_summary"] is None
         assert tick["sigma"]["applied"] is False
-        assert "GER40" in tick["sigma"]["reason"]
 
     def test_rn_probs_present_with_trade(self, engine):
         engine.market.refresh_price()

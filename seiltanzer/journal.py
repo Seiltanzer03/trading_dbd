@@ -48,9 +48,14 @@ class Journal:
                     notes TEXT DEFAULT '',
                     zones TEXT DEFAULT '[]',
                     max_r REAL,
+                    edge_at_open REAL,
                     status TEXT NOT NULL DEFAULT 'open'
                         CHECK(status IN ('open','closed'))
                 )""")
+            # миграция для существующих БД без колонки edge_at_open
+            cols = [r[1] for r in self._conn.execute("PRAGMA table_info(trades)")]
+            if "edge_at_open" not in cols:
+                self._conn.execute("ALTER TABLE trades ADD COLUMN edge_at_open REAL")
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS account (
                     id INTEGER PRIMARY KEY CHECK(id = 1),
@@ -127,6 +132,35 @@ class Journal:
             self._conn.execute(
                 "UPDATE trades SET max_r = MAX(COALESCE(max_r, -1e9), ?) WHERE id=?",
                 (max_r, trade_id))
+
+    def update_edge_at_open(self, trade_id: int, edge: float | None) -> None:
+        """Фиксирует край (модель−рынок) на момент входа — только если ещё не задан."""
+        if edge is None:
+            return
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE trades SET edge_at_open=? WHERE id=? AND edge_at_open IS NULL",
+                (edge, trade_id))
+
+    def edge_track(self) -> dict:
+        """Сбывается ли переоценка: винрейт закрытых сделок с +краем и с −краем.
+
+        Если сделки, где вы видели положительный край (рынок недооценивал сетап),
+        закрываются в плюс чаще — край действительно предсказателен.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT edge_at_open, result_r FROM trades "
+                "WHERE status='closed' AND edge_at_open IS NOT NULL "
+                "AND result_r IS NOT NULL").fetchall()
+        pos = [r for r in rows if r["edge_at_open"] > 0]
+        neg = [r for r in rows if r["edge_at_open"] <= 0]
+
+        def wr(rs):
+            return (sum(1 for r in rs if r["result_r"] > 0) / len(rs)) if rs else None
+        return {"n": len(rows),
+                "pos_n": len(pos), "pos_wr": wr(pos),
+                "neg_n": len(neg), "neg_wr": wr(neg)}
 
     def update_zones(self, trade_id: int, zones: list) -> dict:
         with self._lock, self._conn:

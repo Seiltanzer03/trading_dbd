@@ -60,19 +60,22 @@ class Instrument:
     options_proxy: str | None     # тикер опционной цепочки (ETF-прокси) или None
     demo_price: float             # стартовая цена в демо-режиме
     demo_vol: float               # годовая вола в демо-режиме
+    proxy_experimental: bool = False  # тонкий/неточный прокси — помечать в UI
 
 
 INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
     Instrument("NAS100", "^NDX",     "QQQ", 21500.0, 0.22),
     Instrument("SP500",  "^GSPC",    "SPY", 6100.0,  0.17),
     Instrument("US30",   "^DJI",     "DIA", 44500.0, 0.15),
-    Instrument("GER40",  "^GDAXI",   None,  24300.0, 0.16),
-    Instrument("UK100",  "^FTSE",    None,  8900.0,  0.12),
+    # экспериментальные прокси — US-ETF на страну/валюту; трекинг неточный,
+    # опционы тонкие; данные помечаются «низкая надёжность» в интерфейсе.
+    Instrument("GER40",  "^GDAXI",   "EWG", 24300.0, 0.16, proxy_experimental=True),
+    Instrument("UK100",  "^FTSE",    "EWU", 8900.0,  0.12, proxy_experimental=True),
     Instrument("JPY100", "JPY=X",    None,  148.0,   0.10),
     Instrument("XAU",    "GC=F",     "GLD", 3350.0,  0.16),
     Instrument("XAG",    "SI=F",     "SLV", 38.0,    0.28),
-    Instrument("EURUSD", "EURUSD=X", None,  1.17,    0.07),
-    Instrument("USDCAD", "CAD=X",    None,  1.37,    0.06),
+    Instrument("EURUSD", "EURUSD=X", "FXE", 1.17,    0.07, proxy_experimental=True),
+    Instrument("USDCAD", "CAD=X",    "FXC", 1.37,    0.06, proxy_experimental=True),
 ]}
 
 # индексы волатильности (Yahoo). Первые три — ворота фильтров стратегии;

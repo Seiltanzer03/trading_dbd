@@ -136,6 +136,31 @@ class Engine:
             else:
                 factors.append({"k": "ГАММА", "v": "− зона: движения ускоряются (тренд чище)", "tone": "neutral"})
 
+        # скью (risk-reversal): направление рынка vs направление сделки
+        opts = p.get("options_summary") or {}
+        skew = opts.get("skew")
+        direction = (prob or {}).get("r") is not None and (p.get("trade") or {}).get("direction")
+        if skew and direction:
+            tilt = skew["tilt"]
+            aligned = (tilt == "бычий" and direction == "long") or \
+                      (tilt == "медвежий" and direction == "short")
+            against = (tilt == "медвежий" and direction == "long") or \
+                      (tilt == "бычий" and direction == "short")
+            if aligned:
+                factors.append({"k": "СКЬЮ", "v": f"{tilt} уклон — по вашему направлению", "tone": "good"}); score += 1
+            elif against:
+                factors.append({"k": "СКЬЮ", "v": f"{tilt} уклон — против вашего направления", "tone": "bad"}); score -= 1
+            else:
+                factors.append({"k": "СКЬЮ", "v": "нейтральный уклон", "tone": "neutral"})
+
+        # term-structure: ожидание движения
+        term = opts.get("term")
+        if term:
+            if term["shape"] == "бэквордация":
+                factors.append({"k": "TERM", "v": "бэквордация — рынок ждёт движение скоро", "tone": "neutral"})
+            elif term["shape"] == "контанго":
+                factors.append({"k": "TERM", "v": "контанго — спокойно, далёкие цели по времени ок", "tone": "neutral"})
+
         phase = (p.get("atr") or {}).get("phase")
         if phase == "shock":
             factors.append({"k": "ФАЗА", "v": "ШОК — экстремальная вола, лучше переждать", "tone": "bad"}); score -= 2
@@ -326,6 +351,9 @@ class Engine:
             "max_r": max_r,
         }
         market = self._market_dist(trade, price, T, band.p)
+        if market and market.get("edge") is not None:
+            # фиксируется только один раз (первый тик после входа) — трек «край vs факт»
+            self.journal.update_edge_at_open(trade["id"], market["edge"])
         gamma = self._gamma_pin(trade, price)
         return {"prob": prob, "mc": mc, "ladder": ladder, "market": market,
                 "gamma": gamma,
@@ -465,6 +493,9 @@ class Engine:
             "proxy": m["proxy"],
             "expiry": m["expiry"],
             "demo": m.get("demo", False),
+            "experimental": m.get("experimental", False),
+            "skew": m.get("skew"),
+            "term": m.get("term"),
             "spot_proxy": m["spot"],
             "scale": scale,
             "implied_move_frac": m["implied_move"]["move_frac"],

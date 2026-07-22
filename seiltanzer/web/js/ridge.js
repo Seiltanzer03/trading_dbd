@@ -86,24 +86,28 @@ export function initRidge(canvas) {
       ctx.fillText('OPEN INTEREST · коллы(зел)/путы(крас)', padL, ridgeBottom + 10);
     }
 
-    // гряды с дыханием
+    // гряды с дыханием + изометрическая перспектива (3D-объём): старые ряды
+    // уходят вглубь-вправо, текущая (нижняя) выровнена с маркерами сделки
     const rowGap = (ridgeBottom - padT) / snaps.length, amp = rowGap * 2.2;
+    const DEPTH = plotW * 0.016;
     snaps.forEach((snap, i) => {
       const isLast = i === snaps.length - 1;
       const baseY = padT + rowGap * (i + 1);
+      const depthX = (snaps.length - 1 - i) * DEPTH;   // 0 для текущей, растёт для старых
+      const XD = (p) => X(p) + depthX;
       const kk = snap.density.strikes.map((k) => k * scale);
       const qq = isLast && curLatest ? curLatest : snap.density.q;
       const qm = Math.max(...qq) || 1;
       const breath = 1 + 0.05 * Math.sin(now / 900 + i * 0.7);  // лёгкое дыхание
-      ctx.beginPath(); ctx.moveTo(X(Math.max(kk[0], lo)), baseY);
-      for (let j = 0; j < kk.length; j++) { if (kk[j] < lo || kk[j] > hi) continue; ctx.lineTo(X(kk[j]), baseY - (qq[j] / qm) * amp * (isLast ? 1 : breath)); }
-      ctx.lineTo(X(Math.min(kk[kk.length - 1], hi)), baseY); ctx.closePath();
+      ctx.beginPath(); ctx.moveTo(XD(Math.max(kk[0], lo)), baseY);
+      for (let j = 0; j < kk.length; j++) { if (kk[j] < lo || kk[j] > hi) continue; ctx.lineTo(XD(kk[j]), baseY - (qq[j] / qm) * amp * (isLast ? 1 : breath)); }
+      ctx.lineTo(XD(Math.min(kk[kk.length - 1], hi)), baseY); ctx.closePath();
       ctx.fillStyle = isLast ? 'rgba(20,20,15,0.06)' : 'rgba(255,255,255,0.9)'; ctx.fill();
       ctx.strokeStyle = isLast ? COLORS.ink : COLORS.dim; ctx.lineWidth = isLast ? 2 : 0.8;
       ctx.globalAlpha = isLast ? 1 : 0.4 + 0.5 * (i / snaps.length); ctx.stroke(); ctx.globalAlpha = 1; ctx.lineWidth = 1;
       const d = new Date(snap.ts * 1000);
       ctx.fillStyle = isLast ? COLORS.ink : COLORS.dim; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'right';
-      ctx.fillText(d.toISOString().slice(11, 16), padL - 6, baseY - 2);
+      ctx.fillText(d.toISOString().slice(11, 16), padL - 6 + depthX, baseY - 2);
     });
 
     // проекция модели (красная, живая)
