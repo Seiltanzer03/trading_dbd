@@ -63,6 +63,7 @@ function connectWS() {
 
 function onTick() {
   renderHeader();
+  renderVerdict();
   renderLattice();
   renderFilters();
   renderLadder();
@@ -166,6 +167,37 @@ function renderHeader() {
     source: `VIX=${fmtNum(vols.vix?.value, 2)} GVZ=${fmtNum(vols.gvz?.value, 2)} DV1X=${vols.dv1x?.value == null ? 'нет' : fmtNum(vols.dv1x?.value, 2)}`,
     error: worst.includes('no_data') ? 'часть индексов недоступна' : null,
   }, 'Индексы волатильности (дневки Yahoo).\n');
+}
+
+// ---------------------------------------------------------------- verdict
+
+function renderVerdict() {
+  const v = S.tick?.verdict;
+  const strip = $('#verdict-strip');
+  if (!v) { strip.hidden = true; return; }
+  strip.hidden = false;
+  const lbl = $('#v-label');
+  lbl.textContent = v.label;
+  lbl.className = 'verdict-badge ' + v.tone;
+  const eEl = $('#v-edge');
+  if (v.edge == null) { eEl.textContent = '—'; eEl.className = 'verdict-edge'; }
+  else {
+    tweenNumber(eEl, v.edge * 100, (x) => (x >= 0 ? '+' : '') + x.toFixed(1) + '%');
+    eEl.className = 'verdict-edge ' + (v.edge >= 0 ? 'good' : 'bad');
+  }
+  const mkt = S.tick.market;
+  $('#v-pmm').textContent = mkt
+    ? `P модели ${fmtPct(mkt.p_model)} · P рынка ${fmtPct(mkt.hit_ratio)}`
+    : 'опционов для инструмента нет — край недоступен';
+  $('#v-action').textContent = v.action;
+  const fx = $('#v-factors');
+  fx.innerHTML = '';
+  for (const f of v.factors) {
+    const d = document.createElement('div');
+    d.className = 'vfactor ' + f.tone;
+    d.innerHTML = `<span class="vk">${f.k}</span><span>${f.v}</span>`;
+    fx.appendChild(d);
+  }
 }
 
 // ---------------------------------------------------------------- lattice

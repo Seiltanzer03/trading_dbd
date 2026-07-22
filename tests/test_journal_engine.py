@@ -105,6 +105,27 @@ class TestEngineDemo:
         assert lv["entry"] == price and lv["implied_band"] is not None
         assert lv["gex"]["demo"] is True
 
+    def test_verdict_and_gamma_present(self, engine):
+        engine.market.refresh_price(); engine.market.refresh_daily()
+        engine.market.refresh_vols(); engine.market.refresh_chain()
+        price = engine.market.price["value"]
+        t = engine.journal.open_trade(3, "NAS100", "long",
+                                      price, price * 0.997, price * 1.0075)
+        engine.on_trade_opened(t)
+        engine.market.refresh_price(); engine.market.refresh_chain()
+        tick = engine.tick_payload()
+        v = tick["verdict"]
+        assert v is not None
+        assert v["tone"] in ("good", "bad", "neutral")
+        assert isinstance(v["action"], str) and len(v["action"]) > 10
+        assert any(f["k"] == "КРАЙ" for f in v["factors"])
+        g = tick["gamma"]
+        assert g["available"] is True
+        assert g["zone"] in ("positive", "negative")
+        assert "magnet" in g and "toward" in g
+        # магнит есть и в карте уровней (для частиц/маркера)
+        assert tick["levels"]["gamma"]["magnet"] == pytest.approx(g["magnet"])
+
     def test_prob_r_moves_with_price(self, engine):
         engine.market.refresh_price()
         price = engine.market.price["value"]

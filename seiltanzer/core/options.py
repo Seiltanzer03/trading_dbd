@@ -276,6 +276,68 @@ def gex_profile(strikes, call_oi, put_oi, call_iv, put_iv,
 
 # --------------------------------------------------------- синтетическая цепочка
 
+def gamma_pin(strikes_instr, net_gex, zero_flip_instr, price: float,
+              entry: float, stop: float, take: float, direction: str) -> dict:
+    """Гамма-пиннинг: куда дилерское гамма-позиционирование тянет цену.
+
+    Логика (стандартная эвристика, помечена как таковая):
+      • net gamma в точке цены > 0  -> зона ПОЛОЖИТЕЛЬНОЙ гаммы: дилеры хеджируют
+        контр-трендово, цена «пиннится» к крупным страйкам (меанреверсия, вялость);
+      • net gamma < 0 -> зона ОТРИЦАТЕЛЬНОЙ гаммы: хедж усиливает движение (пробои
+        чище, тренды резче);
+      • zero-gamma flip — граница режимов.
+    magnet — крупнейшая положительная гамма-стена (магнит пиннинга).
+    Возвращает состояние + направление/силу тяги + R-координаты + подсказку.
+    Всё непроверяемо (позиционирование дилеров не наблюдаемо) — контекст, не сигнал.
+    """
+    k = np.asarray(strikes_instr, dtype=float)
+    g = np.asarray(net_gex, dtype=float)
+    if len(k) < 3 or not np.isfinite(price):
+        return {"available": False}
+    order = np.argsort(k)
+    k, g = k[order], g[order]
+    gmax = float(np.max(np.abs(g))) or 1.0
+    net_at = float(np.interp(price, k, g))
+    positive = net_at > 0
+    # магнит — крупнейшая ПОЛОЖИТЕЛЬНАЯ гамма-стена (к ней тянет в + зоне)
+    pos_mask = g > 0
+    if pos_mask.any():
+        magnet = float(k[pos_mask][int(np.argmax(g[pos_mask]))])
+    else:
+        magnet = float(k[int(np.argmax(g))])
+    risk = abs(entry - stop) or 1.0
+
+    def to_r(px):
+        return (px - entry) / risk if direction == "long" else (entry - px) / risk
+
+    magnet_r = to_r(magnet)
+    price_r = to_r(price)
+    take_r = to_r(take)
+    pull_dir = 1 if magnet > price else (-1 if magnet < price else 0)  # вверх/вниз в цене
+    strength = min(abs(net_at) / gmax, 1.0)
+    # тянет ли магнит к тейку или к стопу (в R-координатах сделки)
+    toward = "тейку" if magnet_r > price_r else "стопу"
+    if positive:
+        note = (f"зона + гаммы: меанреверсия/пиннинг к {magnet:.0f} "
+                f"({magnet_r:+.2f}R) — тянет к {toward}; далёкий тейк труднее, "
+                f"фиксируй раньше")
+    else:
+        note = ("зона − гаммы: движения ускоряются, пробои и тренды чище — "
+                "если импульс в вашу сторону, далёкий тейк реальнее")
+    return {
+        "available": True,
+        "zone": "positive" if positive else "negative",
+        "net_at_price": net_at,
+        "strength": strength,          # 0..1
+        "flip": zero_flip_instr,
+        "magnet": magnet,
+        "magnet_r": magnet_r,
+        "pull_dir": pull_dir,          # +1 цена тянется вверх, -1 вниз
+        "toward": toward,              # "тейку" | "стопу"
+        "note": note,
+    }
+
+
 def synth_chain(spot: float, sigma: float, t_years: float,
                 n_strikes: int = 41, width: float = 0.12, r: float = 0.0,
                 oi_skew: float = 0.0, seed: int | None = None) -> dict:

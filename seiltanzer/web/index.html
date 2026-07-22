@@ -17,6 +17,7 @@
 
   <!-- ======================= 1. ШАПКА ======================= -->
   <section class="card header-card" id="header-card">
+    <div class="header-main">
     <div class="header-left">
       <div class="brand-row">
         <span class="brand-dot">◉</span>
@@ -50,6 +51,23 @@
         <button class="btn btn-primary" id="btn-new-trade">НОВАЯ СДЕЛКА</button>
         <button class="btn" id="btn-close-trade" hidden>ЗАКРЫТЬ СДЕЛКУ</button>
       </div>
+    </div>
+    </div><!-- /header-main -->
+
+    <!-- ГЛАВНЫЙ СИГНАЛ СДЕЛКИ -->
+    <div class="verdict-strip" id="verdict-strip" hidden>
+      <div class="verdict-row">
+        <div class="verdict-badge" id="v-label"
+             data-tip="Итоговый сигнал сделки — синтез края над рынком, фильтров стратегии, гамма-режима и фазы волы. Ниже — каждый фактор отдельно (не «чёрный ящик»).">—</div>
+        <div class="verdict-edge-block">
+          <div class="lbl">КРАЙ vs РЫНОК</div>
+          <div class="verdict-edge" id="v-edge"
+               data-tip="Главная опционная метрика: P вашей модели − hit_ratio опционного рынка (risk-neutral). Положительный = рынок недооценивает ваш сетап (потенциальное преимущество). Отрицательный = рынок оценивает выше вас — осторожно.">—</div>
+          <div class="tiny dim" id="v-pmm">—</div>
+        </div>
+        <div class="verdict-action" id="v-action"></div>
+      </div>
+      <div class="verdict-factors" id="v-factors"></div>
     </div>
   </section>
 
@@ -157,7 +175,7 @@
         <div class="canvas-empty" id="levels-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ</div>
       </div>
     </div>
-    <div class="panel-foot dim">затенение — implied move ±1σ (ожидаемый ход рынка к экспирации); пунктир — GEX-уровни (эвристика позиционирования дилеров, непроверяемо); прямоугольники — ваши FVG-зоны; шкала зумируется в коридор сделки</div>
+    <div class="panel-foot dim">оранжевый ромб — гамма-магнит (куда пиннингует дилерская гамма); оранжевые частицы текут к аттрактору — «куда тянет рынок»; затенение — implied move ±1σ; пунктир — GEX-уровни (эвристика, непроверяемо); прямоугольники — ваши FVG-зоны</div>
   </section>
 
   <!-- ================ 5. ФИЛЬТРЫ + ЛЕСТНИЦА ================ -->

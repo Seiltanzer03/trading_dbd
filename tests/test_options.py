@@ -152,3 +152,25 @@ class TestGex:
                           np.full(21, 0.2), np.full(21, 0.2), 100.0, 0.02)
         assert np.allclose(g.net_gex, 0)
         assert g.zero_flip is None and g.top_levels == []
+
+
+class TestGammaPin:
+    def test_magnet_is_positive_wall(self):
+        ks = np.linspace(90, 110, 21)
+        net = np.zeros(21)
+        net[15] = 5.0      # крупная положительная гамма-стена на 105
+        net[5] = -3.0
+        gp = O.gamma_pin(ks, net, 100.0, 100.0, 100.0, 99.0, 102.5, "long")
+        assert gp["available"] is True
+        assert gp["magnet"] == pytest.approx(105.0)
+        assert gp["pull_dir"] == 1 and gp["toward"] == "тейку"
+
+    def test_zone_sign_from_net_at_price(self):
+        ks = np.linspace(90, 110, 21)
+        net = np.linspace(-4, 4, 21)   # отрицательная ниже 100, положительная выше
+        below = O.gamma_pin(ks, net, 100.0, 96.0, 96.0, 95.0, 99.0, "long")
+        above = O.gamma_pin(ks, net, 100.0, 104.0, 104.0, 103.0, 107.0, "long")
+        assert below["zone"] == "negative" and above["zone"] == "positive"
+
+    def test_degenerate_returns_unavailable(self):
+        assert O.gamma_pin([100], [1], None, 100, 100, 99, 102, "long")["available"] is False

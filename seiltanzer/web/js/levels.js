@@ -11,7 +11,15 @@ const H = 190;
 export function initLevels(canvas) {
   let data = null;
   let curPrice = null;
+  let particles = [];
   function setData(levels) { data = levels; }
+
+  // цель потока частиц: гамма-магнит (пиннинг) либо тейк (снос)
+  function flowTarget() {
+    if (data?.gamma?.magnet != null) return { p: data.gamma.magnet, s: 0.35 + data.gamma.strength };
+    if (data?.take != null) return { p: data.take, s: 0.5 };
+    return null;
+  }
 
   function draw() {
     const { ctx, w } = setupCanvas(canvas, H);
@@ -114,6 +122,21 @@ export function initLevels(canvas) {
     if (inRange(data.day_low)) marker(data.day_low, COLORS.dim, 'LO', 86, [1, 3], 1);
     if (inRange(data.day_high)) marker(data.day_high, COLORS.dim, 'HI', 86, [1, 3], 1);
 
+    // гамма-магнит (притяжение пиннинга) — оранжевый ромб
+    const gm = data.gamma;
+    if (gm && inRange(gm.magnet)) {
+      const x = X(gm.magnet);
+      ctx.strokeStyle = '#E8622A'; ctx.setLineDash([3, 3]); ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(x, 62); ctx.lineTo(x, axisY); ctx.stroke();
+      ctx.setLineDash([]); ctx.lineWidth = 1;
+      ctx.fillStyle = '#E8622A';
+      ctx.beginPath();
+      ctx.moveTo(x, 54); ctx.lineTo(x + 5, 60); ctx.lineTo(x, 66); ctx.lineTo(x - 5, 60);
+      ctx.closePath(); ctx.fill();
+      ctx.font = '8px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
+      ctx.fillText(`ГАММА-МАГНИТ ${gm.zone === 'positive' ? '(пиннинг)' : '(снос)'}`, x, 50);
+    }
+
     // сделка — ступенчато по высоте, чтобы подписи не слипались при тесном стопе
     marker(data.stop, COLORS.red, 'СТОП −1R', 10);
     marker(data.entry, COLORS.ink, 'ВХОД 0R', 24);
@@ -131,12 +154,39 @@ export function initLevels(canvas) {
       ctx.fillText(`${fmtPrice(pnow)}  (${rOf(pnow) >= 0 ? '+' : ''}${rOf(pnow).toFixed(2)}R)`,
                    x, axisY + 31);
     }
+
+    // частицы-поток к аттрактору (гамма-магнит/тейк) — «куда тянет рынок»
+    const flowY = axisY - 8;
+    for (const pt of particles) {
+      if (!inRange(pt.p)) continue;
+      ctx.globalAlpha = Math.max(0, Math.min(1, pt.t)) * 0.8;
+      ctx.fillStyle = '#E8622A';
+      ctx.beginPath(); ctx.arc(X(pt.p), flowY - pt.off, 1.8, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function updateParticles(dt) {
+    const tgt = flowTarget();
+    const src = (curPrice != null && isFinite(curPrice)) ? curPrice : data?.price;
+    if (!tgt || src == null) { particles = []; return; }
+    const span = Math.abs(tgt.p - src) || 1;
+    if (particles.length < 46 && Math.random() < 0.6)
+      particles.push({ p: src + (Math.random() - 0.5) * span * 0.2, t: 1,
+                       off: (Math.random() - 0.5) * 14 });
+    for (const pt of particles) {
+      pt.p += (tgt.p - pt.p) * Math.min(1, dt * (0.8 + tgt.s * 1.4));
+      pt.t -= dt * 0.55;
+      if (pt.t <= 0 || Math.abs(pt.p - tgt.p) < span * 0.02) pt.dead = true;
+    }
+    particles = particles.filter((p) => !p.dead);
   }
 
   let last = performance.now();
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05); last = now;
     if (data && data.price != null) curPrice = approach(curPrice, data.price, dt, 6);
+    updateParticles(dt);
     draw();
     requestAnimationFrame(frame);
   }

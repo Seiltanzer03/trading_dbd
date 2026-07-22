@@ -57,10 +57,72 @@ html, body {
 
 .header-card {
   display: flex;
-  justify-content: space-between;
-  gap: 16px;
+  flex-direction: column;
   padding: 12px 16px;
 }
+.header-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+/* ---- главный сигнал сделки (вердикт) ---- */
+.verdict-strip {
+  margin-top: 10px;
+  border-top: 1px solid var(--rule);
+  padding-top: 10px;
+}
+.verdict-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.verdict-badge {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  padding: 6px 14px;
+  border: 2px solid var(--dim);
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.verdict-badge.good { color: var(--green); border-color: var(--green); background: #EDF4EF; }
+.verdict-badge.bad { color: var(--red); border-color: var(--red); background: #F9ECEC; }
+.verdict-badge.neutral { color: var(--ink); border-color: var(--rule); background: var(--accent-bg); }
+.verdict-edge-block { display: flex; flex-direction: column; }
+.verdict-edge {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.verdict-edge.good { color: var(--green); }
+.verdict-edge.bad { color: var(--red); }
+.verdict-action {
+  flex: 1;
+  min-width: 240px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.verdict-factors { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.vfactor {
+  font-size: 9.5px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 3px 7px;
+  display: flex;
+  gap: 6px;
+}
+.vfactor .vk { color: var(--dim); font-weight: 600; }
+.vfactor.good { border-color: var(--green); }
+.vfactor.good .vk { color: var(--green); }
+.vfactor.bad { border-color: var(--red); }
+.vfactor.bad .vk { color: var(--red); }
 
 .brand-row { display: flex; align-items: baseline; gap: 10px; }
 .brand-dot { font-size: 14px; }

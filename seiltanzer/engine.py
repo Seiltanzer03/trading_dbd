@@ -85,10 +85,95 @@ class Engine:
             "filters": self._filters_payload(trade),
         }
 
+        payload["verdict"] = None
         price = self.market.price.get("value")
         if trade and price:
             payload.update(self._trade_payloads(trade, price, sigma, atr))
+            payload["verdict"] = self._verdict(payload)
         return payload
+
+    def _verdict(self, p: dict) -> dict:
+        """Синтез состояния сделки в понятный сигнал + рекомендуемое действие.
+
+        Собирает край (рынок vs модель), фильтры стратегии, гамма-режим, фазу волы
+        и позицию (r/лестница) в один вердикт: что это значит и что делать.
+        Каждый фактор виден отдельно (не «чёрный ящик»).
+        """
+        prob, market = p.get("prob"), p.get("market")
+        gamma, ladder = p.get("gamma"), p.get("ladder")
+        filters = p.get("filters", [])
+        factors, score = [], 0
+
+        edge = market.get("edge") if market else None
+        if edge is None:
+            factors.append({"k": "КРАЙ", "v": "нет опционов для рынка", "tone": "neutral"})
+        elif edge > 0.12:
+            factors.append({"k": "КРАЙ", "v": f"+{edge*100:.0f}% — рынок недооценивает сетап", "tone": "good"}); score += 2
+        elif edge > 0.03:
+            factors.append({"k": "КРАЙ", "v": f"+{edge*100:.0f}% — лёгкий перевес над рынком", "tone": "good"}); score += 1
+        elif edge < -0.12:
+            factors.append({"k": "КРАЙ", "v": f"{edge*100:.0f}% — рынок оценивает выше вас", "tone": "bad"}); score -= 2
+        elif edge < -0.03:
+            factors.append({"k": "КРАЙ", "v": f"{edge*100:.0f}% — рынок чуть выше вас", "tone": "bad"}); score -= 1
+        else:
+            factors.append({"k": "КРАЙ", "v": "≈ на уровне рынка", "tone": "neutral"})
+
+        blocks = [c for c in filters if c.get("required") and c["state"] == "block"]
+        manuals = [c for c in filters if c.get("required") and c["state"] == "manual"]
+        if blocks:
+            factors.append({"k": "ФИЛЬТРЫ", "v": "BLOCK: " + ", ".join(c["label"] for c in blocks), "tone": "bad"}); score -= 3
+        elif manuals:
+            factors.append({"k": "ФИЛЬТРЫ", "v": "проверь вручную: " + ", ".join(c["label"] for c in manuals), "tone": "neutral"})
+        else:
+            factors.append({"k": "ФИЛЬТРЫ", "v": "все PASS", "tone": "good"})
+
+        if gamma and gamma.get("available"):
+            if gamma["zone"] == "positive":
+                if gamma["toward"] == "тейку":
+                    factors.append({"k": "ГАММА", "v": "+ зона, пиннинг тянет к тейку", "tone": "good"}); score += 1
+                else:
+                    factors.append({"k": "ГАММА", "v": "+ зона, пиннинг тянет к стопу — далёкий тейк труднее", "tone": "bad"}); score -= 1
+            else:
+                factors.append({"k": "ГАММА", "v": "− зона: движения ускоряются (тренд чище)", "tone": "neutral"})
+
+        phase = (p.get("atr") or {}).get("phase")
+        if phase == "shock":
+            factors.append({"k": "ФАЗА", "v": "ШОК — экстремальная вола, лучше переждать", "tone": "bad"}); score -= 2
+        elif phase == "flat":
+            factors.append({"k": "ФАЗА", "v": "ФЛЭТ — режь цель, не жди далёкого тейка", "tone": "neutral"})
+
+        # вердикт
+        if blocks:
+            label, tone = "НЕ ВХОДИТЬ", "bad"
+            action = "Фильтр стратегии блокирует сетап — пропусти или дождись условий."
+        elif score >= 3:
+            label, tone = "СИЛЬНЫЙ ПЕРЕВЕС", "good"
+            action = "Сетап в вашу пользу и рынок недооценивает — вход по плану, ведите по лестнице фиксации."
+        elif score >= 1:
+            label, tone = "ПЕРЕВЕС", "good"
+            action = "Небольшой перевес — вход допустим, дисциплина по лестнице и БУ после 1.5R."
+        elif score <= -3:
+            label, tone = "ПРОТИВ ВАС", "bad"
+            action = "Рынок/гамма/фаза против — пропустите или минимальный объём."
+        elif score <= -1:
+            label, tone = "ОСТОРОЖНО", "bad"
+            action = "Есть встречные факторы — уменьшите объём или дождитесь лучшего расклада."
+        else:
+            label, tone = "НЕЙТРАЛЬНО", "neutral"
+            action = "Явного перевеса нет — торгуйте только чёткий сетап, стандартный риск."
+
+        # позиционная подсказка (в сделке)
+        if ladder and prob:
+            r = prob.get("r", 0)
+            if ladder.get("be_armed"):
+                action += " Стоп уже в БУ — снимайте по лестнице, остаток тралом."
+            elif r >= 1.0:
+                action += f" r={r:+.2f}: рубеж 1.0R пройден — фиксируйте 10%, двигайтесь к БУ (1.5R)."
+            elif r <= -0.6:
+                action += f" r={r:+.2f}: близко к стопу — не усредняйте, план на стоп готов."
+
+        return {"label": label, "tone": tone, "action": action, "score": score,
+                "edge": edge, "factors": factors}
 
     def _account_payload(self) -> dict:
         acc = self.journal.account()
@@ -241,8 +326,26 @@ class Engine:
             "max_r": max_r,
         }
         market = self._market_dist(trade, price, T, band.p)
+        gamma = self._gamma_pin(trade, price)
         return {"prob": prob, "mc": mc, "ladder": ladder, "market": market,
-                "levels": self._levels_payload(trade, price, sigma)}
+                "gamma": gamma,
+                "levels": self._levels_payload(trade, price, sigma, gamma)}
+
+    def _gamma_pin(self, trade: dict, price: float) -> dict:
+        """Гамма-пиннинг в шкале инструмента (эвристика позиционирования дилеров)."""
+        m = self.market.chain.get("metrics")
+        scale = self._proxy_scale()
+        if not m or not scale:
+            return {"available": False,
+                    "reason": f"нет опционной цепочки для {self.market.instrument_code}"}
+        from .core.options import gamma_pin
+        gex = m["gex"]
+        strikes_instr = [s * scale for s in gex["strikes"]]
+        flip = gex["zero_flip"] * scale if gex["zero_flip"] else None
+        res = gamma_pin(strikes_instr, gex["net"], flip, price,
+                        trade["entry"], trade["stop"], trade["take"], trade["direction"])
+        res["demo"] = m.get("demo", False)
+        return res
 
     def _market_dist(self, trade: dict, price: float, T: float,
                      p_model: float) -> dict | None:
@@ -376,7 +479,8 @@ class Engine:
                               for t in m["gex"]["top"]],
         }
 
-    def _levels_payload(self, trade: dict, price: float, sigma: dict) -> dict:
+    def _levels_payload(self, trade: dict, price: float, sigma: dict,
+                        gamma: dict | None = None) -> dict:
         opts = self._options_summary()
         vwap = self.market.vwap()
         day = self.market.day_range()
@@ -409,6 +513,12 @@ class Engine:
                 "zero_flip": opts["gex_zero_flip_instr"],
                 "top": opts["gex_top_instr"],
                 "demo": opts["demo"],
+            }
+        if gamma and gamma.get("available"):
+            levels["gamma"] = {
+                "magnet": gamma["magnet"], "zone": gamma["zone"],
+                "pull_dir": gamma["pull_dir"], "strength": gamma["strength"],
+                "toward": gamma["toward"], "flip": gamma["flip"],
             }
         return levels
 
