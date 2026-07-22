@@ -18,6 +18,9 @@ def main() -> None:
                     help="демо-режим: синтетический поток цены (бейдж DEMO)")
     ap.add_argument("--check", action="store_true",
                     help="самопроверка боевых данных Yahoo и выход (без сервера)")
+    ap.add_argument("--stream", action="store_true",
+                    help="живой WebSocket-стрим цены (Yahoo, бесплатно, без ключа); "
+                         "требует pip install websockets; откат на REST при сбое")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--data-dir", default=".",
@@ -29,11 +32,11 @@ def main() -> None:
         run_check()
         return
 
-    settings = Settings(demo=args.demo, host=args.host, port=args.port,
-                        data_dir=args.data_dir)
+    settings = Settings(demo=args.demo, stream=args.stream, host=args.host,
+                        port=args.port, data_dir=args.data_dir)
     app = create_app(settings)
     print(f"Seiltanzer Terminal -> http://{args.host}:{args.port}"
-          f"{' [DEMO]' if args.demo else ''}")
+          f"{' [DEMO]' if args.demo else ''}{' [STREAM]' if args.stream else ''}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

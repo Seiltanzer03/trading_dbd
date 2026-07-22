@@ -97,6 +97,7 @@ class MarketData:
         self.cache = cache
         self.demo = settings.demo
         self.demo_market = DemoMarket(seed=7) if self.demo else None
+        self.stream = None          # StreamHub | None (живой WS-стрим цены)
         self.instrument_code: str = "NAS100"
 
         self.price = _status_dict()
@@ -145,6 +146,16 @@ class MarketData:
             cutoff = now - 8 * 3600
             self.intraday = [x for x in self.intraday if x[0] > cutoff]
             return
+        # живой WebSocket-стрим цены (если включён и есть свежий тик) — приоритет
+        if self.stream is not None:
+            sp = self.stream.fresh(self.instrument.yahoo, max_age=8.0)
+            if sp is not None:
+                now = time.time()
+                self.price = _status_dict(sp, "live", now,
+                                          source=f"stream {self.instrument.yahoo}")
+                self.intraday.append((now, sp, 0.0))
+                self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
+                return
         try:
             import yfinance as yf
             t = yf.Ticker(self.instrument.yahoo)

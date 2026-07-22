@@ -87,8 +87,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def poll_loop():
         last = {"price": 0.0, "intraday": 0.0, "vols": 0.0,
                 "daily": 0.0, "chain": 0.0}
+        # при живом стриме цену «опрашиваем» часто (берём свежий тик из памяти)
+        price_period = 1.0 if (settings.demo or settings.stream) else settings.price_poll_sec
         periods = {
-            "price": 1.0 if settings.demo else settings.price_poll_sec,
+            "price": price_period,
             "intraday": 60.0,
             "vols": 5.0 if settings.demo else settings.vol_poll_sec,
             "daily": 1800.0,
@@ -119,15 +121,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     dead.append(ws)
             for ws in dead:
                 clients.discard(ws)
-            await asyncio.sleep(1.0 if settings.demo else 2.0)
+            await asyncio.sleep(1.0 if (settings.demo or settings.stream) else 2.0)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI):
+        if engine.stream_hub is not None:
+            engine.stream_hub.start()      # живой WS-стрим цены (нужен event loop)
         task = asyncio.create_task(poll_loop())
         yield
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        if engine.stream_hub is not None:
+            await engine.stream_hub.stop()
         engine.close()
 
     app.router.lifespan_context = lifespan

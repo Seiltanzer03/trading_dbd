@@ -173,7 +173,9 @@ function renderHeader() {
 // живая котировка на латтике: тик, цвет вверх/вниз, вспышка, % от входа
 function handleLivePrice(t) {
   const price = t.feeds?.price?.value;
-  $('#lat-price-instr').textContent = t.instrument;
+  const streaming = (t.feeds?.price?.source || '').startsWith('stream');
+  $('#lat-price-instr').textContent = t.instrument + (streaming ? ' ⚡' : '');
+  $('#lat-price-instr').title = streaming ? 'живой WebSocket-стрим цены' : '';
   if (price == null) { $('#lat-price').textContent = '—'; $('#lat-price-chg').textContent = ''; return; }
   const el = $('#lat-price');
   tweenNumber(el, price, (v) => fmtPrice(v), 14);

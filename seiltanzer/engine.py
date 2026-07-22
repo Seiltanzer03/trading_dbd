@@ -37,6 +37,12 @@ class Engine:
         self.cache = DiskCache(settings.cache_db)
         self.journal = Journal(settings.trades_db)
         self.market = MarketData(settings, self.cache)
+        self.stream_hub = None
+        if settings.stream:
+            from .data.stream import StreamHub
+            tickers = sorted({i.yahoo for i in INSTRUMENTS.values()})
+            self.stream_hub = StreamHub(tickers)
+            self.market.stream = self.stream_hub
         self._mc_cache_key: tuple | None = None
         self._mc_cache: dict | None = None
         trade = self.journal.active_trade()

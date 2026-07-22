@@ -108,6 +108,7 @@ BREAKEVEN_AFTER = 1.5
 @dataclass
 class Settings:
     demo: bool = False
+    stream: bool = False        # бесплатный WebSocket-стрим цены (Yahoo), опция
     host: str = "127.0.0.1"
     port: int = 8790
     data_dir: str = field(default_factory=lambda: os.environ.get("SEILTANZER_DATA_DIR", "."))
