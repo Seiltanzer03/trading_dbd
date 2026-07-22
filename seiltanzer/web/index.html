@@ -75,6 +75,11 @@
           <div class="tiny dim" id="lat-band-lbl">интервал 90% (Уилсон)</div>
         </div>
         <div class="stat-sep"></div>
+        <div class="stat-row"><span class="lbl">P РЫНКА (hit)</span><span class="val" id="lat-mhit"
+          data-tip="Рыночный аналог «дойти до тейка раньше стопа»: hit = P(за тейк)/(P(за тейк)+P(за стоп)) по risk-neutral плотности опционов. Сопоставим с P модели.">—</span></div>
+        <div class="stat-row"><span class="lbl">КРАЙ vs РЫНОК</span><span class="val" id="lat-edge"
+          data-tip="Край = P модели − hit рынка. Положительный → ваша статистика даёт лучшие шансы, чем закладывает опционный рынок (потенциальная недооценка сетапа рынком). Отрицательный → рынок оценивает выше вас.">—</span></div>
+        <div class="stat-sep"></div>
         <div class="stat-row"><span class="lbl">r СЕЙЧАС</span><span class="val" id="lat-r"
           data-tip="Текущее положение сделки в R: (цена − вход)/(вход − стоп), со знаком направления. Источник: фид цены.">—</span></div>
         <div class="stat-row"><span class="lbl">EV ХОЛД</span><span class="val" id="lat-ev-hold"
@@ -96,7 +101,7 @@
         <div class="canvas-empty" id="lattice-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ — ДОСКА ЖДЁТ</div>
       </div>
     </div>
-    <div class="panel-foot dim">распределение = проекция сделки в R (ширина ← режим опционной волы, центр ← текущий r, сдвигается с ценой); шарики Монте-Карло сходятся к нему — не рынок</div>
+    <div class="panel-foot dim">распределение = risk-neutral плотность ОПЦИОННОГО РЫНКА в R вашей сделки (оранжевая огибающая); пунктир — проекция вашей модели; расхождение = КРАЙ; оранжевая зона справа — «куда платит рынок»; шарики сходятся к рынку</div>
   </section>
 
   <!-- ================ 3. STRIKE LANDSCAPE ================ -->

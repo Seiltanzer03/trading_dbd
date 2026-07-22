@@ -126,6 +126,59 @@ class RNDensity:
         return p_above, 1.0 - p_above
 
 
+def market_r_distribution(density: "RNDensity", scale: float, entry: float,
+                          stop: float, take: float, direction: str,
+                          T: float, n_bins: int = 11) -> dict:
+    """Risk-neutral распределение ИСХОДА сделки в R-координатах (из опционов).
+
+    Плотность рынка q(S) (страйки прокси × scale -> шкала инструмента) переносится
+    на ось R сделки: r = (S-entry)/risk для лонга, (entry-S)/risk для шорта.
+    Возвращает 11-корзинное распределение по [-1, T] (масса за тейк -> правая
+    корзина, за стоп -> левая), плюс:
+      p_take  — P(S за тейком) по рынку,
+      p_stop  — P(S за стопом),
+      hit_ratio = p_take / (p_take + p_stop) — рыночный аналог «дойти до тейка
+                  раньше стопа» (сопоставим с модельной P).
+    Это и есть опционное преимущество: рынок против вашей статистики.
+    """
+    risk = abs(entry - stop)
+    if risk <= 0 or T <= 0:
+        raise ValueError("вырожденная сделка")
+    # density.strikes в шкале прокси -> в шкалу инструмента
+    dens = RNDensity(strikes=np.asarray(density.strikes) * scale,
+                     density=np.asarray(density.density) / max(scale, 1e-9),
+                     t_years=density.t_years)
+
+    def s_of_r(rv):
+        return entry + rv * risk if direction == "long" else entry - rv * risk
+
+    # хвостовые массы за барьерами
+    if direction == "long":
+        p_take = dens.tail_probs(take)[0]   # S >= take
+        p_stop = dens.tail_probs(stop)[1]   # S <= stop
+    else:
+        p_take = dens.tail_probs(take)[1]   # S <= take
+        p_stop = dens.tail_probs(stop)[0]   # S >= stop
+
+    edges = np.linspace(-1.0, T, n_bins + 1)
+    probs = np.zeros(n_bins)
+    for b in range(n_bins):
+        r_lo, r_hi = edges[b], edges[b + 1]
+        s_a, s_b = s_of_r(r_lo), s_of_r(r_hi)
+        lo_s, hi_s = min(s_a, s_b), max(s_a, s_b)
+        mass = dens.tail_probs(lo_s)[0] - dens.tail_probs(hi_s)[0]  # P(lo<=S<=hi)
+        probs[b] = max(mass, 0.0)
+    probs[0] += p_stop      # всё за стопом — в левую корзину
+    probs[-1] += p_take     # всё за тейком — в правую
+    total = probs.sum()
+    if total > 0:
+        probs = probs / total
+    hit = p_take / (p_take + p_stop) if (p_take + p_stop) > 0 else None
+    return {"edges": edges.tolist(), "probs": probs.tolist(),
+            "p_take": float(p_take), "p_stop": float(p_stop),
+            "hit_ratio": (float(hit) if hit is not None else None)}
+
+
 def bl_density(strikes, call_mids, t_years: float, r: float = 0.0,
                window: int = 5) -> RNDensity:
     """Плотность Бридена–Литценбергера из mid-цен коллов (п.5 ядра).

@@ -10,8 +10,15 @@
   --green: #2E7D4F;
   --dim: #8A877D;
   --accent-bg: #EEECE4;
+  --accent: #E8622A;
   --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
+
+@keyframes livepulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.feed.live::first-letter, .badge.live::first-letter { color: var(--green); }
+.badge.live, .feed.live { animation: livepulse 1.8s ease-in-out infinite; }
+.val { transition: color .3s ease; }
+#lat-p { transition: none; }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 

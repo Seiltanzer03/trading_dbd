@@ -4,20 +4,23 @@
 // далёкий уровень не растягивал шкалу и не слепял всё в край.
 
 import { COLORS, setupCanvas, fmtPrice } from './util.js';
+import { approach } from './anim.js';
 
 const H = 190;
 
 export function initLevels(canvas) {
   let data = null;
-  function setData(levels) { data = levels; draw(); }
+  let curPrice = null;
+  function setData(levels) { data = levels; }
 
   function draw() {
     const { ctx, w } = setupCanvas(canvas, H);
     ctx.clearRect(0, 0, w, H);
     if (!data) return;
+    const pnow = (curPrice != null && isFinite(curPrice)) ? curPrice : data.price;
 
     // домен — ТОЛЬКО по уровням сделки и опционному коридору
-    const core = [data.entry, data.stop, data.take, data.price];
+    const core = [data.entry, data.stop, data.take, pnow];
     if (data.implied_band) core.push(data.implied_band.low, data.implied_band.high);
     const valid = core.filter((x) => x != null && isFinite(x));
     let lo = Math.min(...valid), hi = Math.max(...valid);
@@ -116,20 +119,28 @@ export function initLevels(canvas) {
     marker(data.entry, COLORS.ink, 'ВХОД 0R', 24);
     marker(data.take, COLORS.green, `ТЕЙК +${rOf(data.take).toFixed(2)}R`, 10);
 
-    // текущая цена — курсор снизу
-    if (inRange(data.price)) {
-      const x = X(data.price);
+    // текущая цена — курсор снизу (скользит)
+    if (inRange(pnow)) {
+      const x = X(pnow);
       ctx.fillStyle = COLORS.ink;
       ctx.beginPath();
       ctx.moveTo(x - 5, axisY + 20); ctx.lineTo(x + 5, axisY + 20);
       ctx.lineTo(x, axisY + 12); ctx.closePath(); ctx.fill();
       ctx.font = '10px "IBM Plex Mono", monospace';
       ctx.textAlign = 'center';
-      ctx.fillText(`${fmtPrice(data.price)}  (${rOf(data.price) >= 0 ? '+' : ''}${rOf(data.price).toFixed(2)}R)`,
+      ctx.fillText(`${fmtPrice(pnow)}  (${rOf(pnow) >= 0 ? '+' : ''}${rOf(pnow).toFixed(2)}R)`,
                    x, axisY + 31);
     }
   }
 
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.05); last = now;
+    if (data && data.price != null) curPrice = approach(curPrice, data.price, dt, 6);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
   window.addEventListener('resize', draw);
   return { setData };
 }

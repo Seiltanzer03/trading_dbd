@@ -3,6 +3,7 @@
 // Каждое число получает data-tip «как посчитано» с живыми значениями.
 
 import { $, fmtPct, fmtNum, fmtPrice, fmtR, fmtTs, STATUS_ICON, statusLabel, initTooltips } from './util.js';
+import { tweenNumber } from './anim.js';
 import { initLattice } from './lattice.js';
 import { initRidge } from './ridge.js';
 import { initLevels } from './levels.js';
@@ -179,18 +180,24 @@ function renderLattice() {
   $('#lattice-status').textContent = active
     ? (t.demo ? '◆ DEMO' : '● LIVE') : '○ НЕТ СДЕЛКИ';
 
+  const mkt = t.market;
   lattice.setData({
     active,
     p: p?.p,
     T: p?.T ?? 2.5,
     r: p?.r ?? 0,
-    hist: t.mc?.hist,
+    marketProbs: mkt?.probs,
+    modelProbs: t.mc?.hist?.probs,
+    edges: mkt?.edges || t.mc?.hist?.edges,
+    hit: mkt?.hit_ratio,
+    edge: mkt?.edge,
     tradeId: t.trade?.id ?? null,
     regime: p?.vol_regime,
   });
 
   if (!active) {
-    ['lat-p', 'lat-r', 'lat-ev-hold', 'lat-ev-ladder', 'lat-green', 'lat-conv', 'lat-calib']
+    ['lat-p', 'lat-mhit', 'lat-edge', 'lat-r', 'lat-ev-hold', 'lat-ev-ladder',
+     'lat-green', 'lat-conv', 'lat-calib']
       .forEach((id) => { $('#' + id).textContent = '—'; });
     $('#lat-balls').textContent = '0';
     $('#lat-band-fill').style.left = '0%';
@@ -199,7 +206,26 @@ function renderLattice() {
     return;
   }
 
-  $('#lat-p').textContent = (p.p * 100).toFixed(1) + '%';
+  // рынок vs модель
+  if (mkt) {
+    $('#lat-mhit').textContent = fmtPct(mkt.hit_ratio);
+    $('#lat-mhit').dataset.tip =
+      `Рыночный «hit» = P(за тейк) / (P(за тейк)+P(за стоп)) по risk-neutral плотности опционов (${mkt.demo ? 'DEMO' : 'экспирация ' + mkt.expiry}).\n` +
+      `P(за тейк)=${fmtPct(mkt.p_take)}, P(за стоп)=${fmtPct(mkt.p_stop)}.\nСопоставим с P модели (${fmtPct(mkt.p_model)}).`;
+    const ed = mkt.edge;
+    $('#lat-edge').textContent = ed == null ? '—' : (ed >= 0 ? '+' : '') + fmtPct(ed);
+    $('#lat-edge').className = 'val ' + (ed == null ? '' : ed >= 0 ? 'green' : 'red');
+    $('#lat-edge').dataset.tip =
+      `Край = P модели − hit рынка = ${fmtPct(mkt.p_model)} − ${fmtPct(mkt.hit_ratio)} = ${ed == null ? '—' : (ed >= 0 ? '+' : '') + fmtPct(ed)}.\n` +
+      `Положительный → ваша статистика даёт лучшие шансы, чем закладывает рынок опционов (потенциальный край). Отрицательный → рынок оценивает сетап выше вас — осторожно.`;
+  } else {
+    $('#lat-mhit').textContent = '—';
+    $('#lat-mhit').dataset.tip = `Опционной цепочки для ${t.instrument} нет — рыночного распределения нет, доска показывает вашу модель честно.`;
+    $('#lat-edge').textContent = '—';
+    $('#lat-edge').className = 'val';
+  }
+
+  tweenNumber($('#lat-p'), p.p * 100, (v) => v.toFixed(1) + '%');
   $('#lat-p').dataset.tip =
     `P(тейк раньше стопа) — модель первого достижения:\n` +
     `dX = μdt + σdW, стоп −1R, тейк +${p.T.toFixed(2)}R\n` +

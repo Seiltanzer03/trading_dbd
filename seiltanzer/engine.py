@@ -74,10 +74,12 @@ class Engine:
             "account": account,
             "atr": atr,
             "sigma": sigma,
+            "regime": self._regime_payload(atr),
             "trade": trade,
             "prob": None,
             "mc": None,
             "ladder": None,
+            "market": None,
             "levels": None,
             "options_summary": self._options_summary(),
             "filters": self._filters_payload(trade),
@@ -105,6 +107,26 @@ class Engine:
                 "phase": row.phase,
             },
         }
+
+    def _regime_payload(self, atr: dict) -> dict:
+        """Регим-ридаут (из дневных баров): тренд в σ, кластер волы, реализованная
+        вола. Всё выводимо из данных; при отсутствии — честные None."""
+        bars = self.market.daily.get("bars")
+        out = {"trend_sigma": None, "vol_cluster": None, "realized_vol": None,
+               "phase": atr.get("phase"), "status": self.market.daily.get("status")}
+        if not bars or len(bars.get("closes", [])) < 21:
+            return out
+        import numpy as np
+        closes = np.asarray(bars["closes"][-21:], dtype=float)
+        rets = np.diff(np.log(closes))
+        if rets.std() > 0:
+            # z-счёт последней доходности относительно 20-дневного распределения
+            out["trend_sigma"] = round(float((rets[-1] - rets.mean()) / rets.std()), 2)
+        out["realized_vol"] = self.market.baseline_vol()
+        ph = atr.get("phase")
+        out["vol_cluster"] = ({"shock": "ВЫСОКИЙ", "impulse": "ВЫСОКИЙ",
+                               "flat": "НИЗКИЙ", "normal": "СРЕДНИЙ"}.get(ph))
+        return out
 
     def _atr_payload(self) -> dict:
         ratio = self.market.atr_ratio()
@@ -218,8 +240,41 @@ class Engine:
             "be_armed": max_r >= BREAKEVEN_AFTER,
             "max_r": max_r,
         }
-        return {"prob": prob, "mc": mc, "ladder": ladder,
+        market = self._market_dist(trade, price, T, band.p)
+        return {"prob": prob, "mc": mc, "ladder": ladder, "market": market,
                 "levels": self._levels_payload(trade, price, sigma)}
+
+    def _market_dist(self, trade: dict, price: float, T: float,
+                     p_model: float) -> dict | None:
+        """Распределение исхода из рыночной risk-neutral плотности (опционы) в R.
+
+        None, если для инструмента нет цепочки (тогда доска покажет модель честно).
+        edge = P_модели − рыночный hit_ratio: положительный — ваша статистика даёт
+        лучшие шансы, чем закладывает опционный рынок (потенциальный край/переоценка).
+        """
+        m = self.market.chain.get("metrics")
+        scale = self._proxy_scale()
+        if not m or not scale:
+            return None
+        try:
+            from .core.options import RNDensity, market_r_distribution
+            import numpy as np
+            dens = RNDensity(strikes=np.asarray(m["density"]["strikes"]),
+                             density=np.asarray(m["density"]["q"]),
+                             t_years=m["t_years"])
+            md = market_r_distribution(dens, scale, trade["entry"], trade["stop"],
+                                       trade["take"], trade["direction"], T)
+        except (ValueError, KeyError):
+            return None
+        edge = (p_model - md["hit_ratio"]) if md["hit_ratio"] is not None else None
+        md.update({
+            "available": True,
+            "demo": m.get("demo", False),
+            "expiry": m.get("expiry"),
+            "edge": edge,
+            "p_model": p_model,
+        })
+        return md
 
     # горизонт по умолчанию для σ-поправки без цепочки (свинг-сделки): торг. дни
     DEFAULT_HORIZON_TRADING_DAYS = 5.0

@@ -97,6 +97,37 @@ class TestBLDensity:
         assert d.tail_probs(SPOT * 0.5)[0] == 1.0
 
 
+class TestMarketRDistribution:
+    def test_distribution_and_tails(self, chain):
+        d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
+        # лонг: вход=спот, стоп −1% , тейк +2.5% (в цене), RR=2.5
+        entry, stop, take = SPOT, SPOT * 0.99, SPOT * 1.025
+        md = O.market_r_distribution(d, 1.0, entry, stop, take, "long", 2.5)
+        assert len(md["probs"]) == 11
+        assert abs(sum(md["probs"]) - 1.0) < 1e-6
+        assert 0 <= md["p_take"] <= 1 and 0 <= md["p_stop"] <= 1
+        # hit_ratio согласован с хвостами
+        assert md["hit_ratio"] == pytest.approx(
+            md["p_take"] / (md["p_take"] + md["p_stop"]), rel=1e-6)
+
+    def test_long_short_symmetry(self, chain):
+        d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
+        # для симметричной ~лог-нормальной плотности: лонг вверх и шорт вниз с теми
+        # же |расстояниями| дают зеркальные хвосты
+        long = O.market_r_distribution(d, 1.0, SPOT, SPOT * 0.99, SPOT * 1.025, "long", 2.5)
+        short = O.market_r_distribution(d, 1.0, SPOT, SPOT * 1.01, SPOT * 0.975, "short", 2.5)
+        assert long["p_take"] == pytest.approx(short["p_take"], abs=0.05)
+
+    def test_scale_maps_proxy_to_instrument(self, chain):
+        d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
+        # тот же расклад в шкале инструмента (×10) должен дать тот же hit_ratio
+        scale = 10.0
+        base = O.market_r_distribution(d, 1.0, SPOT, SPOT * 0.99, SPOT * 1.025, "long", 2.5)
+        scaled = O.market_r_distribution(d, scale, SPOT * scale, SPOT * scale * 0.99,
+                                         SPOT * scale * 1.025, "long", 2.5)
+        assert base["hit_ratio"] == pytest.approx(scaled["hit_ratio"], rel=1e-6)
+
+
 class TestGex:
     def test_flip_sign_with_skewed_oi(self, chain):
         g = O.gex_profile(chain["strikes"], chain["call_oi"], chain["put_oi"],
