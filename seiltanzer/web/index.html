@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SEILTANZER TERMINAL</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/terminal.css">
+</head>
+<body>
+<div id="tooltip" class="tooltip" hidden></div>
+<div id="offline-banner" class="offline-banner" hidden>○ НЕТ СВЯЗИ С СЕРВЕРОМ — ДАННЫЕ НЕ ОБНОВЛЯЮТСЯ</div>
+
+<main class="wrap">
+
+  <!-- ======================= 1. ШАПКА ======================= -->
+  <section class="card header-card" id="header-card">
+    <div class="header-left">
+      <div class="brand-row">
+        <span class="brand-dot">◉</span>
+        <h1 class="brand" id="acc-name">SEILTANZER</h1>
+        <span class="badge badge-demo" id="demo-badge" hidden>◆ DEMO</span>
+      </div>
+      <div class="header-sub">
+        <span id="hdr-setup" class="hdr-setup"
+              data-tip="Активный сетап открытой сделки (№ и имя из стратегии). Без сделки — нет активного сетапа.">—</span>
+      </div>
+      <div class="risk-line" id="risk-line">
+        <span class="lbl">СЧЁТ</span>
+        <button class="linklike" id="hdr-balance"
+            data-tip="Баланс / начальный капитал; клик — изменить. Balance% = balance / acc_size × 100 (Excel, колонка F).">—</button>
+        <span class="lbl">ФАЗА</span><span id="hdr-phase" class="val">—</span>
+        <span class="lbl">РИСК</span><span id="hdr-risk" class="val"
+            data-tip="Риск на сделку из динамической матрицы (глава 2.1, формула Excel G): базовый риск по Balance% + поправка фазы (1ph:+2, 2ph:+1).">—</span>
+        <span class="lbl">ЦЕЛЬ RR</span><span id="hdr-rr" class="val"
+            data-tip="Целевой RR из матрицы (Excel J) × ATR-множитель фазы рынка (шок 0.6, флэт 0.8, импульс 1.2, норма 1.0) — глава 2.9.">—</span>
+        <span class="lbl">РЕЖИМ</span><span id="hdr-mode" class="val dim">—</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="feed-row" id="feed-row">
+        <span class="feed" id="feed-price" data-tip="Фид цены (yfinance, опрос 3–5 c). ● live / ◐ delayed / ○ нет данных / ◆ demo.">● ЦЕНА</span>
+        <span class="feed" id="feed-chain" data-tip="Фид опционной цепочки (опрос 5–10 мин).">● ЦЕПОЧКА</span>
+        <span class="feed" id="feed-vix" data-tip="Фид индексов волатильности VIX/GVZ/DV1X (дневное закрытие).">● VIX</span>
+      </div>
+      <div class="clock" id="utc-clock" data-tip="Часы UTC (локальные часы браузера, переведённые в UTC).">--:--:-- UTC</div>
+      <div class="hdr-buttons">
+        <button class="btn btn-primary" id="btn-new-trade">НОВАЯ СДЕЛКА</button>
+        <button class="btn" id="btn-close-trade" hidden>ЗАКРЫТЬ СДЕЛКУ</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================ 2. PROBABILITY LATTICE ================ -->
+  <section class="card panel" id="panel-lattice">
+    <div class="panel-head">
+      <h2>PROBABILITY LATTICE · ЖИВАЯ ДОСКА ГАЛЬТОНА</h2>
+      <div class="panel-head-right">
+        <button class="btn btn-small" id="btn-lattice-reset"
+                data-tip="Сбросить накопленную гистограмму шариков.">СБРОС</button>
+        <span class="badge" id="lattice-status">○ НЕТ СДЕЛКИ</span>
+      </div>
+    </div>
+    <div class="panel-body lattice-body">
+      <div class="stats-col" id="lattice-stats">
+        <div class="stat">
+          <div class="lbl">P (ТЕЙК РАНЬШЕ СТОПА)</div>
+          <div class="hero" id="lat-p" data-tip="">—</div>
+          <div class="band-bar" id="lat-band">
+            <div class="band-fill" id="lat-band-fill"></div>
+            <div class="band-tick" id="lat-band-tick"></div>
+          </div>
+          <div class="tiny dim" id="lat-band-lbl">интервал 90% (Уилсон)</div>
+        </div>
+        <div class="stat-sep"></div>
+        <div class="stat-row"><span class="lbl">r СЕЙЧАС</span><span class="val" id="lat-r"
+          data-tip="Текущее положение сделки в R: (цена − вход)/(вход − стоп), со знаком направления. Источник: фид цены.">—</span></div>
+        <div class="stat-row"><span class="lbl">EV ХОЛД</span><span class="val" id="lat-ev-hold"
+          data-tip="">—</span></div>
+        <div class="stat-row"><span class="lbl">EV ЛЕСТНИЦА</span><span class="val" id="lat-ev-ladder"
+          data-tip="">—</span></div>
+        <div class="stat-sep"></div>
+        <div class="stat-row"><span class="lbl">ШАРИКОВ УПАЛО</span><span class="val" id="lat-balls">0</span></div>
+        <div class="stat-row"><span class="lbl">ДОЛЯ ЗЕЛЁНЫХ</span><span class="val" id="lat-green"
+          data-tip="Доля шариков, приземлившихся правее нуля (в зелёных корзинах).">—</span></div>
+        <div class="stat-row"><span class="lbl">СХОДИМОСТЬ</span><span class="val" id="lat-conv"
+          data-tip="|доля зелёных шариков − P(терминальный R > 0) по Монте-Карло|. Показывает, что доска сэмплирует именно модельное распределение, а не рисует красивое.">—</span></div>
+        <div class="stat-sep"></div>
+        <div class="stat-row"><span class="lbl">КАЛИБРОВКА</span><span class="val" id="lat-calib"
+          data-tip="Источник винрейта: встроенная таблица 16 сетапов или ваш журнал (при ≥20 закрытых сделок по сетапу — приоритет журнала).">—</span></div>
+      </div>
+      <div class="canvas-holder">
+        <canvas id="lattice-canvas"></canvas>
+        <div class="canvas-empty" id="lattice-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ — ДОСКА ЖДЁТ</div>
+      </div>
+    </div>
+    <div class="panel-foot dim">наклон доски = вероятность из вашей статистики и опционной волы; шарики — исходы Монте-Карло, не рынок</div>
+  </section>
+
+  <!-- ================ 3. STRIKE LANDSCAPE ================ -->
+  <section class="card panel" id="panel-ridge">
+    <div class="panel-head">
+      <h2>STRIKE LANDSCAPE · ГРЯДА RISK-NEUTRAL ПЛОТНОСТЕЙ</h2>
+      <div class="panel-head-right">
+        <span class="badge" id="ridge-status">○ НЕТ ДАННЫХ</span>
+      </div>
+    </div>
+    <div class="panel-body ridge-body">
+      <div class="stats-col" id="ridge-stats">
+        <div class="stat-row"><span class="lbl">ПРОКСИ</span><span class="val" id="rg-proxy"
+          data-tip="Опционная цепочка ETF-прокси (QQQ→NAS100, SPY→SP500, DIA→US30, GLD→XAU). Страйки пересчитаны в шкалу инструмента пропорцией цена_инструмента/спот_прокси (приближение).">—</span></div>
+        <div class="stat-row"><span class="lbl">ЭКСПИРАЦИЯ</span><span class="val" id="rg-expiry">—</span></div>
+        <div class="stat-row"><span class="lbl">IMPLIED MOVE</span><span class="val" id="rg-move"
+          data-tip="">—</span></div>
+        <div class="stat-row"><span class="lbl">σ IMPLIED</span><span class="val" id="rg-sigma"
+          data-tip="">—</span></div>
+        <div class="stat-row"><span class="lbl">σ BASELINE 20D</span><span class="val" id="rg-base"
+          data-tip="Реализованная вола инструмента: std лог-доходностей 20 дневных баров × √252. Источник: дневки Yahoo.">—</span></div>
+        <div class="stat-row"><span class="lbl">ПОПРАВКА σ</span><span class="val" id="rg-ratio"
+          data-tip="">—</span></div>
+        <div class="stat-sep"></div>
+        <div class="stat-row"><span class="lbl">P(ЗА ТЕЙК) РЫНОК</span><span class="val" id="rg-p-take"
+          data-tip="">—</span></div>
+        <div class="stat-row"><span class="lbl">P(ЗА СТОП) РЫНОК</span><span class="val" id="rg-p-stop"
+          data-tip="">—</span></div>
+        <div class="stat-row"><span class="lbl">P МОДЕЛИ</span><span class="val" id="rg-p-model"
+          data-tip="Модельная P(тейк раньше стопа) — для сравнения с risk-neutral вероятностями рынка. Расхождение = рынок видит другой расклад, чем ваша статистика.">—</span></div>
+      </div>
+      <div class="canvas-holder">
+        <canvas id="ridge-canvas"></canvas>
+        <div class="canvas-empty" id="ridge-empty">○ ОПЦИОННЫЕ ДАННЫЕ НЕДОСТУПНЫ</div>
+      </div>
+    </div>
+    <div class="panel-foot dim">каждая гряда — плотность Бридена–Литценбергера из снапшота цепочки (каждые ~10 мин); нижняя жирная — актуальная; вертикали: вход · стоп · тейк · GEX</div>
+  </section>
+
+  <!-- ================ 4. КАРТА УРОВНЕЙ ================ -->
+  <section class="card panel" id="panel-levels">
+    <div class="panel-head">
+      <h2>КАРТА УРОВНЕЙ · КОРИДОР ЦЕНЫ</h2>
+      <div class="panel-head-right">
+        <button class="btn btn-small" id="btn-zones"
+                data-tip="Редактировать FVG-зоны текущей сделки (верх/низ/таймфрейм).">FVG-ЗОНЫ</button>
+        <span class="badge" id="levels-status">○ НЕТ СДЕЛКИ</span>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div class="canvas-holder levels-holder">
+        <canvas id="levels-canvas"></canvas>
+        <div class="canvas-empty" id="levels-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ</div>
+      </div>
+    </div>
+    <div class="panel-foot dim">затенение — implied move ±1σ до конца сессии (из ATM straddle); пунктир — GEX-уровни (эвристика позиционирования дилеров, непроверяемо); прямоугольники — ваши FVG-зоны</div>
+  </section>
+
+  <!-- ================ 5. ФИЛЬТРЫ + ЛЕСТНИЦА ================ -->
+  <section class="card panel" id="panel-filters">
+    <div class="panel-body filters-body">
+      <div class="filters-half">
+        <div class="lbl panel-mini-title">ФИЛЬТРЫ СТРАТЕГИИ</div>
+        <div class="chips" id="filter-chips"></div>
+      </div>
+      <div class="vsep"></div>
+      <div class="ladder-half">
+        <div class="lbl panel-mini-title">ЛЕСТНИЦА ФИКСАЦИИ <span class="dim">(10% НА РУБЕЖ · БУ ПОСЛЕ 1.5R)</span></div>
+        <div class="ladder" id="ladder-row"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================ 6. ЖУРНАЛ ================ -->
+  <section class="card panel" id="panel-journal">
+    <div class="panel-head clickable" id="journal-toggle">
+      <h2>ЖУРНАЛ СДЕЛОК <span class="dim" id="journal-count"></span></h2>
+      <div class="panel-head-right">
+        <a class="btn btn-small" href="/api/journal.csv" download="seiltanzer_journal.csv"
+           data-tip="Экспорт всего журнала в CSV (разделитель ;).">CSV</a>
+        <button class="btn btn-small" id="btn-add-hist"
+                data-tip="Добавить закрытую сделку задним числом (бэкфилл статистики сетапа).">+ ИСТОРИЯ</button>
+        <span class="badge" id="journal-arrow">▾</span>
+      </div>
+    </div>
+    <div class="panel-body" id="journal-body">
+      <table class="journal-table" id="journal-table">
+        <thead>
+          <tr><th>№</th><th>ОТКРЫТА</th><th>СЕТАП</th><th>ИНСТР.</th><th>НАПР.</th>
+              <th>ВХОД</th><th>СТОП</th><th>ТЕЙК</th><th>R</th><th>СТАТУС</th><th>ЗАМЕТКИ</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="setup-stats-block">
+        <div class="lbl panel-mini-title">СТАТИСТИКА СЕТАПОВ <span class="dim">2α/(α+β) ПО ЖУРНАЛУ · КАЛИБРОВКА ПРИ ≥20</span></div>
+        <div class="setup-grid" id="setup-grid"></div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="foot dim">
+    SEILTANZER TERMINAL · инструмент поддержки решений, не сигнальный сервис ·
+    каждое число имеет tooltip «как посчитано» · нет данных = честное «нет данных»
+  </footer>
+</main>
+
+<!-- ================ МОДАЛЫ ================ -->
+<div class="modal-back" id="modal-back" hidden>
+  <div class="modal card" id="modal"></div>
+</div>
+
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
