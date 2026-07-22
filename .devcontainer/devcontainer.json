@@ -1,0 +1,17 @@
+{
+  "name": "Seiltanzer Terminal",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "pip install -e '.[dev]'",
+  "forwardPorts": [8790],
+  "portsAttributes": {
+    "8790": {
+      "label": "Seiltanzer Terminal",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  }
+}
