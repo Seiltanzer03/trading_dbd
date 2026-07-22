@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import time
 
 from .config import INSTRUMENTS, LADDER_RUNGS, LADDER_FRACTION, BREAKEVEN_AFTER, \
@@ -177,6 +178,16 @@ class Engine:
 
         band = pb.prob_band(r, stats.wins, stats.n, T, sigma_ratio=sr)
         jn, jw = self.journal.journal_counts(trade["setup"])
+
+        # sigma_R — абсолютный ожидаемый ход сделки в R к экспирации (для карты/справки).
+        sigma_R, sr_source = self._sigma_R(trade, price, sigma)
+        # ширина доски определяется РЕЖИМОМ волы (implied/realized), а не абсолютом:
+        # при тесных стопах абсолютный ход в разы больше барьеров и дал бы бинарный
+        # исход. Здесь колокол всегда виден, но раздувается в разогнанном рынке
+        # (ratio>1) и сжимается в сжатом (ratio<1) — и сдвигается с ценой (r0).
+        ratio_eff = sigma["ratio"] if sigma.get("applied") else 1.0
+        board_sigma_R = float(min(max(0.85 * math.sqrt(ratio_eff), 0.45), 1.7))
+
         prob = {
             "r": r, "T": T, "p": band.p, "p_lo": band.p_lo, "p_hi": band.p_hi,
             "mu": band.mu, "sigma_ratio": band.sigma_ratio,
@@ -187,9 +198,14 @@ class Engine:
             "small_sample": stats.n < 30,          # ТЗ: <30 — всегда с интервалом
             "efficiency": stats.efficiency,
             "efficiency_verdict": rk.efficiency_verdict(stats.efficiency),
+            "sigma_R": sigma_R,
+            "sigma_R_source": sr_source,
+            "board_sigma_R": board_sigma_R,
+            "vol_regime": ("разогнанный" if ratio_eff > 1.15 else
+                           "сжатый" if ratio_eff < 0.87 else "нормальный"),
         }
 
-        mc = self._mc(r, band.mu, band.sigma_ratio, T)
+        mc = self._mc(r, band.mu, band.sigma_ratio, T, board_sigma_R)
 
         max_r = max(trade.get("max_r") if trade.get("max_r") is not None else r, r)
         self.journal.update_max_r(trade["id"], max_r)
@@ -203,24 +219,63 @@ class Engine:
             "max_r": max_r,
         }
         return {"prob": prob, "mc": mc, "ladder": ladder,
-                "levels": self._levels_payload(trade, price)}
+                "levels": self._levels_payload(trade, price, sigma)}
 
-    def _mc(self, r: float, mu: float, sigma_ratio: float, T: float) -> dict:
-        key = (round(r, 2), round(mu, 3), round(sigma_ratio, 2), round(T, 2))
+    # горизонт по умолчанию для σ-поправки без цепочки (свинг-сделки): торг. дни
+    DEFAULT_HORIZON_TRADING_DAYS = 5.0
+
+    def _sigma_R(self, trade: dict, price: float, sigma: dict) -> tuple[float, str]:
+        """Разброс хода сделки в R за горизонт распределения.
+
+        Приоритет источника (всё из реальных данных):
+          1) implied move опционной цепочки к экспирации -> "implied move";
+          2) индекс волы / realized за горизонт по умолчанию -> "vol-index"/"realized";
+          3) нейтральный разброс, если волы нет вовсе -> "нейтрально (нет волы)".
+        Возврат (sigma_R, источник). sigma_R ограничен [0.25, 8].
+        """
+        risk = abs(trade["entry"] - trade["stop"])
+        if risk <= 0:
+            return 1.0, "нейтрально"
+        opts = self._options_summary()
+        if opts and opts.get("implied_move_abs_instr"):
+            # move_abs = E|ΔS| к экспирации; СКО хода = move_abs*sqrt(pi/2)
+            sr = opts["implied_move_abs_instr"] * math.sqrt(math.pi / 2) / risk
+            return float(min(max(sr, 0.25), 8.0)), "implied move"
+        # без цепочки: σ_implied из индекса волы либо realized, за горизонт по умолч.
+        t_years = self.DEFAULT_HORIZON_TRADING_DAYS / 252.0
+        if sigma.get("applied") and sigma.get("sigma_implied"):
+            std_price = sigma["sigma_implied"] * price * math.sqrt(t_years)
+            src = "vol-index" if sigma.get("source") == "vol_index" else "implied"
+            return float(min(max(std_price / risk, 0.25), 8.0)), src
+        base = self.market.baseline_vol()
+        if base and base > 0:
+            std_price = base * price * math.sqrt(t_years)
+            return float(min(max(std_price / risk, 0.25), 8.0)), "realized 20д"
+        return 1.2, "нейтрально (нет волы)"
+
+    def _mc(self, r: float, mu: float, sigma_ratio: float, T: float,
+            board_sigma_R: float) -> dict:
+        key = (round(r, 2), round(mu, 3), round(sigma_ratio, 2), round(T, 2),
+               round(board_sigma_R, 2))
         if key == self._mc_cache_key and self._mc_cache is not None:
             return self._mc_cache
-        res = pb.simulate_remainder(r, mu, sigma_ratio, T,
-                                    n_paths=3000, dt=0.01, horizon=16.0,
-                                    seed=int(key[0] * 100) & 0x7FFF)
+        seed = int(abs(r) * 100) & 0x7FFF
+        # eventual — до поглощения (для EV холд/лестница и hero-совместимой P)
+        ev = pb.simulate_remainder(r, mu, sigma_ratio, T,
+                                   n_paths=3000, dt=0.01, horizon=16.0, seed=seed)
+        # forward — проекция к ближайшей части горизонта, ширина = режим волы (доска)
+        fwd = pb.forward_distribution(r, theta=2.0 * mu, sigma_R=board_sigma_R, T=T,
+                                      n_paths=4000, horizon=1.0, dt=0.005, seed=seed)
         out = {
-            "p_take": res.p_take,
-            "p_stop": res.p_stop,
-            "ev_hold": round(pb.ev_hold(res), 4),
-            "ev_ladder": round(pb.ev_ladder(res, LADDER_RUNGS, LADDER_FRACTION,
+            "p_take": ev.p_take,
+            "p_stop": ev.p_stop,
+            "ev_hold": round(pb.ev_hold(ev), 4),
+            "ev_ladder": round(pb.ev_ladder(ev, LADDER_RUNGS, LADDER_FRACTION,
                                             BREAKEVEN_AFTER), 4),
-            "hist": pb.terminal_histogram(res, n_bins=9),
-            "horizons": pb.horizon_probs(res, (1.0, 2.0, 4.0, 8.0)),
-            "n_paths": len(res.terminal),
+            "hist": pb.terminal_histogram(fwd, n_bins=11),
+            "p_take_horizon": fwd.p_take,
+            "p_stop_horizon": fwd.p_stop,
+            "n_paths": len(fwd.terminal),
         }
         self._mc_cache_key, self._mc_cache = key, out
         return out
@@ -258,13 +313,15 @@ class Engine:
             "implied_move_abs_instr": m["implied_move"]["move_abs"] * scale,
             "sigma_annual": sigma_ann,
             "session_band_abs": band,   # ±1σ до конца сессии в пунктах инструмента
+            # ±ожидаемый ход к экспирации (implied move) — коридор рынка для карты
+            "expiry_band_abs": m["implied_move"]["move_abs"] * scale,
             "gex_zero_flip_instr": (m["gex"]["zero_flip"] * scale
                                     if m["gex"]["zero_flip"] else None),
             "gex_top_instr": [{"price": t["strike"] * scale, "gex": t["gex"]}
                               for t in m["gex"]["top"]],
         }
 
-    def _levels_payload(self, trade: dict, price: float) -> dict:
+    def _levels_payload(self, trade: dict, price: float, sigma: dict) -> dict:
         opts = self._options_summary()
         vwap = self.market.vwap()
         day = self.market.day_range()
@@ -281,11 +338,16 @@ class Engine:
             "implied_band": None,
             "gex": None,
         }
-        if opts and opts.get("session_band_abs"):
+        # коридор = ожидаемый ход рынка к экспирации (implied move); если его нет,
+        # но есть σ-поправка из индекса волы — строим ±1σ за горизонт по умолчанию
+        band_abs = opts.get("expiry_band_abs") if opts else None
+        band_demo = opts.get("demo") if opts else False
+        if band_abs is None and sigma.get("applied") and sigma.get("sigma_implied"):
+            band_abs = sigma["sigma_implied"] * price * math.sqrt(5.0 / 252.0)
+        if band_abs:
             levels["implied_band"] = {
-                "low": price - opts["session_band_abs"],
-                "high": price + opts["session_band_abs"],
-                "demo": opts["demo"],
+                "low": price - band_abs, "high": price + band_abs,
+                "demo": bool(band_demo),
             }
         if opts:
             levels["gex"] = {

@@ -68,6 +68,15 @@ function onTick() {
   renderLevels();
   renderRidgeStats();
   maybeRefreshRidge();
+  // живое обновление гряды каждый тик: курсор цены + проекция модели
+  if (S.tick?.trade) {
+    ridge.updateLive({
+      price: S.tick.feeds?.price?.value,
+      modelHist: S.tick.mc?.hist,
+      trade: S.tick.trade,
+      modelProb: S.tick.prob?.p,
+    });
+  }
 }
 
 function renderAll() {
@@ -174,8 +183,10 @@ function renderLattice() {
     active,
     p: p?.p,
     T: p?.T ?? 2.5,
+    r: p?.r ?? 0,
     hist: t.mc?.hist,
     tradeId: t.trade?.id ?? null,
+    regime: p?.vol_regime,
   });
 
   if (!active) {
@@ -322,9 +333,28 @@ function renderRidgeStats() {
   $('#ridge-status').textContent = rAvail
     ? `${STATUS_ICON[chainSt]} ${statusLabel(chainSt)}` : '○ НЕТ ДАННЫХ';
 
+  // σ-поправка показывается из t.sigma всегда (в т.ч. когда источник — индекс
+  // волы и полной цепочки нет); строки цепочки — только при наличии os.
+  const srcLabel = { chain: 'цепочка', vol_index: 'индекс волы' }[t.sigma.source] || '';
+  $('#rg-sigma').textContent = t.sigma.applied ? fmtPct(t.sigma.sigma_implied, 1) : '—';
+  $('#rg-sigma').dataset.tip = t.sigma.applied
+    ? `σ_implied годовая = ${fmtPct(t.sigma.sigma_implied, 2)}\nисточник: ${srcLabel}` +
+      (t.sigma.source === 'chain' ? '\n(из ATM straddle: implied_move × √(π/2t))'
+                                  : '\n(значение индекса волы ÷ 100)')
+    : 'нет источника implied-волы';
+  $('#rg-base').textContent = t.sigma.applied ? fmtPct(t.sigma.sigma_baseline, 1) : '—';
+  $('#rg-ratio').textContent = t.sigma.applied
+    ? '×' + fmtNum(t.sigma.ratio, 3) + (srcLabel ? ` (${srcLabel})` : '') : 'НЕ ПРИМЕНЕНА';
+  $('#rg-ratio').dataset.tip = t.sigma.applied
+    ? `σ процесса умножена на σ_impl/σ_baseline = ${fmtPct(t.sigma.sigma_implied, 1)}/${fmtPct(t.sigma.sigma_baseline, 1)} = ${fmtNum(t.sigma.ratio, 3)}\nисточник σ_implied: ${srcLabel}\n(сжатый рынок «остужает» далёкий тейк, разогнанный — наоборот)`
+    : `Поправка не применена: ${t.sigma.reason || 'нет данных'} — модель работает без опционной поправки (честнее, чем выдумывать).`;
+
   if (!os) {
-    ['rg-proxy', 'rg-expiry', 'rg-move', 'rg-sigma', 'rg-base', 'rg-ratio',
-     'rg-p-take', 'rg-p-stop', 'rg-p-model'].forEach((id) => { $('#' + id).textContent = '—'; });
+    ['rg-proxy', 'rg-expiry', 'rg-move', 'rg-p-take', 'rg-p-stop']
+      .forEach((id) => { $('#' + id).textContent = '—'; });
+    $('#rg-proxy').textContent = t.sigma.source === 'vol_index'
+      ? 'ИНДЕКС ВОЛЫ' : '—';
+    $('#rg-p-model').textContent = S.tick?.prob ? fmtPct(S.tick.prob.p) : '—';
     return;
   }
   $('#rg-proxy').textContent = os.proxy + (os.demo ? ' ◆' : '');
@@ -334,14 +364,6 @@ function renderRidgeStats() {
     `Implied move до экспирации ${os.expiry}:\nATM straddle ${os.proxy} / спот = ${fmtPct(os.implied_move_frac)}\n` +
     `в пунктах инструмента: × scale ${fmtNum(os.scale, 4)} = ${fmtPrice(os.implied_move_abs_instr)}\n` +
     `(ожидаемое |движение|, E|ΔS/S|)`;
-  $('#rg-sigma').textContent = fmtPct(t.sigma.sigma_implied, 1);
-  $('#rg-sigma').dataset.tip =
-    `σ_implied годовая = implied_move × √(π/2t) = ${fmtPct(t.sigma.sigma_implied, 2)}\n(из E|Z| = σ√(2/π) для нормального Z)`;
-  $('#rg-base').textContent = fmtPct(t.sigma.sigma_baseline, 1);
-  $('#rg-ratio').textContent = t.sigma.applied ? '×' + fmtNum(t.sigma.ratio, 3) : 'НЕ ПРИМЕНЕНА';
-  $('#rg-ratio').dataset.tip = t.sigma.applied
-    ? `σ процесса умножена на σ_impl/σ_baseline = ${fmtPct(t.sigma.sigma_implied, 1)}/${fmtPct(t.sigma.sigma_baseline, 1)} = ${fmtNum(t.sigma.ratio, 3)}\n(п.4 ТЗ: сжатый рынок «остужает» далёкий тейк на горизонте, разогнанный — наоборот)`
-    : `Поправка не применена: ${t.sigma.reason || 'нет данных'} — модель работает с σ=1 (без опционной поправки), это явно честнее, чем выдумывать.`;
 
   const rn = S.ridge?.rn_probs;
   $('#rg-p-take').textContent = rn ? fmtPct(rn.p_beyond_take) : '—';

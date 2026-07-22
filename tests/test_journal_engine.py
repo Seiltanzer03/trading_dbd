@@ -94,8 +94,12 @@ class TestEngineDemo:
         assert p is not None and 0 < p["p_lo"] <= p["p"] <= p["p_hi"] < 1
         assert p["calibration"] == "builtin" and p["small_sample"] is True
         assert abs(p["r"]) < 0.2
-        assert tick["mc"]["n_paths"] == 3000
-        assert abs(tick["mc"]["p_take"] - p["p"]) < 0.06
+        assert tick["mc"]["n_paths"] == 4000            # forward-распределение доски
+        assert abs(tick["mc"]["p_take"] - p["p"]) < 0.06  # eventual ~ hero P
+        # доска — распределение к горизонту: не бинарна, есть масса в середине
+        assert len(tick["mc"]["hist"]["probs"]) == 11
+        assert sum(tick["mc"]["hist"]["probs"][1:-1]) > 0.3
+        assert 0.4 < p["board_sigma_R"] < 1.8
         assert tick["ladder"]["crossed"] == [False] * 6
         lv = tick["levels"]
         assert lv["entry"] == price and lv["implied_band"] is not None
@@ -125,6 +129,24 @@ class TestEngineDemo:
         snap = ridge["snapshots"][-1]
         assert snap["demo"] is True
         assert len(snap["density"]["strikes"]) == len(snap["density"]["q"])
+
+    def test_xag_has_slv_chain(self, engine):
+        engine.market.set_instrument("XAG")
+        engine.market.refresh_price()
+        engine.market.refresh_chain()
+        assert engine.market.chain["metrics"]["proxy"] == "SLV"
+        ridge = engine.ridge_payload()
+        assert ridge["available"] is True
+
+    def test_eurusd_sigma_from_vol_index(self, engine):
+        engine.market.set_instrument("EURUSD")
+        for fn in (engine.market.refresh_price, engine.market.refresh_daily,
+                   engine.market.refresh_vols, engine.market.refresh_chain):
+            fn()
+        sr = engine.market.sigma_ratio()
+        # цепочки нет, но σ берётся из индекса волы (^EVZ)
+        assert sr["applied"] is True and sr["source"] == "vol_index"
+        assert sr["sigma_implied"] is not None
 
     def test_ridge_unavailable_for_no_options(self, engine):
         engine.market.set_instrument("GER40")

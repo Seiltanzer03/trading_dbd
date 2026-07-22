@@ -214,6 +214,28 @@ def simulate_remainder(r0: float, mu: float, sigma: float, T: float,
                     T=T, dt=dt, horizon=horizon)
 
 
+def forward_distribution(r0: float, theta: float, sigma_R: float, T: float,
+                         n_paths: int = 4000, horizon: float = 1.0,
+                         dt: float = 0.005, seed: int | None = None) -> MCResult:
+    """Распределение R к горизонту, где полный разброс за горизонт = sigma_R.
+
+    В отличие от `simulate_remainder` (гонит до поглощения на длинном горизонте
+    и даёт почти бинарный исход −1/T), здесь горизонт нормирован в 1, а
+    `sigma_R` = ожидаемое СКО хода сделки в R-единицах за этот горизонт
+    (берётся из implied move опционов / индекса волы). Поэтому распределение:
+      • сдвигается с текущим r0 (движение цены),
+      • раздувается при росте волатильности и сжимается при её падении,
+      • копит атомы на −1 и T (поглощённые пути), но между ними есть плотность.
+
+    theta = 2*mu/sigma^2 фиксирует «край» из винрейта (как в first-passage),
+    так что доля зелёных сходится к модельной вероятности.
+    """
+    sigma = max(sigma_R, 1e-6)
+    mu = 0.5 * theta * sigma * sigma
+    return simulate_remainder(r0, mu, sigma, T, n_paths=n_paths, dt=dt,
+                              horizon=horizon, seed=seed)
+
+
 def ev_hold(mc: MCResult) -> float:
     """EV удержания до стопа/тейка: среднее терминального R."""
     return float(np.mean(mc.terminal))

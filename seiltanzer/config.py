@@ -70,14 +70,26 @@ INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
     Instrument("UK100",  "^FTSE",    None,  8900.0,  0.12),
     Instrument("JPY100", "JPY=X",    None,  148.0,   0.10),
     Instrument("XAU",    "GC=F",     "GLD", 3350.0,  0.16),
-    Instrument("XAG",    "SI=F",     None,  38.0,    0.28),
+    Instrument("XAG",    "SI=F",     "SLV", 38.0,    0.28),
     Instrument("EURUSD", "EURUSD=X", None,  1.17,    0.07),
     Instrument("USDCAD", "CAD=X",    None,  1.37,    0.06),
 ]}
 
-# индексы волатильности (Yahoo); ^V1X (VDAX-NEW) в Yahoo обычно недоступен —
-# фид честно вернёт "no_data", UI покажет «проверь вручную» (ТЗ, п.7 ядра).
-VOL_INDEX_TICKERS = {"vix": "^VIX", "gvz": "^GVZ", "dv1x": "^V1X"}
+# индексы волатильности (Yahoo). Первые три — ворота фильтров стратегии;
+# evz/vxn — источник implied-волы для σ-поправки там, где полной цепочки нет.
+# ^V1X (VDAX-NEW) в Yahoo обычно недоступен — фид честно вернёт "no_data",
+# UI покажет «проверь вручную» (ТЗ, п.7 ядра).
+VOL_INDEX_TICKERS = {
+    "vix": "^VIX", "gvz": "^GVZ", "dv1x": "^V1X",
+    "evz": "^EVZ",   # CBOE EuroCurrency Volatility Index — implied-вола EUR/USD
+    "vxn": "^VXN",   # CBOE NASDAQ-100 Volatility Index
+}
+
+# Инструмент -> ключ индекса волы как ИСТОЧНИК sigma_implied, когда полной
+# опционной цепочки нет. Значение индекса — годовая implied-вола в % (÷100).
+# Даёт σ-поправку без цепочки (но без Strike Landscape / GEX). Честный список:
+# только там, где есть бесплатный профильный индекс волы.
+SIGMA_INDEX_FOR = {"EURUSD": "evz"}
 
 
 # ----------------------------------------------------- лестница фиксации

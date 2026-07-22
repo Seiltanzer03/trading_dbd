@@ -10,15 +10,21 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import math
 import random
 import time
 
 import numpy as np
 
-from ..config import INSTRUMENTS, VOL_INDEX_TICKERS, Instrument, Settings
+from ..config import (INSTRUMENTS, SIGMA_INDEX_FOR, VOL_INDEX_TICKERS,
+                      Instrument, Settings)
 from ..core import options as opt
 from .cache import DiskCache
+
+# yfinance шумит в stderr про делистинги (например ^V1X/VDAX недоступен) —
+# это ожидаемо и обрабатывается статусом no_data, поэтому глушим его логгер.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 DELAYED_GRACE = 5.0  # во сколько раз можно превысить период опроса до no_data
 
@@ -33,7 +39,7 @@ class DemoMarket:
     def __init__(self, seed: int | None = None):
         self.rng = random.Random(seed)
         self.prices = {c: i.demo_price for c, i in INSTRUMENTS.items()}
-        self.vols = {"vix": 17.5, "gvz": 16.0, "dv1x": 16.5}
+        self.vols = {"vix": 17.5, "gvz": 16.0, "dv1x": 16.5, "evz": 8.0, "vxn": 22.0}
         self._last = time.time()
 
     def step(self) -> None:
@@ -47,9 +53,11 @@ class DemoMarket:
             self.prices[code] *= math.exp(-0.5 * sigma * sigma * dt_y
                                           + sigma * math.sqrt(dt_y) * z * 8.0)
             # *8: демо-время ускорено, чтобы движение было видно на панелях
-        for k, anchor in (("vix", 17.5), ("gvz", 16.0), ("dv1x", 16.5)):
+        for k, anchor, floor in (("vix", 17.5, 9.0), ("gvz", 16.0, 9.0),
+                                 ("dv1x", 16.5, 9.0), ("evz", 8.0, 4.0),
+                                 ("vxn", 22.0, 12.0)):
             v = self.vols[k]
-            self.vols[k] = max(9.0, v + 0.05 * (anchor - v) + self.rng.gauss(0, 0.15))
+            self.vols[k] = max(floor, v + 0.05 * (anchor - v) + self.rng.gauss(0, 0.15))
 
     def daily_bars(self, code: str, days: int = 60) -> dict:
         inst = INSTRUMENTS[code]
@@ -334,6 +342,11 @@ class MarketData:
                 "strikes": [round(float(x), 4) for x in density.strikes],
                 "q": [float(x) for x in density.density],
             },
+            "oi_profile": {
+                "strikes": [float(x) for x in raw["strikes"]],
+                "call_oi": [float(x) for x in np.nan_to_num(raw["call_oi"])],
+                "put_oi": [float(x) for x in np.nan_to_num(raw["put_oi"])],
+            },
             "gex": {
                 "strikes": [float(x) for x in gex.strikes],
                 "net": [float(x) for x in gex.net_gex],
@@ -386,19 +399,33 @@ class MarketData:
     def sigma_ratio(self) -> dict:
         """Опционная поправка: sigma_implied / sigma_baseline (п.4 ядра).
 
-        Возвращает {"ratio", "sigma_implied", "sigma_baseline", "applied", "reason"}.
+        Источник sigma_implied по приоритету:
+          1) полная опционная цепочка (implied move) — "chain";
+          2) профильный индекс волы (например ^EVZ для EURUSD) — "vol_index";
+        иначе поправка не применяется (честно указывается причина).
+
+        Возвращает {ratio, sigma_implied, sigma_baseline, applied, source, reason}.
         """
         out = {"ratio": 1.0, "sigma_implied": None, "sigma_baseline": None,
-               "applied": False, "reason": None}
+               "applied": False, "source": None, "reason": None}
         base = self.baseline_vol()
         m = self.chain.get("metrics")
-        if m is None:
-            out["reason"] = f"нет опционной цепочки для {self.instrument_code}"
+        si, source = None, None
+        if m is not None:
+            si, source = m["implied_move"]["sigma_annual"], "chain"
+        else:
+            key = SIGMA_INDEX_FOR.get(self.instrument_code)
+            feed = self.vols.get(key) if key else None
+            if feed and feed.get("value"):
+                si, source = feed["value"] / 100.0, "vol_index"
+        if si is None:
+            out["reason"] = (f"нет опционной цепочки/индекса волы для "
+                             f"{self.instrument_code}")
             return out
         if base is None or base <= 0:
             out["reason"] = "нет дневной истории для базовой волы"
             return out
-        si = m["implied_move"]["sigma_annual"]
         out.update(sigma_implied=si, sigma_baseline=base,
-                   ratio=min(max(si / base, 0.25), 4.0), applied=True)
+                   ratio=min(max(si / base, 0.25), 4.0), applied=True,
+                   source=source)
         return out

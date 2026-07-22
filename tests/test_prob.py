@@ -158,6 +158,32 @@ class TestMonteCarlo:
         assert h["probs"][0] > 0.1 and h["probs"][-1] > 0.3
 
 
+class TestForwardDistribution:
+    def test_not_binary_has_interior(self):
+        # умеренный разброс -> заметная масса в середине (не только на барьерах)
+        theta = 2 * P.calibrate_mu(0.68, 2.5)
+        fwd = P.forward_distribution(0.0, theta, sigma_R=0.7, T=2.5,
+                                     n_paths=6000, seed=1)
+        h = P.terminal_histogram(fwd, n_bins=11)
+        assert sum(h["probs"][1:-1]) > 0.5
+
+    def test_wider_with_volatility(self):
+        # выше sigma_R -> больше поглощений на барьерах (шире разброс)
+        theta = 2 * P.calibrate_mu(0.68, 2.5)
+        narrow = P.forward_distribution(0.0, theta, 0.4, 2.5, n_paths=6000, seed=2)
+        wide = P.forward_distribution(0.0, theta, 1.4, 2.5, n_paths=6000, seed=2)
+        hn = P.terminal_histogram(narrow, 11)
+        hw = P.terminal_histogram(wide, 11)
+        assert (hw["probs"][0] + hw["probs"][-1]) > (hn["probs"][0] + hn["probs"][-1])
+
+    def test_shifts_with_position(self):
+        # сдвиг r0 вправо -> масса распределения смещается к тейку
+        theta = 2 * P.calibrate_mu(0.68, 2.5)
+        left = P.forward_distribution(-0.3, theta, 0.7, 2.5, n_paths=6000, seed=3)
+        right = P.forward_distribution(1.2, theta, 0.7, 2.5, n_paths=6000, seed=3)
+        assert float(np.mean(right.terminal)) > float(np.mean(left.terminal))
+
+
 class TestRCoordinate:
     def test_long_short(self):
         assert P.r_coordinate(101, 100, 99, "long") == pytest.approx(1.0)
