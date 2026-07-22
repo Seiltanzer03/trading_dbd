@@ -206,6 +206,22 @@ class TestEngineDemo:
         assert not (rn["p_beyond_take"] > 0.5 and rn["p_beyond_stop"] > 0.5)
 
 
+class TestLiveNoStubs:
+    def test_live_mode_has_no_synthetic_data(self, tmp_path):
+        # боевой режим (demo=False): синтетического рынка нет вообще,
+        # фиды стартуют в честном no_data, снапшоты не предзасеиваются
+        from seiltanzer.data.cache import DiskCache
+        from seiltanzer.data.feeds import MarketData
+        s = Settings(demo=False, data_dir=str(tmp_path))
+        md = MarketData(s, DiskCache(s.cache_db))
+        assert md.demo_market is None
+        assert md.price["value"] is None and md.price["status"] == "no_data"
+        assert md.chain["metrics"] is None
+        assert md.daily.get("bars") is None
+        assert md.cache.chain_snapshots("QQQ") == []  # без демо-засева
+        md.cache.close()
+
+
 class TestFiltersLogic:
     def test_vix_filter_states(self, engine):
         engine.market.refresh_price()
