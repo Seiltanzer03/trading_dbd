@@ -320,7 +320,7 @@ html, body {
 
 /* ------------------------------------------------ modal + forms */
 
-.modal-back[hidden], .tooltip[hidden], #offline-banner[hidden] { display: none; }
+[hidden] { display: none !important; }
 
 .modal-back {
   position: fixed;

@@ -449,10 +449,24 @@ $('#btn-new-trade').addEventListener('click', () => {
       <button class="btn btn-primary" id="f-open">ОТКРЫТЬ</button>
     </div>`);
   $('#f-cancel').onclick = closeModal;
+  // Автоподстановка входа честна только если инструмент выбранного сетапа
+  // совпадает с активным (для которого сейчас идёт фид цены). Иначе — пусто.
   const prefill = () => {
+    const su = S.setups.find((s) => s.num === Number($('#f-setup').value));
     const price = S.tick?.feeds?.price?.value;
-    if (price && !$('#f-entry').value) $('#f-entry').value = price.toPrecision(8);
+    const sameInstr = su && su.instrument === S.tick?.instrument;
+    if (sameInstr && price) {
+      $('#f-entry').value = price.toPrecision(8);
+      $('#f-rr-hint').textContent =
+        `вход подставлен из фида ${su.instrument} (${price.toPrecision(8)}); тейк можно оставить пустым — рассчитаю из RR (правило 2.8)`;
+    } else {
+      $('#f-entry').value = '';
+      $('#f-rr-hint').textContent = su
+        ? `инструмент сетапа — ${su.instrument}; нет живого фида для него, введите вход вручную. Тейк можно оставить пустым (рассчитаю из RR).`
+        : 'тейк можно оставить пустым — рассчитаю из целевого RR сетапа (правило 2.8)';
+    }
   };
+  $('#f-setup').onchange = prefill;
   prefill();
   $('#f-open').onclick = async () => {
     try {
