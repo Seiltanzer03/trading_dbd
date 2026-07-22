@@ -89,7 +89,7 @@ export function initRidge(canvas) {
     // гряды с дыханием + изометрическая перспектива (3D-объём): старые ряды
     // уходят вглубь-вправо, текущая (нижняя) выровнена с маркерами сделки
     const rowGap = (ridgeBottom - padT) / snaps.length, amp = rowGap * 2.2;
-    const DEPTH = plotW * 0.016;
+    const DEPTH = plotW * 0.024;
     snaps.forEach((snap, i) => {
       const isLast = i === snaps.length - 1;
       const baseY = padT + rowGap * (i + 1);
@@ -137,15 +137,27 @@ export function initRidge(canvas) {
     (gex.top || []).forEach((t) => vline(t.strike * scale, COLORS.dim, [4, 4], 'GEX', true));
     if (gex.zero_flip) vline(gex.zero_flip * scale, '#A87A18', [2, 3], 'FLIP', true);
     if (trade) { vline(trade.entry, COLORS.ink, [], 'ВХОД', false); vline(trade.stop, COLORS.red, [], 'СТОП', false); vline(trade.take, '#E8622A', [], 'ТЕЙК', false); }
+    // ЖИВОЙ ЛУЧ ЦЕНЫ — жирная вертикаль через весь 3D-стек, скользит с котировкой
     if (price != null && price >= lo && price <= hi) {
       const x = X(price);
-      ctx.fillStyle = COLORS.ink; ctx.beginPath(); ctx.moveTo(x - 4, padT - 12); ctx.lineTo(x + 4, padT - 12); ctx.lineTo(x, padT - 4); ctx.closePath(); ctx.fill();
+      const pw = 0.5 + 0.5 * pulse(now, 1400);
+      ctx.strokeStyle = 'rgba(232,98,42,0.85)'; ctx.lineWidth = 2.2;
+      ctx.beginPath(); ctx.moveTo(x, padT - 14); ctx.lineTo(x, ridgeBottom); ctx.stroke();
+      ctx.strokeStyle = `rgba(232,98,42,${0.18 * pw})`; ctx.lineWidth = 6;
+      ctx.beginPath(); ctx.moveTo(x, padT - 14); ctx.lineTo(x, ridgeBottom); ctx.stroke();
+      ctx.lineWidth = 1; ctx.fillStyle = '#E8622A';
+      ctx.beginPath(); ctx.moveTo(x - 5, padT - 14); ctx.lineTo(x + 5, padT - 14); ctx.lineTo(x, padT - 6); ctx.closePath(); ctx.fill();
+      ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
+      ctx.fillText('ЦЕНА ' + fmtPrice(price), x, padT - 18);
     }
 
     // выноска рынок vs модель
     if (data.rn_probs && trade) {
+      const pt = data.rn_probs.p_beyond_take;
+      const mult = pt > 0 ? (1 / pt) : null;
       const box = [
-        `P(ЗА ТЕЙК) РЫНОК ${(data.rn_probs.p_beyond_take * 100).toFixed(1)}%`,
+        `P(ЗА ТЕЙК) РЫНОК ${(pt * 100).toFixed(1)}%`,
+        mult ? `×${mult.toFixed(mult >= 10 ? 0 : 1)} ЕСЛИ ПРОБЬЁТ ТЕЙК` : null,
         `P(ЗА СТОП) РЫНОК ${(data.rn_probs.p_beyond_stop * 100).toFixed(1)}%`,
         live.modelProb != null ? `P МОДЕЛИ ${(live.modelProb * 100).toFixed(1)}%` : null,
       ].filter(Boolean);
@@ -155,7 +167,10 @@ export function initRidge(canvas) {
       ctx.fillStyle = 'rgba(255,255,255,0.95)'; ctx.strokeStyle = COLORS.rule;
       ctx.fillRect(bx, by, bw, box.length * 13 + 8); ctx.strokeRect(bx, by, bw, box.length * 13 + 8);
       ctx.textAlign = 'left';
-      box.forEach((str, i) => { ctx.fillStyle = i === 0 ? '#E8622A' : i === 1 ? COLORS.red : COLORS.ink; ctx.fillText(str, bx + 7, by + 14 + i * 13); });
+      box.forEach((str, i) => {
+        ctx.fillStyle = str.includes('ТЕЙК') ? '#E8622A' : str.includes('СТОП') ? COLORS.red : COLORS.ink;
+        ctx.fillText(str, bx + 7, by + 14 + i * 13);
+      });
     }
 
     // ось

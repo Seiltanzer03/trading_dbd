@@ -59,6 +59,25 @@ class TestJournal:
         journal.update_max_r(t["id"], 0.3)  # ниже — не должен затирать
         assert journal.get_trade(t["id"])["max_r"] == pytest.approx(0.8)
 
+    def test_edit_and_delete(self, journal):
+        t = journal.open_trade(3, "NAS100", "long", 21500, 21450, 21625)
+        # правка уровней с проверкой геометрии
+        ed = journal.edit_trade(t["id"], entry=21510, stop=21460, take=21640,
+                                notes="правка")
+        assert ed["entry"] == 21510 and ed["notes"] == "правка"
+        # некорректная геометрия отклоняется
+        with pytest.raises(ValueError):
+            journal.edit_trade(t["id"], take=21400)  # тейк не по направлению лонга
+        # закрытие и правка результата
+        journal.close_trade(t["id"], 2.5)
+        ed2 = journal.edit_trade(t["id"], result_r=1.8)
+        assert ed2["result_r"] == 1.8
+        # удаление
+        journal.delete_trade(t["id"])
+        assert journal.list_trades() == []
+        with pytest.raises(ValueError):
+            journal.delete_trade(t["id"])
+
     def test_account_and_csv(self, journal):
         acc = journal.update_account(balance=51000, phase="1ph")
         assert acc["balance"] == 51000 and acc["phase"] == "1ph"

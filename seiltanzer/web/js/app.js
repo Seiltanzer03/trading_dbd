@@ -71,15 +71,13 @@ function onTick() {
   renderLevels();
   renderRidgeStats();
   maybeRefreshRidge();
-  // живое обновление гряды каждый тик: курсор цены + проекция модели
-  if (S.tick?.trade) {
-    ridge.updateLive({
-      price: S.tick.feeds?.price?.value,
-      modelHist: S.tick.mc?.hist,
-      trade: S.tick.trade,
-      modelProb: S.tick.prob?.p,
-    });
-  }
+  // живое обновление гряды каждый тик: луч цены двигается всегда (даже без сделки)
+  ridge.updateLive({
+    price: S.tick?.feeds?.price?.value,
+    modelHist: S.tick?.mc?.hist,
+    trade: S.tick?.trade || null,
+    modelProb: S.tick?.prob?.p,
+  });
 }
 
 function renderAll() {
@@ -172,6 +170,32 @@ function renderHeader() {
   }, 'Индексы волатильности (дневки Yahoo).\n');
 }
 
+// живая котировка на латтике: тик, цвет вверх/вниз, вспышка, % от входа
+function handleLivePrice(t) {
+  const price = t.feeds?.price?.value;
+  $('#lat-price-instr').textContent = t.instrument;
+  if (price == null) { $('#lat-price').textContent = '—'; $('#lat-price-chg').textContent = ''; return; }
+  const el = $('#lat-price');
+  tweenNumber(el, price, (v) => fmtPrice(v), 14);
+  const prev = S._lastPrice;
+  if (prev != null && price !== prev) {
+    const up = price > prev;
+    el.className = 'live-price ' + (up ? 'up' : 'down');
+    const row = $('#lat-price-row');
+    row.classList.remove('tickflash'); void row.offsetWidth; row.classList.add('tickflash');
+  }
+  // изменение от входа (если в сделке)
+  const chg = $('#lat-price-chg');
+  const tr = t.trade;
+  if (tr) {
+    const pct = tr.direction === 'long' ? (price - tr.entry) / tr.entry * 100
+                                        : (tr.entry - price) / tr.entry * 100;
+    chg.textContent = `${pct >= 0 ? '▲' : '▼'} ${Math.abs(pct).toFixed(2)}% от входа`;
+    chg.className = 'live-chg ' + (pct >= 0 ? 'up' : 'down');
+  } else { chg.textContent = ''; }
+  S._lastPrice = price;
+}
+
 // ---------------------------------------------------------------- verdict
 
 function renderVerdict() {
@@ -208,6 +232,7 @@ function renderVerdict() {
 function renderLattice() {
   const t = S.tick;
   if (!t) return;
+  handleLivePrice(t);          // котировка тикает всегда, даже без сделки
   const p = t.prob;
   const active = !!(p && t.mc);
   $('#lattice-empty').style.display = active ? 'none' : 'flex';
@@ -270,6 +295,11 @@ function renderLattice() {
     `(${p.wins}/${p.n}, источник: ${p.calibration === 'journal' ? 'ваш журнал' : 'встроенная таблица'})\n` +
     `σ = ${p.sigma_ratio.toFixed(3)} — поправка опционной волы (σ_impl/σ_baseline${t.sigma.applied ? '' : ' НЕ применена: ' + (t.sigma.reason || '')})` +
     (p.small_sample ? `\nВЫБОРКА < 30 — смотрите интервал [${(p.p_lo * 100).toFixed(1)}–${(p.p_hi * 100).toFixed(1)}%], не точечное число` : '');
+
+  // среднее P за сделку (визуальный ориентир — стабильно ли преимущество)
+  if (t.trade?.id !== S._pTradeId) { S._pTradeId = t.trade?.id; S._pSum = 0; S._pN = 0; }
+  S._pSum += p.p; S._pN += 1;
+  $('#lat-p-avg').textContent = `· ср ${((S._pSum / S._pN) * 100).toFixed(1)}%`;
 
   const lo = p.p_lo * 100, hi = p.p_hi * 100;
   $('#lat-band-fill').style.left = lo + '%';
@@ -430,7 +460,8 @@ function renderRidgeStats() {
     $('#rg-skew').className = 'val ' + (sk.tilt === 'бычий' ? 'green' : sk.tilt === 'медвежий' ? 'red' : '');
     $('#rg-skew').dataset.tip =
       `Risk-reversal = IV(OTM call) − IV(OTM put) = ${fmtPct(sk.call_iv_otm, 1)} − ${fmtPct(sk.put_iv_otm, 1)} = ${(sk.rr * 100).toFixed(1)}пп.\n` +
-      `Уклон: ${sk.tilt}. Отрицательный = рынок платит за защиту от падения; положительный = спрос на рост.`;
+      `Уклон: ${sk.tilt}. Отрицательный = рынок платит за защиту от падения; положительный = спрос на рост.\n` +
+      `КОГДА СМОТРЕТЬ: перед входом. Уклон против вашего направления → сетап слабее (учтено в вердикте). Сильный уклон (>3пп) = рынок явно позиционирован в одну сторону.`;
   } else { $('#rg-skew').textContent = '—'; $('#rg-skew').className = 'val'; }
   // term-structure
   const tm = os.term;
@@ -440,7 +471,8 @@ function renderRidgeStats() {
       `Наклон ATM-волы: ${(tm.slope * 100).toFixed(1)}% -> ${tm.shape}.\n` +
       (tm.shape === 'бэквордация' ? 'Ближняя вола выше — near-term стресс/событие, движение ждут скоро.'
        : tm.shape === 'контанго' ? 'Дальняя вола выше — спокойно сейчас, далёкие по времени цели ок.'
-       : 'Плоская — без выраженного ожидания.');
+       : 'Плоская — без выраженного ожидания.') +
+      `\nКОГДА СМОТРЕТЬ: при выборе горизонта сделки. Бэквордация → жди быстрого движения (можно брать ближе тейк/быстрее фиксировать). Контанго → время работает, далёкие цели по RR реалистичнее.`;
   } else { $('#rg-term').textContent = '—'; }
   $('#rg-move').textContent = `${fmtPct(os.implied_move_frac)} / ${fmtPrice(os.implied_move_abs_instr)}`;
   $('#rg-move').dataset.tip =
@@ -475,9 +507,71 @@ function renderJournal() {
       `<td>${fmtPrice(t.entry)}</td><td>${fmtPrice(t.stop)}</td><td>${fmtPrice(t.take)}</td>` +
       `<td class="${res > 0 ? 'green' : res < 0 ? 'red' : ''}">${res == null ? '—' : fmtR(res)}</td>` +
       `<td>${t.status === 'open' ? '● ОТКРЫТА' : 'закрыта'}</td>` +
-      `<td class="notes">${(t.notes || '').slice(0, 120)}</td>`;
+      `<td class="notes">${(t.notes || '').slice(0, 90)}</td>` +
+      `<td class="jrow-actions"><button class="jbtn j-edit" data-id="${t.id}" title="Редактировать">✎</button>` +
+      `<button class="jbtn j-del" data-id="${t.id}" title="Удалить">✕</button></td>`;
     tbody.appendChild(tr);
   }
+  tbody.querySelectorAll('.j-edit').forEach((b) =>
+    b.addEventListener('click', () => editTradeModal(Number(b.dataset.id))));
+  tbody.querySelectorAll('.j-del').forEach((b) =>
+    b.addEventListener('click', () => deleteTradeModal(Number(b.dataset.id))));
+}
+
+function editTradeModal(id) {
+  const t = S.journal.find((x) => x.id === id);
+  if (!t) return;
+  const opts = S.setups.map((su) =>
+    `<option value="${su.num}" ${su.num === t.setup ? 'selected' : ''}>№${su.num} · ${su.name}</option>`).join('');
+  openModal(`
+    <h3>РЕДАКТИРОВАТЬ СДЕЛКУ №${t.id}</h3>
+    <div class="form-grid">
+      <label>Сетап</label><select id="e-setup">${opts}</select>
+      <label>Направление</label>
+      <select id="e-dir"><option value="long" ${t.direction === 'long' ? 'selected' : ''}>ЛОНГ</option><option value="short" ${t.direction === 'short' ? 'selected' : ''}>ШОРТ</option></select>
+      <label>Вход</label><input id="e-entry" type="number" step="any" value="${t.entry}">
+      <label>Стоп</label><input id="e-stop" type="number" step="any" value="${t.stop}">
+      <label>Тейк</label><input id="e-take" type="number" step="any" value="${t.take}">
+      <label>Результат, R</label><input id="e-res" type="number" step="any" value="${t.result_r ?? ''}"${t.status === 'open' ? ' disabled' : ''}>
+      <span class="form-hint">${t.status === 'open' ? 'открытая сделка — результат задаётся при закрытии' : 'закрытая — можно исправить результат'}</span>
+      <label>Заметки</label><textarea id="e-notes">${t.notes || ''}</textarea>
+    </div>
+    <div class="form-error" id="f-err"></div>
+    <div class="form-actions">
+      <button class="btn" id="f-cancel">ОТМЕНА</button>
+      <button class="btn btn-primary" id="f-save">СОХРАНИТЬ</button>
+    </div>`);
+  $('#f-cancel').onclick = closeModal;
+  $('#f-save').onclick = async () => {
+    try {
+      const body = { trade_id: id, setup: Number($('#e-setup').value),
+        direction: $('#e-dir').value, entry: Number($('#e-entry').value),
+        stop: Number($('#e-stop').value), take: Number($('#e-take').value),
+        notes: $('#e-notes').value };
+      if (t.status === 'closed' && $('#e-res').value !== '') body.result_r = Number($('#e-res').value);
+      await apiPost('/api/trade/edit', body);
+      closeModal();
+      await refreshJournalAndSetups();
+    } catch (e) { $('#f-err').textContent = e.message; }
+  };
+}
+
+function deleteTradeModal(id) {
+  const t = S.journal.find((x) => x.id === id);
+  if (!t) return;
+  openModal(`
+    <h3>УДАЛИТЬ СДЕЛКУ №${t.id}?</h3>
+    <p style="font-size:12px;line-height:1.5;">Сделка №${t.id} · ${t.instrument} · ${t.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'} · вход ${fmtPrice(t.entry)}. Удаление необратимо и повлияет на статистику сетапа.</p>
+    <div class="form-error" id="f-err"></div>
+    <div class="form-actions">
+      <button class="btn" id="f-cancel">ОТМЕНА</button>
+      <button class="btn btn-primary" id="f-del" style="border-color:var(--red);background:var(--red);color:#fff;">УДАЛИТЬ</button>
+    </div>`);
+  $('#f-cancel').onclick = closeModal;
+  $('#f-del').onclick = async () => {
+    try { await apiPost('/api/trade/delete', { trade_id: id }); closeModal(); await refreshJournalAndSetups(); }
+    catch (e) { $('#f-err').textContent = e.message; }
+  };
 }
 
 function renderEdgeTrack() {

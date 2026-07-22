@@ -168,6 +168,41 @@ class Journal:
                                (json.dumps(zones), trade_id))
         return self.get_trade(trade_id)
 
+    def edit_trade(self, trade_id: int, **fields) -> dict:
+        """Редактирование сделки: setup/direction/entry/stop/take/result_r/notes.
+
+        Проверяет геометрию уровней; для закрытой сделки допускает правку result_r.
+        """
+        cur = self.get_trade(trade_id)
+        allowed = {"setup", "direction", "entry", "stop", "take", "result_r", "notes"}
+        upd = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not upd:
+            return cur
+        merged = {**cur, **upd}
+        if merged["setup"] not in SETUPS:
+            raise ValueError(f"неизвестный сетап: {merged['setup']}")
+        if merged["direction"] not in ("long", "short"):
+            raise ValueError("direction: long|short")
+        e, s, tk, d = merged["entry"], merged["stop"], merged["take"], merged["direction"]
+        if e == s:
+            raise ValueError("вход и стоп совпадают")
+        if (d == "long") != (tk > e):
+            raise ValueError("тейк должен быть по направлению сделки")
+        if (d == "long") != (s < e):
+            raise ValueError("стоп должен быть с противоположной стороны от входа")
+        sets = ", ".join(f"{k}=?" for k in upd)
+        with self._lock, self._conn:
+            self._conn.execute(f"UPDATE trades SET {sets} WHERE id=?",
+                               (*upd.values(), trade_id))
+        return self.get_trade(trade_id)
+
+    def delete_trade(self, trade_id: int) -> None:
+        with self._lock, self._conn:
+            n = self._conn.execute("DELETE FROM trades WHERE id=?",
+                                   (trade_id,)).rowcount
+        if n == 0:
+            raise ValueError(f"сделка {trade_id} не найдена")
+
     def get_trade(self, trade_id: int) -> dict:
         with self._lock:
             row = self._conn.execute(

@@ -39,6 +39,21 @@ class ZonesUpdate(BaseModel):
     zones: list[dict]
 
 
+class TradeEdit(BaseModel):
+    trade_id: int
+    setup: int | None = None
+    direction: str | None = None
+    entry: float | None = None
+    stop: float | None = None
+    take: float | None = None
+    result_r: float | None = None
+    notes: str | None = None
+
+
+class TradeDelete(BaseModel):
+    trade_id: int
+
+
 class AccountUpdate(BaseModel):
     name: str | None = None
     phase: str | None = None
@@ -206,6 +221,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return engine.journal.update_zones(req.trade_id, req.zones)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/trade/edit")
+    def api_trade_edit(req: TradeEdit):
+        try:
+            return engine.journal.edit_trade(
+                req.trade_id, setup=req.setup, direction=req.direction,
+                entry=req.entry, stop=req.stop, take=req.take,
+                result_r=req.result_r, notes=req.notes)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/trade/delete")
+    def api_trade_delete(req: TradeDelete):
+        try:
+            engine.journal.delete_trade(req.trade_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"ok": True}
 
     @app.post("/api/account")
     def api_account(req: AccountUpdate):

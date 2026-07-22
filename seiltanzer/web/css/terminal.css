@@ -370,6 +370,26 @@ html, body {
 .edge-track { font-size: 11px; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
 .edge-track b { font-weight: 600; }
 
+.jrow-actions { white-space: nowrap; text-align: right; }
+.jbtn {
+  font-family: var(--mono); font-size: 12px; line-height: 1;
+  border: 1px solid var(--rule); background: var(--card); color: var(--ink);
+  border-radius: 3px; padding: 2px 6px; cursor: pointer; margin-left: 3px;
+}
+.jbtn:hover { background: var(--accent-bg); }
+.jbtn.j-del:hover { border-color: var(--red); color: var(--red); }
+
+/* живая котировка на латтике */
+.live-price-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.live-price { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; transition: color .15s; }
+.live-price.up { color: var(--green); }
+.live-price.down { color: var(--red); }
+.live-chg { font-size: 11px; font-variant-numeric: tabular-nums; }
+.live-chg.up { color: var(--green); }
+.live-chg.down { color: var(--red); }
+@keyframes tickflash { 0% { background: rgba(232,98,42,.18); } 100% { background: transparent; } }
+.tickflash { animation: tickflash .5s ease-out; }
+
 .setup-stats-block { margin-top: 16px; border-top: 1px solid var(--rule); padding-top: 10px; }
 .setup-grid {
   display: grid;

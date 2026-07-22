@@ -83,8 +83,14 @@
     </div>
     <div class="panel-body lattice-body">
       <div class="stats-col" id="lattice-stats">
+        <div class="live-price-row" id="lat-price-row"
+             data-tip="Живая котировка инструмента (обновляется каждый тик). Именно от её движения меняется r = положение сделки в R, а значит и вся доска, P и распределение — смотрите, как реагирует.">
+          <span class="lbl" id="lat-price-instr">—</span>
+          <span class="live-price" id="lat-price">—</span>
+          <span class="live-chg" id="lat-price-chg"></span>
+        </div>
         <div class="stat">
-          <div class="lbl">P (ТЕЙК РАНЬШЕ СТОПА)</div>
+          <div class="lbl">P (ТЕЙК РАНЬШЕ СТОПА) <span class="dim" id="lat-p-avg"></span></div>
           <div class="hero" id="lat-p" data-tip="">—</div>
           <div class="band-bar" id="lat-band">
             <div class="band-fill" id="lat-band-fill"></div>
@@ -213,7 +219,7 @@
       <table class="journal-table" id="journal-table">
         <thead>
           <tr><th>№</th><th>ОТКРЫТА</th><th>СЕТАП</th><th>ИНСТР.</th><th>НАПР.</th>
-              <th>ВХОД</th><th>СТОП</th><th>ТЕЙК</th><th>R</th><th>СТАТУС</th><th>ЗАМЕТКИ</th></tr>
+              <th>ВХОД</th><th>СТОП</th><th>ТЕЙК</th><th>R</th><th>СТАТУС</th><th>ЗАМЕТКИ</th><th></th></tr>
         </thead>
         <tbody></tbody>
       </table>
