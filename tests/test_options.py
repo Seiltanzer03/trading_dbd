@@ -1,0 +1,123 @@
+import math
+
+import numpy as np
+import pytest
+
+from seiltanzer.core import options as O
+
+
+SPOT, SIGMA, T_YEARS = 500.0, 0.20, 7 / 365
+
+
+@pytest.fixture(scope="module")
+def chain():
+    return O.synth_chain(SPOT, SIGMA, T_YEARS, n_strikes=61, width=0.10,
+                         oi_skew=0.6, seed=42)
+
+
+class TestBlackScholes:
+    def test_put_call_parity(self):
+        c = O.bs_call(100, 105, 0.5, 0.3)
+        p = O.bs_put(100, 105, 0.5, 0.3)
+        assert c - p == pytest.approx(100 - 105, abs=1e-9)
+
+    def test_gamma_known_value(self):
+        # S=K=100, t=1, sigma=0.2, r=0: d1=0.1, gamma = pdf(0.1)/(100*0.2)
+        g = O.bs_gamma(100, 100, 1.0, 0.2)
+        assert g == pytest.approx(math.exp(-0.005) / math.sqrt(2 * math.pi) / 20.0, rel=1e-9)
+
+    def test_gamma_peaks_atm(self):
+        gs = [O.bs_gamma(100, k, 0.1, 0.2) for k in (80, 100, 120)]
+        assert gs[1] > gs[0] and gs[1] > gs[2]
+
+
+class TestImpliedMove:
+    def test_recovers_sigma(self, chain):
+        im = O.implied_move(chain["strikes"], chain["call_mid"], chain["put_mid"],
+                            SPOT, T_YEARS)
+        # straddle ~= S*sigma*sqrt(2t/pi) -> sigma_annual должна восстановиться
+        assert im.sigma_annual == pytest.approx(SIGMA, rel=0.03)
+        assert im.atm_strike == pytest.approx(SPOT, rel=0.01)
+        assert im.move_abs == pytest.approx(SPOT * SIGMA * math.sqrt(2 * T_YEARS / math.pi),
+                                            rel=0.03)
+
+    def test_empty_chain_raises(self):
+        with pytest.raises(ValueError):
+            O.implied_move([], [], [], SPOT, T_YEARS)
+
+    def test_expired_raises(self, chain):
+        with pytest.raises(ValueError):
+            O.implied_move(chain["strikes"], chain["call_mid"], chain["put_mid"],
+                           SPOT, -0.01)
+
+
+class TestRealizedVol:
+    def test_constant_returns(self):
+        # лог-нормальный ряд с известной дневной сигмой
+        rng = np.random.default_rng(0)
+        daily = 0.01
+        closes = 100 * np.exp(np.cumsum(rng.normal(0, daily, 400)))
+        rv = O.realized_vol(closes, trading_days=200)
+        assert rv == pytest.approx(daily * math.sqrt(252), rel=0.15)
+
+    def test_too_short_raises(self):
+        with pytest.raises(ValueError):
+            O.realized_vol([100, 101], trading_days=20)
+
+
+class TestBLDensity:
+    def test_density_integrates_to_one(self, chain):
+        d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
+        assert np.trapezoid(d.density, d.strikes) == pytest.approx(1.0, abs=1e-9)
+        assert (d.density >= 0).all()
+
+    def test_recovers_lognormal_tails(self, chain):
+        # P(S_T > K) по BL-плотности должна совпасть с N(d2) Блэка–Шоулза
+        d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
+        for lvl_mult in (0.98, 1.0, 1.02):
+            lvl = SPOT * lvl_mult
+            p_above, p_below = d.tail_probs(lvl)
+            d2 = (math.log(SPOT / lvl) - 0.5 * SIGMA ** 2 * T_YEARS) / (SIGMA * math.sqrt(T_YEARS))
+            expected = 0.5 * math.erfc(-d2 / math.sqrt(2))
+            assert p_above == pytest.approx(expected, abs=0.03), f"level {lvl}"
+            assert p_above + p_below == pytest.approx(1.0, abs=1e-9)
+
+    def test_density_peak_near_spot(self, chain):
+        d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
+        peak = d.strikes[int(np.argmax(d.density))]
+        assert abs(peak - SPOT) / SPOT < 0.02
+
+    def test_few_strikes_raises(self):
+        with pytest.raises(ValueError):
+            O.bl_density([100, 101, 102], [5, 4, 3], T_YEARS)
+
+    def test_tail_outside_grid(self, chain):
+        d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
+        assert d.tail_probs(SPOT * 2)[0] == 0.0
+        assert d.tail_probs(SPOT * 0.5)[0] == 1.0
+
+
+class TestGex:
+    def test_flip_sign_with_skewed_oi(self, chain):
+        g = O.gex_profile(chain["strikes"], chain["call_oi"], chain["put_oi"],
+                          chain["call_iv"], chain["put_iv"], SPOT, T_YEARS)
+        # oi_skew>0: путы ниже спота (минус), коллы выше (плюс) -> флип около спота
+        assert g.zero_flip is not None
+        assert abs(g.zero_flip - SPOT) / SPOT < 0.03
+        below = g.net_gex[g.strikes < SPOT * 0.97]
+        above = g.net_gex[g.strikes > SPOT * 1.03]
+        assert below.sum() < 0 < above.sum()
+
+    def test_top_levels(self, chain):
+        g = O.gex_profile(chain["strikes"], chain["call_oi"], chain["put_oi"],
+                          chain["call_iv"], chain["put_iv"], SPOT, T_YEARS)
+        assert 1 <= len(g.top_levels) <= 3
+        max_abs = max(abs(v) for v in g.net_gex)
+        assert any(abs(t["gex"]) == pytest.approx(max_abs) for t in g.top_levels)
+
+    def test_zero_oi_gives_flat_profile(self):
+        ks = np.linspace(90, 110, 21)
+        g = O.gex_profile(ks, np.zeros(21), np.zeros(21),
+                          np.full(21, 0.2), np.full(21, 0.2), 100.0, 0.02)
+        assert np.allclose(g.net_gex, 0)
+        assert g.zero_flip is None and g.top_levels == []
