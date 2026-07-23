@@ -48,7 +48,9 @@ async function boot() {
 }
 
 function connectWS() {
-  const ws = new WebSocket(`ws://${location.host}/ws`);
+  // на https-странице (Codespaces и т.п.) браузер блокирует ws:// как mixed content
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${proto}//${location.host}/ws`);
   ws.onopen = () => { S.wsOk = true; $('#offline-banner').hidden = true; };
   ws.onmessage = (ev) => {
     S.tick = JSON.parse(ev.data);
