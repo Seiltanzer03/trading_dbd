@@ -63,6 +63,21 @@ curl -fsSL https://raw.githubusercontent.com/Seiltanzer03/trading_dbd/main/deplo
 доступ только через SSH-туннель (`ssh -L 8790:localhost:8790 root@IP` и открывать
 `http://localhost:8790`).
 
+#### Обновление сервера — три способа
+
+1. **Автодеплой (GitHub Actions).** Воркфлоу `.github/workflows/deploy.yml` при
+   каждом пуше в `main` (или по кнопке *Actions → deploy → Run workflow*) гоняет
+   тесты и сам заходит на сервер по SSH: `git reset --hard origin/main` + рестарт.
+   Нужен один секрет репозитория `SSH_PASSWORD` (Settings → Secrets → Actions).
+2. **Из локальной папки, без GitHub** (`deploy/local_deploy.py`). Заливает текущую
+   папку на сервер по SSH/SFTP и рестартит сервис — для агента/машины, у которой
+   есть только папка проекта и сеть до сервера. Настройка: скопировать
+   `deploy/server.env.example` → `deploy/server.env`, вписать хост/логин/пароль,
+   затем `pip install paramiko && python deploy/local_deploy.py`. Папка `data/`
+   на сервере не трогается; заливаются только изменённые файлы.
+3. **Вручную одной командой** — тот же `install.sh` (делает `git reset --hard
+   origin/main` + рестарт) в веб-консоли VPS.
+
 ### Живой стрим цены (бесплатно, опция)
 
 ```bash

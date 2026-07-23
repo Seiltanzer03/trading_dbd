@@ -6,3 +6,4 @@ trades.db
 cache.db
 .pytest_cache/
 dist/
+deploy/server.env
