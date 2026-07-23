@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SEILTANZER TERMINAL</title>
 <link rel="icon" href="data:,">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- шрифт вендорится локально (offline, без внешних CDN) -->
+<link rel="stylesheet" href="/static/vendor/fonts/ibm-plex-mono.css">
 <link rel="stylesheet" href="/static/css/terminal.css">
 </head>
 <body>
@@ -212,7 +212,7 @@
         <div class="canvas-empty" id="ridge-empty">○ ОПЦИОННЫЕ ДАННЫЕ НЕДОСТУПНЫ</div>
       </div>
     </div>
-    <div class="panel-foot dim">серые гряды — risk-neutral плотности из снапшотов цепочки; нижняя жирная — актуальная; красная кривая — проекция вашей модели (живая); столбики снизу — объём (open interest); вертикали: вход · стоп · тейк · GEX. Ниже — «СТЕНЫ OI»: где стоит крупнейший опционный интерес (сопротивление/поддержка)</div>
+    <div class="panel-foot dim">серые гряды — risk-neutral плотности из снапшотов цепочки; нижняя жирная — актуальная; красная кривая — проекция вашей модели (живая); столбики снизу — ЧИСТАЯ ГАММА (Net GEX): зелёное вверх = дилеры гасят (пиннинг, S/R), красное вниз = разгоняют (пробой); жёлтый пунктир — zero-gamma flip; вертикали: вход · стоп · тейк · GEX. В колонке слева «СТЕНЫ OI» — сырой крупнейший интерес коллов/путов</div>
   </section>
 
   <!-- ================ 3b. PROBABILITY CONE (3D) ================ -->

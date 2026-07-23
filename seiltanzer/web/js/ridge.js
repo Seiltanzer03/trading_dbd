@@ -70,20 +70,40 @@ export function initRidge(canvas) {
       else ctx.fillRect(sX, padT - 4, (w - padR) - sX, ridgeBottom - padT + 4);
     }
 
-    // профиль OI (объём)
-    const oi = latest.oi_profile;
-    if (oi && oi.strikes) {
-      const inWin = oi.strikes.map((k, i) => ({ x: k * scale, c: oi.call_oi[i], p: oi.put_oi[i] })).filter((o) => o.x >= lo && o.x <= hi);
-      const oiMax = Math.max(1, ...inWin.map((o) => o.c + o.p));
+    // профиль ЧИСТОЙ ГАММЫ (Net GEX) — «стены» дилерского хеджа (как на квант-деске):
+    //   зелёное ВВЕРХ = + гамма (дилеры гасят движение -> пиннинг, реальная
+    //     поддержка/сопротивление у крупных страйков);
+    //   красное ВНИЗ = − гамма (дилеры разгоняют -> зоны пробоя, движения резче).
+    // Заменяет сырой OI (сырой OI как «стены ликвидности» вынесен в колонку слева).
+    const gx = latest.gex;
+    if (gx && gx.strikes && gx.net) {
+      const inWin = gx.strikes.map((k, i) => ({ x: k * scale, g: gx.net[i] }))
+        .filter((o) => o.x >= lo && o.x <= hi);
+      const gAbsMax = Math.max(1e-9, ...inWin.map((o) => Math.abs(o.g)));
       const bw = Math.max(2, plotW / Math.max(inWin.length, 1) - 1);
-      const oiBase = H - padB;
+      const midY = ridgeBottom + oiH / 2;   // нулевая линия гаммы (центр полосы)
+      const half = oiH / 2 - 3;
+      ctx.strokeStyle = COLORS.rule; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(padL, midY); ctx.lineTo(w - padR, midY); ctx.stroke();
       inWin.forEach((o) => {
-        const hc = (o.c / oiMax) * (oiH - 4), hp = (o.p / oiMax) * (oiH - 4);
-        ctx.fillStyle = 'rgba(46,125,79,0.5)'; ctx.fillRect(X(o.x) - bw / 2, oiBase - hc, bw, hc);
-        ctx.fillStyle = 'rgba(198,55,60,0.45)'; ctx.fillRect(X(o.x) - bw / 2, oiBase - hc - hp, bw, hp);
+        const hgt = (Math.abs(o.g) / gAbsMax) * half;
+        if (o.g >= 0) { ctx.fillStyle = 'rgba(46,125,79,0.6)'; ctx.fillRect(X(o.x) - bw / 2, midY - hgt, bw, hgt); }
+        else { ctx.fillStyle = 'rgba(198,55,60,0.55)'; ctx.fillRect(X(o.x) - bw / 2, midY, bw, hgt); }
       });
-      ctx.fillStyle = COLORS.dim; ctx.font = '8px "IBM Plex Mono", monospace'; ctx.textAlign = 'left';
-      ctx.fillText('OPEN INTEREST · коллы(зел)/путы(крас)', padL, ridgeBottom + 10);
+      // zero-gamma flip — граница режимов (пунктир)
+      if (gx.zero_flip) {
+        const fx = X(gx.zero_flip * scale);
+        if (fx >= padL && fx <= w - padR) {
+          ctx.strokeStyle = '#A87A18'; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(fx, ridgeBottom); ctx.lineTo(fx, H - padB); ctx.stroke(); ctx.setLineDash([]);
+        }
+      }
+      // подпись с белой подложкой (читаемо поверх столбиков)
+      ctx.font = '8px "IBM Plex Mono", monospace'; ctx.textAlign = 'left';
+      const cap = 'NET GEX · +гамма зел(гасит/пиннинг) / −гамма крас(разгоняет)';
+      const cw = ctx.measureText(cap).width;
+      ctx.fillStyle = 'rgba(255,255,255,0.82)'; ctx.fillRect(padL - 1, ridgeBottom + 2, cw + 4, 10);
+      ctx.fillStyle = COLORS.dim; ctx.fillText(cap, padL + 1, ridgeBottom + 10);
     }
 
     // гряды с дыханием + изометрическая перспектива (3D-объём): старые ряды
