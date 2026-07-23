@@ -236,6 +236,103 @@ def forward_distribution(r0: float, theta: float, sigma_R: float, T: float,
                               horizon=horizon, seed=seed)
 
 
+def cone_surface(r0: float, mu: float, sigma: float, T: float,
+                 n_slices: int = 12, n_bins: int = 11, n_paths: int = 4000,
+                 horizon: float = 16.0, dt: float = 0.01,
+                 seed: int | None = None) -> dict:
+    """Эволюция распределения R во времени — «конус неопределённости» first-passage.
+
+    Симулирует пути dX = mu dt + sigma dW из r0 с поглощением на -1 (стоп) и T (тейк);
+    на `n_slices` равных отсечках времени в (0, horizon] снимает срез:
+      • density[j][b] — доля ВСЕХ путей, ещё ЖИВЫХ (не поглощённых) и попавших в
+        корзину b оси R на момент t_j. Сумма по b = доля живых = 1 − уже дошедшие
+        до барьеров. Так поверхность «теряет массу» стенам по мере времени;
+      • p_take_by_t[j] / p_stop_by_t[j] — накопленная доля путей, уже поглощённых
+        тейком/стопом к t_j (кривые «дошло до барьера», ползущие вверх по стенам).
+    mu/sigma — те же, что калибруют P(тейк раньше стопа), поэтому к концу горизонта
+    p_take_by_t → P(модели), p_stop_by_t → 1−P: дальние стены конуса и есть шапка-P.
+    Ось времени — модельное «время до развязки» (нормируется на фронте в 0..100%),
+    не календарь: календарного времени поглощения бесплатные данные не дают.
+    """
+    if T <= 0:
+        raise ValueError("T (целевой RR) должен быть > 0")
+    sigma = max(sigma, 1e-6)
+    r0 = min(max(r0, -1.0 + 1e-9), T - 1e-9)
+    rng = np.random.default_rng(seed)
+    n_steps = max(int(round(horizon / dt)), n_slices)
+    # строго возрастающие отсечки шагов (ровно n_slices штук), СГУЩЁННЫЕ к началу:
+    # время поглощения право-скошено, поэтому ранняя динамика (разлёт + первый
+    # слив к барьерам) интереснее — степенное распределение отсечек её показывает.
+    checkpoints: list[int] = []
+    for j in range(n_slices):
+        frac = ((j + 1) / n_slices) ** 1.8
+        c = int(round(frac * n_steps))
+        c = max(c, (checkpoints[-1] + 1) if checkpoints else 1)
+        checkpoints.append(min(c, n_steps))
+    edges = np.linspace(-1.0, T, n_bins + 1)
+
+    r = np.full(n_paths, r0, dtype=np.float64)
+    alive = np.ones(n_paths, dtype=bool)
+    took = np.zeros(n_paths, dtype=bool)
+    stopped = np.zeros(n_paths, dtype=bool)
+    sdt = sigma * math.sqrt(dt)
+    var_dt = sigma * sigma * dt
+
+    times, density, p_take_by_t, p_stop_by_t = [], [], [], []
+    cp = 0
+    for step in range(1, n_steps + 1):
+        idx = np.flatnonzero(alive)
+        if idx.size:
+            prev = r[idx].copy()
+            r[idx] = prev + mu * dt + sdt * rng.standard_normal(idx.size)
+            sub = r[idx]
+            tp = sub >= T
+            sl = sub <= -1.0
+            inside = ~tp & ~sl
+            if inside.any():
+                p_lo = prev[inside]
+                p_hi = sub[inside]
+                bridge_sl = np.exp(-2.0 * (p_lo + 1.0) * (p_hi + 1.0) / var_dt)
+                bridge_tp = np.exp(-2.0 * (T - p_lo) * (T - p_hi) / var_dt)
+                u = rng.random(inside.sum())
+                hit_sl = u < bridge_sl
+                hit_tp = ~hit_sl & (u < bridge_sl + bridge_tp)
+                ii = np.flatnonzero(inside)
+                sl[ii[hit_sl]] = True
+                tp[ii[hit_tp]] = True
+            if tp.any():
+                j = idx[tp]
+                took[j] = True
+                alive[j] = False
+            if sl.any():
+                j = idx[sl & ~tp]
+                stopped[j] = True
+                alive[j] = False
+        while cp < n_slices and step == checkpoints[cp]:
+            counts = np.zeros(n_bins)
+            alive_r = r[alive]
+            if alive_r.size:
+                bi = np.clip(np.searchsorted(edges, alive_r, side="right") - 1,
+                             0, n_bins - 1)
+                counts = np.bincount(bi, minlength=n_bins).astype(float)
+            times.append(step / n_steps * horizon)
+            density.append((counts / n_paths).tolist())
+            p_take_by_t.append(float(took.sum()) / n_paths)
+            p_stop_by_t.append(float(stopped.sum()) / n_paths)
+            cp += 1
+
+    return {
+        "times": times,
+        "edges": edges.tolist(),
+        "density": density,             # n_slices × n_bins, доля живых путей
+        "p_take_by_t": p_take_by_t,
+        "p_stop_by_t": p_stop_by_t,
+        "p_take": float(took.sum()) / n_paths,
+        "p_stop": float(stopped.sum()) / n_paths,
+        "r0": float(r0), "T": float(T),
+    }
+
+
 def ev_hold(mc: MCResult) -> float:
     """EV удержания до стопа/тейка: среднее терминального R."""
     return float(np.mean(mc.terminal))

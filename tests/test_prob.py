@@ -184,6 +184,35 @@ class TestForwardDistribution:
         assert float(np.mean(right.terminal)) > float(np.mean(left.terminal))
 
 
+class TestConeSurface:
+    def test_walls_converge_to_first_passage(self):
+        # дальние стены конуса = P(тейк)/P(стоп) первого достижения
+        mu = P.calibrate_mu(0.60, 2.5)
+        p = P.first_passage_prob(0.0, mu, 1.0, 2.5)
+        c = P.cone_surface(0.0, mu, 1.0, 2.5, horizon=16.0, dt=16.0 / 1500,
+                           n_paths=6000, seed=11)
+        assert c["p_take"] == pytest.approx(p, abs=0.03)
+        assert c["p_take"] + c["p_stop"] == pytest.approx(1.0, abs=0.03)
+
+    def test_shape_and_monotone_walls(self):
+        mu = P.calibrate_mu(0.58, 2.5)
+        c = P.cone_surface(0.0, mu, 1.0, 2.5, seed=3)
+        assert len(c["density"]) == 12 and len(c["density"][0]) == 11
+        assert len(c["edges"]) == 12
+        # накопленные кривые «дошло до барьера» не убывают
+        assert all(b >= a - 1e-9 for a, b in zip(c["p_take_by_t"], c["p_take_by_t"][1:]))
+        assert all(b >= a - 1e-9 for a, b in zip(c["p_stop_by_t"], c["p_stop_by_t"][1:]))
+        # живая масса убывает со временем (сливается к стенам)
+        alive = [sum(row) for row in c["density"]]
+        assert alive[0] > alive[-1]
+
+    def test_positive_drift_moves_crowd_up(self):
+        # сильный перевес -> к тейку сливается больше, чем к стопу
+        mu = P.calibrate_mu(0.75, 2.5)
+        c = P.cone_surface(0.0, mu, 1.0, 2.5, seed=5)
+        assert c["p_take"] > c["p_stop"]
+
+
 class TestRCoordinate:
     def test_long_short(self):
         assert P.r_coordinate(101, 100, 99, "long") == pytest.approx(1.0)

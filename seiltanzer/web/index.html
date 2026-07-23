@@ -72,6 +72,39 @@
     </div>
   </section>
 
+  <!-- ============ СОСТОЯНИЕ / ПЕРСПЕКТИВА (одним взглядом) ============ -->
+  <section class="card state-card" id="panel-state" hidden>
+    <div class="state-cell" data-tip="Текущее положение сделки в R: (цена−вход)/(вход−стоп) со знаком направления. 0 = вход, −1 = стоп, +T = тейк. Двигается с каждым тиком цены.">
+      <div class="lbl">ПОЗИЦИЯ · r</div>
+      <div class="state-val" id="st-r">—</div>
+      <div class="tiny dim" id="st-r-sub"></div>
+    </div>
+    <div class="state-cell" data-tip="Сколько осталось до тейка: в R (единицах риска) и в ATR (обычных дневных ходах). В ATR — это «сколько типичных свечей» до цели: >3 ATR — цель далеко, следи за фазой и временем.">
+      <div class="lbl">ДО ТЕЙКА</div>
+      <div class="state-val green" id="st-take">—</div>
+      <div class="tiny dim" id="st-take-atr"></div>
+    </div>
+    <div class="state-cell" data-tip="Сколько осталось до стопа: в R и в ATR. Малый запас в ATR (<1) = стоп «под рынком», легко выбить обычным шумом.">
+      <div class="lbl">ДО СТОПА</div>
+      <div class="state-val red" id="st-stop">—</div>
+      <div class="tiny dim" id="st-stop-atr"></div>
+    </div>
+    <div class="state-cell" data-tip="P(тейк раньше стопа) прямо сейчас с интервалом неопределённости (Уилсон 90%). При выборке <30 смотри интервал, не точку. Полная формула — в блоке доски.">
+      <div class="lbl">P(ТЕЙК&lt;СТОП)</div>
+      <div class="state-val" id="st-p">—</div>
+      <div class="tiny dim" id="st-p-band"></div>
+    </div>
+    <div class="state-cell" data-tip="Край = P модели − hit рынка опционов. Рядом — как он изменился с момента входа (зафиксирован на первом тике). Рост края = ваш сценарий укрепляется относительно рынка.">
+      <div class="lbl">КРАЙ vs РЫНОК</div>
+      <div class="state-val" id="st-edge">—</div>
+      <div class="tiny dim" id="st-edge-shift"></div>
+    </div>
+    <div class="state-cell state-action" data-tip="Сжатая рекомендация из вердикта под текущий r. Не сигнал на сделку — поддержка решения; окончательное решение за вами.">
+      <div class="lbl">ЧТО ДЕЛАТЬ</div>
+      <div class="state-headline" id="st-headline">—</div>
+    </div>
+  </section>
+
   <!-- ================ 2. PROBABILITY LATTICE ================ -->
   <section class="card panel" id="panel-lattice">
     <div class="panel-head">
@@ -111,6 +144,8 @@
           data-tip="">—</span></div>
         <div class="stat-row"><span class="lbl">EV ЛЕСТНИЦА</span><span class="val" id="lat-ev-ladder"
           data-tip="">—</span></div>
+        <div class="stat-row"><span class="lbl">ПОРОГ EV=0</span><span class="val" id="lat-be"
+          data-tip="Винрейт, при котором удержание до тейка/стопа даёт EV=0: 1/(1+T) для RR 1:T. Если ваша P(тейк) выше порога — при удержании математика в плюс; ниже — в минус. Рядом — запас над порогом.">—</span></div>
         <div class="stat-sep"></div>
         <div class="stat-row"><span class="lbl">ШАРИКОВ УПАЛО</span><span class="val" id="lat-balls">0</span></div>
         <div class="stat-row"><span class="lbl">ДОЛЯ ЗЕЛЁНЫХ</span><span class="val" id="lat-green"
@@ -120,6 +155,9 @@
         <div class="stat-sep"></div>
         <div class="stat-row"><span class="lbl">КАЛИБРОВКА</span><span class="val" id="lat-calib"
           data-tip="Источник винрейта: встроенная таблица 16 сетапов или ваш журнал (при ≥20 закрытых сделок по сетапу — приоритет журнала).">—</span></div>
+        <div class="stat-sep"></div>
+        <div class="lat-read" id="lat-read"
+          data-tip="Практический вывод из доски: сравнение вашей P с порогом безубытка и с оценкой рынка. Это резюме, а не сигнал.">—</div>
       </div>
       <div class="canvas-holder">
         <canvas id="lattice-canvas"></canvas>
@@ -155,6 +193,13 @@
         <div class="stat-row"><span class="lbl">TERM ВОЛЫ</span><span class="val" id="rg-term"
           data-tip="Term-structure: наклон ATM-волы по экспирациям. Контанго (дальняя выше) = спокойно сейчас; бэквордация (ближняя выше) = near-term стресс/событие, движение ждут скоро.">—</span></div>
         <div class="stat-sep"></div>
+        <div class="stat-row"><span class="lbl">СТЕНА КОЛЛОВ</span><span class="val" id="rg-call-wall"
+          data-tip="Страйк с крупнейшим open interest коллов — «стена сопротивления»: цене труднее пройти вверх, дилерский хедж часто гасит движение у неё. Практика: если тейк (лонг) стоит ЗА этой стеной — дойти труднее, фиксируй раньше/подвинь цель.">—</span></div>
+        <div class="stat-row"><span class="lbl">СТЕНА ПУТОВ</span><span class="val" id="rg-put-wall"
+          data-tip="Страйк с крупнейшим open interest путов — «стена поддержки»: часто тормозит падение. Практика: стоп (лонг) чуть НИЖЕ такой стены безопаснее, чем прямо на пути к ней.">—</span></div>
+        <div class="stat-row"><span class="lbl">ТЕЙК vs СТЕНЫ</span><span class="val" id="rg-wall-read"
+          data-tip="Где ваши тейк/стоп относительно стен OI: «тейк за стеной коллов» = труднее дойти; «есть простор» = крупных барьеров на пути нет.">—</span></div>
+        <div class="stat-sep"></div>
         <div class="stat-row"><span class="lbl">P(ЗА ТЕЙК) РЫНОК</span><span class="val" id="rg-p-take"
           data-tip="">—</span></div>
         <div class="stat-row"><span class="lbl">P(ЗА СТОП) РЫНОК</span><span class="val" id="rg-p-stop"
@@ -167,7 +212,24 @@
         <div class="canvas-empty" id="ridge-empty">○ ОПЦИОННЫЕ ДАННЫЕ НЕДОСТУПНЫ</div>
       </div>
     </div>
-    <div class="panel-foot dim">серые гряды — risk-neutral плотности из снапшотов цепочки; нижняя жирная — актуальная; красная кривая — проекция вашей модели (живая); столбики снизу — объём (open interest); вертикали: вход · стоп · тейк · GEX</div>
+    <div class="panel-foot dim">серые гряды — risk-neutral плотности из снапшотов цепочки; нижняя жирная — актуальная; красная кривая — проекция вашей модели (живая); столбики снизу — объём (open interest); вертикали: вход · стоп · тейк · GEX. Ниже — «СТЕНЫ OI»: где стоит крупнейший опционный интерес (сопротивление/поддержка)</div>
+  </section>
+
+  <!-- ================ 3b. PROBABILITY CONE (3D) ================ -->
+  <section class="card panel" id="panel-cone">
+    <div class="panel-head">
+      <h2>PROBABILITY CONE · КОНУС ВЕРОЯТНОСТИ (3D)</h2>
+      <div class="panel-head-right">
+        <span class="badge" id="cone-status">○ НЕТ СДЕЛКИ</span>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div class="canvas-holder cone-holder">
+        <canvas id="cone-canvas"></canvas>
+        <div class="canvas-empty" id="cone-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ — КОНУС ЖДЁТ</div>
+      </div>
+    </div>
+    <div class="panel-foot dim">ось R (стоп · 0 · тейк) — вправо, ВРЕМЯ («до развязки») — вглубь, высота — плотность живых путей. Узкий гребень «сейчас» расплывается и сливается к стенам-барьерам: КРАСНАЯ (стоп) и ЗЕЛЁНАЯ (тейк) кривые ползут вверх = накопленная вероятность дойти; их высота у дальней грани = P(стоп)/P(тейк). Оранжевый луч — текущая цена; тёмный пунктир на дальней грани — где рынок ждёт цену на экспирации. Ось времени — модельная (не календарь: тик-данных по опционам в бесплатных источниках нет)</div>
   </section>
 
   <!-- ================ 4. КАРТА УРОВНЕЙ ================ -->

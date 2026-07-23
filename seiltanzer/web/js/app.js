@@ -7,12 +7,14 @@ import { tweenNumber } from './anim.js';
 import { initLattice } from './lattice.js';
 import { initRidge } from './ridge.js';
 import { initLevels } from './levels.js';
+import { initCone } from './cone.js';
 
 initTooltips();
 
 const lattice = initLattice($('#lattice-canvas'));
 const ridge = initRidge($('#ridge-canvas'));
 const levels = initLevels($('#levels-canvas'));
+const cone = initCone($('#cone-canvas'));
 
 const S = {
   tick: null,
@@ -79,11 +81,13 @@ function connectWS() {
 function onTick() {
   renderHeader();
   renderVerdict();
+  renderState();
   renderLattice();
   renderFilters();
   renderLadder();
   renderLevels();
   renderRidgeStats();
+  renderCone();
   maybeRefreshRidge();
   // живое обновление гряды каждый тик: луч цены двигается всегда (даже без сделки)
   ridge.updateLive({
@@ -92,6 +96,8 @@ function onTick() {
     trade: S.tick?.trade || null,
     modelProb: S.tick?.prob?.p,
   });
+  // живой луч цены в конусе (r) двигается каждый тик
+  cone.updateLive({ r: S.tick?.prob?.r });
 }
 
 function renderAll() {
@@ -243,6 +249,67 @@ function renderVerdict() {
   }
 }
 
+// ------------------------------------------------------ state / prospects
+
+function renderState() {
+  const s = S.tick?.state;
+  const card = $('#panel-state');
+  if (!s) { card.hidden = true; return; }
+  card.hidden = false;
+
+  // позиция r
+  tweenNumber($('#st-r'), s.r, (v) => fmtR(v), 12);
+  $('#st-r').className = 'state-val ' + (s.r >= 0 ? 'green' : 'red');
+  $('#st-r-sub').textContent = s.be_armed ? 'стоп в БУ' : `цель ${s.T.toFixed(2)}R`;
+
+  // до тейка / стопа (R + ATR)
+  $('#st-take').textContent = fmtR(s.to_take_r);
+  $('#st-take-atr').textContent = s.to_take_atr != null ? `${s.to_take_atr.toFixed(1)} ATR` : 'ATR н/д';
+  $('#st-stop').textContent = fmtR(-s.to_stop_r);
+  $('#st-stop-atr').textContent = s.to_stop_atr != null ? `${s.to_stop_atr.toFixed(1)} ATR` : 'ATR н/д';
+
+  // P с полосой
+  tweenNumber($('#st-p'), s.p * 100, (v) => v.toFixed(1) + '%', 10);
+  $('#st-p-band').textContent = `[${(s.p_lo * 100).toFixed(0)}–${(s.p_hi * 100).toFixed(0)}%]`
+    + (s.small_sample ? ' · n<30' : '');
+
+  // край + сдвиг от входа
+  if (s.edge == null) {
+    $('#st-edge').textContent = '—'; $('#st-edge').className = 'state-val dim';
+    $('#st-edge-shift').textContent = 'нет опционов';
+  } else {
+    $('#st-edge').textContent = (s.edge >= 0 ? '+' : '') + (s.edge * 100).toFixed(0) + '%';
+    $('#st-edge').className = 'state-val ' + (s.edge >= 0 ? 'green' : 'red');
+    if (s.edge_shift == null) {
+      $('#st-edge-shift').textContent = 'вход: фиксируется';
+    } else {
+      const arrow = s.edge_shift > 0.005 ? '↑' : s.edge_shift < -0.005 ? '↓' : '→';
+      $('#st-edge-shift').textContent =
+        `вход ${(s.edge_at_open * 100).toFixed(0)}% ${arrow}`;
+    }
+  }
+
+  // действие
+  const h = $('#st-headline');
+  h.textContent = s.headline || '';
+  h.className = 'state-headline ' + (s.tone || '');
+}
+
+// ---------------------------------------------------------------- cone
+
+function renderCone() {
+  const t = S.tick;
+  const c = t?.cone;
+  const active = !!(c && c.available);
+  $('#cone-empty').style.display = active ? 'none' : 'flex';
+  $('#cone-status').className = 'badge ' + (active ? (t.demo ? 'demo' : 'live') : 'no_data');
+  $('#cone-status').textContent = active ? (t.demo ? '◆ DEMO' : '● LIVE') : '○ НЕТ СДЕЛКИ';
+  cone.setData(active ? c : null, {
+    direction: t?.trade?.direction || 'long',
+    headlineP: t?.prob?.p,
+  });
+}
+
 // ---------------------------------------------------------------- lattice
 
 function renderLattice() {
@@ -273,7 +340,7 @@ function renderLattice() {
 
   if (!active) {
     ['lat-p', 'lat-mhit', 'lat-edge', 'lat-r', 'lat-ev-hold', 'lat-ev-ladder',
-     'lat-green', 'lat-conv', 'lat-calib']
+     'lat-be', 'lat-green', 'lat-conv', 'lat-calib', 'lat-read']
       .forEach((id) => { $('#' + id).textContent = '—'; });
     $('#lat-balls').textContent = '0';
     $('#lat-band-fill').style.left = '0%';
@@ -338,6 +405,34 @@ function renderLattice() {
     `EV лестницы фиксации (глава 2.2): 10% позиции на 1.0/1.25/1.5/1.75/2.0/2.2R,\n` +
     `стоп в БУ после 1.5R. По тем же ${t.mc.n_paths} путям МК.\n` +
     `Допущения: рубеж исполняется точно по уровню, БУ — по 0R без проскальзывания.`;
+
+  // порог безубытка по винрейту + запас
+  if (p.p_breakeven != null) {
+    const marg = (p.p - p.p_breakeven) * 100;
+    $('#lat-be').textContent = fmtPct(p.p_breakeven) +
+      ` (${marg >= 0 ? '+' : ''}${marg.toFixed(0)}пп)`;
+    $('#lat-be').className = 'val ' + (marg >= 0 ? 'green' : 'red');
+    $('#lat-be').dataset.tip =
+      `Порог EV=0 при RR 1:${p.T.toFixed(2)} = 1/(1+${p.T.toFixed(2)}) = ${fmtPct(p.p_breakeven)}.\n` +
+      `Ваша P(тейк) ${fmtPct(p.p)} ${marg >= 0 ? 'ВЫШЕ' : 'НИЖЕ'} порога на ${Math.abs(marg).toFixed(0)}пп -> ` +
+      `удержание до цели математически ${marg >= 0 ? 'в плюс' : 'в минус'} (без учёта лестницы фиксации).`;
+  } else { $('#lat-be').textContent = '—'; $('#lat-be').className = 'val'; }
+
+  // практический вывод доски одной строкой
+  const readEl = $('#lat-read');
+  const overBE = p.p - (p.p_breakeven ?? 1 / (1 + p.T));
+  const parts = [];
+  parts.push(overBE >= 0
+    ? `P выше порога EV=0 на ${(overBE * 100).toFixed(0)}пп`
+    : `P НИЖЕ порога EV=0 на ${(Math.abs(overBE) * 100).toFixed(0)}пп`);
+  if (mkt && mkt.edge != null) {
+    parts.push(mkt.edge >= 0.03 ? `рынок недооценивает сетап (+${(mkt.edge * 100).toFixed(0)}%)`
+      : mkt.edge <= -0.03 ? `рынок оценивает выше вас (${(mkt.edge * 100).toFixed(0)}%)`
+      : 'вы на уровне рынка');
+  } else parts.push('рынка опционов нет — только модель');
+  if (p.small_sample) parts.push(`выборка n=${p.n}<30 — доверяй интервалу, не точке`);
+  readEl.textContent = parts.join(' · ');
+  readEl.className = 'lat-read ' + (overBE >= 0 ? 'good' : 'bad');
 
   const st = lattice.stats;
   $('#lat-balls').textContent = String(st.dropped);
@@ -456,6 +551,8 @@ function renderRidgeStats() {
     ? `σ процесса умножена на σ_impl/σ_baseline = ${fmtPct(t.sigma.sigma_implied, 1)}/${fmtPct(t.sigma.sigma_baseline, 1)} = ${fmtNum(t.sigma.ratio, 3)}\nисточник σ_implied: ${srcLabel}\n(сжатый рынок «остужает» далёкий тейк, разогнанный — наоборот)`
     : `Поправка не применена: ${t.sigma.reason || 'нет данных'} — модель работает без опционной поправки (честнее, чем выдумывать).`;
 
+  renderOiWalls();
+
   if (!os) {
     ['rg-proxy', 'rg-expiry', 'rg-move', 'rg-skew', 'rg-term', 'rg-p-take', 'rg-p-stop']
       .forEach((id) => { $('#' + id).textContent = '—'; });
@@ -506,6 +603,36 @@ function renderRidgeStats() {
     ? `P(цена за стопом на экспирации) — аналогично P(за тейк), хвост с другой стороны.${rn.demo ? '\n◆ DEMO-цепочка' : ''}`
     : 'нужны открытая сделка и цепочка';
   $('#rg-p-model').textContent = S.tick?.prob ? fmtPct(S.tick.prob.p) : '—';
+}
+
+// стены open interest: где стоит крупнейший опционный интерес (сопротивление/поддержка)
+function renderOiWalls() {
+  const ow = S.ridge?.oi_walls;
+  const call = $('#rg-call-wall'), put = $('#rg-put-wall'), read = $('#rg-wall-read');
+  if (!ow) {
+    call.textContent = '—'; put.textContent = '—'; read.textContent = '—';
+    return;
+  }
+  const pctStr = (x) => x == null ? '' : ` (${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%)`;
+  call.textContent = fmtPrice(ow.call_wall) + pctStr(ow.call_wall_pct);
+  put.textContent = fmtPrice(ow.put_wall) + pctStr(ow.put_wall_pct);
+  // тейк/стоп относительно стен (нужна сделка)
+  const tr = S.ridge?.trade || S.tick?.trade;
+  if (!tr) { read.textContent = 'нет сделки'; read.className = 'val dim'; return; }
+  const long = tr.direction === 'long';
+  const takeBeyondCall = long ? tr.take > ow.call_wall : tr.take < ow.put_wall;
+  const wallOnPath = long ? ow.call_wall : ow.put_wall;   // барьер по ходу к тейку
+  if (takeBeyondCall) {
+    read.textContent = `тейк ЗА стеной ${long ? 'коллов' : 'путов'} — труднее`;
+    read.className = 'val red';
+  } else if (long ? (wallOnPath > tr.entry && wallOnPath < tr.take)
+                  : (wallOnPath < tr.entry && wallOnPath > tr.take)) {
+    read.textContent = `стена на пути к тейку — фиксируй у ${fmtPrice(wallOnPath)}`;
+    read.className = 'val';
+  } else {
+    read.textContent = 'простор до тейка — крупных стен по пути нет';
+    read.className = 'val green';
+  }
 }
 
 // ---------------------------------------------------------------- journal

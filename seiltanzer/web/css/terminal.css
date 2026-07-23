@@ -124,6 +124,48 @@ html, body {
 .vfactor.bad { border-color: var(--red); }
 .vfactor.bad .vk { color: var(--red); }
 
+/* ---- строка СОСТОЯНИЕ / ПЕРСПЕКТИВА (одним взглядом) ---- */
+.state-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  margin-top: 12px;
+  padding: 0;
+  overflow: hidden;
+}
+.state-cell {
+  flex: 1;
+  min-width: 118px;
+  padding: 9px 14px;
+  border-right: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.state-cell:last-child { border-right: none; }
+.state-val {
+  font-size: 21px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.05;
+  letter-spacing: -0.01em;
+}
+.state-val.green { color: var(--green); }
+.state-val.red { color: var(--red); }
+.state-val.dim { color: var(--dim); }
+.state-action { flex: 2.6; min-width: 220px; }
+.state-headline { font-size: 12px; line-height: 1.4; font-weight: 500; }
+.state-headline.good { color: var(--green); }
+.state-headline.bad { color: var(--red); }
+
+/* ---- конус ---- */
+.cone-holder { min-height: 300px; }
+
+/* ---- практический вывод доски ---- */
+.lat-read { font-size: 10.5px; line-height: 1.5; letter-spacing: .02em; color: var(--ink); }
+.lat-read.good { color: var(--green); }
+.lat-read.bad { color: var(--red); }
+
 .brand-row { display: flex; align-items: baseline; gap: 10px; }
 .brand-dot { font-size: 14px; }
 .brand { font-size: 18px; font-weight: 700; letter-spacing: .08em; }

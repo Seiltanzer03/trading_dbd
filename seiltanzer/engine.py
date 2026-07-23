@@ -45,6 +45,8 @@ class Engine:
             self.market.stream = self.stream_hub
         self._mc_cache_key: tuple | None = None
         self._mc_cache: dict | None = None
+        self._cone_cache_key: tuple | None = None
+        self._cone_cache: dict | None = None
         trade = self.journal.active_trade()
         if trade:
             self.market.set_instrument(trade["instrument"])
@@ -87,6 +89,8 @@ class Engine:
             "ladder": None,
             "market": None,
             "levels": None,
+            "cone": None,
+            "state": None,
             "options_summary": self._options_summary(),
             "filters": self._filters_payload(trade),
         }
@@ -96,6 +100,7 @@ class Engine:
         if trade and price:
             payload.update(self._trade_payloads(trade, price, sigma, atr))
             payload["verdict"] = self._verdict(payload)
+            payload["state"] = self._state_payload(payload)
         return payload
 
     def _verdict(self, p: dict) -> dict:
@@ -244,16 +249,27 @@ class Engine:
                                "flat": "НИЗКИЙ", "normal": "СРЕДНИЙ"}.get(ph))
         return out
 
+    def _atr_abs(self) -> float | None:
+        """ATR(20) в пунктах инструмента — для дистанций «до тейка/стопа в ATR»."""
+        bars = self.market.daily.get("bars")
+        if not bars:
+            return None
+        try:
+            return rk.atr(bars["highs"], bars["lows"], bars["closes"], 20)
+        except (ValueError, KeyError):
+            return None
+
     def _atr_payload(self) -> dict:
         ratio = self.market.atr_ratio()
+        atr_abs = self._atr_abs()
         if ratio is None:
             return {"status": "no_data", "ratio": None, "phase": None,
-                    "k": None, "rr_mult": None,
+                    "k": None, "rr_mult": None, "atr_abs": atr_abs,
                     "reason": "нет дневной истории инструмента"}
         ph = rk.classify_atr_phase(ratio)
         return {"status": self.market.daily.get("status", "no_data"),
                 "ratio": round(ratio, 3), "phase": ph.phase, "k": ph.k,
-                "rr_mult": ph.rr_mult, "reason": None}
+                "rr_mult": ph.rr_mult, "atr_abs": atr_abs, "reason": None}
 
     # ------------------------------------------------------------- filters
 
@@ -328,6 +344,7 @@ class Engine:
 
         prob = {
             "r": r, "T": T, "p": band.p, "p_lo": band.p_lo, "p_hi": band.p_hi,
+            "p_breakeven": 1.0 / (1.0 + T),   # винрейт для EV=0 при RR 1:T
             "mu": band.mu, "sigma_ratio": band.sigma_ratio,
             "winrate": band.winrate, "wr_lo": band.wr_lo, "wr_hi": band.wr_hi,
             "n": stats.n, "wins": stats.wins,
@@ -361,9 +378,98 @@ class Engine:
             # фиксируется только один раз (первый тик после входа) — трек «край vs факт»
             self.journal.update_edge_at_open(trade["id"], market["edge"])
         gamma = self._gamma_pin(trade, price)
+        cone = self._cone(r, band.mu, band.sigma_ratio, T, market)
         return {"prob": prob, "mc": mc, "ladder": ladder, "market": market,
-                "gamma": gamma,
+                "gamma": gamma, "cone": cone,
                 "levels": self._levels_payload(trade, price, sigma, gamma)}
+
+    def _cone(self, r: float, mu: float, sigma: float, T: float,
+              market: dict | None) -> dict:
+        """3D-конус вероятности: эволюция распределения R во времени (first-passage)
+        + рыночная терминальная плотность на «задней стене» (где рынок ждёт цену).
+
+        μ/σ — те же, что калибруют шапку-P, поэтому дальние стены конуса сходятся
+        к P(тейк)/P(стоп). Горизонт «до развязки» подбирается под σ (при низкой
+        волатильности путям нужно больше модельного времени), число шагов фикс.
+        Кэшируется по округлённым параметрам — пересчёт только при заметном сдвиге.
+        """
+        key = (round(r, 2), round(mu, 3), round(sigma, 3), round(T, 2))
+        if key == self._cone_cache_key and self._cone_cache is not None:
+            base = self._cone_cache
+        else:
+            seed = (int(abs(r) * 100) ^ 0x5A5A) & 0x7FFF
+            # горизонт до развязки ~ (T+1)^2/σ^2, ограничен; шаги фикс. (1500)
+            horizon = float(min(max(4.0 * (T + 1.0) / (sigma * sigma), 8.0), 48.0))
+            base = pb.cone_surface(r, mu, sigma, T, horizon=horizon,
+                                   dt=horizon / 1500.0, seed=seed)
+            self._cone_cache_key, self._cone_cache = key, base
+        out = dict(base)
+        out["available"] = True
+        out["sigma"] = sigma
+        # терминальная плотность рынка (risk-neutral) — для «задней стены» конуса
+        if market and market.get("probs"):
+            out["market_terminal"] = market["probs"]
+            out["market_edges"] = market["edges"]
+            out["market_hit"] = market.get("hit_ratio")
+            out["market_demo"] = market.get("demo", False)
+        else:
+            out["market_terminal"] = None
+        return out
+
+    def _state_payload(self, p: dict) -> dict | None:
+        """Строка «СОСТОЯНИЕ / ПЕРСПЕКТИВА»: где сделка сейчас и куда клонит.
+
+        Собирает в один взгляд: текущий r, дистанции до тейка/стопа (в R и в ATR),
+        P(тейк раньше стопа) с полосой, сдвиг края относительно входа и одно
+        рекомендованное действие (сжатая формулировка вердикта).
+        """
+        prob, trade = p.get("prob"), p.get("trade")
+        if not prob or not trade:
+            return None
+        price = self.market.price.get("value")
+        r, T = prob["r"], prob["T"]
+        atr_abs = (p.get("atr") or {}).get("atr_abs")
+        entry, stop, take = trade["entry"], trade["stop"], trade["take"]
+        to_take_atr = (abs(take - price) / atr_abs) if (atr_abs and price) else None
+        to_stop_atr = (abs(price - stop) / atr_abs) if (atr_abs and price) else None
+        market = p.get("market")
+        edge = market.get("edge") if market else None
+        edge_open = trade.get("edge_at_open")
+        edge_shift = (edge - edge_open) if (edge is not None and edge_open is not None) else None
+        verdict = p.get("verdict") or {}
+        ladder = p.get("ladder") or {}
+        return {
+            "r": r, "T": T,
+            "to_take_r": T - r, "to_stop_r": r + 1.0,
+            "to_take_atr": to_take_atr, "to_stop_atr": to_stop_atr,
+            "atr_abs": atr_abs,
+            "p": prob["p"], "p_lo": prob["p_lo"], "p_hi": prob["p_hi"],
+            "p_breakeven": prob.get("p_breakeven"),
+            "small_sample": prob.get("small_sample"),
+            "edge": edge, "edge_at_open": edge_open, "edge_shift": edge_shift,
+            "label": verdict.get("label"), "tone": verdict.get("tone"),
+            "be_armed": ladder.get("be_armed"),
+            "headline": self._state_headline(r, prob, verdict, ladder),
+        }
+
+    @staticmethod
+    def _state_headline(r: float, prob: dict, verdict: dict, ladder: dict) -> str:
+        """Одна короткая формулировка действия (сжатие вердикта под текущий r)."""
+        base = {
+            "СИЛЬНЫЙ ПЕРЕВЕС": "держите по плану, снимайте по лестнице фиксации",
+            "ПЕРЕВЕС": "вход/удержание допустимы, БУ после 1.5R",
+            "НЕЙТРАЛЬНО": "торгуйте только чёткий сетап, стандартный риск",
+            "ОСТОРОЖНО": "уменьшите объём или дождитесь лучшего расклада",
+            "ПРОТИВ ВАС": "пропуск или минимальный объём",
+            "НЕ ВХОДИТЬ": "фильтр стратегии блокирует — пропустите",
+        }.get(verdict.get("label"), "оцените по факторам вердикта")
+        if ladder.get("be_armed"):
+            return "стоп в БУ — снимайте по лестнице, остаток тралом; " + base
+        if r >= 1.0:
+            return "рубеж 1.0R пройден — фиксируйте 10%, двигайте стоп к БУ; " + base
+        if r <= -0.6:
+            return "близко к стопу — не усредняйте, план на стоп готов; " + base
+        return base
 
     def _gamma_pin(self, trade: dict, price: float) -> dict:
         """Гамма-пиннинг в шкале инструмента (эвристика позиционирования дилеров)."""
@@ -576,6 +682,7 @@ class Engine:
         scale = self._proxy_scale()
         trade = self.journal.active_trade()
         price = self.market.price.get("value")
+        oi_walls = self._oi_walls(snaps[-1], scale, price)
         rn_probs = None
         if trade and scale:
             latest = snaps[-1]
@@ -603,6 +710,36 @@ class Engine:
                       if trade else None),
             "price": price,
             "rn_probs": rn_probs,
+            "oi_walls": oi_walls,
+        }
+
+    @staticmethod
+    def _oi_walls(snap: dict, scale: float | None, price: float | None) -> dict | None:
+        """Крупнейшие стены open interest: коллы (сопротивление) / путы (поддержка).
+
+        Практическая польза Strike Landscape: где реально стоит опционный интерес,
+        относительно которого цене труднее пройти. Расстояние — в % от цены.
+        """
+        oi = snap.get("oi_profile") if snap else None
+        if not oi or not oi.get("strikes") or not scale:
+            return None
+        ks = [k * scale for k in oi["strikes"]]
+        coi = oi.get("call_oi") or []
+        poi = oi.get("put_oi") or []
+        if len(coi) != len(ks) or len(poi) != len(ks) or not ks:
+            return None
+        ci = max(range(len(ks)), key=lambda i: coi[i])
+        pi = max(range(len(ks)), key=lambda i: poi[i])
+        call_wall, put_wall = ks[ci], ks[pi]
+
+        def pct(level: float) -> float | None:
+            return ((level - price) / price) if price else None
+
+        return {
+            "call_wall": call_wall, "put_wall": put_wall,
+            "call_wall_pct": pct(call_wall), "put_wall_pct": pct(put_wall),
+            "call_oi": float(coi[ci]), "put_oi": float(poi[pi]),
+            "demo": snap.get("demo", False),
         }
 
     def close(self) -> None:
