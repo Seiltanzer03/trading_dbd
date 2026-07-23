@@ -1,194 +1,192 @@
-// Probability Cone — 3D-конус вероятности (first-passage во времени).
+// Probability Cone — НАСТОЯЩИЙ 3D (WebGL через Plotly gl3d).
 //
-// Идея: где окажется сделка, если дать ей развернуться. Ось R (стоп −1 … 0 … тейк
-// +T) идёт вправо, ось ВРЕМЕНИ уходит вглубь (near = «сейчас», far = «развязка»),
-// высота = плотность живых (ещё не поглощённых) путей. Узкий гребень у «сейчас»
-// расплывается в плато и СЛИВАЕТСЯ к двум стенам-барьерам:
-//   • левая КРАСНАЯ стена (СТОП): кривая ползёт вверх = накопленная P дойти до стопа;
-//   • правая ЗЕЛЁНАЯ стена (ТЕЙК): кривая ползёт вверх = накопленная P дойти до тейка;
-//   • их высота у дальней грани = P(стоп) / P(тейк) — это и есть шапка-P.
-// Оранжевый луч = текущая цена (r). Тёмный пунктир на дальней стене = терминальная
-// плотность РЫНКА (risk-neutral) — где рынок ждёт цену на экспирации.
+// Это не изометрическая имитация: сцену можно вращать мышкой, зумить колесом,
+// наводить курсор для точных значений. Поверхность = плотность вероятности
+// исхода сделки (PDF surface): X = R (стоп −1 · 0 · тейк +T), Y = ВРЕМЯ (к
+// развязке), Z = плотность живых (ещё не поглощённых) путей. Две СТЕНЫ-барьера
+// (красная СТОП / зелёная ТЕЙК) — филенные ribbon'ы Mesh3d, высота которых по
+// времени = накопленная вероятность дойти; у дальней грани = P(стоп)/P(тейк).
+// Оранжевый луч — текущая цена (r); тёмный пунктир на дальней грани — плотность
+// РЫНКА на экспирации.
+//
+// Plotly подключается как глобальный скрипт (window.Plotly), т.к. это UMD-бандл,
+// а не ES-модуль. Данные конуса приходят с бэкенда (prob.cone_surface).
 
-import { COLORS, setupCanvas } from './util.js';
-import { approach, approachArr, pulse } from './anim.js';
+const PAPER = '#FFFFFF', SCENE_BG = '#FBFAF6', INK = '#14140F', RULE = '#D8D5CC';
+const DIM = '#8A877D', ORANGE = '#E8622A', RED = '#C6373C', GREEN = '#2E7D4F';
+const FONT = 'IBM Plex Mono, ui-monospace, monospace';
+// палитра поверхности: бумага -> оранжевый
+const SURF_SCALE = [[0, SCENE_BG], [0.35, '#F3C4A6'], [0.7, '#EE8A54'], [1, ORANGE]];
 
-const H = 344;
+export function initCone(elId) {
+  const el = typeof elId === 'string' ? document.querySelector(elId) : elId;
+  let hasPlot = false;
+  let sig = null;          // подпись данных: react только при реальном изменении
+  let beamIdx = null;      // индекс трейса луча цены (для restyle каждый тик)
+  let curT = 2.5, curZmax = 1;
+  // камеру задаём ЯВНО на каждом рендере: react без camera сбрасывает её в
+  // дефолт. Стартовый вид — спереди (СТОП слева · ТЕЙК справа · время вдаль);
+  // поворот пользователя сохраняем, считывая текущую камеру перед react.
+  let currentCam = { eye: { x: 0.15, y: -2.25, z: 0.72 }, up: { x: 0, y: 0, z: 1 } };
+  const live = { r: null };
 
-export function initCone(canvas) {
-  let data = null;
-  const live = { r: null, direction: 'long', headlineP: null };
-  // сглаживаемое состояние
-  let curDens = null, curTake = null, curStop = null, curR = null, curMkt = null;
+  const ready = () => typeof window !== 'undefined' && window.Plotly && el;
 
   function setData(cone, extra) {
-    data = cone && cone.available ? cone : null;
     if (extra) Object.assign(live, extra);
+    if (!ready()) { return; }
+    if (!cone || !cone.available) {
+      if (hasPlot) { window.Plotly.purge(el); hasPlot = false; sig = null; }
+      return;
+    }
+    const s = `${cone.r0}|${cone.p_take}|${cone.p_stop}|${cone.times.length}|`
+            + `${cone.T}|${!!cone.market_terminal}`;
+    if (s === sig) return;   // данные не изменились — не перерисовываем сцену
+    sig = s;
+    render(cone);
   }
-  function updateLive(p) { Object.assign(live, p); }
 
-  function draw(now) {
-    const { ctx, w } = setupCanvas(canvas, H);
-    ctx.clearRect(0, 0, w, H);
-    if (!data) return;
+  // луч цены двигается каждый тик (дёшево: restyle одного трейса)
+  function updateLive(p) {
+    if (p) Object.assign(live, p);
+    if (!ready() || !hasPlot || beamIdx == null || live.r == null) return;
+    const r = Math.max(-1, Math.min(curT, live.r));
+    window.Plotly.restyle(el, { x: [[r, r]] }, [beamIdx]);
+  }
 
-    const T = data.T;
-    const nS = curDens ? curDens.length : data.density.length;
-    const nB = data.edges.length - 1;
-    const edges = data.edges;
-    const binMid = (b) => (edges[b] + edges[b + 1]) / 2;
+  function render(cone) {
+    const P = window.Plotly;
+    const T = cone.T; curT = T;
+    const edges = cone.edges, nB = edges.length - 1, nS = cone.density.length;
+    const rMid = (b) => (edges[b] + edges[b + 1]) / 2;
+    const xs = Array.from({ length: nB }, (_, b) => rMid(b));      // ось R
+    const ys = Array.from({ length: nS }, (_, j) => j / (nS - 1)); // ось времени 0..1
 
-    // --- геометрия изометрии
-    const padL = 46, padR = 18, padT = 22, padB = 54;
-    const depthDX = w * 0.17;              // горизонтальный увод в глубину
-    const depthDY = (H - padT - padB) * 0.42;  // вертикальный увод
-    const floorY = H - padB;
-    const originX = padL;
-    const plotW = w - padL - padR - depthDX;
-    const surfAmp = (floorY - padT - depthDY) * 0.92;  // высота гребней плотности
-    const wallAmp = (floorY - padT - depthDY) * 0.96;  // высота стен (для P 0..1)
-
-    const rxOf = (R) => (R - (-1)) / (T + 1);
-    const depthOf = (j) => (nS > 1 ? j / (nS - 1) : 0);   // 0=near .. 1=far
-    const proj = (R, d, z) => [
-      originX + rxOf(R) * plotW + d * depthDX,
-      floorY - d * depthDY - z,
-    ];
-
-    // глобальный максимум плотности — для нормировки высоты гребней
+    // нормировка к [0,1] по глобальному максимуму + мягкое сжатие высоты (^0.6):
+    // стартовый пик «сейчас» иначе давит и прячет расплывание плато во времени
     let gmax = 1e-9;
-    for (const row of curDens) for (const v of row) if (v > gmax) gmax = v;
+    for (const row of cone.density) for (const v of row) if (v > gmax) gmax = v;
+    const z = cone.density.map((row) => row.map((v) => Math.pow(v / gmax, 0.6)));
+    curZmax = 1;
 
-    // ---------- пол (плоскость R × время) + направляющие барьеров
-    ctx.fillStyle = '#FBFAF6';
-    ctx.beginPath();
-    let p = proj(-1, 0, 0); ctx.moveTo(p[0], p[1]);
-    p = proj(T, 0, 0); ctx.lineTo(p[0], p[1]);
-    p = proj(T, 1, 0); ctx.lineTo(p[0], p[1]);
-    p = proj(-1, 1, 0); ctx.lineTo(p[0], p[1]);
-    ctx.closePath(); ctx.fill();
+    // --- поверхность плотности (PDF surface)
+    const surface = {
+      type: 'surface', x: xs, y: ys, z,
+      colorscale: SURF_SCALE, showscale: false, opacity: 0.94,
+      name: 'плотность',
+      contours: { z: { show: true, usecolormap: true, width: 1, project: { z: false } } },
+      lighting: { ambient: 0.75, diffuse: 0.5, specular: 0.08, roughness: 0.9 },
+      hovertemplate: 'R=%{x:+.2f}<br>время=%{y:.0%}<br>плотн.(норм.)=%{z:.2f}<extra></extra>',
+    };
 
-    // линии-грани по ключевым R (стоп/0/тейк) вглубь
-    const guides = [{ R: -1, c: COLORS.red }, { R: 0, c: COLORS.rule }, { R: T, c: COLORS.green }];
-    for (const gd of guides) {
-      const a = proj(gd.R, 0, 0), b = proj(gd.R, 1, 0);
-      ctx.strokeStyle = gd.c; ctx.globalAlpha = 0.4; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
-
-    // ---------- СТЕНЫ барьеров: заполнение восходящей кривой P(дошло к времени t)
-    function wall(R, series, color) {
-      // ribbon от пола до кривой P по глубине
-      ctx.beginPath();
-      let started = false;
+    // --- стена-барьер как филенный ribbon (Mesh3d): низ z=0, верх z=P(дойти к t)
+    function wallMesh(xConst, series, color) {
+      const vx = [], vy = [], vz = [], I = [], J = [], K = [];
       for (let j = 0; j < nS; j++) {
-        const q = proj(R, depthOf(j), series[j] * wallAmp);
-        started ? ctx.lineTo(q[0], q[1]) : (ctx.moveTo(q[0], q[1]), started = true);
+        vx.push(xConst, xConst); vy.push(ys[j], ys[j]); vz.push(0, series[j]);
       }
-      for (let j = nS - 1; j >= 0; j--) { const q = proj(R, depthOf(j), 0); ctx.lineTo(q[0], q[1]); }
-      ctx.closePath();
-      ctx.fillStyle = color.fill; ctx.fill();
-      // жирная кромка кривой
-      ctx.beginPath(); started = false;
-      for (let j = 0; j < nS; j++) {
-        const q = proj(R, depthOf(j), series[j] * wallAmp);
-        started ? ctx.lineTo(q[0], q[1]) : (ctx.moveTo(q[0], q[1]), started = true);
+      for (let j = 0; j < nS - 1; j++) {
+        const b0 = 2 * j, t0 = 2 * j + 1, b1 = 2 * j + 2, t1 = 2 * j + 3;
+        I.push(b0, t0); J.push(t0, b1); K.push(b1, t1);
       }
-      ctx.strokeStyle = color.line; ctx.lineWidth = 2; ctx.stroke();
+      return {
+        type: 'mesh3d', x: vx, y: vy, z: vz, i: I, j: J, k: K,
+        color, opacity: 0.35, flatshading: true, hoverinfo: 'skip',
+        name: xConst < 0 ? 'стена стоп' : 'стена тейк', showlegend: false,
+      };
     }
-    wall(-1, curStop, { fill: 'rgba(198,55,60,0.14)', line: COLORS.red });
-    wall(T, curTake, { fill: 'rgba(46,125,79,0.16)', line: COLORS.green });
-
-    // ---------- поверхность плотности: гряды от дальней к ближней (painter)
-    for (let j = nS - 1; j >= 0; j--) {
-      const d = depthOf(j);
-      const row = curDens[j];
-      // площадь под гребнем
-      ctx.beginPath();
-      let q = proj(edges[0], d, 0); ctx.moveTo(q[0], q[1]);
-      for (let b = 0; b < nB; b++) { q = proj(binMid(b), d, (row[b] / gmax) * surfAmp); ctx.lineTo(q[0], q[1]); }
-      q = proj(edges[nB], d, 0); ctx.lineTo(q[0], q[1]);
-      ctx.closePath();
-      const near = 1 - d;                      // ближние ярче
-      ctx.fillStyle = `rgba(232,98,42,${0.10 + 0.34 * near})`;
-      ctx.fill();
-      ctx.strokeStyle = j === 0 ? '#E8622A' : `rgba(232,98,42,${0.25 + 0.4 * near})`;
-      ctx.lineWidth = j === 0 ? 1.8 : 0.8; ctx.stroke();
+    // --- жирная кромка стены (Scatter3d line) + маркер финальной высоты
+    function wallEdge(xConst, series, color, label) {
+      return {
+        type: 'scatter3d', mode: 'lines+markers',
+        x: Array(nS).fill(xConst), y: ys, z: series,
+        line: { color, width: 6 }, marker: { size: 2, color },
+        name: `${label} ${(series[nS - 1] * 100).toFixed(0)}%`,
+        hovertemplate: `${label}: дойти к %{y:.0%} = %{z:.0%}<extra></extra>`,
+      };
     }
+    const stopMesh = wallMesh(-1, cone.p_stop_by_t, RED);
+    const takeMesh = wallMesh(T, cone.p_take_by_t, GREEN);
+    const stopEdge = wallEdge(-1, cone.p_stop_by_t, RED, 'СТОП');
+    const takeEdge = wallEdge(T, cone.p_take_by_t, GREEN, 'ТЕЙК');
 
-    // ---------- терминальная плотность РЫНКА на дальней грани (пунктир)
-    if (curMkt) {
-      let mmax = 1e-9; for (const v of curMkt) if (v > mmax) mmax = v;
-      const medges = data.market_edges || edges;
+    // --- терминальная плотность РЫНКА на дальней грани (y=1)
+    const traces = [surface, stopMesh, takeMesh, stopEdge, takeEdge];
+    if (cone.market_terminal) {
+      const medges = cone.market_edges || edges;
       const mMid = (b) => (medges[b] + medges[b + 1]) / 2;
-      ctx.beginPath(); let started = false;
-      for (let b = 0; b < curMkt.length; b++) {
-        const q = proj(mMid(b), 1, (curMkt[b] / mmax) * surfAmp * 0.85);
-        started ? ctx.lineTo(q[0], q[1]) : (ctx.moveTo(q[0], q[1]), started = true);
-      }
-      ctx.strokeStyle = COLORS.ink; ctx.lineWidth = 1.4; ctx.setLineDash([4, 3]); ctx.stroke(); ctx.setLineDash([]);
-      const lp = proj(mMid(curMkt.length - 1), 1, 0);
-      ctx.fillStyle = COLORS.dim; ctx.font = '8px "IBM Plex Mono", monospace'; ctx.textAlign = 'right';
-      ctx.fillText('РЫНОК·ЭКСПИР.' + (data.market_demo ? ' ◆' : ''), Math.min(lp[0], w - padR), lp[1] + 10);
+      let mmax = 1e-9; for (const v of cone.market_terminal) if (v > mmax) mmax = v;
+      traces.push({
+        type: 'scatter3d', mode: 'lines',
+        x: cone.market_terminal.map((_, b) => mMid(b)),
+        y: Array(cone.market_terminal.length).fill(1),
+        z: cone.market_terminal.map((v) => v / mmax),
+        line: { color: INK, width: 4, dash: 'dash' },
+        name: 'рынок · экспирация',
+        hovertemplate: 'рынок R=%{x:+.2f}<br>плотн.=%{z:.2f}<extra></extra>',
+      });
     }
 
-    // ---------- ЖИВОЙ ЛУЧ ЦЕНЫ (r) на ближней грани, пульсирует
-    const rNow = Math.max(-1, Math.min(T, curR != null ? curR : data.r0));
-    const beamBase = proj(rNow, 0, 0);
-    const beamTop = proj(rNow, 0, surfAmp * 1.02);
-    const pw = 0.5 + 0.5 * pulse(now, 1500);
-    ctx.strokeStyle = `rgba(232,98,42,${0.2 * pw})`; ctx.lineWidth = 6;
-    ctx.beginPath(); ctx.moveTo(beamBase[0], beamBase[1]); ctx.lineTo(beamTop[0], beamTop[1]); ctx.stroke();
-    ctx.strokeStyle = '#E8622A'; ctx.lineWidth = 2.2;
-    ctx.beginPath(); ctx.moveTo(beamBase[0], beamBase[1]); ctx.lineTo(beamTop[0], beamTop[1]); ctx.stroke();
-    ctx.fillStyle = '#E8622A';
-    ctx.beginPath(); ctx.moveTo(beamTop[0] - 4, beamTop[1]); ctx.lineTo(beamTop[0] + 4, beamTop[1]); ctx.lineTo(beamTop[0], beamTop[1] - 7); ctx.closePath(); ctx.fill();
-    ctx.font = '700 10px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
-    ctx.fillText(`r=${rNow >= 0 ? '+' : ''}${rNow.toFixed(2)}`, beamTop[0], beamTop[1] - 10);
+    // --- луч цены (r) на ближней грани (y=0)
+    const r0 = live.r != null ? Math.max(-1, Math.min(T, live.r)) : cone.r0;
+    beamIdx = traces.length;
+    traces.push({
+      type: 'scatter3d', mode: 'lines',
+      x: [r0, r0], y: [0, 0], z: [0, 1.02],
+      line: { color: ORANGE, width: 8 },
+      name: 'цена (r)', hovertemplate: 'цена r=%{x:+.2f}<extra></extra>',
+    });
 
-    // ---------- подписи осей
-    ctx.font = '9px "IBM Plex Mono", monospace';
-    // R-ось по ближней (front) грани
-    const axStop = proj(-1, 0, 0), ax0 = proj(0, 0, 0), axTake = proj(T, 0, 0);
-    ctx.textAlign = 'center';
-    ctx.fillStyle = COLORS.red; ctx.fillText('СТОП −1R', axStop[0] + 8, floorY + 15);
-    ctx.fillStyle = COLORS.dim; ctx.fillText('0', ax0[0], floorY + 15);
-    ctx.fillStyle = COLORS.green; ctx.fillText(`ТЕЙК +${T.toFixed(1)}R`, axTake[0] - 10, floorY + 15);
-    // ось времени — одна однозначная подпись снизу по центру (глубина = время)
-    ctx.fillStyle = COLORS.dim; ctx.textAlign = 'center';
-    ctx.fillText('ОСЬ ВРЕМЕНИ ⟶ вглубь:  СЕЙЧАС (спереди)  →  РАЗВЯЗКА (у стен)',
-                 (padL + w - padR) / 2, floorY + 31);
+    const layout = {
+      autosize: true, height: 420,
+      margin: { l: 0, r: 0, t: 8, b: 0 },
+      paper_bgcolor: PAPER, font: { family: FONT, color: INK, size: 11 },
+      showlegend: true,
+      legend: { orientation: 'h', x: 0, y: 1.06, font: { size: 10 }, bgcolor: 'rgba(0,0,0,0)' },
+      scene: {
+        bgcolor: SCENE_BG,
+        aspectmode: 'manual', aspectratio: { x: 1.75, y: 1.2, z: 0.7 },
+        xaxis: {
+          title: { text: 'R  (стоп −1 · 0 · тейк)', font: { size: 10, color: DIM } },
+          range: [-1, T], gridcolor: RULE, zerolinecolor: RULE,
+          tickvals: [-1, 0, T], ticktext: ['СТОП −1R', '0', `ТЕЙК +${T.toFixed(1)}R`],
+          tickfont: { size: 9, color: DIM }, backgroundcolor: SCENE_BG, showbackground: true,
+        },
+        yaxis: {
+          title: { text: 'ВРЕМЯ → развязка', font: { size: 10, color: DIM } },
+          range: [0, 1], gridcolor: RULE, tickformat: '.0%',
+          tickfont: { size: 9, color: DIM }, backgroundcolor: SCENE_BG, showbackground: true,
+        },
+        zaxis: {
+          title: { text: 'плотность / P дойти', font: { size: 10, color: DIM } },
+          range: [0, 1.05], gridcolor: RULE, tickfont: { size: 9, color: DIM },
+          backgroundcolor: SCENE_BG, showbackground: true,
+        },
+      },
+    };
+    const config = {
+      responsive: true, displaylogo: false,
+      modeBarButtonsToRemove: ['toImage'],
+      doubleClick: 'reset',
+    };
 
-    // ---------- ридаут: куда клонит конус
-    const pt = curTake[nS - 1], ps = curStop[nS - 1];
-    const lean = pt > ps + 0.03 ? { t: 'КЛОНИТ К ТЕЙКУ', c: COLORS.green }
-              : ps > pt + 0.03 ? { t: 'КЛОНИТ К СТОПУ', c: COLORS.red }
-              : { t: '≈ 50/50', c: COLORS.dim };
-    ctx.font = '700 12px "IBM Plex Mono", monospace'; ctx.textAlign = 'left';
-    ctx.fillStyle = lean.c; ctx.fillText(lean.t, padL, padT - 4);
-    ctx.font = '10px "IBM Plex Mono", monospace'; ctx.fillStyle = COLORS.dim; ctx.textAlign = 'right';
-    ctx.fillText(`ТЕЙК ${(pt * 100).toFixed(0)}% · СТОП ${(ps * 100).toFixed(0)}%`, w - padR, padT - 4);
-  }
-
-  // непрерывный рендер + сглаживание к целевому конусу
-  let last = performance.now();
-  function frame(now) {
-    const dt = Math.min((now - last) / 1000, 0.05); last = now;
-    if (data) {
-      const tgt = data.density;
-      if (!curDens || curDens.length !== tgt.length) curDens = tgt.map((r) => r.slice());
-      else for (let j = 0; j < tgt.length; j++) curDens[j] = approachArr(curDens[j], tgt[j], dt, 4);
-      curTake = approachArr(curTake, data.p_take_by_t, dt, 4);
-      curStop = approachArr(curStop, data.p_stop_by_t, dt, 4);
-      curMkt = data.market_terminal ? approachArr(curMkt, data.market_terminal, dt, 4) : null;
-      const targetR = live.r != null ? live.r : data.r0;
-      curR = approach(curR, targetR, dt, 6);
+    // сохранить текущий поворот пользователя (если сцена уже есть), иначе старт-вид
+    if (hasPlot && el._fullLayout?.scene?.camera) currentCam = el._fullLayout.scene.camera;
+    layout.scene.camera = currentCam;
+    if (!hasPlot) {
+      P.newPlot(el, traces, layout, config);
+      hasPlot = true;
+    } else {
+      P.react(el, traces, layout, config);
     }
-    draw(now);
-    requestAnimationFrame(frame);
   }
-  requestAnimationFrame(frame);
+
+  // ресайз вместе с окном
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', () => {
+      if (ready() && hasPlot) window.Plotly.Plots.resize(el);
+    });
+  }
 
   return { setData, updateLive };
 }

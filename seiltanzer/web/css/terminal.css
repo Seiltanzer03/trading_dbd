@@ -158,8 +158,11 @@ html, body {
 .state-headline.good { color: var(--green); }
 .state-headline.bad { color: var(--red); }
 
-/* ---- конус ---- */
-.cone-holder { min-height: 300px; }
+/* ---- конус (настоящий 3D, Plotly gl3d) ---- */
+.cone-holder { min-height: 420px; }
+#cone-plot { width: 100%; height: 420px; }
+/* модбар Plotly — в бумажную палитру */
+.cone-holder .modebar { background: transparent !important; }
 
 /* ---- практический вывод доски ---- */
 .lat-read { font-size: 10.5px; line-height: 1.5; letter-spacing: .02em; color: var(--ink); }

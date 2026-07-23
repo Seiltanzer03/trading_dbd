@@ -14,7 +14,7 @@ initTooltips();
 const lattice = initLattice($('#lattice-canvas'));
 const ridge = initRidge($('#ridge-canvas'));
 const levels = initLevels($('#levels-canvas'));
-const cone = initCone($('#cone-canvas'));
+const cone = initCone('#cone-plot');
 
 const S = {
   tick: null,
