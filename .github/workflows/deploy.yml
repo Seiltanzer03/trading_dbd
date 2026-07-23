@@ -1,0 +1,52 @@
+name: deploy
+
+# Автодеплой на VPS: при каждом пуше в main (и по кнопке Run workflow) GitHub
+# сначала прогоняет тесты, затем заходит на сервер по SSH и обновляет код +
+# рестартит сервис. Runner'ы GitHub достают сервер напрямую (в отличие от
+# изолированного окружения ассистента). Пароль сервера берётся из секрета
+# репозитория SSH_PASSWORD — пока он не добавлен, шаг деплоя пропускается.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      HAS_PW: ${{ secrets.SSH_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Установка и тесты (сломанное не деплоим)
+        run: |
+          pip install -e ".[dev]"
+          pytest -q
+      - name: Деплой на сервер по SSH
+        if: env.HAS_PW == 'true'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 10m
+          script: |
+            set -e
+            if [ -d /opt/seiltanzer/.git ]; then
+              echo "== обновляю /opt/seiltanzer из origin/main =="
+              cd /opt/seiltanzer
+              git fetch origin main
+              git reset --hard origin/main
+            else
+              echo "== первая установка через install.sh =="
+              curl -fsSL https://raw.githubusercontent.com/Seiltanzer03/trading_dbd/main/deploy/install.sh | bash
+            fi
+            systemctl restart seiltanzer
+            sleep 4
+            echo "active: $(systemctl is-active seiltanzer)"
+            echo "HEAD:   $(git -C /opt/seiltanzer rev-parse --short HEAD)"
+            echo "http:   $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/api/state)"
