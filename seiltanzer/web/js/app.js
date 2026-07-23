@@ -47,21 +47,33 @@ async function boot() {
   connectWS();
 }
 
+function setWsDot(ok) {
+  const el = $('#ws-status');
+  if (!el) return;
+  el.className = 'feed ' + (ok ? 'live' : 'no_data');
+  el.textContent = ok ? '● ONLINE' : '○ OFFLINE';
+}
+
 function connectWS() {
   // на https-странице (Codespaces и т.п.) браузер блокирует ws:// как mixed content
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${proto}//${location.host}/ws`);
-  ws.onopen = () => { S.wsOk = true; $('#offline-banner').hidden = true; };
+  const url = `${proto}//${location.host}/ws`;
+  console.log('[seiltanzer] WS connecting →', url);
+  const ws = new WebSocket(url);
+  ws.onopen = () => {
+    S.wsOk = true; $('#offline-banner').hidden = true; setWsDot(true);
+    console.log('[seiltanzer] WS connected ✓ — живые тики пошли');
+  };
   ws.onmessage = (ev) => {
     S.tick = JSON.parse(ev.data);
     onTick();
   };
-  ws.onclose = () => {
-    S.wsOk = false;
-    $('#offline-banner').hidden = false;
+  ws.onclose = (e) => {
+    S.wsOk = false; $('#offline-banner').hidden = false; setWsDot(false);
+    console.warn('[seiltanzer] WS closed', e.code, e.reason || '', '— переподключение через 2с');
     setTimeout(connectWS, 2000);
   };
-  ws.onerror = () => ws.close();
+  ws.onerror = (e) => { console.error('[seiltanzer] WS error', e); ws.close(); };
 }
 
 function onTick() {

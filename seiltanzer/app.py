@@ -82,6 +82,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.engine = engine
     app.state.settings = settings
 
+    @app.middleware("http")
+    async def _no_cache(request, call_next):
+        # запрет кэша на фронт: гарантирует, что браузер получит свежий JS/CSS
+        # (иначе после git pull старый app.js мог остаться в кэше)
+        resp = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.startswith("/static"):
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            resp.headers["Pragma"] = "no-cache"
+        return resp
+
     # ------------------------------------------------------------ background
 
     async def poll_loop():
