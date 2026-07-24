@@ -40,6 +40,7 @@ export function initFan(canvas) {
     const hy = data.horizon_years;
     const skew = data.skew || 0;            // >0 → сторона −R (страх) шире
     const ratio = data.rv_iv_ratio;         // реализ./implied вола (наценка ММ)
+    const termSlope = data.term_slope || 0; // >0 контанго (вола дышит позже)
     const rNow = curR != null ? curR : r0;
 
     const padL = 58, padR = 16, padT = 40, padB = 34;
@@ -57,8 +58,18 @@ export function initFan(canvas) {
     // веер перцентилей — АСИММЕТРИЧНЫЙ по скью (сторона −R шире при skew>0):
     // это уже не симметричный Блэк-Шоулз, а реальная улыбка волы (толще хвост страха)
     const N = 64;
-    const stdUp = (tau) => sig * (1 - skew) * Math.sqrt(tau);   // вверх (+R)
-    const stdDn = (tau) => sig * (1 + skew) * Math.sqrt(tau);   // вниз (−R)
+    // TERM-STRUCTURE: разброс растёт НЕ как √t линейно, а по форвардной воле.
+    // varFrac(τ) = ∫₀^τ g² / ∫₀¹ g², g(s)=1+slope·(2s−1) — доля дисперсии к моменту
+    // τ (та же нормировка, что в конусе: полная дисперсия сохранена). Контанго →
+    // узко рано, шире к развязке; бэквордация → раздувается сразу.
+    const aT = 1 - termSlope, bT = 2 * termSlope;
+    const gInt1 = aT * aT + aT * bT + bT * bT / 3;              // ∫₀¹ g²
+    const varFrac = (tau) => {
+      const v = aT * aT * tau + aT * bT * tau * tau + bT * bT * tau * tau * tau / 3;
+      return gInt1 > 1e-9 ? Math.max(0, v / gInt1) : tau;
+    };
+    const stdUp = (tau) => sig * (1 - skew) * Math.sqrt(varFrac(tau));   // вверх (+R)
+    const stdDn = (tau) => sig * (1 + skew) * Math.sqrt(varFrac(tau));   // вниз (−R)
     const curve = (z, sign, upFn, dnFn) => {
       const pts = [];
       for (let i = 0; i <= N; i++) {
@@ -83,8 +94,8 @@ export function initFan(canvas) {
     fill(curve(Z75, 1, stdUp, stdDn), curve(Z75, -1, stdUp, stdDn), 'rgba(232,98,42,0.20)');  // 25–75%
     // веер РЕАЛИЗОВАННОЙ волы (пунктир) — сравнение с рынком опционов
     if (ratio) {
-      const upR = (tau) => sig * ratio * (1 - skew) * Math.sqrt(tau);
-      const dnR = (tau) => sig * ratio * (1 + skew) * Math.sqrt(tau);
+      const upR = (tau) => sig * ratio * (1 - skew) * Math.sqrt(varFrac(tau));
+      const dnR = (tau) => sig * ratio * (1 + skew) * Math.sqrt(varFrac(tau));
       stroke(curve(Z95, 1, upR, dnR), COLORS.dim, [4, 3]);
       stroke(curve(Z95, -1, upR, dnR), COLORS.dim, [4, 3]);
     }
@@ -109,7 +120,8 @@ export function initFan(canvas) {
       ctx.strokeStyle = COLORS.dim; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(X(tau), padT); ctx.lineTo(X(tau), padT + plotH); ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle = COLORS.dim; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
-      ctx.fillText(`медиана ≈ ${fmtTime(data.median_years)}`, X(tau), padT - 4);
+      const termTag = termSlope > 0.03 ? ' · контанго' : termSlope < -0.03 ? ' · бэквордация' : '';
+      ctx.fillText(`медиана ≈ ${fmtTime(data.median_years)}${termTag}`, X(tau), padT - 4);
     }
 
     // текущая цена — пульсирующая точка на левом краю

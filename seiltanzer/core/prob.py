@@ -349,7 +349,8 @@ def _rebin_uniform(vals, n_out: int) -> list[float]:
 
 
 def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
-            skew: float = 0.0, horizon_years: float | None = None,
+            skew: float = 0.0, term_slope: float = 0.0,
+            horizon_years: float | None = None,
             n_slices: int = 14, n_bins: int = 31, n_paths: int = 6000,
             n_steps: int = 400, seed: int | None = None) -> dict:
     """RISK-NEUTRAL конус: эволюция распределения R под волатильность — НЕ винрейт.
@@ -383,6 +384,16 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
     sd_neg = sigma_R * (1.0 + skew) * sqdt      # для шага в −R (вниз)
     sd_pos = sigma_R * (1.0 - skew) * sqdt      # для шага в +R (вверх)
     var_dt = sigma_R * sigma_R * dt
+    # TERM-STRUCTURE (форвардная вола): вола «дышит» по срокам, а не растёт как √t
+    # линейно. term_slope>0 (контанго) — дальняя вола выше: конус узкий рано,
+    # раскрывается позже; term_slope<0 (бэквордация) — движение фронтально, конус
+    # раздувается сразу и выполаживается. RMS-нормировка сохраняет ПОЛНУЮ дисперсию
+    # за горизонт (калибровка p_take/p_stop не меняется) — перераспределяется ТОЛЬКО
+    # во времени. term_slope=0 → множитель ≡ 1 (полная обратная совместимость).
+    term_slope = float(min(max(term_slope, -0.6), 0.6))
+    tau_step = (np.arange(1, n_steps + 1) - 0.5) / n_steps          # центр шага
+    g = np.clip(1.0 + term_slope * (2.0 * tau_step - 1.0), 0.35, 1.9)
+    fstep = g / math.sqrt(float(np.mean(g * g)))                    # ∫f²dτ = 1
     edges = np.linspace(-1.0, T, n_bins + 1)
     checkpoints: list[int] = []
     for j in range(n_slices):                    # линейные по времени (честная ось)
@@ -398,11 +409,13 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
     times, density, p_take_by_t, p_stop_by_t = [], [], [], []
     cp = 0
     for step in range(1, n_steps + 1):
+        fi = fstep[step - 1]                    # форвардный множитель волы на шаге
+        var_i = var_dt * fi * fi
         idx = np.flatnonzero(alive)
         if idx.size:
             prev = r[idx].copy()
             noise = rng.standard_normal(idx.size)
-            step_r = np.where(noise < 0, sd_neg, sd_pos) * noise    # асимметричный шаг
+            step_r = np.where(noise < 0, sd_neg, sd_pos) * fi * noise   # асимметр.+терм
             r[idx] = prev + drift_R * dt + step_r
             sub = r[idx]
             tp = sub >= T
@@ -410,8 +423,8 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
             inside = ~tp & ~sl
             if inside.any():
                 plo, phi = prev[inside], sub[inside]
-                bsl = np.exp(-2.0 * (plo + 1.0) * (phi + 1.0) / var_dt)
-                btp = np.exp(-2.0 * (T - plo) * (T - phi) / var_dt)
+                bsl = np.exp(-2.0 * (plo + 1.0) * (phi + 1.0) / var_i)
+                btp = np.exp(-2.0 * (T - plo) * (T - phi) / var_i)
                 u = rng.random(inside.sum())
                 hs = u < bsl
                 ht = ~hs & (u < bsl + btp)
@@ -457,7 +470,7 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
 
     out = {
         "r0": float(r0), "T": float(T), "sigma_R": sigma_R, "drift_R": float(drift_R),
-        "skew": float(skew),
+        "skew": float(skew), "term_slope": float(term_slope),
         "edges": edges.tolist(),
         "density": density,
         "times_frac": times,

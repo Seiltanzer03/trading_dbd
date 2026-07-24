@@ -383,6 +383,12 @@ class Engine:
         if sk and sk.get("rr") is not None:
             rr = sk["rr"]
             skew_R = float(min(max((-rr if direction == "long" else rr) * 3.0, -0.4), 0.4))
+        # TERM-STRUCTURE → форвардная вола конуса: контанго (slope>0) — вола дышит
+        # позже (узко рано, шире к развязке); бэквордация (slope<0) — движение скоро.
+        term = (opts or {}).get("term")
+        term_slope = 0.0
+        if term and term.get("slope") is not None:
+            term_slope = float(min(max(term["slope"], -0.6), 0.6))
         # IV vs RV: во сколько раз реализованная вола отличается от implied
         iv_ann = sigma.get("sigma_implied") if sigma.get("applied") else None
         rv_ann = self.market.baseline_vol()
@@ -405,9 +411,10 @@ class Engine:
 
         # RND к экспирации (Бриден–Литценбергер) — для Strike Landscape и задней стены
         terminal = self._market_dist(trade, price, T, band.p)
-        # risk-neutral конус (диффузия под волу + АСИММЕТРИЯ скью, НЕ винрейт; ось — реальное время)
-        cone = self._cone(r, T, target_spread, drift_R, skew_R, horizon_years,
-                          terminal, rv_iv_ratio)
+        # risk-neutral конус (диффузия под волу + АСИММЕТРИЯ скью + ФОРВАРДНАЯ вола
+        # по term-structure, НЕ винрейт; ось — реальное время)
+        cone = self._cone(r, T, target_spread, drift_R, skew_R, term_slope,
+                          horizon_years, terminal, rv_iv_ratio)
 
         # «рынок» для доски/края/вердикта — из risk-neutral конуса (first-passage):
         # hit_ratio = рыночная P(тейк раньше стопа); край = P модели − hit рынка.
@@ -433,8 +440,8 @@ class Engine:
                 "levels": self._levels_payload(trade, price, sigma, gamma)}
 
     def _cone(self, r: float, T: float, sigma_R: float, drift_R: float,
-              skew_R: float, horizon_years: float | None, terminal: dict | None,
-              rv_iv_ratio: float | None) -> dict:
+              skew_R: float, term_slope: float, horizon_years: float | None,
+              terminal: dict | None, rv_iv_ratio: float | None) -> dict:
         """3D risk-neutral конус: эволюция распределения R под ОПЦИОННУЮ волу.
 
         Драйверы — sigma_R (implied move в R), снос drift_R (скью) и цена (r0);
@@ -443,13 +450,15 @@ class Engine:
         Кэш — по округлённым параметрам (пересчёт только при заметном сдвиге r/волы).
         """
         key = (round(r, 3), round(sigma_R, 3), round(T, 2), round(drift_R, 3),
-               round(skew_R, 3), round((horizon_years or 0.0) * 3650, 2))
+               round(skew_R, 3), round(term_slope, 3),
+               round((horizon_years or 0.0) * 3650, 2))
         if key == self._cone_cache_key and self._cone_cache is not None:
             base = self._cone_cache
         else:
             seed = (int(abs(r) * 1000) ^ 0x5A5A) & 0x7FFF
             base = pb.rn_cone(r, sigma_R, T, drift_R=drift_R, skew=skew_R,
-                              horizon_years=horizon_years, seed=seed)
+                              term_slope=term_slope, horizon_years=horizon_years,
+                              seed=seed)
             self._cone_cache_key, self._cone_cache = key, base
         out = dict(base)
         out["available"] = True

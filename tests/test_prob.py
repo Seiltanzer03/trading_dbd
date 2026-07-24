@@ -243,6 +243,41 @@ class TestRnCone:
         flat = P.rn_cone(0.0, 3.0, 3.0, drift_R=0.0, horizon_years=1 / 52, seed=4)
         assert up["hit_ratio"] > flat["hit_ratio"]
 
+    def test_skew_thickens_fear_tail(self):
+        # skew>0 (сторона −R шире) -> выше P дойти до стопа, чем симметрично
+        sk = P.rn_cone(0.5, 2.5, 3.0, skew=0.4, horizon_years=1 / 52, seed=11)
+        sym = P.rn_cone(0.5, 2.5, 3.0, skew=0.0, horizon_years=1 / 52, seed=11)
+        assert sk["p_stop"] > sym["p_stop"]
+        assert sk["skew"] == pytest.approx(0.4)
+
+    def test_term_structure_preserves_total_variance(self):
+        # форвардная вола перераспределяет разброс во ВРЕМЕНИ, но полная дисперсия
+        # за горизонт сохраняется -> p_take/p_stop/hit_ratio почти не меняются
+        base = P.rn_cone(-0.2, 2.0, 3.0, horizon_years=1 / 52, seed=7)
+        cont = P.rn_cone(-0.2, 2.0, 3.0, term_slope=0.4, horizon_years=1 / 52, seed=7)
+        back = P.rn_cone(-0.2, 2.0, 3.0, term_slope=-0.4, horizon_years=1 / 52, seed=7)
+        assert cont["term_slope"] == pytest.approx(0.4)
+        assert cont["hit_ratio"] == pytest.approx(base["hit_ratio"], abs=1e-9)
+        assert cont["p_stop"] == pytest.approx(base["p_stop"], abs=0.05)
+        assert back["p_stop"] == pytest.approx(base["p_stop"], abs=0.05)
+
+        def spread(c, j):
+            import numpy as np
+            d = np.array(c["density"][j]); e = np.array(c["edges"])
+            mid = (e[:-1] + e[1:]) / 2
+            tot = d.sum() or 1.0
+            m = (d * mid).sum() / tot
+            return float(((((mid - m) ** 2) * d).sum() / tot) ** 0.5)
+
+        # контанго уже симметрии рано, бэквордация — шире рано
+        assert spread(cont, 2) < spread(base, 2) < spread(back, 2)
+
+    def test_term_slope_zero_is_backward_compatible(self):
+        a = P.rn_cone(0.1, 2.4, 2.5, skew=0.1, seed=9)
+        b = P.rn_cone(0.1, 2.4, 2.5, skew=0.1, term_slope=0.0, seed=9)
+        assert a["density"] == b["density"]
+        assert a["p_take"] == b["p_take"] and a["p_stop"] == b["p_stop"]
+
 
 class TestRCoordinate:
     def test_long_short(self):

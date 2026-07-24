@@ -134,16 +134,29 @@ async function maybeRefreshRidge() {
 
 // ----------------------------------------------------------------- header
 
+function fmtIdle(secs) {
+  if (secs == null) return '—';
+  if (secs < 90) return `${Math.round(secs)} с`;
+  const m = secs / 60;
+  if (m < 90) return `${Math.round(m)} мин`;
+  return `${(m / 60).toFixed(1)} ч`;
+}
+
 function feedBadge(el, feed, extraTip) {
   const st = feed?.status || 'no_data';
-  el.className = 'feed ' + st;
+  // «стоит» = live, но котировка не двигается дольше порога → нет тиков (рынок
+  // закрыт/неторговое время). Показываем это отдельно, а не зелёным LIVE.
+  const stale = feed?.fresh === false;
+  el.className = 'feed ' + (stale ? 'delayed' : st);
   const name = el.id.replace('feed-', '').toUpperCase();
-  el.textContent = `${STATUS_ICON[st] || '○'} ${name === 'PRICE' ? 'ЦЕНА' : name === 'CHAIN' ? 'ЦЕПОЧКА' : name}`;
+  const label = name === 'PRICE' ? 'ЦЕНА' : name === 'CHAIN' ? 'ЦЕПОЧКА' : name;
+  el.textContent = `${stale ? '⏸' : (STATUS_ICON[st] || '○')} ${label}${stale ? ' СТОИТ' : ''}`;
   const base = extraTip || '';
   const err = feed?.error ? `\nошибка: ${feed.error}` : '';
   const src = feed?.source ? `\nисточник: ${feed.source}` : '';
   const ts = feed?.ts ? `\nобновлено: ${fmtTs(feed.ts)} UTC` : '';
-  el.dataset.tip = `${base}статус: ${statusLabel(st)}${src}${ts}${err}`;
+  const idle = stale ? `\n⏸ нет тиков ${fmtIdle(feed.idle_secs)} — рынок закрыт/неторговое время` : '';
+  el.dataset.tip = `${base}статус: ${statusLabel(st)}${src}${ts}${idle}${err}`;
 }
 
 function renderHeader() {
@@ -197,8 +210,13 @@ function renderHeader() {
 function handleLivePrice(t) {
   const price = t.feeds?.price?.value;
   const streaming = (t.feeds?.price?.source || '').startsWith('stream');
-  $('#lat-price-instr').textContent = t.instrument + (streaming ? ' ⚡' : '');
-  $('#lat-price-instr').title = streaming ? 'живой WebSocket-стрим цены' : '';
+  const stale = t.feeds?.price?.fresh === false;
+  const idle = t.feeds?.price?.idle_secs;
+  $('#lat-price-instr').textContent = t.instrument
+    + (streaming ? ' ⚡' : '') + (stale ? ' · ⏸ ЗАКРЫТ' : '');
+  $('#lat-price-instr').title = stale
+    ? `нет свежих тиков ${fmtIdle(idle)} — рынок закрыт или неторговое время; цена = последняя котировка`
+    : (streaming ? 'живой WebSocket-стрим цены' : '');
   if (price == null) { $('#lat-price').textContent = '—'; $('#lat-price-chg').textContent = ''; return; }
   const el = $('#lat-price');
   tweenNumber(el, price, (v) => fmtPrice(v), 14);
@@ -217,6 +235,9 @@ function handleLivePrice(t) {
                                         : (tr.entry - price) / tr.entry * 100;
     chg.textContent = `${pct >= 0 ? '▲' : '▼'} ${Math.abs(pct).toFixed(2)}% от входа`;
     chg.className = 'live-chg ' + (pct >= 0 ? 'up' : 'down');
+  } else if (stale) {
+    chg.textContent = `⏸ нет тиков ${fmtIdle(idle)}`;
+    chg.className = 'live-chg';
   } else { chg.textContent = ''; }
   S._lastPrice = price;
 }

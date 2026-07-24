@@ -101,6 +101,8 @@ class MarketData:
         self.instrument_code: str = "NAS100"
 
         self.price = _status_dict()
+        self._price_prev_val: float | None = None   # для детекта «нет тиков» (закрыт рынок)
+        self._price_change_ts: float | None = None
         self.intraday: list[tuple[float, float, float]] = []  # (ts, price, volume)
         self.daily = {"bars": None, **_status_dict()}
         self.vols = {k: _status_dict() for k in VOL_INDEX_TICKERS}
@@ -122,6 +124,8 @@ class MarketData:
         if code != self.instrument_code:
             self.instrument_code = code
             self.price = _status_dict()
+            self._price_prev_val = None
+            self._price_change_ts = None
             self.intraday = []
             self.daily = {"bars": None, **_status_dict()}
             self.chain = {"metrics": None, **_status_dict()}
@@ -133,6 +137,26 @@ class MarketData:
         else:
             d["status"] = "no_data"
             d["value"] = None
+
+    # порог «холостого хода» цены: столько секунд без изменения котировки трактуем
+    # как отсутствие тиков (рынок закрыт/неторговое время). Кэш-индексы вне сессии
+    # и фьючерсы в перерыв возвращают одну и ту же цену — это честнее пометить, чем
+    # рисовать зелёный LIVE у замершего числа.
+    PRICE_IDLE_SEC = 120.0
+
+    def _annotate_freshness(self) -> None:
+        """Проставляет idle_secs/fresh: цена live, но не двигается → рынок стоит."""
+        d = self.price
+        v = d.get("value")
+        if v is None or d.get("status") != "live":
+            return
+        now = time.time()
+        if self._price_prev_val is None or abs(v - self._price_prev_val) > 1e-12:
+            self._price_prev_val = v
+            self._price_change_ts = now
+        idle = now - (self._price_change_ts or now)
+        d["idle_secs"] = round(idle, 1)
+        d["fresh"] = idle <= self.PRICE_IDLE_SEC
 
     # ---------------------------------------------------------------- price
 
@@ -153,6 +177,7 @@ class MarketData:
                 now = time.time()
                 self.price = _status_dict(sp, "live", now,
                                           source=f"stream {self.instrument.yahoo}")
+                self._annotate_freshness()
                 self.intraday.append((now, sp, 0.0))
                 self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
                 return
@@ -171,6 +196,7 @@ class MarketData:
                 p = float(hist["Close"].iloc[-1])
             self.price = _status_dict(p, "live", time.time(),
                                       source=f"yfinance {self.instrument.yahoo}")
+            self._annotate_freshness()
         except Exception as e:  # noqa: BLE001 — фид обязан пережить любой сбой источника
             self._mark_fail(self.price, self.settings.price_poll_sec, str(e))
 
