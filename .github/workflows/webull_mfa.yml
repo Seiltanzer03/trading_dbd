@@ -45,7 +45,29 @@ jobs:
           user = os.environ["WB_USER"].strip()
           code = (os.environ.get("WB_CODE") or "").strip()
           if not code:
-              print("get_mfa (SMS sent?):", wb.get_mfa(user))
+              # перебор форматов номера/региона; SMS уходит на первом рабочем
+              base = "962319447"
+              cands = [
+                  (user, int(os.environ.get("WB_REGION") or "6")),
+                  ("+66-0" + base, 6), ("+66-" + base, 6),
+                  ("+66" + base, 6), ("+660" + base, 6),
+                  ("+66-0" + base, 5), ("+66-" + base, 5),
+                  ("+66-0" + base, 1), ("+66-" + base, 1),
+              ]
+              seen = set()
+              for u, r in cands:
+                  key = (u, r)
+                  if key in seen:
+                      continue
+                  seen.add(key)
+                  try:
+                      ok = webull(region_code=r).get_mfa(u)
+                  except Exception as e:  # noqa: BLE001
+                      ok = f"ERR {type(e).__name__}"
+                  print(f"try user={u!r} region={r} -> {ok}")
+                  if ok is True:
+                      print(f">>> SMS SENT: user={u!r} region={r} — используй ЭТО для логина")
+                      break
           else:
               res = wb.login(username=user, password=os.environ.get("WB_PW",""),
                              device_name="seiltanzer-quotes", mfa=code)
