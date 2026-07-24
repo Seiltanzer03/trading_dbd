@@ -7,3 +7,6 @@ cache.db
 .pytest_cache/
 dist/
 deploy/server.env
+# webull-сессия (токены/устройство) — секреты, не коммитить
+webull_credentials.json
+did.bin
