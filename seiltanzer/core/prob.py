@@ -349,8 +349,9 @@ def _rebin_uniform(vals, n_out: int) -> list[float]:
 
 
 def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
-            horizon_years: float | None = None, n_slices: int = 14, n_bins: int = 31,
-            n_paths: int = 6000, n_steps: int = 400, seed: int | None = None) -> dict:
+            skew: float = 0.0, horizon_years: float | None = None,
+            n_slices: int = 14, n_bins: int = 31, n_paths: int = 6000,
+            n_steps: int = 400, seed: int | None = None) -> dict:
     """RISK-NEUTRAL конус: эволюция распределения R под волатильность — НЕ винрейт.
 
     Диффузия dX = drift_R·dt + σ·dW в R-координатах, где полный разброс за горизонт
@@ -374,7 +375,13 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
     r0 = min(max(r0, -1.0 + 1e-9), T - 1e-9)
     rng = np.random.default_rng(seed)
     dt = 1.0 / n_steps
-    sdt = sigma_R * math.sqrt(dt)
+    # АСИММЕТРИЯ по скью: сторона «страха» шире. skew>0 → шаги вниз (−R) крупнее
+    # (толще нижний хвост, выше P стопа в лонге) — как реальная улыбка волы, а не
+    # симметричный Блэк-Шоулз. Хвосты не занижаются.
+    skew = float(min(max(skew, -0.45), 0.45))
+    sqdt = math.sqrt(dt)
+    sd_neg = sigma_R * (1.0 + skew) * sqdt      # для шага в −R (вниз)
+    sd_pos = sigma_R * (1.0 - skew) * sqdt      # для шага в +R (вверх)
     var_dt = sigma_R * sigma_R * dt
     edges = np.linspace(-1.0, T, n_bins + 1)
     checkpoints: list[int] = []
@@ -394,7 +401,9 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
         idx = np.flatnonzero(alive)
         if idx.size:
             prev = r[idx].copy()
-            r[idx] = prev + drift_R * dt + sdt * rng.standard_normal(idx.size)
+            noise = rng.standard_normal(idx.size)
+            step_r = np.where(noise < 0, sd_neg, sd_pos) * noise    # асимметричный шаг
+            r[idx] = prev + drift_R * dt + step_r
             sub = r[idx]
             tp = sub >= T
             sl = sub <= -1.0
@@ -448,6 +457,7 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
 
     out = {
         "r0": float(r0), "T": float(T), "sigma_R": sigma_R, "drift_R": float(drift_R),
+        "skew": float(skew),
         "edges": edges.tolist(),
         "density": density,
         "times_frac": times,

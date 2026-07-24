@@ -38,6 +38,8 @@ export function initFan(canvas) {
 
     const T = data.T, r0 = data.r0, sig = data.sigma_R, drift = data.drift_R || 0;
     const hy = data.horizon_years;
+    const skew = data.skew || 0;            // >0 → сторона −R (страх) шире
+    const ratio = data.rv_iv_ratio;         // реализ./implied вола (наценка ММ)
     const rNow = curR != null ? curR : r0;
 
     const padL = 58, padR = 16, padT = 40, padB = 34;
@@ -52,14 +54,16 @@ export function initFan(canvas) {
     ctx.fillStyle = 'rgba(46,125,79,0.06)'; ctx.fillRect(padL, Y(yHi), plotW, Y(T) - Y(yHi));
     ctx.fillStyle = 'rgba(198,55,60,0.06)'; ctx.fillRect(padL, Y(-1), plotW, Y(yLo) - Y(-1));
 
-    // веер: перцентили аналитической диффузии (гладко, без шума МК)
+    // веер перцентилей — АСИММЕТРИЧНЫЙ по скью (сторона −R шире при skew>0):
+    // это уже не симметричный Блэк-Шоулз, а реальная улыбка волы (толще хвост страха)
     const N = 64;
-    const band = (z, sign) => {
+    const stdUp = (tau) => sig * (1 - skew) * Math.sqrt(tau);   // вверх (+R)
+    const stdDn = (tau) => sig * (1 + skew) * Math.sqrt(tau);   // вниз (−R)
+    const curve = (z, sign, upFn, dnFn) => {
       const pts = [];
       for (let i = 0; i <= N; i++) {
-        const tau = i / N;
-        const m = r0 + drift * tau, s = sig * Math.sqrt(tau);
-        pts.push([X(tau), Y(m + sign * z * s)]);
+        const tau = i / N, m = r0 + drift * tau;
+        pts.push([X(tau), Y(m + (sign > 0 ? z * upFn(tau) : -z * dnFn(tau)))]);
       }
       return pts;
     };
@@ -69,14 +73,23 @@ export function initFan(canvas) {
       for (let i = lo.length - 1; i >= 0; i--) ctx.lineTo(lo[i][0], lo[i][1]);
       ctx.closePath(); ctx.fillStyle = color; ctx.fill();
     };
+    const stroke = (pts, color, dash) => {
+      ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+      ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash(dash); ctx.stroke(); ctx.setLineDash([]);
+    };
     ctx.save();
     ctx.beginPath(); ctx.rect(padL, padT, plotW, plotH); ctx.clip();
-    fill(band(Z95, 1), band(Z95, -1), 'rgba(232,98,42,0.10)');   // 5–95%
-    fill(band(Z75, 1), band(Z75, -1), 'rgba(232,98,42,0.20)');   // 25–75%
+    fill(curve(Z95, 1, stdUp, stdDn), curve(Z95, -1, stdUp, stdDn), 'rgba(232,98,42,0.10)');  // 5–95% implied
+    fill(curve(Z75, 1, stdUp, stdDn), curve(Z75, -1, stdUp, stdDn), 'rgba(232,98,42,0.20)');  // 25–75%
+    // веер РЕАЛИЗОВАННОЙ волы (пунктир) — сравнение с рынком опционов
+    if (ratio) {
+      const upR = (tau) => sig * ratio * (1 - skew) * Math.sqrt(tau);
+      const dnR = (tau) => sig * ratio * (1 + skew) * Math.sqrt(tau);
+      stroke(curve(Z95, 1, upR, dnR), COLORS.dim, [4, 3]);
+      stroke(curve(Z95, -1, upR, dnR), COLORS.dim, [4, 3]);
+    }
     // медиана
-    ctx.beginPath();
-    for (let i = 0; i <= N; i++) { const tau = i / N; const p = [X(tau), Y(r0 + drift * tau)]; i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); }
-    ctx.strokeStyle = '#E8622A'; ctx.lineWidth = 2; ctx.stroke();
+    stroke(curve(0, 1, stdUp, stdDn), '#E8622A', []);
     ctx.restore();
 
     // барьеры + вход
@@ -118,14 +131,26 @@ export function initFan(canvas) {
     ctx.textAlign = 'right'; ctx.fillStyle = COLORS.dim;
     [T, 0, -1].forEach((R) => ctx.fillText(`${R >= 0 ? '+' : ''}${R}R`, padL - 4, Y(R) + 3));
 
-    // ридаут: куда клонит + вероятности
+    // ридаут строка 1: куда клонит + вероятности
     const lean = data.p_take > data.p_stop + 0.03 ? { t: 'КЛОНИТ К ТЕЙКУ', c: COLORS.green }
       : data.p_stop > data.p_take + 0.03 ? { t: 'КЛОНИТ К СТОПУ', c: COLORS.red }
       : { t: '≈ 50/50', c: COLORS.dim };
-    ctx.textAlign = 'left'; ctx.font = '700 13px "IBM Plex Mono", monospace'; ctx.fillStyle = lean.c;
-    ctx.fillText(lean.t, padL, 20);
+    ctx.textAlign = 'left'; ctx.font = '700 12px "IBM Plex Mono", monospace'; ctx.fillStyle = lean.c;
+    ctx.fillText(lean.t, padL, 14);
     ctx.textAlign = 'right'; ctx.font = '10px "IBM Plex Mono", monospace'; ctx.fillStyle = COLORS.dim;
-    ctx.fillText(`P дойти к развязке: ТЕЙК ${(data.p_take * 100).toFixed(0)}% · СТОП ${(data.p_stop * 100).toFixed(0)}%`, w - padR, 20);
+    ctx.fillText(`P дойти: ТЕЙК ${(data.p_take * 100).toFixed(0)}% · СТОП ${(data.p_stop * 100).toFixed(0)}%`, w - padR, 14);
+    // строка 2: наценка ММ (IV vs RV, пунктирный веер) + перекос волы (скью)
+    ctx.font = '9px "IBM Plex Mono", monospace';
+    if (ratio != null) {
+      const mm = ratio < 0.88 ? { t: `опционы ДОРОЖЕ факта ×${(1 / ratio).toFixed(2)} (RR обманчив)`, c: COLORS.red }
+        : ratio > 1.14 ? { t: `опционы дешевле факта ×${ratio.toFixed(2)}`, c: COLORS.green }
+        : { t: 'опционы ≈ реальной воле', c: COLORS.dim };
+      ctx.textAlign = 'left'; ctx.fillStyle = mm.c; ctx.fillText('◌ пунктир = реализ. вола · ' + mm.t, padL, 30);
+    }
+    if (Math.abs(skew) > 0.03) {
+      ctx.textAlign = 'right'; ctx.fillStyle = COLORS.dim;
+      ctx.fillText(`скью: хвост страха ${skew > 0 ? 'к стопу' : 'к тейку'} шире`, w - padR, 30);
+    }
   }
 
   let last = performance.now();

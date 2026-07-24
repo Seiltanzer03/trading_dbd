@@ -28,7 +28,7 @@ export function initCone(elId) {
   const el = typeof elId === 'string' ? document.querySelector(elId) : elId;
   let hasPlot = false, listenersOn = false;
   let sig = null, pendingCone = null, pendingSig = null;
-  let beamIdx = null, lastBeamR = null;
+  let beamIdx = null, ballIdx = null, lastBeamR = null;
   let curT = 2.5;
   let interacting = false, interactTimer = null;
   const live = { r: null };
@@ -95,31 +95,24 @@ export function initCone(elId) {
     const r = clampR(live.r);
     if (lastBeamR != null && Math.abs(r - lastBeamR) < 0.002) return;
     lastBeamR = r;
+    // двигаем и опору-линию, и точку цены (высота обновится на следующем render)
     window.Plotly.restyle(el, { x: [[r, r]] }, [beamIdx]);
+    window.Plotly.restyle(el, { x: [[r]] }, [ballIdx]);
   }
 
   function render(cone) {
     const P = window.Plotly;
     const T = cone.T; curT = T;
-    const r0 = cone.r0, sig = cone.sigma_R, drift = cone.drift_R || 0;
-    const times = cone.times_frac, nS = times.length;
+    const edges = cone.edges, nB = edges.length - 1, nS = cone.density.length;
+    const rMid = (b) => (edges[b] + edges[b + 1]) / 2;
+    const xs = Array.from({ length: nB }, (_, b) => rMid(b));
     const ys = Array.from({ length: nS }, (_, j) => j / (nS - 1));   // глубина 0..1
-    // расширенная ось R — конус НЕ обрезается барьерами, уходит в зоны П/У
-    const rLo = Math.min(-1.3, r0 - 0.3), rHi = Math.max(T + 0.45, r0 + 0.3);
-    const nR = 41;
-    const xs = Array.from({ length: nR }, (_, i) => rLo + (rHi - rLo) * i / (nR - 1));
 
-    // ГЛАДКАЯ аналитическая НЕпоглощённая плотность (расширяющийся конус-плато,
-    // без шума МК и без «стекания в горку»): Normal(r0+drift·τ, σ·√τ)
-    const INV_SQRT_2PI = 0.3989422804;
-    const zRaw = times.map((tau) => {
-      const s = Math.max(sig * Math.sqrt(Math.max(tau, 1e-4)), 1e-4);
-      const m = r0 + drift * tau;
-      return xs.map((R) => { const d = (R - m) / s; return INV_SQRT_2PI / s * Math.exp(-0.5 * d * d); });
-    });
+    // поверхность = МК-плотность живых путей (тот вид конуса, что «стоит на полу»);
+    // теперь АСИММЕТРИЧНА по скью (сторона страха шире). Мягкое сжатие высоты ^0.7.
     let gmax = 1e-9;
-    for (const row of zRaw) for (const v of row) if (v > gmax) gmax = v;
-    const z = zRaw.map((row) => row.map((v) => Math.pow(v / gmax, 0.7)));
+    for (const row of cone.density) for (const v of row) if (v > gmax) gmax = v;
+    const z = cone.density.map((row) => row.map((v) => Math.pow(v / gmax, 0.7)));
 
     const surface = {
       type: 'surface', x: xs, y: ys, z,
@@ -127,6 +120,12 @@ export function initCone(elId) {
       contours: { z: { show: true, usecolormap: true, width: 1 } },
       lighting: { ambient: 0.78, diffuse: 0.5, specular: 0.06, roughness: 0.9 },
       hovertemplate: 'R=%{x:+.2f}<br>плотн.=%{z:.2f}<extra></extra>',
+    };
+    // высота поверхности у ближней грани (t=0) в точке текущего r — чтобы «цену»
+    // посадить ТОЧКОЙ НА гору конуса, а не палкой рядом
+    const heightAt = (R) => {
+      for (let b = 0; b < nB; b++) if (R >= edges[b] && R < edges[b + 1]) return Math.pow(cone.density[0][b] / gmax, 0.7);
+      return 0.04;
     };
 
     function wallMesh(xConst, series, color) {
@@ -149,11 +148,18 @@ export function initCone(elId) {
       wallMesh(-1, cone.p_stop_by_t, RED), wallMesh(T, cone.p_take_by_t, GREEN),
       wallEdge(-1, cone.p_stop_by_t, RED, 'СТОП'), wallEdge(T, cone.p_take_by_t, GREEN, 'ТЕЙК')];
 
-    const rBeam = live.r != null ? clampR(live.r) : r0;
+    const rBeam = live.r != null ? clampR(live.r) : cone.r0;
     lastBeamR = rBeam;
+    const hB = Math.max(heightAt(rBeam), 0.05);
+    // тонкая опора от пола до точки + ЯРКАЯ ТОЧКА цены НА поверхности конуса
     beamIdx = traces.length;
     traces.push({ type: 'scatter3d', mode: 'lines',
-      x: [rBeam, rBeam], y: [0, 0], z: [0, 1.04], line: { color: ORANGE, width: 9 },
+      x: [rBeam, rBeam], y: [0, 0], z: [0, hB], line: { color: ORANGE, width: 4 },
+      name: 'цена (r)', hoverinfo: 'skip', showlegend: false });
+    ballIdx = traces.length;
+    traces.push({ type: 'scatter3d', mode: 'markers',
+      x: [rBeam], y: [0], z: [hB],
+      marker: { size: 7, color: ORANGE, line: { color: '#fff', width: 1 } },
       name: 'цена (r)', hovertemplate: 'цена r=%{x:+.2f}<extra></extra>' });
 
     // ось времени — адаптивная (реальные единицы)
@@ -174,7 +180,7 @@ export function initCone(elId) {
         camera: currentCam,              // ← ставим сохранённый поворот на каждый render
         bgcolor: SCENE_BG, aspectmode: 'manual', aspectratio: { x: 1.75, y: 1.2, z: 0.72 },
         xaxis: { title: { text: 'R  (стоп −1 · 0 · тейк)', font: { size: 10, color: DIM } },
-          range: [rLo, rHi], gridcolor: RULE, zerolinecolor: RULE,
+          range: [-1, T], gridcolor: RULE, zerolinecolor: RULE,
           tickvals: [-1, 0, T], ticktext: ['СТОП −1R', '0', `ТЕЙК +${T.toFixed(1)}R`],
           tickfont: { size: 9, color: DIM }, backgroundcolor: SCENE_BG, showbackground: true },
         yaxis: { title: { text: yTitle, font: { size: 10, color: DIM } },
