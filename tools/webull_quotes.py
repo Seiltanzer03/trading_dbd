@@ -27,13 +27,15 @@ import os
 import sys
 
 # ── КОНФИГ ─────────────────────────────────────────────────────────────────
-COUNTRY_CODE = "+66"                 # код страны отдельно (пример: +66 — Таиланд)
-PHONE_NUMBER = "YOUR_PHONE_NUMBER"   # номер БЕЗ кода страны (и обычно без ведущего 0)
-PASSWORD = os.environ.get("WEBULL_PASSWORD", "YOUR_PASSWORD")  # лучше через env
-REGION_CODE = 6                      # regionId webull (6 — по умолчанию; поменяйте, если вход не проходит)
+# Можно задать через переменные окружения (быстро, без правки файла):
+#   WEBULL_COUNTRY, WEBULL_PHONE, WEBULL_PASSWORD, WEBULL_REGION, WEBULL_TICKER
+COUNTRY_CODE = os.environ.get("WEBULL_COUNTRY", "+66")   # код страны (пример: +66 — Таиланд)
+PHONE_NUMBER = os.environ.get("WEBULL_PHONE", "YOUR_PHONE_NUMBER")  # БЕЗ кода страны (и обычно без ведущего 0)
+PASSWORD = os.environ.get("WEBULL_PASSWORD", "YOUR_PASSWORD")
+REGION_CODE = int(os.environ.get("WEBULL_REGION", "6"))  # regionId (6 по умолч.; смените, если вход не проходит)
 DEVICE_NAME = "seiltanzer-quotes"
 
-TICKER = "SPY"                       # тикер для цепочки опционов
+TICKER = os.environ.get("WEBULL_TICKER", "SPY")          # тикер для цепочки опционов
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CRED_FILE = os.path.join(SCRIPT_DIR, "webull_credentials.json")
