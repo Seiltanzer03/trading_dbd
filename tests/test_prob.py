@@ -213,6 +213,37 @@ class TestConeSurface:
         assert c["p_take"] > c["p_stop"]
 
 
+class TestRnCone:
+    def test_bell_not_degenerate(self):
+        # risk-neutral колокол — нормальное распределение, не свалено в стоп
+        c = P.rn_cone(0.0, 3.5, 3.0, drift_R=0.0, horizon_years=5 / 365, seed=1)
+        bell = c["slice_probs"]
+        assert len(bell) == 11
+        assert abs(sum(bell) - 1.0) < 1e-6
+        # пик не на самом краю (стоп/тейк), масса в середине
+        peak = max(range(11), key=lambda b: bell[b])
+        assert 1 <= peak <= 9
+        assert sum(bell[3:8]) > 0.4
+
+    def test_hit_ratio_matches_first_passage(self):
+        # рыночный hit = аналитическая first-passage (drift 0 -> (r+1)/(T+1))
+        c = P.rn_cone(0.0, 3.0, 3.0, drift_R=0.0, horizon_years=1 / 365, seed=2)
+        assert c["hit_ratio"] == pytest.approx(1.0 / 4.0, abs=1e-6)
+
+    def test_walls_monotone_and_realtime(self):
+        c = P.rn_cone(0.2, 3.0, 2.5, drift_R=0.0, horizon_years=2 / 365, seed=3)
+        assert all(b >= a - 1e-9 for a, b in zip(c["p_take_by_t"], c["p_take_by_t"][1:]))
+        assert all(b >= a - 1e-9 for a, b in zip(c["p_stop_by_t"], c["p_stop_by_t"][1:]))
+        assert c["horizon_years"] == pytest.approx(2 / 365)
+        assert c["times_years"][-1] == pytest.approx(2 / 365, rel=0.01)
+
+    def test_drift_tilts_toward_take(self):
+        # положительный снос -> выше P дойти до тейка
+        up = P.rn_cone(0.0, 3.0, 3.0, drift_R=0.2, horizon_years=1 / 52, seed=4)
+        flat = P.rn_cone(0.0, 3.0, 3.0, drift_R=0.0, horizon_years=1 / 52, seed=4)
+        assert up["hit_ratio"] > flat["hit_ratio"]
+
+
 class TestRCoordinate:
     def test_long_short(self):
         assert P.r_coordinate(101, 100, 99, "long") == pytest.approx(1.0)

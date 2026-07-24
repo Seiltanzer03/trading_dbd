@@ -251,6 +251,17 @@ function renderVerdict() {
 
 // ------------------------------------------------------ state / prospects
 
+// адаптивный формат длительности (годы -> минуты/часы/дни)
+function fmtDur(years) {
+  if (years == null || !isFinite(years)) return '—';
+  const min = years * 365 * 24 * 60;
+  if (min < 1) return '<1 мин';
+  if (min < 90) return `${Math.round(min)} мин`;
+  const h = min / 60;
+  if (h < 48) return `${h.toFixed(1)} ч`;
+  return `${(h / 24).toFixed(1)} дн`;
+}
+
 function renderState() {
   const s = S.tick?.state;
   const card = $('#panel-state');
@@ -268,10 +279,11 @@ function renderState() {
   $('#st-stop').textContent = fmtR(-s.to_stop_r);
   $('#st-stop-atr').textContent = s.to_stop_atr != null ? `${s.to_stop_atr.toFixed(1)} ATR` : 'ATR н/д';
 
-  // P с полосой
+  // P с полосой + примерное время до развязки (из волы, адаптивно)
   tweenNumber($('#st-p'), s.p * 100, (v) => v.toFixed(1) + '%', 10);
   $('#st-p-band').textContent = `[${(s.p_lo * 100).toFixed(0)}–${(s.p_hi * 100).toFixed(0)}%]`
-    + (s.small_sample ? ' · n<30' : '');
+    + (s.small_sample ? ' · n<30' : '')
+    + (s.median_years != null ? ` · развязка ≈ ${fmtDur(s.median_years)}` : '');
 
   // край + сдвиг от входа
   if (s.edge == null) {
@@ -353,8 +365,8 @@ function renderLattice() {
   if (mkt) {
     $('#lat-mhit').textContent = fmtPct(mkt.hit_ratio);
     $('#lat-mhit').dataset.tip =
-      `Рыночный «hit» = P(за тейк) / (P(за тейк)+P(за стоп)) по risk-neutral плотности опционов (${mkt.demo ? 'DEMO' : 'экспирация ' + mkt.expiry}).\n` +
-      `P(за тейк)=${fmtPct(mkt.p_take)}, P(за стоп)=${fmtPct(mkt.p_stop)}.\nСопоставим с P модели (${fmtPct(mkt.p_model)}).`;
+      `Рыночный «hit» = P(тейк раньше стопа) по risk-neutral диффузии (вола опционов/реализ. + снос скью, БЕЗ винрейта)${mkt.median_years != null ? ', медиана развязки ≈ ' + fmtDur(mkt.median_years) : ''}.\n` +
+      `P дойти к горизонту: тейк ${fmtPct(mkt.p_take)}, стоп ${fmtPct(mkt.p_stop)}.\nСравнивается с P модели (${fmtPct(mkt.p_model)}); расхождение = КРАЙ.`;
     const ed = mkt.edge;
     $('#lat-edge').textContent = ed == null ? '—' : (ed >= 0 ? '+' : '') + fmtPct(ed);
     $('#lat-edge').className = 'val ' + (ed == null ? '' : ed >= 0 ? 'green' : 'red');

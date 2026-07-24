@@ -373,45 +373,80 @@ class Engine:
             "be_armed": max_r >= BREAKEVEN_AFTER,
             "max_r": max_r,
         }
-        market = self._market_dist(trade, price, T, band.p)
-        if market and market.get("edge") is not None:
-            # фиксируется только один раз (первый тик после входа) — трек «край vs факт»
-            self.journal.update_edge_at_open(trade["id"], market["edge"])
+        # снос из скью (risk-reversal): рынок тянет по/против направления сделки
+        opts = self._options_summary()
+        skew = (opts or {}).get("skew")
+        drift_R = 0.0
+        if skew and skew.get("rr") is not None:
+            aligned = skew["rr"] if direction == "long" else -skew["rr"]
+            drift_R = float(min(max(aligned * 4.0, -0.25), 0.25))
+        # АДАПТИВНОЕ реальное время развязки: не привязано к экспирации, а выведено
+        # из скорости движения (волы) относительно расстояния до барьеров. У скальпа
+        # с тесным стопом это минуты, у свинга — дни.
+        risk_price = abs(entry - stop)
+        sigma_ann = (sigma["sigma_implied"] if sigma.get("applied") and sigma.get("sigma_implied")
+                     else self.market.baseline_vol())
+        # σ_R_rate — СКО хода в R за √год: σ_годовая · цена / риск_в_пунктах
+        target_spread = float(min(max(0.8 * (T + 1.0), 2.5), 8.0))  # ширина конуса «до развязки»
+        horizon_years = None
+        if sigma_ann and sigma_ann > 0 and price and risk_price > 0:
+            sigma_R_rate = sigma_ann * price / risk_price
+            if sigma_R_rate > 0:
+                hy = (target_spread / sigma_R_rate) ** 2
+                horizon_years = float(min(max(hy, 1.0 / (365 * 24 * 60)), 60.0 / 365))  # [1мин, 60дн]
+
+        # RND к экспирации (Бриден–Литценбергер) — для Strike Landscape и задней стены
+        terminal = self._market_dist(trade, price, T, band.p)
+        # risk-neutral конус (диффузия под волу + снос скью, НЕ винрейт; ось — реальное время)
+        cone = self._cone(r, T, target_spread, drift_R, horizon_years, terminal)
+
+        # «рынок» для доски/края/вердикта — из risk-neutral конуса (first-passage):
+        # hit_ratio = рыночная P(тейк раньше стопа); край = P модели − hit рынка.
+        market = {
+            "available": True,
+            "probs": cone["slice_probs"], "edges": cone["slice_edges"],
+            "p_take": cone["p_take"], "p_stop": cone["p_stop"],
+            "hit_ratio": cone["hit_ratio"],
+            "edge": band.p - cone["hit_ratio"],
+            "p_model": band.p,
+            "median_years": cone.get("median_years"),
+            "source": "rn_cone", "has_chain": terminal is not None,
+            "demo": (terminal or {}).get("demo", self.settings.demo),
+            "terminal_p_take": (terminal or {}).get("p_take"),
+            "terminal_p_stop": (terminal or {}).get("p_stop"),
+            "terminal_hit": (terminal or {}).get("hit_ratio"),
+        }
+        # фиксируется один раз (первый тик после входа) — трек «край vs факт»
+        self.journal.update_edge_at_open(trade["id"], market["edge"])
         gamma = self._gamma_pin(trade, price)
-        cone = self._cone(r, band.mu, band.sigma_ratio, T, market)
         return {"prob": prob, "mc": mc, "ladder": ladder, "market": market,
                 "gamma": gamma, "cone": cone,
                 "levels": self._levels_payload(trade, price, sigma, gamma)}
 
-    def _cone(self, r: float, mu: float, sigma: float, T: float,
-              market: dict | None) -> dict:
-        """3D-конус вероятности: эволюция распределения R во времени (first-passage)
-        + рыночная терминальная плотность на «задней стене» (где рынок ждёт цену).
+    def _cone(self, r: float, T: float, sigma_R: float, drift_R: float,
+              horizon_years: float | None, terminal: dict | None) -> dict:
+        """3D risk-neutral конус: эволюция распределения R под ОПЦИОННУЮ волу.
 
-        μ/σ — те же, что калибруют шапку-P, поэтому дальние стены конуса сходятся
-        к P(тейк)/P(стоп). Горизонт «до развязки» подбирается под σ (при низкой
-        волатильности путям нужно больше модельного времени), число шагов фикс.
-        Кэшируется по округлённым параметрам — пересчёт только при заметном сдвиге.
+        Драйверы — sigma_R (implied move в R), снос drift_R (скью) и цена (r0);
+        ВИНРЕЙТ не участвует. Ось времени — реальные дни до экспирации. Дальняя
+        грань несёт терминальную RND рынка (Бриден–Литценбергер) как ориентир.
+        Кэш — по округлённым параметрам (пересчёт только при заметном сдвиге r/волы).
         """
-        key = (round(r, 2), round(mu, 3), round(sigma, 3), round(T, 2))
+        key = (round(r, 3), round(sigma_R, 3), round(T, 2), round(drift_R, 3),
+               round((horizon_years or 0.0) * 3650, 2))
         if key == self._cone_cache_key and self._cone_cache is not None:
             base = self._cone_cache
         else:
-            seed = (int(abs(r) * 100) ^ 0x5A5A) & 0x7FFF
-            # горизонт до развязки ~ (T+1)^2/σ^2, ограничен; шаги фикс. (1500)
-            horizon = float(min(max(4.0 * (T + 1.0) / (sigma * sigma), 8.0), 48.0))
-            base = pb.cone_surface(r, mu, sigma, T, horizon=horizon,
-                                   dt=horizon / 1500.0, seed=seed)
+            seed = (int(abs(r) * 1000) ^ 0x5A5A) & 0x7FFF
+            base = pb.rn_cone(r, sigma_R, T, drift_R=drift_R,
+                              horizon_years=horizon_years, seed=seed)
             self._cone_cache_key, self._cone_cache = key, base
         out = dict(base)
         out["available"] = True
-        out["sigma"] = sigma
-        # терминальная плотность рынка (risk-neutral) — для «задней стены» конуса
-        if market and market.get("probs"):
-            out["market_terminal"] = market["probs"]
-            out["market_edges"] = market["edges"]
-            out["market_hit"] = market.get("hit_ratio")
-            out["market_demo"] = market.get("demo", False)
+        if terminal and terminal.get("probs"):
+            out["market_terminal"] = terminal["probs"]
+            out["market_edges"] = terminal["edges"]
+            out["market_demo"] = terminal.get("demo", False)
         else:
             out["market_terminal"] = None
         return out
@@ -447,6 +482,7 @@ class Engine:
             "p_breakeven": prob.get("p_breakeven"),
             "small_sample": prob.get("small_sample"),
             "edge": edge, "edge_at_open": edge_open, "edge_shift": edge_shift,
+            "median_years": (market or {}).get("median_years"),
             "label": verdict.get("label"), "tone": verdict.get("tone"),
             "be_armed": ladder.get("be_armed"),
             "headline": self._state_headline(r, prob, verdict, ladder),

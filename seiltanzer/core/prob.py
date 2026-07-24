@@ -333,6 +333,141 @@ def cone_surface(r0: float, mu: float, sigma: float, T: float,
     }
 
 
+def _rebin_uniform(vals, n_out: int) -> list[float]:
+    """Пересчёт равномерно-корзинного массива в меньшее число корзин (сохраняет массу)."""
+    vals = np.asarray(vals, dtype=float)
+    n_in = len(vals)
+    out = np.zeros(n_out)
+    for i, v in enumerate(vals):
+        lo = i / n_in * n_out
+        hi = (i + 1) / n_in * n_out
+        b = int(lo)
+        while b < hi and b < n_out:
+            out[b] += v * (min(hi, b + 1) - max(lo, b))
+            b += 1
+    return out.tolist()
+
+
+def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
+            horizon_years: float | None = None, n_slices: int = 14, n_bins: int = 31,
+            n_paths: int = 6000, n_steps: int = 400, seed: int | None = None) -> dict:
+    """RISK-NEUTRAL конус: эволюция распределения R под волатильность — НЕ винрейт.
+
+    Диффузия dX = drift_R·dt + σ·dW в R-координатах, где полный разброс за горизонт
+    равен sigma_R. Снос drift_R — из скью (может быть 0). Барьеры −1 (стоп) и T (тейк)
+    поглощают. Это стандартный «вероятностный конус» деска: где рынок (по своей воле)
+    ждёт цену во времени.
+
+    Ось времени АДАПТИВНАЯ и РЕАЛЬНАЯ: `horizon_years` = реальная длительность
+    горизонта (выводится из σ и расстояния до барьеров — у скальпа это минуты, у
+    свинга дни). Доля горизонта → годы/минуты на фронте. Возвращает:
+      density[n_slices][n_bins] — плотность живых путей (гладкая, для 3D-поверхности),
+      times_frac / times_days — время срезов,
+      p_take_by_t / p_stop_by_t — накопленная вероятность дойти к моменту t (стены),
+      p_take / p_stop — к экспирации; hit_ratio — first-passage P(тейк раньше стопа),
+      median_days — медианное время развязки,
+      slice_probs / slice_edges — 11-корзинный «колокол» для доски Гальтона.
+    """
+    if T <= 0:
+        raise ValueError("T должен быть > 0")
+    sigma_R = max(float(sigma_R), 1e-3)
+    r0 = min(max(r0, -1.0 + 1e-9), T - 1e-9)
+    rng = np.random.default_rng(seed)
+    dt = 1.0 / n_steps
+    sdt = sigma_R * math.sqrt(dt)
+    var_dt = sigma_R * sigma_R * dt
+    edges = np.linspace(-1.0, T, n_bins + 1)
+    checkpoints: list[int] = []
+    for j in range(n_slices):                    # линейные по времени (честная ось)
+        c = int(round((j + 1) / n_slices * n_steps))
+        checkpoints.append(max(c, (checkpoints[-1] + 1) if checkpoints else 1))
+
+    r = np.full(n_paths, r0, dtype=np.float64)
+    alive = np.ones(n_paths, dtype=bool)
+    took = np.zeros(n_paths, dtype=bool)
+    stopped = np.zeros(n_paths, dtype=bool)
+    hit_time = np.full(n_paths, np.nan)
+
+    times, density, p_take_by_t, p_stop_by_t = [], [], [], []
+    cp = 0
+    for step in range(1, n_steps + 1):
+        idx = np.flatnonzero(alive)
+        if idx.size:
+            prev = r[idx].copy()
+            r[idx] = prev + drift_R * dt + sdt * rng.standard_normal(idx.size)
+            sub = r[idx]
+            tp = sub >= T
+            sl = sub <= -1.0
+            inside = ~tp & ~sl
+            if inside.any():
+                plo, phi = prev[inside], sub[inside]
+                bsl = np.exp(-2.0 * (plo + 1.0) * (phi + 1.0) / var_dt)
+                btp = np.exp(-2.0 * (T - plo) * (T - phi) / var_dt)
+                u = rng.random(inside.sum())
+                hs = u < bsl
+                ht = ~hs & (u < bsl + btp)
+                ii = np.flatnonzero(inside)
+                sl[ii[hs]] = True
+                tp[ii[ht]] = True
+            t_now = step * dt
+            if tp.any():
+                j = idx[tp]; took[j] = True; alive[j] = False; hit_time[j] = t_now
+            if sl.any():
+                j = idx[sl & ~tp]; stopped[j] = True; alive[j] = False; hit_time[j] = t_now
+        while cp < n_slices and step == checkpoints[cp]:
+            counts = np.zeros(n_bins)
+            ar = r[alive]
+            if ar.size:
+                bi = np.clip(np.searchsorted(edges, ar, side="right") - 1, 0, n_bins - 1)
+                counts = np.bincount(bi, minlength=n_bins).astype(float)
+            times.append(step / n_steps)
+            density.append((counts / n_paths).tolist())
+            p_take_by_t.append(float(took.sum()) / n_paths)
+            p_stop_by_t.append(float(stopped.sum()) / n_paths)
+            cp += 1
+
+    p_take = float(took.sum()) / n_paths
+    p_stop = float(stopped.sum()) / n_paths
+    resolved = ~np.isnan(hit_time)
+    med_frac = float(np.median(hit_time[resolved])) if resolved.any() else None
+    # аналитическая first-passage P(тейк раньше стопа) — «рыночный hit» для края
+    hit_ratio = first_passage_prob(r0, 0.5 * drift_R, 1.0, T)
+
+    # «колокол» для доски: распределение ЖИВЫХ (ещё не поглощённых) путей на срезе,
+    # где живо ~половина (нормальный вид ВНУТРИ барьеров, а не пусто в конце и не
+    # дельта в начале). Массы, ушедшие к стопу/тейку, показываются отдельными
+    # числами, а не раздутыми крайними столбиками (иначе всё «скатывалось в стоп»).
+    alive_frac = [sum(d) for d in density]
+    if max(alive_frac) < 0.15:                   # почти всё сразу поглощается — берём самый живой
+        slice_idx = 0
+    else:
+        slice_idx = min(range(n_slices), key=lambda j: abs(alive_frac[j] - 0.5))
+    bell = _rebin_uniform(density[slice_idx], 11)
+    tot = sum(bell) or 1.0
+    bell = [b / tot for b in bell]
+
+    out = {
+        "r0": float(r0), "T": float(T), "sigma_R": sigma_R, "drift_R": float(drift_R),
+        "edges": edges.tolist(),
+        "density": density,
+        "times_frac": times,
+        "p_take_by_t": p_take_by_t, "p_stop_by_t": p_stop_by_t,
+        "p_take": p_take, "p_stop": p_stop, "hit_ratio": hit_ratio,
+        "slice_probs": bell,
+        "slice_edges": np.linspace(-1.0, T, 12).tolist(),
+        "slice_alive": alive_frac[slice_idx],
+    }
+    if horizon_years and horizon_years > 0:
+        out["horizon_years"] = float(horizon_years)
+        out["times_years"] = [t * horizon_years for t in times]
+        out["median_years"] = med_frac * horizon_years if med_frac is not None else None
+    else:
+        out["horizon_years"] = None
+        out["times_years"] = None
+        out["median_years"] = None
+    return out
+
+
 def ev_hold(mc: MCResult) -> float:
     """EV удержания до стопа/тейка: среднее терминального R."""
     return float(np.mean(mc.terminal))
