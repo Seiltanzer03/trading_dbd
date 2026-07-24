@@ -1,0 +1,67 @@
+name: webull-mfa
+
+# Ручной вспомогательный воркфлоу для входа в webull через раннер GitHub
+# (он достаёт API webull, в отличие от изолированного окружения ассистента).
+# Шаг 1: запустить без code -> уйдёт SMS на телефон.
+# Шаг 2: запустить с code (+ password) -> логин, токен уходит в артефакт webull-session.
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'телефон вида +66-962319447'
+        required: true
+      code:
+        description: 'SMS-код (пусто = только ОТПРАВИТЬ SMS)'
+        required: false
+      password:
+        description: 'пароль webull (нужен только на шаге логина)'
+        required: false
+      region:
+        description: 'regionId'
+        required: false
+        default: '6'
+
+jobs:
+  mfa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: install webull
+        run: pip install "setuptools<66" wheel && pip install webull
+      - name: send SMS or login
+        env:
+          WB_USER: ${{ github.event.inputs.username }}
+          WB_CODE: ${{ github.event.inputs.code }}
+          WB_REGION: ${{ github.event.inputs.region }}
+          WB_PW: ${{ github.event.inputs.password }}
+        run: |
+          python - <<'PY'
+          import os, json
+          from webull import webull
+          wb = webull(region_code=int(os.environ.get("WB_REGION") or "6"))
+          user = os.environ["WB_USER"].strip()
+          code = (os.environ.get("WB_CODE") or "").strip()
+          if not code:
+              print("get_mfa (SMS sent?):", wb.get_mfa(user))
+          else:
+              res = wb.login(username=user, password=os.environ.get("WB_PW",""),
+                             device_name="seiltanzer-quotes", mfa=code)
+              print("login result keys:", list(res.keys()))
+              if "accessToken" in res:
+                  json.dump({k: res[k] for k in
+                             ("accessToken","refreshToken","tokenExpireTime","uuid")},
+                            open("webull_credentials.json","w"), indent=2)
+                  print("TOKEN SAVED")
+              else:
+                  print("LOGIN FAILED:", res)
+          PY
+      - name: upload session (только при логине)
+        if: ${{ github.event.inputs.code != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: webull-session
+          path: webull_credentials.json
+          if-no-files-found: warn
