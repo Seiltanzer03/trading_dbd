@@ -8,6 +8,7 @@ import { initLattice } from './lattice.js';
 import { initRidge } from './ridge.js';
 import { initLevels } from './levels.js';
 import { initCone } from './cone.js';
+import { initFan } from './fan.js';
 
 initTooltips();
 
@@ -15,6 +16,7 @@ const lattice = initLattice($('#lattice-canvas'));
 const ridge = initRidge($('#ridge-canvas'));
 const levels = initLevels($('#levels-canvas'));
 const cone = initCone('#cone-plot');
+const fan = initFan($('#cone-fan'));
 
 const S = {
   tick: null,
@@ -96,8 +98,9 @@ function onTick() {
     trade: S.tick?.trade || null,
     modelProb: S.tick?.prob?.p,
   });
-  // живой луч цены в конусе (r) двигается каждый тик
+  // живой луч цены в конусе + точка цены в веере (r) двигаются каждый тик
   cone.updateLive({ r: S.tick?.prob?.r });
+  fan.updateLive({ r: S.tick?.prob?.r });
 }
 
 function renderAll() {
@@ -320,6 +323,7 @@ function renderCone() {
     direction: t?.trade?.direction || 'long',
     headlineP: t?.prob?.p,
   });
+  fan.setData(active ? c : null);
 }
 
 // ---------------------------------------------------------------- lattice

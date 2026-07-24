@@ -163,6 +163,10 @@ html, body {
 #cone-plot { width: 100%; height: 420px; }
 /* модбар Plotly — в бумажную палитру */
 .cone-holder .modebar { background: transparent !important; }
+/* ---- 2D веер под конусом ---- */
+.cone-fan-wrap { margin-top: 12px; border-top: 1px solid var(--rule); padding-top: 10px; }
+.fan-holder { min-height: 360px; }
+#cone-fan { display: block; width: 100%; }
 
 /* ---- практический вывод доски ---- */
 .lat-read { font-size: 10.5px; line-height: 1.5; letter-spacing: .02em; color: var(--ink); }

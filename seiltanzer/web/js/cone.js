@@ -101,15 +101,25 @@ export function initCone(elId) {
   function render(cone) {
     const P = window.Plotly;
     const T = cone.T; curT = T;
-    const edges = cone.edges, nB = edges.length - 1, nS = cone.density.length;
-    const rMid = (b) => (edges[b] + edges[b + 1]) / 2;
-    const xs = Array.from({ length: nB }, (_, b) => rMid(b));
+    const r0 = cone.r0, sig = cone.sigma_R, drift = cone.drift_R || 0;
+    const times = cone.times_frac, nS = times.length;
     const ys = Array.from({ length: nS }, (_, j) => j / (nS - 1));   // глубина 0..1
+    // расширенная ось R — конус НЕ обрезается барьерами, уходит в зоны П/У
+    const rLo = Math.min(-1.3, r0 - 0.3), rHi = Math.max(T + 0.45, r0 + 0.3);
+    const nR = 41;
+    const xs = Array.from({ length: nR }, (_, i) => rLo + (rHi - rLo) * i / (nR - 1));
 
-    // высота: нормировка + мягкое сжатие (^0.7) — плато, а не игла у «сейчас»
+    // ГЛАДКАЯ аналитическая НЕпоглощённая плотность (расширяющийся конус-плато,
+    // без шума МК и без «стекания в горку»): Normal(r0+drift·τ, σ·√τ)
+    const INV_SQRT_2PI = 0.3989422804;
+    const zRaw = times.map((tau) => {
+      const s = Math.max(sig * Math.sqrt(Math.max(tau, 1e-4)), 1e-4);
+      const m = r0 + drift * tau;
+      return xs.map((R) => { const d = (R - m) / s; return INV_SQRT_2PI / s * Math.exp(-0.5 * d * d); });
+    });
     let gmax = 1e-9;
-    for (const row of cone.density) for (const v of row) if (v > gmax) gmax = v;
-    const z = cone.density.map((row) => row.map((v) => Math.pow(v / gmax, 0.7)));
+    for (const row of zRaw) for (const v of row) if (v > gmax) gmax = v;
+    const z = zRaw.map((row) => row.map((v) => Math.pow(v / gmax, 0.7)));
 
     const surface = {
       type: 'surface', x: xs, y: ys, z,
@@ -139,23 +149,11 @@ export function initCone(elId) {
       wallMesh(-1, cone.p_stop_by_t, RED), wallMesh(T, cone.p_take_by_t, GREEN),
       wallEdge(-1, cone.p_stop_by_t, RED, 'СТОП'), wallEdge(T, cone.p_take_by_t, GREEN, 'ТЕЙК')];
 
-    if (cone.market_terminal) {
-      const medges = cone.market_edges || edges;
-      const mMid = (b) => (medges[b] + medges[b + 1]) / 2;
-      let mmax = 1e-9; for (const v of cone.market_terminal) if (v > mmax) mmax = v;
-      traces.push({ type: 'scatter3d', mode: 'lines',
-        x: cone.market_terminal.map((_, b) => mMid(b)),
-        y: Array(cone.market_terminal.length).fill(1),
-        z: cone.market_terminal.map((v) => v / mmax),
-        line: { color: INK, width: 4, dash: 'dash' }, name: 'рынок · экспирация',
-        hovertemplate: 'рынок R=%{x:+.2f}<extra></extra>' });
-    }
-
-    const r0 = live.r != null ? clampR(live.r) : cone.r0;
-    lastBeamR = r0;
+    const rBeam = live.r != null ? clampR(live.r) : r0;
+    lastBeamR = rBeam;
     beamIdx = traces.length;
     traces.push({ type: 'scatter3d', mode: 'lines',
-      x: [r0, r0], y: [0, 0], z: [0, 1.04], line: { color: ORANGE, width: 9 },
+      x: [rBeam, rBeam], y: [0, 0], z: [0, 1.04], line: { color: ORANGE, width: 9 },
       name: 'цена (r)', hovertemplate: 'цена r=%{x:+.2f}<extra></extra>' });
 
     // ось времени — адаптивная (реальные единицы)
@@ -176,7 +174,7 @@ export function initCone(elId) {
         camera: currentCam,              // ← ставим сохранённый поворот на каждый render
         bgcolor: SCENE_BG, aspectmode: 'manual', aspectratio: { x: 1.75, y: 1.2, z: 0.72 },
         xaxis: { title: { text: 'R  (стоп −1 · 0 · тейк)', font: { size: 10, color: DIM } },
-          range: [-1, T], gridcolor: RULE, zerolinecolor: RULE,
+          range: [rLo, rHi], gridcolor: RULE, zerolinecolor: RULE,
           tickvals: [-1, 0, T], ticktext: ['СТОП −1R', '0', `ТЕЙК +${T.toFixed(1)}R`],
           tickfont: { size: 9, color: DIM }, backgroundcolor: SCENE_BG, showbackground: true },
         yaxis: { title: { text: yTitle, font: { size: 10, color: DIM } },
