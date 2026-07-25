@@ -8,9 +8,22 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import math
 import time
+import asyncio
+import logging
+import contextlib
+import datetime as dt
+from copy import deepcopy
+
+def clean_nans(obj):
+    if isinstance(obj, dict):
+        return {k: clean_nans(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nans(v) for v in obj]
+    elif isinstance(obj, float) and math.isnan(obj):
+        return None
+    return obj
 
 from .config import INSTRUMENTS, LADDER_RUNGS, LADDER_FRACTION, BREAKEVEN_AFTER, \
     SETUPS, Settings
@@ -102,7 +115,7 @@ class Engine:
             payload.update(self._trade_payloads(trade, price, sigma, atr))
             payload["verdict"] = self._verdict(payload)
             payload["state"] = self._state_payload(payload)
-        return payload
+        return clean_nans(payload)
 
     def _verdict(self, p: dict) -> dict:
         """Синтез состояния сделки в понятный сигнал + рекомендуемое действие.
@@ -775,7 +788,7 @@ class Engine:
                 p_stop_side = dens.tail_probs(stop_p)[0]   # выше стопа
             rn_probs = {"p_beyond_take": p_take_side, "p_beyond_stop": p_stop_side,
                         "expiry": latest.get("expiry"), "demo": latest.get("demo")}
-        return {
+        return clean_nans({
             "available": True,
             "proxy": inst.options_proxy,
             "scale": scale,
@@ -786,7 +799,7 @@ class Engine:
             "price": price,
             "rn_probs": rn_probs,
             "oi_walls": oi_walls,
-        }
+        })
 
     @staticmethod
     def _oi_walls(snap: dict, scale: float | None, price: float | None) -> dict | None:
