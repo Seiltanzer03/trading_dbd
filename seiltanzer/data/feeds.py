@@ -297,7 +297,7 @@ class MarketData:
                 iv_base = 0.16 + 0.04 * math.sin(now_ts / 300.0) + (i * 0.01) # Term structure
                 iv_skew = 0.7 * math.sin(now_ts / 240.0)
                 spot = self.demo_market.prices[self.instrument_code]
-                chain = opt.synth_chain(spot, iv_base, d/365.0, 41, 0.06, 0.5, iv_skew, int(now_ts)//30 + i)
+                chain = opt.synth_chain(spot, iv_base, d/365.0, n_strikes=41, width=0.06, r=0.5, iv_skew=iv_skew, seed=int(now_ts)//30 + i)
                 strikes = chain["strikes"].tolist()
                 ivs = chain["call_iv"].tolist() # Используем call_iv для поверхности
                 surface.append({"days": d, "expiry": expiries[i], "strikes": strikes, "ivs": ivs})
