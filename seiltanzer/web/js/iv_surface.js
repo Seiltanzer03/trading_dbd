@@ -1,8 +1,7 @@
 ﻿// IV Surface (3D) — Улыбка волатильности.
-// Moneyness × DTE × IV с медленным авто-вращением + ATM-пульсация.
-// Вращение приостанавливается при ручном взаимодействии.
+// Moneyness × DTE × IV. Без авто-вращения.
 
-const DIM = "#AAAAAA", RULE = "rgba(200,200,200,0.4)", ORANGE = "#E8622A";
+const DIM = "#666666", RULE = "rgba(180,180,180,0.5)", ORANGE = "#E8622A";
 const FONT = "IBM Plex Mono, ui-monospace, monospace";
 
 const SURF_SCALE = [
@@ -17,35 +16,8 @@ const SURF_SCALE = [
 export function initIVSurface(elId) {
     const el = typeof elId === "string" ? document.querySelector(elId) : elId;
     let hasPlot = false;
-    let autoRotateId = null;
     let atmAnimId = null;
-    let theta = 0.8;
-    let interacting = false;
-    let interactTimer = null;
-    const R = 2.1;
 
-    function startAutoRotate() {
-        if (autoRotateId) cancelAnimationFrame(autoRotateId);
-        let last = performance.now();
-        function tick(now) {
-            if (interacting || !hasPlot) { autoRotateId = requestAnimationFrame(tick); return; }
-            const dt = (now - last) / 1000;
-            last = now;
-            theta += 0.3 * dt; // 0.3 радиан/сек
-            const eye = { x: R * Math.cos(theta), y: R * Math.sin(theta), z: 0.7 };
-            try { Plotly.relayout(el, { "scene.camera.eye": eye }); } catch(_) {}
-            autoRotateId = requestAnimationFrame(tick);
-        }
-        autoRotateId = requestAnimationFrame(tick);
-    }
-
-    function pauseAndResume() {
-        interacting = true;
-        if (interactTimer) clearTimeout(interactTimer);
-        interactTimer = setTimeout(() => { interacting = false; }, 6000);
-    }
-
-    // ATM-линия пульсирует по яркости
     let atmPhase = 0;
     function startAtmPulse() {
         if (atmAnimId) cancelAnimationFrame(atmAnimId);
@@ -62,7 +34,6 @@ export function initIVSurface(elId) {
     }
 
     function destroy() {
-        if (autoRotateId) cancelAnimationFrame(autoRotateId);
         if (atmAnimId) cancelAnimationFrame(atmAnimId);
         if (hasPlot) Plotly.purge(el);
         hasPlot = false;
@@ -108,8 +79,8 @@ export function initIVSurface(elId) {
                 bgcolor: "rgba(248,246,242,0.9)",
                 bordercolor: "rgba(200,200,200,0.3)",
                 borderwidth: 1,
-                tickfont: { family: FONT, size: 10, color: "#333" },
-                title: { text: "IV %", side: "right", font: { family: FONT, size: 10, color: "#555" } },
+                tickfont: { family: FONT, size: 11, color: "#111", weight: "bold" },
+                title: { text: "IV %", side: "right", font: { family: FONT, size: 12, color: "#111", weight: "bold" } },
                 ticksuffix: "%"
             },
             contours: {
@@ -128,7 +99,7 @@ export function initIVSurface(elId) {
             z: [zMin + (zMax - zMin) * 0.05, zMax * 0.98],
             line: { color: "rgba(232,98,42,0.85)", width: 4 },
             text: ["", "ATM"],
-            textfont: { family: FONT, size: 10, color: ORANGE },
+            textfont: { family: FONT, size: 12, color: ORANGE },
             textposition: "top center",
             hoverinfo: "skip",
             name: "ATM",
@@ -142,29 +113,29 @@ export function initIVSurface(elId) {
             plot_bgcolor: "rgba(0,0,0,0)",
             scene: {
                 xaxis: {
-                    title: { text: "MONEYNESS %", font: { family: FONT, size: 11, color: "#555" } },
-                    tickfont: { family: FONT, size: 10, color: "#555" },
+                    title: { text: "MONEYNESS %", font: { family: FONT, size: 13, color: "#111" } },
+                    tickfont: { family: FONT, size: 11, color: "#222" },
                     gridcolor: RULE, zeroline: true,
                     zerolinecolor: ORANGE, zerolinewidth: 2,
                     ticksuffix: "%", showbackground: true,
-                    backgroundcolor: "rgba(240,238,232,0.4)"
+                    backgroundcolor: "rgba(240,238,232,0.6)"
                 },
                 yaxis: {
-                    title: { text: "DTE", font: { family: FONT, size: 11, color: "#555" } },
-                    tickfont: { family: FONT, size: 10, color: "#555" },
+                    title: { text: "DTE", font: { family: FONT, size: 13, color: "#111" } },
+                    tickfont: { family: FONT, size: 11, color: "#222" },
                     gridcolor: RULE, zeroline: false,
                     tickvals: yDte, ticktext: yTickText,
-                    showbackground: true, backgroundcolor: "rgba(240,238,232,0.4)"
+                    showbackground: true, backgroundcolor: "rgba(240,238,232,0.6)"
                 },
                 zaxis: {
-                    title: { text: "IV %", font: { family: FONT, size: 11, color: "#555" } },
-                    tickfont: { family: FONT, size: 10, color: "#555" },
+                    title: { text: "IV %", font: { family: FONT, size: 13, color: "#111" } },
+                    tickfont: { family: FONT, size: 11, color: "#222" },
                     gridcolor: RULE, zeroline: false,
                     ticksuffix: "%", showbackground: true,
-                    backgroundcolor: "rgba(240,238,232,0.4)"
+                    backgroundcolor: "rgba(240,238,232,0.6)"
                 },
                 camera: {
-                    eye: { x: R * Math.cos(theta), y: R * Math.sin(theta), z: 0.7 },
+                    eye: { x: 1.4, y: -1.4, z: 0.7 },
                     up: { x: 0, y: 0, z: 1 }
                 },
                 aspectratio: { x: 1.3, y: 1, z: 0.65 },
@@ -183,9 +154,6 @@ export function initIVSurface(elId) {
         if (!hasPlot) {
             Plotly.newPlot(el, [surface, atmLine], layout, config).then(() => {
                 hasPlot = true;
-                // Перехватываем взаимодействие пользователя
-                el.on("plotly_relayout", () => pauseAndResume());
-                startAutoRotate();
                 startAtmPulse();
             });
         } else {
