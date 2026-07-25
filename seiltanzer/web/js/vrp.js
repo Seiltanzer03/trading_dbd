@@ -1,4 +1,4 @@
-﻿// VRP Термометр — Volatility Risk Premium (IV - RV).
+// VRP Термометр — Volatility Risk Premium (IV - RV).
 // Положительный VRP = рынок переплачивает за волу (опционы дорогие).
 // Отрицательный VRP = рынок недооценивает риск (опционы дёшевы).
 // Шкала ДИНАМИЧЕСКАЯ — масштаб меняется под текущую историческую дисперсию.
@@ -56,9 +56,9 @@ export function updateVrp(p) {
         const pp = ((p.iv - p.rv) * 100).toFixed(1);
         const sign = p.vrp_pct >= 0 ? '+' : '';
         let label = `VRP: ${sign}${pp}pp  (RV: ${fmtPct(p.rv)} → IV: ${fmtPct(p.iv)})`;
-        if (p.regime === 'перегрев') label += '  🔥 ДОРОГО — sell vol';
-        else if (p.regime === 'недооценка') label += '  ❄️ ДЁШЕВО — buy vol';
-        else label += '  ⚖️ НОРМА';
+        if (p.regime === 'перегрев') label += '  🔥 IV > RV — рынок ЖДЁТ движение. Следи за направлением скью.';
+        else if (p.regime === 'недооценка') label += '  ❄️ IV < RV — движение уже ИДЁТ, рынок не верит. Тренд может продолжиться.';
+        else label += '  ⚖️ IV≈RV — рынок в балансе ожиданий';
         statusEl.textContent = label;
     }
 }

@@ -55,7 +55,9 @@ export function initCone(elId) {
                 median: null, term_slope: 0, structSig: null };
   const disp = { z: null, pStop: null, pTake: null };
 
-  const INIT_CAM = { eye: { x: 0.15, y: -2.25, z: 0.72 }, up: { x: 0, y: 0, z: 1 } };
+  // Камера: смотрим спереди на конус (ось R идёт вправо)
+  // x=0 — смотрим прямо по оси Y (вид спереди, конус открыт к зрителю)
+  const INIT_CAM = { eye: { x: -0.05, y: -2.3, z: 0.55 }, up: { x: 0, y: 0, z: 1 } };
   // ручное сохранение поворота: ставим на каждый (редкий) пересбор, чтобы вид не
   // отскакивал; при морфе через restyle камера и так не трогается.
   let currentCam = JSON.parse(JSON.stringify(INIT_CAM));
