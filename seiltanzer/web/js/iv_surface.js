@@ -1,5 +1,5 @@
-// IV Surface (3D) — Улыбка волатильности.
-// Moneyness × DTE × IV. Без пульсаций, чтобы не ломать вращение мышью.
+﻿// IV Surface (3D) — Улыбка волатильности.
+// Moneyness × DTE × IV. 
 
 const DIM = "#666666", RULE = "rgba(180,180,180,0.5)", ORANGE = "#E8622A";
 const FONT = "IBM Plex Mono, ui-monospace, monospace";
@@ -16,6 +16,33 @@ const SURF_SCALE = [
 export function initIVSurface(elId) {
     const el = typeof elId === "string" ? document.querySelector(elId) : elId;
     let hasPlot = false;
+    let listenersOn = false;
+    let interacting = false;
+    let interactTimer = null;
+
+    const INIT_CAM = { eye: { x: 1.4, y: -1.4, z: 0.7 }, up: { x: 0, y: 0, z: 1 } };
+    let currentCam = JSON.parse(JSON.stringify(INIT_CAM));
+
+    function markInteract() {
+        interacting = true;
+        if (interactTimer) clearTimeout(interactTimer);
+        interactTimer = setTimeout(() => { interacting = false; }, 300);
+    }
+
+    function grabCam() {
+        const c = el._fullLayout?.scene?.camera;
+        if (c && c.eye) currentCam = c;
+    }
+
+    function attachListeners() {
+        if (listenersOn || !el.on) return;
+        listenersOn = true;
+        el.on('plotly_relayouting', () => { markInteract(); grabCam(); });
+        el.on('plotly_relayout', grabCam);
+        el.addEventListener('mousedown', markInteract);
+        el.addEventListener('touchstart', markInteract, { passive: true });
+        el.addEventListener('wheel', markInteract, { passive: true });
+    }
 
     function destroy() {
         if (hasPlot) Plotly.purge(el);
@@ -29,6 +56,10 @@ export function initIVSurface(elId) {
             document.getElementById("iv-surface-status").innerText = "○ ОЖИДАНИЕ ДАННЫХ";
             return;
         }
+
+        // Если пользователь крутит график мышкой - пропускаем рендер, чтобы не сбросить зажатие
+        if (interacting) return;
+
         el.style.opacity = "1";
         document.getElementById("iv-surface-empty").style.display = "none";
         document.getElementById("iv-surface-status").innerText = "● LIVE (SURFACE)";
@@ -89,6 +120,8 @@ export function initIVSurface(elId) {
             showlegend: false
         };
 
+        if (hasPlot) grabCam();
+
         const layout = {
             uirevision: "iv-surface",
             margin: { t: 5, b: 5, l: 0, r: 55 },
@@ -117,10 +150,7 @@ export function initIVSurface(elId) {
                     ticksuffix: "%", showbackground: true,
                     backgroundcolor: "rgba(240,238,232,0.6)"
                 },
-                camera: {
-                    eye: { x: 1.4, y: -1.4, z: 0.7 },
-                    up: { x: 0, y: 0, z: 1 }
-                },
+                camera: currentCam,
                 aspectratio: { x: 1.3, y: 1, z: 0.65 },
                 bgcolor: "rgba(248,246,242,0.3)"
             }
@@ -134,13 +164,10 @@ export function initIVSurface(elId) {
             scrollZoom: false
         };
 
-        if (hasPlot) {
-            delete layout.scene.camera;
-        }
-
         if (!hasPlot) {
             Plotly.newPlot(el, [surface, atmLine], layout, config).then(() => {
                 hasPlot = true;
+                attachListeners();
             });
         } else {
             Plotly.react(el, [surface, atmLine], layout, config);
