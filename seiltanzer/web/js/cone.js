@@ -1,4 +1,4 @@
-﻿// Probability Cone — НАСТОЯЩИЙ 3D (WebGL, Plotly gl3d), risk-neutral.
+// Probability Cone — НАСТОЯЩИЙ 3D (WebGL, Plotly gl3d), risk-neutral.
 //
 // Поверхность = плотность вероятности исхода сделки под ОПЦИОННУЮ волу + цену
 // (НЕ винрейт). X = R (стоп −1 · 0 · тейк +T), Y = ВРЕМЯ (адаптивное: минуты у
@@ -55,9 +55,8 @@ export function initCone(elId) {
                 median: null, term_slope: 0, structSig: null };
   const disp = { z: null, pStop: null, pTake: null };
 
-  // Камера: смотрим спереди на конус (ось R идёт вправо)
-  // x=0 — смотрим прямо по оси Y (вид спереди, конус открыт к зрителю)
-  const INIT_CAM = { eye: { x: 0.15, y: 2.3, z: 0.65 }, up: { x: 0, y: 0, z: 1 } };
+  // Камера: развернута на 180 градусов (вид спереди/сзади)
+  const INIT_CAM = { eye: { x: 0.15, y: -2.3, z: 0.65 }, up: { x: 0, y: 0, z: 1 } };
   // ручное сохранение поворота: ставим на каждый (редкий) пересбор, чтобы вид не
   // отскакивал; при морфе через restyle камера и так не трогается.
   let currentCam = JSON.parse(JSON.stringify(INIT_CAM));

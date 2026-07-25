@@ -1,5 +1,5 @@
 ﻿// IV Surface (3D) — Улыбка волатильности.
-// Moneyness × DTE × IV. Без авто-вращения.
+// Moneyness × DTE × IV. Без пульсаций, чтобы не ломать вращение мышью.
 
 const DIM = "#666666", RULE = "rgba(180,180,180,0.5)", ORANGE = "#E8622A";
 const FONT = "IBM Plex Mono, ui-monospace, monospace";
@@ -16,25 +16,8 @@ const SURF_SCALE = [
 export function initIVSurface(elId) {
     const el = typeof elId === "string" ? document.querySelector(elId) : elId;
     let hasPlot = false;
-    let atmAnimId = null;
-
-    let atmPhase = 0;
-    function startAtmPulse() {
-        if (atmAnimId) cancelAnimationFrame(atmAnimId);
-        function tick() {
-            atmPhase += 0.03;
-            const a = (0.6 + 0.4 * Math.abs(Math.sin(atmPhase))).toFixed(2);
-            const w = 3 + 2 * Math.abs(Math.sin(atmPhase));
-            try {
-                Plotly.restyle(el, { "line.color": [`rgba(232,98,42,${a})`], "line.width": [w] }, [1]);
-            } catch(_) {}
-            atmAnimId = requestAnimationFrame(tick);
-        }
-        atmAnimId = requestAnimationFrame(tick);
-    }
 
     function destroy() {
-        if (atmAnimId) cancelAnimationFrame(atmAnimId);
         if (hasPlot) Plotly.purge(el);
         hasPlot = false;
     }
@@ -97,7 +80,7 @@ export function initIVSurface(elId) {
             x: [0, 0],
             y: [Math.min(...yDte), Math.max(...yDte)],
             z: [zMin + (zMax - zMin) * 0.05, zMax * 0.98],
-            line: { color: "rgba(232,98,42,0.85)", width: 4 },
+            line: { color: "rgba(232,98,42,0.9)", width: 5 },
             text: ["", "ATM"],
             textfont: { family: FONT, size: 12, color: ORANGE },
             textposition: "top center",
@@ -154,10 +137,12 @@ export function initIVSurface(elId) {
         if (!hasPlot) {
             Plotly.newPlot(el, [surface, atmLine], layout, config).then(() => {
                 hasPlot = true;
-                startAtmPulse();
             });
         } else {
-            Plotly.react(el, [surface, atmLine], layout, config);
+            // Чтобы не сбивать камеру при обновлениях, удаляем её из layout при react
+            const updateLayout = Object.assign({}, layout);
+            delete updateLayout.scene.camera;
+            Plotly.react(el, [surface, atmLine], updateLayout, config);
         }
     }
 
