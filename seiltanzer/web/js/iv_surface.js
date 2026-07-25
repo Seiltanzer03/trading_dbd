@@ -1,4 +1,4 @@
-﻿// IV Surface (3D) — Улыбка волатильности.
+// IV Surface (3D) — Улыбка волатильности.
 // Moneyness × DTE × IV. Без пульсаций, чтобы не ломать вращение мышью.
 
 const DIM = "#666666", RULE = "rgba(180,180,180,0.5)", ORANGE = "#E8622A";
@@ -134,15 +134,16 @@ export function initIVSurface(elId) {
             scrollZoom: false
         };
 
+        if (hasPlot) {
+            delete layout.scene.camera;
+        }
+
         if (!hasPlot) {
             Plotly.newPlot(el, [surface, atmLine], layout, config).then(() => {
                 hasPlot = true;
             });
         } else {
-            // Чтобы не сбивать камеру при обновлениях, удаляем её из layout при react
-            const updateLayout = Object.assign({}, layout);
-            delete updateLayout.scene.camera;
-            Plotly.react(el, [surface, atmLine], updateLayout, config);
+            Plotly.react(el, [surface, atmLine], layout, config);
         }
     }
 

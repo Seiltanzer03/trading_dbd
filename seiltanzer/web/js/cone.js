@@ -56,7 +56,7 @@ export function initCone(elId) {
   const disp = { z: null, pStop: null, pTake: null };
 
   // Камера: развернута на 180 градусов (вид спереди/сзади)
-  const INIT_CAM = { eye: { x: 0.15, y: -2.3, z: 0.65 }, up: { x: 0, y: 0, z: 1 } };
+  const INIT_CAM = { eye: { x: 0.15, y: 2.3, z: 0.65 }, up: { x: 0, y: 0, z: 1 } };
   // ручное сохранение поворота: ставим на каждый (редкий) пересбор, чтобы вид не
   // отскакивал; при морфе через restyle камера и так не трогается.
   let currentCam = JSON.parse(JSON.stringify(INIT_CAM));
