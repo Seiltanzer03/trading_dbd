@@ -105,6 +105,8 @@ class Engine:
             "cone": None,
             "state": None,
             "options_summary": self._options_summary(),
+            "iv_surface": getattr(self.market, "iv_surface", {}),
+            "correlation": getattr(self.market, "correlation", {}),
             "vrp": self._vrp_payload(),
             "filters": self._filters_payload(trade),
         }
@@ -710,6 +712,49 @@ class Engine:
             "regime": regime
         }
 
+    def _volume_profile_payload(self) -> dict | None:
+        intraday = self.market.intraday
+        if not intraday:
+            return None
+            
+        prices = [x[1] for x in intraday]
+        min_p, max_p = min(prices), max(prices)
+        if min_p == max_p:
+            return None
+            
+        # Определяем размер бина: разбиваем диапазон на ~50 бинов
+        bins = 50
+        bin_size = (max_p - min_p) / bins
+        if bin_size == 0:
+            return None
+            
+        profile = {}
+        total_vol = 0
+        has_real_volume = sum(x[2] for x in intraday) > 0
+        
+        for ts, p, vol in intraday:
+            # Если нет реального объема, используем 1 как TPO (Time Price Opportunity)
+            v = vol if has_real_volume else 1.0
+            b = min_p + math.floor((p - min_p) / bin_size) * bin_size
+            b = round(b, 4)
+            profile[b] = profile.get(b, 0) + v
+            total_vol += v
+            
+        if total_vol == 0:
+            return None
+            
+        poc_price = max(profile.keys(), key=lambda k: profile[k])
+        
+        bins_list = [{"price": k, "volume": v} for k, v in profile.items()]
+        bins_list.sort(key=lambda x: x["price"])
+        
+        return {
+            "poc": poc_price,
+            "bins": bins_list,
+            "total": total_vol,
+            "is_tpo": not has_real_volume
+        }
+
     def _levels_payload(self, trade: dict, price: float, sigma: dict,
                         gamma: dict | None = None) -> dict:
         opts = self._options_summary()
@@ -727,6 +772,7 @@ class Engine:
             "day_high": day[1] if day else None,
             "implied_band": None,
             "gex": None,
+            "volume_profile": self._volume_profile_payload(),
         }
         # коридор = ожидаемый ход рынка к экспирации (implied move); если его нет,
         # но есть σ-поправка из индекса волы — строим ±1σ за горизонт по умолчанию

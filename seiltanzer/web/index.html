@@ -253,6 +253,23 @@
     <div class="panel-foot dim">Сверху — НАСТОЯЩИЙ 3D (WebGL) — вращайте мышкой, зум колесом, наведение показывает точные значения. Поверхность = risk-neutral плотность исхода под ОПЦИОННУЮ волу + цену (НЕ винрейт): ось R (стоп · 0 · тейк), ось ВРЕМЯ — реальная и адаптивная (минуты у скальпа, дни у свинга; выведена из волы и расстояния до барьеров), высота — плотность живых путей. Красная/зелёная СТЕНЫ (стоп/тейк): накопленная вероятность дойти во времени. Оранжевый луч — текущая цена (r), двигается с котировкой. В подписи оси — медианное время до развязки. Снизу — 2D ВЕЕР: тот же прогноз плоско и читаемо — веер перцентилей от «сейчас», линии стоп/тейк, зоны прибыли/убытка, точка цены; сразу видно куда, когда и с какой вероятностью</div>
   </section>
 
+  <!-- ================ 3c. IV SURFACE (3D) ================ -->
+  <section class="card panel" id="panel-iv-surface">
+    <div class="panel-head">
+      <h2>IV SURFACE · ПОВЕРХНОСТЬ ВОЛАТИЛЬНОСТИ (3D)</h2>
+      <div class="panel-head-right">
+        <span class="badge" id="iv-surface-status">○ ЗАГРУЗКА</span>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div class="canvas-holder cone-holder" style="height: 380px;">
+        <div id="iv-surface-plot"></div>
+        <div class="canvas-empty" id="iv-surface-empty">○ ОЖИДАНИЕ ДАННЫХ ОПЦИОНОВ</div>
+      </div>
+    </div>
+    <div class="panel-foot dim">Трехмерная визуализация (Strike × Days × IV). Показывает "рентген" рынка: где участники закладывают максимальный риск и как смещаются их ожидания.</div>
+  </section>
+
   <!-- ================ 4. КАРТА УРОВНЕЙ ================ -->
   <section class="card panel" id="panel-levels">
     <div class="panel-head">
@@ -263,8 +280,12 @@
         <span class="badge" id="levels-status">○ НЕТ СДЕЛКИ</span>
       </div>
     </div>
-    <div class="panel-body">
-      <div class="canvas-holder levels-holder">
+    <div class="panel-body" style="display: flex; gap: 16px;">
+      <div class="canvas-holder vp-holder" style="flex: 0 0 25%; max-width: 250px; height: 190px;">
+        <canvas id="vp-canvas"></canvas>
+        <div class="canvas-empty" id="vp-empty">○ НЕТ ДАННЫХ ОБЪЕМА</div>
+      </div>
+      <div class="canvas-holder levels-holder" style="flex: 1; height: 190px;">
         <canvas id="levels-canvas"></canvas>
         <div class="canvas-empty" id="levels-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ</div>
       </div>
@@ -281,20 +302,40 @@
       </div>
       <div class="vsep"></div>
       <div class="ladder-half">
-        <div class="lbl panel-mini-title">ЛЕСТНИЦА ФИКСАЦИИ <span class="dim">(10% НА РУБЕЖ · БУ ПОСЛЕ 1.5R)</span></div>
+        <div class="lbl panel-mini-title">ЛЕСТНИЦА ФИКСАЦИИ (10% НА РУБЕЖ · БУ ПОСЛЕ 1.5R)</div>
         <div class="ladder" id="ladder-row"></div>
+        <div class="tiny dim" id="ladder-note"></div>
       </div>
     </div>
-    <div class="panel-body vrp-body" style="border-top: 1px dashed var(--b-dim); padding-top: 12px; margin-top: 6px;">
-        <div class="lbl panel-mini-title">VRP ТЕРМОМЕТР <span class="dim" id="vrp-status"></span></div>
-        <div class="canvas-holder vrp-holder" style="height: 36px; margin-top: 8px;">
-            <canvas id="vrp-canvas"></canvas>
-            <div class="canvas-empty" id="vrp-empty">○ ОЖИДАНИЕ ДАННЫХ ВОЛАТИЛЬНОСТИ</div>
+    <div class="panel-foot">
+      <div class="vrp-block">
+        <div class="lbl panel-mini-title" id="vrp-status">VRP ТЕРМОМЕТР (RV → IV)</div>
+        <div class="canvas-holder vrp-holder">
+          <canvas id="vrp-canvas"></canvas>
+          <div class="canvas-empty" id="vrp-empty">○ НЕТ ДАННЫХ</div>
         </div>
+      </div>
     </div>
   </section>
 
-  <!-- ================ 6. ЖУРНАЛ ================ -->
+  <!-- ================ 6. CORRELATION MATRIX ================ -->
+  <section class="card panel" id="panel-correlation">
+    <div class="panel-head">
+      <h2>CROSS-ASSET CORRELATION · МАТРИЦА СВЯЗЕЙ</h2>
+      <div class="panel-head-right">
+        <span class="badge" id="corr-status">○ ОЖИДАНИЕ ДАННЫХ</span>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div class="canvas-holder corr-holder" style="height: 250px;">
+        <canvas id="corr-canvas"></canvas>
+        <div class="canvas-empty" id="corr-empty">○ НЕТ ДАННЫХ КОРРЕЛЯЦИИ</div>
+      </div>
+    </div>
+    <div class="panel-foot dim">Анимированная тепловая карта корреляций 8 макро-активов за 30 дней. Оранжевый = прямая корреляция (+1), Синий = обратная (-1). Пульсация на диагонали. Обновляется каждые 30 минут (или симулируется в демо).</div>
+  </section>
+
+  <!-- ================ 7. ЖУРНАЛ ================ -->
   <section class="card panel" id="panel-journal">
     <div class="panel-head clickable" id="journal-toggle">
       <h2>ЖУРНАЛ СДЕЛОК <span class="dim" id="journal-count"></span></h2>

@@ -65,8 +65,8 @@ function renderLoop(time) {
 
     // Центр термометра (0 VRP)
     const midX = w / 2;
-    // Диапазон: например, -30% до +30%
-    const maxRange = 0.3;
+    // Диапазон: например, -75% до +75%
+    const maxRange = 0.75;
     let clampedPct = Math.max(-maxRange, Math.min(maxRange, state.vrp_pct));
     // Нормализуем в [-1, 1]
     let valNorm = clampedPct / maxRange;

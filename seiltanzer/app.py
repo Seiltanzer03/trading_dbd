@@ -97,7 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     async def poll_loop():
         last = {"price": 0.0, "intraday": 0.0, "vols": 0.0,
-                "daily": 0.0, "chain": 0.0}
+                "daily": 0.0, "chain": 0.0, "iv_surface": 0.0, "correlation": 0.0}
         # при живом стриме цену «опрашиваем» часто (берём свежий тик из памяти)
         price_period = 1.0 if (settings.demo or settings.stream) else settings.price_poll_sec
         periods = {
@@ -106,6 +106,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "vols": 5.0 if settings.demo else settings.vol_poll_sec,
             "daily": 1800.0,
             "chain": 30.0 if settings.demo else settings.chain_poll_sec,
+            "iv_surface": 30.0 if settings.demo else settings.chain_poll_sec * 3.0,
+            "correlation": 30.0 if settings.demo else 1800.0,
         }
         jobs = {
             "price": engine.market.refresh_price,
@@ -113,6 +115,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "vols": engine.market.refresh_vols,
             "daily": engine.market.refresh_daily,
             "chain": engine.market.refresh_chain,
+            "iv_surface": engine.market.refresh_iv_surface,
+            "correlation": engine.market.refresh_correlation,
         }
         while True:
             now = time.time()

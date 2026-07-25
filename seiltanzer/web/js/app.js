@@ -11,6 +11,9 @@ import { initCone } from './cone.js';
 import { initFan } from './fan.js';
 import { initVrp, updateVrp } from './vrp.js';
 import { initGex, updateGex } from './gex.js';
+import { initIVSurface } from './iv_surface.js';
+import { initVp, updateVp } from './vp.js';
+import { initCorrelation, updateCorrelation } from './correlation.js';
 
 initTooltips();
 
@@ -19,8 +22,11 @@ const ridge = initRidge($('#ridge-canvas'));
 const levels = initLevels($('#levels-canvas'));
 const cone = initCone('#cone-plot');
 const fan = initFan($('#cone-fan'));
+const ivSurface = initIVSurface('#iv-surface-plot');
 initVrp();
 initGex();
+initVp();
+initCorrelation();
 
 const S = {
   tick: null,
@@ -106,6 +112,9 @@ function onTick() {
   cone.updateLive({ r: S.tick?.prob?.r });
   fan.updateLive({ r: S.tick?.prob?.r });
   updateVrp(S.tick?.vrp);
+  ivSurface.render(S.tick?.state, S.tick?.iv_surface?.value);
+  updateVp(S.tick?.levels?.volume_profile);
+  updateCorrelation(S.tick?.correlation?.value);
 }
 
 function renderAll() {

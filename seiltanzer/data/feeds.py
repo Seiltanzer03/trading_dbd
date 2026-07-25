@@ -108,6 +108,8 @@ class MarketData:
         self.vols = {k: _status_dict() for k in VOL_INDEX_TICKERS}
         self.chain = {"metrics": None, **_status_dict()}
         self._chain_error_detail: str | None = None
+        self.iv_surface = _status_dict()
+        self.correlation = _status_dict()
 
         if self.demo:
             self._seed_demo_snapshots()
@@ -278,6 +280,122 @@ class MarketData:
                 self._mark_fail(self.vols[key], self.settings.vol_poll_sec, str(e))
 
     # ----------------------------------------------------------------- chain
+
+    def refresh_iv_surface(self) -> None:
+        """Сетка IV для нескольких экспираций -> поверхность (3D)."""
+        proxy = self.instrument.options_proxy
+        if proxy is None:
+            self.iv_surface = _status_dict(status="no_data", error="нет опционов")
+            return
+        
+        if self.demo:
+            # Для демо генерируем синтетическую поверхность
+            expiries = ["2d", "7d", "14d", "30d", "60d"]
+            surface = []
+            now_ts = time.time()
+            for i, d in enumerate([2, 7, 14, 30, 60]):
+                iv_base = 0.16 + 0.04 * math.sin(now_ts / 300.0) + (i * 0.01) # Term structure
+                iv_skew = 0.7 * math.sin(now_ts / 240.0)
+                spot = self.demo_market.prices[self.instrument_code]
+                chain = opt.synth_chain(spot, iv_base, d/365.0, 41, 0.06, 0.5, iv_skew, int(now_ts)//30 + i)
+                strikes = chain["strikes"].tolist()
+                ivs = chain["call_iv"].tolist() # Используем call_iv для поверхности
+                surface.append({"days": d, "expiry": expiries[i], "strikes": strikes, "ivs": ivs})
+            
+            self.iv_surface = _status_dict(value=surface, status="live", ts=now_ts, source="synthetic 3D")
+            return
+
+        try:
+            import yfinance as yf
+            t = yf.Ticker(proxy)
+            expiries = t.options
+            if not expiries:
+                raise RuntimeError("нет экспираций")
+            
+            # Берем до 5 ближайших экспираций
+            surface = []
+            now = dt.datetime.now(dt.timezone.utc)
+            for expiry in expiries[:5]:
+                exp_dt = dt.datetime.strptime(expiry, "%Y-%m-%d").replace(hour=21, tzinfo=dt.timezone.utc)
+                days = max((exp_dt - now).total_seconds(), 3600.0) / (24 * 3600)
+                
+                chain = t.option_chain(expiry)
+                calls = chain.calls
+                # Фильтруем ликвидные страйки, если нужно
+                strikes = calls["strike"].tolist()
+                ivs = calls["impliedVolatility"].tolist()
+                
+                surface.append({"days": round(days, 2), "expiry": expiry, "strikes": strikes, "ivs": ivs})
+            
+            self.iv_surface = _status_dict(value=surface, status="live", ts=time.time(), source="yfinance")
+        except Exception as e:
+            self._mark_fail(self.iv_surface, self.settings.chain_poll_sec * 3, f"IV surface ошибка: {e}")
+
+    def refresh_correlation(self) -> None:
+        """Матрица корреляций 8 активов за последние 30 дней."""
+        tickers = ["NQ=F", "ES=F", "GC=F", "EURUSD=X", "^VIX", "DX-Y.NYB", "^TNX", "BTC-USD"]
+        names = ["NAS", "SP500", "GOLD", "EUR", "VIX", "DXY", "10Y", "BTC"]
+        
+        now_ts = time.time()
+        
+        if self.demo:
+            import numpy as np
+            # Генерируем красивую медленно дышащую матрицу
+            n = len(tickers)
+            mat = np.eye(n)
+            t = now_ts / 300.0
+            for i in range(n):
+                for j in range(i+1, n):
+                    # Псевдослучайная синусоида для каждой пары
+                    phase = i * 2.3 + j * 1.7
+                    val = math.sin(t + phase) * 0.8 * math.cos(t * 0.5 + i)
+                    mat[i, j] = val
+                    mat[j, i] = val
+                    
+            self.correlation = _status_dict(
+                value={"assets": names, "matrix": mat.tolist()},
+                status="live",
+                ts=now_ts,
+                source="synthetic correlation"
+            )
+            return
+            
+        try:
+            import yfinance as yf
+            import numpy as np
+            import pandas as pd
+            
+            data = yf.download(tickers, period="1mo", interval="1d", progress=False)
+            closes = data['Close']
+            
+            # Считаем дневные доходности
+            returns = closes.pct_change().dropna()
+            
+            # Корреляционная матрица
+            corr_matrix = returns.corr().fillna(0)
+            
+            # Переупорядочиваем согласно списку tickers
+            ordered_corr = []
+            for i, t1 in enumerate(tickers):
+                row = []
+                for j, t2 in enumerate(tickers):
+                    # yfinance возвращает мультииндекс или алфавитный порядок
+                    # безопаснее брать через pandas
+                    try:
+                        val = corr_matrix.loc[t1, t2]
+                    except KeyError:
+                        val = 0.0
+                    row.append(float(val))
+                ordered_corr.append(row)
+                
+            self.correlation = _status_dict(
+                value={"assets": names, "matrix": ordered_corr},
+                status="live",
+                ts=now_ts,
+                source="yfinance (30d)"
+            )
+        except Exception as e:
+            self._mark_fail(self.correlation, 1800.0, f"Correlation error: {e}")
 
     def refresh_chain(self) -> None:
         """Цепочка ближайшей экспирации -> implied move, BL-плотность, GEX.
