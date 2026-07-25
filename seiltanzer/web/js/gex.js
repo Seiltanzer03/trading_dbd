@@ -1,14 +1,7 @@
 ﻿// GEX КЛЮЧЕВЫЕ УРОВНИ — опционная карта ликвидности.
 // Показывает только ЗНАЧИМЫЕ страйки (топ-10 по абс. значению NET GEX).
 // Это то, что профессионалы называют "options flow wall" или "dealer positioning".
-//
-// КАК ЧИТАТЬ ДЛЯ CFD ТРЕЙДЕРА:
-//   🟢 Зелёный длинный бар (PIN) = дилеры длинная гамма на этом уровне.
-//      Рынок ТОРМОЗИТ у этого страйка → хороший уровень для тейка/разворота.
-//   🔴 Красный длинный бар (PUSH) = дилеры короткая гамма.
-//      Рынок УСКОРЯЕТСЯ при пробое → не ставь тейк здесь, жди за уровнем.
-//   🟡 Пунктир = текущая цена.
-//   → СТРАТЕГИЯ: ищи сетапы где тейк стоит у крупного PIN-уровня.
+
 import { $, setupCanvas } from './util.js';
 import { approach } from './anim.js';
 
@@ -17,6 +10,7 @@ let data = null;
 let statePhase = 0;
 let smoothedNetGex = 0;
 let smoothedLevels = {}; // для плавной анимации каждого бара
+let liveData = { price: 0, trade: null };
 
 export function initGex() {
     canvas = $('#gex-evol-canvas');
@@ -44,6 +38,11 @@ export function updateGex(ridgePayload) {
     if (statusEl) statusEl.textContent = '● OPTIONS FLOW';
 }
 
+export function updateLiveGex(live) {
+    if (live.price !== undefined) liveData.price = live.price;
+    if (live.trade !== undefined) liveData.trade = live.trade;
+}
+
 function fmtVal(v) {
     const a = Math.abs(v);
     if (a >= 1e9) return (v / 1e9).toFixed(1) + 'B';
@@ -63,7 +62,7 @@ function renderLoop() {
     const strikes = snap.gex.strikes.map(s => s * data.scale);
     const net = snap.gex.net;
     const maxAbsNet = Math.max(...net.map(Math.abs), 1e-9);
-    const priceStrike = data.price || 0;
+    const priceStrike = liveData.price || data.price || 0;
 
     // Выбираем топ-12 уровней по abs(net), отсортированных по страйку
     const indexed = net.map((v, i) => ({ s: strikes[i], v }));
@@ -82,6 +81,27 @@ function renderLoop() {
     const padBot = 6;
     const barAreaW = w - padLeft - padRight;
     const rowH = Math.max(10, (h - padTop - padBot) / top.length);
+
+    // Функция для маппинга любой цены на Y координату среди дискретных рядов
+    function priceToY(p) {
+        if (p >= top[0].s) {
+            const diff = top[0].s - top[1].s;
+            return padTop - (diff ? (p - top[0].s)/diff * rowH : 0);
+        }
+        if (p <= top[top.length - 1].s) {
+            const diff = top[top.length - 2].s - top[top.length - 1].s;
+            const baseY = padTop + (top.length - 1) * rowH;
+            return baseY + (diff ? (top[top.length - 1].s - p)/diff * rowH : 0);
+        }
+        for (let i = 0; i < top.length - 1; i++) {
+            if (p <= top[i].s && p >= top[i+1].s) {
+                const range = top[i].s - top[i+1].s;
+                const frac = range ? (top[i].s - p) / range : 0;
+                return padTop + (i + frac) * rowH + rowH/2; // rowH/2 to align with center of row
+            }
+        }
+        return padTop;
+    }
 
     // == Заголовки ==
     ctx.font = 'bold 9px "IBM Plex Mono",monospace';
@@ -174,30 +194,32 @@ function renderLoop() {
         ctx.fillText(sizeLabel, padLeft + barAreaW + 5, y + rowH / 2 + 7);
     }
 
-    // == Текущая цена (горизонтальная оранжевая линия) ==
-    if (priceStrike > 0 && top.length > 1) {
-        const minSt = Math.min(...top.map(l => l.s));
-        const maxSt = Math.max(...top.map(l => l.s));
-        if (maxSt > minSt) {
-            // Ищем позицию цены между уровнями
-            const priceNorm = (maxSt - priceStrike) / (maxSt - minSt);
-            const py = padTop + priceNorm * (top.length * rowH);
-            if (py > padTop && py < h - padBot) {
-                ctx.strokeStyle = 'rgba(232,98,42,0.9)';
-                ctx.lineWidth = 1.5;
-                ctx.setLineDash([6, 4]);
-                ctx.beginPath(); ctx.moveTo(padLeft, py); ctx.lineTo(padLeft + barAreaW, py); ctx.stroke();
-                ctx.setLineDash([]);
-                // Пузырёк с ценой
-                const priceLabel = priceStrike.toFixed(0);
-                const lw = ctx.measureText(priceLabel).width + 10;
-                ctx.fillStyle = 'rgba(232,98,42,0.9)';
-                ctx.beginPath(); ctx.roundRect(padLeft - lw - 2, py - 8, lw, 14, 3); ctx.fill();
-                ctx.fillStyle = '#FFFFFF';
-                ctx.font = 'bold 8px "IBM Plex Mono",monospace';
-                ctx.textAlign = 'right';
-                ctx.fillText(priceLabel, padLeft - 5, py + 3);
-            }
+    function drawLine(yPos, color, text, dash) {
+        if (yPos > padTop && yPos < h - padBot) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5;
+            if (dash) ctx.setLineDash(dash); else ctx.setLineDash([]);
+            ctx.beginPath(); ctx.moveTo(padLeft, yPos); ctx.lineTo(padLeft + barAreaW, yPos); ctx.stroke();
+            ctx.setLineDash([]);
+            
+            const lw = ctx.measureText(text).width + 10;
+            ctx.fillStyle = color;
+            ctx.beginPath(); ctx.roundRect(padLeft - lw - 2, yPos - 8, lw, 14, 3); ctx.fill();
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = 'bold 8px "IBM Plex Mono",monospace';
+            ctx.textAlign = 'right';
+            ctx.fillText(text, padLeft - 5, yPos + 3);
+        }
+    }
+
+    // == Рисуем стоп, тейк и цену ==
+    if (top.length > 1) {
+        if (liveData.trade) {
+            if (liveData.trade.stop) drawLine(priceToY(liveData.trade.stop), 'rgba(198,55,60,0.9)', 'STOP', null);
+            if (liveData.trade.take) drawLine(priceToY(liveData.trade.take), 'rgba(46,125,79,0.9)', 'TAKE', null);
+        }
+        if (priceStrike > 0) {
+            drawLine(priceToY(priceStrike), 'rgba(232,98,42,0.9)', priceStrike.toFixed(0), [6, 4]);
         }
     }
 

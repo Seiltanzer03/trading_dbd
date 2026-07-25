@@ -10,7 +10,7 @@ import { initLevels } from './levels.js';
 import { initCone } from './cone.js';
 import { initFan } from './fan.js';
 import { initVrp, updateVrp } from './vrp.js';
-import { initGex, updateGex } from './gex.js';
+import { initGex, updateGex, updateLiveGex } from './gex.js';
 import { initIVSurface } from './iv_surface.js';
 import { initVp, updateVp } from './vp.js';
 import { initCorrelation, updateCorrelation } from './correlation.js';
@@ -112,6 +112,7 @@ function onTick() {
   cone.updateLive({ r: S.tick?.prob?.r });
   fan.updateLive({ r: S.tick?.prob?.r });
   updateVrp(S.tick?.vrp);
+  updateLiveGex({ price: S.tick?.feeds?.price?.value, trade: S.tick?.trade || null });
   ivSurface.render(S.tick?.state, S.tick?.iv_surface?.value);
   updateVp(S.tick?.levels?.volume_profile);
   updateCorrelation(S.tick?.correlation?.value);
