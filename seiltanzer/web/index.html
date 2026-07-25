@@ -215,6 +215,23 @@
     <div class="panel-foot dim">серые гряды — risk-neutral плотности из снапшотов цепочки; нижняя жирная — актуальная; красная кривая — проекция вашей модели (живая); столбики снизу — ЧИСТАЯ ГАММА (Net GEX): зелёное вверх = дилеры гасят (пиннинг, S/R), красное вниз = разгоняют (пробой); жёлтый пунктир — zero-gamma flip; вертикали: вход · стоп · тейк · GEX. В колонке слева «СТЕНЫ OI» — сырой крупнейший интерес коллов/путов</div>
   </section>
 
+  <!-- ================ 3a. GEX EVOLUTION HEATMAP ================ -->
+  <section class="card panel" id="panel-gex-evol">
+    <div class="panel-head">
+      <h2>GEX EVOLUTION · ЭВОЛЮЦИЯ СТЕН ЛИКВИДНОСТИ</h2>
+      <div class="panel-head-right">
+        <span class="badge" id="gex-evol-status">○ ОЖИДАНИЕ СНАПШОТОВ</span>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div class="canvas-holder gex-evol-holder" style="height: 120px;">
+        <canvas id="gex-evol-canvas"></canvas>
+        <div class="canvas-empty" id="gex-evol-empty">○ ИСТОРИЯ GEX НЕДОСТУПНА</div>
+      </div>
+    </div>
+    <div class="panel-foot dim">Тепловая карта эволюции гаммы: ось X = время (снапшоты), ось Y = страйки. Зелёные зоны — рост пиннинга (стена крепнет), красные — разгон. Показывает, как дилеры перестраивают свои позиции со временем, выявляя тающие или возникающие уровни поддержки/сопротивления.</div>
+  </section>
+
   <!-- ================ 3b. PROBABILITY CONE (3D) ================ -->
   <section class="card panel" id="panel-cone">
     <div class="panel-head">
@@ -255,7 +272,7 @@
     <div class="panel-foot dim">оранжевый ромб — гамма-магнит (куда пиннингует дилерская гамма); оранжевые частицы текут к аттрактору — «куда тянет рынок»; затенение — implied move ±1σ; пунктир — GEX-уровни (эвристика, непроверяемо); прямоугольники — ваши FVG-зоны</div>
   </section>
 
-  <!-- ================ 5. ФИЛЬТРЫ + ЛЕСТНИЦА ================ -->
+  <!-- ================ 5. ФИЛЬТРЫ + ЛЕСТНИЦА + VRP ================ -->
   <section class="card panel" id="panel-filters">
     <div class="panel-body filters-body">
       <div class="filters-half">
@@ -267,6 +284,13 @@
         <div class="lbl panel-mini-title">ЛЕСТНИЦА ФИКСАЦИИ <span class="dim">(10% НА РУБЕЖ · БУ ПОСЛЕ 1.5R)</span></div>
         <div class="ladder" id="ladder-row"></div>
       </div>
+    </div>
+    <div class="panel-body vrp-body" style="border-top: 1px dashed var(--b-dim); padding-top: 12px; margin-top: 6px;">
+        <div class="lbl panel-mini-title">VRP ТЕРМОМЕТР <span class="dim" id="vrp-status"></span></div>
+        <div class="canvas-holder vrp-holder" style="height: 36px; margin-top: 8px;">
+            <canvas id="vrp-canvas"></canvas>
+            <div class="canvas-empty" id="vrp-empty">○ ОЖИДАНИЕ ДАННЫХ ВОЛАТИЛЬНОСТИ</div>
+        </div>
     </div>
   </section>
 

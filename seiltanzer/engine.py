@@ -92,6 +92,7 @@ class Engine:
             "cone": None,
             "state": None,
             "options_summary": self._options_summary(),
+            "vrp": self._vrp_payload(),
             "filters": self._filters_payload(trade),
         }
 
@@ -676,6 +677,24 @@ class Engine:
                                     if m["gex"]["zero_flip"] else None),
             "gex_top_instr": [{"price": t["strike"] * scale, "gex": t["gex"]}
                               for t in m["gex"]["top"]],
+        }
+
+    def _vrp_payload(self) -> dict:
+        m = self.market.chain.get("metrics")
+        rv = self.market.baseline_vol()
+        if not m or rv is None or rv <= 0:
+            return {"available": False}
+        iv = m["implied_move"]["sigma_annual"]
+        vrp = iv - rv
+        vrp_pct = vrp / rv
+        regime = "перегрев" if vrp > 0.05 else ("недооценка" if vrp < -0.03 else "норма")
+        return {
+            "available": True,
+            "iv": iv,
+            "rv": rv,
+            "vrp": vrp,
+            "vrp_pct": vrp_pct,
+            "regime": regime
         }
 
     def _levels_payload(self, trade: dict, price: float, sigma: dict,

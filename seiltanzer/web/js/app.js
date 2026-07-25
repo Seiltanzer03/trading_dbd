@@ -9,6 +9,8 @@ import { initRidge } from './ridge.js';
 import { initLevels } from './levels.js';
 import { initCone } from './cone.js';
 import { initFan } from './fan.js';
+import { initVrp, updateVrp } from './vrp.js';
+import { initGex, updateGex } from './gex.js';
 
 initTooltips();
 
@@ -17,6 +19,8 @@ const ridge = initRidge($('#ridge-canvas'));
 const levels = initLevels($('#levels-canvas'));
 const cone = initCone('#cone-plot');
 const fan = initFan($('#cone-fan'));
+initVrp();
+initGex();
 
 const S = {
   tick: null,
@@ -101,6 +105,7 @@ function onTick() {
   // живой луч цены в конусе + точка цены в веере (r) двигаются каждый тик
   cone.updateLive({ r: S.tick?.prob?.r });
   fan.updateLive({ r: S.tick?.prob?.r });
+  updateVrp(S.tick?.vrp);
 }
 
 function renderAll() {
@@ -109,6 +114,7 @@ function renderAll() {
   renderSetupGrid();
   renderEdgeTrack();
   ridge.setData(S.ridge, S.tick?.prob?.p);
+  updateGex(S.ridge);
 }
 
 async function refreshJournalAndSetups() {
@@ -128,6 +134,7 @@ async function maybeRefreshRidge() {
     try {
       S.ridge = await (await fetch('/api/chain')).json();
       ridge.setData(S.ridge, S.tick?.prob?.p);
+      updateGex(S.ridge);
     } catch { /* оставляем прежнюю гряду */ }
   }
 }
