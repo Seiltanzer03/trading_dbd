@@ -289,20 +289,22 @@ class MarketData:
             return
         
         if self.demo:
-            # Для демо генерируем синтетическую поверхность
-            expiries = ["2d", "7d", "14d", "30d", "60d"]
+            # Для демо генерируем микро-поверхность (внутридневную)
+            days_arr = [0.05, 0.1, 0.25, 0.5, 1.0]
             surface = []
             now_ts = time.time()
-            for i, d in enumerate([2, 7, 14, 30, 60]):
-                iv_base = 0.16 + 0.04 * math.sin(now_ts / 300.0) + (i * 0.01) # Term structure
-                iv_skew = 0.7 * math.sin(now_ts / 240.0)
+            for i, d in enumerate(days_arr):
+                # Быстрое "дыхание" волы для интрадей (каждую минуту меняется)
+                iv_base = 0.16 + 0.06 * math.sin(now_ts / 60.0) + (i * 0.005)
+                # Быстро меняющийся скью
+                iv_skew = 0.8 * math.sin(now_ts / 45.0)
                 spot = self.demo_market.prices[self.instrument_code]
-                chain = opt.synth_chain(spot, iv_base, d/365.0, n_strikes=41, width=0.06, r=0.5, iv_skew=iv_skew, seed=int(now_ts)//30 + i)
+                chain = opt.synth_chain(spot, iv_base, max(0.001, d/365.0), n_strikes=41, width=0.05, r=0.05, iv_skew=iv_skew, seed=int(now_ts)//10 + i)
                 strikes = chain["strikes"].tolist()
                 ivs = chain["call_iv"].tolist() # Используем call_iv для поверхности
-                surface.append({"days": d, "expiry": expiries[i], "strikes": strikes, "ivs": ivs})
+                surface.append({"days": d, "expiry": f"{d*24:.1f}h", "strikes": strikes, "ivs": ivs})
             
-            self.iv_surface = _status_dict(value=surface, status="live", ts=now_ts, source="synthetic 3D")
+            self.iv_surface = _status_dict(value=surface, status="live", ts=now_ts, source="synthetic micro-3D")
             return
 
         try:
@@ -312,10 +314,10 @@ class MarketData:
             if not expiries:
                 raise RuntimeError("нет экспираций")
             
-            # Берем до 5 ближайших экспираций
+            # Берем до 3 ближайших экспираций (Micro-surface фокус)
             surface = []
             now = dt.datetime.now(dt.timezone.utc)
-            for expiry in expiries[:5]:
+            for expiry in expiries[:3]:
                 exp_dt = dt.datetime.strptime(expiry, "%Y-%m-%d").replace(hour=21, tzinfo=dt.timezone.utc)
                 days = max((exp_dt - now).total_seconds(), 3600.0) / (24 * 3600)
                 

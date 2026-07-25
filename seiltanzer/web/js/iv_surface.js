@@ -22,6 +22,7 @@ export function initIVSurface(elId) {
 
     const INIT_CAM = { eye: { x: 1.4, y: -1.4, z: 0.7 }, up: { x: 0, y: 0, z: 1 } };
     let currentCam = JSON.parse(JSON.stringify(INIT_CAM));
+    let skewHistory = [];
 
     function markInteract() {
         interacting = true;
@@ -71,11 +72,59 @@ export function initIVSurface(elId) {
         const yDte = surfaceData.map(e => e.days);
         const yTickText = surfaceData.map(e => {
             const d = e.days;
-            if (d < 1) return Math.round(d * 24) + "h";
+            if (d < 1) return (d * 24).toFixed(1) + "h";
             if (d < 7) return Math.round(d) + "d";
             if (d < 28) return Math.round(d / 7) + "W";
             return Math.round(d / 30) + "M";
         });
+
+        // --- Skew Momentum ---
+        const z0 = surfaceData[0].ivs;
+        let leftIdx = 0, rightIdx = strikes0.length - 1;
+        for (let i = 0; i < moneyPct.length; i++) {
+            if (moneyPct[i] <= -5) leftIdx = i;
+            if (moneyPct[i] >= 5 && rightIdx === strikes0.length - 1) rightIdx = i;
+        }
+        const skew = z0[leftIdx] - z0[rightIdx];
+        
+        const now = Date.now();
+        skewHistory.push({ t: now, v: skew });
+        skewHistory = skewHistory.filter(s => now - s.t < 120000); // 2 minutes window
+        
+        let skewMom = 0;
+        if (skewHistory.length > 1) {
+            const first = skewHistory[0];
+            const last = skewHistory[skewHistory.length - 1];
+            if (last.t > first.t) {
+                skewMom = ((last.v - first.v) / (last.t - first.t)) * 100000; // arbitrary scale for readability
+            }
+        }
+        
+        const skewEl = document.getElementById("iv-skew-momentum");
+        if (skewEl) {
+            skewEl.style.display = "inline-block";
+            const isPutRising = skewMom > 0.05;
+            const isCallRising = skewMom < -0.05;
+            
+            if (isPutRising) {
+                skewEl.style.backgroundColor = "rgba(198,55,60,0.15)";
+                skewEl.style.color = "#C6373C";
+                skewEl.style.border = "1px solid rgba(198,55,60,0.4)";
+                skewEl.innerText = `SKEW MOM: +${skewMom.toFixed(1)} 🔴 ШОРТ (Путы дорожают)`;
+            } else if (isCallRising) {
+                skewEl.style.backgroundColor = "rgba(46,125,79,0.15)";
+                skewEl.style.color = "#2E7D4F";
+                skewEl.style.border = "1px solid rgba(46,125,79,0.4)";
+                skewEl.innerText = `SKEW MOM: ${skewMom.toFixed(1)} 🟢 ЛОНГ (Коллы дорожают)`;
+            } else {
+                skewEl.style.backgroundColor = "transparent";
+                skewEl.style.color = "#8A877D";
+                skewEl.style.border = "1px solid rgba(138,135,125,0.4)";
+                skewEl.innerText = `SKEW MOM: ${skewMom > 0 ? '+' : ''}${skewMom.toFixed(1)} ⚪ НЕЙТРАЛЬНО`;
+            }
+        }
+        // ---------------------
+
         const zIvs = surfaceData.map(e =>
             e.ivs.map(v => (typeof v === "number" && v < 200 && v > 0) ? +(v * 100).toFixed(2) : null)
         );
