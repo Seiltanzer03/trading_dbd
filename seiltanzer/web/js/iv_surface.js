@@ -20,73 +20,12 @@ const SURF_SCALE = [
 
 export function initIVSurface(elId) {
     const el = typeof elId === 'string' ? document.querySelector(elId) : elId;
-    let hasPlot = false, listenersOn = false;
-    let interacting = false, interactTimer = null;
+    let hasPlot = false;
     let currentCam = { eye: { x: 1.5, y: -1.5, z: 0.5 }, up: { x: 0, y: 0, z: 1 } };
     
-    // Auto-rotation parameters
-    let autoRotate = true;
-    let theta = Math.PI / 4;
-    const r = 2.2;
-    let lastTime = performance.now();
-    let animFrameId = null;
-
-    function startAutoRotate() {
-        if (!autoRotate || interacting || !hasPlot) return;
-        const now = performance.now();
-        const dt = (now - lastTime) / 1000.0;
-        lastTime = now;
-        
-        // Медленное вращение 0.05 радиан в секунду
-        theta += 0.05 * dt;
-        
-        currentCam.eye.x = r * Math.cos(theta);
-        currentCam.eye.y = r * Math.sin(theta);
-        
-        try {
-            Plotly.relayout(el, { 'scene.camera': currentCam });
-        } catch (e) {}
-        
-        animFrameId = requestAnimationFrame(startAutoRotate);
-    }
-
-    function hookInteract() {
-        if (listenersOn || !hasPlot) return;
-        listenersOn = true;
-        const p = el.querySelector('.gl-container');
-        if (!p) return;
-        p.addEventListener('mousedown', () => setInteracting());
-        p.addEventListener('wheel', () => setInteracting(), { passive: true });
-        p.addEventListener('touchstart', () => setInteracting(), { passive: true });
-        
-        el.on('plotly_relayout', (ev) => {
-            if (ev['scene.camera']) {
-                currentCam = ev['scene.camera'];
-                const cur_r = Math.sqrt(currentCam.eye.x*currentCam.eye.x + currentCam.eye.y*currentCam.eye.y);
-                theta = Math.atan2(currentCam.eye.y, currentCam.eye.x);
-            }
-        });
-    }
-
-    function setInteracting() {
-        interacting = true;
-        if (animFrameId) {
-            cancelAnimationFrame(animFrameId);
-            animFrameId = null;
-        }
-        if (interactTimer) clearTimeout(interactTimer);
-        interactTimer = setTimeout(() => {
-            interacting = false;
-            lastTime = performance.now();
-            startAutoRotate();
-        }, 5000);
-    }
-
     function destroy() {
-        if (animFrameId) cancelAnimationFrame(animFrameId);
         if (hasPlot) Plotly.purge(el);
         hasPlot = false;
-        listenersOn = false;
     }
 
     function render(state, surfaceData) {
@@ -160,6 +99,7 @@ export function initIVSurface(elId) {
         };
 
         const layout = {
+            uirevision: 'true',
             margin: { t: 0, b: 0, l: 0, r: 0 },
             paper_bgcolor: 'rgba(0,0,0,0)',
             plot_bgcolor: 'rgba(0,0,0,0)',
@@ -171,7 +111,7 @@ export function initIVSurface(elId) {
                     zeroline: false
                 },
                 yaxis: { 
-                    title: { text: 'DAYS TO EXP', font: { family: FONT, size: 10, color: DIM } },
+                    title: { text: 'TIME TO EXPIRY (DTE)', font: { family: FONT, size: 10, color: DIM } },
                     tickfont: { family: FONT, size: 10, color: DIM },
                     gridcolor: RULE,
                     zeroline: false
@@ -190,19 +130,20 @@ export function initIVSurface(elId) {
 
         const config = {
             responsive: true,
-            displayModeBar: false
+            displayModeBar: false,
+            scrollZoom: false
         };
 
         if (!hasPlot) {
             Plotly.newPlot(el, [trace], layout, config).then(() => {
                 hasPlot = true;
-                hookInteract();
-                lastTime = performance.now();
-                startAutoRotate();
             });
         } else {
-            // Плавное обновление
-            Plotly.react(el, [trace], layout, config);
+            // Плавное обновление, камера не сбрасывается благодаря uirevision
+            // Не передаем camera при обновлении, если хотим оставить текущую 
+            const updateLayout = { ...layout };
+            delete updateLayout.scene.camera; 
+            Plotly.react(el, [trace], updateLayout, config);
         }
     }
 

@@ -104,10 +104,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "price": price_period,
             "intraday": 60.0,
             "vols": 5.0 if settings.demo else settings.vol_poll_sec,
-            "daily": 1800.0,
-            "chain": 30.0 if settings.demo else settings.chain_poll_sec,
-            "iv_surface": 30.0 if settings.demo else settings.chain_poll_sec * 3.0,
-            "correlation": 30.0 if settings.demo else 1800.0,
+            "daily": 30.0 if settings.demo else 300.0,
+            "chain": 1.0 if settings.demo else 60.0,
+            "iv_surface": 1.0 if settings.demo else 300.0,
+            "correlation": 30.0 if settings.demo else 300.0,
         }
         jobs = {
             "price": engine.market.refresh_price,

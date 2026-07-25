@@ -332,9 +332,10 @@ class MarketData:
             self._mark_fail(self.iv_surface, self.settings.chain_poll_sec * 3, f"IV surface ошибка: {e}")
 
     def refresh_correlation(self) -> None:
-        """Матрица корреляций 8 активов за последние 30 дней."""
-        tickers = ["NQ=F", "ES=F", "GC=F", "EURUSD=X", "^VIX", "DX-Y.NYB", "^TNX", "BTC-USD"]
-        names = ["NAS", "SP500", "GOLD", "EUR", "VIX", "DXY", "10Y", "BTC"]
+        """CROSS-ASSET & SPOT-VOL CORRELATION MATRIX.
+        Сравнивает цены базовых активов с их индексами ожидаемой волатильности."""
+        tickers = ["NQ=F", "^VXN", "ES=F", "^VIX", "GC=F", "^GVZ", "CL=F", "^OVX"]
+        names = ["NAS", "VXN", "SP500", "VIX", "GOLD", "GVZ", "OIL", "OVX"]
         
         now_ts = time.time()
         
@@ -368,7 +369,8 @@ class MarketData:
             data = yf.download(tickers, period="1mo", interval="1d", progress=False)
             closes = data['Close']
             
-            # Считаем дневные доходности
+            # Считаем дневные доходности (разница для VIX, лог-разница для цен)
+            # Для простоты используем pct_change для всего
             returns = closes.pct_change().dropna()
             
             # Корреляционная матрица
@@ -395,7 +397,7 @@ class MarketData:
                 source="yfinance (30d)"
             )
         except Exception as e:
-            self._mark_fail(self.correlation, 1800.0, f"Correlation error: {e}")
+            self._mark_fail(self.correlation, 300.0, f"Correlation error: {e}")
 
     def refresh_chain(self) -> None:
         """Цепочка ближайшей экспирации -> implied move, BL-плотность, GEX.
