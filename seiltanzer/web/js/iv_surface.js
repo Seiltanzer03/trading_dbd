@@ -1,4 +1,4 @@
-﻿// IV Surface (3D) — Улыбка волатильности.
+// IV Surface (3D) — Улыбка волатильности.
 // Moneyness × DTE × IV. 
 
 const DIM = "#666666", RULE = "rgba(180,180,180,0.5)", ORANGE = "#E8622A";
@@ -161,7 +161,7 @@ export function initIVSurface(elId) {
             displayModeBar: true,
             displaylogo: false,
             modeBarButtonsToRemove: ["toImage", "sendDataToCloud"],
-            scrollZoom: false
+            scrollZoom: true
         };
 
         if (!hasPlot) {
