@@ -65,15 +65,30 @@ export function updateCorrelation(p) {
   if (emptyEl) emptyEl.style.display = 'none';
   
   const shift = regimeShift(p);
+  const interpretEl = document.getElementById('corr-interpretation');
   if (statusEl) {
     if (shift) {
       statusEl.textContent = `⚠ Δρ ${shift.label} ${shift.delta >= 0 ? '+' : ''}${shift.delta.toFixed(2)}`;
       statusEl.className = 'badge warn';
       statusEl.title = `${shift.label}: baseline ${shift.base.toFixed(2)} → rolling ${shift.short.toFixed(2)}. ${shift.meaning}`;
+      
+      if (interpretEl) {
+        interpretEl.innerHTML = `🚨 <b>ВНИМАНИЕ — РЕЖИМНЫЙ СДВИГ:</b> ${shift.label} изменил корреляцию на ${shift.delta > 0 ? '+' : ''}${shift.delta.toFixed(2)} (было ${shift.base.toFixed(2)}, стало ${shift.short.toFixed(2)}).<br><b>Значение для сделки:</b> ${shift.meaning}`;
+        interpretEl.style.display = 'block';
+        interpretEl.style.backgroundColor = 'rgba(231, 76, 60, 0.05)';
+        interpretEl.style.borderColor = 'rgba(231, 76, 60, 0.3)';
+      }
     } else {
       statusEl.textContent = `● ROLLING 5M · ${p.dynamic_pairs || '—'} ПАР`;
       statusEl.className = 'badge live';
       statusEl.title = 'Rolling 5m correlations versus a 3-month daily baseline. Refresh: 5 minutes.';
+      
+      if (interpretEl) {
+        interpretEl.innerHTML = `✅ <b>СТАБИЛЬНЫЙ РЕЖИМ:</b> Связи активов в пределах нормы (отклонения < 0.25). Необычных дивергенций, мешающих вашему тренду, не выявлено.`;
+        interpretEl.style.display = 'block';
+        interpretEl.style.backgroundColor = '#fff';
+        interpretEl.style.borderColor = '#eee';
+      }
     }
   }
   

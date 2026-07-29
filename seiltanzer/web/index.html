@@ -224,15 +224,15 @@
       </div>
     </div>
     <div class="panel-body">
-      <div class="canvas-holder gex-evol-holder" style="height: 350px;">
+      <div class="canvas-holder gex-evol-holder" style="height: 420px;">
         <div id="gex-evol-canvas" style="width: 100%; height: 100%;"></div>
         <div class="canvas-empty" id="gex-evol-empty">○ OI × GAMMA КОНТЕКСТ НЕДОСТУПЕН</div>
       </div>
+      <div id="gex-interpretation" style="padding: 8px 16px; font-size: 12px; font-family: 'IBM Plex Mono', monospace; color: #555; line-height: 1.7; border-top: 1px solid #eee; display: none;"></div>
     </div>
     <div class="panel-foot dim">
-      <b>КАК ЧИТАТЬ:</b> профиль строится из open interest и Black–Scholes gamma. Это карта концентрации опционов, а не наблюдаемая позиция дилеров.<br>
-      🟢 <b>Условный PIN</b> = зона, где при принятом знаке хеджа возможна меанреверсия; 🔴 <b>условный PUSH</b> = зона возможного усиления движения.<br>
-      Используйте как контекст рядом с BL-плотностью и ценой, не как самостоятельный сигнал. Для inverse-proxy слой намеренно выключается.
+      <b>КАК ЧИТАТЬ:</b> Горизонтальные бары — чистая gamma × OI на каждом страйке. 🟢 Зелёные (CALL) = условное сопротивление (пиннинг). 🔴 Красные (PUT) = условная поддержка. <b>FLIP</b> — уровень, где net gamma меняет знак: выше = mean-reversion, ниже = momentum.<br>
+      Выбросы обрезаются по IQR, нулевые страйки скрыты. Используйте как контекст для стоп/тейк размещения.
     </div>
   </section>
 
@@ -342,8 +342,12 @@
         <div id="corr-canvas" style="width: 100%; height: 100%;"></div>
         <div class="canvas-empty" id="corr-empty">○ НЕТ ДАННЫХ КОРРЕЛЯЦИИ</div>
       </div>
+      <div id="corr-interpretation" style="padding: 8px 16px; font-size: 12px; font-family: 'IBM Plex Mono', monospace; color: #555; line-height: 1.7; border-top: 1px solid #eee; display: none;"></div>
     </div>
-    <div class="panel-foot dim">ВЕРХНИЙ ТРЕУГОЛЬНИК = rolling-корреляция 5‑минутных доходностей (96 наблюдений); НИЖНИЙ = Δρ относительно 3‑месячного дневного baseline. Рамка отмечает |Δρ| ≥ 0.25. Это показывает ослабление spot-vol защиты, расхождение индексов и общий beta-режим; не превращает корреляцию в автоматический long/short сигнал. Бесплатное обновление — раз в 5 минут.</div>
+    <div class="panel-foot dim">
+      <b>ВЕРХНИЙ ТРЕУГОЛЬНИК</b> = rolling ρ (5 мин, 96 наблюдений). <b>НИЖНИЙ</b> = Δρ vs 3-месячный baseline.<br>
+      <b>Как использовать:</b> Если spot-vol пара (NAS↔VXN) теряет обратную связь → рынок может быть в «complacency» режиме; если связь усилилась → «fear» режим. Расхождение индексов (NAS↔SP500) → меньше cross-market подтверждения вашего направления.
+    </div>
   </section>
 
   <!-- ================ 7. ЖУРНАЛ ================ -->
