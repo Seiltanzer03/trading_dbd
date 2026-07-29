@@ -24,6 +24,7 @@ export function initIVSurface(elId) {
   let model = null;
   let targetLiveX = 0, displayLiveX = 0;
   let lastFrame = performance.now();
+  const emptyEl = document.getElementById('iv-surface-empty');
   
   // Track trade state for Volatility Delta
   let initialTradeIV = null;
@@ -287,7 +288,12 @@ export function initIVSurface(elId) {
   return {
     render: (state, payload) => {
       const p = normalizePayload(payload);
-      if (!p.value || p.value.length === 0) return;
+      if (!p.value || p.value.length === 0) {
+        if (emptyEl) emptyEl.style.display = 'flex';
+        return;
+      }
+      
+      if (emptyEl) emptyEl.style.display = 'none';
       
       const sig = payloadSignature(p);
       if (sig !== lastPayloadSig) {

@@ -121,11 +121,12 @@ function renderCorrelation() {
     }
     
     const option = {
+        animation: false,
         tooltip: {
             position: 'top',
-            backgroundColor: 'rgba(20,20,15,0.95)',
-            textStyle: { color: '#fff' },
-            borderColor: '#444',
+            backgroundColor: 'rgba(255,255,255,0.95)',
+            textStyle: { color: '#333' },
+            borderColor: '#ddd',
             formatter: function (params) {
                 const pt = params.data;
                 const assetY = assets[pt[1]];
@@ -133,11 +134,11 @@ function renderCorrelation() {
                 const val = pt[2].toFixed(2);
                 if (pt[3] === 'diagonal') return `<b>${assetX}</b>`;
                 if (pt[3] === 'rolling') {
-                    return `<div style="font-size:11px;color:#ccc">${assetY} ↔ ${assetX}</div><br/>
-                            <div style="font-size:14px;color:#fff">Rolling ρ5m: <b style="color:${val >= 0 ? '#e67e22' : '#3498db'}">${val > 0 ? '+' : ''}${val}</b></div>`;
+                    return `<div style="font-size:11px;color:#888">${assetY} ↔ ${assetX}</div><br/>
+                            <div style="font-size:14px;color:#333">Rolling ρ5m: <b style="color:${val >= 0 ? '#e67e22' : '#3498db'}">${val > 0 ? '+' : ''}${val}</b></div>`;
                 } else {
-                    return `<div style="font-size:11px;color:#ccc">${assetX} ↔ ${assetY}</div><br/>
-                            <div style="font-size:14px;color:#fff">Shift (Δρ): <b style="color:${Math.abs(val) > 0.25 ? '#e74c3c' : (val >= 0 ? '#e67e22' : '#3498db')}">${val > 0 ? '+' : ''}${val}</b></div>`;
+                    return `<div style="font-size:11px;color:#888">${assetX} ↔ ${assetY}</div><br/>
+                            <div style="font-size:14px;color:#333">Shift (Δρ): <b style="color:${Math.abs(val) > 0.25 ? '#e74c3c' : (val >= 0 ? '#e67e22' : '#3498db')}">${val > 0 ? '+' : ''}${val}</b></div>`;
                 }
             }
         },
@@ -179,13 +180,11 @@ function renderCorrelation() {
                     }
                     const v = p.data[2];
                     const vFmt = v > 0 ? '+' + v.toFixed(2) : v.toFixed(2);
-                    const style = Math.abs(v) > 0.4 ? 'valLight' : 'valDark';
-                    return `{${style}|${vFmt}}`;
+                    return `{valDark|${vFmt}}`;
                 },
                 rich: {
                     diag: { color: '#888', fontSize: 10, fontWeight: 'bold' },
-                    valDark: { color: '#222', fontSize: 11, fontWeight: 'bold' },
-                    valLight: { color: '#fff', fontSize: 11, fontWeight: 'bold' }
+                    valDark: { color: '#222', fontSize: 11, fontWeight: 'bold' }
                 }
             },
             itemStyle: {

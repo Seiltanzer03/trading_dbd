@@ -87,18 +87,24 @@ function renderGex() {
     const net = data.latest.net;
     const priceStrike = liveData.price || data.price || 0;
     
-    // Filter out extreme far OTM to keep chart zoomed in on action
-    const displayRange = priceStrike * 0.15; // show +/- 15% from price
-    
-    const filteredStrikes = [];
-    const filteredNet = [];
-    
+    // Find closest strike index to price
+    let closestIdx = 0;
+    let minDiff = Infinity;
     for (let i = 0; i < strikes.length; i++) {
-        if (Math.abs(strikes[i] - priceStrike) < displayRange) {
-            filteredStrikes.push(strikes[i]);
-            filteredNet.push(net[i]);
+        const diff = Math.abs(strikes[i] - priceStrike);
+        if (diff < minDiff) {
+            minDiff = diff;
+            closestIdx = i;
         }
     }
+    
+    // Take +/- 15 strikes around the closest one (always ~30 strikes visible)
+    const rangeSpan = 15;
+    const startIdx = Math.max(0, closestIdx - rangeSpan);
+    const endIdx = Math.min(strikes.length - 1, closestIdx + rangeSpan);
+    
+    const filteredStrikes = strikes.slice(startIdx, endIdx + 1);
+    const filteredNet = net.slice(startIdx, endIdx + 1);
     
     const maxAbsNet = Math.max(...filteredNet.map(Math.abs));
 
@@ -153,7 +159,7 @@ function renderGex() {
     }
 
     const option = {
-        grid: { left: '8%', right: '8%', bottom: '5%', top: '5%', containLabel: true },
+        grid: { left: '10%', right: '10%', bottom: '8%', top: '5%', containLabel: true },
         tooltip: {
             trigger: 'axis',
             axisPointer: { type: 'shadow' },
@@ -164,22 +170,22 @@ function renderGex() {
                 const type = v > 0 ? 'CALL (Resistance)' : 'PUT (Support)';
                 return `Strike: ${s.toFixed(2)}<br/>Net GEX: ${fmtVal(v)}<br/>${type}`;
             },
-            backgroundColor: 'rgba(20,20,15,0.9)',
-            textStyle: { color: '#fff', fontSize: 12 },
-            borderColor: '#333'
+            backgroundColor: 'rgba(255,255,255,0.95)',
+            textStyle: { color: '#333', fontSize: 12 },
+            borderColor: '#ddd'
         },
         xAxis: {
             type: 'value',
             splitLine: { show: false },
-            axisLabel: { formatter: (v) => fmtVal(v), color: '#888' },
+            axisLabel: { formatter: (v) => fmtVal(v), color: '#666' },
             max: maxAbsNet * 1.1,
             min: -maxAbsNet * 1.1
         },
         yAxis: {
             type: 'value',
             scale: true,
-            splitLine: { show: true, lineStyle: { color: '#333', type: 'dashed' } },
-            axisLabel: { color: '#888' }
+            splitLine: { show: true, lineStyle: { color: '#eee', type: 'dashed' } },
+            axisLabel: { color: '#666' }
         },
         series: [
             {
@@ -192,7 +198,8 @@ function renderGex() {
                     data: markLines,
                     label: {
                         show: true,
-                        backgroundColor: 'rgba(20,20,15,0.8)',
+                        backgroundColor: 'rgba(255,255,255,0.9)',
+                        color: '#333',
                         padding: 4,
                         borderRadius: 4
                     }

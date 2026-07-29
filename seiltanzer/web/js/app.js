@@ -592,29 +592,31 @@ function renderFilters() {
   
   for (const c of relevant) {
     const isContext = c.decision_weight === false;
-    let ledColor = '#555';
-    let borderColor = '#333';
+    let ledColor = '#888';
+    let borderColor = '#ddd';
     let statusText = '—';
-    let bg = 'rgba(20,20,15,0.6)';
+    let bg = '#fff';
+    let titleColor = '#444';
+    let valueColor = '#222';
     
     if (c.state === 'pass') {
       ledColor = '#2ecc71';
-      borderColor = 'rgba(46, 204, 113, 0.3)';
+      borderColor = 'rgba(46, 204, 113, 0.4)';
       bg = 'rgba(46, 204, 113, 0.05)';
       statusText = isContext ? 'СОВПАЛ' : 'РАБОТАЕТ';
     } else if (c.state === 'block') {
       ledColor = '#e74c3c';
-      borderColor = 'rgba(231, 76, 60, 0.3)';
+      borderColor = 'rgba(231, 76, 60, 0.4)';
       bg = 'rgba(231, 76, 60, 0.05)';
       statusText = isContext ? 'НЕ СОВПАЛ' : 'BLOCK';
     } else if (c.state === 'manual') {
       ledColor = '#f39c12';
-      borderColor = 'rgba(243, 156, 18, 0.3)';
+      borderColor = 'rgba(243, 156, 18, 0.4)';
       bg = 'rgba(243, 156, 18, 0.05)';
       statusText = 'РУЧНАЯ ПРОВЕРКА';
     } else if (c.state === 'no_data') {
       ledColor = '#f39c12';
-      borderColor = 'rgba(243, 156, 18, 0.3)';
+      borderColor = 'rgba(243, 156, 18, 0.4)';
       bg = 'rgba(243, 156, 18, 0.05)';
       statusText = 'НЕТ ДАННЫХ';
     }
@@ -636,14 +638,14 @@ function renderFilters() {
       <div title="${desc}" style="padding: 10px 14px; background: ${bg}; border: 1px solid ${borderColor}; border-radius: 6px; display: flex; flex-direction: column; gap: 6px; position: relative; overflow: hidden; cursor: help;">
         <div style="display: flex; align-items: center; justify-content: space-between;">
             <div style="display: flex; align-items: center; gap: 10px;">
-                <div style="width: 12px; height: 12px; border-radius: 50%; background: ${ledColor}; box-shadow: 0 0 10px ${ledColor};"></div>
-                <div style="font-weight: bold; font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #ddd; letter-spacing: 0.5px;">${c.label}</div>
+                <div style="width: 12px; height: 12px; border-radius: 50%; background: ${ledColor}; box-shadow: 0 0 8px ${ledColor};"></div>
+                <div style="font-weight: bold; font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: ${titleColor}; letter-spacing: 0.5px;">${c.label}</div>
             </div>
-            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: bold; padding: 2px 6px; border-radius: 4px; background: rgba(0,0,0,0.3); color: ${ledColor}; border: 1px solid ${ledColor}40;">${statusText}</div>
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: bold; padding: 2px 6px; border-radius: 4px; background: rgba(0,0,0,0.05); color: ${ledColor}; border: 1px solid ${ledColor}40;">${statusText}</div>
         </div>
         <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: 4px;">
-            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #999; max-width: 60%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${desc.replace(/\n/g, ' ')}</div>
-            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: #fff; font-weight: bold;">${value}</div>
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #777; max-width: 60%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${desc.replace(/\n/g, ' ')}</div>
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: ${valueColor}; font-weight: bold;">${value}</div>
         </div>
       </div>
     `;
