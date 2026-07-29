@@ -393,8 +393,8 @@ export function initCone(elId) {
       marker: { size: 7, color: ORANGE, line: { color: '#fff', width: 1 } },
       name: 'цена (r)', hovertemplate: 'цена r=%{x:+.2f}<br>прогресс к развязке=%{y:.0%}<extra></extra>' };
     return [surface,
-      wallMesh(-1, disp.pStop, RED), wallMesh(tgt.T, disp.pTake, GREEN),
-      wallEdge(-1, disp.pStop, RED, 'СТОП'), wallEdge(tgt.T, disp.pTake, GREEN, 'ТЕЙК'),
+      wallMesh(tgt.xs[0], disp.pStop, RED), wallMesh(tgt.xs[tgt.xs.length - 1], disp.pTake, GREEN),
+      wallEdge(tgt.xs[0], disp.pStop, RED, 'СТОП'), wallEdge(tgt.xs[tgt.xs.length - 1], disp.pTake, GREEN, 'ТЕЙК'),
       ridge(tgt.modeX, INK, 3, 'OPTION MODE', true),
       ridge(tgt.q20X, 'rgba(20,20,15,0.35)', 2, 'Q20', false),
       ridge(tgt.q80X, 'rgba(20,20,15,0.35)', 2, 'Q80', false),
@@ -506,13 +506,28 @@ export function initCone(elId) {
       : tgt.term_slope < -0.03 ? ' · бэквордация (движение скоро)' : '';
     const yTitle = (tgt.hy ? `ВРЕМЯ → развязка · медиана ≈ ${fmtTime(tgt.median)}`
       : 'ВРЕМЯ → развязка (модельное)') + termNote;
+      
+    const finalStopP = disp.pStop[disp.pStop.length - 1] || 0;
+    const finalTakeP = disp.pTake[disp.pTake.length - 1] || 0;
+    const liveEV = (finalTakeP * tgt.T) - finalStopP;
+    const evColor = liveEV >= 0 ? '#2EB44F' : '#E64650';
+    const evText = tgt.probabilityAvailable 
+        ? `<b>LIVE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R</b><br>P(Take): ${(finalTakeP*100).toFixed(0)}% | P(Stop): ${(finalStopP*100).toFixed(0)}%`
+        : `<b>LIVE EV: НЕТ ОПЦИОНОВ</b><br>P(Take): — | P(Stop): —`;
+        
+    let relayoutData = {};
     if (yTitle !== lastYTitle) {
       lastYTitle = yTitle;
       const yTicktext = tgt.hy ? ['сейчас', fmtTime(tgt.hy * 0.5), fmtTime(tgt.hy)]
         : ['сейчас', '50%', 'развязка'];
-      pinAfter(P.relayout(el, { 'scene.yaxis.title.text': yTitle,
-                               'scene.yaxis.ticktext': yTicktext }));
+      relayoutData['scene.yaxis.title.text'] = yTitle;
+      relayoutData['scene.yaxis.ticktext'] = yTicktext;
     }
+    relayoutData['annotations[0].text'] = evText;
+    relayoutData['annotations[0].font.color'] = evColor;
+    relayoutData['annotations[0].bordercolor'] = evColor;
+    pinAfter(P.relayout(el, relayoutData));
+    
     const nStop = tgt.probabilityAvailable
       ? `СТОП ${(tgt.pStop[tgt.pStop.length - 1] * 100).toFixed(0)}%`
       : 'СТОП · БАРЬЕР';

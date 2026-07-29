@@ -172,9 +172,8 @@ export function initIVSurface(elId) {
       series: [
         {
           name: 'IV Surface', type: 'surface',
-          wireframe: { show: true, lineStyle: { color: 'rgba(255,255,255,0.1)' } },
-          shading: 'realistic', itemStyle: { opacity: 0.95 },
-          realisticMaterial: { roughness: 0.5, metalness: 0.1 },
+          wireframe: { show: true, lineStyle: { color: 'rgba(255,255,255,0.15)', width: 1 } },
+          shading: 'lambert', itemStyle: { opacity: 0.95 },
           data: m.surfData
         },
         {
