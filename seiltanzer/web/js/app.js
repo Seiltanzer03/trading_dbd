@@ -102,6 +102,7 @@ function onTick() {
   renderLevels();
   renderRidgeStats();
   renderCone();
+  renderGammaGauge();
   maybeRefreshRidge();
   // живое обновление гряды каждый тик: луч цены двигается всегда (даже без сделки)
   ridge.updateLive({
@@ -798,6 +799,31 @@ function renderOiWalls() {
     read.className = 'val';
   }
 }
+
+function renderGammaGauge() {
+  const badge = document.getElementById('gamma-regime-gauge');
+  if (!badge) return;
+  const g = S.tick?.gamma;
+  if (!g || !g.available) {
+    badge.style.display = 'none';
+    return;
+  }
+  const isPos = g.zone === 'positive';
+  badge.style.display = 'inline-block';
+  // Magnet Mode (Positive Gamma) vs Rocket Mode (Negative Gamma)
+  badge.style.backgroundColor = isPos ? 'rgba(46,125,79,0.12)' : 'rgba(198,55,60,0.12)';
+  badge.style.color = isPos ? '#2ECC71' : '#E8622A';
+  badge.style.border = `1px solid ${isPos ? 'rgba(46,125,79,0.4)' : 'rgba(198,55,60,0.4)'}`;
+  
+  const pct = (g.strength * 100).toFixed(0);
+  const icon = isPos ? '🟢 MAGNET MODE' : '🔴 ROCKET MODE';
+  const flipMsg = g.flip ? ` · FLIP ${fmtPrice(g.flip)}` : '';
+  badge.innerText = `${icon} ${pct}%${flipMsg}`;
+  badge.title = g.note || (isPos 
+    ? 'Положительная гамма: маркет-мейкеры работают контр-трендово. Пиннинг, затухание волатильности.'
+    : 'Отрицательная гамма: хедж маркет-мейкеров ускоряет пробои. Волатильность расширяется.');
+}
+
 
 // ---------------------------------------------------------------- journal
 

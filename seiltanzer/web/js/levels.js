@@ -5,6 +5,7 @@
 
 import { COLORS, setupCanvas, fmtPrice } from './util.js';
 import { approach } from './anim.js';
+import { Heatmap } from './heatmap.js';
 
 const H = 190;
 
@@ -14,6 +15,9 @@ export function initLevels(canvas) {
   let view = null;
   let geometrySig = null;
   let pricePath = [];
+  
+  // Historical price density heatmap
+  const heatmap = new Heatmap({ decay: 0.05 });
 
   function setData(levels) {
     if (!levels) { data = null; return; }
@@ -34,8 +38,15 @@ export function initLevels(canvas) {
         && Math.abs(p - last.p) > Math.max(risk * 3, Math.abs(p) * 0.008);
       if (feedJump)
         pricePath = [];
-      pricePath.push({ p, ts: performance.now(), d: last && !feedJump ? p - last.p : 0 });
+      const dt = last && !feedJump ? p - last.p : 0;
+      pricePath.push({ p, ts: performance.now(), d: dt });
       if (pricePath.length > 42) pricePath.shift();
+      
+      // Update heatmap with real price ticks
+      if (!feedJump) {
+        heatmap.setResolution(risk * 0.02); // 2% of risk as bin size
+        heatmap.add(p, Math.max(1, Math.abs(dt) / risk * 10)); // Weight by micro-velocity
+      }
     }
     data = levels;
     updateView(p);
@@ -92,6 +103,9 @@ export function initLevels(canvas) {
     const axisY = H - 34;
     const rOf = (p) => (data.direction === 'long' ? (p - data.entry) / risk
                                                   : (data.entry - p) / risk);
+
+    // Draw historical heatmap behind everything
+    heatmap.render(ctx, view, X, axisY - 20, '46,125,79');
 
     // implied move ±1σ — затенённый коридор рынка (ключевая надбавленная ценность)
     if (data.implied_band) {
@@ -224,23 +238,59 @@ export function initLevels(canvas) {
                    x, axisY + 31);
     }
 
-    // Честные «летящие шарики»: каждый шар = реально полученная котировка.
-    // Они не соединяются ложной линией; вверх уходит реальное время, цвет
-    // показывает знак микродвижения, размер — его скорость относительно риска.
+    // Живой поток ликвидности (Liquid Flow / Comet Trail)
+    // Рисуем непрерывную светящуюся линию, которая утолщается и ярче светит
+    // при сильных импульсах (скорость микро-тика).
     const now = performance.now(), tapeWindow = 30000;
     pricePath = pricePath.filter((pt) => now - pt.ts <= tapeWindow);
     const visiblePath = pricePath.filter((pt) => inRange(pt.p));
-    for (const pt of visiblePath) {
-      const age = Math.max(0, Math.min(1, (now - pt.ts) / tapeWindow));
-      const impulse = Math.min(1, Math.abs(pt.d || 0) / Math.max(risk * 0.08, 1e-12));
-      const y = axisY - 8 - age * 34;
-      ctx.globalAlpha = 0.18 + (1 - age) * 0.78;
-      ctx.fillStyle = pt.d > 0 ? COLORS.green : pt.d < 0 ? COLORS.red : '#E8622A';
-      ctx.beginPath();
-      ctx.arc(X(pt.p), y, 1.8 + impulse * 2.2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(255,255,255,0.8)';
-      ctx.lineWidth = 0.7; ctx.stroke();
+    
+    if (visiblePath.length > 1) {
+      // Рисуем от старых к новым
+      for (let i = 0; i < visiblePath.length - 1; i++) {
+        const pt = visiblePath[i];
+        const nextPt = visiblePath[i + 1];
+        
+        const age = Math.max(0, Math.min(1, (now - pt.ts) / tapeWindow));
+        const nextAge = Math.max(0, Math.min(1, (now - nextPt.ts) / tapeWindow));
+        
+        const y0 = axisY - 8 - age * 44;
+        const y1 = axisY - 8 - nextAge * 44;
+        
+        const impulse = Math.min(1, Math.abs(pt.d || 0) / Math.max(risk * 0.08, 1e-12));
+        
+        // Линия
+        ctx.beginPath();
+        ctx.moveTo(X(pt.p), y0);
+        ctx.lineTo(X(nextPt.p), y1);
+        
+        // Стилизация (Comet Tail)
+        ctx.lineCap = 'round';
+        ctx.lineWidth = 1.5 + impulse * 4.0;
+        ctx.globalAlpha = Math.max(0, 1.0 - (age * 1.2)); // Угасание к хвосту
+        
+        const color = pt.d > 0 ? COLORS.green : pt.d < 0 ? COLORS.red : '#E8622A';
+        ctx.strokeStyle = color;
+        
+        // Свечение (glow)
+        ctx.shadowBlur = 8 + impulse * 10;
+        ctx.shadowColor = color;
+        
+        ctx.stroke();
+      }
+      // Яркий "голова" кометы для самого свежего тика
+      const head = visiblePath[visiblePath.length - 1];
+      const headAge = Math.max(0, Math.min(1, (now - head.ts) / tapeWindow));
+      if (headAge < 0.1) {
+        ctx.globalAlpha = 1.0;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = head.d > 0 ? COLORS.green : head.d < 0 ? COLORS.red : '#E8622A';
+        ctx.beginPath();
+        ctx.arc(X(head.p), axisY - 8 - headAge * 44, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.shadowBlur = 0;
     }
     ctx.globalAlpha = 1; ctx.lineWidth = 1;
 
@@ -267,6 +317,7 @@ export function initLevels(canvas) {
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05); last = now;
     if (data && data.price != null) curPrice = approach(curPrice, data.price, dt, 6);
+    heatmap.update(dt);
     draw();
     requestAnimationFrame(frame);
   }

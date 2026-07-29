@@ -75,11 +75,18 @@ export function updateVp(p) {
     const existing = state.bins.get(k);
     if (existing) {
       existing.targetVol = volume;
+      existing.targetBidVol = Number(b.bid_vol) || (volume * 0.5);
+      existing.targetAskVol = Number(b.ask_vol) || (volume * 0.5);
       existing.price = Number(b.price);
     } else {
       state.bins.set(k, {
-        price: Number(b.price), targetVol: volume,
+        price: Number(b.price), 
+        targetVol: volume,
+        targetBidVol: Number(b.bid_vol) || (volume * 0.5),
+        targetAskVol: Number(b.ask_vol) || (volume * 0.5),
         currentVol: volume * 0.65,
+        currentBidVol: (Number(b.bid_vol) || (volume * 0.5)) * 0.65,
+        currentAskVol: (Number(b.ask_vol) || (volume * 0.5)) * 0.65,
       });
     }
   }
@@ -133,26 +140,46 @@ function renderLoop(now) {
   const ordered = [...state.bins.values()].sort((a, b) => a.price - b.price);
   for (const b of ordered) {
     b.currentVol = approach(b.currentVol, b.targetVol, dt, 4.5);
+    b.currentBidVol = approach(b.currentBidVol, b.targetBidVol, dt, 4.5);
+    b.currentAskVol = approach(b.currentAskVol, b.targetAskVol, dt, 4.5);
+    
     if (b.targetVol === 0 && b.currentVol < state.currentScale * 0.001) {
       state.bins.delete(key(b.price));
       continue;
     }
     const ratio = Math.max(0, Math.min(1, b.currentVol / Math.max(state.currentScale, 1e-9)));
+    const bidRatio = Math.max(0, Math.min(1, b.currentBidVol / Math.max(state.currentScale, 1e-9)));
+    const askRatio = Math.max(0, Math.min(1, b.currentAskVol / Math.max(state.currentScale, 1e-9)));
+    
     const barW = Math.max(1, ratio * maxW);
+    const bidW = bidRatio * maxW;
+    const askW = askRatio * maxW;
+    
     const y = getY(b.price);
     const isPoc = Math.abs(b.price - state.poc) <= state.binSize * 0.1;
-    const grad = ctx.createLinearGradient(0, y, barW, y);
-    grad.addColorStop(0, 'rgba(46,125,79,0.04)');
-    grad.addColorStop(1, isPoc ? 'rgba(232,98,42,0.84)' : 'rgba(46,125,79,0.52)');
-    ctx.fillStyle = grad;
+    
     if (isPoc) {
       ctx.shadowColor = 'rgba(232,98,42,0.42)';
       ctx.shadowBlur = 7;
+      ctx.fillStyle = 'rgba(232,98,42,0.84)';
+      ctx.beginPath();
+      ctx.roundRect(0, y - binH / 2, barW, Math.max(1, binH - 1), [0, 3, 3, 0]);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    } else {
+      if (bidW > 0) {
+        ctx.fillStyle = 'rgba(198,55,60,0.52)'; // Reddish for bid volume (sellers)
+        ctx.beginPath();
+        ctx.rect(0, y - binH / 2, bidW, Math.max(1, binH - 1));
+        ctx.fill();
+      }
+      if (askW > 0) {
+        ctx.fillStyle = 'rgba(46,125,79,0.52)'; // Greenish for ask volume (buyers)
+        ctx.beginPath();
+        ctx.roundRect(bidW, y - binH / 2, askW, Math.max(1, binH - 1), [0, 3, 3, 0]);
+        ctx.fill();
+      }
     }
-    ctx.beginPath();
-    ctx.roundRect(0, y - binH / 2, barW, Math.max(1, binH - 1), [0, 3, 3, 0]);
-    ctx.fill();
-    ctx.shadowBlur = 0;
   }
 
   if (state.poc != null) {

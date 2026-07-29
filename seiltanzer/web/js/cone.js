@@ -223,7 +223,7 @@ export function initCone(elId) {
       I.push(b0, t0); J.push(t0, b1); K.push(b1, t1);
     }
     return { type: 'mesh3d', x: vx, y: vy, z: vz, i: I, j: J, k: K,
-             color, opacity: 0.11, flatshading: true, hoverinfo: 'skip', showlegend: false };
+             color, opacity: 0.35, flatshading: true, hoverinfo: 'skip', showlegend: false };
   }
   function wallEdge(xConst, series, color, label) {
     const pLabel = tgt.probabilityAvailable
@@ -369,14 +369,14 @@ export function initCone(elId) {
     const customdata = tgt.conditional.map((row, j) =>
       row.map((p) => [p, tgt.survival[j]]));
     const surface = { type: 'surface', x: tgt.xs, y: tgt.ys, z: disp.z,
-      colorscale: SURF_SCALE, showscale: false, opacity: 0.95, name: 'плотность',
+      colorscale: SURF_SCALE, showscale: false, opacity: 1.0, name: 'плотность',
       customdata,
       contours: {
-        x: { show: true, color: 'rgba(255,255,255,0.28)', width: 1 },
-        y: { show: true, color: 'rgba(255,255,255,0.28)', width: 1 },
-        z: { show: true, usecolormap: true, width: 1 },
+        x: { show: true, color: 'rgba(255,255,255,0.15)', width: 1, project: { x: true } },
+        y: { show: true, color: 'rgba(255,255,255,0.15)', width: 1, project: { y: true } },
+        z: { show: true, usecolormap: true, width: 2, project: { z: true } },
       },
-      lighting: { ambient: 0.78, diffuse: 0.5, specular: 0.06, roughness: 0.9 },
+      lighting: { ambient: 0.8, diffuse: 0.6, specular: 0.1, roughness: 0.7 },
       hovertemplate: 'R=%{x:+.2f}<br>условная RND=%{customdata[0]:.1%}' +
         '<br>живая масса=%{customdata[1]:.1%}<extra></extra>' };
     const ridge = (xs, color, width, name, showlegend) => ({

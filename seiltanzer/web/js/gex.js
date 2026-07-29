@@ -1,4 +1,4 @@
-﻿// GEX КЛЮЧЕВЫЕ УРОВНИ — контекст концентрации OI × модельной gamma.
+// GEX КЛЮЧЕВЫЕ УРОВНИ — контекст концентрации OI × модельной gamma.
 // Бесплатная цепочка не раскрывает знак реальной позиции дилеров, поэтому слой
 // не считается наблюдаемым options flow и не получает веса в verdict.
 
@@ -182,29 +182,34 @@ function renderLoop() {
             : (i % 2 === 0 ? 'rgba(216,213,204,0.05)' : 'transparent');
         ctx.fillRect(padLeft, y - barH / 2, barAreaW, barH);
 
-        // Пульсация только для крупных уровней
+        // Gamma Heatmap Profile (Вместо баров)
+        // Рисуем непрерывное облако (glow area)
+        // Но так как цикл рисует по уровням, мы сделаем градиентные эллипсы,
+        // которые сливаются друг с другом в единый профиль.
+        ctx.globalCompositeOperation = 'screen';
         const isPOC = top[i].rank < 2;
         const breathe = isPOC ? 0.8 + 0.2 * Math.abs(Math.sin(statePhase * (i + 1))) : 1.0;
-        const alpha = (0.55 + 0.45 * Math.abs(norm)) * breathe;
-
-        // Бар от центра — зелёный вправо (PIN), красный влево (PUSH)
+        const alpha = (0.35 + 0.5 * Math.abs(norm)) * breathe;
+        
+        ctx.beginPath();
+        const yRadius = barH * 2.5; // Делаем "облака" выше, чтобы они пересекались
+        ctx.ellipse(centerX + (gv > 0 ? barHalf/2 : -barHalf/2), y, barHalf, yRadius, 0, 0, Math.PI * 2);
+        
         if (gv > 0) {
-            // PIN: бар вправо от центра
-            const grad = ctx.createLinearGradient(centerX, 0, centerX + barHalf, 0);
-            grad.addColorStop(0, `rgba(46,125,79,${alpha})`);
-            grad.addColorStop(1, `rgba(46,180,79,${alpha * 0.3})`);
+            // PIN (Зеленое облако)
+            const grad = ctx.createRadialGradient(centerX + barHalf/2, y, 0, centerX + barHalf/2, y, barHalf);
+            grad.addColorStop(0, `rgba(46,180,79,${alpha})`);
+            grad.addColorStop(1, `rgba(46,125,79,0)`);
             ctx.fillStyle = grad;
-            if (isPOC) { ctx.shadowColor = 'rgba(46,125,79,0.6)'; ctx.shadowBlur = 8; }
-            ctx.fillRect(centerX, y - barH / 2 + 1, barHalf, Math.max(2, barH - 2));
         } else {
-            // PUSH: бар влево от центра
-            const grad = ctx.createLinearGradient(centerX - barHalf, 0, centerX, 0);
-            grad.addColorStop(0, `rgba(198,55,60,${alpha * 0.3})`);
-            grad.addColorStop(1, `rgba(198,55,60,${alpha})`);
+            // PUSH (Красное облако)
+            const grad = ctx.createRadialGradient(centerX - barHalf/2, y, 0, centerX - barHalf/2, y, barHalf);
+            grad.addColorStop(0, `rgba(230,70,80,${alpha})`);
+            grad.addColorStop(1, `rgba(198,55,60,0)`);
             ctx.fillStyle = grad;
-            if (isPOC) { ctx.shadowColor = 'rgba(198,55,60,0.6)'; ctx.shadowBlur = 8; }
-            ctx.fillRect(centerX - barHalf, y - barH / 2 + 1, barHalf, Math.max(2, barH - 2));
         }
+        ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
         ctx.shadowBlur = 0;
 
         // Метка страйка слева

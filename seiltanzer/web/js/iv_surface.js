@@ -285,6 +285,25 @@ export function initIVSurface(elId) {
         + '<br><b>IV:</b> %{z:.1f}%<extra></extra>',
       name: 'IV snapshot',
     };
+    
+    // CFD RV (Realized Volatility) Dynamic Wireframe Layer
+    // Рисуется как дышащая сетка (wireframe) под основной поверхностью
+    const rvBaseZ = model.zMin + Math.max((model.zMax - model.zMin) * 0.15, 2.0);
+    const rvZ = model.zIvs.map(row => row.map(v => rvBaseZ + (v - model.zMin) * 0.2));
+    const rvWireframe = {
+      type: 'surface',
+      x: model.moneyPct, y: model.yDte, z: rvZ,
+      showscale: false,
+      opacity: 0.3,
+      colorscale: [[0, '#2ECC71'], [1, '#2ECC71']],
+      hidesurface: true, 
+      contours: {
+        x: { show: true, color: 'rgba(46, 204, 113, 0.4)', width: 2 },
+        y: { show: true, color: 'rgba(46, 204, 113, 0.4)', width: 2 },
+        z: { show: false }
+      },
+      name: 'CFD REALIZED VOLATILITY (RV)', hoverinfo: 'skip'
+    };
     const atmZ = model.zIvs.map((row) =>
       interp(model.moneyPct, row, 0) ?? model.zMin);
     const snapshotAtm = {
@@ -299,17 +318,31 @@ export function initIVSurface(elId) {
     };
     const ridge = {
       type: 'scatter3d', mode: 'lines', x: Array(model.yDte.length).fill(g.x),
-      y: model.yDte, z: g.z, line: { color: ORANGE, width: 7 },
+      y: model.yDte, z: g.z, line: { color: ORANGE, width: 8 },
       name: 'LIVE SPOT SLICE',
       hovertemplate: 'live displacement=%{x:+.2f}%<br>DTE=%{y}<br>IV=%{z:.1f}%<extra></extra>',
     };
+    
+    // Эффект "падающей капли" (Splash/Ripple) для живой цены
+    const dotZ = g.z[0] + (model.zMax - model.zMin) * 0.05;
     const dot = {
-      type: 'scatter3d', mode: 'markers', x: [g.x], y: [model.yDte[0]], z: [g.z[0] + 0.01],
-      marker: { size: 6, color: ORANGE, line: { color: '#fff', width: 1 } },
-      name: 'LIVE ATM', showlegend: false,
-      hovertemplate: 'ближний срок<br>live displacement=%{x:+.2f}%<br>IV=%{z:.1f}%<extra></extra>',
+      type: 'scatter3d', mode: 'markers', x: [g.x], y: [model.yDte[0]], z: [dotZ],
+      marker: { 
+        size: 10, 
+        color: '#FFFFFF', 
+        line: { color: ORANGE, width: 3 },
+        symbol: 'circle'
+      },
+      name: 'LIVE CFD', showlegend: false,
+      hovertemplate: 'живой тик CFD<br>displacement=%{x:+.2f}%<br>IV=%{z:.1f}%<extra></extra>',
     };
-    return [surface, snapshotAtm, curtain, ridge, dot];
+    const dotHalo = {
+      type: 'scatter3d', mode: 'markers', x: [g.x], y: [model.yDte[0]], z: [dotZ - 0.01],
+      marker: { size: 25, color: 'rgba(232, 98, 42, 0.25)', symbol: 'circle' },
+      name: 'HALO', showlegend: false, hoverinfo: 'skip'
+    };
+    
+    return [surface, snapshotAtm, curtain, rvWireframe, ridge, dot, dotHalo];
   }
 
   function layoutFor() {
@@ -353,10 +386,10 @@ export function initIVSurface(elId) {
     const g = liveGeometry(displayLiveX);
     if (!g) return;
     pinAfter(window.Plotly.restyle(el, {
-      x: [g.wallX, Array(model.yDte.length).fill(g.x), [g.x]],
-      y: [g.wallY, model.yDte, [model.yDte[0]]],
-      z: [g.wallZ, g.z, [g.z[0] + 0.01]],
-    }, [LIVE_CURTAIN, LIVE_RIDGE, LIVE_DOT]));
+      x: [g.wallX, [], Array(model.yDte.length).fill(g.x), [g.x], [g.x]],
+      y: [g.wallY, [], model.yDte, [model.yDte[0]], [model.yDte[0]]],
+      z: [g.wallZ, [], g.z, [g.z[0] + (model.zMax - model.zMin) * 0.05], [g.z[0] + (model.zMax - model.zMin) * 0.05 - 0.01]],
+    }, [2, 3, 4, 5, 6])); // Indices: 2=curtain, 3=rvWireframe(skip), 4=ridge, 5=dot, 6=dotHalo
     updateStatus(model.payload, g.x, g.z);
   }
 

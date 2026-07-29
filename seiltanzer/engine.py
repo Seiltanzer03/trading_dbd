@@ -587,10 +587,29 @@ class Engine:
             # Risk-neutral forward tilt из самой плотности. Ограничение защищает
             # от редких плохих mid-котировок бесплатной цепочки.
             drift_R = float(min(max(terminal["mean_r"] - r, -1.25), 1.25))
+            
+        gamma_info = self._gamma_pin(trade, price)
+        ou_theta = 0.0
+        ou_mu = 0.0
+        heston_kappa = 0.0
+        heston_theta = 1.0
+        heston_xi = 0.0
+        heston_rho = 0.0
+
+        if gamma_info and gamma_info.get("zone") == "positive":
+            ou_theta = 5.0 * gamma_info.get("strength", 0.0)
+            ou_mu = gamma_info.get("magnet_r", 0.0)
+            # Притягиваем волатильность (Heston)
+            heston_kappa = 2.0
+            heston_theta = rv_iv_ratio if rv_iv_ratio else 1.0
+            heston_xi = 0.4
+            heston_rho = -0.7
+
         # risk-neutral конус (диффузия под волу + АСИММЕТРИЯ скью + ФОРВАРДНАЯ вола
         # по term-structure, НЕ винрейт; неразрешённые пути якорятся BL-tail ratio)
         cone = self._cone(r, T, cone_sigma_R, drift_R, skew_R, term_slope,
-                          horizon_years, terminal, rv_iv_ratio)
+                          horizon_years, terminal, rv_iv_ratio,
+                          ou_theta, ou_mu, heston_kappa, heston_theta, heston_xi, heston_rho)
 
         has_options = bool(
             terminal is not None
@@ -690,14 +709,16 @@ class Engine:
                 option_edge=option_edge, option_ev=option_ev,
                 chain_ts=self.market.chain.get("ts"), chain_age_sec=chain_age,
                 source=cone.get("hit_source") or "unknown")
-        gamma = self._gamma_pin(trade, price)
         return {"prob": prob, "mc": mc, "ladder": ladder, "market": market,
-                "gamma": gamma, "cone": cone,
-                "levels": self._levels_payload(trade, price, sigma, gamma)}
+                "gamma": gamma_info, "cone": cone,
+                "levels": self._levels_payload(trade, price, sigma, gamma_info)}
 
     def _cone(self, r: float, T: float, sigma_R: float, drift_R: float,
               skew_R: float, term_slope: float, horizon_years: float | None,
-              terminal: dict | None, rv_iv_ratio: float | None) -> dict:
+              terminal: dict | None, rv_iv_ratio: float | None,
+              ou_theta: float = 0.0, ou_mu: float = 0.0,
+              heston_kappa: float = 0.0, heston_theta: float = 1.0,
+              heston_xi: float = 0.0, heston_rho: float = 0.0) -> dict:
         """3D risk-neutral конус: эволюция распределения R под ОПЦИОННУЮ волу.
 
         Драйверы — sigma_R (implied move в R), снос drift_R (скью) и цена (r0);
@@ -709,7 +730,10 @@ class Engine:
         key = (round(r, 3), round(sigma_R, 3), round(T, 2), round(drift_R, 3),
                round(skew_R, 3), round(term_slope, 3),
                round((horizon_years or 0.0) * 3650, 2),
-               round(float(terminal_hit), 4) if terminal_hit is not None else -1.0)
+               round(float(terminal_hit), 4) if terminal_hit is not None else -1.0,
+               round(ou_theta, 2), round(ou_mu, 2),
+               round(heston_kappa, 2), round(heston_theta, 2),
+               round(heston_xi, 2), round(heston_rho, 2))
         if key == self._cone_cache_key and self._cone_cache is not None:
             base = self._cone_cache
         else:
@@ -717,6 +741,9 @@ class Engine:
             base = pb.rn_cone(r, sigma_R, T, drift_R=drift_R, skew=skew_R,
                               term_slope=term_slope, horizon_years=horizon_years,
                               terminal_hit=terminal_hit,
+                              ou_theta=ou_theta, ou_mu=ou_mu,
+                              heston_kappa=heston_kappa, heston_theta=heston_theta,
+                              heston_xi=heston_xi, heston_rho=heston_rho,
                               seed=seed)
             self._cone_cache_key, self._cone_cache = key, base
         out = dict(base)
@@ -1055,32 +1082,67 @@ class Engine:
         bin_size = nice * magnitude
         origin = math.floor(min_p / bin_size) * bin_size
 
-        profile = {}
+        profile = {}  # {price_bin: {"volume": v, "bid_vol": b, "ask_vol": a}}
         total_vol = 0
         has_real_volume = sum(x[2] for x in intraday) > 0
 
+        prev_p = None
         for _ts, raw_p, vol in intraday:
             p = raw_p + quote_offset
             # Если нет реального объема, используем 1 как TPO (Time Price Opportunity)
             v = vol if has_real_volume else 1.0
+            
+            # Эмуляция CVD (Cumulative Volume Delta) по тику:
+            # Если цена выросла — агрессивная покупка (ask), упала — агрессивная продажа (bid)
+            bid_vol = 0.0
+            ask_vol = 0.0
+            if prev_p is not None:
+                if p > prev_p:
+                    ask_vol = v
+                elif p < prev_p:
+                    bid_vol = v
+                else:
+                    bid_vol = v * 0.5
+                    ask_vol = v * 0.5
+            else:
+                bid_vol = v * 0.5
+                ask_vol = v * 0.5
+            prev_p = p
+            
             b = origin + math.floor((p - origin) / bin_size) * bin_size
             b = round(b + bin_size / 2.0, 8)
-            profile[b] = profile.get(b, 0) + v
+            
+            if b not in profile:
+                profile[b] = {"volume": 0.0, "bid_vol": 0.0, "ask_vol": 0.0}
+            
+            profile[b]["volume"] += v
+            profile[b]["bid_vol"] += bid_vol
+            profile[b]["ask_vol"] += ask_vol
             total_vol += v
 
         if total_vol == 0:
             return None
 
-        poc_price = max(profile.keys(), key=lambda k: profile[k])
+        poc_price = max(profile.keys(), key=lambda k: profile[k]["volume"])
 
-        bins_list = [{"price": k, "volume": v} for k, v in profile.items()]
+        bins_list = [
+            {
+                "price": k, 
+                "volume": v["volume"],
+                "bid_vol": v["bid_vol"],
+                "ask_vol": v["ask_vol"],
+                "delta": v["ask_vol"] - v["bid_vol"]
+            } 
+            for k, v in profile.items()
+        ]
         bins_list.sort(key=lambda x: x["price"])
+        
         # 70% value area: берём наиболее принятые ценовые корзины до 70% массы,
         # затем показываем минимальную/максимальную границу выбранного набора.
         selected, accumulated = [], 0.0
-        for price_bin, volume in sorted(profile.items(), key=lambda kv: kv[1], reverse=True):
+        for price_bin, data in sorted(profile.items(), key=lambda kv: kv[1]["volume"], reverse=True):
             selected.append(price_bin)
-            accumulated += volume
+            accumulated += data["volume"]
             if accumulated >= total_vol * 0.70:
                 break
 

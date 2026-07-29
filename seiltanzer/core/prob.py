@@ -416,6 +416,9 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
             skew: float = 0.0, term_slope: float = 0.0,
             horizon_years: float | None = None,
             terminal_hit: float | None = None,
+            ou_theta: float = 0.0, ou_mu: float = 0.0,
+            heston_kappa: float = 0.0, heston_theta: float = 1.0,
+            heston_xi: float = 0.0, heston_rho: float = 0.0,
             n_slices: int = 14, n_bins: int = 31, n_paths: int = 6000,
             n_steps: int = 400, seed: int | None = None) -> dict:
     """RISK-NEUTRAL конус: эволюция распределения R под волатильность — НЕ винрейт.
@@ -475,6 +478,7 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
     checkpoints[-1] = n_steps
 
     r = np.full(n_paths, r0, dtype=np.float64)
+    v = np.ones(n_paths, dtype=np.float64)  # Heston variance process (starts at 1.0)
     alive = np.ones(n_paths, dtype=bool)
     took = np.zeros(n_paths, dtype=bool)
     stopped = np.zeros(n_paths, dtype=bool)
@@ -489,11 +493,29 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
         if idx.size:
             prev = r[idx].copy()
             noise = rng.standard_normal(idx.size)
+            
+            # Heston Stochastic Volatility
+            v_step = 1.0
+            if heston_kappa > 0.0 or heston_xi > 0.0:
+                noise_v = rng.standard_normal(idx.size)
+                if heston_rho != 0.0:
+                    noise_v = heston_rho * noise + math.sqrt(1.0 - heston_rho**2) * noise_v
+                v_prev = v[idx].copy()
+                # Full Truncation scheme for Heston
+                v_pos = np.maximum(v_prev, 0.0)
+                v_next = v_prev + heston_kappa * (heston_theta - v_pos) * dt + heston_xi * np.sqrt(v_pos) * sqdt * noise_v
+                v[idx] = np.maximum(v_next, 0.0)
+                v_step = v_pos
+
             # Skew меняет форму хвостов, но не должен сам создавать направленный
             # снос: E[step_r]=0 и Var[step_r]=sigma_R²·dt·fi².
             skew_noise = _centered_skew_noise(noise, skew)
-            step_r = sigma_R * sqdt * fi * skew_noise
-            r[idx] = prev + drift_R * dt + step_r
+            step_r = sigma_R * sqdt * fi * skew_noise * np.sqrt(v_step)
+            
+            # Ornstein-Uhlenbeck (Mean Reversion) + Base Drift
+            drift_step = (drift_R + ou_theta * (ou_mu - prev)) * dt
+            
+            r[idx] = prev + drift_step + step_r
             sub = r[idx]
             tp = sub >= T
             sl = sub <= -1.0
