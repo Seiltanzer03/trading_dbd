@@ -29,6 +29,8 @@ jobs:
         run: |
           pip install -e ".[dev]"
           pytest -q
+          node --check seiltanzer/web/js/cone.js
+          node tests/web/cone_interaction_smoke.mjs
       - name: Деплой на сервер по SSH
         if: env.HAS_PW == 'true'
         uses: appleboy/ssh-action@v1

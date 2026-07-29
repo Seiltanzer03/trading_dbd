@@ -47,6 +47,7 @@ export function initCone(elId) {
   let structSig = null, pendingStruct = false;
   let curR = null, lastDotR = null;
   let interacting = false, interactTimer = null;
+  let pointerHeld = false;
   let lastYTitle = null, lastNames = null;
   const live = { r: null };
 
@@ -67,27 +68,43 @@ export function initCone(elId) {
   const ready = () => typeof window !== 'undefined' && window.Plotly && el;
 
   // ---------------------------------------------------- взаимодействие/камера
+  function cloneCam(c) {
+    if (!c || !c.eye) return null;
+    return JSON.parse(JSON.stringify(c));
+  }
+  function finishInteraction() {
+    grabCam();
+    interacting = false;
+    flush();
+  }
   function markInteract() {
     interacting = true;
     if (interactTimer) clearTimeout(interactTimer);
-    interactTimer = setTimeout(() => {
-      grabCam();
-      interacting = false;
-      flush();
-    }, 250);
+    // A live restyle must never resume while the pointer is physically held.
+    // The old 250 ms timeout was able to interrupt a slow orbit mid-gesture.
+    if (!pointerHeld) interactTimer = setTimeout(finishInteraction, 280);
   }
   function grabCam() {
     const c = el._fullLayout?.scene?.camera;
-    if (c && c.eye) currentCam = c;
+    const copy = cloneCam(c);
+    if (copy) currentCam = copy;
+  }
+  function beginPointer() {
+    pointerHeld = true;
+    interacting = true;
+    if (interactTimer) clearTimeout(interactTimer);
+    grabCam();
   }
   function releaseInteract() {
+    if (!pointerHeld) return;
+    pointerHeld = false;
     grabCam();
     if (interactTimer) clearTimeout(interactTimer);
-    interactTimer = setTimeout(() => {
+    // Plotly commits the final camera just after the DOM pointerup event.
+    requestAnimationFrame(() => {
       grabCam();
-      interacting = false;
-      flush();
-    }, 80);
+      interactTimer = setTimeout(finishInteraction, 140);
+    });
   }
   function attachListeners() {
     if (listenersOn || !el.on) return;
@@ -104,13 +121,22 @@ export function initCone(elId) {
       grabCam();
       requestAnimationFrame(grabCam);
     });
-    el.addEventListener('mousedown', markInteract);
-    el.addEventListener('pointerdown', markInteract);
-    el.addEventListener('touchstart', markInteract, { passive: true });
+    // Capture before Plotly so the animation loop is frozen for the whole drag.
+    if (window.PointerEvent) {
+      el.addEventListener('pointerdown', beginPointer, true);
+      window.addEventListener('pointerup', releaseInteract, true);
+      window.addEventListener('pointercancel', releaseInteract, true);
+    } else {
+      el.addEventListener('mousedown', beginPointer, true);
+      el.addEventListener('touchstart', beginPointer, { passive: true, capture: true });
+      window.addEventListener('mouseup', releaseInteract, true);
+      window.addEventListener('touchend', releaseInteract, { passive: true, capture: true });
+      window.addEventListener('touchcancel', releaseInteract, { passive: true, capture: true });
+    }
     el.addEventListener('wheel', markInteract, { passive: true });
-    window.addEventListener('mouseup', releaseInteract);
-    window.addEventListener('pointerup', releaseInteract);
-    window.addEventListener('touchend', releaseInteract, { passive: true });
+    window.addEventListener('blur', () => {
+      if (pointerHeld) releaseInteract();
+    });
   }
   function flush() {
     if (!ready() || !hasPlot) return;
@@ -283,12 +309,14 @@ export function initCone(elId) {
       return shape;
     });
     // Geometry is a CONDITIONAL density surface. Survival is deliberately not
-    // multiplied into Z: it belongs on the stop/take walls. A small floor keeps
-    // the WebGL sheet continuous so every time slice remains inspectable.
-    const floor = 0.035;
+    // multiplied into Z: it belongs on the stop/take walls. Scale every time
+    // row by one common peak. Scaling each row to its own peak made every slice
+    // equally tall and turned the widening distribution into a curved awning.
+    const floor = 0.025;
+    const globalPeak = Math.max(...conditional.flatMap((row) => row), 1e-12);
     const z = conditional.map((row) => {
-      const peak = Math.max(...row, 1e-12);
-      return row.map((v) => floor + (1 - floor) * Math.pow(v / peak, 0.58));
+      return row.map((v) =>
+        floor + (1 - floor) * Math.pow(Math.min(1, v / globalPeak), 0.62));
     });
     const nS = conditional.length;
     tgt.z = z; tgt.pStop = [0, ...cone.p_stop_by_t]; tgt.pTake = [0, ...cone.p_take_by_t];
@@ -355,13 +383,15 @@ export function initCone(elId) {
     lastYTitle = yTitle;
     return {
       autosize: true, height: 430, margin: { l: 0, r: 0, t: 8, b: 0 },
+      uirevision: 'probability-cone-ui-v3',
       paper_bgcolor: PAPER, font: { family: FONT, color: INK, size: 11 },
       showlegend: true,
       legend: { orientation: 'h', x: 0, y: 1.07, font: { size: 10 }, bgcolor: 'rgba(0,0,0,0)' },
       scene: {
         camera: currentCam,
+        uirevision: 'probability-cone-camera-v3',
         dragmode: 'orbit',
-        bgcolor: SCENE_BG, aspectmode: 'manual', aspectratio: { x: 1.62, y: 1.34, z: 0.96 },
+        bgcolor: SCENE_BG, aspectmode: 'manual', aspectratio: { x: 1.72, y: 1.38, z: 0.76 },
         xaxis: { title: { text: 'R  (стоп −1 · 0 · тейк)', font: { size: 10, color: DIM } },
           range: [-1, T], gridcolor: RULE, zerolinecolor: RULE,
           tickvals: [-1, 0, T], ticktext: ['СТОП −1R', '0', `ТЕЙК +${T.toFixed(1)}R`],
@@ -437,10 +467,8 @@ export function initCone(elId) {
       lastYTitle = yTitle;
       const yTicktext = tgt.hy ? ['сейчас', fmtTime(tgt.hy * 0.5), fmtTime(tgt.hy)]
         : ['сейчас', '50%', 'развязка'];
-      grabCam();
       P.relayout(el, { 'scene.yaxis.title.text': yTitle,
-                       'scene.yaxis.ticktext': yTicktext,
-                       'scene.camera': currentCam });
+                       'scene.yaxis.ticktext': yTicktext });
     }
     const nStop = tgt.probabilityAvailable
       ? `СТОП ${(tgt.pStop[tgt.pStop.length - 1] * 100).toFixed(0)}%`
