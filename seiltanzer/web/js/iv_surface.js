@@ -7,7 +7,9 @@ const ORANGE = '#E8622A';
 const FONT = 'IBM Plex Mono, ui-monospace, monospace';
 
 function interp(xs, ys, x) {
-  if (!xs.length || x < xs[0] || x > xs[xs.length - 1]) return null;
+  if (!xs || !xs.length) return 0;
+  if (x <= xs[0]) return ys[0];
+  if (x >= xs[xs.length - 1]) return ys[ys.length - 1];
   let hi = 1;
   while (hi < xs.length && xs[hi] < x) hi++;
   if (hi >= xs.length) return ys[ys.length - 1];
@@ -110,10 +112,9 @@ export function initIVSurface(elId) {
     
     for (let r = 0; r < yDte.length; r++) {
       for (let c = 0; c < moneyPct.length; c++) {
-        if (zIvs[r][c] != null) {
-          surfData.push([moneyPct[c], yDte[r], zIvs[r][c]]);
-          rvData.push([moneyPct[c], yDte[r], rvBaseZ + (zIvs[r][c] - zMin) * 0.2]);
-        }
+        const val = zIvs[r][c];
+        surfData.push([moneyPct[c], yDte[r], val]);
+        rvData.push([moneyPct[c], yDte[r], rvBaseZ + (val - zMin) * 0.2]);
       }
     }
 
@@ -173,7 +174,8 @@ export function initIVSurface(elId) {
         {
           name: 'IV Surface', type: 'surface',
           wireframe: { show: true, lineStyle: { color: 'rgba(255,255,255,0.15)', width: 1 } },
-          shading: 'lambert', itemStyle: { opacity: 0.95 },
+          shading: 'realistic', itemStyle: { opacity: 0.95 },
+          realisticMaterial: { roughness: 0.4, metalness: 0.1 },
           data: m.surfData
         },
         {
