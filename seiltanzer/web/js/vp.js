@@ -1,175 +1,169 @@
+// Session Volume/TPO profile.
+//
+// The grid is anchored by the backend to a stable ATR-based bin size. The
+// frontend keeps an expanding session domain and a smoothed 95th-percentile
+// scale, so a new extreme or one oversized POC bin cannot make every bar jump.
+
 import { $, setupCanvas } from './util.js';
 import { approach } from './anim.js';
 
 let canvas, emptyEl;
 let payload = null;
-let state = {
-    bins: [], // { targetVol, currentVol, price }
-    poc: null,
-    maxVol: 0,
-    phase: 0
+const state = {
+  bins: new Map(),
+  poc: null,
+  isTpo: false,
+  valueAreaLow: null,
+  valueAreaHigh: null,
+  domainLo: null,
+  domainHi: null,
+  targetScale: 1,
+  currentScale: 1,
+  binSize: null,
 };
-let particles = [];
+
+function key(price) {
+  return Number(price).toFixed(8);
+}
 
 export function initVp() {
-    canvas = $('#vp-canvas');
-    emptyEl = $('#vp-empty');
-    if (!canvas) return;
-    requestAnimationFrame(renderLoop);
+  canvas = $('#vp-canvas');
+  emptyEl = $('#vp-empty');
+  if (!canvas) return;
+  requestAnimationFrame(renderLoop);
+}
+
+function resetState() {
+  state.bins = new Map();
+  state.domainLo = null;
+  state.domainHi = null;
+  state.currentScale = 1;
+  state.targetScale = 1;
 }
 
 export function updateVp(p) {
-    if (!p || !p.bins || p.bins.length === 0) {
-        payload = null;
-        if (emptyEl) emptyEl.style.display = 'flex';
-        if (canvas) canvas.style.display = 'none';
-        return;
-    }
-    payload = p;
-    if (emptyEl) emptyEl.style.display = 'none';
-    if (canvas) canvas.style.display = 'block';
+  if (!p || !p.bins || p.bins.length === 0) {
+    payload = null;
+    if (emptyEl) emptyEl.style.display = 'flex';
+    if (canvas) canvas.style.display = 'none';
+    return;
+  }
+  payload = p;
+  if (emptyEl) emptyEl.style.display = 'none';
+  if (canvas) canvas.style.display = 'block';
 
-    // Синхронизируем стейт бинов
-    let maxV = 0;
-    p.bins.forEach(b => {
-        if (b.volume > maxV) maxV = b.volume;
-        let existing = state.bins.find(x => x.price === b.price);
-        if (existing) {
-            existing.targetVol = b.volume;
-        } else {
-            state.bins.push({ price: b.price, targetVol: b.volume, currentVol: 0, yOffset: 0 });
-        }
-    });
-    // Удаляем старые бины
-    state.bins = state.bins.filter(sb => p.bins.some(b => b.price === sb.price));
-    state.maxVol = maxV;
-    state.poc = p.poc;
-    state.is_tpo = p.is_tpo;
+  const prices = p.bins.map((b) => Number(b.price)).filter(Number.isFinite);
+  const step = Number(p.bin_size) > 0
+    ? Number(p.bin_size)
+    : Math.max((Math.max(...prices) - Math.min(...prices)) / Math.max(prices.length, 1), 1e-9);
+  const desiredLo = Math.min(...prices) - step / 2;
+  const desiredHi = Math.max(...prices) + step / 2;
+  const disjoint = state.domainLo != null
+    && (desiredHi < state.domainLo || desiredLo > state.domainHi);
+  const gridChanged = state.binSize != null
+    && Math.abs(step - state.binSize) > Math.max(step, state.binSize) * 0.01;
+  if (disjoint || gridChanged) resetState();
+  state.binSize = step;
+  state.domainLo = state.domainLo == null ? desiredLo : Math.min(state.domainLo, desiredLo);
+  state.domainHi = state.domainHi == null ? desiredHi : Math.max(state.domainHi, desiredHi);
+
+  const seen = new Set();
+  for (const b of p.bins) {
+    const k = key(b.price);
+    seen.add(k);
+    const volume = Math.max(0, Number(b.volume) || 0);
+    const existing = state.bins.get(k);
+    if (existing) {
+      existing.targetVol = volume;
+      existing.price = Number(b.price);
+    } else {
+      state.bins.set(k, {
+        price: Number(b.price), targetVol: volume,
+        currentVol: volume * 0.65,
+      });
+    }
+  }
+  // Retain missing bins briefly and fade them instead of tearing down the grid.
+  for (const [k, b] of state.bins.entries()) {
+    if (!seen.has(k)) b.targetVol = 0;
+  }
+
+  const vols = p.bins.map((b) => Math.max(0, Number(b.volume) || 0))
+    .sort((a, b) => a - b);
+  const q95 = vols[Math.min(vols.length - 1, Math.floor((vols.length - 1) * 0.95))] || 1;
+  state.targetScale = Math.max(q95, 1e-9);
+  if (!(state.currentScale > 0)) state.currentScale = state.targetScale;
+  state.poc = Number(p.poc);
+  state.isTpo = !!p.is_tpo;
+  state.valueAreaLow = Number.isFinite(Number(p.value_area_low)) ? Number(p.value_area_low) : null;
+  state.valueAreaHigh = Number.isFinite(Number(p.value_area_high)) ? Number(p.value_area_high) : null;
 }
 
-function renderLoop(time) {
-    requestAnimationFrame(renderLoop);
-    if (!payload || !canvas || canvas.style.display === 'none') return;
+let last = performance.now();
+function renderLoop(now) {
+  requestAnimationFrame(renderLoop);
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  if (!payload || !canvas || canvas.style.display === 'none') return;
 
-    state.phase += 0.03; // Для синусоиды
+  const { ctx, w, h } = setupCanvas(canvas, 190);
+  ctx.clearRect(0, 0, w, h);
+  if (!state.bins.size || !(state.domainHi > state.domainLo)) return;
 
-    const { ctx, w, h } = setupCanvas(canvas, 190);
-    ctx.clearRect(0, 0, w, h);
+  state.currentScale = approach(state.currentScale, state.targetScale, dt, 4);
+  const padY = 10;
+  const getY = (price) =>
+    h - padY - ((price - state.domainLo) / (state.domainHi - state.domainLo)) * (h - padY * 2);
+  const binH = Math.max(2, Math.abs(getY(state.domainLo) - getY(state.domainLo + state.binSize)));
+  const maxW = w - 10;
 
-    if (state.bins.length === 0) return;
+  // Accepted 70% area: stable context before individual bars.
+  if (state.valueAreaLow != null && state.valueAreaHigh != null) {
+    const yTop = getY(state.valueAreaHigh + state.binSize / 2);
+    const yBottom = getY(state.valueAreaLow - state.binSize / 2);
+    ctx.fillStyle = 'rgba(46,125,79,0.045)';
+    ctx.fillRect(0, yTop, w, Math.max(1, yBottom - yTop));
+    ctx.strokeStyle = 'rgba(46,125,79,0.24)';
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(0, yTop); ctx.lineTo(w, yTop);
+    ctx.moveTo(0, yBottom); ctx.lineTo(w, yBottom); ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
-    // Определяем вертикальные координаты (Y = Цена)
-    const minP = Math.min(...state.bins.map(b => b.price));
-    const maxP = Math.max(...state.bins.map(b => b.price));
-    
-    // Функция маппинга цены в Y (перевернутая ось: maxP сверху, minP снизу)
-    const padY = 10;
-    const getY = (p) => {
-        if (maxP === minP) return h / 2;
-        return h - padY - ((p - minP) / (maxP - minP)) * (h - padY * 2);
-    };
-
-    let binH = 4;
-    if (state.bins.length > 1) {
-        // сортируем по цене
-        state.bins.sort((a, b) => a.price - b.price);
-        const step = state.bins[1].price - state.bins[0].price;
-        binH = Math.max(2, Math.abs(getY(minP) - getY(minP + step)));
+  const ordered = [...state.bins.values()].sort((a, b) => a.price - b.price);
+  for (const b of ordered) {
+    b.currentVol = approach(b.currentVol, b.targetVol, dt, 4.5);
+    if (b.targetVol === 0 && b.currentVol < state.currentScale * 0.001) {
+      state.bins.delete(key(b.price));
+      continue;
     }
-
-    const maxW = w - 10; // максимальная длина бара
-
-    // Рисуем бары (жидкая гистограмма)
-    state.bins.forEach((b, i) => {
-        // Spring physics для объема
-        b.currentVol = approach(b.currentVol, b.targetVol, 0.03, 3);
-        
-        let barW = (b.currentVol / state.maxVol) * maxW;
-        if (isNaN(barW) || barW < 0) barW = 0;
-        
-        // Колыхание правого края (жидкий эффект)
-        const wave = Math.sin(state.phase + i * 0.5) * (barW * 0.05); 
-        const drawW = Math.max(1, barW + wave);
-
-        const y = getY(b.price);
-
-        // Градиент заливки
-        let grad = ctx.createLinearGradient(0, y, drawW, y);
-        grad.addColorStop(0, 'rgba(46,125,79,0.05)'); // темный у корня
-        
-        if (b.price === state.poc) {
-            // POC Glow
-            grad.addColorStop(1, 'rgba(232,98,42,0.8)');
-            ctx.shadowColor = 'rgba(232,98,42,0.6)';
-            ctx.shadowBlur = 10;
-            ctx.fillStyle = grad;
-        } else {
-            grad.addColorStop(1, 'rgba(46,125,79,0.5)'); // яркий на конце
-            ctx.fillStyle = grad;
-            ctx.shadowBlur = 0;
-        }
-
-        ctx.beginPath();
-        // Скругленный край бара справа
-        ctx.roundRect(0, y - binH/2, drawW, binH - 1, [0, 4, 4, 0]);
-        ctx.fill();
-        ctx.shadowBlur = 0;
-    });
-
-    // Рисуем POC линию и текст
-    if (state.poc != null) {
-        const y = getY(state.poc);
-        ctx.fillStyle = '#E8622A';
-        ctx.font = '8px "IBM Plex Mono", monospace';
-        ctx.textAlign = 'left';
-        ctx.fillText(`POC${state.is_tpo ? '(TPO)' : ''}`, 4, y - binH);
-        
-        ctx.strokeStyle = 'rgba(232,98,42,0.4)';
-        ctx.setLineDash([2, 2]);
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(w, y);
-        ctx.stroke();
-        ctx.setLineDash([]);
+    const ratio = Math.max(0, Math.min(1, b.currentVol / Math.max(state.currentScale, 1e-9)));
+    const barW = Math.max(1, ratio * maxW);
+    const y = getY(b.price);
+    const isPoc = Math.abs(b.price - state.poc) <= state.binSize * 0.1;
+    const grad = ctx.createLinearGradient(0, y, barW, y);
+    grad.addColorStop(0, 'rgba(46,125,79,0.04)');
+    grad.addColorStop(1, isPoc ? 'rgba(232,98,42,0.84)' : 'rgba(46,125,79,0.52)');
+    ctx.fillStyle = grad;
+    if (isPoc) {
+      ctx.shadowColor = 'rgba(232,98,42,0.42)';
+      ctx.shadowBlur = 7;
     }
+    ctx.beginPath();
+    ctx.roundRect(0, y - binH / 2, barW, Math.max(1, binH - 1), [0, 3, 3, 0]);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
 
-    // Частицы
-    updateAndDrawParticles(ctx, w, h, getY);
-}
-
-function updateAndDrawParticles(ctx, w, h, getY) {
-    // Спавн частиц (дрейф к POC или толстым зонам)
-    if (Math.random() < 0.3 && state.maxVol > 0) {
-        // Спавним на случайной высоте
-        const rp = Math.random() * (Math.max(...state.bins.map(b => b.price)) - Math.min(...state.bins.map(b => b.price))) + Math.min(...state.bins.map(b => b.price));
-        particles.push({
-            price: rp,
-            x: Math.random() * (w * 0.5),
-            life: 1.0,
-            speed: (Math.random() * 0.5 + 0.2)
-        });
-    }
-
-    ctx.fillStyle = 'rgba(255,255,255,0.4)';
-    for (let i = particles.length - 1; i >= 0; i--) {
-        let p = particles[i];
-        
-        // Притяжение к POC
-        if (state.poc != null) {
-            p.price = approach(p.price, state.poc, 0.005, p.speed);
-        }
-        p.x += Math.random() * 0.5; // небольшой дрейф вправо
-        p.life -= 0.01;
-
-        if (p.life <= 0 || p.x > w) {
-            particles.splice(i, 1);
-            continue;
-        }
-
-        ctx.globalAlpha = p.life;
-        ctx.beginPath();
-        ctx.arc(p.x, getY(p.price), 0.8, 0, Math.PI * 2);
-        ctx.fill();
-    }
-    ctx.globalAlpha = 1.0;
+  if (state.poc != null) {
+    const y = getY(state.poc);
+    ctx.strokeStyle = 'rgba(232,98,42,0.55)';
+    ctx.setLineDash([3, 2]);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#E8622A';
+    ctx.font = '8px "IBM Plex Mono", monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(`POC${state.isTpo ? ' · TPO' : ' · VOL'}`, 4, Math.max(9, y - 4));
+  }
 }

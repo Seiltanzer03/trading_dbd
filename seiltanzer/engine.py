@@ -469,9 +469,9 @@ class Engine:
             return chip
 
         chips = [
-            vol_chip("vix", "VIX>20", "vix_gt_20", lambda v: v > 20.0),
-            vol_chip("gvz", "GVZ<18", "gvz_lt_18", lambda v: v < 18.0),
-            vol_chip("dv1x", "DV1X<19", "dv1x_lt_19", lambda v: v < 19.0),
+            vol_chip("vix", "VIX > 20", "vix_gt_20", lambda v: v > 20.0),
+            vol_chip("gvz", "GVZ < 18", "gvz_lt_18", lambda v: v < 18.0),
+            vol_chip("dv1x", "DV1X < 19", "dv1x_lt_19", lambda v: v < 19.0),
         ]
 
         atr = self._atr_payload()
@@ -480,12 +480,17 @@ class Engine:
             "value": atr.get("ratio"), "status_feed": atr.get("status"),
             "state": ("no_data" if atr.get("phase") is None else
                       "block" if atr["phase"] == "shock" else "pass"),
+            "phase": atr.get("phase"), "rr_mult": atr.get("rr_mult"),
+            "decision_weight": True,
             "detail": (atr.get("reason") or
                        f"фаза {atr['phase']}, k={atr['k']}, RRx{atr['rr_mult']}"),
         })
+        tech_required = bool(trade and trade.get("instrument") == "NAS100")
         chips.append({
-            "key": "tech", "label": "ТЕХАНАЛИЗ>-30", "required": trade is not None,
-            "value": None, "status_feed": "manual", "state": "manual",
+            "key": "tech", "label": "ТЕХАНАЛИЗ > −30", "required": tech_required,
+            "value": None, "status_feed": "manual",
+            "state": "manual" if tech_required else "na",
+            "decision_weight": False,
             "detail": "индикатор «Теханализ» TradingView на 1D NAS100 — только вручную",
         })
         return chips
@@ -728,6 +733,9 @@ class Engine:
         if terminal and terminal.get("probs"):
             out["market_terminal"] = terminal["probs"]
             out["market_edges"] = terminal["edges"]
+            out["market_p_take"] = terminal.get("p_take")
+            out["market_p_stop"] = terminal.get("p_stop")
+            out["market_mean_r"] = terminal.get("mean_r")
             out["market_demo"] = terminal.get("demo", False)
         else:
             out["market_terminal"] = None
@@ -1008,14 +1016,18 @@ class Engine:
         iv = m["implied_move"]["sigma_annual"]
         vrp = iv - rv
         vrp_pct = vrp / rv
-        regime = "перегрев" if vrp > 0.05 else ("недооценка" if vrp < -0.03 else "норма")
+        regime = "iv_premium" if vrp > 0.05 else ("iv_discount" if vrp < -0.03 else "balanced")
         return {
             "available": True,
             "iv": iv,
             "rv": rv,
             "vrp": vrp,
+            "vrp_pp": vrp * 100.0,
             "vrp_pct": vrp_pct,
-            "regime": regime
+            "iv_rv_ratio": iv / rv,
+            "regime": regime,
+            "snapshot_ts": self.market.chain.get("ts"),
+            "source": self.market.chain.get("source"),
         }
 
     def _volume_profile_payload(self, quote_offset: float = 0.0) -> dict | None:
@@ -1027,39 +1039,61 @@ class Engine:
         min_p, max_p = min(prices), max(prices)
         if min_p == max_p:
             return None
-            
-        # Определяем размер бина: разбиваем диапазон на ~50 бинов
-        bins = 50
-        bin_size = (max_p - min_p) / bins
-        if bin_size == 0:
-            return None
-            
+
+        # Фиксированная «nice» сетка от дневного ATR, а не min/max каждого
+        # обновления. Поэтому новый экстремум сессии добавляет бины, но не
+        # перебивает всю историю и не заставляет профиль прыгать.
+        atr_abs = self._atr_abs()
+        raw_step = (
+            atr_abs / 36.0 if atr_abs and atr_abs > 0
+            else (max_p - min_p) / 40.0
+        )
+        raw_step = max(raw_step, abs((min_p + max_p) / 2.0) * 1e-7, 1e-9)
+        magnitude = 10.0 ** math.floor(math.log10(raw_step))
+        scaled = raw_step / magnitude
+        nice = next(x for x in (1.0, 2.0, 2.5, 5.0, 10.0) if scaled <= x)
+        bin_size = nice * magnitude
+        origin = math.floor(min_p / bin_size) * bin_size
+
         profile = {}
         total_vol = 0
         has_real_volume = sum(x[2] for x in intraday) > 0
-        
+
         for _ts, raw_p, vol in intraday:
             p = raw_p + quote_offset
             # Если нет реального объема, используем 1 как TPO (Time Price Opportunity)
             v = vol if has_real_volume else 1.0
-            b = min_p + math.floor((p - min_p) / bin_size) * bin_size
-            b = round(b, 4)
+            b = origin + math.floor((p - origin) / bin_size) * bin_size
+            b = round(b + bin_size / 2.0, 8)
             profile[b] = profile.get(b, 0) + v
             total_vol += v
-            
+
         if total_vol == 0:
             return None
-            
+
         poc_price = max(profile.keys(), key=lambda k: profile[k])
-        
+
         bins_list = [{"price": k, "volume": v} for k, v in profile.items()]
         bins_list.sort(key=lambda x: x["price"])
-        
+        # 70% value area: берём наиболее принятые ценовые корзины до 70% массы,
+        # затем показываем минимальную/максимальную границу выбранного набора.
+        selected, accumulated = [], 0.0
+        for price_bin, volume in sorted(profile.items(), key=lambda kv: kv[1], reverse=True):
+            selected.append(price_bin)
+            accumulated += volume
+            if accumulated >= total_vol * 0.70:
+                break
+
         return {
             "poc": poc_price,
             "bins": bins_list,
             "total": total_vol,
-            "is_tpo": not has_real_volume
+            "is_tpo": not has_real_volume,
+            "bin_size": bin_size,
+            "value_area_low": min(selected) if selected else None,
+            "value_area_high": max(selected) if selected else None,
+            "window_start": min(x[0] for x in intraday),
+            "window_end": max(x[0] for x in intraday),
         }
 
     def _levels_payload(self, trade: dict, price: float, sigma: dict,

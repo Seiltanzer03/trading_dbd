@@ -570,68 +570,126 @@ class MarketData:
             self._mark_fail(self.iv_surface, self.settings.chain_poll_sec * 3, f"IV surface ошибка: {e}")
 
     def refresh_correlation(self) -> None:
-        """CROSS-ASSET & SPOT-VOL CORRELATION MATRIX.
-        Сравнивает цены базовых активов с их индексами ожидаемой волатильности."""
+        """Rolling cross-asset regime: 5m correlation versus 3-month baseline."""
         tickers = ["NQ=F", "^VXN", "ES=F", "^VIX", "GC=F", "^GVZ", "CL=F", "^OVX"]
         names = ["NAS", "VXN", "SP500", "VIX", "GOLD", "GVZ", "OIL", "OVX"]
-        
         now_ts = time.time()
-        
+
         if self.demo:
-            import numpy as np
-            # Генерируем красивую медленно дышащую матрицу
             n = len(tickers)
-            mat = np.eye(n)
-            t = now_ts / 300.0
+            baseline = np.eye(n)
+            short = np.eye(n)
+            t = now_ts / 180.0
             for i in range(n):
-                for j in range(i+1, n):
-                    # Псевдослучайная синусоида для каждой пары
-                    phase = i * 2.3 + j * 1.7
-                    val = math.sin(t + phase) * 0.8 * math.cos(t * 0.5 + i)
-                    mat[i, j] = val
-                    mat[j, i] = val
-                    
+                for j in range(i + 1, n):
+                    base = (-0.55 if (i, j) in {(0, 1), (2, 3), (4, 5), (6, 7)}
+                            else 0.68 if (i, j) == (0, 2) else
+                            0.22 * math.sin(i * 1.7 + j))
+                    live = max(-0.98, min(0.98, base + 0.24 * math.sin(t + i * 0.9 + j * 1.3)))
+                    baseline[i, j] = baseline[j, i] = base
+                    short[i, j] = short[j, i] = live
+            delta = short - baseline
             self.correlation = _status_dict(
-                value={"assets": names, "matrix": mat.tolist()},
+                value={"assets": names, "matrix": short.tolist(),
+                       "matrix_short": short.tolist(),
+                       "matrix_baseline": baseline.tolist(),
+                       "matrix_delta": delta.tolist(),
+                       "observations_short": [96] * n,
+                       "short_window": "5m × 96", "baseline_window": "3mo × 1d",
+                       "asof": now_ts},
                 status="demo",
                 ts=now_ts,
-                source="synthetic correlation"
+                source="synthetic rolling regime"
             )
             return
-            
+
         try:
             import yfinance as yf
-            import numpy as np
-            
-            data = yf.download(tickers, period="1mo", interval="1d", progress=False)
-            closes = data['Close']
-            
-            # Считаем дневные доходности (разница для VIX, лог-разница для цен)
-            # Для простоты используем pct_change для всего
-            returns = closes.pct_change().dropna()
-            
-            # Корреляционная матрица
-            corr_matrix = returns.corr().fillna(0)
-            
-            # Переупорядочиваем согласно списку tickers
-            ordered_corr = []
-            for i, t1 in enumerate(tickers):
-                row = []
-                for j, t2 in enumerate(tickers):
-                    # yfinance возвращает мультииндекс или алфавитный порядок
-                    # безопаснее брать через pandas
-                    try:
-                        val = corr_matrix.loc[t1, t2]
-                    except KeyError:
-                        val = 0.0
-                    row.append(float(val))
-                ordered_corr.append(row)
-                
+
+            def closes_from(data):
+                if data is None or len(data) == 0:
+                    return None
+                cols = data.columns
+                if getattr(cols, "nlevels", 1) > 1:
+                    if "Close" in cols.get_level_values(0):
+                        frame = data["Close"]
+                    elif "Close" in cols.get_level_values(1):
+                        frame = data.xs("Close", axis=1, level=1)
+                    else:
+                        return None
+                elif "Close" in cols:
+                    frame = data[["Close"]].rename(columns={"Close": tickers[0]})
+                else:
+                    return None
+                return frame.reindex(columns=tickers)
+
+            def pair_matrix(returns, min_obs: int):
+                n = len(tickers)
+                mat = [[None] * n for _ in range(n)]
+                counts = [0] * n
+                if returns is None or len(returns) == 0:
+                    return mat, counts
+                counts = [int(returns[t].notna().sum()) if t in returns else 0 for t in tickers]
+                for i, t1 in enumerate(tickers):
+                    mat[i][i] = 1.0
+                    for j in range(i + 1, n):
+                        pair = returns[[t1, tickers[j]]].dropna()
+                        val = (
+                            float(pair.iloc[:, 0].corr(pair.iloc[:, 1]))
+                            if len(pair) >= min_obs else None
+                        )
+                        if val is not None and not math.isfinite(val):
+                            val = None
+                        mat[i][j] = mat[j][i] = val
+                return mat, counts
+
+            intraday_data = yf.download(
+                tickers, period="5d", interval="5m", progress=False,
+                auto_adjust=False, threads=False)
+            daily_data = yf.download(
+                tickers, period="3mo", interval="1d", progress=False,
+                auto_adjust=False, threads=False)
+            intraday = closes_from(intraday_data)
+            daily = closes_from(daily_data)
+            intraday_ret = (
+                intraday.ffill(limit=2).pct_change(fill_method=None).tail(96)
+                if intraday is not None else None)
+            daily_ret = (
+                daily.pct_change(fill_method=None).tail(60)
+                if daily is not None else None)
+            short, observations = pair_matrix(intraday_ret, 12)
+            baseline, _ = pair_matrix(daily_ret, 20)
+            matrix, delta = [], []
+            valid_dynamic = 0
+            for i in range(len(tickers)):
+                row, drow = [], []
+                for j in range(len(tickers)):
+                    sv, bv = short[i][j], baseline[i][j]
+                    if sv is not None and bv is not None:
+                        valid_dynamic += int(i < j)
+                        row.append(sv)
+                        drow.append(sv - bv)
+                    else:
+                        row.append(bv if bv is not None else (1.0 if i == j else 0.0))
+                        drow.append(None)
+                matrix.append(row)
+                delta.append(drow)
+            if valid_dynamic == 0:
+                raise RuntimeError("нет пар с достаточным числом 5m наблюдений")
+
             self.correlation = _status_dict(
-                value={"assets": names, "matrix": ordered_corr},
+                value={"assets": names, "matrix": matrix,
+                       "matrix_short": short,
+                       "matrix_baseline": baseline,
+                       "matrix_delta": delta,
+                       "observations_short": observations,
+                       "short_window": "5m × 96",
+                       "baseline_window": "3mo × 1d",
+                       "dynamic_pairs": valid_dynamic,
+                       "asof": now_ts},
                 status="delayed",
                 ts=now_ts,
-                source="yfinance daily returns (30d)"
+                source="yfinance rolling 5m vs daily baseline"
             )
         except Exception as e:
             self._mark_fail(self.correlation, 300.0, f"Correlation error: {e}")

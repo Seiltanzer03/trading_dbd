@@ -1,7 +1,7 @@
 // VRP Термометр — Volatility Risk Premium (IV - RV).
 // Положительный VRP = рынок переплачивает за волу (опционы дорогие).
 // Отрицательный VRP = рынок недооценивает риск (опционы дёшевы).
-// Шкала ДИНАМИЧЕСКАЯ — масштаб меняется под текущую историческую дисперсию.
+// Шкала в процентных пунктах IV−RV; отношение IV/RV показывается отдельно.
 import { $, fmtPct, setupCanvas } from './util.js';
 import { approach } from './anim.js';
 
@@ -9,11 +9,11 @@ let canvas, emptyEl, statusEl;
 let payload = null;
 
 let state = {
-    iv: 0, rv: 0, vrp_pct: 0,
-    phase: 0,
+    iv: 0, rv: 0, vrp: 0,
     history: [],
-    histMin: -0.3,
-    histMax: 0.3,
+    histMin: -0.1,
+    histMax: 0.1,
+    lastSample: null,
 };
 
 export function initVrp() {
@@ -37,29 +37,35 @@ export function updateVrp(p) {
     if (canvas) canvas.style.display = 'block';
 
     if (state.iv === 0 && state.rv === 0) {
-        state.iv = p.iv; state.rv = p.rv; state.vrp_pct = p.vrp_pct;
+        state.iv = p.iv; state.rv = p.rv; state.vrp = p.vrp ?? (p.iv - p.rv);
     }
 
-    // История для динамической шкалы
-    state.history.push(p.vrp_pct);
-    if (state.history.length > 80) state.history.shift();
-    if (state.history.length > 5) {
-        const mg = 0.05;
-        let mn = Math.min(...state.history) - mg;
-        let mx = Math.max(...state.history) + mg;
-        if (mx - mn < 0.4) { const mid = (mx + mn) / 2; mn = mid - 0.2; mx = mid + 0.2; }
-        state.histMin = mn;
-        state.histMax = mx;
+    // Одна точка на новый option snapshot, а не 80 копий одного значения,
+    // добавленных websocket-тиками цены.
+    const sampleId = p.snapshot_ts ?? `${p.iv}|${p.rv}`;
+    if (sampleId !== state.lastSample) {
+        state.lastSample = sampleId;
+        state.history.push(p.vrp ?? (p.iv - p.rv));
+        if (state.history.length > 80) state.history.shift();
+    }
+    if (state.history.length) {
+        const maxAbs = Math.max(0.10, ...state.history.map((v) => Math.abs(v))) * 1.18;
+        state.histMin = -maxAbs;
+        state.histMax = maxAbs;
     }
 
     if (statusEl) {
-        const pp = ((p.iv - p.rv) * 100).toFixed(1);
-        const sign = p.vrp_pct >= 0 ? '+' : '';
-        let label = `VRP: ${sign}${pp}pp  (RV: ${fmtPct(p.rv)} → IV: ${fmtPct(p.iv)})`;
-        if (p.regime === 'перегрев') label += '  🔥 IV > RV — рынок ЖДЁТ движение. Следи за направлением скью.';
-        else if (p.regime === 'недооценка') label += '  ❄️ IV < RV — движение уже ИДЁТ, рынок не верит. Тренд может продолжиться.';
-        else label += '  ⚖️ IV≈RV — рынок в балансе ожиданий';
+        const spread = p.vrp ?? (p.iv - p.rv);
+        const pp = (spread * 100).toFixed(1);
+        const sign = spread >= 0 ? '+' : '';
+        const ratio = p.iv_rv_ratio ?? (p.rv > 0 ? p.iv / p.rv : null);
+        let label = `VRP ${sign}${pp} п.п. · IV/RV ${ratio == null ? '—' : `${ratio.toFixed(2)}×`} · `
+          + `IV ${fmtPct(p.iv)} vs RV ${fmtPct(p.rv)}`;
+        if (p.regime === 'iv_premium') label += ' · опционы закладывают больше движения; НАПРАВЛЕНИЕ НЕ ОПРЕДЕЛЯЕТ';
+        else if (p.regime === 'iv_discount') label += ' · realized выше implied; риск продолжения расширения';
+        else label += ' · IV и RV близки';
         statusEl.textContent = label;
+        statusEl.dataset.tip = 'VRP показан в процентных пунктах (IV − RV). Отношение IV/RV вынесено отдельно, поэтому +34 п.п. больше не выглядит как ошибочные 151%.';
     }
 }
 
@@ -69,8 +75,7 @@ function renderLoop() {
 
     state.iv = approach(state.iv, payload.iv, 0.016, 4);
     state.rv = approach(state.rv, payload.rv, 0.016, 4);
-    state.vrp_pct = approach(state.vrp_pct, payload.vrp_pct, 0.016, 4);
-    state.phase += 0.025;
+    state.vrp = approach(state.vrp, payload.vrp ?? (payload.iv - payload.rv), 0.016, 4);
 
     const { ctx, w, h } = setupCanvas(canvas, 54);
     ctx.clearRect(0, 0, w, h);
@@ -84,7 +89,7 @@ function renderLoop() {
 
     const zeroNorm = (-rMin) / rTot;
     const zeroX = padX + zeroNorm * trackW;
-    const curNorm = Math.max(0, Math.min(1, (state.vrp_pct - rMin) / rTot));
+    const curNorm = Math.max(0, Math.min(1, (state.vrp - rMin) / rTot));
     const markerX = padX + curNorm * trackW;
 
     // Зонный фон
@@ -120,26 +125,25 @@ function renderLoop() {
 
     // Метки крайних значений (динамические)
     ctx.fillStyle = 'rgba(70,130,180,0.8)'; ctx.font = '8px "IBM Plex Mono",monospace';
-    ctx.textAlign = 'left'; ctx.fillText((rMin * 100).toFixed(0) + '%', 1, trackY + trackH / 2 + 3);
+    ctx.textAlign = 'left'; ctx.fillText((rMin * 100).toFixed(0) + 'п.п.', 1, trackY + trackH / 2 + 3);
     ctx.fillStyle = 'rgba(198,55,60,0.8)'; ctx.textAlign = 'right';
-    ctx.fillText('+' + (rMax * 100).toFixed(0) + '%', w - 1, trackY + trackH / 2 + 3);
+    ctx.fillText('+' + (rMax * 100).toFixed(0) + 'п.п.', w - 1, trackY + trackH / 2 + 3);
     ctx.fillStyle = 'rgba(70,130,180,0.55)'; ctx.font = '7px "IBM Plex Mono",monospace';
     ctx.textAlign = 'left'; ctx.fillText('ДЁШЕВО', padX + 3, trackY + trackH / 2 + 3);
     ctx.fillStyle = 'rgba(198,55,60,0.55)'; ctx.textAlign = 'right';
     ctx.fillText('ДОРОГО', padX + trackW - 3, trackY + trackH / 2 + 3);
 
     // Пульсирующий маркер
-    const glow = Math.sin(state.phase * 2) * 2;
-    ctx.beginPath(); ctx.arc(markerX, trackY + trackH / 2, 7 + glow, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(markerX, trackY + trackH / 2, 7, 0, Math.PI * 2);
     ctx.fillStyle = '#FFFFFF';
-    ctx.shadowColor = state.vrp_pct > 0 ? 'rgba(198,55,60,0.8)' : 'rgba(70,130,180,0.8)';
+    ctx.shadowColor = state.vrp > 0 ? 'rgba(198,55,60,0.8)' : 'rgba(70,130,180,0.8)';
     ctx.shadowBlur = 10; ctx.fill();
-    ctx.strokeStyle = state.vrp_pct > 0 ? '#C6373C' : '#2E7D4F';
+    ctx.strokeStyle = state.vrp > 0 ? '#C6373C' : '#2E7D4F';
     ctx.lineWidth = 2.5; ctx.stroke(); ctx.shadowBlur = 0;
 
     // Подпись над маркером
-    const vrpLabel = (state.vrp_pct * 100).toFixed(1) + '%';
-    ctx.fillStyle = state.vrp_pct > 0 ? '#C6373C' : '#2E7D4F';
+    const vrpLabel = `${state.vrp >= 0 ? '+' : ''}${(state.vrp * 100).toFixed(1)}п.п.`;
+    ctx.fillStyle = state.vrp > 0 ? '#C6373C' : '#2E7D4F';
     ctx.textAlign = 'center'; ctx.font = 'bold 8px "IBM Plex Mono",monospace';
     ctx.fillText(vrpLabel, markerX, trackY - 4);
 }

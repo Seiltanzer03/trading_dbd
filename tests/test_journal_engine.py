@@ -444,3 +444,32 @@ class TestFiltersLogic:
         engine.on_trade_opened(t)
         tech = next(c for c in engine.tick_payload()["filters"] if c["key"] == "tech")
         assert tech["state"] == "manual"
+
+
+class TestLiveVisualPayloads:
+    def test_vrp_reports_spread_points_and_ratio_separately(self, engine):
+        engine.market.refresh_price()
+        engine.market.refresh_daily()
+        engine.market.refresh_chain()
+        vrp = engine.tick_payload()["vrp"]
+        assert vrp["available"] is True
+        assert vrp["vrp_pp"] == pytest.approx((vrp["iv"] - vrp["rv"]) * 100)
+        assert vrp["iv_rv_ratio"] == pytest.approx(vrp["iv"] / vrp["rv"])
+
+    def test_volume_profile_grid_does_not_rebin_on_new_extreme(self, engine):
+        engine.market.refresh_daily()
+        engine.market.intraday = [
+            (1.0, 100.0, 10.0), (2.0, 101.0, 20.0), (3.0, 102.0, 15.0)]
+        first = engine._volume_profile_payload()
+        engine.market.intraday.append((4.0, 104.0, 5.0))
+        second = engine._volume_profile_payload()
+        assert second["bin_size"] == pytest.approx(first["bin_size"])
+        assert second["value_area_low"] <= second["poc"] <= second["value_area_high"]
+
+    def test_demo_correlation_has_rolling_and_baseline_layers(self, engine):
+        engine.market.refresh_correlation()
+        value = engine.market.correlation["value"]
+        assert value["matrix_short"]
+        assert value["matrix_baseline"]
+        assert value["matrix_delta"]
+        assert len(value["observations_short"]) == len(value["assets"]) == 8

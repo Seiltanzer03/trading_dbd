@@ -356,6 +356,19 @@ html, body {
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 
+.filter-summary {
+  flex: 1 0 100%;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 6px 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .035em;
+}
+.filter-summary.pass { border-color: var(--green); color: var(--green); background: #EDF4EF; }
+.filter-summary.block { border-color: var(--red); color: var(--red); background: #F9ECEC; }
+.filter-summary.manual { border-color: var(--dim); color: var(--ink); background: var(--accent-bg); }
+
 .chip {
   border: 1px solid var(--rule);
   border-radius: 3px;

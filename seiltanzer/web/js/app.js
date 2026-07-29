@@ -574,13 +574,47 @@ function renderFilters() {
   if (!t) return;
   const box = $('#filter-chips');
   box.innerHTML = '';
-  for (const c of t.filters) {
+  if (!t.trade) {
+    const empty = document.createElement('div');
+    empty.className = 'filter-summary manual';
+    empty.textContent = '○ НЕТ ОТКРЫТОЙ СДЕЛКИ · ФИЛЬТРЫ НЕ АКТИВНЫ';
+    box.appendChild(empty);
+    return;
+  }
+  const relevant = (t.filters || []).filter((c) => c.required);
+  const decisiveBlock = relevant.find((c) => c.state === 'block' && c.decision_weight !== false);
+  const contextMiss = relevant.filter((c) => c.state === 'block' && c.decision_weight === false);
+  const manual = relevant.filter((c) => c.state === 'manual' || c.state === 'no_data');
+  const summary = document.createElement('div');
+  if (decisiveBlock) {
+    summary.className = 'filter-summary block';
+    summary.textContent = `✕ РИСК-ФИЛЬТР: ${decisiveBlock.label} · ВХОД/УДЕРЖАНИЕ ТРЕБУЕТ ПЕРЕСМОТРА`;
+  } else if (manual.length) {
+    summary.className = 'filter-summary manual';
+    summary.textContent = `◑ НУЖНА РУЧНАЯ ПРОВЕРКА: ${manual.map((c) => c.label).join(', ')}`;
+  } else if (contextMiss.length) {
+    summary.className = 'filter-summary manual';
+    summary.textContent = `◐ КОНТЕКСТ НЕ СОВПАЛ: ${contextMiss.map((c) => c.label).join(', ')} · НЕ ПОДМЕНЯЕТ OPTION EDGE`;
+  } else {
+    summary.className = 'filter-summary pass';
+    summary.textContent = `● АКТИВНЫЕ ФИЛЬТРЫ СОГЛАСОВАНЫ · ${relevant.length} ПРОВЕРЕНО`;
+  }
+  summary.dataset.tip = 'Сводка показывает только фильтры активного сетапа. Delayed-индексы волатильности остаются контекстом; ATR-фаза влияет на риск/RR.';
+  box.appendChild(summary);
+
+  for (const c of relevant) {
     const div = document.createElement('div');
     div.className = 'chip ' + c.state;
     const icon = { pass: '●', block: '✕', manual: '◑', na: '·', no_data: '○' }[c.state] || '·';
-    const txt = { pass: 'PASS', block: 'BLOCK', manual: 'MANUAL', na: '—', no_data: 'NO DATA' }[c.state];
+    const isContext = c.decision_weight === false;
+    const txt = c.state === 'pass' ? (isContext ? 'СОВПАЛ' : 'РАБОТАЕТ')
+      : c.state === 'block' ? (isContext ? 'НЕ СОВПАЛ' : 'BLOCK')
+        : c.state === 'manual' ? 'ПРОВЕРИТЬ' : c.state === 'no_data' ? 'НЕТ ДАННЫХ' : '—';
+    const value = c.key === 'atr'
+      ? `${String(c.phase || '—').toUpperCase()} · ratio ${c.value == null ? '—' : fmtNum(c.value, 2)} · RR×${c.rr_mult == null ? '—' : fmtNum(c.rr_mult, 1)}`
+      : c.value == null ? '' : `сейчас ${fmtNum(c.value, 2)}`;
     div.innerHTML = `<span>${icon} ${c.label}</span>` +
-      `<span class="chip-val">${c.value == null ? '' : fmtNum(c.value, 2)}</span>` +
+      `<span class="chip-val">${value}</span>` +
       `<span>${txt}</span>`;
     const feedNote = c.status_feed ? `\nфид: ${statusLabel(c.status_feed)}` : '';
     div.dataset.tip = ({
@@ -590,7 +624,7 @@ function renderFilters() {
       atr: `ATR-фаза (глава 2.9): ratio = ATR(5)/ATR(20) на дневках = ${c.value == null ? 'нет данных' : fmtNum(c.value, 3)}\n${c.detail || ''}\nШок (>1.5) — лучше не входить; фильтр корректирует целевой RR, не отменяет сетап.`,
       tech: `Индикатор «Теханализ» TradingView (1D NAS100, All/60m/240m/1D/1W/1M) должен быть > −30\nдля индексных СВИНГ-сетапов (глава 2.7). Проверяется только вручную.`,
     })[c.key] || c.detail || '';
-    if (c.required && c.state !== 'na') div.style.fontWeight = '600';
+    div.style.fontWeight = '600';
     box.appendChild(div);
   }
 }

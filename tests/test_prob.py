@@ -284,6 +284,15 @@ class TestRnCone:
         row = c["density"][0]
         assert sum(v > max(row) * 0.15 for v in row) >= 3
 
+    def test_survival_mass_is_separate_from_density_shape(self):
+        c = P.rn_cone(0.0, 9.0, 2.5, horizon_years=1 / 365, seed=42)
+        assert c["n_paths"] == 6000
+        assert len(c["surviving_mass"]) == len(c["density"])
+        assert c["surviving_mass"] == pytest.approx(
+            [sum(row) for row in c["density"]], abs=1e-12)
+        assert all(b <= a + 1e-12 for a, b in zip(
+            c["surviving_mass"], c["surviving_mass"][1:]))
+
     def test_skew_thickens_fear_tail(self):
         # Skew меняет форму/барьерные массы, но после обязательного центрирования
         # не обязан монотонно сдвигать P_stop: направленный tilt приходит из BL mean.

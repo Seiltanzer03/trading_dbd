@@ -11,14 +11,63 @@ const H = 190;
 export function initLevels(canvas) {
   let data = null;
   let curPrice = null;
-  let particles = [];
-  function setData(levels) { data = levels; }
+  let view = null;
+  let geometrySig = null;
+  let pricePath = [];
 
-  // цель потока частиц: гамма-магнит (пиннинг) либо тейк (снос)
-  function flowTarget() {
-    if (data?.gamma?.magnet != null) return { p: data.gamma.magnet, s: 0.35 + data.gamma.strength };
-    if (data?.take != null) return { p: data.take, s: 0.5 };
-    return null;
+  function setData(levels) {
+    if (!levels) { data = null; return; }
+    const nextSig = [levels.entry, levels.stop, levels.take, levels.direction]
+      .map((v) => String(v)).join('|');
+    if (nextSig !== geometrySig) {
+      geometrySig = nextSig;
+      view = null;
+      pricePath = [];
+      curPrice = null;
+    }
+    const p = Number(levels.price);
+    const last = pricePath[pricePath.length - 1];
+    if (Number.isFinite(p) && (!last || Math.abs(p - last.p) > 1e-12)) {
+      pricePath.push({ p, ts: performance.now() });
+      if (pricePath.length > 56) pricePath.shift();
+    }
+    data = levels;
+    updateView(p);
+  }
+
+  function desiredView(pnow) {
+    const core = [data.entry, data.stop, data.take, pnow]
+      .filter((x) => x != null && isFinite(x));
+    let lo = Math.min(...core), hi = Math.max(...core);
+    const risk = Math.abs(data.entry - data.stop)
+      || Math.abs(pnow || data.entry || 1) * 0.001 || 1;
+    const minSpan = Math.max(risk * 2.2, Math.abs(pnow || data.entry || 1) * 0.00035);
+    if (!(hi > lo)) { lo -= minSpan / 2; hi += minSpan / 2; }
+    else if (hi - lo < minSpan) {
+      const mid = (lo + hi) / 2;
+      lo = mid - minSpan / 2; hi = mid + minSpan / 2;
+    }
+    const pad = (hi - lo) * 0.12;
+    return { lo: lo - pad, hi: hi + pad };
+  }
+
+  function updateView(pnow) {
+    if (!data) return;
+    const target = desiredView(pnow);
+    if (!view) { view = target; return; }
+    // Стоп/вход/тейк задают устойчивый viewport. Он не пересчитывается от
+    // каждого микротика и сдвигается только если цена реально выходит за 8%
+    // защитной зоны.
+    const span = view.hi - view.lo;
+    const guardLo = view.lo + span * 0.08;
+    const guardHi = view.hi - span * 0.08;
+    if (pnow < guardLo) {
+      const shift = pnow - (view.lo + span * 0.16);
+      view = { lo: view.lo + shift, hi: view.hi + shift };
+    } else if (pnow > guardHi) {
+      const shift = pnow - (view.hi - span * 0.16);
+      view = { lo: view.lo + shift, hi: view.hi + shift };
+    }
   }
 
   function draw() {
@@ -27,21 +76,9 @@ export function initLevels(canvas) {
     if (!data) return;
     const pnow = (curPrice != null && isFinite(curPrice)) ? curPrice : data.price;
 
-    // Домен — только текущая геометрия сделки. Implied ±1σ часто в десятки раз
-    // шире короткого стопа; он показывается клипованной зоной/стрелками и больше
-    // не превращает стоп, вход и цену в одну вертикальную черту.
-    const core = [data.entry, data.stop, data.take, pnow];
-    const valid = core.filter((x) => x != null && isFinite(x));
-    let lo = Math.min(...valid), hi = Math.max(...valid);
     const risk = Math.abs(data.entry - data.stop) || Math.abs(pnow || 1) * 0.001 || 1;
-    const minSpan = Math.max(risk * 2.2, Math.abs(pnow || data.entry || 1) * 0.00035);
-    if (!(hi > lo)) { lo -= minSpan / 2; hi += minSpan / 2; }
-    else if (hi - lo < minSpan) {
-      const mid = (lo + hi) / 2;
-      lo = mid - minSpan / 2; hi = mid + minSpan / 2;
-    }
-    const pad = (hi - lo) * 0.12;
-    lo -= pad; hi += pad;
+    if (!view) updateView(pnow);
+    const lo = view.lo, hi = view.hi;
 
     const padL = 16, padR = 16, plotW = w - padL - padR;
     const X = (p) => padL + ((p - lo) / (hi - lo)) * plotW;
@@ -181,38 +218,49 @@ export function initLevels(canvas) {
                    x, axisY + 31);
     }
 
-    // частицы-поток к аттрактору (гамма-магнит/тейк) — «куда тянет рынок»
-    const flowY = axisY - 8;
-    for (const pt of particles) {
-      if (!inRange(pt.p)) continue;
-      ctx.globalAlpha = Math.max(0, Math.min(1, pt.t)) * 0.8;
-      ctx.fillStyle = '#E8622A';
-      ctx.beginPath(); ctx.arc(X(pt.p), flowY - pt.off, 1.8, 0, Math.PI * 2); ctx.fill();
+    // Реальный тик-трейл вместо случайных «частиц потока». Каждая точка — цена,
+    // реально полученная от фида; возраст кодируется высотой и прозрачностью.
+    const visiblePath = pricePath.filter((pt) => inRange(pt.p));
+    if (visiblePath.length > 1) {
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = 'rgba(232,98,42,0.58)';
+      ctx.beginPath();
+      visiblePath.forEach((pt, i) => {
+        const age = (visiblePath.length - 1 - i) / Math.max(visiblePath.length - 1, 1);
+        const y = axisY - 8 - age * 25;
+        if (i === 0) ctx.moveTo(X(pt.p), y);
+        else ctx.lineTo(X(pt.p), y);
+      });
+      ctx.stroke();
+      for (let i = 0; i < visiblePath.length; i += 4) {
+        const pt = visiblePath[i];
+        const age = (visiblePath.length - 1 - i) / Math.max(visiblePath.length - 1, 1);
+        ctx.globalAlpha = 0.18 + (1 - age) * 0.62;
+        ctx.fillStyle = '#E8622A';
+        ctx.beginPath(); ctx.arc(X(pt.p), axisY - 8 - age * 25, 1.4, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
     }
-    ctx.globalAlpha = 1;
-  }
 
-  function updateParticles(dt) {
-    const tgt = flowTarget();
-    const src = (curPrice != null && isFinite(curPrice)) ? curPrice : data?.price;
-    if (!tgt || src == null) { particles = []; return; }
-    const span = Math.abs(tgt.p - src) || 1;
-    if (particles.length < 46 && Math.random() < 0.6)
-      particles.push({ p: src + (Math.random() - 0.5) * span * 0.2, t: 1,
-                       off: (Math.random() - 0.5) * 14 });
-    for (const pt of particles) {
-      pt.p += (tgt.p - pt.p) * Math.min(1, dt * (0.8 + tgt.s * 1.4));
-      pt.t -= dt * 0.55;
-      if (pt.t <= 0 || Math.abs(pt.p - tgt.p) < span * 0.02) pt.dead = true;
+    // Детерминированный условный gamma-vector: показывает только геометрию
+    // сценария от текущей цены к магниту, без выдуманного наблюдаемого потока.
+    if (gm && inRange(gm.magnet) && inRange(pnow)) {
+      const x0 = X(pnow), x1 = X(gm.magnet), y = axisY - 42;
+      ctx.globalAlpha = 0.25 + 0.45 * Math.max(0, Math.min(1, gm.strength || 0));
+      ctx.strokeStyle = '#E8622A'; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+      const dir = x1 >= x0 ? 1 : -1;
+      ctx.fillStyle = '#E8622A';
+      ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x1 - dir * 6, y - 3);
+      ctx.lineTo(x1 - dir * 6, y + 3); ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 1;
     }
-    particles = particles.filter((p) => !p.dead);
   }
 
   let last = performance.now();
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05); last = now;
     if (data && data.price != null) curPrice = approach(curPrice, data.price, dt, 6);
-    updateParticles(dt);
     draw();
     requestAnimationFrame(frame);
   }

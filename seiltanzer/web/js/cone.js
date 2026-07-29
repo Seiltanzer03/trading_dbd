@@ -24,11 +24,12 @@ import { approach } from './anim.js';
 const PAPER = '#FFFFFF', SCENE_BG = '#FBFAF6', INK = '#14140F', RULE = '#D8D5CC';
 const DIM = '#8A877D', ORANGE = '#E8622A', RED = '#C6373C', GREEN = '#2E7D4F';
 const FONT = 'IBM Plex Mono, ui-monospace, monospace';
-const SURF_SCALE = [[0, SCENE_BG], [0.35, '#F3C4A6'], [0.7, '#EE8A54'], [1, ORANGE]];
+const SURF_SCALE = [[0, '#F8F3EC'], [0.18, '#F3D7C5'], [0.45, '#EDA777'],
+                    [0.72, '#E8753C'], [1, '#A9342C']];
 
 // индексы трасс (порядок фиксирован в buildTraces)
 const SURF = 0, MESH_STOP = 1, MESH_TAKE = 2, EDGE_STOP = 3, EDGE_TAKE = 4,
-      TRAIL = 5, BALL = 6;
+      MODE = 5, Q20 = 6, Q80 = 7, TRAIL = 8, BALL = 9;
 
 function fmtTime(years) {
   if (years == null) return '—';
@@ -53,7 +54,8 @@ export function initCone(elId) {
   const tgt = { z: null, pStop: null, pTake: null, xs: null, ys: null,
                 edges: null, T: 2.5, r0: 0, nS: 0, nB: 0, hy: null,
                 median: null, term_slope: 0, structSig: null,
-                probabilityAvailable: false };
+                probabilityAvailable: false, conditional: null, survival: null,
+                modeX: null, q20X: null, q80X: null };
   const disp = { z: null, pStop: null, pTake: null };
 
   // Камера: развернута на 180 градусов (вид спереди/сзади)
@@ -68,26 +70,47 @@ export function initCone(elId) {
   function markInteract() {
     interacting = true;
     if (interactTimer) clearTimeout(interactTimer);
-    interactTimer = setTimeout(() => { interacting = false; flush(); }, 1200);
-  }
-  function saveCam(c) {
-    if (c && c.eye) currentCam = JSON.parse(JSON.stringify(c));
+    interactTimer = setTimeout(() => {
+      grabCam();
+      interacting = false;
+      flush();
+    }, 250);
   }
   function grabCam() {
-    saveCam(el._fullLayout?.scene?.camera);
+    const c = el._fullLayout?.scene?.camera;
+    if (c && c.eye) currentCam = c;
+  }
+  function releaseInteract() {
+    grabCam();
+    if (interactTimer) clearTimeout(interactTimer);
+    interactTimer = setTimeout(() => {
+      grabCam();
+      interacting = false;
+      flush();
+    }, 80);
   }
   function attachListeners() {
     if (listenersOn || !el.on) return;
     listenersOn = true;
-    el.on('plotly_relayouting', (ev) => {
-      markInteract(); saveCam(ev?.['scene.camera']); grabCam();
+    // В 971ee28 камера сохранялась из _fullLayout на каждом событии Plotly.
+    // Это важно: реальный drag часто присылает granular keys
+    // scene.camera.eye.x, а не цельный scene.camera в payload.
+    el.on('plotly_relayouting', () => {
+      markInteract();
+      grabCam();
+      requestAnimationFrame(grabCam);
     });
-    el.on('plotly_relayout', (ev) => {
-      saveCam(ev?.['scene.camera']); grabCam();
+    el.on('plotly_relayout', () => {
+      grabCam();
+      requestAnimationFrame(grabCam);
     });
     el.addEventListener('mousedown', markInteract);
+    el.addEventListener('pointerdown', markInteract);
     el.addEventListener('touchstart', markInteract, { passive: true });
     el.addEventListener('wheel', markInteract, { passive: true });
+    window.addEventListener('mouseup', releaseInteract);
+    window.addEventListener('pointerup', releaseInteract);
+    window.addEventListener('touchend', releaseInteract, { passive: true });
   }
   function flush() {
     if (!ready() || !hasPlot) return;
@@ -105,10 +128,13 @@ export function initCone(elId) {
     const b0 = Math.max(0, Math.min(nB - 1, Math.floor(fc)));
     const b1 = Math.max(0, Math.min(nB - 1, b0 + 1));
     const tb = Math.max(0, Math.min(1, fc - b0));
-    const jc = Math.max(0, Math.min(1, yf)) * (nS - 1);
-    const j0 = Math.max(0, Math.min(nS - 1, Math.floor(jc)));
-    const j1 = Math.max(0, Math.min(nS - 1, j0 + 1));
-    const tj = jc - j0;
+    const y = Math.max(tgt.ys[0], Math.min(tgt.ys[tgt.ys.length - 1], yf));
+    let j1 = 1;
+    while (j1 < nS && tgt.ys[j1] < y) j1++;
+    j1 = Math.max(0, Math.min(nS - 1, j1));
+    const j0 = Math.max(0, j1 - 1);
+    const tj = j0 === j1 ? 0
+      : (y - tgt.ys[j0]) / Math.max(tgt.ys[j1] - tgt.ys[j0], 1e-12);
     const zx0 = z[j0][b0] + (z[j0][b1] - z[j0][b0]) * tb;
     const zx1 = z[j1][b0] + (z[j1][b1] - z[j1][b0]) * tb;
     return zx0 + (zx1 - zx0) * tj;
@@ -125,9 +151,9 @@ export function initCone(elId) {
     const K = 12, tx = [], ty = [], tz = [];
     for (let i = 0; i <= K; i++) {
       const yf = yFrac * (i / K);
-      tx.push(Rp); ty.push(yf); tz.push(surfZ(Rp, yf) + 0.012);
+      tx.push(Rp); ty.push(yf); tz.push(surfZ(Rp, yf) + 0.004);
     }
-    return { Rp, yFrac, dotZ: surfZ(Rp, yFrac) + 0.02, tx, ty, tz };
+    return { Rp, yFrac, dotZ: surfZ(Rp, yFrac) + 0.006, tx, ty, tz };
   }
   function wallVZ(series) {                        // интерливленый z для mesh3d
     const out = [];
@@ -157,30 +183,122 @@ export function initCone(elId) {
   }
 
   // -------------------------------------------------------------- цель/каркас
+  function smooth(row, passes = 2) {
+    let out = row.slice();
+    for (let k = 0; k < passes; k++) {
+      out = out.map((v, i) =>
+        0.18 * (out[i - 2] ?? out[i - 1] ?? v)
+        + 0.24 * (out[i - 1] ?? v)
+        + 0.36 * v
+        + 0.16 * (out[i + 1] ?? v)
+        + 0.06 * (out[i + 2] ?? out[i + 1] ?? v));
+    }
+    return out;
+  }
+  function normalize(row) {
+    const clean = row.map((v) => Number.isFinite(v) && v > 0 ? v : 0);
+    const total = clean.reduce((a, b) => a + b, 0);
+    return total > 1e-12 ? clean.map((v) => v / total)
+      : clean.map(() => 1 / Math.max(clean.length, 1));
+  }
+  function interp1(xs, ys, x) {
+    if (!xs.length) return 0;
+    if (x <= xs[0]) return ys[0] || 0;
+    if (x >= xs[xs.length - 1]) return ys[ys.length - 1] || 0;
+    let hi = 1;
+    while (hi < xs.length && xs[hi] < x) hi++;
+    const lo = hi - 1;
+    const f = (x - xs[lo]) / Math.max(xs[hi] - xs[lo], 1e-12);
+    return (ys[lo] || 0) + ((ys[hi] || 0) - (ys[lo] || 0)) * f;
+  }
+  function terminalShape(cone, xs) {
+    const probs = Array.isArray(cone.market_terminal) ? cone.market_terminal.slice() : null;
+    const edges = Array.isArray(cone.market_edges) ? cone.market_edges : null;
+    if (!probs || !edges || edges.length !== probs.length + 1) return null;
+    // Tail mass is already represented by the red/green barrier walls. Remove it
+    // from the endpoint buckets before using the option RND inside the corridor.
+    probs[0] = Math.max(0, probs[0] - Number(cone.market_p_stop || 0));
+    probs[probs.length - 1] = Math.max(
+      0, probs[probs.length - 1] - Number(cone.market_p_take || 0));
+    const mids = probs.map((_, i) => (edges[i] + edges[i + 1]) / 2);
+    const widths = probs.map((_, i) => Math.max(edges[i + 1] - edges[i], 1e-9));
+    const dens = probs.map((p, i) => p / widths[i]);
+    return normalize(smooth(xs.map((x) => interp1(mids, dens, x)), 3));
+  }
+  function analyticConditional(cone, xs, t, binW) {
+    // Continuous killed-diffusion approximation. The sine term is the
+    // survival eigenfunction between absorbing barriers; it prevents fake
+    // endpoint spikes when Monte Carlo survivors become sparse.
+    const mu = cone.r0 + Number(cone.drift_R || 0) * t;
+    const sd = Math.max(binW * 0.70, Number(cone.sigma_R || 1) * Math.sqrt(Math.max(t, 0.002)));
+    const skew = Math.max(-0.45, Math.min(0.45, Number(cone.skew || 0)));
+    const raw = xs.map((x) => {
+      const sideScale = x < mu ? 1 + Math.max(skew, 0) : 1 + Math.max(-skew, 0);
+      const g = Math.exp(-0.5 * ((x - mu) / (sd * sideScale)) ** 2);
+      const u = Math.max(1e-4, Math.min(1 - 1e-4, (x + 1) / (cone.T + 1)));
+      return g * Math.pow(Math.sin(Math.PI * u), 0.45);
+    });
+    return normalize(raw);
+  }
+  function quantileX(row, xs, q) {
+    let c = 0;
+    for (let i = 0; i < row.length; i++) {
+      c += row[i];
+      if (c >= q) return xs[i];
+    }
+    return xs[xs.length - 1];
+  }
   function buildTarget(cone) {
     const T = cone.T;
     const edges = cone.edges, nB = edges.length - 1;
     const xs = Array.from({ length: nB }, (_, b) => (edges[b] + edges[b + 1]) / 2);
-    // Явный срез t=0 возвращает основание конуса. Каждый следующий срез
-    // отображает условную форму живых путей, приглушённую их surviving mass:
-    // редкие MC-иглы больше не уничтожают всю плоскость одним global max.
     const binW = (T + 1) / Math.max(nB, 1);
-    const t0 = xs.map((x) => Math.exp(-0.5 * ((x - cone.r0) / Math.max(binW * 0.72, 1e-6)) ** 2));
-    const rows = [t0, ...cone.density.map((row) => row.slice())];
-    const z = rows.map((row, j) => {
-      const mass = j === 0 ? 1 : row.reduce((a, b) => a + b, 0);
-      const smooth = row.map((v, i) => 0.25 * (row[i - 1] ?? v) + 0.5 * v + 0.25 * (row[i + 1] ?? v));
-      const peak = Math.max(...smooth, 1e-12);
-      const amp = j === 0 ? 0.92 : (mass > 0 ? 0.12 + 0.88 * Math.pow(mass, 0.35) : 0);
-      return smooth.map((v) => Math.pow(v / peak, 0.72) * amp);
-    });
     const tf = cone.times_frac || cone.density.map((_, j) => (j + 1) / cone.density.length);
     const ys = [0, ...tf];
-    const nS = rows.length;
+    const rawRows = [
+      analyticConditional(cone, xs, 0.001, binW),
+      ...cone.density.map((row) => row.slice()),
+    ];
+    const survival = [1, ...cone.density.map((row) =>
+      Math.max(0, Math.min(1, row.reduce((a, b) => a + Number(b || 0), 0))))];
+    const optShape = terminalShape(cone, xs);
+    const conditional = rawRows.map((raw, j) => {
+      const t = j === 0 ? 0 : tf[j - 1];
+      const prior = analyticConditional(cone, xs, Math.max(t, 0.001), binW);
+      const mass = survival[j];
+      const empirical = normalize(smooth(raw, 2));
+      // Below ~4% surviving mass the MC histogram is too sparse. Blend toward
+      // the continuous killed-diffusion density instead of showing sampling
+      // spikes or an empty plane.
+      const mcConfidence = j === 0 ? 0 : Math.max(0, Math.min(1, mass / 0.04));
+      let shape = normalize(empirical.map((v, i) =>
+        mcConfidence * v + (1 - mcConfidence) * prior[i]));
+      // The delayed option snapshot anchors the shape, while every live tick
+      // still moves the current-price point. It never replaces barrier masses.
+      if (optShape && j > 0) {
+        const optionWeight = 0.55 * Math.pow(Math.max(t, 0), 0.80);
+        shape = normalize(shape.map((v, i) =>
+          (1 - optionWeight) * v + optionWeight * optShape[i]));
+      }
+      return shape;
+    });
+    // Geometry is a CONDITIONAL density surface. Survival is deliberately not
+    // multiplied into Z: it belongs on the stop/take walls. A small floor keeps
+    // the WebGL sheet continuous so every time slice remains inspectable.
+    const floor = 0.035;
+    const z = conditional.map((row) => {
+      const peak = Math.max(...row, 1e-12);
+      return row.map((v) => floor + (1 - floor) * Math.pow(v / peak, 0.58));
+    });
+    const nS = conditional.length;
     tgt.z = z; tgt.pStop = [0, ...cone.p_stop_by_t]; tgt.pTake = [0, ...cone.p_take_by_t];
     tgt.xs = xs; tgt.ys = ys; tgt.edges = edges; tgt.T = T; tgt.r0 = cone.r0;
     tgt.nS = nS; tgt.nB = nB; tgt.hy = cone.horizon_years;
     tgt.median = cone.median_years; tgt.term_slope = cone.term_slope || 0;
+    tgt.conditional = conditional; tgt.survival = survival;
+    tgt.modeX = conditional.map((row) => xs[row.indexOf(Math.max(...row))]);
+    tgt.q20X = conditional.map((row) => quantileX(row, xs, 0.20));
+    tgt.q80X = conditional.map((row) => quantileX(row, xs, 0.80));
     tgt.probabilityAvailable = !!(cone.option_anchored && cone.probability_available !== false);
     tgt.structSig = `${nB}|${nS}|${(+T).toFixed(2)}|${tgt.probabilityAvailable ? 1 : 0}`;
   }
@@ -191,11 +309,24 @@ export function initCone(elId) {
   }
 
   function buildTraces() {
+    const customdata = tgt.conditional.map((row, j) =>
+      row.map((p) => [p, tgt.survival[j]]));
     const surface = { type: 'surface', x: tgt.xs, y: tgt.ys, z: disp.z,
       colorscale: SURF_SCALE, showscale: false, opacity: 0.95, name: 'плотность',
-      contours: { z: { show: true, usecolormap: true, width: 1 } },
+      customdata,
+      contours: {
+        x: { show: true, color: 'rgba(255,255,255,0.28)', width: 1 },
+        y: { show: true, color: 'rgba(255,255,255,0.28)', width: 1 },
+        z: { show: true, usecolormap: true, width: 1 },
+      },
       lighting: { ambient: 0.78, diffuse: 0.5, specular: 0.06, roughness: 0.9 },
-      hovertemplate: 'R=%{x:+.2f}<br>условная форма × surviving mass=%{z:.2f}<extra></extra>' };
+      hovertemplate: 'R=%{x:+.2f}<br>условная RND=%{customdata[0]:.1%}' +
+        '<br>живая масса=%{customdata[1]:.1%}<extra></extra>' };
+    const ridge = (xs, color, width, name, showlegend) => ({
+      type: 'scatter3d', mode: 'lines', x: xs, y: tgt.ys,
+      z: xs.map((x, j) => surfZ(x, tgt.ys[j]) + 0.008),
+      line: { color, width }, name, showlegend, hoverinfo: 'skip',
+    });
     const d = dotCoords(live.r != null ? live.r : tgt.r0);
     curR = d.Rp; lastDotR = d.Rp;
     const trail = { type: 'scatter3d', mode: 'lines', x: d.tx, y: d.ty, z: d.tz,
@@ -207,6 +338,9 @@ export function initCone(elId) {
     return [surface,
       wallMesh(-1, disp.pStop, RED), wallMesh(tgt.T, disp.pTake, GREEN),
       wallEdge(-1, disp.pStop, RED, 'СТОП'), wallEdge(tgt.T, disp.pTake, GREEN, 'ТЕЙК'),
+      ridge(tgt.modeX, INK, 5, 'OPTION MODE', true),
+      ridge(tgt.q20X, 'rgba(20,20,15,0.35)', 2, 'Q20', false),
+      ridge(tgt.q80X, 'rgba(20,20,15,0.35)', 2, 'Q80', false),
       trail, ball];
   }
 
@@ -221,14 +355,13 @@ export function initCone(elId) {
     lastYTitle = yTitle;
     return {
       autosize: true, height: 430, margin: { l: 0, r: 0, t: 8, b: 0 },
-      uirevision: 'seiltanzer-cone-camera-v3',
       paper_bgcolor: PAPER, font: { family: FONT, color: INK, size: 11 },
       showlegend: true,
       legend: { orientation: 'h', x: 0, y: 1.07, font: { size: 10 }, bgcolor: 'rgba(0,0,0,0)' },
       scene: {
-        uirevision: 'seiltanzer-cone-camera-v3',
         camera: currentCam,
-        bgcolor: SCENE_BG, aspectmode: 'manual', aspectratio: { x: 1.75, y: 1.2, z: 0.72 },
+        dragmode: 'orbit',
+        bgcolor: SCENE_BG, aspectmode: 'manual', aspectratio: { x: 1.62, y: 1.34, z: 0.96 },
         xaxis: { title: { text: 'R  (стоп −1 · 0 · тейк)', font: { size: 10, color: DIM } },
           range: [-1, T], gridcolor: RULE, zerolinecolor: RULE,
           tickvals: [-1, 0, T], ticktext: ['СТОП −1R', '0', `ТЕЙК +${T.toFixed(1)}R`],
@@ -236,8 +369,8 @@ export function initCone(elId) {
         yaxis: { title: { text: yTitle, font: { size: 10, color: DIM } },
           range: [0, 1], gridcolor: RULE, tickvals: [0, 0.5, 1], ticktext: yTicktext,
           tickfont: { size: 9, color: DIM }, backgroundcolor: SCENE_BG, showbackground: true },
-        zaxis: { title: { text: 'форма плотности × живая масса', font: { size: 10, color: DIM } },
-          range: [0, 1.08], gridcolor: RULE, tickfont: { size: 9, color: DIM },
+        zaxis: { title: { text: 'условная RND · форма', font: { size: 10, color: DIM } },
+          range: [0, 1.10], gridcolor: RULE, tickfont: { size: 9, color: DIM },
           backgroundcolor: SCENE_BG, showbackground: true },
       },
     };
@@ -246,7 +379,7 @@ export function initCone(elId) {
   function render() {                              // полный (пере)сбор — редко
     const P = window.Plotly;
     const config = { responsive: true, displaylogo: false,
-      modeBarButtonsToRemove: ['toImage'], doubleClick: 'reset' };
+      modeBarButtonsToRemove: ['toImage'], doubleClick: 'reset', scrollZoom: true };
     if (hasPlot) grabCam();
     const layout = layoutFor();
     layout.scene.camera = currentCam;
@@ -304,8 +437,10 @@ export function initCone(elId) {
       lastYTitle = yTitle;
       const yTicktext = tgt.hy ? ['сейчас', fmtTime(tgt.hy * 0.5), fmtTime(tgt.hy)]
         : ['сейчас', '50%', 'развязка'];
+      grabCam();
       P.relayout(el, { 'scene.yaxis.title.text': yTitle,
-                       'scene.yaxis.ticktext': yTicktext });
+                       'scene.yaxis.ticktext': yTicktext,
+                       'scene.camera': currentCam });
     }
     const nStop = tgt.probabilityAvailable
       ? `СТОП ${(tgt.pStop[tgt.pStop.length - 1] * 100).toFixed(0)}%`
@@ -317,6 +452,14 @@ export function initCone(elId) {
       lastNames = [nStop, nTake];
       P.restyle(el, { name: [nStop, nTake] }, [EDGE_STOP, EDGE_TAKE]);
     }
+    P.restyle(el, { customdata: [tgt.conditional.map((row, j) =>
+      row.map((p) => [p, tgt.survival[j]]))] }, [SURF]);
+    const railZ = (xs) => xs.map((x, j) => surfZ(x, tgt.ys[j]) + 0.008);
+    P.restyle(el, {
+      x: [tgt.modeX, tgt.q20X, tgt.q80X],
+      y: [tgt.ys, tgt.ys, tgt.ys],
+      z: [railZ(tgt.modeX), railZ(tgt.q20X), railZ(tgt.q80X)],
+    }, [MODE, Q20, Q80]);
   }
 
   // ------------------------------------------------------------- публичное API
@@ -330,6 +473,7 @@ export function initCone(elId) {
       if (interacting) { pendingStruct = true; return; }
       snapDisp(); render(); return;
     }
+    if (interacting) return;
     updateChrome();                                // тот же каркас — морф в loop
   }
   function updateLive(p) { if (p) Object.assign(live, p); }
