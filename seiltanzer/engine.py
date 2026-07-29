@@ -1,20 +1,32 @@
 """Движок терминала: собирает состояние тика из фидов, журнала и мат. ядра.
 
-Каждое поле выхода прослеживается до источника: prob.* — из статистики сетапа
-и опционной поправки, mc.* — из Монте-Карло с теми же параметрами, options.* —
-из последней реально полученной цепочки. Если данных нет — поле None и рядом
-причина, фронт обязан показать состояние «нет данных».
+Каждое поле выхода прослеживается до источника: главная prob.* — option-anchored
+barrier MC, историческая модель хранится отдельно как model_* control; options.*
+— из последней реально полученной цепочки плюс live-moneyness. Если option
+anchor отсутствует, edge выключается, а визуальный fallback явно помечается.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 import time
-import asyncio
-import logging
-import contextlib
-import datetime as dt
 from copy import deepcopy
+
+from .config import (
+    BREAKEVEN_AFTER,
+    INSTRUMENTS,
+    LADDER_FRACTION,
+    LADDER_RUNGS,
+    SETUPS,
+    Settings,
+)
+from .core import prob as pb
+from .core import risk as rk
+from .data.cache import DiskCache
+from .data.feeds import MarketData
+from .journal import Journal
+
 
 def clean_nans(obj):
     if isinstance(obj, dict):
@@ -24,14 +36,6 @@ def clean_nans(obj):
     elif isinstance(obj, float) and math.isnan(obj):
         return None
     return obj
-
-from .config import INSTRUMENTS, LADDER_RUNGS, LADDER_FRACTION, BREAKEVEN_AFTER, \
-    SETUPS, Settings
-from .core import prob as pb
-from .core import risk as rk
-from .data.cache import DiskCache
-from .data.feeds import MarketData
-from .journal import Journal
 
 US_CLOSE_UTC_HOUR = 21  # аппроксимация конца сессии для полосы implied move
 
@@ -53,7 +57,12 @@ class Engine:
         self.stream_hub = None
         if settings.stream:
             from .data.stream import StreamHub
-            tickers = sorted({i.yahoo for i in INSTRUMENTS.values()})
+            # Тики торгуемого ряда двигают сделку, тики ETF-прокси двигают
+            # moneyness последнего опционного снимка между обновлениями цепочки.
+            tickers = sorted(
+                {i.yahoo for i in INSTRUMENTS.values()}
+                | {i.options_proxy for i in INSTRUMENTS.values()
+                   if i.options_proxy is not None})
             self.stream_hub = StreamHub(tickers)
             self.market.stream = self.stream_hub
         self._mc_cache_key: tuple | None = None
@@ -66,12 +75,110 @@ class Engine:
 
     # ------------------------------------------------------------ lifecycle
 
+    def _reset_scenario_caches(self) -> None:
+        self._mc_cache_key = None
+        self._mc_cache = None
+        self._cone_cache_key = None
+        self._cone_cache = None
+
     def on_trade_opened(self, trade: dict) -> None:
         self.market.set_instrument(trade["instrument"])
-        self._mc_cache_key = None
+        self._reset_scenario_caches()
         # цепочку и дневки надо обновить сразу под новый инструмент
+        self.market.refresh_proxy_price()
         self.market.refresh_daily()
         self.market.refresh_chain()
+        self.market.refresh_iv_surface()
+
+    def on_trade_edited(self, trade: dict) -> None:
+        """Синхронизирует активный фид и сценарные кэши после правки сделки."""
+        instrument_changed = (
+            self.market.instrument_code != trade["instrument"])
+        self.market.set_instrument(trade["instrument"])
+        self._reset_scenario_caches()
+        if instrument_changed:
+            self.market.refresh_price()
+            self.market.refresh_proxy_price()
+            self.market.refresh_daily()
+            self.market.refresh_chain()
+            self.market.refresh_iv_surface()
+
+    @staticmethod
+    def _effective_price(trade: dict | None, raw_price: float | None) -> float | None:
+        """Цена в шкале сделки: бесплатный тик + зафиксированный basis брокера."""
+        if raw_price is None:
+            return None
+        return float(raw_price) + float((trade or {}).get("quote_offset") or 0.0)
+
+    def _current_instrument_price(self, trade: dict | None = None) -> float | None:
+        """Текущая цена в шкале терминала/сделки, а не сырой тик Yahoo."""
+        if trade is None:
+            trade = self.journal.active_trade()
+        return self._effective_price(trade, self.market.price.get("value"))
+
+    def _quoted_proxy_spot(self) -> float | None:
+        """Полученная stream/REST-котировка proxy, без snapshot-fallback."""
+        quote = self.market.proxy_price.get("value")
+        if quote is not None and math.isfinite(float(quote)) and float(quote) > 0:
+            return float(quote)
+        return None
+
+    def _current_proxy_spot(self, metrics: dict | None = None) -> float | None:
+        """Котировка option-proxy; snapshot spot используется только как fallback."""
+        quote = self._quoted_proxy_spot()
+        if quote is not None:
+            return quote
+        metrics = metrics or self.market.chain.get("metrics")
+        snap = (metrics or {}).get("spot")
+        if snap is not None and math.isfinite(float(snap)) and float(snap) > 0:
+            return float(snap)
+        return None
+
+    def _map_proxy_levels(self, levels, instrument_price: float | None = None,
+                          metrics: dict | None = None) -> list[float] | None:
+        """Страйки proxy -> шкала инструмента через актуальную moneyness."""
+        metrics = metrics or self.market.chain.get("metrics")
+        instrument_price = instrument_price or self._current_instrument_price()
+        proxy_spot = self._current_proxy_spot(metrics)
+        if metrics is None or instrument_price is None or proxy_spot is None:
+            return None
+        try:
+            from .core.options import map_proxy_levels
+            mapped = map_proxy_levels(
+                levels, proxy_spot, instrument_price,
+                self.market.instrument.proxy_transform)
+        except (TypeError, ValueError):
+            return None
+        return [float(x) for x in mapped]
+
+    def _mapped_density(self, instrument_price: float,
+                        metrics: dict | None = None):
+        """BL-плотность proxy -> плотность цены инструмента, включая Jacobian."""
+        metrics = metrics or self.market.chain.get("metrics")
+        proxy_spot = self._current_proxy_spot(metrics)
+        if metrics is None or proxy_spot is None:
+            return None
+        try:
+            import numpy as np
+
+            from .core.options import RNDensity, map_proxy_density
+            raw = RNDensity(
+                strikes=np.asarray(metrics["density"]["strikes"], dtype=float),
+                density=np.asarray(metrics["density"]["q"], dtype=float),
+                t_years=float(metrics["t_years"]))
+            return map_proxy_density(
+                raw, proxy_spot, instrument_price,
+                self.market.instrument.proxy_transform)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _live_iv_surface(self) -> dict:
+        """Опционный снимок + текущий тик прокси для динамического ATM/moneyness."""
+        surf = deepcopy(getattr(self.market, "iv_surface", {}) or {})
+        surf["spot_current"] = self.market.proxy_price.get("value")
+        surf["spot_status"] = self.market.proxy_price.get("status")
+        surf["spot_source"] = self.market.proxy_price.get("source")
+        return surf
 
     # ------------------------------------------------------------- payloads
 
@@ -81,13 +188,25 @@ class Engine:
         trade = self.journal.active_trade()
         atr = self._atr_payload()
         sigma = self.market.sigma_ratio()
+        raw_price = self.market.price.get("value")
+        price = self._effective_price(trade, raw_price)
+        price_feed = {k: v for k, v in self.market.price.items()}
+        price_feed.update({
+            "value": price,
+            "raw_value": raw_price,
+            "effective_value": price,
+            "basis_offset": float((trade or {}).get("quote_offset") or 0.0),
+            "ticker": self.market.instrument.yahoo,
+            "label": self.market.instrument.price_label or self.market.instrument.yahoo,
+        })
 
         payload = {
             "ts": now,
             "demo": self.settings.demo,
             "instrument": self.market.instrument_code,
             "feeds": {
-                "price": {k: v for k, v in self.market.price.items()},
+                "price": price_feed,
+                "proxy_price": {k: v for k, v in self.market.proxy_price.items()},
                 "chain": {k: v for k, v in self.market.chain.items() if k != "metrics"},
                 "daily": {k: v for k, v in self.market.daily.items() if k != "bars"},
                 "vols": self.market.vols,
@@ -104,15 +223,14 @@ class Engine:
             "levels": None,
             "cone": None,
             "state": None,
-            "options_summary": self._options_summary(),
-            "iv_surface": getattr(self.market, "iv_surface", {}),
+            "options_summary": self._options_summary(price),
+            "iv_surface": self._live_iv_surface(),
             "correlation": getattr(self.market, "correlation", {}),
             "vrp": self._vrp_payload(),
             "filters": self._filters_payload(trade),
         }
 
         payload["verdict"] = None
-        price = self.market.price.get("value")
         if trade and price:
             payload.update(self._trade_payloads(trade, price, sigma, atr))
             payload["verdict"] = self._verdict(payload)
@@ -122,8 +240,8 @@ class Engine:
     def _verdict(self, p: dict) -> dict:
         """Синтез состояния сделки в понятный сигнал + рекомендуемое действие.
 
-        Собирает край (рынок vs модель), фильтры стратегии, гамма-режим, фазу волы
-        и позицию (r/лестница) в один вердикт: что это значит и что делать.
+        Собирает option P vs breakeven, применимые фильтры, фазу волы и позицию
+        (r/лестница). GEX/skew показываются как контекст без скрытого веса.
         Каждый фактор виден отдельно (не «чёрный ящик»).
         """
         prob, market = p.get("prob"), p.get("market")
@@ -133,19 +251,33 @@ class Engine:
 
         edge = market.get("edge") if market else None
         if edge is None:
-            factors.append({"k": "КРАЙ", "v": "нет опционов для рынка", "tone": "neutral"})
+            reason = (market or {}).get("anchor_reason") or "нет валидной цепочки"
+            factors.append({"k": "ОПЦИОНЫ", "v": f"{reason} — edge выключен",
+                            "tone": "neutral"})
         elif edge > 0.12:
-            factors.append({"k": "КРАЙ", "v": f"+{edge*100:.0f}% — рынок недооценивает сетап", "tone": "good"}); score += 2
+            factors.append({"k": "ОПЦИОННЫЙ EDGE",
+                            "v": f"+{edge*100:.0f}% над EV=0 для текущих стоп/тейк",
+                            "tone": "good"}); score += 2
         elif edge > 0.03:
-            factors.append({"k": "КРАЙ", "v": f"+{edge*100:.0f}% — лёгкий перевес над рынком", "tone": "good"}); score += 1
+            factors.append({"k": "ОПЦИОННЫЙ EDGE",
+                            "v": f"+{edge*100:.0f}% — умеренная асимметрия",
+                            "tone": "good"}); score += 1
         elif edge < -0.12:
-            factors.append({"k": "КРАЙ", "v": f"{edge*100:.0f}% — рынок оценивает выше вас", "tone": "bad"}); score -= 2
+            factors.append({"k": "ОПЦИОННЫЙ EDGE",
+                            "v": f"{edge*100:.0f}% — опционная геометрия против сделки",
+                            "tone": "bad"}); score -= 2
         elif edge < -0.03:
-            factors.append({"k": "КРАЙ", "v": f"{edge*100:.0f}% — рынок чуть выше вас", "tone": "bad"}); score -= 1
+            factors.append({"k": "ОПЦИОННЫЙ EDGE",
+                            "v": f"{edge*100:.0f}% — слабая встречная асимметрия",
+                            "tone": "bad"}); score -= 1
         else:
-            factors.append({"k": "КРАЙ", "v": "≈ на уровне рынка", "tone": "neutral"})
+            factors.append({"k": "ОПЦИОННЫЙ EDGE", "v": "≈ нейтрально",
+                            "tone": "neutral"})
 
-        blocks = [c for c in filters if c.get("required") and c["state"] == "block"]
+        # Только точные автоматические фильтры могут блокировать вердикт.
+        # 15m Yahoo-контекст не притворяется полной 4H-последовательностью стратегии.
+        blocks = [c for c in filters if c.get("required") and c["state"] == "block"
+                  and c.get("decision_weight", True)]
         manuals = [c for c in filters if c.get("required") and c["state"] == "manual"]
         if blocks:
             factors.append({"k": "ФИЛЬТРЫ", "v": "BLOCK: " + ", ".join(c["label"] for c in blocks), "tone": "bad"}); score -= 3
@@ -157,11 +289,17 @@ class Engine:
         if gamma and gamma.get("available"):
             if gamma["zone"] == "positive":
                 if gamma["toward"] == "тейку":
-                    factors.append({"k": "ГАММА", "v": "+ зона, пиннинг тянет к тейку", "tone": "good"}); score += 1
+                    factors.append({"k": "ГАММА · КОНТЕКСТ",
+                                    "v": "+ условный OI×gamma уровень со стороны тейка",
+                                    "tone": "neutral"})
                 else:
-                    factors.append({"k": "ГАММА", "v": "+ зона, пиннинг тянет к стопу — далёкий тейк труднее", "tone": "bad"}); score -= 1
+                    factors.append({"k": "ГАММА · КОНТЕКСТ",
+                                    "v": "+ условный OI×gamma уровень со стороны стопа",
+                                    "tone": "neutral"})
             else:
-                factors.append({"k": "ГАММА", "v": "− зона: движения ускоряются (тренд чище)", "tone": "neutral"})
+                factors.append({"k": "ГАММА · КОНТЕКСТ",
+                                "v": "− условная зона; знак позиции не наблюдается",
+                                "tone": "neutral"})
 
         # скью (risk-reversal): направление рынка vs направление сделки
         opts = p.get("options_summary") or {}
@@ -174,11 +312,16 @@ class Engine:
             against = (tilt == "медвежий" and direction == "long") or \
                       (tilt == "бычий" and direction == "short")
             if aligned:
-                factors.append({"k": "СКЬЮ", "v": f"{tilt} уклон — по вашему направлению", "tone": "good"}); score += 1
+                factors.append({"k": "СКЬЮ · КОНТЕКСТ",
+                                "v": f"{tilt} уклон — по вашему направлению",
+                                "tone": "neutral"})
             elif against:
-                factors.append({"k": "СКЬЮ", "v": f"{tilt} уклон — против вашего направления", "tone": "bad"}); score -= 1
+                factors.append({"k": "СКЬЮ · КОНТЕКСТ",
+                                "v": f"{tilt} уклон — против вашего направления",
+                                "tone": "neutral"})
             else:
-                factors.append({"k": "СКЬЮ", "v": "нейтральный уклон", "tone": "neutral"})
+                factors.append({"k": "СКЬЮ · КОНТЕКСТ",
+                                "v": "нейтральный уклон", "tone": "neutral"})
 
         # term-structure: ожидание движения
         term = opts.get("term")
@@ -200,7 +343,7 @@ class Engine:
             action = "Фильтр стратегии блокирует сетап — пропусти или дождись условий."
         elif score >= 3:
             label, tone = "СИЛЬНЫЙ ПЕРЕВЕС", "good"
-            action = "Сетап в вашу пользу и рынок недооценивает — вход по плану, ведите по лестнице фиксации."
+            action = "Опционная асимметрия поддерживает сделку — ведите по плану и следите за изменением edge."
         elif score >= 1:
             label, tone = "ПЕРЕВЕС", "good"
             action = "Небольшой перевес — вход допустим, дисциплина по лестнице и БУ после 1.5R."
@@ -298,7 +441,11 @@ class Engine:
             required = code in req
             chip = {"key": key, "label": label, "required": required,
                     "value": feed.get("value"), "status_feed": feed.get("status"),
-                    "state": "na", "detail": None}
+                    "state": "na", "detail": None,
+                    # Yahoo даёт бесплатный 15m-контекст, но не подтверждает
+                    # многошаговую 4H-логику. Показываем, не блокируем опционный
+                    # вердикт этим приблизительным слоем.
+                    "decision_weight": False}
             if not required:
                 chip["detail"] = "не требуется для активного сетапа"
                 return chip
@@ -308,6 +455,8 @@ class Engine:
                 chip["detail"] = f"{label}: фид недоступен — проверь вручную"
                 return chip
             chip["state"] = "pass" if cmp_pass(feed["value"]) else "block"
+            chip["detail"] = (f"{label}: 15m delayed-контекст; "
+                              "не является полным подтверждением сетапа")
             return chip
 
         chips = [
@@ -349,18 +498,20 @@ class Engine:
         band = pb.prob_band(r, stats.wins, stats.n, T, sigma_ratio=sr)
         jn, jw = self.journal.journal_counts(trade["setup"])
 
-        # sigma_R — абсолютный ожидаемый ход сделки в R к экспирации (для карты/справки).
+        # sigma_R — абсолютный ОПЦИОННЫЙ ход в R к выбранной экспирации.
         sigma_R, sr_source = self._sigma_R(trade, price, sigma)
-        # ширина доски определяется РЕЖИМОМ волы (implied/realized), а не абсолютом:
-        # при тесных стопах абсолютный ход в разы больше барьеров и дал бы бинарный
-        # исход. Здесь колокол всегда виден, но раздувается в разогнанном рынке
-        # (ratio>1) и сжимается в сжатом (ratio<1) — и сдвигается с ценой (r0).
+        # Тёмная контрольная линия доски остаётся статистической моделью сетапа;
+        # оранжевая поверхность/корзины ниже будут опционными.
         ratio_eff = sigma["ratio"] if sigma.get("applied") else 1.0
         board_sigma_R = float(min(max(0.85 * math.sqrt(ratio_eff), 0.45), 1.7))
 
         prob = {
             "r": r, "T": T, "p": band.p, "p_lo": band.p_lo, "p_hi": band.p_hi,
             "p_breakeven": 1.0 / (1.0 + T),   # винрейт для EV=0 при RR 1:T
+            "source": "setup_fallback",
+            "model_p": band.p,
+            "model_p_lo": band.p_lo, "model_p_hi": band.p_hi,
+            "model_small_sample": stats.n < 30,
             "mu": band.mu, "sigma_ratio": band.sigma_ratio,
             "winrate": band.winrate, "wr_lo": band.wr_lo, "wr_hi": band.wr_hi,
             "n": stats.n, "wins": stats.wins,
@@ -392,9 +543,9 @@ class Engine:
         # АСИММЕТРИЯ по скью (risk-reversal): сторона страха (падение цены) шире —
         # для лонга это −R (стоп), для шорта +R. skew_R>0 расширяет −R. Медвежий
         # скью (rr<0) в лонге → skew_R>0 (толще нижний хвост, честнее P стопа).
-        opts = self._options_summary()
+        opts = self._options_summary(price)
         sk = (opts or {}).get("skew")
-        drift_R = 0.0                          # снос ~0 (фандинга CFD нет в данных)
+        drift_R = 0.0
         skew_R = 0.0
         if sk and sk.get("rr") is not None:
             rr = sk["rr"]
@@ -410,46 +561,111 @@ class Engine:
         rv_ann = self.market.baseline_vol()
         rv_iv_ratio = (float(min(max(rv_ann / iv_ann, 0.3), 3.0))
                        if (iv_ann and iv_ann > 0 and rv_ann and rv_ann > 0) else None)
-        # АДАПТИВНОЕ реальное время развязки: не привязано к экспирации, а выведено
-        # из скорости движения (волы) относительно расстояния до барьеров. У скальпа
-        # с тесным стопом это минуты, у свинга — дни.
-        risk_price = abs(entry - stop)
-        sigma_ann = (sigma["sigma_implied"] if sigma.get("applied") and sigma.get("sigma_implied")
-                     else self.market.baseline_vol())
-        # σ_R_rate — СКО хода в R за √год: σ_годовая · цена / риск_в_пунктах
-        target_spread = float(min(max(0.8 * (T + 1.0), 2.5), 8.0))  # ширина конуса «до развязки»
-        horizon_years = None
-        if sigma_ann and sigma_ann > 0 and price and risk_price > 0:
-            sigma_R_rate = sigma_ann * price / risk_price
-            if sigma_R_rate > 0:
-                hy = (target_spread / sigma_R_rate) ** 2
-                horizon_years = float(min(max(hy, 1.0 / (365 * 24 * 60)), 60.0 / 365))  # [1мин, 60дн]
+        # Ось времени и ширина теперь не подгоняются под расстояние стоп/тейк.
+        # Их задаёт реальная экспирация последней цепочки и implied move.
+        horizon_years = (opts or {}).get("t_years")
+        cone_sigma_R = sigma_R
 
         # RND к экспирации (Бриден–Литценбергер) — для Strike Landscape и задней стены
-        terminal = self._market_dist(trade, price, T, band.p)
+        terminal = self._market_dist(trade, price, T)
+        if terminal and terminal.get("mean_r") is not None:
+            # Risk-neutral forward tilt из самой плотности. Ограничение защищает
+            # от редких плохих mid-котировок бесплатной цепочки.
+            drift_R = float(min(max(terminal["mean_r"] - r, -1.25), 1.25))
         # risk-neutral конус (диффузия под волу + АСИММЕТРИЯ скью + ФОРВАРДНАЯ вола
-        # по term-structure, НЕ винрейт; ось — реальное время)
-        cone = self._cone(r, T, target_spread, drift_R, skew_R, term_slope,
+        # по term-structure, НЕ винрейт; неразрешённые пути якорятся BL-tail ratio)
+        cone = self._cone(r, T, cone_sigma_R, drift_R, skew_R, term_slope,
                           horizon_years, terminal, rv_iv_ratio)
 
-        # «рынок» для доски/края/вердикта — из risk-neutral конуса (first-passage):
-        # hit_ratio = рыночная P(тейк раньше стопа); край = P модели − hit рынка.
+        has_options = bool(
+            terminal is not None
+            and cone.get("hit_source") == "barrier_mc+bl_terminal")
+        option_p = cone["hit_ratio"] if has_options else None
+        p_be = prob["p_breakeven"]
+        option_edge = (option_p - p_be) if option_p is not None else None
+        option_ev = (T * option_p - (1.0 - option_p)
+                     if option_p is not None else None)
+        # Сценарная полоса включает Monte-Carlo noise, возраст снимка и штраф
+        # экспериментального прокси. Это не академический confidence interval.
+        chain_age = (time.time() - self.market.chain["ts"]
+                     if self.market.chain.get("ts") else None)
+        if option_p is not None:
+            systematic = 0.035
+            if self.market.instrument.proxy_experimental:
+                systematic += 0.055
+            if chain_age is not None:
+                systematic += min(chain_age / 7200.0, 1.0) * 0.04
+            prob.update({
+                "p": option_p,
+                "p_lo": max(0.0, option_p - systematic),
+                "p_hi": min(1.0, option_p + systematic),
+                "source": "options_barrier_mc",
+                "uncertainty": "proxy+snapshot scenario band",
+                "small_sample": False,
+                "band_kind": "scenario",
+            })
+            # Главный EV теперь использует именно опционную вероятность. Исторический
+            # path-sim лестницы сохраняется как отдельный исследовательский ориентир.
+            mc["ev_hold_model"] = mc["ev_hold"]
+            mc["ev_hold"] = option_ev
+            mc["ev_hold_source"] = "options_probability"
+            mc["ev_ladder_source"] = "setup_path_control"
+        else:
+            prob["band_kind"] = "wilson"
+            mc["ev_hold_source"] = "setup_path_control"
+            mc["ev_ladder_source"] = "setup_path_control"
+
+        # «Рынок» для всех визуальных инструментов: finite-horizon barrier MC,
+        # форма/хвост/forward/skew/term которого пришли из опционной цепочки.
         market = {
-            "available": True,
-            "probs": cone["slice_probs"], "edges": cone["slice_edges"],
-            "p_take": cone["p_take"], "p_stop": cone["p_stop"],
-            "hit_ratio": cone["hit_ratio"],
-            "edge": band.p - cone["hit_ratio"],
+            "available": has_options,
+            "probs": cone["slice_probs"] if has_options else None,
+            "edges": cone["slice_edges"] if has_options else None,
+            "p_take": option_p,
+            "p_stop": (1.0 - option_p) if option_p is not None else None,
+            "p_take_horizon": cone["p_take"], "p_stop_horizon": cone["p_stop"],
+            "p_unresolved_horizon": cone.get("unresolved"),
+            "hit_ratio": option_p,
+            "edge": option_edge,
+            "option_ev": option_ev,
+            "p_breakeven": p_be,
             "p_model": band.p,
             "median_years": cone.get("median_years"),
-            "source": "rn_cone", "has_chain": terminal is not None,
+            "source": cone.get("hit_source"), "has_chain": terminal is not None,
             "demo": (terminal or {}).get("demo", self.settings.demo),
             "terminal_p_take": (terminal or {}).get("p_take"),
             "terminal_p_stop": (terminal or {}).get("p_stop"),
             "terminal_hit": (terminal or {}).get("hit_ratio"),
+            "chain_age_sec": chain_age,
+            "proxy": self.market.instrument.options_proxy,
+            "proxy_transform": self.market.instrument.proxy_transform,
+            "barriers_supported": (terminal or {}).get("barriers_supported"),
+            "tail_anchor_supported": (terminal or {}).get("tail_anchor_supported"),
+            "terminal_tail_mass": (terminal or {}).get("tail_mass"),
+            "support_low": (terminal or {}).get("support_low"),
+            "support_high": (terminal or {}).get("support_high"),
+            "anchor_reason": (
+                None if has_options else
+                "стоп/тейк вне доступной сетки страйков"
+                if terminal and terminal.get("barriers_supported") is False else
+                "слишком малая BL-масса за барьерами для устойчивого tail anchor"
+                if terminal and terminal.get("tail_anchor_supported") is False else
+                "нет валидной option-плотности или proxy mapping"
+            ),
+            "quality": ("experimental" if self.market.instrument.proxy_experimental
+                        else "reference_proxy"),
         }
-        # фиксируется один раз (первый тик после входа) — трек «край vs факт»
-        self.journal.update_edge_at_open(trade["id"], market["edge"])
+        # Первый edge + редкие живые снимки дают out-of-sample проверку, а не
+        # обещание преимущества по одному красивому кадру.
+        self.journal.update_edge_at_open(trade["id"], option_edge)
+        if option_p is not None:
+            self.journal.record_option_forecast(
+                trade["id"], price=price, r=r,
+                p_take=option_p, p_stop=1.0 - option_p,
+                p_unresolved=cone.get("unresolved", 0.0),
+                option_edge=option_edge, option_ev=option_ev,
+                chain_ts=self.market.chain.get("ts"), chain_age_sec=chain_age,
+                source=cone.get("hit_source") or "unknown")
         gamma = self._gamma_pin(trade, price)
         return {"prob": prob, "mc": mc, "ladder": ladder, "market": market,
                 "gamma": gamma, "cone": cone,
@@ -465,19 +681,28 @@ class Engine:
         грань несёт терминальную RND рынка (Бриден–Литценбергер) как ориентир.
         Кэш — по округлённым параметрам (пересчёт только при заметном сдвиге r/волы).
         """
+        terminal_hit = (terminal or {}).get("hit_ratio")
         key = (round(r, 3), round(sigma_R, 3), round(T, 2), round(drift_R, 3),
                round(skew_R, 3), round(term_slope, 3),
-               round((horizon_years or 0.0) * 3650, 2))
+               round((horizon_years or 0.0) * 3650, 2),
+               round(float(terminal_hit), 4) if terminal_hit is not None else -1.0)
         if key == self._cone_cache_key and self._cone_cache is not None:
             base = self._cone_cache
         else:
             seed = (int(abs(r) * 1000) ^ 0x5A5A) & 0x7FFF
             base = pb.rn_cone(r, sigma_R, T, drift_R=drift_R, skew=skew_R,
                               term_slope=term_slope, horizon_years=horizon_years,
+                              terminal_hit=terminal_hit,
                               seed=seed)
             self._cone_cache_key, self._cone_cache = key, base
         out = dict(base)
+        # Конус остаётся видимым и без опционов, но в таком случае он явно
+        # обозначен как fallback и не участвует в расчёте преимущества.
         out["available"] = True
+        out["option_anchored"] = (
+            terminal is not None
+            and out.get("hit_source") == "barrier_mc+bl_terminal"
+        )
         out["rv_iv_ratio"] = rv_iv_ratio
         if terminal and terminal.get("probs"):
             out["market_terminal"] = terminal["probs"]
@@ -497,10 +722,12 @@ class Engine:
         prob, trade = p.get("prob"), p.get("trade")
         if not prob or not trade:
             return None
-        price = self.market.price.get("value")
+        price = (p.get("levels") or {}).get("price")
+        if price is None:
+            price = self._current_instrument_price(trade)
         r, T = prob["r"], prob["T"]
         atr_abs = (p.get("atr") or {}).get("atr_abs")
-        entry, stop, take = trade["entry"], trade["stop"], trade["take"]
+        stop, take = trade["stop"], trade["take"]
         to_take_atr = (abs(take - price) / atr_abs) if (atr_abs and price) else None
         to_stop_atr = (abs(price - stop) / atr_abs) if (atr_abs and price) else None
         market = p.get("market")
@@ -546,48 +773,55 @@ class Engine:
     def _gamma_pin(self, trade: dict, price: float) -> dict:
         """Гамма-пиннинг в шкале инструмента (эвристика позиционирования дилеров)."""
         m = self.market.chain.get("metrics")
-        scale = self._proxy_scale()
-        if not m or not scale:
+        if not m:
             return {"available": False,
                     "reason": f"нет опционной цепочки для {self.market.instrument_code}"}
+        if self.market.instrument.proxy_transform == "inverse":
+            return {
+                "available": False,
+                "reason": ("GEX отключён для inverse-proxy: без знака реальной "
+                           "дилерской позиции перенос был бы вводящим в заблуждение"),
+                "decision_weight": False,
+            }
         from .core.options import gamma_pin
         gex = m["gex"]
-        strikes_instr = [s * scale for s in gex["strikes"]]
-        flip = gex["zero_flip"] * scale if gex["zero_flip"] else None
+        strikes_instr = self._map_proxy_levels(gex["strikes"], price, m)
+        if not strikes_instr:
+            return {"available": False, "reason": "нет синхронной цены proxy"}
+        flip_levels = (self._map_proxy_levels([gex["zero_flip"]], price, m)
+                       if gex.get("zero_flip") is not None else None)
+        flip = flip_levels[0] if flip_levels else None
         res = gamma_pin(strikes_instr, gex["net"], flip, price,
                         trade["entry"], trade["stop"], trade["take"], trade["direction"])
         res["demo"] = m.get("demo", False)
+        res["decision_weight"] = False
+        res["quality"] = "oi_heuristic_not_observed_dealer_position"
         return res
 
-    def _market_dist(self, trade: dict, price: float, T: float,
-                     p_model: float) -> dict | None:
+    def _market_dist(self, trade: dict, price: float, T: float) -> dict | None:
         """Распределение исхода из рыночной risk-neutral плотности (опционы) в R.
 
-        None, если для инструмента нет цепочки (тогда доска покажет модель честно).
-        edge = P_модели − рыночный hit_ratio: положительный — ваша статистика даёт
-        лучшие шансы, чем закладывает опционный рынок (потенциальный край/переоценка).
+        Плотность сначала переносится из proxy в инструмент через текущую
+        moneyness (для inverse-прокси — с Jacobian), затем раскладывается по
+        барьерам сделки. None означает, что edge должен быть выключен.
         """
         m = self.market.chain.get("metrics")
-        scale = self._proxy_scale()
-        if not m or not scale:
+        dens = self._mapped_density(price, m)
+        if not m or dens is None:
             return None
         try:
-            from .core.options import RNDensity, market_r_distribution
-            import numpy as np
-            dens = RNDensity(strikes=np.asarray(m["density"]["strikes"]),
-                             density=np.asarray(m["density"]["q"]),
-                             t_years=m["t_years"])
-            md = market_r_distribution(dens, scale, trade["entry"], trade["stop"],
+            from .core.options import market_r_distribution
+            md = market_r_distribution(dens, 1.0, trade["entry"], trade["stop"],
                                        trade["take"], trade["direction"], T)
-        except (ValueError, KeyError):
+        except (TypeError, ValueError, KeyError):
             return None
-        edge = (p_model - md["hit_ratio"]) if md["hit_ratio"] is not None else None
         md.update({
             "available": True,
             "demo": m.get("demo", False),
             "expiry": m.get("expiry"),
-            "edge": edge,
-            "p_model": p_model,
+            "proxy_spot_current": self._current_proxy_spot(m),
+            "proxy_spot_snapshot": m.get("spot"),
+            "proxy_transform": self.market.instrument.proxy_transform,
         })
         return md
 
@@ -606,7 +840,7 @@ class Engine:
         risk = abs(trade["entry"] - trade["stop"])
         if risk <= 0:
             return 1.0, "нейтрально"
-        opts = self._options_summary()
+        opts = self._options_summary(price)
         if opts and opts.get("implied_move_abs_instr"):
             # move_abs = E|ΔS| к экспирации; СКО хода = move_abs*sqrt(pi/2)
             sr = opts["implied_move_abs_instr"] * math.sqrt(math.pi / 2) / risk
@@ -653,45 +887,95 @@ class Engine:
     # --------------------------------------------------------------- levels
 
     def _proxy_scale(self) -> float | None:
-        """Коэффициент пересчёта цен прокси-ETF в шкалу инструмента.
+        """Совместимый scale только для direct-proxy.
 
-        scale = цена_инструмента / спот_прокси на момент снапшота цепочки.
-        Пропорциональное отображение — приближение, указывается в tooltip.
+        Новая математика использует `_map_proxy_levels`; единого множителя у
+        inverse-прокси не существует.
         """
         m = self.market.chain.get("metrics")
-        price = self.market.price.get("value")
-        if not m or not price or not m.get("spot"):
+        if self.market.instrument.proxy_transform != "direct":
             return None
-        return price / m["spot"]
+        price = self._current_instrument_price()
+        proxy_spot = self._current_proxy_spot(m)
+        if not m or not price or not proxy_spot:
+            return None
+        return price / proxy_spot
 
-    def _options_summary(self) -> dict | None:
+    def _options_summary(self, price: float | None = None) -> dict | None:
         m = self.market.chain.get("metrics")
         if not m:
             return None
-        scale = self._proxy_scale() or 1.0
+        price = price or self._current_instrument_price()
+        proxy_current = self._current_proxy_spot(m)
+        if price is None or proxy_current is None:
+            return None
         sess_rem_y = _seconds_to_session_end() / (365.0 * 24 * 3600)
         sigma_ann = m["implied_move"]["sigma_annual"]
-        price = self.market.price.get("value")
         band = (price * sigma_ann * (sess_rem_y ** 0.5)) if price else None
+
+        # Для inverse-прокси инструментальные calls/puts меняются местами:
+        # дорогие calls FXC означают защиту/ставку на падение USD/CAD.
+        skew = deepcopy(m.get("skew"))
+        if skew and self.market.instrument.proxy_transform == "inverse":
+            skew["rr_proxy"] = skew.get("rr")
+            skew["rr"] = -float(skew["rr"])
+            skew["call_iv_otm"], skew["put_iv_otm"] = (
+                skew.get("put_iv_otm"), skew.get("call_iv_otm"))
+            skew["tilt"] = ("бычий" if skew["rr"] > 0.01 else
+                            "медвежий" if skew["rr"] < -0.01 else
+                            "нейтральный")
+
+        gex_available = self.market.instrument.proxy_transform == "direct"
+        mapped_flip = None
+        mapped_top: list[dict] = []
+        if gex_available:
+            flip = m["gex"].get("zero_flip")
+            if flip is not None:
+                vals = self._map_proxy_levels([flip], price, m)
+                mapped_flip = vals[0] if vals else None
+            top_strikes = [t["strike"] for t in m["gex"].get("top", [])]
+            top_mapped = self._map_proxy_levels(top_strikes, price, m) or []
+            mapped_top = [
+                {"price": mapped, "gex": src["gex"]}
+                for mapped, src in zip(top_mapped, m["gex"].get("top", []))
+            ]
+
+        chain_ts = self.market.chain.get("ts")
+        chain_age = time.time() - chain_ts if chain_ts else None
         return {
             "proxy": m["proxy"],
             "expiry": m["expiry"],
+            "t_years": m.get("t_years"),
             "demo": m.get("demo", False),
             "experimental": m.get("experimental", False),
-            "skew": m.get("skew"),
+            "skew": skew,
             "term": m.get("term"),
             "spot_proxy": m["spot"],
-            "scale": scale,
+            "spot_proxy_snapshot": m["spot"],
+            "spot_proxy_current": proxy_current,
+            "spot_proxy_status": self.market.proxy_price.get("status"),
+            "spot_proxy_source": self.market.proxy_price.get("source"),
+            "spot_proxy_is_snapshot_fallback": self._quoted_proxy_spot() is None,
+            "proxy_move_since_snapshot": proxy_current / m["spot"] - 1.0,
+            "proxy_transform": self.market.instrument.proxy_transform,
+            "price_instrument_current": price,
+            "price_label": (self.market.instrument.price_label
+                            or self.market.instrument.yahoo),
+            "chain_status": self.market.chain.get("status"),
+            "chain_age_sec": chain_age,
             "implied_move_frac": m["implied_move"]["move_frac"],
-            "implied_move_abs_instr": m["implied_move"]["move_abs"] * scale,
+            # Процентный implied move переносим на текущую цену; это устойчивее
+            # абсолютного ETF-scale и корректно по направлению и для inverse.
+            "implied_move_abs_instr": price * m["implied_move"]["move_frac"],
             "sigma_annual": sigma_ann,
             "session_band_abs": band,   # ±1σ до конца сессии в пунктах инструмента
             # ±ожидаемый ход к экспирации (implied move) — коридор рынка для карты
-            "expiry_band_abs": m["implied_move"]["move_abs"] * scale,
-            "gex_zero_flip_instr": (m["gex"]["zero_flip"] * scale
-                                    if m["gex"]["zero_flip"] else None),
-            "gex_top_instr": [{"price": t["strike"] * scale, "gex": t["gex"]}
-                              for t in m["gex"]["top"]],
+            "expiry_band_abs": price * m["implied_move"]["move_frac"],
+            "gex_available": gex_available,
+            "gex_reason": (None if gex_available else
+                           "inverse-proxy: знак dealer GEX не переносится надёжно"),
+            "gex_zero_flip_instr": mapped_flip,
+            "gex_top_instr": mapped_top,
         }
 
     def _vrp_payload(self) -> dict:
@@ -712,12 +996,12 @@ class Engine:
             "regime": regime
         }
 
-    def _volume_profile_payload(self) -> dict | None:
+    def _volume_profile_payload(self, quote_offset: float = 0.0) -> dict | None:
         intraday = self.market.intraday
         if not intraday:
             return None
-            
-        prices = [x[1] for x in intraday]
+
+        prices = [x[1] + quote_offset for x in intraday]
         min_p, max_p = min(prices), max(prices)
         if min_p == max_p:
             return None
@@ -732,7 +1016,8 @@ class Engine:
         total_vol = 0
         has_real_volume = sum(x[2] for x in intraday) > 0
         
-        for ts, p, vol in intraday:
+        for _ts, raw_p, vol in intraday:
+            p = raw_p + quote_offset
             # Если нет реального объема, используем 1 как TPO (Time Price Opportunity)
             v = vol if has_real_volume else 1.0
             b = min_p + math.floor((p - min_p) / bin_size) * bin_size
@@ -757,9 +1042,14 @@ class Engine:
 
     def _levels_payload(self, trade: dict, price: float, sigma: dict,
                         gamma: dict | None = None) -> dict:
-        opts = self._options_summary()
-        vwap = self.market.vwap()
-        day = self.market.day_range()
+        opts = self._options_summary(price)
+        quote_offset = float(trade.get("quote_offset") or 0.0)
+        raw_vwap = self.market.vwap()
+        raw_day = self.market.day_range()
+        vwap = raw_vwap + quote_offset if raw_vwap is not None else None
+        day = (
+            (raw_day[0] + quote_offset, raw_day[1] + quote_offset)
+            if raw_day else None)
         levels = {
             "price": price,
             "entry": trade["entry"], "stop": trade["stop"], "take": trade["take"],
@@ -772,7 +1062,7 @@ class Engine:
             "day_high": day[1] if day else None,
             "implied_band": None,
             "gex": None,
-            "volume_profile": self._volume_profile_payload(),
+            "volume_profile": self._volume_profile_payload(quote_offset),
         }
         # коридор = ожидаемый ход рынка к экспирации (implied move); если его нет,
         # но есть σ-поправка из индекса волы — строим ±1σ за горизонт по умолчанию
@@ -813,32 +1103,53 @@ class Engine:
             return {"available": False,
                     "reason": "ещё нет ни одного снапшота цепочки",
                     "snapshots": []}
-        scale = self._proxy_scale()
         trade = self.journal.active_trade()
-        price = self.market.price.get("value")
-        oi_walls = self._oi_walls(snaps[-1], scale, price)
+        price = self._current_instrument_price(trade)
+        proxy_spot = self._current_proxy_spot(snaps[-1])
+        if price is None or proxy_spot is None:
+            return {
+                "available": False,
+                "reason": "нет синхронной цены инструмента или option-proxy",
+                "snapshots": [],
+            }
+        mapped_snaps = [
+            self._map_snapshot(s, price, proxy_spot)
+            for s in snaps
+        ]
+        mapped_snaps = [s for s in mapped_snaps if s is not None]
+        if not mapped_snaps:
+            return {
+                "available": False,
+                "reason": "не удалось перенести option-proxy в шкалу инструмента",
+                "snapshots": [],
+            }
+        oi_walls = self._oi_walls(mapped_snaps[-1], 1.0, price)
         rn_probs = None
-        if trade and scale:
-            latest = snaps[-1]
-            from .core.options import RNDensity
+        if trade:
+            latest = mapped_snaps[-1]
             import numpy as np
+
+            from .core.options import RNDensity
             dens = RNDensity(strikes=np.asarray(latest["density"]["strikes"]),
                              density=np.asarray(latest["density"]["q"]),
                              t_years=latest["t_years"])
-            take_p, stop_p = trade["take"] / scale, trade["stop"] / scale
             if trade["direction"] == "long":
-                p_take_side = dens.tail_probs(take_p)[0]   # выше тейка
-                p_stop_side = dens.tail_probs(stop_p)[1]   # ниже стопа
+                p_take_side = dens.tail_probs(trade["take"])[0]
+                p_stop_side = dens.tail_probs(trade["stop"])[1]
             else:
-                p_take_side = dens.tail_probs(take_p)[1]   # ниже тейка (шорт)
-                p_stop_side = dens.tail_probs(stop_p)[0]   # выше стопа
+                p_take_side = dens.tail_probs(trade["take"])[1]
+                p_stop_side = dens.tail_probs(trade["stop"])[0]
             rn_probs = {"p_beyond_take": p_take_side, "p_beyond_stop": p_stop_side,
                         "expiry": latest.get("expiry"), "demo": latest.get("demo")}
         return clean_nans({
             "available": True,
             "proxy": inst.options_proxy,
-            "scale": scale,
-            "snapshots": snaps,
+            # Снимки уже в шкале инструмента; frontend scale оставлен равным 1
+            # для обратной совместимости всех существующих визуальных слоёв.
+            "scale": 1.0,
+            "proxy_transform": inst.proxy_transform,
+            "proxy_spot_current": proxy_spot,
+            "snapshots": mapped_snaps,
             "trade": ({"entry": trade["entry"], "stop": trade["stop"],
                        "take": trade["take"], "direction": trade["direction"]}
                       if trade else None),
@@ -847,12 +1158,95 @@ class Engine:
             "oi_walls": oi_walls,
         })
 
+    def _map_snapshot(self, snap: dict, instrument_price: float,
+                      proxy_spot: float) -> dict | None:
+        """Кэшированный option snapshot -> единая живая шкала инструмента."""
+        try:
+            import numpy as np
+
+            from .core.options import RNDensity, map_proxy_density, map_proxy_levels
+
+            out = deepcopy(snap)
+            transform = self.market.instrument.proxy_transform
+
+            raw_density = RNDensity(
+                strikes=np.asarray(snap["density"]["strikes"], dtype=float),
+                density=np.asarray(snap["density"]["q"], dtype=float),
+                t_years=float(snap["t_years"]))
+            dens = map_proxy_density(raw_density, proxy_spot, instrument_price,
+                                     transform)
+            out["density"] = {
+                **out["density"],
+                "strikes": dens.strikes.tolist(),
+                "q": dens.density.tolist(),
+            }
+
+            oi = deepcopy(snap.get("oi_profile") or {})
+            if oi.get("strikes"):
+                oi_k = map_proxy_levels(
+                    oi["strikes"], proxy_spot, instrument_price, transform)
+                order = np.argsort(oi_k)
+                call_oi = np.asarray(oi.get("call_oi") or [], dtype=float)
+                put_oi = np.asarray(oi.get("put_oi") or [], dtype=float)
+                oi["strikes"] = oi_k[order].tolist()
+                if len(call_oi) == len(order) and len(put_oi) == len(order):
+                    if transform == "inverse":
+                        # proxy puts ~= instrument calls; proxy calls ~= puts.
+                        oi["call_oi"] = put_oi[order].tolist()
+                        oi["put_oi"] = call_oi[order].tolist()
+                    else:
+                        oi["call_oi"] = call_oi[order].tolist()
+                        oi["put_oi"] = put_oi[order].tolist()
+                out["oi_profile"] = oi
+
+            gx = deepcopy(snap.get("gex") or {})
+            if transform == "inverse":
+                # Не рисуем ложный дилерский знак для нелинейно обратного proxy.
+                gx.update({
+                    "strikes": [],
+                    "net": [],
+                    "zero_flip": None,
+                    "top": [],
+                    "available": False,
+                    "reason": "inverse-proxy: GEX sign disabled",
+                })
+            elif gx.get("strikes"):
+                gk = map_proxy_levels(
+                    gx["strikes"], proxy_spot, instrument_price, transform)
+                order = np.argsort(gk)
+                net = np.asarray(gx.get("net") or [], dtype=float)
+                gx["strikes"] = gk[order].tolist()
+                if len(net) == len(order):
+                    gx["net"] = net[order].tolist()
+                if gx.get("zero_flip") is not None:
+                    gx["zero_flip"] = float(map_proxy_levels(
+                        [gx["zero_flip"]], proxy_spot, instrument_price,
+                        transform)[0])
+                top = gx.get("top") or []
+                if top:
+                    tk = map_proxy_levels(
+                        [t["strike"] for t in top], proxy_spot,
+                        instrument_price, transform)
+                    gx["top"] = [
+                        {**t, "strike": float(k)} for t, k in zip(top, tk)
+                    ]
+                gx["available"] = True
+            out["gex"] = gx
+            out["spot_proxy_snapshot"] = snap.get("spot")
+            out["spot_proxy_current"] = proxy_spot
+            out["spot"] = instrument_price
+            out["proxy_transform"] = transform
+            return out
+        except (KeyError, TypeError, ValueError):
+            return None
+
     @staticmethod
     def _oi_walls(snap: dict, scale: float | None, price: float | None) -> dict | None:
-        """Крупнейшие стены open interest: коллы (сопротивление) / путы (поддержка).
+        """Крупнейшие концентрации open interest коллов/путов.
 
-        Практическая польза Strike Landscape: где реально стоит опционный интерес,
-        относительно которого цене труднее пройти. Расстояние — в % от цены.
+        Показывает, где реально сосредоточены контракты, но не называет эти
+        страйки поддержкой/сопротивлением: сторона позиции и хедж неизвестны.
+        Расстояние — в % от цены.
         """
         oi = snap.get("oi_profile") if snap else None
         if not oi or not oi.get("strikes") or not scale:
@@ -875,6 +1269,186 @@ class Engine:
             "call_oi": float(coi[ci]), "put_oi": float(poi[pi]),
             "demo": snap.get("demo", False),
         }
+
+    def diagnostics_payload(self) -> dict:
+        """Самопроверка применимости данных и визуальных инструментов.
+
+        Это не торговый сигнал: endpoint объясняет, какой ряд реально показан,
+        чем он связан с опционами и какие слои имеют право влиять на verdict.
+        """
+        trade = self.journal.active_trade()
+        inst = self.market.instrument
+        raw = self.market.price.get("value")
+        effective = self._effective_price(trade, raw)
+        m = self.market.chain.get("metrics")
+        proxy_spot = self._current_proxy_spot(m)
+        quoted_proxy_spot = self._quoted_proxy_spot()
+        proxy_quote_status = self.market.proxy_price.get("status")
+        live_proxy_mapping = bool(
+            quoted_proxy_spot is not None
+            and proxy_quote_status in {"live", "demo"})
+        chain_ts = self.market.chain.get("ts")
+        age = time.time() - chain_ts if chain_ts else None
+        has_density = bool(
+            m and (m.get("density") or {}).get("strikes")
+            and (m.get("density") or {}).get("q"))
+        data_ready = bool(has_density and effective and proxy_spot is not None)
+        trade_dist = None
+        if trade and effective and data_ready:
+            try:
+                target_r = pb.target_rr_from_levels(
+                    trade["entry"], trade["stop"], trade["take"],
+                    trade["direction"])
+                trade_dist = self._market_dist(trade, effective, target_r)
+            except (KeyError, TypeError, ValueError):
+                trade_dist = None
+        barriers_supported = (
+            trade_dist.get("barriers_supported") if trade_dist else None)
+        tail_anchor_supported = (
+            trade_dist.get("tail_anchor_supported") if trade_dist else None)
+        anchor_ready = bool(
+            data_ready
+            and (not trade or (
+                trade_dist is not None
+                and trade_dist.get("hit_ratio") is not None
+            ))
+        )
+        decision_ready = bool(trade and anchor_ready)
+        dynamic_mapping = bool(data_ready and quoted_proxy_spot is not None)
+        inverse = inst.proxy_transform == "inverse"
+
+        warnings: list[str] = []
+        if inst.code in {"XAU", "XAG"}:
+            warnings.append(
+                "price feed — активный COMEX futures; spot/CFD брокера может "
+                "иметь постоянный basis и roll-разницу")
+        if trade and abs(float(trade.get("quote_offset") or 0.0)) > 0:
+            warnings.append(
+                f"к ценовому ряду применён basis {float(trade['quote_offset']):+.4f}, "
+                "зафиксированный при открытии сделки")
+        if inst.proxy_experimental:
+            warnings.append(
+                "option-proxy экспериментальный: используйте только как "
+                "сценарный контекст, не как точную цену инструмента")
+        if age is not None and age > 1800:
+            warnings.append("опционный снимок старше 30 минут")
+        if quoted_proxy_spot is None and inst.options_proxy:
+            warnings.append(
+                "нет живой цены option-proxy; динамическая moneyness использует "
+                "spot последнего снимка")
+        elif (quoted_proxy_spot is not None
+              and proxy_quote_status == "delayed"):
+            warnings.append(
+                "option-proxy обновляется REST-котировкой indicative/delayed, "
+                "а не живым stream-тиком")
+        if barriers_supported is False and trade_dist:
+            warnings.append(
+                "стоп или тейк лежит за доступной сеткой страйков; option edge "
+                "выключен, визуальный fallback сохранён")
+        elif tail_anchor_supported is False and trade_dist:
+            warnings.append(
+                "суммарная BL-масса за барьерами слишком мала для устойчивого "
+                "tail-ratio; option edge выключен")
+
+        anchor_status = (
+            "option_anchored_live" if anchor_ready and live_proxy_mapping else
+            "option_anchored_indicative" if anchor_ready and dynamic_mapping else
+            "option_anchored_snapshot" if anchor_ready else
+            "fallback"
+        )
+
+        features = {
+            "probability_lattice": {
+                "status": anchor_status,
+                "decision_weight": decision_ready,
+                "driver": ("BL density + barrier MC + live instrument/proxy ticks"
+                           if anchor_ready and live_proxy_mapping else
+                           "BL snapshot + indicative proxy mapping"
+                           if anchor_ready and dynamic_mapping else
+                           "BL snapshot + barrier MC"
+                           if anchor_ready else "setup control model"),
+            },
+            "strike_landscape": {
+                "status": (
+                    "ready_live" if data_ready and live_proxy_mapping else
+                    "ready_indicative" if data_ready and dynamic_mapping else
+                    "ready_snapshot" if data_ready else "no_data"),
+                "decision_weight": decision_ready,
+                "driver": "mapped BL densities and max-OI context",
+            },
+            "probability_cone_3d": {
+                "status": anchor_status,
+                "decision_weight": decision_ready,
+                "driver": "implied move + BL terminal tail + skew/term structure",
+            },
+            "probability_fan_2d": {
+                "status": anchor_status,
+                "decision_weight": decision_ready,
+                "driver": "readable slice of the same cone",
+            },
+            "iv_surface_3d": {
+                "status": ("snapshot_plus_live_spot"
+                           if self.market.iv_surface.get("value")
+                           and live_proxy_mapping
+                           else "snapshot_plus_indicative_spot"
+                           if self.market.iv_surface.get("value")
+                           and quoted_proxy_spot is not None
+                           else "snapshot_only"
+                           if self.market.iv_surface.get("value") else "no_data"),
+                "decision_weight": False,
+                "driver": "delayed IV snapshot; quote-driven moneyness only",
+            },
+            "gex": {
+                "status": ("disabled_inverse_proxy" if inverse else
+                           "context_only" if m else "no_data"),
+                "decision_weight": False,
+                "driver": "open-interest sign heuristic; dealer positions unobserved",
+            },
+            "volatility_filters": {
+                "status": "context_only",
+                "decision_weight": False,
+                "driver": "Yahoo 15m delayed context, not full strategy sequence",
+            },
+        }
+        return clean_nans({
+            "instrument": {
+                "code": inst.code,
+                "price_ticker": inst.yahoo,
+                "price_label": inst.price_label or inst.yahoo,
+                "option_proxy": inst.options_proxy,
+                "proxy_transform": inst.proxy_transform,
+                "proxy_quality": ("experimental" if inst.proxy_experimental
+                                  else "reference"),
+            },
+            "quote": {
+                "raw": raw,
+                "effective": effective,
+                "basis_offset": float((trade or {}).get("quote_offset") or 0.0),
+                "source": self.market.price.get("source"),
+                "status": self.market.price.get("status"),
+            },
+            "options": {
+                "status": self.market.chain.get("status"),
+                "source": self.market.chain.get("source"),
+                "expiry": (m or {}).get("expiry"),
+                "snapshot_spot": (m or {}).get("spot"),
+                "proxy_spot_current": proxy_spot,
+                "proxy_quote": quoted_proxy_spot,
+                "proxy_quote_status": proxy_quote_status,
+                "uses_snapshot_spot_fallback": quoted_proxy_spot is None,
+                "snapshot_age_sec": age,
+                "density_ready": has_density,
+                "barriers_supported": barriers_supported,
+                "tail_anchor_supported": tail_anchor_supported,
+                "terminal_tail_mass": (
+                    trade_dist.get("tail_mass") if trade_dist else None),
+                "dynamic_mapping_ready": dynamic_mapping,
+                "live_mapping_ready": live_proxy_mapping,
+                "option_anchor_ready": anchor_ready,
+            },
+            "features": features,
+            "warnings": warnings,
+        })
 
     def close(self) -> None:
         self.cache.close()

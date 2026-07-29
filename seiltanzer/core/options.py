@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 import numpy as np
 
 SQRT_2PI = math.sqrt(2.0 * math.pi)
+# Если суммарная BL-масса за двумя барьерами меньше 0.5%, их отношение слишком
+# чувствительно к одному плохому бесплатному mid и не должно якорить весь edge.
+MIN_TAIL_ANCHOR_MASS = 0.005
 
 
 def _norm_pdf(x: float) -> float:
@@ -125,8 +128,61 @@ class RNDensity:
         p_above = min(max(p_above, 0.0), 1.0)
         return p_above, 1.0 - p_above
 
+    def mean(self) -> float:
+        """Математическое ожидание уровня под нормированной плотностью."""
+        return float(np.trapezoid(self.strikes * self.density, self.strikes))
 
-def market_r_distribution(density: "RNDensity", scale: float, entry: float,
+
+def map_proxy_levels(levels, proxy_spot: float, instrument_spot: float,
+                     transform: str = "direct") -> np.ndarray:
+    """Переносит уровни прокси в шкалу инструмента через относительные доходности.
+
+    Это не притворяется точным арбитражным соответствием ETF и CFD/фьючерса.
+    Оно сохраняет то, что бесплатный прокси действительно несёт: форму
+    распределения в moneyness.
+
+    direct:
+        Y(K) = S_y * K / S_x
+    inverse (например FXC -> USD/CAD):
+        Y(K) = S_y * S_x / K
+    """
+    k = np.asarray(levels, dtype=float)
+    if proxy_spot <= 0 or instrument_spot <= 0:
+        raise ValueError("споты прокси и инструмента должны быть > 0")
+    if transform == "direct":
+        return instrument_spot * k / proxy_spot
+    if transform == "inverse":
+        if np.any(k <= 0):
+            raise ValueError("страйки inverse-прокси должны быть > 0")
+        return instrument_spot * proxy_spot / k
+    raise ValueError(f"неизвестное преобразование прокси: {transform}")
+
+
+def map_proxy_density(density: RNDensity, proxy_spot: float,
+                      instrument_spot: float,
+                      transform: str = "direct") -> RNDensity:
+    """Переносит q(K) прокси в шкалу инструмента с корректным Якобианом."""
+    k = np.asarray(density.strikes, dtype=float)
+    q = np.asarray(density.density, dtype=float)
+    y = map_proxy_levels(k, proxy_spot, instrument_spot, transform)
+    if transform == "direct":
+        jac = np.full_like(k, instrument_spot / proxy_spot)
+    else:
+        jac = instrument_spot * proxy_spot / np.maximum(k * k, 1e-18)
+    qy = q / np.maximum(np.abs(jac), 1e-18)
+    order = np.argsort(y)
+    y, qy = y[order], qy[order]
+    ok = np.isfinite(y) & np.isfinite(qy) & (qy >= 0)
+    y, qy = y[ok], qy[ok]
+    if len(y) < 3:
+        raise ValueError("после преобразования прокси осталось мало точек")
+    area = float(np.trapezoid(qy, y))
+    if area <= 0:
+        raise ValueError("плотность прокси вырождена после преобразования")
+    return RNDensity(strikes=y, density=qy / area, t_years=density.t_years)
+
+
+def market_r_distribution(density: RNDensity, scale: float, entry: float,
                           stop: float, take: float, direction: str,
                           T: float, n_bins: int = 11) -> dict:
     """Risk-neutral распределение ИСХОДА сделки в R-координатах (из опционов).
@@ -137,9 +193,9 @@ def market_r_distribution(density: "RNDensity", scale: float, entry: float,
     корзина, за стоп -> левая), плюс:
       p_take  — P(S за тейком) по рынку,
       p_stop  — P(S за стопом),
-      hit_ratio = p_take / (p_take + p_stop) — рыночный аналог «дойти до тейка
-                  раньше стопа» (сопоставим с модельной P).
-    Это и есть опционное преимущество: рынок против вашей статистики.
+      hit_ratio = p_take / (p_take + p_stop) — terminal tail-ratio, которым
+                  option-anchored barrier MC распределяет неразрешённые пути.
+    Сам по себе tail-ratio не объявляется вероятностью первого достижения.
     """
     risk = abs(entry - stop)
     if risk <= 0 or T <= 0:
@@ -173,10 +229,36 @@ def market_r_distribution(density: "RNDensity", scale: float, entry: float,
     total = probs.sum()
     if total > 0:
         probs = probs / total
-    hit = p_take / (p_take + p_stop) if (p_take + p_stop) > 0 else None
+    support_low = float(dens.strikes[0])
+    support_high = float(dens.strikes[-1])
+    barriers_supported = (
+        support_low <= min(stop, take)
+        and max(stop, take) <= support_high
+    )
+    # Нормированная BL-плотность известна только внутри доступной сетки
+    # страйков. Если один из барьеров лежит за ней, нулевая хвостовая масса была
+    # бы артефактом бесплатной цепочки, а не рыночной вероятностью.
+    tail_mass = float(p_take + p_stop)
+    tail_anchor_supported = (
+        barriers_supported and tail_mass >= MIN_TAIL_ANCHOR_MASS)
+    hit = (
+        p_take / (p_take + p_stop)
+        if tail_anchor_supported
+        else None
+    )
+    # Среднее терминальное положение в R — опционно-выведенный forward tilt.
+    mean_s = density.mean() * scale
+    mean_r = ((mean_s - entry) / risk if direction == "long"
+              else (entry - mean_s) / risk)
     return {"edges": edges.tolist(), "probs": probs.tolist(),
             "p_take": float(p_take), "p_stop": float(p_stop),
-            "hit_ratio": (float(hit) if hit is not None else None)}
+            "hit_ratio": (float(hit) if hit is not None else None),
+            "mean_r": float(mean_r),
+            "barriers_supported": barriers_supported,
+            "tail_anchor_supported": tail_anchor_supported,
+            "tail_mass": tail_mass,
+            "support_low": support_low,
+            "support_high": support_high}
 
 
 def bl_density(strikes, call_mids, t_years: float, r: float = 0.0,
@@ -364,7 +446,6 @@ def gamma_pin(strikes_instr, net_gex, zero_flip_instr, price: float,
 
     magnet_r = to_r(magnet)
     price_r = to_r(price)
-    take_r = to_r(take)
     pull_dir = 1 if magnet > price else (-1 if magnet < price else 0)  # вверх/вниз в цене
     strength = min(abs(net_at) / gmax, 1.0)
     # тянет ли магнит к тейку или к стопу (в R-координатах сделки)

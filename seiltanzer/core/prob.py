@@ -156,6 +156,36 @@ class MCResult:
         return float(np.mean(self.terminal <= -1.0 + 1e-12))
 
 
+def _competing_bridge_probs(lower: np.ndarray,
+                            upper: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Нормирует вероятности двух барьеров, когда их сумма численно > 1.
+
+    Формула броуновского моста для каждого барьера выводится отдельно. На очень
+    широком шаге обе оценки могут суммарно превысить единицу; без нормировки
+    порядок проверок искусственно отдавал лишнюю массу нижнему барьеру.
+    """
+    total = lower + upper
+    scale = np.maximum(total, 1.0)
+    return lower / scale, upper / scale
+
+
+def _centered_skew_noise(z: np.ndarray, skew: float) -> np.ndarray:
+    """Асимметричный шум с E=0 и Var=1.
+
+    Отрицательные и положительные полуоси масштабируются по-разному, чтобы
+    сохранить skew хвостов. Простое разное масштабирование имеет ненулевое
+    среднее, которое на мелкой сетке превращается в огромный ложный дрейф.
+    Здесь этот сдвиг удалён аналитически, а дисперсия нормирована обратно к 1.
+    """
+    k = float(min(max(skew, -0.45), 0.45))
+    if abs(k) < 1e-15:
+        return z
+    raw = np.where(z < 0.0, (1.0 + k) * z, (1.0 - k) * z)
+    mean = -2.0 * k / math.sqrt(2.0 * math.pi)
+    variance = 1.0 + k * k * (1.0 - 2.0 / math.pi)
+    return (raw - mean) / math.sqrt(variance)
+
+
 def simulate_remainder(r0: float, mu: float, sigma: float, T: float,
                        n_paths: int = 3000, dt: float = 0.01,
                        horizon: float = 12.0, seed: int | None = None) -> MCResult:
@@ -189,6 +219,8 @@ def simulate_remainder(r0: float, mu: float, sigma: float, T: float,
             p_hi_ = sub[inside]
             bridge_sl = np.exp(-2.0 * (p_lo + 1.0) * (p_hi_ + 1.0) / var_dt)
             bridge_tp = np.exp(-2.0 * (T - p_lo) * (T - p_hi_) / var_dt)
+            bridge_sl, bridge_tp = _competing_bridge_probs(
+                bridge_sl, bridge_tp)
             u = rng.random(inside.sum())
             hit_sl_b = u < bridge_sl
             hit_tp_b = ~hit_sl_b & (u < bridge_sl + bridge_tp)
@@ -294,6 +326,8 @@ def cone_surface(r0: float, mu: float, sigma: float, T: float,
                 p_hi = sub[inside]
                 bridge_sl = np.exp(-2.0 * (p_lo + 1.0) * (p_hi + 1.0) / var_dt)
                 bridge_tp = np.exp(-2.0 * (T - p_lo) * (T - p_hi) / var_dt)
+                bridge_sl, bridge_tp = _competing_bridge_probs(
+                    bridge_sl, bridge_tp)
                 u = rng.random(inside.sum())
                 hit_sl = u < bridge_sl
                 hit_tp = ~hit_sl & (u < bridge_sl + bridge_tp)
@@ -351,6 +385,7 @@ def _rebin_uniform(vals, n_out: int) -> list[float]:
 def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
             skew: float = 0.0, term_slope: float = 0.0,
             horizon_years: float | None = None,
+            terminal_hit: float | None = None,
             n_slices: int = 14, n_bins: int = 31, n_paths: int = 6000,
             n_steps: int = 400, seed: int | None = None) -> dict:
     """RISK-NEUTRAL конус: эволюция распределения R под волатильность — НЕ винрейт.
@@ -366,7 +401,9 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
       density[n_slices][n_bins] — плотность живых путей (гладкая, для 3D-поверхности),
       times_frac / times_days — время срезов,
       p_take_by_t / p_stop_by_t — накопленная вероятность дойти к моменту t (стены),
-      p_take / p_stop — к экспирации; hit_ratio — first-passage P(тейк раньше стопа),
+      p_take / p_stop — реально пересекли барьеры к горизонту;
+      hit_ratio — опционно-якорная P(тейк раньше стопа): пересечённые пути +
+        неразрешённые пути, оценённые по BL-плотности (`terminal_hit`),
       median_days — медианное время развязки,
       slice_probs / slice_edges — 11-корзинный «колокол» для доски Гальтона.
     """
@@ -381,8 +418,6 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
     # симметричный Блэк-Шоулз. Хвосты не занижаются.
     skew = float(min(max(skew, -0.45), 0.45))
     sqdt = math.sqrt(dt)
-    sd_neg = sigma_R * (1.0 + skew) * sqdt      # для шага в −R (вниз)
-    sd_pos = sigma_R * (1.0 - skew) * sqdt      # для шага в +R (вверх)
     var_dt = sigma_R * sigma_R * dt
     # TERM-STRUCTURE (форвардная вола): вола «дышит» по срокам, а не растёт как √t
     # линейно. term_slope>0 (контанго) — дальняя вола выше: конус узкий рано,
@@ -415,7 +450,10 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
         if idx.size:
             prev = r[idx].copy()
             noise = rng.standard_normal(idx.size)
-            step_r = np.where(noise < 0, sd_neg, sd_pos) * fi * noise   # асимметр.+терм
+            # Skew меняет форму хвостов, но не должен сам создавать направленный
+            # снос: E[step_r]=0 и Var[step_r]=sigma_R²·dt·fi².
+            skew_noise = _centered_skew_noise(noise, skew)
+            step_r = sigma_R * sqdt * fi * skew_noise
             r[idx] = prev + drift_R * dt + step_r
             sub = r[idx]
             tp = sub >= T
@@ -425,6 +463,7 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
                 plo, phi = prev[inside], sub[inside]
                 bsl = np.exp(-2.0 * (plo + 1.0) * (phi + 1.0) / var_i)
                 btp = np.exp(-2.0 * (T - plo) * (T - phi) / var_i)
+                bsl, btp = _competing_bridge_probs(bsl, btp)
                 u = rng.random(inside.sum())
                 hs = u < bsl
                 ht = ~hs & (u < bsl + btp)
@@ -452,8 +491,20 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
     p_stop = float(stopped.sum()) / n_paths
     resolved = ~np.isnan(hit_time)
     med_frac = float(np.median(hit_time[resolved])) if resolved.any() else None
-    # аналитическая first-passage P(тейк раньше стопа) — «рыночный hit» для края
-    hit_ratio = first_passage_prob(r0, 0.5 * drift_R, 1.0, T)
+    # Для конечного опционного горизонта часть путей не дошла ни до одного
+    # барьера. Их нельзя превращать в примитивную формулу расстояний. Когда есть
+    # BL-плотность, распределяем эту массу по опционному tail-ratio. Только
+    # fallback без цепочки оставляет аналитическую геометрию — движок не имеет
+    # права называть её «рынком» или считать из неё edge.
+    resolved = min(max(p_take + p_stop, 0.0), 1.0)
+    unresolved = 1.0 - resolved
+    if terminal_hit is not None and math.isfinite(terminal_hit):
+        th = min(max(float(terminal_hit), 0.0), 1.0)
+        hit_ratio = min(max(p_take + unresolved * th, 0.0), 1.0)
+        hit_source = "barrier_mc+bl_terminal"
+    else:
+        hit_ratio = first_passage_prob(r0, 0.5 * drift_R, 1.0, T)
+        hit_source = "geometry_fallback"
 
     # «колокол» для доски: распределение ЖИВЫХ (ещё не поглощённых) путей на срезе,
     # где живо ~половина (нормальный вид ВНУТРИ барьеров, а не пусто в конце и не
@@ -476,6 +527,7 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
         "times_frac": times,
         "p_take_by_t": p_take_by_t, "p_stop_by_t": p_stop_by_t,
         "p_take": p_take, "p_stop": p_stop, "hit_ratio": hit_ratio,
+        "unresolved": unresolved, "hit_source": hit_source,
         "slice_probs": bell,
         "slice_edges": np.linspace(-1.0, T, 12).tolist(),
         "slice_alive": alive_frac[slice_idx],

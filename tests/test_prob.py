@@ -214,6 +214,22 @@ class TestConeSurface:
 
 
 class TestRnCone:
+    def test_skew_noise_keeps_zero_mean_and_unit_variance(self):
+        z = np.random.default_rng(123).standard_normal(400_000)
+        noise = P._centered_skew_noise(z, 0.4)
+        assert float(noise.mean()) == pytest.approx(0.0, abs=0.005)
+        assert float(noise.std()) == pytest.approx(1.0, abs=0.005)
+        # Положительный skew оставляет более тяжёлую отрицательную полуось.
+        assert abs(float(np.quantile(noise, 0.01))) > float(
+            np.quantile(noise, 0.99))
+
+    def test_competing_bridge_probabilities_never_exceed_one(self):
+        lo, hi = P._competing_bridge_probs(
+            np.array([0.8, 0.2]), np.array([0.7, 0.3]))
+        assert np.all(lo + hi <= 1.0 + 1e-12)
+        assert lo[1] == pytest.approx(0.2)
+        assert hi[1] == pytest.approx(0.3)
+
     def test_bell_not_degenerate(self):
         # risk-neutral колокол — нормальное распределение, не свалено в стоп
         c = P.rn_cone(0.0, 3.5, 3.0, drift_R=0.0, horizon_years=5 / 365, seed=1)
@@ -226,9 +242,21 @@ class TestRnCone:
         assert sum(bell[3:8]) > 0.4
 
     def test_hit_ratio_matches_first_passage(self):
-        # рыночный hit = аналитическая first-passage (drift 0 -> (r+1)/(T+1))
+        # fallback без BL anchor остаётся геометрическим, но явно помечен.
         c = P.rn_cone(0.0, 3.0, 3.0, drift_R=0.0, horizon_years=1 / 365, seed=2)
         assert c["hit_ratio"] == pytest.approx(1.0 / 4.0, abs=1e-6)
+        assert c["hit_source"] == "geometry_fallback"
+
+    def test_terminal_anchor_replaces_geometry_for_unresolved_paths(self):
+        low = P.rn_cone(
+            0.0, 0.4, 3.0, terminal_hit=0.1,
+            horizon_years=1 / 365, seed=22)
+        high = P.rn_cone(
+            0.0, 0.4, 3.0, terminal_hit=0.9,
+            horizon_years=1 / 365, seed=22)
+        assert low["unresolved"] > 0.8
+        assert high["hit_ratio"] > low["hit_ratio"] + 0.6
+        assert high["hit_source"] == "barrier_mc+bl_terminal"
 
     def test_walls_monotone_and_realtime(self):
         c = P.rn_cone(0.2, 3.0, 2.5, drift_R=0.0, horizon_years=2 / 365, seed=3)
@@ -244,10 +272,13 @@ class TestRnCone:
         assert up["hit_ratio"] > flat["hit_ratio"]
 
     def test_skew_thickens_fear_tail(self):
-        # skew>0 (сторона −R шире) -> выше P дойти до стопа, чем симметрично
+        # Skew меняет форму/барьерные массы, но после обязательного центрирования
+        # не обязан монотонно сдвигать P_stop: направленный tilt приходит из BL mean.
         sk = P.rn_cone(0.5, 2.5, 3.0, skew=0.4, horizon_years=1 / 52, seed=11)
         sym = P.rn_cone(0.5, 2.5, 3.0, skew=0.0, horizon_years=1 / 52, seed=11)
-        assert sk["p_stop"] > sym["p_stop"]
+        delta = abs(sk["p_stop"] - sym["p_stop"])
+        delta += abs(sk["p_take"] - sym["p_take"])
+        assert delta > 0.001
         assert sk["skew"] == pytest.approx(0.4)
 
     def test_term_structure_preserves_total_variance(self):

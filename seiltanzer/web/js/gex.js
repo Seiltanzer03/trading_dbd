@@ -1,6 +1,6 @@
-﻿// GEX КЛЮЧЕВЫЕ УРОВНИ — опционная карта ликвидности.
-// Показывает только ЗНАЧИМЫЕ страйки (топ-10 по абс. значению NET GEX).
-// Это то, что профессионалы называют "options flow wall" или "dealer positioning".
+﻿// GEX КЛЮЧЕВЫЕ УРОВНИ — контекст концентрации OI × модельной gamma.
+// Бесплатная цепочка не раскрывает знак реальной позиции дилеров, поэтому слой
+// не считается наблюдаемым options flow и не получает веса в verdict.
 
 import { $, setupCanvas } from './util.js';
 import { approach } from './anim.js';
@@ -10,7 +10,7 @@ let data = null;
 let statePhase = 0;
 let smoothedNetGex = 0;
 let smoothedLevels = {}; // для плавной анимации каждого бара
-let liveData = { price: 0, trade: null };
+let liveData = { price: 0, proxyPrice: 0, trade: null };
 
 export function initGex() {
     canvas = $('#gex-evol-canvas');
@@ -28,18 +28,32 @@ export function updateGex(ridgePayload) {
         if (statusEl) statusEl.textContent = 'o GEX НЕДОСТУПЕН';
         return;
     }
+    const latest = ridgePayload.snapshots[ridgePayload.snapshots.length - 1];
+    if (!latest?.gex?.available || !latest.gex.strikes?.length) {
+        data = null;
+        if (emptyEl) {
+            emptyEl.style.display = 'flex';
+            emptyEl.textContent = '○ GEX КОНТЕКСТ ОТКЛЮЧЁН ДЛЯ ЭТОГО PROXY';
+        }
+        if (canvas) canvas.style.display = 'none';
+        if (statusEl) statusEl.textContent = '○ GEX CONTEXT ONLY';
+        return;
+    }
     data = {
         snaps: ridgePayload.snapshots,
         scale: ridgePayload.scale || 1.0,
-        price: ridgePayload.price
+        price: ridgePayload.price,
+        proxyPrice: ridgePayload.proxy_spot_current,
+        transform: ridgePayload.proxy_transform || 'direct',
     };
     if (emptyEl) emptyEl.style.display = 'none';
     if (canvas) canvas.style.display = 'block';
-    if (statusEl) statusEl.textContent = '● OPTIONS FLOW';
+    if (statusEl) statusEl.textContent = '◐ OI-GEX HEURISTIC';
 }
 
 export function updateLiveGex(live) {
     if (live.price !== undefined) liveData.price = live.price;
+    if (live.proxyPrice !== undefined) liveData.proxyPrice = live.proxyPrice;
     if (live.trade !== undefined) liveData.trade = live.trade;
 }
 
@@ -59,7 +73,13 @@ function renderLoop() {
     const snap = data.snaps[data.snaps.length - 1];
     if (!snap || !snap.gex || !snap.gex.strikes || snap.gex.strikes.length === 0) return;
 
-    const strikes = snap.gex.strikes.map(s => s * data.scale);
+    const instrumentFactor = (liveData.price && data.price)
+        ? liveData.price / data.price : 1.0;
+    const proxyFactor = (liveData.proxyPrice && data.proxyPrice)
+        ? liveData.proxyPrice / data.proxyPrice : 1.0;
+    const liveMap = data.transform === 'inverse'
+        ? instrumentFactor * proxyFactor : instrumentFactor / proxyFactor;
+    const strikes = snap.gex.strikes.map(s => s * data.scale * liveMap);
     const net = snap.gex.net;
     const maxAbsNet = Math.max(...net.map(Math.abs), 1e-9);
     const priceStrike = liveData.price || data.price || 0;
@@ -107,16 +127,16 @@ function renderLoop() {
     ctx.font = 'bold 9px "IBM Plex Mono",monospace';
     ctx.fillStyle = '#8A877D';
     ctx.textAlign = 'center';
-    ctx.fillText('OPTIONS FLOW · КЛЮЧЕВЫЕ УРОВНИ (NET GEX)', w / 2, 12);
+    ctx.fillText('OI × GAMMA · ЭВРИСТИЧЕСКИЕ УРОВНИ', w / 2, 12);
     
-    // Подпись: PIN = тормоз | PUSH = разгон
+    // PIN/PUSH — только названия условных сценариев принятого знака позиции.
     ctx.font = '8px "IBM Plex Mono",monospace';
     ctx.fillStyle = 'rgba(46,125,79,0.8)';
     ctx.textAlign = 'left';
-    ctx.fillText('▮ PIN = тормоз', padLeft, 21);
+    ctx.fillText('▮ усл. PIN', padLeft, 21);
     ctx.fillStyle = 'rgba(198,55,60,0.8)';
     ctx.textAlign = 'right';
-    ctx.fillText('PUSH = разгон ▮', padLeft + barAreaW, 21);
+    ctx.fillText('усл. PUSH ▮', padLeft + barAreaW, 21);
 
     // Центральная нулевая линия
     const centerX = padLeft + barAreaW / 2;
@@ -223,7 +243,7 @@ function renderLoop() {
         }
     }
 
-    // == NET FLOW сводка (правый блок) ==
+    // == Условная OI×gamma сводка (не наблюдаемый flow) ==
     const totalNet = net.reduce((a, b) => a + b, 0);
     smoothedNetGex = approach(smoothedNetGex, totalNet, 0.04, 2);
     const isPin = smoothedNetGex > 0;
@@ -251,9 +271,9 @@ function renderLoop() {
     ctx.fillStyle = '#FFFFFF';
     ctx.font = 'bold 9px "IBM Plex Mono",monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(isPin ? 'PIN' : 'PUSH', summaryX + summaryW / 2, summaryY + summaryH / 2 - 5);
+    ctx.fillText(isPin ? 'PIN?' : 'PUSH?', summaryX + summaryW / 2, summaryY + summaryH / 2 - 5);
     ctx.font = '7px "IBM Plex Mono",monospace';
     ctx.fillStyle = '#8A877D';
-    ctx.fillText(isPin ? 'пиннинг' : 'разгон', summaryX + summaryW / 2, summaryY + summaryH / 2 + 7);
+    ctx.fillText('условно', summaryX + summaryW / 2, summaryY + summaryH / 2 + 7);
     ctx.fillText(fmtVal(smoothedNetGex), summaryX + summaryW / 2, summaryY + summaryH / 2 + 17);
 }

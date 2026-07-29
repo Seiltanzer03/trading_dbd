@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import os
 import time
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config import INSTRUMENTS, SETUPS, Settings, settings_from_env
 from .engine import Engine
@@ -25,7 +26,11 @@ class TradeOpen(BaseModel):
     stop: float
     take: float
     notes: str = ""
-    zones: list[dict] = []
+    zones: list[dict] = Field(default_factory=list)
+    # Текущая цена у брокера/на торгуемом CFD в момент открытия формы.
+    # Если отличается от бесплатного фьючерса Yahoo, сохраняем постоянный basis
+    # и продолжаем вести сделку живыми изменениями бесплатного ряда.
+    reference_price: float | None = None
 
 
 class TradeClose(BaseModel):
@@ -36,7 +41,7 @@ class TradeClose(BaseModel):
 
 class ZonesUpdate(BaseModel):
     trade_id: int
-    zones: list[dict]
+    zones: list[dict] = Field(default_factory=list)
 
 
 class TradeEdit(BaseModel):
@@ -96,21 +101,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ------------------------------------------------------------ background
 
     async def poll_loop():
-        last = {"price": 0.0, "intraday": 0.0, "vols": 0.0,
+        last = {"price": 0.0, "proxy_price": 0.0, "intraday": 0.0, "vols": 0.0,
                 "daily": 0.0, "chain": 0.0, "iv_surface": 0.0, "correlation": 0.0}
+        running: dict[str, asyncio.Task] = {}
         # при живом стриме цену «опрашиваем» часто (берём свежий тик из памяти)
         price_period = 1.0 if (settings.demo or settings.stream) else settings.price_poll_sec
         periods = {
             "price": price_period,
+            "proxy_price": 1.0 if (settings.demo or settings.stream)
+                           else settings.proxy_poll_sec,
             "intraday": 60.0,
             "vols": 5.0 if settings.demo else settings.vol_poll_sec,
             "daily": 30.0 if settings.demo else 300.0,
-            "chain": 1.0 if settings.demo else 60.0,
-            "iv_surface": 1.0 if settings.demo else 300.0,
+            "chain": 1.0 if settings.demo else settings.chain_poll_sec,
+            "iv_surface": 1.0 if settings.demo else settings.chain_poll_sec,
             "correlation": 30.0 if settings.demo else 300.0,
         }
         jobs = {
             "price": engine.market.refresh_price,
+            "proxy_price": engine.market.refresh_proxy_price,
             "intraday": engine.market.refresh_intraday,
             "vols": engine.market.refresh_vols,
             "daily": engine.market.refresh_daily,
@@ -118,25 +127,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "iv_surface": engine.market.refresh_iv_surface,
             "correlation": engine.market.refresh_correlation,
         }
-        while True:
-            now = time.time()
-            for name, fn in jobs.items():
-                if now - last[name] >= periods[name]:
-                    last[name] = now
+        try:
+            while True:
+                now = time.time()
+                # Долгий option_chain/IV запрос больше не останавливает тиковый
+                # WebSocket: каждый фид работает максимум в одном background task.
+                for name, task in list(running.items()):
+                    if task.done():
+                        with contextlib.suppress(Exception):
+                            task.result()
+                        del running[name]
+                for name, fn in jobs.items():
+                    if name not in running and now - last[name] >= periods[name]:
+                        last[name] = now
+                        running[name] = asyncio.create_task(asyncio.to_thread(fn))
+
+                payload = engine.tick_payload()
+                dead = []
+                for ws in clients:
                     try:
-                        await asyncio.to_thread(fn)
-                    except Exception:  # noqa: BLE001 — фид сам ведёт статус
-                        pass
-            payload = engine.tick_payload()
-            dead = []
-            for ws in clients:
-                try:
-                    await ws.send_json(payload)
-                except Exception:  # noqa: BLE001
-                    dead.append(ws)
-            for ws in dead:
-                clients.discard(ws)
-            await asyncio.sleep(1.0 if (settings.demo or settings.stream) else 2.0)
+                        await ws.send_json(payload)
+                    except Exception:  # noqa: BLE001
+                        dead.append(ws)
+                for ws in dead:
+                    clients.discard(ws)
+                await asyncio.sleep(
+                    1.0 if (settings.demo or settings.stream) else 2.0)
+        finally:
+            # Не закрываем sqlite, пока уже запущенный фид ещё может писать кэш.
+            if running:
+                await asyncio.gather(*running.values(), return_exceptions=True)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -162,6 +182,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "ridge": engine.ridge_payload(),
             "journal": engine.journal.list_trades(),
             "edge_track": engine.journal.edge_track(),
+            "validation": engine.journal.validation_report(),
             "setups": _setups_payload(),
             "instruments": {c: {"yahoo": i.yahoo, "options_proxy": i.options_proxy}
                             for c, i in INSTRUMENTS.items()},
@@ -185,6 +206,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/setups")
     def api_setups():
         return _setups_payload()
+
+    @app.get("/api/diagnostics")
+    def api_diagnostics():
+        return engine.diagnostics_payload()
+
+    @app.get("/api/validation")
+    def api_validation():
+        return engine.journal.validation_report()
 
     @app.get("/api/chain")
     def api_chain(ticker: str | None = None):
@@ -220,10 +249,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if setup is None:
             raise HTTPException(400, f"неизвестный сетап: {req.setup}")
         try:
+            # Basis имеет смысл только против правильного бесплатного ряда.
+            # Без активной сделки движок мог всё ещё стоять, например, на NAS100,
+            # пока пользователь открывает XAU.
+            if engine.market.instrument_code != setup.instrument:
+                engine.market.set_instrument(setup.instrument)
+                engine.market.refresh_price()
+            raw_price = engine.market.price.get("value")
+            reference = req.reference_price
+            if reference is not None and (not math.isfinite(reference) or reference <= 0):
+                raise ValueError("текущая цена брокера должна быть положительным числом")
+            if reference is not None and raw_price is None:
+                raise ValueError(
+                    "не удалось получить бесплатную котировку выбранного "
+                    "инструмента — basis сейчас зафиксировать нельзя")
+            quote_offset = ((reference - raw_price)
+                            if reference is not None and raw_price is not None else 0.0)
             trade = engine.journal.open_trade(
                 setup=req.setup, instrument=setup.instrument,
                 direction=req.direction, entry=req.entry, stop=req.stop,
-                take=req.take, notes=req.notes, zones=req.zones)
+                take=req.take, notes=req.notes, zones=req.zones,
+                quote_offset=quote_offset, raw_price_at_open=raw_price,
+                quote_source=engine.market.price.get("source"))
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         engine.on_trade_opened(trade)
@@ -246,12 +293,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/trade/edit")
     def api_trade_edit(req: TradeEdit):
         try:
-            return engine.journal.edit_trade(
+            trade = engine.journal.edit_trade(
                 req.trade_id, setup=req.setup, direction=req.direction,
                 entry=req.entry, stop=req.stop, take=req.take,
                 result_r=req.result_r, notes=req.notes)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        if trade["status"] == "open":
+            engine.on_trade_edited(trade)
+        return trade
 
     @app.post("/api/trade/delete")
     def api_trade_delete(req: TradeDelete):

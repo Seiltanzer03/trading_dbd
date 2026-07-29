@@ -61,21 +61,42 @@ class Instrument:
     demo_price: float             # стартовая цена в демо-режиме
     demo_vol: float               # годовая вола в демо-режиме
     proxy_experimental: bool = False  # тонкий/неточный прокси — помечать в UI
+    # Как переносить ДОХОДНОСТИ/страйки прокси в шкалу торгуемого инструмента:
+    # direct:  +1% прокси ~= +1% инструмента;
+    # inverse: +1% прокси ~= -1% инструмента (FXC -> USD/CAD).
+    proxy_transform: str = "direct"
+    # Короткая честная подпись реального ценового ряда. Код инструмента — это
+    # пользовательская стратегия, price_label — то, что действительно пришло.
+    price_label: str | None = None
 
 
 INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
-    Instrument("NAS100", "^NDX",     "QQQ", 21500.0, 0.22),
-    Instrument("SP500",  "^GSPC",    "SPY", 6100.0,  0.17),
-    Instrument("US30",   "^DJI",     "DIA", 44500.0, 0.15),
+    Instrument("NAS100", "^NDX",     "QQQ", 21500.0, 0.22,
+               price_label="NASDAQ-100 cash index"),
+    Instrument("SP500",  "^GSPC",    "SPY", 6100.0,  0.17,
+               price_label="S&P 500 cash index"),
+    Instrument("US30",   "^DJI",     "DIA", 44500.0, 0.15,
+               price_label="Dow Jones cash index"),
     # экспериментальные прокси — US-ETF на страну/валюту; трекинг неточный,
     # опционы тонкие; данные помечаются «низкая надёжность» в интерфейсе.
-    Instrument("GER40",  "^GDAXI",   "EWG", 24300.0, 0.16, proxy_experimental=True),
-    Instrument("UK100",  "^FTSE",    "EWU", 8900.0,  0.12, proxy_experimental=True),
-    Instrument("JPY100", "JPY=X",    None,  148.0,   0.10),
-    Instrument("XAU",    "GC=F",     "GLD", 3350.0,  0.16),
-    Instrument("XAG",    "SI=F",     "SLV", 38.0,    0.28),
-    Instrument("EURUSD", "EURUSD=X", "FXE", 1.17,    0.07, proxy_experimental=True),
-    Instrument("USDCAD", "CAD=X",    "FXC", 1.37,    0.06, proxy_experimental=True),
+    Instrument("GER40",  "^GDAXI",   "EWG", 24300.0, 0.16, proxy_experimental=True,
+               price_label="DAX cash index"),
+    Instrument("UK100",  "^FTSE",    "EWU", 8900.0,  0.12, proxy_experimental=True,
+               price_label="FTSE 100 cash index"),
+    Instrument("JPY100", "JPY=X",    None,  148.0,   0.10,
+               price_label="USD/JPY (название JPY100 условное)"),
+    # Yahoo GC=F/SI=F — активные фьючерсы, НЕ spot CFD. Терминал показывает это
+    # явно; при открытии сделки пользователь может задать текущую цену брокера,
+    # и тиковый ряд будет basis-adjusted постоянным сдвигом.
+    Instrument("XAU",    "GC=F",     "GLD", 3350.0,  0.16,
+               price_label="COMEX Gold active futures"),
+    Instrument("XAG",    "SI=F",     "SLV", 38.0,    0.28,
+               price_label="COMEX Silver active futures"),
+    Instrument("EURUSD", "EURUSD=X", "FXE", 1.17,    0.07, proxy_experimental=True,
+               price_label="EUR/USD"),
+    # FXC — CAD/USD-подобный ETF: его доходности противоположны USD/CAD.
+    Instrument("USDCAD", "CAD=X",    "FXC", 1.37,    0.06, proxy_experimental=True,
+               proxy_transform="inverse", price_label="USD/CAD"),
 ]}
 
 # индексы волатильности (Yahoo). Первые три — ворота фильтров стратегии;
@@ -114,6 +135,7 @@ class Settings:
     data_dir: str = field(default_factory=lambda: os.environ.get("SEILTANZER_DATA_DIR", "."))
     price_poll_sec: float = 4.0     # ТЗ: 3–5 сек
     chain_poll_sec: float = 600.0   # ТЗ: 5–10 мин
+    proxy_poll_sec: float = 60.0    # REST-прокси; при --stream обновляется тиково
     vol_poll_sec: float = 60.0
     journal_min_trades: int = 20    # порог перекалибровки на журнал (ТЗ, п.2 ядра)
 

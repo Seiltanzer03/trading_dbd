@@ -13,7 +13,10 @@ const H = 360;
 
 export function initRidge(canvas) {
   let data = null;
-  const live = { price: null, modelHist: null, trade: null, modelProb: null };
+  const live = {
+    price: null, proxyPrice: null, modelHist: null, trade: null,
+    modelProb: null, optionProb: null, rnProbs: null,
+  };
   let curPrice = null, curModel = null, curLatest = null;
 
   function setData(payload, modelProb) { data = payload; live.modelProb = modelProb; }
@@ -33,7 +36,14 @@ export function initRidge(canvas) {
     ctx.clearRect(0, 0, w, H);
     if (!data || !data.available || !data.snapshots?.length) return;
 
-    const scale = data.scale || 1.0;
+    const instrumentFactor = (live.price && data.price)
+      ? live.price / data.price : 1.0;
+    const proxyFactor = (live.proxyPrice && data.proxy_spot_current)
+      ? live.proxyPrice / data.proxy_spot_current : 1.0;
+    const liveMap = data.proxy_transform === 'inverse'
+      ? instrumentFactor * proxyFactor
+      : instrumentFactor / proxyFactor;
+    const scale = (data.scale || 1.0) * liveMap;
     const snaps = data.snapshots.slice(-9);
     const latest = snaps[snaps.length - 1];
     const trade = live.trade || data.trade;
@@ -70,11 +80,8 @@ export function initRidge(canvas) {
       else ctx.fillRect(sX, padT - 4, (w - padR) - sX, ridgeBottom - padT + 4);
     }
 
-    // профиль ЧИСТОЙ ГАММЫ (Net GEX) — «стены» дилерского хеджа (как на квант-деске):
-    //   зелёное ВВЕРХ = + гамма (дилеры гасят движение -> пиннинг, реальная
-    //     поддержка/сопротивление у крупных страйков);
-    //   красное ВНИЗ = − гамма (дилеры разгоняют -> зоны пробоя, движения резче).
-    // Заменяет сырой OI (сырой OI как «стены ликвидности» вынесен в колонку слева).
+    // OI × модельная gamma. Знак реальной дилерской позиции бесплатная цепочка
+    // не раскрывает: цвета показывают условный сценарий, не наблюдаемый flow.
     const gx = latest.gex;
     if (gx && gx.strikes && gx.net) {
       const inWin = gx.strikes.map((k, i) => ({ x: k * scale, g: gx.net[i] }))
@@ -100,7 +107,7 @@ export function initRidge(canvas) {
       }
       // подпись с белой подложкой (читаемо поверх столбиков)
       ctx.font = '8px "IBM Plex Mono", monospace'; ctx.textAlign = 'left';
-      const cap = 'NET GEX · +гамма зел(гасит/пиннинг) / −гамма крас(разгоняет)';
+      const cap = 'OI×GAMMA · УСЛОВНЫЙ ЗНАК · DEALER POSITION НЕ НАБЛЮДАЕТСЯ';
       const cw = ctx.measureText(cap).width;
       ctx.fillStyle = 'rgba(255,255,255,0.82)'; ctx.fillRect(padL - 1, ridgeBottom + 2, cw + 4, 10);
       ctx.fillStyle = COLORS.dim; ctx.fillText(cap, padL + 1, ridgeBottom + 10);
@@ -172,14 +179,14 @@ export function initRidge(canvas) {
     }
 
     // выноска рынок vs модель
-    if (data.rn_probs && trade) {
-      const pt = data.rn_probs.p_beyond_take;
-      const mult = pt > 0 ? (1 / pt) : null;
+    const rn = live.rnProbs || data.rn_probs;
+    if (rn && trade) {
+      const pt = rn.p_beyond_take;
       const box = [
         `P(ЗА ТЕЙК) РЫНОК ${(pt * 100).toFixed(1)}%`,
-        mult ? `×${mult.toFixed(mult >= 10 ? 0 : 1)} ЕСЛИ ПРОБЬЁТ ТЕЙК` : null,
-        `P(ЗА СТОП) РЫНОК ${(data.rn_probs.p_beyond_stop * 100).toFixed(1)}%`,
-        live.modelProb != null ? `P МОДЕЛИ ${(live.modelProb * 100).toFixed(1)}%` : null,
+        `P(ЗА СТОП) РЫНОК ${(rn.p_beyond_stop * 100).toFixed(1)}%`,
+        live.optionProb != null ? `P FIRST-PASSAGE ${(live.optionProb * 100).toFixed(1)}%` : null,
+        live.modelProb != null ? `CONTROL ${(live.modelProb * 100).toFixed(1)}%` : null,
       ].filter(Boolean);
       ctx.font = '9px "IBM Plex Mono", monospace';
       const bw = Math.max(...box.map((s) => ctx.measureText(s).width)) + 14;

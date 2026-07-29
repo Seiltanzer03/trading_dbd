@@ -33,7 +33,8 @@ def run_check() -> None:
         f = md.vols[key]
         st = f["status"]
         val = _fmt(f["value"])
-        note = "" if st == "live" else f"  ({f.get('error') or 'нет данных'})"
+        note = (f"  ({f.get('error') or 'нет данных'})"
+                if st == "no_data" else f"  ({f.get('source') or 'Yahoo'})")
         print(f"  {key.upper():5} {tkr:6}  {st:8} {val}{note}")
 
     header = (f"\n{'ИНСТР':7} {'ЦЕНА':>10} {'ДНЕВКИ':>7} {'ПРОКСИ':7} "
@@ -48,7 +49,9 @@ def run_check() -> None:
         md.refresh_chain()
 
         price = md.price
-        price_s = f"{_fmt(price['value'])}" if price["status"] == "live" else price["status"]
+        price_s = (
+            f"{_fmt(price['value'])}/{price['status']}"
+            if price["value"] is not None else price["status"])
         daily_s = "ok" if md.daily.get("bars") else "нет"
         proxy = inst.options_proxy or "—"
         exp_mark = " ⚠" if inst.proxy_experimental else ""
@@ -68,9 +71,10 @@ def run_check() -> None:
                 chain_st = "нет прокси"
 
         print(f"  {code:7} {price_s:>10} {daily_s:>7} {proxy:5}{exp_mark:<2} "
-              f"{chain_st:8} {str(n_strikes):>6} {impl:>9} {skew_s:>7} {term_s:>12}")
+              f"{chain_st:8} {n_strikes!s:>6} {impl:>9} {skew_s:>7} {term_s:>12}")
 
-    print("\nЛегенда: live/ok = реальные данные Yahoo пришли; no_data/нет = источник")
-    print("не ответил (честно, без подстановки); ⚠ = экспериментальный ETF-прокси")
+    print("\nЛегенда: live = свежий stream-тик; delayed = REST/15m/опционный snapshot;")
+    print("ok = дневная история пришла; no_data/нет = источник не ответил;")
+    print("⚠ = экспериментальный ETF-прокси")
     print("(тонкие опционы — низкая надёжность). Демо-данных здесь НЕТ.")
     cache.close()

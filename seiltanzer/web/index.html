@@ -42,7 +42,7 @@
     </div>
     <div class="header-right">
       <div class="feed-row" id="feed-row">
-        <span class="feed" id="feed-price" data-tip="Фид цены (yfinance, опрос 3–5 c). ● live / ◐ delayed / ○ нет данных / ◆ demo.">● ЦЕНА</span>
+        <span class="feed" id="feed-price" data-tip="Фид цены: ● live только для свежего WebSocket-тика; REST-котировка Yahoo помечается ◐ delayed/indicative; ○ нет данных; ◆ demo.">● ЦЕНА</span>
         <span class="feed" id="feed-chain" data-tip="Фид опционной цепочки (опрос 5–10 мин).">● ЦЕПОЧКА</span>
         <span class="feed" id="feed-vix" data-tip="Фид индексов волатильности VIX/GVZ/DV1X (дневное закрытие).">● VIX</span>
         <span class="feed no_data" id="ws-status" data-tip="Состояние WebSocket-связи с сервером (живые тики). ● ONLINE — тики идут; ○ OFFLINE — сокет не подключён (смотрите консоль браузера F12).">○ OFFLINE</span>
@@ -59,11 +59,11 @@
     <div class="verdict-strip" id="verdict-strip" hidden>
       <div class="verdict-row">
         <div class="verdict-badge" id="v-label"
-             data-tip="Итоговый сигнал сделки — синтез края над рынком, фильтров стратегии, гамма-режима и фазы волы. Ниже — каждый фактор отдельно (не «чёрный ящик»).">—</div>
+             data-tip="Итоговый режим сделки: опционная вероятность против порога EV=0, точные фильтры и фаза волы. GEX/skew остаются видимым контекстом, но не получают скрытого веса.">—</div>
         <div class="verdict-edge-block">
-          <div class="lbl">КРАЙ vs РЫНОК</div>
+          <div class="lbl">OPTION EDGE vs EV=0</div>
           <div class="verdict-edge" id="v-edge"
-               data-tip="Главная опционная метрика: P вашей модели − hit_ratio опционного рынка (risk-neutral). Положительный = рынок недооценивает ваш сетап (потенциальное преимущество). Отрицательный = рынок оценивает выше вас — осторожно.">—</div>
+               data-tip="P(тейк раньше стопа), выведенная из опционов, минус минимальная P для EV=0 при текущих стопе и тейке. Это не вероятность из одной геометрической пропорции.">—</div>
           <div class="tiny dim" id="v-pmm">—</div>
         </div>
         <div class="verdict-action" id="v-action"></div>
@@ -89,13 +89,13 @@
       <div class="state-val red" id="st-stop">—</div>
       <div class="tiny dim" id="st-stop-atr"></div>
     </div>
-    <div class="state-cell" data-tip="P(тейк раньше стопа) прямо сейчас с интервалом неопределённости (Уилсон 90%). При выборке <30 смотри интервал, не точку. Полная формула — в блоке доски.">
+    <div class="state-cell" data-tip="Опционная P(тейк раньше стопа) прямо сейчас. Между delayed-снимками цепочки её двигает цена инструмента и, когда доступен stream, option-proxy; без stream используется indicative/snapshot mapping. Полоса учитывает качество proxy и возраст снимка.">
       <div class="lbl">P(ТЕЙК&lt;СТОП)</div>
       <div class="state-val" id="st-p">—</div>
       <div class="tiny dim" id="st-p-band"></div>
     </div>
-    <div class="state-cell" data-tip="Край = P модели − hit рынка опционов. Рядом — как он изменился с момента входа (зафиксирован на первом тике). Рост края = ваш сценарий укрепляется относительно рынка.">
-      <div class="lbl">КРАЙ vs РЫНОК</div>
+    <div class="state-cell" data-tip="Опционный edge = P_options − P(EV=0). Рядом — как запас изменился с момента входа.">
+      <div class="lbl">OPTION EDGE</div>
       <div class="state-val" id="st-edge">—</div>
       <div class="tiny dim" id="st-edge-shift"></div>
     </div>
@@ -133,10 +133,10 @@
           <div class="tiny dim" id="lat-band-lbl">интервал 90% (Уилсон)</div>
         </div>
         <div class="stat-sep"></div>
-        <div class="stat-row"><span class="lbl">P РЫНКА (hit)</span><span class="val" id="lat-mhit"
-          data-tip="Рыночный аналог «дойти до тейка раньше стопа»: hit = P(за тейк)/(P(за тейк)+P(за стоп)) по risk-neutral плотности опционов. Сопоставим с P модели.">—</span></div>
-        <div class="stat-row"><span class="lbl">КРАЙ vs РЫНОК</span><span class="val" id="lat-edge"
-          data-tip="Край = P модели − hit рынка. Положительный → ваша статистика даёт лучшие шансы, чем закладывает опционный рынок (потенциальная недооценка сетапа рынком). Отрицательный → рынок оценивает выше вас.">—</span></div>
+        <div class="stat-row"><span class="lbl">P OPTIONS (hit)</span><span class="val" id="lat-mhit"
+          data-tip="Finite-horizon first-passage P: barrier Monte Carlo под implied move/skew/term structure, с BL-tail для путей, не достигших барьера к экспирации.">—</span></div>
+        <div class="stat-row"><span class="lbl">OPTION EDGE vs EV=0</span><span class="val" id="lat-edge"
+          data-tip="P_options минус порог безубыточности для текущего RR. Положительный запас — кандидат на преимущество, который ещё должен пройти out-of-sample проверку журнала.">—</span></div>
         <div class="stat-sep"></div>
         <div class="stat-row"><span class="lbl">r СЕЙЧАС</span><span class="val" id="lat-r"
           data-tip="Текущее положение сделки в R: (цена − вход)/(вход − стоп), со знаком направления. Источник: фид цены.">—</span></div>
@@ -153,8 +153,8 @@
         <div class="stat-row"><span class="lbl">СХОДИМОСТЬ</span><span class="val" id="lat-conv"
           data-tip="|доля зелёных шариков − P(терминальный R > 0) по Монте-Карло|. Показывает, что доска сэмплирует именно модельное распределение, а не рисует красивое.">—</span></div>
         <div class="stat-sep"></div>
-        <div class="stat-row"><span class="lbl">КАЛИБРОВКА</span><span class="val" id="lat-calib"
-          data-tip="Источник винрейта: встроенная таблица 16 сетапов или ваш журнал (при ≥20 закрытых сделок по сетапу — приоритет журнала).">—</span></div>
+        <div class="stat-row"><span class="lbl">CONTROL LINE</span><span class="val" id="lat-calib"
+          data-tip="Статистика сетапа питает только пунктирную контрольную линию и path-control лестницы; главная P и edge приходят из опционов.">—</span></div>
         <div class="stat-sep"></div>
         <div class="lat-read" id="lat-read"
           data-tip="Практический вывод из доски: сравнение вашей P с порогом безубытка и с оценкой рынка. Это резюме, а не сигнал.">—</div>
@@ -164,7 +164,7 @@
         <div class="canvas-empty" id="lattice-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ — ДОСКА ЖДЁТ</div>
       </div>
     </div>
-    <div class="panel-foot dim">распределение = risk-neutral плотность исхода (диффузия под опционную волу + снос скью, БЕЗ винрейта) — нормальный колокол в R вашей сделки (оранжевая огибающая); пунктир — проекция вашей модели по винрейту; расхождение = КРАЙ; P РЫНКА (hit) — first-passage «тейк раньше стопа»; шарики сходятся к рыночному распределению</div>
+    <div class="panel-foot dim">оранжевая доска = option-anchored barrier distribution: implied move + BL-tail + skew + term structure, оживлённые ценой и доступным proxy mapping; пунктир = справочный исторический control, не источник edge; без валидной цепочки или покрытия барьеров сеткой страйков edge выключается</div>
   </section>
 
   <!-- ================ 3. STRIKE LANDSCAPE ================ -->
@@ -178,7 +178,7 @@
     <div class="panel-body ridge-body">
       <div class="stats-col" id="ridge-stats">
         <div class="stat-row"><span class="lbl">ПРОКСИ</span><span class="val" id="rg-proxy"
-          data-tip="Опционная цепочка ETF-прокси (QQQ→NAS100, SPY→SP500, DIA→US30, GLD→XAU). Страйки пересчитаны в шкалу инструмента пропорцией цена_инструмента/спот_прокси (приближение).">—</span></div>
+          data-tip="Delayed-цепочка ETF-proxy переносится в шкалу инструмента по относительной moneyness. Для FXC→USD/CAD используется обратное преобразование с Jacobian плотности.">—</span></div>
         <div class="stat-row"><span class="lbl">ЭКСПИРАЦИЯ</span><span class="val" id="rg-expiry">—</span></div>
         <div class="stat-row"><span class="lbl">IMPLIED MOVE</span><span class="val" id="rg-move"
           data-tip="">—</span></div>
@@ -193,32 +193,32 @@
         <div class="stat-row"><span class="lbl">TERM ВОЛЫ</span><span class="val" id="rg-term"
           data-tip="Term-structure: наклон ATM-волы по экспирациям. Контанго (дальняя выше) = спокойно сейчас; бэквордация (ближняя выше) = near-term стресс/событие, движение ждут скоро.">—</span></div>
         <div class="stat-sep"></div>
-        <div class="stat-row"><span class="lbl">СТЕНА КОЛЛОВ</span><span class="val" id="rg-call-wall"
-          data-tip="Страйк с крупнейшим open interest коллов — «стена сопротивления»: цене труднее пройти вверх, дилерский хедж часто гасит движение у неё. Практика: если тейк (лонг) стоит ЗА этой стеной — дойти труднее, фиксируй раньше/подвинь цель.">—</span></div>
-        <div class="stat-row"><span class="lbl">СТЕНА ПУТОВ</span><span class="val" id="rg-put-wall"
-          data-tip="Страйк с крупнейшим open interest путов — «стена поддержки»: часто тормозит падение. Практика: стоп (лонг) чуть НИЖЕ такой стены безопаснее, чем прямо на пути к ней.">—</span></div>
-        <div class="stat-row"><span class="lbl">ТЕЙК vs СТЕНЫ</span><span class="val" id="rg-wall-read"
-          data-tip="Где ваши тейк/стоп относительно стен OI: «тейк за стеной коллов» = труднее дойти; «есть простор» = крупных барьеров на пути нет.">—</span></div>
+        <div class="stat-row"><span class="lbl">MAX OI КОЛЛОВ</span><span class="val" id="rg-call-wall"
+          data-tip="Страйк с крупнейшим open interest коллов. Это наблюдаемая концентрация контрактов, но не доказанное сопротивление: знак позиции и хедж держателей неизвестны. Смотрите фактическую реакцию цены.">—</span></div>
+        <div class="stat-row"><span class="lbl">MAX OI ПУТОВ</span><span class="val" id="rg-put-wall"
+          data-tip="Страйк с крупнейшим open interest путов. Это контекст концентрации, а не гарантированная поддержка: бесплатная цепочка не показывает сторону сделки и реальное дилерское позиционирование.">—</span></div>
+        <div class="stat-row"><span class="lbl">ТЕЙК vs MAX OI</span><span class="val" id="rg-wall-read"
+          data-tip="Где тейк и стоп находятся относительно максимумов OI. Это подсказка, где наблюдать реакцию цены, без автоматического вывода «пройдёт/не пройдёт».">—</span></div>
         <div class="stat-sep"></div>
         <div class="stat-row"><span class="lbl">P(ЗА ТЕЙК) РЫНОК</span><span class="val" id="rg-p-take"
           data-tip="">—</span></div>
         <div class="stat-row"><span class="lbl">P(ЗА СТОП) РЫНОК</span><span class="val" id="rg-p-stop"
           data-tip="">—</span></div>
-        <div class="stat-row"><span class="lbl">P МОДЕЛИ</span><span class="val" id="rg-p-model"
-          data-tip="Модельная P(тейк раньше стопа) — для сравнения с risk-neutral вероятностями рынка. Расхождение = рынок видит другой расклад, чем ваша статистика.">—</span></div>
+        <div class="stat-row"><span class="lbl">P FIRST-PASSAGE</span><span class="val" id="rg-p-model"
+          data-tip="Главная option-anchored вероятность достичь тейка раньше стопа; хвостовые P выше — терминальные вероятности оказаться за уровнями к экспирации.">—</span></div>
       </div>
       <div class="canvas-holder">
         <canvas id="ridge-canvas"></canvas>
         <div class="canvas-empty" id="ridge-empty">○ ОПЦИОННЫЕ ДАННЫЕ НЕДОСТУПНЫ</div>
       </div>
     </div>
-    <div class="panel-foot dim">серые гряды — risk-neutral плотности из снапшотов цепочки; нижняя жирная — актуальная; красная кривая — проекция вашей модели (живая); столбики снизу — ЧИСТАЯ ГАММА (Net GEX): зелёное вверх = дилеры гасят (пиннинг, S/R), красное вниз = разгоняют (пробой); жёлтый пунктир — zero-gamma flip; вертикали: вход · стоп · тейк · GEX. В колонке слева «СТЕНЫ OI» — сырой крупнейший интерес коллов/путов</div>
+    <div class="panel-foot dim">серые гряды — BL risk-neutral плотности delayed-снимков, оживлённые текущей moneyness; нижняя — актуальная; красная линия — исторический control. OI/GEX снизу — эвристический контекст: бесплатная цепочка не раскрывает, кто держит позицию и как хеджирует; для inverse-proxy GEX отключён</div>
   </section>
 
   <!-- ================ 3a. GEX EVOLUTION HEATMAP ================ -->
   <section class="card panel" id="panel-gex-evol">
     <div class="panel-head">
-      <h2>GEX EVOLUTION · ЭВОЛЮЦИЯ СТЕН ЛИКВИДНОСТИ</h2>
+      <h2>OI × GAMMA CONTEXT · ЭВОЛЮЦИЯ УСЛОВНЫХ УРОВНЕЙ</h2>
       <div class="panel-head-right">
         <span class="badge" id="gex-evol-status">○ ОЖИДАНИЕ СНАПШОТОВ</span>
       </div>
@@ -226,14 +226,13 @@
     <div class="panel-body">
       <div class="canvas-holder gex-evol-holder" style="height: 200px;">
         <canvas id="gex-evol-canvas"></canvas>
-        <div class="canvas-empty" id="gex-evol-empty">○ OPTIONS FLOW GEX НЕДОСТУПЕН</div>
+        <div class="canvas-empty" id="gex-evol-empty">○ OI × GAMMA КОНТЕКСТ НЕДОСТУПЕН</div>
       </div>
     </div>
     <div class="panel-foot dim">
-      <b>КАК ЧИТАТЬ ДЛЯ CFD-ТРЕЙДЕРА:</b> Это уровни, где крупные маркет-мейкеры вынуждены покупать или продавать актив, чтобы захеджировать свои опционные позиции.<br>
-      🟢 <b>Зелёный бар (PIN / Тормоз)</b> = уровень притягивает цену. Здесь дилеры торгуют против тренда (покупают на падении, продают на росте), гася волатильность. Отличный уровень для тейк-профита.<br>
-      🔴 <b>Красный бар (PUSH / Разгон)</b> = уровень отталкивает цену. Дилеры торгуют по тренду, ускоряя пробой. Если цена пробивает красный уровень, она полетит дальше. Ставьте тейк ЗА ним, а не перед ним.<br>
-      На графике отображены топ-12 самых крупных уровней, а также линии вашей <b>текущей цены (пунктир), СТОПА и ТЕЙКА</b>.
+      <b>КАК ЧИТАТЬ:</b> профиль строится из open interest и Black–Scholes gamma. Это карта концентрации опционов, а не наблюдаемая позиция дилеров.<br>
+      🟢 <b>Условный PIN</b> = зона, где при принятом знаке хеджа возможна меанреверсия; 🔴 <b>условный PUSH</b> = зона возможного усиления движения.<br>
+      Используйте как контекст рядом с BL-плотностью и ценой, не как самостоятельный сигнал. Для inverse-proxy слой намеренно выключается.
     </div>
   </section>
 
@@ -255,7 +254,7 @@
         <div class="canvas-holder fan-holder"><canvas id="cone-fan"></canvas></div>
       </div>
     </div>
-    <div class="panel-foot dim">Сверху — НАСТОЯЩИЙ 3D (WebGL) — вращайте мышкой, зум колесом, наведение показывает точные значения. Поверхность = risk-neutral плотность исхода под ОПЦИОННУЮ волу + цену (НЕ винрейт): ось R (стоп · 0 · тейк), ось ВРЕМЯ — реальная и адаптивная (минуты у скальпа, дни у свинга; выведена из волы и расстояния до барьеров), высота — плотность живых путей. Красная/зелёная СТЕНЫ (стоп/тейк): накопленная вероятность дойти во времени. Оранжевый луч — текущая цена (r), двигается с котировкой. В подписи оси — медианное время до развязки. Снизу — 2D ВЕЕР: тот же прогноз плоско и читаемо — веер перцентилей от «сейчас», линии стоп/тейк, зоны прибыли/убытка, точка цены; сразу видно куда, когда и с какой вероятностью</div>
+    <div class="panel-foot dim">Сверху — НАСТОЯЩИЙ 3D (WebGL) — вращайте мышкой, зум колесом, наведение показывает точные значения. Поверхность = risk-neutral сценарная плотность под implied move, BL-tail, skew и term structure (НЕ винрейт): ось R (стоп · 0 · тейк), ось ВРЕМЯ — срок ближайшей доступной экспирации, высота — плотность ещё не поглощённых путей. Красная/зелёная стены показывают накопленную массу пересечений барьеров. Оранжевый луч — текущая цена (r). Снизу — 2D ВЕЕР: читаемый срез того же расчёта, а не отдельная модель. Если барьер вне доступной сетки страйков, edge выключается, но визуальный fallback остаётся.</div>
   </section>
 
   <!-- ================ 3c. IV SURFACE (3D) ================ -->
@@ -275,9 +274,9 @@
     </div>
     <div class="panel-foot dim">
       <b>ОСИ:</b> Ось X — Moneyness (отклонение от цены). Ось Y — Время до экспирации (часы). Ось Z — Волатильность (IV).<br>
-      <b>ИНСТРУКЦИЯ ПО ПРИМЕНЕНИЮ В 15-МИНУТНОЙ CFD СТРАТЕГИИ:</b><br>
-      <b>1. Поиск точки входа (SKEW MOMENTUM)</b>: Если вы планируете лонг, убедитесь, что индикатор не горит красным. Если моментум 🔴 ШОРТ (Путы дорожают), значит институционалы прямо сейчас панически скупают страховку от падения. Входить в лонг против такого потока опасно — пропустите сигнал.<br>
-      <b>2. Выход из позиции (Микро-поверхность)</b>: График показывает ближайшие часы до закрытия (ось Y) и пересчитывается с каждым тиком цены. Если вы уже в сделке (например, в шорте), а край поверхности с противоположной стороны резко взлетает вверх (Коллы дорожают), это сигнал к досрочной фиксации прибыли, пока цена не развернулась против вас.
+      <b>КАК ПРИМЕНЯТЬ ВО ВРЕМЯ СДЕЛКИ:</b><br>
+      <b>1. Направленный контекст:</b> сравнивайте put/call wing delayed-снимка в текущей moneyness. Более дорогой put-wing означает risk-neutral асимметрию вниз, но не доказывает, что «институционалы прямо сейчас покупают» и сам по себе не блокирует вход.<br>
+      <b>2. Живая навигация:</b> между обновлениями цепочки меняется положение текущего proxy-spot на той же поверхности; сами IV не меняются. Реальное изменение улыбки подтверждается только новым timestamp цепочки. Используйте его вместе с option edge и ценовой реакцией, а не как автоматическую команду на выход.
     </div>
   </section>
 
@@ -301,7 +300,7 @@
         <div class="canvas-empty" id="levels-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ</div>
       </div>
     </div>
-    <div class="panel-foot dim">оранжевый ромб — гамма-магнит (куда пиннингует дилерская гамма); оранжевые частицы текут к аттрактору — «куда тянет рынок»; затенение — implied move ±1σ; пунктир — GEX-уровни (эвристика, непроверяемо); прямоугольники — ваши FVG-зоны</div>
+    <div class="panel-foot dim">оранжевый ромб и частицы — визуализация условного OI×gamma-сценария, а не наблюдаемого дилерского потока; затенение — implied move; пунктир — эвристические GEX-уровни без веса в verdict; прямоугольники — ваши FVG-зоны</div>
   </section>
 
   <!-- ================ 5. ФИЛЬТРЫ + ЛЕСТНИЦА + VRP ================ -->
@@ -367,9 +366,9 @@
         <tbody></tbody>
       </table>
       <div class="setup-stats-block">
-        <div class="lbl panel-mini-title">КРАЙ vs ФАКТ <span class="dim">СБЫВАЕТСЯ ЛИ ПЕРЕОЦЕНКА РЫНКА</span></div>
+        <div class="lbl panel-mini-title">OPTION EDGE vs ФАКТ <span class="dim">BRIER · LOG LOSS · ТОЛЬКО BARRIER-ИСХОДЫ</span></div>
         <div class="edge-track" id="edge-track"
-             data-tip="Из закрытых сделок: винрейт тех, где на входе был положительный край (рынок недооценивал сетап), против сделок с отрицательным/нулевым краем. Если +край даёт заметно выше винрейт — метрика реально предсказательна на ВАШИХ сделках.">—</div>
+             data-tip="Из закрытых сделок: результат тех, где option P была выше порога EV=0, против остальных. Это out-of-sample проверка кандидата на преимущество, а не доказательство по одному снимку.">—</div>
       </div>
       <div class="setup-stats-block">
         <div class="lbl panel-mini-title">СТАТИСТИКА СЕТАПОВ <span class="dim">2α/(α+β) ПО ЖУРНАЛУ · КАЛИБРОВКА ПРИ ≥20</span></div>

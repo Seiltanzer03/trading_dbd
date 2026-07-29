@@ -127,6 +127,45 @@ class TestMarketRDistribution:
                                          SPOT * scale * 1.025, "long", 2.5)
         assert base["hit_ratio"] == pytest.approx(scaled["hit_ratio"], rel=1e-6)
 
+    def test_barrier_outside_strike_support_disables_tail_anchor(self, chain):
+        d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
+        md = O.market_r_distribution(
+            d, 1.0, SPOT, SPOT * 0.99, SPOT * 1.50, "long", 50.0)
+        assert md["barriers_supported"] is False
+        assert md["tail_anchor_supported"] is False
+        assert md["hit_ratio"] is None
+
+    def test_tiny_terminal_tail_mass_disables_unstable_ratio(self):
+        strikes = np.linspace(0.0, 1.0, 1001)
+        d = O.RNDensity(
+            strikes=strikes, density=np.ones_like(strikes), t_years=1 / 365)
+        md = O.market_r_distribution(
+            d, 1.0, 0.5, 0.001, 0.999, "long", 1.0)
+        assert md["barriers_supported"] is True
+        assert md["tail_mass"] < O.MIN_TAIL_ANCHOR_MASS
+        assert md["tail_anchor_supported"] is False
+        assert md["hit_ratio"] is None
+
+
+class TestProxyMapping:
+    def test_direct_levels_preserve_moneyness(self):
+        mapped = O.map_proxy_levels([90, 100, 110], 100, 200, "direct")
+        assert mapped.tolist() == pytest.approx([180, 200, 220])
+
+    def test_inverse_levels_reverse_direction(self):
+        mapped = O.map_proxy_levels([90, 100, 110], 100, 2, "inverse")
+        assert mapped[0] > mapped[1] > mapped[2]
+        assert mapped.tolist() == pytest.approx([200 / 90, 2.0, 200 / 110])
+
+    @pytest.mark.parametrize("transform", ["direct", "inverse"])
+    def test_density_mapping_keeps_unit_mass(self, chain, transform):
+        d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
+        mapped = O.map_proxy_density(d, SPOT, 2000, transform)
+        assert np.all(np.diff(mapped.strikes) > 0)
+        assert np.trapezoid(mapped.density, mapped.strikes) == pytest.approx(
+            1.0, abs=1e-9)
+        assert mapped.mean() > 0
+
 
 class TestGex:
     def test_flip_sign_with_skewed_oi(self, chain):

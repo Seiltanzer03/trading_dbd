@@ -33,6 +33,7 @@ const S = {
   ridge: null,
   setups: [],
   journal: [],
+  validation: null,
   chainTs: null,
   wsOk: false,
 };
@@ -54,6 +55,7 @@ async function boot() {
     S.setups = st.setups;
     S.journal = st.journal;
     S.edge_track = st.edge_track;
+    S.validation = st.validation;
     renderAll();
   } catch (e) {
     console.error('state fetch failed', e);
@@ -104,16 +106,26 @@ function onTick() {
   // живое обновление гряды каждый тик: луч цены двигается всегда (даже без сделки)
   ridge.updateLive({
     price: S.tick?.feeds?.price?.value,
+    proxyPrice: S.tick?.feeds?.proxy_price?.value,
     modelHist: S.tick?.mc?.hist,
     trade: S.tick?.trade || null,
-    modelProb: S.tick?.prob?.p,
+    modelProb: S.tick?.prob?.model_p,
+    optionProb: S.tick?.prob?.source === 'options_barrier_mc' ? S.tick.prob.p : null,
+    rnProbs: S.tick?.market?.available ? {
+      p_beyond_take: S.tick.market.terminal_p_take,
+      p_beyond_stop: S.tick.market.terminal_p_stop,
+    } : null,
   });
   // живой луч цены в конусе + точка цены в веере (r) двигаются каждый тик
   cone.updateLive({ r: S.tick?.prob?.r });
   fan.updateLive({ r: S.tick?.prob?.r });
   updateVrp(S.tick?.vrp);
-  updateLiveGex({ price: S.tick?.feeds?.price?.value, trade: S.tick?.trade || null });
-  ivSurface.render(S.tick?.state, S.tick?.iv_surface?.value);
+  updateLiveGex({
+    price: S.tick?.feeds?.price?.value,
+    proxyPrice: S.tick?.feeds?.proxy_price?.value,
+    trade: S.tick?.trade || null,
+  });
+  ivSurface.render(S.tick?.state, S.tick?.iv_surface);
   updateVp(S.tick?.levels?.volume_profile);
   updateCorrelation(S.tick?.correlation?.value);
 }
@@ -123,7 +135,7 @@ function renderAll() {
   renderJournal();
   renderSetupGrid();
   renderEdgeTrack();
-  ridge.setData(S.ridge, S.tick?.prob?.p);
+  ridge.setData(S.ridge, S.tick?.prob?.model_p);
   updateGex(S.ridge);
 }
 
@@ -134,6 +146,7 @@ async function refreshJournalAndSetups() {
   S.ridge = st.ridge;
   S.tick = st.tick;
   S.edge_track = st.edge_track;
+  S.validation = st.validation;
   renderAll();
 }
 
@@ -143,7 +156,7 @@ async function maybeRefreshRidge() {
     S.chainTs = ts;
     try {
       S.ridge = await (await fetch('/api/chain')).json();
-      ridge.setData(S.ridge, S.tick?.prob?.p);
+      ridge.setData(S.ridge, S.tick?.prob?.model_p);
       updateGex(S.ridge);
     } catch { /* оставляем прежнюю гряду */ }
   }
@@ -210,7 +223,11 @@ function renderHeader() {
     $('#btn-new-trade').disabled = false;
   }
 
-  feedBadge($('#feed-price'), t.feeds.price, 'Фид цены (опрос 3–5 c).\n');
+  const px = t.feeds.price;
+  const basisTip = px?.basis_offset
+    ? `ряд: ${px.label || px.ticker}\nсырой тик ${fmtPrice(px.raw_value)} + basis ${px.basis_offset >= 0 ? '+' : ''}${fmtPrice(px.basis_offset)} = ${fmtPrice(px.value)}\n`
+    : `ряд: ${px?.label || px?.ticker || '—'}\n`;
+  feedBadge($('#feed-price'), px, basisTip);
   feedBadge($('#feed-chain'), t.feeds.chain, 'Фид опционной цепочки (опрос 5–10 мин).\n');
   const vols = t.feeds.vols;
   const worst = ['vix', 'gvz', 'dv1x'].map((k) => vols[k]?.status || 'no_data');
@@ -220,7 +237,7 @@ function renderHeader() {
     ts: vols.vix?.ts,
     source: `VIX=${fmtNum(vols.vix?.value, 2)} GVZ=${fmtNum(vols.gvz?.value, 2)} DV1X=${vols.dv1x?.value == null ? 'нет' : fmtNum(vols.dv1x?.value, 2)}`,
     error: worst.includes('no_data') ? 'часть индексов недоступна' : null,
-  }, 'Индексы волатильности (дневки Yahoo).\n');
+  }, 'Индексы волатильности: бесплатный 15m delayed-контекст, не тиковый фильтр.\n');
 }
 
 // живая котировка на латтике: тик, цвет вверх/вниз, вспышка, % от входа
@@ -276,9 +293,9 @@ function renderVerdict() {
     eEl.className = 'verdict-edge ' + (v.edge >= 0 ? 'good' : 'bad');
   }
   const mkt = S.tick.market;
-  $('#v-pmm').textContent = mkt
-    ? `P модели ${fmtPct(mkt.p_model)} · P рынка ${fmtPct(mkt.hit_ratio)}`
-    : 'опционов для инструмента нет — край недоступен';
+  $('#v-pmm').textContent = mkt?.available
+    ? `P options ${fmtPct(mkt.hit_ratio)} · EV=0 ${fmtPct(mkt.p_breakeven)}`
+    : `option edge недоступен${mkt?.anchor_reason ? ` · ${mkt.anchor_reason}` : ''}`;
   $('#v-action').textContent = v.action;
   const fx = $('#v-factors');
   fx.innerHTML = '';
@@ -329,7 +346,7 @@ function renderState() {
   // край + сдвиг от входа
   if (s.edge == null) {
     $('#st-edge').textContent = '—'; $('#st-edge').className = 'state-val dim';
-    $('#st-edge-shift').textContent = 'нет опционов';
+    $('#st-edge-shift').textContent = 'option edge недоступен';
   } else {
     $('#st-edge').textContent = (s.edge >= 0 ? '+' : '') + (s.edge * 100).toFixed(0) + '%';
     $('#st-edge').className = 'state-val ' + (s.edge >= 0 ? 'green' : 'red');
@@ -355,8 +372,17 @@ function renderCone() {
   const c = t?.cone;
   const active = !!(c && c.available);
   $('#cone-empty').style.display = active ? 'none' : 'flex';
-  $('#cone-status').className = 'badge ' + (active ? (t.demo ? 'demo' : 'live') : 'no_data');
-  $('#cone-status').textContent = active ? (t.demo ? '◆ DEMO' : '● LIVE') : '○ НЕТ СДЕЛКИ';
+  const anchored = !!c?.option_anchored;
+  const liveMapping = t?.feeds?.proxy_price?.status === 'live';
+  $('#cone-status').className = 'badge ' + (active
+    ? (t.demo ? 'demo' : anchored && liveMapping ? 'live' : 'delayed')
+    : 'no_data');
+  $('#cone-status').textContent = active
+    ? (t.demo ? '◆ DEMO'
+      : anchored && liveMapping ? '● OPTIONS + LIVE MAPPING'
+      : anchored ? '◐ OPTIONS + INDICATIVE MAPPING'
+      : '◐ FALLBACK · БЕЗ EDGE')
+    : '○ НЕТ СДЕЛКИ';
   cone.setData(active ? c : null, {
     direction: t?.trade?.direction || 'long',
     headlineP: t?.prob?.p,
@@ -372,10 +398,18 @@ function renderLattice() {
   handleLivePrice(t);          // котировка тикает всегда, даже без сделки
   const p = t.prob;
   const active = !!(p && t.mc);
+  const optionAnchored = p?.source === 'options_barrier_mc';
+  const liveMapping = t?.feeds?.proxy_price?.status === 'live';
   $('#lattice-empty').style.display = active ? 'none' : 'flex';
-  $('#lattice-status').className = 'badge ' + (active ? (t.demo ? 'demo' : 'live') : 'no_data');
+  $('#lattice-status').className = 'badge ' + (active
+    ? (t.demo ? 'demo' : optionAnchored && liveMapping ? 'live' : 'delayed')
+    : 'no_data');
   $('#lattice-status').textContent = active
-    ? (t.demo ? '◆ DEMO' : '● LIVE') : '○ НЕТ СДЕЛКИ';
+    ? (t.demo ? '◆ DEMO'
+      : optionAnchored && liveMapping ? '● OPTIONS + LIVE MAPPING'
+      : optionAnchored ? '◐ OPTIONS + INDICATIVE MAPPING'
+      : '◐ FALLBACK · БЕЗ EDGE')
+    : '○ НЕТ СДЕЛКИ';
 
   const mkt = t.market;
   lattice.setData({
@@ -383,7 +417,7 @@ function renderLattice() {
     p: p?.p,
     T: p?.T ?? 2.5,
     r: p?.r ?? 0,
-    marketProbs: mkt?.probs,
+    marketProbs: mkt?.available ? mkt.probs : null,
     modelProbs: t.mc?.hist?.probs,
     edges: mkt?.edges || t.mc?.hist?.edges,
     hit: mkt?.hit_ratio,
@@ -403,35 +437,30 @@ function renderLattice() {
     return;
   }
 
-  // рынок vs модель
-  if (mkt) {
+  // Опционная вероятность и её запас над безубыточностью.
+  if (mkt?.available) {
     $('#lat-mhit').textContent = fmtPct(mkt.hit_ratio);
     $('#lat-mhit').dataset.tip =
-      `Рыночный «hit» = P(тейк раньше стопа) по risk-neutral диффузии (вола опционов/реализ. + снос скью, БЕЗ винрейта)${mkt.median_years != null ? ', медиана развязки ≈ ' + fmtDur(mkt.median_years) : ''}.\n` +
-      `P дойти к горизонту: тейк ${fmtPct(mkt.p_take)}, стоп ${fmtPct(mkt.p_stop)}.\nСравнивается с P модели (${fmtPct(mkt.p_model)}); расхождение = КРАЙ.`;
+      `P(тейк раньше стопа) по finite-horizon barrier MC.\n` +
+      `Ширина: implied move; хвост и forward: BL-плотность; асимметрия: skew; время: term structure.${mkt.median_years != null ? '\nМедиана развязки ≈ ' + fmtDur(mkt.median_years) : ''}\n` +
+      `К горизонту уже поглощено: тейк ${fmtPct(mkt.p_take_horizon)}, стоп ${fmtPct(mkt.p_stop_horizon)}, не разрешено ${fmtPct(mkt.p_unresolved_horizon)}. Неразрешённая масса якорится BL tail-ratio ${fmtPct(mkt.terminal_hit)}.`;
     const ed = mkt.edge;
     $('#lat-edge').textContent = ed == null ? '—' : (ed >= 0 ? '+' : '') + fmtPct(ed);
     $('#lat-edge').className = 'val ' + (ed == null ? '' : ed >= 0 ? 'green' : 'red');
     $('#lat-edge').dataset.tip =
-      `Край = P модели − hit рынка = ${fmtPct(mkt.p_model)} − ${fmtPct(mkt.hit_ratio)} = ${ed == null ? '—' : (ed >= 0 ? '+' : '') + fmtPct(ed)}.\n` +
-      `Положительный → ваша статистика даёт лучшие шансы, чем закладывает рынок опционов (потенциальный край). Отрицательный → рынок оценивает сетап выше вас — осторожно.`;
+      `Опционный запас = P_options − P(EV=0) = ${fmtPct(mkt.hit_ratio)} − ${fmtPct(mkt.p_breakeven)} = ${ed == null ? '—' : (ed >= 0 ? '+' : '') + fmtPct(ed)}.\n` +
+      `Это честная проверка асимметрии текущих барьеров по данным опционов, а не вероятность из одной пропорции стоп/тейк.`;
   } else {
     $('#lat-mhit').textContent = '—';
-    $('#lat-mhit').dataset.tip = `Опционной цепочки для ${t.instrument} нет — рыночного распределения нет, доска показывает вашу модель честно.`;
+    $('#lat-mhit').dataset.tip = `${mkt?.anchor_reason || `Нет валидной цепочки/преобразования для ${t.instrument}`}; опционный edge выключен. Тёмная контрольная модель остаётся только справочной.`;
     $('#lat-edge').textContent = '—';
     $('#lat-edge').className = 'val';
   }
 
   tweenNumber($('#lat-p'), p.p * 100, (v) => v.toFixed(1) + '%');
-  $('#lat-p').dataset.tip =
-    `P(тейк раньше стопа) — модель первого достижения:\n` +
-    `dX = μdt + σdW, стоп −1R, тейк +${p.T.toFixed(2)}R\n` +
-    `P = (s(x)−s(−1)) / (s(T)−s(−1)), s(x)=exp(−2μx/σ²)\n` +
-    `x = r = ${p.r.toFixed(3)} (из фида цены)\n` +
-    `μ = ${p.mu.toFixed(4)} — бисекция под винрейт ${(p.winrate * 100).toFixed(1)}% ` +
-    `(${p.wins}/${p.n}, источник: ${p.calibration === 'journal' ? 'ваш журнал' : 'встроенная таблица'})\n` +
-    `σ = ${p.sigma_ratio.toFixed(3)} — поправка опционной волы (σ_impl/σ_baseline${t.sigma.applied ? '' : ' НЕ применена: ' + (t.sigma.reason || '')})` +
-    (p.small_sample ? `\nВЫБОРКА < 30 — смотрите интервал [${(p.p_lo * 100).toFixed(1)}–${(p.p_hi * 100).toFixed(1)}%], не точечное число` : '');
+  $('#lat-p').dataset.tip = p.source === 'options_barrier_mc'
+    ? `ОПЦИОННАЯ P(тейк раньше стопа).\nТекущий r=${p.r.toFixed(3)} двигается с ценой; moneyness опционного снимка использует ${t.feeds?.proxy_price?.status === 'live' ? 'живой stream-тик' : 'последнюю indicative/snapshot-котировку'} ${t.options_summary?.proxy || 'proxy'}.\nПолный ход σ=${p.sigma_R.toFixed(3)}R из implied move; BL-плотность задаёт terminal tail/forward, skew — асимметрию, term structure — раскрытие по времени.\nВинрейт сетапа в эту P не подставляется.`
+    : `FALLBACK без опционной цепочки: контрольная first-passage модель по статистике сетапа.\nОна сохраняет динамический визуал, но не считается опционным преимуществом и не влияет на edge.`;
 
   // среднее P за сделку (визуальный ориентир — стабильно ли преимущество)
   if (t.trade?.id !== S._pTradeId) { S._pTradeId = t.trade?.id; S._pSum = 0; S._pN = 0; }
@@ -442,23 +471,27 @@ function renderLattice() {
   $('#lat-band-fill').style.left = lo + '%';
   $('#lat-band-fill').style.width = Math.max(hi - lo, 0.5) + '%';
   $('#lat-band-tick').style.left = `calc(${p.p * 100}% - 1px)`;
-  $('#lat-band-lbl').textContent =
-    `[${lo.toFixed(1)}% – ${hi.toFixed(1)}%] интервал 90% (Уилсон, n=${p.n})`;
-  $('#lat-band').dataset.tip =
-    `Интервал неопределённости: Уилсон 90% по винрейту ${p.wins}/${p.n}\n` +
-    `-> винрейт ∈ [${(p.wr_lo * 100).toFixed(1)}%, ${(p.wr_hi * 100).toFixed(1)}%]\n` +
-    `-> μ ∈ [lo, hi] -> P ∈ [${lo.toFixed(1)}%, ${hi.toFixed(1)}%].\nПоказывается всегда; при n<30 — единственно честное представление.`;
+  if (p.band_kind === 'scenario') {
+    $('#lat-band-lbl').textContent =
+      `[${lo.toFixed(1)}% – ${hi.toFixed(1)}%] сценарная полоса proxy/snapshot`;
+    $('#lat-band').dataset.tip =
+      `Не статистический confidence interval. Полоса расширяется из-за возраста цепочки и качества proxy; нужна, чтобы не принимать одну бесплатную delayed-оценку за точное число.`;
+  } else {
+    $('#lat-band-lbl').textContent =
+      `[${lo.toFixed(1)}% – ${hi.toFixed(1)}%] fallback Уилсон 90% (n=${p.n})`;
+    $('#lat-band').dataset.tip =
+      `Fallback-интервал Уилсона по контрольной статистике ${p.wins}/${p.n}; опционным edge не считается.`;
+  }
 
   $('#lat-r').textContent = fmtR(p.r);
   $('#lat-ev-hold').textContent = fmtR(t.mc.ev_hold);
   $('#lat-ev-hold').dataset.tip =
-    `EV удержания до стопа/тейка: среднее терминального R по ${t.mc.n_paths} путям МК\n` +
-    `с теми же μ, σ, что и P; ≈ p·T − (1−p) = ${(p.p * p.T - (1 - p.p)).toFixed(3)}`;
+    t.mc.ev_hold_source === 'options_probability'
+      ? `Опционный EV удержания = P_options·T − (1−P_options) = ${(p.p * p.T - (1 - p.p)).toFixed(3)}R. Комиссии, проскальзывание и physical drift не включены.`
+      : `Fallback EV контрольной модели; опционным преимуществом не считается.`;
   $('#lat-ev-ladder').textContent = fmtR(t.mc.ev_ladder);
   $('#lat-ev-ladder').dataset.tip =
-    `EV лестницы фиксации (глава 2.2): 10% позиции на 1.0/1.25/1.5/1.75/2.0/2.2R,\n` +
-    `стоп в БУ после 1.5R. По тем же ${t.mc.n_paths} путям МК.\n` +
-    `Допущения: рубеж исполняется точно по уровню, БУ — по 0R без проскальзывания.`;
+    `Исследовательский path-control лестницы по исторической модели: 10% на 1.0/1.25/1.5/1.75/2.0/2.2R, БУ после 1.5R.\nНе участвует в опционном edge; сохранён для контроля исполнения плана.`;
 
   // порог безубытка по винрейту + запас
   if (p.p_breakeven != null) {
@@ -469,7 +502,8 @@ function renderLattice() {
     $('#lat-be').dataset.tip =
       `Порог EV=0 при RR 1:${p.T.toFixed(2)} = 1/(1+${p.T.toFixed(2)}) = ${fmtPct(p.p_breakeven)}.\n` +
       `Ваша P(тейк) ${fmtPct(p.p)} ${marg >= 0 ? 'ВЫШЕ' : 'НИЖЕ'} порога на ${Math.abs(marg).toFixed(0)}пп -> ` +
-      `удержание до цели математически ${marg >= 0 ? 'в плюс' : 'в минус'} (без учёта лестницы фиксации).`;
+      `risk-neutral сценарный EV ${marg >= 0 ? 'положительный' : 'отрицательный'} ` +
+      `(не доказанный physical edge; без комиссий и лестницы).`;
   } else { $('#lat-be').textContent = '—'; $('#lat-be').className = 'val'; }
 
   // практический вывод доски одной строкой
@@ -479,12 +513,14 @@ function renderLattice() {
   parts.push(overBE >= 0
     ? `P выше порога EV=0 на ${(overBE * 100).toFixed(0)}пп`
     : `P НИЖЕ порога EV=0 на ${(Math.abs(overBE) * 100).toFixed(0)}пп`);
-  if (mkt && mkt.edge != null) {
-    parts.push(mkt.edge >= 0.03 ? `рынок недооценивает сетап (+${(mkt.edge * 100).toFixed(0)}%)`
-      : mkt.edge <= -0.03 ? `рынок оценивает выше вас (${(mkt.edge * 100).toFixed(0)}%)`
-      : 'вы на уровне рынка');
-  } else parts.push('рынка опционов нет — только модель');
-  if (p.small_sample) parts.push(`выборка n=${p.n}<30 — доверяй интервалу, не точке`);
+  if (mkt?.available && mkt.edge != null) {
+    parts.push(mkt.edge >= 0.03 ? `опционная асимметрия положительная (+${(mkt.edge * 100).toFixed(0)}пп)`
+      : mkt.edge <= -0.03 ? `опционная асимметрия отрицательная (${(mkt.edge * 100).toFixed(0)}пп)`
+      : 'опционная асимметрия около нуля');
+  } else parts.push('нет option anchor — edge выключен');
+  if (p.source !== 'options_barrier_mc' && p.model_small_sample) {
+    parts.push(`контрольная выборка n=${p.n}<30`);
+  }
   readEl.textContent = parts.join(' · ');
   readEl.className = 'lat-read ' + (overBE >= 0 ? 'good' : 'bad');
 
@@ -496,13 +532,13 @@ function renderLattice() {
   $('#lat-conv').dataset.tip =
     `|доля зелёных − P(R>0 по МК)| = |${st.greenShare == null ? '—' : (st.greenShare * 100).toFixed(1)}% − ${st.pGreenModel == null ? '—' : (st.pGreenModel * 100).toFixed(1)}%|\n` +
     `Метрика честности доски: корзины сэмплируются из МК-распределения,\nпоэтому расхождение должно убывать с числом шариков (закон больших чисел).`;
-  $('#lat-calib').textContent = p.calibration === 'journal'
-    ? `ЖУРНАЛ (${p.journal_n})` : `ТАБЛИЦА (${p.n})`;
+  $('#lat-calib').textContent = `CONTROL · ${p.calibration === 'journal'
+    ? `ЖУРНАЛ ${p.journal_n}` : `ТАБЛИЦА ${p.n}`}`;
   $('#lat-calib').dataset.tip =
-    `Источник статистики сетапа для калибровки μ.\n` +
+    `Контрольная статистика пунктирной линии — не источник главной опционной P.\n` +
     `Встроенная таблица: ${p.calibration === 'builtin' ? `${p.wins}/${p.n}` : '—'}\n` +
     `Журнал по сетапу: ${p.journal_wins}/${p.journal_n} закрытых\n` +
-    `Переключение на журнал при ≥20 закрытых сделок по сетапу (приоритет журнала).`;
+    `Нужна для последующей проверки, расходятся ли опционы с вашим исполнением.`;
 }
 
 // ---------------------------------------------------------------- filters
@@ -612,13 +648,14 @@ function renderRidgeStats() {
       .forEach((id) => { $('#' + id).textContent = '—'; });
     $('#rg-proxy').textContent = t.sigma.source === 'vol_index'
       ? 'ИНДЕКС ВОЛЫ' : '—';
-    $('#rg-p-model').textContent = S.tick?.prob ? fmtPct(S.tick.prob.p) : '—';
+    $('#rg-p-model').textContent = S.tick?.prob?.source === 'options_barrier_mc'
+      ? fmtPct(S.tick.prob.p) : '—';
     return;
   }
   $('#rg-proxy').textContent = os.proxy + (os.demo ? ' ◆' : '') + (os.experimental ? ' ⚠' : '');
   $('#rg-proxy').dataset.tip = os.experimental
-    ? `⚠ ЭКСПЕРИМЕНТАЛЬНЫЙ ПРОКСИ ${os.proxy}: US-ETF на страну/валюту, трекинг неточный и опционы тонкие — плотность/скью/GEX/гамма для ${t.instrument} НИЗКОЙ НАДЁЖНОСТИ, используйте как грубый контекст.`
-    : `Опционная цепочка ETF-прокси ${os.proxy}. Страйки пересчитаны в шкалу инструмента пропорцией цена/спот_прокси (приближение).`;
+    ? `⚠ ЭКСПЕРИМЕНТАЛЬНЫЙ ПРОКСИ ${os.proxy}: трекинг/ликвидность ограничены. Преобразование ${os.proxy_transform}; сценарная полоса расширена, GEX может быть выключен.`
+    : `Delayed-цепочка ${os.proxy}; страйки переносятся по текущей moneyness (${os.proxy_transform}). Proxy mapping сейчас: ${os.spot_proxy_status === 'live' ? 'live stream' : os.spot_proxy_is_snapshot_fallback ? 'snapshot fallback' : 'REST indicative'}.`;
   $('#rg-expiry').textContent = os.expiry;
   // скью (risk-reversal)
   const sk = os.skew;
@@ -628,7 +665,7 @@ function renderRidgeStats() {
     $('#rg-skew').dataset.tip =
       `Risk-reversal = IV(OTM call) − IV(OTM put) = ${fmtPct(sk.call_iv_otm, 1)} − ${fmtPct(sk.put_iv_otm, 1)} = ${(sk.rr * 100).toFixed(1)}пп.\n` +
       `Уклон: ${sk.tilt}. Отрицательный = рынок платит за защиту от падения; положительный = спрос на рост.\n` +
-      `КОГДА СМОТРЕТЬ: перед входом. Уклон против вашего направления → сетап слабее (учтено в вердикте). Сильный уклон (>3пп) = рынок явно позиционирован в одну сторону.`;
+      `Это контекст формы хвоста; отдельно verdict не усиливает, чтобы не считать один и тот же опционный эффект дважды.`;
   } else { $('#rg-skew').textContent = '—'; $('#rg-skew').className = 'val'; }
   // term-structure
   const tm = os.term;
@@ -644,10 +681,15 @@ function renderRidgeStats() {
   $('#rg-move').textContent = `${fmtPct(os.implied_move_frac)} / ${fmtPrice(os.implied_move_abs_instr)}`;
   $('#rg-move').dataset.tip =
     `Implied move до экспирации ${os.expiry}:\nATM straddle ${os.proxy} / спот = ${fmtPct(os.implied_move_frac)}\n` +
-    `в пунктах инструмента: × scale ${fmtNum(os.scale, 4)} = ${fmtPrice(os.implied_move_abs_instr)}\n` +
-    `(ожидаемое |движение|, E|ΔS/S|)`;
+    `в пунктах текущего инструмента: цена × move% = ${fmtPrice(os.implied_move_abs_instr)}\n` +
+    `proxy snapshot ${fmtPrice(os.spot_proxy_snapshot)} → ${os.spot_proxy_status === 'live' ? 'live' : os.spot_proxy_is_snapshot_fallback ? 'snapshot fallback' : 'indicative'} ${fmtPrice(os.spot_proxy_current)}; transform=${os.proxy_transform}`;
 
-  const rn = S.ridge?.rn_probs;
+  const rn = t.market?.available ? {
+    p_beyond_take: t.market.terminal_p_take,
+    p_beyond_stop: t.market.terminal_p_stop,
+    expiry: os.expiry,
+    demo: t.market.demo,
+  } : null;
   $('#rg-p-take').textContent = rn ? fmtPct(rn.p_beyond_take) : '—';
   $('#rg-p-take').dataset.tip = rn
     ? `P(цена за тейком на экспирации ${rn.expiry}) по risk-neutral плотности:\n∫ q(K)dK за уровнем тейка; q ≈ e^{rT}·d²C/dK² (Бриден–Литценбергер),\nсглаживание локальной квадратичной регрессией, отрицательные значения обрезаны.\nСтрайки прокси → шкала инструмента пропорцией (приближение).${rn.demo ? '\n◆ DEMO-цепочка' : ''}`
@@ -656,10 +698,11 @@ function renderRidgeStats() {
   $('#rg-p-stop').dataset.tip = rn
     ? `P(цена за стопом на экспирации) — аналогично P(за тейк), хвост с другой стороны.${rn.demo ? '\n◆ DEMO-цепочка' : ''}`
     : 'нужны открытая сделка и цепочка';
-  $('#rg-p-model').textContent = S.tick?.prob ? fmtPct(S.tick.prob.p) : '—';
+  $('#rg-p-model').textContent = S.tick?.prob?.source === 'options_barrier_mc'
+    ? fmtPct(S.tick.prob.p) : '—';
 }
 
-// стены open interest: где стоит крупнейший опционный интерес (сопротивление/поддержка)
+// Концентрации open interest: контекст страйков, не наблюдаемая «стена» дилеров.
 function renderOiWalls() {
   const ow = S.ridge?.oi_walls;
   const call = $('#rg-call-wall'), put = $('#rg-put-wall'), read = $('#rg-wall-read');
@@ -670,22 +713,22 @@ function renderOiWalls() {
   const pctStr = (x) => x == null ? '' : ` (${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%)`;
   call.textContent = fmtPrice(ow.call_wall) + pctStr(ow.call_wall_pct);
   put.textContent = fmtPrice(ow.put_wall) + pctStr(ow.put_wall_pct);
-  // тейк/стоп относительно стен (нужна сделка)
+  // тейк/стоп относительно концентраций OI (нужна сделка)
   const tr = S.ridge?.trade || S.tick?.trade;
   if (!tr) { read.textContent = 'нет сделки'; read.className = 'val dim'; return; }
   const long = tr.direction === 'long';
   const takeBeyondCall = long ? tr.take > ow.call_wall : tr.take < ow.put_wall;
   const wallOnPath = long ? ow.call_wall : ow.put_wall;   // барьер по ходу к тейку
   if (takeBeyondCall) {
-    read.textContent = `тейк ЗА стеной ${long ? 'коллов' : 'путов'} — труднее`;
-    read.className = 'val red';
+    read.textContent = `тейк за max OI ${long ? 'коллов' : 'путов'} · контекст`;
+    read.className = 'val';
   } else if (long ? (wallOnPath > tr.entry && wallOnPath < tr.take)
                   : (wallOnPath < tr.entry && wallOnPath > tr.take)) {
-    read.textContent = `стена на пути к тейку — фиксируй у ${fmtPrice(wallOnPath)}`;
+    read.textContent = `max OI на пути: ${fmtPrice(wallOnPath)} · наблюдай реакцию`;
     read.className = 'val';
   } else {
-    read.textContent = 'простор до тейка — крупных стен по пути нет';
-    read.className = 'val green';
+    read.textContent = 'max OI не лежит между входом и тейком';
+    read.className = 'val';
   }
 }
 
@@ -773,20 +816,28 @@ function deleteTradeModal(id) {
 
 function renderEdgeTrack() {
   const et = S.edge_track;
+  const vr = S.validation;
   const el = $('#edge-track');
   if (!el) return;
   if (!et || et.n === 0) {
-    el.textContent = 'ещё нет закрытых сделок с зафиксированным краем — накопится по мере торговли';
+    el.textContent = vr?.message
+      || 'ещё нет закрытых сделок с зафиксированным option edge';
     el.className = 'edge-track dim';
     return;
   }
   const pos = et.pos_wr == null ? '—' : fmtPct(et.pos_wr);
   const neg = et.neg_wr == null ? '—' : fmtPct(et.neg_wr);
-  const better = et.pos_wr != null && et.neg_wr != null && et.pos_wr > et.neg_wr;
+  const enough = (vr?.n || 0) >= 30;
+  const better = enough && et.pos_wr != null && et.neg_wr != null && et.pos_wr > et.neg_wr;
+  const calibration = vr?.n
+    ? `<br><b>OPTION CALIBRATION:</b> Brier ${vr.brier.toFixed(3)} · log loss ${vr.log_loss.toFixed(3)} · barrier outcomes ${vr.n}` +
+      (vr.censored_n ? ` · censored ${vr.censored_n}` : '')
+    : `<br><span class="dim">${vr?.message || 'barrier-калибровка ещё не накоплена'}</span>`;
   el.innerHTML =
-    `<b>+КРАЙ:</b> ${pos} винрейт (${et.pos_n} сд.) &nbsp;·&nbsp; ` +
-    `<b>−/0 КРАЙ:</b> ${neg} винрейт (${et.neg_n} сд.) &nbsp;·&nbsp; ` +
-    `<span class="${better ? 'green' : 'dim'}">${better ? 'край предсказателен ✓' : 'пока без явного преимущества'}</span>`;
+    `<b>+OPTION EDGE:</b> ${pos} положительных исходов (${et.pos_n} сд.) &nbsp;·&nbsp; ` +
+    `<b>−/0 EDGE:</b> ${neg} (${et.neg_n} сд.) &nbsp;·&nbsp; ` +
+    `<span class="${better ? 'green' : 'dim'}">${better ? 'есть out-of-sample подтверждение' : 'выборка пока не подтверждает преимущество'}</span>` +
+    calibration;
   el.className = 'edge-track';
 }
 
@@ -855,6 +906,8 @@ $('#btn-new-trade').addEventListener('click', () => {
       <label>Вход</label><input id="f-entry" type="number" step="any">
       <label>Стоп</label><input id="f-stop" type="number" step="any">
       <label>Тейк</label><input id="f-take" type="number" step="any">
+      <label>Цена у брокера сейчас</label><input id="f-reference" type="number" step="any">
+      <span class="form-hint">Необязательно. Для XAU/XAG/CFD укажите текущую котировку брокера: терминал зафиксирует basis к бесплатному фьючерсу и дальше будет двигать её живыми тиками.</span>
       <span class="form-hint" id="f-rr-hint">тейк можно оставить пустым — рассчитаю из целевого RR сетапа (правило 2.8)</span>
       <label>Заметки</label><textarea id="f-notes"></textarea>
     </div>
@@ -872,10 +925,12 @@ $('#btn-new-trade').addEventListener('click', () => {
     const sameInstr = su && su.instrument === S.tick?.instrument;
     if (sameInstr && price) {
       $('#f-entry').value = price.toPrecision(8);
+      $('#f-reference').value = price.toPrecision(8);
       $('#f-rr-hint').textContent =
         `вход подставлен из фида ${su.instrument} (${price.toPrecision(8)}); тейк можно оставить пустым — рассчитаю из RR (правило 2.8)`;
     } else {
       $('#f-entry').value = '';
+      $('#f-reference').value = '';
       $('#f-rr-hint').textContent = su
         ? `инструмент сетапа — ${su.instrument}; нет живого фида для него, введите вход вручную. Тейк можно оставить пустым (рассчитаю из RR).`
         : 'тейк можно оставить пустым — рассчитаю из целевого RR сетапа (правило 2.8)';
@@ -897,6 +952,7 @@ $('#btn-new-trade').addEventListener('click', () => {
       }
       await apiPost('/api/trade', {
         setup, direction: dir, entry, stop, take,
+        reference_price: $('#f-reference').value ? Number($('#f-reference').value) : null,
         notes: $('#f-notes').value, zones: [],
       });
       closeModal();

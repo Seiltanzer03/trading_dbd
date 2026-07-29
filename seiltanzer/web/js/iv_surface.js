@@ -22,7 +22,6 @@ export function initIVSurface(elId) {
 
     const INIT_CAM = { eye: { x: 1.4, y: -1.4, z: 0.7 }, up: { x: 0, y: 0, z: 1 } };
     let currentCam = JSON.parse(JSON.stringify(INIT_CAM));
-    let skewHistory = [];
 
     function markInteract() {
         interacting = true;
@@ -50,7 +49,23 @@ export function initIVSurface(elId) {
         hasPlot = false;
     }
 
-    function render(state, surfaceData) {
+    function interp(xs, ys, x) {
+        if (!xs.length || x < xs[0] || x > xs[xs.length - 1]) return null;
+        let hi = 1;
+        while (hi < xs.length && xs[hi] < x) hi++;
+        if (hi >= xs.length) return ys[ys.length - 1];
+        const lo = hi - 1;
+        const span = xs[hi] - xs[lo];
+        if (!span) return ys[lo];
+        const f = (x - xs[lo]) / span;
+        return ys[lo] + (ys[hi] - ys[lo]) * f;
+    }
+
+    function render(state, surfacePayload) {
+        const payload = Array.isArray(surfacePayload)
+            ? { value: surfacePayload, status: "delayed" }
+            : (surfacePayload || {});
+        const surfaceData = payload.value;
         if (!surfaceData || surfaceData.length === 0) {
             el.style.opacity = "0";
             document.getElementById("iv-surface-empty").style.display = "flex";
@@ -63,14 +78,56 @@ export function initIVSurface(elId) {
 
         el.style.opacity = "1";
         document.getElementById("iv-surface-empty").style.display = "none";
-        document.getElementById("iv-surface-status").innerText = "● LIVE (SURFACE)";
-        document.getElementById("iv-surface-status").className = "badge live";
+        const status = document.getElementById("iv-surface-status");
+        const isDemo = payload.status === "demo";
+        const hasLiveSpot = payload.spot_status === "live";
+        const hasIndicativeSpot = Number(payload.spot_current) > 0;
+        status.innerText = isDemo ? "◆ DEMO SURFACE"
+            : hasLiveSpot ? "● OPTIONS SNAPSHOT + LIVE PROXY"
+            : hasIndicativeSpot ? "◐ OPTIONS SNAPSHOT + INDICATIVE PROXY"
+            : "◐ OPTIONS SNAPSHOT · SNAPSHOT SPOT";
+        status.className = "badge " + (isDemo ? "demo" : "delayed");
 
-        const strikes0 = surfaceData[0].strikes;
-        const atm = strikes0[Math.floor(strikes0.length / 2)];
-        const moneyPct = strikes0.map(k => +((k / atm - 1) * 100).toFixed(2));
-        const yDte = surfaceData.map(e => e.days);
-        const yTickText = surfaceData.map(e => {
+        // IV остаётся delayed-снимком. Динамика честная: живой тик proxy
+        // сдвигает ATM/moneyness, но не изображает новые опционные котировки.
+        const strikes0 = surfaceData[0].strikes || [];
+        const fallbackSpot = surfaceData[0].spot_at_snapshot
+            || strikes0[Math.floor(strikes0.length / 2)];
+        const spot = Number(payload.spot_current) > 0
+            ? Number(payload.spot_current) : fallbackSpot;
+        if (!spot || !strikes0.length) return;
+        // У разных экспираций разные страйки. Старая версия передавала всем
+        // строкам x-сетку первой экспирации и могла геометрически исказить 3D.
+        // Интерполируем каждую улыбку на общую live-moneyness сетку.
+        const rows = surfaceData.map((row) => {
+            const pairs = (row.strikes || []).map((k, i) => ({
+                x: (k / spot - 1) * 100,
+                iv: Number(row.ivs?.[i]) * 100,
+            })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.iv)
+                && p.iv > 0 && p.iv < 200).sort((a, b) => a.x - b.x);
+            return { row, pairs };
+        }).filter((r) => r.pairs.length >= 3);
+        if (!rows.length) return;
+        let xLo = Math.max(-20, ...rows.map((r) => r.pairs[0].x));
+        let xHi = Math.min(20, ...rows.map((r) => r.pairs[r.pairs.length - 1].x));
+        if (!(xHi > xLo + 1)) {
+            xLo = Math.max(-20, rows[0].pairs[0].x);
+            xHi = Math.min(20, rows[0].pairs[rows[0].pairs.length - 1].x);
+        }
+        const moneyPct = Array.from(
+            { length: 41 },
+            (_, i) => +(xLo + (xHi - xLo) * i / 40).toFixed(2));
+        const zIvs = rows.map(({ pairs }) => {
+            const xs = pairs.map((p) => p.x);
+            const ys = pairs.map((p) => p.iv);
+            return moneyPct.map((x) => {
+                const v = interp(xs, ys, x);
+                return v == null ? null : +v.toFixed(2);
+            });
+        });
+        const cleanData = rows.map((r) => r.row);
+        const yDte = cleanData.map(e => e.days);
+        const yTickText = cleanData.map(e => {
             const d = e.days;
             if (d < 1) return (d * 24).toFixed(1) + "h";
             if (d < 7) return Math.round(d) + "d";
@@ -78,58 +135,41 @@ export function initIVSurface(elId) {
             return Math.round(d / 30) + "M";
         });
 
-        // --- Skew Momentum ---
-        const z0 = surfaceData[0].ivs;
-        let leftIdx = 0, rightIdx = strikes0.length - 1;
-        for (let i = 0; i < moneyPct.length; i++) {
-            if (moneyPct[i] <= -5) leftIdx = i;
-            if (moneyPct[i] >= 5 && rightIdx === strikes0.length - 1) rightIdx = i;
-        }
-        const skew = z0[leftIdx] - z0[rightIdx];
-        
-        const now = Date.now();
-        skewHistory.push({ t: now, v: skew });
-        skewHistory = skewHistory.filter(s => now - s.t < 120000); // 2 minutes window
-        
-        let skewMom = 0;
-        if (skewHistory.length > 1) {
-            const first = skewHistory[0];
-            const last = skewHistory[skewHistory.length - 1];
-            if (last.t > first.t) {
-                skewMom = ((last.v - first.v) / (last.t - first.t)) * 100000; // arbitrary scale for readability
-            }
-        }
-        
+        // Live tail-skew derived from a delayed smile at CURRENT moneyness.
+        // Никакого фиктивного «momentum» из повторения одного snapshot.
+        const nearest = (target) => moneyPct.reduce(
+            (best, x, i) => Math.abs(x - target) < Math.abs(moneyPct[best] - target)
+                ? i : best, 0);
+        const leftIdx = nearest(-5), rightIdx = nearest(5);
+        const skew = (zIvs[0][leftIdx] ?? 0) - (zIvs[0][rightIdx] ?? 0);
         const skewEl = document.getElementById("iv-skew-momentum");
         if (skewEl) {
             skewEl.style.display = "inline-block";
-            const isPutRising = skewMom > 0.05;
-            const isCallRising = skewMom < -0.05;
-            
-            if (isPutRising) {
+            if (skew > 1.0) {
                 skewEl.style.backgroundColor = "rgba(198,55,60,0.15)";
                 skewEl.style.color = "#C6373C";
                 skewEl.style.border = "1px solid rgba(198,55,60,0.4)";
-                skewEl.innerText = `SKEW MOM: +${skewMom.toFixed(1)} 🔴 ШОРТ (Путы дорожают)`;
-            } else if (isCallRising) {
+                skewEl.innerText = `TAIL SKEW: PUT WING +${skew.toFixed(1)}пп`;
+            } else if (skew < -1.0) {
                 skewEl.style.backgroundColor = "rgba(46,125,79,0.15)";
                 skewEl.style.color = "#2E7D4F";
                 skewEl.style.border = "1px solid rgba(46,125,79,0.4)";
-                skewEl.innerText = `SKEW MOM: ${skewMom.toFixed(1)} 🟢 ЛОНГ (Коллы дорожают)`;
+                skewEl.innerText = `TAIL SKEW: CALL WING +${Math.abs(skew).toFixed(1)}пп`;
             } else {
                 skewEl.style.backgroundColor = "transparent";
                 skewEl.style.color = "#8A877D";
                 skewEl.style.border = "1px solid rgba(138,135,125,0.4)";
-                skewEl.innerText = `SKEW MOM: ${skewMom > 0 ? '+' : ''}${skewMom.toFixed(1)} ⚪ НЕЙТРАЛЬНО`;
+                skewEl.innerText = `TAIL SKEW: ${skew >= 0 ? '+' : ''}${skew.toFixed(1)}пп · FLAT`;
             }
+            const spotKind = isDemo ? "demo proxy" : hasLiveSpot ? "live proxy" : hasIndicativeSpot
+                ? "indicative proxy" : "snapshot spot";
+            skewEl.title = `Delayed IV snapshot, пересчитанный к ${spotKind} ${spot.toFixed(4)}. Контекст хвоста, не самостоятельный сигнал.`;
         }
-        // ---------------------
-
-        const zIvs = surfaceData.map(e =>
-            e.ivs.map(v => (typeof v === "number" && v < 200 && v > 0) ? +(v * 100).toFixed(2) : null)
-        );
         const allZ = zIvs.flat().filter(v => v !== null);
-        const zMin = Math.min(...allZ), zMax = Math.max(...allZ);
+        if (!allZ.length) return;
+        const zMin = Math.min(...allZ);
+        const rawZMax = Math.max(...allZ);
+        const zMax = rawZMax > zMin ? rawZMax : zMin + 0.01;
 
         const surface = {
             type: "surface",

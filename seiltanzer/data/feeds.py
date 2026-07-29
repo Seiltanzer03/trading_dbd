@@ -101,8 +101,11 @@ class MarketData:
         self.instrument_code: str = "NAS100"
 
         self.price = _status_dict()
+        self.proxy_price = _status_dict()
         self._price_prev_val: float | None = None   # для детекта «нет тиков» (закрыт рынок)
         self._price_change_ts: float | None = None
+        self._last_price_rest_attempt = 0.0
+        self._last_proxy_rest_attempt = 0.0
         self.intraday: list[tuple[float, float, float]] = []  # (ts, price, volume)
         self.daily = {"bars": None, **_status_dict()}
         self.vols = {k: _status_dict() for k in VOL_INDEX_TICKERS}
@@ -126,11 +129,15 @@ class MarketData:
         if code != self.instrument_code:
             self.instrument_code = code
             self.price = _status_dict()
+            self.proxy_price = _status_dict()
             self._price_prev_val = None
             self._price_change_ts = None
+            self._last_price_rest_attempt = 0.0
+            self._last_proxy_rest_attempt = 0.0
             self.intraday = []
             self.daily = {"bars": None, **_status_dict()}
             self.chain = {"metrics": None, **_status_dict()}
+            self.iv_surface = _status_dict()
 
     def _mark_fail(self, d: dict, poll_sec: float, err: str) -> None:
         d["error"] = err[:200]
@@ -162,12 +169,65 @@ class MarketData:
 
     # ---------------------------------------------------------------- price
 
+    def refresh_proxy_price(self) -> None:
+        """Цена опционного прокси для синхронного moneyness-преобразования.
+
+        Цепочка может обновляться раз в несколько минут, но QQQ/GLD/другой ETF
+        доступен в том же бесплатном тиковом стриме. Поэтому форма опционов
+        остаётся снимком, а её положение относительно текущей цены оживает
+        между снимками без выдумывания новых опционных котировок.
+        """
+        proxy = self.instrument.options_proxy
+        if proxy is None:
+            self.proxy_price = _status_dict(error="у инструмента нет опционного прокси")
+            return
+        if self.demo:
+            # В демо цепочка строится сразу в шкале базового инструмента.
+            self.proxy_price = _status_dict(
+                self.demo_market.prices[self.instrument_code], "demo", time.time(),
+                source=f"demo proxy {proxy}")
+            return
+        if self.stream is not None:
+            sp = self.stream.fresh(proxy, max_age=8.0)
+            if sp is not None:
+                self.proxy_price = _status_dict(
+                    sp, "live", time.time(), source=f"stream {proxy}")
+                return
+            if self.proxy_price.get("status") == "live":
+                self.proxy_price["status"] = "delayed"
+                self.proxy_price["error"] = "stream tick stale; REST fallback"
+        # Не долбим Yahoo отдельным REST-запросом чаще заданного периода, в том
+        # числе после ошибки или при пропавшем stream.
+        now = time.time()
+        if now - self._last_proxy_rest_attempt < self.settings.proxy_poll_sec:
+            return
+        self._last_proxy_rest_attempt = now
+        try:
+            import yfinance as yf
+            t = yf.Ticker(proxy)
+            p = None
+            try:
+                p = float(t.fast_info.last_price)
+            except Exception:
+                pass
+            if p is None or not math.isfinite(p) or p <= 0:
+                hist = t.history(period="1d", interval="1m")
+                if len(hist) == 0:
+                    raise RuntimeError("Yahoo вернул пустую историю прокси")
+                p = float(hist["Close"].iloc[-1])
+            self.proxy_price = _status_dict(
+                p, "delayed", time.time(),
+                source=f"yfinance REST {proxy} (indicative)")
+        except Exception as e:  # noqa: BLE001
+            self._mark_fail(self.proxy_price, self.settings.proxy_poll_sec, str(e))
+
     def refresh_price(self) -> None:
         if self.demo:
             self.demo_market.step()
             p = self.demo_market.prices[self.instrument_code]
             now = time.time()
             self.price = _status_dict(p, "demo", now, source="demo GBM")
+            self.refresh_proxy_price()
             self.intraday.append((now, p, abs(random.gauss(1000, 300))))
             cutoff = now - 8 * 3600
             self.intraday = [x for x in self.intraday if x[0] > cutoff]
@@ -183,6 +243,13 @@ class MarketData:
                 self.intraday.append((now, sp, 0.0))
                 self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
                 return
+            if self.price.get("status") == "live":
+                self.price["status"] = "delayed"
+                self.price["error"] = "stream tick stale; REST fallback"
+        now = time.time()
+        if now - self._last_price_rest_attempt < self.settings.price_poll_sec:
+            return
+        self._last_price_rest_attempt = now
         try:
             import yfinance as yf
             t = yf.Ticker(self.instrument.yahoo)
@@ -196,8 +263,9 @@ class MarketData:
                 if len(hist) == 0:
                     raise RuntimeError("Yahoo вернул пустую историю")
                 p = float(hist["Close"].iloc[-1])
-            self.price = _status_dict(p, "live", time.time(),
-                                      source=f"yfinance {self.instrument.yahoo}")
+            self.price = _status_dict(
+                p, "delayed", time.time(),
+                source=f"yfinance REST {self.instrument.yahoo} (indicative)")
             self._annotate_freshness()
         except Exception as e:  # noqa: BLE001 — фид обязан пережить любой сбой источника
             self._mark_fail(self.price, self.settings.price_poll_sec, str(e))
@@ -271,11 +339,17 @@ class MarketData:
         import yfinance as yf
         for key, ticker in VOL_INDEX_TICKERS.items():
             try:
-                hist = yf.Ticker(ticker).history(period="5d", interval="1d")
+                # 15m — бесплатный динамический контекст. Это не тиковый опцион и
+                # не точная 4H-последовательность стратегии; источник/таймфрейм
+                # явно возвращаются в payload.
+                hist = yf.Ticker(ticker).history(period="5d", interval="15m")
                 if len(hist) == 0:
                     raise RuntimeError("пусто")
-                self.vols[key] = _status_dict(float(hist["Close"].iloc[-1]), "live",
-                                              time.time(), source=f"yfinance {ticker}")
+                self.vols[key] = _status_dict(float(hist["Close"].iloc[-1]), "delayed",
+                                              time.time(),
+                                              source=f"yfinance {ticker} 15m")
+                self.vols[key]["timeframe"] = "15m"
+                self.vols[key]["delay_hint_sec"] = 900
             except Exception as e:  # noqa: BLE001
                 self._mark_fail(self.vols[key], self.settings.vol_poll_sec, str(e))
 
@@ -302,9 +376,15 @@ class MarketData:
                 chain = opt.synth_chain(spot, iv_base, max(0.001, d/365.0), n_strikes=41, width=0.05, r=0.05, iv_skew=iv_skew, seed=int(now_ts)//10 + i)
                 strikes = chain["strikes"].tolist()
                 ivs = chain["call_iv"].tolist() # Используем call_iv для поверхности
-                surface.append({"days": d, "expiry": f"{d*24:.1f}h", "strikes": strikes, "ivs": ivs})
+                surface.append({
+                    "days": d, "expiry": f"{d*24:.1f}h",
+                    "strikes": strikes, "ivs": ivs,
+                    "spot_at_snapshot": spot,
+                })
             
-            self.iv_surface = _status_dict(value=surface, status="live", ts=now_ts, source="synthetic micro-3D")
+            self.iv_surface = _status_dict(
+                value=surface, status="demo", ts=now_ts,
+                source="synthetic micro-3D")
             return
 
         try:
@@ -313,23 +393,39 @@ class MarketData:
             expiries = t.options
             if not expiries:
                 raise RuntimeError("нет экспираций")
-            
+
             # Берем до 3 ближайших экспираций (Micro-surface фокус)
             surface = []
             now = dt.datetime.now(dt.timezone.utc)
+            spot_snapshot = float(t.fast_info.last_price)
+            if not math.isfinite(spot_snapshot) or spot_snapshot <= 0:
+                raise RuntimeError("нет валидного spot для IV surface")
             for expiry in expiries[:3]:
                 exp_dt = dt.datetime.strptime(expiry, "%Y-%m-%d").replace(hour=21, tzinfo=dt.timezone.utc)
                 days = max((exp_dt - now).total_seconds(), 3600.0) / (24 * 3600)
-                
+
                 chain = t.option_chain(expiry)
                 calls = chain.calls
-                # Фильтруем ликвидные страйки, если нужно
-                strikes = calls["strike"].tolist()
-                ivs = calls["impliedVolatility"].tolist()
-                
-                surface.append({"days": round(days, 2), "expiry": expiry, "strikes": strikes, "ivs": ivs})
-            
-            self.iv_surface = _status_dict(value=surface, status="live", ts=time.time(), source="yfinance")
+                strikes_raw = calls["strike"].to_numpy(dtype=float)
+                ivs_raw = calls["impliedVolatility"].to_numpy(dtype=float)
+                ok = (
+                    np.isfinite(strikes_raw) & np.isfinite(ivs_raw)
+                    & (strikes_raw > 0) & (ivs_raw > 0) & (ivs_raw < 5.0)
+                )
+                strikes = strikes_raw[ok].tolist()
+                ivs = ivs_raw[ok].tolist()
+                if len(strikes) < 3:
+                    continue
+                surface.append({"days": round(days, 2), "expiry": expiry,
+                                "strikes": strikes, "ivs": ivs,
+                                "spot_at_snapshot": spot_snapshot})
+            if not surface:
+                raise RuntimeError("нет валидных IV-точек")
+
+            self.iv_surface = _status_dict(value=surface, status="delayed",
+                                           ts=time.time(),
+                                           source=f"yfinance {proxy} options")
+            self.iv_surface["delay_hint_sec"] = 900
         except Exception as e:
             self._mark_fail(self.iv_surface, self.settings.chain_poll_sec * 3, f"IV surface ошибка: {e}")
 
@@ -357,7 +453,7 @@ class MarketData:
                     
             self.correlation = _status_dict(
                 value={"assets": names, "matrix": mat.tolist()},
-                status="live",
+                status="demo",
                 ts=now_ts,
                 source="synthetic correlation"
             )
@@ -366,7 +462,6 @@ class MarketData:
         try:
             import yfinance as yf
             import numpy as np
-            import pandas as pd
             
             data = yf.download(tickers, period="1mo", interval="1d", progress=False)
             closes = data['Close']
@@ -394,9 +489,9 @@ class MarketData:
                 
             self.correlation = _status_dict(
                 value={"assets": names, "matrix": ordered_corr},
-                status="live",
+                status="delayed",
                 ts=now_ts,
-                source="yfinance (30d)"
+                source="yfinance daily returns (30d)"
             )
         except Exception as e:
             self._mark_fail(self.correlation, 300.0, f"Correlation error: {e}")
@@ -435,6 +530,13 @@ class MarketData:
             if not expiries:
                 raise RuntimeError("нет экспираций")
             spot = float(t.fast_info.last_price)
+            if not math.isfinite(spot) or spot <= 0:
+                raise RuntimeError("нет валидной цены option-proxy")
+            # Не затираем свежий stream-тик более слабой REST-котировкой.
+            if self.proxy_price.get("status") != "live":
+                self.proxy_price = _status_dict(
+                    spot, "delayed", time.time(),
+                    source=f"yfinance REST {proxy} (chain snapshot)")
             expiry = expiries[0]
             exp_dt = dt.datetime.strptime(expiry, "%Y-%m-%d").replace(
                 hour=21, tzinfo=dt.timezone.utc)
@@ -471,8 +573,9 @@ class MarketData:
                 raw, spot, proxy, demo=False,
                 experimental=self.instrument.proxy_experimental, term=term)
             self.chain = {"metrics": metrics,
-                          **_status_dict(True, "live", time.time(),
-                                         source=f"yfinance {proxy} {expiry}")}
+                          **_status_dict(True, "delayed", time.time(),
+                                         source=f"yfinance {proxy} options {expiry}")}
+            self.chain["delay_hint_sec"] = 900
             self.cache.add_chain_snapshot(proxy, metrics)
         except Exception as e:  # noqa: BLE001
             # протухший кэш допустим для контекста, но статус честный
@@ -489,6 +592,10 @@ class MarketData:
                                term: dict | None = None) -> dict:
         im = opt.implied_move(raw["strikes"], raw["call_mid"], raw["put_mid"],
                               spot, raw["t_years"])
+        if not (1e-5 < im.move_frac < 0.50 and im.sigma_annual < 5.0):
+            raise ValueError(
+                "ATM straddle дал неправдоподобный implied move; "
+                "цепочка отклонена как повреждённая")
         density = opt.bl_density(raw["strikes"], raw["call_mid"], raw["t_years"])
         gex = opt.gex_profile(raw["strikes"], raw["call_oi"], raw["put_oi"],
                               raw["call_iv"], raw["put_iv"], spot, raw["t_years"])
@@ -535,7 +642,7 @@ class MarketData:
         return opt.term_structure(pts)
 
     def _fetch_term(self, ticker, expiries, spot: float) -> dict | None:
-        """ATM-IV ближайших ~3 экспираций -> term-structure (live)."""
+        """ATM-IV ближайших ~3 экспираций -> delayed term-structure."""
         pts = []
         for exp in list(expiries)[:3]:
             try:

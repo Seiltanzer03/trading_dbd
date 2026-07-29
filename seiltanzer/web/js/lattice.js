@@ -175,7 +175,7 @@ export function initLattice(canvas) {
       const ed = s.tgt.edge;
       ctx.fillStyle = ed >= 0 ? COLORS.green : COLORS.red;
       ctx.font = '10px "IBM Plex Mono", monospace'; ctx.textAlign = 'right';
-      ctx.fillText(`КРАЙ vs РЫНОК ${ed >= 0 ? '+' : ''}${(ed * 100).toFixed(1)}%`, w - g.padX, 12);
+      ctx.fillText(`OPTION EDGE vs EV=0 ${ed >= 0 ? '+' : ''}${(ed * 100).toFixed(1)}%`, w - g.padX, 12);
     }
 
     // шарики
