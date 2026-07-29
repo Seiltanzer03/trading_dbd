@@ -109,7 +109,7 @@ export function initIVSurface(elId) {
     const rawMax = Math.max(...allZ);
     const zMax = rawMax > zMin ? rawMax : zMin + 0.01;
 
-    // Complete 2D Grid Array for ECharts-GL
+    // Complete 2D Grid Array for ECharts-GL (r = category index)
     const surfData = [];
     const rvData = [];
     const rvBaseZ = zMin + Math.max((zMax - zMin) * 0.15, 1.0);
@@ -117,8 +117,8 @@ export function initIVSurface(elId) {
     for (let r = 0; r < yDte.length; r++) {
       for (let c = 0; c < moneyPct.length; c++) {
         const val = zIvs[r][c];
-        surfData.push([moneyPct[c], yDte[r], val]);
-        rvData.push([moneyPct[c], yDte[r], rvBaseZ + (val - zMin) * 0.15]);
+        surfData.push([moneyPct[c], r, val]);
+        rvData.push([moneyPct[c], r, rvBaseZ + (val - zMin) * 0.15]);
       }
     }
 
@@ -131,7 +131,7 @@ export function initIVSurface(elId) {
   function getOptionForModel(m, liveX, liveZ) {
     const ridgeData = [];
     for (let r = 0; r < m.yDte.length; r++) {
-      ridgeData.push([liveX, m.yDte[r], liveZ[r]]);
+      ridgeData.push([liveX, r, liveZ[r]]);
     }
 
     const dotZ = liveZ[0] + (m.zMax - m.zMin) * 0.05;
@@ -142,7 +142,8 @@ export function initIVSurface(elId) {
         show: true,
         formatter: (p) => {
           if (p.seriesName === 'IV Surface') {
-            return `<b>Moneyness:</b> ${p.data[0].toFixed(2)}%<br><b>DTE:</b> ${p.data[1].toFixed(2)}d<br><b>IV:</b> ${p.data[2].toFixed(2)}%`;
+            const dteStr = m.yTickText[p.data[1]] || `${p.data[1]}`;
+            return `<b>Moneyness:</b> ${p.data[0].toFixed(2)}%<br><b>DTE:</b> ${dteStr}<br><b>IV:</b> ${p.data[2].toFixed(2)}%`;
           }
           return '';
         }
@@ -162,7 +163,8 @@ export function initIVSurface(elId) {
         splitLine: { lineStyle: { color: 'rgba(200,200,200,0.3)' } }
       },
       yAxis3D: {
-        type: 'value',
+        type: 'category',
+        data: m.yTickText,
         name: 'DTE (1-DAY)',
         nameTextStyle: { color: '#888', fontSize: 10 },
         axisLabel: { textStyle: { color: '#666', fontSize: 9 } },
@@ -186,8 +188,8 @@ export function initIVSurface(elId) {
           beta: -35
         },
         boxWidth: 100,
-        boxHeight: 50,
-        boxDepth: 70,
+        boxHeight: 60,
+        boxDepth: 80,
         light: {
           main: { intensity: 1.2, shadow: false },
           ambient: { intensity: 0.6 }
@@ -223,7 +225,7 @@ export function initIVSurface(elId) {
           symbol: 'circle',
           symbolSize: 12,
           itemStyle: { color: '#FFF', borderColor: ORANGE, borderWidth: 2 },
-          data: [[liveX, m.yDte[0], dotZ]]
+          data: [[liveX, 0, dotZ]]
         }
       ]
     };
