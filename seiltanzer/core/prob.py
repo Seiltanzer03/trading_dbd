@@ -382,6 +382,36 @@ def _rebin_uniform(vals, n_out: int) -> list[float]:
     return out.tolist()
 
 
+def _smooth_hist(vals, passes: int = 2) -> np.ndarray:
+    """Лёгкое KDE-подобное сглаживание корзин с точным сохранением массы."""
+    out = np.asarray(vals, dtype=float)
+    total = float(out.sum())
+    if out.size < 3 or total <= 0:
+        return out
+    for _ in range(max(0, passes)):
+        padded = np.pad(out, (1, 1), mode="edge")
+        out = np.convolve(padded, np.array([0.25, 0.5, 0.25]), mode="valid")
+    smoothed = float(out.sum())
+    return out * (total / smoothed) if smoothed > 0 else out
+
+
+def _hist_quantile(probs: list[float], edges: np.ndarray, q: float) -> float | None:
+    """Квантиль кусочно-равномерной гистограммы."""
+    p = np.asarray(probs, dtype=float)
+    total = float(p.sum())
+    if total <= 0:
+        return None
+    target = min(max(float(q), 0.0), 1.0) * total
+    cum = 0.0
+    for i, mass in enumerate(p):
+        nxt = cum + float(mass)
+        if target <= nxt and mass > 0:
+            frac = (target - cum) / float(mass)
+            return float(edges[i] + frac * (edges[i + 1] - edges[i]))
+        cum = nxt
+    return float(edges[-1])
+
+
 def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
             skew: float = 0.0, term_slope: float = 0.0,
             horizon_years: float | None = None,
@@ -430,10 +460,19 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
     g = np.clip(1.0 + term_slope * (2.0 * tau_step - 1.0), 0.35, 1.9)
     fstep = g / math.sqrt(float(np.mean(g * g)))                    # ∫f²dτ = 1
     edges = np.linspace(-1.0, T, n_bins + 1)
+    # При implied move в несколько R линейная сетка пропускала всю раннюю форму:
+    # уже на первом срезе большая часть путей была поглощена, поэтому 3D выглядел
+    # как редкие иглы. Сгущаем реальные временные срезы у начала; times_frac ниже
+    # сохраняет честные подписи времени.
+    nearest_barrier = max(min(r0 + 1.0, T - r0), 0.10)
+    urgency = sigma_R / nearest_barrier
+    time_power = min(4.0, max(1.0, 1.0 + math.log10(max(urgency, 1.0))))
     checkpoints: list[int] = []
-    for j in range(n_slices):                    # линейные по времени (честная ось)
-        c = int(round((j + 1) / n_slices * n_steps))
+    for j in range(n_slices):
+        frac = ((j + 1) / n_slices) ** time_power
+        c = int(round(frac * n_steps))
         checkpoints.append(max(c, (checkpoints[-1] + 1) if checkpoints else 1))
+    checkpoints[-1] = n_steps
 
     r = np.full(n_paths, r0, dtype=np.float64)
     alive = np.ones(n_paths, dtype=bool)
@@ -482,6 +521,7 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
                 bi = np.clip(np.searchsorted(edges, ar, side="right") - 1, 0, n_bins - 1)
                 counts = np.bincount(bi, minlength=n_bins).astype(float)
             times.append(step / n_steps)
+            counts = _smooth_hist(counts, passes=2)
             density.append((counts / n_paths).tolist())
             p_take_by_t.append(float(took.sum()) / n_paths)
             p_stop_by_t.append(float(stopped.sum()) / n_paths)
@@ -493,9 +533,8 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
     med_frac = float(np.median(hit_time[resolved])) if resolved.any() else None
     # Для конечного опционного горизонта часть путей не дошла ни до одного
     # барьера. Их нельзя превращать в примитивную формулу расстояний. Когда есть
-    # BL-плотность, распределяем эту массу по опционному tail-ratio. Только
-    # fallback без цепочки оставляет аналитическую геометрию — движок не имеет
-    # права называть её «рынком» или считать из неё edge.
+    # BL-плотность, распределяем эту массу по опционному tail-ratio. Без неё
+    # никакая формула расстояний не имеет права становиться headline-P.
     resolved = min(max(p_take + p_stop, 0.0), 1.0)
     unresolved = 1.0 - resolved
     if terminal_hit is not None and math.isfinite(terminal_hit):
@@ -503,8 +542,8 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
         hit_ratio = min(max(p_take + unresolved * th, 0.0), 1.0)
         hit_source = "barrier_mc+bl_terminal"
     else:
-        hit_ratio = first_passage_prob(r0, 0.5 * drift_R, 1.0, T)
-        hit_source = "geometry_fallback"
+        hit_ratio = None
+        hit_source = "no_option_anchor"
 
     # «колокол» для доски: распределение ЖИВЫХ (ещё не поглощённых) путей на срезе,
     # где живо ~половина (нормальный вид ВНУТРИ барьеров, а не пусто в конце и не
@@ -516,8 +555,12 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
     else:
         slice_idx = min(range(n_slices), key=lambda j: abs(alive_frac[j] - 0.5))
     bell = _rebin_uniform(density[slice_idx], 11)
+    bell = _smooth_hist(bell, passes=1).tolist()
     tot = sum(bell) or 1.0
     bell = [b / tot for b in bell]
+    bell_edges = np.linspace(-1.0, T, 12)
+    mode_idx = int(np.argmax(bell))
+    mode_r = float((bell_edges[mode_idx] + bell_edges[mode_idx + 1]) / 2.0)
 
     out = {
         "r0": float(r0), "T": float(T), "sigma_R": sigma_R, "drift_R": float(drift_R),
@@ -528,9 +571,17 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
         "p_take_by_t": p_take_by_t, "p_stop_by_t": p_stop_by_t,
         "p_take": p_take, "p_stop": p_stop, "hit_ratio": hit_ratio,
         "unresolved": unresolved, "hit_source": hit_source,
+        "probability_available": hit_ratio is not None,
+        "scenario_only": hit_ratio is None,
+        "time_scale_power": time_power,
         "slice_probs": bell,
-        "slice_edges": np.linspace(-1.0, T, 12).tolist(),
+        "slice_edges": bell_edges.tolist(),
         "slice_alive": alive_frac[slice_idx],
+        "slice_time_frac": times[slice_idx],
+        "slice_mode_r": mode_r,
+        "slice_p10_r": _hist_quantile(bell, bell_edges, 0.10),
+        "slice_median_r": _hist_quantile(bell, bell_edges, 0.50),
+        "slice_p90_r": _hist_quantile(bell, bell_edges, 0.90),
     }
     if horizon_years and horizon_years > 0:
         out["horizon_years"] = float(horizon_years)

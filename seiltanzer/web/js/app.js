@@ -180,13 +180,17 @@ function feedBadge(el, feed, extraTip) {
   el.className = 'feed ' + (stale ? 'delayed' : st);
   const name = el.id.replace('feed-', '').toUpperCase();
   const label = name === 'PRICE' ? 'ЦЕНА' : name === 'CHAIN' ? 'ЦЕПОЧКА' : name;
-  el.textContent = `${stale ? '⏸' : (STATUS_ICON[st] || '○')} ${label}${stale ? ' СТОИТ' : ''}`;
+  const derived = feed?.derived ? ' · PROXY MAP' : '';
+  el.textContent = `${stale ? '⏸' : (STATUS_ICON[st] || '○')} ${label}${derived}${stale ? ' СТОИТ' : ''}`;
   const base = extraTip || '';
   const err = feed?.error ? `\nошибка: ${feed.error}` : '';
   const src = feed?.source ? `\nисточник: ${feed.source}` : '';
   const ts = feed?.ts ? `\nобновлено: ${fmtTs(feed.ts)} UTC` : '';
   const idle = stale ? `\n⏸ нет тиков ${fmtIdle(feed.idle_secs)} — рынок закрыт/неторговое время` : '';
-  el.dataset.tip = `${base}статус: ${statusLabel(st)}${src}${ts}${idle}${err}`;
+  const mapping = feed?.derived
+    ? `\nderived live: доходность ${feed.driver_ticker || 'proxy'} перенесена от контрольного якоря ${feed.anchor_ticker || ''}; возраст якоря ${fmtIdle(feed.anchor_age_sec)}`
+    : '';
+  el.dataset.tip = `${base}статус: ${statusLabel(st)}${src}${mapping}${ts}${idle}${err}`;
 }
 
 function renderHeader() {
@@ -244,13 +248,17 @@ function renderHeader() {
 function handleLivePrice(t) {
   const price = t.feeds?.price?.value;
   const streaming = (t.feeds?.price?.source || '').startsWith('stream');
+  const derived = !!t.feeds?.price?.derived;
   const stale = t.feeds?.price?.fresh === false;
   const idle = t.feeds?.price?.idle_secs;
   $('#lat-price-instr').textContent = t.instrument
-    + (streaming ? ' ⚡' : '') + (stale ? ' · ⏸ ЗАКРЫТ' : '');
+    + (streaming ? ' ⚡' : '') + (derived ? ' · PROXY MAP' : '')
+    + (stale ? ' · ⏸ ЗАКРЫТ' : '');
   $('#lat-price-instr').title = stale
     ? `нет свежих тиков ${fmtIdle(idle)} — рынок закрыт или неторговое время; цена = последняя котировка`
-    : (streaming ? 'живой WebSocket-стрим цены' : '');
+    : (derived
+      ? `derived live: уровень якорится к ${t.feeds.price.anchor_ticker}, движение приходит из ${t.feeds.price.driver_ticker}`
+      : (streaming ? 'живой WebSocket-стрим цены' : ''));
   if (price == null) { $('#lat-price').textContent = '—'; $('#lat-price-chg').textContent = ''; return; }
   const el = $('#lat-price');
   tweenNumber(el, price, (v) => fmtPrice(v), 14);
@@ -337,11 +345,15 @@ function renderState() {
   $('#st-stop').textContent = fmtR(-s.to_stop_r);
   $('#st-stop-atr').textContent = s.to_stop_atr != null ? `${s.to_stop_atr.toFixed(1)} ATR` : 'ATR н/д';
 
-  // P с полосой + примерное время до развязки (из волы, адаптивно)
-  tweenNumber($('#st-p'), s.p * 100, (v) => v.toFixed(1) + '%', 10);
-  $('#st-p-band').textContent = `[${(s.p_lo * 100).toFixed(0)}–${(s.p_hi * 100).toFixed(0)}%]`
-    + (s.small_sample ? ' · n<30' : '')
-    + (s.median_years != null ? ` · развязка ≈ ${fmtDur(s.median_years)}` : '');
+  // Только option-anchored P. При отсутствии якоря не показываем surrogate.
+  if (s.p != null && s.p_lo != null && s.p_hi != null) {
+    tweenNumber($('#st-p'), s.p * 100, (v) => v.toFixed(1) + '%', 10);
+    $('#st-p-band').textContent = `[${(s.p_lo * 100).toFixed(0)}–${(s.p_hi * 100).toFixed(0)}%]`
+      + (s.median_years != null ? ` · развязка ≈ ${fmtDur(s.median_years)}` : '');
+  } else {
+    $('#st-p').textContent = '—';
+    $('#st-p-band').textContent = 'нет option anchor · сценарий без P';
+  }
 
   // край + сдвиг от входа
   if (s.edge == null) {
@@ -381,7 +393,7 @@ function renderCone() {
     ? (t.demo ? '◆ DEMO'
       : anchored && liveMapping ? '● OPTIONS + LIVE MAPPING'
       : anchored ? '◐ OPTIONS + INDICATIVE MAPPING'
-      : '◐ FALLBACK · БЕЗ EDGE')
+      : '◐ SCENARIO · БЕЗ P / EDGE')
     : '○ НЕТ СДЕЛКИ';
   cone.setData(active ? c : null, {
     direction: t?.trade?.direction || 'long',
@@ -408,20 +420,26 @@ function renderLattice() {
     ? (t.demo ? '◆ DEMO'
       : optionAnchored && liveMapping ? '● OPTIONS + LIVE MAPPING'
       : optionAnchored ? '◐ OPTIONS + INDICATIVE MAPPING'
-      : '◐ FALLBACK · БЕЗ EDGE')
+      : '◐ SCENARIO · БЕЗ P / EDGE')
     : '○ НЕТ СДЕЛКИ';
 
   const mkt = t.market;
   lattice.setData({
     active,
-    p: p?.p,
     T: p?.T ?? 2.5,
     r: p?.r ?? 0,
-    marketProbs: mkt?.available ? mkt.probs : null,
-    modelProbs: t.mc?.hist?.probs,
-    edges: mkt?.edges || t.mc?.hist?.edges,
+    distributionProbs: mkt?.scenario_probs,
+    edges: mkt?.scenario_edges,
+    optionAnchored: !!mkt?.available,
     hit: mkt?.hit_ratio,
     edge: mkt?.edge,
+    pStop: mkt?.p_stop_horizon,
+    pTake: mkt?.p_take_horizon,
+    unresolved: mkt?.p_unresolved_horizon,
+    q10: mkt?.scenario_p10_r,
+    q50: mkt?.scenario_median_r,
+    q90: mkt?.scenario_p90_r,
+    mode: mkt?.scenario_mode_r,
     tradeId: t.trade?.id ?? null,
     regime: p?.vol_regime,
   });
@@ -457,44 +475,46 @@ function renderLattice() {
     $('#lat-edge').className = 'val';
   }
 
-  tweenNumber($('#lat-p'), p.p * 100, (v) => v.toFixed(1) + '%');
-  $('#lat-p').dataset.tip = p.source === 'options_barrier_mc'
-    ? `ОПЦИОННАЯ P(тейк раньше стопа).\nТекущий r=${p.r.toFixed(3)} двигается с ценой; moneyness опционного снимка использует ${t.feeds?.proxy_price?.status === 'live' ? 'живой stream-тик' : 'последнюю indicative/snapshot-котировку'} ${t.options_summary?.proxy || 'proxy'}.\nПолный ход σ=${p.sigma_R.toFixed(3)}R из implied move; BL-плотность задаёт terminal tail/forward, skew — асимметрию, term structure — раскрытие по времени.\nВинрейт сетапа в эту P не подставляется.`
-    : `FALLBACK без опционной цепочки: контрольная first-passage модель по статистике сетапа.\nОна сохраняет динамический визуал, но не считается опционным преимуществом и не влияет на edge.`;
-
-  // среднее P за сделку (визуальный ориентир — стабильно ли преимущество)
-  if (t.trade?.id !== S._pTradeId) { S._pTradeId = t.trade?.id; S._pSum = 0; S._pN = 0; }
-  S._pSum += p.p; S._pN += 1;
-  $('#lat-p-avg').textContent = `· ср ${((S._pSum / S._pN) * 100).toFixed(1)}%`;
-
-  const lo = p.p_lo * 100, hi = p.p_hi * 100;
-  $('#lat-band-fill').style.left = lo + '%';
-  $('#lat-band-fill').style.width = Math.max(hi - lo, 0.5) + '%';
-  $('#lat-band-tick').style.left = `calc(${p.p * 100}% - 1px)`;
-  if (p.band_kind === 'scenario') {
+  if (p.available && p.p != null) {
+    tweenNumber($('#lat-p'), p.p * 100, (v) => v.toFixed(1) + '%');
+    $('#lat-p').dataset.tip =
+      `ОПЦИОННАЯ P(тейк раньше стопа), не пропорция расстояний.\nТекущий r=${p.r.toFixed(3)}; moneyness использует ${t.feeds?.proxy_price?.status === 'live' ? 'живой stream-тик' : 'последнюю indicative/snapshot-котировку'} ${t.options_summary?.proxy || 'proxy'}.\nПолный ход σ=${p.sigma_R.toFixed(3)}R из implied move; BL-плотность задаёт terminal tail/forward, skew — асимметрию, term structure — раскрытие по времени.\nВинрейт сетапа в эту P не подставляется.`;
+    if (t.trade?.id !== S._pTradeId) {
+      S._pTradeId = t.trade?.id; S._pSum = 0; S._pN = 0;
+    }
+    S._pSum += p.p; S._pN += 1;
+    $('#lat-p-avg').textContent = `· ср ${((S._pSum / S._pN) * 100).toFixed(1)}%`;
+    const lo = p.p_lo * 100, hi = p.p_hi * 100;
+    $('#lat-band-fill').style.left = lo + '%';
+    $('#lat-band-fill').style.width = Math.max(hi - lo, 0.5) + '%';
+    $('#lat-band-tick').style.left = `calc(${p.p * 100}% - 1px)`;
     $('#lat-band-lbl').textContent =
       `[${lo.toFixed(1)}% – ${hi.toFixed(1)}%] сценарная полоса proxy/snapshot`;
     $('#lat-band').dataset.tip =
       `Не статистический confidence interval. Полоса расширяется из-за возраста цепочки и качества proxy; нужна, чтобы не принимать одну бесплатную delayed-оценку за точное число.`;
   } else {
-    $('#lat-band-lbl').textContent =
-      `[${lo.toFixed(1)}% – ${hi.toFixed(1)}%] fallback Уилсон 90% (n=${p.n})`;
-    $('#lat-band').dataset.tip =
-      `Fallback-интервал Уилсона по контрольной статистике ${p.wins}/${p.n}; опционным edge не считается.`;
+    $('#lat-p').textContent = '—';
+    $('#lat-p').dataset.tip =
+      `Нет валидного опционного якоря: P выключена. Доска показывает только условную сценарную плотность живых путей; расстояние стоп/тейк и таблица сетапа не подставляются как вероятность.`;
+    $('#lat-p-avg').textContent = '';
+    $('#lat-band-fill').style.left = '0%';
+    $('#lat-band-fill').style.width = '0%';
+    $('#lat-band-tick').style.left = '0%';
+    $('#lat-band-lbl').textContent = 'P выключена · сценарная плотность без edge';
   }
 
   $('#lat-r').textContent = fmtR(p.r);
-  $('#lat-ev-hold').textContent = fmtR(t.mc.ev_hold);
+  $('#lat-ev-hold').textContent = p.available ? fmtR(t.mc.ev_hold) : '—';
   $('#lat-ev-hold').dataset.tip =
     t.mc.ev_hold_source === 'options_probability'
       ? `Опционный EV удержания = P_options·T − (1−P_options) = ${(p.p * p.T - (1 - p.p)).toFixed(3)}R. Комиссии, проскальзывание и physical drift не включены.`
-      : `Fallback EV контрольной модели; опционным преимуществом не считается.`;
-  $('#lat-ev-ladder').textContent = fmtR(t.mc.ev_ladder);
+      : `Без option anchor EV не показывается: историческая таблица не заменяет рыночную вероятность.`;
+  $('#lat-ev-ladder').textContent = p.available ? fmtR(t.mc.ev_ladder) : '—';
   $('#lat-ev-ladder').dataset.tip =
     `Исследовательский path-control лестницы по исторической модели: 10% на 1.0/1.25/1.5/1.75/2.0/2.2R, БУ после 1.5R.\nНе участвует в опционном edge; сохранён для контроля исполнения плана.`;
 
   // порог безубытка по винрейту + запас
-  if (p.p_breakeven != null) {
+  if (p.available && p.p != null && p.p_breakeven != null) {
     const marg = (p.p - p.p_breakeven) * 100;
     $('#lat-be').textContent = fmtPct(p.p_breakeven) +
       ` (${marg >= 0 ? '+' : ''}${marg.toFixed(0)}пп)`;
@@ -508,21 +528,26 @@ function renderLattice() {
 
   // практический вывод доски одной строкой
   const readEl = $('#lat-read');
-  const overBE = p.p - (p.p_breakeven ?? 1 / (1 + p.T));
   const parts = [];
-  parts.push(overBE >= 0
-    ? `P выше порога EV=0 на ${(overBE * 100).toFixed(0)}пп`
-    : `P НИЖЕ порога EV=0 на ${(Math.abs(overBE) * 100).toFixed(0)}пп`);
+  const overBE = p.available && p.p != null
+    ? p.p - (p.p_breakeven ?? 1 / (1 + p.T)) : null;
+  if (overBE != null) {
+    parts.push(overBE >= 0
+      ? `P выше порога EV=0 на ${(overBE * 100).toFixed(0)}пп`
+      : `P НИЖЕ порога EV=0 на ${(Math.abs(overBE) * 100).toFixed(0)}пп`);
+  } else {
+    parts.push('P не рассчитана: нет устойчивого option anchor');
+  }
   if (mkt?.available && mkt.edge != null) {
     parts.push(mkt.edge >= 0.03 ? `опционная асимметрия положительная (+${(mkt.edge * 100).toFixed(0)}пп)`
       : mkt.edge <= -0.03 ? `опционная асимметрия отрицательная (${(mkt.edge * 100).toFixed(0)}пп)`
       : 'опционная асимметрия около нуля');
   } else parts.push('нет option anchor — edge выключен');
-  if (p.source !== 'options_barrier_mc' && p.model_small_sample) {
-    parts.push(`контрольная выборка n=${p.n}<30`);
+  if (mkt?.scenario_p10_r != null) {
+    parts.push(`живая масса P10/P50/P90: ${fmtR(mkt.scenario_p10_r)} / ${fmtR(mkt.scenario_median_r)} / ${fmtR(mkt.scenario_p90_r)}`);
   }
   readEl.textContent = parts.join(' · ');
-  readEl.className = 'lat-read ' + (overBE >= 0 ? 'good' : 'bad');
+  readEl.className = 'lat-read ' + (overBE == null ? '' : overBE >= 0 ? 'good' : 'bad');
 
   const st = lattice.stats;
   $('#lat-balls').textContent = String(st.dropped);
@@ -532,13 +557,11 @@ function renderLattice() {
   $('#lat-conv').dataset.tip =
     `|доля зелёных − P(R>0 по МК)| = |${st.greenShare == null ? '—' : (st.greenShare * 100).toFixed(1)}% − ${st.pGreenModel == null ? '—' : (st.pGreenModel * 100).toFixed(1)}%|\n` +
     `Метрика честности доски: корзины сэмплируются из МК-распределения,\nпоэтому расхождение должно убывать с числом шариков (закон больших чисел).`;
-  $('#lat-calib').textContent = `CONTROL · ${p.calibration === 'journal'
-    ? `ЖУРНАЛ ${p.journal_n}` : `ТАБЛИЦА ${p.n}`}`;
+  $('#lat-calib').textContent =
+    `t=${((mkt?.scenario_slice_time_frac ?? 0) * 100).toFixed(0)}% · alive ${fmtPct(mkt?.scenario_slice_alive)}`;
   $('#lat-calib').dataset.tip =
-    `Контрольная статистика пунктирной линии — не источник главной опционной P.\n` +
-    `Встроенная таблица: ${p.calibration === 'builtin' ? `${p.wins}/${p.n}` : '—'}\n` +
-    `Журнал по сетапу: ${p.journal_wins}/${p.journal_n} закрытых\n` +
-    `Нужна для последующей проверки, расходятся ли опционы с вашим исполнением.`;
+    `Доска показывает условное распределение путей, ещё не поглощённых барьерами, на информативном временном срезе.\n` +
+    `Поглощённые массы стопа/тейка вынесены отдельно и больше не раздувают крайние колонки.`;
 }
 
 // ---------------------------------------------------------------- filters
@@ -605,8 +628,15 @@ function renderLevels() {
   const t = S.tick;
   const has = !!t?.levels;
   $('#levels-empty').style.display = has ? 'none' : 'flex';
-  $('#levels-status').className = 'badge ' + (has ? (t.demo ? 'demo' : 'live') : 'no_data');
-  $('#levels-status').textContent = has ? (t.demo ? '◆ DEMO' : '● LIVE') : '○ НЕТ СДЕЛКИ';
+  const px = t?.feeds?.price;
+  const fresh = px?.fresh !== false;
+  const live = px?.status === 'live' && fresh;
+  const tone = !has ? 'no_data' : t.demo ? 'demo' : live ? 'live' : 'delayed';
+  $('#levels-status').className = 'badge ' + tone;
+  $('#levels-status').textContent = !has ? '○ НЕТ СДЕЛКИ'
+    : t.demo ? '◆ DEMO'
+    : live ? (px?.derived ? '● LIVE · PROXY MAP' : '● LIVE')
+    : px?.fresh === false ? '⏸ НЕТ ТИКОВ' : '◐ INDICATIVE';
   $('#btn-zones').disabled = !has;
   if (has) levels.setData(t.levels);
 }

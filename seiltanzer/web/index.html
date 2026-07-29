@@ -142,7 +142,7 @@
           data-tip="Текущее положение сделки в R: (цена − вход)/(вход − стоп), со знаком направления. Источник: фид цены.">—</span></div>
         <div class="stat-row"><span class="lbl">EV ХОЛД</span><span class="val" id="lat-ev-hold"
           data-tip="">—</span></div>
-        <div class="stat-row"><span class="lbl">EV ЛЕСТНИЦА</span><span class="val" id="lat-ev-ladder"
+        <div class="stat-row"><span class="lbl">EXECUTION CONTROL</span><span class="val" id="lat-ev-ladder"
           data-tip="">—</span></div>
         <div class="stat-row"><span class="lbl">ПОРОГ EV=0</span><span class="val" id="lat-be"
           data-tip="Винрейт, при котором удержание до тейка/стопа даёт EV=0: 1/(1+T) для RR 1:T. Если ваша P(тейк) выше порога — при удержании математика в плюс; ниже — в минус. Рядом — запас над порогом.">—</span></div>
@@ -153,8 +153,8 @@
         <div class="stat-row"><span class="lbl">СХОДИМОСТЬ</span><span class="val" id="lat-conv"
           data-tip="|доля зелёных шариков − P(терминальный R > 0) по Монте-Карло|. Показывает, что доска сэмплирует именно модельное распределение, а не рисует красивое.">—</span></div>
         <div class="stat-sep"></div>
-        <div class="stat-row"><span class="lbl">CONTROL LINE</span><span class="val" id="lat-calib"
-          data-tip="Статистика сетапа питает только пунктирную контрольную линию и path-control лестницы; главная P и edge приходят из опционов.">—</span></div>
+        <div class="stat-row"><span class="lbl">DENSITY SLICE</span><span class="val" id="lat-calib"
+          data-tip="Временной срез и доля ещё не поглощённых путей, из которых построена центральная форма распределения.">—</span></div>
         <div class="stat-sep"></div>
         <div class="lat-read" id="lat-read"
           data-tip="Практический вывод из доски: сравнение вашей P с порогом безубытка и с оценкой рынка. Это резюме, а не сигнал.">—</div>
@@ -164,7 +164,7 @@
         <div class="canvas-empty" id="lattice-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ — ДОСКА ЖДЁТ</div>
       </div>
     </div>
-    <div class="panel-foot dim">оранжевая доска = option-anchored barrier distribution: implied move + BL-tail + skew + term structure, оживлённые ценой и доступным proxy mapping; пунктир = справочный исторический control, не источник edge; без валидной цепочки или покрытия барьеров сеткой страйков edge выключается</div>
+    <div class="panel-foot dim">оранжевая доска = сглаженная условная плотность ещё живых путей; P10/P50/P90 и mode показывают рабочий диапазон, а массы уже достигших стопа/тейка вынесены отдельно — поэтому крайние колонки больше не раздуваются. P и edge появляются только при валидном option anchor; иначе остаётся динамическая сценарная карта без суррогатной вероятности</div>
   </section>
 
   <!-- ================ 3. STRIKE LANDSCAPE ================ -->
@@ -254,7 +254,7 @@
         <div class="canvas-holder fan-holder"><canvas id="cone-fan"></canvas></div>
       </div>
     </div>
-    <div class="panel-foot dim">Сверху — НАСТОЯЩИЙ 3D (WebGL) — вращайте мышкой, зум колесом, наведение показывает точные значения. Поверхность = risk-neutral сценарная плотность под implied move, BL-tail, skew и term structure (НЕ винрейт): ось R (стоп · 0 · тейк), ось ВРЕМЯ — срок ближайшей доступной экспирации, высота — плотность ещё не поглощённых путей. Красная/зелёная стены показывают накопленную массу пересечений барьеров. Оранжевый луч — текущая цена (r). Снизу — 2D ВЕЕР: читаемый срез того же расчёта, а не отдельная модель. Если барьер вне доступной сетки страйков, edge выключается, но визуальный fallback остаётся.</div>
+    <div class="panel-foot dim">Сверху — НАСТОЯЩИЙ 3D (WebGL) — вращайте мышкой, выбранная камера сохраняется при обновлениях. Поверхность = условная форма risk-neutral/scenario-плотности × surviving mass: ось R (стоп · 0 · тейк), ось ВРЕМЯ — реальные адаптивные срезы к экспирации. Красная/зелёная стены показывают barrier-массы; они становятся вероятностями сделки только при валидном BL option anchor. Без него конус остаётся динамической сценарной картой, но P и edge выключены.</div>
   </section>
 
   <!-- ================ 3c. IV SURFACE (3D) ================ -->

@@ -45,7 +45,9 @@ export function updateGex(ridgePayload) {
         price: ridgePayload.price,
         proxyPrice: ridgePayload.proxy_spot_current,
         transform: ridgePayload.proxy_transform || 'direct',
+        instrument: ridgePayload.instrument || null,
     };
+    smoothedLevels = {};
     if (emptyEl) emptyEl.style.display = 'none';
     if (canvas) canvas.style.display = 'block';
     if (statusEl) statusEl.textContent = '◐ OI-GEX HEURISTIC';
@@ -81,16 +83,7 @@ function renderLoop() {
         ? instrumentFactor * proxyFactor : instrumentFactor / proxyFactor;
     const strikes = snap.gex.strikes.map(s => s * data.scale * liveMap);
     const net = snap.gex.net;
-    const maxAbsNet = Math.max(...net.map(Math.abs), 1e-9);
     const priceStrike = liveData.price || data.price || 0;
-
-    // Выбираем топ-12 уровней по abs(net), отсортированных по страйку
-    const indexed = net.map((v, i) => ({ s: strikes[i], v }));
-    const topN = 12;
-    const top = [...indexed]
-        .sort((a, b) => Math.abs(b.v) - Math.abs(a.v))
-        .slice(0, topN)
-        .sort((a, b) => b.s - a.s); // по убыванию цены (сверху дорогие страйки)
 
     const { ctx, w, h } = setupCanvas(canvas, 180);
     ctx.clearRect(0, 0, w, h);
@@ -100,28 +93,46 @@ function renderLoop() {
     const padTop = 22;
     const padBot = 6;
     const barAreaW = w - padLeft - padRight;
-    const rowH = Math.max(10, (h - padTop - padBot) / top.length);
+    const plotTop = padTop + 3, plotBot = h - padBot;
+    const plotH = plotBot - plotTop;
 
-    // Функция для маппинга любой цены на Y координату среди дискретных рядов
-    function priceToY(p) {
-        if (p >= top[0].s) {
-            const diff = top[0].s - top[1].s;
-            return padTop - (diff ? (p - top[0].s)/diff * rowH : 0);
-        }
-        if (p <= top[top.length - 1].s) {
-            const diff = top[top.length - 2].s - top[top.length - 1].s;
-            const baseY = padTop + (top.length - 1) * rowH;
-            return baseY + (diff ? (top[top.length - 1].s - p)/diff * rowH : 0);
-        }
-        for (let i = 0; i < top.length - 1; i++) {
-            if (p <= top[i].s && p >= top[i+1].s) {
-                const range = top[i].s - top[i+1].s;
-                const frac = range ? (top[i].s - p) / range : 0;
-                return padTop + (i + frac) * rowH + rowH/2; // rowH/2 to align with center of row
-            }
-        }
-        return padTop;
+    // Непрерывное локальное окно вокруг текущей сделки. Далёкий крупный OI
+    // больше не сжимает stop/price/take в одну строку.
+    const sortedStrikes = [...strikes].filter(Number.isFinite).sort((a, b) => a - b);
+    const gaps = sortedStrikes.slice(1).map((v, i) => v - sortedStrikes[i])
+        .filter((v) => v > 0).sort((a, b) => a - b);
+    const strikeStep = gaps.length ? gaps[Math.floor(gaps.length / 2)]
+        : Math.max(Math.abs(priceStrike) * 0.001, 1);
+    const tr = liveData.trade;
+    const core = [priceStrike, tr?.entry, tr?.stop, tr?.take]
+        .filter((v) => Number.isFinite(v) && v > 0);
+    if (!core.length && sortedStrikes.length) {
+        core.push(sortedStrikes[Math.floor(sortedStrikes.length / 2)]);
     }
+    const coreLo = Math.min(...core), coreHi = Math.max(...core);
+    const risk = tr?.entry && tr?.stop ? Math.abs(tr.entry - tr.stop) : strikeStep;
+    const flank = Math.max(strikeStep * 2.4, risk * 1.6, (coreHi - coreLo) * 0.20);
+    let viewLo = coreLo - flank, viewHi = coreHi + flank;
+    if (!(viewHi > viewLo)) { viewLo = priceStrike - flank; viewHi = priceStrike + flank; }
+    const priceToY = (p) => plotTop + ((viewHi - p) / (viewHi - viewLo)) * plotH;
+
+    const indexed = net.map((v, i) => ({
+        s: strikes[i], v, rank: 0,
+        prox: Math.abs(strikes[i] - priceStrike) / Math.max(viewHi - viewLo, 1),
+    })).filter((x) => Number.isFinite(x.s) && Number.isFinite(x.v));
+    const globalRank = [...indexed].sort((a, b) => Math.abs(b.v) - Math.abs(a.v));
+    globalRank.forEach((x, i) => { x.rank = i; });
+    const local = indexed.filter((x) => x.s >= viewLo && x.s <= viewHi);
+    const nearest = [...indexed].sort((a, b) => a.prox - b.prox).slice(0, 5);
+    const pool = [...new Set([...local, ...nearest])];
+    const top = pool.sort((a, b) => {
+        const scoreA = Math.abs(a.v) / Math.max(...net.map(Math.abs), 1e-9) - 0.12 * a.prox;
+        const scoreB = Math.abs(b.v) / Math.max(...net.map(Math.abs), 1e-9) - 0.12 * b.prox;
+        return scoreB - scoreA;
+    }).slice(0, 14).sort((a, b) => b.s - a.s);
+    if (!top.length) return;
+    const maxAbsNet = Math.max(...top.map((x) => Math.abs(x.v)), 1e-9);
+    const barH = Math.max(4, Math.min(9, plotH / Math.max(top.length * 1.35, 1)));
 
     // == Заголовки ==
     ctx.font = 'bold 9px "IBM Plex Mono",monospace';
@@ -152,8 +163,8 @@ function renderLoop() {
     // == Строки уровней ==
     for (let i = 0; i < top.length; i++) {
         const { s: st, v: gv } = top[i];
-        const y = padTop + i * rowH;
-        const key = st.toFixed(0);
+        const y = priceToY(st);
+        const key = st.toFixed(4);
         
         // Плавная анимация bar width
         const targetNorm = gv / maxAbsNet; // [-1..1]
@@ -162,17 +173,17 @@ function renderLoop() {
         const norm = smoothedLevels[key];
         const barHalf = Math.abs(norm) * (barAreaW / 2);
         
-        const isAtm = priceStrike > 0 && Math.abs(st - priceStrike) < (top[0].s - top[top.length - 1].s) / (top.length * 1.5);
+        const isAtm = priceStrike > 0 && Math.abs(st - priceStrike) < strikeStep * 0.65;
         const isAbovePrice = priceStrike > 0 && st > priceStrike;
         
         // Фон строки
         ctx.fillStyle = isAtm
             ? 'rgba(232,98,42,0.07)'
             : (i % 2 === 0 ? 'rgba(216,213,204,0.05)' : 'transparent');
-        ctx.fillRect(padLeft, y, barAreaW, rowH - 1);
+        ctx.fillRect(padLeft, y - barH / 2, barAreaW, barH);
 
         // Пульсация только для крупных уровней
-        const isPOC = i < 2;
+        const isPOC = top[i].rank < 2;
         const breathe = isPOC ? 0.8 + 0.2 * Math.abs(Math.sin(statePhase * (i + 1))) : 1.0;
         const alpha = (0.55 + 0.45 * Math.abs(norm)) * breathe;
 
@@ -184,7 +195,7 @@ function renderLoop() {
             grad.addColorStop(1, `rgba(46,180,79,${alpha * 0.3})`);
             ctx.fillStyle = grad;
             if (isPOC) { ctx.shadowColor = 'rgba(46,125,79,0.6)'; ctx.shadowBlur = 8; }
-            ctx.fillRect(centerX, y + 2, barHalf, rowH - 4);
+            ctx.fillRect(centerX, y - barH / 2 + 1, barHalf, Math.max(2, barH - 2));
         } else {
             // PUSH: бар влево от центра
             const grad = ctx.createLinearGradient(centerX - barHalf, 0, centerX, 0);
@@ -192,7 +203,7 @@ function renderLoop() {
             grad.addColorStop(1, `rgba(198,55,60,${alpha})`);
             ctx.fillStyle = grad;
             if (isPOC) { ctx.shadowColor = 'rgba(198,55,60,0.6)'; ctx.shadowBlur = 8; }
-            ctx.fillRect(centerX - barHalf, y + 2, barHalf, rowH - 4);
+            ctx.fillRect(centerX - barHalf, y - barH / 2 + 1, barHalf, Math.max(2, barH - 2));
         }
         ctx.shadowBlur = 0;
 
@@ -200,7 +211,7 @@ function renderLoop() {
         ctx.font = isAtm ? 'bold 9px "IBM Plex Mono",monospace' : '8px "IBM Plex Mono",monospace';
         ctx.fillStyle = isAtm ? '#E8622A' : (isAbovePrice ? '#5A87A0' : '#A09D94');
         ctx.textAlign = 'right';
-        ctx.fillText(st.toFixed(0), padLeft - 5, y + rowH / 2 + 3);
+        ctx.fillText(st.toFixed(priceStrike < 10 ? 4 : priceStrike < 100 ? 2 : 0), padLeft - 5, y + 3);
 
         // Метка PIN/PUSH и значение справа
         const typeLabel = gv > 0 ? 'PIN' : 'PUSH';
@@ -208,14 +219,14 @@ function renderLoop() {
         ctx.fillStyle = gv > 0 ? 'rgba(46,125,79,0.85)' : 'rgba(198,55,60,0.85)';
         ctx.font = 'bold 8px "IBM Plex Mono",monospace';
         ctx.textAlign = 'left';
-        ctx.fillText(typeLabel, padLeft + barAreaW + 5, y + rowH / 2 - 2);
+        ctx.fillText(typeLabel, padLeft + barAreaW + 5, y - 1);
         ctx.font = '7px "IBM Plex Mono",monospace';
         ctx.fillStyle = '#8A877D';
-        ctx.fillText(sizeLabel, padLeft + barAreaW + 5, y + rowH / 2 + 7);
+        ctx.fillText(sizeLabel, padLeft + barAreaW + 5, y + 7);
     }
 
     function drawLine(yPos, color, text, dash) {
-        if (yPos > padTop && yPos < h - padBot) {
+        if (yPos >= plotTop && yPos <= plotBot) {
             ctx.strokeStyle = color;
             ctx.lineWidth = 1.5;
             if (dash) ctx.setLineDash(dash); else ctx.setLineDash([]);
@@ -229,19 +240,39 @@ function renderLoop() {
             ctx.font = 'bold 8px "IBM Plex Mono",monospace';
             ctx.textAlign = 'right';
             ctx.fillText(text, padLeft - 5, yPos + 3);
+        } else {
+            const topSide = yPos < plotTop;
+            const yy = topSide ? plotTop + 2 : plotBot - 2;
+            ctx.fillStyle = color;
+            ctx.font = 'bold 8px "IBM Plex Mono",monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText(`${topSide ? '↑' : '↓'} ${text}`, padLeft + 4, yy + (topSide ? 8 : -3));
         }
     }
 
     // == Рисуем стоп, тейк и цену ==
-    if (top.length > 1) {
-        if (liveData.trade) {
-            if (liveData.trade.stop) drawLine(priceToY(liveData.trade.stop), 'rgba(198,55,60,0.9)', 'STOP', null);
-            if (liveData.trade.take) drawLine(priceToY(liveData.trade.take), 'rgba(46,125,79,0.9)', 'TAKE', null);
+    if (top.length > 0) {
+        if (tr) {
+            if (tr.stop) drawLine(priceToY(tr.stop), 'rgba(198,55,60,0.9)', 'STOP', null);
+            if (tr.entry) drawLine(priceToY(tr.entry), 'rgba(20,20,15,0.7)', 'ENTRY', [2, 3]);
+            if (tr.take) drawLine(priceToY(tr.take), 'rgba(46,125,79,0.9)', 'TAKE', null);
         }
         if (priceStrike > 0) {
             drawLine(priceToY(priceStrike), 'rgba(232,98,42,0.9)', priceStrike.toFixed(0), [6, 4]);
         }
     }
+
+    // Самые сильные глобальные уровни вне локального окна не теряются:
+    // показываем их компактными edge-маркерами без изменения масштаба.
+    const far = globalRank.filter((x) => x.s < viewLo || x.s > viewHi).slice(0, 2);
+    far.forEach((x, i) => {
+        const above = x.s > viewHi;
+        ctx.fillStyle = x.v > 0 ? 'rgba(46,125,79,0.8)' : 'rgba(198,55,60,0.8)';
+        ctx.font = '7px "IBM Plex Mono",monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${above ? '↑' : '↓'} GEX ${x.s.toFixed(priceStrike < 100 ? 2 : 0)}`,
+            centerX + (i ? 58 : -58), above ? plotTop + 8 : plotBot - 3);
+    });
 
     // == Условная OI×gamma сводка (не наблюдаемый flow) ==
     const totalNet = net.reduce((a, b) => a + b, 0);
@@ -259,7 +290,7 @@ function renderLoop() {
     ctx.beginPath(); ctx.roundRect(summaryX, summaryY, summaryW, summaryH, 4); ctx.fill();
     
     // Заполненная часть
-    const netMag = Math.abs(smoothedNetGex) / (maxAbsNet * Math.min(top.length, 10));
+    const netMag = Math.abs(smoothedNetGex) / (maxAbsNet * Math.min(indexed.length, 10));
     const fillH = Math.min(summaryH * 0.9, summaryH * netMag);
     const fillY = summaryY + summaryH / 2 - fillH / 2;
     ctx.fillStyle = isPin ? `rgba(46,125,79,${netGlow})` : `rgba(198,55,60,${netGlow})`;

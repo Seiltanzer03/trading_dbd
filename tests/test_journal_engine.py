@@ -298,11 +298,15 @@ class TestEngineDemo:
             10, "JPY100", "long", price, price * 0.995, price * 1.0125)
         engine.on_trade_opened(t)
         tick = engine.tick_payload()
-        assert tick["prob"]["source"] == "setup_fallback"
+        assert tick["prob"]["source"] == "no_option_anchor"
+        assert tick["prob"]["p"] is None
+        assert tick["prob"]["available"] is False
         assert tick["market"]["available"] is False
         assert tick["market"]["edge"] is None
         assert tick["cone"]["available"] is True
         assert tick["cone"]["option_anchored"] is False
+        assert tick["cone"]["scenario_only"] is True
+        assert tick["verdict"]["label"] == "НЕТ OPTION EDGE"
 
     def test_barrier_outside_option_grid_disables_edge(self, engine):
         engine.market.refresh_price()

@@ -241,11 +241,13 @@ class TestRnCone:
         assert 1 <= peak <= 9
         assert sum(bell[3:8]) > 0.4
 
-    def test_hit_ratio_matches_first_passage(self):
-        # fallback без BL anchor остаётся геометрическим, но явно помечен.
+    def test_no_option_anchor_disables_headline_probability(self):
+        # Без BL anchor геометрия стоп/тейк не становится суррогатной P.
         c = P.rn_cone(0.0, 3.0, 3.0, drift_R=0.0, horizon_years=1 / 365, seed=2)
-        assert c["hit_ratio"] == pytest.approx(1.0 / 4.0, abs=1e-6)
-        assert c["hit_source"] == "geometry_fallback"
+        assert c["hit_ratio"] is None
+        assert c["hit_source"] == "no_option_anchor"
+        assert c["probability_available"] is False
+        assert c["scenario_only"] is True
 
     def test_terminal_anchor_replaces_geometry_for_unresolved_paths(self):
         low = P.rn_cone(
@@ -266,10 +268,21 @@ class TestRnCone:
         assert c["times_years"][-1] == pytest.approx(2 / 365, rel=0.01)
 
     def test_drift_tilts_toward_take(self):
-        # положительный снос -> выше P дойти до тейка
+        # Положительный снос меняет сценарную barrier-массу, но без option
+        # anchor это намеренно не публикуется как headline probability.
         up = P.rn_cone(0.0, 3.0, 3.0, drift_R=0.2, horizon_years=1 / 52, seed=4)
         flat = P.rn_cone(0.0, 3.0, 3.0, drift_R=0.0, horizon_years=1 / 52, seed=4)
-        assert up["hit_ratio"] > flat["hit_ratio"]
+        assert up["p_take"] > flat["p_take"]
+        assert up["hit_ratio"] is None and flat["hit_ratio"] is None
+
+    def test_large_implied_move_keeps_early_surface_informative(self):
+        c = P.rn_cone(0.0, 9.0, 2.5, horizon_years=1 / 365, seed=42)
+        assert c["time_scale_power"] > 1.0
+        assert c["times_frac"][0] < 0.03
+        assert sum(c["density"][0]) > sum(c["density"][-1])
+        # Масса не сосредоточена в единственной MC-игле.
+        row = c["density"][0]
+        assert sum(v > max(row) * 0.15 for v in row) >= 3
 
     def test_skew_thickens_fear_tail(self):
         # Skew меняет форму/барьерные массы, но после обязательного центрирования

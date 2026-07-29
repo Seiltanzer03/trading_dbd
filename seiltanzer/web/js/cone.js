@@ -52,7 +52,8 @@ export function initCone(elId) {
   // цель (из сервера) и отображаемое (плавно морфится к цели)
   const tgt = { z: null, pStop: null, pTake: null, xs: null, ys: null,
                 edges: null, T: 2.5, r0: 0, nS: 0, nB: 0, hy: null,
-                median: null, term_slope: 0, structSig: null };
+                median: null, term_slope: 0, structSig: null,
+                probabilityAvailable: false };
   const disp = { z: null, pStop: null, pTake: null };
 
   // Камера: развернута на 180 градусов (вид спереди/сзади)
@@ -67,17 +68,23 @@ export function initCone(elId) {
   function markInteract() {
     interacting = true;
     if (interactTimer) clearTimeout(interactTimer);
-    interactTimer = setTimeout(() => { interacting = false; flush(); }, 250);
+    interactTimer = setTimeout(() => { interacting = false; flush(); }, 1200);
+  }
+  function saveCam(c) {
+    if (c && c.eye) currentCam = JSON.parse(JSON.stringify(c));
   }
   function grabCam() {
-    const c = el._fullLayout?.scene?.camera;
-    if (c && c.eye) currentCam = c;
+    saveCam(el._fullLayout?.scene?.camera);
   }
   function attachListeners() {
     if (listenersOn || !el.on) return;
     listenersOn = true;
-    el.on('plotly_relayouting', () => { markInteract(); grabCam(); });
-    el.on('plotly_relayout', grabCam);
+    el.on('plotly_relayouting', (ev) => {
+      markInteract(); saveCam(ev?.['scene.camera']); grabCam();
+    });
+    el.on('plotly_relayout', (ev) => {
+      saveCam(ev?.['scene.camera']); grabCam();
+    });
     el.addEventListener('mousedown', markInteract);
     el.addEventListener('touchstart', markInteract, { passive: true });
     el.addEventListener('wheel', markInteract, { passive: true });
@@ -138,26 +145,44 @@ export function initCone(elId) {
              color, opacity: 0.35, flatshading: true, hoverinfo: 'skip', showlegend: false };
   }
   function wallEdge(xConst, series, color, label) {
+    const pLabel = tgt.probabilityAvailable
+      ? `${label} ${(series[series.length - 1] * 100).toFixed(0)}%`
+      : `${label} · БАРЬЕР`;
+    const hover = tgt.probabilityAvailable
+      ? `${label}: option-anchored P дойти = %{z:.0%}<extra></extra>`
+      : `${label}: доля сценарных путей у барьера = %{z:.0%}<extra></extra>`;
     return { type: 'scatter3d', mode: 'lines',
       x: Array(tgt.nS).fill(xConst), y: tgt.ys, z: series,
-      line: { color, width: 6 }, name: `${label} ${(series[series.length - 1] * 100).toFixed(0)}%`,
-      hovertemplate: `${label}: дойти = %{z:.0%}<extra></extra>` };
+      line: { color, width: 6 }, name: pLabel, hovertemplate: hover };
   }
 
   // -------------------------------------------------------------- цель/каркас
   function buildTarget(cone) {
     const T = cone.T;
-    const edges = cone.edges, nB = edges.length - 1, nS = cone.density.length;
+    const edges = cone.edges, nB = edges.length - 1;
     const xs = Array.from({ length: nB }, (_, b) => (edges[b] + edges[b + 1]) / 2);
-    const ys = Array.from({ length: nS }, (_, j) => j / (nS - 1));
-    let gmax = 1e-9;
-    for (const row of cone.density) for (const v of row) if (v > gmax) gmax = v;
-    const z = cone.density.map((row) => row.map((v) => Math.pow(v / gmax, 0.7)));
-    tgt.z = z; tgt.pStop = cone.p_stop_by_t.slice(); tgt.pTake = cone.p_take_by_t.slice();
+    // Явный срез t=0 возвращает основание конуса. Каждый следующий срез
+    // отображает условную форму живых путей, приглушённую их surviving mass:
+    // редкие MC-иглы больше не уничтожают всю плоскость одним global max.
+    const binW = (T + 1) / Math.max(nB, 1);
+    const t0 = xs.map((x) => Math.exp(-0.5 * ((x - cone.r0) / Math.max(binW * 0.72, 1e-6)) ** 2));
+    const rows = [t0, ...cone.density.map((row) => row.slice())];
+    const z = rows.map((row, j) => {
+      const mass = j === 0 ? 1 : row.reduce((a, b) => a + b, 0);
+      const smooth = row.map((v, i) => 0.25 * (row[i - 1] ?? v) + 0.5 * v + 0.25 * (row[i + 1] ?? v));
+      const peak = Math.max(...smooth, 1e-12);
+      const amp = j === 0 ? 0.92 : (mass > 0 ? 0.12 + 0.88 * Math.pow(mass, 0.35) : 0);
+      return smooth.map((v) => Math.pow(v / peak, 0.72) * amp);
+    });
+    const tf = cone.times_frac || cone.density.map((_, j) => (j + 1) / cone.density.length);
+    const ys = [0, ...tf];
+    const nS = rows.length;
+    tgt.z = z; tgt.pStop = [0, ...cone.p_stop_by_t]; tgt.pTake = [0, ...cone.p_take_by_t];
     tgt.xs = xs; tgt.ys = ys; tgt.edges = edges; tgt.T = T; tgt.r0 = cone.r0;
     tgt.nS = nS; tgt.nB = nB; tgt.hy = cone.horizon_years;
     tgt.median = cone.median_years; tgt.term_slope = cone.term_slope || 0;
-    tgt.structSig = `${nB}|${nS}|${(+T).toFixed(2)}`;
+    tgt.probabilityAvailable = !!(cone.option_anchored && cone.probability_available !== false);
+    tgt.structSig = `${nB}|${nS}|${(+T).toFixed(2)}|${tgt.probabilityAvailable ? 1 : 0}`;
   }
   function snapDisp() {                            // отобразить цель немедленно (пересбор)
     disp.z = tgt.z.map((row) => row.slice());
@@ -170,7 +195,7 @@ export function initCone(elId) {
       colorscale: SURF_SCALE, showscale: false, opacity: 0.95, name: 'плотность',
       contours: { z: { show: true, usecolormap: true, width: 1 } },
       lighting: { ambient: 0.78, diffuse: 0.5, specular: 0.06, roughness: 0.9 },
-      hovertemplate: 'R=%{x:+.2f}<br>плотн.=%{z:.2f}<extra></extra>' };
+      hovertemplate: 'R=%{x:+.2f}<br>условная форма × surviving mass=%{z:.2f}<extra></extra>' };
     const d = dotCoords(live.r != null ? live.r : tgt.r0);
     curR = d.Rp; lastDotR = d.Rp;
     const trail = { type: 'scatter3d', mode: 'lines', x: d.tx, y: d.ty, z: d.tz,
@@ -196,10 +221,12 @@ export function initCone(elId) {
     lastYTitle = yTitle;
     return {
       autosize: true, height: 430, margin: { l: 0, r: 0, t: 8, b: 0 },
+      uirevision: 'seiltanzer-cone-camera-v3',
       paper_bgcolor: PAPER, font: { family: FONT, color: INK, size: 11 },
       showlegend: true,
       legend: { orientation: 'h', x: 0, y: 1.07, font: { size: 10 }, bgcolor: 'rgba(0,0,0,0)' },
       scene: {
+        uirevision: 'seiltanzer-cone-camera-v3',
         camera: currentCam,
         bgcolor: SCENE_BG, aspectmode: 'manual', aspectratio: { x: 1.75, y: 1.2, z: 0.72 },
         xaxis: { title: { text: 'R  (стоп −1 · 0 · тейк)', font: { size: 10, color: DIM } },
@@ -209,7 +236,7 @@ export function initCone(elId) {
         yaxis: { title: { text: yTitle, font: { size: 10, color: DIM } },
           range: [0, 1], gridcolor: RULE, tickvals: [0, 0.5, 1], ticktext: yTicktext,
           tickfont: { size: 9, color: DIM }, backgroundcolor: SCENE_BG, showbackground: true },
-        zaxis: { title: { text: 'плотность / P дойти', font: { size: 10, color: DIM } },
+        zaxis: { title: { text: 'форма плотности × живая масса', font: { size: 10, color: DIM } },
           range: [0, 1.08], gridcolor: RULE, tickfont: { size: 9, color: DIM },
           backgroundcolor: SCENE_BG, showbackground: true },
       },
@@ -277,12 +304,15 @@ export function initCone(elId) {
       lastYTitle = yTitle;
       const yTicktext = tgt.hy ? ['сейчас', fmtTime(tgt.hy * 0.5), fmtTime(tgt.hy)]
         : ['сейчас', '50%', 'развязка'];
-      grabCam();
-      P.relayout(el, { 'scene.yaxis.title.text': yTitle, 'scene.yaxis.ticktext': yTicktext,
-                       'scene.camera': currentCam });
+      P.relayout(el, { 'scene.yaxis.title.text': yTitle,
+                       'scene.yaxis.ticktext': yTicktext });
     }
-    const nStop = `СТОП ${(tgt.pStop[tgt.pStop.length - 1] * 100).toFixed(0)}%`;
-    const nTake = `ТЕЙК ${(tgt.pTake[tgt.pTake.length - 1] * 100).toFixed(0)}%`;
+    const nStop = tgt.probabilityAvailable
+      ? `СТОП ${(tgt.pStop[tgt.pStop.length - 1] * 100).toFixed(0)}%`
+      : 'СТОП · БАРЬЕР';
+    const nTake = tgt.probabilityAvailable
+      ? `ТЕЙК ${(tgt.pTake[tgt.pTake.length - 1] * 100).toFixed(0)}%`
+      : 'ТЕЙК · БАРЬЕР';
     if (!lastNames || nStop !== lastNames[0] || nTake !== lastNames[1]) {
       lastNames = [nStop, nTake];
       P.restyle(el, { name: [nStop, nTake] }, [EDGE_STOP, EDGE_TAKE]);

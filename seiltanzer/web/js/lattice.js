@@ -20,8 +20,10 @@ export function initLattice(canvas) {
   const s = {
     active: false, marketAvail: false,
     T: 2.5, tradeId: null, regime: null,
-    tgt: { probs: null, model: null, r: 0, tilt: 0.5, edge: null, hit: null },
-    cur: { probs: null, model: null, r: 0, tilt: 0.5 },
+    tgt: { probs: null, r: 0, tilt: 0.5, edge: null, hit: null,
+           pStop: null, pTake: null, unresolved: null,
+           q10: null, q50: null, q90: null, mode: null },
+    cur: { probs: null, r: 0, tilt: 0.5 },
     edges: null,
     counts: new Array(BINS).fill(0), balls: [], dropped: 0, green: 0,
     lastSpawn: 0, nextSpawnIn: 480,
@@ -34,16 +36,23 @@ export function initLattice(canvas) {
     s.active = d.active; s.regime = d.regime;
     if (!d.active) return;
     s.T = d.T ?? 2.5;
-    s.marketAvail = !!d.marketProbs;
-    const primary = d.marketProbs || d.modelProbs;
+    s.marketAvail = !!d.optionAnchored;
+    const primary = d.distributionProbs;
+    if (!primary || !primary.length) return;
     s.tgt.probs = primary;
-    s.tgt.model = d.modelProbs;
     s.tgt.r = d.r ?? 0;
-    s.tgt.tilt = d.hit != null ? d.hit : (d.p ?? 0.5);
+    s.tgt.tilt = d.hit != null ? d.hit
+      : primary.reduce((a, v, b) => a + ((d.edges?.[b] ?? -1) >= 0 ? v : 0), 0);
     s.tgt.edge = d.edge;
     s.tgt.hit = d.hit;
+    s.tgt.pStop = d.pStop;
+    s.tgt.pTake = d.pTake;
+    s.tgt.unresolved = d.unresolved;
+    s.tgt.q10 = d.q10; s.tgt.q50 = d.q50; s.tgt.q90 = d.q90; s.tgt.mode = d.mode;
     s.edges = d.edges;
-    if (!s.cur.probs) { s.cur.probs = primary.slice(); s.cur.model = (d.modelProbs || primary).slice(); s.cur.r = s.tgt.r; s.cur.tilt = s.tgt.tilt; }
+    if (!s.cur.probs) {
+      s.cur.probs = primary.slice(); s.cur.r = s.tgt.r; s.cur.tilt = s.tgt.tilt;
+    }
   }
 
   const binMid = (b) => s.edges ? (s.edges[b] + s.edges[b + 1]) / 2 : 0;
@@ -110,13 +119,13 @@ export function initLattice(canvas) {
     if (!s.active || !s.cur.probs) return;
     const baseY = g.baseY, x0 = xOfR(g, 0);
     const mMax = Math.max(...s.cur.probs, 0.001);
-    const mdMax = Math.max(...(s.cur.model || [0.001]), 0.001);
 
     ctx.fillStyle = '#FBFAF6';
     ctx.fillRect(g.padX - 8, baseY - g.distH, w - 2 * g.padX + 16, g.distH);
 
-    // тейл-зона (справа от тейка) — оранжевое свечение «куда платит рынок»
-    const xt = xOfR(g, s.T);
+    // Положительная зона результата. Поглощённые barrier-массы НЕ кладутся в
+    // крайние корзины — они подписаны отдельно сверху.
+    const xt = xOfR(g, 0);
     const glow = 0.06 + 0.05 * pulse(now, 1800);
     ctx.fillStyle = `rgba(232,98,42,${glow})`;
     ctx.fillRect(xt, baseY - g.distH, (w - g.padX) - xt, g.distH);
@@ -137,11 +146,27 @@ export function initLattice(canvas) {
     ctx.beginPath();
     for (let b = 0; b < BINS; b++) { const cx = g.padX + (b + 0.5) * g.binW, cy = baseY - (s.cur.probs[b] / mMax) * (g.distH - 10); b ? ctx.lineTo(cx, cy) : ctx.moveTo(cx, cy); }
     ctx.strokeStyle = '#E8622A'; ctx.lineWidth = 2; ctx.stroke();
-    // проекция модели — тёмная линия
-    if (s.cur.model) {
-      ctx.beginPath();
-      for (let b = 0; b < BINS; b++) { const cx = g.padX + (b + 0.5) * g.binW, cy = baseY - (s.cur.model[b] / mdMax) * (g.distH - 10); b ? ctx.lineTo(cx, cy) : ctx.moveTo(cx, cy); }
-      ctx.strokeStyle = COLORS.ink; ctx.lineWidth = 1.2; ctx.setLineDash([4, 2]); ctx.stroke(); ctx.setLineDash([]);
+    // Опционные/сценарные квантили — практический диапазон живой массы.
+    const qs = [
+      [s.tgt.q10, 'P10', COLORS.red],
+      [s.tgt.q50, 'P50', COLORS.ink],
+      [s.tgt.q90, 'P90', COLORS.green],
+    ];
+    for (const [q, label, color] of qs) {
+      if (q == null || q < -1 || q > s.T) continue;
+      const x = xOfR(g, q);
+      ctx.strokeStyle = color; ctx.lineWidth = label === 'P50' ? 1.5 : 1;
+      ctx.setLineDash(label === 'P50' ? [4, 2] : [2, 3]);
+      ctx.beginPath(); ctx.moveTo(x, baseY - g.distH); ctx.lineTo(x, baseY); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = color; ctx.font = '8px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'center'; ctx.fillText(label, x, baseY - g.distH + 10);
+    }
+    if (s.tgt.mode != null && s.tgt.mode >= -1 && s.tgt.mode <= s.T) {
+      const xm = xOfR(g, s.tgt.mode);
+      ctx.fillStyle = '#E8622A';
+      ctx.beginPath(); ctx.moveTo(xm - 4, baseY - 4); ctx.lineTo(xm + 4, baseY - 4);
+      ctx.lineTo(xm, baseY - 11); ctx.closePath(); ctx.fill();
     }
 
     // линия 0 и барьеры
@@ -168,7 +193,9 @@ export function initLattice(canvas) {
 
     // заголовок + edge
     ctx.textAlign = 'center'; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.fillStyle = COLORS.dim;
-    const src = s.marketAvail ? 'РЫНОК (risk-neutral)' : 'МОДЕЛЬ (нет опционов)';
+    const src = s.marketAvail
+      ? 'OPTION-ANCHORED · УСЛОВНАЯ ЖИВАЯ ПЛОТНОСТЬ'
+      : 'СЦЕНАРНАЯ ПЛОТНОСТЬ · БЕЗ P / EDGE';
     const reg = s.regime ? ` · ВОЛА ${s.regime}` : '';
     ctx.fillText(`РАСПРЕДЕЛЕНИЕ: ${src}${reg}`, w / 2, 12);
     if (s.tgt.edge != null) {
@@ -176,6 +203,15 @@ export function initLattice(canvas) {
       ctx.fillStyle = ed >= 0 ? COLORS.green : COLORS.red;
       ctx.font = '10px "IBM Plex Mono", monospace'; ctx.textAlign = 'right';
       ctx.fillText(`OPTION EDGE vs EV=0 ${ed >= 0 ? '+' : ''}${(ed * 100).toFixed(1)}%`, w - g.padX, 12);
+    }
+    ctx.font = '8px "IBM Plex Mono", monospace';
+    if (s.tgt.pStop != null) {
+      ctx.fillStyle = COLORS.red; ctx.textAlign = 'left';
+      ctx.fillText(`СТОП-К ХОРИЗОНТУ ${(s.tgt.pStop * 100).toFixed(0)}%`, g.padX, 24);
+    }
+    if (s.tgt.pTake != null) {
+      ctx.fillStyle = COLORS.green; ctx.textAlign = 'right';
+      ctx.fillText(`ТЕЙК-К ХОРИЗОНТУ ${(s.tgt.pTake * 100).toFixed(0)}%`, w - g.padX, 24);
     }
 
     // шарики
@@ -194,7 +230,6 @@ export function initLattice(canvas) {
     const dt = Math.min((now - last) / 1000, 0.05); last = now;
     if (s.active && s.tgt.probs) {
       s.cur.probs = approachArr(s.cur.probs, s.tgt.probs, dt, 7);
-      s.cur.model = approachArr(s.cur.model, s.tgt.model, dt, 7);
       s.cur.r = approach(s.cur.r, s.tgt.r, dt, 8);
       s.cur.tilt = approach(s.cur.tilt, s.tgt.tilt, dt, 6);
       s.lastSpawn += dt * 1000;

@@ -106,6 +106,13 @@ class MarketData:
         self._price_change_ts: float | None = None
         self._last_price_rest_attempt = 0.0
         self._last_proxy_rest_attempt = 0.0
+        # Yahoo WebSocket нередко отдаёт ETF (QQQ/GLD), но молчит по cash index
+        # или активному фьючерсу. Тогда сохраняем синхронную пару
+        # instrument↔proxy и переносим только последующую ДОХОДНОСТЬ proxy.
+        # Это не новая «котировка фьючерса», а явно помеченный live mapping.
+        self._price_anchor_raw: float | None = None
+        self._price_anchor_proxy: float | None = None
+        self._price_anchor_ts: float | None = None
         self.intraday: list[tuple[float, float, float]] = []  # (ts, price, volume)
         self.daily = {"bars": None, **_status_dict()}
         self.vols = {k: _status_dict() for k in VOL_INDEX_TICKERS}
@@ -134,6 +141,9 @@ class MarketData:
             self._price_change_ts = None
             self._last_price_rest_attempt = 0.0
             self._last_proxy_rest_attempt = 0.0
+            self._price_anchor_raw = None
+            self._price_anchor_proxy = None
+            self._price_anchor_ts = None
             self.intraday = []
             self.daily = {"bars": None, **_status_dict()}
             self.chain = {"metrics": None, **_status_dict()}
@@ -152,6 +162,8 @@ class MarketData:
     # и фьючерсы в перерыв возвращают одну и ту же цену — это честнее пометить, чем
     # рисовать зелёный LIVE у замершего числа.
     PRICE_IDLE_SEC = 120.0
+    PRICE_ANCHOR_REFRESH_SEC = 60.0
+    PRICE_ANCHOR_MAX_AGE_SEC = 6 * 3600.0
 
     def _annotate_freshness(self) -> None:
         """Проставляет idle_secs/fresh: цена live, но не двигается → рынок стоит."""
@@ -166,6 +178,64 @@ class MarketData:
         idle = now - (self._price_change_ts or now)
         d["idle_secs"] = round(idle, 1)
         d["fresh"] = idle <= self.PRICE_IDLE_SEC
+
+    def _fresh_proxy_stream(self) -> float | None:
+        proxy = self.instrument.options_proxy
+        if self.stream is None or proxy is None:
+            return None
+        return self.stream.fresh(proxy, max_age=8.0)
+
+    def _set_price_anchor(self, raw: float, proxy: float | None,
+                          ts: float | None = None) -> None:
+        if proxy is None or not math.isfinite(proxy) or proxy <= 0:
+            return
+        if not math.isfinite(raw) or raw <= 0:
+            return
+        self._price_anchor_raw = float(raw)
+        self._price_anchor_proxy = float(proxy)
+        self._price_anchor_ts = float(ts if ts is not None else time.time())
+
+    def _mapped_proxy_tick(self, now: float | None = None) -> dict | None:
+        """Живое изменение инструмента из stream-доходности ETF-прокси.
+
+        Уровень инструмента берётся только из его собственной REST/stream
+        котировки. Proxy переносит изменение между переякориваниями; направление
+        `inverse` меняет знак доходности. Старый якорь не используется бесконечно.
+        """
+        now = time.time() if now is None else now
+        proxy = self.instrument.options_proxy
+        sp = self._fresh_proxy_stream()
+        if (proxy is None or sp is None or self._price_anchor_raw is None
+                or self._price_anchor_proxy is None or self._price_anchor_ts is None):
+            return None
+        age = now - self._price_anchor_ts
+        if age > self.PRICE_ANCHOR_MAX_AGE_SEC:
+            return None
+        ratio = sp / self._price_anchor_proxy
+        if not math.isfinite(ratio) or ratio <= 0:
+            return None
+        if self.instrument.proxy_transform == "inverse":
+            value = self._price_anchor_raw / ratio
+        else:
+            value = self._price_anchor_raw * ratio
+        if not math.isfinite(value) or value <= 0:
+            return None
+        return {
+            "value": float(value),
+            "status": "live",
+            "ts": now,
+            "error": None,
+            "source": (
+                f"stream {proxy} return → {self.instrument.yahoo} "
+                f"({self.instrument.proxy_transform} derived)"
+            ),
+            "derived": True,
+            "driver_ticker": proxy,
+            "anchor_ticker": self.instrument.yahoo,
+            "anchor_age_sec": round(max(age, 0.0), 1),
+            "anchor_value": self._price_anchor_raw,
+            "driver_value": float(sp),
+        }
 
     # ---------------------------------------------------------------- price
 
@@ -239,15 +309,31 @@ class MarketData:
                 now = time.time()
                 self.price = _status_dict(sp, "live", now,
                                           source=f"stream {self.instrument.yahoo}")
+                self.price["derived"] = False
+                self._set_price_anchor(sp, self._fresh_proxy_stream(), now)
                 self._annotate_freshness()
                 self.intraday.append((now, sp, 0.0))
                 self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
                 return
-            if self.price.get("status") == "live":
-                self.price["status"] = "delayed"
-                self.price["error"] = "stream tick stale; REST fallback"
         now = time.time()
+        mapped = self._mapped_proxy_tick(now)
+        anchor_age = (
+            now - self._price_anchor_ts if self._price_anchor_ts is not None
+            else math.inf
+        )
+        # Между контрольными REST-якорями живой proxy управляет отображаемой
+        # доходностью. Каждую секунду REST здесь не нужен и только замораживал бы
+        # динамику обратно на indicative last_price.
+        if mapped is not None and anchor_age < self.PRICE_ANCHOR_REFRESH_SEC:
+            self.price = mapped
+            self._annotate_freshness()
+            self.intraday.append((now, mapped["value"], 0.0))
+            self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
+            return
         if now - self._last_price_rest_attempt < self.settings.price_poll_sec:
+            if mapped is not None:
+                self.price = mapped
+                self._annotate_freshness()
             return
         self._last_price_rest_attempt = now
         try:
@@ -263,12 +349,28 @@ class MarketData:
                 if len(hist) == 0:
                     raise RuntimeError("Yahoo вернул пустую историю")
                 p = float(hist["Close"].iloc[-1])
-            self.price = _status_dict(
-                p, "delayed", time.time(),
-                source=f"yfinance REST {self.instrument.yahoo} (indicative)")
+            anchor_now = time.time()
+            proxy_tick = self._fresh_proxy_stream()
+            if proxy_tick is None and self.proxy_price.get("value") is not None:
+                proxy_tick = float(self.proxy_price["value"])
+            self._set_price_anchor(p, proxy_tick, anchor_now)
+            mapped = self._mapped_proxy_tick(anchor_now)
+            if mapped is not None and self._fresh_proxy_stream() is not None:
+                self.price = mapped
+            else:
+                self.price = _status_dict(
+                    p, "delayed", anchor_now,
+                    source=f"yfinance REST {self.instrument.yahoo} (indicative)")
+                self.price["derived"] = False
             self._annotate_freshness()
         except Exception as e:  # noqa: BLE001 — фид обязан пережить любой сбой источника
-            self._mark_fail(self.price, self.settings.price_poll_sec, str(e))
+            mapped = self._mapped_proxy_tick(now)
+            if mapped is not None:
+                mapped["error"] = f"REST re-anchor failed: {str(e)[:120]}"
+                self.price = mapped
+                self._annotate_freshness()
+            else:
+                self._mark_fail(self.price, self.settings.price_poll_sec, str(e))
 
     def refresh_intraday(self) -> None:
         """1m-бары дня для VWAP (объём нужен; у кэш-индексов его нет — честно None)."""

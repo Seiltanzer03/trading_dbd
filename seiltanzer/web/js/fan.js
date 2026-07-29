@@ -41,6 +41,7 @@ export function initFan(canvas) {
     const skew = data.skew || 0;            // >0 → сторона −R (страх) шире
     const ratio = data.rv_iv_ratio;         // реализ./implied вола (наценка ММ)
     const termSlope = data.term_slope || 0; // >0 контанго (вола дышит позже)
+    const anchored = !!data.option_anchored;
     const rNow = curR != null ? curR : r0;
 
     const padL = 58, padR = 16, padT = 40, padB = 34;
@@ -110,9 +111,9 @@ export function initFan(canvas) {
       ctx.fillStyle = lblColor || color; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'left';
       ctx.fillText(lbl, padL + 2, Y(R) - 3);
     };
-    hline(T, COLORS.green, [], `ТЕЙК +${T.toFixed(2)}R · дойти ${(data.p_take * 100).toFixed(0)}%`, COLORS.green);
+    hline(T, COLORS.green, [], `ТЕЙК +${T.toFixed(2)}R · ${anchored ? 'P к горизонту' : 'сценариев'} ${(data.p_take * 100).toFixed(0)}%`, COLORS.green);
     hline(0, COLORS.dim, [3, 3], 'ВХОД (0)', COLORS.dim);
-    hline(-1, COLORS.red, [], `СТОП −1R · дойти ${(data.p_stop * 100).toFixed(0)}%`, COLORS.red);
+    hline(-1, COLORS.red, [], `СТОП −1R · ${anchored ? 'P к горизонту' : 'сценариев'} ${(data.p_stop * 100).toFixed(0)}%`, COLORS.red);
 
     // медиана развязки — вертикаль
     if (hy && data.median_years != null) {
@@ -143,14 +144,14 @@ export function initFan(canvas) {
     ctx.textAlign = 'right'; ctx.fillStyle = COLORS.dim;
     [T, 0, -1].forEach((R) => ctx.fillText(`${R >= 0 ? '+' : ''}${R}R`, padL - 4, Y(R) + 3));
 
-    // ридаут строка 1: куда клонит + вероятности
+    // Ридаут. Без BL option anchor это только доли сценарных путей, не P сделки.
     const lean = data.p_take > data.p_stop + 0.03 ? { t: 'КЛОНИТ К ТЕЙКУ', c: COLORS.green }
       : data.p_stop > data.p_take + 0.03 ? { t: 'КЛОНИТ К СТОПУ', c: COLORS.red }
       : { t: '≈ 50/50', c: COLORS.dim };
     ctx.textAlign = 'left'; ctx.font = '700 12px "IBM Plex Mono", monospace'; ctx.fillStyle = lean.c;
-    ctx.fillText(lean.t, padL, 14);
+    ctx.fillText(anchored ? lean.t : 'СЦЕНАРНЫЙ ВЕЕР · БЕЗ P / EDGE', padL, 14);
     ctx.textAlign = 'right'; ctx.font = '10px "IBM Plex Mono", monospace'; ctx.fillStyle = COLORS.dim;
-    ctx.fillText(`P дойти: ТЕЙК ${(data.p_take * 100).toFixed(0)}% · СТОП ${(data.p_stop * 100).toFixed(0)}%`, w - padR, 14);
+    ctx.fillText(`${anchored ? 'P к горизонту' : 'доля сценариев'}: ТЕЙК ${(data.p_take * 100).toFixed(0)}% · СТОП ${(data.p_stop * 100).toFixed(0)}%`, w - padR, 14);
     // строка 2: наценка ММ (IV vs RV, пунктирный веер) + перекос волы (скью)
     ctx.font = '9px "IBM Plex Mono", monospace';
     if (ratio != null) {

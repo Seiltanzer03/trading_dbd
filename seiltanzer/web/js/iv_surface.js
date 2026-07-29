@@ -26,19 +26,26 @@ export function initIVSurface(elId) {
     function markInteract() {
         interacting = true;
         if (interactTimer) clearTimeout(interactTimer);
-        interactTimer = setTimeout(() => { interacting = false; }, 300);
+        interactTimer = setTimeout(() => { interacting = false; }, 1200);
+    }
+
+    function saveCam(c) {
+        if (c && c.eye) currentCam = JSON.parse(JSON.stringify(c));
     }
 
     function grabCam() {
-        const c = el._fullLayout?.scene?.camera;
-        if (c && c.eye) currentCam = c;
+        saveCam(el._fullLayout?.scene?.camera);
     }
 
     function attachListeners() {
         if (listenersOn || !el.on) return;
         listenersOn = true;
-        el.on('plotly_relayouting', () => { markInteract(); grabCam(); });
-        el.on('plotly_relayout', grabCam);
+        el.on('plotly_relayouting', (ev) => {
+            markInteract(); saveCam(ev?.['scene.camera']); grabCam();
+        });
+        el.on('plotly_relayout', (ev) => {
+            saveCam(ev?.['scene.camera']); grabCam();
+        });
         el.addEventListener('mousedown', markInteract);
         el.addEventListener('touchstart', markInteract, { passive: true });
         el.addEventListener('wheel', markInteract, { passive: true });
@@ -217,6 +224,7 @@ export function initIVSurface(elId) {
             paper_bgcolor: "rgba(0,0,0,0)",
             plot_bgcolor: "rgba(0,0,0,0)",
             scene: {
+                uirevision: "iv-surface-camera-v2",
                 xaxis: {
                     title: { text: "MONEYNESS %", font: { family: FONT, size: 13, color: "#111" } },
                     tickfont: { family: FONT, size: 11, color: "#222" },

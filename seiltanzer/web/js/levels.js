@@ -1,5 +1,5 @@
 // Карта уровней — коридор цены вокруг позиции.
-// Домен оси зумируется в сделку (вход/стоп/тейк/цена/implied-коридор); остальные
+// Домен оси зумируется в сделку (вход/стоп/тейк/цена); остальные
 // уровни (FVG-зоны, GEX, VWAP, дневной диапазон) клипуются в это окно, чтобы один
 // далёкий уровень не растягивал шкалу и не слепял всё в край.
 
@@ -27,37 +27,54 @@ export function initLevels(canvas) {
     if (!data) return;
     const pnow = (curPrice != null && isFinite(curPrice)) ? curPrice : data.price;
 
-    // домен — ТОЛЬКО по уровням сделки и опционному коридору
+    // Домен — только текущая геометрия сделки. Implied ±1σ часто в десятки раз
+    // шире короткого стопа; он показывается клипованной зоной/стрелками и больше
+    // не превращает стоп, вход и цену в одну вертикальную черту.
     const core = [data.entry, data.stop, data.take, pnow];
-    if (data.implied_band) core.push(data.implied_band.low, data.implied_band.high);
     const valid = core.filter((x) => x != null && isFinite(x));
     let lo = Math.min(...valid), hi = Math.max(...valid);
-    if (!(hi > lo)) { hi = lo + 1; }
-    const pad = (hi - lo) * 0.14;
+    const risk = Math.abs(data.entry - data.stop) || Math.abs(pnow || 1) * 0.001 || 1;
+    const minSpan = Math.max(risk * 2.2, Math.abs(pnow || data.entry || 1) * 0.00035);
+    if (!(hi > lo)) { lo -= minSpan / 2; hi += minSpan / 2; }
+    else if (hi - lo < minSpan) {
+      const mid = (lo + hi) / 2;
+      lo = mid - minSpan / 2; hi = mid + minSpan / 2;
+    }
+    const pad = (hi - lo) * 0.12;
     lo -= pad; hi += pad;
 
     const padL = 16, padR = 16, plotW = w - padL - padR;
     const X = (p) => padL + ((p - lo) / (hi - lo)) * plotW;
     const inRange = (p) => p != null && isFinite(p) && p >= lo && p <= hi;
     const axisY = H - 34;
-    const risk = Math.abs(data.entry - data.stop) || 1;
     const rOf = (p) => (data.direction === 'long' ? (p - data.entry) / risk
                                                   : (data.entry - p) / risk);
 
     // implied move ±1σ — затенённый коридор рынка (ключевая надбавленная ценность)
     if (data.implied_band) {
-      const x0 = X(Math.max(data.implied_band.low, lo));
-      const x1 = X(Math.min(data.implied_band.high, hi));
-      ctx.fillStyle = 'rgba(46,125,79,0.08)';
-      ctx.fillRect(x0, 20, x1 - x0, axisY - 20);
-      ctx.strokeStyle = 'rgba(46,125,79,0.4)';
-      ctx.setLineDash([2, 3]);
-      ctx.strokeRect(x0, 20, x1 - x0, axisY - 20);
-      ctx.setLineDash([]);
+      const bandLo = Math.max(data.implied_band.low, lo);
+      const bandHi = Math.min(data.implied_band.high, hi);
+      const x0 = X(bandLo), x1 = X(bandHi);
+      if (bandHi > bandLo) {
+        ctx.fillStyle = 'rgba(46,125,79,0.08)';
+        ctx.fillRect(x0, 20, x1 - x0, axisY - 20);
+        ctx.strokeStyle = 'rgba(46,125,79,0.4)';
+        ctx.setLineDash([2, 3]);
+        ctx.strokeRect(x0, 20, x1 - x0, axisY - 20);
+        ctx.setLineDash([]);
+      }
       ctx.fillStyle = COLORS.green;
       ctx.font = '8px "IBM Plex Mono", monospace';
       ctx.textAlign = 'left';
-      ctx.fillText('IMPLIED ±1σ' + (data.implied_band.demo ? ' ◆' : ''), x0 + 3, 30);
+      ctx.fillText('IMPLIED ±1σ' + (data.implied_band.demo ? ' ◆' : ''), Math.max(padL + 3, x0 + 3), 30);
+      if (data.implied_band.low < lo) {
+        ctx.textAlign = 'left';
+        ctx.fillText(`← −1σ ${fmtPrice(data.implied_band.low)}`, padL + 3, 42);
+      }
+      if (data.implied_band.high > hi) {
+        ctx.textAlign = 'right';
+        ctx.fillText(`+1σ ${fmtPrice(data.implied_band.high)} →`, w - padR - 3, 42);
+      }
     }
 
     // FVG-зоны пользователя (клипуются)
@@ -100,13 +117,16 @@ export function initLevels(canvas) {
       ctx.fillText(label, x, labelY);
     }
     // уровень за окном — стрелка у края
+    const edgeLanes = { left: 0, right: 0 };
     function edgeArrow(price, color, label) {
       if (price == null || !isFinite(price) || inRange(price)) return;
       const left = price < lo;
+      const side = left ? 'left' : 'right';
+      const y = axisY - 5 - Math.min(edgeLanes[side]++, 4) * 11;
       const x = left ? padL + 6 : w - padR - 6;
       ctx.fillStyle = color; ctx.font = '8px "IBM Plex Mono", monospace';
       ctx.textAlign = left ? 'left' : 'right';
-      ctx.fillText(`${label} ${left ? '←' : '→'}`, x, axisY - 4);
+      ctx.fillText(`${label} ${left ? '←' : '→'}`, x, y);
     }
 
     // GEX / VWAP / дневной диапазон — контекст (клип или стрелка)
@@ -118,9 +138,14 @@ export function initLevels(canvas) {
       marker(data.gex.zero_flip, '#A87A18', 'FLIP', 62, [2, 3], 1);
       edgeArrow(data.gex.zero_flip, '#A87A18', 'FLIP');
     }
-    if (data.vwap != null) marker(data.vwap, '#5B6C9E', 'VWAP', 74, [1, 2], 1);
-    if (inRange(data.day_low)) marker(data.day_low, COLORS.dim, 'LO', 86, [1, 3], 1);
-    if (inRange(data.day_high)) marker(data.day_high, COLORS.dim, 'HI', 86, [1, 3], 1);
+    if (data.vwap != null) {
+      marker(data.vwap, '#5B6C9E', 'VWAP', 74, [1, 2], 1);
+      edgeArrow(data.vwap, '#5B6C9E', 'VWAP');
+    }
+    marker(data.day_low, COLORS.dim, 'LO', 86, [1, 3], 1);
+    marker(data.day_high, COLORS.dim, 'HI', 86, [1, 3], 1);
+    edgeArrow(data.day_low, COLORS.dim, 'LO');
+    edgeArrow(data.day_high, COLORS.dim, 'HI');
 
     // гамма-магнит (притяжение пиннинга) — оранжевый ромб
     const gm = data.gamma;
@@ -136,6 +161,7 @@ export function initLevels(canvas) {
       ctx.font = '8px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
       ctx.fillText(`ГАММА-МАГНИТ ${gm.zone === 'positive' ? '(пиннинг)' : '(снос)'}`, x, 50);
     }
+    if (gm) edgeArrow(gm.magnet, '#E8622A', 'ГАММА');
 
     // сделка — ступенчато по высоте, чтобы подписи не слипались при тесном стопе
     marker(data.stop, COLORS.red, 'СТОП −1R', 10);

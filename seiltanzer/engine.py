@@ -337,10 +337,17 @@ class Engine:
         elif phase == "flat":
             factors.append({"k": "ФАЗА", "v": "ФЛЭТ — режь цель, не жди далёкого тейка", "tone": "neutral"})
 
-        # вердикт
+        # вердикт. Без option anchor не превращаем фильтры/расстояния/историческую
+        # таблицу в суррогат «преимущества»: остаётся только сценарный монитор.
         if blocks:
             label, tone = "НЕ ВХОДИТЬ", "bad"
             action = "Фильтр стратегии блокирует сетап — пропусти или дождись условий."
+        elif edge is None:
+            label, tone = "НЕТ OPTION EDGE", "neutral"
+            action = (
+                "Нет валидного опционного якоря — конус и доска показывают "
+                "сценарии, но вероятность и торговый перевес выключены."
+            )
         elif score >= 3:
             label, tone = "СИЛЬНЫЙ ПЕРЕВЕС", "good"
             action = "Опционная асимметрия поддерживает сделку — ведите по плану и следите за изменением edge."
@@ -506,9 +513,10 @@ class Engine:
         board_sigma_R = float(min(max(0.85 * math.sqrt(ratio_eff), 0.45), 1.7))
 
         prob = {
-            "r": r, "T": T, "p": band.p, "p_lo": band.p_lo, "p_hi": band.p_hi,
+            "r": r, "T": T, "p": None, "p_lo": None, "p_hi": None,
             "p_breakeven": 1.0 / (1.0 + T),   # винрейт для EV=0 при RR 1:T
-            "source": "setup_fallback",
+            "source": "no_option_anchor",
+            "available": False,
             "model_p": band.p,
             "model_p_lo": band.p_lo, "model_p_hi": band.p_hi,
             "model_small_sample": stats.n < 30,
@@ -600,6 +608,7 @@ class Engine:
                 "p_lo": max(0.0, option_p - systematic),
                 "p_hi": min(1.0, option_p + systematic),
                 "source": "options_barrier_mc",
+                "available": True,
                 "uncertainty": "proxy+snapshot scenario band",
                 "small_sample": False,
                 "band_kind": "scenario",
@@ -611,7 +620,7 @@ class Engine:
             mc["ev_hold_source"] = "options_probability"
             mc["ev_ladder_source"] = "setup_path_control"
         else:
-            prob["band_kind"] = "wilson"
+            prob["band_kind"] = None
             mc["ev_hold_source"] = "setup_path_control"
             mc["ev_ladder_source"] = "setup_path_control"
 
@@ -621,6 +630,14 @@ class Engine:
             "available": has_options,
             "probs": cone["slice_probs"] if has_options else None,
             "edges": cone["slice_edges"] if has_options else None,
+            "scenario_probs": cone["slice_probs"],
+            "scenario_edges": cone["slice_edges"],
+            "scenario_slice_alive": cone.get("slice_alive"),
+            "scenario_slice_time_frac": cone.get("slice_time_frac"),
+            "scenario_mode_r": cone.get("slice_mode_r"),
+            "scenario_p10_r": cone.get("slice_p10_r"),
+            "scenario_median_r": cone.get("slice_median_r"),
+            "scenario_p90_r": cone.get("slice_p90_r"),
             "p_take": option_p,
             "p_stop": (1.0 - option_p) if option_p is not None else None,
             "p_take_horizon": cone["p_take"], "p_stop_horizon": cone["p_stop"],
@@ -703,6 +720,8 @@ class Engine:
             terminal is not None
             and out.get("hit_source") == "barrier_mc+bl_terminal"
         )
+        out["scenario_only"] = not out["option_anchored"]
+        out["probability_available"] = out["option_anchored"]
         out["rv_iv_ratio"] = rv_iv_ratio
         if terminal and terminal.get("probs"):
             out["market_terminal"] = terminal["probs"]
@@ -761,6 +780,7 @@ class Engine:
             "ОСТОРОЖНО": "уменьшите объём или дождитесь лучшего расклада",
             "ПРОТИВ ВАС": "пропуск или минимальный объём",
             "НЕ ВХОДИТЬ": "фильтр стратегии блокирует — пропустите",
+            "НЕТ OPTION EDGE": "сценарный монитор без вероятности — ждите option anchor",
         }.get(verdict.get("label"), "оцените по факторам вердикта")
         if ladder.get("be_armed"):
             return "стоп в БУ — снимайте по лестнице, остаток тралом; " + base
@@ -1322,6 +1342,11 @@ class Engine:
             warnings.append(
                 "price feed — активный COMEX futures; spot/CFD брокера может "
                 "иметь постоянный basis и roll-разницу")
+        if self.market.price.get("derived"):
+            warnings.append(
+                "между контрольными котировками уровень инструмента двигается "
+                "по доходности live ETF-прокси; это derived mapping, не биржевой "
+                "тик самого фьючерса/индекса")
         if trade and abs(float(trade.get("quote_offset") or 0.0)) > 0:
             warnings.append(
                 f"к ценовому ряду применён basis {float(trade['quote_offset']):+.4f}, "
@@ -1366,7 +1391,8 @@ class Engine:
                            "BL snapshot + indicative proxy mapping"
                            if anchor_ready and dynamic_mapping else
                            "BL snapshot + barrier MC"
-                           if anchor_ready else "setup control model"),
+                           if anchor_ready else
+                           "scenario diffusion only; headline probability disabled"),
             },
             "strike_landscape": {
                 "status": (
@@ -1426,6 +1452,11 @@ class Engine:
                 "basis_offset": float((trade or {}).get("quote_offset") or 0.0),
                 "source": self.market.price.get("source"),
                 "status": self.market.price.get("status"),
+                "derived": bool(self.market.price.get("derived")),
+                "driver_ticker": self.market.price.get("driver_ticker"),
+                "anchor_age_sec": self.market.price.get("anchor_age_sec"),
+                "fresh": self.market.price.get("fresh"),
+                "idle_secs": self.market.price.get("idle_secs"),
             },
             "options": {
                 "status": self.market.chain.get("status"),
