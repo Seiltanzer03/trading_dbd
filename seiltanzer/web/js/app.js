@@ -180,7 +180,8 @@ function feedBadge(el, feed, extraTip) {
   el.className = 'feed ' + (stale ? 'delayed' : st);
   const name = el.id.replace('feed-', '').toUpperCase();
   const label = name === 'PRICE' ? 'ЦЕНА' : name === 'CHAIN' ? 'ЦЕПОЧКА' : name;
-  const derived = feed?.derived ? ' · PROXY MAP' : '';
+  const derived = feed?.derived
+    ? (feed?.driver_experimental ? ' · EXP MAP' : ' · PROXY MAP') : '';
   el.textContent = `${stale ? '⏸' : (STATUS_ICON[st] || '○')} ${label}${derived}${stale ? ' СТОИТ' : ''}`;
   const base = extraTip || '';
   const err = feed?.error ? `\nошибка: ${feed.error}` : '';
@@ -249,15 +250,17 @@ function handleLivePrice(t) {
   const price = t.feeds?.price?.value;
   const streaming = (t.feeds?.price?.source || '').startsWith('stream');
   const derived = !!t.feeds?.price?.derived;
+  const experimental = !!t.feeds?.price?.driver_experimental;
   const stale = t.feeds?.price?.fresh === false;
   const idle = t.feeds?.price?.idle_secs;
   $('#lat-price-instr').textContent = t.instrument
-    + (streaming ? ' ⚡' : '') + (derived ? ' · PROXY MAP' : '')
+    + (streaming ? ' ⚡' : '')
+    + (derived ? (experimental ? ' · EXP MAP' : ' · PROXY MAP') : '')
     + (stale ? ' · ⏸ ЗАКРЫТ' : '');
   $('#lat-price-instr').title = stale
     ? `нет свежих тиков ${fmtIdle(idle)} — рынок закрыт или неторговое время; цена = последняя котировка`
     : (derived
-      ? `derived live: уровень якорится к ${t.feeds.price.anchor_ticker}, движение приходит из ${t.feeds.price.driver_ticker}`
+      ? `derived live${experimental ? ' (экспериментальный)' : ''}: уровень якорится к ${t.feeds.price.anchor_ticker}, движение приходит из ${t.feeds.price.driver_ticker}`
       : (streaming ? 'живой WebSocket-стрим цены' : ''));
   if (price == null) { $('#lat-price').textContent = '—'; $('#lat-price-chg').textContent = ''; return; }
   const el = $('#lat-price');

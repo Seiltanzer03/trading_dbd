@@ -68,6 +68,10 @@ class Instrument:
     # Короткая честная подпись реального ценового ряда. Код инструмента — это
     # пользовательская стратегия, price_label — то, что действительно пришло.
     price_label: str | None = None
+    # Дополнительные тиковые драйверы только для переноса ДОХОДНОСТИ между
+    # контрольными котировками основного ряда. Первый свежий имеет приоритет.
+    # Опционный proxy остаётся отдельным полем и не подменяется этим списком.
+    live_price_drivers: tuple[str, ...] = ()
 
 
 INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
@@ -88,8 +92,13 @@ INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
     # Yahoo GC=F/SI=F — активные фьючерсы, НЕ spot CFD. Терминал показывает это
     # явно; при открытии сделки пользователь может задать текущую цену брокера,
     # и тиковый ряд будет basis-adjusted постоянным сдвигом.
+    # Yahoo stream периодически молчит по GC=F и ETF до US-сессии. GLD —
+    # предпочтительный драйвер; PAXG-USD — круглосуточный экспериментальный
+    # fallback. Оба переносят только доходность на регулярно обновляемый GC=F
+    # якорь, поэтому крипто-цена не показывается как цена фьючерса.
     Instrument("XAU",    "GC=F",     "GLD", 3350.0,  0.16,
-               price_label="COMEX Gold active futures"),
+               price_label="COMEX Gold active futures",
+               live_price_drivers=("GLD", "PAXG-USD")),
     Instrument("XAG",    "SI=F",     "SLV", 38.0,    0.28,
                price_label="COMEX Silver active futures"),
     Instrument("EURUSD", "EURUSD=X", "FXE", 1.17,    0.07, proxy_experimental=True,

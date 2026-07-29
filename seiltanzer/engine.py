@@ -62,7 +62,9 @@ class Engine:
             tickers = sorted(
                 {i.yahoo for i in INSTRUMENTS.values()}
                 | {i.options_proxy for i in INSTRUMENTS.values()
-                   if i.options_proxy is not None})
+                   if i.options_proxy is not None}
+                | {driver for i in INSTRUMENTS.values()
+                   for driver in i.live_price_drivers})
             self.stream_hub = StreamHub(tickers)
             self.market.stream = self.stream_hub
         self._mc_cache_key: tuple | None = None
@@ -1345,8 +1347,13 @@ class Engine:
         if self.market.price.get("derived"):
             warnings.append(
                 "между контрольными котировками уровень инструмента двигается "
-                "по доходности live ETF-прокси; это derived mapping, не биржевой "
+                "по доходности live proxy; это derived mapping, не биржевой "
                 "тик самого фьючерса/индекса")
+        if self.market.price.get("driver_experimental"):
+            warnings.append(
+                f"тиковый драйвер {self.market.price.get('driver_ticker')} "
+                "экспериментальный; он оживляет только доходность между "
+                "контрольными котировками основного ряда")
         if trade and abs(float(trade.get("quote_offset") or 0.0)) > 0:
             warnings.append(
                 f"к ценовому ряду применён basis {float(trade['quote_offset']):+.4f}, "
@@ -1454,6 +1461,8 @@ class Engine:
                 "status": self.market.price.get("status"),
                 "derived": bool(self.market.price.get("derived")),
                 "driver_ticker": self.market.price.get("driver_ticker"),
+                "driver_experimental": bool(
+                    self.market.price.get("driver_experimental")),
                 "anchor_age_sec": self.market.price.get("anchor_age_sec"),
                 "fresh": self.market.price.get("fresh"),
                 "idle_secs": self.market.price.get("idle_secs"),

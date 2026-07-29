@@ -73,3 +73,32 @@ def test_inverse_proxy_return_changes_sign(tmp_path):
         assert md.price["source"].endswith("(inverse derived)")
     finally:
         cache.close()
+
+
+def test_gold_uses_live_paxg_when_gld_stream_is_silent(tmp_path):
+    cache = DiskCache(str(tmp_path / "cache.db"))
+    try:
+        md = MarketData(Settings(stream=True, data_dir=str(tmp_path)), cache)
+        md.set_instrument("XAU")
+        md.stream = _StubStream({"PAXG-USD": 4040.0})
+        md._set_price_anchor(
+            4000.0, 4000.0, time.time(), driver_ticker="PAXG-USD")
+        md.refresh_price()
+        assert md.price["value"] == pytest.approx(4040.0)
+        assert md.price["status"] == "live"
+        assert md.price["driver_ticker"] == "PAXG-USD"
+        assert md.price["driver_experimental"] is True
+        assert md.price["anchor_ticker"] == "GC=F"
+    finally:
+        cache.close()
+
+
+def test_gold_prefers_gld_driver_when_both_are_fresh(tmp_path):
+    cache = DiskCache(str(tmp_path / "cache.db"))
+    try:
+        md = MarketData(Settings(stream=True, data_dir=str(tmp_path)), cache)
+        md.set_instrument("XAU")
+        md.stream = _StubStream({"GLD": 370.0, "PAXG-USD": 4040.0})
+        assert md._fresh_price_driver() == ("GLD", 370.0)
+    finally:
+        cache.close()

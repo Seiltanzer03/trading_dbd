@@ -106,12 +106,13 @@ class MarketData:
         self._price_change_ts: float | None = None
         self._last_price_rest_attempt = 0.0
         self._last_proxy_rest_attempt = 0.0
-        # Yahoo WebSocket нередко отдаёт ETF (QQQ/GLD), но молчит по cash index
-        # или активному фьючерсу. Тогда сохраняем синхронную пару
-        # instrument↔proxy и переносим только последующую ДОХОДНОСТЬ proxy.
+        # Yahoo WebSocket нередко отдаёт proxy, но молчит по cash index или
+        # активному фьючерсу. Тогда сохраняем синхронную пару instrument↔driver
+        # и переносим только последующую ДОХОДНОСТЬ driver.
         # Это не новая «котировка фьючерса», а явно помеченный live mapping.
         self._price_anchor_raw: float | None = None
         self._price_anchor_proxy: float | None = None
+        self._price_anchor_driver: str | None = None
         self._price_anchor_ts: float | None = None
         self.intraday: list[tuple[float, float, float]] = []  # (ts, price, volume)
         self.daily = {"bars": None, **_status_dict()}
@@ -143,6 +144,7 @@ class MarketData:
             self._last_proxy_rest_attempt = 0.0
             self._price_anchor_raw = None
             self._price_anchor_proxy = None
+            self._price_anchor_driver = None
             self._price_anchor_ts = None
             self.intraday = []
             self.daily = {"bars": None, **_status_dict()}
@@ -185,14 +187,41 @@ class MarketData:
             return None
         return self.stream.fresh(proxy, max_age=8.0)
 
+    def _price_driver_tickers(self) -> tuple[str, ...]:
+        """Тиковые proxy для цены; option-proxy — совместимый default."""
+        if self.instrument.live_price_drivers:
+            return self.instrument.live_price_drivers
+        proxy = self.instrument.options_proxy
+        return (proxy,) if proxy else ()
+
+    def _fresh_price_driver(self, preferred: str | None = None
+                            ) -> tuple[str, float] | None:
+        if self.stream is None:
+            return None
+        tickers = (preferred,) if preferred else self._price_driver_tickers()
+        for ticker in tickers:
+            if not ticker:
+                continue
+            value = self.stream.fresh(ticker, max_age=8.0)
+            if value is not None:
+                return ticker, float(value)
+        return None
+
     def _set_price_anchor(self, raw: float, proxy: float | None,
-                          ts: float | None = None) -> None:
+                          ts: float | None = None,
+                          driver_ticker: str | None = None) -> None:
         if proxy is None or not math.isfinite(proxy) or proxy <= 0:
             return
         if not math.isfinite(raw) or raw <= 0:
             return
+        if driver_ticker is None:
+            drivers = self._price_driver_tickers()
+            driver_ticker = drivers[0] if drivers else None
+        if driver_ticker is None:
+            return
         self._price_anchor_raw = float(raw)
         self._price_anchor_proxy = float(proxy)
+        self._price_anchor_driver = driver_ticker
         self._price_anchor_ts = float(ts if ts is not None else time.time())
 
     def _mapped_proxy_tick(self, now: float | None = None) -> dict | None:
@@ -203,8 +232,9 @@ class MarketData:
         `inverse` меняет знак доходности. Старый якорь не используется бесконечно.
         """
         now = time.time() if now is None else now
-        proxy = self.instrument.options_proxy
-        sp = self._fresh_proxy_stream()
+        proxy = self._price_anchor_driver
+        live_driver = self._fresh_price_driver(preferred=proxy)
+        sp = live_driver[1] if live_driver else None
         if (proxy is None or sp is None or self._price_anchor_raw is None
                 or self._price_anchor_proxy is None or self._price_anchor_ts is None):
             return None
@@ -231,6 +261,7 @@ class MarketData:
             ),
             "derived": True,
             "driver_ticker": proxy,
+            "driver_experimental": proxy != self.instrument.options_proxy,
             "anchor_ticker": self.instrument.yahoo,
             "anchor_age_sec": round(max(age, 0.0), 1),
             "anchor_value": self._price_anchor_raw,
@@ -310,7 +341,10 @@ class MarketData:
                 self.price = _status_dict(sp, "live", now,
                                           source=f"stream {self.instrument.yahoo}")
                 self.price["derived"] = False
-                self._set_price_anchor(sp, self._fresh_proxy_stream(), now)
+                driver = self._fresh_price_driver()
+                self._set_price_anchor(
+                    sp, driver[1] if driver else None, now,
+                    driver_ticker=driver[0] if driver else None)
                 self._annotate_freshness()
                 self.intraday.append((now, sp, 0.0))
                 self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
@@ -350,12 +384,16 @@ class MarketData:
                     raise RuntimeError("Yahoo вернул пустую историю")
                 p = float(hist["Close"].iloc[-1])
             anchor_now = time.time()
-            proxy_tick = self._fresh_proxy_stream()
+            driver = self._fresh_price_driver()
+            proxy_tick = driver[1] if driver else None
+            driver_ticker = driver[0] if driver else None
             if proxy_tick is None and self.proxy_price.get("value") is not None:
                 proxy_tick = float(self.proxy_price["value"])
-            self._set_price_anchor(p, proxy_tick, anchor_now)
+                driver_ticker = self.instrument.options_proxy
+            self._set_price_anchor(
+                p, proxy_tick, anchor_now, driver_ticker=driver_ticker)
             mapped = self._mapped_proxy_tick(anchor_now)
-            if mapped is not None and self._fresh_proxy_stream() is not None:
+            if mapped is not None:
                 self.price = mapped
             else:
                 self.price = _status_dict(
