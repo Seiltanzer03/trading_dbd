@@ -43,6 +43,7 @@ export function initIVSurface(elId) {
   let rendering = false;
   let model = null, pendingPayload = null;
   let interacting = false, interactTimer = null;
+  let pointerHeld = false, userCamera = false;
   let targetLiveX = 0, displayLiveX = 0, lastFrame = performance.now(), lastDraw = 0;
 
   const INIT_CAM = { eye: { x: 1.4, y: -1.4, z: 0.82 }, up: { x: 0, y: 0, z: 1 } };
@@ -53,45 +54,79 @@ export function initIVSurface(elId) {
   }
   function grabCam() {
     const c = el?._fullLayout?.scene?.camera;
-    if (c && c.eye) currentCam = c;
+    if (c && c.eye) currentCam = JSON.parse(JSON.stringify(c));
+  }
+  function cameraFromEvent(ev) {
+    if (!ev || typeof ev !== 'object') return;
+    if (ev['scene.camera']?.eye) {
+      currentCam = JSON.parse(JSON.stringify(ev['scene.camera'])); userCamera = true; return;
+    }
+    const next = JSON.parse(JSON.stringify(currentCam));
+    let changed = false;
+    for (const [key, value] of Object.entries(ev)) {
+      if (!key.startsWith('scene.camera.')) continue;
+      const parts = key.slice('scene.camera.'.length).split('.');
+      let dst = next;
+      for (let i = 0; i < parts.length - 1; i++) dst = dst[parts[i]] ||= {};
+      dst[parts.at(-1)] = value; changed = true;
+    }
+    if (changed) { currentCam = next; userCamera = true; }
+  }
+  function sameCamera(a, b) {
+    return ['eye', 'center', 'up'].every((k) => ['x', 'y', 'z'].every((q) =>
+      Math.abs(Number(a?.[k]?.[q] || 0) - Number(b?.[k]?.[q] || 0)) < 1e-5));
+  }
+  function pinAfter(write, pinned = JSON.parse(JSON.stringify(currentCam))) {
+    if (!userCamera) return write;
+    Promise.resolve(write).then(() => {
+      if (!interacting && !sameCamera(el?._fullLayout?.scene?.camera, pinned))
+        window.Plotly.relayout(el, { 'scene.camera': pinned });
+    });
+    return write;
+  }
+  function beginPointer() {
+    pointerHeld = true; interacting = true;
+    if (interactTimer) clearTimeout(interactTimer);
   }
   function markInteract() {
     interacting = true;
     if (interactTimer) clearTimeout(interactTimer);
-    interactTimer = setTimeout(releaseInteract, 250);
+    if (!pointerHeld) interactTimer = setTimeout(finishInteraction, 280);
+  }
+  function finishInteraction() {
+    interacting = false;
+    if (pendingPayload) {
+      const p = pendingPayload; pendingPayload = null; render(null, p);
+    }
   }
   function releaseInteract() {
-    grabCam();
+    if (!pointerHeld) return;
+    pointerHeld = false;
     if (interactTimer) clearTimeout(interactTimer);
-    interactTimer = setTimeout(() => {
-      grabCam();
-      interacting = false;
-      if (pendingPayload) {
-        const p = pendingPayload;
-        pendingPayload = null;
-        render(null, p);
-      }
-    }, 80);
+    requestAnimationFrame(() => {
+      grabCam(); userCamera = true;
+      interactTimer = setTimeout(finishInteraction, 140);
+    });
   }
   function attachListeners() {
     if (listenersOn || !el?.on) return;
     listenersOn = true;
-    el.on('plotly_relayouting', () => {
+    el.on('plotly_relayouting', (ev) => {
       markInteract();
-      grabCam();
-      requestAnimationFrame(grabCam);
+      cameraFromEvent(ev);
     });
-    el.on('plotly_relayout', () => {
-      grabCam();
-      requestAnimationFrame(grabCam);
-    });
-    el.addEventListener('mousedown', markInteract);
-    el.addEventListener('pointerdown', markInteract);
-    el.addEventListener('touchstart', markInteract, { passive: true });
+    el.on('plotly_relayout', cameraFromEvent);
+    if (window.PointerEvent) {
+      el.addEventListener('pointerdown', beginPointer, true);
+      window.addEventListener('pointerup', releaseInteract, true);
+      window.addEventListener('pointercancel', releaseInteract, true);
+    } else {
+      el.addEventListener('mousedown', beginPointer, true);
+      el.addEventListener('touchstart', beginPointer, { passive: true, capture: true });
+      window.addEventListener('mouseup', releaseInteract, true);
+      window.addEventListener('touchend', releaseInteract, { passive: true, capture: true });
+    }
     el.addEventListener('wheel', markInteract, { passive: true });
-    window.addEventListener('mouseup', releaseInteract);
-    window.addEventListener('pointerup', releaseInteract);
-    window.addEventListener('touchend', releaseInteract, { passive: true });
   }
 
   function normalizePayload(surfacePayload) {
@@ -280,11 +315,12 @@ export function initIVSurface(elId) {
   function layoutFor() {
     return {
       margin: { t: 5, b: 5, l: 0, r: 55 },
+      uirevision: 'iv-surface-ui-v3',
       paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
       font: { family: FONT, color: INK },
       legend: { orientation: 'h', x: 0, y: 1.03, font: { size: 9 } },
       scene: {
-        dragmode: 'orbit', camera: currentCam,
+        dragmode: 'orbit', camera: currentCam, uirevision: 'iv-surface-camera-v3',
         xaxis: {
           title: { text: 'MONEYNESS VS SNAPSHOT %', font: { family: FONT, size: 12, color: '#111' } },
           tickfont: { family: FONT, size: 10, color: '#222' },
@@ -316,11 +352,11 @@ export function initIVSurface(elId) {
     if (!ready() || !hasPlot || !model || interacting) return;
     const g = liveGeometry(displayLiveX);
     if (!g) return;
-    window.Plotly.restyle(el, {
+    pinAfter(window.Plotly.restyle(el, {
       x: [g.wallX, Array(model.yDte.length).fill(g.x), [g.x]],
       y: [g.wallY, model.yDte, [model.yDte[0]]],
       z: [g.wallZ, g.z, [g.z[0] + 0.01]],
-    }, [LIVE_CURTAIN, LIVE_RIDGE, LIVE_DOT]);
+    }, [LIVE_CURTAIN, LIVE_RIDGE, LIVE_DOT]));
     updateStatus(model.payload, g.x, g.z);
   }
 
@@ -369,7 +405,7 @@ export function initIVSurface(elId) {
     el.style.opacity = '1';
     const empty = document.getElementById('iv-surface-empty');
     if (empty) empty.style.display = 'none';
-    if (hasPlot) grabCam();
+    if (hasPlot && !userCamera) grabCam();
     const layout = layoutFor();
     layout.scene.camera = currentCam;
     const config = {
@@ -382,7 +418,7 @@ export function initIVSurface(elId) {
       hasPlot = true;
       snapshotSig = sig;
       attachListeners();
-      grabCam();
+      if (!userCamera) grabCam();
       updateStatus(payload, g.x, g.z);
       if (pendingPayload) {
         const p = pendingPayload;
@@ -393,7 +429,7 @@ export function initIVSurface(elId) {
     rendering = true;
     const plotPromise = !hasPlot
       ? window.Plotly.newPlot(el, tracesFor(g), layout, config)
-      : window.Plotly.react(el, tracesFor(g), layout, config);
+      : pinAfter(window.Plotly.react(el, tracesFor(g), layout, config));
     plotPromise.then(done).catch((err) => {
       rendering = false;
       console.error('[seiltanzer] IV surface render failed', err);

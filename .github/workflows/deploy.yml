@@ -30,6 +30,8 @@ jobs:
           pip install -e ".[dev]"
           pytest -q
           node --check seiltanzer/web/js/cone.js
+          node --check seiltanzer/web/js/iv_surface.js
+          node --check seiltanzer/web/js/levels.js
           node tests/web/cone_interaction_smoke.mjs
       - name: Деплой на сервер по SSH
         if: env.HAS_PW == 'true'

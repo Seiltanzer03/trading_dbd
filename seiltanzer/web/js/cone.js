@@ -48,6 +48,7 @@ export function initCone(elId) {
   let curR = null, lastDotR = null;
   let interacting = false, interactTimer = null;
   let pointerHeld = false;
+  let userCamera = false;
   let lastYTitle = null, lastNames = null;
   const live = { r: null };
 
@@ -72,8 +73,38 @@ export function initCone(elId) {
     if (!c || !c.eye) return null;
     return JSON.parse(JSON.stringify(c));
   }
+  function cameraFromEvent(ev) {
+    if (!ev || typeof ev !== 'object') return;
+    if (ev['scene.camera']?.eye) {
+      currentCam = cloneCam(ev['scene.camera']); userCamera = true; return;
+    }
+    const next = cloneCam(currentCam);
+    let changed = false;
+    for (const [key, value] of Object.entries(ev)) {
+      if (!key.startsWith('scene.camera.')) continue;
+      const parts = key.slice('scene.camera.'.length).split('.');
+      let dst = next;
+      for (let i = 0; i < parts.length - 1; i++) dst = dst[parts[i]] ||= {};
+      dst[parts[parts.length - 1]] = value;
+      changed = true;
+    }
+    if (changed) { currentCam = next; userCamera = true; }
+  }
+  function sameCamera(a, b) {
+    const vals = (c) => ['eye', 'center', 'up'].flatMap((k) =>
+      ['x', 'y', 'z'].map((q) => Number(c?.[k]?.[q] ?? 0)));
+    const av = vals(a), bv = vals(b);
+    return av.every((v, i) => Math.abs(v - bv[i]) < 1e-5);
+  }
+  function pinAfter(write, pinned = cloneCam(currentCam)) {
+    if (!userCamera || !pinned) return write;
+    Promise.resolve(write).then(() => {
+      if (!interacting && !sameCamera(el._fullLayout?.scene?.camera, pinned))
+        window.Plotly.relayout(el, { 'scene.camera': pinned });
+    });
+    return write;
+  }
   function finishInteraction() {
-    grabCam();
     interacting = false;
     flush();
   }
@@ -98,11 +129,11 @@ export function initCone(elId) {
   function releaseInteract() {
     if (!pointerHeld) return;
     pointerHeld = false;
-    grabCam();
     if (interactTimer) clearTimeout(interactTimer);
     // Plotly commits the final camera just after the DOM pointerup event.
     requestAnimationFrame(() => {
       grabCam();
+      userCamera = true;
       interactTimer = setTimeout(finishInteraction, 140);
     });
   }
@@ -112,14 +143,12 @@ export function initCone(elId) {
     // В 971ee28 камера сохранялась из _fullLayout на каждом событии Plotly.
     // Это важно: реальный drag часто присылает granular keys
     // scene.camera.eye.x, а не цельный scene.camera в payload.
-    el.on('plotly_relayouting', () => {
+    el.on('plotly_relayouting', (ev) => {
       markInteract();
-      grabCam();
-      requestAnimationFrame(grabCam);
+      cameraFromEvent(ev);
     });
-    el.on('plotly_relayout', () => {
-      grabCam();
-      requestAnimationFrame(grabCam);
+    el.on('plotly_relayout', (ev) => {
+      cameraFromEvent(ev);
     });
     // Capture before Plotly so the animation loop is frozen for the whole drag.
     if (window.PointerEvent) {
@@ -194,7 +223,7 @@ export function initCone(elId) {
       I.push(b0, t0); J.push(t0, b1); K.push(b1, t1);
     }
     return { type: 'mesh3d', x: vx, y: vy, z: vz, i: I, j: J, k: K,
-             color, opacity: 0.35, flatshading: true, hoverinfo: 'skip', showlegend: false };
+             color, opacity: 0.11, flatshading: true, hoverinfo: 'skip', showlegend: false };
   }
   function wallEdge(xConst, series, color, label) {
     const pLabel = tgt.probabilityAvailable
@@ -366,7 +395,7 @@ export function initCone(elId) {
     return [surface,
       wallMesh(-1, disp.pStop, RED), wallMesh(tgt.T, disp.pTake, GREEN),
       wallEdge(-1, disp.pStop, RED, 'СТОП'), wallEdge(tgt.T, disp.pTake, GREEN, 'ТЕЙК'),
-      ridge(tgt.modeX, INK, 5, 'OPTION MODE', true),
+      ridge(tgt.modeX, INK, 3, 'OPTION MODE', true),
       ridge(tgt.q20X, 'rgba(20,20,15,0.35)', 2, 'Q20', false),
       ridge(tgt.q80X, 'rgba(20,20,15,0.35)', 2, 'Q80', false),
       trail, ball];
@@ -419,7 +448,7 @@ export function initCone(elId) {
       P.newPlot(el, traces, layout, config);
       hasPlot = true; attachListeners();
     } else {
-      P.react(el, traces, layout, config);
+      pinAfter(P.react(el, traces, layout, config));
     }
     structSig = tgt.structSig;
   }
@@ -446,14 +475,15 @@ export function initCone(elId) {
     return maxd > 1e-4;
   }
   function applyMorph() {
-    window.Plotly.restyle(el,
+    pinAfter(window.Plotly.restyle(el,
       { z: [disp.z, wallVZ(disp.pStop), wallVZ(disp.pTake), disp.pStop, disp.pTake] },
-      [SURF, MESH_STOP, MESH_TAKE, EDGE_STOP, EDGE_TAKE]);
+      [SURF, MESH_STOP, MESH_TAKE, EDGE_STOP, EDGE_TAKE]));
   }
   function applyDot() {
     const d = dotCoords(curR);
-    window.Plotly.restyle(el, { x: [d.tx, [d.Rp]], y: [d.ty, [d.yFrac]], z: [d.tz, [d.dotZ]] },
-      [TRAIL, BALL]);
+    pinAfter(window.Plotly.restyle(el,
+      { x: [d.tx, [d.Rp]], y: [d.ty, [d.yFrac]], z: [d.tz, [d.dotZ]] },
+      [TRAIL, BALL]));
   }
   // редкое обновление «хрома» (заголовок оси = медиана, легенда = проценты) без
   // пересбора; камера пиннится, чтобы relayout не сбросил вид.
@@ -467,8 +497,8 @@ export function initCone(elId) {
       lastYTitle = yTitle;
       const yTicktext = tgt.hy ? ['сейчас', fmtTime(tgt.hy * 0.5), fmtTime(tgt.hy)]
         : ['сейчас', '50%', 'развязка'];
-      P.relayout(el, { 'scene.yaxis.title.text': yTitle,
-                       'scene.yaxis.ticktext': yTicktext });
+      pinAfter(P.relayout(el, { 'scene.yaxis.title.text': yTitle,
+                               'scene.yaxis.ticktext': yTicktext }));
     }
     const nStop = tgt.probabilityAvailable
       ? `СТОП ${(tgt.pStop[tgt.pStop.length - 1] * 100).toFixed(0)}%`
@@ -478,16 +508,16 @@ export function initCone(elId) {
       : 'ТЕЙК · БАРЬЕР';
     if (!lastNames || nStop !== lastNames[0] || nTake !== lastNames[1]) {
       lastNames = [nStop, nTake];
-      P.restyle(el, { name: [nStop, nTake] }, [EDGE_STOP, EDGE_TAKE]);
+      pinAfter(P.restyle(el, { name: [nStop, nTake] }, [EDGE_STOP, EDGE_TAKE]));
     }
-    P.restyle(el, { customdata: [tgt.conditional.map((row, j) =>
-      row.map((p) => [p, tgt.survival[j]]))] }, [SURF]);
+    pinAfter(P.restyle(el, { customdata: [tgt.conditional.map((row, j) =>
+      row.map((p) => [p, tgt.survival[j]]))] }, [SURF]));
     const railZ = (xs) => xs.map((x, j) => surfZ(x, tgt.ys[j]) + 0.008);
-    P.restyle(el, {
+    pinAfter(P.restyle(el, {
       x: [tgt.modeX, tgt.q20X, tgt.q80X],
       y: [tgt.ys, tgt.ys, tgt.ys],
       z: [railZ(tgt.modeX), railZ(tgt.q20X), railZ(tgt.q80X)],
-    }, [MODE, Q20, Q80]);
+    }, [MODE, Q20, Q80]));
   }
 
   // ------------------------------------------------------------- публичное API

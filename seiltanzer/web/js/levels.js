@@ -28,8 +28,14 @@ export function initLevels(canvas) {
     const p = Number(levels.price);
     const last = pricePath[pricePath.length - 1];
     if (Number.isFinite(p) && (!last || Math.abs(p - last.p) > 1e-12)) {
-      pricePath.push({ p, ts: performance.now() });
-      if (pricePath.length > 56) pricePath.shift();
+      const risk = Math.abs(Number(levels.entry) - Number(levels.stop)) || Math.abs(p) * 0.001;
+      // A feed/proxy switch is not market velocity: do not draw it through the map.
+      const feedJump = last
+        && Math.abs(p - last.p) > Math.max(risk * 3, Math.abs(p) * 0.008);
+      if (feedJump)
+        pricePath = [];
+      pricePath.push({ p, ts: performance.now(), d: last && !feedJump ? p - last.p : 0 });
+      if (pricePath.length > 42) pricePath.shift();
     }
     data = levels;
     updateView(p);
@@ -218,33 +224,29 @@ export function initLevels(canvas) {
                    x, axisY + 31);
     }
 
-    // Реальный тик-трейл вместо случайных «частиц потока». Каждая точка — цена,
-    // реально полученная от фида; возраст кодируется высотой и прозрачностью.
+    // Честные «летящие шарики»: каждый шар = реально полученная котировка.
+    // Они не соединяются ложной линией; вверх уходит реальное время, цвет
+    // показывает знак микродвижения, размер — его скорость относительно риска.
+    const now = performance.now(), tapeWindow = 30000;
+    pricePath = pricePath.filter((pt) => now - pt.ts <= tapeWindow);
     const visiblePath = pricePath.filter((pt) => inRange(pt.p));
-    if (visiblePath.length > 1) {
-      ctx.lineWidth = 1.6;
-      ctx.strokeStyle = 'rgba(232,98,42,0.58)';
+    for (const pt of visiblePath) {
+      const age = Math.max(0, Math.min(1, (now - pt.ts) / tapeWindow));
+      const impulse = Math.min(1, Math.abs(pt.d || 0) / Math.max(risk * 0.08, 1e-12));
+      const y = axisY - 8 - age * 34;
+      ctx.globalAlpha = 0.18 + (1 - age) * 0.78;
+      ctx.fillStyle = pt.d > 0 ? COLORS.green : pt.d < 0 ? COLORS.red : '#E8622A';
       ctx.beginPath();
-      visiblePath.forEach((pt, i) => {
-        const age = (visiblePath.length - 1 - i) / Math.max(visiblePath.length - 1, 1);
-        const y = axisY - 8 - age * 25;
-        if (i === 0) ctx.moveTo(X(pt.p), y);
-        else ctx.lineTo(X(pt.p), y);
-      });
-      ctx.stroke();
-      for (let i = 0; i < visiblePath.length; i += 4) {
-        const pt = visiblePath[i];
-        const age = (visiblePath.length - 1 - i) / Math.max(visiblePath.length - 1, 1);
-        ctx.globalAlpha = 0.18 + (1 - age) * 0.62;
-        ctx.fillStyle = '#E8622A';
-        ctx.beginPath(); ctx.arc(X(pt.p), axisY - 8 - age * 25, 1.4, 0, Math.PI * 2); ctx.fill();
-      }
-      ctx.globalAlpha = 1;
+      ctx.arc(X(pt.p), y, 1.8 + impulse * 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+      ctx.lineWidth = 0.7; ctx.stroke();
     }
+    ctx.globalAlpha = 1; ctx.lineWidth = 1;
 
     // Детерминированный условный gamma-vector: показывает только геометрию
     // сценария от текущей цены к магниту, без выдуманного наблюдаемого потока.
-    if (gm && inRange(gm.magnet) && inRange(pnow)) {
+    if (gm && Number(gm.strength || 0) >= 0.2 && inRange(gm.magnet) && inRange(pnow)) {
       const x0 = X(pnow), x1 = X(gm.magnet), y = axisY - 42;
       ctx.globalAlpha = 0.25 + 0.45 * Math.max(0, Math.min(1, gm.strength || 0));
       ctx.strokeStyle = '#E8622A'; ctx.lineWidth = 1.2;
@@ -253,6 +255,10 @@ export function initLevels(canvas) {
       ctx.fillStyle = '#E8622A';
       ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x1 - dir * 6, y - 3);
       ctx.lineTo(x1 - dir * 6, y + 3); ctx.closePath(); ctx.fill();
+      ctx.font = '7.5px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`УСЛ. Γ ${(Math.min(1, gm.strength || 0) * 100).toFixed(0)}%`,
+                   (x0 + x1) / 2, y - 5);
       ctx.globalAlpha = 1;
     }
   }
