@@ -1,0 +1,5950 @@
+#!/usr/bin/env python3
+"""Validate the public OpenBuild package without third-party dependencies."""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+import re
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PLUGIN = ROOT / "plugins" / "openbuild"
+SKILL = PLUGIN / "skills" / "build"
+BLINDSPOT_PROTOCOL = SKILL / "references" / "blindspot-protocol.md"
+IMPLEMENTATION_DELEGATION = SKILL / "references" / "implementation-delegation.md"
+REVIEW_PROTOCOL = SKILL / "references" / "review-protocol.md"
+AGENT_RUNNER = SKILL / "scripts" / "agent_runner.py"
+RECOVERY_STATE = SKILL / "scripts" / "recovery_state.py"
+MODEL_MAP_RESOLVER = SKILL / "scripts" / "model_map.py"
+DISCOVERY_CONTRACT = SKILL / "scripts" / "discovery_contract.py"
+PROJECT_STATE = SKILL / "scripts" / "project_state.py"
+PROJECT_LANES = SKILL / "scripts" / "project_lanes.py"
+PROJECT_SCOPES = SKILL / "scripts" / "project_scopes.py"
+PACKAGED_MODEL_MAP = SKILL / "profiles" / "openbuild_model_map.toml"
+MODEL_MAP_INTERVIEW = SKILL / "references" / "model-map-interview.md"
+PACKAGED_SEARCH_MODEL = "gpt-5.3-codex-spark"
+PACKAGED_AGENT_DEFAULTS = {
+    "openbuild_search_separate": (PACKAGED_SEARCH_MODEL, "low", "read-only"),
+    "openbuild_search_balanced": ("gpt-5.6-terra", "medium", "read-only"),
+    "openbuild_search_strong": ("gpt-5.6-sol", "high", "read-only"),
+    "openbuild_search_strongest": ("gpt-5.6-sol", "xhigh", "read-only"),
+    "openbuild_implementation_fast": ("gpt-5.6-luna", "medium", "workspace-write"),
+    "openbuild_implementation_luna_xhigh": ("gpt-5.6-luna", "xhigh", "workspace-write"),
+    "openbuild_implementation_balanced": ("gpt-5.6-terra", "medium", "workspace-write"),
+    "openbuild_implementation_strong": ("gpt-5.6-terra", "xhigh", "workspace-write"),
+    "openbuild_implementation_sol_high": ("gpt-5.6-sol", "high", "workspace-write"),
+    "openbuild_implementation_strongest": ("gpt-5.6-sol", "xhigh", "workspace-write"),
+    "openbuild_review_fast": ("gpt-5.6-luna", "medium", "read-only"),
+    "openbuild_review_luna_xhigh": ("gpt-5.6-luna", "xhigh", "read-only"),
+    "openbuild_review_balanced": ("gpt-5.6-terra", "medium", "read-only"),
+    "openbuild_review_strong": ("gpt-5.6-terra", "xhigh", "read-only"),
+    "openbuild_review_sol_high": ("gpt-5.6-sol", "high", "read-only"),
+    "openbuild_review_strongest": ("gpt-5.6-sol", "xhigh", "read-only"),
+}
+PACKAGED_ROUTING_RUNG = {
+    **{f"openbuild_{role}_fast": "luna-medium" for role in ("implementation", "review")},
+    **{f"openbuild_{role}_luna_xhigh": "luna-xhigh" for role in ("implementation", "review")},
+    **{f"openbuild_{role}_balanced": "terra-medium" for role in ("implementation", "review")},
+    **{f"openbuild_{role}_strong": "terra-xhigh" for role in ("implementation", "review")},
+    **{f"openbuild_{role}_sol_high": "sol-high" for role in ("implementation", "review")},
+    **{f"openbuild_{role}_strongest": "sol-xhigh" for role in ("implementation", "review")},
+}
+PACKAGED_AGENT_PROFILES = {
+    name: SKILL / "profiles" / f"{name}.toml" for name in PACKAGED_AGENT_DEFAULTS
+}
+PACKAGED_SEARCH_PROFILE = PACKAGED_AGENT_PROFILES["openbuild_search_separate"]
+PACKAGED_SEARCH_INSTRUCTIONS = (
+    "You are the already-delegated read-only Explorer. Do not spawn or delegate to another agent.\n\n"
+    "When code discovery, broad rg, route or symbol lookup, owner mapping, or cross-file evidence gathering is needed:\n"
+    "- perform repository search, rg, rg --files, Get-Content, and local file reading yourself;\n"
+    "- do not edit files, write configuration, make product or architecture decisions, commit, push, or answer the user;\n"
+    "- return exactly one UTF-8 JSON object and no Markdown fences or surrounding prose;\n"
+    "- use schema openbuild.discovery.v1 with exactly these fields: schema, worktree_fingerprint, summary, owners, couplings, tests, flows, constraints, uncertainties;\n"
+    "- copy the runtime-provided worktree_fingerprint object exactly; it is owner-verified before and after the run;\n"
+    "- make owners, couplings, tests, and flows flat arrays whose items directly use exactly path, line_start, line_end, symbol, reason and optional kind/related_path; make owners and tests non-empty;\n"
+    "- make constraints and uncertainties arrays of bounded strings, never evidence objects or nested structures;\n"
+    "- keep every path repository-relative and every line range tight: line_end - line_start + 1 must be at most 200, and one item must never combine distant symbols; include relevant constraints, uncertainties, negative results, and the search stop condition in the bounded fields;\n"
+    "- never cite generated build-output, vendor, dependency, cache, coverage, or artifact paths; source directories named build remain valid evidence; keep raw logs and large file dumps out of the result.\n\n"
+    "The main process validates the strict JSON, paths, ranges, owner/test evidence, and fingerprint before consuming it.\n"
+)
+
+REQUIRED = [
+    ROOT / ".agents" / "plugins" / "marketplace.json",
+    ROOT / ".gitattributes",
+    ROOT / ".gitignore",
+    ROOT / "README.md",
+    ROOT / "README.ru.md",
+    ROOT / "CONTRIBUTING.md",
+    ROOT / "LICENSE",
+    ROOT / "CHANGELOG.md",
+    PLUGIN / ".codex-plugin" / "plugin.json",
+    SKILL / "SKILL.md",
+    SKILL / "agents" / "openai.yaml",
+    SKILL / "references" / "spec-template.md",
+    BLINDSPOT_PROTOCOL,
+    SKILL / "references" / "code-discovery.md",
+    IMPLEMENTATION_DELEGATION,
+    SKILL / "references" / "minimality-protocol.md",
+    SKILL / "references" / "model-routing.md",
+    MODEL_MAP_INTERVIEW,
+    REVIEW_PROTOCOL,
+    AGENT_RUNNER,
+    RECOVERY_STATE,
+    MODEL_MAP_RESOLVER,
+    DISCOVERY_CONTRACT,
+    PROJECT_STATE,
+    PROJECT_LANES,
+    PROJECT_SCOPES,
+    PACKAGED_MODEL_MAP,
+    *PACKAGED_AGENT_PROFILES.values(),
+    SKILL / "references" / "tdd-workflow.md",
+    SKILL / "references" / "versioning.md",
+    ROOT / "scripts" / "test_validate_package.py",
+    ROOT / "scripts" / "test_agent_runner.py",
+    ROOT / "scripts" / "test_recovery_state.py",
+    ROOT / "scripts" / "test_model_map.py",
+    ROOT / "scripts" / "test_discovery_contract.py",
+    ROOT / "scripts" / "test_project_lanes.py",
+]
+
+TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".toml", ".py"}
+SEMVER_IDENTIFIER = r"(?:0|[1-9]\d*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+SEMVER_PRERELEASE = rf"{SEMVER_IDENTIFIER}(?:\.{SEMVER_IDENTIFIER})*"
+SEMVER_BUILD = r"[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*"
+SEMVER = re.compile(
+    rf"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    rf"(?:-{SEMVER_PRERELEASE})?(?:\+{SEMVER_BUILD})?$"
+)
+SEMVER_PARTS = re.compile(
+    r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    rf"(?:-(?P<prerelease>{SEMVER_PRERELEASE}))?(?:\+{SEMVER_BUILD})?$"
+)
+MANIFEST_RELATIVE = "plugins/openbuild/.codex-plugin/plugin.json"
+VERSION_SYNC_PATHS = {MANIFEST_RELATIVE, "CHANGELOG.md", "README.md", "README.ru.md"}
+SEARCH_AGENT = "openbuild_search_separate"
+SEARCH_DISPATCH_FAILURES = {
+    "profile-not-discoverable",
+    "profile-incomplete",
+    "cli-unavailable",
+    "chatgpt-auth-unavailable",
+    "model-unavailable",
+    "quota-exhausted",
+    "sandbox-mismatch",
+    "runner-failed",
+    "spawn-failed",
+    "worker-timeout",
+    "unusable-evidence",
+}
+EXACT_DISPATCH_METHODS = {"codex-exec-explicit-model"}
+IMPLEMENTATION_AGENT_BY_TIER = {
+    "fast": "openbuild_implementation_fast",
+    "luna_xhigh": "openbuild_implementation_luna_xhigh",
+    "balanced": "openbuild_implementation_balanced",
+    "strong": "openbuild_implementation_strong",
+    "sol_high": "openbuild_implementation_sol_high",
+    "strongest": "openbuild_implementation_strongest",
+}
+IMPLEMENTATION_START_BY_RISK = {
+    "low": ("fast", "openbuild_implementation_fast"),
+    "medium": ("balanced", "openbuild_implementation_balanced"),
+    "high": ("balanced", "openbuild_implementation_balanced"),
+    "critical": ("strongest", "openbuild_implementation_strongest"),
+}
+IMPLEMENTATION_MAX_TIER_BY_RISK = {
+    "low": "sol_high",
+    "medium": "sol_high",
+    "high": "sol_high",
+    "critical": "strongest",
+}
+IMPLEMENTATION_TIERS = tuple(IMPLEMENTATION_AGENT_BY_TIER)
+IMPLEMENTATION_NEXT_RUNG = {
+    "openbuild_implementation_fast": "openbuild_implementation_luna_xhigh",
+    "openbuild_implementation_luna_xhigh": "openbuild_implementation_balanced",
+    "openbuild_implementation_balanced": "openbuild_implementation_strong",
+    "openbuild_implementation_strong": "openbuild_implementation_sol_high",
+}
+IMPLEMENTATION_ESCALATION_REASONS = {
+    "task-complexity-above-tier",
+    "unresolved-cross-layer-reasoning",
+    "validation-strategy-uncertain",
+    "capability-gap",
+}
+REVIEW_AGENT_BY_TIER = {
+    "fast": "openbuild_review_fast",
+    "luna_xhigh": "openbuild_review_luna_xhigh",
+    "balanced": "openbuild_review_balanced",
+    "strong": "openbuild_review_strong",
+    "sol_high": "openbuild_review_sol_high",
+    "strongest": "openbuild_review_strongest",
+}
+REVIEW_START_BY_RISK = {
+    "low": "fast",
+    "medium": "balanced",
+    "high": "balanced",
+    "critical": "strongest",
+}
+REVIEW_MAX_TIER_BY_RISK = {
+    "low": "sol_high",
+    "medium": "sol_high",
+    "high": "sol_high",
+    "critical": "strongest",
+}
+REVIEW_TIERS = tuple(REVIEW_AGENT_BY_TIER)
+REVIEW_ESCALATION_REASONS = {
+    "low-confidence",
+    "incomplete-coverage",
+    "conflicting-evidence",
+    "validation-failure",
+    "unresolved-high-impact-finding",
+    "material-diff-change",
+    "complexity-floor",
+}
+CANONICAL_AGENT_IDS = {
+    "openbuild_implementation_fast": "openbuild-implementation-fast",
+    "openbuild_implementation_luna_xhigh": "openbuild-implementation-luna-xhigh",
+    "openbuild_implementation_balanced": "openbuild-implementation-balanced",
+    "openbuild_implementation_strong": "openbuild-implementation-strong",
+    "openbuild_implementation_sol_high": "openbuild-implementation-sol-high",
+    "openbuild_implementation_strongest": "openbuild-implementation-strongest",
+    "openbuild_review_fast": "openbuild-review-fast",
+    "openbuild_review_luna_xhigh": "openbuild-review-luna-xhigh",
+    "openbuild_review_balanced": "openbuild-review-balanced",
+    "openbuild_review_strong": "openbuild-review-strong",
+    "openbuild_review_sol_high": "openbuild-review-sol-high",
+    "openbuild_review_strongest": "openbuild-review-strongest",
+}
+AGENT_NAME = re.compile(r"^[a-z0-9_]+$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+MIGRATION_ENTRY_BINDING_FIELDS = (
+    "scope",
+    "source_path",
+    "target_path",
+    "root_fingerprint",
+    "legacy_name",
+    "target_name",
+    "source_sha256",
+    "target_sha256",
+    "rendered_sha256",
+    "exact_diff",
+    "action",
+)
+
+
+def _canonical_sha256(value: object) -> str:
+    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def migration_entry_id(entry: dict[str, object]) -> str:
+    """Return the stable ID that binds one migration entry to its exact preview."""
+
+    return _canonical_sha256({field: entry.get(field) for field in MIGRATION_ENTRY_BINDING_FIELDS})
+
+
+def migration_supported_mappings() -> list[dict[str, str]]:
+    """Return the complete legacy-to-canonical mapping in canonical order."""
+
+    return [
+        {"legacy_name": legacy, "target_name": canonical}
+        for canonical, legacy in sorted(CANONICAL_AGENT_IDS.items())
+    ]
+
+
+def migration_plan_id(
+    entries: list[dict[str, object]], detected_legacy_names: list[str]
+) -> str:
+    """Return the immutable ID for a complete detected-profile migration preview."""
+
+    payload = {
+        "supported_mappings": migration_supported_mappings(),
+        "detected_legacy_names": sorted(detected_legacy_names),
+        "entry_ids": sorted(str(entry.get("entry_id", "")) for entry in entries),
+    }
+    return _canonical_sha256(payload)
+
+
+def fail(errors: list[str], message: str) -> None:
+    errors.append(message)
+
+
+def read_text(path: Path, errors: list[str]) -> str:
+    data = path.read_bytes()
+    relative = path.relative_to(ROOT)
+    if data.startswith(b"\xef\xbb\xbf"):
+        fail(errors, f"{relative}: UTF-8 BOM is not allowed")
+    if b"\r" in data:
+        fail(errors, f"{relative}: CR/CRLF detected; repository text must use LF")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail(errors, f"{relative}: not valid UTF-8 ({exc})")
+        return ""
+
+
+def _receipt_exit_code(receipt: dict[str, object]) -> int | None:
+    value = receipt.get("codex_exit_code")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def explicit_success_evidence_is_valid(receipt: dict[str, object]) -> bool:
+    return (
+        receipt.get("codex_exit_evidence") == "valid"
+        and _receipt_exit_code(receipt) == 0
+        and receipt.get("result_evidence") == "valid"
+    )
+
+
+def explicit_failure_evidence_is_valid(receipt: dict[str, object]) -> bool:
+    exit_evidence = receipt.get("codex_exit_evidence")
+    result_evidence = receipt.get("result_evidence")
+    exit_code = _receipt_exit_code(receipt)
+    return (
+        exit_evidence in {"missing", "malformed", "identity-mismatch"}
+        or (exit_evidence == "valid" and exit_code is not None and exit_code != 0)
+        or result_evidence in {"missing", "empty", "invalid"}
+        or (
+            receipt.get("fallback_reason") == "unusable-evidence"
+            and receipt.get("terminal_event") == "turn.completed"
+            and explicit_success_evidence_is_valid(receipt)
+        )
+    )
+
+
+def validate_explicit_terminal_evidence(
+    receipt: dict[str, object], *, label: str
+) -> list[str]:
+    """Require complete, internally consistent runner evidence on every explicit terminal receipt."""
+
+    if receipt.get("dispatch_method") != "codex-exec-explicit-model":
+        return []
+    errors: list[str] = []
+    required = {"codex_exit_evidence", "codex_exit_code", "result_evidence"}
+    missing = sorted(field for field in required if field not in receipt)
+    if missing:
+        return [f"{label}: explicit-model terminal receipt missing evidence fields {missing}"]
+    exit_evidence = receipt.get("codex_exit_evidence")
+    result_evidence = receipt.get("result_evidence")
+    raw_exit_code = receipt.get("codex_exit_code")
+    if exit_evidence not in {"valid", "missing", "malformed", "identity-mismatch"}:
+        errors.append(f"{label}: explicit-model terminal receipt has invalid exit evidence state")
+    if result_evidence not in {"valid", "missing", "empty", "invalid"}:
+        errors.append(f"{label}: explicit-model terminal receipt has invalid result evidence state")
+    if exit_evidence == "valid" and (
+        isinstance(raw_exit_code, bool) or not isinstance(raw_exit_code, int)
+    ):
+        errors.append(f"{label}: valid exit evidence requires an integer Codex exit code")
+    if exit_evidence in {"missing", "malformed", "identity-mismatch"} and (
+        raw_exit_code is not None and raw_exit_code != "unknown"
+    ):
+        errors.append(
+            f"{label}: non-valid exit evidence cannot carry a Codex exit code"
+        )
+    run_status = receipt.get("run_status")
+    if run_status == "completed" and not explicit_success_evidence_is_valid(receipt):
+        errors.append(f"{label}: completed receipt needs exit code zero and valid result evidence")
+    if run_status == "failed" and not explicit_failure_evidence_is_valid(receipt):
+        errors.append(
+            f"{label}: failed receipt needs independent exit/result failure evidence"
+        )
+    return errors
+
+
+def validate_packaged_search_profile(profile: dict[str, object]) -> list[str]:
+    """Lock the portable Spark profile and its discovery instruction exactly."""
+
+    errors: list[str] = []
+    expected = {
+        "name": SEARCH_AGENT,
+        "model": PACKAGED_SEARCH_MODEL,
+        "model_reasoning_effort": "low",
+        "sandbox_mode": "read-only",
+    }
+    for field, value in expected.items():
+        if profile.get(field) != value:
+            errors.append(f"openbuild_search_separate.toml: {field} must be {value!r}")
+    if profile.get("developer_instructions") != PACKAGED_SEARCH_INSTRUCTIONS:
+        errors.append(
+            "openbuild_search_separate.toml: developer_instructions must match the exact canonical Explorer contract"
+        )
+    return errors
+
+
+def validate_packaged_agent_profile(
+    agent_name: str,
+    profile: dict[str, object],
+) -> list[str]:
+    """Lock every zero-setup role to its reviewed concrete tuple."""
+
+    model, effort, sandbox = PACKAGED_AGENT_DEFAULTS[agent_name]
+    errors: list[str] = []
+    expected = {
+        "name": agent_name,
+        "model": model,
+        "model_reasoning_effort": effort,
+        "sandbox_mode": sandbox,
+    }
+    if agent_name in PACKAGED_ROUTING_RUNG:
+        expected.update(
+            {
+                "routing_rung": PACKAGED_ROUTING_RUNG[agent_name],
+                "routing_tuple_confirmed": True,
+            }
+        )
+    for field, value in expected.items():
+        if profile.get(field) != value:
+            errors.append(f"{agent_name}.toml: {field} must be {value!r}")
+    for field in ("description", "developer_instructions"):
+        value = profile.get(field)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{agent_name}.toml: {field} must be non-empty")
+    if agent_name == SEARCH_AGENT:
+        errors.extend(validate_packaged_search_profile(profile))
+    elif agent_name.startswith("openbuild_search_") and profile.get("developer_instructions") != PACKAGED_SEARCH_INSTRUCTIONS:
+        errors.append(
+            f"{agent_name}.toml: developer_instructions must match the exact canonical Explorer contract"
+        )
+    elif agent_name.startswith("openbuild_implementation_"):
+        instructions = str(profile.get("developer_instructions", ""))
+        next_rung = IMPLEMENTATION_NEXT_RUNG.get(agent_name)
+        if next_rung is None:
+            if "Capability escalation is forbidden;" not in instructions:
+                errors.append(f"{agent_name}.toml: terminal writer must forbid capability escalation")
+        else:
+            edge = (
+                "Before the first edit, a capability escalation may name only "
+                f"`{next_rung}` as the next rung."
+            )
+            if instructions.count(edge) != 1:
+                errors.append(f"{agent_name}.toml: needs exactly one named pre-edit next-rung permission")
+            elif instructions.find("After any edit") < instructions.find(edge):
+                errors.append(f"{agent_name}.toml: next-rung permission must precede post-edit prohibition")
+            named_rungs = re.findall(r"openbuild_implementation_[a-z0-9_]+", instructions)
+            if named_rungs != [next_rung]:
+                errors.append(f"{agent_name}.toml: may name only its configured next implementation rung")
+    elif agent_name.startswith("openbuild_review_"):
+        instructions = str(profile.get("developer_instructions", ""))
+        if "Escalate only on configured concrete evidence; score alone and timeout, auth, quota, sandbox, or transport failures never escalate." not in instructions:
+            errors.append(f"{agent_name}.toml: reviewer escalation must require concrete evidence and block transport failures")
+        if agent_name == "openbuild_review_strongest" and (
+            "This Sol/xhigh profile is critical-only and is never the next rung for a non-critical review."
+            not in instructions
+        ):
+            errors.append(
+                "openbuild_review_strongest.toml: strongest reviewer must remain critical-only"
+            )
+    return errors
+
+
+def markdown_section(text: str, heading: str) -> str:
+    """Return one Markdown section without matching tokens from later sections."""
+
+    lines = text.splitlines()
+    try:
+        start = lines.index(heading)
+    except ValueError:
+        return ""
+
+    level = len(heading) - len(heading.lstrip("#"))
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        match = re.match(r"^(#{1,6})\s+", lines[index])
+        if match and len(match.group(1)) <= level:
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
+def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
+    """Validate start -> activation -> worker search -> terminal receipt -> evidence use."""
+
+    errors: list[str] = []
+    lookup_indices = [
+        index for index, event in enumerate(events) if event.get("event") == "repository-search"
+    ]
+    if not lookup_indices:
+        return ["search dispatch trace: missing repository-search event"]
+    lookup_index = lookup_indices[0]
+    all_dispatch_indices = [
+        index
+        for index, event in enumerate(events)
+        if event.get("event") == "search-dispatch"
+    ]
+    dispatch_indices = [
+        index
+        for index, event in enumerate(events[:lookup_index])
+        if event.get("event") == "search-dispatch"
+    ]
+    if not dispatch_indices:
+        return ["search dispatch trace: exact agent dispatch must precede repository search"]
+    dispatch_index = dispatch_indices[0]
+    if len(all_dispatch_indices) != 1:
+        errors.append(
+            "search dispatch trace: exactly one discovery dispatch is allowed; "
+            "failed discovery cannot create a replacement agent"
+        )
+    dispatch = events[dispatch_index]
+    agent_name = dispatch.get("agent_name", "")
+    task_name = dispatch.get("task_name", "")
+    if agent_name != SEARCH_AGENT:
+        errors.append(f"search dispatch trace: first dispatch agent_name must select exact agent {SEARCH_AGENT}")
+    if not AGENT_NAME.fullmatch(agent_name):
+        errors.append("search dispatch trace: agent_name must use the runtime-safe lowercase underscore grammar")
+    if not task_name or task_name == agent_name:
+        errors.append("search dispatch trace: task_name must be a separate non-profile task label")
+
+    attempt_result = dispatch.get("result")
+    attempt_reason = dispatch.get("fallback_reason", "")
+    if attempt_result == "selected":
+        if attempt_reason not in {"", "none"}:
+            errors.append("search dispatch trace: selected route must not report a fallback reason")
+    elif attempt_result == "failed":
+        if attempt_reason not in SEARCH_DISPATCH_FAILURES:
+            errors.append("search dispatch trace: failed dispatch must use an allowed fallback reason")
+    else:
+        errors.append("search dispatch trace: dispatch result must be selected or failed")
+
+    receipt_fields = {
+        "search_agent",
+        "task_name",
+        "dispatch_method",
+        "configured_model",
+        "model_reasoning_effort",
+        "sandbox",
+        "observed_agent",
+        "observed_model",
+        "terminal_event",
+        "activated",
+        "run_status",
+        "pool",
+        "dispatch_result",
+        "fallback_reason",
+        "process_tree_stopped",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+    }
+
+    def validate_common_receipt(receipt: dict[str, str]) -> None:
+        missing = sorted(field for field in receipt_fields if field not in receipt)
+        if missing:
+            errors.append(f"search dispatch trace: routing receipt missing fields {missing}")
+        if receipt.get("search_agent") != SEARCH_AGENT:
+            errors.append(f"search dispatch trace: routing receipt must name {SEARCH_AGENT}")
+        if receipt.get("task_name") != task_name:
+            errors.append("search dispatch trace: routing receipt task_name must match the separate task label")
+        if receipt.get("dispatch_method") not in EXACT_DISPATCH_METHODS | {"unavailable"}:
+            errors.append("search dispatch trace: routing receipt has invalid dispatch method")
+
+    receipts = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("event") == "search-routing-receipt"
+    ]
+    consumption_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("event") == "search-evidence-consumed"
+    ]
+    prior_receipts = [(index, receipt) for index, receipt in receipts if dispatch_index < index < lookup_index]
+    if not prior_receipts:
+        errors.append("search dispatch trace: routing receipt must follow dispatch and precede repository search")
+        return errors
+
+    if attempt_result == "failed":
+        receipt_index, receipt = prior_receipts[-1]
+        validate_common_receipt(receipt)
+        errors.extend(
+            validate_explicit_terminal_evidence(receipt, label="search dispatch trace")
+        )
+        if (
+            receipt.get("dispatch_method") == "codex-exec-explicit-model"
+            and receipt.get("sandbox") != "read-only"
+        ):
+            errors.append("search dispatch trace: explicit search runner must be read-only")
+        if receipt.get("run_status") != "failed" or receipt.get("dispatch_result") != "failed":
+            errors.append("search dispatch trace: failed dispatch requires a terminal failed receipt")
+        fallback_reason = receipt.get("fallback_reason", "")
+        if fallback_reason not in SEARCH_DISPATCH_FAILURES or fallback_reason != attempt_reason:
+            errors.append("search dispatch trace: failed receipt must preserve the allowed dispatch reason")
+        terminal_event = receipt.get("terminal_event")
+        if terminal_event not in {None, "none", "turn.failed", "turn.completed"}:
+            errors.append("search dispatch trace: failed explicit-model receipt has invalid terminal event")
+        if terminal_event == "turn.completed" and not explicit_failure_evidence_is_valid(receipt):
+            errors.append("search dispatch trace: failed turn.completed needs independent exit/result failure evidence")
+        if receipt.get("process_tree_stopped") is not True:
+            errors.append("search dispatch trace: terminal failed receipt must confirm the process tree stopped")
+        if consumption_events:
+            errors.append("search dispatch trace: failed worker evidence cannot be consumed")
+        if events[lookup_index].get("actor") != "root":
+            errors.append(
+                "search dispatch trace: failed discovery must transition directly to root recovery"
+            )
+        if fallback_reason == "worker-timeout":
+            confirmations = [
+                event
+                for event in events[dispatch_index + 1 : receipt_index]
+                if event.get("event") == "agent-cancellation-confirmed"
+            ]
+            if not confirmations:
+                errors.append("search dispatch trace: worker-timeout fallback requires cancellation confirmation")
+            else:
+                confirmation = confirmations[-1]
+                if not confirmation.get("worker_pid"):
+                    errors.append("search dispatch trace: cancellation confirmation requires a worker PID")
+                if confirmation.get("codex_started") not in {True, False}:
+                    errors.append("search dispatch trace: cancellation confirmation needs codex_started state")
+                if confirmation.get("codex_started") is True and not confirmation.get("codex_pid"):
+                    errors.append("search dispatch trace: started Codex process requires its PID")
+                if confirmation.get("worker_stopped") is not True or confirmation.get("codex_stopped") is not True:
+                    errors.append("search dispatch trace: cancellation confirmation must prove both processes stopped")
+        return errors
+
+    running_receipts = [
+        (index, receipt)
+        for index, receipt in prior_receipts
+        if receipt.get("run_status") == "running"
+    ]
+    if not running_receipts:
+        errors.append("search dispatch trace: selected worker needs an unactivated running receipt before search")
+        return errors
+    running_index, running = running_receipts[-1]
+    validate_common_receipt(running)
+    if running.get("dispatch_method") != "codex-exec-explicit-model":
+        errors.append("search dispatch trace: selected search requires the explicit CLI runner")
+    if (
+        running.get("configured_model") != PACKAGED_SEARCH_MODEL
+        or running.get("model_reasoning_effort") != "low"
+    ):
+        errors.append(
+            "search dispatch trace: primary packaged runner must use fixed Spark model and low effort"
+        )
+    if running.get("dispatch_result") != "selected" or running.get("fallback_reason") not in {"", "none"}:
+        errors.append("search dispatch trace: running receipt must preserve selected routing")
+    if running.get("activated") is not False or running.get("terminal_event") not in {None, "none"}:
+        errors.append("search dispatch trace: pre-search receipt must be unactivated and non-terminal")
+    if running.get("process_tree_stopped") is not False:
+        errors.append("search dispatch trace: running receipt cannot claim a stopped process tree")
+    if running.get("pool") not in {"separate", "main", "unknown"}:
+        errors.append(
+            "search dispatch trace: pool is reporting metadata and must be separate, main, or unknown"
+        )
+    if running.get("sandbox") != "read-only":
+        errors.append("search dispatch trace: selected search worker must be read-only")
+    for field in ("run_dir", "worker_pid", "worker_process_identity", "codex_pid", "codex_process_identity"):
+        if not running.get(field):
+            errors.append(f"search dispatch trace: running receipt requires {field}")
+
+    prelookup_failures = [
+        (index, receipt)
+        for index, receipt in prior_receipts
+        if index > running_index and receipt.get("run_status") == "failed"
+    ]
+    if prelookup_failures:
+        terminal_index, terminal = prelookup_failures[-1]
+        validate_common_receipt(terminal)
+        errors.extend(
+            validate_explicit_terminal_evidence(terminal, label="search dispatch trace")
+        )
+        for field in (
+            "search_agent",
+            "task_name",
+            "dispatch_method",
+            "configured_model",
+            "model_reasoning_effort",
+            "run_dir",
+            "worker_pid",
+            "worker_process_identity",
+            "codex_pid",
+            "codex_process_identity",
+        ):
+            if terminal.get(field) != running.get(field):
+                errors.append(f"search dispatch trace: failed terminal receipt changed routing field {field}")
+        fallback_reason = terminal.get("fallback_reason", "")
+        if terminal.get("dispatch_result") != "failed" or fallback_reason not in SEARCH_DISPATCH_FAILURES:
+            errors.append("search dispatch trace: failed terminal receipt needs an allowed fallback reason")
+        if terminal.get("process_tree_stopped") is not True:
+            errors.append("search dispatch trace: failed terminal receipt must confirm stopped process tree")
+        terminal_event = terminal.get("terminal_event")
+        if terminal_event not in {None, "none", "turn.failed", "turn.completed"}:
+            errors.append("search dispatch trace: failed terminal receipt has invalid terminal event")
+        if terminal_event == "turn.completed" and not explicit_failure_evidence_is_valid(terminal):
+            errors.append("search dispatch trace: failed turn.completed needs independent exit/result failure evidence")
+        if terminal.get("activated") is True:
+            activations = [
+                event
+                for event in events[running_index + 1 : terminal_index]
+                if event.get("event") == "search-agent-activated"
+            ]
+            if len(activations) != 1:
+                errors.append("search dispatch trace: activated failed worker needs one matching activation event")
+        if events[lookup_index].get("actor") != "root":
+            errors.append(
+                "search dispatch trace: failed discovery must transition directly to root recovery"
+            )
+        if consumption_events:
+            errors.append("search dispatch trace: failed worker evidence cannot be consumed")
+        if fallback_reason == "worker-timeout":
+            confirmations = [
+                event
+                for event in events[running_index + 1 : terminal_index]
+                if event.get("event") == "agent-cancellation-confirmed"
+            ]
+            if not confirmations:
+                errors.append("search dispatch trace: worker-timeout fallback requires cancellation confirmation")
+            else:
+                confirmation = confirmations[-1]
+                if confirmation.get("worker_stopped") is not True or confirmation.get("codex_stopped") is not True:
+                    errors.append("search dispatch trace: cancellation confirmation must prove both processes stopped")
+        return errors
+
+    activations = [
+        event
+        for event in events[running_index + 1 : lookup_index]
+        if event.get("event") == "search-agent-activated"
+    ]
+    if len(activations) != 1:
+        errors.append("search dispatch trace: exactly one matching activation must precede worker search")
+    else:
+        activation = activations[0]
+        bindings = {
+            "search_agent": SEARCH_AGENT,
+            "task_name": task_name,
+            "run_dir": running.get("run_dir"),
+            "worker_process_identity": running.get("worker_process_identity"),
+            "codex_process_identity": running.get("codex_process_identity"),
+        }
+        for field, expected in bindings.items():
+            if activation.get(field) != expected:
+                errors.append(f"search dispatch trace: activation changed {field}")
+        if activation.get("activated") is not True:
+            errors.append("search dispatch trace: activation event must confirm activated true")
+    if events[lookup_index].get("actor") != SEARCH_AGENT:
+        errors.append("search dispatch trace: selected exact agent must own the first repository search")
+
+    terminal_receipts = [
+        (index, receipt)
+        for index, receipt in receipts
+        if index > lookup_index and receipt.get("run_status") in {"completed", "failed"}
+    ]
+    if not terminal_receipts:
+        errors.append("search dispatch trace: terminal routing receipt must follow worker search")
+        return errors
+    terminal_index, terminal = terminal_receipts[0]
+    worker_searches = [
+        event
+        for event in events[lookup_index:terminal_index]
+        if event.get("event") == "repository-search"
+    ]
+    if any(event.get("actor") != SEARCH_AGENT for event in worker_searches):
+        errors.append(
+            "search dispatch trace: every repository search before the selected worker terminal receipt "
+            f"must remain owned by {SEARCH_AGENT}"
+        )
+    if any(
+        event.get("event") == "repository-search" and event.get("actor") == SEARCH_AGENT
+        for event in events[terminal_index + 1 :]
+    ):
+        errors.append(
+            "search dispatch trace: selected worker cannot perform repository search after its terminal receipt"
+        )
+    validate_common_receipt(terminal)
+    errors.extend(validate_explicit_terminal_evidence(terminal, label="search dispatch trace"))
+    for field in (
+        "search_agent",
+        "task_name",
+        "dispatch_method",
+        "configured_model",
+        "model_reasoning_effort",
+        "sandbox",
+        "pool",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+    ):
+        if terminal.get(field) != running.get(field):
+            errors.append(f"search dispatch trace: terminal receipt changed routing field {field}")
+    if terminal.get("activated") is not True or terminal.get("process_tree_stopped") is not True:
+        errors.append("search dispatch trace: terminal receipt must confirm activation and stopped process tree")
+
+    run_status = terminal.get("run_status")
+    if run_status == "completed":
+        if terminal.get("dispatch_result") != "selected" or terminal.get("fallback_reason") not in {"", "none"}:
+            errors.append("search dispatch trace: completed terminal receipt is inconsistent")
+        if terminal.get("terminal_event") != "turn.completed":
+            errors.append("search dispatch trace: completed explicit-model receipt requires turn.completed")
+        if not explicit_success_evidence_is_valid(terminal):
+            errors.append("search dispatch trace: completed receipt needs exit code zero and valid result evidence")
+        if len(consumption_events) != 1:
+            errors.append(
+                "search dispatch trace: completed worker needs exactly one run-bound search evidence consumption"
+            )
+        else:
+            consumption_index, consumption = consumption_events[0]
+            if (
+                consumption.get("actor") != "root"
+                or consumption.get("search_agent") != SEARCH_AGENT
+                or consumption.get("run_dir") != terminal.get("run_dir")
+            ):
+                errors.append(
+                    "search dispatch trace: completed worker needs exactly one run-bound search evidence consumption"
+                )
+            elif consumption_index <= terminal_index:
+                errors.append("search dispatch trace: terminal receipt must precede search evidence consumption")
+    else:
+        if terminal.get("dispatch_result") != "failed" or terminal.get("fallback_reason") not in SEARCH_DISPATCH_FAILURES:
+            errors.append("search dispatch trace: failed terminal receipt needs an allowed fallback reason")
+        terminal_event = terminal.get("terminal_event")
+        if terminal_event not in {None, "none", "turn.failed", "turn.completed"}:
+            errors.append("search dispatch trace: failed terminal receipt has invalid terminal event")
+        if terminal_event == "turn.completed" and not explicit_failure_evidence_is_valid(terminal):
+            errors.append("search dispatch trace: failed turn.completed needs independent exit/result failure evidence")
+        if consumption_events:
+            errors.append("search dispatch trace: failed worker evidence cannot be consumed")
+        post_terminal_searches = [
+            event
+            for event in events[terminal_index + 1 :]
+            if event.get("event") == "repository-search"
+        ]
+        if any(event.get("actor") != "root" for event in post_terminal_searches):
+            errors.append(
+                "search dispatch trace: post-terminal failed discovery permits only root-owned recovery"
+            )
+        if terminal.get("fallback_reason") == "worker-timeout":
+            confirmations = [
+                event
+                for event in events[running_index + 1 : terminal_index]
+                if event.get("event") == "agent-cancellation-confirmed"
+            ]
+            if not confirmations or confirmations[-1].get("worker_stopped") is not True or confirmations[-1].get("codex_stopped") is not True:
+                errors.append("search dispatch trace: worker-timeout fallback requires stopped-process confirmation")
+
+    return errors
+
+
+def validate_profile_migration_trace(events: list[dict[str, object]]) -> list[str]:
+    """Validate the guided legacy-profile migration plan and per-entry receipts."""
+
+    errors: list[str] = []
+    preview_indices = [
+        index for index, event in enumerate(events) if event.get("event") == "profile-migration-preview"
+    ]
+    previews = [events[index] for index in preview_indices]
+    if not previews:
+        return ["profile migration trace: missing migration preview"]
+    if len(previews) != 1:
+        errors.append("profile migration trace: exactly one immutable preview is allowed")
+    preview = previews[0]
+    preview_index = preview_indices[0]
+
+    plan_id = preview.get("plan_id")
+    entries = preview.get("entries")
+    detected_legacy_names = preview.get("detected_legacy_names")
+    if preview.get("supported_mappings") != migration_supported_mappings():
+        errors.append(
+            "profile migration trace: preview must carry the complete supported legacy mapping"
+        )
+    if not isinstance(entries, list):
+        return errors + ["profile migration trace: preview entries must be a list"]
+    if not isinstance(detected_legacy_names, list) or not all(
+        isinstance(value, str) for value in detected_legacy_names
+    ):
+        return errors + [
+            "profile migration trace: preview requires the complete detected legacy inventory"
+        ]
+    if len(detected_legacy_names) != len(set(detected_legacy_names)):
+        errors.append("profile migration trace: detected legacy inventory contains duplicates")
+    unknown_detected = sorted(set(detected_legacy_names) - set(CANONICAL_AGENT_IDS.values()))
+    if unknown_detected:
+        errors.append(
+            f"profile migration trace: detected legacy inventory contains unknown names {unknown_detected}"
+        )
+
+    entries_by_id: dict[str, dict[str, object]] = {}
+    targets: set[str] = set()
+    represented_legacy_names: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            errors.append("profile migration trace: every preview entry must be an object")
+            continue
+        entry_id = entry.get("entry_id")
+        legacy_name = entry.get("legacy_name")
+        target_name = entry.get("target_name")
+        source_sha256 = entry.get("source_sha256")
+        target_sha256 = entry.get("target_sha256")
+        rendered_sha256 = entry.get("rendered_sha256")
+        action = entry.get("action")
+        if not isinstance(entry_id, str) or entry_id in entries_by_id:
+            errors.append("profile migration trace: every entry needs a unique stable entry_id")
+            continue
+        if entry_id != migration_entry_id(entry):
+            errors.append(
+                f"profile migration trace: {entry_id or '<missing>'} entry_id must bind the canonical entry SHA-256"
+            )
+        entries_by_id[entry_id] = entry
+        if target_name not in CANONICAL_AGENT_IDS:
+            errors.append(f"profile migration trace: {entry_id} has an unknown canonical target")
+        elif legacy_name != CANONICAL_AGENT_IDS[target_name]:
+            errors.append(f"profile migration trace: {entry_id} legacy/canonical mapping is invalid")
+        if isinstance(legacy_name, str):
+            represented_legacy_names.add(legacy_name)
+        if not isinstance(target_name, str) or not AGENT_NAME.fullmatch(target_name):
+            errors.append(f"profile migration trace: {entry_id} target must use underscore grammar")
+        if isinstance(target_name, str):
+            if target_name in targets:
+                errors.append(f"profile migration trace: duplicate target {target_name}")
+            targets.add(target_name)
+        if not isinstance(source_sha256, str) or not SHA256.fullmatch(source_sha256):
+            errors.append(f"profile migration trace: {entry_id} needs a source SHA-256 precondition")
+        if target_sha256 != "absent" and (
+            not isinstance(target_sha256, str) or not SHA256.fullmatch(target_sha256)
+        ):
+            errors.append(f"profile migration trace: {entry_id} needs target SHA-256 or absent")
+        if not isinstance(rendered_sha256, str) or not SHA256.fullmatch(rendered_sha256):
+            errors.append(f"profile migration trace: {entry_id} needs the rendered canonical SHA-256")
+        scope = entry.get("scope")
+        if scope not in {"user", "project"}:
+            errors.append(f"profile migration trace: {entry_id} needs user or project scope")
+        root_fingerprint = entry.get("root_fingerprint")
+        if not isinstance(root_fingerprint, str) or not SHA256.fullmatch(root_fingerprint):
+            errors.append(f"profile migration trace: {entry_id} needs a trusted root fingerprint")
+        for field, expected_stem in (
+            ("source_path", legacy_name),
+            ("target_path", target_name),
+        ):
+            relative_path = entry.get(field)
+            if (
+                not isinstance(relative_path, str)
+                or not relative_path
+                or Path(relative_path).is_absolute()
+                or ".." in Path(relative_path).parts
+                or not isinstance(expected_stem, str)
+                or Path(relative_path).name != f"{expected_stem}.toml"
+            ):
+                errors.append(
+                    f"profile migration trace: {entry_id} {field} must be a scope-relative profile path"
+                )
+        exact_diff = entry.get("exact_diff")
+        if (
+            not isinstance(exact_diff, str)
+            or not exact_diff
+            or not isinstance(legacy_name, str)
+            or not isinstance(target_name, str)
+            or legacy_name not in exact_diff
+            or target_name not in exact_diff
+        ):
+            errors.append(f"profile migration trace: {entry_id} needs the complete exact TOML diff")
+        if action not in {"create-if-absent", "already-migrated", "config-conflict"}:
+            errors.append(f"profile migration trace: {entry_id} has an invalid action")
+        elif action == "create-if-absent" and target_sha256 != "absent":
+            errors.append(f"profile migration trace: {entry_id} create-if-absent requires an absent target")
+        elif action == "already-migrated" and target_sha256 != rendered_sha256:
+            errors.append(f"profile migration trace: {entry_id} already-migrated requires the rendered hash")
+        elif action == "config-conflict" and target_sha256 in {"absent", rendered_sha256}:
+            errors.append(f"profile migration trace: {entry_id} config-conflict requires a divergent target hash")
+
+    if represented_legacy_names != set(detected_legacy_names):
+        errors.append(
+            "profile migration trace: entries must cover the complete detected legacy inventory"
+        )
+    expected_plan_id = migration_plan_id(
+        [entry for entry in entries if isinstance(entry, dict)], detected_legacy_names
+    )
+    if not isinstance(plan_id, str) or plan_id != expected_plan_id:
+        errors.append("profile migration trace: plan_id must equal the canonical preview SHA-256")
+
+    approval_fields = (
+        "entry_id",
+        "source_sha256",
+        "target_sha256",
+        "rendered_sha256",
+        "action",
+    )
+    approvals: dict[str, dict[str, object]] = {}
+    approval_indices: dict[str, int] = {}
+    receipts: dict[str, dict[str, object]] = {}
+    receipt_indices: dict[str, int] = {}
+    for event_index, event in enumerate(events):
+        if event.get("plan_id") != plan_id:
+            if event.get("event") in {"profile-migration-approval", "profile-migration-receipt"}:
+                errors.append("profile migration trace: approval/receipt plan_id must match preview")
+            continue
+        if event.get("event") == "profile-migration-approval":
+            if event_index <= preview_index:
+                errors.append(
+                    "profile migration trace: authority must follow the displayed preview"
+                )
+                continue
+            approved_entries = event.get("entries")
+            if not isinstance(approved_entries, list) or not all(
+                isinstance(value, dict) for value in approved_entries
+            ):
+                errors.append(
+                    "profile migration trace: approval must bind per-entry authority to exact precondition hashes"
+                )
+                continue
+            for approved in approved_entries:
+                entry_id = approved.get("entry_id")
+                if not isinstance(entry_id, str) or entry_id not in entries_by_id:
+                    errors.append("profile migration trace: approval references an unknown entry_id")
+                    continue
+                expected = {
+                    field: entries_by_id[entry_id].get(field) for field in approval_fields
+                }
+                actual = {field: approved.get(field) for field in approval_fields}
+                if actual != expected:
+                    errors.append(
+                        f"profile migration trace: {entry_id} approval must bind exact precondition hashes and action"
+                    )
+                    continue
+                if entry_id in approvals:
+                    errors.append(f"profile migration trace: {entry_id} has duplicate authority records")
+                approvals[entry_id] = approved
+                approval_indices[entry_id] = event_index
+        elif event.get("event") == "profile-migration-receipt":
+            if event_index <= preview_index:
+                errors.append("profile migration trace: receipt must follow the displayed preview")
+                continue
+            entry_id = event.get("entry_id")
+            status = event.get("status")
+            if not isinstance(entry_id, str) or entry_id not in entries_by_id:
+                errors.append("profile migration trace: receipt references an unknown entry_id")
+                continue
+            if status not in {"created", "already-migrated", "config-conflict", "hash-drift"}:
+                errors.append(f"profile migration trace: {entry_id} has an invalid receipt status")
+                continue
+            if entry_id in receipts:
+                errors.append(f"profile migration trace: {entry_id} has duplicate receipts")
+            observed_source = event.get("observed_source_sha256")
+            observed_target = event.get("observed_target_sha256")
+            result_sha256 = event.get("result_sha256")
+            if not all(
+                value == "absent" or (isinstance(value, str) and SHA256.fullmatch(value))
+                for value in (observed_source, observed_target)
+            ):
+                errors.append(
+                    f"profile migration trace: {entry_id} receipt needs observed precondition hashes"
+                )
+            if result_sha256 != "not-written" and (
+                not isinstance(result_sha256, str) or not SHA256.fullmatch(result_sha256)
+            ):
+                errors.append(f"profile migration trace: {entry_id} receipt needs a result hash")
+            receipts[entry_id] = event
+            receipt_indices[entry_id] = event_index
+
+    for entry_id, entry in entries_by_id.items():
+        action = entry.get("action")
+        receipt = receipts.get(entry_id)
+        status = receipt.get("status") if receipt else None
+        observed_source = receipt.get("observed_source_sha256") if receipt else None
+        observed_target = receipt.get("observed_target_sha256") if receipt else None
+        result_sha256 = receipt.get("result_sha256") if receipt else None
+        preconditions_match = (
+            observed_source == entry.get("source_sha256")
+            and observed_target == entry.get("target_sha256")
+        )
+        if status == "created" and action != "create-if-absent":
+            errors.append(f"profile migration trace: {entry_id} created status contradicts preview action")
+        if action == "create-if-absent" and status not in {"created", "hash-drift"}:
+            errors.append(f"profile migration trace: {entry_id} create-if-absent receipt contradicts preview")
+        if status == "created":
+            if entry_id not in approvals:
+                errors.append(f"profile migration trace: {entry_id} was created without per-entry authority")
+            elif approval_indices[entry_id] >= receipt_indices[entry_id]:
+                errors.append(f"profile migration trace: {entry_id} was created before per-entry authority")
+            if not preconditions_match:
+                errors.append(f"profile migration trace: {entry_id} was created after hash drift")
+            if result_sha256 != entry.get("rendered_sha256"):
+                errors.append(f"profile migration trace: {entry_id} created result must match rendered hash")
+        if action == "already-migrated" and status not in {"already-migrated", "hash-drift"}:
+            errors.append(f"profile migration trace: {entry_id} already-migrated receipt contradicts preview")
+        if action == "config-conflict" and status not in {"config-conflict", "hash-drift"}:
+            errors.append(f"profile migration trace: {entry_id} overwrote a divergent target")
+        if status == "already-migrated" and (
+            not preconditions_match or result_sha256 != entry.get("rendered_sha256")
+        ):
+            errors.append(f"profile migration trace: {entry_id} already-migrated hashes are inconsistent")
+        if status == "config-conflict" and (
+            not preconditions_match or result_sha256 != entry.get("target_sha256")
+        ):
+            errors.append(f"profile migration trace: {entry_id} conflict must preserve the target hash")
+        if status == "hash-drift" and (preconditions_match or result_sha256 != "not-written"):
+            errors.append(f"profile migration trace: {entry_id} hash-drift must record no write")
+        if status is None:
+            errors.append(f"profile migration trace: {entry_id} is missing a resumable receipt")
+
+    return errors
+
+
+def validate_decision_authority_trace(events: list[dict[str, str]]) -> list[str]:
+    """Validate that product-impacting specification edits remain user-authorized."""
+
+    errors: list[str] = []
+    product_impact_axes = {
+        "acceptance",
+        "accessibility",
+        "age",
+        "audience",
+        "availability",
+        "behavior",
+        "billing",
+        "capacity",
+        "compatibility",
+        "compliance",
+        "cost",
+        "data",
+        "economy",
+        "eligibility",
+        "geography",
+        "legal",
+        "localization",
+        "lock-in",
+        "migration",
+        "moderation",
+        "monetization",
+        "non-goal",
+        "offline",
+        "operations",
+        "performance",
+        "permissions",
+        "platform",
+        "pricing",
+        "priority",
+        "privacy",
+        "product-behavior",
+        "reliability",
+        "responsive",
+        "retention",
+        "rewards",
+        "rollout",
+        "safety",
+        "scope",
+        "security",
+        "support",
+        "user-flow",
+        "ux",
+    }
+    non_product_impacts = {"authority", "outcome-neutral", "repository-fact"}
+    canonical_impacts = product_impact_axes | non_product_impacts
+    dispositions = {"new-authority", "product-decision", "repository-fact", "technical-decision"}
+
+    sources: dict[str, dict[str, str]] = {}
+    source_links: dict[str, set[str]] = {}
+    source_decision_ids: dict[str, set[str]] = {}
+    invalid_sources: set[str] = set()
+    source_map_seen = False
+    source_map_complete = False
+    unreconciled_sources: set[str] = set()
+    locked_decisions: set[str] = set()
+    decision_sources: dict[str, str] = {}
+    selected_outcomes: dict[str, str] = {}
+    product_decisions: set[str] = set()
+    reopened_decisions: set[str] = set()
+    presented_questions: set[str] = set()
+    user_decision_index: dict[str, int] = {}
+    technical_gap_ids: set[str] = set()
+    technical_decision_ids: set[str] = set()
+    decision_versions: dict[str, int] = {}
+    decision_target_history: dict[str, set[tuple[str, str]]] = {}
+    pre_reopen_outcomes: dict[str, str] = {}
+    reapplications_required: dict[str, set[tuple[str, str]]] = {}
+    normative_writes: list[tuple[str, str, str, int, str, str, int]] = []
+    applications: dict[tuple[str, str, str], int] = {}
+    application_versions: dict[tuple[str, str, str], int] = {}
+    last_application_receipt: int | None = None
+    final_receipt: dict[str, str] | None = None
+
+    for index, event in enumerate(events):
+        kind = event.get("event")
+        if kind == "spec-source":
+            required = {
+                "path",
+                "authority",
+                "revision",
+                "normative_scope",
+                "decision_ids",
+                "normative_links",
+                "link_evidence",
+                "editable",
+                "reconciliation",
+            }
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: specification source missing fields {missing}")
+            path = event.get("path", "")
+            source_invalid = bool(missing)
+            if path in sources:
+                errors.append(f"decision authority trace: duplicate specification source {path}")
+                source_invalid = True
+            if event.get("editable") not in {"yes", "no", "unknown"}:
+                errors.append("decision authority trace: source editability must be yes, no, or unknown")
+                source_invalid = True
+            reconciliation = event.get("reconciliation", "")
+            if reconciliation not in {"aligned", "conflict", "deferred", "gap"}:
+                errors.append("decision authority trace: source reconciliation has an invalid state")
+                source_invalid = True
+            if reconciliation == "deferred":
+                errors.append(
+                    "decision authority trace: an initial deferred source requires post-map user-decision reconciliation"
+                )
+                source_invalid = True
+            raw_decision_ids = event.get("decision_ids", "")
+            declared_decisions = (
+                set()
+                if raw_decision_ids == "none"
+                else {value.strip() for value in raw_decision_ids.split(",") if value.strip()}
+            )
+            if not raw_decision_ids or "none" in declared_decisions or any(
+                not value.startswith(("D-", "T-")) for value in declared_decisions
+            ):
+                errors.append("decision authority trace: source decision IDs must be stable D-###/T-### IDs or none")
+                source_invalid = True
+            raw_links = event.get("normative_links", "")
+            links = (
+                set()
+                if raw_links == "none"
+                else {value.strip() for value in raw_links.split(",") if value.strip()}
+            )
+            if not raw_links or "none" in links:
+                errors.append("decision authority trace: source normative links must be mapped paths or none")
+                source_invalid = True
+            if path:
+                sources[path] = event
+                source_links[path] = links
+                source_decision_ids[path] = declared_decisions
+                if source_invalid:
+                    invalid_sources.add(path)
+                if reconciliation in {"conflict", "gap", "deferred"}:
+                    unreconciled_sources.add(path)
+            if source_map_seen:
+                source_map_complete = False
+
+        elif kind == "spec-source-map":
+            source_map_seen = True
+            required = {"root", "source_count", "complete"}
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: source map missing fields {missing}")
+            try:
+                source_count = int(event.get("source_count", ""))
+            except ValueError:
+                source_count = -1
+                errors.append("decision authority trace: source map count must be an integer")
+            if not sources:
+                errors.append("decision authority trace: source map cannot be complete without structured sources")
+            if event.get("root") not in sources:
+                errors.append("decision authority trace: source map root must reference a structured source")
+            if source_count != len(sources):
+                errors.append("decision authority trace: source map count does not match structured sources")
+            if event.get("complete") not in {"true", "false"}:
+                errors.append("decision authority trace: source map complete must be true or false")
+            declared_links = set().union(*source_links.values()) if source_links else set()
+            unmapped_links = sorted(declared_links - set(sources))
+            if unmapped_links:
+                errors.append(f"decision authority trace: source graph has unmapped normative links {unmapped_links}")
+            root = event.get("root", "")
+            reachable: set[str] = set()
+            pending = [root] if root in sources else []
+            while pending:
+                current = pending.pop()
+                if current in reachable:
+                    continue
+                reachable.add(current)
+                pending.extend(link for link in source_links.get(current, set()) if link in sources)
+            unreachable_sources = sorted(set(sources) - reachable)
+            if unreachable_sources:
+                errors.append(
+                    f"decision authority trace: source graph has unreachable specification sources {unreachable_sources}"
+                )
+            source_map_complete = (
+                event.get("complete") == "true"
+                and not missing
+                and bool(sources)
+                and event.get("root") in sources
+                and source_count == len(sources)
+                and not invalid_sources
+                and not unmapped_links
+                and not unreachable_sources
+            )
+
+        elif kind == "spec-source-reconciled":
+            path = event.get("path", "")
+            state = event.get("reconciliation", "")
+            original_state = sources.get(path, {}).get("reconciliation")
+            if (
+                path not in sources
+                or original_state not in {"conflict", "gap"}
+                or state not in {"aligned", "deferred"}
+                or not event.get("evidence")
+            ):
+                errors.append("decision authority trace: source reconciliation requires a mapped source and evidence")
+            else:
+                resolution_basis = event.get("resolution_basis", "")
+                decision_id = event.get("decision_id", "")
+                user_resolved = (
+                    resolution_basis == "user-decision"
+                    and decision_id.startswith("D-")
+                    and decision_id in locked_decisions
+                    and decision_id not in reopened_decisions
+                    and user_decision_index.get(decision_id, len(events)) < index
+                    and event.get("answer_source") == decision_sources.get(decision_id)
+                    and event.get("selected_outcome") == selected_outcomes.get(decision_id)
+                )
+                expected_record_type = {
+                    "explicit-precedence": "precedence",
+                    "explicit-supersession": "supersession",
+                }.get(resolution_basis)
+                authority_source = event.get("authority_source", "")
+                authority_line = event.get("authority_record_line", "")
+                explicit_authority = bool(
+                    expected_record_type
+                    and authority_source in sources
+                    and event.get("authority_record_type") == expected_record_type
+                    and event.get("authority_record_target") == path
+                    and event.get("authority_record_revision") == sources.get(authority_source, {}).get("revision")
+                    and authority_line.isdigit()
+                    and int(authority_line) > 0
+                    and event.get("evidence", "").startswith(f"{authority_source}:{authority_line}")
+                )
+                if expected_record_type and not explicit_authority:
+                    errors.append(
+                        "decision authority trace: explicit precedence/supersession requires a structured authority record"
+                    )
+                verified_gap = (
+                    original_state == "gap"
+                    and resolution_basis == "verified-evidence"
+                    and authority_source in sources
+                    and event.get("authority_record_target") == path
+                    and event.get("authority_record_revision") == sources.get(authority_source, {}).get("revision")
+                    and authority_line.isdigit()
+                    and int(authority_line) > 0
+                )
+                valid_resolution = user_resolved or explicit_authority or verified_gap
+                if original_state == "conflict" and not (user_resolved or explicit_authority):
+                    errors.append(
+                        "decision authority trace: conflict resolution requires a user decision or explicit precedence/supersession record"
+                    )
+                    valid_resolution = False
+                if state == "deferred" and not user_resolved:
+                    errors.append("decision authority trace: deferred source requires a matching user decision")
+                    valid_resolution = False
+                if not valid_resolution:
+                    if original_state != "conflict":
+                        errors.append(
+                            "decision authority trace: source reconciliation requires structured authority provenance"
+                        )
+                else:
+                    sources[path]["reconciliation"] = state
+                    unreconciled_sources.discard(path)
+
+        elif kind == "locked-decision":
+            decision_id = event.get("decision_id", "")
+            source = event.get("source", "")
+            if (
+                event.get("status") == "resolved"
+                and decision_id.startswith("D-")
+                and decision_id not in reopened_decisions
+                and source in sources
+                and decision_id in source_decision_ids.get(source, set())
+                and event.get("selected_outcome")
+            ):
+                locked_decisions.add(decision_id)
+                decision_sources[decision_id] = source
+                selected_outcomes[decision_id] = event["selected_outcome"]
+                decision_versions[decision_id] = decision_versions.get(decision_id, 0) + 1
+            else:
+                if source in sources and decision_id.startswith("D-") and decision_id not in source_decision_ids.get(source, set()):
+                    errors.append(
+                        f"decision authority trace: {decision_id} is not declared by provenance source {source}"
+                    )
+                errors.append(
+                    "decision authority trace: locked decision must be a non-reopened resolved D-### with mapped provenance and outcome"
+                )
+
+        elif kind == "gap-classified":
+            gap_id = event.get("gap_id", "")
+            decision_id = event.get("decision_id", "")
+            disposition = event.get("disposition", "")
+            impacts = {value.strip() for value in event.get("impact", "").split(",") if value.strip()}
+            if not gap_id.startswith("B-"):
+                errors.append("decision authority trace: every classified gap requires a stable B-###")
+            if disposition not in dispositions:
+                errors.append("decision authority trace: gap disposition is invalid")
+            unknown_impacts = sorted(impacts - canonical_impacts)
+            if not impacts or unknown_impacts:
+                errors.append(
+                    f"decision authority trace: gap impact must use the closed canonical schema; unknown {unknown_impacts}"
+                )
+            has_product_impact = bool(impacts & product_impact_axes)
+            if has_product_impact:
+                product_decisions.add(decision_id)
+                if disposition not in {"product-decision", "new-authority"}:
+                    errors.append(
+                        "decision authority trace: product-impacting gap cannot be relabelled as a technical decision"
+                    )
+                if not decision_id.startswith("D-"):
+                    errors.append("decision authority trace: product-impacting gap requires a stable D-###")
+            elif disposition == "technical-decision":
+                if impacts != {"outcome-neutral"} or not decision_id.startswith("T-"):
+                    errors.append(
+                        "decision authority trace: technical gap requires T-### and outcome-neutral impact"
+                    )
+                technical_gap_ids.add(decision_id)
+            elif disposition == "product-decision":
+                errors.append("decision authority trace: product decision requires a canonical product impact")
+            elif disposition == "repository-fact" and impacts != {"repository-fact"}:
+                errors.append("decision authority trace: repository fact requires repository-fact impact")
+            elif disposition == "new-authority":
+                if impacts != {"authority"} and not has_product_impact:
+                    errors.append("decision authority trace: new authority requires authority or product impact")
+                if not decision_id.startswith("D-"):
+                    errors.append("decision authority trace: new authority requires a stable D-###")
+                product_decisions.add(decision_id)
+
+        elif kind == "decision-reopened":
+            decision_id = event.get("decision_id", "")
+            if (
+                decision_id not in locked_decisions
+                and decision_id not in user_decision_index
+            ) or not event.get("evidence") or not event.get("changed_consequence"):
+                errors.append("decision authority trace: reopening requires a resolved D-### and changed evidence")
+            pre_reopen_outcomes[decision_id] = selected_outcomes.get(decision_id, "")
+            prior_targets = decision_target_history.get(decision_id, set())
+            if prior_targets:
+                reapplications_required[decision_id] = set(prior_targets)
+            locked_decisions.discard(decision_id)
+            user_decision_index.pop(decision_id, None)
+            decision_sources.pop(decision_id, None)
+            selected_outcomes.pop(decision_id, None)
+            decision_versions[decision_id] = decision_versions.get(decision_id, 0) + 1
+            presented_questions.discard(decision_id)
+            product_decisions.add(decision_id)
+            reopened_decisions.add(decision_id)
+            if any(write[0] == decision_id for write in normative_writes):
+                normative_writes = [write for write in normative_writes if write[0] != decision_id]
+                applications = {key: value for key, value in applications.items() if key[0] != decision_id}
+                application_versions = {
+                    key: value for key, value in application_versions.items() if key[0] != decision_id
+                }
+                last_application_receipt = None
+                final_receipt = None
+
+        elif kind == "technical-decision":
+            decision_id = event.get("decision_id", "")
+            if not decision_id.startswith("T-"):
+                errors.append("decision authority trace: technical decision requires a stable T-###")
+            if (
+                event.get("preserves_locked_outcomes") != "true"
+                or event.get("normative_effect") != "false"
+                or not event.get("preservation_evidence")
+            ):
+                errors.append(
+                    "decision authority trace: technical decision must preserve locked outcomes and have no normative effect"
+                )
+            technical_decision_ids.add(decision_id)
+
+        elif kind == "question-presented":
+            if not source_map_complete:
+                errors.append("decision authority trace: complete source map must precede a decision packet")
+            required = {
+                "decision_id",
+                "current_state",
+                "options",
+                "consequences",
+                "risks",
+                "recommendation",
+                "affected_scope",
+            }
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: decision packet missing fields {missing}")
+            decision_id = event.get("decision_id", "")
+            if not decision_id.startswith("D-"):
+                errors.append("decision authority trace: decision packet requires a stable D-###")
+            else:
+                presented_questions.add(decision_id)
+                product_decisions.add(decision_id)
+
+        elif kind == "user-decision":
+            decision_id = event.get("decision_id", "")
+            if (
+                not decision_id.startswith("D-")
+                or not event.get("selection")
+                or not event.get("source")
+            ):
+                errors.append("decision authority trace: user decision requires D-###, selection, and answer source")
+            else:
+                if decision_id in locked_decisions and decision_id not in reopened_decisions:
+                    errors.append(
+                        "decision authority trace: a user answer cannot replace a locked decision without decision-reopened"
+                    )
+                user_decision_index[decision_id] = index
+                locked_decisions.add(decision_id)
+                reopened_decisions.discard(decision_id)
+                product_decisions.add(decision_id)
+                decision_sources[decision_id] = event["source"]
+                selected_outcomes[decision_id] = event["selection"]
+                decision_versions[decision_id] = decision_versions.get(decision_id, 0) + 1
+
+        elif kind == "normative-spec-write":
+            decision_id = event.get("decision_id", "")
+            target = event.get("target", "")
+            change = event.get("change", "")
+            answer_source = event.get("answer_source", "")
+            selected_outcome = event.get("selected_outcome", "")
+            if not source_map_complete:
+                errors.append("decision authority trace: complete source map must precede a normative spec write")
+            if target not in sources or sources.get(target, {}).get("editable") != "yes":
+                errors.append("decision authority trace: normative spec write target must be a mapped editable source")
+            if not change:
+                errors.append("decision authority trace: normative spec write requires a stable change description")
+            authority_matches = (
+                bool(answer_source)
+                and bool(selected_outcome)
+                and answer_source == decision_sources.get(decision_id)
+                and selected_outcome == selected_outcomes.get(decision_id)
+            )
+            if not authority_matches:
+                errors.append(
+                    "decision authority trace: normative spec write requires the current answer source and selected outcome"
+                )
+            basis = event.get("basis", "")
+            preserves_locked = (
+                basis == "locked-decision"
+                and decision_id in locked_decisions
+                and decision_id not in reopened_decisions
+                and authority_matches
+                and event.get("changes_decision", "false") != "true"
+            )
+            follows_user_answer = (
+                basis == "user-decision"
+                and decision_id in locked_decisions
+                and decision_id not in reopened_decisions
+                and authority_matches
+                and user_decision_index.get(decision_id, len(events)) < index
+            )
+            if not preserves_locked and not follows_user_answer:
+                errors.append(
+                    f"decision authority trace: user decision must precede normative spec write for {decision_id or 'unknown'}"
+                )
+            write_key = (decision_id, target, change)
+            if any(write[:3] == write_key for write in normative_writes):
+                errors.append("decision authority trace: duplicate normative write mapping")
+            normative_writes.append(
+                (
+                    *write_key,
+                    index,
+                    answer_source,
+                    selected_outcome,
+                    decision_versions.get(decision_id, 0),
+                )
+            )
+            if preserves_locked or follows_user_answer:
+                decision_target_history.setdefault(decision_id, set()).add((target, change))
+
+        elif kind == "decision-application":
+            required = {
+                "decision_id",
+                "target",
+                "change",
+                "answer_source",
+                "selected_outcome",
+                "changed_sections",
+                "changed_criteria",
+                "preserved_invariants",
+            }
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: decision application missing fields {missing}")
+            key = (event.get("decision_id", ""), event.get("target", ""), event.get("change", ""))
+            matching_writes = [write for write in normative_writes if write[:3] == key and write[3] < index]
+            if not matching_writes:
+                errors.append("decision authority trace: decision application must map an earlier normative write")
+            decision_id = event.get("decision_id", "")
+            matching_write = matching_writes[-1] if matching_writes else None
+            expected_answer_source = matching_write[4] if matching_write else decision_sources.get(decision_id)
+            expected_outcome = matching_write[5] if matching_write else selected_outcomes.get(decision_id)
+            expected_version = matching_write[6] if matching_write else -1
+            if event.get("answer_source") != expected_answer_source:
+                errors.append("decision authority trace: decision application answer source does not match provenance")
+            if event.get("selected_outcome") != expected_outcome:
+                errors.append("decision authority trace: decision application outcome does not match the decision")
+            if matching_write and expected_version != decision_versions.get(decision_id):
+                errors.append("decision authority trace: decision application maps a stale decision version")
+            if key in applications:
+                errors.append("decision authority trace: duplicate decision application mapping")
+            applications[key] = index
+            application_versions[key] = expected_version
+            if (
+                matching_write
+                and expected_version == decision_versions.get(decision_id)
+                and event.get("answer_source") == expected_answer_source
+                and event.get("selected_outcome") == expected_outcome
+            ):
+                required_targets = reapplications_required.get(decision_id)
+                if required_targets is not None:
+                    required_targets.discard((event.get("target", ""), event.get("change", "")))
+                    if not required_targets:
+                        reapplications_required.pop(decision_id, None)
+
+        elif kind == "decision-noop-application":
+            required = {
+                "decision_id",
+                "answer_source",
+                "selected_outcome",
+                "confirmed_no_change",
+                "affected_targets",
+                "reason",
+            }
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: no-op application missing fields {missing}")
+            decision_id = event.get("decision_id", "")
+            raw_targets = event.get("affected_targets", "")
+            covered_targets: set[tuple[str, str]] = set()
+            malformed_targets = False
+            for value in raw_targets.split("|"):
+                if "::" not in value:
+                    malformed_targets = True
+                    continue
+                target, change = (part.strip() for part in value.split("::", 1))
+                if not target or not change:
+                    malformed_targets = True
+                    continue
+                covered_targets.add((target, change))
+            required_targets = reapplications_required.get(decision_id, set())
+            repeats_previous_outcome = (
+                bool(pre_reopen_outcomes.get(decision_id))
+                and event.get("selected_outcome") == pre_reopen_outcomes.get(decision_id)
+            )
+            covers_every_target = bool(required_targets) and covered_targets == required_targets and not malformed_targets
+            if not repeats_previous_outcome:
+                errors.append("decision authority trace: no-op application must repeat the pre-reopen outcome")
+            if not covers_every_target:
+                errors.append(
+                    "decision authority trace: no-op application must cover every pre-reopen target/change"
+                )
+            valid_noop = (
+                decision_id in reapplications_required
+                and decision_id in locked_decisions
+                and decision_id not in reopened_decisions
+                and event.get("confirmed_no_change") == "true"
+                and event.get("answer_source") == decision_sources.get(decision_id)
+                and event.get("selected_outcome") == selected_outcomes.get(decision_id)
+                and user_decision_index.get(decision_id, len(events)) < index
+                and not missing
+                and repeats_previous_outcome
+                and covers_every_target
+            )
+            if not valid_noop:
+                errors.append(
+                    "decision authority trace: no-op application requires a matching post-reopen user confirmation"
+                )
+            key = (decision_id, "<no-op>", event.get("affected_targets", ""))
+            if key in applications:
+                errors.append("decision authority trace: duplicate decision application mapping")
+            applications[key] = index
+            application_versions[key] = decision_versions.get(decision_id, -1)
+            if valid_noop:
+                reapplications_required.pop(decision_id, None)
+
+        elif kind == "decision-application-receipt":
+            required = {"application_count", "preserved_decisions", "remaining_open"}
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: application receipt missing fields {missing}")
+            try:
+                application_count = int(event.get("application_count", ""))
+            except ValueError:
+                application_count = -1
+                errors.append("decision authority trace: application receipt count must be an integer")
+            if application_count != len(applications):
+                errors.append("decision authority trace: application receipt count does not match mappings")
+            last_application_receipt = index
+            final_receipt = event
+
+        elif kind == "ready":
+            if index != len(events) - 1:
+                errors.append("decision authority trace: Ready must be the terminal authority event")
+            if not source_map_complete:
+                errors.append("decision authority trace: Ready requires a complete specification source map")
+            if unreconciled_sources:
+                errors.append(
+                    f"decision authority trace: Ready has unreconciled specification sources {sorted(unreconciled_sources)}"
+                )
+            if event.get("open_decisions") != "none":
+                errors.append("decision authority trace: Ready requires no open user decisions")
+            unresolved = sorted(product_decisions - locked_decisions)
+            if unresolved:
+                errors.append(f"decision authority trace: Ready has unresolved product decisions {unresolved}")
+            unanswered_packets = sorted(
+                decision_id for decision_id in unresolved if decision_id not in presented_questions
+            )
+            if unanswered_packets:
+                errors.append(f"decision authority trace: product decisions lack decision packets {unanswered_packets}")
+            unresolved_technical = sorted(technical_gap_ids - technical_decision_ids)
+            if unresolved_technical:
+                errors.append(f"decision authority trace: Ready has unresolved technical decisions {unresolved_technical}")
+            if reapplications_required:
+                remaining_reapplications = sorted(
+                    (decision_id, target, change)
+                    for decision_id, targets in reapplications_required.items()
+                    for target, change in targets
+                )
+                errors.append(
+                    "decision authority trace: reopened decision requires current normative reapplication "
+                    f"{remaining_reapplications}"
+                )
+            write_keys = {write[:3] for write in normative_writes}
+            missing_applications = sorted(write_keys - set(applications))
+            if missing_applications:
+                errors.append(
+                    f"decision authority trace: application receipt omits normative writes {missing_applications}"
+                )
+            stale_applications = sorted(
+                key
+                for key, version in application_versions.items()
+                if version != decision_versions.get(key[0], -1)
+            )
+            if stale_applications:
+                errors.append(
+                    f"decision authority trace: Ready has applications from stale decision versions {stale_applications}"
+                )
+            last_write_index = max((write[3] for write in normative_writes), default=-1)
+            last_application_index = max(applications.values(), default=-1)
+            if (normative_writes or applications) and (
+                last_application_receipt is None
+                or last_application_receipt < last_write_index
+                or last_application_receipt < last_application_index
+            ):
+                errors.append("decision authority trace: Ready requires an application receipt after normative writes")
+            if final_receipt is not None and final_receipt.get("remaining_open") != "none":
+                errors.append("decision authority trace: application receipt still has open decisions")
+
+    return errors
+
+
+def _validate_single_implementation_dispatch_trace(
+    events: list[dict[str, object]],
+    *,
+    expected_tier_override: str | None = None,
+    expected_agent_override: str | None = None,
+) -> list[str]:
+    """Validate lease → dispatch → running receipt → writes → terminal receipt → release."""
+
+    errors: list[str] = []
+    write_indexes = [
+        index
+        for index, event in enumerate(events)
+        if event.get("event") in {"test-write", "code-write"}
+    ]
+    if not write_indexes:
+        return ["implementation dispatch trace: missing test-write or code-write event"]
+    first_write_index = write_indexes[0]
+    last_write_index = write_indexes[-1]
+
+    prior_events = events[:first_write_index]
+    lease_events = [
+        (index, event)
+        for index, event in enumerate(prior_events)
+        if event.get("event") == "writer-lease-acquired"
+    ]
+    if not lease_events:
+        return ["implementation dispatch trace: writer lease must be acquired before dispatch"]
+    lease_index, lease_event = lease_events[-1]
+    lease_id = lease_event.get("lease", "")
+    if not lease_id:
+        errors.append("implementation dispatch trace: acquired writer lease needs an ID")
+
+    dispatches = [event for event in prior_events if event.get("event") == "implementation-dispatch"]
+    if not dispatches:
+        return ["implementation dispatch trace: exact writer dispatch must precede every code edit"]
+    if len(dispatches) != 1 or len(lease_events) != 1:
+        errors.append(
+            "implementation dispatch trace: failed or replaced writer route blocks replacement dispatch and edits"
+        )
+
+    failed_prewrite_receipts = [
+        event
+        for event in prior_events
+        if event.get("event") == "implementation-routing-receipt"
+        and event.get("run_status") in {"failed", "cancelled"}
+    ]
+    if failed_prewrite_receipts:
+        errors.append(
+            "implementation dispatch trace: failed writer route blocks replacement dispatch and edits"
+        )
+
+    dispatch = dispatches[-1]
+    risk = dispatch.get("risk", "")
+    expected = IMPLEMENTATION_START_BY_RISK.get(risk)
+    if expected is None:
+        errors.append("implementation dispatch trace: risk must be low, medium, high, or critical")
+        return errors
+    expected_tier, expected_agent = expected
+    if expected_tier_override is not None or expected_agent_override is not None:
+        if expected_tier_override is None or expected_agent_override is None:
+            errors.append("implementation dispatch trace: incomplete expected escalation route")
+        else:
+            expected_tier = expected_tier_override
+            expected_agent = expected_agent_override
+    agent_name = dispatch.get("agent_name", "")
+    task_name = dispatch.get("task_name", "")
+    if agent_name != expected_agent:
+        errors.append(
+            f"implementation dispatch trace: {risk} risk agent_name must select exact writer {expected_agent}"
+        )
+    if not AGENT_NAME.fullmatch(agent_name):
+        errors.append("implementation dispatch trace: agent_name must use underscore grammar")
+    if not task_name or task_name == agent_name:
+        errors.append("implementation dispatch trace: task_name must be a separate non-profile task label")
+    if dispatch.get("result") != "selected":
+        errors.append("implementation dispatch trace: code edits require a selected exact writer")
+    if dispatch.get("fallback_reason", "none") not in {"", "none"}:
+        errors.append("implementation dispatch trace: selected exact writer must not report fallback")
+    dispatch_index = prior_events.index(dispatch)
+    if dispatch_index <= lease_index:
+        errors.append("implementation dispatch trace: writer lease must precede exact dispatch")
+    if dispatch.get("lease") != lease_id:
+        errors.append("implementation dispatch trace: dispatch lease must match the acquired lease")
+
+    receipt_events = [
+        (index, event)
+        for index, event in enumerate(prior_events)
+        if event.get("event") == "implementation-routing-receipt"
+    ]
+    if not receipt_events:
+        errors.append("implementation dispatch trace: implementation routing receipt must precede every code edit")
+        return errors
+
+    receipt_index, receipt = receipt_events[-1]
+    if receipt_index <= dispatch_index:
+        errors.append("implementation dispatch trace: routing receipt must follow exact writer dispatch")
+    required_fields = {
+        "risk",
+        "requested_agent",
+        "task_name",
+        "requested_tier",
+        "dispatch_method",
+        "configured_model",
+        "model_reasoning_effort",
+        "observed_agent",
+        "observed_model",
+        "sandbox",
+        "lease",
+        "run_status",
+        "dispatch_result",
+        "fallback_reason",
+        "activated",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+        "process_tree_stopped",
+    }
+    missing = sorted(field for field in required_fields if field not in receipt)
+    if missing:
+        errors.append(f"implementation dispatch trace: routing receipt missing fields {missing}")
+    if receipt.get("risk") != risk:
+        errors.append("implementation dispatch trace: receipt risk must match dispatch risk")
+    if receipt.get("requested_agent") != expected_agent:
+        errors.append("implementation dispatch trace: receipt must name the exact risk-matched writer")
+    if receipt.get("task_name") != task_name:
+        errors.append("implementation dispatch trace: receipt task_name must match the separate task label")
+    if receipt.get("requested_tier") != expected_tier:
+        errors.append("implementation dispatch trace: receipt tier must match the risk floor")
+    if receipt.get("lease") != lease_id:
+        errors.append("implementation dispatch trace: running receipt lease must match the acquired lease")
+    dispatch_method = receipt.get("dispatch_method")
+    if dispatch_method not in EXACT_DISPATCH_METHODS:
+        errors.append("implementation dispatch trace: writer requires an exact dispatch method")
+    if dispatch_method == "codex-exec-explicit-model":
+        if not receipt.get("model_reasoning_effort"):
+            errors.append("implementation dispatch trace: explicit-model receipt needs model_reasoning_effort")
+        if receipt.get("terminal_event") not in {None, "none"}:
+            errors.append("implementation dispatch trace: running receipt must not claim terminal completion")
+    if receipt.get("run_status") != "running":
+        errors.append("implementation dispatch trace: pre-write receipt must be running")
+    if receipt.get("activated") is not False:
+        errors.append("implementation dispatch trace: pre-write receipt must be recorded before activation")
+    if receipt.get("process_tree_stopped") is not False:
+        errors.append("implementation dispatch trace: running receipt cannot claim a stopped process tree")
+    if receipt.get("sandbox") != "workspace-write":
+        errors.append("implementation dispatch trace: writer sandbox must be workspace-write")
+    if receipt.get("dispatch_result") != "selected":
+        errors.append("implementation dispatch trace: receipt must confirm selected writer")
+    if receipt.get("fallback_reason") not in {"", "none"}:
+        errors.append("implementation dispatch trace: selected writer receipt must not report fallback")
+
+    activation_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if receipt_index < index < first_write_index
+        and event.get("event") == "implementation-agent-activated"
+    ]
+    if len(activation_events) != 1:
+        errors.append(
+            "implementation dispatch trace: exactly one activation event must follow the recorded receipt and precede every edit"
+        )
+    else:
+        _, activation = activation_events[0]
+        activation_bindings = {
+            "lease": lease_id,
+            "agent_name": expected_agent,
+            "task_name": task_name,
+            "run_dir": receipt.get("run_dir"),
+            "worker_process_identity": receipt.get("worker_process_identity"),
+            "codex_process_identity": receipt.get("codex_process_identity"),
+        }
+        for field, expected_value in activation_bindings.items():
+            if activation.get(field) != expected_value:
+                errors.append(
+                    f"implementation dispatch trace: activation event changed lease/run binding {field}"
+                )
+        if activation.get("activated") is not True:
+            errors.append("implementation dispatch trace: activation event must confirm activated true")
+    if any(events[index].get("actor") != expected_agent for index in write_indexes):
+        errors.append("implementation dispatch trace: exact risk-matched writer must own every code edit")
+
+    terminal_receipts = [
+        (index, event)
+        for index, event in enumerate(events)
+        if index > last_write_index
+        and event.get("event") == "implementation-routing-receipt"
+        and event.get("lease") == lease_id
+    ]
+    if not terminal_receipts:
+        errors.append("implementation dispatch trace: terminal routing receipt must follow writer edits")
+        return errors
+    if len(terminal_receipts) != 1:
+        errors.append(
+            "implementation dispatch trace: exactly one terminal routing receipt must follow writer edits"
+        )
+    terminal_index, terminal = terminal_receipts[0]
+    for field in (
+        "risk",
+        "requested_agent",
+        "task_name",
+        "requested_tier",
+        "dispatch_method",
+        "configured_model",
+        "model_reasoning_effort",
+        "observed_agent",
+        "observed_model",
+        "terminal_event",
+        "sandbox",
+        "lease",
+        "run_status",
+        "dispatch_result",
+        "fallback_reason",
+        "process_tree_stopped",
+        "activated",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+        "codex_exit_evidence",
+        "codex_exit_code",
+        "result_evidence",
+    ):
+        if field not in terminal:
+            errors.append(f"implementation dispatch trace: terminal receipt missing field {field}")
+    for field in (
+        "risk",
+        "requested_agent",
+        "task_name",
+        "requested_tier",
+        "dispatch_method",
+        "configured_model",
+        "model_reasoning_effort",
+        "sandbox",
+        "lease",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+    ):
+        if terminal.get(field) != receipt.get(field):
+            errors.append(f"implementation dispatch trace: terminal receipt changed routing field {field}")
+    run_status = terminal.get("run_status")
+    errors.extend(
+        validate_explicit_terminal_evidence(terminal, label="implementation dispatch trace")
+    )
+    if terminal.get("process_tree_stopped") is not True:
+        errors.append("implementation dispatch trace: terminal receipt must confirm stopped process tree")
+    if terminal.get("activated") is not True:
+        errors.append("implementation dispatch trace: terminal receipt must confirm activation")
+    if run_status == "completed":
+        if terminal.get("dispatch_result") != "selected" or terminal.get("fallback_reason") not in {"", "none"}:
+            errors.append("implementation dispatch trace: completed writer terminal receipt is inconsistent")
+        if dispatch_method == "codex-exec-explicit-model" and terminal.get("terminal_event") != "turn.completed":
+            errors.append("implementation dispatch trace: terminal explicit-model receipt requires turn.completed")
+        if dispatch_method == "codex-exec-explicit-model" and not explicit_success_evidence_is_valid(terminal):
+            errors.append(
+                "implementation dispatch trace: completed writer needs exit code zero and valid result evidence"
+            )
+    elif run_status == "failed":
+        if terminal.get("dispatch_result") != "failed" or terminal.get("fallback_reason") in {"", "none"}:
+            errors.append("implementation dispatch trace: failed writer terminal receipt needs a failure reason")
+        terminal_event = terminal.get("terminal_event")
+        if terminal_event not in {"turn.failed", "turn.completed", "none", None}:
+            errors.append("implementation dispatch trace: failed writer terminal event is invalid")
+        if (
+            dispatch_method == "codex-exec-explicit-model"
+            and terminal_event == "turn.completed"
+            and not explicit_failure_evidence_is_valid(terminal)
+        ):
+            errors.append(
+                "implementation dispatch trace: failed turn.completed needs independent exit/result failure evidence"
+            )
+    else:
+        errors.append("implementation dispatch trace: terminal receipt must report completed or failed")
+
+    semantic_results = [
+        (index, event)
+        for index, event in enumerate(events)
+        if index > terminal_index
+        and event.get("event") == "implementation-result"
+        and event.get("outcome") in {"blocked", "needs-escalation"}
+    ]
+    semantic_disposition: str | None = None
+    semantic_close_index: int | None = None
+    if semantic_results:
+        if len(semantic_results) != 1:
+            errors.append(
+                "implementation dispatch trace: semantic completion requires exactly one implementation result"
+            )
+        result_index, semantic_result = semantic_results[0]
+        semantic_disposition = str(semantic_result.get("outcome"))
+        if semantic_disposition == "needs-escalation":
+            errors.append(
+                "implementation dispatch trace: NEEDS_ESCALATION is allowed only before any edit"
+            )
+        for field, expected_value in {
+            "risk": risk,
+            "tier": expected_tier,
+            "agent_name": expected_agent,
+            "lease": lease_id,
+            "run_dir": terminal.get("run_dir"),
+        }.items():
+            if semantic_result.get(field) != expected_value:
+                errors.append(
+                    f"implementation dispatch trace: semantic result changed {field}"
+                )
+
+        rejections = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event.get("event") == "semantic-handoff-rejected"
+        ]
+        if len(rejections) != 1:
+            errors.append(
+                "implementation dispatch trace: semantic completion requires exactly one semantic rejection"
+            )
+        else:
+            rejection_index, rejection = rejections[0]
+            if rejection_index <= result_index:
+                errors.append(
+                    "implementation dispatch trace: semantic rejection must follow the semantic result"
+                )
+            rejection_bindings = {
+                "actor": "root",
+                "disposition": semantic_disposition,
+                "lease": lease_id,
+                "run_dir": terminal.get("run_dir"),
+                "handoff_created": False,
+                "success": False,
+                "replayed": False,
+            }
+            for field, expected_value in rejection_bindings.items():
+                if rejection.get(field) != expected_value:
+                    errors.append(
+                        f"implementation dispatch trace: semantic rejection changed {field}"
+                    )
+            if not re.fullmatch(r"[0-9a-f]{64}", str(rejection.get("evidence_digest") or "")):
+                errors.append(
+                    "implementation dispatch trace: semantic rejection requires a SHA-256 evidence digest"
+                )
+
+        invalidations = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event.get("event") == "source-checkpoint-invalidated"
+        ]
+        if semantic_disposition == "blocked" and invalidations:
+            errors.append(
+                "implementation dispatch trace: BLOCKED may retain its checkpoint and must not invalidate it"
+            )
+        closes = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event.get("event") == "guardian-close-acknowledged"
+        ]
+        if len(closes) != 1:
+            errors.append(
+                "implementation dispatch trace: semantic rejection requires one guardian close acknowledgement"
+            )
+        else:
+            semantic_close_index, close = closes[0]
+            if rejections and semantic_close_index <= rejections[0][0]:
+                errors.append(
+                    "implementation dispatch trace: guardian close must follow semantic rejection"
+                )
+            if (
+                close.get("lease") != lease_id
+                or close.get("run_dir") != terminal.get("run_dir")
+                or close.get("closed") is not True
+                or close.get("process_tree_stopped") is not True
+            ):
+                errors.append(
+                    "implementation dispatch trace: guardian close changed the rejected run binding"
+                )
+
+    handoff_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("event") == "implementation-handoff-accepted"
+    ]
+    accepted_handoff_index: int | None = None
+    if run_status == "completed" and semantic_disposition is None:
+        valid_handoffs = [
+            (index, event) for index, event in handoff_events if index > terminal_index
+        ]
+        if len(valid_handoffs) != 1 or len(handoff_events) != 1:
+            errors.append(
+                "implementation dispatch trace: completed writer needs one run-bound accepted handoff after terminal evidence"
+            )
+        else:
+            accepted_handoff_index, handoff = valid_handoffs[0]
+            handoff_bindings = {
+                "lease": lease_id,
+                "agent_name": expected_agent,
+                "task_name": task_name,
+                "run_dir": terminal.get("run_dir"),
+                "worker_process_identity": terminal.get("worker_process_identity"),
+                "codex_process_identity": terminal.get("codex_process_identity"),
+                "result_evidence": "valid",
+            }
+            for field, expected_value in handoff_bindings.items():
+                if handoff.get(field) != expected_value:
+                    errors.append(
+                        f"implementation dispatch trace: accepted handoff changed terminal binding {field}"
+                    )
+    elif handoff_events:
+        errors.append("implementation dispatch trace: failed writer result cannot be accepted as a handoff")
+
+    premature_releases = [
+        event
+        for index, event in enumerate(events)
+        if lease_index < index < terminal_index and event.get("event") == "writer-lease-released"
+    ]
+    if premature_releases:
+        errors.append("implementation dispatch trace: writer lease was released before terminal receipt")
+
+    release_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if index > terminal_index and event.get("event") == "writer-lease-released"
+    ]
+    if not release_events:
+        errors.append("implementation dispatch trace: writer lease release must follow terminal receipt")
+    elif len(release_events) != 1:
+        errors.append(
+            "implementation dispatch trace: exactly one writer lease release must follow terminal receipt"
+        )
+    elif release_events[0][1].get("lease") != lease_id:
+        errors.append("implementation dispatch trace: released lease must match the acquired lease")
+    elif accepted_handoff_index is not None and release_events[0][0] <= accepted_handoff_index:
+        errors.append("implementation dispatch trace: lease release must follow accepted handoff")
+    elif semantic_close_index is not None and release_events[0][0] <= semantic_close_index:
+        errors.append("implementation dispatch trace: rejected lease release must follow guardian close")
+
+    return errors
+
+
+def _validate_prewrite_implementation_escalation_cycle(
+    events: list[dict[str, object]],
+    *,
+    risk: str,
+    expected_tier: str,
+    expected_agent: str,
+    expected_next_tier: str,
+) -> list[str]:
+    """Validate one completed no-edit capability probe before a stronger lease."""
+
+    errors: list[str] = []
+    if any(event.get("event") in {"test-write", "code-write"} for event in events):
+        errors.append(
+            "implementation dispatch trace: NEEDS_ESCALATION is allowed only before any edit"
+        )
+    if any(event.get("event") == "implementation-handoff-accepted" for event in events):
+        errors.append(
+            "implementation dispatch trace: escalation probe cannot authorize an implementation handoff"
+        )
+
+    def exactly_one(event_name: str) -> tuple[int, dict[str, object]] | None:
+        matches = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event.get("event") == event_name
+        ]
+        if len(matches) != 1:
+            errors.append(
+                f"implementation dispatch trace: escalation cycle requires exactly one {event_name}"
+            )
+            return None
+        return matches[0]
+
+    lease_record = exactly_one("writer-lease-acquired")
+    dispatch_record = exactly_one("implementation-dispatch")
+    activation_record = exactly_one("implementation-agent-activated")
+    result_record = exactly_one("implementation-result")
+    rejection_record = exactly_one("semantic-handoff-rejected")
+    invalidation_record = exactly_one("source-checkpoint-invalidated")
+    close_record = exactly_one("guardian-close-acknowledged")
+    release_record = exactly_one("writer-lease-released")
+    approval_record = exactly_one("implementation-escalation-approved")
+    receipts = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("event") == "implementation-routing-receipt"
+    ]
+    running_receipts = [item for item in receipts if item[1].get("run_status") == "running"]
+    terminal_receipts = [
+        item for item in receipts if item[1].get("run_status") in {"completed", "failed", "cancelled"}
+    ]
+    if len(running_receipts) != 1:
+        errors.append(
+            "implementation dispatch trace: escalation cycle requires one unactivated running receipt"
+        )
+    if len(terminal_receipts) != 1:
+        errors.append(
+            "implementation dispatch trace: escalation cycle requires one terminal receipt"
+        )
+    if (
+        lease_record is None
+        or dispatch_record is None
+        or activation_record is None
+        or result_record is None
+        or rejection_record is None
+        or invalidation_record is None
+        or close_record is None
+        or release_record is None
+        or approval_record is None
+        or len(running_receipts) != 1
+        or len(terminal_receipts) != 1
+    ):
+        return errors
+
+    lease_index, lease_event = lease_record
+    dispatch_index, dispatch = dispatch_record
+    running_index, running = running_receipts[0]
+    activation_index, activation = activation_record
+    terminal_index, terminal = terminal_receipts[0]
+    result_index, result = result_record
+    rejection_index, rejection = rejection_record
+    invalidation_index, invalidation = invalidation_record
+    close_index, close = close_record
+    release_index, release = release_record
+    approval_index, approval = approval_record
+    if not (
+        lease_index
+        < dispatch_index
+        < running_index
+        < activation_index
+        < terminal_index
+        < result_index
+        < rejection_index
+        < invalidation_index
+        < close_index
+        < release_index
+        < approval_index
+    ):
+        errors.append(
+            "implementation dispatch trace: escalation lifecycle must be lease, dispatch, running receipt, "
+            "activation, terminal receipt, result, semantic rejection, checkpoint invalidation, "
+            "guardian close, release, then root approval"
+        )
+
+    lease_id = lease_event.get("lease")
+    task_name = dispatch.get("task_name")
+    if not lease_id or lease_event.get("owner") != expected_agent:
+        errors.append("implementation dispatch trace: escalation lease must bind the exact lower tier")
+    if (
+        dispatch.get("risk") != risk
+        or dispatch.get("tier") != expected_tier
+        or dispatch.get("agent_name") != expected_agent
+    ):
+        errors.append(
+            "implementation dispatch trace: escalation cycle must start at the exact expected tier"
+        )
+    if not task_name or task_name == expected_agent:
+        errors.append("implementation dispatch trace: escalation task_name must remain descriptive")
+    if dispatch.get("lease") != lease_id or dispatch.get("result") != "selected":
+        errors.append("implementation dispatch trace: escalation dispatch must bind the selected lease")
+    if dispatch.get("fallback_reason") not in {"", "none"}:
+        errors.append("implementation dispatch trace: escalation probe is not a fallback route")
+
+    immutable = {
+        "risk": risk,
+        "requested_agent": expected_agent,
+        "task_name": task_name,
+        "requested_tier": expected_tier,
+        "dispatch_method": "codex-exec-explicit-model",
+        "sandbox": "workspace-write",
+        "lease": lease_id,
+    }
+    for phase, receipt in (("running", running), ("terminal", terminal)):
+        for field, expected_value in immutable.items():
+            if receipt.get(field) != expected_value:
+                errors.append(
+                    f"implementation dispatch trace: {phase} escalation receipt changed {field}"
+                )
+        if not receipt.get("configured_model") or not receipt.get("model_reasoning_effort"):
+            errors.append(
+                f"implementation dispatch trace: {phase} escalation receipt needs concrete model and effort"
+            )
+    if (
+        running.get("activated") is not False
+        or running.get("process_tree_stopped") is not False
+        or running.get("terminal_event") not in {None, "none"}
+    ):
+        errors.append(
+            "implementation dispatch trace: escalation running receipt must be unactivated and non-terminal"
+        )
+    activation_bindings = {
+        "lease": lease_id,
+        "agent_name": expected_agent,
+        "task_name": task_name,
+        "run_dir": running.get("run_dir"),
+        "worker_process_identity": running.get("worker_process_identity"),
+        "codex_process_identity": running.get("codex_process_identity"),
+        "activated": True,
+    }
+    for field, expected_value in activation_bindings.items():
+        if activation.get(field) != expected_value:
+            errors.append(
+                f"implementation dispatch trace: escalation activation changed {field}"
+            )
+
+    for field in (
+        "configured_model",
+        "model_reasoning_effort",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+    ):
+        if terminal.get(field) != running.get(field):
+            errors.append(
+                f"implementation dispatch trace: terminal escalation receipt changed {field}"
+            )
+    transport_success = (
+        terminal.get("run_status") == "completed"
+        and terminal.get("dispatch_result") == "selected"
+        and terminal.get("fallback_reason") in {"", "none"}
+        and terminal.get("activated") is True
+        and terminal.get("process_tree_stopped") is True
+        and terminal.get("terminal_event") == "turn.completed"
+        and explicit_success_evidence_is_valid(terminal)
+    )
+    if not transport_success:
+        errors.append(
+            "implementation dispatch trace: infrastructure or transport failure blocks replacement dispatch and edits; it cannot authorize escalation"
+        )
+    if terminal.get("observed_agent") != expected_agent or terminal.get("observed_model") in {
+        None,
+        "",
+        "unknown",
+    }:
+        errors.append(
+            "implementation dispatch trace: escalation terminal receipt needs concrete observed agent and model"
+        )
+
+    reason = result.get("reason")
+    if (
+        result.get("outcome") != "needs-escalation"
+        or reason not in IMPLEMENTATION_ESCALATION_REASONS
+    ):
+        errors.append(
+            "implementation dispatch trace: stronger writer requires a completed NEEDS_ESCALATION capability reason"
+        )
+    result_bindings = {
+        "risk": risk,
+        "tier": expected_tier,
+        "agent_name": expected_agent,
+        "lease": lease_id,
+        "run_dir": terminal.get("run_dir"),
+    }
+    for field, expected_value in result_bindings.items():
+        if result.get(field) != expected_value:
+            errors.append(f"implementation dispatch trace: escalation result changed {field}")
+    rejection_bindings = {
+        "actor": "root",
+        "disposition": "needs-escalation",
+        "lease": lease_id,
+        "run_dir": terminal.get("run_dir"),
+        "handoff_created": False,
+        "success": False,
+        "replayed": False,
+    }
+    for field, expected_value in rejection_bindings.items():
+        if rejection.get(field) != expected_value:
+            errors.append(
+                f"implementation dispatch trace: escalation semantic rejection changed {field}"
+            )
+    evidence_digest = rejection.get("evidence_digest")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(evidence_digest or "")):
+        errors.append(
+            "implementation dispatch trace: escalation semantic rejection requires a SHA-256 evidence digest"
+        )
+    invalidation_bindings = {
+        "actor": "root",
+        "lease": lease_id,
+        "run_dir": terminal.get("run_dir"),
+        "disposition": "recovery-ineligible",
+        "reason": "semantic-needs-escalation",
+        "evidence_digest": evidence_digest,
+    }
+    for field, expected_value in invalidation_bindings.items():
+        if invalidation.get(field) != expected_value:
+            errors.append(
+                f"implementation dispatch trace: checkpoint invalidation changed {field}"
+            )
+    if not re.fullmatch(r"[0-9a-f]{64}", str(invalidation.get("source_state_id") or "")):
+        errors.append(
+            "implementation dispatch trace: checkpoint invalidation requires a source state ID"
+        )
+    if (
+        close.get("lease") != lease_id
+        or close.get("run_dir") != terminal.get("run_dir")
+        or close.get("closed") is not True
+        or close.get("process_tree_stopped") is not True
+    ):
+        errors.append(
+            "implementation dispatch trace: escalation guardian close changed the rejected run binding"
+        )
+    if release.get("lease") != lease_id:
+        errors.append("implementation dispatch trace: escalation must release the completed probe lease")
+
+    approval_bindings = {
+        "actor": "root",
+        "risk": risk,
+        "from_tier": expected_tier,
+        "to_tier": expected_next_tier,
+        "reason": reason,
+        "lease": lease_id,
+        "run_dir": terminal.get("run_dir"),
+        "verified_no_writes": True,
+        "process_tree_stopped": True,
+        "result_evidence": "valid",
+    }
+    for field, expected_value in approval_bindings.items():
+        if approval.get(field) != expected_value:
+            errors.append(
+                f"implementation dispatch trace: root escalation approval changed {field}"
+            )
+    return errors
+
+
+def validate_implementation_dispatch_trace(
+    events: list[dict[str, object]],
+) -> list[str]:
+    """Validate one exact writer or a bounded pre-edit capability escalation ladder."""
+
+    dispatch_indexes = [
+        index for index, event in enumerate(events) if event.get("event") == "implementation-dispatch"
+    ]
+    lease_indexes = [
+        index for index, event in enumerate(events) if event.get("event") == "writer-lease-acquired"
+    ]
+    if len(dispatch_indexes) <= 1:
+        return _validate_single_implementation_dispatch_trace(events)
+    if len(dispatch_indexes) != len(lease_indexes):
+        return [
+            "implementation dispatch trace: every escalation dispatch requires a separate sequential lease"
+        ]
+
+    first_dispatch = events[dispatch_indexes[0]]
+    risk = str(first_dispatch.get("risk", ""))
+    start = IMPLEMENTATION_START_BY_RISK.get(risk)
+    max_tier = IMPLEMENTATION_MAX_TIER_BY_RISK.get(risk)
+    if start is None or max_tier is None:
+        return ["implementation dispatch trace: risk must be low, medium, high, or critical"]
+    start_tier, _ = start
+    start_rank = IMPLEMENTATION_TIERS.index(start_tier)
+    max_rank = IMPLEMENTATION_TIERS.index(max_tier)
+    escalation_count = len(dispatch_indexes) - 1
+    final_rank = start_rank + escalation_count
+    errors: list[str] = []
+    if any(events[index].get("risk") != risk for index in dispatch_indexes):
+        errors.append(
+            "implementation dispatch trace: escalation cannot change the milestone risk"
+        )
+    if final_rank >= len(IMPLEMENTATION_TIERS):
+        errors.append("implementation dispatch trace: escalation exceeded the available writer ladder")
+        final_rank = len(IMPLEMENTATION_TIERS) - 1
+    if final_rank > max_rank:
+        errors.append(
+            "implementation dispatch trace: stronger writer exceeded the risk ceiling; strongest is critical-only"
+        )
+
+    for position, lease_index in enumerate(lease_indexes[:-1]):
+        next_lease_index = lease_indexes[position + 1]
+        expected_rank = start_rank + position
+        next_rank = expected_rank + 1
+        if next_rank >= len(IMPLEMENTATION_TIERS):
+            errors.append("implementation dispatch trace: escalation cannot move beyond strongest")
+            break
+        expected_tier = IMPLEMENTATION_TIERS[expected_rank]
+        expected_next_tier = IMPLEMENTATION_TIERS[next_rank]
+        expected_agent = IMPLEMENTATION_AGENT_BY_TIER[expected_tier]
+        cycle = events[lease_index:next_lease_index]
+        cycle_dispatches = [
+            event for event in cycle if event.get("event") == "implementation-dispatch"
+        ]
+        next_dispatch = events[dispatch_indexes[position + 1]]
+        next_tier = next_dispatch.get("tier")
+        if not next_tier:
+            next_tier = next(
+                (
+                    event.get("requested_tier")
+                    for event in events[dispatch_indexes[position + 1] + 1 :]
+                    if event.get("event") == "implementation-routing-receipt"
+                ),
+                None,
+            )
+        if (
+            not cycle_dispatches
+            or cycle_dispatches[0].get("tier") != expected_tier
+            or next_tier != expected_next_tier
+        ):
+            errors.append(
+                "implementation dispatch trace: capability escalation must advance exactly one tier"
+            )
+        if any(
+            event.get("event") == "implementation-routing-receipt"
+            and event.get("run_status") in {"failed", "cancelled"}
+            for event in cycle
+        ):
+            errors.append(
+                "implementation dispatch trace: infrastructure failure blocks replacement dispatch and edits"
+            )
+        errors.extend(
+            _validate_prewrite_implementation_escalation_cycle(
+                cycle,
+                risk=risk,
+                expected_tier=expected_tier,
+                expected_agent=expected_agent,
+                expected_next_tier=expected_next_tier,
+            )
+        )
+
+    final_tier = IMPLEMENTATION_TIERS[final_rank]
+    final_agent = IMPLEMENTATION_AGENT_BY_TIER[final_tier]
+    errors.extend(
+        _validate_single_implementation_dispatch_trace(
+            events[lease_indexes[-1] :],
+            expected_tier_override=final_tier,
+            expected_agent_override=final_agent,
+        )
+    )
+    return errors
+
+
+def validate_review_escalation_trace(events: list[dict[str, object]]) -> list[str]:
+    """Validate exact read-only reviewer dispatch and evidence-gated tier escalation."""
+
+    errors: list[str] = []
+    dispatch_indexes = [
+        index for index, event in enumerate(events) if event.get("event") == "review-dispatch"
+    ]
+    if not dispatch_indexes:
+        return ["review escalation trace: missing exact reviewer dispatch"]
+
+    seen: set[tuple[str, str]] = set()
+    prior_tier: str | None = None
+    prior_result_index: int | None = None
+    prior_result: dict[str, str] | None = None
+    initial_risk = events[dispatch_indexes[0]].get("risk", "")
+    initial_start = REVIEW_START_BY_RISK.get(initial_risk)
+    initial_max_tier = REVIEW_MAX_TIER_BY_RISK.get(initial_risk)
+    max_rank = REVIEW_TIERS.index(initial_max_tier) if initial_max_tier in REVIEW_TIERS else -1
+
+    for position, dispatch_index in enumerate(dispatch_indexes):
+        dispatch = events[dispatch_index]
+        risk = dispatch.get("risk", "")
+        tier = dispatch.get("tier", "")
+        agent_name = dispatch.get("agent_name", "")
+        task_name = dispatch.get("task_name", "")
+        diff_revision = dispatch.get("diff_revision", "")
+        expected_start = REVIEW_START_BY_RISK.get(risk)
+        expected_agent = REVIEW_AGENT_BY_TIER.get(tier)
+
+        if expected_start is None:
+            errors.append("review escalation trace: risk must be low, medium, high, or critical")
+            continue
+        if risk != initial_risk:
+            errors.append("review escalation trace: escalation cannot change the diff risk")
+        if initial_start is not None:
+            expected_start = initial_start
+        if position == 0 and tier != expected_start:
+            errors.append(
+                f"review escalation trace: {risk} risk must start at exact {expected_start} reviewer"
+            )
+        if expected_agent is None or agent_name != expected_agent:
+            errors.append("review escalation trace: dispatch must select the exact agent for its tier")
+        if tier in REVIEW_TIERS and REVIEW_TIERS.index(tier) > max_rank:
+            errors.append(
+                "review escalation trace: stronger reviewer exceeded the risk ceiling; strongest is critical-only"
+            )
+        if not AGENT_NAME.fullmatch(agent_name):
+            errors.append("review escalation trace: agent_name must use underscore grammar")
+        if not task_name or task_name == agent_name:
+            errors.append("review escalation trace: task_name must be a separate non-profile task label")
+        if dispatch.get("result") != "selected":
+            errors.append("review escalation trace: review requires a selected exact reviewer")
+        key = (diff_revision, tier)
+        if key in seen:
+            errors.append("review escalation trace: unchanged diff cannot repeat the same reviewer tier")
+        seen.add(key)
+
+        if prior_tier is not None and prior_result is not None and prior_result_index is not None:
+            if prior_tier in REVIEW_TIERS:
+                prior_rank = REVIEW_TIERS.index(prior_tier)
+                expected_next = REVIEW_TIERS[prior_rank + 1] if prior_rank < max_rank else None
+                if prior_rank >= max_rank:
+                    errors.append(
+                        "review escalation trace: non-critical review route is exhausted; strongest is critical-only"
+                    )
+                elif tier != expected_next:
+                    errors.append("review escalation trace: sequential review ladder cannot skip a proven tier")
+            reason = prior_result.get("escalation_reason", "none")
+            if reason not in REVIEW_ESCALATION_REASONS:
+                errors.append("review escalation trace: stronger reviewer requires a concrete escalation trigger")
+            evidence = prior_result.get("concrete_evidence")
+            if not isinstance(evidence, str) or not evidence.strip() or evidence.strip() == "none":
+                errors.append("review escalation trace: stronger reviewer requires configured concrete evidence, not score alone")
+            actionable = prior_result.get("actionable_findings", "none") not in {
+                "",
+                "0",
+                "false",
+                "none",
+            }
+            if actionable:
+                between = events[prior_result_index + 1 : dispatch_index]
+                if not any(event.get("event") == "root-remediation" for event in between):
+                    errors.append("review escalation trace: root must remediate actionable findings before escalation")
+                if not any(
+                    event.get("event") == "validation" and event.get("result") == "green"
+                    for event in between
+                ):
+                    errors.append("review escalation trace: green validation must follow remediation before escalation")
+
+        next_dispatch_index = (
+            dispatch_indexes[position + 1] if position + 1 < len(dispatch_indexes) else len(events)
+        )
+        window = events[dispatch_index + 1 : next_dispatch_index]
+        receipts = [
+            (offset, event)
+            for offset, event in enumerate(window)
+            if event.get("event") == "review-routing-receipt"
+        ]
+        running_receipts = [
+            (offset, receipt)
+            for offset, receipt in receipts
+            if receipt.get("run_status") == "running"
+        ]
+        terminal_receipts = [
+            (offset, receipt)
+            for offset, receipt in receipts
+            if receipt.get("run_status") in {"completed", "failed"}
+        ]
+        activations = [
+            (offset, event)
+            for offset, event in enumerate(window)
+            if event.get("event") == "review-agent-activated"
+        ]
+        results = [
+            (offset, event)
+            for offset, event in enumerate(window)
+            if event.get("event") == "review-result"
+        ]
+        if len(running_receipts) != 1:
+            errors.append(
+                "review escalation trace: exact review requires one selected running routing receipt"
+            )
+        if len(activations) != 1:
+            errors.append("review escalation trace: exact review requires one matching activation event")
+        if len(results) != 1:
+            errors.append("review escalation trace: selected reviewer must return one structured result")
+        if not running_receipts or not activations or not results:
+            continue
+
+        running_offset, running = running_receipts[0]
+        selected_terminal_receipts = [
+            (offset, receipt)
+            for offset, receipt in terminal_receipts
+            if offset > running_offset
+        ]
+        if len(selected_terminal_receipts) != 1:
+            errors.append(
+                "review escalation trace: exact review requires one terminal receipt after selected running routing"
+            )
+            continue
+        activation_offset, activation = activations[0]
+        terminal_offset, terminal = selected_terminal_receipts[0]
+        result_offset, result = results[0]
+        if not running_offset < activation_offset < terminal_offset < result_offset:
+            errors.append(
+                "review escalation trace: lifecycle must be running receipt, activation, terminal receipt, then result"
+            )
+
+        required_receipt = {
+            "diff_revision",
+            "risk_floor",
+            "requested_agent",
+            "task_name",
+            "requested_tier",
+            "dispatch_method",
+            "configured_model",
+            "model_reasoning_effort",
+            "observed_agent",
+            "observed_model",
+            "terminal_event",
+            "activated",
+            "run_status",
+            "sandbox",
+            "dispatch_result",
+            "fallback_reason",
+            "process_tree_stopped",
+            "run_dir",
+            "worker_pid",
+            "worker_process_identity",
+            "codex_pid",
+            "codex_process_identity",
+            "codex_exit_evidence",
+            "codex_exit_code",
+            "result_evidence",
+        }
+        for phase, receipt in (("running", running), ("terminal", terminal)):
+            missing_receipt = sorted(field for field in required_receipt if field not in receipt)
+            if missing_receipt:
+                errors.append(
+                    f"review escalation trace: {phase} routing receipt missing fields {missing_receipt}"
+                )
+            if receipt.get("diff_revision") != diff_revision:
+                errors.append(f"review escalation trace: {phase} receipt diff revision must match dispatch")
+            if receipt.get("risk_floor") != expected_start:
+                errors.append(f"review escalation trace: {phase} receipt must record the risk review floor")
+            if receipt.get("requested_agent") != expected_agent or receipt.get("requested_tier") != tier:
+                errors.append(f"review escalation trace: {phase} receipt must name the exact requested reviewer")
+            if receipt.get("task_name") != task_name:
+                errors.append(f"review escalation trace: {phase} receipt task_name must match")
+
+        dispatch_method = running.get("dispatch_method")
+        if dispatch_method not in EXACT_DISPATCH_METHODS:
+            errors.append("review escalation trace: reviewer requires an exact dispatch method")
+        if dispatch_method == "codex-exec-explicit-model":
+            if not running.get("model_reasoning_effort"):
+                errors.append("review escalation trace: explicit-model receipt needs model_reasoning_effort")
+            if any(offset < running_offset for offset, _ in receipts):
+                errors.append(
+                    "review escalation trace: primary explicit runner cannot follow an earlier routing receipt"
+                )
+        if running.get("activated") is not False or running.get("terminal_event") not in {None, "none"}:
+            errors.append("review escalation trace: running receipt must be unactivated and non-terminal")
+        if running.get("process_tree_stopped") is not False:
+            errors.append("review escalation trace: running receipt cannot claim a stopped process tree")
+        running_exit_code = running.get("codex_exit_code")
+        if (
+            running.get("codex_exit_evidence") != "missing"
+            or (running_exit_code is not None and running_exit_code != "unknown")
+            or running.get("result_evidence") != "missing"
+        ):
+            errors.append(
+                "review escalation trace: running receipt must carry missing/unknown/missing evidence"
+            )
+        if running.get("dispatch_result") != "selected" or running.get("fallback_reason") not in {"", "none"}:
+            errors.append("review escalation trace: running receipt must preserve selected routing")
+        for field in ("run_dir", "worker_pid", "worker_process_identity", "codex_pid", "codex_process_identity"):
+            if not running.get(field):
+                errors.append(f"review escalation trace: running receipt requires {field}")
+        if running.get("sandbox") != "read-only":
+            errors.append("review escalation trace: reviewer sandbox must be read-only")
+
+        activation_bindings = {
+            "diff_revision": diff_revision,
+            "requested_agent": expected_agent,
+            "task_name": task_name,
+            "run_dir": running.get("run_dir"),
+            "worker_process_identity": running.get("worker_process_identity"),
+            "codex_process_identity": running.get("codex_process_identity"),
+        }
+        for field, expected in activation_bindings.items():
+            if activation.get(field) != expected:
+                errors.append(f"review escalation trace: activation changed {field}")
+        if activation.get("activated") is not True:
+            errors.append("review escalation trace: activation event must confirm activated true")
+
+        immutable_fields = {
+            "diff_revision",
+            "risk_floor",
+            "requested_agent",
+            "task_name",
+            "requested_tier",
+            "dispatch_method",
+            "configured_model",
+            "model_reasoning_effort",
+            "sandbox",
+            "run_dir",
+            "worker_pid",
+            "worker_process_identity",
+            "codex_pid",
+            "codex_process_identity",
+        }
+        for field in immutable_fields:
+            if terminal.get(field) != running.get(field):
+                errors.append(f"review escalation trace: terminal receipt changed routing field {field}")
+        if terminal.get("activated") is not True or terminal.get("process_tree_stopped") is not True:
+            errors.append("review escalation trace: terminal receipt must confirm activation and stopped process tree")
+        if terminal.get("run_status") != "completed":
+            errors.append("review escalation trace: reviewer result requires a completed terminal receipt")
+        if terminal.get("dispatch_result") != "selected" or terminal.get("fallback_reason") not in {"", "none"}:
+            errors.append("review escalation trace: terminal receipt must preserve selected routing")
+        if terminal.get("terminal_event") != "turn.completed":
+            errors.append("review escalation trace: completed explicit-model receipt requires turn.completed")
+        if terminal.get("observed_agent") != expected_agent:
+            errors.append("review escalation trace: terminal receipt must observe the exact reviewer")
+        errors.extend(
+            validate_explicit_terminal_evidence(
+                terminal,
+                label="review escalation trace",
+            )
+        )
+        if not explicit_success_evidence_is_valid(terminal):
+            errors.append(
+                "review escalation trace: terminal receipt needs exit code zero and valid result evidence"
+            )
+
+        required_result = {
+            "diff_revision",
+            "tier",
+            "verdict",
+            "confidence",
+            "coverage",
+            "actionable_findings",
+            "escalation_reason",
+            "concrete_evidence",
+        }
+        missing_result = sorted(field for field in required_result if field not in result)
+        if missing_result:
+            errors.append(f"review escalation trace: reviewer result missing fields {missing_result}")
+        if result.get("diff_revision") != diff_revision or result.get("tier") != tier:
+            errors.append("review escalation trace: reviewer result must match dispatched tier and diff")
+        if result.get("verdict") not in {"ACCEPT", "REVISE", "ESCALATE", "BLOCKED"}:
+            errors.append("review escalation trace: reviewer result has an invalid verdict")
+
+        prior_tier = tier
+        prior_result = result
+        prior_result_index = dispatch_index + 1 + result_offset
+
+    if prior_result is not None:
+        final_reason = prior_result.get("escalation_reason", "none")
+        actionable = prior_result.get("actionable_findings", "none") not in {
+            "",
+            "0",
+            "false",
+            "none",
+        }
+        incomplete = (
+            prior_result.get("verdict") != "ACCEPT"
+            or prior_result.get("confidence") == "low"
+            or prior_result.get("coverage") != "complete"
+        )
+        if final_reason in REVIEW_ESCALATION_REASONS or actionable or incomplete:
+            if initial_risk != "critical" and prior_tier == initial_max_tier:
+                errors.append(
+                    "review escalation trace: non-critical review route is exhausted with unresolved findings"
+                )
+            elif prior_tier == "strongest":
+                errors.append("review escalation trace: strongest reviewer left the task blocked")
+            else:
+                errors.append("review escalation trace: unresolved trigger requires the next reviewer tier")
+
+    return errors
+
+
+def validate_auto_routing_contract(
+    skill_text: str,
+    protocol_text: str,
+    metadata_text: str,
+    readme: str,
+    readme_ru: str,
+) -> list[str]:
+    errors: list[str] = []
+    invocation = markdown_section(skill_text, "## Parse the invocation")
+    if "`$build auto <idea-or-path>`" not in invocation:
+        errors.append("SKILL.md invocation contract: missing explicit auto mode")
+    if "`$build <idea-or-path>`: treat as `auto`" not in invocation:
+        errors.append("SKILL.md invocation contract: bare invocation must use auto phase routing")
+    selection = markdown_section(skill_text, "## Select the specification safely")
+    for token in ["workflow target", "first incomplete phase", "legacy `Ready`"]:
+        if token not in selection:
+            errors.append(f"SKILL.md auto-routing contract: missing {token}")
+    lifecycle = markdown_section(protocol_text, "## Lifecycle routing")
+    for token in [
+        "workflow target",
+        "first incomplete phase",
+        "`new` and `refine`",
+        "`run` and `full`",
+        "`auto`",
+        "| `Draft`, `Questions`",
+        "| Legacy `Ready`",
+        "| `In progress` | implementation",
+        "| `Complete` | verification",
+        "full acceptance set",
+        "focused and risk-based signals",
+        "documentation/version",
+        "rollout/rollback",
+    ]:
+        if token not in lifecycle:
+            errors.append(f"blindspot-protocol.md lifecycle routing: missing {token}")
+    if "auto mode" not in metadata_text:
+        errors.append("agents/openai.yaml: default prompt must select auto mode")
+    return errors
+
+
+def validate_blindspot_contract(
+    skill_text: str,
+    protocol_text: str,
+    template_text: str,
+    readme: str,
+    readme_ru: str,
+) -> list[str]:
+    errors: list[str] = []
+    audit = markdown_section(skill_text, "## Audit blind spots")
+    if "[the specification readiness protocol](references/blindspot-protocol.md)" not in audit:
+        errors.append("SKILL.md blind-spot section: missing readiness protocol link")
+
+    selection = markdown_section(skill_text, "## Select the specification safely")
+    for token in [
+        "specification source map",
+        "every in-scope normative file",
+        "every outgoing normative edge",
+        "every source is reachable from the root",
+        "Do not assume that the root file overrides",
+    ]:
+        if token not in selection:
+            errors.append(f"SKILL.md specification source map: missing {token}")
+
+    authority = markdown_section(skill_text, "## Protect user decision authority")
+    for token in [
+        "The user owns any choice",
+        "product-impact boundary",
+        "T-###",
+        "mixed or uncertain",
+        "Never silently prefer",
+        "Initial source mapping cannot self-declare a user deferral",
+    ]:
+        if token not in authority:
+            errors.append(f"SKILL.md decision authority: missing {token}")
+
+    interview = markdown_section(skill_text, "## Ask product questions before normative edits")
+    for token in [
+        "Do not change normative specification content",
+        "decision application receipt",
+        "cannot replace a locked `D-###`",
+        "reopened decision invalidates the prior write/application authorization",
+        "every previously affected target/change tuple",
+        "keep the status at `Questions`",
+    ]:
+        if token not in interview:
+            errors.append(f"SKILL.md normative edit gate: missing {token}")
+
+    for heading, label in [
+        ("## Specification source map", "specification source map"),
+        ("## Coverage model", "coverage model"),
+        ("## Decision authority and conflict protocol", "decision authority"),
+        ("## Decision memory and deduplication", "decision memory"),
+        ("## Decision application gate", "decision application gate"),
+        ("## Adaptive critic loop", "adaptive critic loop"),
+        ("## Critic result", "critic result"),
+        ("## Ready gate", "Ready gate"),
+    ]:
+        if not markdown_section(protocol_text, heading):
+            errors.append(f"blindspot-protocol.md: missing {label} section")
+
+    source_map = markdown_section(protocol_text, "## Specification source map")
+    for token in [
+        "every in-scope document linked",
+        "every outgoing normative link",
+        "every mapped source is reachable from the selected root",
+        "decision provenance must explicitly list",
+        "cannot self-declare `deferred`",
+        "decision record",
+        "Do not infer that the root silently overrides",
+        "route the conflict through the decision authority protocol",
+    ]:
+        if token not in source_map:
+            errors.append(f"blindspot-protocol.md source map: missing {token}")
+
+    coverage = markdown_section(protocol_text, "## Coverage model")
+    for token in ["B-###", "gap", "covered", "not applicable", "repository fact", "technical decision", "product decision", "new authority"]:
+        if token not in coverage:
+            errors.append(f"blindspot-protocol.md coverage model: missing {token}")
+
+    decision_memory = markdown_section(protocol_text, "## Decision memory and deduplication")
+    for token in [
+        "D-###",
+        "Decision key",
+        "legacy IDs",
+        "resolved",
+        "reopened",
+        "new evidence",
+        "do not ask it again",
+        "A second user answer cannot overwrite the locked outcome",
+        "conditional child decision",
+    ]:
+        if token not in decision_memory:
+            errors.append(f"blindspot-protocol.md decision memory: missing {token}")
+
+    decision_authority = markdown_section(protocol_text, "## Decision authority and conflict protocol")
+    for token in [
+        "bridge between user intent and implementation",
+        "product-impact test",
+        "When classification is mixed or uncertain",
+        "T-###",
+        "Never silently choose",
+        "structured reconciliation receipt",
+        "record type, governed target, source revision, and positive line number",
+        "Free-text evidence",
+        "wait for the user's answer",
+    ]:
+        if token not in decision_authority:
+            errors.append(f"blindspot-protocol.md decision authority: missing {token}")
+
+    application_gate = markdown_section(protocol_text, "## Decision application gate")
+    for token in [
+        "Do not change that dependent normative specification content",
+        "An answered independent ID may be applied immediately",
+        "decision application receipt",
+        "one structured mapping for every normative decision/target/change tuple",
+        "exact answer source",
+        "Every normative write captures the authorizing decision version",
+        "invalidates every prior normative write/application authorization",
+        "complete set of affected `(target, change)` tuples",
+        "repeats the exact pre-reopen outcome",
+        "Every Build-made normative change",
+        "cannot authorize a normative product change",
+        "keep the specification in `Questions`",
+    ]:
+        if token not in application_gate:
+            errors.append(f"blindspot-protocol.md decision application gate: missing {token}")
+
+    critic_loop = markdown_section(protocol_text, "## Adaptive critic loop")
+    for token in [
+        "decision memory",
+        "coverage ledger",
+        "semantic specification inputs",
+        "Do not increment it for audit metadata",
+        "closure verdict remains bound",
+        "low",
+        "medium",
+        "high",
+        "critical",
+        "unchanged tuple",
+        "sequential separated root-perspective passes",
+        "non-trivial low work",
+        "two complementary",
+        "separate closure pass for high",
+        "three complementary",
+        "effective model map",
+        "critic.<risk>",
+        "configured evidence trigger",
+        "Transport failure does not authorize another critic model",
+        "do not satisfy a required independent closure",
+        "self-review, limited",
+    ]:
+        if token not in critic_loop:
+            errors.append(f"blindspot-protocol.md adaptive critic loop: missing {token}")
+
+    ready_gate = markdown_section(protocol_text, "## Ready gate")
+    for token in [
+        "coverage ledger",
+        "specification source map",
+        "gap",
+        "blocking product decisions",
+        "material contradiction",
+        "missing new authority",
+        "critic finding",
+        "acceptance criteria",
+        "current specification revision",
+        "COVERED",
+        "decision application receipt",
+        "Build-made normative change",
+        "T-###",
+        "current decision version",
+    ]:
+        if token not in ready_gate:
+            errors.append(f"blindspot-protocol.md Ready gate: missing {token}")
+
+    risks = markdown_section(template_text, "## 9. Risks and blind spots")
+    ledger_header = "ID | Concern | Status | Disposition | Evidence or decision | Next action"
+    if ledger_header not in risks or "B-###" not in risks or "D-###" not in risks:
+        errors.append("spec-template.md coverage ledger: missing durable IDs or required columns")
+    if "### Decision application receipt" not in risks or "Changed files/sections/ACs/milestones" not in risks:
+        errors.append("spec-template.md: missing decision application receipt")
+
+    current_state = markdown_section(template_text, "## 2. Current state and evidence")
+    if "### Specification source map" not in current_state or "Normative scope and decision IDs" not in current_state:
+        errors.append("spec-template.md: missing specification source map")
+
+    decisions = markdown_section(template_text, "## 3. Decision memory")
+    for token in ["### User-owned product decisions", "### Technical decision ledger", "T-001", "### Pending proposals"]:
+        if token not in decisions:
+            errors.append(f"spec-template.md decision authority: missing {token}")
+
+    critic_result = markdown_section(protocol_text, "## Critic result")
+    for token in [
+        "Specification revision:",
+        "Perspective:",
+        "Verdict: COVERED | GAPS",
+        "Coverage:",
+        "New gaps:",
+        "Reopen requests:",
+        "Duplicate/resolved references:",
+    ]:
+        if token not in critic_result:
+            errors.append(f"blindspot-protocol.md critic result: missing {token}")
+
+    return errors
+
+
+def validate_implementation_delegation_contract(
+    skill_text: str,
+    protocol_text: str,
+    model_routing: str,
+    tdd_workflow: str,
+    review_protocol: str,
+    versioning_text: str,
+    readme: str,
+    readme_ru: str,
+    runner_text: str,
+) -> list[str]:
+    errors: list[str] = []
+    implementation = markdown_section(skill_text, "## Implement milestones")
+    review = markdown_section(skill_text, "## Run progressive review")
+    if "[adaptive implementation delegation](references/implementation-delegation.md)" not in implementation:
+        errors.append("SKILL.md implementation section: missing adaptive delegation link")
+
+    for heading, label in [
+        ("## Delegation modes", "delegation modes"),
+        ("## Single-writer lease", "single-writer lease"),
+        ("## Worker contract", "worker contract"),
+        ("## Root handoff gate", "root handoff gate"),
+    ]:
+        if not markdown_section(protocol_text, heading):
+            errors.append(f"implementation-delegation.md: missing {label} section")
+
+    lease = markdown_section(protocol_text, "## Single-writer lease")
+    for token in ["one active writer", "Allowed files", "Forbidden files", "Baseline", "Stop conditions", "otherwise no lease is granted"]:
+        if token not in lease:
+            errors.append(f"implementation-delegation.md single-writer lease: missing {token}")
+
+    modes = markdown_section(protocol_text, "## Delegation modes")
+    for token in ["`root-only`", "`bounded-worker`", "`sequential-workers`", "parallel write-heavy", "`critical`"]:
+        if token not in modes:
+            errors.append(f"implementation-delegation.md delegation modes: missing {token}")
+
+    worker = markdown_section(protocol_text, "## Worker contract")
+    for token in ["specification", "version", "stage, commit, push", "product or architecture decisions", "stop before further test and production code edits"]:
+        if token not in worker:
+            errors.append(f"implementation-delegation.md worker contract: missing {token}")
+
+    handoff = markdown_section(protocol_text, "## Root handoff gate")
+    for token in [
+        "Recheck branch",
+        "allowed",
+        "Reread the implementation",
+        "Rerun the focused green check independently",
+        "version/changelog/documentation",
+        "progressive review",
+        "Git exclusively root-owned",
+        "Do not repair an edited or failed milestone through a replacement lease without new explicit user authority",
+    ]:
+        if token not in handoff:
+            errors.append(f"implementation-delegation.md root handoff: missing {token}")
+
+    if "## Implementation worker routing" not in model_routing or "Implementation worker" not in model_routing:
+        errors.append("model-routing.md: missing Implementation worker routing contract")
+    if "bounded implementation worker" not in tdd_workflow:
+        errors.append("tdd-workflow.md: missing bounded implementation worker contract")
+    tdd_steps = markdown_section(tdd_workflow, "## Red → green → refactor")
+    route_position = tdd_steps.find("Resolve `implementation.<risk>` through the effective model map")
+    edit_position = tdd_steps.find("Under that lease, add or modify the test")
+    if route_position < 0 or edit_position < 0 or route_position >= edit_position:
+        errors.append("tdd-workflow.md: risk-matched writer route and lease must precede every test code edit")
+    for token in ["keep the milestone blocked", "create no replacement writer"]:
+        if token not in tdd_steps:
+            errors.append(f"tdd-workflow.md: failed exact writer recovery contract missing {token}")
+
+    automatic_contracts = [
+        (
+            skill_text,
+            "external controller timeout of at least 120 seconds",
+            "SKILL.md automatic orchestration: missing dispatch controller timeout",
+        ),
+        (
+            model_routing,
+            "external controller timeout of at least 120 seconds",
+            "model-routing.md automatic orchestration: missing dispatch controller timeout",
+        ),
+        (
+            protocol_text,
+            "external controller timeout of at least 120 seconds",
+            "implementation-delegation.md automatic orchestration: missing dispatch controller timeout",
+        ),
+        (
+            skill_text,
+            "activated `normal-legacy` failure release",
+            "SKILL.md root completion: missing legacy timeout release audit",
+        ),
+        (
+            model_routing,
+            "activated `normal-legacy` failure release",
+            "model-routing.md root completion: missing legacy timeout release audit",
+        ),
+        (
+            protocol_text,
+            "activated `normal-legacy` failure release",
+            "implementation-delegation.md root completion: missing legacy timeout release audit",
+        ),
+        (skill_text, "runner-owned `dispatch`", "SKILL.md automatic orchestration: missing runner-owned dispatch"),
+        (
+            skill_text,
+            "stage-prompt --repo <workspace-root>",
+            "SKILL.md recovery autonomy: missing owner-private prompt staging",
+        ),
+        (
+            skill_text,
+            "root performs no workspace write at all",
+            "SKILL.md recovery autonomy: missing non-vacant root-write boundary",
+        ),
+        (
+            skill_text,
+            "_reconcile-terminal-abandonment --run-dir <path>",
+            "SKILL.md recovery autonomy: missing same-lifecycle abandonment",
+        ),
+        (
+            skill_text,
+            "required_action=provide-decision",
+            "SKILL.md recovery autonomy: missing closed decision outcome",
+        ),
+        (
+            skill_text,
+            "Only a new recovery target writer requires explicit user opt-in",
+            "SKILL.md automatic orchestration: missing recovery target authority boundary",
+        ),
+        (
+            review,
+            "runner-owned `dispatch`",
+            "SKILL.md progressive review: missing runner-owned dispatch",
+        ),
+        (
+            model_routing,
+            "one immutable 900-second observation budget",
+            "model-routing.md automatic deadline: missing immutable 900-second observation budget",
+        ),
+        (
+            model_routing,
+            "Only a new recovery target writer requires explicit user opt-in",
+            "model-routing.md automatic orchestration: missing recovery target authority boundary",
+        ),
+        (
+            tdd_workflow,
+            "runner-owned `dispatch`",
+            "tdd-workflow.md automatic orchestration: missing runner-owned dispatch",
+        ),
+        (
+            protocol_text,
+            "same-profile-retry",
+            "implementation-delegation.md automatic orchestration: missing same-profile retry",
+        ),
+        (
+            protocol_text,
+            "normalized-malformed-needs-escalation",
+            "implementation-delegation.md automatic orchestration: missing malformed escalation classifier",
+        ),
+        (
+            protocol_text,
+            "never asks whether to continue or cancel",
+            "implementation-delegation.md automatic orchestration: missing routine-prompt boundary",
+        ),
+        (
+            protocol_text,
+            "Automatic same-scope root-completion requires no operational user prompt",
+            "implementation-delegation.md automatic orchestration: missing root-completion authority boundary",
+        ),
+        (
+            protocol_text,
+            "Never place prompt, recovery prompt, receipt, helper, ignored artifact, specification update, version, or changelog write",
+            "implementation-delegation.md recovery autonomy: missing non-vacant workspace-write boundary",
+        ),
+        (
+            protocol_text,
+            "exact `[outside-set-drift]`",
+            "implementation-delegation.md recovery autonomy: missing exact abandonment cause",
+        ),
+        (
+            skill_text,
+            "terminal-abandonment-v2",
+            "SKILL.md recovery overlap: missing v2 terminal outcome",
+        ),
+        (
+            skill_text,
+            "terminal-abandonment-v3",
+            "SKILL.md legacy normal overlap: missing v3 terminal outcome",
+        ),
+        (
+            skill_text,
+            "terminal-abandonment-v5",
+            "SKILL.md legacy normal single overlap: missing v5 terminal outcome",
+        ),
+        (
+            skill_text,
+            "CAS-attaches that exact lease/run/allowed-set to the project lane",
+            "SKILL.md project lane bridge: missing pre-prompt attach boundary",
+        ),
+        (
+            protocol_text,
+            "exact sorted pair `[outside-set-drift, preexisting-dirty-overlap]`",
+            "implementation-delegation.md recovery overlap: missing exact pair",
+        ),
+        (
+            protocol_text,
+            "legacy `normal-contained` lease",
+            "implementation-delegation.md legacy normal overlap: missing v3 lease boundary",
+        ),
+        (
+            protocol_text,
+            "exact single reason `[preexisting-dirty-overlap]`",
+            "implementation-delegation.md legacy normal single overlap: missing v5 reason boundary",
+        ),
+        (
+            protocol_text,
+            "successful accepted handoff records `waiting-for-integration`",
+            "implementation-delegation.md project lane bridge: missing terminal boundary",
+        ),
+        (
+            skill_text,
+            "_reconcile-containment-loss --run-dir <path>",
+            "SKILL.md containment-loss reconciliation: missing command boundary",
+        ),
+        (
+            skill_text,
+            "terminal-abandonment-v4",
+            "SKILL.md containment-loss reconciliation: missing v4 exact-triple boundary",
+        ),
+        (
+            protocol_text,
+            "The sole quarantine exception is private `_reconcile-containment-loss`",
+            "implementation-delegation.md containment-loss reconciliation: missing exact quarantine boundary",
+        ),
+        (
+            protocol_text,
+            "fresh reasons are exactly `[git-control-plane-drift, outside-set-drift, preexisting-dirty-overlap]`",
+            "implementation-delegation.md containment-loss reconciliation: missing v4 reason boundary",
+        ),
+        (
+            protocol_text,
+            "required_action=provide-decision",
+            "implementation-delegation.md recovery autonomy: missing decision outcome boundary",
+        ),
+        (
+            protocol_text,
+            "automation-exhausted` only when safe executor/route capabilities",
+            "implementation-delegation.md recovery autonomy: missing capability-exhaustion boundary",
+        ),
+        (
+            model_routing,
+            "Exact `[outside-set-drift]` uses terminal abandonment v1",
+            "model-routing.md recovery autonomy: missing same-lifecycle routing boundary",
+        ),
+        (
+            model_routing,
+            "Exact `[outside-set-drift, preexisting-dirty-overlap]` uses terminal abandonment v2 for a recovery-target and v3 for a legacy `normal-contained` lease",
+            "model-routing.md recovery overlap: missing v2/v3 routing boundary",
+        ),
+        (
+            model_routing,
+            "exact single `[preexisting-dirty-overlap]` uses v5 only for a completed legacy `normal-contained` lease",
+            "model-routing.md legacy normal single overlap: missing v5 routing boundary",
+        ),
+        (
+            model_routing,
+            "An exact post-zero `containment-loss-after-boundary` quarantine",
+            "model-routing.md containment-loss reconciliation: missing non-routing boundary",
+        ),
+        (
+            model_routing,
+            "Only that quarantined legacy-normal path may select v4",
+            "model-routing.md containment-loss reconciliation: missing v4 confinement",
+        ),
+        (
+            model_routing,
+            "asks for permission that cannot change the evidence",
+            "model-routing.md recovery autonomy: missing no-useless-permission boundary",
+        ),
+        (
+            tdd_workflow,
+            "terminal-abandonment-v1",
+            "tdd-workflow.md recovery autonomy: missing abandonment fixture contract",
+        ),
+        (
+            tdd_workflow,
+            "terminal-abandonment-v2",
+            "tdd-workflow.md recovery overlap: missing v2 fixture contract",
+        ),
+        (
+            tdd_workflow,
+            "terminal-abandonment-v3",
+            "tdd-workflow.md legacy normal overlap: missing v3 fixture contract",
+        ),
+        (
+            tdd_workflow,
+            "terminal-abandonment-v5",
+            "tdd-workflow.md legacy normal single overlap: missing v5 fixture contract",
+        ),
+        (
+            tdd_workflow,
+            "Post-zero containment-loss reconciliation must additionally reproduce",
+            "tdd-workflow.md containment-loss reconciliation: missing fixture contract",
+        ),
+        (
+            tdd_workflow,
+            "Its v4 regression must advance HEAD after checkpoint capture",
+            "tdd-workflow.md containment-loss reconciliation: missing v4 committed-HEAD fixture",
+        ),
+        (
+            review_protocol,
+            "legacy `normal-contained` v3",
+            "review-protocol.md recovery overlap: missing v3 review boundary",
+        ),
+        (
+            review_protocol,
+            "legacy `normal-contained` lifecycle to v5 without artificial drift",
+            "review-protocol.md legacy normal single overlap: missing v5 review boundary",
+        ),
+        (
+            review_protocol,
+            "post-zero containment-loss diffs additionally prove",
+            "review-protocol.md containment-loss reconciliation: missing review boundary",
+        ),
+        (
+            versioning_text,
+            "first new durable transition raises the floor to 2.4.0 before source invalidation",
+            "versioning.md v5 reconciliation: missing reader-floor rollout contract",
+        ),
+        (
+            readme,
+            "continues observing automatically within one immutable 15-minute budget",
+            "README.md automatic orchestration: missing immutable 15-minute continuation",
+        ),
+        (
+            readme,
+            "Only a new checkpoint-bound recovery target writer requires explicit user authorization",
+            "README.md automatic orchestration: missing new-writer authority boundary",
+        ),
+        (
+            readme,
+            "Version 2.4.0 adds ordinary post-zero reconciliation",
+            "README.md legacy normal single overlap: missing operator outcome",
+        ),
+        (
+            readme,
+            "Version 2.4.0-alpha.2 previews the M2 project-lane lifecycle",
+            "README.md project lane bridge: missing operator outcome",
+        ),
+        (
+            readme,
+            "Version 2.3.6 extends post-zero containment-loss reconciliation",
+            "README.md containment-loss reconciliation: missing operator outcome",
+        ),
+        (
+            readme,
+            "Version 2.3.4 repairs root completion after an activated `normal-legacy` timeout",
+            "README.md legacy timeout root completion: missing operator outcome",
+        ),
+        (
+            readme,
+            "Version 2.3.3 prevents the host controller's short default timeout",
+            "README.md dispatch controller timeout: missing operator outcome",
+        ),
+        (
+            readme_ru,
+            "автоматически продолжает наблюдение в пределах одного неизменяемого 15-минутного бюджета",
+            "README.ru.md automatic orchestration: missing immutable 15-minute continuation",
+        ),
+        (
+            readme_ru,
+            "Только новый checkpoint-bound recovery target writer требует явного разрешения пользователя",
+            "README.ru.md automatic orchestration: missing new-writer authority boundary",
+        ),
+        (
+            readme_ru,
+            "Версия 2.4.0 добавляет обычный post-zero reconciliation",
+            "README.ru.md legacy normal single overlap: missing operator outcome",
+        ),
+        (
+            readme_ru,
+            "Версия 2.4.0-alpha.2 предварительно выпускает M2 lifecycle project lanes",
+            "README.ru.md project lane bridge: missing operator outcome",
+        ),
+        (
+            readme_ru,
+            "Версия 2.3.6 расширяет post-zero containment-loss reconciliation",
+            "README.ru.md containment-loss reconciliation: missing operator outcome",
+        ),
+        (
+            readme_ru,
+            "Версия 2.3.4 восстанавливает root completion после таймаута активированного `normal-legacy`",
+            "README.ru.md legacy timeout root completion: missing operator outcome",
+        ),
+        (
+            readme_ru,
+            "Версия 2.3.3 не позволяет короткому default timeout внешнего controller",
+            "README.ru.md dispatch controller timeout: missing operator outcome",
+        ),
+    ]
+    for text, token, error in automatic_contracts:
+        if token not in text:
+            errors.append(error)
+
+    for label, text in [
+        ("SKILL.md progressive review", review),
+        ("model-routing.md", model_routing),
+        ("tdd-workflow.md", tdd_workflow),
+    ]:
+        if "call `activate`" in text:
+            errors.append(f"{label}: ordinary orchestration must not require manual activation")
+
+    for token, label in [
+        ("OBSERVATION_BUDGET_SECONDS = 900", "immutable observation budget"),
+        ("def nonrecovery_allowed_set_digest", "ordinary activation allowed-set binding"),
+        ("def root_completion_source_binding(", "root completion source binding"),
+        (
+            "def _validate_legacy_root_completion_release(",
+            "legacy timeout root completion audit",
+        ),
+        ("def activation_window", "activation deadline evidence"),
+        ("def dispatch_run(args", "runner-owned dispatch"),
+        ("dispatch-unactivated-receipt.json", "durable unactivated receipt"),
+        ("dispatch-activated-receipt.json", "durable activated receipt"),
+        ("activated = activate_run(argparse.Namespace(run_dir=run_dir))", "same-run activation"),
+        ('dispatch = subparsers.add_parser(', "dispatch CLI command"),
+        ('"stage-prompt"', "owner-private prompt staging command"),
+        ("prompt_owner.mark_prompt_snapshot_released", "normal prompt release marker"),
+    ]:
+        if token not in runner_text:
+            errors.append(f"agent_runner.py automatic orchestration: missing {label}")
+    return errors
+
+
+def validate_changelog_contract(changelog: str, version: str) -> list[str]:
+    errors: list[str] = []
+    unreleased = markdown_section(changelog, "## [Unreleased]")
+    if not unreleased:
+        errors.append("CHANGELOG.md: missing Unreleased section")
+        return errors
+
+    release_heading = next(
+        (
+            line
+            for line in changelog.splitlines()
+            if re.fullmatch(rf"## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}", line)
+        ),
+        None,
+    )
+    if release_heading:
+        current_section = markdown_section(changelog, release_heading)
+        current_label = release_heading
+    elif contains_exact_version(unreleased, version):
+        current_section = unreleased
+        current_label = "CHANGELOG.md Unreleased"
+    else:
+        errors.append(f"CHANGELOG.md: missing current manifest version {version} in Unreleased or a dated release")
+        return errors
+
+    for token in [
+        "packaged defaults",
+        "`codex-exec-explicit-model`",
+        "project → user → packaged",
+        "unknown-model agent routes",
+        "README",
+    ]:
+        if token not in current_section:
+            errors.append(f"{current_label}: missing current workflow note {token}")
+    return errors
+
+
+def validate_release_docs_contract(readme: str, readme_ru: str, version: str) -> list[str]:
+    errors: list[str] = []
+    for label, text in [("README.md", readme), ("README.ru.md", readme_ru)]:
+        for token in [
+            f"--ref v{version}",
+            f"/tree/v{version}/plugins/openbuild/skills/build",
+        ]:
+            if token not in text:
+                errors.append(f"{label}: released version {version} is not pinned by {token}")
+    return errors
+
+
+def validate_usage_routing_contract(
+    skill_text: str,
+    model_routing: str,
+    code_discovery: str,
+    implementation: str,
+    review_protocol: str,
+    readme: str,
+    readme_ru: str,
+    model_map_interview: str,
+    template_text: str,
+) -> list[str]:
+    errors: list[str] = []
+
+    explicit_discovery = markdown_section(skill_text, "## Explicit Code Discovery Delegation")
+    for token in [
+        "only through `scripts/model_map.py` followed by `scripts/agent_runner.py`",
+        "packaged default is `openbuild_search_separate`",
+        "pinned to `gpt-5.3-codex-spark`, low reasoning, and read-only sandbox",
+        "explicitly confirmed project or user map",
+        "canonical Explorer instructions and read-only sandbox remain fixed",
+        "bounded `openbuild.discovery.v1` JSON result",
+        "owner-captured content fingerprint",
+        "Do not call a native Explorer or any other agent API",
+        "completed semantic search",
+        "listed evidence trigger",
+        "one narrow transport exception",
+        "create no further agent",
+        "minimum targeted root search",
+    ]:
+        if token not in explicit_discovery:
+            errors.append(f"SKILL.md explicit code discovery delegation: missing {token}")
+
+    search_preflight = markdown_section(skill_text, "## Initialize search routing")
+    for token in [
+        "Before locating a specification",
+        "exact-runner circuit-breaker state",
+        "scripts/model_map.py resolve --use-case discovery --risk default",
+        "map_source",
+        "map_sha256",
+        "first returned profile",
+        "scripts/agent_runner.py",
+        "codex exec -m <model> -c model_reasoning_effort=<effort>",
+        "before the root runs `rg`",
+        "availability fallback fields",
+        "--search-fallback-source <Spark-run-handle>",
+        "Otherwise the transport failure permits only disclosed targeted root recovery",
+    ]:
+        if token not in search_preflight:
+            category = (
+                "exact agent dispatch"
+                if "agent" in token or "model_map.py" in token or "first returned" in token
+                else "search preflight"
+            )
+            errors.append(f"SKILL.md {category}: missing {token}")
+    preflight_position = skill_text.find("## Initialize search routing")
+    selection_position = skill_text.find("## Select the specification safely")
+    baseline_position = skill_text.find("## Establish the baseline")
+    if preflight_position < 0 or selection_position < 0 or baseline_position < 0 or not (preflight_position < selection_position < baseline_position):
+        errors.append("SKILL.md search preflight: must precede specification selection and baseline discovery")
+
+    skill_discovery = markdown_section(skill_text, "## Discover repository evidence")
+    for token in [
+        "before any repository grep",
+        "resolve the effective discovery map",
+        "dispatch its first exact agent",
+        "configured evidence trigger",
+        "one-shot Terra availability fallback",
+        "create no further discovery agent",
+        "minimum targeted root search",
+    ]:
+        if token not in skill_discovery:
+            errors.append(f"SKILL.md usage routing: missing {token}")
+    skill_implementation = markdown_section(skill_text, "## Implement milestones")
+    for token in [
+        "model_map.py resolve --use-case implementation",
+        "first returned exact profile",
+        "single-writer lease",
+        "configured trigger before any edit",
+        "next configured route step",
+        "preserve the same TDD/minimality/validation gates at every route step",
+    ]:
+        if token not in skill_implementation:
+            errors.append(f"SKILL.md risk-matched writer routing: missing {token}")
+
+    search_order = markdown_section(model_routing, "## Search usage-pool order")
+    for token in [
+        "**Configured exact route:**",
+        "model_map.py",
+        "openbuild_search_separate",
+        "gpt-5.3-codex-spark",
+        "strict `openbuild.discovery.v1`",
+        "**Semantic escalation:**",
+        "**Availability fallback:**",
+        "configured evidence gap",
+        "max_steps",
+        "**Root recovery:**",
+        "opens the circuit breaker",
+        "single fallback claim",
+        "Do not scrape or infer remaining quota",
+        "Do not silently skip it",
+        "No third search agent exists",
+        "profile-not-discoverable",
+        "model-unavailable",
+        "quota-exhausted",
+        "spawn-failed",
+        "terminal receipt",
+        "agent_runner.py",
+        "codex-exec-explicit-model",
+        "turn.completed",
+        "creation-bound exit zero",
+        "strict JSON validation",
+        "Availability receipts",
+        "Project/user overrides may change exact model and effort",
+        "search overrides keep canonical instructions immutable",
+        "coherent pre-turn",
+        "complete JSONL/stderr collection",
+        "every explicit error record",
+        "raw top-level `code`",
+        "unrecognized error-bearing event",
+        "present JSONL, stderr, and result read",
+        "verified regular non-reparse descriptor identity",
+        "conflicting `code`/`type` values",
+        "JSONL and stderr evidence",
+        "Source-time Spark/Terra",
+    ]:
+        if token not in search_order:
+            if token in SEARCH_DISPATCH_FAILURES:
+                category = "fallback reason"
+            elif token.startswith("select `openbuild") or "does not count" in token:
+                category = "exact agent dispatch"
+            else:
+                category = "search usage-pool order"
+            errors.append(f"model-routing.md {category}: missing {token}")
+    ordered_search_tokens = [
+        "**Configured exact route:**",
+        "**Semantic escalation:**",
+        "**Availability fallback:**",
+        "**Root recovery:**",
+    ]
+    search_positions = [search_order.find(token) for token in ordered_search_tokens]
+    if any(position < 0 for position in search_positions) or search_positions != sorted(search_positions):
+        errors.append("model-routing.md search order: configured route and semantic escalation must precede root recovery")
+    for token in [
+        "rung metadata is validated after profile precedence resolves",
+        "same-OS-account confirmation plus exact legacy binding/commit/remediation/Git evidence",
+        "diagnostic root review cannot close an exact-review or release gate",
+        "completed semantically insufficient result with a listed trigger",
+    ]:
+        if token not in model_routing:
+            errors.append(f"model-routing.md preserved lifecycle safeguard: missing {token}")
+
+    implementation_route = markdown_section(model_routing, "## Implementation worker routing")
+    for token in [
+        "resolve `implementation.<risk>` through `model_map.py`",
+        "first returned exact profile",
+        "packaged map uses",
+        "openbuild_implementation_fast",
+        "openbuild_implementation_luna_xhigh",
+        "openbuild_implementation_balanced",
+        "openbuild_implementation_strong",
+        "openbuild_implementation_sol_high",
+        "openbuild_implementation_strongest",
+        "Escalate only on evidence",
+        "`NEEDS_ESCALATION`",
+        "Before any edit",
+        "trigger listed by the resolved route",
+        "exactly one configured route step",
+        "max_steps",
+        "Infrastructure or transport failure",
+        "Every created implementation agent must have concrete model, effort, and sandbox evidence",
+        "stop before further test or production edits",
+        "Before every test or production code edit",
+        "rather than lowering the risk floor",
+        "acquire the single-writer lease for the exact selected profile",
+        "`running` Implementation routing receipt",
+        "implementation-agent-activated",
+        "`agent_name`",
+        "`task_name`",
+        "Implementation routing receipt",
+        "implementation-handoff-accepted",
+        "semantic-handoff-rejected",
+        "invalidates the source checkpoint and published recovery artifact",
+        "before close, release, and next-route approval",
+        "checkpoint_invalidation=pending",
+        "failure retains the lease",
+        "bind `completed`",
+        "agent_runner.py",
+        "codex-exec-explicit-model",
+        "turn.completed",
+    ]:
+        if token not in implementation_route:
+            category = "exact writer dispatch" if "single-writer lease" in token else "implementation routing"
+            errors.append(f"model-routing.md {category}: missing {token}")
+
+    review_route = markdown_section(model_routing, "### Exact sequential reviewer dispatch")
+    for token in [
+        "Resolve the exact starting reviewer through `model_map.py`",
+        "critic or progressive-review ladder",
+        "first returned profile",
+        "returned order",
+        "configured trigger",
+        "max_steps",
+        "Move exactly one route step",
+        "Review routing receipt",
+        "unactivated `running` Review routing receipt",
+        "review-agent-activated",
+        "creation-bound exit code zero",
+        "valid result evidence",
+        "agent_runner.py",
+        "codex-exec-explicit-model",
+        "turn.completed",
+        "`agent_name`",
+        "`task_name`",
+        "Reviewers remain read-only",
+    ]:
+        if token not in review_route:
+            if token.startswith("Resolve the exact"):
+                category = "exact reviewer dispatch"
+            elif token == "returned order":
+                category = "sequential review ladder"
+            else:
+                category = "review routing"
+            errors.append(f"model-routing.md {category}: missing {token}")
+
+    setup = markdown_section(model_routing, "## `$build configure-models`")
+    for token in [
+        "backward-compatible alias",
+        "model-map interview",
+        "openbuild_search_separate",
+        "openbuild_search_balanced",
+        "openbuild_search_strong",
+        "openbuild_search_strongest",
+        "openbuild_implementation_fast",
+        "openbuild_implementation_balanced",
+        "openbuild_implementation_strong",
+        "openbuild_implementation_strongest",
+        "openbuild_review_fast",
+        "openbuild_review_balanced",
+        "openbuild_review_strong",
+        "openbuild_review_strongest",
+        "confirmed usage pool",
+        "workspace-write",
+    ]:
+        if token not in setup:
+            errors.append(f"model-routing.md configure-models: missing {token}")
+
+    migration = markdown_section(model_routing, "### Guided legacy-profile migration")
+    for token in [
+        "immutable `plan_id`",
+        "stable `entry_id`",
+        "SHA-256",
+        "create-if-absent",
+        "already-migrated",
+        "config-conflict",
+        "per-entry authority",
+        "hash-drift",
+        "separate displayed plan and permission",
+    ]:
+        if token not in migration:
+            errors.append(f"model-routing.md guided migration: missing {token}")
+    for canonical, legacy in CANONICAL_AGENT_IDS.items():
+        if canonical not in migration or legacy not in migration:
+            errors.append(f"model-routing.md guided migration: missing mapping {legacy} -> {canonical}")
+
+    mandatory_search = markdown_section(code_discovery, "## Mandatory routing rule")
+    for token in [
+        "`rg --files`",
+        "discovery.default",
+        "scripts/model_map.py",
+        "new grep or lookup",
+        "circuit breaker",
+        "one-shot Terra availability fallback",
+        "before the root runs any new repository search command",
+        "Advance exactly one configured semantic route step",
+        "listed evidence trigger",
+        "All other transport/exact-selection/result failures",
+        "agent_runner.py",
+        "codex-exec-explicit-model",
+        "turn.completed",
+        "runner-owned `dispatch`",
+    ]:
+        if token not in mandatory_search:
+            category = (
+                "exact agent dispatch"
+                if "root runs" in token or "generic spawn" in token or "runner-owned" in token
+                else "usage routing"
+            )
+            errors.append(f"code-discovery.md {category}: missing {token}")
+    if "call `activate`" in mandatory_search:
+        errors.append("code-discovery.md exact agent dispatch: ordinary orchestration must not require manual activation")
+
+    evidence_contract = markdown_section(code_discovery, "## Evidence map")
+    for token in [
+        "literal backslashes fail closed",
+        "`.pytest_cache`",
+        "`artifacts`",
+        "`target`",
+        "legitimate source directories named `build` remain valid",
+        "symlink/reparse escapes",
+        "same-object identity checks",
+        "Checked-out gitlinks contribute a bounded nested tracked plus untracked/nonignored content fingerprint",
+    ]:
+        if token not in evidence_contract:
+            errors.append(f"code-discovery.md evidence contract: missing {token}")
+
+    model_claims = markdown_section(code_discovery, "## Model and savings claims")
+    for token in [
+        "effective project, user, or packaged model map is mandatory",
+        "packaged default is Spark/low first",
+        "canonical Terra/medium",
+        "Legacy complete maps",
+        "targeted root recovery",
+    ]:
+        if token not in model_claims:
+            errors.append(f"code-discovery.md exact discovery contract: missing {token}")
+    if "openbuild-discovery" in code_discovery:
+        errors.append("code-discovery.md: legacy openbuild-discovery route is not allowed")
+
+    routing_receipt = markdown_section(code_discovery, "## Search routing receipt")
+    for token in [
+        "search_agent: <exact current profile returned by the model map>",
+        "map_source:",
+        "map_sha256:",
+        "route_step:",
+        "task_name:",
+        "dispatch_method:",
+        "configured_model:",
+        "observed_agent:",
+        "observed_model:",
+        "activated: true | false",
+        "pool:",
+        "dispatch_result:",
+        "fallback_reason:",
+        "unactivated `run_status: running`",
+        "search-agent-activated",
+        "agent-cancellation-confirmed",
+        "search-evidence-consumed",
+        "Failed or unusable evidence never emits `search-evidence-consumed`",
+        "codex_exit_evidence:",
+        "result_evidence:",
+        "transport_failure_reason:",
+        "search_fallback_profile_sequence_sha256:",
+        "usage dashboard as secondary evidence",
+    ]:
+        if token not in routing_receipt:
+            errors.append(f"code-discovery.md routing receipt: missing {token}")
+
+    for token in [
+        "effective user, project, or packaged model map for every complexity class",
+        "Resolve `implementation.<risk>` before the lease",
+        "packaged defaults",
+        "openbuild_implementation_fast",
+        "openbuild_implementation_balanced",
+        "openbuild_implementation_strong",
+        "openbuild_implementation_strongest",
+        "Read-only search/discovery",
+        "Every created implementation run requires concrete model, effort, and sandbox evidence",
+        "`low` | Luna/medium `openbuild_implementation_fast`",
+        "`high` | the same Terra/medium → Terra/xhigh → Sol/high ladder",
+        "`critical` | Sol/xhigh `openbuild_implementation_strongest`",
+        "configured `NEEDS_ESCALATION` trigger before any edit",
+        "checkpoint_invalidation=pending",
+        "Failure or crash retains the lease",
+        "registry-bound `completed`",
+        "`git ls-files --stage -v -z`",
+        "`assume-unchanged`",
+        "`skip-worktree`",
+        "`FILE_ATTRIBUTE_REPARSE_POINT`",
+        "every path component with non-following metadata",
+        "holds the same object identity through hashing and enumeration",
+        "Immediately before activation",
+        "`clone3(CLONE_INTO_CGROUP)`",
+        "privacy-safe terminal archive",
+        "fallback bind uses the same visible-generation resolution",
+        "Before any registry or private-source durable replace",
+        "stop before further test and production code edits",
+        "Dispatch the first exact profile returned by `<build-skill-root>/scripts/model_map.py resolve --use-case implementation --risk <risk>` before every test or production code edit",
+        "Implementation routing receipt",
+        "routing_map_source:",
+        "routing_map_sha256:",
+        "route_step:",
+        "codex_exit_evidence:",
+        "implementation-handoff-accepted",
+        "Every terminal explicit-model receipt",
+    ]:
+        if token not in implementation:
+            if token.startswith("Dispatch the first exact"):
+                category = "exact writer dispatch"
+            elif token == "Implementation routing receipt":
+                category = "implementation routing receipt"
+            else:
+                category = "risk-matched writer routing"
+            errors.append(f"implementation-delegation.md {category}: missing {token}")
+
+    review_dispatch = markdown_section(review_protocol, "## Exact dispatch and routing receipt")
+    for token in [
+        "Resolve `review.<risk>` through `<build-skill-root>/scripts/model_map.py`",
+        "first exact returned reviewer",
+        "map source/hash and route step",
+        "resolved route strictly sequentially",
+        "max_steps",
+        "packaged defaults start Luna/medium for low, Terra/medium for medium/high, and Sol/xhigh for critical",
+        "Review routing receipt",
+        "routing_map_source:",
+        "routing_map_sha256:",
+        "route_step:",
+        "review-agent-activated",
+        "run_status:",
+        "process_tree_stopped:",
+        "codex_exit_evidence:",
+        "codex_exit_code:",
+        "result_evidence:",
+        "task_name:",
+        "sandbox: <read-only",
+        "concrete model/effort plus valid exit/result evidence",
+        "creates no replacement reviewer",
+        "exact non-terminal evidence tuple",
+        "non-critical route ends at Sol/high",
+        "Sol/xhigh is critical-only",
+        "risk-specific ceiling",
+        "runner-owned `dispatch`",
+    ]:
+        if token not in review_dispatch:
+            errors.append(f"review-protocol.md exact reviewer routing: missing {token}")
+    if "call `activate`" in review_dispatch:
+        errors.append("review-protocol.md exact reviewer routing: ordinary orchestration must not require manual activation")
+    if "recovery-autonomy diffs prove owner-private prompt staging" not in review_protocol:
+        errors.append(
+            "review-protocol.md recovery autonomy: missing prompt/lease/abandonment/outcome audit"
+        )
+    review_tier_vocabulary = (
+        "Requested tier: fast | luna_xhigh | balanced | strong | sol_high | strongest | unknown"
+    )
+    if review_tier_vocabulary not in review_protocol:
+        errors.append(
+            f"review-protocol.md exact reviewer routing: missing {review_tier_vocabulary}"
+        )
+
+    reasoning_first_docs = [
+        (
+            "model-map-interview.md",
+            model_map_interview,
+            [
+                "one, two, three, four, or five steps",
+                "openbuild_implementation_luna_xhigh",
+                "openbuild_implementation_sol_high",
+                "Luna/medium → Luna/xhigh → Terra/medium → Terra/xhigh → Sol/high",
+                "`routing_rung`",
+                "`routing_tuple_confirmed = true`",
+            ],
+        ),
+        (
+            "implementation-delegation.md",
+            implementation,
+            [
+                "openbuild_implementation_luna_xhigh",
+                "openbuild_implementation_sol_high",
+                "exact configured canonical profile/model-effort step",
+            ],
+        ),
+        (
+            "review-protocol.md",
+            review_protocol,
+            [
+                "Luna/medium for low, Terra/medium for medium/high, and Sol/xhigh for critical",
+                "exact configured profile/model-effort step",
+            ],
+        ),
+        (
+            "model-routing.md",
+            model_routing,
+            ["exact canonical openbuild_implementation_* ID from the displayed route"],
+        ),
+        (
+            "spec-template.md",
+            template_text,
+            ["ordered exact canonical profile/model/effort steps, up to five"],
+        ),
+    ]
+    for label, text, tokens in reasoning_first_docs:
+        for token in tokens:
+            if token not in text:
+                errors.append(f"{label} reasoning-first owner docs: missing {token}")
+    for label, text, stale in [
+        ("model-map-interview.md", model_map_interview, ["fast → balanced", "from one to four"]),
+        ("implementation-delegation.md", implementation, ["<fast|balanced|strong|strongest>"]),
+        ("review-protocol.md", review_protocol, ["<fast|balanced|strong|strongest>"]),
+        ("model-routing.md", model_routing, ['openbuild_implementation_<fast|balanced|strong|strongest>']),
+        ("spec-template.md", template_text, ["fast-profile | balanced-profile"]),
+    ]:
+        for token in stale:
+            if token in text:
+                errors.append(f"{label} reasoning-first owner docs: stale {token}")
+
+    for label, text, token in [
+        (
+            "SKILL.md",
+            skill_text,
+            "exact top-level and nested allowlist schemas before durable replacement",
+        ),
+        (
+            "implementation-delegation.md",
+            implementation,
+            "Before any registry or private-source durable replace",
+        ),
+        (
+            "README.md",
+            readme,
+            "Every registry and private-source generation is checked against exact top-level and nested allowlists",
+        ),
+        (
+            "README.ru.md",
+            readme_ru,
+            "Каждое поколение registry и private source проверяется по точным allowlist-схемам",
+        ),
+    ]:
+        if token not in text:
+            errors.append(f"{label} authoritative schema owner docs: missing {token}")
+
+    return errors
+
+
+def validate_agent_usage_report_contract(
+    skill_text: str,
+    model_routing: str,
+    template_text: str,
+    readme: str,
+    readme_ru: str,
+) -> list[str]:
+    """Validate truthful logical-agent reporting and its CLI dependency boundary."""
+
+    errors: list[str] = []
+    ledger = markdown_section(skill_text, "## Maintain the agent activity ledger")
+    for token in [
+        "search, critic, implementation, or review agent through the exact runner",
+        "wrapper and its child `codex exec` are one logical run",
+        "Pre-spawn dispatch failures do not increment the created-run count",
+        "unusable, cancelled, or timed out",
+        "actual model and reasoning effort from the exact runner receipt",
+        "terminal and semantic outcome",
+        "AC, milestone, or specification-section mapping",
+        "PID, thread/run paths, raw prompts, logs, token/usage values, and authentication details",
+    ]:
+        if token not in ledger:
+            errors.append(f"SKILL.md agent usage ledger: missing {token}")
+
+    completion = markdown_section(skill_text, "## Complete the workflow")
+    for token in [
+        "Use `Agents` for an English response and `Агенты` for a Russian response.",
+        "actually created logical agent runs",
+        "pre-spawn dispatch failures separately",
+        "`Role/task`",
+        "`Actual model/effort`",
+        "`Status/outcome`",
+        "`Work`",
+        "`AC/milestone/spec mapping`",
+        "Every created-agent row comes from an exact runner receipt",
+    ]:
+        if token not in completion:
+            errors.append(f"SKILL.md final agent usage: missing {token}")
+    if "`Agent usage`" in completion:
+        errors.append("SKILL.md localized agent heading: literal `Agent usage` title is not allowed")
+
+    template_ledger = markdown_section(template_text, "## 11. Agent activity ledger")
+    for token in [
+        "Created logical agent runs:",
+        "| Run | Created | Role/task | Actual model | Effort | Status/outcome | Work and specification mapping | Evidence |",
+        "wrapper and its child `codex exec` count as one logical run",
+        "Pre-spawn dispatch failures do not increment the created-run count",
+        "unusable, cancelled, or timed out",
+        "accepted explicit-runner receipt",
+        "Never create an agent row from a requested label or unverified native dispatch",
+        "AC, milestone, or specification section",
+        "PID, thread ID, private run path, raw prompt, raw log, token or usage value, or authentication detail",
+        "Pre-spawn dispatch failures (not included in created count):",
+        "The final localized report uses `Agents` for English and `Агенты` for Russian.",
+    ]:
+        if token not in template_ledger:
+            errors.append(f"spec-template.md agent usage ledger: missing {token}")
+    if "`Agent usage`" in template_ledger:
+        errors.append("spec-template.md localized agent heading: literal `Agent usage` title is not allowed")
+
+    run_agents = markdown_section(skill_text, "## Run explicit-model agents")
+    dependency = markdown_section(model_routing, "## Exact-agent dependency checkpoint")
+    for token in ["`python --version`", "`codex --version`", "Python 3.11", "dependency checkpoint"]:
+        if token not in run_agents:
+            errors.append(f"SKILL.md dependency checkpoint: missing {token}")
+    for token in [
+        "On Windows, run `python --version`.",
+        "On POSIX, run `python3 --version` first and use `python --version` only as a fallback.",
+        "Run `codex --version` on every platform.",
+        "Only on Windows, show the exact commands",
+        "On POSIX, provide manual, platform-appropriate Python and Codex CLI installation guidance without choosing or running a package manager.",
+    ]:
+        if token not in run_agents:
+            errors.append(f"SKILL.md OS-aware dependency checkpoint: missing {token}")
+    for token in [
+        "`python --version`",
+        "`codex --version`",
+        "`winget install -e --id Python.Python.3.12`",
+        '`powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`',
+        "separate explicit permission",
+        "Wait for installation",
+        "Authentication remains manual",
+        "`codex login status`",
+        "Never automate or request credentials",
+        "declined or unavailable",
+    ]:
+        if token not in dependency:
+            errors.append(f"model-routing.md dependency checkpoint: missing {token}")
+    for token in [
+        "On Windows, execute `python --version`.",
+        "On POSIX, execute `python3 --version` first and use `python --version` only as a fallback.",
+        "Execute `codex --version` on every platform",
+        "Show the `winget` and standalone PowerShell commands only on Windows.",
+        "On POSIX, provide manual, platform-appropriate Python and Codex CLI installation guidance without choosing or running a package manager.",
+        "OS-appropriate Python check plus `codex --version`",
+    ]:
+        if token not in dependency:
+            errors.append(f"model-routing.md OS-aware dependency checkpoint: missing {token}")
+
+    install_commands = [
+        "codex plugin remove openbuild@openbuild",
+        "codex plugin marketplace remove openbuild",
+        "codex plugin marketplace add GeorgVahi/OpenBuild --ref v",
+        "codex plugin add openbuild@openbuild",
+    ]
+    for label, text, tokens in [
+        (
+            "README.md",
+            readme,
+            [
+                "[Русская версия](README.ru.md)",
+                "Python 3.11 or newer",
+                "saved ChatGPT login",
+                "$openbuild:build",
+                "## Exact model-routed agents",
+                "Native Explorer",
+                "unknown model metadata",
+                "## Progressive review",
+            ],
+        ),
+        (
+            "README.ru.md",
+            readme_ru,
+            [
+                "[English version](README.md)",
+                "Python 3.11 или новее",
+                "сохранённым входом через ChatGPT",
+                "$openbuild:build",
+                "## Агенты с точным выбором модели",
+                "Native Explorer",
+                "неизвестной моделью",
+                "## Progressive review",
+            ],
+        ),
+    ]:
+        for token in tokens:
+            if token not in text:
+                errors.append(f"{label} concise public contract: missing {token}")
+        observed_commands = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("codex plugin ")
+        ]
+        normalized_commands = [
+            re.sub(r"--ref v\S+", "--ref v", command) for command in observed_commands
+        ]
+        if normalized_commands != install_commands:
+            errors.append(f"{label}: installation must contain exactly the four supported commands")
+        if len(text.splitlines()) > 140:
+            errors.append(f"{label}: concise public README exceeds 140 lines")
+
+    for forbidden_heading in [
+        "How blind-spot critique works",
+        "Как работает критика blind spots",
+        "How TDD-first implementation works",
+        "Как работает TDD-first реализация",
+        "How evidence-gated minimality works",
+        "Как работает evidence-gated minimality",
+        "What shipped in",
+        "Что вошло в",
+    ]:
+        if forbidden_heading in readme or forbidden_heading in readme_ru:
+            errors.append(f"public README retains removed verbose section {forbidden_heading}")
+    return errors
+
+
+def validate_json(path: Path, errors: list[str]) -> dict:
+    text = read_text(path, errors)
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        fail(errors, f"{path.relative_to(ROOT)}: invalid JSON ({exc})")
+        return {}
+    if not isinstance(value, dict):
+        fail(errors, f"{path.relative_to(ROOT)}: root must be an object")
+        return {}
+    return value
+
+
+def validate_local_links(path: Path, text: str, errors: list[str]) -> None:
+    pattern = re.compile(r"\[[^\]]+\]\((?!https?://|mailto:|#)([^)]+)\)")
+    for match in pattern.finditer(text):
+        target = match.group(1).strip().strip("<>").split("#", 1)[0]
+        if not target:
+            continue
+        resolved = (path.parent / target).resolve()
+        if not resolved.exists():
+            fail(errors, f"{path.relative_to(ROOT)}: missing local link target {target}")
+
+
+def semver_key(value: str) -> tuple[int, int, int, int, tuple[tuple[int, int | str], ...]]:
+    match = SEMVER_PARTS.fullmatch(value)
+    if not match:
+        raise ValueError(f"invalid SemVer: {value}")
+    prerelease = match.group("prerelease")
+    parts: tuple[tuple[int, int | str], ...] = ()
+    if prerelease is not None:
+        parts = tuple((0, int(item)) if item.isdigit() else (1, item) for item in prerelease.split("."))
+    return (
+        int(match.group("major")),
+        int(match.group("minor")),
+        int(match.group("patch")),
+        1 if prerelease is None else 0,
+        parts,
+    )
+
+
+def contains_exact_version(text: str, version: str) -> bool:
+    return re.search(rf"(?<![0-9A-Za-z.-]){re.escape(version)}(?![0-9A-Za-z.-])", text) is not None
+
+
+def validate_semver_contract(errors: list[str]) -> None:
+    valid = ["0.2.0-dev.2", "0.2.0", "1.0.0-alpha.1", "1.0.0+build.01"]
+    invalid = ["0.2.0-dev..2", "0.2.0-dev.01", "01.0.0", "1.0.0-", "1.0.0+build..1"]
+    for value in valid:
+        if not SEMVER.fullmatch(value):
+            fail(errors, f"internal SemVer validator rejected valid case {value}")
+    for value in invalid:
+        if SEMVER.fullmatch(value):
+            fail(errors, f"internal SemVer validator accepted invalid case {value}")
+
+
+def git_output(*args: str) -> str | None:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def normalized_paths(*outputs: str | None) -> set[str]:
+    result: set[str] = set()
+    for output in outputs:
+        if output:
+            result.update(line.strip().replace("\\", "/") for line in output.splitlines() if line.strip())
+    return result
+
+
+def commit_requires_version_bump(paths: set[str], *, commit_exists: bool = False) -> bool:
+    """OpenBuild assigns a unique SemVer version to every commit after the root."""
+
+    return commit_exists or bool(paths)
+
+
+def is_public_package_path(path: str) -> bool:
+    relative = Path(path.replace("\\", "/"))
+    if any(part in {".git", ".tmp", "__pycache__"} for part in relative.parts):
+        return False
+    if relative.as_posix() == "TZ.md":
+        return False
+    if relative.as_posix().startswith("plugins/openbuild/"):
+        return True
+    return relative.suffix.lower() in TEXT_SUFFIXES or relative.name in {"LICENSE", ".gitignore", ".gitattributes"}
+
+
+def text_from_snapshot(revision: str, path: str) -> str | None:
+    selector = f":{path}" if revision == "INDEX" else f"{revision}:{path}"
+    return git_output("show", selector)
+
+
+def version_from_git(revision: str) -> str | None:
+    text = text_from_snapshot(revision, MANIFEST_RELATIVE)
+    if text is None:
+        return None
+    try:
+        value = json.loads(text).get("version")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return value if isinstance(value, str) and SEMVER.fullmatch(value) else None
+
+
+def validate_version_snapshot(
+    revision: str,
+    previous_revision: str,
+    changed_paths: set[str],
+    errors: list[str],
+    context: str,
+) -> None:
+    missing = VERSION_SYNC_PATHS - changed_paths
+    if missing:
+        fail(errors, f"version commit gate ({context}): synchronized files missing from one diff: {sorted(missing)}")
+        return
+
+    current = version_from_git(revision)
+    previous = version_from_git(previous_revision)
+    if current is None or previous is None:
+        fail(errors, f"version commit gate ({context}): could not read strict SemVer manifests")
+        return
+    if semver_key(current) <= semver_key(previous):
+        fail(errors, f"version commit gate ({context}): version did not increase ({previous} -> {current})")
+
+    for path in ["README.md", "README.ru.md", "CHANGELOG.md"]:
+        text = text_from_snapshot(revision, path)
+        if text is None or not contains_exact_version(text, current):
+            fail(errors, f"version commit gate ({context}): {path} does not contain exact version {current}")
+
+
+def validate_version_progression(current: str, errors: list[str], commit_gate: bool) -> None:
+    if git_output("rev-parse", "--is-inside-work-tree") != "true":
+        return
+
+    tracked_working = git_output("diff", "--name-only", "HEAD", "--")
+    untracked_working = git_output("ls-files", "--others", "--exclude-standard")
+    working_paths = normalized_paths(tracked_working, untracked_working)
+
+    if commit_gate:
+        unstaged_paths = normalized_paths(
+            git_output("diff", "--name-only", "--"),
+            untracked_working,
+        )
+        unstaged_package_files = {path for path in unstaged_paths if is_public_package_path(path)}
+        if unstaged_package_files:
+            fail(
+                errors,
+                f"commit gate: public package files are not fully staged: {sorted(unstaged_package_files)}",
+            )
+            return
+
+        staged_paths = normalized_paths(git_output("diff", "--cached", "--name-only", "HEAD", "--"))
+        if staged_paths:
+            if commit_requires_version_bump(staged_paths):
+                validate_version_snapshot("INDEX", "HEAD", staged_paths, errors, "index versus HEAD")
+            return
+        if commit_requires_version_bump(working_paths):
+            fail(errors, "version commit gate: stage the complete task diff before validation")
+            return
+
+        committed_paths = normalized_paths(
+            git_output("diff-tree", "--no-commit-id", "--name-only", "-r", "-m", "HEAD", "--")
+        )
+        parent_exists = git_output("rev-parse", "HEAD^") is not None
+        if commit_requires_version_bump(committed_paths, commit_exists=parent_exists):
+            validate_version_snapshot("HEAD", "HEAD^", committed_paths, errors, "HEAD versus HEAD^")
+        return
+
+    previous_revision: str | None = None
+    context = ""
+    if commit_requires_version_bump(working_paths):
+        previous_revision = "HEAD"
+        context = "working tree versus HEAD"
+    else:
+        committed_paths = normalized_paths(
+            git_output("diff-tree", "--no-commit-id", "--name-only", "-r", "-m", "HEAD", "--")
+        )
+        if commit_requires_version_bump(
+            committed_paths,
+            commit_exists=git_output("rev-parse", "HEAD^") is not None,
+        ):
+            previous_revision = "HEAD^"
+            context = "HEAD versus HEAD^"
+
+    if previous_revision is None:
+        return
+    previous = version_from_git(previous_revision)
+    if previous is None:
+        return
+    if semver_key(current) <= semver_key(previous):
+        fail(
+            errors,
+            f"plugin.json: repository commit changed ({context}) but version did not increase "
+            f"({previous} -> {current})",
+        )
+
+
+def public_text_files() -> list[Path]:
+    result: list[Path] = []
+    for path in ROOT.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(ROOT)
+        if any(part in {".git", ".tmp", "__pycache__"} for part in relative.parts):
+            continue
+        if relative.as_posix() == "TZ.md":
+            continue
+        if path.suffix.lower() in TEXT_SUFFIXES or path.name in {"LICENSE", ".gitignore", ".gitattributes"}:
+            result.append(path)
+    return result
+
+
+def parse_project_transition_registry(source: str) -> list[dict[str, object]]:
+    """Read the literal R-031 registry without importing its state owner."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        raise ValueError("project state transition registry is not parseable") from exc
+    value: ast.AST | None = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "TRANSITION_REGISTRY_DATA"
+            for target in node.targets
+        ):
+            value = node.value
+            break
+    if value is None:
+        raise ValueError("project state transition registry literal is missing")
+    try:
+        data = ast.literal_eval(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("project state transition registry is not literal data") from exc
+    if not isinstance(data, tuple) or not all(isinstance(entry, dict) for entry in data):
+        raise ValueError("project state transition registry has an invalid shape")
+    return [dict(entry) for entry in data]
+
+
+def validate_project_transition_registry(entries: list[dict[str, object]]) -> list[str]:
+    """Keep registry completeness checks static and independent of state sinks."""
+    errors: list[str] = []
+    expected = {"I0", "BA0", "B0", *(f"O{number}" for number in range(1, 9)), "S", "BS", "R", "TST"}
+    fields = {"short_id", "id", "class", "family", "incident_safe", "test_only"}
+    short_ids = [entry.get("short_id") for entry in entries]
+    full_ids = [entry.get("id") for entry in entries]
+    classes = [entry.get("class") for entry in entries]
+    if set(short_ids) != expected or len(short_ids) != len(set(short_ids)):
+        errors.append("project_state.py: R-031 transition short IDs are incomplete or non-unique")
+    if len(full_ids) != len(set(full_ids)) or not all(isinstance(value, str) for value in full_ids):
+        errors.append("project_state.py: R-031 transition full IDs are malformed or non-unique")
+    if len(classes) != len(set(classes)) or not all(isinstance(value, str) and value for value in classes):
+        errors.append("project_state.py: R-031 transition concrete classes are malformed or non-unique")
+    family_members = {
+        "bootstrap": {"I0", "BA0", "B0"},
+        "ordinary": {f"O{number}" for number in range(1, 9)},
+        "incident": {"S", "BS"},
+        "observer": {"R"},
+        "test": {"TST"},
+    }
+    for entry in entries:
+        if set(entry) != fields:
+            errors.append("project_state.py: R-031 transition registry fields are not exact")
+            continue
+        short_id = entry["short_id"]
+        full_id = entry["id"]
+        if not isinstance(short_id, str) or entry["family"] not in family_members or short_id not in family_members[entry["family"]]:
+            errors.append("project_state.py: R-031 transition family membership is invalid")
+        if not isinstance(full_id, str) or not isinstance(short_id, str) or not full_id.startswith(f"R-031.M1.{short_id}."):
+            errors.append("project_state.py: R-031 transition full ID is not exact")
+        if entry["test_only"] is not (short_id == "TST"):
+            errors.append("project_state.py: R-031 test-only transition separation is invalid")
+        if short_id in {"S", "BS", "R", "TST"} and entry["incident_safe"] is not True:
+            errors.append("project_state.py: R-031 incident-safe observer transition is invalid")
+        if short_id not in {"S", "BS", "R", "TST"} and entry["incident_safe"] is not False:
+            errors.append("project_state.py: R-031 non-observer transition is incorrectly incident-safe")
+    return sorted(set(errors))
+
+
+_TRANSITION_ASSIGNMENT_CONTEXT = re.compile(
+    r"(?:\b(?:model|model_id)\b|[\"'](?:model|model_id)[\"'])\s*[:=]",
+    re.IGNORECASE,
+)
+_ORDINARY_TRANSITION_PREFIX = "O"
+_ORDINARY_TRANSITION_TOKEN = (
+    rf"(?<![A-Za-z0-9_]){re.escape(_ORDINARY_TRANSITION_PREFIX)}[1-8]"
+    r"(?![A-Za-z0-9_])"
+)
+
+
+def _mask_transition_code_span(match: re.Match[str]) -> str:
+    return re.sub(
+        _ORDINARY_TRANSITION_TOKEN,
+        "ordinary-transition",
+        match.group(0),
+    )
+
+
+def mask_registered_transition_references(
+    text: str,
+    registered_full_ids: set[str],
+    *,
+    registry_table: bool = False,
+) -> str:
+    """Mask only structural transition notation before the fixed-model scan.
+
+    In particular, a model assignment is never exempt, even if it happens to
+    contain a registered transition string.  Ordinary identifiers are exempt
+    only in code spans, transition-table cells, the documented closed ordinary
+    range, or the literal registry ``short_id`` column.
+    """
+    lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if _TRANSITION_ASSIGNMENT_CONTEXT.search(line):
+            lines.append(line)
+            continue
+        masked = line
+        for transition_id in sorted(registered_full_ids, key=len, reverse=True):
+            pattern = rf"(?<![A-Za-z0-9_.-]){re.escape(transition_id)}(?![A-Za-z0-9_.-])"
+            masked = re.sub(pattern, "registered-transition", masked)
+        masked = re.sub(r"`[^`\r\n]+`", _mask_transition_code_span, masked)
+        masked = re.sub(
+            rf"(?P<cell>\|\s*){_ORDINARY_TRANSITION_TOKEN}(?=[\s.`|])",
+            r"\g<cell>ordinary-transition",
+            masked,
+        )
+        masked = re.sub(
+            rf"\b{re.escape(_ORDINARY_TRANSITION_PREFIX)}[1]\s*[-–—]\s*"
+            rf"{re.escape(_ORDINARY_TRANSITION_PREFIX)}[8]\b",
+            "ordinary-transition-range",
+            masked,
+        )
+        if registry_table:
+            masked = re.sub(
+                r"((?:[\"']short_id[\"'])\s*:\s*[\"'])"
+                + re.escape(_ORDINARY_TRANSITION_PREFIX)
+                + r"[1-8]([\"'])",
+                r"\1ordinary-transition\2",
+                masked,
+            )
+        lines.append(masked)
+    return "".join(lines)
+
+
+def mask_packaged_model_references(text: str) -> str:
+    """Mask packaged model references without collapsing Markdown spans."""
+    for packaged_model, _, _ in PACKAGED_AGENT_DEFAULTS.values():
+        text = text.replace(packaged_model, "packaged-model")
+    return text
+
+
+def validate_search_availability_classifier_contract(runner_text: str) -> list[str]:
+    """Keep the fail-closed complete-stream classifier visible to package validation."""
+    errors: list[str] = []
+    for token in [
+        "def classify_search_availability_failure(",
+        "for value in structured_objects:",
+        "code_field != type_field",
+        "return next(iter(reasons)) if len(reasons) == 1 else None",
+        "RAW_SEARCH_ERROR_TYPES",
+        "NON_ERROR_JSONL_EVENT_TYPES",
+        'elif "code" in event or event_type in RAW_SEARCH_ERROR_TYPES:',
+        "event_type not in NON_ERROR_JSONL_EVENT_TYPES",
+        'evidence.get("structured_stderr_valid", True) is True',
+        'codex_exit_status == "valid"',
+        "codex_exit_code != 0",
+        'termination.get("cleanup_errors") == []',
+        'termination.get("failure_message") == expected_failure',
+        'source_receipt.get("codex_exit_evidence") != "valid"',
+        'source_receipt.get("result_evidence") != "missing"',
+        'source_request.get("search_fallback_binding") is not None',
+        'request.get("search_fallback_source") is None',
+    ]:
+        if token not in runner_text:
+            errors.append(f"agent_runner.py search availability classifier: missing {token}")
+    return errors
+
+
+def validate_safe_artifact_reader_contract(
+    runner_text: str,
+    discovery_text: str,
+) -> list[str]:
+    """Require descriptor-bound, no-follow, same-object reads for routing artifacts."""
+    errors: list[str] = []
+    for token in [
+        "read_regular_file_no_follow,",
+        "raw = read_regular_file_no_follow(path)",
+        "except DiscoveryContractError:",
+    ]:
+        if token not in runner_text:
+            errors.append(f"agent_runner.py safe artifact reader: missing {token}")
+    if runner_text.count("raw = read_regular_file_no_follow(path)") < 3:
+        errors.append(
+            "agent_runner.py safe artifact reader: JSONL, stderr, and result collectors must share the descriptor-bound reader"
+        )
+    for token in [
+        "def read_regular_file_no_follow(",
+        'getattr(os, "O_NOFOLLOW", 0)',
+        "opened_before = os.fstat(descriptor)",
+        "chunk = os.read(descriptor, 1024 * 1024)",
+        "opened_after = os.fstat(descriptor)",
+        "_is_link_or_reparse(opened_before)",
+        "_file_identity(before) != _file_identity(opened_before)",
+        "_file_identity(opened_after) != _file_identity(after)",
+        "raw = read_regular_file_no_follow(",
+    ]:
+        if token not in discovery_text:
+            errors.append(f"discovery_contract.py safe artifact reader: missing {token}")
+    if "result_path.read_bytes()" in discovery_text:
+        errors.append(
+            "discovery_contract.py safe artifact reader: result validation must not reopen the path"
+        )
+    return errors
+
+
+def validate_project_lane_runner_bridge(
+    runner_text: str,
+    project_lanes_text: str,
+    project_scopes_text: str,
+) -> list[str]:
+    errors: list[str] = []
+    runner_contract = [
+        (
+            "from project_lanes import ProjectLaneCoordinator, ProjectLaneError",
+            "project lane owner import",
+        ),
+        ("def recovery_registry_for_request(", "lane-local registry routing"),
+        ("def resolve_project_lane_start(", "project lane start resolver"),
+        (
+            "def resolve_project_lane_recovery_authorization(",
+            "project lane recovery authorization resolver",
+        ),
+        ('"project-lane-request-v1"', "project lane private request schema"),
+        ("def attach_project_lane_writer(", "project lane writer attach"),
+        ("def quarantine_project_lane_writer(", "project lane quarantine"),
+        ("def finalize_project_lane_terminal(", "project lane terminal replay"),
+        (
+            "def prepare_project_lane_recovery(",
+            "project lane recovery-ready bridge",
+        ),
+        (
+            "def complete_project_lane_writer(",
+            "project lane successful terminal bridge",
+        ),
+        ('parser.add_argument("--project-lane-id")', "project lane CLI identity"),
+        (
+            'parser.add_argument("--project-coordinator-root")',
+            "project coordinator CLI binding",
+        ),
+        (
+            'parser.add_argument("--project-integration-ref")',
+            "project integration CLI binding",
+        ),
+    ]
+    project_contract = [
+        ("class ProjectLaneCoordinator:", "project lane owner"),
+        ("def runner_writer_binding(", "runner lane binding"),
+        ("def verify_runner_writer_binding(", "runner lane binding replay"),
+        ("def attach_contained_writer(", "contained writer attach"),
+        ("def record_recovery_ready(", "lane recovery-ready transition"),
+        ('"recovery-ready"', "recovery-ready lane state"),
+        ('"recovery-target"', "recovery-target writer kind"),
+        ("def record_successful_terminal(", "successful terminal projection"),
+        ('"waiting-for-integration"', "integration-wait lane state"),
+        ("def cancel_or_crash(", "lane quarantine transition"),
+        ("def close_terminal(", "lane terminal close"),
+    ]
+    for token, label in runner_contract:
+        if token not in runner_text:
+            errors.append(f"agent_runner.py: missing {label}")
+    for token, label in project_contract:
+        if token not in project_lanes_text:
+            errors.append(f"project_lanes.py: missing {label}")
+    for token, label in [
+        ("def migrate_legacy_claims(", "legacy lane scope migration"),
+        ("def assert_lane_authority(", "typed lane authority owner"),
+        ("def assert_write_authority(", "runner scope-authority owner"),
+        (
+            "runner allowed path escapes active file or directory scopes",
+            "runner allowed-set confinement",
+        ),
+    ]:
+        if token not in project_scopes_text:
+            errors.append(f"project_scopes.py: missing {label}")
+    activation_start = runner_text.find("def activate_run(")
+    activation_end = runner_text.find("\ndef dispatch_run(", activation_start)
+    activation = (
+        runner_text[activation_start:activation_end]
+        if activation_start >= 0 and activation_end > activation_start
+        else ""
+    )
+    commit_index = activation.find("registry.commit_activation(")
+    attach_index = activation.find("attach_project_lane_writer(request)")
+    prompt_index = activation.find("atomic_write_json(\n            activation_path")
+    if not (
+        0 <= commit_index < attach_index < prompt_index
+    ):
+        errors.append(
+            "agent_runner.py: project lane attach must follow lane-local activation "
+            "and precede prompt release"
+        )
+    containment_start = runner_text.find("def reconcile_containment_loss_run(")
+    containment_end = runner_text.find(
+        "\ndef _post_commit_root_completion_blocked(",
+        containment_start,
+    )
+    containment = (
+        runner_text[containment_start:containment_end]
+        if containment_start >= 0 and containment_end > containment_start
+        else ""
+    )
+    if (
+        containment.find('quarantine_project_lane_writer(request, "crashed")')
+        < 0
+        or containment.find('finalize_project_lane_terminal(request, "crashed")')
+        < 0
+    ):
+        errors.append(
+            "agent_runner.py: containment-loss reconciliation must quarantine "
+            "and close its bound project lane"
+        )
+    return errors
+
+
+def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> list[str]:
+    errors: list[str] = []
+    recovery_contract = [
+        ('READER_FLOOR = "2.4.0"', "reader floor"),
+        ('_LEGACY_READER_FLOORS = {', "legacy reader compatibility"),
+        ('"2.3.5",', "2.3.5 reader compatibility"),
+        ('"2.3.6",', "2.3.6 reader compatibility"),
+        (
+            "state = self._read_registry_for_write_locked(rebarrier=True)",
+            "pending abandonment reader floor before source replay",
+        ),
+        ("_read_registry_for_write_locked", "reader floor before source write"),
+        (
+            "private source write requires a durable current reader floor",
+            "reader floor before source write",
+        ),
+        ('"terminal-root-completion-v1"', "post-commit terminal schema"),
+        ('"remediation-scope-v1"', "post-commit remediation scope"),
+        ("finalize_post_commit_root_completion", "atomic post-commit finalization"),
+        ("complete_post_commit_root_completion", "post-commit checkpoint invalidation"),
+        ("post_commit_root_completion_replay_binding", "full-tuple completed replay"),
+        ('"authorization_consumption": "consumed"', "intent-authoritative capability consumption"),
+        ('b"openbuild-workspace-v2\\0"', "workspace key"),
+        ("_default_state_root", "owner-private state root"),
+        ("state_root / \"workspaces\"", "owner-private state root"),
+        ("_windows_directory_is_private", "owner-private Windows DACL"),
+        ("D:P(A;OICI;FA;;;SY)", "owner-private Windows DACL"),
+        ("_lock", "OS-backed workspace lock"),
+        ("_is_vacant", "exact vacancy"),
+        ("prepare_source_checkpoint", "pre-snapshot lifecycle"),
+        ("bind_reserved_source_snapshot", "reserved source provenance boundary"),
+        ('"normal-snapshot-bound"', "reserved source provenance boundary"),
+        ('"activation-provenance-drift"', "activation provenance boundary"),
+        ('"activation_abort"', "activation provenance boundary"),
+        ("finalize_prepared_checkpoint", "terminal source binding"),
+        ("revalidate_checkpoint", "checkpoint revalidation"),
+        ("grant_authorization", "durable authorization"),
+        ("consume_grant_and_reserve", "atomic authorization consumption"),
+        ("claim_launch", "target lifecycle"),
+        ("fail_recovery_target_before_boundary", "target pre-boundary disposition"),
+        ("public_checkpoint_for_source", "target source binding"),
+        ("assert_checkpoint_allowed_paths", "target allowed-path binding"),
+        ("bind_process_unactivated", "target lifecycle"),
+        ("_validate_contained_process_binding", "contained receipt binding"),
+        ('provider[field] != plan[field] or precommit[field] != plan[field]', "contained receipt binding"),
+        ('precommit["worker_pid"] != process["pid"]', "contained receipt binding"),
+        ("_validate_terminal_identity_binding", "terminal identity binding"),
+        ("_validate_semantic_registry_binding", "semantic registry binding"),
+        ("_require_zero_write_source_locked", "semantic zero-write proof"),
+        (
+            "blocked semantic disposition must retain its checkpoint",
+            "semantic disposition matrix",
+        ),
+        (
+            "semantic checkpoint invalidation is not source-authoritative",
+            "semantic source authority",
+        ),
+        ("resolve_visible_commit=True", "decidable guardian registry commit"),
+        ("claim_contained_launch", "contained normal lifecycle"),
+        ("containment_failed_before_boundary", "containment boundary disposition"),
+        ("prove_fallback_teardown", "ordinary fallback teardown proof"),
+        ("claim_normal_fallback", "one-shot ordinary fallback"),
+        ("quarantine_fallback_launch", "ambiguous fallback quarantine"),
+        ("bind_fallback_process_unactivated", "ordinary fallback process boundary"),
+        ("release_legacy_terminal", "legacy terminal release"),
+        (
+            '_require_hex(allowed_set_digest, "activation allowed-set digest")',
+            "activation digest format boundary",
+        ),
+        ("record_terminal_evidence", "contained terminalization"),
+        ("prove_contained_tree_empty", "contained zero proof"),
+        ("reject_semantic_handoff", "semantic handoff rejection"),
+        ("record_terminal_abandonment", "terminal abandonment transition"),
+        ("complete_terminal_abandonment", "terminal abandonment completion"),
+        ('"terminal-abandonment-v1"', "terminal abandonment schema"),
+        ('"terminal-abandonment-v2"', "recovery overlap abandonment schema"),
+        ('"terminal-abandonment-v3"', "legacy normal overlap abandonment schema"),
+        ('"terminal-abandonment-v4"', "legacy normal control-plane overlap abandonment schema"),
+        ('"terminal-abandonment-v5"', "legacy normal single overlap abandonment schema"),
+        ('"outside-set-drift"', "terminal abandonment cause"),
+        ('"outside-set-drift-with-preexisting-dirty-overlap"', "recovery overlap abandonment cause"),
+        (
+            '"legacy-normal-outside-set-drift-with-preexisting-dirty-overlap"',
+            "legacy normal overlap abandonment cause",
+        ),
+        (
+            '"legacy-normal-preexisting-dirty-overlap"',
+            "legacy normal single overlap abandonment cause",
+        ),
+        ('"terminal-abandoned-outside-set-drift"', "terminal abandonment invalidation"),
+        ('"terminal-abandoned-recovery-overlap"', "recovery overlap abandonment invalidation"),
+        (
+            '"terminal-abandoned-legacy-normal-overlap"',
+            "legacy normal overlap abandonment invalidation",
+        ),
+        (
+            '"terminal-abandoned-legacy-normal-dirty-overlap"',
+            "legacy normal single overlap abandonment invalidation",
+        ),
+        (
+            '"terminal-abandoned-legacy-normal-control-plane-overlap"',
+            "legacy normal control-plane overlap abandonment invalidation",
+        ),
+        ("invalidate_source_checkpoint", "semantic checkpoint invalidation"),
+        (
+            "complete_source_checkpoint_invalidation",
+            "semantic checkpoint invalidation completion",
+        ),
+        ("commit_handoff", "canonical handoff outbox"),
+        ("materialize_handoff", "canonical handoff materialization"),
+        ("acknowledge_guardian_close", "guardian close acknowledgement"),
+        ("release_contained_terminal", "contained terminal release"),
+        ('b"openbuild-terminal-archive-v1\\0"', "contained terminal archive"),
+        ("_validate_terminal_archive", "contained terminal archive"),
+        ('"terminal_receipt_digest"', "contained terminal archive"),
+        ("quarantine_containment_loss", "post-boundary containment quarantine"),
+        ('b"openbuild-containment-loss-reconciliation-v1\\0"', "containment-loss reconciliation domain"),
+        (
+            'b"openbuild-containment-loss-orphan-observation-v1\\0"',
+            "orphan containment-loss observation domain",
+        ),
+        ('"containment-loss-reconciled"', "containment-loss reconciliation history"),
+        ("record_containment_loss_abandonment", "containment-loss abandonment transition"),
+        (
+            "record_orphan_containment_loss_abandonment",
+            "orphan containment-loss abandonment transition",
+        ),
+        ('"owner-orphan-recovery-v1"', "orphan containment-loss proof origin"),
+        ("acknowledge_containment_loss_close", "containment-loss guardian close"),
+        ("retire_for_downgrade", "reader floor retirement"),
+        ("retire_authorization", "prompt authorization retirement"),
+        ('"authorization-retired"', "prompt authorization retirement"),
+        ("mark_prompt_snapshot_released", "prompt snapshot release"),
+        ("expected_run_id = _lease_run_id(lease)", "shared lease run binding"),
+        (
+            '"terminal abandonment recovery authorization binding is incomplete"',
+            "abandonment authorization retirement",
+        ),
+        (
+            "recovery terminal release authorization binding",
+            "recovery terminal authorization retirement",
+        ),
+        ('"prompt-snapshot-released"', "prompt snapshot release"),
+        ('"prompt_snapshot_id"', "immutable prompt snapshot binding"),
+        ('"--porcelain=v2"', "Git provenance"),
+        ('"ls-files", "--stage", "-v", "-z"', "Git index flags"),
+        ("_lstat_snapshot_path(relative)", "Windows reparse ancestors"),
+        ("_reject_snapshot_reparse_point(metadata)", "Windows reparse points"),
+        ("_hold_snapshot_object", "snapshot TOCTOU boundary"),
+        ("_windows_open_snapshot_chain", "snapshot TOCTOU boundary"),
+        ("share_read_write = 0x00000001 | 0x00000002", "snapshot TOCTOU boundary"),
+        ("open_reparse_point = 0x00200000", "snapshot TOCTOU boundary"),
+        ('getattr(os, "O_NOFOLLOW", 0)', "snapshot TOCTOU boundary"),
+        ("dir_fd=final_parent_fd", "snapshot TOCTOU boundary"),
+        ("_snapshot_metadata_matches", "snapshot TOCTOU boundary"),
+        ("_windows_read_handle_chunks", "snapshot TOCTOU boundary"),
+        ("_require_exact_object", "authoritative exact-schema validation"),
+        ("_validate_lease", "authoritative lease schema"),
+        ("_validate_history_event", "authoritative history schema"),
+        ("_validate_outbox", "authoritative outbox schema"),
+        ("_validate_public_checkpoint", "privacy-safe public checkpoint schema"),
+        ("_validate_private_authorization", "private authorization schema"),
+        ("self._validate_registry(state)", "pre-publication registry schema gate"),
+        (
+            'self._validate_source(state, state["source_state_id"])',
+            "pre-publication source schema gate",
+        ),
+        ('"--ignored", "--exclude-standard", "-z"', "Git provenance"),
+        ('b"openbuild-content-v1\\0"', "keyed privacy"),
+        ('b"openbuild-path-v1\\0"', "keyed privacy"),
+        ("DEFAULT_MAX_RECORDS = 100_000", "inventory limits"),
+        ("DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024", "inventory limits"),
+        ("MOVEFILE_WRITE_THROUGH", "durable Windows replace"),
+        ("os.fsync", "durability barrier"),
+        ("previous_generation_digest", "generation chain"),
+        ('"git-common-dir-drift"', "Git common-directory quarantine"),
+    ]
+    for token, category in recovery_contract:
+        if token not in recovery_text:
+            errors.append(f"recovery_state.py {category}: missing {token}")
+    if recovery_text.count("_validate_contained_process_binding") != 2:
+        errors.append(
+            "recovery_state.py contained receipt binding: the validator must be defined and applied exactly once"
+        )
+    if recovery_text.count("_validate_terminal_identity_binding") != 2:
+        errors.append(
+            "recovery_state.py terminal identity binding: the validator must be defined and applied exactly once"
+        )
+    if recovery_text.count("_validate_semantic_registry_binding") != 2:
+        errors.append(
+            "recovery_state.py semantic registry binding: the validator must be defined and applied exactly once"
+        )
+    if recovery_text.count("_require_zero_write_source_locked") != 2:
+        errors.append(
+            "recovery_state.py semantic zero-write proof: the validator must be defined and applied exactly once"
+        )
+    abandon_owner = recovery_text.find("def record_terminal_abandonment")
+    abandon_end = recovery_text.find("def complete_terminal_abandonment", abandon_owner)
+    abandon_dry_revalidation = recovery_text.find("persist=False", abandon_owner, abandon_end)
+    abandon_exact_reason = recovery_text.find(
+        'reasons = candidate_checkpoint.get("reasons")',
+        abandon_owner,
+        abandon_end,
+    )
+    abandon_registry_commit = recovery_text.find(
+        "return self._commit_registry_locked(state)", abandon_owner, abandon_end
+    )
+    if (
+        abandon_owner < 0
+        or abandon_end < 0
+        or abandon_dry_revalidation < 0
+        or abandon_exact_reason < 0
+        or abandon_registry_commit < 0
+        or not abandon_owner
+        < abandon_dry_revalidation
+        < abandon_exact_reason
+        < abandon_registry_commit
+        < abandon_end
+        or "self._commit_source_locked(source)"
+        in recovery_text[abandon_owner:abandon_end]
+    ):
+        errors.append(
+            "recovery_state.py terminal abandonment no-mutation gate: exact reason validation and pending registry commit must precede source mutation"
+        )
+    if 'self.workspace / ".openbuild"' in recovery_text:
+        errors.append("recovery_state.py owner-private state root: registry must not live in the checkout")
+    record_path = recovery_text.find("def _record_path")
+    component_walk = recovery_text.find("self._lstat_snapshot_path(relative)", record_path)
+    kind_classification = recovery_text.find("if stat.S_ISREG(mode):", record_path)
+    walk_owner = recovery_text.find("def _lstat_snapshot_path", kind_classification)
+    reparse_guard = recovery_text.find(
+        "_reject_snapshot_reparse_point(metadata)", walk_owner
+    )
+    if (
+        record_path < 0
+        or component_walk < 0
+        or walk_owner < 0
+        or reparse_guard < 0
+        or kind_classification < 0
+        or not record_path < component_walk < kind_classification < walk_owner < reparse_guard
+    ):
+        errors.append(
+            "recovery_state.py Windows reparse points: non-following component walk must precede snapshot kind classification"
+        )
+    hash_owner = recovery_text.find("def _hash_file")
+    file_hold = recovery_text.find("with self._hold_snapshot_object(", hash_owner)
+    file_read = recovery_text.find("_windows_read_handle_chunks", file_hold)
+    directory_owner = recovery_text.find('if kind == "directory" and recurse:')
+    directory_hold = recovery_text.find(
+        "with self._hold_snapshot_object(", directory_owner
+    )
+    directory_scan = recovery_text.find("os.scandir(scan_target)", directory_hold)
+    if (
+        hash_owner < 0
+        or file_hold < 0
+        or file_read < 0
+        or directory_owner < 0
+        or directory_hold < 0
+        or directory_scan < 0
+        or not hash_owner < file_hold < file_read
+        or not directory_owner < directory_hold < directory_scan
+    ):
+        errors.append(
+            "recovery_state.py snapshot TOCTOU boundary: held no-follow object identity must precede file read and directory enumeration"
+        )
+    fallback_bind_owner = recovery_text.find("def bind_fallback_process_unactivated")
+    fallback_bind_end = recovery_text.find("def bind_legacy_process_unactivated", fallback_bind_owner)
+    fallback_bind_resolve = recovery_text.find(
+        "resolve_visible_commit=True", fallback_bind_owner, fallback_bind_end
+    )
+    if (
+        fallback_bind_owner < 0
+        or fallback_bind_end < 0
+        or fallback_bind_resolve < 0
+        or not fallback_bind_owner < fallback_bind_resolve < fallback_bind_end
+    ):
+        errors.append(
+            "recovery_state.py ordinary fallback process bind: durable commit must resolve the exact visible generation"
+        )
+    registry_commit = recovery_text.find("def _commit_registry_locked")
+    registry_schema_gate = recovery_text.find(
+        "self._validate_registry(state)", registry_commit
+    )
+    registry_replace = recovery_text.find("_durable_replace(self.path", registry_commit)
+    source_commit = recovery_text.find("def _commit_source_locked")
+    source_schema_gate = recovery_text.find(
+        'self._validate_source(state, state["source_state_id"])', source_commit
+    )
+    source_replace = recovery_text.find("_durable_replace(path", source_commit)
+    if (
+        registry_commit < 0
+        or registry_schema_gate < 0
+        or registry_replace < 0
+        or not registry_commit < registry_schema_gate < registry_replace
+        or source_commit < 0
+        or source_schema_gate < 0
+        or source_replace < 0
+        or not source_commit < source_schema_gate < source_replace
+    ):
+        errors.append(
+            "recovery_state.py authoritative schema: registry and source generations must validate before durable replace"
+        )
+
+    runner_contract = [
+        ("recovery_registry_for_agent", "implementation-only registry owner"),
+        ("acquire_owner_prompt_snapshot", "stable prompt import"),
+        ("_windows_read_stable_external_prompt", "stable Windows prompt import"),
+        ("_posix_read_stable_external_prompt", "stable POSIX prompt import"),
+        ("windows_object_is_private", "private Windows prompt DACL"),
+        ("protect_windows_private_file", "private Windows prompt DACL"),
+        ("MAX_PROMPT_BYTES", "bounded prompt staging"),
+        ("stage_owner_prompt_snapshot", "owner-private prompt staging"),
+        ("stage_prompt_run", "owner-private prompt staging"),
+        ('"stage-prompt"', "owner-private prompt staging command"),
+        ("read_owner_prompt_snapshot", "immutable prompt snapshot read"),
+        ("collect_owner_prompt_snapshot_references", "prompt retention classification"),
+        ("garbage_collect_owner_prompt_snapshots", "prompt retention garbage collection"),
+        ("prompt_owner.mark_prompt_snapshot_released", "normal prompt release"),
+        ("resolve_run_reference", "opaque run handle resolution"),
+        ('"run_handle": public_run_handle(run_dir)', "public receipt path redaction"),
+        (
+            '"prompt_source_classification": "owner-private-snapshot"',
+            "public receipt prompt classification",
+        ),
+        ('"prompt_sha256": request.get("prompt_sha256")', "public receipt prompt digest"),
+        ('if not agent_name.startswith("openbuild_implementation_"):', "implementation-only"),
+        ("validate_recovery_start_options", "structured recovery preflight"),
+        ('--allowed-file', "structured recovery preflight"),
+        ('--specification-revision', "structured recovery preflight"),
+        ('--recovery-target-milestone', "structured recovery preflight"),
+        ("registry.prepare_source_checkpoint", "pre-snapshot dispatch"),
+        ("durable_write_private_bytes", "durable prompt binding"),
+        ("durable_write_private_json", "durable prompt binding"),
+        ("garbage_collect_owner_prompt_snapshots", "prompt snapshot GC"),
+        (
+            "registry._read_source_locked(path.stem, rebarrier=True)",
+            "authoritative prompt GC scan",
+        ),
+        ("registry.reserve_normal", "normal lease arbitration"),
+        ("registry.bind_reserved_source_snapshot", "reserved source provenance boundary"),
+        ("guardian_run", "outside-worker containment guardian"),
+        ("create_windows_kill_job(bind_current=False)", "outside-Job Windows guardian"),
+        ("_WINDOWS_CREATE_SUSPENDED", "creation-suspended Windows worker"),
+        ("assign_windows_process_to_job", "creation-bound Windows Job attachment"),
+        ("verify_windows_process_in_job", "verified Windows Job attachment"),
+        ("resume_windows_suspended_process", "post-attachment Windows worker resume"),
+        ("QueryInformationJobObject", "Windows full-tree zero proof"),
+        ("create_linux_cgroup", "Linux cgroup v2 provider"),
+        ("_CLONE_INTO_CGROUP", "creation-bound Linux worker"),
+        ("_clone3_process_into_cgroup", "creation-bound Linux worker"),
+        ("spawn_linux_worker_creation_bound", "creation-bound Linux worker"),
+        ('"cgroup.events"', "Linux cgroup v2 zero proof"),
+        ("OPENBUILD_CGROUP_V2_DELEGATION", "Linux fail-closed delegation intent gate"),
+        ("establish_linux_anti_migration_boundary", "native Linux anti-migration boundary"),
+        ("_LINUX_CLONE_NEWCGROUP", "private Linux cgroup namespace"),
+        ("_LINUX_CLONE_NEWNS", "private Linux mount namespace"),
+        ("_LINUX_MS_RDONLY", "read-only Linux cgroup view"),
+        ('"linux-anti-migration-ready"', "authenticated Linux anti-migration proof"),
+        ('"cgroup_mounts_read_only"', "Linux read-only mount proof"),
+        ('"cgroup_write_denied"', "Linux active write-denial proof"),
+        ('"no_cgroup_control_fds"', "Linux cgroup descriptor proof"),
+        ('"capabilities_zero"', "Linux capability-drop proof"),
+        ("query_linux_cgroup_members", "Linux membership revalidation"),
+        ("await_guardian_precommit", "fresh guardian precommit attestation"),
+        ('"guardian-precommit-ready"', "authenticated guardian precommit receipt"),
+        ('"precommit_nonce"', "guardian precommit binding"),
+        ('private_plan.get("provider_plan_id") != provider_plan_id', "guardian provider-plan binding"),
+        ('private_plan.get("ipc_plan_id") != ipc_plan_id', "guardian IPC-plan binding"),
+        ('precommit.get("provider_plan_id") != provider_plan_id', "guardian provider-plan attestation"),
+        ('precommit.get("ipc_plan_id") != ipc_plan_id', "guardian IPC-plan attestation"),
+        ("bound_state = registry.bind_process_unactivated", "guardian-owned registry commit"),
+        ('"registry_digest": bound_state["digest"]', "guardian-owned registry receipt"),
+        ("await_worker_containment_gate", "pre-user-code containment gate"),
+        ("registry.bind_process_unactivated", "durable containment boundary"),
+        ("registry.commit_activation", "activation provenance revalidation"),
+        ("registry.claim_launch", "runner recovery-target launch"),
+        ("registry.fail_recovery_target_before_boundary", "runner target failed-start"),
+        ('"recovery_parent_checkpoint"', "runner target parent verification"),
+        ("audit_guardian_health", "post-boundary guardian loss quarantine"),
+        ("reconcile_implementation_registry", "runner terminal lifecycle"),
+        ("registry.record_terminal_evidence", "runner terminal receipt binding"),
+        ("_expected_lease_run_id(lease)", "terminal exact run binding"),
+        (
+            "_terminal_binding(receipt, run_id=expected_run_id)",
+            "terminal exact run receipt",
+        ),
+        ('"run-dir-v1"', "legacy terminal binding compatibility"),
+        ("_match_terminal_binding", "terminal binding compatibility match"),
+        ("registry.record_terminal_abandonment", "runner terminal abandonment binding"),
+        ("registry.complete_terminal_abandonment", "runner terminal abandonment completion"),
+        ('"terminal-abandonment-v2"', "runner recovery overlap public result"),
+        ('"terminal-abandonment-v3"', "runner legacy normal overlap public result"),
+        ('"terminal-abandonment-v4"', "runner legacy normal control-plane overlap result"),
+        ('"terminal-abandonment-v5"', "runner legacy normal single overlap result"),
+        (
+            '"outside-set-drift-with-preexisting-dirty-overlap"',
+            "runner recovery overlap public cause",
+        ),
+        (
+            '"legacy-normal-outside-set-drift-with-preexisting-dirty-overlap"',
+            "runner legacy normal overlap public cause",
+        ),
+        (
+            '"legacy-normal-preexisting-dirty-overlap"',
+            "runner legacy normal single overlap public cause",
+        ),
+        ("registry.materialize_handoff", "runner handoff materialization"),
+        ("registry.release_contained_terminal", "runner contained release"),
+        ("success_verification_digest", "root-verified success gate"),
+        ('"_finalize-success"', "root-verified success gate"),
+        ('"_reject-handoff"', "root semantic rejection gate"),
+        ('"_reconcile-terminal-abandonment"', "terminal abandonment command"),
+        ("reconcile_containment_loss_run", "containment-loss reconciliation lifecycle"),
+        ("registry.record_containment_loss_abandonment", "containment-loss abandonment binding"),
+        (
+            "_orphan_containment_loss_observation",
+            "orphan containment-loss evidence verification",
+        ),
+        (
+            "registry.record_orphan_containment_loss_abandonment",
+            "orphan containment-loss abandonment binding",
+        ),
+        ("registry.acknowledge_containment_loss_close", "containment-loss guardian close"),
+        ('"_reconcile-containment-loss"', "containment-loss reconciliation command"),
+        ('"containment-loss-reconciliation-v1"', "containment-loss public result"),
+        ('"_stage-post-commit-root-completion-action"', "hidden post-commit action snapshot command"),
+        ('"_authorize-post-commit-root-completion"', "hidden post-commit authorization command"),
+        ('"_finalize-post-commit-root-completion"', "hidden post-commit finalization command"),
+        ("_post_commit_root_completion_blocked", "privacy-safe post-commit blocked output"),
+        ("_post_commit_root_completion_result", "privacy-safe post-commit completed output"),
+        ("registry.post_commit_root_completion_replay_binding", "full-tuple completed replay"),
+        ("reject_semantic_handoff_run", "root semantic rejection gate"),
+        ("registry.reject_semantic_handoff", "root semantic rejection transition"),
+        (
+            "registry.complete_source_checkpoint_invalidation",
+            "root semantic invalidation completion",
+        ),
+        ('"_authorize-recovery"', "explicit recovery authorization gate"),
+        ("authorize_recovery_run", "explicit recovery authorization gate"),
+        ("def classify_recovery_outcome(", "closed recovery outcomes"),
+        ("def root_completion_authorization_record(", "root completion audit"),
+        ("def root_completion_source_binding(", "root completion source binding"),
+        (
+            "def _validate_legacy_root_completion_release(",
+            "legacy timeout root completion audit",
+        ),
+        (
+            "def record_root_completion_authorization_run(",
+            "durable root completion audit",
+        ),
+        ('"_record-root-completion"', "root completion audit command"),
+        (
+            'states["released"] -= states["grant-referenced"] | states["lease-referenced"]',
+            "active prompt reference precedence",
+        ),
+        ("def classify_public_failure(", "public failure classification"),
+        ('"failure_message": classify_public_failure(', "public failure projection"),
+        ('"external-action",', "external-action outcome class"),
+        ('"root_verification_digest"', "root-verified handoff binding"),
+        ("registry.bind_fallback_process_unactivated", "runner fallback process boundary"),
+        (
+            "ordinary fallback process bind did not return its exact durable receipt",
+            "runner fallback process receipt verification",
+        ),
+        ("registry.quarantine_fallback_launch", "runner fallback ambiguity quarantine"),
+        ("registry.release_legacy_terminal", "runner legacy release"),
+        ('"--soft-timeout-exit-zero"', "soft observation timeout"),
+        ("return 0 if args.soft_timeout_exit_zero else 3", "soft observation timeout"),
+    ]
+    for token, category in runner_contract:
+        if token not in runner_text:
+            errors.append(f"agent_runner.py recovery {category}: missing {token}")
+    containment_owner = runner_text.find("def reconcile_containment_loss_run")
+    containment_end = runner_text.find(
+        "def _post_commit_root_completion_blocked", containment_owner
+    )
+    containment_ready = runner_text.find(
+        'run_dir / "guardian-ready.json"',
+        containment_owner,
+        containment_end,
+    )
+    containment_orphan_observation = runner_text.find(
+        "_orphan_containment_loss_observation(",
+        containment_owner,
+        containment_end,
+    )
+    containment_orphan_record = runner_text.find(
+        "registry.record_orphan_containment_loss_abandonment(",
+        containment_orphan_observation,
+        containment_end,
+    )
+    containment_receipt = runner_text.find(
+        "receipt = public_receipt(run_dir)", containment_owner, containment_end
+    )
+    containment_binding = runner_text.find(
+        "_match_terminal_binding(", containment_receipt, containment_end
+    )
+    containment_record = runner_text.find(
+        "registry.record_containment_loss_abandonment(",
+        containment_binding,
+        containment_end,
+    )
+    containment_complete = runner_text.find(
+        "registry.complete_terminal_abandonment(lease_id)",
+        containment_record,
+        containment_end,
+    )
+    containment_close = runner_text.find(
+        "registry.acknowledge_containment_loss_close(lease_id)",
+        containment_complete,
+        containment_end,
+    )
+    containment_release = runner_text.find(
+        "registry.release_contained_terminal(lease_id)",
+        containment_close,
+        containment_end,
+    )
+    if (
+        containment_owner < 0
+        or containment_end < 0
+        or containment_ready < 0
+        or containment_receipt < 0
+        or containment_binding < 0
+        or containment_record < 0
+        or containment_orphan_observation < 0
+        or containment_orphan_record < 0
+        or containment_complete < 0
+        or containment_close < 0
+        or containment_release < 0
+        or not containment_owner
+        < containment_ready
+        < containment_receipt
+        < containment_binding
+        < containment_record
+        < containment_complete
+        < containment_close
+        < containment_release
+        < containment_end
+        or not containment_owner
+        < containment_orphan_observation
+        < containment_orphan_record
+        < containment_complete
+    ):
+        errors.append(
+            "agent_runner.py containment-loss reconciliation: authenticated evidence and terminal binding must precede abandonment, invalidation, close, and release"
+        )
+    public_receipt_start = runner_text.find("def public_receipt")
+    public_receipt_end = runner_text.find("\ndef apply_preboundary_guardian_failure", public_receipt_start)
+    public_receipt_text = (
+        runner_text[public_receipt_start:public_receipt_end]
+        if public_receipt_start >= 0 and public_receipt_end > public_receipt_start
+        else ""
+    )
+    for private_field in ('"run_dir":', '"profile_source":', '"artifacts":'):
+        if private_field in public_receipt_text:
+            errors.append(
+                "agent_runner.py recovery public receipt path redaction: "
+                f"forbidden private field {private_field}"
+            )
+    pre_snapshot = runner_text.find("registry.prepare_source_checkpoint")
+    prompt_write = runner_text.find(
+        "durable_write_private_bytes(prompt_snapshot, source_prompt)", pre_snapshot
+    )
+    request_write = runner_text.find(
+        'durable_write_private_json(run_dir / "request.json", request)', prompt_write
+    )
+    reserve = runner_text.find("registry.reserve_normal", pre_snapshot)
+    snapshot_boundary = runner_text.find("registry.bind_reserved_source_snapshot", reserve)
+    prompt_release = runner_text.find(
+        "prompt_owner.mark_prompt_snapshot_released", snapshot_boundary
+    )
+    prompt_gc = runner_text.find(
+        "garbage_collect_owner_prompt_snapshots(prompt_owner)", prompt_release
+    )
+    contained_claim = runner_text.find("registry.claim_contained_launch", snapshot_boundary)
+    if (
+        pre_snapshot < 0
+        or prompt_write < 0
+        or request_write < 0
+        or reserve < 0
+        or snapshot_boundary < 0
+        or prompt_release < 0
+        or prompt_gc < 0
+        or contained_claim < 0
+        or not pre_snapshot
+        < prompt_write
+        < request_write
+        < reserve
+        < snapshot_boundary
+        < prompt_release
+        < prompt_gc
+        < contained_claim
+    ):
+        errors.append(
+            "agent_runner.py durable prompt binding and prompt snapshot GC: preliminary snapshot, durable prompt/request, "
+            "lease reservation, release/GC and contained claim are out of order"
+        )
+    terminal_release = runner_text.find("registry.release_contained_terminal(lease_id)")
+    terminal_prompt_gc = runner_text.find(
+        "garbage_collect_owner_prompt_snapshots(registry)", terminal_release
+    )
+    if terminal_release < 0 or terminal_prompt_gc < terminal_release:
+        errors.append(
+            "agent_runner.py prompt snapshot GC: terminal release has no production cleanup hook"
+        )
+    suspended_spawn = runner_text.find("start_suspended=True")
+    windows_assign = runner_text.find("assign_windows_process_to_job(provider_handle, worker)", suspended_spawn)
+    windows_verify = runner_text.find("verify_windows_process_in_job(provider_handle, worker)", windows_assign)
+    windows_resume = runner_text.find("resume_windows_suspended_process(worker)", windows_verify)
+    if (
+        suspended_spawn < 0
+        or windows_assign < 0
+        or windows_verify < 0
+        or windows_resume < 0
+        or not suspended_spawn < windows_assign < windows_verify < windows_resume
+    ):
+        errors.append(
+            "agent_runner.py recovery creation-suspended Windows worker: spawn, assign, verify and resume are out of order"
+        )
+    guardian_owner = runner_text.find("def guardian_run")
+    linux_spawn = runner_text.find("worker = spawn_linux_worker_creation_bound(", guardian_owner)
+    linux_membership = runner_text.find(
+        "worker.pid not in query_linux_cgroup_members(provider_handle)", linux_spawn
+    )
+    late_linux_attach = "attach_linux_process_to_cgroup" in runner_text
+    post_spawn_membership_write = bool(
+        re.search(r'\(\s*cgroup\s*/\s*["\']cgroup\.procs["\']\s*\)\.write_text', runner_text)
+    )
+    if (
+        guardian_owner < 0
+        or linux_spawn < 0
+        or linux_membership < 0
+        or not guardian_owner < linux_spawn < linux_membership
+        or late_linux_attach
+        or post_spawn_membership_write
+    ):
+        errors.append(
+            "agent_runner.py recovery creation-bound Linux worker: clone3 cgroup birth must precede membership proof without post-spawn attachment"
+        )
+    if runner_text.count("registry.bind_process_unactivated(") != 1:
+        errors.append(
+            "agent_runner.py recovery guardian-owned registry commit: boundary commit must have exactly one guardian owner"
+        )
+    runner_fallback_bind = runner_text.find("registry.bind_fallback_process_unactivated(")
+    runner_fallback_verify = runner_text.find(
+        "ordinary fallback process bind did not return its exact durable receipt",
+        runner_fallback_bind,
+    )
+    runner_fallback_quarantine = runner_text.find(
+        "registry.quarantine_fallback_launch(", runner_fallback_verify
+    )
+    if (
+        runner_fallback_bind < 0
+        or runner_fallback_verify < 0
+        or runner_fallback_quarantine < 0
+        or not runner_fallback_bind < runner_fallback_verify < runner_fallback_quarantine
+    ):
+        errors.append(
+            "agent_runner.py recovery fallback process bind: exact receipt verification must precede ambiguity quarantine"
+        )
+    return errors
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args not in ([], ["--commit-gate"], ["--no-commit-gate"]):
+        print("Usage: python scripts/validate_package.py [--commit-gate|--no-commit-gate]")
+        return 2
+    commit_gate = "--commit-gate" in args
+    errors: list[str] = []
+    validate_semver_contract(errors)
+
+    for path in REQUIRED:
+        if not path.is_file():
+            fail(errors, f"missing required file: {path.relative_to(ROOT)}")
+
+    if errors:
+        for error in errors:
+            print(f"ERROR: {error}")
+        return 1
+
+    plugin = validate_json(PLUGIN / ".codex-plugin" / "plugin.json", errors)
+    marketplace = validate_json(ROOT / ".agents" / "plugins" / "marketplace.json", errors)
+
+    if plugin.get("name") != "openbuild":
+        fail(errors, "plugin.json: name must be openbuild")
+    version = plugin.get("version")
+    if not isinstance(version, str) or not SEMVER.fullmatch(version):
+        fail(errors, "plugin.json: version must be strict SemVer")
+    if isinstance(version, str) and SEMVER.fullmatch(version):
+        validate_version_progression(version, errors, commit_gate)
+    if plugin.get("license") != "MIT":
+        fail(errors, "plugin.json: license must be MIT")
+    if plugin.get("skills") != "./skills/":
+        fail(errors, "plugin.json: skills must use ./skills/")
+
+    entries = marketplace.get("plugins")
+    if marketplace.get("name") != "openbuild" or not isinstance(entries, list) or len(entries) != 1:
+        fail(errors, "marketplace.json: expected one plugin in the openbuild marketplace")
+    elif entries[0].get("name") != "openbuild" or entries[0].get("source", {}).get("path") != "./plugins/openbuild":
+        fail(errors, "marketplace.json: plugin name/path mismatch")
+
+    skill_text = read_text(SKILL / "SKILL.md", errors)
+    if not re.search(r"(?m)^name: build$", skill_text):
+        fail(errors, "SKILL.md: missing name: build")
+    if len(skill_text.splitlines()) > 500:
+        fail(errors, "SKILL.md: exceeds the 500-line progressive-disclosure limit")
+    required_skill_tokens = [
+        "[code discovery](references/code-discovery.md)",
+        "[the minimality protocol](references/minimality-protocol.md)",
+        "[the TDD workflow](references/tdd-workflow.md)",
+        "[the specification readiness protocol](references/blindspot-protocol.md)",
+        "[adaptive implementation delegation](references/implementation-delegation.md)",
+        "[versioning](references/versioning.md)",
+        "TDD-first",
+        "attempt budget",
+        "version impact",
+        "separate-usage",
+        "model_map.py resolve --use-case implementation",
+        "--soft-timeout-exit-zero",
+        "then `90`, then `120`",
+    ]
+    for token in required_skill_tokens:
+        if token not in skill_text:
+            fail(errors, f"SKILL.md: missing orchestration contract {token}")
+
+    minimality_text = read_text(SKILL / "references" / "minimality-protocol.md", errors)
+    for token in ["## Decision ladder", "## Non-negotiable safeguards", "Minimality decision:"]:
+        if token not in minimality_text:
+            fail(errors, f"minimality-protocol.md: missing contract {token}")
+    for path, token in [
+        (SKILL / "references" / "tdd-workflow.md", "Minimality decision:"),
+        (SKILL / "references" / "review-protocol.md", "Minimality assessment:"),
+        (SKILL / "references" / "spec-template.md", "Minimality decision:"),
+        (SKILL / "references" / "spec-template.md", "Search routing receipt:"),
+        (SKILL / "references" / "spec-template.md", "Implementation routing receipt:"),
+        (SKILL / "references" / "spec-template.md", "Review routing receipt:"),
+    ]:
+        if token not in read_text(path, errors):
+            fail(errors, f"{path.name}: missing minimality contract {token}")
+
+    metadata_text = read_text(SKILL / "agents" / "openai.yaml", errors)
+    if 'allow_implicit_invocation: false' not in metadata_text:
+        fail(errors, "agents/openai.yaml: implicit invocation must be disabled")
+    if "this Build skill" not in metadata_text or "auto mode" not in metadata_text:
+        fail(errors, "agents/openai.yaml: default prompt must be invocation-neutral and select auto mode")
+
+    runner_text = read_text(AGENT_RUNNER, errors)
+    errors.extend(validate_search_availability_classifier_contract(runner_text))
+    for token in [
+        "ROUTING_RUNG_BY_AGENT",
+        "KNOWN_MODEL_EFFORT_RUNG",
+        'routing_tuple_confirmed") is not True',
+        "known model/effort tuple",
+    ]:
+        if token not in runner_text:
+            fail(errors, f"agent_runner.py: missing effective profile routing envelope {token}")
+    recovery_text = read_text(RECOVERY_STATE, errors)
+    errors.extend(validate_recovery_control_plane(runner_text, recovery_text))
+    project_lanes_text = read_text(PROJECT_LANES, errors)
+    project_scopes_text = read_text(PROJECT_SCOPES, errors)
+    errors.extend(
+        validate_project_lane_runner_bridge(
+            runner_text,
+            project_lanes_text,
+            project_scopes_text,
+        )
+    )
+    for token in [
+        "codex-exec-explicit-model",
+        "model_reasoning_effort",
+        "turn.completed",
+        "CODEX_API_KEY",
+        "OPENAI_API_KEY",
+        "ChatGPT",
+        "Do not spawn or delegate to another agent",
+        "features.multi_agent=false",
+        "forced_login_method",
+        "model_provider",
+        "--lease-id",
+        "process_tree_stopped",
+        "activate",
+        "process_identity",
+        "process_identity_from_popen",
+        "create_windows_kill_job",
+        "windows_directory_is_private",
+        "darwin_process_start_time",
+        "ps_process_group_status",
+        "codex_exit_evidence",
+        "codex-exit.json",
+        "ACTIVE_WORKER_FINALIZING",
+        "process_tree_record_state",
+        "refusing group signal",
+        "activation does not match the live creation-bound Codex process",
+        "communicate_after_activation",
+        "process_record_state",
+        "model_providers",
+        "final_result_error",
+        "prompt.md",
+        "Python 3.11",
+        "startup cleanup is unconfirmed",
+        "prepare_search_fallback_claim",
+        "--search-fallback-source",
+        "--expected-map-sha256",
+        "search-fallback-claim.json",
+        "_windows_move_claim_write_through",
+        "after private claim metadata barrier",
+        "profile_sequence_sha256",
+        "validate_discovery_result",
+        "openbuild-search-route-binding-v1",
+        "discovery_route_binding",
+        "turn_started",
+    ]:
+        if token not in runner_text:
+            fail(errors, f"agent_runner.py: missing explicit-model contract {token}")
+    custom_scope_resolution = runner_text.find("scopes = [")
+    project_scope_resolution = runner_text.find('repo.resolve() / ".codex" / "agents"', custom_scope_resolution)
+    user_scope_resolution = runner_text.find('codex_home.resolve() / "agents"', custom_scope_resolution)
+    packaged_default_resolution = runner_text.find("PACKAGED_PROFILE_DIR,", custom_scope_resolution)
+    search_contract_resolution = runner_text.find(
+        'name.startswith("openbuild_search_") and developer_instructions != SEARCH_DEVELOPER_INSTRUCTIONS'
+    )
+    if (
+        custom_scope_resolution < 0
+        or project_scope_resolution < 0
+        or user_scope_resolution < 0
+        or packaged_default_resolution < 0
+        or not (custom_scope_resolution < project_scope_resolution < user_scope_resolution < packaged_default_resolution)
+        or search_contract_resolution < 0
+    ):
+        fail(
+            errors,
+            "agent_runner.py: every profile must resolve project then user then packaged while search keeps its canonical contract",
+        )
+    windows_job_position = runner_text.find("ACTIVE_WINDOWS_JOB = create_windows_kill_job()")
+    worker_auth_position = runner_text.find(
+        'require_chatgpt_login(request["command"][0], environment)'
+    )
+    if windows_job_position < 0 or worker_auth_position < 0 or windows_job_position > worker_auth_position:
+        fail(errors, "agent_runner.py: Windows Job Object must exist before worker auth subprocess")
+
+    for agent_name, profile_path in PACKAGED_AGENT_PROFILES.items():
+        profile_text = read_text(profile_path, errors)
+        try:
+            packaged_profile = tomllib.loads(profile_text)
+        except tomllib.TOMLDecodeError as exc:
+            fail(errors, f"{profile_path.name}: invalid TOML ({exc})")
+            packaged_profile = {}
+        errors.extend(validate_packaged_agent_profile(agent_name, packaged_profile))
+
+    resolver_text = read_text(MODEL_MAP_RESOLVER, errors)
+    for token in [
+        "project",
+        "user",
+        "packaged",
+        "critical_confirmed",
+        "semantic-before-edit",
+        "transport_failure",
+        "load_agent_profile",
+        "map_sha256",
+        "ROUTE_LADDERS",
+        "critical-only profile",
+        "cannot start on Sol",
+        "contiguous reasoning-first segment",
+        "availability_fallback_agent",
+        "availability_fallback_triggers",
+        "availability-fallback",
+    ]:
+        if token not in resolver_text:
+            fail(errors, f"model_map.py: missing model-map contract {token}")
+    try:
+        map_validation = subprocess.run(
+            [sys.executable, str(MODEL_MAP_RESOLVER), "validate", "--path", str(PACKAGED_MODEL_MAP)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail(errors, f"openbuild_model_map.toml: validator could not run ({exc})")
+    else:
+        if map_validation.returncode != 0:
+            detail = (map_validation.stderr or map_validation.stdout).strip()
+            fail(errors, f"openbuild_model_map.toml: validation failed ({detail})")
+
+    discovery_contract_text = read_text(DISCOVERY_CONTRACT, errors)
+    errors.extend(
+        validate_safe_artifact_reader_contract(
+            runner_text,
+            discovery_contract_text,
+        )
+    )
+    for token in [
+        "openbuild.discovery.v1",
+        "git-tracked-untracked-nonignored-v1",
+        "MAX_RESULT_BYTES",
+        "MAX_FILES",
+        "MAX_BYTES",
+        "MAX_SECONDS",
+        "compute_worktree_fingerprint",
+        "validate_discovery_result",
+        "gitlink",
+        "symlink",
+        "line_start",
+        "line_end",
+        "owners",
+        "tests",
+        "fingerprint-unavailable",
+        "line_counts",
+        "O_NOFOLLOW",
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        "_file_identity",
+    ]:
+        if token not in discovery_contract_text:
+            fail(errors, f"discovery_contract.py: missing strict discovery contract {token}")
+
+    interview_text = read_text(MODEL_MAP_INTERVIEW, errors)
+    for token in [
+        "one to three questions",
+        "recommended option first",
+        "Discovery",
+        "Specification critics",
+        "Implementation",
+        "Review",
+        "Critical work",
+        "final preview",
+        "exact diff",
+        "explicit permission",
+        "model_map.py validate",
+        "routing_rung",
+        "routing_tuple_confirmed = true",
+    ]:
+        if token.lower() not in interview_text.lower():
+            fail(errors, f"model-map-interview.md: missing guided interview contract {token}")
+
+    readme = read_text(ROOT / "README.md", errors)
+    readme_ru = read_text(ROOT / "README.ru.md", errors)
+    required_docs_tokens = [
+        "codex plugin remove openbuild@openbuild",
+        "codex plugin marketplace remove openbuild",
+        "codex plugin marketplace add GeorgVahi/OpenBuild --ref v",
+        "codex plugin add openbuild@openbuild",
+        "$openbuild:build",
+        "codex exec",
+        "CONTRIBUTING.md",
+    ]
+    for token in required_docs_tokens:
+        if token not in readme:
+            fail(errors, f"README.md: missing documented token {token}")
+        if token not in readme_ru:
+            fail(errors, f"README.ru.md: missing documented token {token}")
+
+    required_doc_sections = [
+        ("## Requirements", "## Требования"),
+        ("## Install or update", "## Установка или обновление"),
+        ("## Usage", "## Использование"),
+        ("## Exact model-routed agents", "## Агенты с точным выбором модели"),
+        ("## Progressive review", "## Progressive review"),
+        ("## Repository and Git behavior", "## Репозиторий и Git"),
+    ]
+    for english, russian in required_doc_sections:
+        if english not in readme:
+            fail(errors, f"README.md: missing required section {english}")
+        if russian not in readme_ru:
+            fail(errors, f"README.ru.md: missing required section {russian}")
+
+    template_text = read_text(SKILL / "references" / "spec-template.md", errors)
+    blindspot_text = read_text(BLINDSPOT_PROTOCOL, errors)
+    implementation_delegation_text = read_text(IMPLEMENTATION_DELEGATION, errors)
+    review_protocol_text = read_text(REVIEW_PROTOCOL, errors)
+    code_discovery_text = read_text(SKILL / "references" / "code-discovery.md", errors)
+    model_routing_text = read_text(SKILL / "references" / "model-routing.md", errors)
+    tdd_workflow_text = read_text(SKILL / "references" / "tdd-workflow.md", errors)
+    versioning_text = read_text(SKILL / "references" / "versioning.md", errors)
+    errors.extend(validate_auto_routing_contract(skill_text, blindspot_text, metadata_text, readme, readme_ru))
+    errors.extend(validate_blindspot_contract(skill_text, blindspot_text, template_text, readme, readme_ru))
+    errors.extend(
+        validate_implementation_delegation_contract(
+            skill_text,
+            implementation_delegation_text,
+            model_routing_text,
+            tdd_workflow_text,
+            review_protocol_text,
+            versioning_text,
+            readme,
+            readme_ru,
+            runner_text,
+        )
+    )
+    errors.extend(
+        validate_usage_routing_contract(
+            skill_text,
+            model_routing_text,
+            code_discovery_text,
+            implementation_delegation_text,
+            review_protocol_text,
+            readme,
+            readme_ru,
+            interview_text,
+            template_text,
+        )
+    )
+    errors.extend(
+        validate_agent_usage_report_contract(
+            skill_text,
+            model_routing_text,
+            template_text,
+            readme,
+            readme_ru,
+        )
+    )
+
+    if "TZ.md" not in read_text(ROOT / ".gitignore", errors).splitlines():
+        fail(errors, ".gitignore: local TZ.md must be ignored")
+    changelog = read_text(ROOT / "CHANGELOG.md", errors)
+    if isinstance(version, str) and not contains_exact_version(changelog, version):
+        fail(errors, f"CHANGELOG.md: current plugin version {version} is not documented")
+    if isinstance(version, str):
+        errors.extend(validate_changelog_contract(changelog, version))
+        if re.search(rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE):
+            errors.extend(validate_release_docs_contract(readme, readme_ru, version))
+
+    contributing = read_text(ROOT / "CONTRIBUTING.md", errors)
+    for token in [
+        "Semantic Versioning",
+        "plugins/openbuild/.codex-plugin/plugin.json",
+        "version impact",
+        "prerelease counter",
+        "Every OpenBuild commit",
+        "immutable",
+    ]:
+        if token not in contributing:
+            fail(errors, f"CONTRIBUTING.md: missing versioning contract {token}")
+
+    for token in [
+        "Version impact",
+        "every Build-created commit",
+        "prerelease",
+        "patch",
+        "minor",
+        "major",
+        "immutable",
+        "runtime reader floor",
+        "without rewrite-on-read",
+    ]:
+        if token not in versioning_text:
+            fail(errors, f"references/versioning.md: missing contract {token}")
+
+    for path, text in [(ROOT / "README.md", readme), (ROOT / "README.ru.md", readme_ru)]:
+        if isinstance(version, str) and not contains_exact_version(text, version):
+            fail(errors, f"{path.name}: current plugin version {version} is not documented")
+        for stale in ["immutable stable tag", "### Stable `v0.1.0`", "stable tags"]:
+            if stale.lower() in text.lower():
+                fail(errors, f"{path.name}: stale stable-release wording {stale!r}")
+    if not read_text(ROOT / "LICENSE", errors).startswith("MIT License"):
+        fail(errors, "LICENSE: expected MIT license text")
+
+    forbidden = ["[TO" + "DO", "TO" + "DO:", "C:" + "\\Users\\", "BIAS" + "MACHINE"]
+    fixed_model = re.compile(r"\b(?:gpt[\s\-_‑–—]?\d|o\d(?:[-._][a-z0-9]+)?|claude[\s\-_‑–—]?\d|gemini[\s\-_‑–—]?\d)", re.IGNORECASE)
+    registry_text = read_text(PROJECT_STATE, errors)
+    try:
+        transition_entries = parse_project_transition_registry(registry_text)
+    except ValueError as exc:
+        fail(errors, f"project_state.py: {exc}")
+        transition_entries = []
+    errors.extend(validate_project_transition_registry(transition_entries))
+    registered_transition_ids = {
+        entry["id"]
+        for entry in transition_entries
+        if isinstance(entry.get("id"), str)
+    }
+    active_model_assignment = re.compile(
+        r'''(?im)^\s*["']?(?:model|model_id)["']?\s*[:=]\s*["'](?![<{])([^"']+)["']'''
+    )
+    for path in public_text_files():
+        text = read_text(path, errors)
+        relative = path.relative_to(ROOT)
+        for marker in forbidden:
+            if marker in text:
+                fail(errors, f"{relative}: forbidden marker {marker!r}")
+        model_scan_text = mask_packaged_model_references(text)
+        model_scan_text = mask_registered_transition_references(
+            model_scan_text,
+            registered_transition_ids,
+            registry_table=path == PROJECT_STATE,
+        )
+        if fixed_model.search(model_scan_text):
+            fail(errors, f"{relative}: fixed model slug is not allowed")
+        assignment = active_model_assignment.search(text)
+        packaged_assignment = next(
+            (
+                assignment.group(1) == PACKAGED_AGENT_DEFAULTS[agent_name][0]
+                for agent_name, profile_path in PACKAGED_AGENT_PROFILES.items()
+                if path == profile_path
+            ),
+            False,
+        ) if assignment else False
+        if assignment and path != ROOT / "scripts" / "test_agent_runner.py" and not packaged_assignment:
+            fail(errors, f"{relative}: active fixed model assignment is not allowed ({assignment.group(1)!r})")
+        if path.suffix.lower() == ".md":
+            validate_local_links(path, text, errors)
+
+    if errors:
+        for error in sorted(set(errors)):
+            print(f"ERROR: {error}")
+        return 1
+
+    print("OpenBuild package validation passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

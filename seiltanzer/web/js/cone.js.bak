@@ -223,7 +223,7 @@ export function initCone(elId) {
       I.push(b0, t0); J.push(t0, b1); K.push(b1, t1);
     }
     return { type: 'mesh3d', x: vx, y: vy, z: vz, i: I, j: J, k: K,
-             color, opacity: 0.35, flatshading: true, hoverinfo: 'skip', showlegend: false };
+             color, opacity: 0.11, flatshading: true, hoverinfo: 'skip', showlegend: false };
   }
   function wallEdge(xConst, series, color, label) {
     const pLabel = tgt.probabilityAvailable
@@ -341,8 +341,7 @@ export function initCone(elId) {
     // multiplied into Z: it belongs on the stop/take walls. Scale every time
     // row by one common peak. Scaling each row to its own peak made every slice
     // equally tall and turned the widening distribution into a curved awning.
-    // Geometry is a CONDITIONAL density surface.
-    const floor = 0.0; // Set to 0.0 to fix the gap between surface and the floor axis.
+    const floor = 0.025;
     const globalPeak = Math.max(...conditional.flatMap((row) => row), 1e-12);
     const z = conditional.map((row) => {
       return row.map((v) =>
@@ -370,15 +369,16 @@ export function initCone(elId) {
     const customdata = tgt.conditional.map((row, j) =>
       row.map((p) => [p, tgt.survival[j]]));
     const surface = { type: 'surface', x: tgt.xs, y: tgt.ys, z: disp.z,
-      colorscale: SURF_SCALE, showscale: false, opacity: 1.0, name: 'плотность',
+      colorscale: SURF_SCALE, showscale: false, opacity: 0.95, name: 'плотность',
       customdata,
       contours: {
-        x: { show: true, color: 'rgba(255,255,255,0.15)', width: 1, project: { x: true } },
-        y: { show: true, color: 'rgba(255,255,255,0.15)', width: 1, project: { y: true } },
-        z: { show: true, usecolormap: true, width: 2, project: { z: true } },
+        x: { show: true, color: 'rgba(255,255,255,0.28)', width: 1 },
+        y: { show: true, color: 'rgba(255,255,255,0.28)', width: 1 },
+        z: { show: true, usecolormap: true, width: 1 },
       },
-      lighting: { ambient: 0.8, diffuse: 0.6, specular: 0.1, roughness: 0.7 },
-      hovertemplate: 'R=%{x:+.2f}<br>RND=%{z:.2f}<extra></extra>' };
+      lighting: { ambient: 0.78, diffuse: 0.5, specular: 0.06, roughness: 0.9 },
+      hovertemplate: 'R=%{x:+.2f}<br>условная RND=%{customdata[0]:.1%}' +
+        '<br>живая масса=%{customdata[1]:.1%}<extra></extra>' };
     const ridge = (xs, color, width, name, showlegend) => ({
       type: 'scatter3d', mode: 'lines', x: xs, y: tgt.ys,
       z: xs.map((x, j) => surfZ(x, tgt.ys[j]) + 0.008),
@@ -429,14 +429,9 @@ export function initCone(elId) {
           range: [0, 1], gridcolor: RULE, tickvals: [0, 0.5, 1], ticktext: yTicktext,
           tickfont: { size: 9, color: DIM }, backgroundcolor: SCENE_BG, showbackground: true },
         zaxis: { title: { text: 'условная RND · форма', font: { size: 10, color: DIM } },
-          range: [0, 1.05], rangemode: 'tozero', gridcolor: RULE, tickfont: { size: 9, color: DIM },
+          range: [0, 1.10], gridcolor: RULE, tickfont: { size: 9, color: DIM },
           backgroundcolor: SCENE_BG, showbackground: true },
       },
-      annotations: [{
-        showarrow: false, x: 0.05, y: 0.95, xref: 'paper', yref: 'paper',
-        text: 'Загрузка EV...', font: { size: 12, color: ORANGE, family: FONT },
-        bgcolor: 'rgba(20,20,15,0.8)', bordercolor: ORANGE, borderwidth: 1, borderpad: 6
-      }]
     };
   }
 
@@ -449,14 +444,6 @@ export function initCone(elId) {
     layout.scene.camera = currentCam;
     const traces = buildTraces();
     lastNames = [traces[EDGE_STOP].name, traces[EDGE_TAKE].name];
-    const finalStopP = disp.pStop[disp.pStop.length - 1];
-    const finalTakeP = disp.pTake[disp.pTake.length - 1];
-    const liveEV = (finalTakeP * tgt.T) - finalStopP;
-    const evColor = liveEV >= 0 ? '#2EB44F' : '#E64650';
-    const evText = `<b>LIVE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R</b><br>P(Take): ${(finalTakeP*100).toFixed(0)}% | P(Stop): ${(finalStopP*100).toFixed(0)}%`;
-    layout.annotations[0].text = evText;
-    layout.annotations[0].font.color = evColor;
-    layout.annotations[0].bordercolor = evColor;
     if (!hasPlot) {
       P.newPlot(el, traces, layout, config);
       hasPlot = true; attachListeners();

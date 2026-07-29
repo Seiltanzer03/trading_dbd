@@ -227,24 +227,6 @@ export function initLevels(canvas) {
 
     // текущая цена — курсор снизу (скользит)
     if (inRange(pnow)) {
-      // In-Trade Corridor (Зона активности сделки)
-      if (data.entry != null && inRange(data.entry)) {
-        const xEntry = X(data.entry);
-        const xNow = X(pnow);
-        const w = xNow - xEntry;
-        if (Math.abs(w) > 2) {
-          const isProfit = (data.take > data.entry && pnow > data.entry) || (data.take < data.entry && pnow < data.entry);
-          ctx.fillStyle = isProfit ? 'rgba(46,180,79,0.1)' : 'rgba(230,70,80,0.1)';
-          ctx.fillRect(Math.min(xEntry, xNow), 70, Math.abs(w), axisY - 70);
-          
-          // Метка Volume at Risk
-          ctx.fillStyle = isProfit ? 'rgba(46,180,79,0.8)' : 'rgba(230,70,80,0.8)';
-          ctx.font = '8px "IBM Plex Mono", monospace';
-          ctx.textAlign = 'center';
-          ctx.fillText(`ZONE`, xEntry + w/2, 80);
-        }
-      }
-
       const x = X(pnow);
       ctx.fillStyle = COLORS.ink;
       ctx.beginPath();
@@ -256,59 +238,23 @@ export function initLevels(canvas) {
                    x, axisY + 31);
     }
 
-    // Живой поток ликвидности (Liquid Flow / Comet Trail)
-    // Рисуем непрерывную светящуюся линию, которая утолщается и ярче светит
-    // при сильных импульсах (скорость микро-тика).
+    // Честные «летящие шарики»: каждый шар = реально полученная котировка.
+    // Они не соединяются ложной линией; вверх уходит реальное время, цвет
+    // показывает знак микродвижения, размер — его скорость относительно риска.
     const now = performance.now(), tapeWindow = 30000;
     pricePath = pricePath.filter((pt) => now - pt.ts <= tapeWindow);
     const visiblePath = pricePath.filter((pt) => inRange(pt.p));
-    
-    if (visiblePath.length > 1) {
-      // Рисуем от старых к новым
-      for (let i = 0; i < visiblePath.length - 1; i++) {
-        const pt = visiblePath[i];
-        const nextPt = visiblePath[i + 1];
-        
-        const age = Math.max(0, Math.min(1, (now - pt.ts) / tapeWindow));
-        const nextAge = Math.max(0, Math.min(1, (now - nextPt.ts) / tapeWindow));
-        
-        const y0 = axisY - 8 - age * 44;
-        const y1 = axisY - 8 - nextAge * 44;
-        
-        const impulse = Math.min(1, Math.abs(pt.d || 0) / Math.max(risk * 0.08, 1e-12));
-        
-        // Линия
-        ctx.beginPath();
-        ctx.moveTo(X(pt.p), y0);
-        ctx.lineTo(X(nextPt.p), y1);
-        
-        // Стилизация (Comet Tail)
-        ctx.lineCap = 'round';
-        ctx.lineWidth = 1.5 + impulse * 4.0;
-        ctx.globalAlpha = Math.max(0, 1.0 - (age * 1.2)); // Угасание к хвосту
-        
-        const color = pt.d > 0 ? COLORS.green : pt.d < 0 ? COLORS.red : '#E8622A';
-        ctx.strokeStyle = color;
-        
-        // Свечение (glow)
-        ctx.shadowBlur = 8 + impulse * 10;
-        ctx.shadowColor = color;
-        
-        ctx.stroke();
-      }
-      // Яркий "голова" кометы для самого свежего тика
-      const head = visiblePath[visiblePath.length - 1];
-      const headAge = Math.max(0, Math.min(1, (now - head.ts) / tapeWindow));
-      if (headAge < 0.1) {
-        ctx.globalAlpha = 1.0;
-        ctx.fillStyle = '#FFFFFF';
-        ctx.shadowBlur = 12;
-        ctx.shadowColor = head.d > 0 ? COLORS.green : head.d < 0 ? COLORS.red : '#E8622A';
-        ctx.beginPath();
-        ctx.arc(X(head.p), axisY - 8 - headAge * 44, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.shadowBlur = 0;
+    for (const pt of visiblePath) {
+      const age = Math.max(0, Math.min(1, (now - pt.ts) / tapeWindow));
+      const impulse = Math.min(1, Math.abs(pt.d || 0) / Math.max(risk * 0.08, 1e-12));
+      const y = axisY - 8 - age * 34;
+      ctx.globalAlpha = 0.18 + (1 - age) * 0.78;
+      ctx.fillStyle = pt.d > 0 ? COLORS.green : pt.d < 0 ? COLORS.red : '#E8622A';
+      ctx.beginPath();
+      ctx.arc(X(pt.p), y, 1.8 + impulse * 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+      ctx.lineWidth = 0.7; ctx.stroke();
     }
     ctx.globalAlpha = 1; ctx.lineWidth = 1;
 
