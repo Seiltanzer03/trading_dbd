@@ -38,6 +38,22 @@ export function initIVSurface(elId) {
       : (surfacePayload || {});
   }
 
+  function payloadSignature(payload) {
+    const rows = payload.value || [];
+    const compact = rows.map((r) => {
+      const strikes = r.strikes || [], ivs = r.ivs || [];
+      return [
+        Number(r.days || 0).toFixed(4),
+        strikes.length,
+        Number(strikes[0] || 0).toFixed(4),
+        Number(strikes[strikes.length - 1] || 0).toFixed(4),
+        Number(ivs[0] || 0).toFixed(5),
+        Number(ivs[ivs.length - 1] || 0).toFixed(5),
+      ].join(':');
+    }).join('|');
+    return `${payload.ts || ''}|${compact}`;
+  }
+
   function buildModel(payload) {
     const surfaceData = payload.value || [];
     const firstStrikes = surfaceData[0]?.strikes || [];
@@ -253,16 +269,25 @@ export function initIVSurface(elId) {
   window.addEventListener('resize', () => { if (chart) chart.resize(); });
   requestAnimationFrame(renderLoop);
 
+  let lastPayloadSig = null;
+
   return {
-    update: (payload) => {
+    render: (state, payload) => {
       const p = normalizePayload(payload);
       if (!p.value || p.value.length === 0) return;
-      model = buildModel(p);
+      
+      const sig = payloadSignature(p);
+      if (sig !== lastPayloadSig) {
+        lastPayloadSig = sig;
+        model = buildModel(p);
+      }
+      
       if (model) {
-        displayLiveX = targetLiveX = 0;
+        setLive(p);
         applyLiveGeometry();
       }
     },
+    updateLive: setLive,
     setLive,
     resetTradeState
   };

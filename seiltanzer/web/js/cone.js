@@ -217,7 +217,7 @@ export function initCone(elId) {
   }
   function wallMesh(xConst, series, color) {
     const vx = [], vy = [], vz = [], I = [], J = [], K = [], ys = tgt.ys, nS = tgt.nS;
-    for (let j = 0; j < nS; j++) { vx.push(xConst, xConst); vy.push(ys[j], ys[j]); vz.push(0, series[j]); }
+    for (let j = 0; j < nS; j++) { vx.push(xConst, xConst); vy.push(ys[j], ys[j]); vz.push(-0.02, series[j]); }
     for (let j = 0; j < nS - 1; j++) {
       const b0 = 2 * j, t0 = 2 * j + 1, b1 = 2 * j + 2, t1 = 2 * j + 3;
       I.push(b0, t0); J.push(t0, b1); K.push(b1, t1);
@@ -429,7 +429,7 @@ export function initCone(elId) {
           range: [0, 1], gridcolor: RULE, tickvals: [0, 0.5, 1], ticktext: yTicktext,
           tickfont: { size: 9, color: DIM }, backgroundcolor: SCENE_BG, showbackground: true },
         zaxis: { title: { text: 'условная RND · форма', font: { size: 10, color: DIM } },
-          range: [0, 1.05], rangemode: 'tozero', gridcolor: RULE, tickfont: { size: 9, color: DIM },
+          range: [0, 1.05], autorange: false, gridcolor: RULE, tickfont: { size: 9, color: DIM },
           backgroundcolor: SCENE_BG, showbackground: true },
       },
       annotations: [{
