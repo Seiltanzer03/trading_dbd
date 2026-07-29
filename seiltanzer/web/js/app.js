@@ -575,59 +575,81 @@ function renderFilters() {
   if (!t) return;
   const box = $('#filter-chips');
   box.innerHTML = '';
+  
   if (!t.trade) {
-    const empty = document.createElement('div');
-    empty.className = 'filter-summary manual';
-    empty.textContent = '○ НЕТ ОТКРЫТОЙ СДЕЛКИ · ФИЛЬТРЫ НЕ АКТИВНЫ';
-    box.appendChild(empty);
+    box.innerHTML = `
+      <div style="padding: 12px; background: rgba(20,20,15,0.4); border: 1px solid #333; border-radius: 6px; color: #888; font-family: monospace; display: flex; align-items: center; gap: 10px;">
+        <div style="width: 10px; height: 10px; border-radius: 50%; background: #444;"></div>
+        ОЖИДАНИЕ СДЕЛКИ · ФИЛЬТРЫ ОТКЛЮЧЕНЫ
+      </div>`;
     return;
   }
+  
   const relevant = (t.filters || []).filter((c) => c.required);
-  const decisiveBlock = relevant.find((c) => c.state === 'block' && c.decision_weight !== false);
-  const contextMiss = relevant.filter((c) => c.state === 'block' && c.decision_weight === false);
-  const manual = relevant.filter((c) => c.state === 'manual' || c.state === 'no_data');
-  const summary = document.createElement('div');
-  if (decisiveBlock) {
-    summary.className = 'filter-summary block';
-    summary.textContent = `✕ РИСК-ФИЛЬТР: ${decisiveBlock.label} · ВХОД/УДЕРЖАНИЕ ТРЕБУЕТ ПЕРЕСМОТРА`;
-  } else if (manual.length) {
-    summary.className = 'filter-summary manual';
-    summary.textContent = `◑ НУЖНА РУЧНАЯ ПРОВЕРКА: ${manual.map((c) => c.label).join(', ')}`;
-  } else if (contextMiss.length) {
-    summary.className = 'filter-summary manual';
-    summary.textContent = `◐ КОНТЕКСТ НЕ СОВПАЛ: ${contextMiss.map((c) => c.label).join(', ')} · НЕ ПОДМЕНЯЕТ OPTION EDGE`;
-  } else {
-    summary.className = 'filter-summary pass';
-    summary.textContent = `● АКТИВНЫЕ ФИЛЬТРЫ СОГЛАСОВАНЫ · ${relevant.length} ПРОВЕРЕНО`;
-  }
-  summary.dataset.tip = 'Сводка показывает только фильтры активного сетапа. Delayed-индексы волатильности остаются контекстом; ATR-фаза влияет на риск/RR.';
-  box.appendChild(summary);
-
+  if (!relevant.length) return;
+  
+  let html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; width: 100%;">';
+  
   for (const c of relevant) {
-    const div = document.createElement('div');
-    div.className = 'chip ' + c.state;
-    const icon = { pass: '●', block: '✕', manual: '◑', na: '·', no_data: '○' }[c.state] || '·';
     const isContext = c.decision_weight === false;
-    const txt = c.state === 'pass' ? (isContext ? 'СОВПАЛ' : 'РАБОТАЕТ')
-      : c.state === 'block' ? (isContext ? 'НЕ СОВПАЛ' : 'BLOCK')
-        : c.state === 'manual' ? 'ПРОВЕРИТЬ' : c.state === 'no_data' ? 'НЕТ ДАННЫХ' : '—';
+    let ledColor = '#555';
+    let borderColor = '#333';
+    let statusText = '—';
+    let bg = 'rgba(20,20,15,0.6)';
+    
+    if (c.state === 'pass') {
+      ledColor = '#2ecc71';
+      borderColor = 'rgba(46, 204, 113, 0.3)';
+      bg = 'rgba(46, 204, 113, 0.05)';
+      statusText = isContext ? 'СОВПАЛ' : 'РАБОТАЕТ';
+    } else if (c.state === 'block') {
+      ledColor = '#e74c3c';
+      borderColor = 'rgba(231, 76, 60, 0.3)';
+      bg = 'rgba(231, 76, 60, 0.05)';
+      statusText = isContext ? 'НЕ СОВПАЛ' : 'BLOCK';
+    } else if (c.state === 'manual') {
+      ledColor = '#f39c12';
+      borderColor = 'rgba(243, 156, 18, 0.3)';
+      bg = 'rgba(243, 156, 18, 0.05)';
+      statusText = 'РУЧНАЯ ПРОВЕРКА';
+    } else if (c.state === 'no_data') {
+      ledColor = '#f39c12';
+      borderColor = 'rgba(243, 156, 18, 0.3)';
+      bg = 'rgba(243, 156, 18, 0.05)';
+      statusText = 'НЕТ ДАННЫХ';
+    }
+    
     const value = c.key === 'atr'
       ? `${String(c.phase || '—').toUpperCase()} · ratio ${c.value == null ? '—' : fmtNum(c.value, 2)} · RR×${c.rr_mult == null ? '—' : fmtNum(c.rr_mult, 1)}`
-      : c.value == null ? '' : `сейчас ${fmtNum(c.value, 2)}`;
-    div.innerHTML = `<span>${icon} ${c.label}</span>` +
-      `<span class="chip-val">${value}</span>` +
-      `<span>${txt}</span>`;
+      : c.value == null ? '' : `${fmtNum(c.value, 2)}`;
+      
     const feedNote = c.status_feed ? `\nфид: ${statusLabel(c.status_feed)}` : '';
-    div.dataset.tip = ({
-      vix: `Фильтр VIX>20 — сетапы 5, 6, 11 (режим страха).\nтекущее значение: ${c.value == null ? 'нет данных' : fmtNum(c.value, 2)}${feedNote}`,
-      gvz: `Фильтр GVZ<18 — сетап 11 (вола золота).\nтекущее значение: ${c.value == null ? 'нет данных' : fmtNum(c.value, 2)}${feedNote}`,
-      dv1x: `Фильтр DV1X<19 — сетап 7 (GER40). Тикер ^V1X в Yahoo обычно недоступен —\nтогда статус MANUAL: проверь значение вручную, не пропускай молча.${feedNote}`,
-      atr: `ATR-фаза (глава 2.9): ratio = ATR(5)/ATR(20) на дневках = ${c.value == null ? 'нет данных' : fmtNum(c.value, 3)}\n${c.detail || ''}\nШок (>1.5) — лучше не входить; фильтр корректирует целевой RR, не отменяет сетап.`,
-      tech: `Индикатор «Теханализ» TradingView (1D NAS100, All/60m/240m/1D/1W/1M) должен быть > −30\nдля индексных СВИНГ-сетапов (глава 2.7). Проверяется только вручную.`,
-    })[c.key] || c.detail || '';
-    div.style.fontWeight = '600';
-    box.appendChild(div);
+    const desc = ({
+      vix: `Фильтр VIX>20 — сетапы 5, 6, 11 (режим страха).`,
+      gvz: `Фильтр GVZ<18 — сетап 11 (вола золота).`,
+      dv1x: `Фильтр DV1X<19 — сетап 7 (GER40).`,
+      atr: `ATR-фаза: ratio = ATR(5)/ATR(20)`,
+      tech: 'Тех. анализ/Trend — требует ручной сверки с TradingView.'
+    }[c.key] || c.desc || '—') + feedNote;
+    
+    html += `
+      <div title="${desc}" style="padding: 10px 14px; background: ${bg}; border: 1px solid ${borderColor}; border-radius: 6px; display: flex; flex-direction: column; gap: 6px; position: relative; overflow: hidden; cursor: help;">
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <div style="width: 12px; height: 12px; border-radius: 50%; background: ${ledColor}; box-shadow: 0 0 10px ${ledColor};"></div>
+                <div style="font-weight: bold; font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #ddd; letter-spacing: 0.5px;">${c.label}</div>
+            </div>
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: bold; padding: 2px 6px; border-radius: 4px; background: rgba(0,0,0,0.3); color: ${ledColor}; border: 1px solid ${ledColor}40;">${statusText}</div>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: 4px;">
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #999; max-width: 60%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${desc.replace(/\n/g, ' ')}</div>
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: #fff; font-weight: bold;">${value}</div>
+        </div>
+      </div>
+    `;
   }
+  html += '</div>';
+  box.innerHTML = html;
 }
 
 function renderLadder() {

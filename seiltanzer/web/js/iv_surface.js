@@ -28,8 +28,14 @@ export function initIVSurface(elId) {
   // Track trade state for Volatility Delta
   let initialTradeIV = null;
 
+  if (typeof ResizeObserver !== 'undefined' && el) {
+    new ResizeObserver(() => {
+      if (chart) chart.resize();
+    }).observe(el);
+  }
+
   function ready() {
-    return typeof window !== 'undefined' && window.echarts && el;
+    return !!window.echarts;
   }
 
   function normalizePayload(surfacePayload) {
@@ -265,6 +271,13 @@ export function initIVSurface(elId) {
     }
     requestAnimationFrame(renderLoop);
   }
+
+  const ro = new ResizeObserver(() => {
+    if (chart) {
+      chart.resize();
+    }
+  });
+  ro.observe(el);
 
   window.addEventListener('resize', () => { if (chart) chart.resize(); });
   requestAnimationFrame(renderLoop);
