@@ -46,49 +46,44 @@ class _StubStream:
         return self.quotes.get(symbol)
 
 
-def test_price_uses_live_proxy_return_between_rest_anchors(tmp_path):
+def test_price_never_uses_proxy_as_instrument_quote(tmp_path):
     cache = DiskCache(str(tmp_path / "cache.db"))
     try:
         md = MarketData(Settings(stream=True, data_dir=str(tmp_path)), cache)
         md.stream = _StubStream({"QQQ": 102.0})  # ^NDX намеренно молчит
-        md._set_price_anchor(20_000.0, 100.0, time.time())
+        md.price = {"value": 20_000.0, "status": "delayed", "ts": time.time()}
+        md._last_price_rest_attempt = time.time()
         md.refresh_price()
-        assert md.price["value"] == pytest.approx(20_400.0)
-        assert md.price["status"] == "live"
-        assert md.price["derived"] is True
-        assert md.price["driver_ticker"] == "QQQ"
+        assert md.price["value"] == pytest.approx(20_000.0)
+        assert md.price.get("derived") is not True
     finally:
         cache.close()
 
 
-def test_inverse_proxy_return_changes_sign(tmp_path):
+def test_inverse_proxy_does_not_replace_fx_quote(tmp_path):
     cache = DiskCache(str(tmp_path / "cache.db"))
     try:
         md = MarketData(Settings(stream=True, data_dir=str(tmp_path)), cache)
         md.set_instrument("USDCAD")
         md.stream = _StubStream({"FXC": 102.0})  # CAD-strength proxy +2%
-        md._set_price_anchor(1.40, 100.0, time.time())
+        md.price = {"value": 1.40, "status": "delayed", "ts": time.time()}
+        md._last_price_rest_attempt = time.time()
         md.refresh_price()
-        assert md.price["value"] == pytest.approx(1.40 / 1.02)
-        assert md.price["source"].endswith("(inverse derived)")
+        assert md.price["value"] == pytest.approx(1.40)
     finally:
         cache.close()
 
 
-def test_gold_uses_live_paxg_when_gld_stream_is_silent(tmp_path):
+def test_gold_proxy_does_not_replace_futures_quote(tmp_path):
     cache = DiskCache(str(tmp_path / "cache.db"))
     try:
         md = MarketData(Settings(stream=True, data_dir=str(tmp_path)), cache)
         md.set_instrument("XAU")
         md.stream = _StubStream({"PAXG-USD": 4040.0})
-        md._set_price_anchor(
-            4000.0, 4000.0, time.time(), driver_ticker="PAXG-USD")
+        md.price = {"value": 4000.0, "status": "delayed", "ts": time.time()}
+        md._last_price_rest_attempt = time.time()
         md.refresh_price()
-        assert md.price["value"] == pytest.approx(4040.0)
-        assert md.price["status"] == "live"
-        assert md.price["driver_ticker"] == "PAXG-USD"
-        assert md.price["driver_experimental"] is True
-        assert md.price["anchor_ticker"] == "GC=F"
+        assert md.price["value"] == pytest.approx(4000.0)
     finally:
         cache.close()
 

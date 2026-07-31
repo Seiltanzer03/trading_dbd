@@ -341,33 +341,12 @@ class MarketData:
                 self.price = _status_dict(sp, "live", now,
                                           source=f"stream {self.instrument.yahoo}")
                 self.price["derived"] = False
-                driver = self._fresh_price_driver()
-                self._set_price_anchor(
-                    sp, driver[1] if driver else None, now,
-                    driver_ticker=driver[0] if driver else None)
                 self._annotate_freshness()
                 self.intraday.append((now, sp, 0.0))
                 self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
                 return
         now = time.time()
-        mapped = self._mapped_proxy_tick(now)
-        anchor_age = (
-            now - self._price_anchor_ts if self._price_anchor_ts is not None
-            else math.inf
-        )
-        # Между контрольными REST-якорями живой proxy управляет отображаемой
-        # доходностью. Каждую секунду REST здесь не нужен и только замораживал бы
-        # динамику обратно на indicative last_price.
-        if mapped is not None and anchor_age < self.PRICE_ANCHOR_REFRESH_SEC:
-            self.price = mapped
-            self._annotate_freshness()
-            self.intraday.append((now, mapped["value"], 0.0))
-            self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
-            return
         if now - self._last_price_rest_attempt < self.settings.price_poll_sec:
-            if mapped is not None:
-                self.price = mapped
-                self._annotate_freshness()
             return
         self._last_price_rest_attempt = now
         try:
@@ -384,31 +363,13 @@ class MarketData:
                     raise RuntimeError("Yahoo вернул пустую историю")
                 p = float(hist["Close"].iloc[-1])
             anchor_now = time.time()
-            driver = self._fresh_price_driver()
-            proxy_tick = driver[1] if driver else None
-            driver_ticker = driver[0] if driver else None
-            if proxy_tick is None and self.proxy_price.get("value") is not None:
-                proxy_tick = float(self.proxy_price["value"])
-                driver_ticker = self.instrument.options_proxy
-            self._set_price_anchor(
-                p, proxy_tick, anchor_now, driver_ticker=driver_ticker)
-            mapped = self._mapped_proxy_tick(anchor_now)
-            if mapped is not None:
-                self.price = mapped
-            else:
-                self.price = _status_dict(
-                    p, "delayed", anchor_now,
-                    source=f"yfinance REST {self.instrument.yahoo} (indicative)")
-                self.price["derived"] = False
+            self.price = _status_dict(
+                p, "delayed", anchor_now,
+                source=f"yfinance REST {self.instrument.yahoo} (indicative)")
+            self.price["derived"] = False
             self._annotate_freshness()
         except Exception as e:  # noqa: BLE001 — фид обязан пережить любой сбой источника
-            mapped = self._mapped_proxy_tick(now)
-            if mapped is not None:
-                mapped["error"] = f"REST re-anchor failed: {str(e)[:120]}"
-                self.price = mapped
-                self._annotate_freshness()
-            else:
-                self._mark_fail(self.price, self.settings.price_poll_sec, str(e))
+            self._mark_fail(self.price, self.settings.price_poll_sec, str(e))
 
     def refresh_intraday(self) -> None:
         """1m-бары дня для VWAP (объём нужен; у кэш-индексов его нет — честно None)."""
