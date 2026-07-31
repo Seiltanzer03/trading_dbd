@@ -92,7 +92,11 @@ export function updateVp(p) {
   }
   // Retain missing bins briefly and fade them instead of tearing down the grid.
   for (const [k, b] of state.bins.entries()) {
-    if (!seen.has(k)) b.targetVol = 0;
+    if (!seen.has(k)) {
+      b.targetVol = 0;
+      b.targetBidVol = 0;
+      b.targetAskVol = 0;
+    }
   }
 
   const vols = p.bins.map((b) => Math.max(0, Number(b.volume) || 0))
@@ -166,6 +170,13 @@ function renderLoop(now) {
       ctx.roundRect(0, y - binH / 2, barW, Math.max(1, binH - 1), [0, 3, 3, 0]);
       ctx.fill();
       ctx.shadowBlur = 0;
+    } else if (state.isTpo) {
+      // TPO contains time-at-price, not observed bid/ask volume. A single
+      // neutral bar is honest and avoids a fake red/green order-flow signal.
+      ctx.fillStyle = 'rgba(46,125,79,0.48)';
+      ctx.beginPath();
+      ctx.roundRect(0, y - binH / 2, barW, Math.max(1, binH - 1), [0, 3, 3, 0]);
+      ctx.fill();
     } else {
       if (bidW > 0) {
         ctx.fillStyle = 'rgba(198,55,60,0.52)'; // Reddish for bid volume (sellers)

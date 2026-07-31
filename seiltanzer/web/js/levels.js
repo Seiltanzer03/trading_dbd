@@ -104,6 +104,21 @@ export function initLevels(canvas) {
     const rOf = (p) => (data.direction === 'long' ? (p - data.entry) / risk
                                                   : (data.entry - p) / risk);
 
+    // Trade geometry is the primary visual layer: loss and profit corridors
+    // remain readable even when the implied band is much wider than the trade.
+    const lossLo = Math.max(lo, Math.min(data.stop, data.entry));
+    const lossHi = Math.min(hi, Math.max(data.stop, data.entry));
+    const gainLo = Math.max(lo, Math.min(data.entry, data.take));
+    const gainHi = Math.min(hi, Math.max(data.entry, data.take));
+    if (lossHi > lossLo) {
+      ctx.fillStyle = 'rgba(198,55,60,0.105)';
+      ctx.fillRect(X(lossLo), 20, X(lossHi) - X(lossLo), axisY - 20);
+    }
+    if (gainHi > gainLo) {
+      ctx.fillStyle = 'rgba(46,125,79,0.105)';
+      ctx.fillRect(X(gainLo), 20, X(gainHi) - X(gainLo), axisY - 20);
+    }
+
     // Draw historical heatmap behind everything
     heatmap.render(ctx, view, X, axisY - 20, '46,125,79');
 
@@ -160,6 +175,10 @@ export function initLevels(canvas) {
       ctx.beginPath(); ctx.moveTo(x, axisY); ctx.lineTo(x, axisY + 4); ctx.stroke();
       ctx.textAlign = 'center';
       ctx.fillText(fmtPrice(p), x, axisY + 15);
+      ctx.fillStyle = COLORS.dim;
+      ctx.font = '7px "IBM Plex Mono", monospace';
+      ctx.fillText(`${rOf(p) >= 0 ? '+' : ''}${rOf(p).toFixed(1)}R`, x, axisY - 4);
+      ctx.font = '9px "IBM Plex Mono", monospace';
     }
 
     // маркер уровня со ступенчатой подписью (top: высота подписи)
