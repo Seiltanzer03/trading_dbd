@@ -36,11 +36,14 @@ jobs:
       - name: Деплой на сервер по SSH
         if: env.HAS_PW == 'true'
         uses: appleboy/ssh-action@v1
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
+          envs: OPENROUTER_API_KEY
           command_timeout: 10m
           script: |
             set -e
@@ -53,6 +56,14 @@ jobs:
               echo "== первая установка через install.sh =="
               curl -fsSL https://raw.githubusercontent.com/Seiltanzer03/trading_dbd/main/deploy/install.sh | bash
             fi
+            if [ -n "$OPENROUTER_API_KEY" ]; then
+              umask 077
+              printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY" > /etc/seiltanzer.env
+            fi
+            mkdir -p /etc/systemd/system/seiltanzer.service.d
+            printf '[Service]\nEnvironmentFile=-/etc/seiltanzer.env\n' \
+              > /etc/systemd/system/seiltanzer.service.d/openrouter.conf
+            systemctl daemon-reload
             systemctl restart seiltanzer
             sleep 4
             echo "active: $(systemctl is-active seiltanzer)"

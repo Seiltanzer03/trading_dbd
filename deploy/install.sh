@@ -64,6 +64,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$APP_DIR
+EnvironmentFile=-/etc/seiltanzer.env
 ExecStart=$APP_DIR/.venv/bin/python -m seiltanzer $ARGS
 Restart=always
 RestartSec=5

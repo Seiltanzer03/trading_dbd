@@ -7,7 +7,7 @@ import { COLORS, setupCanvas, fmtPrice } from './util.js';
 import { approach } from './anim.js';
 import { Heatmap } from './heatmap.js';
 
-const H = 190;
+const H = 260;
 
 export function initLevels(canvas) {
   let data = null;
@@ -169,8 +169,8 @@ export function initLevels(canvas) {
     ctx.beginPath(); ctx.moveTo(padL, axisY); ctx.lineTo(w - padR, axisY); ctx.stroke();
     ctx.fillStyle = COLORS.dim;
     ctx.font = '9px "IBM Plex Mono", monospace';
-    for (let i = 0; i <= 6; i++) {
-      const p = lo + ((hi - lo) * i) / 6, x = X(p);
+    for (let i = 0; i <= 10; i++) {
+      const p = lo + ((hi - lo) * i) / 10, x = X(p);
       ctx.strokeStyle = COLORS.rule;
       ctx.beginPath(); ctx.moveTo(x, axisY); ctx.lineTo(x, axisY + 4); ctx.stroke();
       ctx.textAlign = 'center';
@@ -291,8 +291,8 @@ export function initLevels(canvas) {
         const age = Math.max(0, Math.min(1, (now - pt.ts) / tapeWindow));
         const nextAge = Math.max(0, Math.min(1, (now - nextPt.ts) / tapeWindow));
         
-        const y0 = axisY - 8 - age * 44;
-        const y1 = axisY - 8 - nextAge * 44;
+        const y0 = axisY - 8 - age * 78;
+        const y1 = axisY - 8 - nextAge * 78;
         
         const impulse = Math.min(1, Math.abs(pt.d || 0) / Math.max(risk * 0.08, 1e-12));
         
@@ -324,7 +324,7 @@ export function initLevels(canvas) {
         ctx.shadowBlur = 12;
         ctx.shadowColor = head.d > 0 ? COLORS.green : head.d < 0 ? COLORS.red : '#E8622A';
         ctx.beginPath();
-        ctx.arc(X(head.p), axisY - 8 - headAge * 44, 2.5, 0, Math.PI * 2);
+        ctx.arc(X(head.p), axisY - 8 - headAge * 78, 2.5, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.shadowBlur = 0;
@@ -360,5 +360,16 @@ export function initLevels(canvas) {
   }
   requestAnimationFrame(frame);
   window.addEventListener('resize', draw);
-  return { setData };
+  function getStats() {
+    if (!data || pricePath.length < 2) return { impulseR: 0, ticks: pricePath.length };
+    const first = pricePath[0], lastPt = pricePath[pricePath.length - 1];
+    const risk = Math.abs(Number(data.entry) - Number(data.stop)) || 1;
+    const sign = data.direction === 'long' ? 1 : -1;
+    return {
+      impulseR: sign * (lastPt.p - first.p) / risk,
+      ticks: pricePath.length,
+      windowSec: Math.max(1, (lastPt.ts - first.ts) / 1000),
+    };
+  }
+  return { setData, getStats };
 }

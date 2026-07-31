@@ -27,9 +27,20 @@ export function initFan(canvas) {
   let data = null;
   const live = { r: null };
   let curR = null;
+  let rTrail = [];
 
-  function setData(cone) { data = cone && cone.available ? cone : null; }
-  function updateLive(p) { if (p) Object.assign(live, p); }
+  function setData(cone) {
+    data = cone && cone.available ? cone : null;
+    if (!data) rTrail = [];
+  }
+  function updateLive(p) {
+    if (!p) return;
+    Object.assign(live, p);
+    const r = Number(p.r), ts = performance.now();
+    if (Number.isFinite(r) && (!rTrail.length || Math.abs(r - rTrail.at(-1).r) > 1e-7))
+      rTrail.push({ r, ts });
+    rTrail = rTrail.filter((pt) => ts - pt.ts <= 90000);
+  }
 
   function draw(now) {
     const { ctx, w } = setupCanvas(canvas, H);
@@ -43,6 +54,12 @@ export function initFan(canvas) {
     const termSlope = data.term_slope || 0; // >0 контанго (вола дышит позже)
     const anchored = !!data.option_anchored;
     const rNow = curR != null ? curR : r0;
+    const trailMove = rTrail.length > 1 ? rTrail.at(-1).r - rTrail[0].r : 0;
+    const liveImpulse = Math.max(-0.65, Math.min(0.65, trailMove * 1.8));
+    const optionDrift = Math.max(-0.45, Math.min(0.45, drift * 0.30));
+    // The ray is a conditional tendency from the current point: live movement
+    // dominates, option drift stabilizes it. Barrier geometry is not direction.
+    const trendR = liveImpulse * 0.68 + optionDrift * 0.32;
 
     const padL = 58, padR = 16, padT = 40, padB = 34;
     const plotW = w - padL - padR, plotH = H - padT - padB;
@@ -74,7 +91,7 @@ export function initFan(canvas) {
     const curve = (z, sign, upFn, dnFn) => {
       const pts = [];
       for (let i = 0; i <= N; i++) {
-        const tau = i / N, m = r0 + drift * tau;
+        const tau = i / N, m = rNow + trendR * tau;
         pts.push([X(tau), Y(m + (sign > 0 ? z * upFn(tau) : -z * dnFn(tau)))]);
       }
       return pts;
@@ -145,9 +162,9 @@ export function initFan(canvas) {
     [T, 0, -1].forEach((R) => ctx.fillText(`${R >= 0 ? '+' : ''}${R}R`, padL - 4, Y(R) + 3));
 
     // Ридаут. Без BL option anchor это только доли сценарных путей, не P сделки.
-    const lean = data.p_take > data.p_stop + 0.03 ? { t: 'КЛОНИТ К ТЕЙКУ', c: COLORS.green }
-      : data.p_stop > data.p_take + 0.03 ? { t: 'КЛОНИТ К СТОПУ', c: COLORS.red }
-      : { t: '≈ 50/50', c: COLORS.dim };
+    const lean = trendR > 0.04 ? { t: 'ЖИВОЙ УКЛОН К ТЕЙКУ', c: COLORS.green }
+      : trendR < -0.04 ? { t: 'ЖИВОЙ УКЛОН К СТОПУ', c: COLORS.red }
+      : { t: 'ЖИВОЙ УКЛОН НЕЙТРАЛЕН', c: COLORS.dim };
     ctx.textAlign = 'left'; ctx.font = '700 12px "IBM Plex Mono", monospace'; ctx.fillStyle = lean.c;
     ctx.fillText(anchored ? lean.t : 'СЦЕНАРНЫЙ ВЕЕР · БЕЗ P / EDGE', padL, 14);
     ctx.textAlign = 'right'; ctx.font = '10px "IBM Plex Mono", monospace'; ctx.fillStyle = COLORS.dim;

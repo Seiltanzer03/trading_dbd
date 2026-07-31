@@ -12,7 +12,6 @@ import { initFan } from './fan.js';
 import { initVrp, updateVrp } from './vrp.js';
 import { initGex, updateGex, updateLiveGex } from './gex.js';
 import { initIVSurface } from './iv_surface.js';
-import { initVp, updateVp } from './vp.js';
 import { initCorrelation, updateCorrelation } from './correlation.js';
 
 initTooltips();
@@ -25,7 +24,6 @@ const fan = initFan($('#cone-fan'));
 const ivSurface = initIVSurface('#iv-surface-plot');
 initVrp();
 initGex();
-initVp();
 initCorrelation();
 
 const S = {
@@ -127,7 +125,6 @@ function onTick() {
     trade: S.tick?.trade || null,
   });
   ivSurface.render(S.tick?.state, S.tick?.iv_surface);
-  updateVp(S.tick?.levels?.volume_profile);
   updateCorrelation(S.tick?.correlation?.value);
 }
 
@@ -700,7 +697,31 @@ function renderLevels() {
     : live ? (px?.derived ? '● LIVE · PROXY MAP' : '● LIVE')
     : px?.fresh === false ? '⏸ НЕТ ТИКОВ' : '◐ INDICATIVE';
   $('#btn-zones').disabled = !has;
-  if (has) levels.setData(t.levels);
+  if (has) {
+    levels.setData(t.levels);
+    const l = t.levels, state = t.state || {}, stats = levels.getStats();
+    const r = t.prob?.r;
+    $('#lc-r').textContent = r == null ? '—' : `${r >= 0 ? '+' : ''}${r.toFixed(2)}R`;
+    $('#lc-room').textContent = state.to_stop_r == null ? '—'
+      : `стоп ${state.to_stop_r.toFixed(2)}R · тейк ${state.to_take_r.toFixed(2)}R`;
+    const band = l.implied_band;
+    const takeInside = band && l.take >= band.low && l.take <= band.high;
+    const stopInside = band && l.stop >= band.low && l.stop <= band.high;
+    $('#lc-implied').textContent = band
+      ? `тейк ${takeInside ? 'внутри' : 'вне'} · стоп ${stopInside ? 'внутри' : 'вне'} ±1σ` : '—';
+    const risk = Math.abs(l.entry - l.stop) || 1;
+    const dir = l.direction === 'long' ? 1 : -1;
+    const distR = (price) => price == null ? null : dir * (price - l.price) / risk;
+    const vw = distR(l.vwap);
+    $('#lc-vwap').textContent = vw == null ? '—' : `${vw >= 0 ? '+' : ''}${vw.toFixed(2)}R от цены`;
+    const gammaPrice = l.gamma?.magnet ?? l.gex?.zero_flip;
+    const gd = distR(gammaPrice);
+    $('#lc-gamma').textContent = gd == null ? '—'
+      : `${fmtPrice(gammaPrice)} · ${gd >= 0 ? '+' : ''}${gd.toFixed(2)}R`;
+    const imp = stats.impulseR || 0;
+    $('#lc-impulse').textContent = `${imp > 0.015 ? '↑' : imp < -0.015 ? '↓' : '→'} `
+      + `${imp >= 0 ? '+' : ''}${imp.toFixed(2)}R · ${stats.ticks} тиков`;
+  }
 }
 
 // ------------------------------------------------------------ ridge stats
@@ -994,6 +1015,24 @@ function openModal(html) {
 function closeModal() { $('#modal-back').hidden = true; }
 $('#modal-back').addEventListener('click', (e) => {
   if (e.target === $('#modal-back')) closeModal();
+});
+
+$('#btn-ai-verdict').addEventListener('click', async () => {
+  openModal(`
+    <h3>ИИ · ДИНАМИЧЕСКИЙ РАЗБОР СДЕЛКИ</h3>
+    <div class="tiny dim">Снимок всех расчётных метрик фиксируется сервером в момент нажатия.</div>
+    <pre id="ai-verdict-text" class="ai-verdict-text">АНАЛИЗИРУЮ ТЕКУЩЕЕ СОСТОЯНИЕ…</pre>
+    <div class="modal-actions"><button class="btn" id="ai-close">ЗАКРЫТЬ</button></div>`);
+  $('#ai-close').addEventListener('click', closeModal);
+  const out = $('#ai-verdict-text');
+  try {
+    const resp = await fetch('/api/ai/verdict', { method: 'POST' });
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
+    out.textContent = body.verdict;
+  } catch (err) {
+    out.textContent = 'ИИ-РАЗБОР НЕДОСТУПЕН: ' + err.message;
+  }
 });
 
 async function apiPost(url, body) {

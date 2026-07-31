@@ -51,6 +51,7 @@
       <div class="hdr-buttons">
         <button class="btn btn-primary" id="btn-new-trade">НОВАЯ СДЕЛКА</button>
         <button class="btn" id="btn-close-trade" hidden>ЗАКРЫТЬ СДЕЛКУ</button>
+        <button class="btn" id="btn-ai-verdict">ИИ · РАЗБОР СДЕЛКИ</button>
       </div>
     </div>
     </div><!-- /header-main -->
@@ -291,17 +292,24 @@
         <span class="badge" id="levels-status">○ НЕТ СДЕЛКИ</span>
       </div>
     </div>
-    <div class="panel-body" style="display: flex; gap: 16px;">
-      <div class="canvas-holder vp-holder" style="flex: 0 0 25%; max-width: 250px; height: 190px;">
-        <canvas id="vp-canvas"></canvas>
-        <div class="canvas-empty" id="vp-empty">○ НЕТ ДАННЫХ ОБЪЕМА</div>
+    <div class="panel-body levels-workspace">
+      <div class="levels-context" id="levels-context">
+        <div class="lbl panel-mini-title">КОНТЕКСТ СДЕЛКИ</div>
+        <div class="levels-context-grid">
+          <div><span class="lbl">ТЕКУЩИЙ r</span><b id="lc-r">—</b></div>
+          <div><span class="lbl">ДО СТОПА / ТЕЙКА</span><b id="lc-room">—</b></div>
+          <div><span class="lbl">IMPLIED ROOM</span><b id="lc-implied">—</b></div>
+          <div><span class="lbl">VWAP</span><b id="lc-vwap">—</b></div>
+          <div><span class="lbl">GAMMA / FLIP</span><b id="lc-gamma">—</b></div>
+          <div><span class="lbl">ТИК-ИМПУЛЬС</span><b id="lc-impulse">—</b></div>
+        </div>
       </div>
-      <div class="canvas-holder levels-holder" style="flex: 1; height: 190px;">
+      <div class="canvas-holder levels-holder">
         <canvas id="levels-canvas"></canvas>
         <div class="canvas-empty" id="levels-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ</div>
       </div>
     </div>
-    <div class="panel-foot dim">оранжевый тик-трейл строится только по реально полученным котировкам; стрелка к ромбу — условный OI×gamma-вектор, не наблюдаемый дилерский поток. Масштаб фиксируется геометрией сделки и меняется лишь при выходе цены из защитной зоны; затенение — implied move; пунктир — эвристические GEX-уровни без веса в verdict.</div>
+    <div class="panel-foot dim">главная шкала — геометрия сделки в цене и R; красный/зелёный коридоры = риск/потенциал, точки = реальные тики, импульс считается по их окну. Implied move, VWAP и условные OI×gamma-уровни используются как контекст, а не как самостоятельный сигнал.</div>
   </section>
 
   <!-- ================ 5. ФИЛЬТРЫ + ЛЕСТНИЦА + VRP ================ -->

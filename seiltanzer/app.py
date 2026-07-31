@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from .config import INSTRUMENTS, SETUPS, Settings, settings_from_env
 from .engine import Engine
+from .ai_verdict import build_snapshot, request_verdict
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 
@@ -82,6 +83,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or settings_from_env()
     engine = Engine(settings)
     clients: set[WebSocket] = set()
+    ai_last_call = 0.0
+    ai_lock = asyncio.Lock()
 
     app = FastAPI(title="Seiltanzer Terminal", version="0.1.0")
     app.state.engine = engine
@@ -317,6 +320,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return engine.journal.update_account(**req.model_dump())
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/ai/verdict")
+    async def api_ai_verdict():
+        nonlocal ai_last_call
+        if ai_lock.locked():
+            raise HTTPException(429, "ИИ уже анализирует предыдущий снимок")
+        if time.monotonic() - ai_last_call < 15:
+            raise HTTPException(429, "Повторный анализ доступен через 15 секунд")
+        async with ai_lock:
+            ai_last_call = time.monotonic()
+            snapshot = build_snapshot(engine)
+            try:
+                return await asyncio.to_thread(request_verdict, snapshot)
+            except RuntimeError as exc:
+                raise HTTPException(502, str(exc)) from exc
 
     # -------------------------------------------------------------------- ws
 
