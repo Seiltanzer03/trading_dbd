@@ -114,6 +114,8 @@ def request_verdict(snapshot: dict) -> dict:
         headers={
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Seiltanzer-Terminal/1.0",
             "HTTP-Referer": "https://seiltanzer-terminal.local",
             "X-Title": "Seiltanzer Terminal",
         },
