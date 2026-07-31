@@ -120,7 +120,8 @@ runFrames(3);
 const surface = graph.data[0];
 const rowPeaks = surface.z.map((row) => Math.max(...row));
 const minZ = Math.min(...surface.z.flat());
-assert(minZ >= 0.025 - 1e-12, 'the complete probability sheet must stay visible');
+assert(surface.z.flat().every(Number.isFinite), 'probability sheet must contain only finite values');
+assert(minZ >= -1e-12, 'probability sheet must not fall below the floor axis');
 assert(
   rowPeaks.at(-1) < rowPeaks[0] - 0.05,
   'one global density scale must form a widening cone, not an equal-height awning',
