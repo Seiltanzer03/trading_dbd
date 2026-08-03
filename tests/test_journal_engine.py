@@ -143,6 +143,12 @@ class TestJournal:
 
 
 class TestEngineDemo:
+    def test_jp225_is_not_mapped_to_usdjpy(self):
+        instrument = INSTRUMENTS["JPY100"]
+        assert instrument.yahoo == "^N225"
+        assert instrument.swissquote_pair is None
+        assert "JP225" in instrument.price_label
+
     def test_all_instruments_have_explicit_data_applicability(self, engine):
         for code, instrument in INSTRUMENTS.items():
             engine.market.set_instrument(code)

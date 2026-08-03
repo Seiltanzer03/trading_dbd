@@ -90,9 +90,10 @@ INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
                price_label="DAX cash index"),
     Instrument("UK100",  "^FTSE",    "EWU", 8900.0,  0.12, proxy_experimental=True,
                price_label="FTSE 100 cash index"),
-    Instrument("JPY100", "JPY=X",    None,  148.0,   0.10,
-               price_label="USD/JPY (название JPY100 условное)",
-               swissquote_pair="USD/JPY"),
+    # В стратегии исторически используется код JPY100, но торгуемый инструмент
+    # пользователя — JP225/Nikkei 225, а не валютная пара USD/JPY.
+    Instrument("JPY100", "^N225",    None,  62500.0, 0.20,
+               price_label="JP225 / Nikkei 225 cash index"),
     # Отображаем spot OTC. Yahoo futures остаются только источником
     # истории/объёма и переводятся в текущую spot-шкалу.
     Instrument("XAU",    "GC=F",     "GLD", 3350.0,  0.16,
