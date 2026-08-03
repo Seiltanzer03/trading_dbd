@@ -622,7 +622,12 @@ class Engine:
         heston_xi = 0.0
         heston_rho = 0.0
 
-        if gamma_info and gamma_info.get("zone") == "positive":
+        # Бесплатный OI×Black-Scholes-gamma не раскрывает знак реальной dealer
+        # позиции. Поэтому он остаётся визуальным контекстом и не имеет права
+        # сжимать option-implied barrier distribution до ложных 0%/100%.
+        # OU/Heston включаются только для источника с подтверждённым знаком.
+        if (gamma_info and gamma_info.get("zone") == "positive"
+                and gamma_info.get("decision_weight") is True):
             ou_theta = 5.0 * gamma_info.get("strength", 0.0)
             ou_mu = gamma_info.get("magnet_r", 0.0)
             # Притягиваем волатильность (Heston)
