@@ -33,6 +33,7 @@ const S = {
   journal: [],
   validation: null,
   aiHistory: [],
+  aiHistoryTradeId: null,
   chainTs: null,
   wsOk: false,
 };
@@ -56,6 +57,7 @@ async function boot() {
     S.edge_track = st.edge_track;
     S.validation = st.validation;
     S.aiHistory = st.ai_history || [];
+    S.aiHistoryTradeId = st.tick?.trade?.id ?? null;
     renderAll();
   } catch (e) {
     console.error('state fetch failed', e);
@@ -335,6 +337,12 @@ function renderState() {
   const s = S.tick?.state;
   const card = $('#panel-state');
   if (!s) { card.hidden = true; return; }
+  const tradeId = S.tick?.trade?.id ?? null;
+  if (tradeId !== S.aiHistoryTradeId) {
+    S.aiHistoryTradeId = tradeId;
+    S.aiHistory = [];
+    if (tradeId != null) refreshAiHistory();
+  }
   card.hidden = false;
 
   // позиция r
@@ -397,7 +405,9 @@ function renderAiHistoryLink() {
 async function refreshAiHistory() {
   const resp = await fetch('/api/ai/history');
   if (!resp.ok) return;
-  S.aiHistory = (await resp.json()).items || [];
+  const body = await resp.json();
+  if (body.trade_id !== S.aiHistoryTradeId) return;
+  S.aiHistory = body.items || [];
   renderAiHistoryLink();
 }
 
