@@ -57,6 +57,8 @@ jobs:
               echo "== первая установка через install.sh =="
               curl -fsSL https://raw.githubusercontent.com/Seiltanzer03/trading_dbd/main/deploy/install.sh | bash
             fi
+            echo "== синхронизирую runtime-зависимости =="
+            /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
             if [ -n "$OPENROUTER_API_KEY" ]; then
               umask 077
               printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY" > /etc/seiltanzer.env
