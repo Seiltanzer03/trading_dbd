@@ -75,6 +75,8 @@ jobs:
             echo "active: $(systemctl is-active seiltanzer)"
             echo "HEAD:   $(git -C /opt/seiltanzer rev-parse --short HEAD)"
             echo "http:   $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/api/state)"
+            curl -fsS http://127.0.0.1:8790/api/state | \
+              /opt/seiltanzer/.venv/bin/python -c 'import json,sys; d=json.load(sys.stdin); p=d["tick"]["feeds"]["price"]; print("quote:", d["tick"]["instrument"], p.get("value"), p.get("source"), p.get("status"))'
       - name: Публикую проверенный production-статус
         if: always()
         env:
