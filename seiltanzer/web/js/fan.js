@@ -85,8 +85,6 @@ export function initFan(canvas) {
     const ratio = data.rv_iv_ratio;         // реализ./implied вола (наценка ММ)
     const termSlope = data.term_slope || 0; // >0 контанго (вола дышит позже)
     const anchored = !!data.option_anchored;
-    const raceTake = data.p_take_anchored ?? data.hit_ratio;
-    const raceStop = data.p_stop_anchored ?? (raceTake != null ? 1 - raceTake : null);
     const touchTake = data.p_take;
     const touchStop = data.p_stop;
     const noTouch = data.unresolved;
@@ -217,7 +215,7 @@ export function initFan(canvas) {
     ctx.textAlign = 'left'; ctx.font = '700 12px "IBM Plex Mono", monospace'; ctx.fillStyle = lean.c;
     ctx.fillText(anchored ? lean.t : 'СЦЕНАРНЫЙ ВЕЕР · БЕЗ P / EDGE', padL, 14);
     ctx.textAlign = 'right'; ctx.font = '10px "IBM Plex Mono", monospace'; ctx.fillStyle = COLORS.dim;
-    ctx.fillText(`${anchored ? 'RACE' : 'сценарии'}: ТЕЙК ${fmtProb(raceTake)} · СТОП ${fmtProb(raceStop)} · NO-TOUCH≤H ${fmtProb(noTouch)}`, w - padR, 14);
+    ctx.fillText(`${anchored ? 'FIRST-TOUCH≤H' : 'сценарии'}: ТЕЙК ${fmtProb(touchTake)} · СТОП ${fmtProb(touchStop)} · NO-TOUCH ${fmtProb(noTouch)}`, w - padR, 14);
     // строка 2: наценка ММ (IV vs RV, пунктирный веер) + перекос волы (скью)
     ctx.font = '9px "IBM Plex Mono", monospace';
     if (ratio != null) {

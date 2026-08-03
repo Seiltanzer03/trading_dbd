@@ -52,51 +52,6 @@ def first_passage_prob(x: float, mu: float, sigma: float, T: float) -> float:
     return min(max(p, 0.0), 1.0)
 
 
-def option_race_prob(x: float, sigma_R: float, T: float,
-                     drift_R: float = 0.0, skew: float = 0.0,
-                     ou_theta: float = 0.0, ou_mu: float = 0.0,
-                     n_grid: int = 801) -> float:
-    """Option-implied P(+T раньше −1) через scale function диффузии.
-
-    Это не пропорция stop/take: в генератор входят implied move ``sigma_R``,
-    forward-drift из проверенной RND и gamma mean-reversion (OU).  Skew задаёт
-    локальную волатильность по сторонам текущей цены. Для мартингала без drift
-    формула корректно сводится к линейной harmonic measure — это свойство
-    first-passage, а не эвристика RR.
-    """
-    if T <= 0:
-        raise ValueError("T должен быть > 0")
-    if sigma_R <= 0:
-        raise ValueError("sigma_R должна быть > 0")
-    if x <= -1.0:
-        return 0.0
-    if x >= T:
-        return 1.0
-    n_grid = max(101, int(n_grid) | 1)
-    grid = np.linspace(-1.0, T, n_grid)
-    skew = float(min(max(skew, -0.45), 0.45))
-    local_sigma = np.where(
-        grid < x, sigma_R * (1.0 + skew), sigma_R * (1.0 - skew))
-    local_sigma = np.maximum(local_sigma, sigma_R * 0.20)
-    drift = float(drift_R) + max(float(ou_theta), 0.0) * (float(ou_mu) - grid)
-    psi = 2.0 * drift / (local_sigma * local_sigma)
-    dx = np.diff(grid)
-    primitive = np.zeros_like(grid)
-    primitive[1:] = np.cumsum(0.5 * (psi[:-1] + psi[1:]) * dx)
-    # scale density; shift exponent before exp for numerical stability
-    exponent = -primitive
-    exponent -= float(np.max(exponent))
-    scale_density = np.exp(np.clip(exponent, -700.0, 0.0))
-    scale_int = np.zeros_like(grid)
-    scale_int[1:] = np.cumsum(
-        0.5 * (scale_density[:-1] + scale_density[1:]) * dx)
-    total = float(scale_int[-1])
-    if total <= 0 or not math.isfinite(total):
-        return first_passage_prob(x, drift_R, sigma_R, T)
-    at_x = float(np.interp(x, grid, scale_int))
-    return min(max(at_x / total, 0.0), 1.0)
-
-
 def calibrate_mu(winrate: float, T: float, sigma: float = 1.0) -> float:
     """Подбор mu бисекцией из условия first_passage_prob(0, mu, sigma, T) == winrate.
 
@@ -480,7 +435,7 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
       times_frac / times_days — время срезов,
       p_take_by_t / p_stop_by_t — накопленная вероятность дойти к моменту t (стены),
       p_take / p_stop — реально пересекли барьеры к горизонту;
-      hit_ratio — option-implied P(тейк раньше стопа) из scale function;
+      hit_ratio — option-implied P(тейк first-touch до текущего горизонта);
       p_take/p_stop/unresolved — отдельные touch/touch/no-touch на горизонте,
       median_days — медианное время развязки,
       slice_probs / slice_edges — полная, не обрезанная барьерами RND доски.
@@ -601,17 +556,17 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
     # На конечном опционном горизонте есть ТРИ исхода: take-touch, stop-touch и
     # no-touch.  Terminal BL tail-ratio нельзя использовать как first-passage:
     # P(S_T за тейком) / tail mass не говорит, какой барьер был первым, а его
-    # дополнение тем более не является P(stop). Headline race-P считаем scale
-    # function той же option-implied диффузии; finite-horizon touch оставляем
-    # отдельной трёхисходной метрикой.
+    # дополнение тем более не является P(stop). Headline P — только фактическая
+    # first-touch масса к заданному опционному горизонту.
     resolved = min(max(p_take + p_stop, 0.0), 1.0)
     unresolved = 1.0 - resolved
     if terminal_hit is not None and math.isfinite(terminal_hit):
-        hit_ratio = option_race_prob(
-            r0, sigma_R, T, drift_R=drift_R, skew=skew,
-            ou_theta=ou_theta, ou_mu=ou_mu)
-        hit_source = "option_dynamics_first_passage"
-        stop_anchored = 1.0 - hit_ratio
+        # Headline probability is the actual competing first-touch probability
+        # inside the option horizon. It comes from barrier MC driven by IV/skew/
+        # term/forward/gamma. No distance-ratio and no normalization of no-touch.
+        hit_ratio = p_take
+        hit_source = "option_barrier_first_touch"
+        stop_anchored = p_stop
     else:
         hit_ratio = None
         hit_source = "no_option_anchor"

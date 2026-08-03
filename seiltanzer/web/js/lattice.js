@@ -227,11 +227,11 @@ export function initLattice(canvas) {
     ctx.font = '8px "IBM Plex Mono", monospace';
     if (s.tgt.pStop != null) {
       ctx.fillStyle = COLORS.red; ctx.textAlign = 'left';
-      ctx.fillText(`RACE СТОП ${fmtProb(s.tgt.pStop)}`, g.padX, 24);
+      ctx.fillText(`СТОП FIRST-TOUCH≤H ${fmtProb(s.tgt.pStop)}`, g.padX, 24);
     }
     if (s.tgt.pTake != null) {
       ctx.fillStyle = COLORS.green; ctx.textAlign = 'right';
-      ctx.fillText(`RACE ТЕЙК ${fmtProb(s.tgt.pTake)} · NO-TOUCH≤H ${fmtProb(s.tgt.unresolved)}`, w - g.padX, 24);
+      ctx.fillText(`ТЕЙК FIRST-TOUCH≤H ${fmtProb(s.tgt.pTake)} · NO-TOUCH ${fmtProb(s.tgt.unresolved)}`, w - g.padX, 24);
     }
 
     // шарики

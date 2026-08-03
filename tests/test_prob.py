@@ -260,22 +260,17 @@ class TestRnCone:
         # BL terminal tail-ratio only gates option availability; it must not
         # turn all no-touch mass into stop/take first-passage probability.
         assert high["hit_ratio"] == pytest.approx(low["hit_ratio"])
-        assert high["hit_source"] == "option_dynamics_first_passage"
+        assert high["hit_source"] == "option_barrier_first_touch"
         assert low["p_take_anchored"] == pytest.approx(low["hit_ratio"])
-        assert low["p_stop_anchored"] == pytest.approx(1 - low["hit_ratio"])
+        assert low["p_take_anchored"] == pytest.approx(low["p_take"])
+        assert low["p_stop_anchored"] == pytest.approx(low["p_stop"])
+        assert low["p_take"] + low["p_stop"] + low["unresolved"] == pytest.approx(1)
         assert low["p_take_anchored_by_t"][-1] == pytest.approx(low["p_take"])
         assert low["p_stop_anchored_by_t"][-1] == pytest.approx(low["p_stop"])
         assert all(b >= a - 1e-9 for a, b in zip(
             low["p_take_anchored_by_t"], low["p_take_anchored_by_t"][1:]))
         assert all(b >= a - 1e-9 for a, b in zip(
             low["p_stop_anchored_by_t"], low["p_stop_anchored_by_t"][1:]))
-
-    def test_option_race_matches_scale_function_and_is_not_terminal_tail(self):
-        p = P.option_race_prob(1.0, 0.4, 2.0, drift_R=0.0)
-        assert p == pytest.approx((1.0 + 1.0) / (2.0 + 1.0), abs=0.003)
-        mean_reverting = P.option_race_prob(
-            1.0, 0.4, 2.0, drift_R=0.0, ou_theta=2.0, ou_mu=0.0)
-        assert mean_reverting < p
 
     def test_lattice_rnd_is_full_horizon_and_not_clipped_at_barriers(self):
         c = P.rn_cone(

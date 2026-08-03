@@ -65,7 +65,7 @@ export function initCone(elId) {
                 median: null, term_slope: 0, structSig: null,
                 probabilityAvailable: false, conditional: null, survival: null,
                 modeX: null, q20X: null, q80X: null,
-                raceTake: null, raceStop: null, noTouch: null };
+                touchTake: null, touchStop: null, noTouch: null };
   const disp = { z: null, pStop: null, pTake: null };
 
   // Камера: развернута на 180 градусов (вид спереди/сзади)
@@ -363,8 +363,8 @@ export function initCone(elId) {
     tgt.xs = xs; tgt.ys = ys; tgt.edges = edges; tgt.T = T; tgt.r0 = cone.r0;
     tgt.nS = nS; tgt.nB = nB; tgt.hy = cone.horizon_years;
     tgt.median = cone.median_years; tgt.term_slope = cone.term_slope || 0;
-    tgt.raceTake = cone.p_take_anchored;
-    tgt.raceStop = cone.p_stop_anchored;
+    tgt.touchTake = cone.p_take;
+    tgt.touchStop = cone.p_stop;
     tgt.noTouch = cone.unresolved;
     tgt.conditional = conditional; tgt.survival = survival;
     tgt.modeX = conditional.map((row) => xs[row.indexOf(Math.max(...row))]);
@@ -466,11 +466,11 @@ export function initCone(elId) {
     lastNames = [traces[EDGE_STOP].name, traces[EDGE_TAKE].name];
     const finalStopP = disp.pStop[disp.pStop.length - 1];
     const finalTakeP = disp.pTake[disp.pTake.length - 1];
-    const liveEV = (tgt.raceTake * tgt.T) - tgt.raceStop;
+    const liveEV = (tgt.touchTake * tgt.T) - tgt.touchStop;
     const evColor = liveEV >= 0 ? '#2EB44F' : '#E64650';
-    const evText = `<b>RACE: ТЕЙК ${fmtProb(tgt.raceTake)} · СТОП ${fmtProb(tgt.raceStop)}</b><br>`
-      + `TOUCH≤H: T ${fmtProb(finalTakeP)} · S ${fmtProb(finalStopP)} · NO ${fmtProb(tgt.noTouch)}<br>`
-      + `RACE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R`;
+    const evText = `<b>FIRST-TOUCH≤H</b><br>`
+      + `ТЕЙК ${fmtProb(finalTakeP)} · СТОП ${fmtProb(finalStopP)} · NO-TOUCH ${fmtProb(tgt.noTouch)}<br>`
+      + `BARRIER EV≤H: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R`;
     layout.annotations[0].text = evText;
     layout.annotations[0].font.color = evColor;
     layout.annotations[0].bordercolor = evColor;
@@ -528,12 +528,12 @@ export function initCone(elId) {
       
     const finalStopP = disp.pStop[disp.pStop.length - 1] || 0;
     const finalTakeP = disp.pTake[disp.pTake.length - 1] || 0;
-    const liveEV = (tgt.raceTake * tgt.T) - tgt.raceStop;
+    const liveEV = (tgt.touchTake * tgt.T) - tgt.touchStop;
     const evColor = liveEV >= 0 ? '#2EB44F' : '#E64650';
     const evText = tgt.probabilityAvailable 
-        ? `<b>RACE: ТЕЙК ${fmtProb(tgt.raceTake)} · СТОП ${fmtProb(tgt.raceStop)}</b><br>`
-          + `TOUCH≤H: T ${fmtProb(finalTakeP)} · S ${fmtProb(finalStopP)} · NO ${fmtProb(tgt.noTouch)}<br>`
-          + `RACE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R`
+        ? `<b>FIRST-TOUCH≤H</b><br>`
+          + `ТЕЙК ${fmtProb(finalTakeP)} · СТОП ${fmtProb(finalStopP)} · NO-TOUCH ${fmtProb(tgt.noTouch)}<br>`
+          + `BARRIER EV≤H: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R`
         : `<b>LIVE EV: НЕТ ОПЦИОНОВ</b><br>P(Take): — | P(Stop): —`;
         
     let relayoutData = {};

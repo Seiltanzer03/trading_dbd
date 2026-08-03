@@ -211,20 +211,21 @@ class TestEngineDemo:
         p = tick["prob"]
         assert p is not None and 0 < p["p_lo"] <= p["p"] <= p["p_hi"] < 1
         assert p["calibration"] == "builtin"
-        assert p["source"] == "options_first_passage"
+        assert p["source"] == "options_barrier_first_touch"
         assert p["small_sample"] is False and p["model_small_sample"] is True
         assert abs(p["r"]) < 0.2
         assert tick["mc"]["n_paths"] == 4000            # forward-распределение доски
         assert tick["market"]["available"] is True
-        assert tick["market"]["edge"] == pytest.approx(
-            p["p"] - p["p_breakeven"])
-        assert tick["market"]["p_take_race"] + tick["market"]["p_stop_race"] == pytest.approx(1.0)
+        assert tick["market"]["edge"] is None
         assert (tick["market"]["p_take_horizon"]
                 + tick["market"]["p_stop_horizon"]
                 + tick["market"]["p_unresolved_horizon"]) == pytest.approx(1.0)
         assert tick["market"]["scenario_edges"][0] < -1.0
         assert tick["market"]["scenario_edges"][-1] > p["T"]
-        assert tick["mc"]["ev_hold_source"] == "options_probability"
+        assert tick["market"]["horizon_barrier_ev"] == pytest.approx(
+            p["T"] * tick["market"]["p_take_horizon"]
+            - tick["market"]["p_stop_horizon"])
+        assert tick["mc"]["ev_hold_source"] == "options_horizon_barrier_component"
         # доска — распределение к горизонту: не бинарна, есть масса в середине
         assert len(tick["mc"]["hist"]["probs"]) == 11
         assert sum(tick["mc"]["hist"]["probs"][1:-1]) > 0.3
@@ -247,7 +248,7 @@ class TestEngineDemo:
         assert v is not None
         assert v["tone"] in ("good", "bad", "neutral")
         assert isinstance(v["action"], str) and len(v["action"]) > 10
-        assert any(f["k"] == "ОПЦИОННЫЙ EDGE" for f in v["factors"])
+        assert any(f["k"] == "BARRIER EV≤H" for f in v["factors"])
         g = tick["gamma"]
         assert g["available"] is True
         assert g["decision_weight"] is False
@@ -336,7 +337,7 @@ class TestEngineDemo:
         assert tick["cone"]["available"] is True
         assert tick["cone"]["option_anchored"] is False
         assert tick["cone"]["scenario_only"] is True
-        assert tick["verdict"]["label"] == "НЕТ OPTION EDGE"
+        assert tick["verdict"]["label"] == "НЕТ OPTION MODEL"
 
     def test_barrier_outside_option_grid_disables_edge(self, engine):
         engine.market.refresh_price()

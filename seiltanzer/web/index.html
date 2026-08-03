@@ -95,8 +95,8 @@
       <div class="state-val" id="st-p">—</div>
       <div class="tiny dim" id="st-p-band"></div>
     </div>
-    <div class="state-cell" data-tip="Опционный edge = P_options − P(EV=0). Рядом — как запас изменился с момента входа.">
-      <div class="lbl">OPTION EDGE</div>
+    <div class="state-cell" data-tip="Опционный barrier-компонент к горизонту: T×P(take first-touch) − P(stop first-touch), в R. NO-TOUCH учитывается отдельно.">
+      <div class="lbl">BARRIER EV≤H</div>
       <div class="state-val" id="st-edge">—</div>
       <div class="tiny dim" id="st-edge-shift"></div>
     </div>
@@ -126,7 +126,7 @@
           <span class="live-chg" id="lat-price-chg"></span>
         </div>
         <div class="stat">
-          <div class="lbl">P (ТЕЙК РАНЬШЕ СТОПА) <span class="dim" id="lat-p-avg"></span></div>
+          <div class="lbl">P (ТЕЙК FIRST-TOUCH≤H) <span class="dim" id="lat-p-avg"></span></div>
           <div class="hero" id="lat-p" data-tip="">—</div>
           <div class="band-bar" id="lat-band">
             <div class="band-fill" id="lat-band-fill"></div>
@@ -135,10 +135,10 @@
           <div class="tiny dim" id="lat-band-lbl">интервал 90% (Уилсон)</div>
         </div>
         <div class="stat-sep"></div>
-        <div class="stat-row"><span class="lbl">P OPTIONS (RACE)</span><span class="val" id="lat-mhit"
-          data-tip="Option-implied вероятность того, что тейк будет первым барьером. Touch/no-touch текущего горизонта показываются отдельно.">—</span></div>
-        <div class="stat-row"><span class="lbl">OPTION EDGE vs EV=0</span><span class="val" id="lat-edge"
-          data-tip="P_options минус порог безубыточности для текущего RR. Положительный запас — кандидат на преимущество, который ещё должен пройти out-of-sample проверку журнала.">—</span></div>
+        <div class="stat-row"><span class="lbl">P OPTIONS (TOUCH≤H)</span><span class="val" id="lat-mhit"
+          data-tip="Option-implied вероятность first-touch тейка до текущего горизонта; stop-touch и no-touch показываются отдельно.">—</span></div>
+        <div class="stat-row"><span class="lbl">BARRIER EV≤H</span><span class="val" id="lat-edge"
+          data-tip="Вклад касаний барьеров к горизонту: T×P(take touch) − P(stop touch), в R. No-touch не превращается в стоп.">—</span></div>
         <div class="stat-sep"></div>
         <div class="stat-row"><span class="lbl">r СЕЙЧАС</span><span class="val" id="lat-r"
           data-tip="Текущее положение сделки в R: (цена − вход)/(вход − стоп), со знаком направления. Источник: фид цены.">—</span></div>
@@ -146,8 +146,8 @@
           data-tip="">—</span></div>
         <div class="stat-row"><span class="lbl">EXECUTION CONTROL</span><span class="val" id="lat-ev-ladder"
           data-tip="">—</span></div>
-        <div class="stat-row"><span class="lbl">ПОРОГ EV=0</span><span class="val" id="lat-be"
-          data-tip="Винрейт, при котором удержание до тейка/стопа даёт EV=0: 1/(1+T) для RR 1:T. Если ваша P(тейк) выше порога — при удержании математика в плюс; ниже — в минус. Рядом — запас над порогом.">—</span></div>
+        <div class="stat-row"><span class="lbl">NO-TOUCH≤H</span><span class="val" id="lat-be"
+          data-tip="Вероятность, что до текущего опционного горизонта цена не коснётся ни стопа, ни тейка.">—</span></div>
         <div class="stat-sep"></div>
         <div class="stat-row"><span class="lbl">ШАРИКОВ УПАЛО</span><span class="val" id="lat-balls">0</span></div>
         <div class="stat-row"><span class="lbl">ДОЛЯ ЗЕЛЁНЫХ</span><span class="val" id="lat-green"
@@ -166,7 +166,7 @@
         <div class="canvas-empty" id="lattice-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ — ДОСКА ЖДЁТ</div>
       </div>
     </div>
-    <div class="panel-foot dim">оранжевая доска = полная option-implied RND на горизонте, без обрезки по стопу/тейку и без складывания хвостов в крайние столбцы. P10/P50/P90 и mode показывают рабочий диапазон; RACE P и конечные touch/touch/no-touch считаются раздельно. P и edge появляются только при валидном option anchor</div>
+    <div class="panel-foot dim">оранжевая доска = полная option-implied RND на горизонте, без обрезки по стопу/тейку и без складывания хвостов в крайние столбцы. P10/P50/P90 и mode показывают рабочий диапазон; take-touch, stop-touch и no-touch считаются как три отдельных исхода barrier-модели</div>
   </section>
 
   <!-- ================ 3. STRIKE LANDSCAPE ================ -->
@@ -256,7 +256,7 @@
         <div class="canvas-holder fan-holder"><canvas id="cone-fan"></canvas></div>
       </div>
     </div>
-    <div class="panel-foot dim">Сверху — 3D WebGL: вращайте мышкой, выбранная камера сохраняется. Полотно = непрерывная условная risk-neutral плотность; OPTION MODE и Q20–Q80 показывают концентрацию рынка. Стены показывают только фактический first-touch к горизонту. RACE P отвечает, какой барьер будет первым; NO-TOUCH показывает массу без касания — эти метрики больше не смешиваются.</div>
+    <div class="panel-foot dim">Сверху — 3D WebGL: вращайте мышкой, выбранная камера сохраняется. Полотно = непрерывная условная risk-neutral плотность; OPTION MODE и Q20–Q80 показывают концентрацию рынка. Стены показывают first-touch к горизонту; NO-TOUCH остаётся отдельной массой и не превращается в вероятность стопа.</div>
   </section>
 
   <!-- ================ 3c. IV SURFACE (3D) ================ -->

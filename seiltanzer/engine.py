@@ -266,29 +266,29 @@ class Engine:
         filters = p.get("filters", [])
         factors, score = [], 0
 
-        edge = market.get("edge") if market else None
-        if edge is None:
+        barrier_ev = market.get("horizon_barrier_ev") if market else None
+        if barrier_ev is None:
             reason = (market or {}).get("anchor_reason") or "нет валидной цепочки"
-            factors.append({"k": "ОПЦИОНЫ", "v": f"{reason} — edge выключен",
+            factors.append({"k": "BARRIER EV≤H", "v": f"{reason} — оценка выключена",
                             "tone": "neutral"})
-        elif edge > 0.12:
-            factors.append({"k": "ОПЦИОННЫЙ EDGE",
-                            "v": f"+{edge*100:.0f}% над EV=0 для текущих стоп/тейк",
+        elif barrier_ev > 0.15:
+            factors.append({"k": "BARRIER EV≤H",
+                            "v": f"+{barrier_ev:.2f}R к опционному горизонту",
                             "tone": "good"}); score += 2
-        elif edge > 0.03:
-            factors.append({"k": "ОПЦИОННЫЙ EDGE",
-                            "v": f"+{edge*100:.0f}% — умеренная асимметрия",
+        elif barrier_ev > 0.03:
+            factors.append({"k": "BARRIER EV≤H",
+                            "v": f"+{barrier_ev:.2f}R — умеренная асимметрия",
                             "tone": "good"}); score += 1
-        elif edge < -0.12:
-            factors.append({"k": "ОПЦИОННЫЙ EDGE",
-                            "v": f"{edge*100:.0f}% — опционная геометрия против сделки",
+        elif barrier_ev < -0.15:
+            factors.append({"k": "BARRIER EV≤H",
+                            "v": f"{barrier_ev:.2f}R — опционная геометрия против сделки",
                             "tone": "bad"}); score -= 2
-        elif edge < -0.03:
-            factors.append({"k": "ОПЦИОННЫЙ EDGE",
-                            "v": f"{edge*100:.0f}% — слабая встречная асимметрия",
+        elif barrier_ev < -0.03:
+            factors.append({"k": "BARRIER EV≤H",
+                            "v": f"{barrier_ev:.2f}R — слабая встречная асимметрия",
                             "tone": "bad"}); score -= 1
         else:
-            factors.append({"k": "ОПЦИОННЫЙ EDGE", "v": "≈ нейтрально",
+            factors.append({"k": "BARRIER EV≤H", "v": "≈ 0R",
                             "tone": "neutral"})
 
         # Только точные автоматические фильтры могут блокировать вердикт.
@@ -359,15 +359,15 @@ class Engine:
         if blocks:
             label, tone = "НЕ ВХОДИТЬ", "bad"
             action = "Фильтр стратегии блокирует сетап — пропусти или дождись условий."
-        elif edge is None:
-            label, tone = "НЕТ OPTION EDGE", "neutral"
+        elif barrier_ev is None:
+            label, tone = "НЕТ OPTION MODEL", "neutral"
             action = (
                 "Нет валидного опционного якоря — конус и доска показывают "
-                "сценарии, но вероятность и торговый перевес выключены."
+                "сценарии, но barrier-вероятности и EV выключены."
             )
         elif score >= 3:
             label, tone = "СИЛЬНЫЙ ПЕРЕВЕС", "good"
-            action = "Опционная асимметрия поддерживает сделку — ведите по плану и следите за изменением edge."
+            action = "Опционная асимметрия поддерживает сделку — ведите по плану и следите за barrier EV."
         elif score >= 1:
             label, tone = "ПЕРЕВЕС", "good"
             action = "Небольшой перевес — вход допустим, дисциплина по лестнице и БУ после 1.5R."
@@ -392,7 +392,7 @@ class Engine:
                 action += f" r={r:+.2f}: близко к стопу — не усредняйте, план на стоп готов."
 
         return {"label": label, "tone": tone, "action": action, "score": score,
-                "edge": edge, "factors": factors}
+                "edge": None, "barrier_ev": barrier_ev, "factors": factors}
 
     def _account_payload(self) -> dict:
         acc = self.journal.account()
@@ -632,7 +632,7 @@ class Engine:
             heston_rho = -0.7
 
         # risk-neutral конус: option-implied diffusion + skew/term/gamma.
-        # Race-P и конечные touch/touch/no-touch считаются раздельно.
+        # Take-touch / stop-touch / no-touch считаются раздельно.
         cone = self._cone(r, T, cone_sigma_R, drift_R, skew_R, term_slope,
                           horizon_years, terminal, rv_iv_ratio,
                           ou_theta, ou_mu, heston_kappa, heston_theta, heston_xi, heston_rho)
@@ -641,12 +641,15 @@ class Engine:
 
         has_options = bool(
             terminal is not None
-            and cone.get("hit_source") == "option_dynamics_first_passage")
+            and cone.get("hit_source") == "option_barrier_first_touch")
         option_p = cone["hit_ratio"] if has_options else None
         p_be = prob["p_breakeven"]
-        option_edge = (option_p - p_be) if option_p is not None else None
-        option_ev = (T * option_p - (1.0 - option_p)
-                     if option_p is not None else None)
+        # Binary EV threshold is invalid while no-touch mass exists. Keep the
+        # finite-horizon barrier contribution in R, and do not publish a fake
+        # probability edge against 1/(1+T).
+        option_edge = None
+        option_ev = ((T * cone["p_take"] - cone["p_stop"])
+                     if has_options else None)
         # Сценарная полоса включает Monte-Carlo noise, возраст снимка и штраф
         # экспериментального прокси. Это не академический confidence interval.
         chain_age = (time.time() - self.market.chain["ts"]
@@ -661,7 +664,7 @@ class Engine:
                 "p": option_p,
                 "p_lo": max(0.0, option_p - systematic),
                 "p_hi": min(1.0, option_p + systematic),
-                "source": "options_first_passage",
+                "source": "options_barrier_first_touch",
                 "available": True,
                 "uncertainty": "proxy+snapshot scenario band",
                 "small_sample": False,
@@ -671,7 +674,7 @@ class Engine:
             # path-sim лестницы сохраняется как отдельный исследовательский ориентир.
             mc["ev_hold_model"] = mc["ev_hold"]
             mc["ev_hold"] = option_ev
-            mc["ev_hold_source"] = "options_probability"
+            mc["ev_hold_source"] = "options_horizon_barrier_component"
             mc["ev_ladder_source"] = "setup_path_control"
         else:
             prob["band_kind"] = None
@@ -693,20 +696,18 @@ class Engine:
             "scenario_median_r": cone.get("slice_median_r"),
             "scenario_p90_r": cone.get("slice_p90_r"),
             "p_take": option_p,
-            "p_stop": (1.0 - option_p) if option_p is not None else None,
-            # Three-outcome finite horizon and eventual barrier race are
-            # intentionally separate; no-touch is never folded into stop.
+            "p_stop": cone.get("p_stop") if has_options else None,
+            # Three-outcome finite horizon: no-touch is never folded into stop.
             "p_take_horizon": cone.get("p_take"),
             "p_stop_horizon": cone.get("p_stop"),
             "p_unresolved_horizon": cone.get("unresolved"),
-            "p_take_race": cone.get("p_take_anchored"),
-            "p_stop_race": cone.get("p_stop_anchored"),
             "p_take_reached_horizon": cone.get("p_take"),
             "p_stop_reached_horizon": cone.get("p_stop"),
             "p_unresolved_raw_horizon": cone.get("unresolved"),
             "hit_ratio": option_p,
             "edge": option_edge,
             "option_ev": option_ev,
+            "horizon_barrier_ev": option_ev,
             "p_breakeven": p_be,
             "p_model": band.p,
             "median_years": cone.get("median_years"),
@@ -736,13 +737,13 @@ class Engine:
             "quality": ("experimental" if self.market.instrument.proxy_experimental
                         else "reference_proxy"),
         }
-        # Первый edge + редкие живые снимки дают out-of-sample проверку, а не
+        # Первый снимок + редкие живые снимки дают out-of-sample проверку, а не
         # обещание преимущества по одному красивому кадру.
         self.journal.update_edge_at_open(trade["id"], option_edge)
         if option_p is not None:
             self.journal.record_option_forecast(
                 trade["id"], price=price, r=r,
-                p_take=option_p, p_stop=1.0 - option_p,
+                p_take=option_p, p_stop=cone.get("p_stop", 0.0),
                 p_unresolved=cone.get("unresolved", 0.0),
                 option_edge=option_edge, option_ev=option_ev,
                 chain_ts=self.market.chain.get("ts"), chain_age_sec=chain_age,
@@ -792,7 +793,7 @@ class Engine:
         out["available"] = True
         out["option_anchored"] = (
             terminal is not None
-            and out.get("hit_source") == "option_dynamics_first_passage"
+            and out.get("hit_source") == "option_barrier_first_touch"
         )
         out["scenario_only"] = not out["option_anchored"]
         out["probability_available"] = out["option_anchored"]
@@ -841,6 +842,8 @@ class Engine:
             "p_breakeven": prob.get("p_breakeven"),
             "small_sample": prob.get("small_sample"),
             "edge": edge, "edge_at_open": edge_open, "edge_shift": edge_shift,
+            "horizon_barrier_ev": (market or {}).get("horizon_barrier_ev"),
+            "p_no_touch_horizon": (market or {}).get("p_unresolved_horizon"),
             "median_years": (market or {}).get("median_years"),
             "label": verdict.get("label"), "tone": verdict.get("tone"),
             "be_armed": ladder.get("be_armed"),

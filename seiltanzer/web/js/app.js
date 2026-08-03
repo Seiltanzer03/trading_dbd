@@ -113,7 +113,7 @@ function onTick() {
     modelHist: S.tick?.mc?.hist,
     trade: S.tick?.trade || null,
     modelProb: S.tick?.prob?.model_p,
-    optionProb: S.tick?.prob?.source === 'options_first_passage' ? S.tick.prob.p : null,
+    optionProb: S.tick?.prob?.source === 'options_barrier_first_touch' ? S.tick.prob.p : null,
     rnProbs: S.tick?.market?.available ? {
       p_beyond_take: S.tick.market.terminal_p_take,
       p_beyond_stop: S.tick.market.terminal_p_stop,
@@ -307,7 +307,7 @@ function renderVerdict() {
   }
   const mkt = S.tick.market;
   $('#v-pmm').textContent = mkt?.available
-    ? `P options ${fmtPct(mkt.hit_ratio)} · EV=0 ${fmtPct(mkt.p_breakeven)}`
+    ? `touch≤H: тейк ${fmtPct(mkt.p_take_horizon)} · стоп ${fmtPct(mkt.p_stop_horizon)} · no-touch ${fmtPct(mkt.p_unresolved_horizon)}`
     : `option edge недоступен${mkt?.anchor_reason ? ` · ${mkt.anchor_reason}` : ''}`;
   $('#v-action').textContent = v.action;
   const fx = $('#v-factors');
@@ -366,21 +366,13 @@ function renderState() {
     $('#st-p-band').textContent = 'нет option anchor · сценарий без P';
   }
 
-  // край + сдвиг от входа
-  if (s.edge == null) {
-    $('#st-edge').textContent = '—'; $('#st-edge').className = 'state-val dim';
-    $('#st-edge-shift').textContent = 'option edge недоступен';
-  } else {
-    $('#st-edge').textContent = (s.edge >= 0 ? '+' : '') + (s.edge * 100).toFixed(0) + '%';
-    $('#st-edge').className = 'state-val ' + (s.edge >= 0 ? 'green' : 'red');
-    if (s.edge_shift == null) {
-      $('#st-edge-shift').textContent = 'вход: фиксируется';
-    } else {
-      const arrow = s.edge_shift > 0.005 ? '↑' : s.edge_shift < -0.005 ? '↓' : '→';
-      $('#st-edge-shift').textContent =
-        `вход ${(s.edge_at_open * 100).toFixed(0)}% ${arrow}`;
-    }
-  }
+  // Конечный горизонт не бинарен: вместо фиктивного P-edge показываем честный
+  // barrier EV, а no-touch оставляем отдельной массой.
+  const bev = s.horizon_barrier_ev;
+  $('#st-edge').textContent = bev == null ? '—' : fmtR(bev);
+  $('#st-edge').className = 'state-val ' + (bev == null ? 'dim' : bev >= 0 ? 'green' : 'red');
+  $('#st-edge-shift').textContent = bev == null
+    ? 'barrier EV недоступен' : `NO-TOUCH ${fmtPct(s.p_no_touch_horizon)}`;
 
   // действие
   const h = $('#st-headline');
@@ -444,7 +436,7 @@ function renderLattice() {
   handleLivePrice(t);          // котировка тикает всегда, даже без сделки
   const p = t.prob;
   const active = !!(p && t.mc);
-  const optionAnchored = p?.source === 'options_first_passage';
+  const optionAnchored = p?.source === 'options_barrier_first_touch';
   const liveMapping = t?.feeds?.proxy_price?.status === 'live';
   $('#lattice-empty').style.display = active ? 'none' : 'flex';
   $('#lattice-status').className = 'badge ' + (active
@@ -467,8 +459,8 @@ function renderLattice() {
     optionAnchored: !!mkt?.available,
     hit: mkt?.hit_ratio,
     edge: mkt?.edge,
-    pStop: mkt?.p_stop_race ?? mkt?.p_stop,
-    pTake: mkt?.p_take_race ?? mkt?.p_take,
+    pStop: mkt?.p_stop,
+    pTake: mkt?.p_take,
     unresolved: mkt?.p_unresolved_horizon,
     q10: mkt?.scenario_p10_r,
     q50: mkt?.scenario_median_r,
@@ -489,20 +481,19 @@ function renderLattice() {
     return;
   }
 
-  // Опционная вероятность и её запас над безубыточностью.
+  // Реальная трёхисходная barrier-математика опционного горизонта.
   if (mkt?.available) {
     $('#lat-mhit').textContent = fmtPct(mkt.hit_ratio);
     $('#lat-mhit').dataset.tip =
-      `P(тейк раньше стопа) по option-implied first-passage scale function.\n` +
-      `Драйверы: implied move, проверенный/shrunk forward, skew, term structure и gamma mean-reversion; простая пропорция RR не подставляется.${mkt.median_years != null ? '\nМедиана касания ≈ ' + fmtDur(mkt.median_years) : '\nМедиана касания лежит дальше текущего option-horizon.'}\n` +
-      `К горизонту: тейк-touch ${fmtPct(mkt.p_take_horizon)}, стоп-touch ${fmtPct(mkt.p_stop_horizon)}, NO-TOUCH ${fmtPct(mkt.p_unresolved_horizon)}. ` +
-      `Эти три исхода не смешиваются с RACE P. ${mkt.forward_drift_rejected != null ? 'Аномальный BL-forward отклонён risk-фильтром.' : ''}`;
-    const ed = mkt.edge;
-    $('#lat-edge').textContent = ed == null ? '—' : (ed >= 0 ? '+' : '') + fmtPct(ed);
-    $('#lat-edge').className = 'val ' + (ed == null ? '' : ed >= 0 ? 'green' : 'red');
+      `P(first-touch тейка до option-horizon) по barrier Monte Carlo.\n` +
+      `Драйверы: implied move, skew, term structure, robust forward и gamma regime; расстояния задают только уровни барьеров, но не превращаются в формулу вероятности.\n` +
+      `Тейк ${fmtPct(mkt.p_take_horizon)}, стоп ${fmtPct(mkt.p_stop_horizon)}, NO-TOUCH ${fmtPct(mkt.p_unresolved_horizon)}.${mkt.forward_drift_rejected != null ? ' Аномальный BL-forward отклонён.' : ''}`;
+    const bev = mkt.horizon_barrier_ev;
+    $('#lat-edge').textContent = bev == null ? '—' : fmtR(bev);
+    $('#lat-edge').className = 'val ' + (bev == null ? '' : bev >= 0 ? 'green' : 'red');
     $('#lat-edge').dataset.tip =
-      `Опционный запас = P_options − P(EV=0) = ${fmtPct(mkt.hit_ratio)} − ${fmtPct(mkt.p_breakeven)} = ${ed == null ? '—' : (ed >= 0 ? '+' : '') + fmtPct(ed)}.\n` +
-      `Это честная проверка асимметрии текущих барьеров по данным опционов, а не вероятность из одной пропорции стоп/тейк.`;
+      `Barrier EV≤H = T×P(take first-touch) − P(stop first-touch) = ${bev == null ? '—' : fmtR(bev)}.\n` +
+      `NO-TOUCH имеет нулевой barrier-вклад и не записывается в стоп.`;
   } else {
     $('#lat-mhit').textContent = '—';
     $('#lat-mhit').dataset.tip = `${mkt?.anchor_reason || `Нет валидной цепочки/преобразования для ${t.instrument}`}; опционный edge выключен. Тёмная контрольная модель остаётся только справочной.`;
@@ -513,7 +504,7 @@ function renderLattice() {
   if (p.available && p.p != null) {
     tweenNumber($('#lat-p'), p.p * 100, (v) => v.toFixed(1) + '%');
     $('#lat-p').dataset.tip =
-      `ОПЦИОННАЯ P(тейк раньше стопа), не пропорция расстояний.\nТекущий r=${p.r.toFixed(3)}; moneyness использует ${t.feeds?.proxy_price?.status === 'live' ? 'живой stream-тик' : 'последнюю indicative/snapshot-котировку'} ${t.options_summary?.proxy || 'proxy'}.\nПолный ход σ=${p.sigma_R.toFixed(3)}R из implied move; BL-плотность задаёт terminal tail/forward, skew — асимметрию, term structure — раскрытие по времени.\nВинрейт сетапа в эту P не подставляется.`;
+      `ОПЦИОННАЯ P(first-touch тейка до горизонта), не пропорция расстояний.\nТекущий r=${p.r.toFixed(3)}; moneyness использует ${t.feeds?.proxy_price?.status === 'live' ? 'живой stream-тик' : 'последнюю indicative/snapshot-котировку'} ${t.options_summary?.proxy || 'proxy'}.\nПолный ход σ=${p.sigma_R.toFixed(3)}R из implied move; skew задаёт асимметрию, term structure — раскрытие во времени, gamma regime — mean reversion.\nВинрейт сетапа в эту P не подставляется.`;
     if (t.trade?.id !== S._pTradeId) {
       S._pTradeId = t.trade?.id; S._pSum = 0; S._pN = 0;
     }
@@ -541,48 +532,29 @@ function renderLattice() {
   $('#lat-r').textContent = fmtR(p.r);
   $('#lat-ev-hold').textContent = p.available ? fmtR(t.mc.ev_hold) : '—';
   $('#lat-ev-hold').dataset.tip =
-    t.mc.ev_hold_source === 'options_probability'
-      ? `Опционный EV удержания = P_options·T − (1−P_options) = ${(p.p * p.T - (1 - p.p)).toFixed(3)}R. Комиссии, проскальзывание и physical drift не включены.`
+    t.mc.ev_hold_source === 'options_horizon_barrier_component'
+      ? `Barrier EV≤H = T×P(take touch) − P(stop touch). NO-TOUCH не считается стопом. Комиссии и проскальзывание не включены.`
       : `Без option anchor EV не показывается: историческая таблица не заменяет рыночную вероятность.`;
   $('#lat-ev-ladder').textContent = p.available ? fmtR(t.mc.ev_ladder) : '—';
   $('#lat-ev-ladder').dataset.tip =
     `Исследовательский path-control лестницы по исторической модели: 10% на 1.0/1.25/1.5/1.75/2.0/2.2R, БУ после 1.5R.\nНе участвует в опционном edge; сохранён для контроля исполнения плана.`;
 
-  // порог безубытка по винрейту + запас
-  if (p.available && p.p != null && p.p_breakeven != null) {
-    const marg = (p.p - p.p_breakeven) * 100;
-    $('#lat-be').textContent = fmtPct(p.p_breakeven) +
-      ` (${marg >= 0 ? '+' : ''}${marg.toFixed(0)}пп)`;
-    $('#lat-be').className = 'val ' + (marg >= 0 ? 'green' : 'red');
-    $('#lat-be').dataset.tip =
-      `Порог EV=0 при RR 1:${p.T.toFixed(2)} = 1/(1+${p.T.toFixed(2)}) = ${fmtPct(p.p_breakeven)}.\n` +
-      `Ваша P(тейк) ${fmtPct(p.p)} ${marg >= 0 ? 'ВЫШЕ' : 'НИЖЕ'} порога на ${Math.abs(marg).toFixed(0)}пп -> ` +
-      `risk-neutral сценарный EV ${marg >= 0 ? 'положительный' : 'отрицательный'} ` +
-      `(не доказанный physical edge; без комиссий и лестницы).`;
-  } else { $('#lat-be').textContent = '—'; $('#lat-be').className = 'val'; }
+  $('#lat-be').textContent = fmtPct(mkt?.p_unresolved_horizon);
+  $('#lat-be').className = 'val';
 
   // практический вывод доски одной строкой
   const readEl = $('#lat-read');
   const parts = [];
-  const overBE = p.available && p.p != null
-    ? p.p - (p.p_breakeven ?? 1 / (1 + p.T)) : null;
-  if (overBE != null) {
-    parts.push(overBE >= 0
-      ? `P выше порога EV=0 на ${(overBE * 100).toFixed(0)}пп`
-      : `P НИЖЕ порога EV=0 на ${(Math.abs(overBE) * 100).toFixed(0)}пп`);
-  } else {
-    parts.push('P не рассчитана: нет устойчивого option anchor');
-  }
-  if (mkt?.available && mkt.edge != null) {
-    parts.push(mkt.edge >= 0.03 ? `опционная асимметрия положительная (+${(mkt.edge * 100).toFixed(0)}пп)`
-      : mkt.edge <= -0.03 ? `опционная асимметрия отрицательная (${(mkt.edge * 100).toFixed(0)}пп)`
-      : 'опционная асимметрия около нуля');
-  } else parts.push('нет option anchor — edge выключен');
+  const bev = mkt?.horizon_barrier_ev;
+  if (mkt?.available) {
+    parts.push(`first-touch≤H: тейк ${fmtPct(mkt.p_take_horizon)} / стоп ${fmtPct(mkt.p_stop_horizon)} / no-touch ${fmtPct(mkt.p_unresolved_horizon)}`);
+    parts.push(bev == null ? 'barrier EV н/д' : `barrier EV ${fmtR(bev)}`);
+  } else parts.push('нет устойчивого option anchor');
   if (mkt?.scenario_p10_r != null) {
     parts.push(`живая масса P10/P50/P90: ${fmtR(mkt.scenario_p10_r)} / ${fmtR(mkt.scenario_median_r)} / ${fmtR(mkt.scenario_p90_r)}`);
   }
   readEl.textContent = parts.join(' · ');
-  readEl.className = 'lat-read ' + (overBE == null ? '' : overBE >= 0 ? 'good' : 'bad');
+  readEl.className = 'lat-read ' + (bev == null ? '' : bev >= 0 ? 'good' : 'bad');
 
   const st = lattice.stats;
   $('#lat-balls').textContent = String(st.dropped);
@@ -794,7 +766,7 @@ function renderRidgeStats() {
       .forEach((id) => { $('#' + id).textContent = '—'; });
     $('#rg-proxy').textContent = t.sigma.source === 'vol_index'
       ? 'ИНДЕКС ВОЛЫ' : '—';
-    $('#rg-p-model').textContent = S.tick?.prob?.source === 'options_first_passage'
+    $('#rg-p-model').textContent = S.tick?.prob?.source === 'options_barrier_first_touch'
       ? fmtPct(S.tick.prob.p) : '—';
     return;
   }
@@ -844,7 +816,7 @@ function renderRidgeStats() {
   $('#rg-p-stop').dataset.tip = rn
     ? `P(цена за стопом на экспирации) — аналогично P(за тейк), хвост с другой стороны.${rn.demo ? '\n◆ DEMO-цепочка' : ''}`
     : 'нужны открытая сделка и цепочка';
-  $('#rg-p-model').textContent = S.tick?.prob?.source === 'options_first_passage'
+  $('#rg-p-model').textContent = S.tick?.prob?.source === 'options_barrier_first_touch'
     ? fmtPct(S.tick.prob.p) : '—';
 }
 

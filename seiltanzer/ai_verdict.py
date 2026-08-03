@@ -22,8 +22,9 @@ SYSTEM_PROMPT = """Ты — наблюдатель активной сделки
   но не самостоятельная причина действия;
 - option P — risk-neutral first-passage оценка, не исторический winrate и не
   простая пропорция стоп/тейк;
-- не путай RACE P (какой барьер будет первым) с TOUCH<=H и NO-TOUCH на текущем
-  опционном горизонте; большой NO-TOUCH не является вероятностью стопа;
+- трактуй вероятность только как три исхода опционной barrier-модели к горизонту:
+  TAKE FIRST-TOUCH, STOP FIRST-TOUCH и NO-TOUCH; не нормализуй первые два до
+  100%, большой NO-TOUCH не является вероятностью стопа;
 - delayed/proxy данные понижают уверенность; OI/GEX — только эвристический контекст;
 - близость к стопу сама по себе не ломает тезис. Не пиши очевидное «на стопе
   закрыть». Называй цену близкой только при <=0.25R или <=0.35 ATR до стопа;
@@ -313,7 +314,7 @@ def _observation(engine, tick: dict, ridge: dict, trade: dict) -> dict:
             "price_tape": _price_tape(engine, tick, trade),
         },
         "option_probability": {
-            "available": prob.get("source") == "options_first_passage",
+            "available": prob.get("source") == "options_barrier_first_touch",
             "p_take_first": _rnd(prob.get("p")), "scenario_band": [_rnd(prob.get("p_lo")), _rnd(prob.get("p_hi"))],
             "p_ev0": _rnd(prob.get("p_breakeven")), "edge": _rnd(market.get("edge")),
             "edge_at_open": _rnd(trade.get("edge_at_open")),
@@ -322,8 +323,6 @@ def _observation(engine, tick: dict, ridge: dict, trade: dict) -> dict:
             "no_touch_horizon": _rnd(market.get("p_unresolved_horizon")),
             "touch_take_horizon": _rnd(market.get("p_take_horizon")),
             "touch_stop_horizon": _rnd(market.get("p_stop_horizon")),
-            "race_take": _rnd(market.get("p_take_race")),
-            "race_stop": _rnd(market.get("p_stop_race")),
             "raw_reached_take": _rnd(market.get("p_take_reached_horizon")),
             "raw_reached_stop": _rnd(market.get("p_stop_reached_horizon")),
             "raw_unresolved": _rnd(market.get("p_unresolved_raw_horizon")),
@@ -340,8 +339,6 @@ def _observation(engine, tick: dict, ridge: dict, trade: dict) -> dict:
             "q90_r": _rnd(market.get("scenario_p90_r"), 3),
             "alive_mass": _rnd(market.get("scenario_slice_alive")),
             "slice_time_frac": _rnd(market.get("scenario_slice_time_frac")),
-            "race_take": _rnd(market.get("p_take_race")),
-            "race_stop": _rnd(market.get("p_stop_race")),
             "touch_take_horizon": _rnd(market.get("p_take_horizon")),
             "touch_stop_horizon": _rnd(market.get("p_stop_horizon")),
             "no_touch_horizon": _rnd(market.get("p_unresolved_horizon")),
