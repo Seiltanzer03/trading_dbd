@@ -570,3 +570,10 @@ button[data-tip], a[data-tip] { cursor: pointer; }
   white-space:pre-wrap; font:11px/1.65 "IBM Plex Mono",monospace;
   color:var(--ink); background:rgba(46,125,79,.035); border:1px solid var(--rule);
 }
+.ai-history-link {
+  margin-top:7px; padding:0; border:0; border-bottom:1px dotted currentColor;
+  background:none; color:var(--blue); font:9px "IBM Plex Mono",monospace;
+  letter-spacing:.04em; cursor:pointer;
+}
+.ai-history-item { margin:12px 0; border-top:1px solid var(--rule); padding-top:10px; }
+.ai-history-time { color:var(--dim); font:9px "IBM Plex Mono",monospace; }

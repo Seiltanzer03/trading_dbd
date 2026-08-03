@@ -32,6 +32,7 @@ const S = {
   setups: [],
   journal: [],
   validation: null,
+  aiHistory: [],
   chainTs: null,
   wsOk: false,
 };
@@ -54,6 +55,7 @@ async function boot() {
     S.journal = st.journal;
     S.edge_track = st.edge_track;
     S.validation = st.validation;
+    S.aiHistory = st.ai_history || [];
     renderAll();
   } catch (e) {
     console.error('state fetch failed', e);
@@ -376,6 +378,27 @@ function renderState() {
   const h = $('#st-headline');
   h.textContent = s.headline || '';
   h.className = 'state-headline ' + (s.tone || '');
+  renderAiHistoryLink();
+}
+
+function renderAiHistoryLink() {
+  const btn = $('#btn-ai-history');
+  if (!btn) return;
+  const items = S.aiHistory || [];
+  btn.hidden = !items.length;
+  if (!items.length) return;
+  const latest = items.at(-1);
+  const stamp = new Date(latest.ts * 1000).toLocaleString('ru-RU', {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+  });
+  btn.textContent = `ИИ · ${items.length} РАЗБ. · ${stamp}`;
+}
+
+async function refreshAiHistory() {
+  const resp = await fetch('/api/ai/history');
+  if (!resp.ok) return;
+  S.aiHistory = (await resp.json()).items || [];
+  renderAiHistoryLink();
 }
 
 // ---------------------------------------------------------------- cone
@@ -462,7 +485,9 @@ function renderLattice() {
     $('#lat-mhit').dataset.tip =
       `P(тейк раньше стопа) по finite-horizon barrier MC.\n` +
       `Ширина: implied move; хвост и forward: BL-плотность; асимметрия: skew; время: term structure.${mkt.median_years != null ? '\nМедиана развязки ≈ ' + fmtDur(mkt.median_years) : ''}\n` +
-      `К горизонту уже поглощено: тейк ${fmtPct(mkt.p_take_horizon)}, стоп ${fmtPct(mkt.p_stop_horizon)}, не разрешено ${fmtPct(mkt.p_unresolved_horizon)}. Неразрешённая масса якорится BL tail-ratio ${fmtPct(mkt.terminal_hit)}.`;
+      `Option split горизонта: тейк ${fmtPct(mkt.p_take_horizon)}, стоп ${fmtPct(mkt.p_stop_horizon)}. ` +
+      `Фактически коснулось барьеров в MC: тейк ${fmtPct(mkt.p_take_reached_horizon)}, стоп ${fmtPct(mkt.p_stop_reached_horizon)}; ` +
+      `остаток ${fmtPct(mkt.p_unresolved_raw_horizon)} распределён BL tail-ratio ${fmtPct(mkt.terminal_hit)}.`;
     const ed = mkt.edge;
     $('#lat-edge').textContent = ed == null ? '—' : (ed >= 0 ? '+' : '') + fmtPct(ed);
     $('#lat-edge').className = 'val ' + (ed == null ? '' : ed >= 0 ? 'green' : 'red');
@@ -1017,6 +1042,24 @@ $('#modal-back').addEventListener('click', (e) => {
   if (e.target === $('#modal-back')) closeModal();
 });
 
+$('#btn-ai-history').addEventListener('click', () => {
+  openModal(`
+    <h3>ИИ · РАЗБОРЫ ТЕКУЩЕЙ СДЕЛКИ</h3>
+    <div id="ai-history-list"></div>
+    <div class="modal-actions"><button class="btn" id="ai-history-close">ЗАКРЫТЬ</button></div>`);
+  const list = $('#ai-history-list');
+  [...(S.aiHistory || [])].reverse().forEach((item) => {
+    const wrap = document.createElement('div'); wrap.className = 'ai-history-item';
+    const timeEl = document.createElement('div'); timeEl.className = 'ai-history-time';
+    timeEl.textContent = new Date(item.ts * 1000).toLocaleString('ru-RU')
+      + (item.model ? ` · ${item.model}` : '');
+    const report = document.createElement('pre'); report.className = 'ai-verdict-text';
+    report.textContent = item.verdict;
+    wrap.append(timeEl, report); list.appendChild(wrap);
+  });
+  $('#ai-history-close').addEventListener('click', closeModal);
+});
+
 $('#btn-ai-verdict').addEventListener('click', async () => {
   openModal(`
     <h3>ИИ · ДИНАМИЧЕСКИЙ РАЗБОР СДЕЛКИ</h3>
@@ -1030,6 +1073,7 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     const body = await resp.json();
     if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
     out.textContent = body.verdict;
+    await refreshAiHistory();
   } catch (err) {
     out.textContent = 'ИИ-РАЗБОР НЕДОСТУПЕН: ' + err.message;
   }

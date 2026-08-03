@@ -13,6 +13,13 @@ import { approach, pulse } from './anim.js';
 const H = 360;
 const Z95 = 1.6449, Z75 = 0.6745;
 
+function fmtProb(p) {
+  if (p == null || !Number.isFinite(p)) return '—';
+  const pct = p * 100;
+  if (pct > 0 && pct < 0.1) return '<0.1%';
+  return `${pct < 10 ? pct.toFixed(1) : pct.toFixed(0)}%`;
+}
+
 function fmtTime(years) {
   if (years == null || !isFinite(years)) return '—';
   const min = years * 365 * 24 * 60;
@@ -28,6 +35,7 @@ export function initFan(canvas) {
   const live = { r: null };
   let curR = null;
   let rTrail = [];
+  let trendR = 0;
 
   function setData(cone) {
     data = cone && cone.available ? cone : null;
@@ -39,7 +47,31 @@ export function initFan(canvas) {
     const r = Number(p.r), ts = performance.now();
     if (Number.isFinite(r) && (!rTrail.length || Math.abs(r - rTrail.at(-1).r) > 1e-7))
       rTrail.push({ r, ts });
-    rTrail = rTrail.filter((pt) => ts - pt.ts <= 90000);
+    rTrail = rTrail.filter((pt) => ts - pt.ts <= 120000);
+  }
+
+  function projectedMove(windowMs, projectionSec) {
+    if (rTrail.length < 2) return 0;
+    const end = rTrail.at(-1);
+    const pts = rTrail.filter((pt) => end.ts - pt.ts <= windowMs);
+    if (pts.length < 2) return 0;
+    const first = pts[0], elapsed = Math.max((end.ts - first.ts) / 1000, 1);
+    return (end.r - first.r) / elapsed * projectionSec;
+  }
+
+  function targetTrend(rNow) {
+    const clip = (v, n) => Math.max(-n, Math.min(n, v || 0));
+    const fast = clip(projectedMove(18000, 28), 0.55);
+    const slow = clip(projectedMove(90000, 75), 0.45);
+    const optionCenter = [data?.slice_mode_r, data?.slice_median_r]
+      .filter(Number.isFinite);
+    const center = optionCenter.length
+      ? optionCenter.reduce((a, v) => a + v, 0) / optionCenter.length : rNow;
+    const optionPull = clip(center - rNow, 0.45);
+    const driftPull = clip((data?.drift_R || 0) * 0.25, 0.25);
+    // Fast tape leads; option mode/median stabilise without forcing every deal
+    // toward a barrier. No stop/take distance enters the direction.
+    return clip(fast * 0.48 + slow * 0.22 + optionPull * 0.24 + driftPull * 0.06, 0.60);
   }
 
   function draw(now) {
@@ -54,12 +86,6 @@ export function initFan(canvas) {
     const termSlope = data.term_slope || 0; // >0 контанго (вола дышит позже)
     const anchored = !!data.option_anchored;
     const rNow = curR != null ? curR : r0;
-    const trailMove = rTrail.length > 1 ? rTrail.at(-1).r - rTrail[0].r : 0;
-    const liveImpulse = Math.max(-0.65, Math.min(0.65, trailMove * 1.8));
-    const optionDrift = Math.max(-0.45, Math.min(0.45, drift * 0.30));
-    // The ray is a conditional tendency from the current point: live movement
-    // dominates, option drift stabilizes it. Barrier geometry is not direction.
-    const trendR = liveImpulse * 0.68 + optionDrift * 0.32;
 
     const padL = 58, padR = 16, padT = 40, padB = 34;
     const plotW = w - padL - padR, plotH = H - padT - padB;
@@ -128,9 +154,9 @@ export function initFan(canvas) {
       ctx.fillStyle = lblColor || color; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'left';
       ctx.fillText(lbl, padL + 2, Y(R) - 3);
     };
-    hline(T, COLORS.green, [], `ТЕЙК +${T.toFixed(2)}R · ${anchored ? 'P к горизонту' : 'сценариев'} ${(data.p_take * 100).toFixed(0)}%`, COLORS.green);
+    hline(T, COLORS.green, [], `ТЕЙК +${T.toFixed(2)}R · ${anchored ? 'OPTION SPLIT' : 'сценариев'} ${fmtProb(data.p_take_anchored ?? data.p_take)}`, COLORS.green);
     hline(0, COLORS.dim, [3, 3], 'ВХОД (0)', COLORS.dim);
-    hline(-1, COLORS.red, [], `СТОП −1R · ${anchored ? 'P к горизонту' : 'сценариев'} ${(data.p_stop * 100).toFixed(0)}%`, COLORS.red);
+    hline(-1, COLORS.red, [], `СТОП −1R · ${anchored ? 'OPTION SPLIT' : 'сценариев'} ${fmtProb(data.p_stop_anchored ?? data.p_stop)}`, COLORS.red);
 
     // медиана развязки — вертикаль
     if (hy && data.median_years != null) {
@@ -168,7 +194,7 @@ export function initFan(canvas) {
     ctx.textAlign = 'left'; ctx.font = '700 12px "IBM Plex Mono", monospace'; ctx.fillStyle = lean.c;
     ctx.fillText(anchored ? lean.t : 'СЦЕНАРНЫЙ ВЕЕР · БЕЗ P / EDGE', padL, 14);
     ctx.textAlign = 'right'; ctx.font = '10px "IBM Plex Mono", monospace'; ctx.fillStyle = COLORS.dim;
-    ctx.fillText(`${anchored ? 'P к горизонту' : 'доля сценариев'}: ТЕЙК ${(data.p_take * 100).toFixed(0)}% · СТОП ${(data.p_stop * 100).toFixed(0)}%`, w - padR, 14);
+    ctx.fillText(`${anchored ? 'OPTION SPLIT' : 'доля сценариев'}: ТЕЙК ${fmtProb(data.p_take_anchored ?? data.p_take)} · СТОП ${fmtProb(data.p_stop_anchored ?? data.p_stop)}`, w - padR, 14);
     // строка 2: наценка ММ (IV vs RV, пунктирный веер) + перекос волы (скью)
     ctx.font = '9px "IBM Plex Mono", monospace';
     if (ratio != null) {
@@ -188,6 +214,7 @@ export function initFan(canvas) {
     const dt = Math.min((now - last) / 1000, 0.05); last = now;
     const target = live.r != null ? live.r : (data ? data.r0 : null);
     if (target != null) curR = approach(curR, target, dt, 6);
+    if (curR != null) trendR = approach(trendR, targetTrend(curR), dt, 3.5);
     draw(now);
     requestAnimationFrame(frame);
   }

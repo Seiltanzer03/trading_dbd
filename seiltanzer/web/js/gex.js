@@ -200,9 +200,15 @@ function renderGex() {
         }
         if (biggestCall) parts.push(`🟢 Макс. CALL GEX: ${biggestCall.strike.toFixed(1)} (${fmtVal(biggestCall.net)}) — условное сопротивление`);
         if (biggestPut) parts.push(`🔴 Макс. PUT GEX: ${biggestPut.strike.toFixed(1)} (${fmtVal(biggestPut.net)}) — условная поддержка`);
-        if (data.top) {
-            parts.push(`📌 Top OI: ${(data.top * data.scale * liveMap).toFixed(1)}`);
-        }
+        const callWall = Number(data.oiWalls?.call_wall);
+        const putWall = Number(data.oiWalls?.put_wall);
+        const wallParts = [];
+        if (Number.isFinite(callWall)) wallParts.push(`CALL ${(callWall * data.scale * liveMap).toFixed(1)}`);
+        if (Number.isFinite(putWall)) wallParts.push(`PUT ${(putWall * data.scale * liveMap).toFixed(1)}`);
+        if (wallParts.length) parts.push(`📌 MAX OI: ${wallParts.join(' · ')}`);
+        const topGex = Array.isArray(data.top)
+            ? data.top.find((x) => Number.isFinite(Number(x?.strike))) : null;
+        if (topGex) parts.push(`Γ Top |GEX|: ${(Number(topGex.strike) * data.scale * liveMap).toFixed(1)}`);
         interpretEl.innerHTML = parts.join('<br>');
         interpretEl.style.display = parts.length ? 'block' : 'none';
     }

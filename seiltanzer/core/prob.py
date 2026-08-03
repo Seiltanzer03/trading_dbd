@@ -563,9 +563,35 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
         th = min(max(float(terminal_hit), 0.0), 1.0)
         hit_ratio = min(max(p_take + unresolved * th, 0.0), 1.0)
         hit_source = "barrier_mc+bl_terminal"
+        # Raw series above answers "already touched by t".  For the visual
+        # horizon split, progressively allocate the final unresolved mass by
+        # the BL tail anchor.  Common residuals make both curves monotone and
+        # finish at the same option-anchored P used by the headline metric.
+        take_residual = max(0.0, hit_ratio - p_take)
+        stop_anchored = 1.0 - hit_ratio
+        stop_residual = max(0.0, stop_anchored - p_stop)
+        p_take_anchored_by_t = [
+            min(1.0, raw + tau * take_residual)
+            for raw, tau in zip(p_take_by_t, times)
+        ]
+        p_stop_anchored_by_t = [
+            min(1.0, raw + tau * stop_residual)
+            for raw, tau in zip(p_stop_by_t, times)
+        ]
+        unresolved_anchored_by_t = [
+            max(0.0, 1.0 - pt - ps)
+            for pt, ps in zip(p_take_anchored_by_t, p_stop_anchored_by_t)
+        ]
     else:
         hit_ratio = None
         hit_source = "no_option_anchor"
+        stop_anchored = None
+        p_take_anchored_by_t = list(p_take_by_t)
+        p_stop_anchored_by_t = list(p_stop_by_t)
+        unresolved_anchored_by_t = [
+            max(0.0, 1.0 - pt - ps)
+            for pt, ps in zip(p_take_by_t, p_stop_by_t)
+        ]
 
     # «колокол» для доски: распределение ЖИВЫХ (ещё не поглощённых) путей на срезе,
     # где живо ~половина (нормальный вид ВНУТРИ барьеров, а не пусто в конце и не
@@ -591,7 +617,13 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
         "density": density,
         "times_frac": times,
         "p_take_by_t": p_take_by_t, "p_stop_by_t": p_stop_by_t,
+        "p_take_anchored_by_t": p_take_anchored_by_t,
+        "p_stop_anchored_by_t": p_stop_anchored_by_t,
+        "unresolved_anchored_by_t": unresolved_anchored_by_t,
         "p_take": p_take, "p_stop": p_stop, "hit_ratio": hit_ratio,
+        "p_take_anchored": hit_ratio,
+        "p_stop_anchored": stop_anchored,
+        "unresolved_anchored": (0.0 if hit_ratio is not None else unresolved),
         "unresolved": unresolved, "hit_source": hit_source,
         "probability_available": hit_ratio is not None,
         "scenario_only": hit_ratio is None,

@@ -9,9 +9,10 @@ from seiltanzer.engine import Engine
 
 def test_prompt_is_compact_scenario_manager_not_stop_repeater():
     assert len(SETUP_PLAYBOOKS) == 16
-    assert "<=220 слов" in SYSTEM_PROMPT
+    assert "<=280 слов" in SYSTEM_PROMPT
     assert "Не пиши очевидное" in SYSTEM_PROMPT
     assert "БУ только" in SYSTEM_PROMPT
+    assert "опционный триггер" in SYSTEM_PROMPT
 
 
 def test_snapshot_covers_visual_models_and_trade_memory(tmp_path):

@@ -16,6 +16,13 @@ const ROWS = 8;
 const BINS = 11;
 const H = 380;
 
+function fmtProb(p) {
+  if (p == null || !Number.isFinite(p)) return '—';
+  const pct = p * 100;
+  if (pct > 0 && pct < 0.1) return '<0.1%';
+  return `${pct < 10 ? pct.toFixed(1) : pct.toFixed(0)}%`;
+}
+
 export function initLattice(canvas) {
   const s = {
     active: false, marketAvail: false,
@@ -207,11 +214,11 @@ export function initLattice(canvas) {
     ctx.font = '8px "IBM Plex Mono", monospace';
     if (s.tgt.pStop != null) {
       ctx.fillStyle = COLORS.red; ctx.textAlign = 'left';
-      ctx.fillText(`СТОП-К ХОРИЗОНТУ ${(s.tgt.pStop * 100).toFixed(0)}%`, g.padX, 24);
+      ctx.fillText(`СТОП · OPTION SPLIT ${fmtProb(s.tgt.pStop)}`, g.padX, 24);
     }
     if (s.tgt.pTake != null) {
       ctx.fillStyle = COLORS.green; ctx.textAlign = 'right';
-      ctx.fillText(`ТЕЙК-К ХОРИЗОНТУ ${(s.tgt.pTake * 100).toFixed(0)}%`, w - g.padX, 24);
+      ctx.fillText(`ТЕЙК · OPTION SPLIT ${fmtProb(s.tgt.pTake)}`, w - g.padX, 24);
     }
 
     // шарики

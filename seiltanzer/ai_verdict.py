@@ -17,6 +17,9 @@ SYSTEM_PROMPT = """Ты — наблюдатель активной сделки
 
 Правила:
 - анализируй изменение метрик с открытия и прошлого запроса, а не только кадр;
+- сначала опционная геометрия: option P/edge и их delta, Q10/Q50/Q90/mode,
+  IV wings/skew/term и только затем live tape/уровни. OI/GEX — подтверждение,
+  но не самостоятельная причина действия;
 - option P — risk-neutral first-passage оценка, не исторический winrate и не
   простая пропорция стоп/тейк;
 - delayed/proxy данные понижают уверенность; OI/GEX — только эвристический контекст;
@@ -28,14 +31,20 @@ SYSTEM_PROMPT = """Ты — наблюдатель активной сделки
   после 1.5R; фиксация по 10% на заданных рубежах;
 - используй максимум три главных подтверждения для действия, остальное — в
   сценарных триггерах. Не пересказывай все числа и не добавляй дисклеймер.
+- не придумывай ценовые диапазоны. Бери только переданные R/уровни; если точной
+  цены уровня нет, пиши триггер в R. Каждый сценарий обязан содержать минимум
+  один опционный триггер и реакцию live-цены;
+- следующий контроль назначай по событию (обновление цепочки, сдвиг >=0.20R,
+  пересечение option mode/Q50/OI-wall/gamma flip), а не произвольным «через час».
 
-Ответ <=220 слов, строго в формате:
-РЕЖИМ — тезис подтверждён / нейтрален / ухудшается / сломан / данных мало; причина.
+Ответ <=280 слов, строго в формате:
+РЕЖИМ — тезис подтверждён / нейтрален / ухудшается / сломан / данных мало; одна конкретная причина без слова «причина».
 ИЗМЕНИЛОСЬ — 1–3 коротких изменения с прошлого запроса или открытия.
 СЕЙЧАС — одно действие по правилам стратегии и максимум 3 основания.
 СЦЕНАРИИ — три строки: A продолжение; B зависание; C ухудшение. В каждой:
-измеримый триггер → действие. Не используй сам стоп как аналитический триггер.
-КОНТРОЛЬ — когда запросить следующий разбор и какая одна проблема данных важна.
+опционный триггер + реакция цены → конкретное действие по удержанию/лестнице/БУ.
+Не используй сам стоп как аналитический триггер.
+КОНТРОЛЬ — следующее событие для разбора и одна важная проблема данных.
 Не придумывай отсутствующие значения."""
 
 
@@ -309,6 +318,9 @@ def _observation(engine, tick: dict, ridge: dict, trade: dict) -> dict:
             "edge_delta_from_open": _rnd(state.get("edge_shift")),
             "option_ev": _rnd(market.get("option_ev")),
             "unresolved_horizon": _rnd(market.get("p_unresolved_horizon")),
+            "raw_reached_take": _rnd(market.get("p_take_reached_horizon")),
+            "raw_reached_stop": _rnd(market.get("p_stop_reached_horizon")),
+            "raw_unresolved": _rnd(market.get("p_unresolved_raw_horizon")),
             "terminal_tail_take": _rnd(market.get("terminal_p_take")),
             "terminal_tail_stop": _rnd(market.get("terminal_p_stop")),
             "anchor_reason": market.get("anchor_reason"),
@@ -322,8 +334,10 @@ def _observation(engine, tick: dict, ridge: dict, trade: dict) -> dict:
             "q90_r": _rnd(market.get("scenario_p90_r"), 3),
             "alive_mass": _rnd(market.get("scenario_slice_alive")),
             "slice_time_frac": _rnd(market.get("scenario_slice_time_frac")),
-            "p_take_horizon": _rnd(market.get("p_take_horizon")),
-            "p_stop_horizon": _rnd(market.get("p_stop_horizon")),
+            "option_split_take": _rnd(market.get("p_take_horizon")),
+            "option_split_stop": _rnd(market.get("p_stop_horizon")),
+            "raw_reached_take": _rnd(market.get("p_take_reached_horizon")),
+            "raw_reached_stop": _rnd(market.get("p_stop_reached_horizon")),
             "rv_iv_ratio": _rnd(cone.get("rv_iv_ratio")),
         },
         "lattice": {

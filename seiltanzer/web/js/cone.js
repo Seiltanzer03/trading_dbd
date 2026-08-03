@@ -41,6 +41,13 @@ function fmtTime(years) {
   return `${(h / 24).toFixed(1)} дн`;
 }
 
+function fmtProb(p) {
+  if (p == null || !Number.isFinite(p)) return '—';
+  const pct = p * 100;
+  if (pct > 0 && pct < 0.1) return '<0.1%';
+  return `${pct < 10 ? pct.toFixed(1) : pct.toFixed(0)}%`;
+}
+
 export function initCone(elId) {
   const el = typeof elId === 'string' ? document.querySelector(elId) : elId;
   let hasPlot = false, listenersOn = false;
@@ -349,7 +356,11 @@ export function initCone(elId) {
         floor + (1 - floor) * Math.pow(Math.min(1, v / globalPeak), 0.62));
     });
     const nS = conditional.length;
-    tgt.z = z; tgt.pStop = [0, ...cone.p_stop_by_t]; tgt.pTake = [0, ...cone.p_take_by_t];
+    const stopPath = cone.option_anchored
+      ? (cone.p_stop_anchored_by_t || cone.p_stop_by_t) : cone.p_stop_by_t;
+    const takePath = cone.option_anchored
+      ? (cone.p_take_anchored_by_t || cone.p_take_by_t) : cone.p_take_by_t;
+    tgt.z = z; tgt.pStop = [0, ...stopPath]; tgt.pTake = [0, ...takePath];
     tgt.xs = xs; tgt.ys = ys; tgt.edges = edges; tgt.T = T; tgt.r0 = cone.r0;
     tgt.nS = nS; tgt.nB = nB; tgt.hy = cone.horizon_years;
     tgt.median = cone.median_years; tgt.term_slope = cone.term_slope || 0;
@@ -453,7 +464,7 @@ export function initCone(elId) {
     const finalTakeP = disp.pTake[disp.pTake.length - 1];
     const liveEV = (finalTakeP * tgt.T) - finalStopP;
     const evColor = liveEV >= 0 ? '#2EB44F' : '#E64650';
-    const evText = `<b>LIVE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R</b><br>P(Take): ${(finalTakeP*100).toFixed(0)}% | P(Stop): ${(finalStopP*100).toFixed(0)}%`;
+    const evText = `<b>LIVE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R</b><br>P(Take): ${fmtProb(finalTakeP)} | P(Stop): ${fmtProb(finalStopP)}`;
     layout.annotations[0].text = evText;
     layout.annotations[0].font.color = evColor;
     layout.annotations[0].bordercolor = evColor;
@@ -512,7 +523,7 @@ export function initCone(elId) {
     const liveEV = (finalTakeP * tgt.T) - finalStopP;
     const evColor = liveEV >= 0 ? '#2EB44F' : '#E64650';
     const evText = tgt.probabilityAvailable 
-        ? `<b>LIVE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R</b><br>P(Take): ${(finalTakeP*100).toFixed(0)}% | P(Stop): ${(finalStopP*100).toFixed(0)}%`
+        ? `<b>LIVE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R</b><br>P(Take): ${fmtProb(finalTakeP)} | P(Stop): ${fmtProb(finalStopP)}`
         : `<b>LIVE EV: НЕТ ОПЦИОНОВ</b><br>P(Take): — | P(Stop): —`;
         
     let relayoutData = {};
@@ -529,10 +540,10 @@ export function initCone(elId) {
     pinAfter(P.relayout(el, relayoutData));
     
     const nStop = tgt.probabilityAvailable
-      ? `СТОП ${(tgt.pStop[tgt.pStop.length - 1] * 100).toFixed(0)}%`
+      ? `СТОП ${fmtProb(tgt.pStop[tgt.pStop.length - 1])}`
       : 'СТОП · БАРЬЕР';
     const nTake = tgt.probabilityAvailable
-      ? `ТЕЙК ${(tgt.pTake[tgt.pTake.length - 1] * 100).toFixed(0)}%`
+      ? `ТЕЙК ${fmtProb(tgt.pTake[tgt.pTake.length - 1])}`
       : 'ТЕЙК · БАРЬЕР';
     if (!lastNames || nStop !== lastNames[0] || nTake !== lastNames[1]) {
       lastNames = [nStop, nTake];

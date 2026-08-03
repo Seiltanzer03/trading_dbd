@@ -259,6 +259,14 @@ class TestRnCone:
         assert low["unresolved"] > 0.8
         assert high["hit_ratio"] > low["hit_ratio"] + 0.6
         assert high["hit_source"] == "barrier_mc+bl_terminal"
+        assert low["p_take_anchored"] == pytest.approx(low["hit_ratio"])
+        assert low["p_stop_anchored"] == pytest.approx(1 - low["hit_ratio"])
+        assert low["p_take_anchored_by_t"][-1] == pytest.approx(low["hit_ratio"])
+        assert low["p_stop_anchored_by_t"][-1] == pytest.approx(1 - low["hit_ratio"])
+        assert all(b >= a - 1e-9 for a, b in zip(
+            low["p_take_anchored_by_t"], low["p_take_anchored_by_t"][1:]))
+        assert all(b >= a - 1e-9 for a, b in zip(
+            low["p_stop_anchored_by_t"], low["p_stop_anchored_by_t"][1:]))
 
     def test_walls_monotone_and_realtime(self):
         c = P.rn_cone(0.2, 3.0, 2.5, drift_R=0.0, horizon_years=2 / 365, seed=3)

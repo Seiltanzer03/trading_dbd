@@ -180,18 +180,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/state")
     def api_state():
+        active = engine.journal.active_trade()
         return {
             "tick": engine.tick_payload(),
             "ridge": engine.ridge_payload(),
             "journal": engine.journal.list_trades(),
             "edge_track": engine.journal.edge_track(),
             "validation": engine.journal.validation_report(),
+            "ai_history": (engine.journal.recent_ai_verdicts(active["id"], limit=10)
+                           if active else []),
             "setups": _setups_payload(),
             "instruments": {c: {"yahoo": i.yahoo,
                                 "quote_pair": i.swissquote_pair,
                                 "broker_symbol": i.tradingview_symbol,
                                 "options_proxy": i.options_proxy}
                             for c, i in INSTRUMENTS.items()},
+        }
+
+    @app.get("/api/ai/history")
+    def api_ai_history():
+        active = engine.journal.active_trade()
+        return {
+            "trade_id": active["id"] if active else None,
+            "items": (engine.journal.recent_ai_verdicts(active["id"], limit=10)
+                      if active else []),
         }
 
     def _setups_payload():

@@ -681,8 +681,14 @@ class Engine:
             "scenario_p90_r": cone.get("slice_p90_r"),
             "p_take": option_p,
             "p_stop": (1.0 - option_p) if option_p is not None else None,
-            "p_take_horizon": cone["p_take"], "p_stop_horizon": cone["p_stop"],
-            "p_unresolved_horizon": cone.get("unresolved"),
+            # UI uses the option-anchored horizon split. Raw barrier touches are
+            # retained separately for diagnostics and AI semantics.
+            "p_take_horizon": cone.get("p_take_anchored"),
+            "p_stop_horizon": cone.get("p_stop_anchored"),
+            "p_unresolved_horizon": cone.get("unresolved_anchored"),
+            "p_take_reached_horizon": cone.get("p_take"),
+            "p_stop_reached_horizon": cone.get("p_stop"),
+            "p_unresolved_raw_horizon": cone.get("unresolved"),
             "hit_ratio": option_p,
             "edge": option_edge,
             "option_ev": option_ev,
@@ -752,7 +758,9 @@ class Engine:
         if key == self._cone_cache_key and self._cone_cache is not None:
             base = self._cone_cache
         else:
-            seed = (int(abs(r) * 1000) ^ 0x5A5A) & 0x7FFF
+            # Common random numbers: a live r-tick must move the same simulated
+            # paths, not reshuffle all paths and make the density jump.
+            seed = 0x5A5A
             base = pb.rn_cone(r, sigma_R, T, drift_R=drift_R, skew=skew_R,
                               term_slope=term_slope, horizon_years=horizon_years,
                               terminal_hit=terminal_hit,
