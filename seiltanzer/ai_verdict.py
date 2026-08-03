@@ -39,7 +39,8 @@ proxy или manual structure неизвестна — снизь уверенн
 ОПЦИОНЫ — 2–3 главных факта и их изменение.
 СЕЙЧАС — одно действие; обязательно: barrier EV/NO-TOUCH, live-фаза и конкретное
 условие активного setup.playbook. Нельзя называть pTake «низкой» без NO-TOUCH и горизонта.
-СЦЕНАРИИ — A/B/C: перенеси числовой триггер и action из scenario_frame, не обобщай.
+СЦЕНАРИИ — A/B/C: дословно сохрани пороги и action из scenario_frame, не подменяй
+порог текущим baseline. Назови конкретный setup_guard, не слово setup.playbook.
 КОНТРОЛЬ — ближайшее событийное условие и одна главная проблема качества.
 Только переданные значения; цены используй лишь из exact_levels."""
 
@@ -469,24 +470,34 @@ def _scenario_frame(strategy: dict, obs: dict, history: dict, timing: dict) -> d
     p_take, p_stop, no_touch = (op.get("touch_take_horizon"), op.get("touch_stop_horizon"),
                                 op.get("no_touch_horizon"))
     current_r = _num(pos.get("r"))
+    ev = _num(op.get("barrier_ev_r"))
     next_rung = next((x for x in strategy.get("management", {}).get("rungs_r", [])
                       if current_r is None or x > current_r + 1e-6), None)
     no_touch_label = ("NO-TOUCH dominates" if _num(no_touch) is not None
                       and _num(no_touch) >= max(_num(p_take) or 0, _num(p_stop) or 0)
                       else "NO-TOUCH rises")
+    playbook = strategy.get("playbook") or {}
+    setup_guard = f"manual: {playbook.get('entry')}; invalidation: {playbook.get('invalidation')}"
+    p_take_up = round(min((p_take or 0) + 0.01, 1.0), 4) if p_take is not None else None
+    p_stop_up = round(min((p_stop or 0) + 0.01, 1.0), 4) if p_stop is not None else None
+    ev_up = round(ev + 0.03, 4) if ev is not None else None
+    ev_down = round(ev - 0.03, 4) if ev is not None else None
     return {
+        "setup_guard": setup_guard,
+        "baseline": {"barrier_ev_r": ev, "p_take": p_take, "p_stop": p_stop,
+                     "no_touch": no_touch, "r": current_r},
         "A_continuation": {
-            "option_trigger": f"barrierEV improves from {op.get('barrier_ev_r')}R and pTake rises from {p_take}",
+            "option_trigger": f"barrierEV >= {ev_up}R AND pTake >= {p_take_up}",
             "live_trigger": f"R holds above option mode {cone.get('mode_r')} while median {cone.get('median_r')} reprices upward",
-            "action": f"hold; take 10% at next rung {next_rung}R" if next_rung else "manage remainder by trailing rules",
+            "action": f"hold only with setup_guard; take 10% at {next_rung}R" if next_rung else "manage remainder by trailing rules",
         },
         "B_stall": {
             "option_trigger": f"{no_touch_label} from {no_touch}",
             "live_trigger": f"R rotates around option mode {cone.get('mode_r')}/median {cone.get('median_r')} without >=0.20R progress",
-            "action": "hold only while setup structure remains valid; reassess on chain refresh/horizon roll",
+            "action": "hold only with setup_guard; reassess on chain refresh/horizon roll",
         },
         "C_deterioration": {
-            "option_trigger": f"pStop rises from {p_stop} and barrierEV deteriorates",
+            "option_trigger": f"pStop >= {p_stop_up} OR barrierEV <= {ev_down}R",
             "live_trigger": f"R loses option mode {cone.get('mode_r')} with adverse live tape and falling median {cone.get('median_r')}",
             "action": "do not widen/average; preserve original stop and use only armed strategy management",
         },
@@ -624,7 +635,7 @@ def request_verdict(snapshot: dict) -> dict:
     content = result.get("choices", [{}])[0].get("message", {}).get("content")
     if not content:
         raise RuntimeError("OpenRouter вернул пустой ответ")
-    forbidden = [term for term in ("edge", "null", "delta от открытия")
+    forbidden = [term for term in ("edge", "null", "delta от открытия", "setup.playbook")
                  if term in content.lower()]
     if forbidden:
         correction = dict(body)

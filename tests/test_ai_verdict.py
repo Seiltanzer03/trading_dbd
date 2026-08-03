@@ -42,6 +42,8 @@ def test_snapshot_covers_visual_models_and_trade_memory(tmp_path):
         assert set(snapshot["scenario_frame"]) >= {
             "A_continuation", "B_stall", "C_deterioration", "next_review_events",
         }
+        assert "15m bullish body close" in snapshot["scenario_frame"]["setup_guard"]
+        assert ">=" in snapshot["scenario_frame"]["A_continuation"]["option_trigger"]
         assert snapshot["decision_frame"]["option_regime"]
         assert snapshot["strategy"]["playbook"]["timeframes"] == "12H/4H/15m"
         assert snapshot["time_context"]["timezone"] == "Europe/Athens"
