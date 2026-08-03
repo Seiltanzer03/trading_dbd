@@ -340,11 +340,21 @@ class TestEngineDemo:
         assert tick["feeds"]["price"]["value"] == pytest.approx(reference + 3.0)
         assert tick["feeds"]["price"]["basis_offset"] == pytest.approx(60.0)
         assert tick["prob"]["r"] == pytest.approx(0.3)
-        assert "COMEX Gold" in tick["feeds"]["price"]["label"]
+        assert "XAU/USD spot" in tick["feeds"]["price"]["label"]
         assert tick["levels"]["day_low"] == pytest.approx(raw + 59.0)
         assert tick["levels"]["day_high"] == pytest.approx(raw + 61.0)
         assert tick["levels"]["vwap"] == pytest.approx(raw + 60.0 + 1.0 / 3.0)
         assert tick["levels"]["volume_profile"]["poc"] > raw + 60.0
+
+    def test_old_futures_basis_is_ignored_after_spot_feed_switch(self, tmp_path):
+        live = Engine(Settings(demo=False, data_dir=str(tmp_path)))
+        try:
+            live.market.set_instrument("XAU")
+            old_trade = {"quote_offset": -63.0,
+                         "quote_source": "yfinance REST GC=F (indicative)"}
+            assert live._effective_price(old_trade, 4044.0) == pytest.approx(4044.0)
+        finally:
+            live.close()
 
     def test_inverse_proxy_disables_only_gex(self, engine):
         engine.market.set_instrument("USDCAD")

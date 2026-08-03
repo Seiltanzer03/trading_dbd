@@ -10,10 +10,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import math
 import random
+import statistics
 import time
+import urllib.parse
+import urllib.request
 
 import numpy as np
 
@@ -31,6 +35,32 @@ DELAYED_GRACE = 5.0  # во сколько раз можно превысить 
 
 def _status_dict(value=None, status="no_data", ts=None, error=None, source=None):
     return {"value": value, "status": status, "ts": ts, "error": error, "source": source}
+
+
+def _fetch_swissquote_quote(pair: str, timeout: float = 5.0) -> dict:
+    """Прямой OTC bid/ask без ключа; OPENROUTER_PROXY здесь не используется."""
+    encoded = "/".join(urllib.parse.quote(x, safe="") for x in pair.split("/"))
+    url = ("https://forex-data-feed.swissquote.com/public-quotes/"
+           f"bboquotes/instrument/{encoded}")
+    request = urllib.request.Request(
+        url, headers={"Accept": "application/json", "User-Agent": "Seiltanzer/0.1"})
+    # OPENROUTER_PROXY — отдельная переменная и urllib её не читает: данный
+    # запрос никогда не идёт через пользовательский AI-прокси.
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.load(response)
+    rows = [p for venue in payload
+            for p in venue.get("spreadProfilePrices", [])
+            if math.isfinite(float(p.get("bid", 0)))
+            and math.isfinite(float(p.get("ask", 0)))
+            and float(p["bid"]) > 0 and float(p["ask"]) >= float(p["bid"])]
+    if not rows:
+        raise RuntimeError(f"Swissquote не вернул bid/ask для {pair}")
+    bids = [float(p["bid"]) for p in rows]
+    asks = [float(p["ask"]) for p in rows]
+    timestamps = [float(v.get("ts", 0)) / 1000 for v in payload if v.get("ts")]
+    bid, ask = statistics.median(bids), statistics.median(asks)
+    return {"value": (bid + ask) / 2, "bid": bid, "ask": ask,
+            "ts": max(timestamps) if timestamps else time.time()}
 
 
 class DemoMarket:
@@ -333,6 +363,30 @@ class MarketData:
             cutoff = now - 8 * 3600
             self.intraday = [x for x in self.intraday if x[0] > cutoff]
             return
+        # Для OTC/spot инструментов нельзя показывать Yahoo futures: у XAU их
+        # basis меняется с экспирацией и сейчас достигает десятков долларов.
+        pair = self.instrument.swissquote_pair
+        if pair:
+            now = time.time()
+            if now - self._last_price_rest_attempt < self.settings.price_poll_sec:
+                return
+            self._last_price_rest_attempt = now
+            try:
+                quote = _fetch_swissquote_quote(pair)
+                age = max(0.0, now - float(quote["ts"]))
+                status = "live" if age <= 30 else "delayed"
+                self.price = _status_dict(
+                    quote["value"], status, quote["ts"],
+                    source=f"Swissquote OTC {pair} bid/ask")
+                self.price.update({"bid": quote["bid"], "ask": quote["ask"],
+                                   "spread": quote["ask"] - quote["bid"],
+                                   "derived": False, "instrument_type": "spot_otc"})
+                self._annotate_freshness()
+                self.intraday.append((now, quote["value"], 0.0))
+                self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
+            except Exception as e:  # неверный futures fallback хуже, чем no_data
+                self._mark_fail(self.price, self.settings.price_poll_sec, str(e))
+            return
         # живой WebSocket-стрим цены (если включён и есть свежий тик) — приоритет
         if self.stream is not None:
             sp = self.stream.fresh(self.instrument.yahoo, max_age=8.0)
@@ -379,8 +433,16 @@ class MarketData:
             import yfinance as yf
             hist = yf.Ticker(self.instrument.yahoo).history(period="1d", interval="1m")
             if len(hist):
-                self.intraday = [(ts.timestamp(), float(r["Close"]), float(r["Volume"]))
-                                 for ts, r in hist.iterrows()]
+                offset = 0.0
+                if self.instrument.swissquote_pair:
+                    if self.price.get("value") is None:
+                        return  # не публикуем futures-шкалу под именем spot
+                    # Фьючерсные бары служат формой/объёмом, но вся шкала
+                    # переносится в текущий spot одним внутридневным basis.
+                    offset = float(self.price["value"]) - float(hist["Close"].iloc[-1])
+                self.intraday = [
+                    (ts.timestamp(), float(r["Close"]) + offset, float(r["Volume"]))
+                    for ts, r in hist.iterrows()]
         except Exception:
             pass  # VWAP просто останется в no_data
 
@@ -414,9 +476,16 @@ class MarketData:
             bars = {"highs": hist["High"].tolist(),
                     "lows": hist["Low"].tolist(),
                     "closes": hist["Close"].tolist()}
+            if self.instrument.swissquote_pair:
+                if self.price.get("value") is None:
+                    raise RuntimeError("нет прямого spot-якоря для дневной шкалы")
+                offset = float(self.price["value"]) - float(bars["closes"][-1])
+                bars = {key: [float(x) + offset for x in values]
+                        for key, values in bars.items()}
             self.daily = {"bars": bars,
                           **_status_dict(True, "live", time.time(),
-                                         source=f"yfinance {self.instrument.yahoo} 1d")}
+                                         source=(f"yfinance {self.instrument.yahoo} 1d "
+                                                 "→ current spot basis"))}
             self.cache.put(f"daily:{self.instrument.yahoo}", bars)
         except Exception as e:  # noqa: BLE001
             cached = self.cache.get(f"daily:{self.instrument.yahoo}",

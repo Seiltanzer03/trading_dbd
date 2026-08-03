@@ -187,7 +187,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "edge_track": engine.journal.edge_track(),
             "validation": engine.journal.validation_report(),
             "setups": _setups_payload(),
-            "instruments": {c: {"yahoo": i.yahoo, "options_proxy": i.options_proxy}
+            "instruments": {c: {"yahoo": i.yahoo,
+                                "quote_pair": i.swissquote_pair,
+                                "options_proxy": i.options_proxy}
                             for c, i in INSTRUMENTS.items()},
         }
 

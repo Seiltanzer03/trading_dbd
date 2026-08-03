@@ -72,6 +72,9 @@ class Instrument:
     # контрольными котировками основного ряда. Первый свежий имеет приоритет.
     # Опционный proxy остаётся отдельным полем и не подменяется этим списком.
     live_price_drivers: tuple[str, ...] = ()
+    # Прямая OTC/spot-котировка Swissquote. Если задана, именно она является
+    # отображаемой ценой; Yahoo-фьючерс используется только для истории.
+    swissquote_pair: str | None = None
 
 
 INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
@@ -88,24 +91,23 @@ INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
     Instrument("UK100",  "^FTSE",    "EWU", 8900.0,  0.12, proxy_experimental=True,
                price_label="FTSE 100 cash index"),
     Instrument("JPY100", "JPY=X",    None,  148.0,   0.10,
-               price_label="USD/JPY (название JPY100 условное)"),
-    # Yahoo GC=F/SI=F — активные фьючерсы, НЕ spot CFD. Терминал показывает это
-    # явно; при открытии сделки пользователь может задать текущую цену брокера,
-    # и тиковый ряд будет basis-adjusted постоянным сдвигом.
-    # Yahoo stream периодически молчит по GC=F и ETF до US-сессии. GLD —
-    # предпочтительный драйвер; PAXG-USD — круглосуточный экспериментальный
-    # fallback. Оба переносят только доходность на регулярно обновляемый GC=F
-    # якорь, поэтому крипто-цена не показывается как цена фьючерса.
+               price_label="USD/JPY (название JPY100 условное)",
+               swissquote_pair="USD/JPY"),
+    # Отображаем spot OTC. Yahoo futures остаются только источником
+    # истории/объёма и переводятся в текущую spot-шкалу.
     Instrument("XAU",    "GC=F",     "GLD", 3350.0,  0.16,
-               price_label="COMEX Gold active futures",
-               live_price_drivers=("GLD", "PAXG-USD")),
+               price_label="XAU/USD spot (Swissquote OTC)",
+               live_price_drivers=("GLD", "PAXG-USD"),
+               swissquote_pair="XAU/USD"),
     Instrument("XAG",    "SI=F",     "SLV", 38.0,    0.28,
-               price_label="COMEX Silver active futures"),
+               price_label="XAG/USD spot (Swissquote OTC)",
+               swissquote_pair="XAG/USD"),
     Instrument("EURUSD", "EURUSD=X", "FXE", 1.17,    0.07, proxy_experimental=True,
-               price_label="EUR/USD"),
+               price_label="EUR/USD", swissquote_pair="EUR/USD"),
     # FXC — CAD/USD-подобный ETF: его доходности противоположны USD/CAD.
     Instrument("USDCAD", "CAD=X",    "FXC", 1.37,    0.06, proxy_experimental=True,
-               proxy_transform="inverse", price_label="USD/CAD"),
+               proxy_transform="inverse", price_label="USD/CAD",
+               swissquote_pair="USD/CAD"),
 ]}
 
 # индексы волатильности (Yahoo). Первые три — ворота фильтров стратегии;

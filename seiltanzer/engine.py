@@ -105,12 +105,21 @@ class Engine:
             self.market.refresh_chain()
             self.market.refresh_iv_surface()
 
-    @staticmethod
-    def _effective_price(trade: dict | None, raw_price: float | None) -> float | None:
+    def _trade_quote_offset(self, trade: dict | None) -> float:
+        """Калибровка брокера; старый futures→CFD basis после смены фида недействителен."""
+        if not trade:
+            return 0.0
+        offset = float(trade.get("quote_offset") or 0.0)
+        if (offset and not self.settings.demo and self.market.instrument.swissquote_pair
+                and "Swissquote OTC" not in str(trade.get("quote_source") or "")):
+            return 0.0
+        return offset
+
+    def _effective_price(self, trade: dict | None, raw_price: float | None) -> float | None:
         """Цена в шкале сделки: бесплатный тик + зафиксированный basis брокера."""
         if raw_price is None:
             return None
-        return float(raw_price) + float((trade or {}).get("quote_offset") or 0.0)
+        return float(raw_price) + self._trade_quote_offset(trade)
 
     def _current_instrument_price(self, trade: dict | None = None) -> float | None:
         """Текущая цена в шкале терминала/сделки, а не сырой тик Yahoo."""
@@ -197,8 +206,10 @@ class Engine:
             "value": price,
             "raw_value": raw_price,
             "effective_value": price,
-            "basis_offset": float((trade or {}).get("quote_offset") or 0.0),
-            "ticker": self.market.instrument.yahoo,
+            "basis_offset": self._trade_quote_offset(trade),
+            "ticker": (self.market.instrument.swissquote_pair
+                       or self.market.instrument.yahoo),
+            "history_ticker": self.market.instrument.yahoo,
             "label": self.market.instrument.price_label or self.market.instrument.yahoo,
         })
 
@@ -1161,7 +1172,7 @@ class Engine:
     def _levels_payload(self, trade: dict, price: float, sigma: dict,
                         gamma: dict | None = None) -> dict:
         opts = self._options_summary(price)
-        quote_offset = float(trade.get("quote_offset") or 0.0)
+        quote_offset = self._trade_quote_offset(trade)
         raw_vwap = self.market.vwap()
         raw_day = self.market.day_range()
         vwap = raw_vwap + quote_offset if raw_vwap is not None else None
@@ -1450,9 +1461,10 @@ class Engine:
                 f"тиковый драйвер {self.market.price.get('driver_ticker')} "
                 "экспериментальный; он оживляет только доходность между "
                 "контрольными котировками основного ряда")
-        if trade and abs(float(trade.get("quote_offset") or 0.0)) > 0:
+        active_quote_offset = self._trade_quote_offset(trade)
+        if trade and abs(active_quote_offset) > 0:
             warnings.append(
-                f"к ценовому ряду применён basis {float(trade['quote_offset']):+.4f}, "
+                f"к ценовому ряду применён basis {active_quote_offset:+.4f}, "
                 "зафиксированный при открытии сделки")
         if inst.proxy_experimental:
             warnings.append(
@@ -1552,7 +1564,7 @@ class Engine:
             "quote": {
                 "raw": raw,
                 "effective": effective,
-                "basis_offset": float((trade or {}).get("quote_offset") or 0.0),
+                "basis_offset": self._trade_quote_offset(trade),
                 "source": self.market.price.get("source"),
                 "status": self.market.price.get("status"),
                 "derived": bool(self.market.price.get("derived")),

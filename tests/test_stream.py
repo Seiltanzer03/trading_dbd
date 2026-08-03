@@ -88,6 +88,41 @@ def test_gold_proxy_does_not_replace_futures_quote(tmp_path):
         cache.close()
 
 
+def test_gold_uses_direct_spot_quote_not_futures_stream(tmp_path, monkeypatch):
+    cache = DiskCache(str(tmp_path / "cache.db"))
+    try:
+        md = MarketData(Settings(stream=True, data_dir=str(tmp_path)), cache)
+        md.set_instrument("XAU")
+        md.stream = _StubStream({"GC=F": 4107.0})
+        monkeypatch.setattr(
+            "seiltanzer.data.feeds._fetch_swissquote_quote",
+            lambda pair: {"value": 4044.0, "bid": 4043.7, "ask": 4044.3,
+                          "ts": time.time()})
+        md.refresh_price()
+        assert md.price["value"] == pytest.approx(4044.0)
+        assert md.price["source"].startswith("Swissquote OTC XAU/USD")
+        assert md.price["instrument_type"] == "spot_otc"
+        assert md.price["derived"] is False
+    finally:
+        cache.close()
+
+
+def test_spot_failure_never_falls_back_to_wrong_futures(tmp_path, monkeypatch):
+    cache = DiskCache(str(tmp_path / "cache.db"))
+    try:
+        md = MarketData(Settings(stream=True, data_dir=str(tmp_path)), cache)
+        md.set_instrument("XAU")
+        md.stream = _StubStream({"GC=F": 4107.0})
+        monkeypatch.setattr(
+            "seiltanzer.data.feeds._fetch_swissquote_quote",
+            lambda pair: (_ for _ in ()).throw(RuntimeError("feed down")))
+        md.refresh_price()
+        assert md.price["value"] is None
+        assert md.price["status"] == "no_data"
+    finally:
+        cache.close()
+
+
 def test_gold_prefers_gld_driver_when_both_are_fresh(tmp_path):
     cache = DiskCache(str(tmp_path / "cache.db"))
     try:
