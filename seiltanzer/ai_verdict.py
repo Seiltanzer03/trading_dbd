@@ -664,5 +664,8 @@ def request_verdict(snapshot: dict) -> dict:
                 content, result = fixed, retry_result
         except httpx.HTTPError:
             pass
+    setup_guard = _at(snapshot, "scenario_frame", "setup_guard")
+    if setup_guard:
+        content = content.replace("setup_guard", str(setup_guard))
     return {"verdict": content.strip(), "model": result.get("model", model),
             "captured_ts": snapshot.get("captured_ts")}

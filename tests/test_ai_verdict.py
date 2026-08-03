@@ -103,3 +103,20 @@ def test_ai_rewrites_legacy_metric_answer_once(monkeypatch):
     monkeypatch.setattr("seiltanzer.ai_verdict.httpx.Client", Client)
     assert request_verdict({"captured_ts": 1})["verdict"] == "СТАТУС — нейтрален"
     assert len(calls) == 2
+
+
+def test_ai_expands_setup_guard_from_exact_playbook(monkeypatch):
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"choices": [{"message": {"content": "A → setup_guard; B → ok; C → ok"}}]}
+    class Client:
+        def __init__(self, **_kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def post(self, *_args, **_kwargs): return Response()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr("seiltanzer.ai_verdict.httpx.Client", Client)
+    out = request_verdict({"scenario_frame": {"setup_guard": "точное условие 8H FVG"}})
+    assert "setup_guard" not in out["verdict"]
+    assert "точное условие 8H FVG" in out["verdict"]
