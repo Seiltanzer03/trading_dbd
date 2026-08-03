@@ -61,6 +61,23 @@ class TestJournal:
         journal.update_max_r(t["id"], 0.3)  # ниже — не должен затирать
         assert journal.get_trade(t["id"])["max_r"] == pytest.approx(0.8)
 
+    def test_ai_memory_is_scoped_to_trade_and_resets_with_scenario(self, journal):
+        t = journal.open_trade(3, "NAS100", "long", 100, 99, 102.5)
+        journal.record_ai_verdict(
+            t["id"], {"trade_id": t["id"], "observation": {"r": 0.2}},
+            "РЕЖИМ — нейтрален", "test-model")
+        history = journal.recent_ai_verdicts(t["id"])
+        assert len(history) == 1
+        assert history[0]["verdict"] == "РЕЖИМ — нейтрален"
+        journal.edit_trade(t["id"], stop=98.5)
+        assert journal.recent_ai_verdicts(t["id"]) == []
+
+    def test_ai_memory_resets_when_setup_changes_on_same_instrument(self, journal):
+        t = journal.open_trade(1, "NAS100", "long", 100, 99, 102.5)
+        journal.record_ai_verdict(t["id"], {"trade_id": t["id"]}, "старый тезис")
+        journal.edit_trade(t["id"], setup=3)
+        assert journal.recent_ai_verdicts(t["id"]) == []
+
     def test_edit_and_delete(self, journal):
         t = journal.open_trade(3, "NAS100", "long", 21500, 21450, 21625)
         # правка уровней с проверкой геометрии

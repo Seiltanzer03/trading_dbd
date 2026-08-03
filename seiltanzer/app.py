@@ -332,10 +332,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if time.monotonic() - ai_last_call < 15:
             raise HTTPException(429, "Повторный анализ доступен через 15 секунд")
         async with ai_lock:
-            ai_last_call = time.monotonic()
             snapshot = build_snapshot(engine)
+            if snapshot.get("trade_id") is None:
+                raise HTTPException(400, "Нет активной сделки для ИИ-разбора")
+            ai_last_call = time.monotonic()
             try:
-                return await asyncio.to_thread(request_verdict, snapshot)
+                result = await asyncio.to_thread(request_verdict, snapshot)
+                engine.journal.record_ai_verdict(
+                    int(snapshot["trade_id"]), snapshot,
+                    result["verdict"], result.get("model"))
+                result["context_reviews"] = len(snapshot.get("previous_reviews") or [])
+                return result
             except RuntimeError as exc:
                 raise HTTPException(502, str(exc)) from exc
 

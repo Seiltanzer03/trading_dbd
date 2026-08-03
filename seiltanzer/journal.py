@@ -99,6 +99,19 @@ class Journal:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_forecast_trade_ts "
                 "ON option_forecasts(trade_id, ts)")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_verdicts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_id INTEGER NOT NULL,
+                    ts REAL NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    model TEXT,
+                    FOREIGN KEY(trade_id) REFERENCES trades(id)
+                )""")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_ai_verdict_trade_ts "
+                "ON ai_verdicts(trade_id, ts)")
 
     # ---------------------------------------------------------------- trades
 
@@ -238,6 +251,36 @@ class Journal:
                 (trade_id, now, price, r, p_take, p_stop, p_unresolved,
                  option_edge, option_ev, chain_ts, chain_age_sec, source))
 
+    def option_forecast_history(self, trade_id: int, limit: int = 120) -> list[dict]:
+        """Хронология option-метрик активной сделки для динамического разбора."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts,price,r,p_take,p_stop,p_unresolved,option_edge,"
+                "option_ev,chain_ts,chain_age_sec,source FROM option_forecasts "
+                "WHERE trade_id=? ORDER BY ts DESC LIMIT ?",
+                (trade_id, max(1, int(limit)))).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def record_ai_verdict(self, trade_id: int, snapshot: dict,
+                          verdict: str, model: str | None = None) -> None:
+        """Сохраняет наблюдение ИИ только в контексте конкретной сделки."""
+        if not verdict.strip():
+            return
+        payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO ai_verdicts(trade_id,ts,snapshot_json,verdict,model) "
+                "VALUES(?,?,?,?,?)",
+                (trade_id, time.time(), payload, verdict.strip(), model))
+
+    def recent_ai_verdicts(self, trade_id: int, limit: int = 3) -> list[dict]:
+        """Последние разборы текущей сделки, от старого к новому."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts,verdict,model FROM ai_verdicts WHERE trade_id=? "
+                "ORDER BY ts DESC LIMIT ?", (trade_id, max(1, int(limit)))).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
     def validation_report(self) -> dict:
         """Out-of-sample отчёт по ПЕРВОМУ прогнозу каждой закрытой сделки."""
         with self._lock:
@@ -343,7 +386,7 @@ class Journal:
 
         scenario_changed = bool(
             {"direction", "entry", "stop", "take"} & set(upd)
-            or instrument_changed
+            or "setup" in upd or instrument_changed
         )
         if scenario_changed:
             # Старый максимум R и первый option forecast относятся к другой
@@ -363,11 +406,15 @@ class Journal:
             if scenario_changed:
                 self._conn.execute(
                     "DELETE FROM option_forecasts WHERE trade_id=?", (trade_id,))
+                self._conn.execute(
+                    "DELETE FROM ai_verdicts WHERE trade_id=?", (trade_id,))
         return self.get_trade(trade_id)
 
     def delete_trade(self, trade_id: int) -> None:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM option_forecasts WHERE trade_id=?",
+                               (trade_id,))
+            self._conn.execute("DELETE FROM ai_verdicts WHERE trade_id=?",
                                (trade_id,))
             n = self._conn.execute("DELETE FROM trades WHERE id=?",
                                    (trade_id,)).rowcount
