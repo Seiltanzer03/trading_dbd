@@ -144,14 +144,14 @@ def _fetch_tradingview_ws_quote(symbol: str, timeout: float = 5.0) -> dict:
         raise RuntimeError("websockets не установлен") from e
     session = "qs_" + "".join(random.choice("abcdefghijklmnopqrstuvwxyz")
                                 for _ in range(12))
-    date = dt.datetime.now(dt.timezone.utc).strftime("%Y_%m_%d-%H_%M")
-    escaped = urllib.parse.quote(symbol, safe="")
-    url = ("wss://data.tradingview.com/socket.io/websocket"
-           f"?from=symbols/{escaped}/&date={date}")
+    url = "wss://data.tradingview.com/socket.io/websocket"
     deadline = time.monotonic() + timeout
     try:
-        with connect(url, origin="https://www.tradingview.com",
+        with connect(url, origin="https://data.tradingview.com",
                      open_timeout=timeout, close_timeout=1) as ws:
+            # Сервер сначала выдаёт session_id; команды, посланные раньше этого
+            # handshake-сообщения, иногда молча игнорируются.
+            ws.recv(timeout=max(0.1, deadline - time.monotonic()))
             ws.send(_tv_frame("set_auth_token", ["unauthorized_user_token"]))
             ws.send(_tv_frame("quote_create_session", [session]))
             ws.send(_tv_frame("quote_set_fields", [session, "lp", "bid", "ask",
@@ -159,6 +159,7 @@ def _fetch_tradingview_ws_quote(symbol: str, timeout: float = 5.0) -> dict:
                                                      "description"]))
             ws.send(_tv_frame("quote_add_symbols", [session, symbol,
                                                       {"flags": ["force_permission"]}]))
+            ws.send(_tv_frame("quote_fast_symbols", [session, symbol]))
             while time.monotonic() < deadline:
                 raw = ws.recv(timeout=max(0.1, deadline - time.monotonic()))
                 for payload in _tv_payloads(raw):
