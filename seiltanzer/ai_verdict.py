@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.error
-import urllib.request
 from typing import Any
+
+import httpx
 
 
 SYSTEM_PROMPT = """Ты — риск-менеджер и второй пилот терминала Seiltanzer.
@@ -97,7 +97,7 @@ def request_verdict(snapshot: dict) -> dict:
     if not key:
         raise RuntimeError("OPENROUTER_API_KEY не настроен на сервере")
     model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
-    body = json.dumps({
+    body = {
         "model": model,
         "temperature": 0.25,
         "max_tokens": 1400,
@@ -106,26 +106,29 @@ def request_verdict(snapshot: dict) -> dict:
             {"role": "user", "content": "Снимок терминала в момент нажатия:\n"
              + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))},
         ],
-    }, ensure_ascii=False).encode()
-    req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions",
-        data=body,
-        method="POST",
-        headers={
+    }
+    proxy = os.environ.get("OPENROUTER_PROXY", "").strip() or None
+    try:
+        with httpx.Client(proxy=proxy, timeout=45, trust_env=False) as client:
+            resp = client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                json=body,
+                headers={
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "Seiltanzer-Terminal/1.0",
             "HTTP-Referer": "https://seiltanzer-terminal.local",
             "X-Title": "Seiltanzer Terminal",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=45) as resp:
-            result = json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        detail = exc.read(500).decode(errors="replace")
-        raise RuntimeError(f"OpenRouter HTTP {exc.code}: {detail}") from exc
+                },
+            )
+            resp.raise_for_status()
+            result = resp.json()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:500]
+        raise RuntimeError(f"OpenRouter HTTP {exc.response.status_code}: {detail}") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"OpenRouter connection failed: {type(exc).__name__}") from exc
     content = result.get("choices", [{}])[0].get("message", {}).get("content")
     if not content:
         raise RuntimeError("OpenRouter вернул пустой ответ")

@@ -38,12 +38,13 @@ jobs:
         uses: appleboy/ssh-action@v1
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_PROXY: ${{ secrets.OPENROUTER_PROXY }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          envs: OPENROUTER_API_KEY
+          envs: OPENROUTER_API_KEY,OPENROUTER_PROXY
           command_timeout: 10m
           script: |
             set -e
@@ -59,6 +60,9 @@ jobs:
             if [ -n "$OPENROUTER_API_KEY" ]; then
               umask 077
               printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY" > /etc/seiltanzer.env
+            fi
+            if [ -n "$OPENROUTER_PROXY" ]; then
+              printf 'OPENROUTER_PROXY=%s\n' "$OPENROUTER_PROXY" >> /etc/seiltanzer.env
             fi
             mkdir -p /etc/systemd/system/seiltanzer.service.d
             printf '[Service]\nEnvironmentFile=-/etc/seiltanzer.env\n' \
