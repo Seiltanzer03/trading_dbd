@@ -715,6 +715,7 @@ class Engine:
             "horizon_barrier_ev": option_ev,
             "p_breakeven": p_be,
             "p_model": band.p,
+            "horizon_years": horizon_years,
             "median_years": cone.get("median_years"),
             "source": cone.get("hit_source"), "has_chain": terminal is not None,
             "demo": (terminal or {}).get("demo", self.settings.demo),
@@ -870,7 +871,7 @@ class Engine:
         if ladder.get("be_armed"):
             return "стоп в БУ — снимайте по лестнице, остаток тралом; " + base
         if r >= 1.0:
-            return "рубеж 1.0R пройден — фиксируйте 10%, двигайте стоп к БУ; " + base
+            return "рубеж 1.0R пройден — фиксируйте 10%; БУ только после 1.5R; " + base
         if r <= -0.6:
             return "близко к стопу — не усредняйте, план на стоп готов; " + base
         return base

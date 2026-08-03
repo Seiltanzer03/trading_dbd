@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from seiltanzer.ai_verdict import (
@@ -9,10 +11,11 @@ from seiltanzer.engine import Engine
 
 def test_prompt_is_compact_scenario_manager_not_stop_repeater():
     assert len(SETUP_PLAYBOOKS) == 16
-    assert "<=280 слов" in SYSTEM_PROMPT
-    assert "Не пиши очевидное" in SYSTEM_PROMPT
-    assert "БУ только" in SYSTEM_PROMPT
-    assert "опционный триггер" in SYSTEM_PROMPT
+    assert "<=240 слов" in SYSTEM_PROMPT
+    assert "Не пиши «закрыть на стопе»" in SYSTEM_PROMPT
+    assert "только после 1.5R" in SYSTEM_PROMPT
+    assert "scenario_frame" in SYSTEM_PROMPT
+    assert SETUP_PLAYBOOKS[11]["entry"].startswith("long after VIX")
 
 
 def test_snapshot_covers_visual_models_and_trade_memory(tmp_path):
@@ -32,6 +35,22 @@ def test_snapshot_covers_visual_models_and_trade_memory(tmp_path):
             "volatility", "correlation", "filters", "execution", "feed_quality",
         }
         assert snapshot["metric_history"]["samples"] >= 1
+        assert set(snapshot["evidence_matrix"]) == {
+            "options_primary", "live_price", "levels_structure", "cross_asset",
+            "oi_gamma_context", "execution_time", "data_quality",
+        }
+        assert set(snapshot["scenario_frame"]) >= {
+            "A_continuation", "B_stall", "C_deterioration", "next_review_events",
+        }
+        assert snapshot["decision_frame"]["option_regime"]
+        assert snapshot["strategy"]["playbook"]["timeframes"] == "12H/4H/15m"
+        assert snapshot["time_context"]["timezone"] == "Europe/Athens"
+        assert set(snapshot["observation"]["exact_levels"]) == {
+            "entry", "stop", "take", "current",
+        }
+        serialized = str(snapshot["metric_history"])
+        assert "option_edge" not in serialized and "p_ev0" not in serialized
+        assert len(json.dumps(snapshot, ensure_ascii=False)) < 25000
     finally:
         engine.close()
 
@@ -61,5 +80,5 @@ def test_ai_proxy_is_scoped_to_openrouter_client(monkeypatch):
     assert request_verdict({"captured_tick": {"ts": 1}})["verdict"] == "ok"
     assert seen["proxy"].startswith("socks5://")
     assert seen["trust_env"] is False
-    assert seen["body"]["max_tokens"] == 700
+    assert seen["body"]["max_tokens"] == 650
     assert seen["body"]["temperature"] == 0.1

@@ -281,6 +281,32 @@ class Journal:
                 "ORDER BY ts DESC LIMIT ?", (trade_id, max(1, int(limit)))).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def recent_ai_contexts(self, trade_id: int, limit: int = 3) -> list[dict]:
+        """Последние разборы вместе с минимальным машинным контекстом."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts,snapshot_json,verdict,model FROM ai_verdicts WHERE trade_id=? "
+                "ORDER BY ts DESC LIMIT ?", (trade_id, max(1, int(limit)))).fetchall()
+        result = []
+        for row in reversed(rows):
+            item = dict(row)
+            try:
+                snapshot = json.loads(item.pop("snapshot_json") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                snapshot = {}
+            obs = snapshot.get("observation") or {}
+            item["metrics"] = {
+                "r": ((obs.get("position") or {}).get("r")),
+                "p_take": ((obs.get("option_probability") or {}).get("p_take_first")),
+                "p_stop": ((obs.get("option_probability") or {}).get("touch_stop_horizon")),
+                "no_touch": ((obs.get("option_probability") or {}).get("no_touch_horizon")),
+                "barrier_ev_r": ((obs.get("option_probability") or {}).get("barrier_ev_r")
+                                 if (obs.get("option_probability") or {}).get("barrier_ev_r") is not None
+                                 else (obs.get("option_probability") or {}).get("option_ev")),
+            }
+            result.append(item)
+        return result
+
     def validation_report(self) -> dict:
         """Out-of-sample отчёт по ПЕРВОМУ прогнозу каждой закрытой сделки."""
         with self._lock:

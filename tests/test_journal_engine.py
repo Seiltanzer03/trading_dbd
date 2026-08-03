@@ -69,6 +69,9 @@ class TestJournal:
         history = journal.recent_ai_verdicts(t["id"])
         assert len(history) == 1
         assert history[0]["verdict"] == "РЕЖИМ — нейтрален"
+        contexts = journal.recent_ai_contexts(t["id"])
+        assert contexts[0]["metrics"]["r"] is None
+        assert "snapshot_json" not in contexts[0]
         journal.edit_trade(t["id"], stop=98.5)
         assert journal.recent_ai_verdicts(t["id"]) == []
 
