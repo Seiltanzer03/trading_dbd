@@ -17,14 +17,14 @@ from .strategy_playbooks import PLAYBOOKS as SETUP_PLAYBOOKS
 
 SYSTEM_PROMPT = """Ты — компактный risk observer активной сделки Seiltanzer.
 Ты получаешь уже нормализованный снимок: точную карточку сетапа из PDF, время,
-динамику, evidence_matrix и scenario_frame. Прочитай ВСЕ группы, но выводи только
+динамику, evidence_matrix, decision_frame и scenario_frame. Прочитай ВСЕ группы, но выводи только
 решающие факторы.
 
 Иерархия: (1) option barrier first-touch TAKE/STOP/NO-TOUCH, barrier EV, RND
 Q10/Q50/Q90/mode, IV skew/term; (2) live tape/ATR/уровни; (3) correlation;
 (4) OI/GEX только как эвристический контекст. Это risk-neutral сценарная модель,
 не исторический winrate и не расстояние stop/take. Большой NO-TOUCH означает
-зависание до горизонта, не STOP. Не используй legacy edge/p_ev0/model_control.
+зависание до горизонта, не STOP. Не используй устаревшие или отсутствующие поля.
 
 Правила: сравни с открытием и прошлым запросом; учитывай длительность сделки,
 сессию, время до горизонта и обновления цепочки. Не выдумывай FVG-подтверждение,
@@ -37,8 +37,9 @@ proxy или manual structure неизвестна — снизь уверенн
 СТАТУС — подтверждён / нейтрален / ухудшается / сломан / данных мало; одно основание.
 ВРЕМЯ — фаза сделки, сессия и отношение к option horizon одной строкой.
 ОПЦИОНЫ — 2–3 главных факта и их изменение.
-СЕЙЧАС — одно действие и максимум 3 основания.
-СЦЕНАРИИ — A/B/C, по одной строке из scenario_frame: option-триггер + live-реакция → действие.
+СЕЙЧАС — одно действие; обязательно: barrier EV/NO-TOUCH, live-фаза и конкретное
+условие активного setup.playbook. Нельзя называть pTake «низкой» без NO-TOUCH и горизонта.
+СЦЕНАРИИ — A/B/C: перенеси числовой триггер и action из scenario_frame, не обобщай.
 КОНТРОЛЬ — ближайшее событийное условие и одна главная проблема качества.
 Только переданные значения; цены используй лишь из exact_levels."""
 
@@ -578,7 +579,10 @@ def build_snapshot(engine) -> dict:
         "evidence_matrix": _evidence_matrix(strategy, observation, history, timing),
         "decision_frame": _decision_frame(strategy, observation, history, timing),
         "scenario_frame": _scenario_frame(strategy, observation, history, timing),
-        "previous_reviews": previous,
+        "previous_reviews": [
+            {"ts": item.get("ts"), "metrics": item.get("metrics")}
+            for item in previous
+        ],
         "validation": engine.journal.validation_report(),
     }
 
@@ -620,5 +624,30 @@ def request_verdict(snapshot: dict) -> dict:
     content = result.get("choices", [{}])[0].get("message", {}).get("content")
     if not content:
         raise RuntimeError("OpenRouter вернул пустой ответ")
+    forbidden = [term for term in ("edge", "null", "delta от открытия")
+                 if term in content.lower()]
+    if forbidden:
+        correction = dict(body)
+        correction["max_tokens"] = 650
+        correction["messages"] = body["messages"] + [
+            {"role": "assistant", "content": content},
+            {"role": "user", "content": "Перепиши ответ полностью. Нарушения: "
+             + ", ".join(forbidden)
+             + ". Используй только decision_frame/scenario_frame; не повторяй отсутствующие метрики."},
+        ]
+        try:
+            with httpx.Client(proxy=proxy, timeout=45, trust_env=False) as client:
+                retry = client.post(
+                    "https://openrouter.ai/api/v1/chat/completions", json=correction,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                             "Accept": "application/json", "User-Agent": "Seiltanzer-Terminal/1.0",
+                             "HTTP-Referer": "https://seiltanzer-terminal.local", "X-Title": "Seiltanzer Terminal"})
+                retry.raise_for_status()
+                retry_result = retry.json()
+            fixed = retry_result.get("choices", [{}])[0].get("message", {}).get("content")
+            if fixed:
+                content, result = fixed, retry_result
+        except httpx.HTTPError:
+            pass
     return {"verdict": content.strip(), "model": result.get("model", model),
             "captured_ts": snapshot.get("captured_ts")}

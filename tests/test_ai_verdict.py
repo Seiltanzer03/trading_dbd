@@ -82,3 +82,22 @@ def test_ai_proxy_is_scoped_to_openrouter_client(monkeypatch):
     assert seen["trust_env"] is False
     assert seen["body"]["max_tokens"] == 650
     assert seen["body"]["temperature"] == 0.1
+
+
+def test_ai_rewrites_legacy_metric_answer_once(monkeypatch):
+    calls = []
+    class Response:
+        def __init__(self, content): self.content = content
+        def raise_for_status(self): pass
+        def json(self): return {"choices": [{"message": {"content": self.content}}]}
+    class Client:
+        def __init__(self, **_kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def post(self, *_args, **kwargs):
+            calls.append(kwargs["json"])
+            return Response("edge null" if len(calls) == 1 else "СТАТУС — нейтрален")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr("seiltanzer.ai_verdict.httpx.Client", Client)
+    assert request_verdict({"captured_ts": 1})["verdict"] == "СТАТУС — нейтрален"
+    assert len(calls) == 2
