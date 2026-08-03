@@ -39,8 +39,9 @@ proxy или manual structure неизвестна — снизь уверенн
 ОПЦИОНЫ — 2–3 главных факта и их изменение.
 СЕЙЧАС — одно действие; обязательно: barrier EV/NO-TOUCH, live-фаза и конкретное
 условие активного setup.playbook. Нельзя называть pTake «низкой» без NO-TOUCH и горизонта.
-СЦЕНАРИИ — A/B/C: дословно сохрани пороги и action из scenario_frame, не подменяй
-порог текущим baseline. Назови конкретный setup_guard, не слово setup.playbook.
+СЦЕНАРИИ — три отдельные строки `A/B/C: option + live → action`; дословно сохрани
+пороги и action из scenario_frame, не подменяй порог текущим baseline. Назови
+конкретный setup_guard, не слово setup.playbook.
 КОНТРОЛЬ — ближайшее событийное условие и одна главная проблема качества.
 Только переданные значения; цены используй лишь из exact_levels."""
 
@@ -473,11 +474,11 @@ def _scenario_frame(strategy: dict, obs: dict, history: dict, timing: dict) -> d
     ev = _num(op.get("barrier_ev_r"))
     next_rung = next((x for x in strategy.get("management", {}).get("rungs_r", [])
                       if current_r is None or x > current_r + 1e-6), None)
-    no_touch_label = ("NO-TOUCH dominates" if _num(no_touch) is not None
+    no_touch_label = ("NO-TOUCH доминирует" if _num(no_touch) is not None
                       and _num(no_touch) >= max(_num(p_take) or 0, _num(p_stop) or 0)
-                      else "NO-TOUCH rises")
+                      else "NO-TOUCH растёт")
     playbook = strategy.get("playbook") or {}
-    setup_guard = f"manual: {playbook.get('entry')}; invalidation: {playbook.get('invalidation')}"
+    setup_guard = f"ручное условие: {playbook.get('entry')}; инвалидация: {playbook.get('invalidation')}"
     p_take_up = round(min((p_take or 0) + 0.01, 1.0), 4) if p_take is not None else None
     p_stop_up = round(min((p_stop or 0) + 0.01, 1.0), 4) if p_stop is not None else None
     ev_up = round(ev + 0.03, 4) if ev is not None else None
@@ -487,19 +488,19 @@ def _scenario_frame(strategy: dict, obs: dict, history: dict, timing: dict) -> d
         "baseline": {"barrier_ev_r": ev, "p_take": p_take, "p_stop": p_stop,
                      "no_touch": no_touch, "r": current_r},
         "A_continuation": {
-            "option_trigger": f"barrierEV >= {ev_up}R AND pTake >= {p_take_up}",
-            "live_trigger": f"R holds above option mode {cone.get('mode_r')} while median {cone.get('median_r')} reprices upward",
-            "action": f"hold only with setup_guard; take 10% at {next_rung}R" if next_rung else "manage remainder by trailing rules",
+            "option_trigger": f"barrierEV >= {ev_up}R И pTake >= {p_take_up}",
+            "live_trigger": f"R держится выше option mode {cone.get('mode_r')}, median {cone.get('median_r')} растёт",
+            "action": f"удерживать только при setup_guard; снять 10% на {next_rung}R" if next_rung else "вести остаток по правилам trailing",
         },
         "B_stall": {
-            "option_trigger": f"{no_touch_label} from {no_touch}",
-            "live_trigger": f"R rotates around option mode {cone.get('mode_r')}/median {cone.get('median_r')} without >=0.20R progress",
-            "action": "hold only with setup_guard; reassess on chain refresh/horizon roll",
+            "option_trigger": f"{no_touch_label} от baseline {no_touch}",
+            "live_trigger": f"R вращается у option mode {cone.get('mode_r')}/median {cone.get('median_r')} без прогресса >=0.20R",
+            "action": "удерживать только при setup_guard; пересчитать после новой цепочки/сдвига горизонта",
         },
         "C_deterioration": {
-            "option_trigger": f"pStop >= {p_stop_up} OR barrierEV <= {ev_down}R",
-            "live_trigger": f"R loses option mode {cone.get('mode_r')} with adverse live tape and falling median {cone.get('median_r')}",
-            "action": "do not widen/average; preserve original stop and use only armed strategy management",
+            "option_trigger": f"pStop >= {p_stop_up} ИЛИ barrierEV <= {ev_down}R",
+            "live_trigger": f"R теряет option mode {cone.get('mode_r')}, live tape против и median {cone.get('median_r')} падает",
+            "action": "не расширять/не усреднять; сохранить исходный стоп и только активированные правила стратегии",
         },
         "next_review_events": [
             "new option-chain timestamp", "R move >=0.20 from this review",
@@ -635,16 +636,19 @@ def request_verdict(snapshot: dict) -> dict:
     content = result.get("choices", [{}])[0].get("message", {}).get("content")
     if not content:
         raise RuntimeError("OpenRouter вернул пустой ответ")
-    forbidden = [term for term in ("edge", "null", "delta от открытия", "setup.playbook")
-                 if term in content.lower()]
-    if forbidden:
+    violations = [term for term in ("edge", "null", "delta от открытия", "setup.playbook")
+                  if term in content.lower()]
+    if content.count("→") < 3:
+        violations.append("нет трёх действий формата триггер → действие")
+    if violations:
         correction = dict(body)
         correction["max_tokens"] = 650
         correction["messages"] = body["messages"] + [
             {"role": "assistant", "content": content},
             {"role": "user", "content": "Перепиши ответ полностью. Нарушения: "
-             + ", ".join(forbidden)
-             + ". Используй только decision_frame/scenario_frame; не повторяй отсутствующие метрики."},
+             + ", ".join(violations)
+             + ". Используй только decision_frame/scenario_frame; выведи A/B/C отдельными строками, "
+               "в каждой дословный числовой порог, live-триггер, стрелка → и action."},
         ]
         try:
             with httpx.Client(proxy=proxy, timeout=45, trust_env=False) as client:
