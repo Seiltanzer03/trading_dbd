@@ -257,16 +257,36 @@ class TestRnCone:
             0.0, 0.4, 3.0, terminal_hit=0.9,
             horizon_years=1 / 365, seed=22)
         assert low["unresolved"] > 0.8
-        assert high["hit_ratio"] > low["hit_ratio"] + 0.6
-        assert high["hit_source"] == "barrier_mc+bl_terminal"
+        # BL terminal tail-ratio only gates option availability; it must not
+        # turn all no-touch mass into stop/take first-passage probability.
+        assert high["hit_ratio"] == pytest.approx(low["hit_ratio"])
+        assert high["hit_source"] == "option_dynamics_first_passage"
         assert low["p_take_anchored"] == pytest.approx(low["hit_ratio"])
         assert low["p_stop_anchored"] == pytest.approx(1 - low["hit_ratio"])
-        assert low["p_take_anchored_by_t"][-1] == pytest.approx(low["hit_ratio"])
-        assert low["p_stop_anchored_by_t"][-1] == pytest.approx(1 - low["hit_ratio"])
+        assert low["p_take_anchored_by_t"][-1] == pytest.approx(low["p_take"])
+        assert low["p_stop_anchored_by_t"][-1] == pytest.approx(low["p_stop"])
         assert all(b >= a - 1e-9 for a, b in zip(
             low["p_take_anchored_by_t"], low["p_take_anchored_by_t"][1:]))
         assert all(b >= a - 1e-9 for a, b in zip(
             low["p_stop_anchored_by_t"], low["p_stop_anchored_by_t"][1:]))
+
+    def test_option_race_matches_scale_function_and_is_not_terminal_tail(self):
+        p = P.option_race_prob(1.0, 0.4, 2.0, drift_R=0.0)
+        assert p == pytest.approx((1.0 + 1.0) / (2.0 + 1.0), abs=0.003)
+        mean_reverting = P.option_race_prob(
+            1.0, 0.4, 2.0, drift_R=0.0, ou_theta=2.0, ou_mu=0.0)
+        assert mean_reverting < p
+
+    def test_lattice_rnd_is_full_horizon_and_not_clipped_at_barriers(self):
+        c = P.rn_cone(
+            1.0, 0.35, 1.8, terminal_hit=0.02,
+            horizon_years=1 / 365, seed=23)
+        assert c["lattice_kind"] == "full_horizon_option_rnd"
+        assert c["slice_time_frac"] == 1.0
+        assert c["slice_edges"][0] < -1.0
+        assert c["slice_edges"][-1] > c["T"]
+        assert sum(c["slice_probs"]) == pytest.approx(1.0)
+        assert c["no_touch_horizon"] == pytest.approx(c["unresolved"])
 
     def test_walls_monotone_and_realtime(self):
         c = P.rn_cone(0.2, 3.0, 2.5, drift_R=0.0, horizon_years=2 / 365, seed=3)

@@ -135,8 +135,8 @@
           <div class="tiny dim" id="lat-band-lbl">интервал 90% (Уилсон)</div>
         </div>
         <div class="stat-sep"></div>
-        <div class="stat-row"><span class="lbl">P OPTIONS (hit)</span><span class="val" id="lat-mhit"
-          data-tip="Finite-horizon first-passage P: barrier Monte Carlo под implied move/skew/term structure, с BL-tail для путей, не достигших барьера к экспирации.">—</span></div>
+        <div class="stat-row"><span class="lbl">P OPTIONS (RACE)</span><span class="val" id="lat-mhit"
+          data-tip="Option-implied вероятность того, что тейк будет первым барьером. Touch/no-touch текущего горизонта показываются отдельно.">—</span></div>
         <div class="stat-row"><span class="lbl">OPTION EDGE vs EV=0</span><span class="val" id="lat-edge"
           data-tip="P_options минус порог безубыточности для текущего RR. Положительный запас — кандидат на преимущество, который ещё должен пройти out-of-sample проверку журнала.">—</span></div>
         <div class="stat-sep"></div>
@@ -155,8 +155,8 @@
         <div class="stat-row"><span class="lbl">СХОДИМОСТЬ</span><span class="val" id="lat-conv"
           data-tip="|доля зелёных шариков − P(терминальный R > 0) по Монте-Карло|. Показывает, что доска сэмплирует именно модельное распределение, а не рисует красивое.">—</span></div>
         <div class="stat-sep"></div>
-        <div class="stat-row"><span class="lbl">DENSITY SLICE</span><span class="val" id="lat-calib"
-          data-tip="Временной срез и доля ещё не поглощённых путей, из которых построена центральная форма распределения.">—</span></div>
+        <div class="stat-row"><span class="lbl">HORIZON MASS</span><span class="val" id="lat-calib"
+          data-tip="Масса сценариев без касания стопа или тейка на текущем опционном горизонте.">—</span></div>
         <div class="stat-sep"></div>
         <div class="lat-read" id="lat-read"
           data-tip="Практический вывод из доски: сравнение вашей P с порогом безубытка и с оценкой рынка. Это резюме, а не сигнал.">—</div>
@@ -166,7 +166,7 @@
         <div class="canvas-empty" id="lattice-empty">○ НЕТ ОТКРЫТОЙ СДЕЛКИ — ДОСКА ЖДЁТ</div>
       </div>
     </div>
-    <div class="panel-foot dim">оранжевая доска = сглаженная условная плотность ещё живых путей; P10/P50/P90 и mode показывают рабочий диапазон, а массы уже достигших стопа/тейка вынесены отдельно — поэтому крайние колонки больше не раздуваются. P и edge появляются только при валидном option anchor; иначе остаётся динамическая сценарная карта без суррогатной вероятности</div>
+    <div class="panel-foot dim">оранжевая доска = полная option-implied RND на горизонте, без обрезки по стопу/тейку и без складывания хвостов в крайние столбцы. P10/P50/P90 и mode показывают рабочий диапазон; RACE P и конечные touch/touch/no-touch считаются раздельно. P и edge появляются только при валидном option anchor</div>
   </section>
 
   <!-- ================ 3. STRIKE LANDSCAPE ================ -->
@@ -256,7 +256,7 @@
         <div class="canvas-holder fan-holder"><canvas id="cone-fan"></canvas></div>
       </div>
     </div>
-    <div class="panel-foot dim">Сверху — 3D WebGL: вращайте мышкой, выбранная камера сохраняется. Полотно = НЕПРЕРЫВНАЯ УСЛОВНАЯ risk-neutral плотность при ещё живом сценарии; OPTION MODE и коридор Q20–Q80 показывают, где концентрируется рынок. Surviving mass больше не обнуляет полотно: она вынесена в красную/зелёную barrier-стены. Вероятности сделки и edge включаются только при валидном BL option anchor; без него поверхность остаётся сценарным контекстом.</div>
+    <div class="panel-foot dim">Сверху — 3D WebGL: вращайте мышкой, выбранная камера сохраняется. Полотно = непрерывная условная risk-neutral плотность; OPTION MODE и Q20–Q80 показывают концентрацию рынка. Стены показывают только фактический first-touch к горизонту. RACE P отвечает, какой барьер будет первым; NO-TOUCH показывает массу без касания — эти метрики больше не смешиваются.</div>
   </section>
 
   <!-- ================ 3c. IV SURFACE (3D) ================ -->

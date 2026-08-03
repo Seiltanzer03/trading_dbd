@@ -113,7 +113,7 @@ function onTick() {
     modelHist: S.tick?.mc?.hist,
     trade: S.tick?.trade || null,
     modelProb: S.tick?.prob?.model_p,
-    optionProb: S.tick?.prob?.source === 'options_barrier_mc' ? S.tick.prob.p : null,
+    optionProb: S.tick?.prob?.source === 'options_first_passage' ? S.tick.prob.p : null,
     rnProbs: S.tick?.market?.available ? {
       p_beyond_take: S.tick.market.terminal_p_take,
       p_beyond_stop: S.tick.market.terminal_p_stop,
@@ -444,7 +444,7 @@ function renderLattice() {
   handleLivePrice(t);          // котировка тикает всегда, даже без сделки
   const p = t.prob;
   const active = !!(p && t.mc);
-  const optionAnchored = p?.source === 'options_barrier_mc';
+  const optionAnchored = p?.source === 'options_first_passage';
   const liveMapping = t?.feeds?.proxy_price?.status === 'live';
   $('#lattice-empty').style.display = active ? 'none' : 'flex';
   $('#lattice-status').className = 'badge ' + (active
@@ -467,8 +467,8 @@ function renderLattice() {
     optionAnchored: !!mkt?.available,
     hit: mkt?.hit_ratio,
     edge: mkt?.edge,
-    pStop: mkt?.p_stop_horizon,
-    pTake: mkt?.p_take_horizon,
+    pStop: mkt?.p_stop_race ?? mkt?.p_stop,
+    pTake: mkt?.p_take_race ?? mkt?.p_take,
     unresolved: mkt?.p_unresolved_horizon,
     q10: mkt?.scenario_p10_r,
     q50: mkt?.scenario_median_r,
@@ -493,11 +493,10 @@ function renderLattice() {
   if (mkt?.available) {
     $('#lat-mhit').textContent = fmtPct(mkt.hit_ratio);
     $('#lat-mhit').dataset.tip =
-      `P(тейк раньше стопа) по finite-horizon barrier MC.\n` +
-      `Ширина: implied move; хвост и forward: BL-плотность; асимметрия: skew; время: term structure.${mkt.median_years != null ? '\nМедиана развязки ≈ ' + fmtDur(mkt.median_years) : ''}\n` +
-      `Option split горизонта: тейк ${fmtPct(mkt.p_take_horizon)}, стоп ${fmtPct(mkt.p_stop_horizon)}. ` +
-      `Фактически коснулось барьеров в MC: тейк ${fmtPct(mkt.p_take_reached_horizon)}, стоп ${fmtPct(mkt.p_stop_reached_horizon)}; ` +
-      `остаток ${fmtPct(mkt.p_unresolved_raw_horizon)} распределён BL tail-ratio ${fmtPct(mkt.terminal_hit)}.`;
+      `P(тейк раньше стопа) по option-implied first-passage scale function.\n` +
+      `Драйверы: implied move, проверенный/shrunk forward, skew, term structure и gamma mean-reversion; простая пропорция RR не подставляется.${mkt.median_years != null ? '\nМедиана касания ≈ ' + fmtDur(mkt.median_years) : '\nМедиана касания лежит дальше текущего option-horizon.'}\n` +
+      `К горизонту: тейк-touch ${fmtPct(mkt.p_take_horizon)}, стоп-touch ${fmtPct(mkt.p_stop_horizon)}, NO-TOUCH ${fmtPct(mkt.p_unresolved_horizon)}. ` +
+      `Эти три исхода не смешиваются с RACE P. ${mkt.forward_drift_rejected != null ? 'Аномальный BL-forward отклонён risk-фильтром.' : ''}`;
     const ed = mkt.edge;
     $('#lat-edge').textContent = ed == null ? '—' : (ed >= 0 ? '+' : '') + fmtPct(ed);
     $('#lat-edge').className = 'val ' + (ed == null ? '' : ed >= 0 ? 'green' : 'red');
@@ -594,10 +593,9 @@ function renderLattice() {
     `|доля зелёных − P(R>0 по МК)| = |${st.greenShare == null ? '—' : (st.greenShare * 100).toFixed(1)}% − ${st.pGreenModel == null ? '—' : (st.pGreenModel * 100).toFixed(1)}%|\n` +
     `Метрика честности доски: корзины сэмплируются из МК-распределения,\nпоэтому расхождение должно убывать с числом шариков (закон больших чисел).`;
   $('#lat-calib').textContent =
-    `t=${((mkt?.scenario_slice_time_frac ?? 0) * 100).toFixed(0)}% · alive ${fmtPct(mkt?.scenario_slice_alive)}`;
+    `H=100% · NO-TOUCH ${fmtPct(mkt?.p_unresolved_horizon)}`;
   $('#lat-calib').dataset.tip =
-    `Доска показывает условное распределение путей, ещё не поглощённых барьерами, на информативном временном срезе.\n` +
-    `Поглощённые массы стопа/тейка вынесены отдельно и больше не раздувают крайние колонки.`;
+    `Доска показывает полную option-implied RND на горизонте. Ось расширена за стоп и тейк; хвосты не складываются в крайние колонки и распределение не обрезается барьерами.`;
 }
 
 // ---------------------------------------------------------------- filters
@@ -796,7 +794,7 @@ function renderRidgeStats() {
       .forEach((id) => { $('#' + id).textContent = '—'; });
     $('#rg-proxy').textContent = t.sigma.source === 'vol_index'
       ? 'ИНДЕКС ВОЛЫ' : '—';
-    $('#rg-p-model').textContent = S.tick?.prob?.source === 'options_barrier_mc'
+    $('#rg-p-model').textContent = S.tick?.prob?.source === 'options_first_passage'
       ? fmtPct(S.tick.prob.p) : '—';
     return;
   }
@@ -846,7 +844,7 @@ function renderRidgeStats() {
   $('#rg-p-stop').dataset.tip = rn
     ? `P(цена за стопом на экспирации) — аналогично P(за тейк), хвост с другой стороны.${rn.demo ? '\n◆ DEMO-цепочка' : ''}`
     : 'нужны открытая сделка и цепочка';
-  $('#rg-p-model').textContent = S.tick?.prob?.source === 'options_barrier_mc'
+  $('#rg-p-model').textContent = S.tick?.prob?.source === 'options_first_passage'
     ? fmtPct(S.tick.prob.p) : '—';
 }
 

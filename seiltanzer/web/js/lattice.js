@@ -73,7 +73,11 @@ export function initLattice(canvas) {
              binW: (w - 2 * padX) / BINS, rowH: boardH / (ROWS + 1), w,
              baseY: H - axisH - 6 };
   }
-  const xOfR = (g, R) => g.padX + ((R + 1) / (s.T + 1)) * (g.w - 2 * g.padX);
+  const domain = () => ({ lo: s.edges?.[0] ?? -1, hi: s.edges?.at(-1) ?? s.T });
+  const xOfR = (g, R) => {
+    const { lo, hi } = domain();
+    return g.padX + ((R - lo) / Math.max(hi - lo, 1e-9)) * (g.w - 2 * g.padX);
+  };
   const rowShear = (g, j) => (s.cur.tilt - 0.5) * g.binW * 1.4 * (j / ROWS);
   const pegX = (g, j, i) => g.padX + (BINS / 2) * g.binW + (2 * i - j) * g.binW / 2 + rowShear(g, j);
   const pegY = (g, j) => g.padTop + j * g.rowH;
@@ -130,8 +134,8 @@ export function initLattice(canvas) {
     ctx.fillStyle = '#FBFAF6';
     ctx.fillRect(g.padX - 8, baseY - g.distH, w - 2 * g.padX + 16, g.distH);
 
-    // Положительная зона результата. Поглощённые barrier-массы НЕ кладутся в
-    // крайние корзины — они подписаны отдельно сверху.
+    // Положительная зона результата; полная RND продолжается за обоими
+    // барьерами, поэтому график больше не обрезается у stop/take.
     const xt = xOfR(g, 0);
     const glow = 0.06 + 0.05 * pulse(now, 1800);
     ctx.fillStyle = `rgba(232,98,42,${glow})`;
@@ -160,7 +164,8 @@ export function initLattice(canvas) {
       [s.tgt.q90, 'P90', COLORS.green],
     ];
     for (const [q, label, color] of qs) {
-      if (q == null || q < -1 || q > s.T) continue;
+      const { lo, hi } = domain();
+      if (q == null || q < lo || q > hi) continue;
       const x = xOfR(g, q);
       ctx.strokeStyle = color; ctx.lineWidth = label === 'P50' ? 1.5 : 1;
       ctx.setLineDash(label === 'P50' ? [4, 2] : [2, 3]);
@@ -169,16 +174,24 @@ export function initLattice(canvas) {
       ctx.fillStyle = color; ctx.font = '8px "IBM Plex Mono", monospace';
       ctx.textAlign = 'center'; ctx.fillText(label, x, baseY - g.distH + 10);
     }
-    if (s.tgt.mode != null && s.tgt.mode >= -1 && s.tgt.mode <= s.T) {
+    const dom = domain();
+    if (s.tgt.mode != null && s.tgt.mode >= dom.lo && s.tgt.mode <= dom.hi) {
       const xm = xOfR(g, s.tgt.mode);
       ctx.fillStyle = '#E8622A';
       ctx.beginPath(); ctx.moveTo(xm - 4, baseY - 4); ctx.lineTo(xm + 4, baseY - 4);
       ctx.lineTo(xm, baseY - 11); ctx.closePath(); ctx.fill();
     }
 
-    // линия 0 и барьеры
+    // вход и реальные барьеры внутри расширенной оси RND
     ctx.strokeStyle = COLORS.rule; ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(x0, g.padTop - 10); ctx.lineTo(x0, baseY); ctx.stroke(); ctx.setLineDash([]);
+    for (const [R, color, label] of [[-1, COLORS.red, 'СТОП −1R'], [s.T, COLORS.green, `ТЕЙК +${s.T.toFixed(2)}R`]]) {
+      const xb = xOfR(g, R);
+      ctx.strokeStyle = color; ctx.lineWidth = 1.3; ctx.setLineDash([5, 3]);
+      ctx.beginPath(); ctx.moveTo(xb, baseY - g.distH); ctx.lineTo(xb, baseY); ctx.stroke();
+      ctx.setLineDash([]); ctx.fillStyle = color; ctx.font = '8px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'center'; ctx.fillText(label, xb, baseY - g.distH + 20);
+    }
 
     // маркер текущего r (скользит) — оранжевый
     const xr = Math.max(g.padX, Math.min(w - g.padX, xOfR(g, s.cur.r)));
@@ -189,10 +202,10 @@ export function initLattice(canvas) {
 
     // ось
     ctx.fillStyle = COLORS.ink; ctx.font = '10px "IBM Plex Mono", monospace';
-    ctx.textAlign = 'left'; ctx.fillText('-1R (СТОП)', g.padX, H - 8);
+    ctx.textAlign = 'left'; ctx.fillText(`${dom.lo >= 0 ? '+' : ''}${dom.lo.toFixed(2)}R`, g.padX, H - 8);
     ctx.textAlign = 'center'; ctx.fillText('0', x0, H - 8);
     ctx.fillText(`r=${s.cur.r >= 0 ? '+' : ''}${s.cur.r.toFixed(2)}`, xr, baseY + 20);
-    ctx.textAlign = 'right'; ctx.fillText(`+${s.T.toFixed(2)}R (ТЕЙК)`, w - g.padX, H - 8);
+    ctx.textAlign = 'right'; ctx.fillText(`${dom.hi >= 0 ? '+' : ''}${dom.hi.toFixed(2)}R`, w - g.padX, H - 8);
 
     // штырьки (наклон = рыночный tilt)
     ctx.fillStyle = COLORS.dim;
@@ -201,7 +214,7 @@ export function initLattice(canvas) {
     // заголовок + edge
     ctx.textAlign = 'center'; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.fillStyle = COLORS.dim;
     const src = s.marketAvail
-      ? 'OPTION-ANCHORED · УСЛОВНАЯ ЖИВАЯ ПЛОТНОСТЬ'
+      ? 'OPTION-ANCHORED · FULL-HORIZON RND · БЕЗ ОБРЕЗКИ БАРЬЕРАМИ'
       : 'СЦЕНАРНАЯ ПЛОТНОСТЬ · БЕЗ P / EDGE';
     const reg = s.regime ? ` · ВОЛА ${s.regime}` : '';
     ctx.fillText(`РАСПРЕДЕЛЕНИЕ: ${src}${reg}`, w / 2, 12);
@@ -214,11 +227,11 @@ export function initLattice(canvas) {
     ctx.font = '8px "IBM Plex Mono", monospace';
     if (s.tgt.pStop != null) {
       ctx.fillStyle = COLORS.red; ctx.textAlign = 'left';
-      ctx.fillText(`СТОП · OPTION SPLIT ${fmtProb(s.tgt.pStop)}`, g.padX, 24);
+      ctx.fillText(`RACE СТОП ${fmtProb(s.tgt.pStop)}`, g.padX, 24);
     }
     if (s.tgt.pTake != null) {
       ctx.fillStyle = COLORS.green; ctx.textAlign = 'right';
-      ctx.fillText(`ТЕЙК · OPTION SPLIT ${fmtProb(s.tgt.pTake)}`, w - g.padX, 24);
+      ctx.fillText(`RACE ТЕЙК ${fmtProb(s.tgt.pTake)} · NO-TOUCH≤H ${fmtProb(s.tgt.unresolved)}`, w - g.padX, 24);
     }
 
     // шарики

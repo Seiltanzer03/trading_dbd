@@ -64,7 +64,8 @@ export function initCone(elId) {
                 edges: null, T: 2.5, r0: 0, nS: 0, nB: 0, hy: null,
                 median: null, term_slope: 0, structSig: null,
                 probabilityAvailable: false, conditional: null, survival: null,
-                modeX: null, q20X: null, q80X: null };
+                modeX: null, q20X: null, q80X: null,
+                raceTake: null, raceStop: null, noTouch: null };
   const disp = { z: null, pStop: null, pTake: null };
 
   // Камера: развернута на 180 градусов (вид спереди/сзади)
@@ -234,10 +235,10 @@ export function initCone(elId) {
   }
   function wallEdge(xConst, series, color, label) {
     const pLabel = tgt.probabilityAvailable
-      ? `${label} ${(series[series.length - 1] * 100).toFixed(0)}%`
+      ? `${label} TOUCH≤H ${fmtProb(series[series.length - 1])}`
       : `${label} · БАРЬЕР`;
     const hover = tgt.probabilityAvailable
-      ? `${label}: option-anchored P дойти = %{z:.0%}<extra></extra>`
+      ? `${label}: first-touch к опционному горизонту = %{z:.1%}<extra></extra>`
       : `${label}: доля сценарных путей у барьера = %{z:.0%}<extra></extra>`;
     return { type: 'scatter3d', mode: 'lines',
       x: Array(tgt.nS).fill(xConst), y: tgt.ys, z: series,
@@ -356,14 +357,15 @@ export function initCone(elId) {
         floor + (1 - floor) * Math.pow(Math.min(1, v / globalPeak), 0.62));
     });
     const nS = conditional.length;
-    const stopPath = cone.option_anchored
-      ? (cone.p_stop_anchored_by_t || cone.p_stop_by_t) : cone.p_stop_by_t;
-    const takePath = cone.option_anchored
-      ? (cone.p_take_anchored_by_t || cone.p_take_by_t) : cone.p_take_by_t;
+    const stopPath = cone.p_stop_by_t;
+    const takePath = cone.p_take_by_t;
     tgt.z = z; tgt.pStop = [0, ...stopPath]; tgt.pTake = [0, ...takePath];
     tgt.xs = xs; tgt.ys = ys; tgt.edges = edges; tgt.T = T; tgt.r0 = cone.r0;
     tgt.nS = nS; tgt.nB = nB; tgt.hy = cone.horizon_years;
     tgt.median = cone.median_years; tgt.term_slope = cone.term_slope || 0;
+    tgt.raceTake = cone.p_take_anchored;
+    tgt.raceStop = cone.p_stop_anchored;
+    tgt.noTouch = cone.unresolved;
     tgt.conditional = conditional; tgt.survival = survival;
     tgt.modeX = conditional.map((row) => xs[row.indexOf(Math.max(...row))]);
     tgt.q20X = conditional.map((row) => quantileX(row, xs, 0.20));
@@ -416,7 +418,9 @@ export function initCone(elId) {
     const hy = tgt.hy, T = tgt.T;
     const termNote = tgt.term_slope > 0.03 ? ' · контанго (вола дышит позже)'
       : tgt.term_slope < -0.03 ? ' · бэквордация (движение скоро)' : '';
-    const yTitle = (hy ? `ВРЕМЯ → развязка · медиана ≈ ${fmtTime(tgt.median)}`
+    const medText = tgt.median != null ? `медиана ≈ ${fmtTime(tgt.median)}`
+      : hy ? `медиана касания > ${fmtTime(hy)}` : 'медиана н/д';
+    const yTitle = (hy ? `ВРЕМЯ → развязка · ${medText}`
       : 'ВРЕМЯ → развязка (модельное)') + termNote;
     const yTicktext = hy ? ['сейчас', fmtTime(hy * 0.5), fmtTime(hy)]
       : ['сейчас', '50%', 'развязка'];
@@ -462,9 +466,11 @@ export function initCone(elId) {
     lastNames = [traces[EDGE_STOP].name, traces[EDGE_TAKE].name];
     const finalStopP = disp.pStop[disp.pStop.length - 1];
     const finalTakeP = disp.pTake[disp.pTake.length - 1];
-    const liveEV = (finalTakeP * tgt.T) - finalStopP;
+    const liveEV = (tgt.raceTake * tgt.T) - tgt.raceStop;
     const evColor = liveEV >= 0 ? '#2EB44F' : '#E64650';
-    const evText = `<b>LIVE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R</b><br>P(Take): ${fmtProb(finalTakeP)} | P(Stop): ${fmtProb(finalStopP)}`;
+    const evText = `<b>RACE: ТЕЙК ${fmtProb(tgt.raceTake)} · СТОП ${fmtProb(tgt.raceStop)}</b><br>`
+      + `TOUCH≤H: T ${fmtProb(finalTakeP)} · S ${fmtProb(finalStopP)} · NO ${fmtProb(tgt.noTouch)}<br>`
+      + `RACE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R`;
     layout.annotations[0].text = evText;
     layout.annotations[0].font.color = evColor;
     layout.annotations[0].bordercolor = evColor;
@@ -515,15 +521,19 @@ export function initCone(elId) {
     const P = window.Plotly;
     const termNote = tgt.term_slope > 0.03 ? ' · контанго (вола дышит позже)'
       : tgt.term_slope < -0.03 ? ' · бэквордация (движение скоро)' : '';
-    const yTitle = (tgt.hy ? `ВРЕМЯ → развязка · медиана ≈ ${fmtTime(tgt.median)}`
+    const medText = tgt.median != null ? `медиана ≈ ${fmtTime(tgt.median)}`
+      : tgt.hy ? `медиана касания > ${fmtTime(tgt.hy)}` : 'медиана н/д';
+    const yTitle = (tgt.hy ? `ВРЕМЯ → развязка · ${medText}`
       : 'ВРЕМЯ → развязка (модельное)') + termNote;
       
     const finalStopP = disp.pStop[disp.pStop.length - 1] || 0;
     const finalTakeP = disp.pTake[disp.pTake.length - 1] || 0;
-    const liveEV = (finalTakeP * tgt.T) - finalStopP;
+    const liveEV = (tgt.raceTake * tgt.T) - tgt.raceStop;
     const evColor = liveEV >= 0 ? '#2EB44F' : '#E64650';
     const evText = tgt.probabilityAvailable 
-        ? `<b>LIVE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R</b><br>P(Take): ${fmtProb(finalTakeP)} | P(Stop): ${fmtProb(finalStopP)}`
+        ? `<b>RACE: ТЕЙК ${fmtProb(tgt.raceTake)} · СТОП ${fmtProb(tgt.raceStop)}</b><br>`
+          + `TOUCH≤H: T ${fmtProb(finalTakeP)} · S ${fmtProb(finalStopP)} · NO ${fmtProb(tgt.noTouch)}<br>`
+          + `RACE EV: ${liveEV > 0 ? '+' : ''}${liveEV.toFixed(2)}R`
         : `<b>LIVE EV: НЕТ ОПЦИОНОВ</b><br>P(Take): — | P(Stop): —`;
         
     let relayoutData = {};
@@ -540,10 +550,10 @@ export function initCone(elId) {
     pinAfter(P.relayout(el, relayoutData));
     
     const nStop = tgt.probabilityAvailable
-      ? `СТОП ${fmtProb(tgt.pStop[tgt.pStop.length - 1])}`
+      ? `СТОП TOUCH≤H ${fmtProb(tgt.pStop[tgt.pStop.length - 1])}`
       : 'СТОП · БАРЬЕР';
     const nTake = tgt.probabilityAvailable
-      ? `ТЕЙК ${fmtProb(tgt.pTake[tgt.pTake.length - 1])}`
+      ? `ТЕЙК TOUCH≤H ${fmtProb(tgt.pTake[tgt.pTake.length - 1])}`
       : 'ТЕЙК · БАРЬЕР';
     if (!lastNames || nStop !== lastNames[0] || nTake !== lastNames[1]) {
       lastNames = [nStop, nTake];

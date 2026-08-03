@@ -598,10 +598,21 @@ class Engine:
 
         # RND к экспирации (Бриден–Литценбергер) — для Strike Landscape и задней стены
         terminal = self._market_dist(trade, price, T)
+        forward_drift_source = "carry_neutral"
+        forward_drift_rejected = None
         if terminal and terminal.get("mean_r") is not None:
-            # Risk-neutral forward tilt из самой плотности. Ограничение защищает
-            # от редких плохих mid-котировок бесплатной цепочки.
-            drift_R = float(min(max(terminal["mean_r"] - r, -1.25), 1.25))
+            # Бесплатная BL-плотность иногда имеет урезанный хвост, из-за чего
+            # её среднее улетает на несколько R. Это нельзя превращать в drift.
+            # Принимаем только правдоподобный forward, затем shrink + cap как в
+            # robust risk model; на intraday rejected forward = нейтральный carry.
+            raw_forward_move = float(terminal["mean_r"] - r)
+            plausibility = max(3.0 * sigma_R, 0.35)
+            if abs(raw_forward_move) <= plausibility:
+                cap = max(0.30 * sigma_R, 0.04)
+                drift_R = float(min(max(0.25 * raw_forward_move, -cap), cap))
+                forward_drift_source = "bl_forward_shrunk"
+            else:
+                forward_drift_rejected = raw_forward_move
             
         gamma_info = self._gamma_pin(trade, price)
         ou_theta = 0.0
@@ -620,15 +631,17 @@ class Engine:
             heston_xi = 0.4
             heston_rho = -0.7
 
-        # risk-neutral конус (диффузия под волу + АСИММЕТРИЯ скью + ФОРВАРДНАЯ вола
-        # по term-structure, НЕ винрейт; неразрешённые пути якорятся BL-tail ratio)
+        # risk-neutral конус: option-implied diffusion + skew/term/gamma.
+        # Race-P и конечные touch/touch/no-touch считаются раздельно.
         cone = self._cone(r, T, cone_sigma_R, drift_R, skew_R, term_slope,
                           horizon_years, terminal, rv_iv_ratio,
                           ou_theta, ou_mu, heston_kappa, heston_theta, heston_xi, heston_rho)
+        cone["forward_drift_source"] = forward_drift_source
+        cone["forward_drift_rejected"] = forward_drift_rejected
 
         has_options = bool(
             terminal is not None
-            and cone.get("hit_source") == "barrier_mc+bl_terminal")
+            and cone.get("hit_source") == "option_dynamics_first_passage")
         option_p = cone["hit_ratio"] if has_options else None
         p_be = prob["p_breakeven"]
         option_edge = (option_p - p_be) if option_p is not None else None
@@ -648,7 +661,7 @@ class Engine:
                 "p": option_p,
                 "p_lo": max(0.0, option_p - systematic),
                 "p_hi": min(1.0, option_p + systematic),
-                "source": "options_barrier_mc",
+                "source": "options_first_passage",
                 "available": True,
                 "uncertainty": "proxy+snapshot scenario band",
                 "small_sample": False,
@@ -681,11 +694,13 @@ class Engine:
             "scenario_p90_r": cone.get("slice_p90_r"),
             "p_take": option_p,
             "p_stop": (1.0 - option_p) if option_p is not None else None,
-            # UI uses the option-anchored horizon split. Raw barrier touches are
-            # retained separately for diagnostics and AI semantics.
-            "p_take_horizon": cone.get("p_take_anchored"),
-            "p_stop_horizon": cone.get("p_stop_anchored"),
-            "p_unresolved_horizon": cone.get("unresolved_anchored"),
+            # Three-outcome finite horizon and eventual barrier race are
+            # intentionally separate; no-touch is never folded into stop.
+            "p_take_horizon": cone.get("p_take"),
+            "p_stop_horizon": cone.get("p_stop"),
+            "p_unresolved_horizon": cone.get("unresolved"),
+            "p_take_race": cone.get("p_take_anchored"),
+            "p_stop_race": cone.get("p_stop_anchored"),
             "p_take_reached_horizon": cone.get("p_take"),
             "p_stop_reached_horizon": cone.get("p_stop"),
             "p_unresolved_raw_horizon": cone.get("unresolved"),
@@ -700,6 +715,8 @@ class Engine:
             "terminal_p_take": (terminal or {}).get("p_take"),
             "terminal_p_stop": (terminal or {}).get("p_stop"),
             "terminal_hit": (terminal or {}).get("hit_ratio"),
+            "forward_drift_source": forward_drift_source,
+            "forward_drift_rejected": forward_drift_rejected,
             "chain_age_sec": chain_age,
             "proxy": self.market.instrument.options_proxy,
             "proxy_transform": self.market.instrument.proxy_transform,
@@ -775,7 +792,7 @@ class Engine:
         out["available"] = True
         out["option_anchored"] = (
             terminal is not None
-            and out.get("hit_source") == "barrier_mc+bl_terminal"
+            and out.get("hit_source") == "option_dynamics_first_passage"
         )
         out["scenario_only"] = not out["option_anchored"]
         out["probability_available"] = out["option_anchored"]

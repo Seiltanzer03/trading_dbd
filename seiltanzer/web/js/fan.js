@@ -85,6 +85,11 @@ export function initFan(canvas) {
     const ratio = data.rv_iv_ratio;         // реализ./implied вола (наценка ММ)
     const termSlope = data.term_slope || 0; // >0 контанго (вола дышит позже)
     const anchored = !!data.option_anchored;
+    const raceTake = data.p_take_anchored ?? data.hit_ratio;
+    const raceStop = data.p_stop_anchored ?? (raceTake != null ? 1 - raceTake : null);
+    const touchTake = data.p_take;
+    const touchStop = data.p_stop;
+    const noTouch = data.unresolved;
     const rNow = curR != null ? curR : r0;
 
     const padL = 58, padR = 16, padT = 40, padB = 34;
@@ -94,6 +99,16 @@ export function initFan(canvas) {
     const yHi = Math.max(T + 0.45, rNow + 0.4);
     const X = (tau) => padL + tau * plotW;
     const Y = (R) => padT + (yHi - R) / (yHi - yLo) * plotH;
+
+    // Полная шкала развязки: квартали реального option-horizon остаются видны
+    // независимо от наличия фактических barrier hits.
+    ctx.font = '8px "IBM Plex Mono", monospace';
+    [0, 0.25, 0.5, 0.75, 1].forEach((tau) => {
+      ctx.strokeStyle = tau === 1 ? 'rgba(20,20,15,.38)' : 'rgba(20,20,15,.10)';
+      ctx.lineWidth = 1; ctx.setLineDash(tau === 1 ? [3, 3] : [2, 4]);
+      ctx.beginPath(); ctx.moveTo(X(tau), padT); ctx.lineTo(X(tau), padT + plotH); ctx.stroke();
+      ctx.setLineDash([]);
+    });
 
     // зоны прибыли/убытка
     ctx.fillStyle = 'rgba(46,125,79,0.06)'; ctx.fillRect(padL, Y(yHi), plotW, Y(T) - Y(yHi));
@@ -154,18 +169,23 @@ export function initFan(canvas) {
       ctx.fillStyle = lblColor || color; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'left';
       ctx.fillText(lbl, padL + 2, Y(R) - 3);
     };
-    hline(T, COLORS.green, [], `ТЕЙК +${T.toFixed(2)}R · ${anchored ? 'OPTION SPLIT' : 'сценариев'} ${fmtProb(data.p_take_anchored ?? data.p_take)}`, COLORS.green);
+    hline(T, COLORS.green, [], `ТЕЙК +${T.toFixed(2)}R · TOUCH≤H ${fmtProb(touchTake)}`, COLORS.green);
     hline(0, COLORS.dim, [3, 3], 'ВХОД (0)', COLORS.dim);
-    hline(-1, COLORS.red, [], `СТОП −1R · ${anchored ? 'OPTION SPLIT' : 'сценариев'} ${fmtProb(data.p_stop_anchored ?? data.p_stop)}`, COLORS.red);
+    hline(-1, COLORS.red, [], `СТОП −1R · TOUCH≤H ${fmtProb(touchStop)}`, COLORS.red);
 
     // медиана развязки — вертикаль
-    if (hy && data.median_years != null) {
-      const tau = Math.max(0, Math.min(1, data.median_years / hy));
+    if (hy) {
+      const hasMedian = data.median_years != null;
+      const tau = hasMedian ? Math.max(0, Math.min(1, data.median_years / hy)) : 1;
       ctx.strokeStyle = COLORS.dim; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(X(tau), padT); ctx.lineTo(X(tau), padT + plotH); ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle = COLORS.dim; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
       const termTag = termSlope > 0.03 ? ' · контанго' : termSlope < -0.03 ? ' · бэквордация' : '';
-      ctx.fillText(`медиана ≈ ${fmtTime(data.median_years)}${termTag}`, X(tau), padT - 4);
+      const medianLabel = hasMedian
+        ? `медиана касания ≈ ${fmtTime(data.median_years)}`
+        : `медиана касания > ${fmtTime(hy)}`;
+      ctx.textAlign = hasMedian ? 'center' : 'right';
+      ctx.fillText(`${medianLabel}${termTag}`, X(tau) - (hasMedian ? 0 : 3), padT - 4);
     }
 
     // текущая цена — пульсирующая точка на левом краю
@@ -179,13 +199,16 @@ export function initFan(canvas) {
     // ось времени
     ctx.fillStyle = COLORS.dim; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
     const tlabel = (tau) => hy ? fmtTime(hy * tau) : `${(tau * 100).toFixed(0)}%`;
-    ctx.textAlign = 'left'; ctx.fillText('сейчас', padL, H - 12);
-    ctx.textAlign = 'center'; ctx.fillText(tlabel(0.5), padL + plotW / 2, H - 12);
-    ctx.textAlign = 'right'; ctx.fillText('развязка ' + tlabel(1), w - padR, H - 12);
+    [0, 0.25, 0.5, 0.75, 1].forEach((tau) => {
+      ctx.textAlign = tau === 0 ? 'left' : tau === 1 ? 'right' : 'center';
+      const label = tau === 0 ? 'сейчас' : tau === 1 ? `H ${tlabel(1)}` : tlabel(tau);
+      ctx.fillText(label, X(tau), H - 12);
+      ctx.fillRect(X(tau) - 0.5, H - 28, 1, 4);
+    });
 
     // R-подписи слева
     ctx.textAlign = 'right'; ctx.fillStyle = COLORS.dim;
-    [T, 0, -1].forEach((R) => ctx.fillText(`${R >= 0 ? '+' : ''}${R}R`, padL - 4, Y(R) + 3));
+    [T, 0, -1].forEach((R) => ctx.fillText(`${R >= 0 ? '+' : ''}${R.toFixed(2)}R`, padL - 4, Y(R) + 3));
 
     // Ридаут. Без BL option anchor это только доли сценарных путей, не P сделки.
     const lean = trendR > 0.04 ? { t: 'ЖИВОЙ УКЛОН К ТЕЙКУ', c: COLORS.green }
@@ -194,7 +217,7 @@ export function initFan(canvas) {
     ctx.textAlign = 'left'; ctx.font = '700 12px "IBM Plex Mono", monospace'; ctx.fillStyle = lean.c;
     ctx.fillText(anchored ? lean.t : 'СЦЕНАРНЫЙ ВЕЕР · БЕЗ P / EDGE', padL, 14);
     ctx.textAlign = 'right'; ctx.font = '10px "IBM Plex Mono", monospace'; ctx.fillStyle = COLORS.dim;
-    ctx.fillText(`${anchored ? 'OPTION SPLIT' : 'доля сценариев'}: ТЕЙК ${fmtProb(data.p_take_anchored ?? data.p_take)} · СТОП ${fmtProb(data.p_stop_anchored ?? data.p_stop)}`, w - padR, 14);
+    ctx.fillText(`${anchored ? 'RACE' : 'сценарии'}: ТЕЙК ${fmtProb(raceTake)} · СТОП ${fmtProb(raceStop)} · NO-TOUCH≤H ${fmtProb(noTouch)}`, w - padR, 14);
     // строка 2: наценка ММ (IV vs RV, пунктирный веер) + перекос волы (скью)
     ctx.font = '9px "IBM Plex Mono", monospace';
     if (ratio != null) {

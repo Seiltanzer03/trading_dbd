@@ -193,9 +193,10 @@ def market_r_distribution(density: RNDensity, scale: float, entry: float,
     корзина, за стоп -> левая), плюс:
       p_take  — P(S за тейком) по рынку,
       p_stop  — P(S за стопом),
-      hit_ratio = p_take / (p_take + p_stop) — terminal tail-ratio, которым
-                  option-anchored barrier MC распределяет неразрешённые пути.
-    Сам по себе tail-ratio не объявляется вероятностью первого достижения.
+      hit_ratio = p_take / (p_take + p_stop) — диагностический terminal
+                  tail-ratio, которым проверяется пригодность сетки страйков.
+    Он не используется как вероятность первого достижения и не распределяет
+    no-touch массу между стопом и тейком.
     """
     risk = abs(entry - stop)
     if risk <= 0 or T <= 0:

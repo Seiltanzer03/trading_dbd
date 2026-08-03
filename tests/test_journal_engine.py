@@ -211,13 +211,19 @@ class TestEngineDemo:
         p = tick["prob"]
         assert p is not None and 0 < p["p_lo"] <= p["p"] <= p["p_hi"] < 1
         assert p["calibration"] == "builtin"
-        assert p["source"] == "options_barrier_mc"
+        assert p["source"] == "options_first_passage"
         assert p["small_sample"] is False and p["model_small_sample"] is True
         assert abs(p["r"]) < 0.2
         assert tick["mc"]["n_paths"] == 4000            # forward-распределение доски
         assert tick["market"]["available"] is True
         assert tick["market"]["edge"] == pytest.approx(
             p["p"] - p["p_breakeven"])
+        assert tick["market"]["p_take_race"] + tick["market"]["p_stop_race"] == pytest.approx(1.0)
+        assert (tick["market"]["p_take_horizon"]
+                + tick["market"]["p_stop_horizon"]
+                + tick["market"]["p_unresolved_horizon"]) == pytest.approx(1.0)
+        assert tick["market"]["scenario_edges"][0] < -1.0
+        assert tick["market"]["scenario_edges"][-1] > p["T"]
         assert tick["mc"]["ev_hold_source"] == "options_probability"
         # доска — распределение к горизонту: не бинарна, есть масса в середине
         assert len(tick["mc"]["hist"]["probs"]) == 11
