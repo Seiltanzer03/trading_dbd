@@ -75,25 +75,34 @@ class Instrument:
     # Прямая OTC/spot-котировка Swissquote. Если задана, именно она является
     # отображаемой ценой; Yahoo-фьючерс используется только для истории.
     swissquote_pair: str | None = None
+    # Точный broker CFD symbol в бесплатном TradingView scanner snapshot.
+    # Yahoo остаётся резервом и источником истории, но не основной ценой.
+    tradingview_symbol: str | None = None
 
 
 INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
     Instrument("NAS100", "^NDX",     "QQQ", 21500.0, 0.22,
-               price_label="NASDAQ-100 cash index"),
+               price_label="OANDA NAS100/USD CFD",
+               tradingview_symbol="OANDA:NAS100USD"),
     Instrument("SP500",  "^GSPC",    "SPY", 6100.0,  0.17,
-               price_label="S&P 500 cash index"),
+               price_label="OANDA SPX500/USD CFD",
+               tradingview_symbol="OANDA:SPX500USD"),
     Instrument("US30",   "^DJI",     "DIA", 44500.0, 0.15,
-               price_label="Dow Jones cash index"),
+               price_label="OANDA US30/USD CFD",
+               tradingview_symbol="OANDA:US30USD"),
     # экспериментальные прокси — US-ETF на страну/валюту; трекинг неточный,
     # опционы тонкие; данные помечаются «низкая надёжность» в интерфейсе.
     Instrument("GER40",  "^GDAXI",   "EWG", 24300.0, 0.16, proxy_experimental=True,
-               price_label="DAX cash index"),
+               price_label="FP Markets German 40 Index Cash",
+               tradingview_symbol="FPMARKETS:GER40"),
     Instrument("UK100",  "^FTSE",    "EWU", 8900.0,  0.12, proxy_experimental=True,
-               price_label="FTSE 100 cash index"),
+               price_label="OANDA UK100/GBP CFD",
+               tradingview_symbol="OANDA:UK100GBP"),
     # В стратегии исторически используется код JPY100, но торгуемый инструмент
     # пользователя — JP225/Nikkei 225, а не валютная пара USD/JPY.
     Instrument("JPY100", "^N225",    None,  62500.0, 0.20,
-               price_label="JP225 / Nikkei 225 cash index"),
+               price_label="OANDA JP225Y/JPY CFD",
+               tradingview_symbol="OANDA:JP225YJPY"),
     # Отображаем spot OTC. Yahoo futures остаются только источником
     # истории/объёма и переводятся в текущую spot-шкалу.
     Instrument("XAU",    "GC=F",     "GLD", 3350.0,  0.16,

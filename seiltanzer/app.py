@@ -189,6 +189,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "setups": _setups_payload(),
             "instruments": {c: {"yahoo": i.yahoo,
                                 "quote_pair": i.swissquote_pair,
+                                "broker_symbol": i.tradingview_symbol,
                                 "options_proxy": i.options_proxy}
                             for c, i in INSTRUMENTS.items()},
         }

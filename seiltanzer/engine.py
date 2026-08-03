@@ -110,8 +110,11 @@ class Engine:
         if not trade:
             return 0.0
         offset = float(trade.get("quote_offset") or 0.0)
-        if (offset and not self.settings.demo and self.market.instrument.swissquote_pair
-                and "Swissquote OTC" not in str(trade.get("quote_source") or "")):
+        direct_source = ("Swissquote OTC" if self.market.instrument.swissquote_pair
+                         else "TradingView snapshot"
+                         if self.market.instrument.tradingview_symbol else None)
+        if (offset and not self.settings.demo and direct_source
+                and direct_source not in str(trade.get("quote_source") or "")):
             return 0.0
         return offset
 
@@ -207,7 +210,8 @@ class Engine:
             "raw_value": raw_price,
             "effective_value": price,
             "basis_offset": self._trade_quote_offset(trade),
-            "ticker": (self.market.instrument.swissquote_pair
+            "ticker": (self.market.instrument.tradingview_symbol
+                       or self.market.instrument.swissquote_pair
                        or self.market.instrument.yahoo),
             "history_ticker": self.market.instrument.yahoo,
             "label": self.market.instrument.price_label or self.market.instrument.yahoo,

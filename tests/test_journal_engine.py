@@ -147,6 +147,7 @@ class TestEngineDemo:
         instrument = INSTRUMENTS["JPY100"]
         assert instrument.yahoo == "^N225"
         assert instrument.swissquote_pair is None
+        assert instrument.tradingview_symbol == "OANDA:JP225YJPY"
         assert "JP225" in instrument.price_label
 
     def test_all_instruments_have_explicit_data_applicability(self, engine):

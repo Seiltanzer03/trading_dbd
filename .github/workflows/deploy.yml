@@ -78,6 +78,7 @@ jobs:
             curl -fsS http://127.0.0.1:8790/api/state | \
               /opt/seiltanzer/.venv/bin/python -c 'import json,sys; d=json.load(sys.stdin); p=d["tick"]["feeds"]["price"]; print("quote:", d["tick"]["instrument"], p.get("value"), p.get("source"), p.get("status"))'
             /opt/seiltanzer/.venv/bin/python -c 'from seiltanzer.data.feeds import _fetch_swissquote_quote as q; x=q("XAU/USD"); print("xau spot:", round(x["value"], 3))'
+            /opt/seiltanzer/.venv/bin/python -c 'from seiltanzer.data.feeds import _fetch_tradingview_quote as q; ss=("OANDA:NAS100USD","OANDA:SPX500USD","OANDA:US30USD","OANDA:UK100GBP","OANDA:JP225YJPY","FPMARKETS:GER40"); print("broker quotes:", {s:q(s)["value"] for s in ss})'
       - name: Публикую проверенный production-статус
         if: always()
         env:

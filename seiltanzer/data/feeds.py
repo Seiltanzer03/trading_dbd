@@ -63,6 +63,41 @@ def _fetch_swissquote_quote(pair: str, timeout: float = 5.0) -> dict:
             "ts": max(timestamps) if timestamps else time.time()}
 
 
+def _fetch_tradingview_quote(symbol: str, timeout: float = 5.0) -> dict:
+    """Последняя цена конкретного broker CFD из TradingView scanner.
+
+    Это snapshot, а не выдуманная конверсия cash index. Символ включает
+    поставщика (например OANDA:NAS100USD или FPMARKETS:GER40).
+    """
+    columns = ["close", "bid", "ask", "update_mode", "description"]
+    body = json.dumps({
+        "symbols": {"tickers": [symbol], "query": {"types": []}},
+        "columns": columns,
+    }).encode()
+    request = urllib.request.Request(
+        "https://scanner.tradingview.com/cfd/scan", data=body,
+        headers={"Accept": "application/json", "Content-Type": "application/json",
+                 "User-Agent": "Seiltanzer/0.1"}, method="POST")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.load(response)
+    rows = payload.get("data") or []
+    if not rows or rows[0].get("s") != symbol:
+        raise RuntimeError(f"TradingView не вернул {symbol}")
+    values = rows[0].get("d") or []
+    data = dict(zip(columns, values))
+    value = float(data.get("close"))
+    if not math.isfinite(value) or value <= 0:
+        raise RuntimeError(f"TradingView вернул неверную цену {symbol}")
+    result = {"value": value, "ts": time.time(),
+              "update_mode": data.get("update_mode"),
+              "description": data.get("description")}
+    for key in ("bid", "ask"):
+        raw = data.get(key)
+        if raw is not None and math.isfinite(float(raw)) and float(raw) > 0:
+            result[key] = float(raw)
+    return result
+
+
 class DemoMarket:
     """Синтетический рынок: GBM-цены, OU-индексы волы, BS-цепочки."""
 
@@ -135,6 +170,7 @@ class MarketData:
         self._price_prev_val: float | None = None   # для детекта «нет тиков» (закрыт рынок)
         self._price_change_ts: float | None = None
         self._last_price_rest_attempt = 0.0
+        self._last_broker_rest_attempt = 0.0
         self._last_proxy_rest_attempt = 0.0
         # Yahoo WebSocket нередко отдаёт proxy, но молчит по cash index или
         # активному фьючерсу. Тогда сохраняем синхронную пару instrument↔driver
@@ -161,6 +197,13 @@ class MarketData:
     def instrument(self) -> Instrument:
         return INSTRUMENTS[self.instrument_code]
 
+    def _has_direct_price_scale(self) -> bool:
+        """Цена сейчас действительно в шкале spot/broker, а не Yahoo fallback."""
+        source = str(self.price.get("source") or "")
+        return (bool(self.instrument.swissquote_pair and source.startswith("Swissquote OTC"))
+                or bool(self.instrument.tradingview_symbol
+                        and source.startswith("TradingView snapshot")))
+
     def set_instrument(self, code: str) -> None:
         if code not in INSTRUMENTS:
             raise ValueError(f"неизвестный инструмент: {code}")
@@ -171,6 +214,7 @@ class MarketData:
             self._price_prev_val = None
             self._price_change_ts = None
             self._last_price_rest_attempt = 0.0
+            self._last_broker_rest_attempt = 0.0
             self._last_proxy_rest_attempt = 0.0
             self._price_anchor_raw = None
             self._price_anchor_proxy = None
@@ -363,6 +407,37 @@ class MarketData:
             cutoff = now - 8 * 3600
             self.intraday = [x for x in self.intraday if x[0] > cutoff]
             return
+        broker_error = None
+        broker_symbol = self.instrument.tradingview_symbol
+        if broker_symbol:
+            now = time.time()
+            if now - self._last_broker_rest_attempt < self.settings.price_poll_sec:
+                return
+            self._last_broker_rest_attempt = now
+            try:
+                quote = _fetch_tradingview_quote(broker_symbol)
+                mode = str(quote.get("update_mode") or "").lower()
+                status = ("delayed" if "delayed" in mode or "endofday" in mode
+                          else "live")
+                self.price = _status_dict(
+                    quote["value"], status, quote["ts"],
+                    source=f"TradingView snapshot {broker_symbol}")
+                self.price.update({
+                    "derived": False, "instrument_type": "broker_cfd",
+                    "update_mode": quote.get("update_mode"),
+                    "description": quote.get("description"),
+                })
+                for key in ("bid", "ask"):
+                    if key in quote:
+                        self.price[key] = quote[key]
+                if "bid" in quote and "ask" in quote:
+                    self.price["spread"] = quote["ask"] - quote["bid"]
+                self._annotate_freshness()
+                self.intraday.append((now, quote["value"], 0.0))
+                self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
+                return
+            except Exception as e:  # Yahoo cash остаётся честным fallback
+                broker_error = str(e)[:200]
         # Для OTC/spot инструментов нельзя показывать Yahoo futures: у XAU их
         # basis меняется с экспирацией и сейчас достигает десятков долларов.
         pair = self.instrument.swissquote_pair
@@ -393,7 +468,10 @@ class MarketData:
             if sp is not None:
                 now = time.time()
                 self.price = _status_dict(sp, "live", now,
-                                          source=f"stream {self.instrument.yahoo}")
+                                          error=broker_error,
+                                          source=(f"stream {self.instrument.yahoo}"
+                                                  + (" (broker fallback)"
+                                                     if broker_error else "")))
                 self.price["derived"] = False
                 self._annotate_freshness()
                 self.intraday.append((now, sp, 0.0))
@@ -419,7 +497,9 @@ class MarketData:
             anchor_now = time.time()
             self.price = _status_dict(
                 p, "delayed", anchor_now,
-                source=f"yfinance REST {self.instrument.yahoo} (indicative)")
+                error=broker_error,
+                source=(f"yfinance REST {self.instrument.yahoo} (indicative)"
+                        + ("; broker feed fallback" if broker_error else "")))
             self.price["derived"] = False
             self._annotate_freshness()
         except Exception as e:  # noqa: BLE001 — фид обязан пережить любой сбой источника
@@ -434,12 +514,14 @@ class MarketData:
             hist = yf.Ticker(self.instrument.yahoo).history(period="1d", interval="1m")
             if len(hist):
                 offset = 0.0
-                if self.instrument.swissquote_pair:
+                if self.instrument.swissquote_pair or self.instrument.tradingview_symbol:
                     if self.price.get("value") is None:
-                        return  # не публикуем futures-шкалу под именем spot
+                        return  # не публикуем чужую шкалу под именем broker/spot
                     # Фьючерсные бары служат формой/объёмом, но вся шкала
                     # переносится в текущий spot одним внутридневным basis.
-                    offset = float(self.price["value"]) - float(hist["Close"].iloc[-1])
+                    if self._has_direct_price_scale():
+                        offset = (float(self.price["value"])
+                                  - float(hist["Close"].iloc[-1]))
                 self.intraday = [
                     (ts.timestamp(), float(r["Close"]) + offset, float(r["Volume"]))
                     for ts, r in hist.iterrows()]
@@ -476,16 +558,17 @@ class MarketData:
             bars = {"highs": hist["High"].tolist(),
                     "lows": hist["Low"].tolist(),
                     "closes": hist["Close"].tolist()}
-            if self.instrument.swissquote_pair:
+            if self.instrument.swissquote_pair or self.instrument.tradingview_symbol:
                 if self.price.get("value") is None:
                     raise RuntimeError("нет прямого spot-якоря для дневной шкалы")
-                offset = float(self.price["value"]) - float(bars["closes"][-1])
-                bars = {key: [float(x) + offset for x in values]
-                        for key, values in bars.items()}
+                if self._has_direct_price_scale():
+                    offset = float(self.price["value"]) - float(bars["closes"][-1])
+                    bars = {key: [float(x) + offset for x in values]
+                            for key, values in bars.items()}
             self.daily = {"bars": bars,
                           **_status_dict(True, "live", time.time(),
                                          source=(f"yfinance {self.instrument.yahoo} 1d "
-                                                 "→ current spot basis"))}
+                                                 "→ current quote basis"))}
             self.cache.put(f"daily:{self.instrument.yahoo}", bars)
         except Exception as e:  # noqa: BLE001
             cached = self.cache.get(f"daily:{self.instrument.yahoo}",

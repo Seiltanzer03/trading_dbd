@@ -53,9 +53,30 @@ def test_price_never_uses_proxy_as_instrument_quote(tmp_path):
         md.stream = _StubStream({"QQQ": 102.0})  # ^NDX намеренно молчит
         md.price = {"value": 20_000.0, "status": "delayed", "ts": time.time()}
         md._last_price_rest_attempt = time.time()
+        md._last_broker_rest_attempt = time.time()
         md.refresh_price()
         assert md.price["value"] == pytest.approx(20_000.0)
         assert md.price.get("derived") is not True
+    finally:
+        cache.close()
+
+
+def test_index_uses_exact_broker_snapshot_not_cash_index(tmp_path, monkeypatch):
+    cache = DiskCache(str(tmp_path / "cache.db"))
+    try:
+        md = MarketData(Settings(stream=True, data_dir=str(tmp_path)), cache)
+        md.stream = _StubStream({"^NDX": 28_274.2})
+        monkeypatch.setattr(
+            "seiltanzer.data.feeds._fetch_tradingview_quote",
+            lambda symbol: {"value": 28_341.5, "bid": 28_340.5,
+                            "ask": 28_342.5, "ts": time.time(),
+                            "update_mode": "streaming",
+                            "description": "US Nas 100"})
+        md.refresh_price()
+        assert md.price["value"] == pytest.approx(28_341.5)
+        assert md.price["source"] == "TradingView snapshot OANDA:NAS100USD"
+        assert md.price["instrument_type"] == "broker_cfd"
+        assert md.price["derived"] is False
     finally:
         cache.close()
 
