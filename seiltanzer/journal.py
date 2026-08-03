@@ -295,6 +295,8 @@ class Journal:
             except (TypeError, ValueError, json.JSONDecodeError):
                 snapshot = {}
             obs = snapshot.get("observation") or {}
+            cone = obs.get("probability_cone") or {}
+            tape = (obs.get("position") or {}).get("price_tape") or {}
             item["metrics"] = {
                 "r": ((obs.get("position") or {}).get("r")),
                 "p_take": ((obs.get("option_probability") or {}).get("p_take_first")),
@@ -303,6 +305,9 @@ class Journal:
                 "barrier_ev_r": ((obs.get("option_probability") or {}).get("barrier_ev_r")
                                  if (obs.get("option_probability") or {}).get("barrier_ev_r") is not None
                                  else (obs.get("option_probability") or {}).get("option_ev")),
+                "mode_r": cone.get("mode_r"),
+                "median_r": cone.get("median_r"),
+                "live_short_r": tape.get("directional_short_r"),
             }
             result.append(item)
         return result

@@ -11,10 +11,10 @@ from seiltanzer.engine import Engine
 
 def test_prompt_is_compact_scenario_manager_not_stop_repeater():
     assert len(SETUP_PLAYBOOKS) == 16
-    assert "<=240 слов" in SYSTEM_PROMPT
-    assert "Не пиши «закрыть на стопе»" in SYSTEM_PROMPT
-    assert "только после 1.5R" in SYSTEM_PROMPT
-    assert "scenario_frame" in SYSTEM_PROMPT
+    assert "180–260 слов" in SYSTEM_PROMPT
+    assert "НЕ пересказывай FVG/AMD" in SYSTEM_PROMPT
+    assert "БУ/trailing только после" in SYSTEM_PROMPT
+    assert "manager_frame" in SYSTEM_PROMPT
     assert SETUP_PLAYBOOKS[11]["entry"].startswith("long after VIX")
 
 
@@ -42,9 +42,12 @@ def test_snapshot_covers_visual_models_and_trade_memory(tmp_path):
         assert set(snapshot["scenario_frame"]) >= {
             "A_continuation", "B_stall", "C_deterioration", "next_review_events",
         }
-        assert "15m bullish body close" in snapshot["scenario_frame"]["setup_guard"]
-        assert ">=" in snapshot["scenario_frame"]["A_continuation"]["option_trigger"]
+        assert "setup_guard" not in snapshot["scenario_frame"]
+        assert "рынок переходит" in snapshot["scenario_frame"]["A_continuation"]["meaning"]
         assert snapshot["decision_frame"]["option_regime"]
+        assert snapshot["manager_frame"]["state_name"]
+        assert "текущ" in snapshot["manager_frame"]["reasons_plain"][0]
+        assert "следующий плановый рубеж" in snapshot["manager_frame"]["action_now_plain"]
         assert snapshot["strategy"]["playbook"]["timeframes"] == "12H/4H/15m"
         assert snapshot["time_context"]["timezone"] == "Europe/Athens"
         assert set(snapshot["observation"]["exact_levels"]) == {
@@ -105,11 +108,15 @@ def test_ai_rewrites_legacy_metric_answer_once(monkeypatch):
     assert len(calls) == 2
 
 
-def test_ai_expands_setup_guard_from_exact_playbook(monkeypatch):
+def test_ai_accepts_human_manager_report_without_setup_repetition(monkeypatch):
     class Response:
         def raise_for_status(self): pass
         def json(self):
-            return {"choices": [{"message": {"content": "A → setup_guard; B → ok; C → ok"}}]}
+            return {"choices": [{"message": {"content": (
+                "СОСТОЯНИЕ — зависание.\nИЗМЕНИЛОСЬ — без изменений.\n"
+                "ВРЕМЯ — окно модели.\nЧТО ДЕЛАТЬ — удерживать.\nПОЧЕМУ — рынок ждёт паузу.\n"
+                "ПЛАН — Продолжение → держать; Зависание → ждать; Ухудшение → защищать.\n"
+                "СЛЕДУЮЩАЯ ПРОВЕРКА — новая цепочка.")}}]}
     class Client:
         def __init__(self, **_kwargs): pass
         def __enter__(self): return self
@@ -117,6 +124,6 @@ def test_ai_expands_setup_guard_from_exact_playbook(monkeypatch):
         def post(self, *_args, **_kwargs): return Response()
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr("seiltanzer.ai_verdict.httpx.Client", Client)
-    out = request_verdict({"scenario_frame": {"setup_guard": "точное условие 8H FVG"}})
-    assert "setup_guard" not in out["verdict"]
-    assert "точное условие 8H FVG" in out["verdict"]
+    out = request_verdict({"manager_frame": {"state_name": "ЗАВИСАНИЕ"}})
+    assert "СОСТОЯНИЕ — зависание" in out["verdict"]
+    assert "setup" not in out["verdict"].lower()

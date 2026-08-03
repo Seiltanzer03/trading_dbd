@@ -15,35 +15,33 @@ import httpx
 from .strategy_playbooks import PLAYBOOKS as SETUP_PLAYBOOKS
 
 
-SYSTEM_PROMPT = """Ты — компактный risk observer активной сделки Seiltanzer.
-Ты получаешь уже нормализованный снимок: точную карточку сетапа из PDF, время,
-динамику, evidence_matrix, decision_frame и scenario_frame. Прочитай ВСЕ группы, но выводи только
-решающие факторы.
+SYSTEM_PROMPT = """Ты — понятный диспетчер УЖЕ ОТКРЫТОЙ сделки Seiltanzer.
+Входовой сетап уже принят трейдером: НЕ пересказывай FVG/AMD/Block/Fib и не
+переоценивай вход. Из стратегии используй только лестницу фиксаций, БУ и trailing.
 
-Иерархия: (1) option barrier first-touch TAKE/STOP/NO-TOUCH, barrier EV, RND
-Q10/Q50/Q90/mode, IV skew/term; (2) live tape/ATR/уровни; (3) correlation;
-(4) OI/GEX только как эвристический контекст. Это risk-neutral сценарная модель,
-не исторический winrate и не расстояние stop/take. Большой NO-TOUCH означает
-зависание до горизонта, не STOP. Не используй устаревшие или отсутствующие поля.
+Внутренне проверь ВСЕ группы evidence_matrix: option first-touch/NO-TOUCH/barrier
+EV/RND/IV/skew/term, live tape/ATR/уровни, корреляции, OI/GEX, время и качество.
+Решение сверяй с manager_frame и scenario_frame. Наружу переводи профессиональные
+метрики на обычный русский. Термин допустим только после смысла в скобках.
+Например: «рынок ждёт боковик до опционного горизонта (NO-TOUCH 82%)», а не просто
+«NO-TOUCH 82%». Низкий pTake при большом NO-TOUCH не называй провалом сделки.
 
-Правила: сравни с открытием и прошлым запросом; учитывай длительность сделки,
-сессию, время до горизонта и обновления цепочки. Не выдумывай FVG-подтверждение,
-уровни или диапазоны. Не пиши «закрыть на стопе». Стоп не расширять, убыток не
-усреднять. Лестница по 10%; БУ и trailing только после 1.5R. Если данные delayed,
-proxy или manual structure неизвестна — снизь уверенность, но дай рабочий план.
-Не используй null как число. Не обещай преимущество: покажи наблюдаемое основание.
+Цель ответа: объяснить текущее состояние, изменение со прошлого разбора, влияние
+времени и конкретное управление. Не пиши общие советы. Не выдумывай уровни.
+Не расширяй стоп, не усредняй убыток. Лестница по 10%; БУ/trailing только после
+1.5R. Delayed/proxy понижает уверенность, но не отменяет рабочий план.
 
-Ответ <=240 слов, без вводных:
-СТАТУС — подтверждён / нейтрален / ухудшается / сломан / данных мало; одно основание.
-ВРЕМЯ — фаза сделки, сессия и отношение к option horizon одной строкой.
-ОПЦИОНЫ — 2–3 главных факта и их изменение.
-СЕЙЧАС — одно действие; обязательно: barrier EV/NO-TOUCH, live-фаза и конкретное
-условие активного setup.playbook. Нельзя называть pTake «низкой» без NO-TOUCH и горизонта.
-СЦЕНАРИИ — три отдельные строки `A/B/C: option + live → action`; дословно сохрани
-пороги и action из scenario_frame, не подменяй порог текущим baseline. Назови
-конкретный setup_guard, не слово setup.playbook.
-КОНТРОЛЬ — ближайшее событийное условие и одна главная проблема качества.
-Только переданные значения; цены используй лишь из exact_levels."""
+Ответ 180–260 слов, строго:
+СОСТОЯНИЕ — короткое русское название фазы и что происходит со сделкой.
+ИЗМЕНИЛОСЬ — 1–2 значимых изменения с прошлого разбора; если их нет — так и скажи.
+ВРЕМЯ — сколько сделка открыта, сессия, что означает оставшееся опционное окно.
+ЧТО ДЕЛАТЬ — одно действие сейчас, следующий рубеж менеджмента и что пока запрещено.
+ПОЧЕМУ — 2–3 фактора простыми словами; технические значения только в скобках.
+ПЛАН — три строки: «Продолжение», «Зависание», «Ухудшение»: понятное событие → действие.
+СЛЕДУЮЩАЯ ПРОВЕРКА — конкретное событие, не произвольное время; затем одна проблема данных.
+
+Запрещены слова без расшифровки: baseline, setup_guard, action, live phase, option mode.
+Не используй null/legacy edge. Не повторяй входовой сетап."""
 
 
 def _num(value: Any) -> float | None:
@@ -474,37 +472,46 @@ def _scenario_frame(strategy: dict, obs: dict, history: dict, timing: dict) -> d
     ev = _num(op.get("barrier_ev_r"))
     next_rung = next((x for x in strategy.get("management", {}).get("rungs_r", [])
                       if current_r is None or x > current_r + 1e-6), None)
-    no_touch_label = ("NO-TOUCH доминирует" if _num(no_touch) is not None
-                      and _num(no_touch) >= max(_num(p_take) or 0, _num(p_stop) or 0)
-                      else "NO-TOUCH растёт")
-    playbook = strategy.get("playbook") or {}
-    setup_guard = f"ручное условие: {playbook.get('entry')}; инвалидация: {playbook.get('invalidation')}"
+    center = _num(cone.get("median_r"))
+    if center is None:
+        center = _num(cone.get("mode_r"))
     p_take_up = round(min((p_take or 0) + 0.01, 1.0), 4) if p_take is not None else None
     p_stop_up = round(min((p_stop or 0) + 0.01, 1.0), 4) if p_stop is not None else None
-    ev_up = round(ev + 0.03, 4) if ev is not None else None
-    ev_down = round(ev - 0.03, 4) if ev is not None else None
+    ev_up = round(max(ev + 0.03, 0.03), 4) if ev is not None else None
+    ev_down = round(min(ev - 0.03, -0.03), 4) if ev is not None else None
+    stall_mass = max(no_touch or 0.0, 0.70)
+    ev_up_text = f"{ev_up:+.2f}R" if ev_up is not None else "положительного значения"
+    ev_down_text = f"{ev_down:.2f}R" if ev_down is not None else "отрицательного значения"
+    p_take_text = f"{p_take_up * 100:.1f}%" if p_take_up is not None else "значимого роста"
+    p_stop_text = f"{p_stop_up * 100:.1f}%" if p_stop_up is not None else "значимого роста"
+    center_text = f"{center:.2f}R" if center is not None else "центра распределения"
+    protect = ("активировать БУ и trailing по правилам" if current_r is not None and current_r >= 1.5
+               else "сохранить исходный стоп; БУ/trailing ещё не активировать")
     return {
-        "setup_guard": setup_guard,
         "baseline": {"barrier_ev_r": ev, "p_take": p_take, "p_stop": p_stop,
-                     "no_touch": no_touch, "r": current_r},
+                     "no_touch": no_touch, "r": current_r, "rnd_center_r": center},
         "A_continuation": {
-            "option_trigger": f"barrierEV >= {ev_up}R И pTake >= {p_take_up}",
-            "live_trigger": f"R держится выше option mode {cone.get('mode_r')}, median {cone.get('median_r')} растёт",
-            "action": f"удерживать только при setup_guard; снять 10% на {next_rung}R" if next_rung else "вести остаток по правилам trailing",
+            "meaning": "рынок переходит от ожидания к продолжению в сторону тейка",
+            "trigger_plain": (f"опционный баланс становится положительным минимум на {ev_up_text}, шанс касания тейка "
+                              f"в текущем окне растёт до {p_take_text}; цена удерживается выше {center_text}"),
+            "action_plain": (f"удерживать; снять очередные 10% на {next_rung}R"
+                             if next_rung else "вести остаток по активированному trailing"),
         },
         "B_stall": {
-            "option_trigger": f"{no_touch_label} от baseline {no_touch}",
-            "live_trigger": f"R вращается у option mode {cone.get('mode_r')}/median {cone.get('median_r')} без прогресса >=0.20R",
-            "action": "удерживать только при setup_guard; пересчитать после новой цепочки/сдвига горизонта",
+            "meaning": "прибыль сохраняется, но рынок не показывает ускорения",
+            "trigger_plain": (f"масса внутри коридора остаётся/растёт до {stall_mass * 100:.1f}%, "
+                              f"цена остаётся около {center_text} без прогресса 0.20R"),
+            "action_plain": "удерживать без добавления; ничего внепланово не фиксировать; пересчитать после новой цепочки",
         },
         "C_deterioration": {
-            "option_trigger": f"pStop >= {p_stop_up} ИЛИ barrierEV <= {ev_down}R",
-            "live_trigger": f"R теряет option mode {cone.get('mode_r')}, live tape против и median {cone.get('median_r')} падает",
-            "action": "не расширять/не усреднять; сохранить исходный стоп и только активированные правила стратегии",
+            "meaning": "зависание превращается в реальное ухудшение, а не обычный шум",
+            "trigger_plain": (f"опционный баланс становится отрицательным до {ev_down_text} или риск касания стопа растёт до {p_stop_text}; "
+                              f"одновременно цена уходит ниже {center_text} и короткий поток направлен против сделки"),
+            "action_plain": f"не добавлять и не усреднять; {protect}",
         },
         "next_review_events": [
-            "new option-chain timestamp", "R move >=0.20 from this review",
-            "cross option mode/median/Q10/Q90", "OI wall or gamma flip crossing",
+            "новая опционная цепочка", "сдвиг цены на 0.20R от этого разбора",
+            "переход цены через центр опционного распределения", "пересечение OI-wall или gamma flip",
         ],
         "time_note": {
             "session": timing.get("session"), "horizon_minutes": timing.get("option_horizon_minutes"),
@@ -557,6 +564,124 @@ def _decision_frame(strategy: dict, obs: dict, history: dict, timing: dict) -> d
     }
 
 
+def _manager_frame(strategy: dict, obs: dict, history: dict, timing: dict) -> dict:
+    """Детерминированный перевод метрик в язык сопровождения сделки."""
+    op, cone, pos = obs["option_probability"], obs["probability_cone"], obs["position"]
+    ev = _num(op.get("barrier_ev_r"))
+    p_take = _num(op.get("touch_take_horizon"))
+    p_stop = _num(op.get("touch_stop_horizon"))
+    no_touch = _num(op.get("no_touch_horizon"))
+    r_now = _num(pos.get("r"))
+    max_r = _num(pos.get("max_r"))
+    mode = _num(cone.get("mode_r"))
+    median = _num(cone.get("median_r"))
+    center_values = [x for x in (mode, median) if x is not None]
+    center = sum(center_values) / len(center_values) if center_values else None
+    tape_r = _num((pos.get("price_tape") or {}).get("directional_short_r"))
+    change = history.get("since_last_ai_review") or {}
+    d_r, d_ev = _num(change.get("r")), _num(change.get("barrier_ev_r"))
+    d_take, d_stop = _num(change.get("p_take")), _num(change.get("p_stop"))
+    d_center = _num(change.get("median_r"))
+    adverse_live = tape_r is not None and tape_r <= -0.08
+    positive_live = tape_r is not None and tape_r >= 0.08
+    center_near = (center is not None and r_now is not None and abs(center - r_now) <= 0.30)
+
+    if not op.get("available"):
+        state_code, state_name = "data_limited", "ДАННЫХ НЕДОСТАТОЧНО"
+        state_explanation = "опционная модель сейчас не имеет валидной привязки; остаётся только live-контекст"
+    elif ev is not None and ev < -0.03 and (adverse_live or (d_ev is not None and d_ev < -0.02)
+                                            or (d_stop is not None and d_stop > 0.01)):
+        state_code, state_name = "deteriorating", "СДЕЛКА УХУДШАЕТСЯ"
+        state_explanation = "опционный перекос и текущий поток одновременно смещаются против позиции"
+    elif no_touch is not None and no_touch >= 0.70 and center_near:
+        state_code, state_name = "stall", "ЗАВИСАНИЕ"
+        state_explanation = "прибыль удерживается, но рынок пока не подтверждает ускорение к тейку"
+    elif ev is not None and ev >= 0.03 and (positive_live or (d_center is not None and d_center > 0.04)):
+        state_code, state_name = "advancing", "ПРОДОЛЖЕНИЕ"
+        state_explanation = "опционный центр и текущий поток подтверждают движение в сторону тейка"
+    elif max_r is not None and r_now is not None and max_r - r_now >= 0.20:
+        state_code, state_name = "pullback", "ОТКАТ ВНУТРИ СДЕЛКИ"
+        state_explanation = "цена отдала часть достигнутого R, но подтверждённого опционного ухудшения ещё нет"
+    else:
+        state_code, state_name = "balanced", "БАЛАНС"
+        state_explanation = "сильного подтверждения продолжения или ухудшения пока нет"
+
+    changes = []
+    if d_r is not None and abs(d_r) >= 0.03:
+        changes.append(f"результат сделки {'вырос' if d_r > 0 else 'снизился'} на {abs(d_r):.2f}R")
+    if d_ev is not None and abs(d_ev) >= 0.01:
+        changes.append(f"опционный перекос {'улучшился' if d_ev > 0 else 'ухудшился'} на {abs(d_ev):.2f}R")
+    if d_take is not None and abs(d_take) >= 0.005:
+        changes.append(f"шанс касания тейка в текущем окне {'вырос' if d_take > 0 else 'снизился'} на {abs(d_take) * 100:.1f} п.п.")
+    if d_stop is not None and abs(d_stop) >= 0.005:
+        changes.append(f"риск касания стопа в текущем окне {'вырос' if d_stop > 0 else 'снизился'} на {abs(d_stop) * 100:.1f} п.п.")
+    if not changes:
+        changes = ["значимого изменения относительно прошлого разбора нет"]
+
+    rungs = strategy.get("management", {}).get("rungs_r", [])
+    next_rung = next((x for x in rungs if r_now is None or x > r_now + 1e-6), None)
+    if r_now is not None and r_now >= 1.5:
+        protection = "порог 1.5R пройден: активировать БУ и trailing по правилам"
+    else:
+        protection = "до 1.5R не переносить стоп в БУ и не включать trailing"
+    if state_code == "deteriorating":
+        action = (f"не добавлять позицию; {protection}" if r_now is not None and r_now >= 1.5
+                  else f"не добавлять позицию; сохранить исходный стоп; {protection}")
+    elif state_code == "data_limited":
+        action = f"не менять позицию по неполным данным; дождаться валидной цепочки; {protection}"
+    else:
+        action = f"удерживать без добавления; {protection}"
+    if next_rung is not None:
+        action += f"; следующий плановый рубеж — {next_rung}R, фиксация 10%"
+
+    if ev is None:
+        option_meaning = "направленный опционный перекос определить нельзя"
+    elif ev >= 0.10:
+        option_meaning = f"опционный перекос заметно в пользу сделки (+{ev:.2f}R)"
+    elif ev >= 0.03:
+        option_meaning = f"опционный перекос слабо в пользу сделки (+{ev:.2f}R), но сам по себе не подтверждает импульс"
+    elif ev <= -0.03:
+        option_meaning = f"опционный перекос против сделки ({ev:.2f}R)"
+    else:
+        option_meaning = f"опционный перекос практически нейтрален ({ev:+.2f}R)"
+    if no_touch is not None and no_touch >= 0.50:
+        horizon_meaning = (f"до конца текущего опционного окна рынок оценивает вероятность не коснуться ни тейка, "
+                           f"ни стопа в {no_touch * 100:.1f}% — это ожидание паузы, а не вероятность проигрыша")
+    elif no_touch is not None:
+        horizon_meaning = (f"в текущем опционном окне касание одного из барьеров вероятнее паузы: "
+                           f"тейк {((p_take or 0) * 100):.1f}%, стоп {((p_stop or 0) * 100):.1f}%, "
+                           f"без касания {no_touch * 100:.1f}%")
+    else:
+        horizon_meaning = "оценка попадания в стоп/тейк к горизонту недоступна"
+    center_meaning = (f"центр ожидаемого распределения около {center:.2f}R"
+                      + (f", текущая цена {r_now:.2f}R" if r_now is not None else "")
+                      if center is not None else "центр распределения недоступен")
+
+    hours_open = (_num(timing.get("minutes_open")) or 0) / 60
+    horizon_minutes = _num(timing.get("option_horizon_minutes"))
+    session_ru = {"US regular open": "основная сессия США",
+                  "US premarket": "премаркет США", "US post/closed": "сессия США закрыта"}.get(
+                      timing.get("session"), timing.get("session"))
+    time_meaning = f"сделка открыта {hours_open:.1f} ч; сейчас {session_ru}"
+    if horizon_minutes is not None:
+        time_meaning += (f"; текущая опционная оценка смотрит ещё примерно на {horizon_minutes:.0f} мин. "
+                         "Это окно модели, а не крайний срок сделки")
+
+    return {
+        "state_code": state_code, "state_name": state_name,
+        "state_explanation": state_explanation,
+        "changes_plain": changes[:2], "time_plain": time_meaning,
+        "action_now_plain": action,
+        "reasons_plain": [horizon_meaning, option_meaning, center_meaning],
+        "technical": {
+            "r": r_now, "max_r": max_r, "rnd_mode_r": mode, "rnd_median_r": median,
+            "barrier_ev_r": ev, "p_take": p_take, "p_stop": p_stop,
+            "no_touch": no_touch, "live_short_r": tape_r,
+        },
+        "confidence_constraints": _decision_frame(strategy, obs, history, timing).get("confidence_constraints"),
+    }
+
+
 def build_snapshot(engine) -> dict:
     tick = engine.tick_payload()
     trade = tick.get("trade")
@@ -576,6 +701,9 @@ def build_snapshot(engine) -> dict:
             "p_stop": observation["option_probability"].get("touch_stop_horizon"),
             "no_touch": observation["option_probability"].get("no_touch_horizon"),
             "barrier_ev_r": observation["option_probability"].get("barrier_ev_r"),
+            "mode_r": observation["probability_cone"].get("mode_r"),
+            "median_r": observation["probability_cone"].get("median_r"),
+            "live_short_r": observation["position"].get("price_tape", {}).get("directional_short_r"),
         }
         history["since_last_ai_review"] = {
             key: (round(float(value) - float(old[key]), 4)
@@ -584,12 +712,14 @@ def build_snapshot(engine) -> dict:
         }
     timing = _time_context(tick, trade, previous)
     strategy = _strategy(engine, trade)
+    decision = _decision_frame(strategy, observation, history, timing)
+    manager = _manager_frame(strategy, observation, history, timing)
     return {
         "captured_ts": tick.get("ts"), "trade_id": trade_id,
         "strategy": strategy, "time_context": timing,
         "observation": observation, "metric_history": history,
         "evidence_matrix": _evidence_matrix(strategy, observation, history, timing),
-        "decision_frame": _decision_frame(strategy, observation, history, timing),
+        "decision_frame": decision, "manager_frame": manager,
         "scenario_frame": _scenario_frame(strategy, observation, history, timing),
         "previous_reviews": [
             {"ts": item.get("ts"), "metrics": item.get("metrics")}
@@ -636,10 +766,14 @@ def request_verdict(snapshot: dict) -> dict:
     content = result.get("choices", [{}])[0].get("message", {}).get("content")
     if not content:
         raise RuntimeError("OpenRouter вернул пустой ответ")
-    violations = [term for term in ("edge", "null", "delta от открытия", "setup.playbook")
+    violations = [term for term in ("edge", "null", "setup_guard", "setup.playbook",
+                                    "baseline", "action:", "live phase", "option mode")
                   if term in content.lower()]
-    if content.count("→") < 3:
-        violations.append("нет трёх действий формата триггер → действие")
+    required_headers = ("СОСТОЯНИЕ", "ИЗМЕНИЛОСЬ", "ВРЕМЯ", "ЧТО ДЕЛАТЬ",
+                        "ПОЧЕМУ", "ПЛАН", "СЛЕДУЮЩАЯ ПРОВЕРКА")
+    missing_headers = [header for header in required_headers if header not in content.upper()]
+    if missing_headers:
+        violations.append("нет разделов: " + ",".join(missing_headers))
     if violations:
         correction = dict(body)
         correction["max_tokens"] = 650
@@ -647,8 +781,8 @@ def request_verdict(snapshot: dict) -> dict:
             {"role": "assistant", "content": content},
             {"role": "user", "content": "Перепиши ответ полностью. Нарушения: "
              + ", ".join(violations)
-             + ". Используй только decision_frame/scenario_frame; выведи A/B/C отдельными строками, "
-               "в каждой дословный числовой порог, live-триггер, стрелка → и action."},
+             + ". Используй manager_frame и scenario_frame. Переведи метрики на обычный русский; "
+               "не повторяй входовой сетап. Сохрани все обязательные разделы и три сценария событие → действие."},
         ]
         try:
             with httpx.Client(proxy=proxy, timeout=45, trust_env=False) as client:
@@ -664,8 +798,5 @@ def request_verdict(snapshot: dict) -> dict:
                 content, result = fixed, retry_result
         except httpx.HTTPError:
             pass
-    setup_guard = _at(snapshot, "scenario_frame", "setup_guard")
-    if setup_guard:
-        content = content.replace("setup_guard", str(setup_guard))
     return {"verdict": content.strip(), "model": result.get("model", model),
             "captured_ts": snapshot.get("captured_ts")}
