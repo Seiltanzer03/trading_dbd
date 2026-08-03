@@ -74,16 +74,24 @@ def _fetch_tradingview_quote(symbol: str, timeout: float = 5.0) -> dict:
         "symbols": {"tickers": [symbol], "query": {"types": []}},
         "columns": columns,
     }).encode()
-    request = urllib.request.Request(
-        "https://scanner.tradingview.com/cfd/scan", data=body,
-        headers={"Accept": "application/json", "Content-Type": "application/json",
-                 "User-Agent": "Seiltanzer/0.1"}, method="POST")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = json.load(response)
-    rows = payload.get("data") or []
-    if not rows or rows[0].get("s") != symbol:
+    row = None
+    # Брокерские CFD у TradingView обычно лежат в scanner/forex; cfd нужен
+    # некоторым региональным поставщикам, поэтому оставляем его вторым маршрутом.
+    for market in ("forex", "cfd"):
+        request = urllib.request.Request(
+            f"https://scanner.tradingview.com/{market}/scan", data=body,
+            headers={"Accept": "application/json",
+                     "Content-Type": "application/json",
+                     "User-Agent": "Seiltanzer/0.1"}, method="POST")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.load(response)
+        row = next((item for item in (payload.get("data") or [])
+                    if item.get("s") == symbol), None)
+        if row:
+            break
+    if row is None:
         raise RuntimeError(f"TradingView не вернул {symbol}")
-    values = rows[0].get("d") or []
+    values = row.get("d") or []
     data = dict(zip(columns, values))
     value = float(data.get("close"))
     if not math.isfinite(value) or value <= 0:
