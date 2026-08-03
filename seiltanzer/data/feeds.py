@@ -13,6 +13,7 @@ import datetime as dt
 import json
 import logging
 import math
+import os
 import random
 import statistics
 import time
@@ -69,41 +70,9 @@ def _fetch_tradingview_quote(symbol: str, timeout: float = 5.0) -> dict:
     Это snapshot, а не выдуманная конверсия cash index. Символ включает
     поставщика (например OANDA:NAS100USD или FPMARKETS:GER40).
     """
-    columns = ["close", "bid", "ask", "update_mode", "description"]
-    body = json.dumps({
-        "symbols": {"tickers": [symbol], "query": {"types": []}},
-        "columns": columns,
-    }).encode()
-    row = None
-    # Брокерские CFD у TradingView обычно лежат в scanner/forex; cfd нужен
-    # некоторым региональным поставщикам, поэтому оставляем его вторым маршрутом.
-    for market in ("forex", "cfd"):
-        request = urllib.request.Request(
-            f"https://scanner.tradingview.com/{market}/scan", data=body,
-            headers={"Accept": "application/json",
-                     "Content-Type": "application/json",
-                     "User-Agent": "Seiltanzer/0.1"}, method="POST")
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.load(response)
-        row = next((item for item in (payload.get("data") or [])
-                    if item.get("s") == symbol), None)
-        if row:
-            break
-    if row is None:
-        return _fetch_tradingview_ws_quote(symbol, timeout)
-    values = row.get("d") or []
-    data = dict(zip(columns, values))
-    value = float(data.get("close"))
-    if not math.isfinite(value) or value <= 0:
-        raise RuntimeError(f"TradingView вернул неверную цену {symbol}")
-    result = {"value": value, "ts": time.time(),
-              "update_mode": data.get("update_mode"),
-              "description": data.get("description")}
-    for key in ("bid", "ask"):
-        raw = data.get(key)
-        if raw is not None and math.isfinite(float(raw)) and float(raw) > 0:
-            result[key] = float(raw)
-    return result
+    if not os.environ.get("TRADINGVIEW_AUTH_TOKEN"):
+        raise RuntimeError("TRADINGVIEW_AUTH_TOKEN не задан; используется Yahoo fallback")
+    return _fetch_tradingview_ws_quote(symbol, timeout)
 
 
 def _tv_frame(method: str, params: list) -> str:
@@ -152,7 +121,8 @@ def _fetch_tradingview_ws_quote(symbol: str, timeout: float = 5.0) -> dict:
             # Сервер сначала выдаёт session_id; команды, посланные раньше этого
             # handshake-сообщения, иногда молча игнорируются.
             ws.recv(timeout=max(0.1, deadline - time.monotonic()))
-            ws.send(_tv_frame("set_auth_token", ["unauthorized_user_token"]))
+            ws.send(_tv_frame("set_auth_token", [
+                os.environ.get("TRADINGVIEW_AUTH_TOKEN", "unauthorized_user_token")]))
             ws.send(_tv_frame("quote_create_session", [session]))
             ws.send(_tv_frame("quote_set_fields", [session, "lp", "bid", "ask",
                                                      "lp_time", "update_mode",

@@ -39,12 +39,13 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_PROXY: ${{ secrets.OPENROUTER_PROXY }}
+          TRADINGVIEW_AUTH_TOKEN: ${{ secrets.TRADINGVIEW_AUTH_TOKEN }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          envs: OPENROUTER_API_KEY,OPENROUTER_PROXY
+          envs: OPENROUTER_API_KEY,OPENROUTER_PROXY,TRADINGVIEW_AUTH_TOKEN
           command_timeout: 10m
           script: |
             set -e
@@ -66,6 +67,9 @@ jobs:
             if [ -n "$OPENROUTER_PROXY" ]; then
               printf 'OPENROUTER_PROXY=%s\n' "$OPENROUTER_PROXY" >> /etc/seiltanzer.env
             fi
+            if [ -n "$TRADINGVIEW_AUTH_TOKEN" ]; then
+              printf 'TRADINGVIEW_AUTH_TOKEN=%s\n' "$TRADINGVIEW_AUTH_TOKEN" >> /etc/seiltanzer.env
+            fi
             mkdir -p /etc/systemd/system/seiltanzer.service.d
             printf '[Service]\nEnvironmentFile=-/etc/seiltanzer.env\n' \
               > /etc/systemd/system/seiltanzer.service.d/openrouter.conf
@@ -78,7 +82,11 @@ jobs:
             curl -fsS http://127.0.0.1:8790/api/state | \
               /opt/seiltanzer/.venv/bin/python -c 'import json,sys; d=json.load(sys.stdin); p=d["tick"]["feeds"]["price"]; print("quote:", d["tick"]["instrument"], p.get("value"), p.get("source"), p.get("status"))'
             /opt/seiltanzer/.venv/bin/python -c 'from seiltanzer.data.feeds import _fetch_swissquote_quote as q; x=q("XAU/USD"); print("xau spot:", round(x["value"], 3))'
-            /opt/seiltanzer/.venv/bin/python -c 'from seiltanzer.data.feeds import _fetch_tradingview_quote as q; ss=("OANDA:NAS100USD","OANDA:SPX500USD","OANDA:US30USD","OANDA:UK100GBP","OANDA:JP225YJPY","FPMARKETS:GER40"); print("broker quotes:", {s:q(s)["value"] for s in ss})'
+            if [ -n "$TRADINGVIEW_AUTH_TOKEN" ]; then
+              /opt/seiltanzer/.venv/bin/python -c 'from seiltanzer.data.feeds import _fetch_tradingview_quote as q; ss=("OANDA:NAS100USD","OANDA:SPX500USD","OANDA:US30USD","OANDA:UK100GBP","OANDA:JP225YJPY","FPMARKETS:GER40"); print("broker quotes:", {s:q(s)["value"] for s in ss})'
+            else
+              echo "broker quotes: disabled (TRADINGVIEW_AUTH_TOKEN missing)"
+            fi
       - name: Публикую проверенный production-статус
         if: always()
         env:
