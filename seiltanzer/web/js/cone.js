@@ -44,7 +44,7 @@ function fmtTime(years) {
 function fmtProb(p) {
   if (p == null || !Number.isFinite(p)) return '—';
   const pct = p * 100;
-  if (pct > 0 && pct < 0.1) return '<0.1%';
+  if (pct < 0.1) return '<0.1%';
   return `${pct < 10 ? pct.toFixed(1) : pct.toFixed(0)}%`;
 }
 
