@@ -90,7 +90,7 @@ def _fetch_tradingview_quote(symbol: str, timeout: float = 5.0) -> dict:
         if row:
             break
     if row is None:
-        raise RuntimeError(f"TradingView не вернул {symbol}")
+        return _fetch_tradingview_ws_quote(symbol, timeout)
     values = row.get("d") or []
     data = dict(zip(columns, values))
     value = float(data.get("close"))
@@ -104,6 +104,93 @@ def _fetch_tradingview_quote(symbol: str, timeout: float = 5.0) -> dict:
         if raw is not None and math.isfinite(float(raw)) and float(raw) > 0:
             result[key] = float(raw)
     return result
+
+
+def _tv_frame(method: str, params: list) -> str:
+    payload = json.dumps({"m": method, "p": params}, separators=(",", ":"))
+    return f"~m~{len(payload.encode())}~m~{payload}"
+
+
+def _tv_payloads(raw: str | bytes):
+    """Разбирает один или несколько ~m~length~m~ кадров TradingView."""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "ignore")
+    pos = 0
+    while True:
+        start = raw.find("~m~", pos)
+        if start < 0:
+            return
+        split = raw.find("~m~", start + 3)
+        if split < 0:
+            return
+        try:
+            size = int(raw[start + 3:split])
+        except ValueError:
+            pos = split + 3
+            continue
+        payload_start = split + 3
+        payload = raw[payload_start:payload_start + size]
+        if len(payload.encode()) < size:
+            return
+        yield payload
+        pos = payload_start + len(payload)
+
+
+def _fetch_tradingview_ws_quote(symbol: str, timeout: float = 5.0) -> dict:
+    """Одноразовый anonymous WebSocket snapshot конкретного broker symbol."""
+    try:
+        from websockets.sync.client import connect
+    except ImportError as e:  # pragma: no cover — dependency обязательна в prod
+        raise RuntimeError("websockets не установлен") from e
+    session = "qs_" + "".join(random.choice("abcdefghijklmnopqrstuvwxyz")
+                                for _ in range(12))
+    date = dt.datetime.now(dt.timezone.utc).strftime("%Y_%m_%d-%H_%M")
+    escaped = urllib.parse.quote(symbol, safe="")
+    url = ("wss://data.tradingview.com/socket.io/websocket"
+           f"?from=symbols/{escaped}/&date={date}")
+    deadline = time.monotonic() + timeout
+    try:
+        with connect(url, origin="https://www.tradingview.com",
+                     open_timeout=timeout, close_timeout=1) as ws:
+            ws.send(_tv_frame("set_auth_token", ["unauthorized_user_token"]))
+            ws.send(_tv_frame("quote_create_session", [session]))
+            ws.send(_tv_frame("quote_set_fields", [session, "lp", "bid", "ask",
+                                                     "lp_time", "update_mode",
+                                                     "description"]))
+            ws.send(_tv_frame("quote_add_symbols", [session, symbol,
+                                                      {"flags": ["force_permission"]}]))
+            while time.monotonic() < deadline:
+                raw = ws.recv(timeout=max(0.1, deadline - time.monotonic()))
+                for payload in _tv_payloads(raw):
+                    if payload.startswith("~h~"):
+                        ws.send(f"~m~{len(payload.encode())}~m~{payload}")
+                        continue
+                    try:
+                        message = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    if message.get("m") != "qsd":
+                        continue
+                    item = (message.get("p") or [None, {}])[1] or {}
+                    if item.get("n") != symbol:
+                        continue
+                    data = item.get("v") or {}
+                    value = float(data.get("lp"))
+                    if not math.isfinite(value) or value <= 0:
+                        continue
+                    result = {"value": value, "ts": time.time(),
+                              "update_mode": data.get("update_mode"),
+                              "description": data.get("description"),
+                              "transport": "stream"}
+                    for key in ("bid", "ask"):
+                        raw_value = data.get(key)
+                        if (raw_value is not None and math.isfinite(float(raw_value))
+                                and float(raw_value) > 0):
+                            result[key] = float(raw_value)
+                    return result
+    except TimeoutError as e:
+        raise RuntimeError(f"TradingView WebSocket timeout для {symbol}") from e
+    raise RuntimeError(f"TradingView WebSocket не вернул {symbol}")
 
 
 class DemoMarket:
@@ -427,9 +514,10 @@ class MarketData:
                 mode = str(quote.get("update_mode") or "").lower()
                 status = ("delayed" if "delayed" in mode or "endofday" in mode
                           else "live")
+                transport = quote.get("transport") or "snapshot"
                 self.price = _status_dict(
                     quote["value"], status, quote["ts"],
-                    source=f"TradingView snapshot {broker_symbol}")
+                    source=f"TradingView {transport} {broker_symbol}")
                 self.price.update({
                     "derived": False, "instrument_type": "broker_cfd",
                     "update_mode": quote.get("update_mode"),
