@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
-import {
+
+globalThis.requestAnimationFrame = () => 0;
+
+const {
   projectTotalVariance,
   buildLocalProjection,
   smileMetrics,
-} from '../../seiltanzer/web/js/iv_surface.js';
+} = await import('../../seiltanzer/web/js/iv_surface.js');
 
 const flat = [
   { days: 2, ivPct: 20 },
