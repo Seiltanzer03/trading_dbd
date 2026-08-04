@@ -1,62 +1,75 @@
-"""Public facade for the quantitative AI policy manager.
-
-The implementation lives in :mod:`seiltanzer.ai_policy_base`.  This facade keeps
-all existing imports stable and applies the remaining-position normalization for
-future ladder executions: each rung is 10% of the original position, therefore
-its weight must be rescaled after earlier rungs have already reduced the position.
-"""
-
+"""Stable public facade for the quantitative AI policy manager v2."""
 from __future__ import annotations
 
-from . import ai_policy_base as _base
+from . import ai_policy_v2 as _impl
 
-# Preserve the complete public and test-facing module surface, including private
-# helpers used by the deterministic test suite.
 globals().update({
-    name: value
-    for name, value in vars(_base).items()
+    name: value for name, value in vars(_impl).items()
     if name not in {"__name__", "__loader__", "__package__", "__spec__"}
 })
 
+_ORIGINAL_SELECT_FINAL_POLICY = _impl.select_final_policy
 
-def baseline_strategy_outcomes(
-    sim: _base.PathSimulation,
-    inputs: _base.PolicyInputs,
-) -> _base.np.ndarray:
-    """Outcome per unit of the position that remains at the review moment.
 
-    The strategy closes ``rung_fraction`` of the original position at each rung.
-    If earlier rungs have already been executed, each future original-position
-    slice is a larger fraction of the current remainder and must be normalized.
+def select_final_policy(*args, **kwargs) -> dict:
+    """Treat every unresolved gate conflict as manual-review-only."""
+    result = _ORIGINAL_SELECT_FINAL_POLICY(*args, **kwargs)
+    result["automatic_execution_allowed"] = result.get("status") in {
+        "confirmed", "downgraded_within_feasible_set",
+    }
+    return result
+
+
+def cancellation_boundaries(inputs: _impl.PolicyInputs, selected: str) -> dict:
+    """Recompute the nearest r-level where the raw optimizer switches to HOLD.
+
+    This implementation is intentionally local to the public facade. It avoids
+    calling the rebound function in ai_policy_base, which caused recursion.
     """
-    past_count = sum(inputs.max_r >= rung - 1e-12 for rung in inputs.rungs)
-    original_remaining = max(1.0 - inputs.rung_fraction * past_count, 1e-9)
-    future_fraction = min(inputs.rung_fraction / original_remaining, 1.0)
-
-    future = _base.np.asarray(
-        [rung for rung in inputs.rungs if rung > inputs.max_r + 1e-8],
-        dtype=float,
+    if selected == "HOLD":
+        return {
+            "available": False,
+            "reason": "Для HOLD границы отмены до исполнения нет; переоценка при движении ±0.15R, новой цепочке или касании рубежа.",
+        }
+    grid = _impl.np.linspace(
+        max(-0.95, inputs.r0 - 0.50),
+        min(inputs.T - 0.02, inputs.r0 + 0.50),
+        21,
     )
-    if future.size:
-        crossed = sim.max_r[:, None] >= future[None, :] - 1e-12
-        realized = future_fraction * (crossed * future[None, :]).sum(axis=1)
-        closed = _base.np.minimum(1.0, future_fraction * crossed.sum(axis=1))
-    else:
-        realized = _base.np.zeros_like(sim.terminal)
-        closed = _base.np.zeros_like(sim.terminal)
+    rows = []
+    for r_value in grid:
+        scenario = _impl.replace(
+            inputs,
+            r0=float(r_value),
+            max_r=max(inputs.max_r, float(r_value)),
+        )
+        metrics, sim = _impl._run_once(
+            scenario, n_paths=1200, n_steps=160, seed=0xD000)
+        choice, _ = _impl._raw_policy_choice(metrics, scenario.r0)
+        p_take = float(_impl.np.mean(~_impl.np.isnan(sim.take_time)))
+        p_stop = float(_impl.np.mean(~_impl.np.isnan(sim.stop_time)))
+        rows.append({
+            "r": round(float(r_value), 4),
+            "choice": choice,
+            "barrier_ev_r": round(inputs.T * p_take - p_stop, 4),
+        })
+    hold_rows = [row for row in rows if row["choice"] == "HOLD"]
+    nearest = min(hold_rows, key=lambda row: abs(row["r"] - inputs.r0)) if hold_rows else None
+    return {
+        "available": bool(nearest),
+        "hold_switch": nearest,
+        "grid_min_r": rows[0]["r"],
+        "grid_max_r": rows[-1]["r"],
+        "method": "пересчёт всех политик по r-сетке; остальные опционные параметры фиксированы",
+        "reason": None if nearest else "На проверенной r-сетке переход к HOLD не найден.",
+    }
 
-    remaining = _base.np.maximum(0.0, 1.0 - closed)
-    exit_r = sim.terminal.copy()
-    be_armed = (inputs.max_r >= inputs.be_after - 1e-12) | (
-        sim.max_r >= inputs.be_after - 1e-12
-    )
-    exit_r = _base.np.where(be_armed & (exit_r < 0.0), 0.0, exit_r)
-    return realized + remaining * exit_r
 
-
-# Functions defined in ai_policy_base resolve globals in that module. Rebind the
-# corrected implementation there as well, so analyze_policies/_run_once use it.
-_base.baseline_strategy_outcomes = baseline_strategy_outcomes
-
-# Keep the facade's own symbol authoritative after the bulk namespace copy.
-globals()["baseline_strategy_outcomes"] = baseline_strategy_outcomes
+# Functions in ai_policy_v2 resolve globals in that module. Patch both modules
+# before any analysis is called.
+_impl.select_final_policy = select_final_policy
+_impl._base.select_final_policy = select_final_policy
+_impl.cancellation_boundaries = cancellation_boundaries
+_impl._base.cancellation_boundaries = cancellation_boundaries
+globals()["select_final_policy"] = select_final_policy
+globals()["cancellation_boundaries"] = cancellation_boundaries
