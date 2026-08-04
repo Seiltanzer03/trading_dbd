@@ -21,5 +21,7 @@ jobs:
         run: |
           node --check seiltanzer/web/js/lattice.js
           node --check seiltanzer/web/js/gex.js
+          node --check seiltanzer/web/js/fan.js
           node tests/web/lattice_scale_smoke.mjs
           node tests/web/gex_svg_smoke.mjs
+          node tests/web/fan_center_path_smoke.mjs
