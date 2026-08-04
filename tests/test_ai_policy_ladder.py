@@ -45,3 +45,4 @@ def test_future_ladder_closes_original_fraction_normalized_to_current_remainder(
     # original therefore equals 12.5% of the current remainder.
     expected = 0.125 * (1.5 + 1.75 + 2.0 + 2.2) + 0.50 * 2.5
     assert math.isclose(outcome, expected, abs_tol=1e-12)
+    assert not math.isclose(outcome, 0.10 * (1.5 + 1.75 + 2.0 + 2.2) + 0.60 * 2.5)
