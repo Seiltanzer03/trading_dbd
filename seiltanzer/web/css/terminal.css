@@ -564,7 +564,27 @@ button[data-tip], a[data-tip] { cursor: pointer; }
   .levels-workspace { grid-template-columns:1fr; }
   .levels-context { border-right:0; border-bottom:1px solid var(--rule); }
   .levels-context-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  
+  /* State Cards Grid */
+  .state-card { display: grid; grid-template-columns: 1fr 1fr; }
+  .state-cell { min-width: 0; border-right: 1px solid var(--rule) !important; border-bottom: 1px solid var(--rule); }
+  .state-cell:nth-child(even) { border-right: none !important; }
+  .state-cell.state-action { grid-column: 1 / -1; border-bottom: none; border-right: none !important; }
+  
+  /* Form Zoom Prevention on iOS */
+  input, select, textarea { font-size: 16px !important; }
+  
+  /* Journal Table Scroll */
+  #journal-body { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .journal-table { white-space: nowrap; }
 }
+
+@media (max-width:430px) {
+  .header-main { flex-direction: column; gap: 8px; }
+  .verdict-row { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .verdict-action { min-width: 0; width: 100%; }
+}
+
 .ai-verdict-text {
   margin:14px 0; padding:14px; max-height:62vh; overflow:auto;
   white-space:pre-wrap; font:11px/1.65 "IBM Plex Mono",monospace;
