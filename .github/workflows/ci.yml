@@ -15,5 +15,10 @@ jobs:
           python-version: "3.11"
       - name: Install
         run: pip install -e ".[dev]"
-      - name: Run tests
+      - name: Run Python tests
         run: pytest -q
+      - name: Check frontend modules
+        run: |
+          node --check seiltanzer/web/js/lattice.js
+          node --check seiltanzer/web/js/gex.js
+          node tests/web/lattice_scale_smoke.mjs
