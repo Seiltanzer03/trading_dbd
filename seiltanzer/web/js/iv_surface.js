@@ -270,7 +270,6 @@ export function initIVSurface(elId) {
   let lastPayload = null;
   let snapshotSig = null;
   let model = null;
-  let userCamera = null;
   let mode = 'local';
   try {
     mode = localStorage.getItem('ivSurfaceMode') === 'real' ? 'real' : 'local';
@@ -371,13 +370,6 @@ export function initIVSurface(elId) {
     return header.trim() || 'idle';
   }
 
-  function grabCam() {
-    if (el && el._fullLayout && el._fullLayout.scene && el._fullLayout.scene.camera) {
-      userCamera = el._fullLayout.scene.camera;
-      if (el.layout && el.layout.scene) el.layout.scene.camera = userCamera;
-    }
-  }
-
   function finishInteraction() {
     interacting = false;
     if (pendingPayload) {
@@ -392,12 +384,10 @@ export function initIVSurface(elId) {
     listenersOn = true;
     el.on('plotly_relayouting', () => {
       interacting = true;
-      grabCam();
       if (interactTimer) clearTimeout(interactTimer);
       if (!pointerHeld) interactTimer = setTimeout(finishInteraction, 300);
     });
     el.on('plotly_relayout', () => {
-      grabCam();
       if (interactTimer) clearTimeout(interactTimer);
       if (!pointerHeld) interactTimer = setTimeout(finishInteraction, 140);
     });
@@ -409,7 +399,6 @@ export function initIVSurface(elId) {
     const release = () => {
       if (!pointerHeld) return;
       pointerHeld = false;
-      grabCam();
       if (interactTimer) clearTimeout(interactTimer);
       requestAnimationFrame(() => {
         interactTimer = setTimeout(finishInteraction, 140);
@@ -603,7 +592,6 @@ export function initIVSurface(elId) {
       font: { family: FONT, color: INK },
       legend: { orientation: 'h', x: 0, y: 1.03, font: { size: 9 } },
       scene: {
-        camera: userCamera || INIT_CAM,
         dragmode: 'orbit',
         uirevision: 'iv-surface-camera-v4',
         xaxis: {
@@ -736,12 +724,21 @@ export function initIVSurface(elId) {
       doubleClick: 'reset',
     };
     rendering = true;
+    const traces = tracesFor(g);
+    const layout = layoutFor();
+    if (hasPlot && el._fullLayout && el._fullLayout.scene && el._fullLayout.scene.camera) {
+      layout.scene.camera = JSON.parse(JSON.stringify(el._fullLayout.scene.camera));
+    } else {
+      layout.scene.camera = INIT_CAM;
+    }
+
     let write;
     if (!hasPlot) {
-      layout.scene.camera = INIT_CAM;
-      write = window.Plotly.newPlot(el, tracesFor(g), layout, config);
+      write = Plotly.newPlot(el, traces, layout, config);
+      hasPlot = true;
+      attachListeners();
     } else {
-      write = window.Plotly.react(el, tracesFor(g), layout, config);
+      write = Plotly.react(el, traces, layout, config);
     }
     Promise.resolve(write).then(() => {
       rendering = false;
@@ -794,6 +791,19 @@ export function initIVSurface(elId) {
     updateStatus();
   }
   requestAnimationFrame(frame);
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', () => {
+      if (ready() && hasPlot) {
+        if (el._fullLayout && el._fullLayout.scene && el._fullLayout.scene.camera) {
+          if (!el.layout) el.layout = {};
+          if (!el.layout.scene) el.layout.scene = {};
+          el.layout.scene.camera = JSON.parse(JSON.stringify(el._fullLayout.scene.camera));
+        }
+        window.Plotly.Plots.resize(el);
+      }
+    });
+  }
 
   function destroy() {
     if (hasPlot) window.Plotly.purge(el);
