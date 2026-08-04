@@ -265,8 +265,6 @@ export function initIVSurface(elId) {
   let listenersOn = false;
   let rendering = false;
   let interacting = false;
-  let pointerHeld = false;
-  let userCamera = false;
   let interactTimer = null;
   let pendingPayload = null;
   let lastPayload = null;
@@ -290,7 +288,6 @@ export function initIVSurface(elId) {
   let morphStart = 0;
 
   const INIT_CAM = { eye: { x: 1.4, y: -1.4, z: 0.82 }, up: { x: 0, y: 0, z: 1 } };
-  let currentCam = JSON.parse(JSON.stringify(INIT_CAM));
 
   const statusEl = document.getElementById('iv-surface-status');
   const metricsEl = document.getElementById('iv-skew-momentum');
@@ -373,48 +370,6 @@ export function initIVSurface(elId) {
     return header.trim() || 'idle';
   }
 
-  function grabCam() {
-    const c = el?._fullLayout?.scene?.camera;
-    if (c?.eye) currentCam = JSON.parse(JSON.stringify(c));
-  }
-
-  function cameraFromEvent(ev) {
-    if (!ev || typeof ev !== 'object') return;
-    if (ev['scene.camera']?.eye) {
-      currentCam = JSON.parse(JSON.stringify(ev['scene.camera']));
-      userCamera = true;
-      return;
-    }
-    const next = JSON.parse(JSON.stringify(currentCam));
-    let changed = false;
-    for (const [key, value] of Object.entries(ev)) {
-      if (!key.startsWith('scene.camera.')) continue;
-      const parts = key.slice('scene.camera.'.length).split('.');
-      let dst = next;
-      for (let i = 0; i < parts.length - 1; i++) dst = dst[parts[i]] ||= {};
-      dst[parts.at(-1)] = value;
-      changed = true;
-    }
-    if (changed) {
-      currentCam = next;
-      userCamera = true;
-    }
-  }
-
-  function sameCamera(a, b) {
-    return ['eye', 'center', 'up'].every((k) => ['x', 'y', 'z'].every((q) =>
-      Math.abs(Number(a?.[k]?.[q] || 0) - Number(b?.[k]?.[q] || 0)) < 1e-5));
-  }
-
-  function pinAfter(write, pinned = JSON.parse(JSON.stringify(currentCam))) {
-    if (!userCamera) return write;
-    Promise.resolve(write).then(() => {
-      if (!interacting && !sameCamera(el?._fullLayout?.scene?.camera, pinned))
-        window.Plotly.relayout(el, { 'scene.camera': pinned });
-    });
-    return write;
-  }
-
   function finishInteraction() {
     interacting = false;
     if (pendingPayload) {
@@ -427,34 +382,15 @@ export function initIVSurface(elId) {
   function attachListeners() {
     if (listenersOn || !el?.on) return;
     listenersOn = true;
-    el.on('plotly_relayouting', (ev) => {
+    el.on('plotly_relayouting', () => {
       interacting = true;
       if (interactTimer) clearTimeout(interactTimer);
-      cameraFromEvent(ev);
+      interactTimer = setTimeout(finishInteraction, 300);
     });
-    el.on('plotly_relayout', cameraFromEvent);
-    const begin = () => {
-      pointerHeld = true;
-      interacting = true;
+    el.on('plotly_relayout', () => {
       if (interactTimer) clearTimeout(interactTimer);
-    };
-    const release = () => {
-      if (!pointerHeld) return;
-      pointerHeld = false;
-      requestAnimationFrame(() => {
-        grabCam();
-        userCamera = true;
-        interactTimer = setTimeout(finishInteraction, 140);
-      });
-    };
-    el.addEventListener('pointerdown', begin, true);
-    window.addEventListener('pointerup', release, true);
-    window.addEventListener('pointercancel', release, true);
-    el.addEventListener('wheel', () => {
-      interacting = true;
-      if (interactTimer) clearTimeout(interactTimer);
-      interactTimer = setTimeout(finishInteraction, 280);
-    }, { passive: true });
+      interactTimer = setTimeout(finishInteraction, 140);
+    });
   }
 
   function setLive(payload) {
@@ -633,7 +569,6 @@ export function initIVSurface(elId) {
       legend: { orientation: 'h', x: 0, y: 1.03, font: { size: 9 } },
       scene: {
         dragmode: 'orbit',
-        camera: currentCam,
         uirevision: 'iv-surface-camera-v4',
         xaxis: {
           title: { text: 'MONEYNESS VS SNAPSHOT %', font: { family: FONT, size: 12, color: '#111' } },
@@ -696,14 +631,14 @@ export function initIVSurface(elId) {
         g.velocityZ,
       ],
     };
-    pinAfter(window.Plotly.restyle(
-      el, update, [WAKE, LIVE_RIBBON, LIVE_CURTAIN, LIVE_RIDGE, LIVE_DOT, VELOCITY]));
+    window.Plotly.restyle(
+      el, update, [WAKE, LIVE_RIBBON, LIVE_CURTAIN, LIVE_RIDGE, LIVE_DOT, VELOCITY]);
     if (includeSurface) {
       const atmZ = model.displayZ.map((row) =>
         interp(model.moneyPct, row, 0, true) ?? model.zMin);
-      pinAfter(window.Plotly.restyle(el, {
+      window.Plotly.restyle(el, {
         z: [model.displayZ, atmZ],
-      }, [SURFACE, SNAPSHOT_ATM]));
+      }, [SURFACE, SNAPSHOT_ATM]);
     }
     updateStatus();
   }
@@ -755,9 +690,7 @@ export function initIVSurface(elId) {
     if (el) el.style.opacity = '1';
     const empty = document.getElementById('iv-surface-empty');
     if (empty) empty.style.display = 'none';
-    if (hasPlot && !userCamera) grabCam();
     const layout = layoutFor();
-    layout.scene.camera = currentCam;
     const config = {
       responsive: true,
       displayModeBar: true,
@@ -767,15 +700,18 @@ export function initIVSurface(elId) {
       doubleClick: 'reset',
     };
     rendering = true;
-    const write = !hasPlot
-      ? window.Plotly.newPlot(el, tracesFor(g), layout, config)
-      : pinAfter(window.Plotly.react(el, tracesFor(g), layout, config));
+    let write;
+    if (!hasPlot) {
+      layout.scene.camera = INIT_CAM;
+      write = window.Plotly.newPlot(el, tracesFor(g), layout, config);
+    } else {
+      write = window.Plotly.react(el, tracesFor(g), layout, config);
+    }
     Promise.resolve(write).then(() => {
       rendering = false;
       hasPlot = true;
       snapshotSig = sig;
       attachListeners();
-      if (!userCamera) grabCam();
       updateStatus(true);
       if (pendingPayload) {
         const p = pendingPayload;

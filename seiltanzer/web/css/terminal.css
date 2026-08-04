@@ -28,6 +28,7 @@ html, body {
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1.45;
+  overflow-x: hidden;
 }
 
 .wrap { max-width: 1180px; margin: 0 auto; padding: 14px 16px 40px; }
@@ -141,6 +142,8 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .state-cell:last-child { border-right: none; }
 .state-val {
@@ -567,7 +570,7 @@ button[data-tip], a[data-tip] { cursor: pointer; }
   
   /* State Cards Grid */
   .state-card { display: grid; grid-template-columns: 1fr 1fr; }
-  .state-cell { min-width: 0; border-right: 1px solid var(--rule) !important; border-bottom: 1px solid var(--rule); }
+  .state-cell { min-width: 0; padding: 6px 8px; border-right: 1px solid var(--rule) !important; border-bottom: 1px solid var(--rule); }
   .state-cell:nth-child(even) { border-right: none !important; }
   .state-cell.state-action { grid-column: 1 / -1; border-bottom: none; border-right: none !important; }
   
@@ -587,7 +590,7 @@ button[data-tip], a[data-tip] { cursor: pointer; }
 
 .ai-verdict-text {
   margin:14px 0; padding:14px; max-height:62vh; overflow:auto;
-  white-space:pre-wrap; font:11px/1.65 "IBM Plex Mono",monospace;
+  white-space:pre-wrap; word-break: break-word; overflow-wrap: anywhere; font:11px/1.65 "IBM Plex Mono",monospace;
   color:var(--ink); background:rgba(46,125,79,.035); border:1px solid var(--rule);
 }
 .ai-history-link {
