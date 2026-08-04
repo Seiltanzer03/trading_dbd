@@ -55,6 +55,7 @@ export function initCone(elId) {
   let curR = null, lastDotR = null;
   let interacting = false, interactTimer = null, pointerHeld = false;
   let lastYTitle = null, lastNames = null;
+  let userCamera = null;
   const live = { r: null };
 
   // цель (из сервера) и отображаемое (плавно морфится к цели)
@@ -71,16 +72,25 @@ export function initCone(elId) {
 
   const ready = () => typeof window !== 'undefined' && window.Plotly && el;
 
+  function grabCam() {
+    if (el && el._fullLayout && el._fullLayout.scene && el._fullLayout.scene.camera) {
+      userCamera = el._fullLayout.scene.camera;
+      if (el.layout && el.layout.scene) el.layout.scene.camera = userCamera;
+    }
+  }
+
   // ---------------------------------------------------- взаимодействие/камера
   function attachListeners() {
     if (listenersOn || !el.on) return;
     listenersOn = true;
     el.on('plotly_relayouting', () => {
       interacting = true;
+      grabCam();
       if (interactTimer) clearTimeout(interactTimer);
       if (!pointerHeld) interactTimer = setTimeout(() => { interacting = false; flush(); }, 300);
     });
     el.on('plotly_relayout', () => {
+      grabCam();
       if (interactTimer) clearTimeout(interactTimer);
       if (!pointerHeld) interactTimer = setTimeout(() => { interacting = false; flush(); }, 140);
     });
@@ -92,6 +102,7 @@ export function initCone(elId) {
     const release = () => {
       if (!pointerHeld) return;
       pointerHeld = false;
+      grabCam();
       if (interactTimer) clearTimeout(interactTimer);
       requestAnimationFrame(() => {
         interactTimer = setTimeout(() => { interacting = false; flush(); }, 140);
@@ -366,6 +377,7 @@ export function initCone(elId) {
       showlegend: true,
       legend: { orientation: 'h', x: 0, y: 1.07, font: { size: 10 }, bgcolor: 'rgba(0,0,0,0)' },
       scene: {
+        camera: userCamera || INIT_CAM,
         uirevision: 'probability-cone-camera-v3',
         dragmode: 'orbit',
         bgcolor: SCENE_BG, aspectmode: 'manual', aspectratio: { x: 1.72, y: 1.38, z: 0.76 },
