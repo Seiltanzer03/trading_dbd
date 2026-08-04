@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { computeFocusDomain, rebinDistribution } from '../../seiltanzer/web/js/lattice.js';
+
+globalThis.requestAnimationFrame = () => 0;
+const { computeFocusDomain, rebinDistribution } = await import('../../seiltanzer/web/js/lattice.js');
 
 const edges = Array.from({ length: 12 }, (_, i) => -15 + i * 3);
 const probs = [0.01, 0.02, 0.04, 0.08, 0.16, 0.25, 0.20, 0.12, 0.07, 0.03, 0.02];
