@@ -22,3 +22,4 @@ jobs:
           node --check seiltanzer/web/js/lattice.js
           node --check seiltanzer/web/js/gex.js
           node tests/web/lattice_scale_smoke.mjs
+          node tests/web/gex_svg_smoke.mjs
