@@ -1,0 +1,3 @@
+Emergency frontend recovery marker.
+Restored valid seiltanzer/web/js/iv_surface.js from commit 752b540 after syntax regression in 4e5289b.
+Recovery commit: 3a750928e869350673e7a7680bc7458060e484e9
