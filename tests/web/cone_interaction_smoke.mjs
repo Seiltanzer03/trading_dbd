@@ -1,14 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-
-const sourcePath = new URL('../../seiltanzer/web/js/cone.js', import.meta.url);
-const source = (await readFile(sourcePath, 'utf8')).replace(
-  "import { approach } from './anim.js';",
-  'const approach = (cur, target, dt, speed = 8) => ' +
-    '(cur == null ? target : cur + (target - cur) * (1 - Math.exp(-speed * dt)));',
-);
-const { initCone } = await import(
-  `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 class FakeTarget {
   constructor() {
@@ -19,8 +9,8 @@ class FakeTarget {
     if (!this.dom.has(name)) this.dom.set(name, []);
     this.dom.get(name).push(fn);
   }
-  dispatch(name) {
-    for (const fn of this.dom.get(name) || []) fn({ type: name });
+  dispatch(name, payload = {}) {
+    for (const fn of this.dom.get(name) || []) fn({ type: name, ...payload });
   }
   on(name, fn) {
     if (!this.plotly.has(name)) this.plotly.set(name, []);
@@ -34,6 +24,7 @@ class FakeTarget {
 const graph = new FakeTarget();
 const fakeWindow = new FakeTarget();
 fakeWindow.PointerEvent = class PointerEvent {};
+fakeWindow.visualViewport = new FakeTarget();
 
 const raf = [];
 globalThis.requestAnimationFrame = (fn) => {
@@ -43,23 +34,34 @@ globalThis.requestAnimationFrame = (fn) => {
 globalThis.window = fakeWindow;
 globalThis.document = { querySelector: () => graph };
 
+const INIT_CAM = {
+  eye: { x: 0.15, y: 2.3, z: 0.65 },
+  up: { x: 0, y: 0, z: 1 },
+};
+const clone = (value) => value == null ? value : JSON.parse(JSON.stringify(value));
 const writes = [];
-const clone = (v) => JSON.parse(JSON.stringify(v));
+
+function emitAfterPlot(el) {
+  queueMicrotask(() => el.emit('plotly_afterplot'));
+}
+
 fakeWindow.Plotly = {
   newPlot(el, traces, layout) {
     writes.push('newPlot');
     el.data = clone(traces);
     el.layout = clone(layout);
-    el._fullLayout = { scene: { camera: clone(layout.scene?.camera || {}) } };
+    el._fullLayout = { scene: { camera: clone(layout.scene?.camera || INIT_CAM) } };
+    emitAfterPlot(el);
     return Promise.resolve(el);
   },
   react(el, traces, layout) {
     writes.push('react');
     el.data = clone(traces);
     el.layout = clone(layout);
-    if (layout.scene?.camera) {
-      el._fullLayout.scene.camera = clone(layout.scene.camera);
-    }
+    // Reproduce the mobile regression: a responsive/structural redraw returns
+    // the WebGL scene to the initial camera before plotly_afterplot.
+    el._fullLayout.scene.camera = clone(INIT_CAM);
+    emitAfterPlot(el);
     return Promise.resolve(el);
   },
   restyle() {
@@ -70,11 +72,28 @@ fakeWindow.Plotly = {
     writes.push('relayout');
     if (update['scene.camera']) {
       el._fullLayout.scene.camera = clone(update['scene.camera']);
+      if (!el.layout.scene) el.layout.scene = {};
+      el.layout.scene.camera = clone(update['scene.camera']);
     }
+    el.emit('plotly_relayout', clone(update));
+    emitAfterPlot(el);
     return Promise.resolve();
   },
-  Plots: { resize() {} },
+  Plots: {
+    resize(el) {
+      writes.push('resize');
+      el._fullLayout.scene.camera = clone(INIT_CAM);
+      if (!el.layout.scene) el.layout.scene = {};
+      el.layout.scene.camera = clone(INIT_CAM);
+      emitAfterPlot(el);
+      return Promise.resolve();
+    },
+  },
 };
+
+const { initCone } = await import(
+  `../../seiltanzer/web/js/cone.js?camera-smoke=${Date.now()}`
+);
 
 function runFrames(count = 1, start = performance.now()) {
   for (let i = 0; i < count; i++) {
@@ -112,12 +131,17 @@ function cone(T = 2.5) {
     p_take_by_t: [0.00, 0.01, 0.04, 0.10, 0.18],
     horizon_years: 1 / 365,
     median_years: 0.5 / 365,
+    p_take: 0.18,
+    p_stop: 0.25,
+    unresolved: 0.57,
   };
 }
 
 const api = initCone('#cone-plot');
 api.setData(cone(), { r: 0.05 });
-runFrames(3);
+await Promise.resolve();
+runFrames(4);
+await new Promise((resolve) => setTimeout(resolve, 30));
 
 const surface = graph.data[0];
 const rowPeaks = surface.z.map((row) => Math.max(...row));
@@ -136,13 +160,18 @@ assert(
 );
 
 const draggedCamera = {
-  eye: { x: -1.34, y: 0.72, z: 1.18 },
+  eye: { x: -0.72, y: 0.48, z: 0.56 },
   center: { x: 0.08, y: -0.04, z: 0.02 },
   up: { x: 0, y: 0, z: 1 },
 };
 graph.dispatch('pointerdown');
 graph._fullLayout.scene.camera = clone(draggedCamera);
-graph.emit('plotly_relayouting', { 'scene.camera.eye.x': draggedCamera.eye.x });
+graph.emit('plotly_relayouting', {
+  'scene.camera.eye.x': draggedCamera.eye.x,
+  'scene.camera.eye.y': draggedCamera.eye.y,
+  'scene.camera.eye.z': draggedCamera.eye.z,
+  'scene.camera.center': draggedCamera.center,
+});
 
 const writesAtPointerDown = writes.length;
 api.setData(cone(3), { r: 0.34 });
@@ -156,18 +185,55 @@ assert.equal(
 );
 
 fakeWindow.dispatch('pointerup');
-runFrames(2);
-await new Promise((resolve) => setTimeout(resolve, 180));
 runFrames(8);
+await new Promise((resolve) => setTimeout(resolve, 360));
+runFrames(12);
+await Promise.resolve();
 assert.deepEqual(
   graph._fullLayout.scene.camera,
   draggedCamera,
-  'the released camera must survive the deferred structural refresh',
+  'rotation and zoom must survive the deferred structural refresh',
+);
+
+fakeWindow.dispatch('resize');
+runFrames(4);
+await new Promise((resolve) => setTimeout(resolve, 220));
+await Promise.resolve();
+assert.deepEqual(
+  graph._fullLayout.scene.camera,
+  draggedCamera,
+  'rotation and zoom must survive a mobile responsive resize',
+);
+
+const zoomedCamera = {
+  eye: { x: -0.38, y: 0.25, z: 0.31 },
+  center: { x: 0.12, y: -0.07, z: 0.04 },
+  up: { x: 0, y: 0, z: 1 },
+};
+graph._fullLayout.scene.camera = clone(zoomedCamera);
+graph.emit('plotly_relayouting', {
+  'scene.camera.eye.x': zoomedCamera.eye.x,
+  'scene.camera.eye.y': zoomedCamera.eye.y,
+  'scene.camera.eye.z': zoomedCamera.eye.z,
+  'scene.camera.center': zoomedCamera.center,
+});
+graph.emit('plotly_relayout', { 'scene.camera': clone(zoomedCamera) });
+api.setData(cone(4), { r: 0.41 });
+runFrames(6);
+await new Promise((resolve) => setTimeout(resolve, 360));
+runFrames(10);
+await Promise.resolve();
+assert.deepEqual(
+  graph._fullLayout.scene.camera,
+  zoomedCamera,
+  'a pinch/scroll zoom must remain fixed after the next model rebuild',
 );
 assert.equal(graph.layout.scene.uirevision, 'probability-cone-camera-v3');
 
 console.log(JSON.stringify({
-  cameraRetained: true,
+  cameraRetainedAfterReact: true,
+  cameraRetainedAfterResize: true,
+  zoomRetained: true,
   writesWhileHeld: 0,
   firstPeak: Number(rowPeaks[0].toFixed(3)),
   horizonPeak: Number(rowPeaks.at(-1).toFixed(3)),
