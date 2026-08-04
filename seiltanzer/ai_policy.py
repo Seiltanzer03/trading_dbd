@@ -5,7 +5,7 @@ from . import ai_policy_v3 as _impl
 
 globals().update({
     name: value for name, value in vars(_impl).items()
-    if name not in {"__name__", "__loader__", "__package__", "__spec__"}
+    if name not in {"__name__", "__loader__", "__package__", "__spec__", "_impl"}
 })
 
 _BASE_SELECT_FINAL_POLICY = _impl._ORIGINAL_SELECT_FINAL_POLICY
@@ -49,8 +49,6 @@ def select_final_policy(raw_choice: str, stability: dict,
     }
     required_share = source_thresholds.get(selected, 1.0)
 
-    # Preserve specific selector diagnostics such as stability fallback. The
-    # authority layer only replaces an otherwise executable/generic decision.
     if executable and source_share < required_share:
         executable = False
         status = "manual_source_conflict"
