@@ -3,6 +3,12 @@ import math
 import numpy as np
 import pytest
 
+def _trapezoid(y, x):
+    fn = getattr(np, "trapezoid", None)
+    if fn is not None:
+        return fn(y, x)
+    return np.trapz(y, x)
+
 from seiltanzer.core import options as O
 
 
@@ -68,7 +74,7 @@ class TestRealizedVol:
 class TestBLDensity:
     def test_density_integrates_to_one(self, chain):
         d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
-        assert getattr(np, 'trapezoid', getattr(np, 'trapz'))(d.density, d.strikes) == pytest.approx(1.0, abs=1e-9)
+        assert _trapezoid(d.density, d.strikes) == pytest.approx(1.0, abs=1e-9)
         assert (d.density >= 0).all()
 
     def test_recovers_lognormal_tails(self, chain):
@@ -162,7 +168,7 @@ class TestProxyMapping:
         d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
         mapped = O.map_proxy_density(d, SPOT, 2000, transform)
         assert np.all(np.diff(mapped.strikes) > 0)
-        assert getattr(np, 'trapezoid', getattr(np, 'trapz'))(mapped.density, mapped.strikes) == pytest.approx(
+        assert _trapezoid(mapped.density, mapped.strikes) == pytest.approx(
             1.0, abs=1e-9)
         assert mapped.mean() > 0
 
