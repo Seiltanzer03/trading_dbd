@@ -1,12 +1,15 @@
 // Probability Lattice — option-implied распределение сделки в практическом R-масштабе.
-// Дальние хвосты не растягивают рабочую область: их масса агрегируется в крайние
-// корзины видимого диапазона, а стоп, тейк и текущий r остаются читаемыми.
+// Шарики накапливаются в R-координатах и не обнуляются при каждом живом
+// обновлении распределения/масштаба. Сброс происходит только при новой сделке
+// или по кнопке «СБРОС».
 
 import { COLORS, setupCanvas } from './util.js';
 import { approach, approachArr, pulse } from './anim.js';
 
 const ROWS = 8;
 const BINS = 11;
+const MAX_SAMPLES = 1600;
+const DOMAIN_STEP_R = 0.25;
 
 function fmtProb(p) {
   if (p == null || !Number.isFinite(p)) return '—';
@@ -19,20 +22,32 @@ function finite(value, fallback) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
 }
 
+function clamp(value, lo, hi) {
+  return Math.max(lo, Math.min(hi, value));
+}
+
+function quantizeDomain(value, step = DOMAIN_STEP_R) {
+  return Math.round(value / step) * step;
+}
+
+/**
+ * Рабочее окно доски. Оно обязательно содержит стоп, тейк и текущий r,
+ * а дальняя option-implied масса затем складывается в крайние корзины.
+ * Границы квантуются по 0.25R, чтобы мелкие тики не дёргали масштаб.
+ */
 export function computeFocusDomain({ edges, T = 2.5, r = 0, q10 = null, q90 = null }) {
-  const rawLo = Array.isArray(edges) && Number.isFinite(edges[0]) ? Number(edges[0]) : -2;
-  const rawHi = Array.isArray(edges) && Number.isFinite(edges.at(-1)) ? Number(edges.at(-1)) : T + 2;
+  const rawLo = Array.isArray(edges) && Number.isFinite(Number(edges[0]))
+    ? Number(edges[0]) : -2;
+  const rawHi = Array.isArray(edges) && Number.isFinite(Number(edges.at(-1)))
+    ? Number(edges.at(-1)) : finite(T, 2.5) + 2;
   const take = Math.max(0.25, finite(T, 2.5));
   const current = finite(r, 0);
 
-  // Ядро обязано показывать оба барьера и текущую позицию с воздухом по краям.
   const coreLo = Math.min(-1.45, current - 0.75);
   const coreHi = Math.max(take + 0.75, current + 0.75);
   let lo = Math.min(coreLo, Number.isFinite(Number(q10)) ? Number(q10) - 0.25 : coreLo);
   let hi = Math.max(coreHi, Number.isFinite(Number(q90)) ? Number(q90) + 0.25 : coreHi);
 
-  // Полный RND иногда даёт огромные хвосты. Ограничиваем только визуальный span;
-  // вероятность за пределами не теряется — rebinDistribution сложит её по краям.
   const maxSpan = Math.max(5.5, take + 3.5);
   if (hi - lo > maxSpan) {
     const coreSpan = coreHi - coreLo;
@@ -48,20 +63,27 @@ export function computeFocusDomain({ edges, T = 2.5, r = 0, q10 = null, q90 = nu
     lo = Math.max(rawLo, mid - 1.25);
     hi = Math.min(rawHi, mid + 1.25);
   }
-  if (!(hi > lo)) return { lo: rawLo, hi: rawHi, rawLo, rawHi, compressed: false };
+  if (!(hi > lo)) {
+    return { lo: rawLo, hi: rawHi, rawLo, rawHi, compressed: false };
+  }
+
+  // Квантизация убирает постоянную смену домена от микродвижений q10/q90/r.
+  const qLo = Math.max(rawLo, quantizeDomain(lo));
+  const qHi = Math.min(rawHi, quantizeDomain(hi));
   return {
-    lo,
-    hi,
+    lo: qHi > qLo ? qLo : lo,
+    hi: qHi > qLo ? qHi : hi,
     rawLo,
     rawHi,
-    compressed: lo > rawLo + 1e-9 || hi < rawHi - 1e-9,
+    compressed: qLo > rawLo + 1e-9 || qHi < rawHi - 1e-9,
   };
 }
 
 export function rebinDistribution(probs, edges, lo, hi, bins = BINS) {
   const out = new Array(bins).fill(0);
   const outEdges = Array.from({ length: bins + 1 }, (_, i) => lo + (hi - lo) * i / bins);
-  if (!Array.isArray(probs) || !Array.isArray(edges) || edges.length !== probs.length + 1 || !(hi > lo)) {
+  if (!Array.isArray(probs) || !Array.isArray(edges)
+      || edges.length !== probs.length + 1 || !(hi > lo)) {
     return { probs: out, edges: outEdges };
   }
 
@@ -88,14 +110,38 @@ export function rebinDistribution(probs, edges, lo, hi, bins = BINS) {
     const clippedB = Math.min(b, hi);
     if (clippedB <= clippedA) continue;
     for (let j = 0; j < bins; j++) {
-      const overlap = Math.max(0, Math.min(clippedB, outEdges[j + 1]) - Math.max(clippedA, outEdges[j]));
+      const overlap = Math.max(
+        0,
+        Math.min(clippedB, outEdges[j + 1]) - Math.max(clippedA, outEdges[j]),
+      );
       if (overlap > 0) out[j] += p * overlap / width;
     }
   }
 
   const total = out.reduce((sum, p) => sum + p, 0);
-  if (total > 0) for (let i = 0; i < out.length; i++) out[i] /= total;
+  if (total > 0) {
+    for (let i = 0; i < out.length; i++) out[i] /= total;
+  }
   return { probs: out, edges: outEdges };
+}
+
+export function binIndexForR(value, edges) {
+  if (!Array.isArray(edges) || edges.length < 2) return 0;
+  const bins = edges.length - 1;
+  if (value <= edges[0]) return 0;
+  if (value >= edges.at(-1)) return bins - 1;
+  for (let i = 0; i < bins; i++) {
+    if (value < edges[i + 1]) return i;
+  }
+  return bins - 1;
+}
+
+/** Пересчитывает накопленные шарики под текущий визуальный домен без их потери. */
+export function empiricalCounts(samples, edges) {
+  const bins = Math.max(0, (edges?.length || 1) - 1);
+  const counts = new Array(bins).fill(0);
+  for (const value of samples || []) counts[binIndexForR(value, edges)]++;
+  return counts;
 }
 
 export function initLattice(canvas) {
@@ -113,8 +159,7 @@ export function initLattice(canvas) {
     cur: { probs: null, r: 0, tilt: 0.5 },
     edges: null,
     rawDomain: null,
-    domainKey: null,
-    counts: new Array(BINS).fill(0),
+    samples: [],
     balls: [],
     dropped: 0,
     green: 0,
@@ -123,17 +168,22 @@ export function initLattice(canvas) {
   };
 
   function reset() {
-    s.counts.fill(0);
+    s.samples = [];
     s.balls = [];
     s.dropped = 0;
     s.green = 0;
+    s.lastSpawn = 0;
   }
 
   function setData(d) {
     if (d.tradeId !== s.tradeId) {
       s.tradeId = d.tradeId;
+      s.cur.probs = null;
+      s.edges = null;
+      s.rawDomain = null;
       reset();
     }
+
     s.active = !!d.active;
     s.regime = d.regime;
     if (!s.active) return;
@@ -152,17 +202,20 @@ export function initLattice(canvas) {
       q90: d.q90,
     });
     const rebinned = rebinDistribution(primary, rawEdges, focused.lo, focused.hi, BINS);
-    const nextKey = `${focused.lo.toFixed(5)}:${focused.hi.toFixed(5)}:${rebinned.probs.length}`;
-    const domainChanged = !!s.domainKey && s.domainKey !== nextKey;
-    if (domainChanged) reset();
-    s.domainKey = nextKey;
+
+    // Ключевое отличие от сломанной версии: смена живого домена НЕ вызывает reset().
+    // Уже упавшие шарики хранятся как реальные R-значения и пересчитываются в
+    // новые корзины функцией empiricalCounts().
     s.rawDomain = focused;
     s.edges = rebinned.edges;
     s.tgt.probs = rebinned.probs;
     s.tgt.r = finite(d.r, 0);
     s.tgt.tilt = d.hit != null
       ? finite(d.hit, 0.5)
-      : rebinned.probs.reduce((sum, p, b) => sum + (binMid(b) >= 0 ? p : 0), 0);
+      : rebinned.probs.reduce((sum, p, b) => {
+        const mid = (rebinned.edges[b] + rebinned.edges[b + 1]) / 2;
+        return sum + (mid >= 0 ? p : 0);
+      }, 0);
     s.tgt.edge = d.edge;
     s.tgt.hit = d.hit;
     s.tgt.pStop = d.pStop;
@@ -173,17 +226,20 @@ export function initLattice(canvas) {
     s.tgt.q90 = d.q90;
     s.tgt.mode = d.mode;
 
-    if (!s.cur.probs || s.cur.probs.length !== rebinned.probs.length || domainChanged) {
+    if (!s.cur.probs || s.cur.probs.length !== rebinned.probs.length) {
       s.cur.probs = rebinned.probs.slice();
       s.cur.r = s.tgt.r;
       s.cur.tilt = s.tgt.tilt;
     }
   }
 
+  const domain = () => ({
+    lo: s.edges?.[0] ?? -1.5,
+    hi: s.edges?.at(-1) ?? s.T + 1,
+  });
   const binMid = (b) => s.edges ? (s.edges[b] + s.edges[b + 1]) / 2 : 0;
-  const isGreen = (b) => binMid(b) > 0;
-  const isTail = (b) => binMid(b) >= s.T - 1e-9;
-  const domain = () => ({ lo: s.edges?.[0] ?? -1.5, hi: s.edges?.at(-1) ?? s.T + 1 });
+  const isGreenBin = (b) => binMid(b) > 0;
+  const isTailBin = (b) => binMid(b) >= s.T - 1e-9;
 
   function canvasHeight() {
     const width = canvas.clientWidth || canvas.parentElement?.clientWidth || 700;
@@ -205,30 +261,40 @@ export function initLattice(canvas) {
     };
   }
 
-  const xOfR = (g, R) => {
+  const xOfR = (g, value) => {
     const { lo, hi } = domain();
-    return g.padX + ((R - lo) / Math.max(hi - lo, 1e-9)) * (g.w - 2 * g.padX);
+    return g.padX + ((value - lo) / Math.max(hi - lo, 1e-9)) * (g.w - 2 * g.padX);
   };
-  const rowShear = (g, j) => (s.cur.tilt - 0.5) * g.binW * 1.25 * (j / ROWS);
-  const pegX = (g, j, i) => g.padX + (BINS / 2) * g.binW + (2 * i - j) * g.binW / 2 + rowShear(g, j);
-  const pegY = (g, j) => g.padTop + j * g.rowH;
+  const rowShear = (g, row) => (s.cur.tilt - 0.5) * g.binW * 1.25 * (row / ROWS);
+  const pegX = (g, row, i) => (
+    g.padX + (BINS / 2) * g.binW + (2 * i - row) * g.binW / 2 + rowShear(g, row)
+  );
+  const pegY = (g, row) => g.padTop + row * g.rowH;
 
-  function sampleBin() {
-    const p = s.tgt.probs;
-    if (!p) return null;
+  function sampleTargetR() {
+    const probs = s.tgt.probs;
+    if (!probs || !s.edges) return null;
     const u = Math.random();
-    let sum = 0;
-    for (let b = 0; b < BINS; b++) {
-      sum += p[b];
-      if (u <= sum) return b;
+    let total = 0;
+    let bin = BINS - 1;
+    for (let i = 0; i < BINS; i++) {
+      total += probs[i];
+      if (u <= total) {
+        bin = i;
+        break;
+      }
     }
-    return BINS - 1;
+    const a = s.edges[bin];
+    const b = s.edges[bin + 1];
+    return a + Math.random() * Math.max(b - a, 1e-9);
   }
 
   function spawnBall() {
-    const bin = sampleBin();
-    if (bin == null) return;
-    const rights = Math.round((bin / (BINS - 1)) * ROWS);
+    const targetR = sampleTargetR();
+    if (targetR == null) return;
+    const dom = domain();
+    const normalized = clamp((targetR - dom.lo) / Math.max(dom.hi - dom.lo, 1e-9), 0, 1);
+    const rights = Math.round(normalized * ROWS);
     const dirs = [];
     for (let i = 0; i < ROWS; i++) dirs.push(i < rights);
     for (let i = dirs.length - 1; i > 0; i--) {
@@ -236,42 +302,52 @@ export function initLattice(canvas) {
       [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
     }
     s.balls.push({
-      bin, dirs, seg: 0, t: 0, rights: 0,
+      targetR,
+      dirs,
+      seg: 0,
+      t: 0,
+      rights: 0,
       wob: 3 + Math.random() * 3,
       sp: 0.9 + Math.random() * 0.3,
       settled: false,
     });
   }
 
-  function binH(g, b) {
+  function binHeight(g, counts, bin) {
     const total = Math.max(1, s.dropped);
-    return Math.min(g.distH - 6, (s.counts[b] / total) * g.distH * 2.4);
+    return Math.min(g.distH - 6, (counts[bin] / total) * g.distH * 2.4);
   }
 
-  function ballPos(g, ball) {
-    const j = ball.seg;
+  function ballPos(g, ball, counts) {
+    const row = ball.seg;
     const t = ball.t;
-    if (j < ROWS) {
-      const x0 = pegX(g, j, ball.rights);
-      const x1 = pegX(g, j + 1, ball.rights + (ball.dirs[j] ? 1 : 0));
-      const y0 = pegY(g, j);
-      const y1 = pegY(g, j + 1);
-      const te = t * t * (3 - 2 * t);
-      const ov = Math.sin(t * Math.PI) * ball.wob * (ball.dirs[j] ? 1 : -1);
-      return { x: x0 + (x1 - x0) * te + ov, y: y0 + (y1 - y0) * t };
+    if (row < ROWS) {
+      const x0 = pegX(g, row, ball.rights);
+      const x1 = pegX(g, row + 1, ball.rights + (ball.dirs[row] ? 1 : 0));
+      const y0 = pegY(g, row);
+      const y1 = pegY(g, row + 1);
+      const eased = t * t * (3 - 2 * t);
+      const wobble = Math.sin(t * Math.PI) * ball.wob * (ball.dirs[row] ? 1 : -1);
+      return {
+        x: x0 + (x1 - x0) * eased + wobble,
+        y: y0 + (y1 - y0) * t,
+      };
     }
+
+    const bin = binIndexForR(ball.targetR, s.edges);
     const x0 = pegX(g, ROWS, ball.rights);
-    const x1 = xOfR(g, binMid(ball.bin));
+    const x1 = clamp(xOfR(g, ball.targetR), g.padX, g.w - g.padX);
     return {
       x: x0 + (x1 - x0) * Math.min(1, t * 1.4),
-      y: pegY(g, ROWS) + (g.baseY - binH(g, ball.bin) - pegY(g, ROWS)) * (t * t),
+      y: pegY(g, ROWS)
+        + (g.baseY - binHeight(g, counts, bin) - pegY(g, ROWS)) * (t * t),
     };
   }
 
-  function stepBalls(dt) {
+  function stepBalls(dtMs) {
     for (const ball of s.balls) {
       const segmentMs = ball.seg < ROWS ? 90 : 220;
-      ball.t += (dt / segmentMs) * ball.sp;
+      ball.t += (dtMs / segmentMs) * ball.sp;
       while (ball.t >= 1) {
         ball.t -= 1;
         if (ball.seg < ROWS) {
@@ -284,10 +360,13 @@ export function initLattice(canvas) {
         }
       }
     }
-    for (const ball of s.balls.filter((item) => item.settled)) {
-      s.counts[ball.bin]++;
+
+    const settled = s.balls.filter((ball) => ball.settled);
+    for (const ball of settled) {
+      s.samples.push(ball.targetR);
+      if (s.samples.length > MAX_SAMPLES) s.samples.shift();
       s.dropped++;
-      if (isGreen(ball.bin)) s.green++;
+      if (ball.targetR > 0) s.green++;
     }
     s.balls = s.balls.filter((ball) => !ball.settled);
   }
@@ -297,8 +376,9 @@ export function initLattice(canvas) {
     const { ctx, w, h } = setupCanvas(canvas, height);
     const g = geom(w, h);
     ctx.clearRect(0, 0, w, h);
-    if (!s.active || !s.cur.probs) return;
+    if (!s.active || !s.cur.probs || !s.edges) return;
 
+    const counts = empiricalCounts(s.samples, s.edges);
     const baseY = g.baseY;
     const x0 = xOfR(g, 0);
     const maxProb = Math.max(...s.cur.probs, 0.001);
@@ -307,20 +387,21 @@ export function initLattice(canvas) {
     ctx.fillStyle = '#FBFAF6';
     ctx.fillRect(g.padX - 8, baseY - g.distH, w - 2 * g.padX + 16, g.distH);
 
-    const positiveX = Math.max(g.padX, Math.min(w - g.padX, xOfR(g, 0)));
+    const positiveX = clamp(xOfR(g, 0), g.padX, w - g.padX);
     const glow = 0.06 + 0.05 * pulse(now, 1800);
     ctx.fillStyle = `rgba(232,98,42,${glow})`;
     ctx.fillRect(positiveX, baseY - g.distH, (w - g.padX) - positiveX, g.distH);
 
     for (let b = 0; b < BINS; b++) {
       const x = g.padX + b * g.binW;
-      const barH = (s.cur.probs[b] / maxProb) * (g.distH - 12);
-      ctx.fillStyle = isTail(b)
+      const marketH = (s.cur.probs[b] / maxProb) * (g.distH - 12);
+      ctx.fillStyle = isTailBin(b)
         ? 'rgba(232,98,42,0.5)'
-        : isGreen(b) ? COLORS.greenSoft : COLORS.redSoft;
-      ctx.fillRect(x + 1.5, baseY - barH, g.binW - 3, barH);
-      const empiricalH = binH(g, b);
-      ctx.strokeStyle = isGreen(b) ? COLORS.green : COLORS.red;
+        : isGreenBin(b) ? COLORS.greenSoft : COLORS.redSoft;
+      ctx.fillRect(x + 1.5, baseY - marketH, g.binW - 3, marketH);
+
+      const empiricalH = binHeight(g, counts, b);
+      ctx.strokeStyle = isGreenBin(b) ? COLORS.green : COLORS.red;
       ctx.lineWidth = 1.1;
       ctx.strokeRect(x + 1.5, baseY - empiricalH, g.binW - 3, empiricalH);
     }
@@ -340,9 +421,10 @@ export function initLattice(canvas) {
       [s.tgt.q50, 'P50', COLORS.ink],
       [s.tgt.q90, 'P90', COLORS.green],
     ];
-    for (const [q, label, color] of quantiles) {
-      if (!Number.isFinite(Number(q)) || q < dom.lo || q > dom.hi) continue;
-      const x = xOfR(g, Number(q));
+    for (const [value, label, color] of quantiles) {
+      const q = Number(value);
+      if (!Number.isFinite(q) || q < dom.lo || q > dom.hi) continue;
+      const x = xOfR(g, q);
       ctx.strokeStyle = color;
       ctx.lineWidth = label === 'P50' ? 1.5 : 1;
       ctx.setLineDash(label === 'P50' ? [4, 2] : [2, 3]);
@@ -357,13 +439,14 @@ export function initLattice(canvas) {
       ctx.fillText(label, x, baseY - g.distH + 10);
     }
 
-    if (Number.isFinite(Number(s.tgt.mode)) && s.tgt.mode >= dom.lo && s.tgt.mode <= dom.hi) {
-      const modeX = xOfR(g, Number(s.tgt.mode));
+    const mode = Number(s.tgt.mode);
+    if (Number.isFinite(mode) && mode >= dom.lo && mode <= dom.hi) {
+      const x = xOfR(g, mode);
       ctx.fillStyle = '#E8622A';
       ctx.beginPath();
-      ctx.moveTo(modeX - 4, baseY - 4);
-      ctx.lineTo(modeX + 4, baseY - 4);
-      ctx.lineTo(modeX, baseY - 11);
+      ctx.moveTo(x - 4, baseY - 4);
+      ctx.lineTo(x + 4, baseY - 4);
+      ctx.lineTo(x, baseY - 11);
       ctx.closePath();
       ctx.fill();
     }
@@ -376,12 +459,12 @@ export function initLattice(canvas) {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    for (const [R, color, label] of [
+    for (const [value, color, label] of [
       [-1, COLORS.red, 'СТОП −1R'],
       [s.T, COLORS.green, `ТЕЙК +${s.T.toFixed(2)}R`],
     ]) {
-      if (R < dom.lo || R > dom.hi) continue;
-      const x = xOfR(g, R);
+      if (value < dom.lo || value > dom.hi) continue;
+      const x = xOfR(g, value);
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.3;
       ctx.setLineDash([5, 3]);
@@ -396,7 +479,7 @@ export function initLattice(canvas) {
       ctx.fillText(label, x, baseY - g.distH + 20);
     }
 
-    const currentX = Math.max(g.padX, Math.min(w - g.padX, xOfR(g, s.cur.r)));
+    const currentX = clamp(xOfR(g, s.cur.r), g.padX, w - g.padX);
     ctx.strokeStyle = '#E8622A';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([2, 2]);
@@ -473,15 +556,16 @@ export function initLattice(canvas) {
     }
 
     for (const ball of s.balls) {
-      const p = ballPos(g, ball);
+      const p = ballPos(g, ball, counts);
       ctx.beginPath();
       ctx.arc(p.x + 1, p.y + 2, 3.2, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(20,20,15,0.12)';
       ctx.fill();
       ctx.beginPath();
       ctx.arc(p.x, p.y, 3.2, 0, Math.PI * 2);
+      const bin = binIndexForR(ball.targetR, s.edges);
       ctx.fillStyle = ball.seg >= ROWS
-        ? (isTail(ball.bin) ? '#E8622A' : isGreen(ball.bin) ? COLORS.green : COLORS.red)
+        ? (isTailBin(bin) ? '#E8622A' : ball.targetR > 0 ? COLORS.green : COLORS.red)
         : COLORS.ink;
       ctx.fill();
     }
@@ -514,8 +598,8 @@ export function initLattice(canvas) {
     get stats() {
       const greenShare = s.dropped ? s.green / s.dropped : null;
       let pGreenModel = null;
-      if (s.tgt.probs) {
-        pGreenModel = s.tgt.probs.reduce((sum, p, b) => sum + (isGreen(b) ? p : 0), 0);
+      if (s.tgt.probs && s.edges) {
+        pGreenModel = s.tgt.probs.reduce((sum, p, b) => sum + (binMid(b) > 0 ? p : 0), 0);
       }
       return {
         dropped: s.dropped,
