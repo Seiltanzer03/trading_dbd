@@ -3,75 +3,124 @@ import json
 import pytest
 
 from seiltanzer.ai_verdict import (
-    SYSTEM_PROMPT, SETUP_PLAYBOOKS, build_snapshot, request_verdict,
+    SYSTEM_PROMPT, SETUP_PLAYBOOKS, build_snapshot, render_policy_report,
+    request_verdict,
 )
 from seiltanzer.config import Settings
 from seiltanzer.engine import Engine
 
 
-def test_prompt_is_compact_scenario_manager_not_stop_repeater():
+def _minimal_policy_snapshot():
+    policies = {}
+    for index, name in enumerate(("HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT")):
+        policies[name] = {
+            "expected_final_r": round(.10 + index * .01, 3),
+            "median_final_r": round(.05 + index * .01, 3),
+            "cvar10_r": round(-.60 + index * .10, 3),
+            "p_next_rung_before_stop": .30,
+            "p_stop_before_next_rung": .40,
+            "no_event_probability": {"60m": .70},
+        }
+    return {
+        "captured_ts": 1,
+        "strategy": {"direction": "long"},
+        "observation": {"exact_levels": {"entry": 100, "stop": 90, "take": 125,
+                                            "current": 102}},
+        "policy_manager": {
+            "recommendation": {
+                "policy": "CLOSE_25", "action_ru": "ЗАКРЫТЬ 25% ПОЗИЦИИ СЕЙЧАС",
+                "remaining_fraction": .75,
+                "remaining_management": "остаток вести по исходному стопу; БУ/trailing запрещены до 1.5R",
+                "next_rung_r": 1.0, "raw_optimizer_policy": "CLOSE_25",
+                "gate_downgrade_reasons": [],
+            },
+            "policies": policies,
+            "selection_rule": {"cvar_floor_r": -.60},
+            "stability": {"selected_count": 9, "checks": 11, "selected_share": 9 / 11},
+            "inputs": {"r0": .2, "chain_age_sec": 120, "chain_status": "ok",
+                       "proxy_quality": "reference_proxy"},
+            "evidence": {"adverse_confirmations": [], "supportive_contradictions": [],
+                         "uncertainty_flags": []},
+            "metric_coverage": {"summary": {"available_groups": 12,
+                                                 "total_groups": 12,
+                                                 "coverage_ratio": 1}},
+            "counterfactual_attribution": {"available": False},
+            "metric_changes": {"available": False},
+            "cancellation_boundary": {"available": False,
+                                      "reason": "На проверенной сетке переход не найден"},
+        },
+    }
+
+
+def test_prompt_makes_quant_engine_authoritative_and_bans_vague_language():
     assert len(SETUP_PLAYBOOKS) == 16
-    assert "180–260 слов" in SYSTEM_PROMPT
-    assert "НЕ пересказывай FVG/AMD" in SYSTEM_PROMPT
-    assert "БУ/trailing только после" in SYSTEM_PROMPT
-    assert "manager_frame" in SYSTEM_PROMPT
-    assert SETUP_PLAYBOOKS[11]["entry"].startswith("long after VIX")
+    assert "policy_manager" in SYSTEM_PROMPT
+    assert "Нельзя менять" in SYSTEM_PROMPT
+    assert "локальная проекция 1–24h" in SYSTEM_PROMPT
+    assert "полная корреляционная матрица" in SYSTEM_PROMPT
+    assert "слишком раннее действие" in SYSTEM_PROMPT
+    assert "РАСЧЁТ ПОЛИТИК" in SYSTEM_PROMPT
 
 
-def test_snapshot_covers_visual_models_and_trade_memory(tmp_path):
+def test_snapshot_contains_quant_policy_and_all_recent_metric_families(tmp_path):
     engine = Engine(Settings(demo=True, data_dir=str(tmp_path)))
     try:
-        trade = engine.journal.open_trade(
-            3, "NAS100", "long", 21500, 21450, 21625)
+        trade = engine.journal.open_trade(3, "NAS100", "long", 21500, 21450, 21625)
         engine.on_trade_opened(trade)
         engine.market.refresh_price()
         engine.market.refresh_vols()
         engine.market.refresh_correlation()
         snapshot = build_snapshot(engine)
+        manager = snapshot["policy_manager"]
         assert snapshot["trade_id"] == trade["id"]
-        assert set(snapshot["observation"]) >= {
-            "position", "option_probability", "probability_cone", "lattice",
-            "strike_landscape", "iv_surface", "gamma", "levels",
-            "volatility", "correlation", "filters", "execution", "feed_quality",
-        }
+        assert set(manager["policies"]) == {"HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
+        for policy in manager["policies"].values():
+            assert set(policy) >= {
+                "expected_final_r", "median_final_r", "cvar10_r",
+                "p_next_rung_before_stop", "p_stop_before_next_rung",
+                "no_event_probability",
+            }
+        evidence = manager["evidence"]
+        assert evidence["cone_rnd"]["center_path"]
+        assert evidence["iv_surface"]["frontend_formula_match"] is True
+        assert len(evidence["iv_surface"]["local_24h"]) == 7
+        assert "all_pairs" in evidence["correlation"]
+        assert evidence["decision_roles"]["context_only"]
+        coverage = snapshot["metric_coverage"]["summary"]
+        assert coverage["total_groups"] == 12
+        assert coverage["all_groups_have_explicit_role"] is True
         assert snapshot["metric_history"]["samples"] >= 1
-        assert set(snapshot["evidence_matrix"]) == {
-            "options_primary", "live_price", "levels_structure", "cross_asset",
-            "oi_gamma_context", "execution_time", "data_quality",
-        }
-        assert set(snapshot["scenario_frame"]) >= {
-            "A_continuation", "B_stall", "C_deterioration", "next_review_events",
-        }
-        assert "setup_guard" not in snapshot["scenario_frame"]
-        assert "рынок переходит" in snapshot["scenario_frame"]["A_continuation"]["meaning"]
-        assert snapshot["decision_frame"]["option_regime"]
-        assert snapshot["manager_frame"]["state_name"]
-        assert "текущ" in snapshot["manager_frame"]["reasons_plain"][0]
-        assert "следующий плановый рубеж" in snapshot["manager_frame"]["action_now_plain"]
-        assert snapshot["strategy"]["playbook"]["timeframes"] == "12H/4H/15m"
-        assert snapshot["time_context"]["timezone"] == "Europe/Athens"
-        assert set(snapshot["observation"]["exact_levels"]) == {
-            "entry", "stop", "take", "current",
-        }
-        serialized = str(snapshot["metric_history"])
-        assert "option_edge" not in serialized and "p_ev0" not in serialized
-        assert len(json.dumps(snapshot, ensure_ascii=False)) < 25000
+        assert len(json.dumps(snapshot, ensure_ascii=False)) < 60000
     finally:
         engine.close()
+
+
+def test_deterministic_report_is_concrete_and_contains_every_policy():
+    report = render_policy_report(_minimal_policy_snapshot())
+    for header in ("ДЕЙСТВИЕ", "РАСЧЁТ ПОЛИТИК", "ПОЧЕМУ ВЫБРАНО",
+                   "ПОДТВЕРЖДЕНИЯ И ПРОТИВОРЕЧИЯ", "РАЗЛОЖЕНИЕ ИЗМЕНЕНИЯ",
+                   "ПОСЛЕ ИСПОЛНЕНИЯ", "ГРАНИЦА ОТМЕНЫ", "СЛЕДУЮЩИЙ ПЕРЕСЧЁТ",
+                   "КАЧЕСТВО ДАННЫХ"):
+        assert header in report
+    for policy in ("HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"):
+        assert policy in report
+    assert "слишком раннее действие" not in report.lower()
+    assert "выше потенциальная прибыль" not in report.lower()
+    assert "ЗАКРЫТЬ 25% ПОЗИЦИИ СЕЙЧАС" in report
+    assert "CVaR10" in report
 
 
 def test_ai_key_is_server_side_and_required(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="не настроен"):
-        request_verdict({"captured_tick": {"ts": 1}})
+        request_verdict({"captured_ts": 1})
 
 
-def test_ai_proxy_is_scoped_to_openrouter_client(monkeypatch):
+def test_ai_proxy_is_scoped_and_quant_settings_are_deterministic(monkeypatch):
     seen = {}
     class Response:
         def raise_for_status(self): pass
-        def json(self):
-            return {"choices": [{"message": {"content": "ok"}}], "model": "test"}
+        def json(self): return {"choices": [{"message": {"content": "ok"}}], "model": "test"}
     class Client:
         def __init__(self, **kwargs): seen.update(kwargs)
         def __enter__(self): return self
@@ -82,41 +131,26 @@ def test_ai_proxy_is_scoped_to_openrouter_client(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("OPENROUTER_PROXY", "socks5://user:pass@proxy:1080")
     monkeypatch.setattr("seiltanzer.ai_verdict.httpx.Client", Client)
-    assert request_verdict({"captured_tick": {"ts": 1}})["verdict"] == "ok"
+    out = request_verdict({"captured_ts": 1})
+    assert out["verdict"] == "ok"
     assert seen["proxy"].startswith("socks5://")
     assert seen["trust_env"] is False
-    assert seen["body"]["max_tokens"] == 650
-    assert seen["body"]["temperature"] == 0.1
+    assert seen["body"]["max_tokens"] == 1100
+    assert seen["body"]["temperature"] == 0.0
 
 
-def test_ai_rewrites_legacy_metric_answer_once(monkeypatch):
-    calls = []
-    class Response:
-        def __init__(self, content): self.content = content
-        def raise_for_status(self): pass
-        def json(self): return {"choices": [{"message": {"content": self.content}}]}
-    class Client:
-        def __init__(self, **_kwargs): pass
-        def __enter__(self): return self
-        def __exit__(self, *_): pass
-        def post(self, *_args, **kwargs):
-            calls.append(kwargs["json"])
-            return Response("edge null" if len(calls) == 1 else "СТАТУС — нейтрален")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setattr("seiltanzer.ai_verdict.httpx.Client", Client)
-    assert request_verdict({"captured_ts": 1})["verdict"] == "СТАТУС — нейтрален"
-    assert len(calls) == 2
-
-
-def test_ai_accepts_human_manager_report_without_setup_repetition(monkeypatch):
+def test_model_cannot_change_action_or_policy_numbers(monkeypatch):
     class Response:
         def raise_for_status(self): pass
         def json(self):
             return {"choices": [{"message": {"content": (
-                "СОСТОЯНИЕ — зависание.\nИЗМЕНИЛОСЬ — без изменений.\n"
-                "ВРЕМЯ — окно модели.\nЧТО ДЕЛАТЬ — удерживать.\nПОЧЕМУ — рынок ждёт паузу.\n"
-                "ПЛАН — Продолжение → держать; Зависание → ждать; Ухудшение → защищать.\n"
-                "СЛЕДУЮЩАЯ ПРОВЕРКА — новая цепочка.")}}]}
+                "ДЕЙСТВИЕ — НЕ СОКРАЩАТЬ ПОЗИЦИЮ.\n"
+                "РАСЧЁТ ПОЛИТИК — HOLD CLOSE_10 CLOSE_25 CLOSE_50 EXIT.\n"
+                "ПОЧЕМУ ВЫБРАНО — всё хорошо.\n"
+                "ПОДТВЕРЖДЕНИЯ И ПРОТИВОРЕЧИЯ — нет.\n"
+                "РАЗЛОЖЕНИЕ ИЗМЕНЕНИЯ — нет.\nПОСЛЕ ИСПОЛНЕНИЯ — держать.\n"
+                "ГРАНИЦА ОТМЕНЫ — нет.\nСЛЕДУЮЩИЙ ПЕРЕСЧЁТ — потом.\n"
+                "КАЧЕСТВО ДАННЫХ — хорошее.")}}], "model": "test"}
     class Client:
         def __init__(self, **_kwargs): pass
         def __enter__(self): return self
@@ -124,6 +158,8 @@ def test_ai_accepts_human_manager_report_without_setup_repetition(monkeypatch):
         def post(self, *_args, **_kwargs): return Response()
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr("seiltanzer.ai_verdict.httpx.Client", Client)
-    out = request_verdict({"manager_frame": {"state_name": "ЗАВИСАНИЕ"}})
-    assert "СОСТОЯНИЕ — зависание" in out["verdict"]
-    assert "setup" not in out["verdict"].lower()
+    snapshot = _minimal_policy_snapshot()
+    out = request_verdict(snapshot)
+    assert out["model"] == "deterministic-policy-fallback"
+    assert out["verdict"] == render_policy_report(snapshot)
+    assert "ЗАКРЫТЬ 25% ПОЗИЦИИ СЕЙЧАС" in out["verdict"]
