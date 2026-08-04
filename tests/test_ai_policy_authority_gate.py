@@ -1,4 +1,5 @@
 import seiltanzer.ai_policy as policy
+import seiltanzer.ai_policy_v3 as policy_v3
 import seiltanzer.ai_verdict as verdict
 
 
@@ -78,7 +79,7 @@ def test_correlated_option_metrics_count_as_one_confirmation_family(monkeypatch)
         },
     }
     monkeypatch.setattr(
-        policy,
+        policy_v3,
         "_ORIGINAL_BUILD_METRIC_EVIDENCE",
         lambda *args, **kwargs: base_evidence,
     )
