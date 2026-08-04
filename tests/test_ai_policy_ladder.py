@@ -43,6 +43,9 @@ def test_future_ladder_closes_original_fraction_normalized_to_current_remainder(
 
     # Two past rungs left 80% of the original position. Each future 10% of the
     # original therefore equals 12.5% of the current remainder.
-    expected = 0.125 * (1.5 + 1.75 + 2.0 + 2.2) + 0.50 * 2.5
+    current_remainder = 1.0 - 2 * inputs.rung_fraction
+    future_fraction = inputs.rung_fraction / current_remainder
+    assert math.isclose(future_fraction, 0.125, abs_tol=1e-12)
+    expected = future_fraction * (1.5 + 1.75 + 2.0 + 2.2) + 0.50 * 2.5
     assert math.isclose(outcome, expected, abs_tol=1e-12)
     assert not math.isclose(outcome, 0.10 * (1.5 + 1.75 + 2.0 + 2.2) + 0.60 * 2.5)
