@@ -1,75 +1,87 @@
-"""Stable public facade for the quantitative AI policy manager v2."""
+"""Stable public facade for the quantitative AI policy manager v3."""
 from __future__ import annotations
 
-from . import ai_policy_v2 as _impl
+from . import ai_policy_v3 as _impl
 
 globals().update({
     name: value for name, value in vars(_impl).items()
-    if name not in {"__name__", "__loader__", "__package__", "__spec__"}
+    if name not in {"__name__", "__loader__", "__package__", "__spec__", "_impl"}
 })
 
-_ORIGINAL_SELECT_FINAL_POLICY = _impl.select_final_policy
+_BASE_SELECT_FINAL_POLICY = _impl._ORIGINAL_SELECT_FINAL_POLICY
 
 
-def select_final_policy(*args, **kwargs) -> dict:
-    """Treat every unresolved gate conflict as manual-review-only."""
-    result = _ORIGINAL_SELECT_FINAL_POLICY(*args, **kwargs)
-    result["automatic_execution_allowed"] = result.get("status") in {
-        "confirmed", "downgraded_within_feasible_set",
+def select_final_policy(raw_choice: str, stability: dict,
+                        metrics: dict[str, dict], evidence: dict,
+                        inputs: _impl.PolicyInputs, selection_rule: dict) -> dict:
+    """Apply source authority without hiding a more specific prior conflict."""
+    result = _BASE_SELECT_FINAL_POLICY(
+        raw_choice, stability, metrics, evidence, inputs, selection_rule)
+    floor = float(selection_rule.get("cvar_floor_r", -0.60))
+    source_stability = authority_stability(inputs, floor)
+    result["authority_stability"] = source_stability
+
+    reliability = _impl._impl._at(
+        evidence, "data_quality", "reliability", default={}) or {}
+    level = reliability.get("level") or "не определена"
+    known_reliability = level in {"высокая", "средняя", "низкая"}
+    families = list(evidence.get("adverse_confirmation_families") or [])
+    selected = result.get("policy") or raw_choice
+    source_share = float(
+        (source_stability.get("winner_shares") or {}).get(selected, 0.0))
+    result["confirmation_families"] = families
+    result["confirmation_count"] = len(families)
+    result["source_stability_share"] = source_share
+    result["data_reliability"] = level
+
+    reasons = list(result.get("reasons") or [])
+    base_status = result.get("status") or "conflict"
+    status = base_status
+    executable_statuses = {"confirmed", "downgraded_within_feasible_set"}
+    executable = base_status in executable_statuses
+
+    source_thresholds = {
+        "HOLD": 0.00,
+        "CLOSE_10": 0.45,
+        "CLOSE_25": 0.50,
+        "CLOSE_50": 0.625,
+        "EXIT": 0.75,
     }
+    required_share = source_thresholds.get(selected, 1.0)
+
+    if executable and source_share < required_share:
+        executable = False
+        status = "manual_source_conflict"
+        reasons.append(
+            f"устойчивость к отключению ненадёжных входов {source_share:.0%} "
+            f"ниже {required_share:.0%}")
+
+    if known_reliability and level == "низкая":
+        executable = False
+        if base_status not in {"conflict_stability_fallback", "manual_conflict"}:
+            status = "manual_data_conflict"
+        reasons.append("надёжность расчёта низкая: действие не подтверждено")
+    elif (known_reliability and selected == "EXIT"
+          and not reliability.get("full_exit_authority", False)):
+        executable = False
+        if base_status not in {"conflict_stability_fallback", "manual_conflict"}:
+            status = "manual_data_conflict"
+        reasons.append(
+            "EXIT запрещён без высокой надёжности, live-цепочки и непрокси IV")
+
+    if status not in executable_statuses:
+        executable = False
+    result["status"] = status
+    result["reasons"] = list(dict.fromkeys(reasons))
+    result["automatic_execution_allowed"] = executable
+    result["execution_policy"] = selected if executable else None
+    result["provisional_policy"] = selected
     return result
 
 
-def cancellation_boundaries(inputs: _impl.PolicyInputs, selected: str) -> dict:
-    """Recompute the nearest r-level where the raw optimizer switches to HOLD.
-
-    This implementation is intentionally local to the public facade. It avoids
-    calling the rebound function in ai_policy_base, which caused recursion.
-    """
-    if selected == "HOLD":
-        return {
-            "available": False,
-            "reason": "Для HOLD границы отмены до исполнения нет; переоценка при движении ±0.15R, новой цепочке или касании рубежа.",
-        }
-    grid = _impl.np.linspace(
-        max(-0.95, inputs.r0 - 0.50),
-        min(inputs.T - 0.02, inputs.r0 + 0.50),
-        21,
-    )
-    rows = []
-    for r_value in grid:
-        scenario = _impl.replace(
-            inputs,
-            r0=float(r_value),
-            max_r=max(inputs.max_r, float(r_value)),
-        )
-        metrics, sim = _impl._run_once(
-            scenario, n_paths=1200, n_steps=160, seed=0xD000)
-        choice, _ = _impl._raw_policy_choice(metrics, scenario.r0)
-        p_take = float(_impl.np.mean(~_impl.np.isnan(sim.take_time)))
-        p_stop = float(_impl.np.mean(~_impl.np.isnan(sim.stop_time)))
-        rows.append({
-            "r": round(float(r_value), 4),
-            "choice": choice,
-            "barrier_ev_r": round(inputs.T * p_take - p_stop, 4),
-        })
-    hold_rows = [row for row in rows if row["choice"] == "HOLD"]
-    nearest = min(hold_rows, key=lambda row: abs(row["r"] - inputs.r0)) if hold_rows else None
-    return {
-        "available": bool(nearest),
-        "hold_switch": nearest,
-        "grid_min_r": rows[0]["r"],
-        "grid_max_r": rows[-1]["r"],
-        "method": "пересчёт всех политик по r-сетке; остальные опционные параметры фиксированы",
-        "reason": None if nearest else "На проверенной r-сетке переход к HOLD не найден.",
-    }
-
-
-# Functions in ai_policy_v2 resolve globals in that module. Patch both modules
-# before any analysis is called.
+# ai_policy_v3 delegates analysis to ai_policy_v2, so patch all three module
+# namespaces before build_snapshot imports this public facade.
 _impl.select_final_policy = select_final_policy
-_impl._base.select_final_policy = select_final_policy
-_impl.cancellation_boundaries = cancellation_boundaries
-_impl._base.cancellation_boundaries = cancellation_boundaries
+_impl._impl.select_final_policy = select_final_policy
+_impl._impl._base.select_final_policy = select_final_policy
 globals()["select_final_policy"] = select_final_policy
-globals()["cancellation_boundaries"] = cancellation_boundaries
