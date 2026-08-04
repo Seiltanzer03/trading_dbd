@@ -68,7 +68,7 @@ class TestRealizedVol:
 class TestBLDensity:
     def test_density_integrates_to_one(self, chain):
         d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
-        assert np.trapezoid(d.density, d.strikes) == pytest.approx(1.0, abs=1e-9)
+        assert getattr(np, 'trapezoid', getattr(np, 'trapz'))(d.density, d.strikes) == pytest.approx(1.0, abs=1e-9)
         assert (d.density >= 0).all()
 
     def test_recovers_lognormal_tails(self, chain):
@@ -162,7 +162,7 @@ class TestProxyMapping:
         d = O.bl_density(chain["strikes"], chain["call_mid"], T_YEARS)
         mapped = O.map_proxy_density(d, SPOT, 2000, transform)
         assert np.all(np.diff(mapped.strikes) > 0)
-        assert np.trapezoid(mapped.density, mapped.strikes) == pytest.approx(
+        assert getattr(np, 'trapezoid', getattr(np, 'trapz'))(mapped.density, mapped.strikes) == pytest.approx(
             1.0, abs=1e-9)
         assert mapped.mean() > 0
 

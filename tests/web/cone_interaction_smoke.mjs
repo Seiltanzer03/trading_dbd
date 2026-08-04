@@ -50,14 +50,16 @@ fakeWindow.Plotly = {
     writes.push('newPlot');
     el.data = clone(traces);
     el.layout = clone(layout);
-    el._fullLayout = { scene: { camera: clone(layout.scene.camera) } };
+    el._fullLayout = { scene: { camera: clone(layout.scene?.camera || {}) } };
     return Promise.resolve(el);
   },
   react(el, traces, layout) {
     writes.push('react');
     el.data = clone(traces);
     el.layout = clone(layout);
-    el._fullLayout.scene.camera = clone(layout.scene.camera);
+    if (layout.scene?.camera) {
+      el._fullLayout.scene.camera = clone(layout.scene.camera);
+    }
     return Promise.resolve(el);
   },
   restyle() {

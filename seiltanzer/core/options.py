@@ -119,7 +119,7 @@ class RNDensity:
         if above.all():
             return 1.0, 0.0
         i = int(np.argmax(above))  # первый страйк >= level
-        p_above = float(np.trapezoid(q[i:], k[i:]))
+        p_above = float(getattr(np, 'trapezoid', getattr(np, 'trapz'))(q[i:], k[i:]))
         if i > 0:
             # частичная трапеция между level и первым страйком >= level
             k0, k1 = k[i - 1], k[i]
@@ -130,7 +130,7 @@ class RNDensity:
 
     def mean(self) -> float:
         """Математическое ожидание уровня под нормированной плотностью."""
-        return float(np.trapezoid(self.strikes * self.density, self.strikes))
+        return float(getattr(np, 'trapezoid', getattr(np, 'trapz'))(self.strikes * self.density, self.strikes))
 
 
 def map_proxy_levels(levels, proxy_spot: float, instrument_spot: float,
@@ -176,7 +176,7 @@ def map_proxy_density(density: RNDensity, proxy_spot: float,
     y, qy = y[ok], qy[ok]
     if len(y) < 3:
         raise ValueError("после преобразования прокси осталось мало точек")
-    area = float(np.trapezoid(qy, y))
+    area = float(getattr(np, 'trapezoid', getattr(np, 'trapz'))(qy, y))
     if area <= 0:
         raise ValueError("плотность прокси вырождена после преобразования")
     return RNDensity(strikes=y, density=qy / area, t_years=density.t_years)
@@ -298,7 +298,7 @@ def bl_density(strikes, call_mids, t_years: float, r: float = 0.0,
         coeffs = np.polyfit(kk, c[lo:hi], 2)
         dens[i] = 2.0 * coeffs[0] * math.exp(r * t_years)
     dens = np.clip(dens, 0.0, None)
-    area = np.trapezoid(dens, k)
+    area = getattr(np, 'trapezoid', getattr(np, 'trapz'))(dens, k)
     if area <= 0:
         raise ValueError("плотность вырождена (нулевая площадь)")
     return RNDensity(strikes=k, density=dens / area, t_years=t_years)

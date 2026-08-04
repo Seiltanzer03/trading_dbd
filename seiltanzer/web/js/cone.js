@@ -53,7 +53,7 @@ export function initCone(elId) {
   let hasPlot = false, listenersOn = false;
   let structSig = null, pendingStruct = false;
   let curR = null, lastDotR = null;
-  let interacting = false, interactTimer = null;
+  let interacting = false, interactTimer = null, pointerHeld = false;
   let lastYTitle = null, lastNames = null;
   const live = { r: null };
 
@@ -78,12 +78,36 @@ export function initCone(elId) {
     el.on('plotly_relayouting', () => {
       interacting = true;
       if (interactTimer) clearTimeout(interactTimer);
-      interactTimer = setTimeout(() => { interacting = false; flush(); }, 300);
+      if (!pointerHeld) interactTimer = setTimeout(() => { interacting = false; flush(); }, 300);
     });
     el.on('plotly_relayout', () => {
       if (interactTimer) clearTimeout(interactTimer);
-      interactTimer = setTimeout(() => { interacting = false; flush(); }, 140);
+      if (!pointerHeld) interactTimer = setTimeout(() => { interacting = false; flush(); }, 140);
     });
+    const begin = () => {
+      pointerHeld = true;
+      interacting = true;
+      if (interactTimer) clearTimeout(interactTimer);
+    };
+    const release = () => {
+      if (!pointerHeld) return;
+      pointerHeld = false;
+      if (interactTimer) clearTimeout(interactTimer);
+      requestAnimationFrame(() => {
+        interactTimer = setTimeout(() => { interacting = false; flush(); }, 140);
+      });
+    };
+    if (window.PointerEvent) {
+      el.addEventListener('pointerdown', begin, true);
+      window.addEventListener('pointerup', release, true);
+      window.addEventListener('pointercancel', release, true);
+    } else {
+      el.addEventListener('mousedown', begin, true);
+      el.addEventListener('touchstart', begin, { passive: true, capture: true });
+      window.addEventListener('mouseup', release, true);
+      window.addEventListener('touchend', release, { passive: true, capture: true });
+      window.addEventListener('touchcancel', release, { passive: true, capture: true });
+    }
   }
   function flush() {
     if (!ready() || !hasPlot) return;
