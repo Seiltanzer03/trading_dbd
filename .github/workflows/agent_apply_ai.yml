@@ -1,4 +1,4 @@
-name: apply-ai-policy-payload
+name: cleanup-ai-policy-payload
 
 on:
   push:
@@ -9,26 +9,21 @@ permissions:
   contents: write
 
 jobs:
-  apply:
-    if: ${{ !contains(github.event.head_commit.message, '[agent-files-applied]') }}
+  cleanup:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/ai-quant-policy-manager
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Apply staged files
-        run: python .github/agent_apply_ai.py
-      - name: Verify generated Python
+      - name: Remove one-shot staging files
         run: |
-          python -m py_compile seiltanzer/ai_policy.py seiltanzer/ai_verdict.py
-          python -m py_compile tests/test_ai_policy.py tests/test_ai_verdict.py
-      - name: Commit generated files
+          rm -rf .github/agent_payload
+          rm -f .github/agent_apply_ai.py
+          rm -f .github/workflows/agent_apply_ai.yml
+      - name: Commit cleanup
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add seiltanzer/ai_policy.py seiltanzer/ai_verdict.py tests/test_ai_policy.py tests/test_ai_verdict.py
-          git commit -m "feat: add quantitative AI policy manager [agent-files-applied]"
+          git add -A
+          git commit -m "chore: remove one-shot AI payload staging"
           git push origin HEAD:agent/ai-quant-policy-manager
