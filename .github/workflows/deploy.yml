@@ -40,12 +40,14 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_PROXY: ${{ secrets.OPENROUTER_PROXY }}
           TRADINGVIEW_AUTH_TOKEN: ${{ secrets.TRADINGVIEW_AUTH_TOKEN }}
+          TERMINAL_USER: ${{ secrets.TERMINAL_USER }}
+          TERMINAL_PASS: ${{ secrets.TERMINAL_PASS }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          envs: OPENROUTER_API_KEY,OPENROUTER_PROXY,TRADINGVIEW_AUTH_TOKEN
+          envs: OPENROUTER_API_KEY,OPENROUTER_PROXY,TRADINGVIEW_AUTH_TOKEN,TERMINAL_USER,TERMINAL_PASS
           command_timeout: 10m
           script: |
             set -e
@@ -69,6 +71,12 @@ jobs:
             fi
             if [ -n "$TRADINGVIEW_AUTH_TOKEN" ]; then
               printf 'TRADINGVIEW_AUTH_TOKEN=%s\n' "$TRADINGVIEW_AUTH_TOKEN" >> /etc/seiltanzer.env
+            fi
+            if [ -n "$TERMINAL_USER" ]; then
+              printf 'TERMINAL_USER=%s\n' "$TERMINAL_USER" >> /etc/seiltanzer.env
+            fi
+            if [ -n "$TERMINAL_PASS" ]; then
+              printf 'TERMINAL_PASS=%s\n' "$TERMINAL_PASS" >> /etc/seiltanzer.env
             fi
             mkdir -p /etc/systemd/system/seiltanzer.service.d
             printf '[Service]\nEnvironmentFile=-/etc/seiltanzer.env\n' \

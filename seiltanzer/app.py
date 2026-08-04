@@ -7,9 +7,11 @@ import contextlib
 import math
 import os
 import time
+import base64
+import secrets
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -91,7 +93,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     @app.middleware("http")
-    async def _no_cache(request, call_next):
+    async def auth_and_no_cache(request, call_next):
+        # Basic Auth check
+        auth_user = os.environ.get("TERMINAL_USER")
+        auth_pass = os.environ.get("TERMINAL_PASS")
+        if auth_user and auth_pass:
+            auth_header = request.headers.get("Authorization")
+            authorized = False
+            if auth_header and auth_header.startswith("Basic "):
+                try:
+                    decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+                    username, _, password = decoded.partition(":")
+                    if (secrets.compare_digest(username.encode("utf8"), auth_user.encode("utf8")) and
+                        secrets.compare_digest(password.encode("utf8"), auth_pass.encode("utf8"))):
+                        authorized = True
+                except Exception:
+                    pass
+            if not authorized:
+                return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": 'Basic realm="Seiltanzer Terminal"'})
+
         # запрет кэша на фронт: гарантирует, что браузер получит свежий JS/CSS
         # (иначе после git pull старый app.js мог остаться в кэше)
         resp = await call_next(request)
@@ -363,6 +383,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
         await ws.accept()
+        
+        # WebSocket Auth (если включено)
+        auth_user = os.environ.get("TERMINAL_USER")
+        auth_pass = os.environ.get("TERMINAL_PASS")
+        if auth_user and auth_pass:
+            auth_header = ws.headers.get("Authorization")
+            authorized = False
+            if auth_header and auth_header.startswith("Basic "):
+                try:
+                    decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+                    username, _, password = decoded.partition(":")
+                    if (secrets.compare_digest(username.encode("utf8"), auth_user.encode("utf8")) and
+                        secrets.compare_digest(password.encode("utf8"), auth_pass.encode("utf8"))):
+                        authorized = True
+                except Exception:
+                    pass
+            if not authorized:
+                await ws.close(code=1008)
+                return
+
         clients.add(ws)
         try:
             await ws.send_json(engine.tick_payload())
