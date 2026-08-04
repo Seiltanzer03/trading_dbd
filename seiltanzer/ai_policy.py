@@ -8,6 +8,17 @@ globals().update({
     if name not in {"__name__", "__loader__", "__package__", "__spec__"}
 })
 
+_ORIGINAL_SELECT_FINAL_POLICY = _impl.select_final_policy
+
+
+def select_final_policy(*args, **kwargs) -> dict:
+    """Treat every unresolved gate conflict as manual-review-only."""
+    result = _ORIGINAL_SELECT_FINAL_POLICY(*args, **kwargs)
+    result["automatic_execution_allowed"] = result.get("status") in {
+        "confirmed", "downgraded_within_feasible_set",
+    }
+    return result
+
 
 def cancellation_boundaries(inputs: _impl.PolicyInputs, selected: str) -> dict:
     """Recompute the nearest r-level where the raw optimizer switches to HOLD.
@@ -54,8 +65,11 @@ def cancellation_boundaries(inputs: _impl.PolicyInputs, selected: str) -> dict:
     }
 
 
-# analyze_policies is defined in ai_policy_v2 and resolves module globals there.
-# Patch both its module and the shared base module before any analysis is called.
+# Functions in ai_policy_v2 resolve globals in that module. Patch both modules
+# before any analysis is called.
+_impl.select_final_policy = select_final_policy
+_impl._base.select_final_policy = select_final_policy
 _impl.cancellation_boundaries = cancellation_boundaries
 _impl._base.cancellation_boundaries = cancellation_boundaries
+globals()["select_final_policy"] = select_final_policy
 globals()["cancellation_boundaries"] = cancellation_boundaries
