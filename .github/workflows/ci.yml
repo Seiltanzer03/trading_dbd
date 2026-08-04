@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply-ladder-fix:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/agent/ai-quant-policy-manager' && !contains(github.event.head_commit.message, '[ladder-fixed]') }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/agent/ai-quant-policy-manager') || (github.event_name == 'pull_request' && github.head_ref == 'agent/ai-quant-policy-manager') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
