@@ -101,8 +101,9 @@ export function createPlotlyCameraGuard(el, initialCamera) {
     if (camera) savedCamera = camera;
   }
 
-  function captureRelayout(update) {
-    if (destroyed || suppressCameraEvents > 0 || !userGestureActive()) return;
+  function captureRelayout(update, allowWithoutDomGesture = false) {
+    if (destroyed || suppressCameraEvents > 0) return;
+    if (!allowWithoutDomGesture && !userGestureActive()) return;
     const camera = cameraFromRelayout(savedCamera, update);
     if (camera) savedCamera = camera;
   }
@@ -142,8 +143,10 @@ export function createPlotlyCameraGuard(el, initialCamera) {
   function ensurePlotlyListeners() {
     if (plotlyListenersOn || !el?.on) return;
     plotlyListenersOn = true;
-    el.on('plotly_relayouting', captureRelayout);
-    el.on('plotly_relayout', captureRelayout);
+    // plotly_relayouting is emitted by an active user camera gesture. Plotly's
+    // programmatic react/resize path emits relayout/afterplot, not relayouting.
+    el.on('plotly_relayouting', (update) => captureRelayout(update, true));
+    el.on('plotly_relayout', (update) => captureRelayout(update, false));
     el.on('plotly_afterplot', () => {
       if (suppressCameraEvents > 0 || activePointers.size > 0) return;
       scheduleRestore([0, 90, 260]);
