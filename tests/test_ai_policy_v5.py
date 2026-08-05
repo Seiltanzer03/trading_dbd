@@ -85,7 +85,7 @@ def test_feasible_hold_without_adverse_evidence_cannot_become_close50(monkeypatc
             },
         }
 
-    monkeypatch.setattr(policy_v5, "_BASE_SELECT_FINAL_POLICY", fake_base_select)
+    monkeypatch.setattr(policy_v5, "_BASE_HARD_CVAR_SELECT", fake_base_select)
     result = policy_v5.select_final_policy(
         "HOLD",
         {"policy_stats": {}},
