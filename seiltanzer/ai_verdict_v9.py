@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from . import ai_verdict_v7 as _impl
+from .ai_policy import resolve_management_sequence
 
 
 globals().update({
@@ -10,14 +11,16 @@ globals().update({
 })
 
 _BASE_RENDER = _impl.render_policy_report
+_BASE_BUILD_SNAPSHOT = _impl.build_snapshot
+_BASE_REQUEST_VERDICT = _impl.request_verdict
 SYSTEM_PROMPT = _impl.SYSTEM_PROMPT + """
 В policy_manager.management_decision находится единственный действующий план сделки.
 Он имеет приоритет над отдельными строками strategy и risk-overlay. Не выдавай две
 параллельные команды. Если execution_status=pending_execution — повтори точное
-instruction_ru и укажи, что после ручного выполнения надо подтвердить решение в
-терминале. Если executed_continuation — не предлагай повторно тот же CLOSE/EXIT.
-Если strategy_active — разрешены предусмотренные стратегией ступени, но запрещены
-новые внеплановые ордера. Обязательно упомяни предыдущее решение и continuity.
+instruction_ru. Если continuity=continue_same_pending_decision, подчеркни, что это
+прежнее действующее решение, а не дополнительное закрытие. Если strategy_active —
+разрешены предусмотренные стратегией ступени, но запрещены новые внеплановые ордера.
+Обязательно упомяни предыдущее решение и continuity.
 """
 
 
@@ -68,18 +71,27 @@ def _management_top(manager: dict) -> list[str]:
     instruction = decision.get("instruction_ru") or "ПЛАН НЕ ОПРЕДЕЛЁН"
     arbiter = manager.get("management_arbiter") or {}
     previous = _previous_text(decision)
+    continuity = decision.get("continuity")
 
     if status == "pending_execution":
+        repeated = continuity == "continue_same_pending_decision"
         return [
-            f"**ДЕЙСТВИЕ СЕЙЧАС** — {instruction}.",
             (
-                "Это единственная действующая команда менеджмента. AI risk-overlay "
-                "имеет приоритет; стандартная стратегия применяется только к "
-                "остатку после выполнения."
+                f"**ДЕЙСТВИЕ СЕЙЧАС** — {instruction}."
+                if not repeated else
+                f"**ДЕЙСТВУЮЩЕЕ РЕШЕНИЕ ИИ** — {instruction}."
             ),
             (
-                f"Статус: ожидается ручное выполнение и подтверждение в терминале. "
-                f"decision_id={decision.get('decision_id')}."
+                "Это прежнее действующее решение, а не команда закрыть ещё такой "
+                "же объём повторно."
+                if repeated else
+                "Это единственная действующая команда менеджмента. AI risk-overlay "
+                "имеет приоритет; стандартная стратегия применяется только к "
+                "остатку после действия."
+            ),
+            (
+                f"Статус: решение остаётся действующим до нового арбитражного "
+                f"пересчёта. decision_id={decision.get('decision_id')}."
             ),
             previous,
             (
@@ -93,8 +105,8 @@ def _management_top(manager: dict) -> list[str]:
         return [
             f"**ДЕЙСТВИЕ СЕЙЧАС** — {instruction}.",
             (
-                "Статус: прежнее активное решение ИИ уже отмечено выполненным. "
-                "Повторно закрывать тот же объём нельзя."
+                "Прежнее активное решение ИИ уже считается выполненным в "
+                "последовательности. Повторно закрывать тот же объём нельзя."
             ),
             previous,
             (
@@ -148,6 +160,43 @@ def _plan_lines(manager: dict) -> list[str]:
     ]
 
 
+def build_snapshot(engine) -> dict:
+    snapshot = _BASE_BUILD_SNAPSHOT(engine)
+    trade_id = snapshot.get("trade_id")
+    if trade_id is None:
+        return snapshot
+    manager = snapshot.get("policy_manager") or {}
+    previous_full = _impl._previous_full_snapshot(engine, int(trade_id))
+    previous_decision = (
+        ((previous_full or {}).get("policy_manager") or {}).get("management_decision")
+    )
+    decision = resolve_management_sequence(
+        manager,
+        previous_decision,
+        trade_id=int(trade_id),
+        captured_ts=snapshot.get("captured_ts"),
+    )
+    manager["management_decision"] = decision
+    rec = manager.get("recommendation") or {}
+    rec.update({
+        "policy": decision.get("policy") or rec.get("policy"),
+        "execution_action_ru": decision.get("instruction_ru"),
+        "working_action_code": decision.get("execution_status"),
+        "manual_execution_required": decision.get("manual_execution_required", False),
+        "automatic_execution_allowed": False,
+    })
+    manager["recommendation"] = rec
+    snapshot["policy_manager"] = manager
+    return snapshot
+
+
+def request_verdict(snapshot: dict) -> dict:
+    result = _BASE_REQUEST_VERDICT(snapshot)
+    decision = ((snapshot.get("policy_manager") or {}).get("management_decision") or {})
+    result["management_decision"] = decision
+    return result
+
+
 def render_policy_report(snapshot: dict) -> str:
     manager = snapshot.get("policy_manager") or {}
     lines = _BASE_RENDER(snapshot).splitlines()
@@ -167,22 +216,28 @@ def render_policy_report(snapshot: dict) -> str:
     status = decision.get("execution_status")
     if status == "pending_execution":
         policy = decision.get("policy")
-        if policy == "EXIT":
+        if decision.get("continuity") == "continue_same_pending_decision":
             body = [
-                "После ручного полного выхода подтвердить выполнение в терминале. "
-                "После подтверждения сопровождение этой сделки прекращается."
+                "Предыдущее решение остаётся действующим. Этот отчёт не создаёт "
+                "дополнительного закрытия; после фактического выполнения вести "
+                "оставшийся объём по единому плану."
+            ]
+        elif policy == "EXIT":
+            body = [
+                "После ручного полного выхода сопровождение этой сделки "
+                "прекращается. Повторного EXIT по этому decision_id нет."
             ]
         else:
             body = [
-                f"После ручного {policy} подтвердить выполнение в терминале. "
-                "Стратегический стоп/БУ и лестница продолжаются только для "
-                "оставшегося объёма; повторять это сокращение нельзя."
+                f"После ручного {policy} стратегический стоп/БУ и лестница "
+                "продолжаются только для оставшегося объёма; повторять это "
+                "сокращение как новый приказ нельзя."
             ]
         _replace_section(lines, "**ПОСЛЕ ИСПОЛНЕНИЯ**", body)
     elif status == "executed_continuation":
         _replace_section(lines, "**ПОСЛЕ ИСПОЛНЕНИЯ**", [
-            "Предыдущее сокращение уже выполнено и учтено в последовательности. "
-            "Новых ордеров по этому отчёту нет; вести фактический остаток."
+            "Предыдущее сокращение уже учтено в последовательности. Новых "
+            "ордеров по этому отчёту нет; вести фактический остаток."
         ])
     else:
         _replace_section(lines, "**ПОСЛЕ ИСПОЛНЕНИЯ**", [
@@ -200,7 +255,11 @@ for module in (
     _impl._impl._impl._impl._base,
 ):
     module.SYSTEM_PROMPT = SYSTEM_PROMPT
+    module.build_snapshot = build_snapshot
+    module.request_verdict = request_verdict
     module.render_policy_report = render_policy_report
 
 globals()["SYSTEM_PROMPT"] = SYSTEM_PROMPT
+globals()["build_snapshot"] = build_snapshot
+globals()["request_verdict"] = request_verdict
 globals()["render_policy_report"] = render_policy_report
