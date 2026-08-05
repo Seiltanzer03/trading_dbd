@@ -1,8 +1,8 @@
 """Policy manager v12: explicit option-implied center diagnostics.
 
 The engine already converts a plausible terminal RND mean into a shrunken and
-capped ``drift_R``.  That drift is therefore already present in every simulated
-path, Expected value and CVaR calculation.  This layer makes the relationship
+capped ``drift_R``. That drift is therefore already present in every simulated
+path, Expected value and CVaR calculation. This layer makes the relationship
 explicit, adds one direction-aware option-distribution observation, and keeps a
 rejected raw mean strictly context-only.
 """
@@ -61,11 +61,6 @@ def _option_center(cone: dict, inputs: PolicyInputs) -> dict:
             else "context_only_rejected" if rejected_gap is not None
             else "neutral_or_unavailable"
         ),
-        "independence_family": "option_distribution",
-        "note": (
-            "raw RND mean is shrunk/capped before entering Expected/CVaR; "
-            "mean, median, mode, skew and barrier EV remain one option family"
-        ),
     }
 
 
@@ -73,6 +68,18 @@ def _append_unique(collection: list[dict], item: dict) -> None:
     metric = item.get("metric")
     if not any(row.get("metric") == metric for row in collection if isinstance(row, dict)):
         collection.append(item)
+
+
+def _compact_center_path(cone_rnd: dict, limit: int = 11) -> None:
+    """Keep enough center-path shape for AI diagnostics without bloating history."""
+    path = cone_rnd.get("center_path") or []
+    if not isinstance(path, list) or len(path) <= limit:
+        return
+    last = len(path) - 1
+    indexes = sorted({round(i * last / (limit - 1)) for i in range(limit)})
+    cone_rnd["center_path"] = [path[index] for index in indexes]
+    cone_rnd["center_path_points_total"] = len(path)
+    cone_rnd["center_path_points_stored"] = len(indexes)
 
 
 def build_metric_evidence(engine, tick: dict, ridge: dict, trade: dict,
@@ -84,10 +91,8 @@ def build_metric_evidence(engine, tick: dict, ridge: dict, trade: dict,
     cone = tick.get("cone") or {}
     center = _option_center(cone, inputs)
     cone_rnd = evidence.setdefault("cone_rnd", {})
+    _compact_center_path(cone_rnd)
     cone_rnd["option_center"] = center
-    cone_rnd["raw_mean_r"] = center.get("raw_mean_r")
-    cone_rnd["robust_forward_r"] = center.get("robust_forward_r")
-    cone_rnd["robust_gap_r"] = center.get("robust_gap_r")
 
     adverse = list(evidence.get("adverse_confirmations") or [])
     supportive = list(evidence.get("supportive_contradictions") or [])
@@ -140,15 +145,7 @@ def build_metric_evidence(engine, tick: dict, ridge: dict, trade: dict,
         context_roles.append("rejected_raw_rnd_mean")
     roles["context_only"] = context_roles
 
-    quality = evidence.setdefault("data_quality", {})
-    quality["option_center"] = {
-        "available": center.get("available"),
-        "accepted": center.get("raw_mean_accepted"),
-        "source": center.get("source"),
-        "raw_rejected_gap_r": center.get("raw_rejected_gap_r"),
-    }
-
-    # Re-run the established family normaliser after adding the new row.  The
+    # Re-run the established family normaliser after adding the new row. The
     # explicit family tag ensures the new center cannot become a second option
     # vote beside barrier EV, median, mode or skew.
     normalise = getattr(_impl, "_normalise_evidence", None)
@@ -165,8 +162,8 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
         previous_policy_inputs=previous_policy_inputs,
         previous_evidence=previous_evidence,
     )
-    evidence = result.get("evidence") or {}
-    result["option_center"] = (evidence.get("cone_rnd") or {}).get("option_center")
+    # The report reads the center from evidence.cone_rnd. Do not duplicate it at
+    # policy_manager root; verdict snapshots are persisted on every AI review.
     result["version"] = "quant-policy-v12-explicit-option-center"
     return result
 
