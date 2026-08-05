@@ -21,11 +21,21 @@ Stress-кандидат, отклонённый gate, нельзя называ�
 def _action_ru(policy: str | None) -> str:
     return {
         "HOLD": "НЕ СОКРАЩАТЬ ПОЗИЦИЮ",
-        "CLOSE_10": "ЗАКРЫТЬ 10% ПОЗИЦИИ",
-        "CLOSE_25": "ЗАКРЫТЬ 25% ПОЗИЦИИ",
-        "CLOSE_50": "ЗАКРЫТЬ 50% ПОЗИЦИИ",
-        "EXIT": "ЗАКРЫТЬ 100% ПОЗИЦИИ",
+        "CLOSE_10": "ЗАКРЫТЬ 10% ПОЗИЦИИ СЕЙЧАС",
+        "CLOSE_25": "ЗАКРЫТЬ 25% ПОЗИЦИИ СЕЙЧАС",
+        "CLOSE_50": "ЗАКРЫТЬ 50% ПОЗИЦИИ СЕЙЧАС",
+        "EXIT": "ЗАКРЫТЬ 100% ПОЗИЦИИ СЕЙЧАС",
     }.get(policy or "", policy or "не определено")
+
+
+def _is_executable(gate: dict, rec: dict) -> bool:
+    explicit = gate.get("automatic_execution_allowed")
+    if explicit is not None:
+        return bool(explicit)
+    explicit = rec.get("automatic_execution_allowed")
+    if explicit is not None:
+        return bool(explicit)
+    return gate.get("status") in {"confirmed", "downgraded_within_feasible_set"}
 
 
 def render_policy_report(snapshot: dict) -> str:
@@ -33,9 +43,7 @@ def render_policy_report(snapshot: dict) -> str:
     manager = snapshot.get("policy_manager") or {}
     gate = manager.get("gate") or {}
     rec = manager.get("recommendation") or {}
-    executable = bool(
-        gate.get("automatic_execution_allowed",
-                 rec.get("automatic_execution_allowed", False)))
+    executable = _is_executable(gate, rec)
     if executable:
         return report.replace(
             "hold_no_reduction_evidence",
@@ -55,7 +63,8 @@ def render_policy_report(snapshot: dict) -> str:
     body = lines[next_header:]
     top = [
         "**ДЕЙСТВИЕ СЕЙЧАС** — НИЧЕГО НЕ МЕНЯТЬ ПО ЭТОМУ ОТЧЁТУ; "
-        "ПРОДОЛЖАТЬ ТЕКУЩЕЕ СОПРОВОЖДЕНИЕ.",
+        "ПРОДОЛЖАТЬ ТЕКУЩЕЕ СОПРОВОЖДЕНИЕ. "
+        "НЕ ИСПОЛНЯТЬ АВТОМАТИЧЕСКИ.",
         f"Основной расчёт: {raw} — {_action_ru(raw)}.",
     ]
     if rejected:
@@ -71,8 +80,7 @@ def render_policy_report(snapshot: dict) -> str:
         )
     else:
         top.append(
-            f"Модельный кандидат совпадает с основным расчётом: {selected}. "
-            "Изменение позиции не подтверждено."
+            f"Расчётное действие: {_action_ru(selected)}; оно не подтверждено."
         )
     top.append("Почему не менять позицию: " + "; ".join(reasons) + ".")
     return "\n".join(top + [""] + body).replace(
