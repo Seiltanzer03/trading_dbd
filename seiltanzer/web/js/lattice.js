@@ -1,7 +1,6 @@
-// Probability Lattice — option-implied распределение сделки в практическом R-масштабе.
-// Шарики накапливаются в R-координатах и не обнуляются при каждом живом
-// обновлении распределения/масштаба. Сброс происходит только при новой сделке
-// или по кнопке «СБРОС».
+// Probability Lattice — option-implied distribution in an actionable R window.
+// The visible histogram is conditional on the working window; distant tails are
+// reported separately and are never folded into the first/last ordinary bins.
 
 import { COLORS, setupCanvas } from './util.js';
 import { approach, approachArr, pulse } from './anim.js';
@@ -10,6 +9,7 @@ const ROWS = 8;
 const BINS = 11;
 const MAX_SAMPLES = 1600;
 const DOMAIN_STEP_R = 0.25;
+const WINDOW_MARGIN_R = 1.0;
 
 function fmtProb(p) {
   if (p == null || !Number.isFinite(p)) return '—';
@@ -26,85 +26,93 @@ function clamp(value, lo, hi) {
   return Math.max(lo, Math.min(hi, value));
 }
 
-function quantizeDomain(value, step = DOMAIN_STEP_R) {
-  return Math.round(value / step) * step;
+function floorDomain(value, step = DOMAIN_STEP_R) {
+  return Math.floor((value + 1e-9) / step) * step;
+}
+
+function ceilDomain(value, step = DOMAIN_STEP_R) {
+  return Math.ceil((value - 1e-9) / step) * step;
 }
 
 /**
- * Рабочее окно доски. Оно обязательно содержит стоп, тейк и текущий r,
- * а дальняя option-implied масса затем складывается в крайние корзины.
- * Границы квантуются по 0.25R, чтобы мелкие тики не дёргали масштаб.
+ * Actionable lattice window: one R beyond the stop and one R beyond the take.
+ * The live price can expand the window if it has already moved outside it.
+ * Quantisation avoids scale jitter from micro-ticks.
  */
-export function computeFocusDomain({ edges, T = 2.5, r = 0, q10 = null, q90 = null }) {
+export function computeFocusDomain({ edges, T = 2.5, r = 0 }) {
   const rawLo = Array.isArray(edges) && Number.isFinite(Number(edges[0]))
     ? Number(edges[0]) : -2;
   const rawHi = Array.isArray(edges) && Number.isFinite(Number(edges.at(-1)))
-    ? Number(edges.at(-1)) : finite(T, 2.5) + 2;
+    ? Number(edges.at(-1)) : finite(T, 2.5) + WINDOW_MARGIN_R;
   const take = Math.max(0.25, finite(T, 2.5));
   const current = finite(r, 0);
 
-  const coreLo = Math.min(-1.45, current - 0.75);
-  const coreHi = Math.max(take + 0.75, current + 0.75);
-  let lo = Math.min(coreLo, Number.isFinite(Number(q10)) ? Number(q10) - 0.25 : coreLo);
-  let hi = Math.max(coreHi, Number.isFinite(Number(q90)) ? Number(q90) + 0.25 : coreHi);
+  let lo = Math.min(-1 - WINDOW_MARGIN_R, current - WINDOW_MARGIN_R);
+  let hi = Math.max(take + WINDOW_MARGIN_R, current + WINDOW_MARGIN_R);
+  lo = Math.max(rawLo, floorDomain(lo));
+  hi = Math.min(rawHi, ceilDomain(hi));
 
-  const maxSpan = Math.max(5.5, take + 3.5);
-  if (hi - lo > maxSpan) {
-    const coreSpan = coreHi - coreLo;
-    const extra = Math.max(0, maxSpan - coreSpan);
-    lo = coreLo - extra * 0.42;
-    hi = coreHi + extra * 0.58;
-  }
-
-  lo = Math.max(rawLo, lo);
-  hi = Math.min(rawHi, hi);
   if (hi - lo < 2.5) {
     const mid = (lo + hi) / 2;
-    lo = Math.max(rawLo, mid - 1.25);
-    hi = Math.min(rawHi, mid + 1.25);
+    lo = Math.max(rawLo, floorDomain(mid - 1.25));
+    hi = Math.min(rawHi, ceilDomain(mid + 1.25));
   }
   if (!(hi > lo)) {
     return { lo: rawLo, hi: rawHi, rawLo, rawHi, compressed: false };
   }
-
-  // Квантизация убирает постоянную смену домена от микродвижений q10/q90/r.
-  const qLo = Math.max(rawLo, quantizeDomain(lo));
-  const qHi = Math.min(rawHi, quantizeDomain(hi));
   return {
-    lo: qHi > qLo ? qLo : lo,
-    hi: qHi > qLo ? qHi : hi,
+    lo,
+    hi,
     rawLo,
     rawHi,
-    compressed: qLo > rawLo + 1e-9 || qHi < rawHi - 1e-9,
+    compressed: lo > rawLo + 1e-9 || hi < rawHi - 1e-9,
   };
 }
 
+/**
+ * Rebin only the probability that genuinely lies inside [lo, hi].
+ * Outside mass is returned as leftTail/rightTail and never added to edge bins.
+ * `probs` is conditional on being inside the visible window, which preserves
+ * the readable distribution shape even for very broad ETF-proxy support.
+ */
 export function rebinDistribution(probs, edges, lo, hi, bins = BINS) {
   const out = new Array(bins).fill(0);
   const outEdges = Array.from({ length: bins + 1 }, (_, i) => lo + (hi - lo) * i / bins);
   if (!Array.isArray(probs) || !Array.isArray(edges)
       || edges.length !== probs.length + 1 || !(hi > lo)) {
-    return { probs: out, edges: outEdges };
+    return {
+      probs: out,
+      absoluteProbs: out.slice(),
+      edges: outEdges,
+      leftTail: 0,
+      rightTail: 0,
+      visibleMass: 0,
+      totalMass: 0,
+    };
   }
 
+  let leftTail = 0;
+  let rightTail = 0;
+  let totalMass = 0;
   for (let i = 0; i < probs.length; i++) {
     const p = Math.max(0, finite(probs[i], 0));
     const a = finite(edges[i], NaN);
     const b = finite(edges[i + 1], NaN);
     if (!p || !Number.isFinite(a) || !Number.isFinite(b) || b <= a) continue;
+    totalMass += p;
     const width = b - a;
 
     if (b <= lo) {
-      out[0] += p;
+      leftTail += p;
       continue;
     }
     if (a >= hi) {
-      out[bins - 1] += p;
+      rightTail += p;
       continue;
     }
 
-    if (a < lo) out[0] += p * (Math.min(b, lo) - a) / width;
-    if (b > hi) out[bins - 1] += p * (b - Math.max(a, hi)) / width;
+    if (a < lo) leftTail += p * (Math.min(b, lo) - a) / width;
+    if (b > hi) rightTail += p * (b - Math.max(a, hi)) / width;
 
     const clippedA = Math.max(a, lo);
     const clippedB = Math.min(b, hi);
@@ -118,29 +126,47 @@ export function rebinDistribution(probs, edges, lo, hi, bins = BINS) {
     }
   }
 
-  const total = out.reduce((sum, p) => sum + p, 0);
-  if (total > 0) {
-    for (let i = 0; i < out.length; i++) out[i] /= total;
+  if (totalMass > 0 && Math.abs(totalMass - 1) > 1e-12) {
+    leftTail /= totalMass;
+    rightTail /= totalMass;
+    for (let i = 0; i < out.length; i++) out[i] /= totalMass;
+    totalMass = 1;
   }
-  return { probs: out, edges: outEdges };
+  const absoluteProbs = out.slice();
+  const visibleMass = absoluteProbs.reduce((sum, p) => sum + p, 0);
+  if (visibleMass > 0) {
+    for (let i = 0; i < out.length; i++) out[i] /= visibleMass;
+  }
+  return {
+    probs: out,
+    absoluteProbs,
+    edges: outEdges,
+    leftTail,
+    rightTail,
+    visibleMass,
+    totalMass,
+  };
 }
 
 export function binIndexForR(value, edges) {
-  if (!Array.isArray(edges) || edges.length < 2) return 0;
+  if (!Array.isArray(edges) || edges.length < 2) return -1;
   const bins = edges.length - 1;
-  if (value <= edges[0]) return 0;
-  if (value >= edges.at(-1)) return bins - 1;
+  if (value < edges[0] || value > edges.at(-1)) return -1;
+  if (value === edges.at(-1)) return bins - 1;
   for (let i = 0; i < bins; i++) {
     if (value < edges[i + 1]) return i;
   }
-  return bins - 1;
+  return -1;
 }
 
-/** Пересчитывает накопленные шарики под текущий визуальный домен без их потери. */
+/** Recalculate landed balls for the current visual window without tail folding. */
 export function empiricalCounts(samples, edges) {
   const bins = Math.max(0, (edges?.length || 1) - 1);
   const counts = new Array(bins).fill(0);
-  for (const value of samples || []) counts[binIndexForR(value, edges)]++;
+  for (const value of samples || []) {
+    const index = binIndexForR(value, edges);
+    if (index >= 0) counts[index]++;
+  }
   return counts;
 }
 
@@ -155,6 +181,7 @@ export function initLattice(canvas) {
       probs: null, r: 0, tilt: 0.5, edge: null, hit: null,
       pStop: null, pTake: null, unresolved: null,
       q10: null, q50: null, q90: null, mode: null,
+      leftTail: 0, rightTail: 0, visibleMass: 1,
     },
     cur: { probs: null, r: 0, tilt: 0.5 },
     edges: null,
@@ -183,7 +210,6 @@ export function initLattice(canvas) {
       s.rawDomain = null;
       reset();
     }
-
     s.active = !!d.active;
     s.regime = d.regime;
     if (!s.active) return;
@@ -194,21 +220,16 @@ export function initLattice(canvas) {
     const rawEdges = d.edges;
     if (!Array.isArray(primary) || !primary.length || !Array.isArray(rawEdges)) return;
 
-    const focused = computeFocusDomain({
-      edges: rawEdges,
-      T: s.T,
-      r: d.r,
-      q10: d.q10,
-      q90: d.q90,
-    });
+    const focused = computeFocusDomain({ edges: rawEdges, T: s.T, r: d.r });
     const rebinned = rebinDistribution(primary, rawEdges, focused.lo, focused.hi, BINS);
+    if (!(rebinned.visibleMass > 0)) return;
 
-    // Ключевое отличие от сломанной версии: смена живого домена НЕ вызывает reset().
-    // Уже упавшие шарики хранятся как реальные R-значения и пересчитываются в
-    // новые корзины функцией empiricalCounts().
     s.rawDomain = focused;
     s.edges = rebinned.edges;
     s.tgt.probs = rebinned.probs;
+    s.tgt.leftTail = rebinned.leftTail;
+    s.tgt.rightTail = rebinned.rightTail;
+    s.tgt.visibleMass = rebinned.visibleMass;
     s.tgt.r = finite(d.r, 0);
     s.tgt.tilt = d.hit != null
       ? finite(d.hit, 0.5)
@@ -234,7 +255,7 @@ export function initLattice(canvas) {
   }
 
   const domain = () => ({
-    lo: s.edges?.[0] ?? -1.5,
+    lo: s.edges?.[0] ?? -2,
     hi: s.edges?.at(-1) ?? s.T + 1,
   });
   const binMid = (b) => s.edges ? (s.edges[b] + s.edges[b + 1]) / 2 : 0;
@@ -279,10 +300,7 @@ export function initLattice(canvas) {
     let bin = BINS - 1;
     for (let i = 0; i < BINS; i++) {
       total += probs[i];
-      if (u <= total) {
-        bin = i;
-        break;
-      }
+      if (u <= total) { bin = i; break; }
     }
     const a = s.edges[bin];
     const b = s.edges[bin + 1];
@@ -302,11 +320,7 @@ export function initLattice(canvas) {
       [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
     }
     s.balls.push({
-      targetR,
-      dirs,
-      seg: 0,
-      t: 0,
-      rights: 0,
+      targetR, dirs, seg: 0, t: 0, rights: 0,
       wob: 3 + Math.random() * 3,
       sp: 0.9 + Math.random() * 0.3,
       settled: false,
@@ -314,7 +328,7 @@ export function initLattice(canvas) {
   }
 
   function binHeight(g, counts, bin) {
-    const total = Math.max(1, s.dropped);
+    const total = Math.max(1, s.samples.length);
     return Math.min(g.distH - 6, (counts[bin] / total) * g.distH * 2.4);
   }
 
@@ -328,19 +342,14 @@ export function initLattice(canvas) {
       const y1 = pegY(g, row + 1);
       const eased = t * t * (3 - 2 * t);
       const wobble = Math.sin(t * Math.PI) * ball.wob * (ball.dirs[row] ? 1 : -1);
-      return {
-        x: x0 + (x1 - x0) * eased + wobble,
-        y: y0 + (y1 - y0) * t,
-      };
+      return { x: x0 + (x1 - x0) * eased + wobble, y: y0 + (y1 - y0) * t };
     }
-
     const bin = binIndexForR(ball.targetR, s.edges);
     const x0 = pegX(g, ROWS, ball.rights);
     const x1 = clamp(xOfR(g, ball.targetR), g.padX, g.w - g.padX);
     return {
       x: x0 + (x1 - x0) * Math.min(1, t * 1.4),
-      y: pegY(g, ROWS)
-        + (g.baseY - binHeight(g, counts, bin) - pegY(g, ROWS)) * (t * t),
+      y: pegY(g, ROWS) + (g.baseY - binHeight(g, counts, Math.max(0, bin)) - pegY(g, ROWS)) * (t * t),
     };
   }
 
@@ -360,7 +369,6 @@ export function initLattice(canvas) {
         }
       }
     }
-
     const settled = s.balls.filter((ball) => ball.settled);
     for (const ball of settled) {
       s.samples.push(ball.targetR);
@@ -369,6 +377,19 @@ export function initLattice(canvas) {
       if (ball.targetR > 0) s.green++;
     }
     s.balls = s.balls.filter((ball) => !ball.settled);
+  }
+
+  function drawTailBadge(ctx, g, side, mass) {
+    if (!(mass > 0.0005)) return;
+    const left = side === 'left';
+    const x = left ? g.padX : g.w - g.padX;
+    const y0 = g.baseY - g.distH;
+    ctx.fillStyle = left ? 'rgba(198,55,60,0.12)' : 'rgba(46,125,79,0.12)';
+    ctx.fillRect(left ? x - 7 : x + 1, y0, 6, g.distH);
+    ctx.fillStyle = left ? COLORS.red : COLORS.green;
+    ctx.font = '8px "IBM Plex Mono", monospace';
+    ctx.textAlign = left ? 'left' : 'right';
+    ctx.fillText(`${left ? '←' : '→'} ${(mass * 100).toFixed(1)}% ЗА ОКНОМ`, x, y0 - 4);
   }
 
   function draw(now) {
@@ -386,7 +407,6 @@ export function initLattice(canvas) {
 
     ctx.fillStyle = '#FBFAF6';
     ctx.fillRect(g.padX - 8, baseY - g.distH, w - 2 * g.padX + 16, g.distH);
-
     const positiveX = clamp(xOfR(g, 0), g.padX, w - g.padX);
     const glow = 0.06 + 0.05 * pulse(now, 1800);
     ctx.fillStyle = `rgba(232,98,42,${glow})`;
@@ -399,7 +419,6 @@ export function initLattice(canvas) {
         ? 'rgba(232,98,42,0.5)'
         : isGreenBin(b) ? COLORS.greenSoft : COLORS.redSoft;
       ctx.fillRect(x + 1.5, baseY - marketH, g.binW - 3, marketH);
-
       const empiricalH = binHeight(g, counts, b);
       ctx.strokeStyle = isGreenBin(b) ? COLORS.green : COLORS.red;
       ctx.lineWidth = 1.1;
@@ -415,6 +434,9 @@ export function initLattice(canvas) {
     ctx.strokeStyle = '#E8622A';
     ctx.lineWidth = 2;
     ctx.stroke();
+
+    drawTailBadge(ctx, g, 'left', s.tgt.leftTail);
+    drawTailBadge(ctx, g, 'right', s.tgt.rightTail);
 
     const quantiles = [
       [s.tgt.q10, 'P10', COLORS.red],
@@ -519,14 +541,15 @@ export function initLattice(canvas) {
     ctx.font = '9px "IBM Plex Mono", monospace';
     ctx.fillStyle = COLORS.dim;
     const source = s.marketAvail
-      ? 'OPTION-ANCHORED · РАБОЧЕЕ ОКНО RND'
+      ? 'OPTION-ANCHORED · АДАПТИВНОЕ ОКНО СДЕЛКИ'
       : 'СЦЕНАРНАЯ ПЛОТНОСТЬ · БЕЗ P / EDGE';
     const regime = s.regime ? ` · ВОЛА ${s.regime}` : '';
     ctx.fillText(`РАСПРЕДЕЛЕНИЕ: ${source}${regime}`, w / 2, 12);
-    if (s.rawDomain?.compressed) {
+    const hasOutside = s.tgt.leftTail > 0.0005 || s.tgt.rightTail > 0.0005;
+    if (hasOutside) {
       ctx.font = '8px "IBM Plex Mono", monospace';
       ctx.fillText(
-        `ХВОСТЫ ${s.rawDomain.rawLo.toFixed(1)}…${s.rawDomain.rawHi.toFixed(1)}R СЖАТЫ В КРАЙНИЕ КОРЗИНЫ`,
+        `ОКНО ${dom.lo.toFixed(2)}…${dom.hi.toFixed(2)}R · ВНУТРИ ${(s.tgt.visibleMass * 100).toFixed(1)}% · ХВОСТЫ ПОКАЗАНЫ ОТДЕЛЬНО`,
         w / 2,
         23,
       );
@@ -543,7 +566,7 @@ export function initLattice(canvas) {
     if (s.tgt.pStop != null) {
       ctx.fillStyle = COLORS.red;
       ctx.textAlign = 'left';
-      ctx.fillText(`СТОП FIRST-TOUCH≤H ${fmtProb(s.tgt.pStop)}`, g.padX, s.rawDomain?.compressed ? 34 : 24);
+      ctx.fillText(`СТОП FIRST-TOUCH≤H ${fmtProb(s.tgt.pStop)}`, g.padX, hasOutside ? 34 : 24);
     }
     if (s.tgt.pTake != null) {
       ctx.fillStyle = COLORS.green;
@@ -551,7 +574,7 @@ export function initLattice(canvas) {
       ctx.fillText(
         `ТЕЙК FIRST-TOUCH≤H ${fmtProb(s.tgt.pTake)} · NO-TOUCH ${fmtProb(s.tgt.unresolved)}`,
         w - g.padX,
-        s.rawDomain?.compressed ? 34 : 24,
+        hasOutside ? 34 : 24,
       );
     }
 
@@ -565,7 +588,7 @@ export function initLattice(canvas) {
       ctx.arc(p.x, p.y, 3.2, 0, Math.PI * 2);
       const bin = binIndexForR(ball.targetR, s.edges);
       ctx.fillStyle = ball.seg >= ROWS
-        ? (isTailBin(bin) ? '#E8622A' : ball.targetR > 0 ? COLORS.green : COLORS.red)
+        ? (isTailBin(Math.max(0, bin)) ? '#E8622A' : ball.targetR > 0 ? COLORS.green : COLORS.red)
         : COLORS.ink;
       ctx.fill();
     }
@@ -608,6 +631,9 @@ export function initLattice(canvas) {
         convergence: greenShare != null && pGreenModel != null
           ? Math.abs(greenShare - pGreenModel)
           : null,
+        visibleMass: s.tgt.visibleMass,
+        leftTail: s.tgt.leftTail,
+        rightTail: s.tgt.rightTail,
       };
     },
   };
