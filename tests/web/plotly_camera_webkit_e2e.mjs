@@ -72,7 +72,7 @@ await page.waitForFunction(() => window.__fixture?.el?._fullLayout?.scene?.camer
 async function dispatchTouch(type, points, changed = points) {
   await page.evaluate(({ type, points, changed }) => {
     const { el } = window.__fixture;
-    const make = (p) => new Touch({
+    const make = (p) => ({
       identifier: p.id,
       target: el,
       clientX: p.x,
@@ -87,14 +87,17 @@ async function dispatchTouch(type, points, changed = points) {
     });
     const touches = points.map(make);
     const changedTouches = changed.map(make);
-    el.dispatchEvent(new TouchEvent(type, {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      touches,
-      targetTouches: touches,
-      changedTouches,
-    }));
+    // Playwright's desktop WebKit build exposes TouchEvent but deliberately
+    // makes Touch an illegal constructor. A real cancelable DOM Event with
+    // read-only touch lists still traverses WebKit capture/bubble listeners,
+    // which is the browser behavior this controller relies on.
+    const event = new Event(type, { bubbles: true, cancelable: true, composed: true });
+    Object.defineProperties(event, {
+      touches: { value: touches, enumerable: true },
+      targetTouches: { value: touches, enumerable: true },
+      changedTouches: { value: changedTouches, enumerable: true },
+    });
+    el.dispatchEvent(event);
   }, { type, points, changed });
 }
 
