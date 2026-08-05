@@ -61,10 +61,17 @@ def render_policy_report(snapshot: dict) -> str:
         len(lines),
     )
     body = lines[next_header:]
-    top = [
+
+    first = (
         "**ДЕЙСТВИЕ СЕЙЧАС** — НИЧЕГО НЕ МЕНЯТЬ ПО ЭТОМУ ОТЧЁТУ; "
         "ПРОДОЛЖАТЬ ТЕКУЩЕЕ СОПРОВОЖДЕНИЕ. "
-        "НЕ ИСПОЛНЯТЬ АВТОМАТИЧЕСКИ.",
+        "НЕ ИСПОЛНЯТЬ АВТОМАТИЧЕСКИ."
+    )
+    if not rejected:
+        first += f" Расчётное действие: {_action_ru(selected)}; оно не подтверждено."
+
+    top = [
+        first,
         f"Основной расчёт: {raw} — {_action_ru(raw)}.",
     ]
     if rejected:
@@ -77,10 +84,6 @@ def render_policy_report(snapshot: dict) -> str:
         top.append(
             f"Неподтверждённый gate-кандидат: {selected} — {_action_ru(selected)}. "
             "Не исполнять."
-        )
-    else:
-        top.append(
-            f"Расчётное действие: {_action_ru(selected)}; оно не подтверждено."
         )
     top.append("Почему не менять позицию: " + "; ".join(reasons) + ".")
     return "\n".join(top + [""] + body).replace(
