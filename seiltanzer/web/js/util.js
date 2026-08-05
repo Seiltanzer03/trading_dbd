@@ -1,6 +1,7 @@
 // Утилиты: форматирование, tooltip, DOM-хелперы.
 
 import './ai_decision_ack.js';
+import './option_center_overlay.js';
 
 export const $ = (sel) => document.querySelector(sel);
 export const $$ = (sel) => [...document.querySelectorAll(sel)];
