@@ -1,11 +1,12 @@
 // Manual acknowledgement controls for stateful AI management decisions.
 // Loaded as a side effect from util.js so the existing app orchestrator stays intact.
 
-const nativeFetch = window.fetch.bind(window);
+const browser = typeof window !== 'undefined' && typeof document !== 'undefined';
+const nativeFetch = browser ? window.fetch.bind(window) : null;
 
 function requestUrl(input) {
   if (typeof input === 'string') return input;
-  if (input instanceof URL) return input.href;
+  if (typeof URL !== 'undefined' && input instanceof URL) return input.href;
   return input?.url || '';
 }
 
@@ -14,8 +15,9 @@ function requestMethod(input, init) {
 }
 
 function isVerdictRequest(input, init) {
+  if (!browser) return false;
   try {
-    const url = new URL(requestUrl(input), location.href);
+    const url = new URL(requestUrl(input), window.location.href);
     return url.pathname === '/api/ai/verdict' && requestMethod(input, init) === 'POST';
   } catch (_) {
     return false;
@@ -64,6 +66,7 @@ async function acknowledge(decision, status, statusEl, buttons) {
 }
 
 function attachDecisionControls(payload) {
+  if (!browser) return;
   const decision = payload?.management_decision;
   if (!decision || decision.execution_status !== 'pending_execution'
       || !decision.manual_execution_required || !decision.decision_id) return;
@@ -115,12 +118,14 @@ function attachDecisionControls(payload) {
   actions.parentNode.insertBefore(panel, actions);
 }
 
-window.fetch = async function seiltanzerFetch(input, init) {
-  const response = await nativeFetch(input, init);
-  if (isVerdictRequest(input, init)) {
-    response.clone().json()
-      .then((payload) => setTimeout(() => attachDecisionControls(payload), 0))
-      .catch(() => {});
-  }
-  return response;
-};
+if (browser) {
+  window.fetch = async function seiltanzerFetch(input, init) {
+    const response = await nativeFetch(input, init);
+    if (isVerdictRequest(input, init)) {
+      response.clone().json()
+        .then((payload) => setTimeout(() => attachDecisionControls(payload), 0))
+        .catch(() => {});
+    }
+    return response;
+  };
+}
