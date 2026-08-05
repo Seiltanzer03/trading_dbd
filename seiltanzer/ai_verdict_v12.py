@@ -54,6 +54,20 @@ def _apply_ack(engine, trade_id: int,
     return previous
 
 
+def _compact_decision(decision: dict) -> dict:
+    """Drop duplicated nullable metadata while keeping the full live plan."""
+    for key in (
+        "arbiter_reason",
+        "last_executed_policy",
+        "last_executed_decision_id",
+        "supersedes_decision_id",
+        "previous",
+    ):
+        if decision.get(key) is None:
+            decision.pop(key, None)
+    return decision
+
+
 def build_snapshot(engine) -> dict:
     """Build one plan after applying the latest user acknowledgement."""
     snapshot = _QUANT_BUILD_SNAPSHOT(engine)
@@ -73,6 +87,7 @@ def build_snapshot(engine) -> dict:
         trade_id=int(trade_id),
         captured_ts=snapshot.get("captured_ts"),
     )
+    decision = _compact_decision(decision)
     manager["management_decision"] = decision
     recommendation = manager.get("recommendation") or {}
     recommendation.update({
