@@ -1,6 +1,7 @@
-// Probability Lattice — option-implied distribution in an actionable R window.
-// The visible histogram is conditional on the working window; distant tails are
-// reported separately and are never folded into the first/last ordinary bins.
+// Probability Lattice — option-implied distribution in a quantile-adaptive R window.
+// The visible histogram follows P10/P90 so the central distribution keeps its
+// real shape. Distant tails remain explicit and are never folded into the
+// first/last ordinary bins.
 
 import { COLORS, setupCanvas } from './util.js';
 import { approach, approachArr, pulse } from './anim.js';
@@ -9,7 +10,7 @@ const ROWS = 8;
 const BINS = 11;
 const MAX_SAMPLES = 1600;
 const DOMAIN_STEP_R = 0.25;
-const WINDOW_MARGIN_R = 1.0;
+const QUANTILE_MARGIN_R = 0.25;
 
 function fmtProb(p) {
   if (p == null || !Number.isFinite(p)) return '—';
@@ -35,27 +36,37 @@ function ceilDomain(value, step = DOMAIN_STEP_R) {
 }
 
 /**
- * Actionable lattice window: one R beyond the stop and one R beyond the take.
- * The live price can expand the window if it has already moved outside it.
- * Quantisation avoids scale jitter from micro-ticks.
+ * Quantile-first working window.
+ *
+ * The pre-PR21 board used P10/P90 to follow the distribution, while PR21 forced
+ * a narrow trade-only crop. That crop could show only a locally flat slice of a
+ * broad NAS100 proxy distribution. We now keep the full central P10-P90 range,
+ * plus stop, take and live r. Only the true outer tails stay outside the board.
  */
-export function computeFocusDomain({ edges, T = 2.5, r = 0 }) {
+export function computeFocusDomain({
+  edges, T = 2.5, r = 0, q10 = null, q50 = null, q90 = null,
+}) {
   const rawLo = Array.isArray(edges) && Number.isFinite(Number(edges[0]))
     ? Number(edges[0]) : -2;
   const rawHi = Array.isArray(edges) && Number.isFinite(Number(edges.at(-1)))
-    ? Number(edges.at(-1)) : finite(T, 2.5) + WINDOW_MARGIN_R;
+    ? Number(edges.at(-1)) : finite(T, 2.5) + 2;
   const take = Math.max(0.25, finite(T, 2.5));
   const current = finite(r, 0);
+  const center = Number.isFinite(Number(q50)) ? Number(q50) : current;
 
-  let lo = Math.min(-1 - WINDOW_MARGIN_R, current - WINDOW_MARGIN_R);
-  let hi = Math.max(take + WINDOW_MARGIN_R, current + WINDOW_MARGIN_R);
-  lo = Math.max(rawLo, floorDomain(lo));
-  hi = Math.min(rawHi, ceilDomain(hi));
+  const coreLo = Math.min(-1.45, current - 0.75);
+  const coreHi = Math.max(take + 0.75, current + 0.75);
+  const distLo = Number.isFinite(Number(q10))
+    ? Number(q10) - QUANTILE_MARGIN_R : coreLo;
+  const distHi = Number.isFinite(Number(q90))
+    ? Number(q90) + QUANTILE_MARGIN_R : coreHi;
+
+  let lo = Math.max(rawLo, floorDomain(Math.min(coreLo, distLo)));
+  let hi = Math.min(rawHi, ceilDomain(Math.max(coreHi, distHi)));
 
   if (hi - lo < 2.5) {
-    const mid = (lo + hi) / 2;
-    lo = Math.max(rawLo, floorDomain(mid - 1.25));
-    hi = Math.min(rawHi, ceilDomain(mid + 1.25));
+    lo = Math.max(rawLo, floorDomain(Math.min(lo, center - 1.25)));
+    hi = Math.min(rawHi, ceilDomain(Math.max(hi, center + 1.25)));
   }
   if (!(hi > lo)) {
     return { lo: rawLo, hi: rawHi, rawLo, rawHi, compressed: false };
@@ -72,8 +83,7 @@ export function computeFocusDomain({ edges, T = 2.5, r = 0 }) {
 /**
  * Rebin only the probability that genuinely lies inside [lo, hi].
  * Outside mass is returned as leftTail/rightTail and never added to edge bins.
- * `probs` is conditional on being inside the visible window, which preserves
- * the readable distribution shape even for very broad ETF-proxy support.
+ * `probs` is conditional on being inside the visible window.
  */
 export function rebinDistribution(probs, edges, lo, hi, bins = BINS) {
   const out = new Array(bins).fill(0);
@@ -220,7 +230,14 @@ export function initLattice(canvas) {
     const rawEdges = d.edges;
     if (!Array.isArray(primary) || !primary.length || !Array.isArray(rawEdges)) return;
 
-    const focused = computeFocusDomain({ edges: rawEdges, T: s.T, r: d.r });
+    const focused = computeFocusDomain({
+      edges: rawEdges,
+      T: s.T,
+      r: d.r,
+      q10: d.q10,
+      q50: d.q50,
+      q90: d.q90,
+    });
     const rebinned = rebinDistribution(primary, rawEdges, focused.lo, focused.hi, BINS);
     if (!(rebinned.visibleMass > 0)) return;
 
@@ -255,7 +272,7 @@ export function initLattice(canvas) {
   }
 
   const domain = () => ({
-    lo: s.edges?.[0] ?? -2,
+    lo: s.edges?.[0] ?? -1.5,
     hi: s.edges?.at(-1) ?? s.T + 1,
   });
   const binMid = (b) => s.edges ? (s.edges[b] + s.edges[b + 1]) / 2 : 0;
@@ -541,7 +558,7 @@ export function initLattice(canvas) {
     ctx.font = '9px "IBM Plex Mono", monospace';
     ctx.fillStyle = COLORS.dim;
     const source = s.marketAvail
-      ? 'OPTION-ANCHORED · АДАПТИВНОЕ ОКНО СДЕЛКИ'
+      ? 'OPTION-ANCHORED · АДАПТИВНОЕ ОКНО P10–P90'
       : 'СЦЕНАРНАЯ ПЛОТНОСТЬ · БЕЗ P / EDGE';
     const regime = s.regime ? ` · ВОЛА ${s.regime}` : '';
     ctx.fillText(`РАСПРЕДЕЛЕНИЕ: ${source}${regime}`, w / 2, 12);
