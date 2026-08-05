@@ -1,26 +1,20 @@
 """Adaptive option-proxy chain selection and conservative tail fallback.
 
-Several index/FX instruments use ETF option proxies.  The legacy feed always
-selected ``expiries[0]`` and required the finite Breeden–Litzenberger support to
-contain both trade barriers.  On QQQ/EWU/EWG/FXC this often disabled the option
-model for every practical trade even though later expiries were usable.
+The legacy feed always selected the first expiry and treated finite
+Breeden–Litzenberger support as the complete market support. Free ETF chains
+frequently truncate that support, which disabled the option model for QQQ/EWU/
+EWG/FXC even when the chain itself was available.
 
-This module is installed from ``seiltanzer.data.__init__`` after ``feeds`` has
-loaded.  It:
-* scans a bounded number of expiries and selects the shortest valid broad chain;
-* falls back to the widest balanced valid density when no expiry fully covers
-  the target moneyness corridor;
-* extrapolates only missing terminal tails with a moment-matched lognormal when
-  the observed BL grid cannot cover a barrier.  The observed density remains the
-  primary source; the fallback exists to avoid treating a free-data truncation
-  as proof of zero probability.
+The patch scans several expiries and enables a conservative parametric tail only
+for real cross-scale proxy mappings. Direct core calculations and demo chains
+retain the original strict contract.
 """
 from __future__ import annotations
 
 import datetime as dt
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -31,9 +25,12 @@ from ..core import options as opt
 REQUIRED_MONEYNESS = (0.78, 1.22)
 MAX_EXPIRIES_TO_SCAN = 10
 _MIN_VARIANCE_RATIO = 1e-8
+_PROXY_SCALE_LOG_THRESHOLD = 0.05
 _INSTALLED = False
 _ORIGINAL_REFRESH_CHAIN = None
+_ORIGINAL_INSTRUMENT_PROPERTY = None
 _ORIGINAL_MARKET_R_DISTRIBUTION = opt.market_r_distribution
+_ORIGINAL_MAP_PROXY_DENSITY = opt.map_proxy_density
 
 
 @dataclass(frozen=True)
@@ -189,7 +186,7 @@ def _adaptive_refresh_chain(self, status_dict) -> None:
                 candidates.append(candidate)
                 if candidate.covers():
                     break
-            except Exception as exc:  # one expiry must not kill the entire model
+            except Exception as exc:
                 scan_errors.append(f"{expiry}: {str(exc)[:100]}")
 
         selected = select_candidate(candidates)
@@ -254,6 +251,19 @@ def _ratio_from_logs(log_a: float, log_b: float) -> float:
     return 1.0 / (1.0 + math.exp(delta))
 
 
+def map_proxy_density(density: opt.RNDensity, proxy_spot: float,
+                      instrument_spot: float,
+                      transform: str = "direct") -> opt.RNDensity:
+    """Mark only genuine cross-scale proxy mappings for tail extrapolation."""
+    mapped = _ORIGINAL_MAP_PROXY_DENSITY(
+        density, proxy_spot, instrument_spot, transform
+    )
+    ratio = float(instrument_spot) / float(proxy_spot)
+    if ratio > 0 and abs(math.log(ratio)) > _PROXY_SCALE_LOG_THRESHOLD:
+        setattr(mapped, "_allow_proxy_tail_extrapolation", True)
+    return mapped
+
+
 def _parametric_tail_distribution(density: opt.RNDensity, scale: float,
                                   entry: float, stop: float, take: float,
                                   direction: str, T: float,
@@ -278,18 +288,13 @@ def _parametric_tail_distribution(density: opt.RNDensity, scale: float,
     def z(level: float) -> float:
         return (math.log(max(float(level), 1e-12)) - mu) / sigma
 
+    z_take, z_stop = z(take), z(stop)
     if direction == "long":
-        z_take, z_stop = z(take), z(stop)
-        p_take = _normal_sf(z_take)
-        p_stop = _normal_cdf(z_stop)
-        log_take = _log_upper_tail(z_take)
-        log_stop = _log_lower_tail(z_stop)
+        p_take, p_stop = _normal_sf(z_take), _normal_cdf(z_stop)
+        log_take, log_stop = _log_upper_tail(z_take), _log_lower_tail(z_stop)
     else:
-        z_take, z_stop = z(take), z(stop)
-        p_take = _normal_cdf(z_take)
-        p_stop = _normal_sf(z_stop)
-        log_take = _log_lower_tail(z_take)
-        log_stop = _log_upper_tail(z_stop)
+        p_take, p_stop = _normal_cdf(z_take), _normal_sf(z_stop)
+        log_take, log_stop = _log_lower_tail(z_take), _log_upper_tail(z_stop)
     hit_ratio = _ratio_from_logs(log_take, log_stop)
 
     risk = abs(entry - stop)
@@ -336,7 +341,8 @@ def market_r_distribution(density: opt.RNDensity, scale: float, entry: float,
     empirical = _ORIGINAL_MARKET_R_DISTRIBUTION(
         density, scale, entry, stop, take, direction, T, n_bins
     )
-    if empirical.get("hit_ratio") is not None:
+    allowed = bool(getattr(density, "_allow_proxy_tail_extrapolation", False))
+    if empirical.get("hit_ratio") is not None or not allowed:
         empirical["tail_extrapolated"] = False
         empirical["tail_method"] = "observed_bl_support"
         return empirical
@@ -350,14 +356,24 @@ def market_r_distribution(density: opt.RNDensity, scale: float, entry: float,
 
 
 def install(feeds_module) -> None:
-    global _INSTALLED, _ORIGINAL_REFRESH_CHAIN
+    global _INSTALLED, _ORIGINAL_REFRESH_CHAIN, _ORIGINAL_INSTRUMENT_PROPERTY
     if _INSTALLED:
         return
     _ORIGINAL_REFRESH_CHAIN = feeds_module.MarketData.refresh_chain
+    _ORIGINAL_INSTRUMENT_PROPERTY = feeds_module.MarketData.instrument
+
+    def instrument(self):
+        base = _ORIGINAL_INSTRUMENT_PROPERTY.fget(self)
+        if (self.instrument_code == "JPY100" and not self.demo
+                and base.options_proxy is None):
+            return replace(base, options_proxy="EWJ", proxy_experimental=True)
+        return base
 
     def refresh_chain(self):
         return _adaptive_refresh_chain(self, feeds_module._status_dict)
 
+    feeds_module.MarketData.instrument = property(instrument)
     feeds_module.MarketData.refresh_chain = refresh_chain
+    opt.map_proxy_density = map_proxy_density
     opt.market_r_distribution = market_r_distribution
     _INSTALLED = True
