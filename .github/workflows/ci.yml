@@ -33,3 +33,9 @@ jobs:
           node tests/web/gex_svg_smoke.mjs
           node tests/web/fan_center_path_smoke.mjs
           node tests/web/iv_surface_live_smoke.mjs
+      - name: Install Playwright WebKit
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps webkit
+      - name: Real WebKit iPhone camera test
+        run: node tests/web/plotly_camera_webkit_e2e.mjs
