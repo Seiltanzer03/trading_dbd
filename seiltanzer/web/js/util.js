@@ -1,5 +1,7 @@
 // Утилиты: форматирование, tooltip, DOM-хелперы.
 
+import './ai_decision_ack.js';
+
 export const $ = (sel) => document.querySelector(sel);
 export const $$ = (sel) => [...document.querySelectorAll(sel)];
 
