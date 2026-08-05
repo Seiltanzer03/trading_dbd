@@ -50,10 +50,9 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
         previous_policy_inputs=previous_policy_inputs,
         previous_evidence=previous_evidence,
     )
-    # Keep v9 usable even when tests or maintenance replace its lower analysis
-    # function with a minimal fixture.
-    if "input_audit" not in result:
-        _enrich_input_audit(result, tick, ridge)
+    # Always enrich the audit: lower layers may have created the role skeleton,
+    # while this layer adds the actual value, symbol, timestamp and age.
+    _enrich_input_audit(result, tick, ridge)
     if "economic_indifference" not in result:
         result["economic_indifference"] = _economic_indifference(result)
     if "strategy_next_step" not in result:
