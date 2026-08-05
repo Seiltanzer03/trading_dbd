@@ -1,7 +1,7 @@
-"""Stable public facade for the quantitative AI policy manager v9."""
+"""Stable public facade for the quantitative AI policy manager v10."""
 from __future__ import annotations
 
-from . import ai_policy_v9 as _impl
+from . import ai_policy_v10 as _impl
 
 
 globals().update({
