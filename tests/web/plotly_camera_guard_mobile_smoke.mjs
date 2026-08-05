@@ -18,6 +18,10 @@ class FakeTarget {
   dispatch(name, payload = {}) {
     for (const fn of this.dom.get(name) || []) fn({ type: name, ...payload });
   }
+  dispatchEvent(event) {
+    this.dispatch(event.type, event);
+    return true;
+  }
   on(name, fn) {
     if (!this.plotly.has(name)) this.plotly.set(name, []);
     this.plotly.get(name).push(fn);
