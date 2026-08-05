@@ -67,8 +67,8 @@ function equalValue(a, b, eps = 1e-9) {
 const IDLE = 'idle';
 const INTERACTING = 'interacting';
 const SETTLING = 'settling';
-const SETTLE_MS = 420;
-const POST_EVENT_QUIET_MS = 90;
+const SETTLE_MS = 300;
+const POST_EVENT_QUIET_MS = 70;
 
 export function createPlotlyCameraGuard(el, initialCamera) {
   let savedCamera = cloneValue(initialCamera) || {};
@@ -248,6 +248,10 @@ export function createPlotlyCameraGuard(el, initialCamera) {
     captureRenderedCamera();
     state = IDLE;
     settleUntil = 0;
+    // Re-apply immediately after the quiet settling window. A deferred
+    // Plotly.react may have reset _fullLayout while the user camera remained
+    // authoritative in savedCamera.
+    restoreNow();
     scheduleRestore([120, 360, 800]);
   }
 
