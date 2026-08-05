@@ -17,6 +17,33 @@ globals().update({
 _BASE_SELECT = _impl.select_final_policy
 _BASE_ANALYZE = _impl.analyze_policies
 
+_ACTIVE_DECISION_REQUIREMENTS = {
+    "CLOSE_10": {
+        "min_parameter_stability": 0.45,
+        "min_source_stability": 0.45,
+        "min_independent_adverse_families": 1,
+        "requires_full_exit_authority": False,
+    },
+    "CLOSE_25": {
+        "min_parameter_stability": 0.55,
+        "min_source_stability": 0.50,
+        "min_independent_adverse_families": 2,
+        "requires_full_exit_authority": False,
+    },
+    "CLOSE_50": {
+        "min_parameter_stability": 0.64,
+        "min_source_stability": 0.625,
+        "min_independent_adverse_families": 2,
+        "requires_full_exit_authority": False,
+    },
+    "EXIT": {
+        "min_parameter_stability": 0.73,
+        "min_source_stability": 0.75,
+        "min_independent_adverse_families": 3,
+        "requires_full_exit_authority": True,
+    },
+}
+
 
 def risk_constraint(inputs: PolicyInputs, tick: dict, trade: dict) -> dict:
     """Use the current stop/BE, but do not model an indicator-driven future trail."""
@@ -122,7 +149,7 @@ def select_final_policy(raw_choice: str, stability: dict,
                 "и нет независимых аргументов за сокращение",
                 (
                     f"надёжность данных {level}: она запрещает активное сокращение, "
-                    "но не отменяет безопасное отсутствие нового ордера"
+                    "но не отменяет подтверждённое отсутствие нового вмешательства"
                 ),
             ],
         })
@@ -161,7 +188,7 @@ def _chain_refresh(engine, tick: dict) -> dict:
                              "chain_poll_sec", 600.0) or 600.0)
     due_ts = (last_ts + poll_sec) if last_ts is not None else now
     seconds_until = max(0.0, due_ts - now)
-    timezone_name = os.environ.get("APP_TIMEZONE", "Europe/Athens")
+    timezone_name = os.environ.get("APP_TIMEZONE", "Europe/Moscow")
     return {
         "poll_interval_sec": round(poll_sec, 1),
         "last_chain_ts": last_ts,
@@ -174,9 +201,11 @@ def _chain_refresh(engine, tick: dict) -> dict:
         "current_status": chain.get("status"),
         "current_source": chain.get("source"),
         "guarantees_live_direct": False,
+        "estimate_basis": "last successful chain timestamp + configured poll interval",
         "note": (
-            "Это время следующей попытки опроса. Источник может снова вернуть "
-            "delayed/proxy данные; получение live/direct цепочки не гарантируется."
+            "Это расчётная ближайшая попытка по расписанию, а не гарантия точного "
+            "момента ответа источника. Источник может снова вернуть delayed/proxy "
+            "данные; получение live/direct цепочки не гарантируется."
         ),
     }
 
@@ -191,6 +220,18 @@ def _status_summary(values: dict) -> dict:
         "available": any(status not in {None, "no_data"} for status in statuses.values()),
         "statuses": statuses,
     }
+
+
+def _ridge_available(ridge: dict) -> bool:
+    if not isinstance(ridge, dict) or not ridge:
+        return False
+    if ridge.get("available") is True:
+        return True
+    if ridge.get("status") in {"live", "delayed", "demo", "ok"}:
+        return True
+    return any(bool(ridge.get(key)) for key in (
+        "density", "strikes", "gex", "oi_profile", "history", "snapshots"
+    ))
 
 
 def _input_audit(tick: dict, ridge: dict) -> dict:
@@ -238,7 +279,7 @@ def _input_audit(tick: dict, ridge: dict) -> dict:
             "role": "uncertainty_and_regime_gate",
         },
         "oi_gex_strike_landscape": {
-            "available": bool(ridge),
+            "available": _ridge_available(ridge),
             "role": "context_only",
         },
         "strategy_filters": {
@@ -296,6 +337,19 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
             "Индикаторный трейлинг исключён из Expected/CVaR. После решения ИИ "
             "ручное сопровождение по индикатору остаётся ответственностью пользователя."
         ),
+    }
+    result["decision_requirements"] = {
+        "common": {
+            "raw_optimizer_must_select_active_policy": True,
+            "policy_must_be_cvar_feasible": True,
+            "data_reliability_must_not_be_low": True,
+            "independent_families_are_net_directional": True,
+            "note": (
+                "Пороговые значения необходимы, но недостаточны: активную политику "
+                "сначала должен выбрать net-оптимизатор среди CVaR-допустимых."
+            ),
+        },
+        "policies": _ACTIVE_DECISION_REQUIREMENTS,
     }
 
     rec = result.get("recommendation") or {}
