@@ -10,7 +10,7 @@ globals().update({
     if name not in {"__name__", "__loader__", "__package__", "__spec__", "_impl"}
 })
 
-_BASE_SELECT_FINAL_POLICY = _impl.select_final_policy
+_BASE_HARD_CVAR_SELECT = _impl._BASE_SELECT
 
 
 def stability_analysis(inputs: PolicyInputs, base_choice: str) -> dict:
@@ -20,26 +20,35 @@ def stability_analysis(inputs: PolicyInputs, base_choice: str) -> dict:
         (f"price_{delta:+.2f}R", replace(
             inputs,
             r0=min(max(inputs.r0 + delta, -0.98), inputs.T - 0.02),
-            max_r=max(inputs.max_r, min(max(inputs.r0 + delta, -0.98), inputs.T - 0.02)),
+            max_r=max(
+                inputs.max_r,
+                min(max(inputs.r0 + delta, -0.98), inputs.T - 0.02),
+            ),
         ))
         for delta in (-0.10, 0.10)
     ]
     scenarios += [
-        (f"sigma_{mult:.2f}x", replace(inputs, sigma_R=max(0.08, inputs.sigma_R * mult)))
+        (f"sigma_{mult:.2f}x", replace(
+            inputs, sigma_R=max(0.08, inputs.sigma_R * mult)))
         for mult in (0.95, 1.05)
     ]
     scenarios += [
-        (f"drift_{delta:+.2f}R", replace(inputs, drift_R=inputs.drift_R + delta))
+        (f"drift_{delta:+.2f}R", replace(
+            inputs, drift_R=inputs.drift_R + delta))
         for delta in (-0.04, 0.04)
     ]
     scenarios += [
         (f"skew_{delta:+.2f}", replace(
-            inputs, skew_R=min(max(inputs.skew_R + delta, -0.45), 0.45)))
+            inputs,
+            skew_R=min(max(inputs.skew_R + delta, -0.45), 0.45),
+        ))
         for delta in (-0.05, 0.05)
     ]
     scenarios += [
         (f"term_{delta:+.2f}", replace(
-            inputs, term_slope=min(max(inputs.term_slope + delta, -0.8), 0.8)))
+            inputs,
+            term_slope=min(max(inputs.term_slope + delta, -0.8), 0.8),
+        ))
         for delta in (-0.10, 0.10)
     ]
 
@@ -82,16 +91,23 @@ def stability_analysis(inputs: PolicyInputs, base_choice: str) -> dict:
         "selected_count": winners.get(base_choice, 0),
         "selected_share": round(winners.get(base_choice, 0) / total, 4),
         "winner_counts": winners,
-        "winner_shares": {name: row["winner_share"] for name, row in stats.items()},
+        "winner_shares": {
+            name: row["winner_share"] for name, row in stats.items()
+        },
         "policy_stats": stats,
         "rows": rows,
-        "risk_rule": "same active stop/BE/trailing CVaR floor as base calculation",
+        "risk_rule": (
+            "same active stop/BE/trailing CVaR floor as base calculation"
+        ),
         "cost_rule": "same net execution-cost model as base calculation",
-        "perturbations": "r±0.10R; sigma±5%; drift±0.04R; skew±0.05; term±0.10",
+        "perturbations": (
+            "r±0.10R; sigma±5%; drift±0.04R; skew±0.05; term±0.10"
+        ),
     }
 
 
-def authority_stability(inputs: PolicyInputs, cvar_floor: float | None = None) -> dict:
+def authority_stability(inputs: PolicyInputs,
+                        cvar_floor: float | None = None) -> dict:
     """Remove uncertain inputs without changing the base risk/cost contract."""
     variants = [
         ("base", inputs),
@@ -99,9 +115,12 @@ def authority_stability(inputs: PolicyInputs, cvar_floor: float | None = None) -
         ("drift_zero", replace(inputs, drift_R=0.0)),
         ("skew_zero", replace(inputs, skew_R=0.0)),
         ("term_zero", replace(inputs, term_slope=0.0)),
-        ("shape_neutral", replace(inputs, drift_R=0.0, skew_R=0.0, term_slope=0.0)),
-        ("sigma_minus_15pct", replace(inputs, sigma_R=max(0.08, inputs.sigma_R * 0.85))),
-        ("sigma_plus_15pct", replace(inputs, sigma_R=max(0.08, inputs.sigma_R * 1.15))),
+        ("shape_neutral", replace(
+            inputs, drift_R=0.0, skew_R=0.0, term_slope=0.0)),
+        ("sigma_minus_15pct", replace(
+            inputs, sigma_R=max(0.08, inputs.sigma_R * 0.85))),
+        ("sigma_plus_15pct", replace(
+            inputs, sigma_R=max(0.08, inputs.sigma_R * 1.15))),
     ]
     winners = {name: 0 for name in POLICY_FRACTIONS}
     feasible = {name: 0 for name in POLICY_FRACTIONS}
@@ -130,11 +149,14 @@ def authority_stability(inputs: PolicyInputs, cvar_floor: float | None = None) -
         "checks": total,
         "winner_counts": winners,
         "winner_shares": {
-            name: round(count / total, 4) for name, count in winners.items()
+            name: round(count / total, 4)
+            for name, count in winners.items()
         },
         "feasible_counts": feasible,
         "variants": rows,
-        "risk_rule": "same active stop/BE/trailing CVaR floor as base calculation",
+        "risk_rule": (
+            "same active stop/BE/trailing CVaR floor as base calculation"
+        ),
         "cost_rule": "same net execution-cost model as base calculation",
         "description": "drift/skew/term neutralisation and sigma ±15%",
     }
@@ -143,23 +165,87 @@ def authority_stability(inputs: PolicyInputs, cvar_floor: float | None = None) -
 def select_final_policy(raw_choice: str, stability: dict,
                         metrics: dict[str, dict], evidence: dict,
                         inputs: PolicyInputs, selection_rule: dict) -> dict:
-    """Never turn feasible HOLD into a reduction without adverse evidence."""
-    result = _BASE_SELECT_FINAL_POLICY(
+    """Apply one hard-risk contract and forbid unsupported HOLD reductions."""
+    result = _BASE_HARD_CVAR_SELECT(
         raw_choice, stability, metrics, evidence, inputs, selection_rule)
-    eligible = list(selection_rule.get("eligible") or [])
-    adverse_families = list(evidence.get("adverse_confirmation_families") or [])
+    floor = float(selection_rule.get("cvar_floor_r", -1.0))
+    source_stability = authority_stability(inputs, floor)
     selected = result.get("policy") or raw_choice
+    source_share = float(
+        (source_stability.get("winner_shares") or {}).get(selected, 0.0))
 
+    reliability = _at(
+        evidence, "data_quality", "reliability", default={}) or {}
+    level = reliability.get("level") or "не определена"
+    known_reliability = level in {"высокая", "средняя", "низкая"}
+    families = list(evidence.get("adverse_confirmation_families") or [])
+    reasons = list(result.get("reasons") or [])
+    base_status = result.get("status") or "conflict"
+    status = base_status
+    executable_statuses = {"confirmed", "downgraded_within_feasible_set"}
+    executable = base_status in executable_statuses
+
+    threshold = {
+        "HOLD": 0.0,
+        "CLOSE_10": 0.45,
+        "CLOSE_25": 0.50,
+        "CLOSE_50": 0.625,
+        "EXIT": 0.75,
+    }.get(selected, 1.0)
+    if executable and source_share < threshold:
+        executable = False
+        status = "manual_source_conflict"
+        reasons.append(
+            f"устойчивость к источнику данных {source_share:.0%} "
+            f"ниже {threshold:.0%}")
+
+    if known_reliability and level == "низкая":
+        executable = False
+        if base_status not in {
+            "conflict_stability_fallback", "manual_conflict"
+        }:
+            status = "manual_data_conflict"
+        reasons.append("надёжность расчёта низкая")
+    elif (known_reliability and selected == "EXIT"
+          and not reliability.get("full_exit_authority", False)):
+        executable = False
+        if base_status not in {
+            "conflict_stability_fallback", "manual_conflict"
+        }:
+            status = "manual_data_conflict"
+        reasons.append(
+            "EXIT требует высокой надёжности, live/direct цепочки и непрокси IV")
+
+    if status not in executable_statuses:
+        executable = False
+
+    result.update({
+        "status": status,
+        "reasons": list(dict.fromkeys(reasons)),
+        "authority_stability": source_stability,
+        "confirmation_families": families,
+        "confirmation_count": len(families),
+        "mixed_confirmation_families": (
+            evidence.get("mixed_confirmation_families") or []),
+        "source_stability_share": source_share,
+        "data_reliability": level,
+        "automatic_execution_allowed": executable,
+        "execution_policy": selected if executable else None,
+        "provisional_policy": selected,
+    })
+
+    eligible = list(selection_rule.get("eligible") or [])
     if (raw_choice == "HOLD" and "HOLD" in eligible
-            and not adverse_families and selected != "HOLD"):
+            and not families and selected != "HOLD"):
         rejected = selected
-        reasons = [
-            reason for reason in (result.get("reasons") or [])
+        cleaned = [
+            reason for reason in result.get("reasons") or []
             if "исходная политика имела устойчивость 0%" not in reason
             and "выбран устойчивый вариант" not in reason
         ]
-        reasons.append(
-            "HOLD сохранён: он проходит CVaR и нет независимых подтверждений сокращения")
+        cleaned.append(
+            "HOLD сохранён: он проходит CVaR и нет независимых "
+            "подтверждений сокращения")
         result.update({
             "policy": "HOLD",
             "provisional_policy": "HOLD",
@@ -167,15 +253,15 @@ def select_final_policy(raw_choice: str, stability: dict,
             "status": "hold_no_reduction_evidence",
             "automatic_execution_allowed": False,
             "rejected_stress_fallback": rejected,
-            "reasons": list(dict.fromkeys(reasons)),
+            "reasons": list(dict.fromkeys(cleaned)),
             "source_stability_share": float(
-                ((result.get("authority_stability") or {}).get("winner_shares") or {}).get("HOLD", 0.0)
+                (source_stability.get("winner_shares") or {}).get(
+                    "HOLD", 0.0)
             ),
         })
     return result
 
 
-# Lower compatibility layers resolve these globals inside their own modules.
 for module in (
     _impl,
     _impl._impl,
