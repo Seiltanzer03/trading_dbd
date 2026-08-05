@@ -4,13 +4,21 @@ class FakeTarget {
   constructor() {
     this.dom = new Map();
     this.plotly = new Map();
+    this.style = {};
   }
   addEventListener(name, fn) {
     if (!this.dom.has(name)) this.dom.set(name, []);
     this.dom.get(name).push(fn);
   }
+  removeEventListener(name, fn) {
+    this.dom.set(name, (this.dom.get(name) || []).filter((item) => item !== fn));
+  }
   dispatch(name, payload = {}) {
     for (const fn of this.dom.get(name) || []) fn({ type: name, ...payload });
+  }
+  dispatchEvent(event) {
+    this.dispatch(event.type, event);
+    return true;
   }
   on(name, fn) {
     if (!this.plotly.has(name)) this.plotly.set(name, []);
