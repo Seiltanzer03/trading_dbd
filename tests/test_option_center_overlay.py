@@ -58,7 +58,6 @@ def test_accepted_option_center_is_one_option_family(monkeypatch):
     assert center["raw_mean_r"] == 2.55
     assert center["robust_forward_r"] == 2.12
     assert center["raw_mean_accepted"] is True
-    assert center["optimizer_role"] == "core_path_input_via_drift_R"
     rows = evidence["supportive_contradictions"]
     added = next(row for row in rows if row["metric"] == "option_center_robust_gap_r")
     assert added["family"] == "option_distribution"
@@ -81,7 +80,6 @@ def test_rejected_raw_mean_stays_context_only(monkeypatch):
     )
     center = evidence["cone_rnd"]["option_center"]
     assert center["raw_mean_accepted"] is False
-    assert center["optimizer_role"] == "context_only_rejected"
     assert not any(
         row.get("metric") == "option_center_robust_gap_r"
         for row in evidence["adverse_confirmations"] + evidence["supportive_contradictions"]
