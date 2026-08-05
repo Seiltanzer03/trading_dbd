@@ -42,24 +42,16 @@ def _option_center(cone: dict, inputs: PolicyInputs) -> dict:
         and source == "bl_forward_shrunk"
         and rejected_gap is None
     )
-    threshold = min(max(0.08 * float(inputs.sigma_R), 0.05), 0.15)
     return {
         "available": raw_mean is not None,
         "raw_mean_r": round(raw_mean, 4) if raw_mean is not None else None,
-        "current_r": round(current, 4),
         "raw_gap_r": round(raw_gap, 4) if raw_gap is not None else None,
         "robust_forward_r": round(current + robust_gap, 4),
         "robust_gap_r": round(robust_gap, 4),
-        "direction_threshold_r": round(threshold, 4),
         "source": source,
         "raw_mean_accepted": accepted,
         "raw_rejected_gap_r": (
             round(rejected_gap, 4) if rejected_gap is not None else None
-        ),
-        "optimizer_role": (
-            "core_path_input_via_drift_R" if accepted
-            else "context_only_rejected" if rejected_gap is not None
-            else "neutral_or_unavailable"
         ),
     }
 
@@ -70,16 +62,14 @@ def _append_unique(collection: list[dict], item: dict) -> None:
         collection.append(item)
 
 
-def _compact_center_path(cone_rnd: dict, limit: int = 11) -> None:
-    """Keep enough center-path shape for AI diagnostics without bloating history."""
+def _compact_center_path(cone_rnd: dict, limit: int = 5) -> None:
+    """Keep representative center-path points without bloating AI history."""
     path = cone_rnd.get("center_path") or []
     if not isinstance(path, list) or len(path) <= limit:
         return
     last = len(path) - 1
     indexes = sorted({round(i * last / (limit - 1)) for i in range(limit)})
     cone_rnd["center_path"] = [path[index] for index in indexes]
-    cone_rnd["center_path_points_total"] = len(path)
-    cone_rnd["center_path_points_stored"] = len(indexes)
 
 
 def build_metric_evidence(engine, tick: dict, ridge: dict, trade: dict,
@@ -98,7 +88,7 @@ def build_metric_evidence(engine, tick: dict, ridge: dict, trade: dict,
     supportive = list(evidence.get("supportive_contradictions") or [])
     context = list(evidence.get("context_observations") or [])
     robust_gap = _number(center.get("robust_gap_r"))
-    threshold = _number(center.get("direction_threshold_r")) or 0.05
+    threshold = min(max(0.08 * float(inputs.sigma_R), 0.05), 0.15)
 
     if center.get("raw_mean_accepted") and robust_gap is not None:
         item = {
