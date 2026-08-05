@@ -15,10 +15,11 @@ _BASE_RENDER = _impl.render_policy_report
 SYSTEM_PROMPT = _impl.SYSTEM_PROMPT + """
 HOLD — это подтверждённое отсутствие нового ордера, а не неподтверждённое исполнение.
 Низкая надёжность данных запрещает активное CLOSE/EXIT, но не отменяет устойчивый HOLD.
-Для ±0.15R всегда показывай r и цену. Показывай время следующей попытки опроса
-цепочки и не обещай live/direct качество. Индикаторный трейлинг не моделируется:
+Для ±0.15R всегда показывай r и цену. Показывай расчётное время следующей попытки
+опроса цепочки и не обещай live/direct качество. Индикаторный трейлинг не моделируется:
 не включай его в Expected/CVaR и не выдавай по нему инструкций.
-Разделяй данные на optimizer, gate и context-only.
+Разделяй данные на optimizer, gate и context-only. Для активных политик показывай
+минимальные требования, но поясняй, что они не заменяют выбор net-оптимизатора.
 """
 
 
@@ -88,7 +89,6 @@ def _insert_section_before(lines: list[str], before_header: str,
 
 
 def _hold_top(manager: dict) -> list[str]:
-    rec = manager.get("recommendation") or {}
     gate = manager.get("gate") or {}
     policies = manager.get("policies") or {}
     hold = policies.get("HOLD") or {}
@@ -113,7 +113,8 @@ def _hold_top(manager: dict) -> list[str]:
         ),
         (
             f"Ограничение данных: надёжность {reliability.get('level', 'не определена')}. "
-            "Это запрещает новое активное CLOSE/EXIT, но не отменяет подтверждённый HOLD."
+            "Это запрещает новое активное CLOSE/EXIT, но не отменяет подтверждённое "
+            "отсутствие нового вмешательства."
         ),
         (
             "Сопровождение в модели: текущий стоп/БУ и лестница фиксаций. "
@@ -144,7 +145,7 @@ def _trigger_lines(manager: dict) -> list[str]:
             f"цена {_fmt_price(upper.get('price'))}."
         ),
         (
-            "Следующая попытка обновления опционной цепочки: "
+            "Расчётная ближайшая попытка обновления опционной цепочки: "
             f"{_fmt_local_time(chain.get('next_attempt_local'))} "
             f"({countdown}; интервал опроса "
             f"{round((_num(chain.get('poll_interval_sec')) or 600) / 60)} мин)."
@@ -152,14 +153,55 @@ def _trigger_lines(manager: dict) -> list[str]:
         (
             "Текущий/ожидаемый источник: "
             f"{chain.get('current_source') or 'не указан'}, статус "
-            f"{chain.get('current_status') or 'не указан'}. Следующий опрос не "
-            "гарантирует live/direct: источник может снова вернуть delayed/proxy данные."
+            f"{chain.get('current_status') or 'не указан'}. Время рассчитано по "
+            "последнему снимку и интервалу опроса; ответ источника может задержаться."
+        ),
+        (
+            "Следующий опрос не гарантирует live/direct: источник может снова "
+            "вернуть delayed/proxy данные."
         ),
         (
             "Внеплановый пересчёт: касание следующего рубежа, стопа или БУ; "
             "изменение модели издержек."
         ),
     ]
+
+
+def _decision_lines(manager: dict) -> list[str]:
+    requirements = manager.get("decision_requirements") or {}
+    policies = requirements.get("policies") or {}
+    names = {
+        "CLOSE_10": "закрытие 10%",
+        "CLOSE_25": "закрытие 25%",
+        "CLOSE_50": "закрытие 50%",
+        "EXIT": "полный выход",
+    }
+    lines = [
+        "Активное сокращение возможно только когда net-оптимизатор сам выбирает "
+        "эту политику среди CVaR-допустимых, а надёжность данных не является низкой."
+    ]
+    for policy in ("CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"):
+        row = policies.get(policy) or {}
+        local = _num(row.get("min_parameter_stability"))
+        source = _num(row.get("min_source_stability"))
+        families = row.get("min_independent_adverse_families")
+        if local is None or source is None or families is None:
+            continue
+        extra = (
+            "; дополнительно требуется full-exit authority live/direct данных"
+            if row.get("requires_full_exit_authority") else ""
+        )
+        lines.append(
+            f"{policy} ({names[policy]}): stress-устойчивость не ниже "
+            f"{local:.0%}; устойчивость к источникам не ниже {source:.0%}; "
+            f"минимум {families} независимых однонаправленных семей против HOLD"
+            f"{extra}."
+        )
+    lines.append(
+        "Эти пороги необходимы, но сами по себе не создают сигнал: Expected net и "
+        "CVaR должны сначала сделать активную политику расчётным победителем."
+    )
+    return lines
 
 
 def _audit_lines(manager: dict) -> list[str]:
@@ -241,6 +283,10 @@ def render_policy_report(snapshot: dict) -> str:
             "при новом снимке цепочки или событии стратегии."
         ])
 
+    _insert_section_before(
+        lines, "**СЛЕДУЮЩИЙ ПЕРЕСЧЁТ**", "**ЧТО ДОЛЖНО ИЗМЕНИТЬ РЕШЕНИЕ** —",
+        _decision_lines(manager),
+    )
     _replace_section(lines, "**СЛЕДУЮЩИЙ ПЕРЕСЧЁТ**", _trigger_lines(manager))
     _insert_section_before(
         lines, "**КАЧЕСТВО ДАННЫХ**", "**КАКИЕ ДАННЫЕ РЕАЛЬНО УЧТЕНЫ** —",
