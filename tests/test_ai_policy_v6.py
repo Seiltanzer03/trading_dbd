@@ -75,6 +75,7 @@ def test_stable_hold_is_confirmed_even_when_data_reliability_is_low(monkeypatch)
     assert result["automatic_execution_allowed"] is False
     assert result["execution_policy"] is None
     assert any("не отменяет" in reason for reason in result["reasons"])
+    assert not any("безопасное" in reason for reason in result["reasons"])
 
 
 def _base_analysis():
@@ -125,11 +126,22 @@ def test_analysis_adds_exact_price_triggers_refresh_time_and_input_roles(monkeyp
     assert triggers["chain_refresh"]["next_attempt_ts"] == 1300.0
     assert triggers["chain_refresh"]["seconds_until_attempt"] == 300.0
     assert triggers["chain_refresh"]["guarantees_live_direct"] is False
+    assert "last successful" in triggers["chain_refresh"]["estimate_basis"]
     audit = result["input_audit"]
     assert audit["rows"]["instrument_price"]["role"] == "optimizer_and_geometry"
     assert audit["rows"]["oi_gex_strike_landscape"]["role"] == "context_only"
     assert audit["all_inputs_equally_weighted"] is False
     assert result["management_model_scope"]["indicator_trailing_modelled"] is False
+    requirements = result["decision_requirements"]["policies"]
+    assert requirements["CLOSE_10"]["min_independent_adverse_families"] == 1
+    assert requirements["CLOSE_50"]["min_parameter_stability"] == 0.64
+    assert requirements["EXIT"]["requires_full_exit_authority"] is True
+
+
+def test_ridge_no_data_dict_is_not_counted_as_available():
+    assert policy_v6._ridge_available({"status": "no_data", "available": False}) is False
+    assert policy_v6._ridge_available({"available": True}) is True
+    assert policy_v6._ridge_available({"gex": {"top": []}}) is True
 
 
 def _metric(expected, cvar):
@@ -250,6 +262,39 @@ def test_report_does_not_call_hold_unconfirmed_and_shows_prices_time_and_audit()
                     "current_status": "delayed",
                 },
             },
+            "decision_requirements": {
+                "common": {
+                    "raw_optimizer_must_select_active_policy": True,
+                    "policy_must_be_cvar_feasible": True,
+                    "data_reliability_must_not_be_low": True,
+                },
+                "policies": {
+                    "CLOSE_10": {
+                        "min_parameter_stability": 0.45,
+                        "min_source_stability": 0.45,
+                        "min_independent_adverse_families": 1,
+                        "requires_full_exit_authority": False,
+                    },
+                    "CLOSE_25": {
+                        "min_parameter_stability": 0.55,
+                        "min_source_stability": 0.50,
+                        "min_independent_adverse_families": 2,
+                        "requires_full_exit_authority": False,
+                    },
+                    "CLOSE_50": {
+                        "min_parameter_stability": 0.64,
+                        "min_source_stability": 0.625,
+                        "min_independent_adverse_families": 2,
+                        "requires_full_exit_authority": False,
+                    },
+                    "EXIT": {
+                        "min_parameter_stability": 0.73,
+                        "min_source_stability": 0.75,
+                        "min_independent_adverse_families": 3,
+                        "requires_full_exit_authority": True,
+                    },
+                },
+            },
             "input_audit": {
                 "available_count": 2,
                 "total_count": 2,
@@ -277,6 +322,9 @@ def test_report_does_not_call_hold_unconfirmed_and_shows_prices_time_and_audit()
     assert "цена 4 181.16" in report
     assert "05.08.2026 14:18:00" in report
     assert "не гарантирует live/direct" in report
+    assert "ЧТО ДОЛЖНО ИЗМЕНИТЬ РЕШЕНИЕ" in report
+    assert "CLOSE_50" in report and "64%" in report and "62%" in report
+    assert "пороги необходимы" in report.lower()
     assert "КАКИЕ ДАННЫЕ РЕАЛЬНО УЧТЕНЫ" in report
     assert "OI/GEX" in report
     assert "индикаторный трейлинг исключён" in report.lower()
