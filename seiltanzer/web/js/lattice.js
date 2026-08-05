@@ -1,7 +1,7 @@
 // Probability Lattice — option-implied distribution in a quantile-adaptive R window.
-// The visible histogram follows the old P10/P90-aware scale that kept the
-// distribution readable. Distant tails remain explicit and are never folded
-// into the first/last ordinary bins.
+// The visible histogram follows P10/P90 so the central distribution keeps its
+// real shape. Distant tails remain explicit and are never folded into the
+// first/last ordinary bins.
 
 import { COLORS, setupCanvas } from './util.js';
 import { approach, approachArr, pulse } from './anim.js';
@@ -10,6 +10,7 @@ const ROWS = 8;
 const BINS = 11;
 const MAX_SAMPLES = 1600;
 const DOMAIN_STEP_R = 0.25;
+const QUANTILE_MARGIN_R = 0.25;
 
 function fmtProb(p) {
   if (p == null || !Number.isFinite(p)) return '—';
@@ -26,56 +27,56 @@ function clamp(value, lo, hi) {
   return Math.max(lo, Math.min(hi, value));
 }
 
-function quantizeDomain(value, step = DOMAIN_STEP_R) {
-  return Math.round(value / step) * step;
+function floorDomain(value, step = DOMAIN_STEP_R) {
+  return Math.floor((value + 1e-9) / step) * step;
+}
+
+function ceilDomain(value, step = DOMAIN_STEP_R) {
+  return Math.ceil((value - 1e-9) / step) * step;
 }
 
 /**
- * Readable working window restored from the pre-PR21 implementation.
- * It always contains stop, take and live r, then uses P10/P90 to follow the
- * actual distribution instead of forcing a fixed -2R…take+1R crop.
- * The maximum span prevents distant proxy tails from flattening the board.
+ * Quantile-first working window.
+ *
+ * The pre-PR21 board used P10/P90 to follow the distribution, while PR21 forced
+ * a narrow trade-only crop. That crop could show only a locally flat slice of a
+ * broad NAS100 proxy distribution. We now keep the full central P10-P90 range,
+ * plus stop, take and live r. Only the true outer tails stay outside the board.
  */
-export function computeFocusDomain({ edges, T = 2.5, r = 0, q10 = null, q90 = null }) {
+export function computeFocusDomain({
+  edges, T = 2.5, r = 0, q10 = null, q50 = null, q90 = null,
+}) {
   const rawLo = Array.isArray(edges) && Number.isFinite(Number(edges[0]))
     ? Number(edges[0]) : -2;
   const rawHi = Array.isArray(edges) && Number.isFinite(Number(edges.at(-1)))
     ? Number(edges.at(-1)) : finite(T, 2.5) + 2;
   const take = Math.max(0.25, finite(T, 2.5));
   const current = finite(r, 0);
+  const center = Number.isFinite(Number(q50)) ? Number(q50) : current;
 
   const coreLo = Math.min(-1.45, current - 0.75);
   const coreHi = Math.max(take + 0.75, current + 0.75);
-  let lo = Math.min(coreLo, Number.isFinite(Number(q10)) ? Number(q10) - 0.25 : coreLo);
-  let hi = Math.max(coreHi, Number.isFinite(Number(q90)) ? Number(q90) + 0.25 : coreHi);
+  const distLo = Number.isFinite(Number(q10))
+    ? Number(q10) - QUANTILE_MARGIN_R : coreLo;
+  const distHi = Number.isFinite(Number(q90))
+    ? Number(q90) + QUANTILE_MARGIN_R : coreHi;
 
-  const maxSpan = Math.max(5.5, take + 3.5);
-  if (hi - lo > maxSpan) {
-    const coreSpan = coreHi - coreLo;
-    const extra = Math.max(0, maxSpan - coreSpan);
-    lo = coreLo - extra * 0.42;
-    hi = coreHi + extra * 0.58;
-  }
+  let lo = Math.max(rawLo, floorDomain(Math.min(coreLo, distLo)));
+  let hi = Math.min(rawHi, ceilDomain(Math.max(coreHi, distHi)));
 
-  lo = Math.max(rawLo, lo);
-  hi = Math.min(rawHi, hi);
   if (hi - lo < 2.5) {
-    const mid = (lo + hi) / 2;
-    lo = Math.max(rawLo, mid - 1.25);
-    hi = Math.min(rawHi, mid + 1.25);
+    lo = Math.max(rawLo, floorDomain(Math.min(lo, center - 1.25)));
+    hi = Math.min(rawHi, ceilDomain(Math.max(hi, center + 1.25)));
   }
   if (!(hi > lo)) {
     return { lo: rawLo, hi: rawHi, rawLo, rawHi, compressed: false };
   }
-
-  const qLo = Math.max(rawLo, quantizeDomain(lo));
-  const qHi = Math.min(rawHi, quantizeDomain(hi));
   return {
-    lo: qHi > qLo ? qLo : lo,
-    hi: qHi > qLo ? qHi : hi,
+    lo,
+    hi,
     rawLo,
     rawHi,
-    compressed: qLo > rawLo + 1e-9 || qHi < rawHi - 1e-9,
+    compressed: lo > rawLo + 1e-9 || hi < rawHi - 1e-9,
   };
 }
 
@@ -234,6 +235,7 @@ export function initLattice(canvas) {
       T: s.T,
       r: d.r,
       q10: d.q10,
+      q50: d.q50,
       q90: d.q90,
     });
     const rebinned = rebinDistribution(primary, rawEdges, focused.lo, focused.hi, BINS);
