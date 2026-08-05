@@ -55,7 +55,25 @@ globalThis.window = fakeWindow;
 globalThis.requestAnimationFrame = (fn) => setTimeout(() => fn(performance.now()), 0);
 
 const writes = [];
+const emitAfter = (el) => queueMicrotask(() => el.emit('plotly_afterplot'));
 fakeWindow.Plotly = {
+  newPlot(el, traces, layout) {
+    el.data = clone(traces || []);
+    el.layout = clone(layout || { scene: { camera: INIT_CAM } });
+    el._fullLayout = { scene: { camera: clone(el.layout.scene?.camera || INIT_CAM) } };
+    emitAfter(el);
+    return Promise.resolve(el);
+  },
+  react(el, traces, layout) {
+    el.data = clone(traces || []);
+    el.layout = clone(layout || el.layout);
+    el._fullLayout.scene.camera = clone(el.layout.scene?.camera || INIT_CAM);
+    emitAfter(el);
+    return Promise.resolve(el);
+  },
+  restyle(el) {
+    return Promise.resolve(el);
+  },
   relayout(el, update) {
     writes.push(clone(update));
     if (update['scene.camera']) {
@@ -63,9 +81,16 @@ fakeWindow.Plotly = {
       el.layout.scene.camera = clone(update['scene.camera']);
     }
     el.emit('plotly_relayout', clone(update));
-    queueMicrotask(() => el.emit('plotly_afterplot'));
+    emitAfter(el);
     return Promise.resolve(el);
   },
+  Plots: {
+    resize(el) {
+      emitAfter(el);
+      return Promise.resolve(el);
+    },
+  },
+  purge() {},
 };
 
 const guard = createPlotlyCameraGuard(graph, INIT_CAM);
