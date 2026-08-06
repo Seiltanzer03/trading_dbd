@@ -1,0 +1,30 @@
+name: lattice-revaluation-v24
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install
+        run: python -m pip install -e '.[dev]'
+      - name: Python syntax
+        run: python -m compileall -q seiltanzer tests
+      - name: Python tests
+        run: pytest -q
+      - name: Lattice frontend smoke
+        run: node tests/web/lattice_scale_smoke.mjs
+      - name: Revaluation UI syntax
+        run: node --check seiltanzer/web/js/lattice_revaluation_ui.js
