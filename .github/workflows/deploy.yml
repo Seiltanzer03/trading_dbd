@@ -47,26 +47,26 @@ jobs:
 
       - name: Пост-проверка результатов production-деплоя
         run: |
-          SERVER_HEAD=$(git -C /opt/seiltanzer rev-parse HEAD)
-          EXPECTED_HEAD="${{ github.sha }}"
-          echo "EXPECTED: $EXPECTED_HEAD"
-          echo "ACTUAL:   $SERVER_HEAD"
-          if [ "$SERVER_HEAD" != "$EXPECTED_HEAD" ]; then
-            echo "ERROR: Server HEAD ($SERVER_HEAD) does not match expected commit ($EXPECTED_HEAD)"
+          DEPLOYED_COMMIT=$(git -C /opt/seiltanzer rev-parse HEAD)
+          EXPECTED_COMMIT=$(git rev-parse HEAD)
+          echo "Server current HEAD: $DEPLOYED_COMMIT"
+          echo "Expected HEAD: $EXPECTED_COMMIT"
+          if [ "$DEPLOYED_COMMIT" != "$EXPECTED_COMMIT" ]; then
+            echo "::error::Commit mismatch! Server HEAD ($DEPLOYED_COMMIT) != Expected ($EXPECTED_COMMIT)"
+            exit 1
+          fi
+          
+          IS_ACTIVE=$(systemctl is-active seiltanzer || true)
+          echo "Systemd service status: $IS_ACTIVE"
+          if [ "$IS_ACTIVE" != "active" ]; then
+            echo "::error::Service is not active ($IS_ACTIVE)"
             exit 1
           fi
 
-          SERVICE_STATUS=$(systemctl is-active seiltanzer || true)
-          echo "Service status: $SERVICE_STATUS"
-          if [ "$SERVICE_STATUS" != "active" ]; then
-            echo "ERROR: Service status is $SERVICE_STATUS"
-            exit 1
-          fi
-
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8790/api/state || echo "000")
-          echo "HTTP status: $HTTP_CODE"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8790/api/state || true)
+          echo "Local API HTTP status: $HTTP_CODE"
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "ERROR: /api/state returned HTTP $HTTP_CODE"
+            echo "::error::Local API status is $HTTP_CODE"
             exit 1
           fi
 
