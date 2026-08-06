@@ -12,6 +12,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: agent/lattice-adaptive-window-v21
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Extract staged sources
         shell: bash
         run: |
@@ -64,6 +67,8 @@ jobs:
           '''
           p.write_text(s[:start] + replacement + s[end:])
           PY
+      - name: Install test dependencies
+        run: python -m pip install -e '.[dev]'
       - name: Validate
         run: |
           node --check seiltanzer/web/js/lattice.js
