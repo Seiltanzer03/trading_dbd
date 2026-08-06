@@ -284,6 +284,36 @@
     </div>
   </section>
 
+  <!-- ================ 3d. WAVELET CYCLE MAP ================ -->
+  <section class="card panel" id="panel-wavelet">
+    <div class="panel-head">
+      <h2>WAVELET CYCLE MAP · СПЕКТРОГРАММА ЦИКЛОВ (CWT)</h2>
+      <div class="panel-head-right" style="display: flex; gap: 8px; align-items: center;">
+        <div class="btn-group" id="wavelet-mode-group">
+          <button class="btn-toggle active" id="btn-wavelet-spectrogram">SPECTROGRAM</button>
+          <button class="btn-toggle" id="btn-wavelet-energy">ENERGY</button>
+        </div>
+        <span class="badge" id="wavelet-status">○ DOMINANT 12.0H</span>
+      </div>
+    </div>
+    <div class="panel-body" style="display: flex; flex-wrap: wrap; gap: 12px; padding: 12px;">
+      <div class="canvas-holder" id="wavelet-canvas-holder" style="flex: 1 1 65%; min-width: 300px; height: 420px; position: relative;">
+        <div class="canvas-empty" id="wavelet-empty">○ WAVELET SPECTRUM UNAVAILABLE</div>
+      </div>
+      <div id="wavelet-summary-card" class="wavelet-side-card" style="flex: 1 1 30%; min-width: 220px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 10px; background: rgba(0,0,0,0.03); border: 1px solid rgba(0,0,0,0.08); border-radius: 4px; display: flex; flex-direction: column; gap: 8px;">
+        <div style="font-weight: 600; color: #333; border-bottom: 1px solid #ccc; padding-bottom: 4px;">WAVELET CYCLE METRICS</div>
+        <div>DOMINANT PERIOD: <span id="wavelet-val-dom" style="font-weight: 600; color: #9b59b6;">12.0h</span></div>
+        <div>MICRO (&lt;4h): <span id="wavelet-val-micro">25.0%</span></div>
+        <div>INTRADAY (4-24h): <span id="wavelet-val-intra">55.0%</span></div>
+        <div>MACRO (&gt;24h): <span id="wavelet-val-macro">20.0%</span></div>
+        <div>PERSISTENCE: <span id="wavelet-val-persist">80%</span></div>
+      </div>
+    </div>
+    <div class="panel-foot dim">
+      <b>CWT SPECTROGRAM:</b> Вейвлет-преобразование Морле на 5m доходностях. Светящаяся голубая линия = доминирующий временной цикл. Тепловая карта отражает спектральную плотность энергии по периодам от 30m до 5 дней.
+    </div>
+  </section>
+
   <!-- ================ 3b. PROBABILITY CONE (3D) ================ -->
   <section class="card panel" id="panel-cone">
     <div class="panel-head">
