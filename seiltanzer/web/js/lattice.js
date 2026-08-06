@@ -1,21 +1,22 @@
-// Probability Lattice v28 — restored classical Galton board.
+// Probability Lattice v29 — live probability snapshots with persistent balls.
 //
-// Architecture intentionally follows the early working implementation:
-//   app.js is the ONLY data source; this module owns no fetch/WebSocket.
-//   10 peg decisions map exactly to 11 aligned physical bins.
-//   Every completed fall increments one real empirical bin.
+// One canonical data stream comes from app.js. CURRENT RND changes on every
+// market tick. Each new ball samples that exact snapshot once, freezes its bin,
+// completes the physical fall, and remains counted until the trade is closed.
 //
-// The soft background bell is a moment/quantile-matched Galton projection of
-// CURRENT option-implied RND into the actionable trade window. It is explicitly
-// a board projection, not a replacement for barrier / RND calculations.
+// Three different objects are intentionally kept separate:
+//   1) CURRENT RND — live black bell, updated by ticks;
+//   2) TIME-AVERAGED SNAPSHOTS — grey dashed bell of landed ball snapshots;
+//   3) LANDED BALLS — orange empirical distribution, never rewritten by ticks.
 import { COLORS, setupCanvas } from './util.js';
 
 const ROWS = 10;
 const BINS = ROWS + 1;
 const GOLDEN = 0.6180339887498949;
 const DOMAIN_STEP_R = 0.25;
-const STORAGE_VERSION = 4;
-const STORAGE_PREFIX = 'seiltanzer:lattice:v4:';
+const STORAGE_VERSION = 5;
+const STORAGE_PREFIX = 'seiltanzer:lattice:v5:';
+const LEGACY_STORAGE_PREFIX = 'seiltanzer:lattice:v4:';
 const IMPACT_HOLD_MS = 150;
 
 function finite(value, fallback = null) {
@@ -44,23 +45,28 @@ function fmtR(value, digits = 2) {
   if (n == null) return '—';
   return `${n >= 0 ? '+' : ''}${n.toFixed(digits)}R`;
 }
-function sameDomain(a, b) {
-  return !!a && !!b && Math.abs(a.lo - b.lo) < 1e-7 && Math.abs(a.hi - b.hi) < 1e-7;
+function validDomain(domain) {
+  return !!domain && Number.isFinite(domain.lo) && Number.isFinite(domain.hi)
+    && domain.hi > domain.lo;
 }
 
-export function computeFocusDomain({ edges, T = 2.5, r = 0 }) {
+// The board axis is a TRADE coordinate system, not a live-price viewport.
+// It is therefore independent of r and stays fixed for the whole trade.
+export function computeFocusDomain({ edges, T = 2.5 }) {
   const rawLo = Array.isArray(edges) && Number.isFinite(Number(edges[0]))
     ? Number(edges[0]) : -2;
   const rawHi = Array.isArray(edges) && Number.isFinite(Number(edges.at(-1)))
     ? Number(edges.at(-1)) : finite(T, 2.5) + 1;
   const take = Math.max(0.25, finite(T, 2.5));
-  const current = finite(r, 0);
-  let lo = Math.min(-2, current - 0.75);
-  let hi = Math.max(take + 1, current + 0.75);
-  lo = Math.max(rawLo, floorDomain(lo));
-  hi = Math.min(rawHi, ceilDomain(hi));
-  if (!(hi > lo)) return { lo: rawLo, hi: rawHi, rawLo, rawHi, compressed: false };
-  return { lo, hi, rawLo, rawHi, compressed: lo > rawLo + 1e-9 || hi < rawHi - 1e-9 };
+  const lo = floorDomain(-2);              // one R beyond the -1R stop
+  const hi = ceilDomain(take + 1);         // one R beyond the take
+  return {
+    lo,
+    hi,
+    rawLo,
+    rawHi,
+    compressed: lo > rawLo + 1e-9 || hi < rawHi - 1e-9,
+  };
 }
 
 export function rebinDistribution(probs, edges, lo, hi, bins = BINS) {
@@ -97,8 +103,13 @@ export function rebinDistribution(probs, edges, lo, hi, bins = BINS) {
     for (let i = 0; i < out.length; i++) out[i] /= total;
   }
   const visibleMass = out.reduce((sum, value) => sum + value, 0);
-  return { probs: visibleMass > 0 ? out.map((value) => value / visibleMass) : out,
-    edges: outEdges, leftTail, rightTail, visibleMass };
+  return {
+    probs: visibleMass > 0 ? out.map((value) => value / visibleMass) : out,
+    edges: outEdges,
+    leftTail,
+    rightTail,
+    visibleMass,
+  };
 }
 
 function distributionMoments(probs, edges) {
@@ -132,10 +143,19 @@ function quantileFromDistribution(probs, edges, q) {
 }
 
 export function buildGaltonDistribution({
-  probs, edges, T = 2.5, r = 0, q10 = null, q50 = null, q90 = null,
+  probs,
+  edges,
+  T = 2.5,
+  r = 0,
+  q10 = null,
+  q50 = null,
+  q90 = null,
   bins = BINS,
+  domainOverride = null,
 }) {
-  const domain = computeFocusDomain({ edges, T, r });
+  const domain = validDomain(domainOverride)
+    ? { ...domainOverride }
+    : computeFocusDomain({ edges, T, r });
   const lo = domain.lo;
   const hi = domain.hi;
   const span = Math.max(1e-9, hi - lo);
@@ -148,10 +168,6 @@ export function buildGaltonDistribution({
   let sigma = p10 != null && p90 != null && p90 > p10
     ? (p90 - p10) / 2.563103131
     : finite(raw.sigma, span * 0.18);
-
-  // A Galton board must remain readable as a bell inside the trade window.
-  // The centre comes from CURRENT RND, while spread is bounded only for this
-  // projection; raw option tails remain in backend probabilities and labels.
   sigma = clamp(sigma, Math.max(0.30, span * 0.085), span * 0.275);
   center = clamp(center, lo + sigma * 0.55, hi - sigma * 0.55);
   const skew = clamp(finite(raw.skew, 0), -1.5, 1.5);
@@ -160,12 +176,21 @@ export function buildGaltonDistribution({
   for (let i = 0; i < bins; i++) {
     const mid = (outEdges[i] + outEdges[i + 1]) / 2;
     const z = (mid - center) / sigma;
-    // Small exponential tilt preserves a single bell while carrying RND skew.
     weights.push(Math.exp(-0.5 * z * z + skew * 0.08 * z));
   }
   const model = normalise(weights) || new Array(bins).fill(1 / bins);
-  return { probs: model, edges: outEdges, lo, hi, center, sigma, skew,
-    rawMean: raw.mean, rawSigma: raw.sigma, domain };
+  return {
+    probs: model,
+    edges: outEdges,
+    lo,
+    hi,
+    center,
+    sigma,
+    skew,
+    rawMean: raw.mean,
+    rawSigma: raw.sigma,
+    domain,
+  };
 }
 
 export function deterministicBin(probs, sequenceIndex) {
@@ -227,23 +252,58 @@ export function advanceBallKinematics(ball, dtMs, rows = ROWS) {
   return { landed: false, expired: false };
 }
 
+export function accumulateSnapshotMass(totalMass, snapshotProbs) {
+  const out = Array.isArray(totalMass) && totalMass.length === BINS
+    ? totalMass.slice() : new Array(BINS).fill(0);
+  const snapshot = normalise(snapshotProbs);
+  if (!snapshot || snapshot.length !== BINS) return out;
+  for (let i = 0; i < BINS; i++) out[i] += snapshot[i];
+  return out;
+}
+
 function safeStorage() {
   try { return typeof localStorage === 'undefined' ? null : localStorage; } catch (_) { return null; }
 }
 function storageKey(tradeId) { return `${STORAGE_PREFIX}${encodeURIComponent(String(tradeId))}`; }
+function legacyStorageKey(tradeId) { return `${LEGACY_STORAGE_PREFIX}${encodeURIComponent(String(tradeId))}`; }
+function sanitizeCounts(values) {
+  if (!Array.isArray(values)) return null;
+  const counts = values.slice(0, BINS).map((n) => Math.max(0, Math.floor(finite(n, 0))));
+  return counts.length === BINS ? counts : null;
+}
+function sanitizeMass(values) {
+  if (!Array.isArray(values)) return new Array(BINS).fill(0);
+  const mass = values.slice(0, BINS).map((n) => Math.max(0, finite(n, 0)));
+  return mass.length === BINS ? mass : new Array(BINS).fill(0);
+}
 function loadStored(tradeId, storage) {
   if (!storage || tradeId == null) return null;
   try {
-    const value = JSON.parse(storage.getItem(storageKey(tradeId)) || 'null');
-    if (!value || value.version !== STORAGE_VERSION || String(value.tradeId) !== String(tradeId)) return null;
-    const counts = Array.isArray(value.counts)
-      ? value.counts.slice(0, BINS).map((n) => Math.max(0, Math.floor(finite(n, 0)))) : null;
-    if (!counts || counts.length !== BINS) return null;
+    let value = JSON.parse(storage.getItem(storageKey(tradeId)) || 'null');
+    if (!value) {
+      const legacy = JSON.parse(storage.getItem(legacyStorageKey(tradeId)) || 'null');
+      if (legacy && String(legacy.tradeId) === String(tradeId)) {
+        value = {
+          version: STORAGE_VERSION,
+          tradeId: String(tradeId),
+          counts: legacy.counts,
+          green: legacy.green,
+          sequence: legacy.sequence,
+          expectedMass: legacy.counts,
+          domain: null,
+        };
+      }
+    }
+    if (!value || String(value.tradeId) !== String(tradeId)) return null;
+    const counts = sanitizeCounts(value.counts);
+    if (!counts) return null;
     return {
       counts,
       dropped: counts.reduce((sum, n) => sum + n, 0),
       green: Math.max(0, Math.floor(finite(value.green, 0))),
       sequence: Math.max(0, Math.floor(finite(value.sequence, 0))),
+      expectedMass: sanitizeMass(value.expectedMass),
+      domain: validDomain(value.domain) ? { lo: value.domain.lo, hi: value.domain.hi } : null,
     };
   } catch (_) { return null; }
 }
@@ -256,12 +316,17 @@ function saveStored(tradeId, state, storage) {
       counts: state.counts,
       green: state.green,
       sequence: state.sequence,
+      expectedMass: state.expectedMass,
+      domain: state.domain,
     }));
-  } catch (_) { /* optional */ }
+  } catch (_) { /* optional persistence */ }
 }
 function clearStored(tradeId, storage) {
   if (!storage || tradeId == null) return;
-  try { storage.removeItem(storageKey(tradeId)); } catch (_) { /* optional */ }
+  try {
+    storage.removeItem(storageKey(tradeId));
+    storage.removeItem(legacyStorageKey(tradeId));
+  } catch (_) { /* optional persistence */ }
 }
 
 export function initLattice(canvas) {
@@ -271,34 +336,58 @@ export function initLattice(canvas) {
     tradeId: null,
     T: 2.5,
     r: 0,
+    domain: null,
     model: null,
+    displayProbs: null,
     rawSlice: null,
     counts: new Array(BINS).fill(0),
+    expectedMass: new Array(BINS).fill(0),
     balls: [],
     dropped: 0,
     green: 0,
     sequence: 0,
+    modelRevision: 0,
     lastSpawn: 0,
     nextSpawnIn: 300,
     sourceLabel: null,
   };
 
-  function reset({ clearStorage = true } = {}) {
-    if (clearStorage) clearStored(state.tradeId, storage);
+  function clearRuntime({ keepTradeId = true } = {}) {
+    const tradeId = state.tradeId;
+    state.active = false;
+    state.T = 2.5;
+    state.r = 0;
+    state.domain = null;
+    state.model = null;
+    state.displayProbs = null;
+    state.rawSlice = null;
     state.counts = new Array(BINS).fill(0);
+    state.expectedMass = new Array(BINS).fill(0);
     state.balls = [];
     state.dropped = 0;
     state.green = 0;
     state.sequence = 0;
+    state.modelRevision = 0;
     state.lastSpawn = 0;
+    state.nextSpawnIn = 300;
+    state.sourceLabel = null;
+    state.tradeId = keepTradeId ? tradeId : null;
   }
-  function switchTrade(tradeId) {
-    if (tradeId === state.tradeId) return;
-    saveStored(state.tradeId, state, storage);
-    state.tradeId = tradeId;
-    reset({ clearStorage: false });
-    const stored = loadStored(tradeId, storage);
-    if (stored) Object.assign(state, stored);
+
+  function switchTrade(nextTradeId) {
+    if (nextTradeId === state.tradeId) return;
+    const previousTradeId = state.tradeId;
+    if (previousTradeId != null) {
+      // A transition to null means the trade was closed: history must disappear.
+      if (nextTradeId == null) clearStored(previousTradeId, storage);
+      else saveStored(previousTradeId, state, storage);
+    }
+    clearRuntime({ keepTradeId: false });
+    state.tradeId = nextTradeId;
+    if (nextTradeId != null) {
+      const stored = loadStored(nextTradeId, storage);
+      if (stored) Object.assign(state, stored);
+    }
   }
 
   function setData(d) {
@@ -306,8 +395,15 @@ export function initLattice(canvas) {
     state.active = !!d.active;
     state.T = Math.max(0.25, finite(d.T, state.T));
     state.r = finite(d.r, state.r);
-    state.sourceLabel = d.optionAnchored ? 'OPTIONS RND → GALTON' : 'SCENARIO → GALTON';
+    state.sourceLabel = d.optionAnchored ? 'OPTIONS RND → LIVE SNAPSHOTS' : 'SCENARIO → LIVE SNAPSHOTS';
     if (!state.active || !Array.isArray(d.distributionProbs) || !Array.isArray(d.edges)) return;
+
+    // Freeze the coordinate system once per trade. Ticks update only probability,
+    // never the meaning of bins and never accumulated balls.
+    if (!validDomain(state.domain)) {
+      const domain = computeFocusDomain({ edges: d.edges, T: state.T });
+      state.domain = { lo: domain.lo, hi: domain.hi };
+    }
     const nextModel = buildGaltonDistribution({
       probs: d.distributionProbs,
       edges: d.edges,
@@ -317,15 +413,14 @@ export function initLattice(canvas) {
       q50: d.q50,
       q90: d.q90,
       bins: BINS,
+      domainOverride: state.domain,
     });
-    if (!sameDomain(state.model, nextModel)) {
-      // This happens only when the actionable window genuinely changes, not on
-      // every market tick. Existing bin meanings would otherwise become wrong.
-      reset({ clearStorage: true });
-    }
     state.model = nextModel;
+    state.modelRevision += 1;
+    if (!state.displayProbs) state.displayProbs = nextModel.probs.slice();
     state.rawSlice = rebinDistribution(d.distributionProbs, d.edges,
-      nextModel.lo, nextModel.hi, BINS);
+      state.domain.lo, state.domain.hi, BINS);
+    saveStored(state.tradeId, state, storage);
   }
 
   function canvasHeight() {
@@ -350,8 +445,8 @@ export function initLattice(canvas) {
   function binIsGreen(bin) { return binMid(bin) > 0; }
   function binIsTake(bin) { return binMid(bin) >= state.T; }
   function xOfR(g, value) {
-    const lo = state.model?.lo ?? -2;
-    const hi = state.model?.hi ?? state.T + 1;
+    const lo = state.domain?.lo ?? -2;
+    const hi = state.domain?.hi ?? state.T + 1;
     return g.padX + (value - lo) / Math.max(1e-9, hi - lo) * (g.w - 2 * g.padX);
   }
   function pegX(g, row, rights) {
@@ -378,9 +473,17 @@ export function initLattice(canvas) {
     };
   }
 
+  function averageSnapshotProbs() {
+    if (!state.dropped) return null;
+    return normalise(state.expectedMass);
+  }
+
   function spawnBall() {
     if (!state.model) return;
-    const bin = deterministicBin(state.model.probs, state.sequence++);
+    // Freeze one complete probability snapshot at launch. Later ticks can move
+    // CURRENT RND, but cannot redirect an already launched ball.
+    const snapshotProbs = state.model.probs.slice();
+    const bin = deterministicBin(snapshotProbs, state.sequence++);
     if (bin == null) return;
     const dirs = Array.from({ length: ROWS }, (_, i) => i < bin);
     let seed = (state.sequence * 2654435761) >>> 0;
@@ -393,6 +496,11 @@ export function initLattice(canvas) {
     state.balls.push({
       bin,
       dirs,
+      snapshotProbs,
+      snapshotRevision: state.modelRevision,
+      snapshotCenter: state.model.center,
+      snapshotSigma: state.model.sigma,
+      spawnedAt: Date.now(),
       seg: 0,
       t: 0,
       rights: 0,
@@ -404,6 +512,7 @@ export function initLattice(canvas) {
       expired: false,
     });
   }
+
   function stepBalls(dtMs) {
     for (const ball of state.balls) {
       const result = advanceBallKinematics(ball, dtMs, ROWS);
@@ -411,12 +520,14 @@ export function initLattice(canvas) {
         state.counts[ball.bin] += 1;
         state.dropped += 1;
         if (binIsGreen(ball.bin)) state.green += 1;
+        state.expectedMass = accumulateSnapshotMass(state.expectedMass, ball.snapshotProbs);
         saveStored(state.tradeId, state, storage);
       }
       if (result.expired) ball.expired = true;
     }
     state.balls = state.balls.filter((ball) => !ball.expired);
   }
+
   function ballPosition(g, ball) {
     if (ball.seg < ROWS) {
       const eased = ball.t * ball.t * (3 - 2 * ball.t);
@@ -440,7 +551,6 @@ export function initLattice(canvas) {
     return { x: x0 + (target.x - x0) * eased, y: y0 + (target.y - y0) * eased };
   }
 
-  function modelMax() { return Math.max(...(state.model?.probs || [0.001]), 0.001); }
   function empiricalShares() {
     const total = Math.max(1, state.dropped);
     return state.counts.map((count) => count / total);
@@ -462,7 +572,7 @@ export function initLattice(canvas) {
     ctx.restore();
   }
   function drawMarker(ctx, g, value, label, color, dash = [4, 3]) {
-    if (!state.model || value < state.model.lo || value > state.model.hi) return;
+    if (!state.domain || value < state.domain.lo || value > state.domain.hi) return;
     const x = xOfR(g, value);
     ctx.save();
     ctx.strokeStyle = color;
@@ -479,11 +589,23 @@ export function initLattice(canvas) {
     ctx.restore();
   }
 
+  function smoothCurrentModel() {
+    if (!state.model) return;
+    if (!state.displayProbs || state.displayProbs.length !== BINS) {
+      state.displayProbs = state.model.probs.slice();
+      return;
+    }
+    for (let i = 0; i < BINS; i++) {
+      state.displayProbs[i] += (state.model.probs[i] - state.displayProbs[i]) * 0.14;
+    }
+    state.displayProbs = normalise(state.displayProbs) || state.model.probs.slice();
+  }
+
   function draw() {
     const { ctx, w, h } = setupCanvas(canvas, canvasHeight());
     const g = geometry(w, h);
     ctx.clearRect(0, 0, w, h);
-    if (!state.active || !state.model) return;
+    if (!state.active || !state.model || !state.domain) return;
 
     const zeroX = clamp(xOfR(g, 0), g.padX, w - g.padX);
     const takeX = clamp(xOfR(g, state.T), g.padX, w - g.padX);
@@ -496,7 +618,6 @@ export function initLattice(canvas) {
     ctx.fillStyle = 'rgba(232,98,42,0.05)';
     ctx.fillRect(takeX, g.top, Math.max(0, w - g.padX - takeX), g.baseY - g.top);
 
-    // Classical triangular peg geometry: bottom row aligns exactly with bin centres.
     ctx.fillStyle = COLORS.dim;
     for (let row = 1; row <= ROWS; row++) {
       for (let rights = 0; rights <= row; rights++) {
@@ -506,22 +627,30 @@ export function initLattice(canvas) {
       }
     }
 
-    // Expected Galton bell from CURRENT RND moments.
-    const maxModel = modelMax();
+    // CURRENT live bell.
+    const currentProbs = state.displayProbs || state.model.probs;
+    const maxCurrent = Math.max(...currentProbs, 0.001);
     for (let bin = 0; bin < BINS; bin++) {
       const x = g.padX + bin * g.binW;
-      const height = state.model.probs[bin] / maxModel * (g.histH - 12);
+      const height = currentProbs[bin] / maxCurrent * (g.histH - 12);
       ctx.fillStyle = binIsTake(bin)
-        ? 'rgba(232,98,42,0.30)'
+        ? 'rgba(232,98,42,0.24)'
         : binIsGreen(bin) ? COLORS.greenSoft : COLORS.redSoft;
       ctx.fillRect(x + 1.5, g.baseY - height, g.binW - 3, height);
       ctx.strokeStyle = 'rgba(20,20,15,0.16)';
       ctx.strokeRect(x + 1.5, g.histTop, g.binW - 3, g.histH);
     }
-    drawCurve(ctx, g, state.model.probs, maxModel,
-      { color: COLORS.ink, width: 2.1, alpha: 0.86 });
+    drawCurve(ctx, g, currentProbs, maxCurrent,
+      { color: COLORS.ink, width: 2.1, alpha: 0.90 });
 
-    // Real landed balls: every visible dot is one counted contribution.
+    // Mean of all probability snapshots that actually produced landed balls.
+    const average = averageSnapshotProbs();
+    if (average) {
+      const maxAverage = Math.max(...average, 0.001);
+      drawCurve(ctx, g, average, maxAverage,
+        { color: '#77716A', width: 1.5, dash: [3, 3], alpha: 0.90 });
+    }
+
     const layout = stackLayout(g);
     for (let bin = 0; bin < BINS; bin++) {
       const shown = Math.min(state.counts[bin], layout.capacity);
@@ -543,12 +672,11 @@ export function initLattice(canvas) {
     }
     ctx.globalAlpha = 1;
 
-    // Empirical shape grows from the actual landed counts.
     if (state.dropped >= 5) {
       const empirical = empiricalShares();
       const maxEmpirical = Math.max(...empirical, 0.001);
       drawCurve(ctx, g, empirical, maxEmpirical,
-        { color: '#E8622A', width: 1.8, dash: [5, 3], alpha: 0.92 });
+        { color: '#E8622A', width: 1.8, dash: [6, 3], alpha: 0.95 });
     }
 
     for (const ball of state.balls) {
@@ -566,7 +694,7 @@ export function initLattice(canvas) {
 
     drawMarker(ctx, g, -1, 'СТОП −1R', COLORS.red);
     drawMarker(ctx, g, state.T, `ТЕЙК +${state.T.toFixed(2)}R`, COLORS.green);
-    drawMarker(ctx, g, state.model.center, 'ЦЕНТР RND', '#6F685F', [2, 3]);
+    drawMarker(ctx, g, state.model.center, 'CURRENT RND', '#6F685F', [2, 3]);
     const currentX = clamp(xOfR(g, state.r), g.padX, w - g.padX);
     ctx.strokeStyle = '#E8622A';
     ctx.setLineDash([2, 2]);
@@ -576,39 +704,41 @@ export function initLattice(canvas) {
     ctx.stroke();
     ctx.setLineDash([]);
 
+    const currentStats = stats();
     ctx.font = '700 10px "IBM Plex Mono", monospace';
     ctx.textAlign = 'left';
     ctx.fillStyle = COLORS.green;
-    ctx.fillText('КЛАССИЧЕСКАЯ ДОСКА · 10 РЯДОВ → 11 КОРЗИН', g.padX, 17);
+    ctx.fillText('LIVE GALTON · ТИК → СНИМОК → ФИКСИРОВАННЫЙ ШАРИК', g.padX, 17);
     ctx.font = '8px "IBM Plex Mono", monospace';
     ctx.fillStyle = COLORS.dim;
-    ctx.fillText('МЯГКИЙ КОЛОКОЛ — GALTON-ПРОЕКЦИЯ CURRENT RND · ТОЧКИ И ПУНКТИР — РЕАЛЬНО УПАВШИЕ ШАРИКИ', g.padX, 31);
-    ctx.fillText('ОДИН ЗАВЕРШЁННЫЙ ПРОХОД = ОДИН ВКЛАД В КОНКРЕТНУЮ КОРЗИНУ', g.padX, 43);
+    ctx.fillText('ЧЁРНАЯ — CURRENT RND · СЕРАЯ — СРЕДНЕЕ СНИМКОВ · ОРАНЖЕВАЯ — УПАВШИЕ ШАРИКИ', g.padX, 31);
+    ctx.fillText('ТИКИ МЕНЯЮТ ТОЛЬКО НОВЫЕ ШАРИКИ; УПАВШИЕ ХРАНЯТСЯ ДО ЗАКРЫТИЯ СДЕЛКИ', g.padX, 43);
     ctx.textAlign = 'right';
-    ctx.fillText(`${state.sourceLabel || 'GALTON'} · μ ${fmtR(state.model.center)} · σ ${fmtR(state.model.sigma)}`,
+    ctx.fillText(`${state.sourceLabel || 'LIVE SNAPSHOTS'} · μ ${fmtR(state.model.center)} · σ ${fmtR(state.model.sigma)}`,
       w - g.padX, 17);
-    ctx.fillText(`ШАРИКОВ ${state.dropped} · P(+R) ${fmtPct(stats().greenShare)} · ОШИБКА ${fmtPct(stats().convergence)}`,
+    ctx.fillText(`ШАРИКОВ ${state.dropped} · P(+R) ${fmtPct(currentStats.greenShare)} · ОШИБКА ${fmtPct(currentStats.convergence)}`,
       w - g.padX, 31);
 
     ctx.font = '9px "IBM Plex Mono", monospace';
     ctx.fillStyle = COLORS.ink;
     ctx.textAlign = 'left';
-    ctx.fillText(`${state.model.lo.toFixed(2)}R`, g.padX, h - 8);
+    ctx.fillText(`${state.domain.lo.toFixed(2)}R`, g.padX, h - 8);
     ctx.textAlign = 'center';
     ctx.fillText('0', zeroX, h - 8);
     ctx.fillText(`r=${fmtR(state.r)}`, currentX, g.baseY + 20);
     ctx.textAlign = 'right';
-    ctx.fillText(`${state.model.hi >= 0 ? '+' : ''}${state.model.hi.toFixed(2)}R`, w - g.padX, h - 8);
+    ctx.fillText(`${state.domain.hi >= 0 ? '+' : ''}${state.domain.hi.toFixed(2)}R`, w - g.padX, h - 8);
   }
 
   function stats() {
     const greenShare = state.dropped ? state.green / state.dropped : null;
-    const pGreenModel = state.model
-      ? state.model.probs.reduce((sum, p, bin) => sum + (binIsGreen(bin) ? p : 0), 0)
+    const average = averageSnapshotProbs();
+    const pGreenModel = average
+      ? average.reduce((sum, p, bin) => sum + (binIsGreen(bin) ? p : 0), 0)
       : null;
     const empirical = empiricalShares();
-    const shapeError = state.dropped && state.model
-      ? 0.5 * empirical.reduce((sum, p, bin) => sum + Math.abs(p - state.model.probs[bin]), 0)
+    const shapeError = state.dropped && average
+      ? 0.5 * empirical.reduce((sum, p, bin) => sum + Math.abs(p - average[bin]), 0)
       : null;
     return {
       dropped: state.dropped,
@@ -617,8 +747,9 @@ export function initLattice(canvas) {
       convergence: greenShare != null && pGreenModel != null
         ? Math.abs(greenShare - pGreenModel) : null,
       shapeError,
-      modelMean: state.model?.center ?? null,
-      modelSigma: state.model?.sigma ?? null,
+      currentModelMean: state.model?.center ?? null,
+      currentModelSigma: state.model?.sigma ?? null,
+      modelRevision: state.modelRevision,
     };
   }
 
@@ -626,16 +757,18 @@ export function initLattice(canvas) {
     if (typeof document === 'undefined') return;
     const current = stats();
     const title = document.querySelector('#panel-lattice h2');
-    if (title) title.textContent = 'PROBABILITY LATTICE · ЖИВАЯ ДОСКА ГАЛЬТОНА';
+    if (title) title.textContent = 'PROBABILITY LATTICE · LIVE-СНИМКИ ВЕРОЯТНОСТИ';
     const button = document.getElementById('btn-lattice-reset');
     if (button) {
-      button.textContent = 'СБРОС ШАРИКОВ';
-      button.dataset.tip = 'Сбросить только накопленное распределение реально упавших шариков.';
+      button.hidden = !!state.active;
+      button.disabled = !!state.active;
+      button.textContent = 'ОЧИСТКА ПОСЛЕ ЗАКРЫТИЯ';
+      button.dataset.tip = 'Во время открытой сделки шарики не удаляются. История очищается при закрытии сделки.';
     }
     const labels = {
       'lat-balls': 'ШАРИКОВ УПАЛО',
       'lat-green': 'ШАРИКИ В +R',
-      'lat-conv': 'ОШИБКА К МОДЕЛИ',
+      'lat-conv': 'ОШИБКА К СРЕДНЕМУ',
     };
     for (const [id, text] of Object.entries(labels)) {
       const value = document.getElementById(id);
@@ -656,9 +789,11 @@ export function initLattice(canvas) {
     const dt = Math.min(55, Math.max(0, now - lastFrame));
     lastFrame = now;
     if (state.active && state.model) {
+      smoothCurrentModel();
       state.lastSpawn += dt;
       if (state.lastSpawn >= state.nextSpawnIn) {
         state.lastSpawn = 0;
+        // Time-based cadence avoids overweighting instruments with noisier feeds.
         state.nextSpawnIn = 285 + (state.sequence % 7) * 24;
         spawnBall();
       }
@@ -675,7 +810,15 @@ export function initLattice(canvas) {
 
   return {
     setData,
-    reset() { reset({ clearStorage: true }); updateDom(); },
+    reset() {
+      // Public reset is allowed only outside an active trade. During the trade,
+      // persistence is part of the data contract and cannot be manually erased.
+      if (state.active && state.tradeId != null) return false;
+      clearStored(state.tradeId, storage);
+      clearRuntime({ keepTradeId: true });
+      updateDom();
+      return true;
+    },
     get stats() { return stats(); },
   };
 }
