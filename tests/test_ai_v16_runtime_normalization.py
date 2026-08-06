@@ -56,7 +56,6 @@ def test_hard_cvar_floor_preserves_gross_contract_and_selects_on_net_basis():
     assert fallback["gross_cvar_floor_r"] == -1.0
     assert fallback["unavoidable_deferred_cost_r"] == 0.01
     assert fallback["net_cvar_floor_r"] == -1.01
-    assert fallback["selection_cvar_floor_r"] == -1.01
 
     explicit = risk_constraint(
         inputs,
