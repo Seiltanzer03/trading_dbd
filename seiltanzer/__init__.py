@@ -6,3 +6,12 @@
 """
 
 __version__ = "0.1.0"
+
+# Keep analytics behavior identical whether production is started through the
+# console script, `python -m seiltanzer`, uvicorn, or tests importing create_app.
+# The installer only replaces the three prototype analytics payload methods;
+# it does not start threads or perform network I/O at import time.
+from .analytics_runtime import install_analytics_runtime as _install_analytics_runtime
+
+_install_analytics_runtime()
+del _install_analytics_runtime
