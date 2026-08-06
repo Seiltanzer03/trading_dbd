@@ -1387,6 +1387,17 @@ class Engine:
             self._wavelet_summary_cache = res.get("summary")
         return clean_nans(res)
 
+    def cross_asset_payload(self) -> dict:
+        """Полноразмерный payload Cross-Asset Force Graph & Correlation Break Velocity."""
+        from .core.cross_asset import compute_correlation_graph
+
+        corr = getattr(self.market, "correlation", {})
+        price_feeds = self.market.price
+        res = compute_correlation_graph(corr, price_feeds)
+        if res.get("available") and res.get("summary"):
+            self._cross_asset_summary_cache = res.get("summary")
+        return clean_nans(res)
+
     def _analytics_summary(self, price, trade) -> dict:
         gex_mig = self.gex_migration_payload()
         gex_sum = (

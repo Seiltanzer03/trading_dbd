@@ -417,14 +417,18 @@
   <!-- ================ 6. CORRELATION MATRIX ================ -->
   <section class="card panel" id="panel-correlation">
     <div class="panel-head">
-      <h2>CROSS-ASSET CORRELATION · МАТРИЦА СВЯЗЕЙ</h2>
-      <div class="panel-head-right">
+      <h2>CROSS-ASSET CORRELATION · МАТРИЦА И ГРАФ СВЯЗЕЙ</h2>
+      <div class="panel-head-right" style="display: flex; gap: 8px; align-items: center;">
+        <div class="btn-group" id="corr-mode-group">
+          <button class="btn-toggle active" id="btn-corr-network">NETWORK</button>
+          <button class="btn-toggle" id="btn-corr-matrix">MATRIX</button>
+        </div>
         <span class="badge" id="corr-status">○ ОЖИДАНИЕ ДАННЫХ</span>
       </div>
     </div>
     <div class="panel-body">
       <div class="canvas-holder corr-holder" style="height: 350px;">
-        <div id="corr-canvas" style="width: 100%; height: 100%;"></div>
+        <div id="corr-chart" style="width: 100%; height: 100%;"></div>
         <div class="canvas-empty" id="corr-empty">○ НЕТ ДАННЫХ КОРРЕЛЯЦИИ</div>
       </div>
       <div id="corr-interpretation" style="padding: 8px 16px; font-size: 12px; font-family: 'IBM Plex Mono', monospace; color: #555; line-height: 1.7; border-top: 1px solid #eee; display: none;"></div>

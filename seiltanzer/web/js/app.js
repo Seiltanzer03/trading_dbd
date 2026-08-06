@@ -13,6 +13,8 @@ import { initVrp, updateVrp } from './vrp.js';
 import { initGex, updateGex, updateLiveGex } from './gex.js';
 import { initIVSurface } from './iv_surface.js';
 import { initCorrelation, updateCorrelation } from './correlation.js';
+import { initRegimePhase, updateLiveRegimePhase } from './regime_phase.js';
+import { initWavelet } from './wavelet.js';
 
 initTooltips();
 
@@ -25,6 +27,8 @@ const ivSurface = initIVSurface('#iv-surface-plot');
 initVrp();
 initGex();
 initCorrelation();
+initRegimePhase();
+initWavelet();
 
 const S = {
   tick: null,
