@@ -274,6 +274,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_analytics_wavelet():
         return engine.wavelet_payload()
 
+    @app.get("/api/analytics/correlation-graph")
+    def api_analytics_correlation_graph():
+        return engine.cross_asset_payload()
+
     @app.get("/api/journal")
     def api_journal():
         return engine.journal.list_trades()

@@ -1,13 +1,11 @@
-// CROSS-ASSET REGIME MATRIX.
-//
-// Upper triangle: rolling 5-minute return correlation (last 96 observations).
-// Lower triangle: change versus the 3-month daily baseline. This makes regime
-// breaks visible instead of animating a static monthly matrix.
-
 import { $ } from './util.js';
 
 let chart, emptyEl, statusEl;
 let payload = null;
+let graphData = null;
+let currentMode = 'NETWORK'; // 'NETWORK' | 'MATRIX'
+let draggedNode = null;
+
 const WATCHED = [
   [0, 1, 'NAS↔VXN', 'spot-vol'],
   [2, 3, 'SP500↔VIX', 'spot-vol'],
@@ -19,37 +17,36 @@ const WATCHED = [
 export function initCorrelation() {
   emptyEl = $('#corr-empty');
   statusEl = $('#corr-status');
+
+  const btnNet = $('#btn-corr-network');
+  const btnMat = $('#btn-corr-matrix');
+
+  if (btnNet) btnNet.addEventListener('click', () => setMode('NETWORK'));
+  if (btnMat) btnMat.addEventListener('click', () => setMode('MATRIX'));
+
+  fetchGraphData();
 }
 
-function finite(v) {
-  return Number.isFinite(Number(v));
+function setMode(mode) {
+  currentMode = mode;
+  const btnNet = $('#btn-corr-network');
+  const btnMat = $('#btn-corr-matrix');
+  if (btnNet) btnNet.classList.toggle('active', mode === 'NETWORK');
+  if (btnMat) btnMat.classList.toggle('active', mode === 'MATRIX');
+
+  if (payload || graphData) renderCorrelation();
 }
 
-function regimeShift(p) {
-  const short = p.matrix_short || p.matrix;
-  const base = p.matrix_baseline;
-  const delta = p.matrix_delta;
-  if (!short || !base || !delta) return null;
-  const candidates = WATCHED.map(([i, j, label, kind]) => {
-    const s = short?.[i]?.[j], b = base?.[i]?.[j], d = delta?.[i]?.[j];
-    return finite(s) && finite(b) && finite(d)
-      ? { i, j, label, kind, short: Number(s), base: Number(b), delta: Number(d) }
-      : null;
-  }).filter(Boolean).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
-  const top = candidates[0];
-  if (!top || Math.abs(top.delta) < 0.18) return null;
-  let meaning = 'связь сменила режим — подтверждение движения слабее';
-  if (top.kind === 'spot-vol') {
-    if (top.base < -0.2 && top.short > top.base + 0.25)
-      meaning = 'обычная обратная spot-vol защита ослабла';
-    else if (top.short < top.base - 0.25)
-      meaning = 'обратная spot-vol связь усилилась';
-  } else if (top.short < top.base - 0.25) {
-    meaning = 'индексы расходятся — меньше cross-market подтверждения';
-  } else if (top.short > top.base + 0.25) {
-    meaning = 'индексы синхронизировались — больше общего beta-риска';
+export async function fetchGraphData() {
+  try {
+    const res = await fetch('/api/analytics/correlation-graph');
+    if (res.ok) {
+      graphData = await res.json();
+      if (currentMode === 'NETWORK') renderCorrelation();
+    }
+  } catch (err) {
+    console.warn('Graph data fetch error:', err);
   }
-  return { ...top, meaning };
 }
 
 export function updateCorrelation(p) {
@@ -58,162 +55,189 @@ export function updateCorrelation(p) {
     payload = null;
     if (emptyEl) emptyEl.style.display = 'flex';
     if (chart) { chart.dispose(); chart = null; }
-    if (statusEl) statusEl.textContent = '○ НЕТ ДАННЫХ';
     return;
   }
   payload = p;
   if (emptyEl) emptyEl.style.display = 'none';
-  
-  const shift = regimeShift(p);
-  const interpretEl = document.getElementById('corr-interpretation');
-  if (statusEl) {
-    if (shift) {
-      statusEl.textContent = `⚠ Δρ ${shift.label} ${shift.delta >= 0 ? '+' : ''}${shift.delta.toFixed(2)}`;
-      statusEl.className = 'badge warn';
-      statusEl.title = `${shift.label}: baseline ${shift.base.toFixed(2)} → rolling ${shift.short.toFixed(2)}. ${shift.meaning}`;
-      
-      if (interpretEl) {
-        interpretEl.innerHTML = `🚨 <b>ВНИМАНИЕ — РЕЖИМНЫЙ СДВИГ:</b> ${shift.label} изменил корреляцию на ${shift.delta > 0 ? '+' : ''}${shift.delta.toFixed(2)} (было ${shift.base.toFixed(2)}, стало ${shift.short.toFixed(2)}).<br><b>Значение для сделки:</b> ${shift.meaning}`;
-        interpretEl.style.display = 'block';
-        interpretEl.style.backgroundColor = 'rgba(231, 76, 60, 0.05)';
-        interpretEl.style.borderColor = 'rgba(231, 76, 60, 0.3)';
-      }
-    } else {
-      statusEl.textContent = `● ROLLING 5M · ${p.dynamic_pairs || '—'} ПАР`;
-      statusEl.className = 'badge live';
-      statusEl.title = 'Rolling 5m correlations versus a 3-month daily baseline. Refresh: 5 minutes.';
-      
-      if (interpretEl) {
-        interpretEl.innerHTML = `✅ <b>СТАБИЛЬНЫЙ РЕЖИМ:</b> Связи активов в пределах нормы (отклонения < 0.25). Необычных дивергенций, мешающих вашему тренду, не выявлено.`;
-        interpretEl.style.display = 'block';
-        interpretEl.style.backgroundColor = '#fff';
-        interpretEl.style.borderColor = '#eee';
-      }
-    }
-  }
-  
+
   renderCorrelation();
 }
 
 function renderCorrelation() {
-    const el = $('#corr-canvas');
-    if (!el || !payload) return;
-    
-    if (!chart && window.echarts) {
-        chart = window.echarts.init(el);
-        new ResizeObserver(() => { if (chart) chart.resize(); }).observe(el);
+  if (currentMode === 'NETWORK') {
+    renderForceGraph();
+  } else {
+    renderMatrixChart();
+  }
+}
+
+function renderForceGraph() {
+  const holder = $('#corr-chart');
+  if (!holder) return;
+
+  if (chart) {
+    chart.dispose();
+    chart = null;
+  }
+
+  let cv = holder.querySelector('canvas');
+  if (!cv) {
+    holder.innerHTML = '<canvas style="width:100%;height:100%;display:block;cursor:grab;"></canvas>';
+    cv = holder.querySelector('canvas');
+  }
+
+  const rect = holder.getBoundingClientRect();
+  const width = Math.max(400, Math.floor(rect.width || 800));
+  const height = Math.max(300, Math.floor(rect.height || 420));
+  cv.width = width;
+  cv.height = height;
+
+  const ctx = cv.getContext('2d');
+
+  const nodes = graphData?.nodes || [
+    { id: 'NAS100', name: 'Nasdaq 100', x: width * 0.3, y: height * 0.3 },
+    { id: 'SPX500', name: 'S&P 500', x: width * 0.4, y: height * 0.4 },
+    { id: 'US30', name: 'Dow Jones', x: width * 0.35, y: height * 0.55 },
+    { id: 'GER40', name: 'DAX 40', x: width * 0.6, y: height * 0.25 },
+    { id: 'UK100', name: 'FTSE 100', x: width * 0.7, y: height * 0.4 },
+    { id: 'GOLD', name: 'Gold', x: width * 0.25, y: height * 0.75 },
+    { id: 'SILVER', name: 'Silver', x: width * 0.35, y: height * 0.8 },
+    { id: 'BTCUSD', name: 'Bitcoin', x: width * 0.75, y: height * 0.7 },
+  ];
+
+  const links = graphData?.links || [];
+
+  // Drag interaction
+  function getMousePos(e) {
+    const r = cv.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  cv.onpointerdown = (e) => {
+    const pos = getMousePos(e);
+    for (const node of nodes) {
+      const dist = Math.hypot(node.x - pos.x, node.y - pos.y);
+      if (dist <= 20) {
+        draggedNode = node;
+        cv.style.cursor = 'grabbing';
+        break;
+      }
     }
-    if (!chart) return;
-    
-    const targetShort = payload.matrix_short || payload.matrix;
-    const targetDelta = payload.matrix_delta || [];
-    const effective = payload.matrix || targetShort;
-    const assets = payload.assets;
-    const n = targetShort.length;
-    
-    const data = [];
-    for (let i = 0; i < n; i++) {
-        for (let j = 0; j < n; j++) {
-            const upper = i < j;
-            let val = 0;
-            let type = '';
-            
-            if (i === j) {
-                val = 1;
-                type = 'diagonal';
-            } else if (upper) {
-                val = finite(targetShort?.[i]?.[j]) ? Number(targetShort[i][j]) : Number(effective?.[i]?.[j] || 0);
-                type = 'rolling';
-            } else {
-                val = finite(targetDelta?.[i]?.[j]) ? Number(targetDelta[i][j]) : 0;
-                type = 'delta';
-            }
-            // Heatmap requires [x, y, value]
-            // We use j for X axis (columns), and i for Y axis (rows). 
-            // We reverse Y axis later by setting inverse: true
-            data.push([j, i, val, type]);
+  };
+
+  window.onpointermove = (e) => {
+    if (draggedNode) {
+      const pos = getMousePos(e);
+      draggedNode.x = pos.x;
+      draggedNode.y = pos.y;
+      drawGraph();
+    }
+  };
+
+  window.onpointerup = () => {
+    if (draggedNode) {
+      draggedNode = null;
+      cv.style.cursor = 'grab';
+    }
+  };
+
+  function drawGraph() {
+    ctx.clearRect(0, 0, width, height);
+
+    // Links
+    for (const link of links) {
+      const sNode = nodes.find((n) => n.id === link.source);
+      const tNode = nodes.find((n) => n.id === link.target);
+      if (sNode && tNode) {
+        ctx.beginPath();
+        ctx.moveTo(sNode.x, sNode.y);
+        ctx.lineTo(tNode.x, tNode.y);
+
+        const rho = link.correlation || 0;
+        const isAlert = link.status === 'BREAK_ALERT';
+
+        ctx.lineWidth = isAlert ? 3 : Math.max(1, Math.abs(rho) * 3.5);
+        if (isAlert) {
+          ctx.strokeStyle = '#e74c3c'; // Flashing warning link
+          ctx.setLineDash([4, 4]);
+        } else if (rho > 0) {
+          ctx.strokeStyle = `rgba(39, 174, 96, ${Math.max(0.3, rho)})`;
+          ctx.setLineDash([]);
+        } else {
+          ctx.strokeStyle = `rgba(192, 57, 43, ${Math.max(0.3, Math.abs(rho))})`;
+          ctx.setLineDash([]);
         }
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
     }
-    
-    const option = {
-        animation: false,
-        tooltip: {
-            position: 'top',
-            backgroundColor: 'rgba(255,255,255,0.95)',
-            textStyle: { color: '#333' },
-            borderColor: '#ddd',
-            formatter: function (params) {
-                const pt = params.data;
-                const assetY = assets[pt[1]];
-                const assetX = assets[pt[0]];
-                const val = pt[2].toFixed(2);
-                if (pt[3] === 'diagonal') return `<b>${assetX}</b>`;
-                if (pt[3] === 'rolling') {
-                    return `<div style="font-size:11px;color:#888">${assetY} ↔ ${assetX}</div><br/>
-                            <div style="font-size:14px;color:#333">Rolling ρ5m: <b style="color:${val >= 0 ? '#e67e22' : '#3498db'}">${val > 0 ? '+' : ''}${val}</b></div>`;
-                } else {
-                    return `<div style="font-size:11px;color:#888">${assetX} ↔ ${assetY}</div><br/>
-                            <div style="font-size:14px;color:#333">Shift (Δρ): <b style="color:${Math.abs(val) > 0.25 ? '#e74c3c' : (val >= 0 ? '#e67e22' : '#3498db')}">${val > 0 ? '+' : ''}${val}</b></div>`;
-                }
-            }
-        },
-        grid: { left: '8%', right: '8%', top: '5%', bottom: '5%', containLabel: true },
-        xAxis: {
-            type: 'category',
-            data: assets,
-            splitArea: { show: true },
-            axisLabel: { color: '#666', fontSize: 10, rotate: -30 }
-        },
-        yAxis: {
-            type: 'category',
-            data: assets,
-            splitArea: { show: true },
-            inverse: true,
-            axisLabel: { color: '#666', fontSize: 10 }
-        },
-        visualMap: {
-            min: -1,
-            max: 1,
-            calculable: true,
-            orient: 'horizontal',
-            left: 'center',
-            bottom: '0%',
-            show: false,
-            inRange: {
-                color: ['#3498db', '#f9f9f9', '#e67e22']
-            }
-        },
-        series: [{
-            name: 'Correlation',
-            type: 'heatmap',
-            data: data,
-            label: {
-                show: true,
-                formatter: function (p) {
-                    if (p.data[3] === 'diagonal') {
-                        return `{diag|${assets[p.data[0]]}}`;
-                    }
-                    const v = p.data[2];
-                    const vFmt = v > 0 ? '+' + v.toFixed(2) : v.toFixed(2);
-                    return `{valDark|${vFmt}}`;
-                },
-                rich: {
-                    diag: { color: '#888', fontSize: 10, fontWeight: 'bold' },
-                    valDark: { color: '#222', fontSize: 11, fontWeight: 'bold' }
-                }
-            },
-            itemStyle: {
-                borderColor: '#fff',
-                borderWidth: 2
-            },
-            emphasis: {
-                itemStyle: {
-                    shadowBlur: 10,
-                    shadowColor: 'rgba(0, 0, 0, 0.5)'
-                }
-            }
-        }]
-    };
-    
-    chart.setOption(option);
+
+    // Nodes
+    for (const node of nodes) {
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, 16, 0, 2 * Math.PI);
+      ctx.fillStyle = '#2c3e50';
+      ctx.fill();
+      ctx.strokeStyle = '#ecf0f1';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 9px IBM Plex Mono, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(node.id, node.x, node.y);
+    }
+  }
+
+  drawGraph();
+
+  if (statusEl) {
+    const alertCount = graphData?.summary?.active_breaks_count || 0;
+    statusEl.textContent = alertCount > 0 ? `● ${alertCount} CORRELATION BREAK ALERTS` : '● NETWORK STABLE';
+  }
+}
+
+function renderMatrixChart() {
+  const holder = $('#corr-chart');
+  if (!holder || !payload || !window.echarts) return;
+
+  const matrix = payload.matrix_short || payload.matrix;
+  const pairs = payload.pairs || ['NAS100', 'VXN', 'SP500', 'VIX', 'GOLD', 'GVZ', 'OIL', 'OVX'];
+
+  chart = window.echarts.init(holder);
+
+  const dataPoints = [];
+  for (let i = 0; i < matrix.length; i++) {
+    for (let j = 0; j < matrix[i].length; j++) {
+      dataPoints.push([i, j, Number(matrix[i][j]).toFixed(2)]);
+    }
+  }
+
+  const option = {
+    tooltip: { position: 'top' },
+    grid: { height: '80%', top: '10%' },
+    xAxis: { type: 'category', data: pairs, splitArea: { show: true } },
+    yAxis: { type: 'category', data: pairs, splitArea: { show: true } },
+    visualMap: {
+      min: -1,
+      max: 1,
+      calculable: true,
+      orient: 'horizontal',
+      left: 'center',
+      bottom: '15%',
+      inRange: { color: ['#c0392b', '#f39c12', '#27ae60'] },
+    },
+    series: [
+      {
+        name: 'Correlation',
+        type: 'heatmap',
+        data: dataPoints,
+        label: { show: true },
+        emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0, 0, 0, 0.5)' } },
+      },
+    ],
+  };
+
+  chart.setOption(option);
 }
