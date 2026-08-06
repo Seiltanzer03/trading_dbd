@@ -49,7 +49,7 @@ export function computeFocusDomain({ edges, T = 2.5, r = 0 }) {
   const rawLo = Array.isArray(edges) && Number.isFinite(Number(edges[0]))
     ? Number(edges[0]) : -2;
   const rawHi = Array.isArray(edges) && Number.isFinite(Number(edges.at(-1)))
-    ? Number(edges.at(-1]) : finite(T, 2.5) + 1;
+    ? Number(edges.at(-1)) : finite(T, 2.5) + 1;
   const take = Math.max(0.25, finite(T, 2.5));
   const current = finite(r, 0);
   let lo = Math.min(-2, current - 0.5);
