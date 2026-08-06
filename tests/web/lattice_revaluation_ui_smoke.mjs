@@ -9,23 +9,24 @@ const source = fs.readFileSync(
 for (const text of [
   'const ROWS = 10',
   'const BINS = ROWS + 1',
-  'LIVE GALTON · ТИК → СНИМОК → ФИКСИРОВАННЫЙ ШАРИК',
-  'ТИКИ МЕНЯЮТ ТОЛЬКО НОВЫЕ ШАРИКИ',
-  'CURRENT RND — live black bell',
-  'TIME-AVERAGED SNAPSHOTS',
+  'LIVE GALTON · ШАРИК → ВКЛАД → РОСТ КОЛОНКИ',
+  'ОСЕВШИХ ТОЧЕК НЕТ: ИХ МАССА ВНУТРИ КОЛОНОК',
   'buildGaltonDistribution',
   'deterministicBin',
   'accumulateSnapshotMass',
+  'columnSharesFromCounts',
+  'columnHeight',
   'advanceBallKinematics',
   'snapshotProbs = state.model.probs.slice()',
   'state.counts[ball.bin] += 1',
   'state.expectedMass = accumulateSnapshotMass',
+  'state.displayCounts',
+  'ctx.fillRect(x + 2, g.baseY - hgt',
   'domainOverride: state.domain',
   'pegX',
-  'stackPoint',
   'requestAnimationFrame',
 ]) {
-  assert.ok(source.includes(text), `live snapshot Galton board must mention ${text}`);
+  assert.ok(source.includes(text), `absorbing-column Galton board must mention ${text}`);
 }
 assert.ok(!source.includes('new WebSocket'),
   'lattice must not own a second websocket competing with app.js');
@@ -33,10 +34,16 @@ assert.ok(!source.includes("fetch('/api/state'"),
   'lattice must receive one canonical data stream through setData');
 assert.ok(!source.includes('Math.random'),
   'ball targets and paths must remain deterministic for reproducible checks');
-assert.ok(!source.includes('reset({ clearStorage: true })'),
-  'market ticks must never clear landed balls');
+assert.ok(!source.includes('stackPoint'),
+  'landed balls must not remain as a separate decorative dot stack');
+assert.ok(!source.includes('ctx.arc(point.x, point.y, 2.15'),
+  'settled dots must be replaced by filled empirical columns');
 assert.ok(source.includes('if (state.active && state.tradeId != null) return false'),
   'manual reset must be blocked while a trade is active');
 assert.ok(source.includes('if (nextTradeId == null) clearStored(previousTradeId, storage)'),
-  'persistent balls must be deleted when the trade closes');
-console.log('live probability snapshot and persistence contract ok');
+  'persistent columns must be deleted only when the trade closes');
+const ballDraw = source.indexOf('for (const ball of state.balls)');
+const columnDraw = source.indexOf('ctx.fillRect(x + 2, g.baseY - hgt');
+assert.ok(ballDraw >= 0 && columnDraw > ballDraw,
+  'columns must draw over the landing phase so they visually absorb the ball');
+console.log('absorbing empirical-column Galton contract ok');

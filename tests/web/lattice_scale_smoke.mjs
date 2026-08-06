@@ -8,6 +8,7 @@ const {
   buildGaltonDistribution,
   advanceBallKinematics,
   accumulateSnapshotMass,
+  columnSharesFromCounts,
 } = await import('../../seiltanzer/web/js/lattice.js');
 
 const domain = computeFocusDomain({
@@ -109,6 +110,22 @@ assert.ok(snapshotAverage.some((value, i) =>
   Math.abs(value - galton.probs[i]) > 1e-4 && Math.abs(value - shifted.probs[i]) > 1e-4),
 'landed convergence target must be the average of historical launch snapshots, not the latest tick');
 
+const emptyColumns = columnSharesFromCounts(new Array(11).fill(0));
+const oneAbsorbed = new Array(11).fill(0);
+oneAbsorbed[6] = 1;
+const oneColumns = columnSharesFromCounts(oneAbsorbed);
+assert.equal(emptyColumns[6], 0);
+assert.ok(oneColumns[6] > 0, 'one landed ball must visibly grow exactly its column');
+assert.equal(oneColumns.filter((value) => value > 0).length, 1,
+  'absorbing a ball must not create decorative mass in other columns');
+const matureCounts = new Array(11).fill(0);
+matureCounts[4] = 10;
+matureCounts[5] = 20;
+const matureColumns = columnSharesFromCounts(matureCounts);
+assert.ok(Math.abs(matureColumns[4] - 1 / 3) < 1e-12);
+assert.ok(Math.abs(matureColumns[5] - 2 / 3) < 1e-12,
+  'after warm-up, column heights must equal the empirical distribution');
+
 const ball = {
   dirs: Array.from({ length: 10 }, (_, i) => i < 6),
   seg: 0, t: 0, rights: 0, speed: 1, impacted: false, impactMs: 0,
@@ -122,9 +139,9 @@ assert.equal(ball.seg, 10);
 assert.equal(ball.rights, 6, 'physical path must terminate in its actual right-count bin');
 assert.equal(ball.impacted, true);
 assert.equal(advanceBallKinematics(ball, 80, 10).expired, false,
-  'landed ball remains visible briefly at impact');
+  'landed ball remains visible briefly while the column absorbs it');
 assert.equal(advanceBallKinematics(ball, 80, 10).expired, true,
-  'moving sprite disappears only after the contribution has landed');
+  'moving sprite disappears only after its mass is inside the column');
 
 console.log(JSON.stringify({ domain, visibleMass: rebinned.visibleMass, maxError,
   galton: { center: galton.center, sigma: galton.sigma, peakIndex, peak } }));
