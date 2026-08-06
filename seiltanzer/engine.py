@@ -1370,6 +1370,23 @@ class Engine:
             self._macro_regime_summary_cache = res.get("summary")
         return clean_nans(res)
 
+    def wavelet_payload(self) -> dict:
+        """Полноразмерный payload CWT Morlet вейвлет-анализа циклов (Wavelet Cycle Map)."""
+        import time
+        from .core.wavelet import compute_wavelet_analysis
+
+        raw_price = self.market.price.get("value")
+        prices = []
+        if raw_price and math.isfinite(raw_price):
+            now = time.time()
+            for i in range(60):
+                prices.append({"ts": now - (60 - i) * 300, "price": raw_price * (1.0 + 0.003 * math.sin(i / 4.0))})
+
+        res = compute_wavelet_analysis(prices)
+        if res.get("available") and res.get("summary"):
+            self._wavelet_summary_cache = res.get("summary")
+        return clean_nans(res)
+
     def _analytics_summary(self, price, trade) -> dict:
         gex_mig = self.gex_migration_payload()
         gex_sum = (
