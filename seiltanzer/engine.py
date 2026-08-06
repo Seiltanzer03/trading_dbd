@@ -1349,6 +1349,27 @@ class Engine:
         res = compute_gex_migration(snaps, price, trade)
         return clean_nans(res)
 
+    def macro_regime_payload(self) -> dict:
+        """Полноразмерный payload 3D Phase Space (Macro Regime Attractor)."""
+        import time
+        from .core.macro_regime import compute_macro_regime
+
+        vols = self.market.vols
+        corr = getattr(self.market, "correlation", {})
+        raw_price = self.market.price.get("value")
+        prices = []
+        if raw_price and math.isfinite(raw_price):
+            now = time.time()
+            for i in range(50):
+                prices.append({"ts": now - i * 300, "price": raw_price * (1.0 - i * 0.0002)})
+
+        prev_regime = getattr(self, "_last_macro_regime", None)
+        res = compute_macro_regime(prices, vols, corr, prev_regime)
+        if res.get("available") and res.get("summary"):
+            self._last_macro_regime = res["summary"]["regime"]
+            self._macro_regime_summary_cache = res.get("summary")
+        return clean_nans(res)
+
     def _analytics_summary(self, price, trade) -> dict:
         gex_mig = self.gex_migration_payload()
         gex_sum = (

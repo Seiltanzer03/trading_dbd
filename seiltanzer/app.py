@@ -266,6 +266,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_analytics_gex_migration():
         return engine.gex_migration_payload()
 
+    @app.get("/api/analytics/regime-phase")
+    def api_analytics_regime_phase():
+        return engine.macro_regime_payload()
+
     @app.get("/api/journal")
     def api_journal():
         return engine.journal.list_trades()
