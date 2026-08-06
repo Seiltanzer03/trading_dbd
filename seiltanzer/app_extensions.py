@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from .ai_decision_state import record_ack
+from .lattice_revaluation import install_lattice_revaluation
 
 
 class AiDecisionAck(BaseModel):

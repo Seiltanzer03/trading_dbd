@@ -7,7 +7,7 @@ import argparse
 import uvicorn
 
 from .app import create_app
-from .app_extensions import install_ai_decision_routes
+from .app_extensions import install_ai_decision_routes, install_lattice_revaluation
 from .config import Settings
 
 
@@ -37,6 +37,7 @@ def main() -> None:
                         port=args.port, data_dir=args.data_dir)
     app = create_app(settings)
     install_ai_decision_routes(app)
+    install_lattice_revaluation(app)
     print(f"Seiltanzer Terminal -> http://{args.host}:{args.port}"
           f"{' [DEMO]' if args.demo else ''}{' [STREAM]' if args.stream else ''}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
