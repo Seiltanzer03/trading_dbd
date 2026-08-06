@@ -7,6 +7,7 @@ const {
   deterministicTarget,
   buildGaltonDistribution,
   advanceBallKinematics,
+  accumulateSnapshotMass,
 } = await import('../../seiltanzer/web/js/lattice.js');
 
 const domain = computeFocusDomain({
@@ -17,6 +18,16 @@ const domain = computeFocusDomain({
 assert.equal(domain.lo, -2, 'board keeps one R beyond the -1R stop');
 assert.equal(domain.hi, 2.5, 'take+1R stays on a stable 0.25R grid');
 assert.ok(domain.lo <= -1 && domain.hi >= 1.31);
+const movedPriceDomain = computeFocusDomain({
+  edges: [-34.1, -20, -8, -3, 0, 3, 8, 20, 33.9],
+  T: 1.31,
+  r: 1.25,
+});
+assert.deepEqual(
+  { lo: movedPriceDomain.lo, hi: movedPriceDomain.hi },
+  { lo: domain.lo, hi: domain.hi },
+  'price ticks must not change the trade coordinate system or reset landed balls',
+);
 
 const edges = Array.from({ length: 137 }, (_, i) => -34 + i * 0.5);
 const probs = edges.slice(0, -1).map((a, i) => {
@@ -80,11 +91,23 @@ const shifted = buildGaltonDistribution({
   q10: -1.0,
   q50: 0.75,
   q90: 2.5,
+  domainOverride: { lo: domain.lo, hi: domain.hi },
 });
+assert.equal(shifted.lo, galton.lo);
+assert.equal(shifted.hi, galton.hi);
 const baseMean = sampleA.reduce((sum, value) => sum + value, 0) / sampleA.length;
 const shiftedSample = Array.from({ length: 440 }, (_, i) => deterministicTarget(shifted.probs, shifted.edges, i));
 const shiftedMean = shiftedSample.reduce((sum, value) => sum + value, 0) / shiftedSample.length;
-assert.ok(shiftedMean > baseMean, 'the Galton bell must move with CURRENT RND centre');
+assert.ok(shiftedMean > baseMean, 'the live Galton bell must move with CURRENT RND centre');
+
+let snapshotMass = new Array(11).fill(0);
+snapshotMass = accumulateSnapshotMass(snapshotMass, galton.probs);
+snapshotMass = accumulateSnapshotMass(snapshotMass, shifted.probs);
+const snapshotAverage = snapshotMass.map((value) => value / 2);
+assert.ok(Math.abs(snapshotAverage.reduce((a, b) => a + b, 0) - 1) < 1e-12);
+assert.ok(snapshotAverage.some((value, i) =>
+  Math.abs(value - galton.probs[i]) > 1e-4 && Math.abs(value - shifted.probs[i]) > 1e-4),
+'landed convergence target must be the average of historical launch snapshots, not the latest tick');
 
 const ball = {
   dirs: Array.from({ length: 10 }, (_, i) => i < 6),
