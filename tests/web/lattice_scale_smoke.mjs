@@ -1,46 +1,147 @@
 import assert from 'node:assert/strict';
-
 globalThis.requestAnimationFrame = () => 0;
 const {
   computeFocusDomain,
   rebinDistribution,
   empiricalCounts,
+  deterministicTarget,
+  buildGaltonDistribution,
+  advanceBallKinematics,
+  accumulateSnapshotMass,
+  columnSharesFromCounts,
 } = await import('../../seiltanzer/web/js/lattice.js');
 
-const edges = Array.from({ length: 12 }, (_, i) => -15 + i * 3);
-const probs = [0.01, 0.02, 0.04, 0.08, 0.16, 0.25, 0.20, 0.12, 0.07, 0.03, 0.02];
-const domain = computeFocusDomain({ edges, T: 2.5, r: 0.2, q10: -3, q90: 5 });
+const domain = computeFocusDomain({
+  edges: [-34.1, -20, -8, -3, 0, 3, 8, 20, 33.9],
+  T: 1.31,
+  r: -0.07,
+});
+assert.equal(domain.lo, -2, 'board keeps one R beyond the -1R stop');
+assert.equal(domain.hi, 2.5, 'take+1R stays on a stable 0.25R grid');
+assert.ok(domain.lo <= -1 && domain.hi >= 1.31);
+const movedPriceDomain = computeFocusDomain({
+  edges: [-34.1, -20, -8, -3, 0, 3, 8, 20, 33.9],
+  T: 1.31,
+  r: 1.25,
+});
+assert.deepEqual(
+  { lo: movedPriceDomain.lo, hi: movedPriceDomain.hi },
+  { lo: domain.lo, hi: domain.hi },
+  'price ticks must not change the trade coordinate system or reset landed balls',
+);
 
-assert.ok(domain.lo <= -1, 'stop must remain visible');
-assert.ok(domain.hi >= 2.5, 'take must remain visible');
-assert.ok(domain.hi - domain.lo <= 6.01, 'distant tails must not stretch the board');
-assert.equal(domain.compressed, true);
+const edges = Array.from({ length: 137 }, (_, i) => -34 + i * 0.5);
+const probs = edges.slice(0, -1).map((a, i) => {
+  const mid = (a + edges[i + 1]) / 2;
+  const z = (mid + 0.4) / 2.4;
+  return Math.exp(-0.5 * z * z);
+});
+const total = probs.reduce((a, b) => a + b, 0);
+for (let i = 0; i < probs.length; i++) probs[i] /= total;
 
 const rebinned = rebinDistribution(probs, edges, domain.lo, domain.hi, 11);
-assert.equal(rebinned.probs.length, 11);
-assert.equal(rebinned.edges.length, 12);
-assert.ok(Math.abs(rebinned.probs.reduce((a, b) => a + b, 0) - 1) < 1e-9,
-  'rebinning must preserve probability mass');
-assert.ok(rebinned.probs[0] > 0 && rebinned.probs.at(-1) > 0,
-  'compressed tails must be retained in edge bins');
+assert.ok(Math.abs(rebinned.leftTail + rebinned.visibleMass + rebinned.rightTail - 1) < 1e-9);
+assert.ok(rebinned.leftTail > 0 && rebinned.rightTail > 0);
+assert.equal(empiricalCounts([-8, -1.8, -0.2, 0.4, 2.2, 9], rebinned.edges)
+  .reduce((a, b) => a + b, 0), 4,
+'out-of-window samples stay outside ordinary board bins');
 
-// Уже упавшие шарики хранятся в R, поэтому при смене визуального масштаба
-// их общее число обязано сохраняться, а не сбрасываться в ноль.
-const samples = [-2.2, -1.1, -0.3, 0.2, 0.9, 2.7, 4.5];
-const countsA = empiricalCounts(samples, rebinned.edges);
-const shifted = computeFocusDomain({ edges, T: 2.5, r: 0.31, q10: -2.8, q90: 4.8 });
-const shiftedEdges = Array.from(
-  { length: 12 },
-  (_, i) => shifted.lo + (shifted.hi - shifted.lo) * i / 11,
-);
-const countsB = empiricalCounts(samples, shiftedEdges);
-assert.equal(countsA.reduce((a, b) => a + b, 0), samples.length);
-assert.equal(countsB.reduce((a, b) => a + b, 0), samples.length,
-  'live rescaling must preserve landed ball count');
+const galton = buildGaltonDistribution({
+  probs,
+  edges,
+  T: 1.31,
+  r: -0.07,
+  q10: -3.47,
+  q50: -0.40,
+  q90: 2.68,
+});
+assert.equal(galton.probs.length, 11, '10 peg decisions must map to exactly 11 bins');
+assert.equal(galton.edges.length, 12);
+assert.ok(Math.abs(galton.probs.reduce((a, b) => a + b, 0) - 1) < 1e-12);
+const peak = Math.max(...galton.probs);
+const peakIndex = galton.probs.indexOf(peak);
+assert.ok(peakIndex > 0 && peakIndex < galton.probs.length - 1,
+  'Galton projection must have an interior bell peak');
+for (let i = 1; i <= peakIndex; i++) {
+  assert.ok(galton.probs[i] >= galton.probs[i - 1] - 1e-12,
+    'left side of the Galton bell must rise toward the mode');
+}
+for (let i = peakIndex + 1; i < galton.probs.length; i++) {
+  assert.ok(galton.probs[i] <= galton.probs[i - 1] + 1e-12,
+    'right side of the Galton bell must fall after the mode');
+}
+const uniform = 1 / galton.probs.length;
+assert.ok(peak > uniform * 1.35,
+  'wide option support must still produce a visible interior Galton peak');
+assert.ok(galton.probs[0] < peak * 0.65 && galton.probs.at(-1) < peak * 0.65,
+  'wide option support must not become a visually flat strip');
 
-console.log(JSON.stringify({
-  domain,
-  shifted,
-  mass: rebinned.probs.reduce((a, b) => a + b, 0),
-  landed: countsB.reduce((a, b) => a + b, 0),
-}));
+const sampleA = Array.from({ length: 440 }, (_, i) => deterministicTarget(galton.probs, galton.edges, i));
+const sampleB = Array.from({ length: 440 }, (_, i) => deterministicTarget(galton.probs, galton.edges, i));
+assert.deepEqual(sampleA, sampleB, 'the same Galton model must create the same deterministic sequence');
+const counts = empiricalCounts(sampleA, galton.edges);
+const empirical = counts.map((count) => count / sampleA.length);
+const maxError = Math.max(...empirical.map((value, i) => Math.abs(value - galton.probs[i])));
+assert.ok(maxError < 0.015, `landed balls must converge to the Galton bell; max error=${maxError}`);
+
+const shifted = buildGaltonDistribution({
+  probs,
+  edges,
+  T: 1.31,
+  r: 0.7,
+  q10: -1.0,
+  q50: 0.75,
+  q90: 2.5,
+  domainOverride: { lo: domain.lo, hi: domain.hi },
+});
+assert.equal(shifted.lo, galton.lo);
+assert.equal(shifted.hi, galton.hi);
+const baseMean = sampleA.reduce((sum, value) => sum + value, 0) / sampleA.length;
+const shiftedSample = Array.from({ length: 440 }, (_, i) => deterministicTarget(shifted.probs, shifted.edges, i));
+const shiftedMean = shiftedSample.reduce((sum, value) => sum + value, 0) / shiftedSample.length;
+assert.ok(shiftedMean > baseMean, 'the live Galton bell must move with CURRENT RND centre');
+
+let snapshotMass = new Array(11).fill(0);
+snapshotMass = accumulateSnapshotMass(snapshotMass, galton.probs);
+snapshotMass = accumulateSnapshotMass(snapshotMass, shifted.probs);
+const snapshotAverage = snapshotMass.map((value) => value / 2);
+assert.ok(Math.abs(snapshotAverage.reduce((a, b) => a + b, 0) - 1) < 1e-12);
+assert.ok(snapshotAverage.some((value, i) =>
+  Math.abs(value - galton.probs[i]) > 1e-4 && Math.abs(value - shifted.probs[i]) > 1e-4),
+'landed convergence target must be the average of historical launch snapshots, not the latest tick');
+
+const emptyColumns = columnSharesFromCounts(new Array(11).fill(0));
+const oneAbsorbed = new Array(11).fill(0);
+oneAbsorbed[6] = 1;
+const oneColumns = columnSharesFromCounts(oneAbsorbed);
+assert.equal(emptyColumns[6], 0);
+assert.ok(oneColumns[6] > 0, 'one landed ball must visibly grow exactly its column');
+assert.equal(oneColumns.filter((value) => value > 0).length, 1,
+  'absorbing a ball must not create decorative mass in other columns');
+const matureCounts = new Array(11).fill(0);
+matureCounts[4] = 10;
+matureCounts[5] = 20;
+const matureColumns = columnSharesFromCounts(matureCounts);
+assert.ok(Math.abs(matureColumns[4] - 1 / 3) < 1e-12);
+assert.ok(Math.abs(matureColumns[5] - 2 / 3) < 1e-12,
+  'after warm-up, column heights must equal the empirical distribution');
+
+const ball = {
+  dirs: Array.from({ length: 10 }, (_, i) => i < 6),
+  seg: 0, t: 0, rights: 0, speed: 1, impacted: false, impactMs: 0,
+};
+let landed = false;
+for (let i = 0; i < 24 && !landed; i++) {
+  landed = advanceBallKinematics(ball, 100, 10).landed;
+}
+assert.equal(landed, true, 'ball must pass all 10 rows and the final bin segment');
+assert.equal(ball.seg, 10);
+assert.equal(ball.rights, 6, 'physical path must terminate in its actual right-count bin');
+assert.equal(ball.impacted, true);
+assert.equal(advanceBallKinematics(ball, 80, 10).expired, false,
+  'landed ball remains visible briefly while the column absorbs it');
+assert.equal(advanceBallKinematics(ball, 80, 10).expired, true,
+  'moving sprite disappears only after its mass is inside the column');
+
+console.log(JSON.stringify({ domain, visibleMass: rebinned.visibleMass, maxError,
+  galton: { center: galton.center, sigma: galton.sigma, peakIndex, peak } }));
