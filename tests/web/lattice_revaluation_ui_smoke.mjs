@@ -9,17 +9,21 @@ const source = fs.readFileSync(
 for (const text of [
   'ПУНКТИР — ВХОД',
   'СЕРАЯ — СРЕДНЕЕ',
-  'ОРАНЖЕВАЯ — СЕЙЧАС',
-  'ШАРИКИ — CURRENT RND',
+  'ОРАНЖЕВАЯ — CURRENT RND',
+  '1 ПРИЗЕМЛЕНИЕ = 1 ВКЛАД',
+  'ЧЁРНАЯ — ЭМПИРИКА ШАРИКОВ',
   'deterministicTarget',
+  'empiricalKernelDistribution',
+  'advanceBallKinematics',
   'spawnBall',
+  's.samples.push(ball.targetR)',
+  'IMPACT_HOLD_MS',
+  'landingPoint',
   'lattice_visual_history',
-  'Δ МАССЫ К ТЕЙКУ',
-  'Δ МАССЫ К СТОПУ',
   'НЕ СЛОЖЕНЫ В КРАЙНИЕ КОРЗИНЫ',
 ]) {
-  assert.ok(source.includes(text), `live Galton board must mention ${text}`);
+  assert.ok(source.includes(text), `real-contribution Galton board must mention ${text}`);
 }
 assert.ok(!source.includes('Math.random'), 'Galton paths and target bins must remain deterministic');
 assert.ok(source.includes('requestAnimationFrame'), 'balls must remain a live animated board');
-console.log('live deterministic Galton revaluation contract ok');
+console.log('real landed-ball Galton contract ok');
