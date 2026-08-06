@@ -10,14 +10,16 @@ for (const text of [
   'ПУНКТИР — ВХОД',
   'СЕРАЯ — СРЕДНЕЕ',
   'ОРАНЖЕВАЯ — СЕЙЧАС',
-  'ФАКТИЧЕСКИЙ ПЕРЕТОК',
-  'flowPlan',
+  'ШАРИКИ — CURRENT RND',
+  'deterministicTarget',
+  'spawnBall',
   'lattice_visual_history',
   'Δ МАССЫ К ТЕЙКУ',
   'Δ МАССЫ К СТОПУ',
+  'НЕ СЛОЖЕНЫ В КРАЙНИЕ КОРЗИНЫ',
 ]) {
-  assert.ok(source.includes(text), `direct lattice canvas must mention ${text}`);
+  assert.ok(source.includes(text), `live Galton board must mention ${text}`);
 }
-assert.ok(!source.includes('spawnBall'), 'random Galton sampling must be removed');
-assert.ok(!source.includes('Math.random'), 'mass-flow animation must be deterministic');
-console.log('direct lattice revaluation visual contract ok');
+assert.ok(!source.includes('Math.random'), 'Galton paths and target bins must remain deterministic');
+assert.ok(source.includes('requestAnimationFrame'), 'balls must remain a live animated board');
+console.log('live deterministic Galton revaluation contract ok');
