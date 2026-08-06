@@ -1,6 +1,6 @@
 """Verdict v16: normalize the final API report after model/fallback rendering.
 
-The previous layer only wrapped ``render_policy_report``.  ``request_verdict``
+The previous layer only wrapped ``render_policy_report``. ``request_verdict``
 can retain an older renderer reference, so the final ``result['verdict']`` must
 also be normalized immediately before it is returned by the API.
 """
@@ -19,9 +19,6 @@ globals().update({
 
 _BASE_RENDER = _impl.render_policy_report
 _BASE_REQUEST = _impl.request_verdict
-_GEOMETRY_RE = re.compile(
-    r"Рубеж раньше стопа: (.+?)\. Стоп раньше рубежа: (.+?)\."
-)
 _SOURCE_STABILITY_RE = re.compile(
     r"(Устойчивость к источнику данных для\s+([A-Z0-9_]+):\s*)"
     r"(\d+)/(\d+)\s*\(([\d.,]+)%\)"
@@ -82,10 +79,12 @@ def _fix_source_stability(text: str) -> str:
 
 def _geometry_values(snapshot: dict) -> tuple[float | None, float | None]:
     manager = snapshot.get("policy_manager") or {}
+    # Only use values produced by the scenario engine. A recommendation-only
+    # fixture may contain a next rung without any geometry/final-take model;
+    # treating that as the final take makes repeated normalization non-idempotent.
     next_rung = _first_number(manager, (
         ("scenario_geometry", "next_rung_r"),
         ("strategy_next_step", "next_rung_r"),
-        ("recommendation", "next_rung_r"),
     ))
     final_take = _first_number(manager, (
         ("inputs", "T"),
@@ -123,48 +122,72 @@ def _barrier_values(snapshot: dict) -> tuple[float | None, float | None, float |
 
 
 def _clarify_geometry_final(text: str, snapshot: dict) -> str:
-    match = _GEOMETRY_RE.search(text)
-    if not match:
+    """Relabel only the geometry sentence, without parsing decimal values."""
+    if "Рубеж раньше стопа:" not in text or "Стоп раньше рубежа:" not in text:
         return text
 
     next_rung, final_take = _geometry_values(snapshot)
-    rung_probability, stop_probability = match.groups()
+    if next_rung is None and final_take is None:
+        return text
+
     intermediate = (
         next_rung is not None
         and final_take is not None
         and next_rung < final_take - 1e-6
     )
+    lines = text.splitlines()
+    geometry_index = next(
+        (
+            index for index, line in enumerate(lines)
+            if "Рубеж раньше стопа:" in line and "Стоп раньше рубежа:" in line
+        ),
+        None,
+    )
+    if geometry_index is None:
+        return text
+
+    line = lines[geometry_index]
     if intermediate:
-        replacement = (
-            f"Ближайшая ступень {_r(next_rung)} раньше стопа: {rung_probability}. "
-            f"Стоп раньше ближайшей ступени: {stop_probability}."
+        line = line.replace(
+            "Рубеж раньше стопа:",
+            f"Ближайшая ступень {_r(next_rung)} раньше стопа:",
+            1,
+        ).replace(
+            "Стоп раньше рубежа:",
+            "Стоп раньше ближайшей ступени:",
+            1,
         )
     else:
-        target = next_rung if next_rung is not None else final_take
-        replacement = (
-            f"Финальный тейк {_r(target)} раньше стопа: {rung_probability}. "
-            f"Стоп раньше финального тейка: {stop_probability}."
+        target = final_take if final_take is not None else next_rung
+        line = line.replace(
+            "Рубеж раньше стопа:",
+            f"Финальный тейк {_r(target)} раньше стопа:",
+            1,
+        ).replace(
+            "Стоп раньше рубежа:",
+            "Стоп раньше финального тейка:",
+            1,
         )
+    lines[geometry_index] = line
 
-    text = text[:match.start()] + replacement + text[match.end():]
-    if not intermediate or _FINAL_TAKE_MARKER in text:
-        return text
+    if intermediate and _FINAL_TAKE_MARKER not in text:
+        p_take, p_stop, no_touch = _barrier_values(snapshot)
+        if p_take is not None and final_take is not None:
+            parts = [
+                f"{_FINAL_TAKE_MARKER} {_r(final_take)} раньше стопа: {_pct(p_take)}"
+            ]
+            if p_stop is not None:
+                parts.append(f"стоп раньше финального тейка: {_pct(p_stop)}")
+            if no_touch is not None:
+                parts.append(f"ни один барьер не достигнут: {_pct(no_touch)}")
+            lines.insert(geometry_index + 1, "; ".join(parts) + ".")
 
-    p_take, p_stop, no_touch = _barrier_values(snapshot)
-    if p_take is None or final_take is None:
-        return text
-    parts = [f"{_FINAL_TAKE_MARKER} {_r(final_take)} раньше стопа: {_pct(p_take)}"]
-    if p_stop is not None:
-        parts.append(f"стоп раньше финального тейка: {_pct(p_stop)}")
-    if no_touch is not None:
-        parts.append(f"ни один барьер не достигнут: {_pct(no_touch)}")
-    return text.replace(replacement, replacement + "\n" + "; ".join(parts) + ".", 1)
+    return "\n".join(lines)
 
 
 def normalize_final_report(text: str, snapshot: dict) -> str:
     text = _clarify_geometry_final(text, snapshot)
-    text = _fix_source_stability(text)
-    return text
+    return _fix_source_stability(text)
 
 
 def render_policy_report(snapshot: dict) -> str:
@@ -173,8 +196,14 @@ def render_policy_report(snapshot: dict) -> str:
 
 def request_verdict(snapshot: dict) -> dict:
     result = _BASE_REQUEST(snapshot)
-    if isinstance(result, dict) and isinstance(result.get("verdict"), str):
-        result = dict(result)
+    if not isinstance(result, dict) or not isinstance(result.get("verdict"), str):
+        return result
+    result = dict(result)
+    # The deterministic fallback must be byte-for-byte identical to the public
+    # renderer. This also prevents a second normalization pass from changing it.
+    if result.get("model") == "deterministic-policy-fallback":
+        result["verdict"] = render_policy_report(snapshot)
+    else:
         result["verdict"] = normalize_final_report(result["verdict"], snapshot)
     return result
 

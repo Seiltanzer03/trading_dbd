@@ -1,9 +1,9 @@
 """Policy manager v14: compare net CVaR with a net hard-risk floor.
 
 All policy outcome distributions already include immediate/deferred execution
-costs. The hard stop/BE floor must therefore be expressed on the same net
-basis. Otherwise an unavoidable 0.01R fallback cost can exclude HOLD solely
-because -1.00R gross becomes -1.01R net.
+costs. Selection must therefore compare them with a net floor. The public risk
+constraint keeps its historical gross ``cvar_floor_r`` contract and exposes the
+net selection floor separately, so older strategy consumers are not broken.
 """
 from __future__ import annotations
 
@@ -34,23 +34,20 @@ def _deferred_cost(costs: dict | None) -> float:
 
 
 def risk_constraint(inputs: PolicyInputs, tick: dict, trade: dict) -> dict:
-    """Return the hard CVaR floor on the same net basis as policy outcomes."""
+    """Expose gross strategy floor plus the compact net optimizer floor."""
     spec = dict(_BASE_RISK_CONSTRAINT(inputs, tick, trade))
     costs = execution_cost_model(tick, trade)
     gross_floor = _number(spec.get("cvar_floor_r"), -1.0)
     deferred_cost = _deferred_cost(costs)
     net_floor = gross_floor - deferred_cost
 
+    # Keep only numeric audit fields here. Execution-cost source and the
+    # human-readable rule already exist elsewhere in the policy snapshot.
     spec.update({
+        "cvar_floor_r": round(gross_floor, 4),
         "gross_cvar_floor_r": round(gross_floor, 4),
+        "net_cvar_floor_r": round(net_floor, 4),
         "unavoidable_deferred_cost_r": round(deferred_cost, 4),
-        "cvar_floor_r": round(net_floor, 4),
-        "cvar_floor_basis": "net_after_unavoidable_deferred_close_cost",
-        "execution_cost_source": costs.get("deferred_source") or costs.get("source"),
-        "rule": (
-            f"{spec.get('rule') or 'active stop/BE'}; net floor = gross floor "
-            "minus unavoidable deferred close cost"
-        ),
     })
     return spec
 
@@ -75,6 +72,13 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
         previous_policy_inputs=previous_policy_inputs,
         previous_evidence=previous_evidence,
     )
+    risk = result.get("risk_constraint") or {}
+    rule = result.get("selection_rule") or {}
+    if risk.get("net_cvar_floor_r") is not None:
+        rule["cvar_floor_r"] = risk["net_cvar_floor_r"]
+        rule["gross_cvar_floor_r"] = risk.get("gross_cvar_floor_r")
+        rule["cvar_floor_basis"] = "net"
+        result["selection_rule"] = rule
     result["version"] = "quant-policy-v14-net-hard-risk-floor"
     return result
 
