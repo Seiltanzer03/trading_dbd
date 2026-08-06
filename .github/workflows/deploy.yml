@@ -47,6 +47,7 @@ jobs:
 
       - name: Пост-проверка результатов production-деплоя
         run: |
+          git config --global --add safe.directory "*" || true
           DEPLOYED_COMMIT=$(git -C /opt/seiltanzer rev-parse HEAD)
           EXPECTED_COMMIT=$(git rev-parse HEAD)
           echo "Server current HEAD: $DEPLOYED_COMMIT"
