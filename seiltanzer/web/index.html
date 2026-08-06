@@ -251,6 +251,39 @@
     </div>
   </section>
 
+  <!-- ================ 3c. MACRO REGIME PHASE ATTRACTOR (3D) ================ -->
+  <section class="card panel" id="panel-macro-regime">
+    <div class="panel-head">
+      <h2>MACRO REGIME · PHASE ATTRACTOR (3D)</h2>
+      <div class="panel-head-right" style="display: flex; gap: 8px; align-items: center;">
+        <div class="btn-group" id="regime-horizon-group">
+          <button class="btn-toggle active" id="btn-regime-6h">6H</button>
+          <button class="btn-toggle" id="btn-regime-24h">24H</button>
+          <button class="btn-toggle" id="btn-regime-3d">3D</button>
+        </div>
+        <span class="badge" id="regime-status">○ CALM TREND</span>
+      </div>
+    </div>
+    <div class="panel-body" style="display: flex; flex-wrap: wrap; gap: 12px; padding: 12px;">
+      <div class="canvas-holder" style="flex: 1 1 65%; min-width: 300px; height: 420px; position: relative;">
+        <div id="regime-phase-plot" style="width: 100%; height: 100%;"></div>
+        <div class="canvas-empty" id="regime-phase-empty">○ PHASE SPACE DYNAMICS UNAVAILABLE</div>
+      </div>
+      <div id="regime-summary-card" class="regime-side-card" style="flex: 1 1 30%; min-width: 220px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 10px; background: rgba(0,0,0,0.03); border: 1px solid rgba(0,0,0,0.08); border-radius: 4px; display: flex; flex-direction: column; gap: 8px;">
+        <div style="font-weight: 600; color: #333; border-bottom: 1px solid #ccc; padding-bottom: 4px;">PHASE SPACE STATE VECTOR</div>
+        <div>REGIME: <span id="regime-val-label" style="font-weight: 600; color: #27ae60;">CALM TREND</span></div>
+        <div>TREND (X): <span id="regime-val-x">0.00</span></div>
+        <div>VOLATILITY (Y): <span id="regime-val-y">0.00</span></div>
+        <div>CROSS-STRESS (Z): <span id="regime-val-z">0.00</span></div>
+        <div>CONFIDENCE: <span id="regime-val-conf">85%</span></div>
+        <div>BOUNDARY DIST: <span id="regime-val-dist">0.45</span></div>
+      </div>
+    </div>
+    <div class="panel-foot dim">
+      <b>3D PHASE SPACE:</b> Ось X = Тренд/Моментум Z-score, Ось Y = Режим волатильности, Ось Z = Кросс-аксесс стресс. Точка показывает текущее состояние рынка; хвост отражает фазовую траекторию за выбранный горизонт. Вращение и масштаб 3D камеры сохраняются.
+    </div>
+  </section>
+
   <!-- ================ 3b. PROBABILITY CONE (3D) ================ -->
   <section class="card panel" id="panel-cone">
     <div class="panel-head">
