@@ -1,29 +1,54 @@
-// OI × GAMMA CONTEXT — локальный SVG без зависимости от внешнего CDN.
-// Панель остаётся рабочей даже когда ECharts/CDN недоступны.
-
 import { $ } from './util.js';
 
 let emptyEl;
 let statusEl;
 let data = null;
+let migrationData = null;
 let liveData = { price: 0, proxyPrice: 0, trade: null };
+let currentMode = 'MIGRATION'; // 'MIGRATION' | 'SNAPSHOT'
 let resizeObserver = null;
 let lastRenderKey = '';
 
 export function initGex() {
   emptyEl = $('#gex-evol-empty');
   statusEl = $('#gex-evol-status');
+
+  const btnMig = $('#btn-gex-migration');
+  const btnSnap = $('#btn-gex-snapshot');
+
+  if (btnMig) {
+    btnMig.addEventListener('click', () => {
+      setMode('MIGRATION');
+    });
+  }
+  if (btnSnap) {
+    btnSnap.addEventListener('click', () => {
+      setMode('SNAPSHOT');
+    });
+  }
+
   const el = $('#gex-evol-canvas');
   if (el && typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => {
-      if (data) renderGex(true);
+      if (data || migrationData) renderGex(true);
     });
     resizeObserver.observe(el);
   }
 }
 
+function setMode(mode) {
+  currentMode = mode;
+  const btnMig = $('#btn-gex-migration');
+  const btnSnap = $('#btn-gex-snapshot');
+  if (btnMig) btnMig.classList.toggle('active', mode === 'MIGRATION');
+  if (btnSnap) btnSnap.classList.toggle('active', mode === 'SNAPSHOT');
+
+  renderGex(true);
+}
+
 function showEmpty(message, status) {
   data = null;
+  migrationData = null;
   const el = $('#gex-evol-canvas');
   if (el) el.replaceChildren();
   if (emptyEl) {
@@ -35,7 +60,7 @@ function showEmpty(message, status) {
   if (interpretEl) interpretEl.style.display = 'none';
 }
 
-export function updateGex(ridgePayload) {
+export async function updateGex(ridgePayload) {
   if (!ridgePayload?.available || !ridgePayload.snapshots?.length) {
     showEmpty('○ OI × GAMMA КОНТЕКСТ НЕДОСТУПЕН', '○ GEX НЕДОСТУПЕН');
     return;
@@ -59,8 +84,19 @@ export function updateGex(ridgePayload) {
     top: latest.gex.top,
   };
 
+  // Получаем данные миграции через REST API
+  try {
+    const res = await fetch('/api/analytics/gex-migration');
+    if (res.ok) {
+      migrationData = await res.json();
+    }
+  } catch (err) {
+    console.warn('GEX Migration fetch failed, falling back to local snapshots:', err);
+  }
+
   if (emptyEl) emptyEl.style.display = 'none';
-  if (statusEl) statusEl.textContent = '● OI-GEX · LOCAL SVG';
+  if (statusEl) statusEl.textContent = currentMode === 'MIGRATION' ? '● GEX MIGRATION MAP' : '● OI-GEX SNAPSHOT';
+
   renderGex(true);
 }
 
@@ -68,7 +104,13 @@ export function updateLiveGex(live) {
   if (live.price !== undefined) liveData.price = Number(live.price) || 0;
   if (live.proxyPrice !== undefined) liveData.proxyPrice = Number(live.proxyPrice) || 0;
   if (live.trade !== undefined) liveData.trade = live.trade;
-  if (data) renderGex(false);
+
+  if (currentMode === 'MIGRATION' && migrationData) {
+    // Двигаем только маркер живой цены на canvas
+    renderMigrationMap(false);
+  } else if (data) {
+    renderGex(false);
+  }
 }
 
 function fmtVal(value) {
@@ -80,73 +122,247 @@ function fmtVal(value) {
   return v.toFixed(0);
 }
 
-function escapeXml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;');
-}
-
-function clamp(value, lo, hi) {
-  return Math.max(lo, Math.min(hi, value));
-}
-
-function prepareVisible() {
-  const instrumentFactor = liveData.price && data.price ? liveData.price / data.price : 1;
-  const proxyFactor = liveData.proxyPrice && data.proxyPrice ? liveData.proxyPrice / data.proxyPrice : 1;
-  const liveMap = data.transform === 'inverse'
-    ? instrumentFactor * proxyFactor
-    : instrumentFactor / proxyFactor;
-
-  const strikes = data.latest.strikes.map((s) => Number(s) * data.scale * liveMap);
-  const nets = data.latest.net.map(Number);
-  const price = liveData.price || data.price || 0;
-  const pairs = [];
-  for (let i = 0; i < Math.min(strikes.length, nets.length); i++) {
-    if (Number.isFinite(strikes[i]) && Number.isFinite(nets[i]) && Math.abs(nets[i]) > 0) {
-      pairs.push({ strike: strikes[i], net: nets[i] });
-    }
-  }
-  if (!pairs.length) return { pairs: [], price, liveMap };
-
-  const absValues = pairs.map((p) => Math.abs(p.net)).sort((a, b) => a - b);
-  const q25 = absValues[Math.floor((absValues.length - 1) * 0.25)] || 0;
-  const q75 = absValues[Math.floor((absValues.length - 1) * 0.75)] || 1;
-  const threshold = Math.max(q75 + (q75 - q25) * 3, q75 || 1);
-  for (const pair of pairs) {
-    pair.clamped = clamp(pair.net, -threshold, threshold);
-    pair.isOutlier = Math.abs(pair.net) > threshold;
-  }
-  pairs.sort((a, b) => a.strike - b.strike);
-
-  let closest = 0;
-  let minDiff = Infinity;
-  for (let i = 0; i < pairs.length; i++) {
-    const diff = Math.abs(pairs[i].strike - price);
-    if (diff < minDiff) {
-      minDiff = diff;
-      closest = i;
-    }
-  }
-
-  const maxRows = 25;
-  let start = Math.max(0, closest - Math.floor(maxRows / 2));
-  let end = Math.min(pairs.length, start + maxRows);
-  start = Math.max(0, end - maxRows);
-  return { pairs: pairs.slice(start, end), price, liveMap };
-}
-
-function markerY(value, visible, top, plotH) {
-  if (!Number.isFinite(value) || !visible.length) return null;
-  const lo = visible[0].strike;
-  const hi = visible.at(-1).strike;
-  if (value < lo || value > hi || hi === lo) return null;
-  return top + plotH - ((value - lo) / (hi - lo)) * plotH;
-}
-
 function renderGex(force = false) {
+  if (currentMode === 'MIGRATION') {
+    renderMigrationMap(force);
+  } else {
+    renderSnapshotBarChart(force);
+  }
+}
+
+function renderMigrationMap(force = false) {
+  const el = $('#gex-evol-canvas');
+  if (!el) return;
+
+  if (!migrationData || !migrationData.available || !migrationData.price_grid?.length) {
+    renderSnapshotBarChart(force);
+    return;
+  }
+
+  const summary = migrationData.summary || {};
+
+  // Обновляем карточку сводки справа
+  const elRegime = $('#gex-sum-regime');
+  const elFlip = $('#gex-sum-flip');
+  const elFlipMig = $('#gex-sum-flip-mig');
+  const elCall = $('#gex-sum-call');
+  const elCallMig = $('#gex-sum-call-mig');
+  const elPut = $('#gex-sum-put');
+  const elPutMig = $('#gex-sum-put-mig');
+  const elPath = $('#gex-sum-path');
+  const elPressure = $('#gex-sum-pressure');
+
+  if (elRegime) elRegime.textContent = summary.gamma_regime || 'UNKNOWN';
+  if (elFlip && summary.flip) {
+    elFlip.textContent = summary.flip.price ? summary.flip.price.toFixed(1) : '-';
+    if (elFlipMig) elFlipMig.textContent = summary.flip.migration_6h ? `${summary.flip.migration_6h > 0 ? '+' : ''}${summary.flip.migration_6h.toFixed(1)} /6h` : '0.0';
+  }
+  if (elCall && summary.call_wall) {
+    elCall.textContent = summary.call_wall.price ? summary.call_wall.price.toFixed(1) : '-';
+    if (elCallMig) elCallMig.textContent = summary.call_wall.migration_6h ? `${summary.call_wall.migration_6h > 0 ? '+' : ''}${summary.call_wall.migration_6h.toFixed(1)} /6h` : '0.0';
+  }
+  if (elPut && summary.put_wall) {
+    elPut.textContent = summary.put_wall.price ? summary.put_wall.price.toFixed(1) : '-';
+    if (elPutMig) elPutMig.textContent = summary.put_wall.migration_6h ? `${summary.put_wall.migration_6h > 0 ? '+' : ''}${summary.put_wall.migration_6h.toFixed(1)} /6h` : '0.0';
+  }
+  if (elPath) {
+    const pathText = summary.take_path || 'CLEAR';
+    elPath.textContent = pathText;
+    if (pathText.includes('OBSTRUCTED')) {
+      elPath.style.background = '#c0392b';
+      elPath.style.color = '#fff';
+    } else {
+      elPath.style.background = '#27ae60';
+      elPath.style.color = '#fff';
+    }
+  }
+  if (elPressure) {
+    const p = summary.path_pressure || 0;
+    elPressure.textContent = (p > 0 ? `+${p.toFixed(2)}` : p.toFixed(2));
+    elPressure.style.color = p > 0 ? '#27ae60' : p < 0 ? '#c0392b' : '#333';
+  }
+
+  // Отрисовка Canvas Heatmap + Trajectories
+  let cv = el.querySelector('canvas');
+  if (!cv) {
+    el.innerHTML = '<canvas style="width:100%;height:100%;display:block;"></canvas>';
+    cv = el.querySelector('canvas');
+  }
+
+  const rect = el.getBoundingClientRect();
+  const width = Math.max(400, Math.floor(rect.width || 800));
+  const height = Math.max(300, Math.floor(rect.height || 420));
+  cv.width = width;
+  cv.height = height;
+
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, width, height);
+
+  const margin = { left: 60, right: 60, top: 20, bottom: 30 };
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+
+  const priceGrid = migrationData.price_grid;
+  const timestamps = migrationData.timestamps;
+  const timesIso = migrationData.times_iso || [];
+  const heatmap = migrationData.heatmap;
+
+  if (!priceGrid.length || !timestamps.length || !heatmap.length) {
+    ctx.fillStyle = '#8A877D';
+    ctx.font = '11px IBM Plex Mono, monospace';
+    ctx.fillText('Снимки миграции отсутствуют', width / 2 - 80, height / 2);
+    return;
+  }
+
+  const pMin = priceGrid[0];
+  const pMax = priceGrid[priceGrid.length - 1];
+  const tMin = timestamps[0];
+  const tMax = timestamps[timestamps.length - 1] || (tMin + 3600);
+
+  const X = (ts) => margin.left + ((ts - tMin) / (tMax - tMin || 1)) * plotW;
+  const Y = (p) => margin.top + plotH - ((p - pMin) / (pMax - pMin || 1)) * plotH;
+
+  // 1. Отрисовка Heatmap Ячеек
+  let maxAbsGex = 1;
+  for (let r = 0; r < heatmap.length; r++) {
+    for (let c = 0; c < heatmap[r].length; c++) {
+      maxAbsGex = Math.max(maxAbsGex, Math.abs(heatmap[r][c]));
+    }
+  }
+
+  const cellW = Math.max(2, plotW / timestamps.length);
+  const cellH = Math.max(2, plotH / priceGrid.length);
+
+  for (let r = 0; r < priceGrid.length; r++) {
+    const p = priceGrid[r];
+    const py = Y(p);
+    for (let c = 0; c < timestamps.length; c++) {
+      const ts = timestamps[c];
+      const px = X(ts);
+      const val = heatmap[r][c];
+
+      if (Math.abs(val) > 0.01) {
+        const norm = Math.min(1.0, Math.abs(val) / maxAbsGex);
+        const alpha = Math.max(0.1, norm * 0.75);
+        if (val > 0) {
+          ctx.fillStyle = `rgba(39, 174, 96, ${alpha})`; // Call / Positive GEX
+        } else {
+          ctx.fillStyle = `rgba(192, 57, 43, ${alpha})`; // Put / Negative GEX
+        }
+        ctx.fillRect(px - cellW / 2, py - cellH / 2, cellW + 0.5, cellH + 0.5);
+      }
+    }
+  }
+
+  // 2. Отрисовка Сетки и Осей
+  ctx.strokeStyle = '#eee';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(margin.left, margin.top, plotW, plotH);
+
+  ctx.fillStyle = '#666';
+  ctx.font = '9px IBM Plex Mono, monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+
+  const numY = 5;
+  for (let i = 0; i <= numY; i++) {
+    const pVal = pMin + (i / numY) * (pMax - pMin);
+    const py = Y(pVal);
+    ctx.fillText(pVal.toFixed(1), margin.left - 6, py);
+  }
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const numX = Math.min(4, timestamps.length - 1);
+  for (let i = 0; i <= numX; i++) {
+    const idx = Math.floor((i / numX) * (timestamps.length - 1));
+    const ts = timestamps[idx];
+    const px = X(ts);
+    const timeStr = timesIso[idx] ? timesIso[idx].substring(11, 16) : '';
+    ctx.fillText(timeStr, px, margin.top + plotH + 6);
+  }
+
+  // 3. Отрисовка Траекторий (Trajectories)
+  const trajs = migrationData.trajectories || {};
+
+  function drawTrajectory(pts, color, dash = [], label = '') {
+    if (!pts || !pts.length) return;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    if (dash.length) ctx.setLineDash(dash);
+
+    ctx.beginPath();
+    let started = false;
+    for (const pt of pts) {
+      if (pt.price != null && Number.isFinite(pt.price)) {
+        const px = X(pt.ts);
+        const py = Y(pt.price);
+        if (!started) {
+          ctx.moveTo(px, py);
+          started = true;
+        } else {
+          ctx.lineTo(px, py);
+        }
+      }
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  drawTrajectory(trajs.flip, '#9b59b6', [4, 4], 'FLIP');
+  drawTrajectory(trajs.call_wall, '#27ae60', [], 'CALL WALL');
+  drawTrajectory(trajs.put_wall, '#c0392b', [], 'PUT WALL');
+
+  // 4. Отрисовка Текущих Живых Маркеров (Price, Entry, Stop, Take)
+  const currentP = liveData.price || migrationData.summary?.call_wall?.price || pMin;
+  if (currentP >= pMin && currentP <= pMax) {
+    const py = Y(currentP);
+    ctx.strokeStyle = '#e67e22';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(margin.left, py);
+    ctx.lineTo(margin.left + plotW, py);
+    ctx.stroke();
+
+    ctx.fillStyle = '#e67e22';
+    ctx.font = 'bold 9px IBM Plex Mono, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(`PRICE ${currentP.toFixed(1)}`, margin.left + plotW + 4, py - 4);
+  }
+
+  const trade = liveData.trade;
+  if (trade) {
+    if (trade.entry) {
+      const ey = Y(Number(trade.entry));
+      ctx.strokeStyle = '#8A877D';
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(margin.left, ey);
+      ctx.lineTo(margin.left + plotW, ey);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    if (trade.stop) {
+      const sy = Y(Number(trade.stop));
+      ctx.strokeStyle = '#c0392b';
+      ctx.beginPath();
+      ctx.moveTo(margin.left, sy);
+      ctx.lineTo(margin.left + plotW, sy);
+      ctx.stroke();
+    }
+    if (trade.take) {
+      const ty = Y(Number(trade.take));
+      ctx.strokeStyle = '#27ae60';
+      ctx.beginPath();
+      ctx.moveTo(margin.left, ty);
+      ctx.lineTo(margin.left + plotW, ty);
+      ctx.stroke();
+    }
+  }
+}
+
+function renderSnapshotBarChart(force = false) {
   const el = $('#gex-evol-canvas');
   if (!el || !data) return;
 
@@ -223,24 +439,70 @@ function renderGex(force = false) {
   svg.push(`<text x="${width - margin.right}" y="13" text-anchor="end" font-size="9" fill="#8A877D" font-family="IBM Plex Mono,monospace">CALL / POSITIVE GEX</text>`);
   svg.push('</svg>');
   el.innerHTML = svg.join('');
+}
 
-  const sorted = [...visible].sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
-  const biggestCall = sorted.find((p) => p.net > 0);
-  const biggestPut = sorted.find((p) => p.net < 0);
-  const interpretEl = $('#gex-interpretation');
-  if (interpretEl) {
-    const parts = [];
-    const flip = data.zeroFlip ? data.zeroFlip * data.scale * liveMap : null;
-    if (flip) parts.push(`<b>Цена ${price > flip ? 'выше' : 'ниже'} gamma flip ${flip.toFixed(1)}</b>`);
-    if (biggestCall) parts.push(`🟢 CALL GEX: ${biggestCall.strike.toFixed(1)} (${fmtVal(biggestCall.net)})`);
-    if (biggestPut) parts.push(`🔴 PUT GEX: ${biggestPut.strike.toFixed(1)} (${fmtVal(biggestPut.net)})`);
-    const callWall = Number(data.oiWalls?.call_wall);
-    const putWall = Number(data.oiWalls?.put_wall);
-    const walls = [];
-    if (Number.isFinite(callWall)) walls.push(`CALL ${(callWall * data.scale * liveMap).toFixed(1)}`);
-    if (Number.isFinite(putWall)) walls.push(`PUT ${(putWall * data.scale * liveMap).toFixed(1)}`);
-    if (walls.length) parts.push(`📌 MAX OI: ${walls.join(' · ')}`);
-    interpretEl.innerHTML = parts.join('<br>');
-    interpretEl.style.display = parts.length ? 'block' : 'none';
+function prepareVisible() {
+  const instrumentFactor = liveData.price && data.price ? liveData.price / data.price : 1;
+  const proxyFactor = liveData.proxyPrice && data.proxyPrice ? liveData.proxyPrice / data.proxyPrice : 1;
+  const liveMap = data.transform === 'inverse'
+    ? instrumentFactor * proxyFactor
+    : instrumentFactor / proxyFactor;
+
+  const strikes = data.latest.strikes.map((s) => Number(s) * data.scale * liveMap);
+  const nets = data.latest.net.map(Number);
+  const price = liveData.price || data.price || 0;
+  const pairs = [];
+  for (let i = 0; i < Math.min(strikes.length, nets.length); i++) {
+    if (Number.isFinite(strikes[i]) && Number.isFinite(nets[i]) && Math.abs(nets[i]) > 0) {
+      pairs.push({ strike: strikes[i], net: nets[i] });
+    }
   }
+  if (!pairs.length) return { pairs: [], price, liveMap };
+
+  const absValues = pairs.map((p) => Math.abs(p.net)).sort((a, b) => a - b);
+  const q25 = absValues[Math.floor((absValues.length - 1) * 0.25)] || 0;
+  const q75 = absValues[Math.floor((absValues.length - 1) * 0.75)] || 1;
+  const threshold = Math.max(q75 + (q75 - q25) * 3, q75 || 1);
+  for (const pair of pairs) {
+    pair.clamped = clamp(pair.net, -threshold, threshold);
+    pair.isOutlier = Math.abs(pair.net) > threshold;
+  }
+  pairs.sort((a, b) => a.strike - b.strike);
+
+  let closest = 0;
+  let minDiff = Infinity;
+  for (let i = 0; i < pairs.length; i++) {
+    const diff = Math.abs(pairs[i].strike - price);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closest = i;
+    }
+  }
+
+  const maxRows = 25;
+  let start = Math.max(0, closest - Math.floor(maxRows / 2));
+  let end = Math.min(pairs.length, start + maxRows);
+  start = Math.max(0, end - maxRows);
+  return { pairs: pairs.slice(start, end), price, liveMap };
+}
+
+function markerY(value, visible, top, plotH) {
+  if (!Number.isFinite(value) || !visible.length) return null;
+  const lo = visible[0].strike;
+  const hi = visible.at(-1).strike;
+  if (value < lo || value > hi || hi === lo) return null;
+  return top + plotH - ((value - lo) / (hi - lo)) * plotH;
+}
+
+function escapeXml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+}
+
+function clamp(value, lo, hi) {
+  return Math.max(lo, Math.min(hi, value));
 }

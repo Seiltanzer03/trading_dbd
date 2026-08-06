@@ -262,6 +262,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                      f"запрошен {ticker}")
         return ridge
 
+    @app.get("/api/analytics/gex-migration")
+    def api_analytics_gex_migration():
+        return engine.gex_migration_payload()
+
     @app.get("/api/journal")
     def api_journal():
         return engine.journal.list_trades()
