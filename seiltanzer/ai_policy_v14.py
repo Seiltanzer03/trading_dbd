@@ -34,28 +34,20 @@ def _deferred_cost(costs: dict | None) -> float:
 
 
 def risk_constraint(inputs: PolicyInputs, tick: dict, trade: dict) -> dict:
-    """Expose gross strategy floor plus the net floor used by the optimizer."""
+    """Expose gross strategy floor plus the compact net optimizer floor."""
     spec = dict(_BASE_RISK_CONSTRAINT(inputs, tick, trade))
     costs = execution_cost_model(tick, trade)
     gross_floor = _number(spec.get("cvar_floor_r"), -1.0)
     deferred_cost = _deferred_cost(costs)
     net_floor = gross_floor - deferred_cost
 
+    # Keep only numeric audit fields here. Execution-cost source and the
+    # human-readable rule already exist elsewhere in the policy snapshot.
     spec.update({
-        # Backward-compatible strategy contract.
         "cvar_floor_r": round(gross_floor, 4),
         "gross_cvar_floor_r": round(gross_floor, 4),
-        "cvar_floor_basis": "gross_strategy_floor_before_execution_costs",
-        # Actual apples-to-apples floor for net policy distributions.
         "net_cvar_floor_r": round(net_floor, 4),
-        "selection_cvar_floor_r": round(net_floor, 4),
-        "selection_cvar_floor_basis": "net_after_unavoidable_deferred_close_cost",
         "unavoidable_deferred_cost_r": round(deferred_cost, 4),
-        "execution_cost_source": costs.get("deferred_source") or costs.get("source"),
-        "rule": (
-            f"{spec.get('rule') or 'active stop/BE'}; optimizer net floor = "
-            "gross strategy floor minus unavoidable deferred close cost"
-        ),
     })
     return spec
 
@@ -85,7 +77,7 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
     if risk.get("net_cvar_floor_r") is not None:
         rule["cvar_floor_r"] = risk["net_cvar_floor_r"]
         rule["gross_cvar_floor_r"] = risk.get("gross_cvar_floor_r")
-        rule["cvar_floor_basis"] = risk.get("selection_cvar_floor_basis")
+        rule["cvar_floor_basis"] = "net"
         result["selection_rule"] = rule
     result["version"] = "quant-policy-v14-net-hard-risk-floor"
     return result
