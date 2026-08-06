@@ -10,8 +10,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: '12,17 20 6 8 *'
+
+# Не допускаем одновременный деплой двух коммитов на один production-сервер.
+# Текущий запуск не прерывается посередине SSH/pip/systemd; следующий ждёт его.
+concurrency:
+  group: production-seiltanzer
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -19,7 +23,8 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       HAS_PW: ${{ secrets.SSH_PASSWORD != '' }}
     steps:
