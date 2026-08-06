@@ -1,15 +1,19 @@
 name: deploy
 
-# Автодеплой на VPS: при каждом пуше в main (и по кнопке Run workflow) GitHub
-# сначала прогоняет тесты, затем заходит на сервер по SSH и обновляет код +
-# рестартит сервис. Runner'ы GitHub достают сервер напрямую (в отличие от
-# изолированного окружения ассистента). Пароль сервера берётся из секрета
-# репозитория SSH_PASSWORD — пока он не добавлен, шаг деплоя пропускается.
+# Автоматический production-деплой на self-hosted runner (VPS 94.241.171.182):
+# Запускается при каждом push/merge в main и по кнопке workflow_dispatch.
+# Сначала выполняются Python и frontend smoke-тесты, затем вызывается root-owned
+# скрипт /usr/local/sbin/deploy-seiltanzer через sudo, после чего выставляется
+# проверенный commit status production/seiltanzer.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: production-seiltanzer
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -17,95 +21,62 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
-    env:
-      HAS_PW: ${{ secrets.SSH_PASSWORD != '' }}
+    runs-on: [self-hosted, linux, x64, seiltanzer-prod]
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Установка и тесты (сломанное не деплоим)
+
+      - name: Установка зависимостей и запуск тестов (сломанное не деплоим)
         run: |
-          pip install -e ".[dev]"
-          pytest -q
+          /opt/seiltanzer/.venv/bin/pip install -q -e ".[dev]"
+          /opt/seiltanzer/.venv/bin/pytest -q
           node --check seiltanzer/web/js/cone.js
           node --check seiltanzer/web/js/iv_surface.js
           node --check seiltanzer/web/js/levels.js
           node tests/web/cone_interaction_smoke.mjs
-      - name: Деплой на сервер по SSH
-        if: env.HAS_PW == 'true'
-        uses: appleboy/ssh-action@v1
+
+      - name: Запуск деплоя на production
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_PROXY: ${{ secrets.OPENROUTER_PROXY }}
           TRADINGVIEW_AUTH_TOKEN: ${{ secrets.TRADINGVIEW_AUTH_TOKEN }}
           TERMINAL_USER: ${{ secrets.TERMINAL_USER }}
           TERMINAL_PASS: ${{ secrets.TERMINAL_PASS }}
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          envs: OPENROUTER_API_KEY,OPENROUTER_PROXY,TRADINGVIEW_AUTH_TOKEN,TERMINAL_USER,TERMINAL_PASS
-          command_timeout: 10m
-          script: |
-            set -e
-            if [ -d /opt/seiltanzer/.git ]; then
-              echo "== обновляю /opt/seiltanzer из origin/main =="
-              cd /opt/seiltanzer
-              git fetch origin main
-              git reset --hard origin/main
-            else
-              echo "== первая установка через install.sh =="
-              curl -fsSL https://raw.githubusercontent.com/Seiltanzer03/trading_dbd/main/deploy/install.sh | bash
-            fi
-            echo "== синхронизирую runtime-зависимости =="
-            /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
-            if [ -n "$OPENROUTER_API_KEY" ]; then
-              umask 077
-              printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY" > /etc/seiltanzer.env
-            fi
-            if [ -n "$OPENROUTER_PROXY" ]; then
-              printf 'OPENROUTER_PROXY=%s\n' "$OPENROUTER_PROXY" >> /etc/seiltanzer.env
-            fi
-            if [ -n "$TRADINGVIEW_AUTH_TOKEN" ]; then
-              printf 'TRADINGVIEW_AUTH_TOKEN=%s\n' "$TRADINGVIEW_AUTH_TOKEN" >> /etc/seiltanzer.env
-            fi
-            if [ -n "$TERMINAL_USER" ]; then
-              printf 'TERMINAL_USER=%s\n' "$TERMINAL_USER" >> /etc/seiltanzer.env
-            fi
-            if [ -n "$TERMINAL_PASS" ]; then
-              printf 'TERMINAL_PASS=%s\n' "$TERMINAL_PASS" >> /etc/seiltanzer.env
-            fi
-            mkdir -p /etc/systemd/system/seiltanzer.service.d
-            printf '[Service]\nEnvironmentFile=-/etc/seiltanzer.env\n' \
-              > /etc/systemd/system/seiltanzer.service.d/openrouter.conf
-            systemctl daemon-reload
-            systemctl restart seiltanzer
-            sleep 4
-            echo "active: $(systemctl is-active seiltanzer)"
-            echo "HEAD:   $(git -C /opt/seiltanzer rev-parse --short HEAD)"
-            echo "http:   $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/api/state)"
-            curl -fsS http://127.0.0.1:8790/api/state | \
-              /opt/seiltanzer/.venv/bin/python -c 'import json,sys; d=json.load(sys.stdin); p=d["tick"]["feeds"]["price"]; print("quote:", d["tick"]["instrument"], p.get("value"), p.get("source"), p.get("status"))'
-            /opt/seiltanzer/.venv/bin/python -c 'from seiltanzer.data.feeds import _fetch_swissquote_quote as q; x=q("XAU/USD"); print("xau spot:", round(x["value"], 3))'
-            if [ -n "$TRADINGVIEW_AUTH_TOKEN" ]; then
-              /opt/seiltanzer/.venv/bin/python -c 'from seiltanzer.data.feeds import _fetch_tradingview_quote as q; ss=("OANDA:NAS100USD","OANDA:SPX500USD","OANDA:US30USD","OANDA:UK100GBP","OANDA:JP225YJPY","FPMARKETS:GER40"); print("broker quotes:", {s:q(s)["value"] for s in ss})'
-            else
-              echo "broker quotes: disabled (TRADINGVIEW_AUTH_TOKEN missing)"
-            fi
+        run: |
+          sudo /usr/local/sbin/deploy-seiltanzer
+
+      - name: Пост-проверка результатов production-деплоя
+        run: |
+          SERVER_HEAD=$(git -C /opt/seiltanzer rev-parse HEAD)
+          EXPECTED_HEAD="${{ github.sha }}"
+          echo "EXPECTED: $EXPECTED_HEAD"
+          echo "ACTUAL:   $SERVER_HEAD"
+          if [ "$SERVER_HEAD" != "$EXPECTED_HEAD" ]; then
+            echo "ERROR: Server HEAD ($SERVER_HEAD) does not match expected commit ($EXPECTED_HEAD)"
+            exit 1
+          fi
+
+          SERVICE_STATUS=$(systemctl is-active seiltanzer || true)
+          echo "Service status: $SERVICE_STATUS"
+          if [ "$SERVICE_STATUS" != "active" ]; then
+            echo "ERROR: Service status is $SERVICE_STATUS"
+            exit 1
+          fi
+
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8790/api/state || echo "000")
+          echo "HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: /api/state returned HTTP $HTTP_CODE"
+            exit 1
+          fi
+
       - name: Публикую проверенный production-статус
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           JOB_STATUS: ${{ job.status }}
-          HAS_SSH_PASSWORD: ${{ env.HAS_PW }}
         run: |
-          if [ "$HAS_SSH_PASSWORD" != "true" ]; then
-            state="error"
-            description="Production deploy skipped: SSH_PASSWORD is missing"
-          elif [ "$JOB_STATUS" = "success" ]; then
+          if [ "$JOB_STATUS" = "success" ]; then
             state="success"
             description="Production active; server HEAD and HTTP 200 verified"
           else
