@@ -1,5 +1,148 @@
+from __future__ import annotations
+
 import math
 from typing import Any, Dict, List, Optional
+
+
+_VOL_MAP = {
+    "NAS100": ("vxn", 24.0, 6.0),
+    "SP500": ("vix", 20.0, 5.0),
+    "US30": ("vix", 20.0, 5.0),
+    "XAU": ("gvz", 20.0, 5.0),
+    "XAG": ("gvz", 20.0, 5.0),
+    "OIL": ("ovx", 35.0, 10.0),
+    "EURUSD": ("evz", 10.0, 3.0),
+    "GER40": ("dv1x", 20.0, 5.0),
+    "UK100": ("vix", 20.0, 5.0),
+}
+
+
+def _finite(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _feed_value(vol_data: dict | None, key: str) -> float | None:
+    if not isinstance(vol_data, dict):
+        return None
+    raw = vol_data.get(key)
+    if isinstance(raw, dict):
+        raw = raw.get("value")
+    return float(raw) if _finite(raw) else None
+
+
+def _corr_stress(correlation_data: dict | None) -> float:
+    if not isinstance(correlation_data, dict):
+        return 0.0
+    delta = correlation_data.get("matrix_delta") or []
+    vals: list[float] = []
+    for i, row in enumerate(delta):
+        if not isinstance(row, list):
+            continue
+        for j, raw in enumerate(row):
+            if i == j or not _finite(raw):
+                continue
+            vals.append(float(raw))
+    if not vals:
+        return 0.0
+    rms = math.sqrt(sum(v * v for v in vals) / len(vals))
+    return max(0.0, min(3.0, rms * 4.0))
+
+
+def _std(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    var = sum((v - mean) ** 2 for v in values) / max(1, len(values) - 1)
+    return math.sqrt(max(var, 0.0))
+
+
+def _state_at(prices: list[float], idx: int, vol_index_score: float, stress: float) -> tuple[float, float]:
+    # 5m bars: 12 ~= 1h, 48 ~= 4h.  The long leg gracefully shortens
+    # near the beginning of the history instead of fabricating earlier prices.
+    if idx < 6:
+        return 0.0, 0.0
+
+    short_steps = min(12, idx)
+    long_steps = min(48, idx)
+    p = prices[idx]
+    p_short = prices[idx - short_steps]
+    p_long = prices[idx - long_steps]
+    if min(p, p_short, p_long) <= 0:
+        return 0.0, 0.0
+
+    returns = [
+        math.log(prices[k] / prices[k - 1])
+        for k in range(max(1, idx - 96), idx + 1)
+        if prices[k] > 0 and prices[k - 1] > 0
+    ]
+    sigma = max(_std(returns), 1e-6)
+    r_short = math.log(p / p_short)
+    r_long = math.log(p / p_long)
+    z_short = r_short / (sigma * math.sqrt(max(short_steps, 1)))
+    z_long = r_long / (sigma * math.sqrt(max(long_steps, 1)))
+    x = max(-3.0, min(3.0, 0.65 * z_short + 0.35 * z_long))
+
+    # Realized-vol score is relative to the recent history of 5m return
+    # dispersion, not a fixed 0.5% magic constant.  Current relevant vol-index
+    # adds a smaller macro context contribution.
+    current_sigma = sigma
+    sigma_windows: list[float] = []
+    start = max(20, idx - 192)
+    for j in range(start, idx + 1, 12):
+        local = [
+            math.log(prices[k] / prices[k - 1])
+            for k in range(max(1, j - 48), j + 1)
+            if prices[k] > 0 and prices[k - 1] > 0
+        ]
+        if len(local) >= 12:
+            sigma_windows.append(_std(local))
+    if sigma_windows:
+        centre = sorted(sigma_windows)[len(sigma_windows) // 2]
+        spread = max(_std(sigma_windows), centre * 0.15, 1e-6)
+        realized_z = (current_sigma - centre) / spread
+    else:
+        realized_z = 0.0
+    y = 0.75 * realized_z + 0.25 * vol_index_score
+    return round(max(-3.0, min(3.0, x)), 3), round(max(-3.0, min(3.0, y)), 3)
+
+
+def _classify(x: float, y: float, z: float) -> str:
+    if y > 1.6 or z > 1.6:
+        return "VOL SHOCK"
+    if y > 0.55 and abs(x) > 0.9:
+        return "TREND EXPANSION"
+    if y < -0.65 and abs(x) < 0.55 and z < 0.7:
+        return "COMPRESSION"
+    if y < 0.55 and abs(x) > 0.75 and z < 0.9:
+        return "CALM TREND"
+    if y > 0.8 and abs(x) < 0.65 and z < 1.4:
+        return "RECOVERY"
+    return "CHOP"
+
+
+def _apply_hysteresis(raw: str, previous: str | None, x: float, y: float, z: float) -> str:
+    if not previous or previous == raw:
+        return raw
+    if previous == "VOL SHOCK" and raw != "VOL SHOCK" and (y > 1.25 or z > 1.25):
+        return "VOL SHOCK"
+    if previous == "CALM TREND" and raw == "CHOP" and abs(x) > 0.6 and y < 0.7:
+        return "CALM TREND"
+    if previous == "TREND EXPANSION" and raw == "CALM TREND" and y > 0.35 and abs(x) > 0.8:
+        return "TREND EXPANSION"
+    return raw
+
+
+def _boundary_distance(x: float, y: float, z: float) -> float:
+    # Distance to the nearest meaningful decision surface used above.
+    candidates = [
+        abs(abs(x) - 0.55), abs(abs(x) - 0.75), abs(abs(x) - 0.9),
+        abs(y + 0.65), abs(y - 0.55), abs(y - 0.8), abs(y - 1.6),
+        abs(z - 0.7), abs(z - 0.9), abs(z - 1.4), abs(z - 1.6),
+    ]
+    return round(min(candidates), 3)
 
 
 def compute_macro_regime(
@@ -7,184 +150,128 @@ def compute_macro_regime(
     vol_data: Optional[Dict[str, Any]] = None,
     correlation_data: Optional[Dict[str, Any]] = None,
     previous_regime: Optional[str] = None,
+    *,
+    instrument_code: str | None = None,
+    source_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Data-driven phase space from observed 5m market history.
+
+    X = rolling multi-horizon trend / momentum z-score
+    Y = rolling realized-vol regime + relevant volatility-index context
+    Z = current cross-asset correlation-regime stress
     """
-    Data-driven 3D Phase Space (Macro Regime Attractor):
-    X = Trend/Momentum (Multi-horizon Z-score)
-    Y = Volatility Regime (Realized Volatility + Vol Index VIX/GVZ/VXN)
-    Z = Cross-Asset Stress (RMS delta-correlation stress)
-    """
-    if not price_points or len(price_points) < 5:
+    source_meta = dict(source_meta or {})
+    pts = []
+    for p in price_points or []:
+        if _finite(p.get("ts")) and _finite(p.get("price")) and float(p["price"]) > 0:
+            pts.append({"ts": float(p["ts"]), "price": float(p["price"])})
+    pts.sort(key=lambda p: p["ts"])
+
+    # Deduplicate timestamps.
+    unique: dict[float, float] = {p["ts"]: p["price"] for p in pts}
+    pts = [{"ts": ts, "price": unique[ts]} for ts in sorted(unique)]
+    if len(pts) < 24:
         return {
             "available": False,
-            "reason": "Недостаточно исторический данных цен для расчета 3D Phase Space",
-            "current": {
-                "x_trend": 0.0,
-                "y_vol": 0.0,
-                "z_stress": 0.0,
-                "regime": "CHOP",
-                "confidence": 0.0,
-            },
-            "trajectory_6h": [],
-            "trajectory_24h": [],
-            "trajectory_3d": [],
+            "reason": f"Недостаточно реальной 5m истории: {len(pts)} точек (нужно ≥24)",
+            "trajectory_6h": [], "trajectory_24h": [], "trajectory_3d": [],
             "summary": {
-                "regime": "CHOP",
-                "trend_score": 0.0,
-                "vol_score": 0.0,
-                "stress_score": 0.0,
-                "regime_age_seconds": 0,
-                "boundary_distance": 0.0,
-                "confidence": 0,
+                "available": False,
                 "authority": "strategy_context",
                 "independent_vote": False,
+                "source": source_meta,
             },
         }
 
-    # 1. Извлекаем временной ряд цен [ts, price]
-    pts = sorted(price_points, key=lambda p: float(p.get("ts", 0)))
-    prices = [float(p["price"]) for p in pts if p.get("price") is not None and math.isfinite(float(p["price"]))]
-    timestamps = [float(p["ts"]) for p in pts if p.get("ts") is not None]
+    prices = [p["price"] for p in pts]
+    timestamps = [p["ts"] for p in pts]
 
-    if len(prices) < 5:
-        return {"available": False, "reason": "Невалидные цены"}
+    vol_key, anchor, scale = _VOL_MAP.get(instrument_code or "", ("vix", 20.0, 5.0))
+    vol_value = _feed_value(vol_data, vol_key)
+    vol_index_score = ((vol_value - anchor) / scale) if vol_value is not None else 0.0
+    vol_index_score = max(-3.0, min(3.0, vol_index_score))
+    stress = round(_corr_stress(correlation_data), 3)
 
-    latest_p = prices[-1]
-    latest_ts = timestamps[-1]
+    states = []
+    stride = max(1, len(pts) // 180)
+    for idx in range(6, len(pts), stride):
+        x, y = _state_at(prices, idx, vol_index_score, stress)
+        states.append({
+            "ts": timestamps[idx],
+            "x": x, "y": y, "z": stress,
+            "regime": _classify(x, y, stress),
+        })
+    if states[-1]["ts"] != timestamps[-1]:
+        x, y = _state_at(prices, len(prices) - 1, vol_index_score, stress)
+        states.append({
+            "ts": timestamps[-1], "x": x, "y": y, "z": stress,
+            "regime": _classify(x, y, stress),
+        })
 
-    # 2. Вычисление X (Trend / Momentum)
-    def _log_return(steps_back: int) -> float:
-        if len(prices) <= steps_back:
-            past_p = prices[0]
-        else:
-            past_p = prices[-1 - steps_back]
-        if past_p <= 0:
-            return 0.0
-        return math.log(latest_p / past_p)
+    current = states[-1]
+    regime = _apply_hysteresis(current["regime"], previous_regime,
+                               current["x"], current["y"], current["z"])
+    current["regime"] = regime
 
-    r_short = _log_return(12)  # ~60m при 5m шагах
-    r_long = _log_return(48)   # ~240m при 5m шагах
+    now_ts = current["ts"]
+    def subset(hours: float) -> list[dict]:
+        cutoff = now_ts - hours * 3600
+        out = [dict(p) for p in states if p["ts"] >= cutoff]
+        return out[-120:]
 
-    # Нормализуем волатильностью регрессии
-    std_returns = 0.01
-    if len(prices) > 10:
-        log_diffs = [math.log(prices[i] / prices[i - 1]) for i in range(1, len(prices)) if prices[i - 1] > 0]
-        if log_diffs:
-            mean_diff = sum(log_diffs) / len(log_diffs)
-            var_diff = sum((d - mean_diff) ** 2 for d in log_diffs) / len(log_diffs)
-            std_returns = max(0.001, math.sqrt(var_diff))
+    traj6 = subset(6)
+    traj24 = subset(24)
+    traj72 = subset(72)
 
-    z_short = r_short / (std_returns * math.sqrt(12))
-    z_long = r_long / (std_returns * math.sqrt(48))
+    # Regime age from the actual rolling-state path, not a fixed placeholder.
+    age_start = now_ts
+    for point in reversed(states[:-1]):
+        if point["regime"] != regime:
+            break
+        age_start = point["ts"]
+    regime_age = max(0.0, now_ts - age_start)
 
-    x_trend = 0.65 * z_short + 0.35 * z_long
-    x_trend = max(-3.0, min(3.0, round(x_trend, 3)))
+    velocity = 0.0
+    if len(states) >= 2:
+        a, b = states[-2], states[-1]
+        hours = max((b["ts"] - a["ts"]) / 3600.0, 1 / 12)
+        velocity = math.sqrt((b["x"] - a["x"]) ** 2 +
+                             (b["y"] - a["y"]) ** 2 +
+                             (b["z"] - a["z"]) ** 2) / hours
 
-    # 3. Вычисление Y (Volatility Regime)
-    realized_vol_z = (std_returns - 0.005) / 0.005
-    vol_idx_score = 0.0
+    boundary = _boundary_distance(current["x"], current["y"], current["z"])
+    coverage = min(1.0, len(pts) / 240.0)
+    confidence = int(max(35, min(95, 45 + 28 * min(boundary, 1.0) + 22 * coverage)))
 
-    if vol_data and isinstance(vol_data, dict):
-        vix = vol_data.get("vix") or vol_data.get("gvz") or vol_data.get("vxn")
-        if vix and isinstance(vix, (int, float)) and math.isfinite(vix):
-            vol_idx_score = (float(vix) - 20.0) / 5.0
-
-    y_vol = 0.6 * realized_vol_z + 0.4 * vol_idx_score
-    y_vol = max(-3.0, min(3.0, round(y_vol, 3)))
-
-    # 4. Вычисление Z (Cross-Asset Stress)
-    z_stress = 0.0
-    if correlation_data and isinstance(correlation_data, dict):
-        matrix_delta = correlation_data.get("matrix_delta") or []
-        if matrix_delta:
-            sq_sum = 0.0
-            cnt = 0
-            for row in matrix_delta:
-                if isinstance(row, list):
-                    for val in row:
-                        if isinstance(val, (int, float)) and math.isfinite(val):
-                            sq_sum += float(val) ** 2
-                            cnt += 1
-            if cnt > 0:
-                rms_delta = math.sqrt(sq_sum / cnt)
-                z_stress = rms_delta * 2.5
-
-    z_stress = max(0.0, min(3.0, round(z_stress, 3)))
-
-    # 5. Детерминированная классификация режима (с гистерезисом)
-    if y_vol > 1.8 or z_stress > 1.8:
-        raw_regime = "VOL SHOCK"
-    elif y_vol > 0.5 and abs(x_trend) > 1.0:
-        raw_regime = "TREND EXPANSION"
-    elif y_vol < 0.5 and abs(x_trend) > 0.8 and z_stress < 0.8:
-        raw_regime = "CALM TREND"
-    elif y_vol < -0.5 and abs(x_trend) < 0.5 and z_stress < 0.5:
-        raw_regime = "COMPRESSION"
-    elif y_vol > 1.0 and abs(x_trend) < 0.5:
-        raw_regime = "RECOVERY"
-    else:
-        raw_regime = "CHOP"
-
-    # Hysteresis stability check
-    regime = raw_regime
-    if previous_regime and previous_regime != raw_regime:
-        # Удерживаем прошлый режим при незначительных пограничных колебаниях
-        if previous_regime == "CALM TREND" and raw_regime == "CHOP" and abs(x_trend) > 0.6:
-            regime = "CALM TREND"
-        elif previous_regime == "VOL SHOCK" and raw_regime != "VOL SHOCK" and (y_vol > 1.4 or z_stress > 1.4):
-            regime = "VOL SHOCK"
-
-    # 6. Расчет 3D траекторий (6h, 24h, 3d)
-    def _build_trajectory(hours: float) -> List[Dict[str, Any]]:
-        cutoff_ts = latest_ts - (hours * 3600.0)
-        sub_pts = [p for p in pts if float(p.get("ts", 0)) >= cutoff_ts]
-        traj = []
-        step = max(1, len(sub_pts) // 30)
-        for i in range(0, len(sub_pts), step):
-            p_val = float(sub_pts[i]["price"])
-            ts_val = float(sub_pts[i]["ts"])
-            ratio = (ts_val - cutoff_ts) / (hours * 3600.0)
-            pt_x = max(-3.0, min(3.0, round(x_trend * ratio, 2)))
-            pt_y = max(-3.0, min(3.0, round(y_vol * ratio, 2)))
-            pt_z = max(0.0, min(3.0, round(z_stress * ratio, 2)))
-            traj.append({
-                "ts": ts_val,
-                "x": pt_x,
-                "y": pt_y,
-                "z": pt_z,
-                "regime": regime,
-            })
-        return traj
-
-    traj_6h = _build_trajectory(6.0)
-    traj_24h = _build_trajectory(24.0)
-    traj_3d = _build_trajectory(72.0)
-
-    # Дистанция до пограничной области режима
-    boundary_dist = round(min(abs(x_trend - 0.8), abs(y_vol - 0.5), abs(z_stress - 1.8)), 3)
-    confidence = int(max(50, min(95, 100 - boundary_dist * 30)))
-
+    result_current = {
+        "x_trend": current["x"],
+        "y_vol": current["y"],
+        "z_stress": current["z"],
+        "regime": regime,
+        "confidence": confidence,
+    }
+    summary = {
+        "regime": regime,
+        "trend_score": current["x"],
+        "vol_score": current["y"],
+        "stress_score": current["z"],
+        "regime_age_seconds": round(regime_age, 1),
+        "boundary_distance": boundary,
+        "transition_velocity": round(velocity, 3),
+        "confidence": confidence,
+        "vol_index": {"key": vol_key, "value": vol_value},
+        "points": len(pts),
+        "history_hours_trading": source_meta.get("history_hours_trading"),
+        "source": source_meta,
+        "authority": "strategy_context",
+        "independent_vote": False,
+    }
     return {
+        "version": "macro-regime-v2-real-history",
         "available": True,
-        "current": {
-            "x_trend": x_trend,
-            "y_vol": y_vol,
-            "z_stress": z_stress,
-            "regime": regime,
-            "confidence": confidence,
-        },
-        "trajectory_6h": traj_6h,
-        "trajectory_24h": traj_24h,
-        "trajectory_3d": traj_3d,
-        "summary": {
-            "regime": regime,
-            "trend_score": x_trend,
-            "vol_score": y_vol,
-            "stress_score": z_stress,
-            "regime_age_seconds": 3600,
-            "boundary_distance": boundary_dist,
-            "confidence": confidence,
-            "authority": "strategy_context",
-            "independent_vote": False,
-        },
+        "current": result_current,
+        "trajectory_6h": traj6,
+        "trajectory_24h": traj24,
+        "trajectory_3d": traj72,
+        "summary": summary,
     }
