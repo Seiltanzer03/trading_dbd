@@ -3,13 +3,16 @@ name: deploy-command
 on:
   issue_comment:
     types: [created]
+  schedule:
+    - cron: '*/5 * * * *'
 
 permissions:
   contents: read
 
 jobs:
-  dispatch:
+  comment-dispatch:
     if: >-
+      github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
       github.event.comment.body == '/deploy-current-main' &&
       github.event.comment.user.login == github.repository_owner
@@ -22,31 +25,42 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$GH_TOKEN"
-
-          before="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId // 0')"
           gh workflow run deploy.yml --repo "$GITHUB_REPOSITORY" --ref main
-
-          run_id=""
-          run_url=""
-          run_status="queued"
-          for _ in $(seq 1 20); do
-            row="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml --branch main --limit 1 --json databaseId,url,status --jq '.[0] | [.databaseId,.url,.status] | @tsv')"
-            current_id="$(printf '%s' "$row" | cut -f1)"
-            if [ -n "$current_id" ] && [ "$current_id" != "$before" ]; then
-              run_id="$current_id"
-              run_url="$(printf '%s' "$row" | cut -f2)"
-              run_status="$(printf '%s' "$row" | cut -f3)"
-              break
-            fi
-            sleep 3
-          done
-
-          if [ -n "$run_id" ]; then
-            body="Deploy текущего main запущен: run #$run_id ($run_status) — $run_url"
-          else
-            body="Команда deploy принята, но новый run ещё не появился в списке GitHub Actions."
-          fi
-
           gh api --method POST \
             "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-            -f body="$body"
+            -f body="Deploy текущего main отправлен в GitHub Actions."
+
+  scheduled-dispatch:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch current main once
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+
+          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq '.sha')"
+          row="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow deploy.yml \
+            --branch main \
+            --limit 30 \
+            --json headSha,status,conclusion,databaseId,url \
+            --jq ".[] | select(.headSha == \"$current_sha\") | [.status, (.conclusion // \"\"), .databaseId, .url] | @tsv" \
+            | head -n 1)"
+
+          status="$(printf '%s' "$row" | cut -f1)"
+          conclusion="$(printf '%s' "$row" | cut -f2)"
+          if [ "$status" = "queued" ] || [ "$status" = "in_progress" ]; then
+            echo "Deploy current main is already $status"
+            exit 0
+          fi
+          if [ "$status" = "completed" ] && [ "$conclusion" = "success" ]; then
+            echo "Current main is already deployed successfully"
+            exit 0
+          fi
+
+          gh workflow run deploy.yml --repo "$GITHUB_REPOSITORY" --ref main
+          echo "Dispatched deploy.yml for $current_sha"
