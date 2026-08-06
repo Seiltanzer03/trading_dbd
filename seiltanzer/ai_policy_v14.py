@@ -1,9 +1,9 @@
 """Policy manager v14: compare net CVaR with a net hard-risk floor.
 
 All policy outcome distributions already include immediate/deferred execution
-costs. The hard stop/BE floor must therefore be expressed on the same net
-basis. Otherwise an unavoidable 0.01R fallback cost can exclude HOLD solely
-because -1.00R gross becomes -1.01R net.
+costs. Selection must therefore compare them with a net floor. The public risk
+constraint keeps its historical gross ``cvar_floor_r`` contract and exposes the
+net selection floor separately, so older strategy consumers are not broken.
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def _deferred_cost(costs: dict | None) -> float:
 
 
 def risk_constraint(inputs: PolicyInputs, tick: dict, trade: dict) -> dict:
-    """Return the hard CVaR floor on the same net basis as policy outcomes."""
+    """Expose gross strategy floor plus the net floor used by the optimizer."""
     spec = dict(_BASE_RISK_CONSTRAINT(inputs, tick, trade))
     costs = execution_cost_model(tick, trade)
     gross_floor = _number(spec.get("cvar_floor_r"), -1.0)
@@ -42,14 +42,19 @@ def risk_constraint(inputs: PolicyInputs, tick: dict, trade: dict) -> dict:
     net_floor = gross_floor - deferred_cost
 
     spec.update({
+        # Backward-compatible strategy contract.
+        "cvar_floor_r": round(gross_floor, 4),
         "gross_cvar_floor_r": round(gross_floor, 4),
+        "cvar_floor_basis": "gross_strategy_floor_before_execution_costs",
+        # Actual apples-to-apples floor for net policy distributions.
+        "net_cvar_floor_r": round(net_floor, 4),
+        "selection_cvar_floor_r": round(net_floor, 4),
+        "selection_cvar_floor_basis": "net_after_unavoidable_deferred_close_cost",
         "unavoidable_deferred_cost_r": round(deferred_cost, 4),
-        "cvar_floor_r": round(net_floor, 4),
-        "cvar_floor_basis": "net_after_unavoidable_deferred_close_cost",
         "execution_cost_source": costs.get("deferred_source") or costs.get("source"),
         "rule": (
-            f"{spec.get('rule') or 'active stop/BE'}; net floor = gross floor "
-            "minus unavoidable deferred close cost"
+            f"{spec.get('rule') or 'active stop/BE'}; optimizer net floor = "
+            "gross strategy floor minus unavoidable deferred close cost"
         ),
     })
     return spec
@@ -75,6 +80,13 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
         previous_policy_inputs=previous_policy_inputs,
         previous_evidence=previous_evidence,
     )
+    risk = result.get("risk_constraint") or {}
+    rule = result.get("selection_rule") or {}
+    if risk.get("net_cvar_floor_r") is not None:
+        rule["cvar_floor_r"] = risk["net_cvar_floor_r"]
+        rule["gross_cvar_floor_r"] = risk.get("gross_cvar_floor_r")
+        rule["cvar_floor_basis"] = risk.get("selection_cvar_floor_basis")
+        result["selection_rule"] = rule
     result["version"] = "quant-policy-v14-net-hard-risk-floor"
     return result
 
