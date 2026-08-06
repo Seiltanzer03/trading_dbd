@@ -1,17 +1,22 @@
-// Probability Lattice v27 — live Galton board with real landed-ball contribution.
-// Every completed fall adds one deterministic quasi-Monte-Carlo observation to
-// a rolling empirical distribution. ENTRY / TIME-AVERAGE / CURRENT remain overlays.
+// Probability Lattice v28 — restored classical Galton board.
+//
+// Architecture intentionally follows the early working implementation:
+//   app.js is the ONLY data source; this module owns no fetch/WebSocket.
+//   10 peg decisions map exactly to 11 aligned physical bins.
+//   Every completed fall increments one real empirical bin.
+//
+// The soft background bell is a moment/quantile-matched Galton projection of
+// CURRENT option-implied RND into the actionable trade window. It is explicitly
+// a board projection, not a replacement for barrier / RND calculations.
 import { COLORS, setupCanvas } from './util.js';
 
-const ROWS = 9;
-const BINS = 24;
-const MAX_SAMPLES = 360;
-const DOMAIN_STEP_R = 0.25;
+const ROWS = 10;
+const BINS = ROWS + 1;
 const GOLDEN = 0.6180339887498949;
-const IMPACT_HOLD_MS = 220;
-const STORAGE_VERSION = 3;
-const STORAGE_PREFIX = 'seiltanzer:lattice:v3:';
-const SAVE_DEBOUNCE_MS = 350;
+const DOMAIN_STEP_R = 0.25;
+const STORAGE_VERSION = 4;
+const STORAGE_PREFIX = 'seiltanzer:lattice:v4:';
+const IMPACT_HOLD_MS = 150;
 
 function finite(value, fallback = null) {
   const n = Number(value);
@@ -24,29 +29,23 @@ function floorDomain(value, step = DOMAIN_STEP_R) {
 function ceilDomain(value, step = DOMAIN_STEP_R) {
   return Math.ceil((value - 1e-9) / step) * step;
 }
+function normalise(values) {
+  if (!Array.isArray(values) || !values.length) return null;
+  const out = values.map((value) => Math.max(0, finite(value, 0)));
+  const total = out.reduce((sum, value) => sum + value, 0);
+  return total > 0 ? out.map((value) => value / total) : null;
+}
 function fmtPct(value, digits = 1) {
   const n = finite(value);
   return n == null ? '—' : `${(n * 100).toFixed(digits)}%`;
-}
-function fmtPp(value, digits = 1) {
-  const n = finite(value);
-  if (n == null) return '—';
-  return `${n >= 0 ? '+' : ''}${(n * 100).toFixed(digits)} пп`;
 }
 function fmtR(value, digits = 2) {
   const n = finite(value);
   if (n == null) return '—';
   return `${n >= 0 ? '+' : ''}${n.toFixed(digits)}R`;
 }
-function normalise(values, length = null) {
-  if (!Array.isArray(values) || (length != null && values.length !== length)) return null;
-  const out = values.map((value) => Math.max(0, finite(value, 0)));
-  const total = out.reduce((sum, value) => sum + value, 0);
-  return total > 0 ? out.map((value) => value / total) : null;
-}
-function sameGrid(a, b) {
-  return Array.isArray(a) && Array.isArray(b) && a.length === b.length
-    && a.every((value, index) => Math.abs(value - Number(b[index])) < 1e-7);
+function sameDomain(a, b) {
+  return !!a && !!b && Math.abs(a.lo - b.lo) < 1e-7 && Math.abs(a.hi - b.hi) < 1e-7;
 }
 
 export function computeFocusDomain({ edges, T = 2.5, r = 0 }) {
@@ -56,8 +55,8 @@ export function computeFocusDomain({ edges, T = 2.5, r = 0 }) {
     ? Number(edges.at(-1)) : finite(T, 2.5) + 1;
   const take = Math.max(0.25, finite(T, 2.5));
   const current = finite(r, 0);
-  let lo = Math.min(-2, current - 0.5);
-  let hi = Math.max(take + 1, current + 0.5);
+  let lo = Math.min(-2, current - 0.75);
+  let hi = Math.max(take + 1, current + 0.75);
   lo = Math.max(rawLo, floorDomain(lo));
   hi = Math.min(rawHi, ceilDomain(hi));
   if (!(hi > lo)) return { lo: rawLo, hi: rawHi, rawLo, rawHi, compressed: false };
@@ -69,18 +68,17 @@ export function rebinDistribution(probs, edges, lo, hi, bins = BINS) {
   const outEdges = Array.from({ length: bins + 1 }, (_, i) => lo + (hi - lo) * i / bins);
   if (!Array.isArray(probs) || !Array.isArray(edges)
       || edges.length !== probs.length + 1 || !(hi > lo)) {
-    return { probs: out, absoluteProbs: out.slice(), edges: outEdges,
-      leftTail: 0, rightTail: 0, visibleMass: 0, totalMass: 0 };
+    return { probs: out, edges: outEdges, leftTail: 0, rightTail: 0, visibleMass: 0 };
   }
   let leftTail = 0;
   let rightTail = 0;
-  let totalMass = 0;
+  let total = 0;
   for (let i = 0; i < probs.length; i++) {
     const p = Math.max(0, finite(probs[i], 0));
     const a = finite(edges[i]);
     const b = finite(edges[i + 1]);
     if (!p || a == null || b == null || b <= a) continue;
-    totalMass += p;
+    total += p;
     const width = b - a;
     if (b <= lo) { leftTail += p; continue; }
     if (a >= hi) { rightTail += p; continue; }
@@ -88,21 +86,105 @@ export function rebinDistribution(probs, edges, lo, hi, bins = BINS) {
     if (b > hi) rightTail += p * (b - hi) / width;
     const ca = Math.max(a, lo);
     const cb = Math.min(b, hi);
-    for (let j = 0; j < bins && cb > ca; j++) {
+    for (let j = 0; j < bins; j++) {
       const overlap = Math.max(0, Math.min(cb, outEdges[j + 1]) - Math.max(ca, outEdges[j]));
-      if (overlap) out[j] += p * overlap / width;
+      if (overlap > 0) out[j] += p * overlap / width;
     }
   }
-  if (totalMass > 0 && Math.abs(totalMass - 1) > 1e-12) {
-    leftTail /= totalMass;
-    rightTail /= totalMass;
-    for (let i = 0; i < out.length; i++) out[i] /= totalMass;
-    totalMass = 1;
+  if (total > 0 && Math.abs(total - 1) > 1e-12) {
+    leftTail /= total;
+    rightTail /= total;
+    for (let i = 0; i < out.length; i++) out[i] /= total;
   }
-  const absoluteProbs = out.slice();
   const visibleMass = out.reduce((sum, value) => sum + value, 0);
-  if (visibleMass > 0) for (let i = 0; i < out.length; i++) out[i] /= visibleMass;
-  return { probs: out, absoluteProbs, edges: outEdges, leftTail, rightTail, visibleMass, totalMass };
+  return { probs: visibleMass > 0 ? out.map((value) => value / visibleMass) : out,
+    edges: outEdges, leftTail, rightTail, visibleMass };
+}
+
+function distributionMoments(probs, edges) {
+  const p = normalise(probs);
+  if (!p || !Array.isArray(edges) || edges.length !== p.length + 1) {
+    return { mean: null, sigma: null, skew: null };
+  }
+  const mids = p.map((_, i) => (Number(edges[i]) + Number(edges[i + 1])) / 2);
+  const mean = p.reduce((sum, value, i) => sum + value * mids[i], 0);
+  const variance = p.reduce((sum, value, i) => sum + value * (mids[i] - mean) ** 2, 0);
+  const sigma = Math.sqrt(Math.max(0, variance));
+  const skew = sigma > 1e-9
+    ? p.reduce((sum, value, i) => sum + value * ((mids[i] - mean) / sigma) ** 3, 0)
+    : 0;
+  return { mean, sigma, skew };
+}
+
+function quantileFromDistribution(probs, edges, q) {
+  const p = normalise(probs);
+  if (!p || !Array.isArray(edges) || edges.length !== p.length + 1) return null;
+  let acc = 0;
+  for (let i = 0; i < p.length; i++) {
+    const next = acc + p[i];
+    if (q <= next + 1e-12) {
+      const within = p[i] > 0 ? clamp((q - acc) / p[i], 0, 1) : 0.5;
+      return Number(edges[i]) + within * (Number(edges[i + 1]) - Number(edges[i]));
+    }
+    acc = next;
+  }
+  return Number(edges.at(-1));
+}
+
+export function buildGaltonDistribution({
+  probs, edges, T = 2.5, r = 0, q10 = null, q50 = null, q90 = null,
+  bins = BINS,
+}) {
+  const domain = computeFocusDomain({ edges, T, r });
+  const lo = domain.lo;
+  const hi = domain.hi;
+  const span = Math.max(1e-9, hi - lo);
+  const raw = distributionMoments(probs, edges);
+  const median = finite(q50, quantileFromDistribution(probs, edges, 0.5));
+  const p10 = finite(q10, quantileFromDistribution(probs, edges, 0.1));
+  const p90 = finite(q90, quantileFromDistribution(probs, edges, 0.9));
+
+  let center = finite(median, finite(raw.mean, finite(r, 0)));
+  let sigma = p10 != null && p90 != null && p90 > p10
+    ? (p90 - p10) / 2.563103131
+    : finite(raw.sigma, span * 0.18);
+
+  // A Galton board must remain readable as a bell inside the trade window.
+  // The centre comes from CURRENT RND, while spread is bounded only for this
+  // projection; raw option tails remain in backend probabilities and labels.
+  sigma = clamp(sigma, Math.max(0.30, span * 0.085), span * 0.275);
+  center = clamp(center, lo + sigma * 0.55, hi - sigma * 0.55);
+  const skew = clamp(finite(raw.skew, 0), -1.5, 1.5);
+  const outEdges = Array.from({ length: bins + 1 }, (_, i) => lo + span * i / bins);
+  const weights = [];
+  for (let i = 0; i < bins; i++) {
+    const mid = (outEdges[i] + outEdges[i + 1]) / 2;
+    const z = (mid - center) / sigma;
+    // Small exponential tilt preserves a single bell while carrying RND skew.
+    weights.push(Math.exp(-0.5 * z * z + skew * 0.08 * z));
+  }
+  const model = normalise(weights) || new Array(bins).fill(1 / bins);
+  return { probs: model, edges: outEdges, lo, hi, center, sigma, skew,
+    rawMean: raw.mean, rawSigma: raw.sigma, domain };
+}
+
+export function deterministicBin(probs, sequenceIndex) {
+  const p = normalise(probs);
+  if (!p) return null;
+  const u = ((sequenceIndex + 0.5) * GOLDEN) % 1;
+  let acc = 0;
+  for (let i = 0; i < p.length; i++) {
+    acc += p[i];
+    if (u <= acc + 1e-12) return i;
+  }
+  return p.length - 1;
+}
+
+export function deterministicTarget(probs, edges, sequenceIndex) {
+  const bin = deterministicBin(probs, sequenceIndex);
+  if (bin == null || !Array.isArray(edges) || edges.length !== probs.length + 1) return null;
+  const within = ((sequenceIndex + 0.5) * GOLDEN * GOLDEN) % 1;
+  return edges[bin] + within * (edges[bin + 1] - edges[bin]);
 }
 
 export function binIndexForR(value, edges) {
@@ -122,79 +204,18 @@ export function empiricalCounts(samples, edges) {
   return counts;
 }
 
-export function deterministicTarget(probs, edges, sequenceIndex) {
-  if (!Array.isArray(probs) || !Array.isArray(edges) || edges.length !== probs.length + 1) return null;
-  const normalized = normalise(probs);
-  if (!normalized) return null;
-  const u = ((sequenceIndex + 0.5) * GOLDEN) % 1;
-  const within = ((sequenceIndex + 0.5) * GOLDEN * GOLDEN) % 1;
-  let acc = 0;
-  let bin = normalized.length - 1;
-  for (let i = 0; i < normalized.length; i++) {
-    acc += normalized[i];
-    if (u <= acc + 1e-12) { bin = i; break; }
-  }
-  return edges[bin] + within * (edges[bin + 1] - edges[bin]);
-}
-
-export function empiricalKernelDistribution(samples, edges, bandwidthBins = 0.85) {
-  const bins = Math.max(0, (edges?.length || 1) - 1);
-  const out = new Array(bins).fill(0);
-  if (!bins || !Array.isArray(samples) || !samples.length) return out;
-  const width = (edges.at(-1) - edges[0]) / bins;
-  if (!(width > 0)) return out;
-  const bw = Math.max(0.35, finite(bandwidthBins, 0.85));
-  let used = 0;
-  for (const sample of samples) {
-    if (binIndexForR(sample, edges) < 0) continue;
-    const position = (sample - edges[0]) / width;
-    let rowTotal = 0;
-    const weights = new Array(bins);
-    for (let j = 0; j < bins; j++) {
-      const z = ((j + 0.5) - position) / bw;
-      const weight = Math.exp(-0.5 * z * z);
-      weights[j] = weight;
-      rowTotal += weight;
-    }
-    if (!(rowTotal > 0)) continue;
-    for (let j = 0; j < bins; j++) out[j] += weights[j] / rowTotal;
-    used++;
-  }
-  if (used > 0) for (let j = 0; j < bins; j++) out[j] /= used;
-  return out;
-}
-
-export function totalVariationDistance(a, b) {
-  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return null;
-  return 0.5 * a.reduce((sum, value, index) => sum + Math.abs(value - b[index]), 0);
-}
-
-export function empiricalMoments(samples) {
-  const values = (samples || []).map(Number).filter(Number.isFinite);
-  if (!values.length) return { mean: null, sigma: null, skew: null };
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
-  const sigma = Math.sqrt(Math.max(0, variance));
-  const skew = sigma > 1e-9
-    ? values.reduce((sum, value) => sum + ((value - mean) / sigma) ** 3, 0) / values.length
-    : 0;
-  return { mean, sigma, skew };
-}
-
 export function advanceBallKinematics(ball, dtMs, rows = ROWS) {
-  if (!ball || !Number.isFinite(dtMs) || dtMs <= 0) {
-    return { landed: false, expired: false };
-  }
+  if (!ball || !(dtMs > 0)) return { landed: false, expired: false };
   if (ball.impacted) {
     ball.impactMs = finite(ball.impactMs, 0) + dtMs;
     return { landed: false, expired: ball.impactMs >= IMPACT_HOLD_MS };
   }
-  const segmentMs = ball.seg < rows ? 92 : 270;
-  ball.t += (dtMs / segmentMs) * finite(ball.speed, 1);
+  const segmentMs = ball.seg < rows ? 94 : 235;
+  ball.t += dtMs / segmentMs * finite(ball.speed, 1);
   while (ball.t >= 1 && !ball.impacted) {
     if (ball.seg < rows) {
       ball.t -= 1;
-      if (ball.dirs?.[ball.seg]) ball.rights++;
+      if (ball.dirs[ball.seg]) ball.rights++;
       ball.seg++;
     } else {
       ball.t = 1;
@@ -210,211 +231,208 @@ function safeStorage() {
   try { return typeof localStorage === 'undefined' ? null : localStorage; } catch (_) { return null; }
 }
 function storageKey(tradeId) { return `${STORAGE_PREFIX}${encodeURIComponent(String(tradeId))}`; }
-function loadBoard(tradeId, storage) {
+function loadStored(tradeId, storage) {
   if (!storage || tradeId == null) return null;
   try {
-    const parsed = JSON.parse(storage.getItem(storageKey(tradeId)) || 'null');
-    if (!parsed || parsed.version !== STORAGE_VERSION || String(parsed.tradeId) !== String(tradeId)) return null;
-    const samples = Array.isArray(parsed.samples)
-      ? parsed.samples.map(Number).filter(Number.isFinite).slice(-MAX_SAMPLES) : [];
+    const value = JSON.parse(storage.getItem(storageKey(tradeId)) || 'null');
+    if (!value || value.version !== STORAGE_VERSION || String(value.tradeId) !== String(tradeId)) return null;
+    const counts = Array.isArray(value.counts)
+      ? value.counts.slice(0, BINS).map((n) => Math.max(0, Math.floor(finite(n, 0)))) : null;
+    if (!counts || counts.length !== BINS) return null;
     return {
-      samples,
-      dropped: Math.max(samples.length, Math.floor(finite(parsed.dropped, samples.length))),
-      sequence: Math.max(samples.length, Math.floor(finite(parsed.sequence, samples.length))),
+      counts,
+      dropped: counts.reduce((sum, n) => sum + n, 0),
+      green: Math.max(0, Math.floor(finite(value.green, 0))),
+      sequence: Math.max(0, Math.floor(finite(value.sequence, 0))),
     };
   } catch (_) { return null; }
 }
-function saveBoard(tradeId, state, storage) {
-  if (!storage || tradeId == null) return false;
+function saveStored(tradeId, state, storage) {
+  if (!storage || tradeId == null) return;
   try {
     storage.setItem(storageKey(tradeId), JSON.stringify({
       version: STORAGE_VERSION,
       tradeId: String(tradeId),
-      samples: state.samples.slice(-MAX_SAMPLES),
-      dropped: state.dropped,
+      counts: state.counts,
+      green: state.green,
       sequence: state.sequence,
-      savedAt: Date.now(),
     }));
-    return true;
-  } catch (_) { return false; }
+  } catch (_) { /* optional */ }
 }
-function clearBoard(tradeId, storage) {
+function clearStored(tradeId, storage) {
   if (!storage || tradeId == null) return;
-  try { storage.removeItem(storageKey(tradeId)); } catch (_) { /* storage is optional */ }
+  try { storage.removeItem(storageKey(tradeId)); } catch (_) { /* optional */ }
 }
 
 export function initLattice(canvas) {
   const storage = safeStorage();
-  const s = {
-    active: false, tradeId: null, T: 2.5, r: 0, edges: null,
-    entry: null, average: null, current: null,
-    tails: { entry: {}, average: {}, current: {} },
-    revaluation: null, visualHistory: null, source: null,
-    samples: [], balls: [], sequence: 0, dropped: 0,
-    lastSpawn: 0, nextSpawnIn: 300, reconnectTimer: null,
-    dirty: false, lastSaveAt: 0,
+  const state = {
+    active: false,
+    tradeId: null,
+    T: 2.5,
+    r: 0,
+    model: null,
+    rawSlice: null,
+    counts: new Array(BINS).fill(0),
+    balls: [],
+    dropped: 0,
+    green: 0,
+    sequence: 0,
+    lastSpawn: 0,
+    nextSpawnIn: 300,
+    sourceLabel: null,
   };
 
-  function persist(force = false) {
-    const now = Date.now();
-    if (!s.dirty && !force) return;
-    if (!force && now - s.lastSaveAt < SAVE_DEBOUNCE_MS) return;
-    if (saveBoard(s.tradeId, s, storage)) {
-      s.dirty = false;
-      s.lastSaveAt = now;
+  function reset({ clearStorage = true } = {}) {
+    if (clearStorage) clearStored(state.tradeId, storage);
+    state.counts = new Array(BINS).fill(0);
+    state.balls = [];
+    state.dropped = 0;
+    state.green = 0;
+    state.sequence = 0;
+    state.lastSpawn = 0;
+  }
+  function switchTrade(tradeId) {
+    if (tradeId === state.tradeId) return;
+    saveStored(state.tradeId, state, storage);
+    state.tradeId = tradeId;
+    reset({ clearStorage: false });
+    const stored = loadStored(tradeId, storage);
+    if (stored) Object.assign(state, stored);
+  }
+
+  function setData(d) {
+    switchTrade(d.tradeId ?? null);
+    state.active = !!d.active;
+    state.T = Math.max(0.25, finite(d.T, state.T));
+    state.r = finite(d.r, state.r);
+    state.sourceLabel = d.optionAnchored ? 'OPTIONS RND → GALTON' : 'SCENARIO → GALTON';
+    if (!state.active || !Array.isArray(d.distributionProbs) || !Array.isArray(d.edges)) return;
+    const nextModel = buildGaltonDistribution({
+      probs: d.distributionProbs,
+      edges: d.edges,
+      T: state.T,
+      r: state.r,
+      q10: d.q10,
+      q50: d.q50,
+      q90: d.q90,
+      bins: BINS,
+    });
+    if (!sameDomain(state.model, nextModel)) {
+      // This happens only when the actionable window genuinely changes, not on
+      // every market tick. Existing bin meanings would otherwise become wrong.
+      reset({ clearStorage: true });
     }
-  }
-  function resetBoard({ clearStorage = true } = {}) {
-    if (clearStorage) clearBoard(s.tradeId, storage);
-    s.samples = [];
-    s.balls = [];
-    s.sequence = 0;
-    s.dropped = 0;
-    s.lastSpawn = 0;
-    s.dirty = false;
-  }
-  function restoreBoard(tradeId) {
-    const restored = loadBoard(tradeId, storage);
-    if (!restored) return;
-    s.samples = restored.samples;
-    s.dropped = restored.dropped;
-    s.sequence = restored.sequence;
-  }
-  function switchTrade(nextTradeId) {
-    if (nextTradeId === s.tradeId) return;
-    persist(true);
-    s.tradeId = nextTradeId;
-    resetBoard({ clearStorage: false });
-    restoreBoard(nextTradeId);
-  }
-  function handleGridChange(nextEdges) {
-    if (sameGrid(s.edges, nextEdges)) return;
-    // Landed samples are R values and remain valid. Only unfinished paths are reset.
-    s.balls = [];
-    s.lastSpawn = 0;
+    state.model = nextModel;
+    state.rawSlice = rebinDistribution(d.distributionProbs, d.edges,
+      nextModel.lo, nextModel.hi, BINS);
   }
 
   function canvasHeight() {
     const width = canvas.clientWidth || canvas.parentElement?.clientWidth || 760;
-    return Math.round(Math.max(500, Math.min(650, width * 0.74)));
+    return Math.round(Math.max(430, Math.min(535, width * 0.62)));
   }
   function geometry(w, h) {
-    const padX = Math.max(42, Math.min(64, w * 0.065));
-    const top = 70;
-    const boardBottom = h - 225;
-    const histTop = boardBottom + 12;
-    const histBottom = h - 120;
-    const deltaTop = histBottom + 22;
-    const deltaBase = h - 58;
-    const axisY = h - 25;
-    return {
-      w, h, padX, top, boardBottom, histTop, histBottom, deltaTop, deltaBase, axisY,
-      boardH: boardBottom - top,
-      histH: histBottom - histTop,
-      binW: (w - 2 * padX) / Math.max(1, (s.current || []).length),
-      rowH: (boardBottom - top) / (ROWS + 1),
-    };
+    const padX = Math.max(34, Math.min(54, w * 0.055));
+    const top = 58;
+    const axisH = 28;
+    const histH = Math.max(132, Math.min(165, h * 0.32));
+    const baseY = h - axisH - 7;
+    const histTop = baseY - histH;
+    const boardBottom = histTop - 11;
+    const rowH = (boardBottom - top) / (ROWS + 0.55);
+    const binW = (w - 2 * padX) / BINS;
+    return { w, h, padX, top, axisH, histH, baseY, histTop, boardBottom, rowH, binW };
   }
-  const domain = () => ({ lo: s.edges?.[0] ?? -2, hi: s.edges?.at(-1) ?? s.T + 1 });
+  function binMid(bin) {
+    return state.model ? (state.model.edges[bin] + state.model.edges[bin + 1]) / 2 : 0;
+  }
+  function binIsGreen(bin) { return binMid(bin) > 0; }
+  function binIsTake(bin) { return binMid(bin) >= state.T; }
   function xOfR(g, value) {
-    const { lo, hi } = domain();
+    const lo = state.model?.lo ?? -2;
+    const hi = state.model?.hi ?? state.T + 1;
     return g.padX + (value - lo) / Math.max(1e-9, hi - lo) * (g.w - 2 * g.padX);
   }
-  function binMid(index) { return (s.edges[index] + s.edges[index + 1]) / 2; }
-  function favorable(index) { return binMid(index) >= 0; }
-  function takeBin(index) { return binMid(index) >= s.T; }
-  function pegX(g, row, rightCount) {
-    const center = g.padX + (g.w - 2 * g.padX) / 2;
-    return center + (2 * rightCount - row) * (g.binW * 0.5);
+  function pegX(g, row, rights) {
+    const center = g.padX + BINS * g.binW / 2;
+    return center + (2 * rights - row) * g.binW / 2;
   }
   function pegY(g, row) { return g.top + row * g.rowH; }
-  function stackGeometry(g) {
-    const columns = clamp(Math.floor((g.binW - 3) / 4.8), 1, 4);
-    const rowGap = 4.7;
-    const maxRows = Math.max(1, Math.floor((g.histH - 8) / rowGap));
-    return { columns, rowGap, capacity: columns * maxRows };
+  function binCenterX(g, bin) { return g.padX + (bin + 0.5) * g.binW; }
+  function stackLayout(g) {
+    const cols = clamp(Math.floor((g.binW - 4) / 5), 1, 5);
+    const gapX = Math.min(4.6, (g.binW - 5) / Math.max(1, cols));
+    const gapY = 4.8;
+    const rows = Math.max(1, Math.floor((g.histH - 12) / gapY));
+    return { cols, gapX, gapY, capacity: cols * rows };
   }
-  function landingPoint(g, bin, ordinal) {
-    const stack = stackGeometry(g);
-    const clampedOrdinal = Math.min(Math.max(0, ordinal), stack.capacity - 1);
-    const column = clampedOrdinal % stack.columns;
-    const row = Math.floor(clampedOrdinal / stack.columns);
-    const center = g.padX + (bin + 0.5) * g.binW;
+  function stackPoint(g, bin, ordinal) {
+    const layout = stackLayout(g);
+    const index = Math.min(Math.max(0, ordinal), layout.capacity - 1);
+    const col = index % layout.cols;
+    const row = Math.floor(index / layout.cols);
     return {
-      x: center + (column - (stack.columns - 1) / 2) * 4.2,
-      y: g.histBottom - 4 - row * stack.rowGap,
+      x: binCenterX(g, bin) + (col - (layout.cols - 1) / 2) * layout.gapX,
+      y: g.baseY - 5 - row * layout.gapY,
     };
-  }
-  function projectedLandingOrdinal(bin, self) {
-    const counts = empiricalCounts(s.samples, s.edges);
-    let reserved = 0;
-    for (const ball of s.balls) {
-      if (ball === self || ball.bin !== bin || ball.landingOrdinal == null || ball.impacted) continue;
-      if (!ball.expired) reserved++;
-    }
-    return (counts[bin] || 0) + reserved;
   }
 
   function spawnBall() {
-    if (!s.current || !s.edges) return;
-    const targetR = deterministicTarget(s.current, s.edges, s.sequence++);
-    if (targetR == null) return;
-    const bin = binIndexForR(targetR, s.edges);
-    if (bin < 0) return;
-    const dom = domain();
-    const normalized = clamp((targetR - dom.lo) / Math.max(1e-9, dom.hi - dom.lo), 0, 1);
-    const rightsNeeded = Math.round(normalized * ROWS);
-    const dirs = Array.from({ length: ROWS }, (_, i) => i < rightsNeeded);
-    let seed = (s.sequence * 2654435761) >>> 0;
+    if (!state.model) return;
+    const bin = deterministicBin(state.model.probs, state.sequence++);
+    if (bin == null) return;
+    const dirs = Array.from({ length: ROWS }, (_, i) => i < bin);
+    let seed = (state.sequence * 2654435761) >>> 0;
     for (let i = dirs.length - 1; i > 0; i--) {
       seed = (1664525 * seed + 1013904223) >>> 0;
       const j = seed % (i + 1);
       [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
     }
-    s.balls.push({
-      targetR, bin, dirs, seg: 0, t: 0, rights: 0,
-      speed: 0.92 + (seed % 17) / 100,
-      wobble: 2.4 + (seed % 13) / 10,
-      impacted: false, impactMs: 0, landingOrdinal: null, expired: false,
+    const queued = state.balls.filter((ball) => ball.bin === bin && !ball.impacted).length;
+    state.balls.push({
+      bin,
+      dirs,
+      seg: 0,
+      t: 0,
+      rights: 0,
+      speed: 0.92 + (seed % 18) / 100,
+      wobble: 2.8 + (seed % 17) / 10,
+      ordinal: state.counts[bin] + queued,
+      impacted: false,
+      impactMs: 0,
+      expired: false,
     });
   }
   function stepBalls(dtMs) {
-    for (const ball of s.balls) {
-      const beforeSeg = ball.seg;
+    for (const ball of state.balls) {
       const result = advanceBallKinematics(ball, dtMs, ROWS);
-      if (ball.seg >= ROWS && ball.landingOrdinal == null) {
-        ball.landingOrdinal = projectedLandingOrdinal(ball.bin, ball);
-      }
       if (result.landed) {
-        // One completed physical fall is one real contribution to the rolling empirical board.
-        s.samples.push(ball.targetR);
-        if (s.samples.length > MAX_SAMPLES) s.samples.shift();
-        s.dropped++;
-        s.dirty = true;
+        state.counts[ball.bin] += 1;
+        state.dropped += 1;
+        if (binIsGreen(ball.bin)) state.green += 1;
+        saveStored(state.tradeId, state, storage);
       }
       if (result.expired) ball.expired = true;
-      // A very slow tab resume cannot skip the visible landing leg.
-      if (beforeSeg < ROWS && ball.seg > ROWS) ball.seg = ROWS;
     }
-    s.balls = s.balls.filter((ball) => !ball.expired);
-    persist(false);
+    state.balls = state.balls.filter((ball) => !ball.expired);
   }
   function ballPosition(g, ball) {
     if (ball.seg < ROWS) {
       const eased = ball.t * ball.t * (3 - 2 * ball.t);
       const x0 = pegX(g, ball.seg, ball.rights);
-      const x1 = pegX(g, ball.seg + 1, ball.rights + (ball.dirs[ball.seg] ? 1 : 0));
-      const wobble = Math.sin(ball.t * Math.PI) * ball.wobble
-        * (ball.dirs[ball.seg] ? 1 : -1);
+      const nextRights = ball.rights + (ball.dirs[ball.seg] ? 1 : 0);
+      const x1 = pegX(g, ball.seg + 1, nextRights);
+      const direction = ball.dirs[ball.seg] ? 1 : -1;
       return {
-        x: x0 + (x1 - x0) * eased + wobble,
-        y: pegY(g, ball.seg) + g.rowH * ball.t,
+        x: x0 + (x1 - x0) * eased + Math.sin(ball.t * Math.PI) * ball.wobble * direction,
+        y: pegY(g, ball.seg) + (pegY(g, ball.seg + 1) - pegY(g, ball.seg)) * ball.t,
       };
     }
-    const target = landingPoint(g, ball.bin, ball.landingOrdinal || 0);
+    const target = stackPoint(g, ball.bin, ball.ordinal);
     if (ball.impacted) {
-      const bounceT = clamp(ball.impactMs / 140, 0, 1);
-      return { x: target.x, y: target.y - Math.sin(bounceT * Math.PI) * 2.3 };
+      const phase = clamp(ball.impactMs / IMPACT_HOLD_MS, 0, 1);
+      return { x: target.x, y: target.y - Math.sin(phase * Math.PI) * 2.2 };
     }
     const eased = ball.t * ball.t;
     const x0 = pegX(g, ROWS, ball.rights);
@@ -422,405 +440,242 @@ export function initLattice(canvas) {
     return { x: x0 + (target.x - x0) * eased, y: y0 + (target.y - y0) * eased };
   }
 
-  function consumeTick(tick) {
-    if (!tick) return;
-    const trade = tick.trade;
-    const market = tick.market;
-    const history = tick.lattice_visual_history;
-    const nextTradeId = trade?.id ?? null;
-    switchTrade(nextTradeId);
-    s.active = !!(trade && market);
-    s.T = finite(tick.prob?.T, s.T);
-    s.r = finite(tick.prob?.r, s.r);
-    s.revaluation = tick.lattice_revaluation || null;
-    s.source = s.revaluation?.source_quality || null;
-    if (history?.available) {
-      const edges = history.current?.edges;
-      const current = normalise(history.current?.probs);
-      const entry = normalise(history.entry?.probs, current?.length);
-      const average = normalise(history.average?.probs, current?.length);
-      if (current && entry && average && Array.isArray(edges) && edges.length === current.length + 1) {
-        handleGridChange(edges);
-        s.edges = edges.map(Number);
-        s.entry = entry;
-        s.average = average;
-        s.current = current;
-        s.visualHistory = history;
-        s.tails = { entry: history.entry || {}, average: history.average || {}, current: history.current || {} };
-      }
-    } else if (Array.isArray(market?.scenario_probs) && Array.isArray(market?.scenario_edges)) {
-      const focused = computeFocusDomain({ edges: market.scenario_edges, T: s.T, r: s.r });
-      const rebinned = rebinDistribution(market.scenario_probs, market.scenario_edges,
-        focused.lo, focused.hi, BINS);
-      if (rebinned.visibleMass > 0) {
-        handleGridChange(rebinned.edges);
-        s.edges = rebinned.edges;
-        s.current = rebinned.probs;
-        s.entry ||= rebinned.probs.slice();
-        s.average ||= rebinned.probs.slice();
-        s.tails.current = { left_tail: rebinned.leftTail, right_tail: rebinned.rightTail,
-          visible_mass: rebinned.visibleMass };
-      }
-    }
-    scheduleDomUpdate();
+  function modelMax() { return Math.max(...(state.model?.probs || [0.001]), 0.001); }
+  function empiricalShares() {
+    const total = Math.max(1, state.dropped);
+    return state.counts.map((count) => count / total);
   }
-
-  function setData(d) {
-    switchTrade(d.tradeId ?? s.tradeId);
-    s.active = !!d.active;
-    s.T = finite(d.T, s.T);
-    s.r = finite(d.r, s.r);
-    if (Array.isArray(d.distributionProbs) && Array.isArray(d.edges)) {
-      const focused = computeFocusDomain({ edges: d.edges, T: s.T, r: s.r });
-      const rebinned = rebinDistribution(d.distributionProbs, d.edges, focused.lo, focused.hi, BINS);
-      if (rebinned.visibleMass > 0) {
-        handleGridChange(rebinned.edges);
-        s.edges = rebinned.edges;
-        s.current = rebinned.probs;
-        s.entry ||= rebinned.probs.slice();
-        s.average ||= rebinned.probs.slice();
-        s.tails.current = { left_tail: rebinned.leftTail, right_tail: rebinned.rightTail,
-          visible_mass: rebinned.visibleMass };
-      }
-    }
-    scheduleDomUpdate();
-  }
-
-  function curveY(g, probs, index, maxProb) {
-    return g.histBottom - (probs[index] / maxProb) * (g.histH - 8);
-  }
-  function drawCurve(ctx, g, probs, maxProb, style) {
-    if (!probs) return;
+  function drawCurve(ctx, g, probs, max, style) {
+    if (!Array.isArray(probs)) return;
     ctx.save();
     ctx.strokeStyle = style.color;
     ctx.lineWidth = style.width;
     ctx.setLineDash(style.dash || []);
     ctx.globalAlpha = style.alpha ?? 1;
     ctx.beginPath();
-    probs.forEach((value, index) => {
-      const x = g.padX + (index + 0.5) * g.binW;
-      const y = curveY(g, probs, index, maxProb);
-      if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    probs.forEach((value, bin) => {
+      const x = binCenterX(g, bin);
+      const y = g.baseY - value / max * (g.histH - 12);
+      if (bin) ctx.lineTo(x, y); else ctx.moveTo(x, y);
     });
     ctx.stroke();
     ctx.restore();
   }
   function drawMarker(ctx, g, value, label, color, dash = [4, 3]) {
-    const n = finite(value);
-    const { lo, hi } = domain();
-    if (n == null || n < lo || n > hi) return;
-    const x = xOfR(g, n);
+    if (!state.model || value < state.model.lo || value > state.model.hi) return;
+    const x = xOfR(g, value);
     ctx.save();
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
-    ctx.lineWidth = 1.1;
     ctx.setLineDash(dash);
     ctx.beginPath();
-    ctx.moveTo(x, g.top);
-    ctx.lineTo(x, g.deltaBase);
+    ctx.moveTo(x, g.top - 8);
+    ctx.lineTo(x, g.baseY);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.font = '8px "IBM Plex Mono", monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(label, x, g.top + 11);
+    ctx.fillText(label, x, g.top - 12);
     ctx.restore();
   }
-  function scoreText() {
-    const score = s.revaluation?.score || {};
-    if (score.direction === 'improving') return ['УЛУЧШЕНИЕ', COLORS.green];
-    if (score.direction === 'deteriorating') return ['УХУДШЕНИЕ', COLORS.red];
-    return ['БЕЗ УСТОЙЧИВОГО СДВИГА', '#8B8176'];
-  }
-  function empiricalState() {
-    const counts = empiricalCounts(s.samples, s.edges);
-    const visible = counts.reduce((sum, value) => sum + value, 0);
-    const hard = visible ? counts.map((value) => value / visible) : counts.map(() => 0);
-    const kde = empiricalKernelDistribution(s.samples, s.edges);
-    const tv = visible && s.current ? totalVariationDistance(kde, s.current) : null;
-    const green = visible && s.edges
-      ? counts.reduce((sum, value, index) => sum + (binMid(index) > 0 ? value : 0), 0) / visible
-      : null;
-    const take = visible && s.edges
-      ? counts.reduce((sum, value, index) => sum + (takeBin(index) ? value : 0), 0) / visible
-      : null;
-    return { counts, visible, hard, kde, tv, agreement: tv == null ? null : 1 - tv, green, take,
-      moments: empiricalMoments(s.samples) };
-  }
 
-  function draw(now) {
+  function draw() {
     const { ctx, w, h } = setupCanvas(canvas, canvasHeight());
     const g = geometry(w, h);
     ctx.clearRect(0, 0, w, h);
-    if (!s.active || !s.current || !s.entry || !s.average || !s.edges) return;
-    const empirical = empiricalState();
-    const maxProb = Math.max(...s.entry, ...s.average, ...s.current, ...empirical.kde, 0.001);
+    if (!state.active || !state.model) return;
+
     const zeroX = clamp(xOfR(g, 0), g.padX, w - g.padX);
-    const takeX = clamp(xOfR(g, s.T), g.padX, w - g.padX);
-
+    const takeX = clamp(xOfR(g, state.T), g.padX, w - g.padX);
     ctx.fillStyle = '#FBFAF6';
-    ctx.fillRect(g.padX, g.top, w - 2 * g.padX, g.deltaBase - g.top);
+    ctx.fillRect(g.padX - 6, g.top - 24, w - 2 * g.padX + 12, g.baseY - g.top + 28);
     ctx.fillStyle = 'rgba(198,55,60,0.035)';
-    ctx.fillRect(g.padX, g.top, Math.max(0, zeroX - g.padX), g.histBottom - g.top);
+    ctx.fillRect(g.padX, g.top, Math.max(0, zeroX - g.padX), g.baseY - g.top);
     ctx.fillStyle = 'rgba(46,125,79,0.035)';
-    ctx.fillRect(zeroX, g.top, Math.max(0, takeX - zeroX), g.histBottom - g.top);
-    ctx.fillStyle = 'rgba(232,98,42,0.055)';
-    ctx.fillRect(takeX, g.top, Math.max(0, w - g.padX - takeX), g.histBottom - g.top);
+    ctx.fillRect(zeroX, g.top, Math.max(0, takeX - zeroX), g.baseY - g.top);
+    ctx.fillStyle = 'rgba(232,98,42,0.05)';
+    ctx.fillRect(takeX, g.top, Math.max(0, w - g.padX - takeX), g.baseY - g.top);
 
+    // Classical triangular peg geometry: bottom row aligns exactly with bin centres.
     ctx.fillStyle = COLORS.dim;
     for (let row = 1; row <= ROWS; row++) {
-      for (let i = 0; i <= row; i++) {
+      for (let rights = 0; rights <= row; rights++) {
         ctx.beginPath();
-        ctx.arc(pegX(g, row, i), pegY(g, row), 1.6, 0, Math.PI * 2);
+        ctx.arc(pegX(g, row, rights), pegY(g, row), 1.75, 0, Math.PI * 2);
         ctx.fill();
       }
     }
 
-    // Model mass is the background; landed balls are the actual empirical contribution.
-    for (let index = 0; index < s.current.length; index++) {
-      const x = g.padX + index * g.binW;
-      const y = curveY(g, s.current, index, maxProb);
-      ctx.fillStyle = takeBin(index)
-        ? 'rgba(232,98,42,0.21)'
-        : favorable(index) ? 'rgba(46,125,79,0.14)' : 'rgba(198,55,60,0.14)';
-      ctx.fillRect(x + 1.2, y, g.binW - 2.4, g.histBottom - y);
+    // Expected Galton bell from CURRENT RND moments.
+    const maxModel = modelMax();
+    for (let bin = 0; bin < BINS; bin++) {
+      const x = g.padX + bin * g.binW;
+      const height = state.model.probs[bin] / maxModel * (g.histH - 12);
+      ctx.fillStyle = binIsTake(bin)
+        ? 'rgba(232,98,42,0.30)'
+        : binIsGreen(bin) ? COLORS.greenSoft : COLORS.redSoft;
+      ctx.fillRect(x + 1.5, g.baseY - height, g.binW - 3, height);
+      ctx.strokeStyle = 'rgba(20,20,15,0.16)';
+      ctx.strokeRect(x + 1.5, g.histTop, g.binW - 3, g.histH);
     }
+    drawCurve(ctx, g, state.model.probs, maxModel,
+      { color: COLORS.ink, width: 2.1, alpha: 0.86 });
 
-    const stack = stackGeometry(g);
-    for (let bin = 0; bin < empirical.counts.length; bin++) {
-      const shown = Math.min(empirical.counts[bin], stack.capacity);
+    // Real landed balls: every visible dot is one counted contribution.
+    const layout = stackLayout(g);
+    for (let bin = 0; bin < BINS; bin++) {
+      const shown = Math.min(state.counts[bin], layout.capacity);
       for (let ordinal = 0; ordinal < shown; ordinal++) {
-        const point = landingPoint(g, bin, ordinal);
+        const point = stackPoint(g, bin, ordinal);
         ctx.beginPath();
         ctx.arc(point.x, point.y, 2.15, 0, Math.PI * 2);
-        ctx.fillStyle = takeBin(bin) ? '#E8622A' : favorable(bin) ? COLORS.green : COLORS.red;
-        ctx.globalAlpha = 0.82;
+        ctx.fillStyle = binIsTake(bin) ? '#E8622A' : binIsGreen(bin) ? COLORS.green : COLORS.red;
+        ctx.globalAlpha = 0.86;
         ctx.fill();
       }
-      if (empirical.counts[bin] > stack.capacity) {
+      if (state.counts[bin] > layout.capacity) {
         ctx.globalAlpha = 1;
+        ctx.fillStyle = COLORS.ink;
         ctx.font = '7px "IBM Plex Mono", monospace';
         ctx.textAlign = 'center';
-        ctx.fillStyle = COLORS.ink;
-        ctx.fillText(`+${empirical.counts[bin] - stack.capacity}`,
-          g.padX + (bin + 0.5) * g.binW, g.histTop + 8);
+        ctx.fillText(`+${state.counts[bin] - layout.capacity}`, binCenterX(g, bin), g.histTop + 9);
       }
     }
     ctx.globalAlpha = 1;
 
-    drawCurve(ctx, g, s.entry, maxProb, { color: '#1D1B18', width: 1.0, dash: [5, 4], alpha: 0.56 });
-    drawCurve(ctx, g, s.average, maxProb, { color: '#7B746C', width: 1.6, alpha: 0.70 });
-    drawCurve(ctx, g, s.current, maxProb, { color: '#E8622A', width: 2.35 });
-    if (empirical.visible >= 8) {
-      drawCurve(ctx, g, empirical.kde, maxProb, { color: COLORS.ink, width: 2.1, alpha: 0.92 });
+    // Empirical shape grows from the actual landed counts.
+    if (state.dropped >= 5) {
+      const empirical = empiricalShares();
+      const maxEmpirical = Math.max(...empirical, 0.001);
+      drawCurve(ctx, g, empirical, maxEmpirical,
+        { color: '#E8622A', width: 1.8, dash: [5, 3], alpha: 0.92 });
     }
 
-    for (const ball of s.balls) {
-      const p = ballPosition(g, ball);
+    for (const ball of state.balls) {
+      const point = ballPosition(g, ball);
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 3.2, 0, Math.PI * 2);
+      ctx.arc(point.x + 1, point.y + 1.5, 3.3, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(20,20,15,0.12)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 3.25, 0, Math.PI * 2);
       ctx.fillStyle = ball.seg < ROWS ? COLORS.ink
-        : takeBin(ball.bin) ? '#E8622A' : favorable(ball.bin) ? COLORS.green : COLORS.red;
-      ctx.globalAlpha = ball.impacted
-        ? 1 - 0.45 * clamp(ball.impactMs / IMPACT_HOLD_MS, 0, 1) : 1;
+        : binIsTake(ball.bin) ? '#E8622A' : binIsGreen(ball.bin) ? COLORS.green : COLORS.red;
       ctx.fill();
     }
-    ctx.globalAlpha = 1;
 
-    const delta = s.current.map((value, index) => value - s.entry[index]);
-    const maxDelta = Math.max(...delta.map(Math.abs), 0.004);
-    ctx.strokeStyle = 'rgba(29,27,24,0.25)';
-    ctx.beginPath();
-    ctx.moveTo(g.padX, g.deltaBase);
-    ctx.lineTo(w - g.padX, g.deltaBase);
-    ctx.stroke();
-    for (let index = 0; index < delta.length; index++) {
-      const value = delta[index];
-      const effect = value * (favorable(index) ? 1 : -1);
-      const barH = Math.abs(value) / maxDelta * (g.deltaBase - g.deltaTop - 5);
-      const x = g.padX + index * g.binW + g.binW * 0.22;
-      ctx.fillStyle = effect >= 0 ? 'rgba(46,125,79,0.72)' : 'rgba(198,55,60,0.72)';
-      ctx.fillRect(x, value >= 0 ? g.deltaBase - barH : g.deltaBase,
-        g.binW * 0.56, value >= 0 ? barH : -barH);
-    }
-
-    drawMarker(ctx, g, -1, 'СТОП −1R', COLORS.red, [5, 3]);
-    drawMarker(ctx, g, s.T, `ТЕЙК +${s.T.toFixed(2)}R`, COLORS.green, [5, 3]);
-    const currentX = clamp(xOfR(g, s.r), g.padX, w - g.padX);
+    drawMarker(ctx, g, -1, 'СТОП −1R', COLORS.red);
+    drawMarker(ctx, g, state.T, `ТЕЙК +${state.T.toFixed(2)}R`, COLORS.green);
+    drawMarker(ctx, g, state.model.center, 'ЦЕНТР RND', '#6F685F', [2, 3]);
+    const currentX = clamp(xOfR(g, state.r), g.padX, w - g.padX);
     ctx.strokeStyle = '#E8622A';
-    ctx.lineWidth = 1.4;
     ctx.setLineDash([2, 2]);
     ctx.beginPath();
-    ctx.moveTo(currentX, g.top - 5);
-    ctx.lineTo(currentX, g.deltaBase + 4);
+    ctx.moveTo(currentX, g.top - 8);
+    ctx.lineTo(currentX, g.baseY + 3);
     ctx.stroke();
     ctx.setLineDash([]);
-    const q = s.revaluation?.current || {};
-    drawMarker(ctx, g, q.q10_r, 'P10', 'rgba(198,55,60,0.75)', [2, 4]);
-    drawMarker(ctx, g, q.q50_r, 'P50', 'rgba(29,27,24,0.75)', [3, 3]);
-    drawMarker(ctx, g, q.q90_r, 'P90', 'rgba(46,125,79,0.75)', [2, 4]);
 
-    const [headline, headlineColor] = scoreText();
     ctx.font = '700 10px "IBM Plex Mono", monospace';
     ctx.textAlign = 'left';
-    ctx.fillStyle = headlineColor;
-    ctx.fillText(`ЖИВАЯ ДОСКА: ${headline}`, g.padX, 17);
+    ctx.fillStyle = COLORS.green;
+    ctx.fillText('КЛАССИЧЕСКАЯ ДОСКА · 10 РЯДОВ → 11 КОРЗИН', g.padX, 17);
     ctx.font = '8px "IBM Plex Mono", monospace';
     ctx.fillStyle = COLORS.dim;
-    ctx.fillText('1 ПРИЗЕМЛЕНИЕ = 1 ВКЛАД  ·  ЧЁРНАЯ — ЭМПИРИКА ШАРИКОВ  ·  ОРАНЖЕВАЯ — CURRENT RND', g.padX, 31);
-    ctx.fillText('ПУНКТИР — ВХОД  ·  СЕРАЯ — СРЕДНЕЕ  ·  ХВОСТЫ НЕ СЛОЖЕНЫ В КРАЙНИЕ КОРЗИНЫ', g.padX, 44);
-    const source = s.source?.label || s.source?.mode || 'SOURCE';
-    const weight = finite(s.revaluation?.score?.confidence_weight, 0);
+    ctx.fillText('МЯГКИЙ КОЛОКОЛ — GALTON-ПРОЕКЦИЯ CURRENT RND · ТОЧКИ И ПУНКТИР — РЕАЛЬНО УПАВШИЕ ШАРИКИ', g.padX, 31);
+    ctx.fillText('ОДИН ЗАВЕРШЁННЫЙ ПРОХОД = ОДИН ВКЛАД В КОНКРЕТНУЮ КОРЗИНУ', g.padX, 43);
     ctx.textAlign = 'right';
-    ctx.fillStyle = COLORS.dim;
-    ctx.fillText(`${source} · ДОВЕРИЕ ${(weight * 100).toFixed(0)}%`, w - g.padX, 17);
-    ctx.fillText(`ВКЛАДОВ ${empirical.visible}/${s.dropped} · СОГЛАСИЕ ${fmtPct(empirical.agreement)}`, w - g.padX, 31);
-    const moments = empirical.moments;
-    ctx.fillText(`μ ${fmtR(moments.mean)} · σ ${fmtR(moments.sigma)} · SKEW ${moments.skew == null ? '—' : moments.skew.toFixed(2)}`,
-      w - g.padX, 44);
+    ctx.fillText(`${state.sourceLabel || 'GALTON'} · μ ${fmtR(state.model.center)} · σ ${fmtR(state.model.sigma)}`,
+      w - g.padX, 17);
+    ctx.fillText(`ШАРИКОВ ${state.dropped} · P(+R) ${fmtPct(stats().greenShare)} · ОШИБКА ${fmtPct(stats().convergence)}`,
+      w - g.padX, 31);
 
     ctx.font = '9px "IBM Plex Mono", monospace';
-    ctx.textAlign = 'left';
     ctx.fillStyle = COLORS.ink;
-    ctx.fillText(`${domain().lo.toFixed(2)}R`, g.padX, g.axisY);
-    ctx.textAlign = 'center';
-    ctx.fillText('0', zeroX, g.axisY);
-    ctx.fillText(`r=${fmtR(s.r)}`, currentX, g.axisY - 13);
-    ctx.textAlign = 'right';
-    ctx.fillText(`${domain().hi >= 0 ? '+' : ''}${domain().hi.toFixed(2)}R`, w - g.padX, g.axisY);
-    ctx.font = '8px "IBM Plex Mono", monospace';
     ctx.textAlign = 'left';
-    ctx.fillStyle = COLORS.red;
-    ctx.fillText(`← ВНЕ ОКНА ${fmtPct(s.tails.current?.left_tail)}`, g.padX, g.deltaTop - 6);
+    ctx.fillText(`${state.model.lo.toFixed(2)}R`, g.padX, h - 8);
+    ctx.textAlign = 'center';
+    ctx.fillText('0', zeroX, h - 8);
+    ctx.fillText(`r=${fmtR(state.r)}`, currentX, g.baseY + 20);
     ctx.textAlign = 'right';
-    ctx.fillStyle = COLORS.green;
-    ctx.fillText(`ВНЕ ОКНА ${fmtPct(s.tails.current?.right_tail)} →`, w - g.padX, g.deltaTop - 6);
+    ctx.fillText(`${state.model.hi >= 0 ? '+' : ''}${state.model.hi.toFixed(2)}R`, w - g.padX, h - 8);
   }
 
-  function favorableDelta() {
-    const buckets = s.revaluation?.change_from_entry?.buckets || {};
-    return finite(buckets.green_zone, 0) + finite(buckets.take_tail, 0);
+  function stats() {
+    const greenShare = state.dropped ? state.green / state.dropped : null;
+    const pGreenModel = state.model
+      ? state.model.probs.reduce((sum, p, bin) => sum + (binIsGreen(bin) ? p : 0), 0)
+      : null;
+    const empirical = empiricalShares();
+    const shapeError = state.dropped && state.model
+      ? 0.5 * empirical.reduce((sum, p, bin) => sum + Math.abs(p - state.model.probs[bin]), 0)
+      : null;
+    return {
+      dropped: state.dropped,
+      greenShare,
+      pGreenModel,
+      convergence: greenShare != null && pGreenModel != null
+        ? Math.abs(greenShare - pGreenModel) : null,
+      shapeError,
+      modelMean: state.model?.center ?? null,
+      modelSigma: state.model?.sigma ?? null,
+    };
   }
-  function adverseDelta() {
-    const buckets = s.revaluation?.change_from_entry?.buckets || {};
-    return finite(buckets.stop_tail, 0) + finite(buckets.red_zone, 0);
-  }
-  function rowLabel(id, text) {
-    const value = document.getElementById(id);
-    const label = value?.parentElement?.querySelector('.lbl');
-    if (label) label.textContent = text;
-  }
+
   function updateDom() {
     if (typeof document === 'undefined') return;
+    const current = stats();
     const title = document.querySelector('#panel-lattice h2');
     if (title) title.textContent = 'PROBABILITY LATTICE · ЖИВАЯ ДОСКА ГАЛЬТОНА';
-    const resetButton = document.getElementById('btn-lattice-reset');
-    if (resetButton) {
-      resetButton.textContent = 'СБРОС ШАРИКОВ';
-      resetButton.dataset.tip = 'Сбросить накопленный вклад шариков. Серверная option-implied история не удаляется.';
+    const button = document.getElementById('btn-lattice-reset');
+    if (button) {
+      button.textContent = 'СБРОС ШАРИКОВ';
+      button.dataset.tip = 'Сбросить только накопленное распределение реально упавших шариков.';
     }
-    rowLabel('lat-balls', 'ВКЛАДОВ ШАРИКОВ');
-    rowLabel('lat-green', 'ШАРИКИ В +R');
-    rowLabel('lat-conv', 'СХОДИМОСТЬ С RND');
-    rowLabel('lat-calib', 'ДОВЕРИЕ / ИСТОЧНИК');
-    const empirical = s.edges ? empiricalState() : null;
-    const score = s.revaluation?.score || {};
-    const source = s.source?.label || s.source?.mode || '—';
-    const setText = (id, text, tone = '') => {
-      const el = document.getElementById(id);
-      if (!el) return;
-      el.textContent = text;
-      el.className = `val${tone ? ` ${tone}` : ''}`;
+    const labels = {
+      'lat-balls': 'ШАРИКОВ УПАЛО',
+      'lat-green': 'ШАРИКИ В +R',
+      'lat-conv': 'ОШИБКА К МОДЕЛИ',
     };
-    setText('lat-balls', empirical ? `${empirical.visible}/${s.dropped}` : String(s.dropped));
-    setText('lat-green', fmtPct(empirical?.green),
-      empirical?.green > 0.55 ? 'green' : empirical?.green < 0.45 ? 'red' : '');
-    setText('lat-conv', fmtPct(empirical?.agreement),
-      empirical?.agreement > 0.82 ? 'green' : empirical?.agreement < 0.62 ? 'red' : '');
-    setText('lat-calib', `${(finite(score.confidence_weight, 0) * 100).toFixed(0)}% · ${source}`);
-    const pAvg = document.getElementById('lat-p-avg');
-    if (pAvg && s.revaluation?.entry && s.revaluation?.average) {
-      pAvg.textContent = `· вход ${fmtPct(s.revaluation.entry.p_take)} · ср ${fmtPct(s.revaluation.average.p_take)}`;
+    for (const [id, text] of Object.entries(labels)) {
+      const value = document.getElementById(id);
+      const label = value?.parentElement?.querySelector('.lbl');
+      if (label) label.textContent = text;
     }
-    const read = document.getElementById('lat-read');
-    if (read) {
-      const [headline] = scoreText();
-      const de = s.revaluation?.change_from_entry || {};
-      const moments = empirical?.moments || {};
-      read.textContent = `${headline}: шарики дали ${empirical?.visible || 0} вкладов · P(+R) ${fmtPct(empirical?.green)} · P(тейк-зона) ${fmtPct(empirical?.take)} · согласие с CURRENT RND ${fmtPct(empirical?.agreement)} · μ ${fmtR(moments.mean)} · skew ${moments.skew == null ? '—' : moments.skew.toFixed(2)} · ΔP тейка ${fmtPp(de.p_take)}`;
-      read.className = `lat-read ${score.direction === 'improving' ? 'good' : score.direction === 'deteriorating' ? 'bad' : ''}`;
-    }
-  }
-  function scheduleDomUpdate() {
-    if (typeof queueMicrotask === 'function') queueMicrotask(updateDom);
-    else setTimeout(updateDom, 0);
-  }
-  async function initialState() {
-    try {
-      const response = await fetch('/api/state', { cache: 'no-store' });
-      if (!response.ok) return;
-      const body = await response.json();
-      consumeTick(body.tick);
-    } catch (_) { /* terminal owns offline reporting */ }
-  }
-  function connect() {
-    if (typeof WebSocket === 'undefined' || typeof location === 'undefined') return;
-    clearTimeout(s.reconnectTimer);
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const socket = new WebSocket(`${protocol}//${location.host}/ws`);
-    socket.onmessage = (event) => {
-      try { consumeTick(JSON.parse(event.data)); } catch (_) { /* ignore malformed tick */ }
-    };
-    socket.onclose = () => { s.reconnectTimer = setTimeout(connect, 2200); };
-    socket.onerror = () => socket.close();
+    const balls = document.getElementById('lat-balls');
+    const green = document.getElementById('lat-green');
+    const conv = document.getElementById('lat-conv');
+    if (balls) balls.textContent = String(current.dropped);
+    if (green) green.textContent = fmtPct(current.greenShare);
+    if (conv) conv.textContent = current.convergence == null
+      ? '—' : `${(current.convergence * 100).toFixed(1)} пп`;
   }
 
   let lastFrame = typeof performance !== 'undefined' ? performance.now() : 0;
   function frame(now) {
-    const dt = Math.min(50, Math.max(0, now - lastFrame));
+    const dt = Math.min(55, Math.max(0, now - lastFrame));
     lastFrame = now;
-    if (s.active && s.current) {
-      s.lastSpawn += dt;
-      if (s.lastSpawn >= s.nextSpawnIn) {
-        s.lastSpawn = 0;
-        s.nextSpawnIn = 260 + (s.sequence % 7) * 24;
+    if (state.active && state.model) {
+      state.lastSpawn += dt;
+      if (state.lastSpawn >= state.nextSpawnIn) {
+        state.lastSpawn = 0;
+        state.nextSpawnIn = 285 + (state.sequence % 7) * 24;
         spawnBall();
       }
       stepBalls(dt);
     }
-    draw(now);
+    draw();
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
   if (typeof window !== 'undefined') {
-    initialState();
-    connect();
-    setInterval(updateDom, 1200);
-    window.addEventListener('beforeunload', () => persist(true));
+    setInterval(updateDom, 500);
+    window.addEventListener('beforeunload', () => saveStored(state.tradeId, state, storage));
   }
 
   return {
     setData,
-    reset() { resetBoard({ clearStorage: true }); scheduleDomUpdate(); },
-    get stats() {
-      const empirical = s.edges ? empiricalState() : null;
-      const modelGreen = s.current && s.edges
-        ? s.current.reduce((sum, p, i) => sum + (binMid(i) > 0 ? p : 0), 0) : null;
-      return {
-        dropped: s.dropped,
-        recentContributions: empirical?.visible || 0,
-        greenShare: empirical?.green ?? null,
-        takeShare: empirical?.take ?? null,
-        pGreenModel: modelGreen,
-        convergence: empirical?.tv ?? null,
-        agreement: empirical?.agreement ?? null,
-        meanR: empirical?.moments.mean ?? null,
-        sigmaR: empirical?.moments.sigma ?? null,
-        skew: empirical?.moments.skew ?? null,
-        visibleMass: finite(s.tails.current?.visible_mass, 1),
-        leftTail: finite(s.tails.current?.left_tail, 0),
-        rightTail: finite(s.tails.current?.right_tail, 0),
-        restored: s.samples.length > 0,
-      };
-    },
+    reset() { reset({ clearStorage: true }); updateDom(); },
+    get stats() { return stats(); },
   };
 }

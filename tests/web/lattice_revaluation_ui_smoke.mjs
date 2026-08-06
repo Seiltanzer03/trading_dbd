@@ -7,23 +7,27 @@ const source = fs.readFileSync(
 );
 
 for (const text of [
-  'ПУНКТИР — ВХОД',
-  'СЕРАЯ — СРЕДНЕЕ',
-  'ОРАНЖЕВАЯ — CURRENT RND',
-  '1 ПРИЗЕМЛЕНИЕ = 1 ВКЛАД',
-  'ЧЁРНАЯ — ЭМПИРИКА ШАРИКОВ',
-  'deterministicTarget',
-  'empiricalKernelDistribution',
+  'const ROWS = 10',
+  'const BINS = ROWS + 1',
+  'КЛАССИЧЕСКАЯ ДОСКА · 10 РЯДОВ → 11 КОРЗИН',
+  'ОДИН ЗАВЕРШЁННЫЙ ПРОХОД = ОДИН ВКЛАД',
+  'buildGaltonDistribution',
+  'deterministicBin',
   'advanceBallKinematics',
   'spawnBall',
-  's.samples.push(ball.targetR)',
-  'IMPACT_HOLD_MS',
-  'landingPoint',
-  'lattice_visual_history',
-  'НЕ СЛОЖЕНЫ В КРАЙНИЕ КОРЗИНЫ',
+  'state.counts[ball.bin] += 1',
+  'pegX',
+  'stackPoint',
+  'requestAnimationFrame',
 ]) {
-  assert.ok(source.includes(text), `real-contribution Galton board must mention ${text}`);
+  assert.ok(source.includes(text), `classic Galton board must mention ${text}`);
 }
-assert.ok(!source.includes('Math.random'), 'Galton paths and target bins must remain deterministic');
-assert.ok(source.includes('requestAnimationFrame'), 'balls must remain a live animated board');
-console.log('real landed-ball Galton contract ok');
+assert.ok(!source.includes('new WebSocket'),
+  'lattice must not own a second websocket competing with app.js');
+assert.ok(!source.includes("fetch('/api/state'"),
+  'lattice must receive one canonical data stream through setData');
+assert.ok(!source.includes('Math.random'),
+  'ball targets and paths must remain deterministic for reproducible checks');
+assert.ok(source.includes('right side of the Galton bell') === false,
+  'test prose must not leak into production module');
+console.log('classic aligned Galton board contract ok');
