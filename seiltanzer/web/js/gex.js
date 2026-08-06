@@ -139,8 +139,7 @@ function updateMigrationSummary(summary) {
     statusEl.textContent = `● GEX MIGRATION · ${n} SNAP${h}`;
   }
 
-  // Add compact real-history metadata when the browser DOM supports creation.
-  const card = $('#gex-migration-summary');
+  const card = $('#gex-summary-card');
   if (card && typeof document.createElement === 'function') {
     let meta = $('#gex-migration-meta');
     if (!meta) {
@@ -192,8 +191,6 @@ function renderMigrationMap() {
   const X = (ts) => margin.left + ((Number(ts) - tMin) / Math.max(1, tMax - tMin)) * plotW;
   const Y = (p) => margin.top + plotH - ((Number(p) - pMin) / Math.max(1e-9, pMax - pMin)) * plotH;
 
-  // Robust GEX scale: 98th percentile + sqrt compression. One extreme strike can
-  // no longer wash out the whole migration surface.
   const abs = [];
   heat.forEach((row) => row.forEach((v) => { if (Math.abs(Number(v)) > 0) abs.push(Math.abs(Number(v))); }));
   const scale = Math.max(percentile(abs, 0.98), 1e-12);
@@ -211,7 +208,6 @@ function renderMigrationMap() {
     }
   }
 
-  // Axes / action-zone grid.
   ctx.font = '9px IBM Plex Mono, monospace';
   ctx.strokeStyle = 'rgba(80,78,72,.16)'; ctx.fillStyle = '#6f6c64';
   for (let i = 0; i <= 6; i++) {
