@@ -245,6 +245,7 @@ class Engine:
             "correlation": getattr(self.market, "correlation", {}),
             "vrp": self._vrp_payload(),
             "filters": self._filters_payload(trade),
+            "analytics": self._analytics_summary(price, trade),
         }
 
         payload["verdict"] = None
@@ -1324,6 +1325,62 @@ class Engine:
             "rn_probs": rn_probs,
             "oi_walls": oi_walls,
         })
+
+    def gex_migration_payload(self) -> dict:
+        """Полноразмерный payload миграции условных уровней (GEX Migration Map)."""
+        ridge = self.ridge_payload()
+        if not ridge.get("available"):
+            return {
+                "available": False,
+                "reason": ridge.get("reason", "Нет данных опционной цепочки"),
+                "summary": {
+                    "gamma_regime": "NO DATA",
+                    "take_path": "NO DATA",
+                    "path_pressure": 0.0,
+                    "authority": "context_only",
+                    "independent_vote": False,
+                },
+            }
+        from .core.gex_migration import compute_gex_migration
+
+        trade = self.journal.active_trade()
+        price = ridge.get("price")
+        snaps = ridge.get("snapshots") or []
+        res = compute_gex_migration(snaps, price, trade)
+        return clean_nans(res)
+
+    def _analytics_summary(self, price, trade) -> dict:
+        gex_mig = self.gex_migration_payload()
+        gex_sum = (
+            gex_mig.get("summary")
+            if gex_mig.get("available")
+            else {
+                "available": False,
+                "gamma_regime": "NO DATA",
+                "take_path": "NO DATA",
+                "path_pressure": 0.0,
+                "authority": "context_only",
+                "independent_vote": False,
+            }
+        )
+        return {
+            "gex_migration": gex_sum,
+            "macro_regime": getattr(
+                self,
+                "_macro_regime_summary_cache",
+                {"available": False, "authority": "strategy_context"},
+            ),
+            "wavelet": getattr(
+                self,
+                "_wavelet_summary_cache",
+                {"available": False, "authority": "derived_price_context"},
+            ),
+            "cross_asset": getattr(
+                self,
+                "_cross_asset_summary_cache",
+                {"available": False, "authority": "correlation_family"},
+            ),
+        }
 
     def _map_snapshot(self, snap: dict, instrument_price: float,
                       proxy_spot: float) -> dict | None:

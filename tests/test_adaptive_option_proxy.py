@@ -1,7 +1,7 @@
 import numpy as np
 
 from seiltanzer.config import INSTRUMENTS
-from seiltanzer.core.options import RNDensity
+from seiltanzer.core.options import RNDensity, _trapezoid
 from seiltanzer.data import adaptive_chain as adaptive
 from seiltanzer.data.feeds import MarketData
 
@@ -37,7 +37,7 @@ def test_widest_balanced_expiry_is_used_when_none_fully_covers():
 def test_missing_bl_tails_are_extrapolated_for_real_proxy_mapping():
     strikes = np.linspace(90.0, 110.0, 41)
     q = np.exp(-0.5 * ((strikes - 100.0) / 4.0) ** 2)
-    area = np.trapezoid(q, strikes)
+    area = _trapezoid(q, strikes)
     density = RNDensity(strikes=strikes, density=q / area, t_years=14 / 365)
     setattr(density, "_allow_proxy_tail_extrapolation", True)
 
@@ -66,7 +66,7 @@ def test_unmarked_density_retains_strict_original_contract():
     q = np.exp(-0.5 * ((strikes - 100.0) / 4.0) ** 2)
     density = RNDensity(
         strikes=strikes,
-        density=q / np.trapezoid(q, strikes),
+        density=q / _trapezoid(q, strikes),
         t_years=14 / 365,
     )
     result = adaptive.market_r_distribution(
@@ -80,7 +80,7 @@ def test_unmarked_density_retains_strict_original_contract():
 def test_empirical_bl_support_is_left_untouched_when_sufficient():
     strikes = np.linspace(70.0, 135.0, 131)
     q = np.exp(-0.5 * ((strikes - 100.0) / 12.0) ** 2)
-    area = np.trapezoid(q, strikes)
+    area = _trapezoid(q, strikes)
     density = RNDensity(strikes=strikes, density=q / area, t_years=30 / 365)
 
     result = adaptive.market_r_distribution(
@@ -103,7 +103,7 @@ def test_real_proxy_mapping_is_marked_but_demo_same_scale_is_not():
     q = np.exp(-0.5 * ((strikes - 100.0) / 8.0) ** 2)
     density = RNDensity(
         strikes=strikes,
-        density=q / np.trapezoid(q, strikes),
+        density=q / _trapezoid(q, strikes),
         t_years=14 / 365,
     )
     real = adaptive.map_proxy_density(density, proxy_spot=100.0,
