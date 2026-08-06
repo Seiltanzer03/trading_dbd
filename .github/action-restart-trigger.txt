@@ -1,3 +1,1 @@
-GitHub Actions restart trigger.
-No runtime or application behavior is changed.
-Requested: 2026-08-06T21:15:00+03:00
+Trigger self-hosted deploy workflow on main: 2026-08-07T00:40:30+03:00
