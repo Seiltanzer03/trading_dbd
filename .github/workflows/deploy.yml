@@ -33,7 +33,12 @@ jobs:
           node --check seiltanzer/web/js/cone.js
           node --check seiltanzer/web/js/iv_surface.js
           node --check seiltanzer/web/js/levels.js
+          node --check seiltanzer/web/js/gex.js
+          node --check seiltanzer/web/js/regime_phase.js
+          node --check seiltanzer/web/js/wavelet.js
+          node --check seiltanzer/web/js/correlation.js
           node tests/web/cone_interaction_smoke.mjs
+          node tests/web/gex_smoke.mjs
 
       - name: Запуск деплоя на production
         env:
@@ -47,7 +52,7 @@ jobs:
 
       - name: Пост-проверка результатов production-деплоя
         run: |
-          git config --global --add safe.directory "*" || true
+          git config --global --add safe.directory /opt/seiltanzer || true
           DEPLOYED_COMMIT=$(git -C /opt/seiltanzer rev-parse HEAD)
           EXPECTED_COMMIT=$(git rev-parse HEAD)
           echo "Server current HEAD: $DEPLOYED_COMMIT"
@@ -56,7 +61,7 @@ jobs:
             echo "::error::Commit mismatch! Server HEAD ($DEPLOYED_COMMIT) != Expected ($EXPECTED_COMMIT)"
             exit 1
           fi
-          
+
           IS_ACTIVE=$(systemctl is-active seiltanzer || true)
           echo "Systemd service status: $IS_ACTIVE"
           if [ "$IS_ACTIVE" != "active" ]; then
@@ -71,6 +76,19 @@ jobs:
             exit 1
           fi
 
+          for endpoint in \
+            /api/analytics/gex-migration \
+            /api/analytics/regime-phase \
+            /api/analytics/wavelet \
+            /api/analytics/correlation-graph; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8790${endpoint}" || true)
+            echo "$endpoint: $code"
+            if [ "$code" != "200" ]; then
+              echo "::error::$endpoint status is $code"
+              exit 1
+            fi
+          done
+
       - name: Публикую проверенный production-статус
         if: always()
         env:
@@ -79,7 +97,7 @@ jobs:
         run: |
           if [ "$JOB_STATUS" = "success" ]; then
             state="success"
-            description="Production active; server HEAD and HTTP 200 verified"
+            description="Production active; analytics endpoints, server HEAD and HTTP 200 verified"
           else
             state="failure"
             description="Tests or production verification failed"

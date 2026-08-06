@@ -6,6 +6,7 @@ import argparse
 
 import uvicorn
 
+from .analytics_runtime import install_analytics_runtime
 from .app import create_app
 from .app_extensions import install_ai_decision_routes, install_lattice_revaluation
 from .config import Settings
@@ -33,6 +34,11 @@ def main() -> None:
         from .check import run_check
         run_check()
         return
+
+    # Advanced analytics keep the public Engine/API contract but use real
+    # observed/history data instead of the temporary synthetic placeholders
+    # that were used by the first visualization prototype.
+    install_analytics_runtime()
 
     settings = Settings(demo=args.demo, stream=args.stream, host=args.host,
                         port=args.port, data_dir=args.data_dir)
