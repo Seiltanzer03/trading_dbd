@@ -18,7 +18,35 @@ jobs:
       - name: Dispatch tested production deploy for current main
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
+          PR_NUMBER: ${{ github.event.issue.number }}
         run: |
-          set -e
+          set -euo pipefail
           test -n "$GH_TOKEN"
+
+          before="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId // 0')"
           gh workflow run deploy.yml --repo "$GITHUB_REPOSITORY" --ref main
+
+          run_id=""
+          run_url=""
+          run_status="queued"
+          for _ in $(seq 1 20); do
+            row="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml --branch main --limit 1 --json databaseId,url,status --jq '.[0] | [.databaseId,.url,.status] | @tsv')"
+            current_id="$(printf '%s' "$row" | cut -f1)"
+            if [ -n "$current_id" ] && [ "$current_id" != "$before" ]; then
+              run_id="$current_id"
+              run_url="$(printf '%s' "$row" | cut -f2)"
+              run_status="$(printf '%s' "$row" | cut -f3)"
+              break
+            fi
+            sleep 3
+          done
+
+          if [ -n "$run_id" ]; then
+            body="Deploy текущего main запущен: run #$run_id ($run_status) — $run_url"
+          else
+            body="Команда deploy принята, но новый run ещё не появился в списке GitHub Actions."
+          fi
+
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            -f body="$body"
