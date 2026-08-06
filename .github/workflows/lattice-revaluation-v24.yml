@@ -28,3 +28,5 @@ jobs:
         run: node tests/web/lattice_scale_smoke.mjs
       - name: Revaluation UI syntax
         run: node --check seiltanzer/web/js/lattice_revaluation_ui.js
+      - name: Revaluation UI contract
+        run: node tests/web/lattice_revaluation_ui_smoke.mjs
