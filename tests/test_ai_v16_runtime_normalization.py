@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import seiltanzer.ai_policy as public_policy
+import seiltanzer.ai_verdict as public_verdict
 from seiltanzer.ai_policy_v14 import (
     _COST_CTX,
     _RISK_CTX,
@@ -7,6 +9,13 @@ from seiltanzer.ai_policy_v14 import (
     risk_constraint,
 )
 from seiltanzer.ai_verdict_v16 import normalize_final_report
+
+
+def test_public_facades_load_current_runtime_layers():
+    assert public_policy.risk_constraint is risk_constraint
+    assert public_policy.risk_constraint.__module__ == "seiltanzer.ai_policy_v14"
+    assert public_verdict.normalize_final_report is normalize_final_report
+    assert public_verdict.request_verdict.__module__ == "seiltanzer.ai_verdict_v16"
 
 
 def test_final_report_labels_nearest_rung_and_repairs_source_percentage():
