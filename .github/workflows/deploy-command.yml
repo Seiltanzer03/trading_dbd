@@ -1,0 +1,24 @@
+name: deploy-command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/deploy-current-main' &&
+      github.event.comment.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch tested production deploy for current main
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -e
+          test -n "$GH_TOKEN"
+          gh workflow run deploy.yml --repo "$GITHUB_REPOSITORY" --ref main
