@@ -1,6 +1,7 @@
 from pathlib import Path
 
 
+# This file also provides a harmless open PR target for owner-only deploy commands.
 def test_deploy_command_is_owner_only_and_uses_repository_pat():
     text = Path('.github/workflows/deploy-command.yml').read_text(encoding='utf-8')
     assert "github.event.comment.body == '/deploy-current-main'" in text
