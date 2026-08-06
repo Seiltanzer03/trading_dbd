@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-const source = fs.readFileSync(
+const wrapper = fs.readFileSync(
   new URL('../../seiltanzer/web/js/lattice.js', import.meta.url),
+  'utf8',
+);
+const source = fs.readFileSync(
+  new URL('../../seiltanzer/web/js/lattice_core.js', import.meta.url),
   'utf8',
 );
 
@@ -46,4 +50,18 @@ const ballDraw = source.indexOf('for (const ball of state.balls)');
 const columnDraw = source.indexOf('ctx.fillRect(x + 2, g.baseY - hgt');
 assert.ok(ballDraw >= 0 && columnDraw > ballDraw,
   'columns must draw over the landing phase so they visually absorb the ball');
-console.log('absorbing empirical-column Galton contract ok');
+
+for (const text of [
+  "export * from './lattice_core.js'",
+  "const STABLE_IDS = ['lat-balls', 'lat-green', 'lat-conv', 'lat-calib', 'lat-read']",
+  'sink.hidden = true',
+  "mirror.id = `${id}-stable`",
+  'КОЛОНКИ ${dropped} · +R',
+  'LIVE ${fmtPct(live)} · ИСТ ${fmtPct(history)} · Δ ${fmtPct(shift)}',
+  "read.style.whiteSpace = 'pre-line'",
+]) {
+  assert.ok(wrapper.includes(text), `stable DOM owner must mention ${text}`);
+}
+assert.ok(!wrapper.includes("document.getElementById('lat-read').textContent"),
+  'wrapper must render only through isolated visible mirrors');
+console.log('absorbing empirical-column and stable DOM ownership contract ok');
