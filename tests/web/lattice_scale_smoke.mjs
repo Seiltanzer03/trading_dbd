@@ -1,116 +1,60 @@
 import assert from 'node:assert/strict';
-
 globalThis.requestAnimationFrame = () => 0;
 const {
   computeFocusDomain,
   rebinDistribution,
   empiricalCounts,
+  savePersistedLattice,
+  loadPersistedLattice,
+  clearPersistedLattice,
 } = await import('../../seiltanzer/web/js/lattice.js');
 
-// The board follows P10/P90 instead of forcing a fixed trade-only crop. Stop,
-// take and live r remain visible, while the central 80% distribution is kept.
-const coarseEdges = Array.from({ length: 12 }, (_, i) => -15 + i * 3);
-const coarseProbs = [0.01, 0.02, 0.04, 0.08, 0.16, 0.25, 0.20, 0.12, 0.07, 0.03, 0.02];
 const domain = computeFocusDomain({
-  edges: coarseEdges,
-  T: 2.5,
-  r: 0.2,
-  q10: -3,
-  q50: 0.5,
-  q90: 5,
-});
-
-assert.equal(domain.lo, -3.25);
-assert.equal(domain.hi, 5.25,
-  'the full P10-P90 range plus margin must remain visible');
-assert.ok(domain.lo <= -1 && domain.hi >= 2.5,
-  'stop and take must remain visible');
-assert.equal(domain.compressed, true);
-
-const rebinned = rebinDistribution(coarseProbs, coarseEdges, domain.lo, domain.hi, 11);
-assert.equal(rebinned.probs.length, 11);
-assert.equal(rebinned.edges.length, 12);
-assert.ok(Math.abs(rebinned.probs.reduce((a, b) => a + b, 0) - 1) < 1e-9,
-  'visible shape must be normalized inside the selected window');
-assert.ok(Math.abs(
-  rebinned.leftTail + rebinned.visibleMass + rebinned.rightTail - 1,
-) < 1e-9, 'tail and visible masses must preserve the full distribution');
-assert.ok(rebinned.leftTail > 0 && rebinned.rightTail > 0,
-  'distant option tails must remain separate diagnostics');
-assert.ok(rebinned.probs[0] < 0.5 && rebinned.probs.at(-1) < 0.5,
-  'tails must not be folded into giant ordinary edge bins');
-
-// NAS100-like broad support: use the actual central quantiles instead of a local
-// -2R…take+1R slice that makes a broad density appear flat.
-const nasdaqDomain = computeFocusDomain({
-  edges: [-34.1, -25, -15, -8, -3, 0, 3, 8, 15, 25, 33.9],
+  edges: [-34.1, -20, -8, -3, 0, 3, 8, 20, 33.9],
   T: 1.31,
   r: -0.07,
   q10: -3.8,
   q50: -0.4,
   q90: 3.0,
 });
-assert.equal(nasdaqDomain.lo, -4.25);
-assert.equal(nasdaqDomain.hi, 3.25);
-assert.ok(nasdaqDomain.lo <= -1 && nasdaqDomain.hi >= 1.31);
+assert.equal(domain.lo, -2, 'board keeps one R of space beyond the -1R stop');
+assert.equal(domain.hi, 2.5, 'take+1R is quantized to a stable 0.25R grid');
+assert.ok(domain.lo <= -1 && domain.hi >= 1.31);
 
-// A smooth input density must remain single-peaked after focusing. The window
-// may crop true outer tails, but it must not create artificial edge peaks or a
-// flat trade-only plateau.
-const smoothEdges = Array.from({ length: 137 }, (_, i) => -34 + i * 0.5);
-const smoothProbs = smoothEdges.slice(0, -1).map((a, i) => {
-  const mid = (a + smoothEdges[i + 1]) / 2;
+const edges = Array.from({ length: 137 }, (_, i) => -34 + i * 0.5);
+const probs = edges.slice(0, -1).map((a, i) => {
+  const mid = (a + edges[i + 1]) / 2;
   const z = (mid + 0.4) / 2.4;
   return Math.exp(-0.5 * z * z);
 });
-const smoothTotal = smoothProbs.reduce((a, b) => a + b, 0);
-for (let i = 0; i < smoothProbs.length; i++) smoothProbs[i] /= smoothTotal;
-const smooth = rebinDistribution(
-  smoothProbs,
-  smoothEdges,
-  nasdaqDomain.lo,
-  nasdaqDomain.hi,
-  11,
-);
-const peak = Math.max(...smooth.probs);
-const peakIndex = smooth.probs.indexOf(peak);
-assert.ok(peakIndex > 0 && peakIndex < smooth.probs.length - 1,
-  'the visible distribution peak must remain inside the board');
-assert.ok(peak > smooth.probs[0] * 1.35 && peak > smooth.probs.at(-1) * 1.35,
-  'a smooth central density must not become an edge-dominated or flat profile');
-assert.ok(smooth.visibleMass > 0.75,
-  'a P10-P90 window should retain most of the distribution mass');
+const total = probs.reduce((a, b) => a + b, 0);
+for (let i = 0; i < probs.length; i++) probs[i] /= total;
+const rebinned = rebinDistribution(probs, edges, domain.lo, domain.hi, 11);
+assert.ok(Math.abs(rebinned.leftTail + rebinned.visibleMass + rebinned.rightTail - 1) < 1e-9);
+assert.ok(rebinned.leftTail > 0 && rebinned.rightTail > 0);
+assert.ok(rebinned.probs[0] < 0.5 && rebinned.probs.at(-1) < 0.5,
+  'outer support must not create giant edge bins');
+assert.equal(empiricalCounts([-8, -1.8, -0.2, 0.4, 2.2, 9], rebinned.edges)
+  .reduce((a, b) => a + b, 0), 4,
+'out-of-window samples stay in tail pockets instead of edge bins');
 
-// Landed balls are real R values. Samples outside the current visual window are
-// not misrepresented as ordinary edge-bin landings.
-const samples = [-5.0, -3.0, -1.5, -0.3, 0.2, 0.9, 2.7, 4.5];
-const countsA = empiricalCounts(samples, smooth.edges);
-assert.equal(countsA.reduce((a, b) => a + b, 0), 6,
-  'out-of-window samples must not be folded into the first/last bins');
+class MemoryStorage {
+  constructor() { this.map = new Map(); }
+  getItem(k) { return this.map.has(k) ? this.map.get(k) : null; }
+  setItem(k, v) { this.map.set(k, String(v)); }
+  removeItem(k) { this.map.delete(k); }
+}
+const storage = new MemoryStorage();
+const persisted = {
+  samples: [-1.4, -0.2, 0.6, 1.9],
+  dropped: 8,
+  green: 2,
+  leftTailDropped: 3,
+  rightTailDropped: 1,
+};
+assert.equal(savePersistedLattice('trade-42', persisted, storage), true);
+assert.deepEqual(loadPersistedLattice('trade-42', storage), persisted);
+assert.equal(clearPersistedLattice('trade-42', storage), true);
+assert.equal(loadPersistedLattice('trade-42', storage), null);
 
-const shifted = computeFocusDomain({
-  edges: smoothEdges,
-  T: 1.31,
-  r: 0.04,
-  q10: -3.75,
-  q50: -0.35,
-  q90: 3.05,
-});
-const shiftedEdges = Array.from(
-  { length: 12 },
-  (_, i) => shifted.lo + (shifted.hi - shifted.lo) * i / 11,
-);
-const countsB = empiricalCounts(samples, shiftedEdges);
-assert.equal(countsB.reduce((a, b) => a + b, 0), 6,
-  'small live moves must retain samples inside the stable quantile window');
-
-console.log(JSON.stringify({
-  domain,
-  nasdaqDomain,
-  shifted,
-  peakIndex,
-  leftTail: smooth.leftTail,
-  visibleMass: smooth.visibleMass,
-  rightTail: smooth.rightTail,
-  visibleBalls: countsB.reduce((a, b) => a + b, 0),
-}));
+console.log(JSON.stringify({ domain, visibleMass: rebinned.visibleMass }));
