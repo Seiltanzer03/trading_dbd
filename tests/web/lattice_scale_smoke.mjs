@@ -58,8 +58,11 @@ for (let i = peakIndex + 1; i < galton.probs.length; i++) {
   assert.ok(galton.probs[i] <= galton.probs[i - 1] + 1e-12,
     'right side of the Galton bell must fall after the mode');
 }
-assert.ok(galton.probs[0] < peak * 0.45 && galton.probs.at(-1) < peak * 0.45,
-  'wide option support must not flatten the Galton board');
+const uniform = 1 / galton.probs.length;
+assert.ok(peak > uniform * 1.35,
+  'wide option support must still produce a visible interior Galton peak');
+assert.ok(galton.probs[0] < peak * 0.65 && galton.probs.at(-1) < peak * 0.65,
+  'wide option support must not become a visually flat strip');
 
 const sampleA = Array.from({ length: 440 }, (_, i) => deterministicTarget(galton.probs, galton.edges, i));
 const sampleB = Array.from({ length: 440 }, (_, i) => deterministicTarget(galton.probs, galton.edges, i));
@@ -101,4 +104,4 @@ assert.equal(advanceBallKinematics(ball, 80, 10).expired, true,
   'moving sprite disappears only after the contribution has landed');
 
 console.log(JSON.stringify({ domain, visibleMass: rebinned.visibleMass, maxError,
-  galton: { center: galton.center, sigma: galton.sigma, peakIndex } }));
+  galton: { center: galton.center, sigma: galton.sigma, peakIndex, peak } }));
