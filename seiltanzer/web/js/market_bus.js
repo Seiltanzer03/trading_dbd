@@ -7,6 +7,44 @@ let lastTs = 0;
 let lastPrice = null;
 let impulse = 0;
 let seq = 0;
+let lastEmitAt = 0;
+let pendingPacket = null;
+let pendingTimer = null;
+
+function isMobile() {
+  if (typeof window === 'undefined') return false;
+  if (typeof window.matchMedia === 'function') return window.matchMedia('(max-width: 760px)').matches;
+  return Number(window.innerWidth || 9999) <= 760;
+}
+
+function emit(packet) {
+  lastEmitAt = performance.now();
+  pendingPacket = null;
+  listeners.forEach((fn) => {
+    try { fn(packet); } catch (err) { console.warn('market tick listener failed', err); }
+  });
+}
+
+function scheduleMobileEmit(packet) {
+  pendingPacket = packet;
+  // During an active 3D gesture the single-owner Plotly camera controller is
+  // authoritative. Keep only the newest tick and release it when the main
+  // thread has room again instead of making subscribers fight the gesture.
+  const busy = typeof window !== 'undefined' && Boolean(window.__seiltanzer3dBusy);
+  const minInterval = busy ? 120 : 50; // ~8 Hz while touching, 20 Hz otherwise.
+  const elapsed = performance.now() - lastEmitAt;
+  if (elapsed >= minInterval && !busy) {
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+    emit(packet);
+    return;
+  }
+  if (pendingTimer) return;
+  pendingTimer = setTimeout(() => {
+    pendingTimer = null;
+    if (!pendingPacket) return;
+    emit(pendingPacket);
+  }, Math.max(16, minInterval - elapsed));
+}
 
 export function subscribeMarketTick(fn) {
   if (typeof fn !== 'function') return () => {};
@@ -38,7 +76,6 @@ export function publishMarketTick(raw = {}) {
   };
   lastTs = now;
   lastPrice = price;
-  listeners.forEach((fn) => {
-    try { fn(packet); } catch (err) { console.warn('market tick listener failed', err); }
-  });
+  if (isMobile()) scheduleMobileEmit(packet);
+  else emit(packet);
 }
