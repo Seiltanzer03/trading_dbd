@@ -42,6 +42,7 @@ jobs:
           node --check seiltanzer/web/js/premium_analytics_theme.js
           node tests/web/cone_interaction_smoke.mjs
           node tests/web/gex_smoke.mjs
+          node tests/web/analytics_mobile_smoke.mjs
 
       - name: Запуск деплоя на production
         env:

@@ -50,6 +50,14 @@ export function ensurePremiumAnalyticsTheme() {
     .analytics-metric-tile b { font-size:11px;color:#263849;overflow-wrap:anywhere; }
 
     @media (max-width: 760px) {
+      #panel-gex-evol,
+      #panel-macro-regime,
+      #panel-wavelet,
+      #panel-correlation {
+        max-width:100% !important;
+        overflow:hidden !important;
+        contain:layout paint style;
+      }
       #panel-gex-evol .panel-head,
       #panel-macro-regime .panel-head,
       #panel-wavelet .panel-head,
@@ -64,9 +72,11 @@ export function ensurePremiumAnalyticsTheme() {
       #panel-wavelet .panel-head h2,
       #panel-correlation .panel-head h2 {
         flex:1 1 100% !important;
+        min-width:0 !important;
         font-size:9.5px !important;
         line-height:1.35 !important;
         letter-spacing:.09em !important;
+        overflow-wrap:anywhere !important;
       }
       #panel-gex-evol .panel-head-right,
       #panel-macro-regime .panel-head-right,
@@ -95,12 +105,15 @@ export function ensurePremiumAnalyticsTheme() {
       #panel-wavelet .btn-toggle,
       #panel-correlation .btn-toggle {
         min-width:0 !important;
+        min-height:34px !important;
         padding:6px 4px !important;
         font-size:8px !important;
-        letter-spacing:.04em !important;
+        letter-spacing:.035em !important;
         white-space:nowrap !important;
         overflow:hidden !important;
         text-overflow:ellipsis !important;
+        touch-action:manipulation !important;
+        -webkit-tap-highlight-color:transparent !important;
       }
       #panel-gex-evol .badge,
       #panel-macro-regime .badge,
@@ -117,6 +130,7 @@ export function ensurePremiumAnalyticsTheme() {
       #panel-wavelet .panel-body {
         display:grid !important;
         grid-template-columns:minmax(0,1fr) !important;
+        align-items:start !important;
         gap:9px !important;
         padding:9px !important;
       }
@@ -130,15 +144,19 @@ export function ensurePremiumAnalyticsTheme() {
         max-width:100% !important;
         flex:0 0 auto !important;
         margin:0 !important;
+        position:relative !important;
       }
       #panel-gex-evol .canvas-holder,
-      #panel-wavelet .canvas-holder { height:340px !important; }
-      #panel-macro-regime .canvas-holder { height:360px !important; }
-      #panel-correlation .corr-holder { height:360px !important; }
+      #panel-wavelet .canvas-holder { height:clamp(300px,84vw,380px) !important; }
+      #panel-macro-regime .canvas-holder { height:clamp(320px,90vw,395px) !important; }
+      #panel-correlation .corr-holder { height:clamp(320px,88vw,385px) !important; }
       #gex-evol-canvas,
       #regime-phase-plot,
       #wavelet-canvas-holder,
-      #corr-chart {
+      #corr-chart,
+      #gex-evol-canvas > *,
+      #wavelet-canvas-holder > *,
+      #corr-chart > * {
         width:100% !important;
         max-width:100% !important;
         min-width:0 !important;
@@ -162,23 +180,41 @@ export function ensurePremiumAnalyticsTheme() {
         padding:9px !important;
         font-size:9.5px !important;
         gap:6px !important;
+        overflow:hidden !important;
       }
       .analytics-metric-grid { gap:4px !important; }
-      .analytics-metric-tile { padding:5px 6px !important; }
+      .analytics-metric-tile { padding:5px 6px !important; min-width:0 !important; }
       .analytics-metric-tile small { font-size:7px !important; }
-      .analytics-metric-tile b { font-size:9px !important; }
+      .analytics-metric-tile b { font-size:9px !important; line-height:1.3 !important; }
       #panel-gex-evol .js-plotly-plot,
       #panel-macro-regime .js-plotly-plot,
-      #panel-wavelet .js-plotly-plot {
+      #panel-wavelet .js-plotly-plot,
+      #panel-gex-evol .plot-container,
+      #panel-macro-regime .plot-container,
+      #panel-wavelet .plot-container,
+      #panel-gex-evol .svg-container,
+      #panel-macro-regime .svg-container,
+      #panel-wavelet .svg-container,
+      #panel-gex-evol .gl-container,
+      #panel-macro-regime .gl-container,
+      #panel-wavelet .gl-container {
+        width:100% !important;
+        max-width:100% !important;
+        height:100% !important;
         touch-action:none !important;
         overscroll-behavior:contain !important;
         user-select:none !important;
         -webkit-user-select:none !important;
+        -webkit-tap-highlight-color:transparent !important;
       }
       #panel-gex-evol .modebar,
       #panel-macro-regime .modebar,
       #panel-wavelet .modebar { display:none !important; }
-      #corr-chart canvas { touch-action:none !important; }
+      #corr-chart canvas {
+        touch-action:none !important;
+        overscroll-behavior:contain !important;
+        -webkit-tap-highlight-color:transparent !important;
+      }
       #corr-interpretation {
         padding:8px 4px !important;
         font-size:9px !important;
@@ -186,6 +222,7 @@ export function ensurePremiumAnalyticsTheme() {
         overflow-wrap:anywhere !important;
       }
       .canvas-empty { font-size:9px !important; padding:14px !important; text-align:center !important; }
+      .analytics-offscreen { contain-intrinsic-size:360px !important; }
       html.analytics-3d-busy #panel-gex-evol,
       html.analytics-3d-busy #panel-macro-regime,
       html.analytics-3d-busy #panel-wavelet,
@@ -197,9 +234,9 @@ export function ensurePremiumAnalyticsTheme() {
 
     @media (max-width: 430px) {
       #panel-gex-evol .canvas-holder,
-      #panel-wavelet .canvas-holder { height:315px !important; }
-      #panel-macro-regime .canvas-holder { height:335px !important; }
-      #panel-correlation .corr-holder { height:340px !important; }
+      #panel-wavelet .canvas-holder { height:clamp(292px,86vw,340px) !important; }
+      #panel-macro-regime .canvas-holder { height:clamp(310px,92vw,360px) !important; }
+      #panel-correlation .corr-holder { height:clamp(310px,90vw,355px) !important; }
       #panel-gex-evol .panel-foot,
       #panel-macro-regime .panel-foot,
       #panel-wavelet .panel-foot,
@@ -214,7 +251,10 @@ export function ensurePremiumAnalyticsTheme() {
       #panel-gex-evol .canvas-holder,
       #panel-wavelet .canvas-holder,
       #panel-macro-regime .canvas-holder,
-      #panel-correlation .corr-holder { height:300px !important; }
+      #panel-correlation .corr-holder { height:290px !important; }
+      #gex-summary-card,
+      #regime-summary-card,
+      #wavelet-summary-card { font-size:8.5px !important; }
     }
   `;
   document.head.appendChild(style);
