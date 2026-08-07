@@ -1,5 +1,7 @@
 import { $ } from './util.js';
 import { createPlotlyCameraGuard } from './plotly_camera_guard.js';
+import { subscribeMarketTick } from './market_bus.js';
+import { ensurePremiumAnalyticsTheme } from './premium_analytics_theme.js';
 
 let plotEl;
 let statusEl;
@@ -8,13 +10,20 @@ let currentHorizon = '6H';
 let regimeData = null;
 let cameraGuard = null;
 let refreshTimer = null;
+let unsubscribeTick = null;
+let anchorPrice = null;
+let liveProbe = null;
+let liveTarget = null;
+let probeRaf = null;
+let lastRestyle = 0;
 
 const INIT_CAM = {
-  eye: { x: 1.55, y: -1.7, z: 1.15 },
+  eye: { x: 1.72, y: -1.86, z: 1.28 },
   up: { x: 0, y: 0, z: 1 },
 };
 
 export function initRegimePhase() {
+  ensurePremiumAnalyticsTheme();
   plotEl = $('#regime-phase-plot');
   statusEl = $('#regime-status');
   emptyEl = $('#regime-phase-empty');
@@ -22,6 +31,7 @@ export function initRegimePhase() {
   $('#btn-regime-6h')?.addEventListener('click', () => setHorizon('6H'));
   $('#btn-regime-24h')?.addEventListener('click', () => setHorizon('24H'));
   $('#btn-regime-3d')?.addEventListener('click', () => setHorizon('3D'));
+  unsubscribeTick = subscribeMarketTick(onMarketTick);
   fetchRegimePhase();
   refreshTimer = setInterval(fetchRegimePhase, 300000);
 }
@@ -39,6 +49,9 @@ export async function fetchRegimePhase() {
     const res = await fetch('/api/analytics/regime-phase', { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     regimeData = await res.json();
+    anchorPrice = null;
+    liveProbe = null;
+    liveTarget = null;
     renderRegimePlot();
   } catch (err) {
     console.warn('Regime phase fetch error:', err);
@@ -46,7 +59,65 @@ export async function fetchRegimePhase() {
   }
 }
 
-export function updateLiveRegimePhase() {}
+export function updateLiveRegimePhase() {
+  // Kept for app.js API compatibility; live ticks now arrive through market_bus.
+}
+
+function onMarketTick(tick) {
+  if (!regimeData?.available || !Number.isFinite(tick.price)) return;
+  if (!anchorPrice) anchorPrice = tick.price;
+  const c = regimeData.current || {};
+  const logMove = Math.log(tick.price / Math.max(anchorPrice, 1e-9));
+  const xMicro = clamp(logMove * 170, -0.58, 0.58);
+  const impulse = clamp(Number(tick.impulse || 0), 0, 1);
+  const speed = clamp(Math.abs(Number(tick.speedBpSec || 0)) / 5, 0, 1);
+  liveTarget = {
+    x: Number(c.x_trend || 0) + xMicro,
+    y: Number(c.y_vol || 0) + impulse * 0.20,
+    z: Math.max(0, Number(c.z_stress || 0) + impulse * 0.26 + speed * 0.12),
+    impulse,
+    tick,
+  };
+  if (!liveProbe) liveProbe = { ...liveTarget };
+  ensureProbeAnimation();
+}
+
+function ensureProbeAnimation() {
+  if (probeRaf || !liveTarget) return;
+  const animate = (now) => {
+    if (!liveTarget || !liveProbe) { probeRaf = null; return; }
+    const k = 0.16;
+    liveProbe.x += (liveTarget.x - liveProbe.x) * k;
+    liveProbe.y += (liveTarget.y - liveProbe.y) * k;
+    liveProbe.z += (liveTarget.z - liveProbe.z) * k;
+    if (now - lastRestyle > 65) {
+      restyleLiveProbe();
+      lastRestyle = now;
+    }
+    const err = Math.hypot(liveTarget.x - liveProbe.x, liveTarget.y - liveProbe.y, liveTarget.z - liveProbe.z);
+    if (err > 0.002 || Number(liveTarget.impulse || 0) > 0.02) {
+      liveTarget.impulse *= 0.965;
+      probeRaf = requestAnimationFrame(animate);
+    } else {
+      probeRaf = null;
+    }
+  };
+  probeRaf = requestAnimationFrame(animate);
+}
+
+function restyleLiveProbe() {
+  if (!plotEl || !window.Plotly || !plotEl.data?.length || !liveProbe) return;
+  const idx = plotEl.data.findIndex((t) => t.name === 'LIVE MICRO-PROBE');
+  const halo = plotEl.data.findIndex((t) => t.name === 'LIVE PROBE HALO');
+  if (idx >= 0) window.Plotly.restyle(plotEl, { x: [[liveProbe.x]], y: [[liveProbe.y]], z: [[liveProbe.z]] }, [idx]);
+  if (halo >= 0) {
+    const size = 18 + 16 * Number(liveProbe.impulse || 0);
+    window.Plotly.restyle(plotEl, { x: [[liveProbe.x]], y: [[liveProbe.y]], z: [[liveProbe.z]], 'marker.size': [[size]] }, [halo]);
+  }
+  updateLiveHud();
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, Number(v))); }
 
 function fmtAge(seconds) {
   const s = Number(seconds || 0);
@@ -56,25 +127,25 @@ function fmtAge(seconds) {
 }
 
 function regimeColor(regime, alpha = 1) {
-  const hex = {
-    'VOL SHOCK': [198, 55, 60],
-    'TREND EXPANSION': [229, 138, 43],
-    'CALM TREND': [46, 125, 79],
-    'COMPRESSION': [70, 112, 166],
-    'RECOVERY': [123, 90, 166],
-    'CHOP': [111, 108, 100],
-  }[regime] || [111, 108, 100];
-  return alpha >= 1 ? `rgb(${hex.join(',')})` : `rgba(${hex.join(',')},${alpha})`;
+  const rgb = {
+    'VOL SHOCK': [242, 82, 102],
+    'TREND EXPANSION': [240, 171, 74],
+    'CALM TREND': [67, 215, 159],
+    'COMPRESSION': [75, 143, 226],
+    'RECOVERY': [183, 130, 238],
+    'CHOP': [138, 154, 168],
+  }[regime] || [138, 154, 168];
+  return alpha >= 1 ? `rgb(${rgb.join(',')})` : `rgba(${rgb.join(',')},${alpha})`;
 }
 
-function rangeFor(values, fallback, minSpan = 1.2, lowerBound = null) {
+function rangeFor(values, fallback, minSpan = 1.4, lowerBound = null) {
   const finite = values.filter(Number.isFinite);
   if (!finite.length) return fallback;
   let lo = Math.min(...finite), hi = Math.max(...finite);
   const centre = (lo + hi) / 2;
   const span = Math.max(hi - lo, minSpan);
-  lo = centre - span * 0.72;
-  hi = centre + span * 0.72;
+  lo = centre - span * .68;
+  hi = centre + span * .68;
   if (lowerBound != null) lo = Math.max(lowerBound, lo);
   return [Math.max(fallback[0], lo), Math.min(fallback[1], hi)];
 }
@@ -82,8 +153,9 @@ function rangeFor(values, fallback, minSpan = 1.2, lowerBound = null) {
 function stressBar(label, value, max = 3) {
   const v = Math.max(0, Math.min(max, Number(value || 0)));
   const pct = Math.round(v / max * 100);
-  return `<div style="display:grid;grid-template-columns:88px 1fr 34px;gap:6px;align-items:center;margin:3px 0">
-    <span>${label}</span><span style="height:5px;background:#e7e4dd;display:block;position:relative"><i style="display:block;height:100%;width:${pct}%;background:${pct > 65 ? '#c6373c' : pct > 35 ? '#d79031' : '#5477a8'}"></i></span><b>${v.toFixed(2)}</b></div>`;
+  const color = pct > 65 ? '#d94255' : pct > 35 ? '#d99535' : '#4d7eaa';
+  return `<div style="display:grid;grid-template-columns:88px 1fr 34px;gap:6px;align-items:center;margin:4px 0">
+    <span>${label}</span><span style="height:6px;background:#e7e4dd;display:block;position:relative;border-radius:4px;overflow:hidden"><i style="display:block;height:100%;width:${pct}%;background:${color};box-shadow:0 0 8px ${color}66"></i></span><b>${v.toFixed(2)}</b></div>`;
 }
 
 function buildTimeline(traj) {
@@ -99,7 +171,7 @@ function buildTimeline(traj) {
   const total = Math.max(1, traj.length);
   return `<div style="margin-top:9px;border-top:1px solid #d9d6ce;padding-top:8px">
     <div style="font-size:9px;color:#777;margin-bottom:5px">REGIME TRANSITION · 24H</div>
-    <div style="height:11px;display:flex;overflow:hidden;border-radius:2px;background:#eee">${segments.map((s) => `<span title="${s.regime}" style="width:${100 * s.count / total}%;background:${regimeColor(s.regime)}"></span>`).join('')}</div>
+    <div style="height:12px;display:flex;overflow:hidden;border-radius:999px;background:#eee">${segments.map((s) => `<span title="${s.regime}" style="width:${100 * s.count / total}%;background:${regimeColor(s.regime)}"></span>`).join('')}</div>
     <div style="display:flex;justify-content:space-between;font-size:9px;color:#777;margin-top:4px"><span>−24H</span><span>NOW</span></div></div>`;
 }
 
@@ -116,35 +188,47 @@ function ensureExtraSummary(summary) {
   const vol = summary.vol_index || {};
   const c = summary.stress_components || {};
   extra.innerHTML = `
-    <div>REGIME AGE: <b>${fmtAge(summary.regime_age_seconds)}</b></div>
-    <div>VELOCITY: <b>${Number(summary.transition_velocity || 0).toFixed(2)}/h</b></div>
-    <div>ACCELERATION: <b>${Number(summary.transition_acceleration || 0).toFixed(2)}/h²</b></div>
-    <div>VOL INDEX: <b>${vol.key ? vol.key.toUpperCase() : '—'} ${vol.value == null ? '—' : Number(vol.value).toFixed(1)}</b></div>
-    <div style="margin-top:7px;font-size:9px;color:#777">STRESS DECOMPOSITION</div>
+    <div class="analytics-metric-grid">
+      <div class="analytics-metric-tile"><small>REGIME AGE</small><b>${fmtAge(summary.regime_age_seconds)}</b></div>
+      <div class="analytics-metric-tile"><small>TRANSITION v</small><b>${Number(summary.transition_velocity || 0).toFixed(2)}/h</b></div>
+      <div class="analytics-metric-tile"><small>ACCELERATION</small><b>${Number(summary.transition_acceleration || 0).toFixed(2)}/h²</b></div>
+      <div class="analytics-metric-tile"><small>VOL INDEX</small><b>${vol.key ? vol.key.toUpperCase() : '—'} ${vol.value == null ? '—' : Number(vol.value).toFixed(1)}</b></div>
+    </div>
+    <div style="margin-top:8px;font-size:9px;color:#777">STRESS DECOMPOSITION</div>
     ${stressBar('CROSS-ASSET', c.cross_asset)}
     ${stressBar('VOL IMPULSE', c.realized_impulse)}
     ${stressBar('SHOCK', c.shock)}
     ${stressBar('DISLOCATION', c.trend_dislocation)}
+    <div id="regime-live-probe-hud" style="margin-top:8px;padding:7px;border-radius:6px;background:#f2f5f6;border:1px solid #dce2e4;color:#50606d">LIVE MICRO-PROBE · waiting for ticks</div>
     ${buildTimeline(regimeData?.trajectory_24h || [])}
     <div style="margin-top:7px;color:#777;font-size:9px">${summary.source?.source || '—'} · ${summary.stress_source || '—'}</div>`;
 }
 
-function boxMesh(cx, cy, cz, sx, sy, sz, color, name) {
+function updateLiveHud() {
+  const el = $('#regime-live-probe-hud');
+  if (!el || !liveProbe || !anchorPrice) return;
+  const t = liveProbe.tick || liveTarget?.tick || {};
+  el.innerHTML = `<b>LIVE MICRO-PROBE</b> · X ${liveProbe.x.toFixed(2)} · Y ${liveProbe.y.toFixed(2)} · Z ${liveProbe.z.toFixed(2)}<br>
+    tick ${Number(t.retBp || 0) >= 0 ? '+' : ''}${Number(t.retBp || 0).toFixed(2)}bp · impulse ${Math.round(Number(liveProbe.impulse || 0) * 100)}% · derived from live price, not a new policy vote`;
+}
+
+function boxMesh(cx, cy, cz, sx, sy, sz, color, name, opacity = .085) {
   const x = [], y = [], z = [];
   for (const dx of [-1, 1]) for (const dy of [-1, 1]) for (const dz of [-1, 1]) {
     x.push(cx + dx * sx / 2); y.push(cy + dy * sy / 2); z.push(Math.max(0, cz + dz * sz / 2));
   }
-  // Vertex ordering from nested loops above.
-  const faces = [
-    [0,1,3],[0,3,2],[4,6,7],[4,7,5],
-    [0,4,5],[0,5,1],[2,3,7],[2,7,6],
-    [0,2,6],[0,6,4],[1,5,7],[1,7,3],
-  ];
+  const faces = [[0,1,3],[0,3,2],[4,6,7],[4,7,5],[0,4,5],[0,5,1],[2,3,7],[2,7,6],[0,2,6],[0,6,4],[1,5,7],[1,7,3]];
   return {
     type: 'mesh3d', name, x, y, z,
     i: faces.map((f) => f[0]), j: faces.map((f) => f[1]), k: faces.map((f) => f[2]),
-    color, opacity: 0.065, hoverinfo: 'skip', showlegend: false, flatshading: true,
+    color, opacity, hoverinfo: 'skip', showlegend: false, flatshading: false,
+    lighting: { ambient: .8, diffuse: .28, roughness: .95 },
   };
+}
+
+function trajectoryForHorizon() {
+  const key = currentHorizon === '24H' ? 'trajectory_24h' : currentHorizon === '3D' ? 'trajectory_3d' : 'trajectory_6h';
+  return regimeData?.[key] || [];
 }
 
 function renderRegimePlot() {
@@ -155,7 +239,6 @@ function renderRegimePlot() {
     return;
   }
   if (emptyEl) emptyEl.style.display = 'none';
-
   const summary = regimeData.summary || {};
   const current = regimeData.current || {};
   if ($('#regime-val-label')) { $('#regime-val-label').textContent = current.regime || 'CHOP'; $('#regime-val-label').style.color = regimeColor(current.regime); }
@@ -167,8 +250,7 @@ function renderRegimePlot() {
   if (statusEl) statusEl.textContent = `● ${current.regime || 'CHOP'} · Z ${Number(current.z_stress || 0).toFixed(2)} · ${currentHorizon}`;
   ensureExtraSummary(summary);
 
-  const key = currentHorizon === '24H' ? 'trajectory_24h' : currentHorizon === '3D' ? 'trajectory_3d' : 'trajectory_6h';
-  const traj = regimeData[key] || [];
+  const traj = trajectoryForHorizon();
   const x = traj.map((p) => Number(p.x));
   const y = traj.map((p) => Number(p.y));
   const z = traj.map((p) => Number(p.z));
@@ -178,69 +260,90 @@ function renderRegimePlot() {
     const a = traj[i - 1], dt = Math.max((Number(p.ts) - Number(a.ts)) / 3600, 1 / 12);
     return Math.hypot(Number(p.x)-Number(a.x), Number(p.y)-Number(a.y), Number(p.z)-Number(a.z)) / dt;
   });
-  const maxSpeed = Math.max(0.001, ...speeds);
-
+  const maxSpeed = Math.max(.001, ...speeds);
+  const ages = traj.map((_, i) => i / Math.max(1, traj.length - 1));
   const traces = [
-    boxMesh(1.55, 0.0, 0.35, 1.35, 1.45, 0.7, '#2e7d4f', 'CALM +'),
-    boxMesh(-1.55, 0.0, 0.35, 1.35, 1.45, 0.7, '#2e7d4f', 'CALM -'),
-    boxMesh(0.0, -1.35, 0.28, 1.45, 1.0, 0.55, '#5477a8', 'COMPRESSION'),
-    boxMesh(1.55, 1.05, 0.8, 1.5, 1.15, 1.0, '#e58a2b', 'TREND EXP +'),
-    boxMesh(-1.55, 1.05, 0.8, 1.5, 1.15, 1.0, '#e58a2b', 'TREND EXP -'),
-    boxMesh(0.0, 1.9, 2.0, 2.6, 1.1, 1.7, '#c6373c', 'VOL SHOCK'),
+    boxMesh(1.55, 0.0, 0.36, 1.35, 1.45, .72, '#2e9f74', 'CALM +'),
+    boxMesh(-1.55, 0.0, 0.36, 1.35, 1.45, .72, '#2e9f74', 'CALM -'),
+    boxMesh(0.0, -1.35, .28, 1.45, 1.0, .56, '#477fba', 'COMPRESSION'),
+    boxMesh(1.55, 1.05, .8, 1.5, 1.15, 1.0, '#d88b2c', 'TREND EXP +'),
+    boxMesh(-1.55, 1.05, .8, 1.5, 1.15, 1.0, '#d88b2c', 'TREND EXP -'),
+    boxMesh(0.0, 1.9, 2.0, 2.6, 1.1, 1.7, '#b92f44', 'VOL SHOCK', .105),
+    {
+      type: 'scatter3d', mode: 'lines', name: 'TRAIL HALO', x, y, z,
+      line: { color: 'rgba(61,156,205,.13)', width: 15 }, hoverinfo: 'skip', showlegend: false,
+    },
     {
       type: 'scatter3d', mode: 'lines+markers', name: 'REAL TRAJECTORY', x, y, z,
       text: labels, hovertemplate: '%{text}<br>X=%{x:.2f}<br>Y=%{y:.2f}<br>Z=%{z:.2f}<extra></extra>',
-      line: { color: '#183f68', width: 6 },
-      marker: { size: speeds.map((s) => 2.5 + 4 * Math.min(1, s / maxSpeed)), color: z,
-                colorscale: [[0,'#3e7896'],[0.45,'#49a2a0'],[0.72,'#e0a13e'],[1,'#c6373c']], cmin: 0, cmax: Math.max(1, ...z), showscale: false,
-                line: { color: 'rgba(255,255,255,.55)', width: 0.5 } },
+      line: { color: '#58b9df', width: 6 },
+      marker: {
+        size: speeds.map((s, i) => 2.5 + 4.2 * Math.min(1, s / maxSpeed) + 1.5 * ages[i]),
+        color: z, colorscale: [[0,'#2b7091'],[.4,'#3ec3ad'],[.72,'#e6a947'],[1,'#ef5268']],
+        cmin: 0, cmax: Math.max(1, ...z), showscale: false,
+        line: { color: 'rgba(255,255,255,.5)', width: .5 }, opacity: .92,
+      },
     },
     {
-      type: 'scatter3d', mode: 'lines', hoverinfo: 'skip', showlegend: false,
-      x, y, z: z.map(() => 0), line: { color: 'rgba(45,60,75,.22)', width: 2, dash: 'dot' },
+      type: 'scatter3d', mode: 'lines', name: 'FLOOR SHADOW', x, y, z: z.map(() => 0),
+      line: { color: 'rgba(107,171,202,.18)', width: 3, dash: 'dot' }, hoverinfo: 'skip', showlegend: false,
     },
     {
-      type: 'scatter3d', mode: 'lines', hoverinfo: 'skip', showlegend: false,
+      type: 'scatter3d', mode: 'lines', name: 'STRESS STEM',
       x: [Number(current.x_trend || 0), Number(current.x_trend || 0)],
       y: [Number(current.y_vol || 0), Number(current.y_vol || 0)],
-      z: [0, Number(current.z_stress || 0)], line: { color: 'rgba(198,55,60,.38)', width: 4, dash: 'dot' },
+      z: [0, Number(current.z_stress || 0)], line: { color: 'rgba(239,82,104,.48)', width: 5, dash: 'dot' }, hoverinfo: 'skip', showlegend: false,
     },
     {
-      type: 'scatter3d', mode: 'markers+text', name: 'CURRENT',
+      type: 'scatter3d', mode: 'markers', name: 'LIVE PROBE HALO',
       x: [Number(current.x_trend || 0)], y: [Number(current.y_vol || 0)], z: [Number(current.z_stress || 0)],
-      marker: { size: 10, color: regimeColor(current.regime), line: { color: '#fff', width: 1.8 } },
-      text: [current.regime || 'STATE'], textposition: 'top center',
-      hovertemplate: `CURRENT ${current.regime || '—'}<br>X=%{x:.2f}<br>Y=%{y:.2f}<br>Z=%{z:.2f}<extra></extra>`,
+      marker: { size: 18, color: 'rgba(255,187,80,.16)', line: { color: 'rgba(255,187,80,.42)', width: 1 } }, hoverinfo: 'skip', showlegend: false,
+    },
+    {
+      type: 'scatter3d', mode: 'markers+text', name: 'LIVE MICRO-PROBE',
+      x: [Number(current.x_trend || 0)], y: [Number(current.y_vol || 0)], z: [Number(current.z_stress || 0)],
+      marker: { size: 7, color: '#ffbb50', line: { color: '#fff', width: 1.2 } },
+      text: ['LIVE'], textposition: 'top center', hoverinfo: 'skip', showlegend: false,
+    },
+    {
+      type: 'scatter3d', mode: 'markers+text', name: 'MODEL STATE',
+      x: [Number(current.x_trend || 0)], y: [Number(current.y_vol || 0)], z: [Number(current.z_stress || 0)],
+      marker: { size: 9, color: regimeColor(current.regime), line: { color: '#fff', width: 1.6 } },
+      text: [current.regime || 'STATE'], textposition: 'bottom center', hoverinfo: 'skip', showlegend: false,
     },
   ];
 
   const vv = current.velocity_vector || summary.velocity_vector || {};
   const speed = Number(vv.speed || 0);
-  if (speed > 0.001) {
-    const s = 0.75 / speed;
+  if (speed > .001) {
+    const s = .72 / speed;
     traces.push({
-      type: 'cone', showlegend: false, hoverinfo: 'skip', anchor: 'tail', sizemode: 'absolute', sizeref: 0.32,
+      type: 'cone', showlegend: false, hoverinfo: 'skip', anchor: 'tail', sizemode: 'absolute', sizeref: .30,
       x: [Number(current.x_trend || 0)], y: [Number(current.y_vol || 0)], z: [Number(current.z_stress || 0)],
       u: [Number(vv.x || 0) * s], v: [Number(vv.y || 0) * s], w: [Number(vv.z || 0) * s],
-      colorscale: [[0, regimeColor(current.regime)], [1, regimeColor(current.regime)]], showscale: false,
+      colorscale: [[0,'#ffbb50'],[1,'#ef5268']], showscale: false,
     });
   }
 
-  const xr = rangeFor([...x, Number(current.x_trend || 0)], [-3, 3], 2.2);
-  const yr = rangeFor([...y, Number(current.y_vol || 0)], [-3, 3], 2.2);
+  const xr = rangeFor([...x, Number(current.x_trend || 0)], [-3, 3], 2.4);
+  const yr = rangeFor([...y, Number(current.y_vol || 0)], [-3, 3], 2.4);
   const maxZ = Math.max(0, ...z.filter(Number.isFinite), Number(current.z_stress || 0));
-  const zr = [0, Math.min(3, Math.max(1.25, maxZ + 0.55))];
+  const zr = [0, Math.min(3, Math.max(1.45, maxZ + .62))];
   const layout = {
     margin: { l: 0, r: 0, b: 0, t: 0 }, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', showlegend: false,
-    uirevision: 'macro-phase-camera-v3',
+    uirevision: 'macro-phase-premium-live-v3',
     scene: {
-      xaxis: { title: 'TREND · X', range: xr, gridcolor: '#dedbd3', zerolinecolor: '#8a877d', showspikes: false },
-      yaxis: { title: 'VOL REGIME · Y', range: yr, gridcolor: '#dedbd3', zerolinecolor: '#8a877d', showspikes: false },
-      zaxis: { title: 'FRAGILITY / STRESS · Z', range: zr, gridcolor: '#dedbd3', zerolinecolor: '#8a877d', showspikes: false },
-      bgcolor: 'rgba(255,255,255,0)', aspectmode: 'cube',
+      xaxis: { title: 'TREND · X', range: xr, gridcolor: 'rgba(182,207,222,.16)', zerolinecolor: 'rgba(230,238,243,.38)', color: '#b8cad5', showspikes: false },
+      yaxis: { title: 'VOL REGIME · Y', range: yr, gridcolor: 'rgba(182,207,222,.16)', zerolinecolor: 'rgba(230,238,243,.38)', color: '#b8cad5', showspikes: false },
+      zaxis: { title: 'FRAGILITY / STRESS · Z', range: zr, gridcolor: 'rgba(182,207,222,.14)', zerolinecolor: 'rgba(230,238,243,.32)', color: '#b8cad5', showspikes: false },
+      bgcolor: 'rgba(4,12,20,0)', aspectmode: 'manual', aspectratio: { x: 1.25, y: 1.08, z: .86 },
     },
   };
-  cameraGuard?.beforeWrite();
-  window.Plotly.react(plotEl, traces, layout, { responsive: true, displayModeBar: false });
-  cameraGuard?.afterWrite();
+  cameraGuard?.beforeWrite?.();
+  window.Plotly.react(plotEl, traces, layout, { responsive: true, displayModeBar: false, scrollZoom: true });
+  cameraGuard?.afterWrite?.();
+  if (!liveProbe) {
+    liveProbe = { x: Number(current.x_trend || 0), y: Number(current.y_vol || 0), z: Number(current.z_stress || 0), impulse: 0 };
+  }
+  updateLiveHud();
 }
