@@ -31,10 +31,14 @@ def test_macro_regime_trajectory_is_rolling_not_origin_interpolation():
     assert res["available"] is True
     traj = res["trajectory_24h"]
     assert len(traj) > 8
-    # A real rolling trajectory must contain multiple independently calculated
-    # state changes; the old prototype was just a straight ratio from origin.
     xy = {(round(p["x"], 2), round(p["y"], 2)) for p in traj}
     assert len(xy) > 5
+    # Z must be a real third dimension, not the old constant cross-stress plane.
+    z_values = {round(p["z"], 3) for p in traj}
+    assert len(z_values) > 2
+    assert "velocity_vector" in res["current"]
+    assert "transition_acceleration" in res["summary"]
+    assert "stress_components" in res["summary"]
     assert res["summary"]["points"] == len(prices)
     assert res["summary"]["source"]["source"] == "fixture 5m history"
     assert res["summary"]["authority"] == "strategy_context"
@@ -43,10 +47,8 @@ def test_macro_regime_trajectory_is_rolling_not_origin_interpolation():
 
 def test_macro_regime_accepts_actual_status_dict_vol_feed():
     prices = _prices()
-    low = compute_macro_regime(
-        prices, {"vxn": {"value": 18.0}}, instrument_code="NAS100")
-    high = compute_macro_regime(
-        prices, {"vxn": {"value": 42.0}}, instrument_code="NAS100")
+    low = compute_macro_regime(prices, {"vxn": {"value": 18.0}}, instrument_code="NAS100")
+    high = compute_macro_regime(prices, {"vxn": {"value": 42.0}}, instrument_code="NAS100")
     assert low["available"] and high["available"]
     assert high["current"]["y_vol"] > low["current"]["y_vol"]
 
