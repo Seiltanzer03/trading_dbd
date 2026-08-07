@@ -4,6 +4,7 @@
 
 import { initCone as initCoreCone } from './cone_core.js';
 import { createPlotlyCameraGuard } from './plotly_camera_guard.js';
+import { applyLocalTouchClock } from './touch_clock.js';
 
 const INIT_CAM = {
   eye: { x: 0.15, y: 2.3, z: 0.65 },
@@ -22,6 +23,11 @@ export function initCone(elId) {
   const core = initCoreCone(el);
 
   function setData(...args) {
+    // Probability stays option-implied. Only the displayed calendar touch clock
+    // is re-mapped to the current local variance pace (term structure + RV/IV).
+    // Mutating the shared cone payload is intentional: app.js sends the same
+    // object to Fan immediately after Cone, so both panels show one clock.
+    if (args[0]) applyLocalTouchClock(args[0]);
     camera.beforeWrite();
     const result = core.setData(...args);
     camera.afterWrite();
