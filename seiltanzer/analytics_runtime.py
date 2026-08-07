@@ -48,12 +48,8 @@ def _market_history(engine: Engine) -> tuple[list[dict], dict]:
 
     points: list[dict] = []
     meta = {
-        "source": None,
-        "status": "no_data",
-        "mapping": "none",
-        "interval": "5m",
-        "time_basis": "trading_bars",
-        "loaded_at": now,
+        "source": None, "status": "no_data", "mapping": "none",
+        "interval": "5m", "time_basis": "trading_bars", "loaded_at": now,
     }
 
     if market.demo:
@@ -81,16 +77,10 @@ def _market_history(engine: Engine) -> tuple[list[dict], dict]:
                 ratio = 1.0
                 mapping = "direct_history"
                 if closes and _finite(current) and current and closes[-1][1] > 0:
-                    # The active Yahoo series can be a futures/history proxy for
-                    # a direct broker CFD/spot quote.  A multiplicative anchor
-                    # preserves returns exactly and avoids inventing bar shapes.
                     ratio = float(current) / closes[-1][1]
                     if abs(ratio - 1.0) > 1e-6:
                         mapping = "return_shape_to_live_anchor"
-                points = [
-                    {"ts": ts, "price": price * ratio}
-                    for ts, price in closes
-                ]
+                points = [{"ts": ts, "price": price * ratio} for ts, price in closes]
                 meta.update(
                     source=f"yfinance {market.instrument.yahoo} 5d/5m",
                     status="derived" if mapping != "direct_history" else "delayed",
@@ -99,7 +89,6 @@ def _market_history(engine: Engine) -> tuple[list[dict], dict]:
         except Exception as exc:  # noqa: BLE001
             meta["error"] = str(exc)[:180]
 
-    # Honest in-memory fallback: these are actual observed/refreshed prices.
     if len(points) < 24:
         raw = list(market.intraday or [])
         fallback = [
@@ -115,8 +104,6 @@ def _market_history(engine: Engine) -> tuple[list[dict], dict]:
                 mapping="terminal_scale",
             )
 
-    # Sort/dedupe and append the genuinely current terminal quote as the newest
-    # observation if it is newer than the final 5m bar.
     by_ts: dict[float, float] = {}
     for p in points:
         if _finite(p.get("ts")) and _finite(p.get("price")) and float(p["price"]) > 0:
@@ -138,11 +125,26 @@ def _market_history(engine: Engine) -> tuple[list[dict], dict]:
 
     with _LOCK:
         _HISTORY_CACHE[code] = {
-            "loaded_at": now,
-            "points": deepcopy(points),
-            "meta": dict(meta),
+            "loaded_at": now, "points": deepcopy(points), "meta": dict(meta),
         }
     return points, meta
+
+
+def _remember_correlation(payload: dict | None) -> list[dict]:
+    if not isinstance(payload, dict):
+        with _LOCK:
+            return deepcopy(_CORR_HISTORY)
+    asof = payload.get("asof")
+    if not _finite(asof):
+        asof = time.time()
+    item = deepcopy(payload)
+    item["asof"] = float(asof)
+    with _LOCK:
+        if not _CORR_HISTORY or abs(_CORR_HISTORY[-1].get("asof", 0) - item["asof"]) > 1:
+            _CORR_HISTORY.append(item)
+        cutoff = time.time() - 26 * 3600
+        _CORR_HISTORY[:] = [p for p in _CORR_HISTORY if p.get("asof", 0) >= cutoff][-320:]
+        return deepcopy(_CORR_HISTORY)
 
 
 def _macro_regime_payload(self: Engine) -> dict:
@@ -151,6 +153,7 @@ def _macro_regime_payload(self: Engine) -> dict:
     prices, meta = _market_history(self)
     corr_status = getattr(self.market, "correlation", {}) or {}
     corr = corr_status.get("value") if isinstance(corr_status, dict) else None
+    corr_history = _remember_correlation(corr)
     prev = getattr(self, "_last_macro_regime", None)
     res = compute_macro_regime(
         prices,
@@ -159,6 +162,7 @@ def _macro_regime_payload(self: Engine) -> dict:
         prev,
         instrument_code=self.market.instrument_code,
         source_meta=meta,
+        correlation_history=corr_history,
     )
     if res.get("available") and res.get("summary"):
         self._last_macro_regime = res["summary"].get("regime")
@@ -174,22 +178,6 @@ def _wavelet_payload(self: Engine) -> dict:
     if res.get("available") and res.get("summary"):
         self._wavelet_summary_cache = res.get("summary")
     return clean_nans(res)
-
-
-def _remember_correlation(payload: dict | None) -> list[dict]:
-    if not isinstance(payload, dict):
-        return []
-    asof = payload.get("asof")
-    if not _finite(asof):
-        asof = time.time()
-    item = deepcopy(payload)
-    item["asof"] = float(asof)
-    with _LOCK:
-        if not _CORR_HISTORY or abs(_CORR_HISTORY[-1].get("asof", 0) - item["asof"]) > 1:
-            _CORR_HISTORY.append(item)
-        cutoff = time.time() - 26 * 3600
-        _CORR_HISTORY[:] = [p for p in _CORR_HISTORY if p.get("asof", 0) >= cutoff][-320:]
-        return deepcopy(_CORR_HISTORY)
 
 
 def _cross_asset_payload(self: Engine) -> dict:
