@@ -38,6 +38,7 @@ jobs:
           node --check seiltanzer/web/js/wavelet.js
           node --check seiltanzer/web/js/correlation.js
           node --check seiltanzer/web/js/market_bus.js
+          node --check seiltanzer/web/js/analytics_mobile.js
           node --check seiltanzer/web/js/premium_analytics_theme.js
           node tests/web/cone_interaction_smoke.mjs
           node tests/web/gex_smoke.mjs
