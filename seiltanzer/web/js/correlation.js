@@ -41,21 +41,16 @@ function renderForceGraph(){
 
   function draw(now=0){
     ctx.clearRect(0,0,width,height);
-    // Quiet topology first.
-    links.forEach((l,li)=>{const a=byId.get(l.source),b=byId.get(l.target);if(!a||!b)return;const rho=Number(l.correlation||0),alert=l.status==='BREAK_ALERT',tension=Number(l.tension||0);const alpha=alert?.82:.10+Math.abs(rho)*.43;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.strokeStyle=alert?'rgba(198,55,60,.78)':lineColor(rho,alpha);ctx.lineWidth=(alert?2.5:.7+Math.abs(rho)*2.7)+Math.min(1.2,tension);ctx.setLineDash(alert?[7,5]:[]);ctx.stroke();ctx.setLineDash([]);
+    links.forEach((l)=>{const a=byId.get(l.source),b=byId.get(l.target);if(!a||!b)return;const rho=Number(l.correlation||0),alert=l.status==='BREAK_ALERT',tension=Number(l.tension||0);const alpha=alert ? .82 : .10+Math.abs(rho)*.43;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.strokeStyle=alert?'rgba(198,55,60,.78)':lineColor(rho,alpha);ctx.lineWidth=(alert?2.5:.7+Math.abs(rho)*2.7)+Math.min(1.2,tension);ctx.setLineDash(alert?[7,5]:[]);ctx.stroke();ctx.setLineDash([]);
       if(Math.abs(rho)>=.58||alert){const mx=(a.x+b.x)/2,my=(a.y+b.y)/2,txt=`${rho>=0?'+':''}${rho.toFixed(2)}`;ctx.font='9px IBM Plex Mono,monospace';const tw=ctx.measureText(txt).width+8;ctx.fillStyle='rgba(255,255,255,.87)';ctx.fillRect(mx-tw/2,my-8,tw,15);ctx.fillStyle=alert?'#b52c31':'#5d5a53';ctx.textAlign='center';ctx.fillText(txt,mx,my+3);}
     });
-    // Data-driven activity packets. Two mirrored packets deliberately avoid implying causal direction.
-    dynamics.forEach((l,li)=>{const a=byId.get(l.source),b=byId.get(l.target);if(!a||!b)return;const vel=Math.max(.02,Number(l.velocity_magnitude||0)),phase=((now/1000)*(0.08+vel*.9)+li*.173)%1;const tension=Math.min(1,Number(l.tension||0));for(const t of [phase,1-phase]){const x=a.x+(b.x-a.x)*t,y=a.y+(b.y-a.y)*t,r=2.2+5*tension;const g=ctx.createRadialGradient(x,y,0,x,y,r*2.5);g.addColorStop(0,l.status==='BREAK_ALERT'?'rgba(225,66,58,.95)':'rgba(33,156,164,.9)');g.addColorStop(1,'rgba(255,255,255,0)');ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r*2.5,0,Math.PI*2);ctx.fill();}}
-    );
+    dynamics.forEach((l,li)=>{const a=byId.get(l.source),b=byId.get(l.target);if(!a||!b)return;const vel=Math.max(.02,Number(l.velocity_magnitude||0)),phase=((now/1000)*(0.08+vel*.9)+li*.173)%1;const tension=Math.min(1,Number(l.tension||0));for(const t of [phase,1-phase]){const x=a.x+(b.x-a.x)*t,y=a.y+(b.y-a.y)*t,r=2.2+5*tension;const g=ctx.createRadialGradient(x,y,0,x,y,r*2.5);g.addColorStop(0,l.status==='BREAK_ALERT'?'rgba(225,66,58,.95)':'rgba(33,156,164,.9)');g.addColorStop(1,'rgba(255,255,255,0)');ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r*2.5,0,Math.PI*2);ctx.fill();}});
     nodes.forEach(n=>{const stress=Math.min(1,Number(n.stress_normalized||0)),coupling=Math.min(1,Number(n.coupling||0)),r=15+9*coupling;
       if(stress>.03){const halo=ctx.createRadialGradient(n.x,n.y,r*.7,n.x,n.y,r+18+stress*16);halo.addColorStop(0,`rgba(198,55,60,${.08+.18*stress})`);halo.addColorStop(1,'rgba(198,55,60,0)');ctx.fillStyle=halo;ctx.beginPath();ctx.arc(n.x,n.y,r+18+stress*16,0,Math.PI*2);ctx.fill();}
       ctx.beginPath();ctx.arc(n.x,n.y,r,0,Math.PI*2);ctx.fillStyle=groupColor(n.group);ctx.fill();ctx.strokeStyle=n.break_count?'#c6373c':'#fff';ctx.lineWidth=n.break_count?3:2;ctx.stroke();
-      // Stress ring is a quantitative gauge, not decoration.
       ctx.beginPath();ctx.arc(n.x,n.y,r+5,-Math.PI/2,-Math.PI/2+Math.PI*2*stress);ctx.strokeStyle=stress>.65?'#c6373c':stress>.35?'#d79031':'#33a8a5';ctx.lineWidth=3;ctx.stroke();
       ctx.fillStyle='#fff';ctx.font='bold 9px IBM Plex Mono,monospace';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(n.id,n.x,n.y);if(stress>.35){ctx.fillStyle='#6c6860';ctx.font='8px IBM Plex Mono,monospace';ctx.fillText(`σ ${Number(n.stress_pressure||0).toFixed(2)}`,n.x,n.y+r+16);}
     });
-    // Bottom topology HUD.
     const s=graphData.summary||{};ctx.fillStyle='rgba(248,247,243,.9)';ctx.fillRect(8,height-30,width-16,23);ctx.font='9px IBM Plex Mono,monospace';ctx.fillStyle='#55524c';ctx.textAlign='left';ctx.fillText(`SYSTEM COUPLING ${Number(s.systemic_coupling||0).toFixed(2)}   TENSION ${Number(s.network_tension||0).toFixed(2)}   FRAGMENT ${Number(s.fragmentation||0).toFixed(2)}   STRESS NODE ${s.dominant_stress_node||'—'}`,18,height-15);
     if(dynamics.length)rafId=requestAnimationFrame(draw);else rafId=null;
   }
@@ -65,7 +60,6 @@ function renderForceGraph(){
   cv.onpointerdown=e=>{const p=pointerPos(e),hit=nodes.find(n=>Math.hypot(n.x-p.x,n.y-p.y)<=30);if(!hit)return;draggedNodeId=hit.id;cv.setPointerCapture?.(e.pointerId);cv.style.cursor='grabbing';};
   cv.onpointermove=e=>{if(!draggedNodeId)return;const p=pointerPos(e),n=byId.get(draggedNodeId);if(!n)return;n.x=Math.max(30,Math.min(width-30,p.x));n.y=Math.max(30,Math.min(height-30,p.y));positions.set(n.id,{x:n.x,y:n.y});if(!dynamics.length)draw(performance.now());};
   const release=e=>{if(!draggedNodeId)return;draggedNodeId=null;cv.releasePointerCapture?.(e.pointerId);cv.style.cursor='grab';};cv.onpointerup=release;cv.onpointercancel=release;
-
   const summary=graphData.summary||{};if(statusEl)statusEl.textContent=summary.active_breaks_count?`⚠ ${summary.active_breaks_count} BREAK · TENSION ${Number(summary.network_tension||0).toFixed(2)}`:`● ${summary.observed_pairs||links.length} PAIRS · COUPLING ${Number(summary.systemic_coupling||0).toFixed(2)}${summary.velocity_ready?'':' · ΔV BUILDING'}`;
   const interpret=$('#corr-interpretation');if(interpret){const top=(graphData.break_alerts||[])[0];interpret.innerHTML=top?`<b>NETWORK TENSION:</b> ${top.source}↔${top.target} · ρ ${Number(top.correlation).toFixed(2)} · Δbaseline ${top.delta_baseline==null?'—':Number(top.delta_baseline).toFixed(2)} · Δ15m ${top.delta_15m==null?'—':Number(top.delta_15m).toFixed(2)}. Светящиеся пакеты показывают скорость изменения связи в обе стороны и <b>не означают причинность</b>.`:`<b>TOPOLOGY:</b> размер узла = средняя сила связей, внешнее кольцо = incident stress, толщина ребра = |ρ|. Динамика включается только когда реально меняется correlation relationship.`;interpret.style.display='block';}
 }
