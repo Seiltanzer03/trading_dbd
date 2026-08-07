@@ -7,6 +7,7 @@ let resizeTimer = null;
 let observer = null;
 let mutationObserver = null;
 let optimizeTimer = null;
+let resizePendingAfterGesture = false;
 
 export function isAnalyticsMobile() {
   if (typeof window === 'undefined') return false;
@@ -71,6 +72,12 @@ function rootElement() {
   return document.documentElement || null;
 }
 
+function is3dBusy() {
+  if (typeof window === 'undefined') return false;
+  return Boolean(window.__seiltanzer3dBusy)
+    || Boolean(rootElement()?.classList?.contains?.('analytics-3d-busy'));
+}
+
 function advancedPanels() {
   if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return [];
   return ['#panel-gex-evol', '#panel-macro-regime', '#panel-wavelet', '#panel-correlation']
@@ -93,17 +100,27 @@ function markViewportState() {
   if (!mobile) root.classList.remove('analytics-3d-busy');
 }
 
+function preventPlotPagePan(event) {
+  if (!isAnalyticsMobile() || !event?.touches?.length) return;
+  event.preventDefault?.();
+}
+
 function tunePlotTouch(plot) {
   if (!plot?.style || !isAnalyticsMobile()) return;
   plot.style.touchAction = 'none';
   plot.style.overscrollBehavior = 'contain';
   plot.style.userSelect = 'none';
   plot.style.webkitUserSelect = 'none';
+  plot.style.webkitTouchCallout = 'none';
   plot.setAttribute?.('data-mobile-touch-ready', '1');
+  if (plot.dataset?.mobilePagePanGuard !== '1' && typeof plot.addEventListener === 'function') {
+    plot.addEventListener('touchmove', preventPlotPagePan, { passive: false });
+    if (plot.dataset) plot.dataset.mobilePagePanGuard = '1';
+  }
 }
 
 async function optimizeSurfacePlot(plot) {
-  if (!isAnalyticsMobile() || !plot || plot.dataset?.mobileMeshOptimized === '1') return;
+  if (!isAnalyticsMobile() || is3dBusy() || !plot || plot.dataset?.mobileMeshOptimized === '1') return;
   if (!window.Plotly || !Array.isArray(plot.data) || !plot.data.some((t) => t?.type === 'surface')) return;
   const traces = plot.data.map((trace) => decimateSurfaceTrace(trace));
   const changed = traces.some((trace, i) => trace !== plot.data[i]);
@@ -130,10 +147,11 @@ async function optimizeSurfacePlot(plot) {
 }
 
 function scheduleOptimize() {
-  if (!isAnalyticsMobile()) return;
+  if (!isAnalyticsMobile() || is3dBusy()) return;
   if (optimizeTimer) clearTimeout(optimizeTimer);
   optimizeTimer = setTimeout(() => {
     optimizeTimer = null;
+    if (is3dBusy()) return;
     advancedPlotNodes().forEach((plot) => {
       tunePlotTouch(plot);
       optimizeSurfacePlot(plot);
@@ -142,6 +160,10 @@ function scheduleOptimize() {
 }
 
 function resizeAdvancedPlots() {
+  if (is3dBusy()) {
+    resizePendingAfterGesture = true;
+    return;
+  }
   if (typeof window === 'undefined' || !window.Plotly?.Plots?.resize) return;
   advancedPlotNodes().forEach((plot) => {
     tunePlotTouch(plot);
@@ -154,11 +176,16 @@ function scheduleResize() {
   if (resizeTimer) clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
     resizeTimer = null;
+    if (is3dBusy()) {
+      resizePendingAfterGesture = true;
+      return;
+    }
     markViewportState();
     resizeAdvancedPlots();
     if (typeof window !== 'undefined' && typeof window.CustomEvent === 'function' && typeof window.dispatchEvent === 'function') {
       window.dispatchEvent(new window.CustomEvent('seiltanzer:analytics-mobile-resize'));
     }
+    resizePendingAfterGesture = false;
   }, 100);
 }
 
@@ -173,28 +200,25 @@ function installVisibilityObserver() {
   advancedPanels().forEach((panel) => observer.observe(panel));
 }
 
+// Do not use content-visibility:hidden here. These panels have auto height, so
+// hiding their contents changes the document geometry on real phones and makes
+// the scroll position jump exactly when a 3D gesture begins. Paint suppression
+// is handled by the analytics-3d-busy/analytics-offscreen CSS visibility rule,
+// which keeps the layout box intact.
 function setPanelSuspended(panel, suspend) {
   if (!panel?.style) return;
   if (suspend) {
     if (panel.dataset.mobileSuspended === '1') return;
     panel.dataset.mobileSuspended = '1';
-    panel.dataset.mobileContentVisibility = panel.style.contentVisibility || '';
-    panel.style.contentVisibility = 'hidden';
+    panel.dataset.mobilePointerEvents = panel.style.pointerEvents || '';
     panel.style.pointerEvents = 'none';
-    panel.querySelectorAll?.('canvas').forEach((canvas) => {
-      canvas.dataset.mobileVisibility = canvas.style.visibility || '';
-      canvas.style.visibility = 'hidden';
-    });
+    panel.setAttribute?.('data-mobile-render-paused', '1');
   } else {
     if (panel.dataset.mobileSuspended !== '1') return;
     delete panel.dataset.mobileSuspended;
-    panel.style.contentVisibility = panel.dataset.mobileContentVisibility || '';
-    panel.style.pointerEvents = '';
-    delete panel.dataset.mobileContentVisibility;
-    panel.querySelectorAll?.('canvas').forEach((canvas) => {
-      canvas.style.visibility = canvas.dataset.mobileVisibility || '';
-      delete canvas.dataset.mobileVisibility;
-    });
+    panel.style.pointerEvents = panel.dataset.mobilePointerEvents || '';
+    delete panel.dataset.mobilePointerEvents;
+    panel.removeAttribute?.('data-mobile-render-paused');
   }
 }
 
@@ -206,17 +230,44 @@ function suspendOffscreenPanels(suspend) {
   }
 }
 
+function setPageGestureLock(active) {
+  if (typeof document === 'undefined') return;
+  for (const target of [rootElement(), document.body].filter(Boolean)) {
+    if (!target?.style) continue;
+    if (active) {
+      if (target.dataset?.analyticsGestureLock === '1') continue;
+      if (target.dataset) {
+        target.dataset.analyticsGestureLock = '1';
+        target.dataset.analyticsOverscrollY = target.style.overscrollBehaviorY || '';
+        target.dataset.analyticsOverflowAnchor = target.style.overflowAnchor || '';
+      }
+      target.style.overscrollBehaviorY = 'none';
+      target.style.overflowAnchor = 'none';
+    } else {
+      if (target.dataset?.analyticsGestureLock !== '1') continue;
+      target.style.overscrollBehaviorY = target.dataset.analyticsOverscrollY || '';
+      target.style.overflowAnchor = target.dataset.analyticsOverflowAnchor || '';
+      delete target.dataset.analyticsGestureLock;
+      delete target.dataset.analyticsOverscrollY;
+      delete target.dataset.analyticsOverflowAnchor;
+    }
+  }
+}
+
 function bind3dBusyState() {
   if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
   window.addEventListener('seiltanzer:3d-busy', () => {
     if (!isAnalyticsMobile()) return;
     rootElement()?.classList?.add('analytics-3d-busy');
+    setPageGestureLock(true);
     suspendOffscreenPanels(true);
   });
   window.addEventListener('seiltanzer:3d-idle', () => {
     rootElement()?.classList?.remove('analytics-3d-busy');
+    setPageGestureLock(false);
     suspendOffscreenPanels(false);
-    scheduleResize();
+    if (resizePendingAfterGesture) scheduleResize();
+    else scheduleOptimize();
   });
 }
 
@@ -224,13 +275,15 @@ function bindViewport() {
   if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
   window.addEventListener('resize', scheduleResize, { passive: true });
   window.addEventListener('orientationchange', scheduleResize, { passive: true });
+  // Mobile browser chrome changes visualViewport while the finger is down.
+  // scheduleResize deliberately defers that work until the 3D gesture is idle.
   window.visualViewport?.addEventListener?.('resize', scheduleResize, { passive: true });
 }
 
 function installPlotObserver() {
   if (mutationObserver || typeof MutationObserver === 'undefined' || typeof document === 'undefined' || !document.body) return;
   mutationObserver = new MutationObserver((records) => {
-    if (!isAnalyticsMobile()) return;
+    if (!isAnalyticsMobile() || is3dBusy()) return;
     const relevant = records.some((record) => [...(record.addedNodes || [])].some((node) =>
       node?.nodeType === 1 && (
         node.matches?.('.js-plotly-plot, [data-renderer="pressure"], [data-wavelet-renderer="surface"]')
