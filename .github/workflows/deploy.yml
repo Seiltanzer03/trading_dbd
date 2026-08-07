@@ -30,6 +30,7 @@ jobs:
         run: |
           /opt/seiltanzer/.venv/bin/pip install -q -e ".[dev]"
           /opt/seiltanzer/.venv/bin/pytest -q
+          node --check seiltanzer/web/js/touch_clock.js
           node --check seiltanzer/web/js/cone.js
           node --check seiltanzer/web/js/iv_surface.js
           node --check seiltanzer/web/js/levels.js
@@ -40,6 +41,7 @@ jobs:
           node --check seiltanzer/web/js/market_bus.js
           node --check seiltanzer/web/js/analytics_mobile.js
           node --check seiltanzer/web/js/premium_analytics_theme.js
+          node tests/web/touch_clock_smoke.mjs
           node tests/web/cone_interaction_smoke.mjs
           node tests/web/gex_smoke.mjs
           node tests/web/analytics_mobile_smoke.mjs
