@@ -38,6 +38,7 @@ class FakeElement {
   }
   click() { for (const fn of this.listeners.get('click') || []) fn({}); }
   appendChild(child) { this.children.push(child); return child; }
+  append(...children) { this.children.push(...children); }
   insertBefore(child, before) {
     if (!before) return this.appendChild(child);
     const i = this.children.indexOf(before);
@@ -73,13 +74,16 @@ function getElement(id) {
 globalThis.document = {
   head,
   querySelector(sel) { return getElement(sel.replace('#', '')); },
-  createElement(tag) { return tag.toLowerCase() === 'canvas' ? new FakeCanvas() : new FakeElement('', tag); }
+  querySelectorAll() { return []; },
+  createElement(tag) { return tag.toLowerCase() === 'canvas' ? new FakeCanvas() : new FakeElement('', tag); },
+  addEventListener() {},
 };
 globalThis.requestAnimationFrame = () => 1;
 globalThis.cancelAnimationFrame = () => {};
 
 globalThis.fetch = async () => ({
   ok: true,
+  clone() { return this; },
   json: async () => ({
     available: true,
     timestamps: [1000, 2000],
@@ -109,7 +113,15 @@ globalThis.fetch = async () => ({
     }
   })
 });
-globalThis.window = { fetch: (...args) => globalThis.fetch(...args) };
+globalThis.window = {
+  fetch: (...args) => globalThis.fetch(...args),
+  addEventListener() {},
+  dispatchEvent() {},
+  requestAnimationFrame: globalThis.requestAnimationFrame,
+  cancelAnimationFrame: globalThis.cancelAnimationFrame,
+  location: { href: 'http://localhost/' },
+  devicePixelRatio: 1,
+};
 
 const { initGex, updateGex, updateLiveGex } = await import('../../seiltanzer/web/js/gex.js');
 
