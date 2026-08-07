@@ -29,8 +29,15 @@ def test_cross_asset_uses_actual_assets_and_break_alert():
     assert link["baseline"] == -0.75
     assert link["delta_baseline"] == 0.55
     assert link["delta_5m"] is None
+    assert link["tension"] > 0
     assert res["summary"]["active_breaks_count"] == 1
     assert res["summary"]["regime"] == "CORRELATION BREAKDOWN"
+    assert 0 <= res["summary"]["fragmentation"] <= 1
+    assert res["summary"]["dominant_stress_node"] in {"NAS", "VXN"}
+    for node in res["nodes"]:
+        assert "coupling" in node
+        assert "stress_pressure" in node
+        assert "stress_normalized" in node
 
 
 def test_cross_asset_velocity_requires_real_previous_sample():
@@ -49,6 +56,6 @@ def test_cross_asset_velocity_requires_real_previous_sample():
     res = compute_correlation_graph(current, history=[previous, current])
     assert res["available"] is True
     assert res["links"][0]["delta_5m"] == -0.18
+    assert res["links"][0]["velocity_magnitude"] == 0.18
     assert res["summary"]["velocity_ready"] is True
-    # No fabricated BTC/GOLD/etc. nodes may appear.
     assert {n["id"] for n in res["nodes"]} == {"NAS", "SP500"}
