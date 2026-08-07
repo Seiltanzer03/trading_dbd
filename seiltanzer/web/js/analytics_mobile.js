@@ -1,3 +1,4 @@
+// Mobile performance/runtime budget for the advanced analytics panels.
 const MOBILE_QUERY = '(max-width: 760px)';
 const MOBILE_SURFACE_ROWS = 30;
 const MOBILE_SURFACE_COLS = 44;
