@@ -55,14 +55,32 @@ function installVisibilityObserver() {
   advancedPanels().forEach((panel) => observer.observe(panel));
 }
 
+function suspendOffscreenPanels(suspend) {
+  if (!isAnalyticsMobile()) return;
+  for (const panel of advancedPanels()) {
+    if (!panel.classList.contains('analytics-offscreen')) continue;
+    if (suspend) {
+      panel.dataset.mobileContentVisibility = panel.style.contentVisibility || '';
+      panel.style.contentVisibility = 'hidden';
+      panel.style.pointerEvents = 'none';
+    } else {
+      panel.style.contentVisibility = panel.dataset.mobileContentVisibility || '';
+      panel.style.pointerEvents = '';
+      delete panel.dataset.mobileContentVisibility;
+    }
+  }
+}
+
 function bind3dBusyState() {
   if (typeof window === 'undefined') return;
   window.addEventListener('seiltanzer:3d-busy', () => {
     if (!isAnalyticsMobile()) return;
     document.documentElement.classList.add('analytics-3d-busy');
+    suspendOffscreenPanels(true);
   });
   window.addEventListener('seiltanzer:3d-idle', () => {
     document.documentElement.classList.remove('analytics-3d-busy');
+    suspendOffscreenPanels(false);
     scheduleResize();
   });
 }
