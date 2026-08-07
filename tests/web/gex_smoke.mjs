@@ -75,7 +75,6 @@ globalThis.document = {
   querySelector(sel) { return getElement(sel.replace('#', '')); },
   createElement(tag) { return tag.toLowerCase() === 'canvas' ? new FakeCanvas() : new FakeElement('', tag); }
 };
-globalThis.window = {};
 globalThis.requestAnimationFrame = () => 1;
 globalThis.cancelAnimationFrame = () => {};
 
@@ -110,6 +109,7 @@ globalThis.fetch = async () => ({
     }
   })
 });
+globalThis.window = { fetch: (...args) => globalThis.fetch(...args) };
 
 const { initGex, updateGex, updateLiveGex } = await import('../../seiltanzer/web/js/gex.js');
 
@@ -127,7 +127,6 @@ const ridgeMock = {
 await updateGex(ridgeMock);
 updateLiveGex({ price: 101, trade: ridgeMock.trade });
 
-// Repeated mode switches must replace the renderer, never stack canvases.
 getElement('btn-gex-snapshot').click();
 getElement('btn-gex-migration').click();
 getElement('btn-gex-snapshot').click();
