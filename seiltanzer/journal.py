@@ -112,6 +112,26 @@ class Journal:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_ai_verdict_trade_ts "
                 "ON ai_verdicts(trade_id, ts)")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS policy_shadow_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_id INTEGER NOT NULL,
+                    ts REAL NOT NULL,
+                    old_policy TEXT NOT NULL,
+                    candidate_policy TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    review_r REAL NOT NULL,
+                    expected_delta_r REAL,
+                    cvar_delta_r REAL,
+                    execution_cost_delta_r REAL,
+                    source_quality REAL,
+                    final_result_r REAL,
+                    resolved_at REAL,
+                    FOREIGN KEY(trade_id) REFERENCES trades(id)
+                )""")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_policy_shadow_trade_ts "
+                "ON policy_shadow_reviews(trade_id, ts)")
 
     # ---------------------------------------------------------------- trades
 
@@ -167,6 +187,10 @@ class Journal:
                 "UPDATE trades SET status='closed', closed_at=?, result_r=?, "
                 "notes=COALESCE(?, notes) WHERE id=?",
                 (time.time(), result_r, notes, trade_id))
+            self._conn.execute(
+                "UPDATE policy_shadow_reviews SET final_result_r=?, resolved_at=? "
+                "WHERE trade_id=? AND final_result_r IS NULL",
+                (result_r, time.time(), trade_id))
         return self.get_trade(trade_id)
 
     def add_closed(self, setup: int, direction: str, entry: float, stop: float,
@@ -312,6 +336,106 @@ class Journal:
             result.append(item)
         return result
 
+    # ------------------------------------------------------- policy shadow OOS
+
+    def record_policy_shadow(
+        self, trade_id: int, *, old_policy: str, candidate_policy: str,
+        reason: str, review_r: float, expected_delta_r: float | None,
+        cvar_delta_r: float | None, execution_cost_delta_r: float | None,
+        source_quality: float | None, min_interval_sec: float = 60.0,
+    ) -> None:
+        """Persist old/candidate decisions before their future outcome is known."""
+        if not math.isfinite(float(review_r)):
+            return
+        now = time.time()
+        with self._lock, self._conn:
+            last = self._conn.execute(
+                "SELECT ts,old_policy,candidate_policy FROM policy_shadow_reviews "
+                "WHERE trade_id=? ORDER BY ts DESC LIMIT 1", (trade_id,)).fetchone()
+            if (last is not None and now - float(last["ts"]) < min_interval_sec
+                    and last["old_policy"] == old_policy
+                    and last["candidate_policy"] == candidate_policy):
+                return
+            self._conn.execute(
+                "INSERT INTO policy_shadow_reviews("
+                "trade_id,ts,old_policy,candidate_policy,reason,review_r,"
+                "expected_delta_r,cvar_delta_r,execution_cost_delta_r,source_quality) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (trade_id, now, old_policy, candidate_policy, reason, review_r,
+                 expected_delta_r, cvar_delta_r, execution_cost_delta_r,
+                 source_quality))
+
+    def policy_shadow_report(self) -> dict:
+        """Observed agreement and conservative outcome proxies; never auto-promotes."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM policy_shadow_reviews ORDER BY ts").fetchall()
+        if not rows:
+            return {
+                "observations": 0, "resolved_observations": 0,
+                "resolved_trades": 0, "policy_agreement": None,
+                "policy_changes": 0, "expected_improvement_r": None,
+                "tail_loss_improvement_r": None, "false_early_exit_proxy": None,
+                "false_hold_proxy": None, "turnover_increase": None,
+                "execution_cost_increase_r": None,
+                "promotion_allowed": False,
+                "promotion_reason": "no resolved out-of-sample shadow observations",
+            }
+        fractions = {
+            "HOLD": 0.0, "CLOSE_10": 0.10, "CLOSE_25": 0.25,
+            "CLOSE_50": 0.50, "EXIT": 1.0,
+        }
+        changed = [row for row in rows if row["old_policy"] != row["candidate_policy"]]
+        resolved = [row for row in rows if row["final_result_r"] is not None]
+        resolved_changed = [row for row in resolved
+                            if row["old_policy"] != row["candidate_policy"]]
+
+        def average(key: str, collection) -> float | None:
+            values = [float(row[key]) for row in collection if row[key] is not None]
+            return sum(values) / len(values) if values else None
+
+        false_early = [
+            row for row in resolved_changed
+            if fractions.get(row["candidate_policy"], 0.0)
+            > fractions.get(row["old_policy"], 0.0)
+            and float(row["final_result_r"]) > float(row["review_r"])
+        ]
+        false_hold = [
+            row for row in resolved_changed
+            if fractions.get(row["candidate_policy"], 0.0)
+            < fractions.get(row["old_policy"], 0.0)
+            and float(row["final_result_r"]) < float(row["review_r"])
+        ]
+        turnover = [
+            max(0.0, fractions.get(row["candidate_policy"], 0.0)
+                - fractions.get(row["old_policy"], 0.0))
+            for row in rows
+        ]
+        return {
+            "observations": len(rows),
+            "resolved_observations": len(resolved),
+            "resolved_trades": len({int(row["trade_id"]) for row in resolved}),
+            "policy_agreement": 1.0 - len(changed) / len(rows),
+            "policy_changes": len(changed),
+            "expected_improvement_r": average("expected_delta_r", rows),
+            "tail_loss_improvement_r": average("cvar_delta_r", rows),
+            "false_early_exit_proxy": (
+                len(false_early) / len(resolved_changed) if resolved_changed else None),
+            "false_hold_proxy": (
+                len(false_hold) / len(resolved_changed) if resolved_changed else None),
+            "turnover_increase": sum(turnover) / len(turnover),
+            "execution_cost_increase_r": average("execution_cost_delta_r", rows),
+            "outcome_proxy_warning": (
+                "final trade R is not a causal counterfactual for an unexecuted policy; "
+                "false-exit/hold fields are diagnostics only"
+            ),
+            "promotion_allowed": False,
+            "promotion_reason": (
+                "manual reviewed calibration is required; observation count alone "
+                "cannot prove causal policy improvement"
+            ),
+        }
+
     def validation_report(self) -> dict:
         """Out-of-sample отчёт по ПЕРВОМУ прогнозу каждой закрытой сделки."""
         with self._lock:
@@ -331,6 +455,7 @@ class Journal:
                 "n": 0, "brier": None, "log_loss": None,
                 "calibration": [], "censored_n": 0,
                 "message": "нет закрытых сделок с прогнозом",
+                "policy_shadow": self.policy_shadow_report(),
             }
         resolved: list[tuple[sqlite3.Row, float]] = []
         censored = 0
@@ -351,6 +476,7 @@ class Journal:
                 "n": 0, "brier": None, "log_loss": None,
                 "calibration": [], "censored_n": censored,
                 "message": "есть прогнозы, но нет закрытых barrier-исходов",
+                "policy_shadow": self.policy_shadow_report(),
             }
         ps = [
             min(max(float(row["p_take"]), 1e-6), 1 - 1e-6)
@@ -379,6 +505,7 @@ class Journal:
                 if r["option_edge"] is not None and r["option_edge"] > 0),
             "warning": ("исследовательская статистика; малые выборки не доказывают "
                         "устойчивое преимущество"),
+            "policy_shadow": self.policy_shadow_report(),
         }
 
     def update_zones(self, trade_id: int, zones: list) -> dict:
@@ -439,6 +566,13 @@ class Journal:
                     "DELETE FROM option_forecasts WHERE trade_id=?", (trade_id,))
                 self._conn.execute(
                     "DELETE FROM ai_verdicts WHERE trade_id=?", (trade_id,))
+                self._conn.execute(
+                    "DELETE FROM policy_shadow_reviews WHERE trade_id=?", (trade_id,))
+            elif "result_r" in upd and cur.get("status") == "closed":
+                self._conn.execute(
+                    "UPDATE policy_shadow_reviews SET final_result_r=?, resolved_at=? "
+                    "WHERE trade_id=?",
+                    (upd["result_r"], time.time(), trade_id))
         return self.get_trade(trade_id)
 
     def delete_trade(self, trade_id: int) -> None:
@@ -446,6 +580,8 @@ class Journal:
             self._conn.execute("DELETE FROM option_forecasts WHERE trade_id=?",
                                (trade_id,))
             self._conn.execute("DELETE FROM ai_verdicts WHERE trade_id=?",
+                               (trade_id,))
+            self._conn.execute("DELETE FROM policy_shadow_reviews WHERE trade_id=?",
                                (trade_id,))
             n = self._conn.execute("DELETE FROM trades WHERE id=?",
                                    (trade_id,)).rowcount
