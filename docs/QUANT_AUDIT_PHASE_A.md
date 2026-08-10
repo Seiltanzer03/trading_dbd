@@ -185,6 +185,17 @@ published, while `median_years` remains the compatibility field. Robust option
 derivatives, analytic GEX curvature and formula-attributed interactions are
 implemented under the non-authoritative shadow contract documented in
 `OPTION_DERIVATIVE_SHADOW_CONTRACT.md`.
+
+### PR D validation note
+
+Policy v15 now evaluates derivative-weighted BASE/continuation/mean-reversion/
+vol/skew/gamma/correlation stresses with the same net cost and hard-CVaR
+contracts as the production manager. The result remains a shadow robustness
+candidate because no reviewed out-of-sample promotion evidence exists yet.
+Old/candidate policies and future outcomes are persisted under the contract in
+`DERIVED_POLICY_VALIDATION_CONTRACT.md`; verdict v17 reports deterministic
+ENTRY/average/previous-review/NOW attribution and explicitly states when the
+production action was unchanged.
 - **PR D:** named stress ensemble, validated derived-state integration and deterministic verdict attribution.
 
 No derived metric receives live policy authority merely because it is mathematically plausible.

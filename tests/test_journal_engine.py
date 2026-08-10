@@ -138,6 +138,30 @@ class TestJournal:
         assert report["n"] == 1 and report["censored_n"] == 1
         assert report["brier"] == pytest.approx((0.7 - 1.0) ** 2)
 
+    def test_policy_shadow_is_recorded_before_outcome_and_resolved_on_close(self, journal):
+        trade = journal.open_trade(3, "NAS100", "long", 100, 99, 102.5)
+        journal.record_policy_shadow(
+            trade["id"], old_policy="HOLD", candidate_policy="CLOSE_25",
+            reason="test divergence", review_r=0.2, expected_delta_r=0.05,
+            cvar_delta_r=0.18, execution_cost_delta_r=0.01,
+            source_quality=0.8, min_interval_sec=0,
+        )
+        pending = journal.policy_shadow_report()
+        assert pending["observations"] == 1
+        assert pending["resolved_observations"] == 0
+        assert pending["promotion_allowed"] is False
+
+        journal.close_trade(trade["id"], 1.1)
+        report = journal.policy_shadow_report()
+        assert report["resolved_observations"] == 1
+        assert report["resolved_trades"] == 1
+        assert report["policy_changes"] == 1
+        assert report["expected_improvement_r"] == pytest.approx(0.05)
+        assert report["tail_loss_improvement_r"] == pytest.approx(0.18)
+        assert report["false_early_exit_proxy"] == 1.0
+        assert report["turnover_increase"] == pytest.approx(0.25)
+        assert report["promotion_allowed"] is False
+
     def test_note_edit_keeps_forecast_when_levels_are_unchanged(self, journal):
         t = journal.open_trade(3, "NAS100", "long", 100, 99, 102.5)
         journal.record_option_forecast(
