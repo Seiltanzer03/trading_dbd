@@ -2,12 +2,16 @@
 // app.js already calls updateLiveGex() on every WS price tick; gex.js publishes
 // that packet here so other analytics can react without opening duplicate WS feeds.
 //
-// Performance rule: raw market bursts are coalesced, but analytics listeners must
-// NEVER run inside requestAnimationFrame. The Galton board, Plotly transitions and
-// other motion own that pre-paint frame budget. We use rAF only as a paint boundary,
-// then flush analytics in a macrotask after the browser has had a chance to paint.
+// Performance rule: raw market bursts are coalesced and analytics listeners are
+// dispatched one heavy visual task per painted frame. The Galton board, Plotly
+// transitions and other motion therefore keep their frame budget even when a raw
+// websocket tick wakes several analytical modules at the same instant.
+
+import { scheduleFrameTask } from './frame_budget.js';
 
 const listeners = new Set();
+const listenerIds = new WeakMap();
+let nextListenerId = 1;
 let lastTs = 0;
 let lastPrice = null;
 let impulse = 0;
@@ -40,10 +44,6 @@ function requestVisualFrame(fn) {
 }
 
 function requestPostPaint(fn) {
-  // rAF callbacks execute before paint. Heavy analytics work inside that callback
-  // caused a visible ~1 Hz hitch in independently animated canvases when WS ticks
-  // arrived at ~1 Hz. Queue a macrotask from rAF so the current visual frame paints
-  // first; the analytics state remains only one event-loop turn behind the tick.
   requestVisualFrame(() => setTimeout(fn, 0));
 }
 
@@ -53,7 +53,7 @@ function scheduleFlush() {
   requestPostPaint(() => {
     flushPending = false;
     flushMarketTick();
-    // A new tick may have arrived while listeners were rendering.
+    // A new tick may have arrived while the previous packet was being prepared.
     if (pendingRaw) scheduleFlush();
   });
 }
@@ -100,13 +100,23 @@ function flushMarketTick() {
   pendingCount = 0;
   pendingLastInputPrice = price;
 
-  listeners.forEach((fn) => {
-    try { fn(packet); } catch (err) { console.warn('market tick listener failed', err); }
-  });
+  // Do not wake every Plotly/Canvas subscriber in one macrotask. Each listener
+  // receives the same canonical packet, but the shared scheduler gives a paint
+  // boundary between listeners. A newer packet replaces only that listener's
+  // not-yet-rendered visual job, so stale intermediate frames never pile up.
+  for (const fn of listeners) {
+    const id = listenerIds.get(fn) || nextListenerId++;
+    listenerIds.set(fn, id);
+    scheduleFrameTask(`market-listener:${id}`, () => {
+      if (!listeners.has(fn)) return;
+      try { fn(packet); } catch (err) { console.warn('market tick listener failed', err); }
+    });
+  }
 }
 
 export function subscribeMarketTick(fn) {
   if (typeof fn !== 'function') return () => {};
+  if (!listenerIds.has(fn)) listenerIds.set(fn, nextListenerId++);
   listeners.add(fn);
   return () => listeners.delete(fn);
 }

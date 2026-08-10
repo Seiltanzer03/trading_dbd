@@ -5,6 +5,7 @@
 import { initCone as initCoreCone } from './cone_core.js';
 import { createPlotlyCameraGuard } from './plotly_camera_guard.js';
 import { applyLocalTouchClock } from './touch_clock.js';
+import { createLatestPanelTask } from './frame_budget.js';
 
 const INIT_CAM = {
   eye: { x: 0.15, y: 2.3, z: 0.65 },
@@ -22,23 +23,34 @@ export function initCone(elId) {
   const camera = createPlotlyCameraGuard(el, INIT_CAM);
   const core = initCoreCone(el);
 
-  function setData(...args) {
-    // Probability stays option-implied. Only the displayed calendar touch clock
-    // is re-mapped to the current local variance pace (term structure + RV/IV).
-    // Mutating the shared cone payload is intentional: app.js sends the same
-    // object to Fan immediately after Cone, so both panels show one clock.
-    if (args[0]) applyLocalTouchClock(args[0]);
+  const setDataTask = createLatestPanelTask('cone:set-data', el, (...args) => {
     camera.beforeWrite();
     const result = core.setData(...args);
     camera.afterWrite();
     publish('seiltanzer:cone-data', { cone: args[0] || null, extra: args[1] || null });
     return result;
-  }
+  }, { margin: 300 });
 
-  function updateLive(...args) {
+  const liveTask = createLatestPanelTask('cone:live', el, (...args) => {
     const result = core.updateLive(...args);
     publish('seiltanzer:cone-live', args[0] || {});
     return result;
+  }, { margin: 220 });
+
+  function setData(...args) {
+    // Probability stays option-implied. Only the displayed calendar touch clock
+    // is re-mapped to the current local variance pace (term structure + RV/IV).
+    // Keep this synchronous mutation because app.js sends the same cone object to
+    // Fan immediately afterwards; both panels must always share one touch clock.
+    if (args[0]) applyLocalTouchClock(args[0]);
+    setDataTask.schedule(...args);
+  }
+
+  function updateLive(...args) {
+    // Live r is still delivered at display-frame latency when the panel is visible.
+    // Offscreen updates collapse to the newest state instead of spending Plotly
+    // work while another panel (for example the Galton board) owns the screen.
+    liveTask.schedule(...args);
   }
 
   return { setData, updateLive };
