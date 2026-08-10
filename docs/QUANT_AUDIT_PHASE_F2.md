@@ -51,3 +51,7 @@ chronological purge and maximum-horizon embargo before any challenger scoring.
 
 Continuation gate: passive horizons now use versioned exchange-local trading
 time, and deterministic event anchors are anti-clustered and threshold-frozen.
+
+
+Calibration v2 reports reliability raw/effective N, quantile pinball loss and
+train-frozen base rates on pristine purged/embargoed TEST only.
