@@ -10,6 +10,8 @@ let payload = null;
 let graphData = null;
 let currentMode = 'NETWORK';
 let resizeObserver = null;
+let visibilityObserver = null;
+let panelVisible = true;
 let refreshTimer = null;
 let rafId = null;
 let draggedNodeId = null;
@@ -17,7 +19,34 @@ let hoveredNodeId = null;
 let liveTick = null;
 let unsubscribeTick = null;
 let generation = 0;
+let lastMatrixSig = null;
 const positions = new Map();
+
+function threeDBusy() {
+  if (typeof window === 'undefined') return false;
+  return Boolean(window.__seiltanzer3dBusy)
+    || Boolean(document?.documentElement?.classList?.contains?.('analytics-3d-busy'));
+}
+
+function canAnimateNetwork() {
+  return currentMode === 'NETWORK'
+    && panelVisible
+    && !(typeof document !== 'undefined' && document.hidden)
+    && !threeDBusy();
+}
+
+function correlationSignature(p) {
+  const matrix = p?.matrix_short || p?.matrix;
+  if (!Array.isArray(matrix) || !matrix.length) return 'empty';
+  const assets = p?.assets || p?.pairs || [];
+  // Matrix is small (usually 6–10 assets), so a rounded signature is much cheaper
+  // than recreating an ECharts instance on every websocket price tick.
+  const values = matrix.map((row) => (row || []).map((v) =>
+    Number.isFinite(Number(v)) ? Number(v).toFixed(4) : 'x').join(',')).join(';');
+  const delta = (p?.matrix_delta || []).map((row) => (row || []).map((v) =>
+    Number.isFinite(Number(v)) ? Number(v).toFixed(4) : 'x').join(',')).join(';');
+  return `${p?.ts || p?.updated_at || ''}|${assets.join(',')}|${values}|${delta}`;
+}
 
 export function initCorrelation() {
   ensurePremiumAnalyticsTheme();
@@ -30,7 +59,30 @@ export function initCorrelation() {
     resizeObserver = new ResizeObserver(() => renderCorrelation(true));
     resizeObserver.observe(holder);
   }
+  const panel = $('#panel-correlation');
+  if (panel && typeof IntersectionObserver !== 'undefined') {
+    visibilityObserver = new IntersectionObserver((entries) => {
+      const entry = entries[0];
+      panelVisible = entry ? entry.isIntersecting : true;
+      if (!panelVisible && rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      } else if (panelVisible) ensureNetworkAnimation();
+    }, { rootMargin: '180px 0px', threshold: 0.01 });
+    visibilityObserver.observe(panel);
+  }
   window.addEventListener?.('seiltanzer:analytics-mobile-resize', () => renderCorrelation(true));
+  window.addEventListener?.('seiltanzer:3d-busy', () => {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+  });
+  window.addEventListener?.('seiltanzer:3d-idle', ensureNetworkAnimation);
+  document?.addEventListener?.('visibilitychange', () => {
+    if (document.hidden && rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    } else ensureNetworkAnimation();
+  }, { passive: true });
   unsubscribeTick = subscribeMarketTick((tick) => { liveTick = tick; ensureNetworkAnimation(); });
   fetchGraphData();
   refreshTimer = setInterval(fetchGraphData, 300000);
@@ -70,10 +122,15 @@ export function updateCorrelation(p) {
   const matrix = p?.matrix_short || p?.matrix;
   if (!p || !matrix?.length) {
     payload = null;
+    lastMatrixSig = null;
     if (currentMode === 'MATRIX' && emptyEl) emptyEl.style.display = 'flex';
     return;
   }
+  const sig = correlationSignature(p);
+  const changed = sig !== lastMatrixSig;
   payload = p;
+  if (!changed) return;
+  lastMatrixSig = sig;
   if (currentMode === 'MATRIX') renderMatrixChart(true);
 }
 
@@ -164,8 +221,11 @@ function networkCanvas() {
   const dpr = analyticsMobileDpr();
   const width = mobile ? Math.max(280, Math.floor(rect.width || 340)) : Math.max(560, Math.floor(rect.width || 930));
   const height = mobile ? Math.max(300, Math.floor(rect.height || 350)) : Math.max(340, Math.floor(rect.height || 390));
-  cv.width = Math.floor(width * dpr); cv.height = Math.floor(height * dpr);
-  cv.style.width = `${width}px`; cv.style.height = `${height}px`;
+  const pixelWidth = Math.floor(width * dpr), pixelHeight = Math.floor(height * dpr);
+  if (cv.width !== pixelWidth) cv.width = pixelWidth;
+  if (cv.height !== pixelHeight) cv.height = pixelHeight;
+  if (cv.style.width !== `${width}px`) cv.style.width = `${width}px`;
+  if (cv.style.height !== `${height}px`) cv.style.height = `${height}px`;
   return { holder, cv, dpr, width, height, mobile };
 }
 
@@ -175,6 +235,7 @@ function renderForceGraph(force = false) {
     if (statusEl) statusEl.textContent = '○ NO REAL NETWORK DATA';
     return;
   }
+  if (!panelVisible && !force) return;
   if (emptyEl) emptyEl.style.display = 'none';
   if (chart) { try { chart.dispose(); } catch {} chart = null; }
   const { cv, dpr, width, height, mobile } = networkCanvas();
@@ -188,11 +249,17 @@ function renderForceGraph(force = false) {
 
   const activeInstrument = aliasForInstrument(liveTick?.trade?.instrument);
   const allActive = links.filter((l) => Math.abs(Number(l.correlation || 0)) >= .22 || Number(l.tension || 0) >= .08 || l.status === 'BREAK_ALERT');
+  const linkDynamics = allActive.some((l) => Number(l.velocity_magnitude || 0) > .01 || l.status === 'BREAK_ALERT');
   let lastDraw = 0;
-  const minFrame = mobile ? 32 : 15;
+  const activeFrame = mobile ? 32 : 16;
+  const idleFrame = mobile ? 110 : 80;
 
   const draw = (now) => {
     if (generationNow !== generation || currentMode !== 'NETWORK') return;
+    if (!canAnimateNetwork()) { rafId = null; return; }
+    const liveImpulseNow = clamp(Number(liveTick?.impulse || 0), 0, 1);
+    const dynamicNow = linkDynamics || liveImpulseNow > .015 || draggedNodeId || hoveredNodeId;
+    const minFrame = dynamicNow ? activeFrame : idleFrame;
     if (now - lastDraw < minFrame) { rafId = requestAnimationFrame(draw); return; }
     lastDraw = now;
     ctx.clearRect(0, 0, width, height);
@@ -253,7 +320,7 @@ function renderForceGraph(force = false) {
       const incident = links.filter((l) => l.source === n.id || l.target === n.id);
       const noDynamics = incident.every((l) => Math.abs(Number(l.correlation || 0)) < .015 && Number(l.tension || 0) < .015);
       const isLive = activeInstrument && (n.id === activeInstrument || (activeInstrument === 'XAU' && n.id === 'GOLD'));
-      const liveImpulse = isLive ? clamp(Number(liveTick?.impulse || 0), 0, 1) : 0;
+      const liveImpulse = isLive ? liveImpulseNow : 0;
       const r = (mobile ? 12 : 15) + coupling * (mobile ? 7 : 10);
 
       if (stress > .03 || liveImpulse > .02) {
@@ -291,7 +358,7 @@ function renderForceGraph(force = false) {
 
   bindNetworkPointer(cv, nodes, byId, width, height, mobile);
   if (rafId) cancelAnimationFrame(rafId);
-  rafId = requestAnimationFrame(draw);
+  if (canAnimateNetwork()) rafId = requestAnimationFrame(draw);
   updateNetworkText(links, allActive);
 }
 
@@ -322,9 +389,9 @@ function drawHover(ctx, byId, links, width, height) {
 
 function bindNetworkPointer(cv, nodes, byId, width, height, mobile) {
   const pointer=(e)=>{const r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)*width/r.width,y:(e.clientY-r.top)*height/r.height};};
-  cv.onpointerdown=(e)=>{const p=pointer(e),hit=nodes.find(n=>Math.hypot(n.x-p.x,n.y-p.y)<=(mobile?25:30));if(!hit)return;draggedNodeId=hit.id;cv.setPointerCapture?.(e.pointerId);cv.style.cursor='grabbing';};
-  cv.onpointermove=(e)=>{const p=pointer(e);if(draggedNodeId){const n=byId.get(draggedNodeId);if(n){n.x=Math.max(24,Math.min(width-24,p.x));n.y=Math.max(24,Math.min(height-24,p.y));positions.set(n.id,{x:n.x,y:n.y});}}else if(!mobile){const hit=nodes.find(n=>Math.hypot(n.x-p.x,n.y-p.y)<=30);hoveredNodeId=hit?.id||null;cv.style.cursor=hit?'pointer':'grab';}};
-  const release=(e)=>{if(draggedNodeId){draggedNodeId=null;cv.releasePointerCapture?.(e.pointerId);cv.style.cursor='grab';}};cv.onpointerup=release;cv.onpointercancel=release;cv.onpointerleave=()=>{if(!draggedNodeId)hoveredNodeId=null;};
+  cv.onpointerdown=(e)=>{const p=pointer(e),hit=nodes.find(n=>Math.hypot(n.x-p.x,n.y-p.y)<=(mobile?25:30));if(!hit)return;draggedNodeId=hit.id;cv.setPointerCapture?.(e.pointerId);cv.style.cursor='grabbing';ensureNetworkAnimation();};
+  cv.onpointermove=(e)=>{const p=pointer(e);if(draggedNodeId){const n=byId.get(draggedNodeId);if(n){n.x=Math.max(24,Math.min(width-24,p.x));n.y=Math.max(24,Math.min(height-24,p.y));positions.set(n.id,{x:n.x,y:n.y});}}else if(!mobile){const hit=nodes.find(n=>Math.hypot(n.x-p.x,n.y-p.y)<=30);hoveredNodeId=hit?.id||null;cv.style.cursor=hit?'pointer':'grab';}ensureNetworkAnimation();};
+  const release=(e)=>{if(draggedNodeId){draggedNodeId=null;cv.releasePointerCapture?.(e.pointerId);cv.style.cursor='grab';ensureNetworkAnimation();}};cv.onpointerup=release;cv.onpointercancel=release;cv.onpointerleave=()=>{if(!draggedNodeId)hoveredNodeId=null;};
 }
 
 function updateNetworkText(links, activeLinks) {
@@ -332,17 +399,18 @@ function updateNetworkText(links, activeLinks) {
   const interpret=$('#corr-interpretation');if(interpret){const top=(graphData.break_alerts||[])[0];interpret.innerHTML=top?`<b>NETWORK TENSION:</b> ${top.source}↔${top.target} · ρ ${Number(top.correlation).toFixed(2)} · Δbaseline ${top.delta_baseline==null?'—':Number(top.delta_baseline).toFixed(2)} · Δ15m ${top.delta_15m==null?'—':Number(top.delta_15m).toFixed(2)}. <b>Все ${links.length} наблюдаемых связи</b> показаны фоновым слоем; активный слой выделяет ${activeLinks.length} сильных/быстро меняющихся.`:`<b>FULL TOPOLOGY:</b> все ${links.length} наблюдаемых пары показаны; ${activeLinks.length} находятся в активном слое.`;interpret.style.display='block';}
 }
 
-function ensureNetworkAnimation(){if(currentMode==='NETWORK'&&!rafId)renderForceGraph(false);}
+function ensureNetworkAnimation(){
+  if(canAnimateNetwork()&&!rafId)renderForceGraph(false);
+}
 
 function renderMatrixChart(force=false) {
   const holder=$('#corr-chart'); if(!holder||!payload||!window.echarts)return;
   if(emptyEl)emptyEl.style.display='none';
   holder.querySelectorAll('canvas[data-corr-renderer="network"]').forEach(n=>n.remove());
-  if(chart)chart.dispose();
   const mobile=isAnalyticsMobile();
-  chart=window.echarts.init(holder,null,{renderer:'canvas',devicePixelRatio:analyticsMobileDpr()});
+  if (!chart) chart=window.echarts.init(holder,null,{renderer:'canvas',devicePixelRatio:analyticsMobileDpr()});
   const matrix=payload.matrix_short||payload.matrix,assets=payload.assets||payload.pairs||[],delta=payload.matrix_delta||[],points=[];
   for(let i=0;i<matrix.length;i++)for(let j=0;j<matrix[i].length;j++){const v=Number(matrix[i][j]);if(Number.isFinite(v))points.push([j,i,v,Number(delta?.[i]?.[j])]);}
-  chart.setOption({animationDuration:mobile?120:280,backgroundColor:'#08131f',tooltip:{show:!mobile,backgroundColor:'rgba(4,12,20,.96)',borderColor:'#2b485e',textStyle:{color:'#d6e4eb',fontFamily:'IBM Plex Mono',fontSize:10},formatter:p=>{const[j,i,rho,d]=p.data;return`<b>${assets[i]} ↔ ${assets[j]}</b><br>rolling ρ: ${rho.toFixed(2)}<br>Δ vs baseline: ${Number.isFinite(d)?d.toFixed(2):'—'}`;}},grid:mobile?{left:45,right:8,top:20,bottom:44}:{left:70,right:30,top:28,bottom:48},xAxis:{type:'category',data:assets,axisLabel:{rotate:mobile?-45:-25,fontSize:mobile?7:9,color:'#a9bdc9',interval:0},axisLine:{lineStyle:{color:'#345064'}},splitLine:{show:true,lineStyle:{color:'rgba(164,190,207,.07)'}}},yAxis:{type:'category',data:assets,inverse:true,axisLabel:{fontSize:mobile?7:9,color:'#a9bdc9'},axisLine:{lineStyle:{color:'#345064'}},splitLine:{show:true,lineStyle:{color:'rgba(164,190,207,.07)'}}},visualMap:{min:-1,max:1,show:false,inRange:{color:['#d84861','#172839','#36c898']}},series:[{type:'heatmap',data:points,label:{show:true,formatter:p=>Number(p.data[2]).toFixed(mobile?1:2),fontSize:mobile?7:9,color:'#dce7ed'},itemStyle:{borderColor:'rgba(210,225,234,.12)',borderWidth:1}}]});
+  chart.setOption({animationDuration:mobile?120:280,backgroundColor:'#08131f',tooltip:{show:!mobile,backgroundColor:'rgba(4,12,20,.96)',borderColor:'#2b485e',textStyle:{color:'#d6e4eb',fontFamily:'IBM Plex Mono',fontSize:10},formatter:p=>{const[j,i,rho,d]=p.data;return`<b>${assets[i]} ↔ ${assets[j]}</b><br>rolling ρ: ${rho.toFixed(2)}<br>Δ vs baseline: ${Number.isFinite(d)?d.toFixed(2):'—'}`;}},grid:mobile?{left:45,right:8,top:20,bottom:44}:{left:70,right:30,top:28,bottom:48},xAxis:{type:'category',data:assets,axisLabel:{rotate:mobile?-45:-25,fontSize:mobile?7:9,color:'#a9bdc9',interval:0},axisLine:{lineStyle:{color:'#345064'}},splitLine:{show:true,lineStyle:{color:'rgba(164,190,207,.07)'}}},yAxis:{type:'category',data:assets,inverse:true,axisLabel:{fontSize:mobile?7:9,color:'#a9bdc9'},axisLine:{lineStyle:{color:'#345064'}},splitLine:{show:true,lineStyle:{color:'rgba(164,190,207,.07)'}}},visualMap:{min:-1,max:1,show:false,inRange:{color:['#d84861','#172839','#36c898']}},series:[{type:'heatmap',data:points,label:{show:true,formatter:p=>Number(p.data[2]).toFixed(mobile?1:2),fontSize:mobile?7:9,color:'#dce7ed'},itemStyle:{borderColor:'rgba(210,225,234,.12)',borderWidth:1}}]}, {notMerge:true,lazyUpdate:true});
   if(statusEl)statusEl.textContent=`● MATRIX · ${assets.length} ASSETS`;
 }

@@ -45,6 +45,7 @@ jobs:
           node tests/web/cone_interaction_smoke.mjs
           node tests/web/gex_smoke.mjs
           node tests/web/analytics_mobile_smoke.mjs
+          node tests/web/render_budget_smoke.mjs
 
       - name: Запуск деплоя на production
         env:
