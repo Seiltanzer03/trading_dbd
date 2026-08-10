@@ -10,6 +10,8 @@ import { approach, pulse } from './anim.js';
 const H = 360;
 const Z95 = 1.6449, Z75 = 0.6745;
 const LIVE_DECAY_TAU = 0.18;
+const MIN_DECISION_MINUTES = 30;
+const DECISION_P50_POSITION = 0.50;
 
 function fmtProb(p) {
   if (p == null || !Number.isFinite(p)) return '—';
@@ -31,6 +33,76 @@ function fmtTime(years) {
 function clamp(value, limit) {
   const v = Number(value) || 0;
   return Math.max(-limit, Math.min(limit, v));
+}
+
+function finite(value) { return Number.isFinite(Number(value)); }
+
+/** Linear CDF interpolation at a full option-horizon fraction. */
+export function cumulativeAt(times, values, tau) {
+  if (!Array.isArray(times) || !Array.isArray(values) || !times.length
+      || times.length !== values.length) return null;
+  const t = Math.max(0, Math.min(1, Number(tau) || 0));
+  let prevT = 0, prevV = 0;
+  for (let i = 0; i < times.length; i++) {
+    const nextT = Math.max(prevT, Number(times[i]) || 0);
+    const nextV = Math.max(prevV, Number(values[i]) || 0);
+    if (t <= nextT) {
+      const u = (t - prevT) / Math.max(nextT - prevT, 1e-9);
+      return prevV + (nextV - prevV) * Math.max(0, Math.min(1, u));
+    }
+    prevT = nextT; prevV = nextV;
+  }
+  return prevV;
+}
+
+/**
+ * Pick a management window without changing the option distribution itself.
+ * DECISION uses the local first-touch variance clock and adds room around its
+ * P50. EXPIRY remains the untouched option horizon for deep inspection.
+ */
+export function computeFanView(cone, mode = 'DECISION') {
+  const fullYears = finite(cone?.horizon_years) && Number(cone.horizon_years) > 0
+    ? Number(cone.horizon_years) : null;
+  if (!fullYears || mode === 'EXPIRY') {
+    return {
+      mode: 'EXPIRY', horizon_frac: 1, horizon_years: fullYears,
+      zoomed: false, source: 'option_expiry',
+      p_take: finite(cone?.p_take) ? Number(cone.p_take) : null,
+      p_stop: finite(cone?.p_stop) ? Number(cone.p_stop) : null,
+      p_no_touch: finite(cone?.unresolved) ? Number(cone.unresolved) : null,
+    };
+  }
+
+  const clockYears = finite(cone?.touch_clock?.median_years)
+    && Number(cone.touch_clock.median_years) > 0
+    ? Number(cone.touch_clock.median_years) : null;
+  let decisionYears = fullYears;
+  let source = 'option_expiry_no_local_p50';
+  if (clockYears != null) {
+    const minimum = Math.min(fullYears, MIN_DECISION_MINUTES / (365 * 24 * 60));
+    // Put the operational P50 at the midpoint: half the chart shows the run-up
+    // to median touch and half shows what happens if the trade survives it.
+    decisionYears = Math.min(fullYears, Math.max(minimum, clockYears / DECISION_P50_POSITION));
+    source = 'local_first_touch_p50';
+  }
+  // A tiny crop creates visual churn without adding decision value.
+  const horizonFrac = decisionYears / fullYears < 0.90
+    ? Math.max(1e-4, decisionYears / fullYears) : 1;
+  const take = cumulativeAt(cone?.times_frac, cone?.p_take_by_t, horizonFrac);
+  const stop = cumulativeAt(cone?.times_frac, cone?.p_stop_by_t, horizonFrac);
+  const pTake = take == null && horizonFrac === 1 && finite(cone?.p_take) ? Number(cone.p_take) : take;
+  const pStop = stop == null && horizonFrac === 1 && finite(cone?.p_stop) ? Number(cone.p_stop) : stop;
+  return {
+    mode: horizonFrac < 1 ? 'DECISION' : 'EXPIRY',
+    horizon_frac: horizonFrac,
+    horizon_years: fullYears * horizonFrac,
+    full_horizon_years: fullYears,
+    zoomed: horizonFrac < 1,
+    source,
+    p_take: pTake,
+    p_stop: pStop,
+    p_no_touch: pTake != null && pStop != null ? Math.max(0, 1 - pTake - pStop) : null,
+  };
 }
 
 /** Квантиль гистограммы; веса могут быть ненормированными. */
@@ -118,10 +190,43 @@ export function liveImpulseShape(tau, decayTau = LIVE_DECAY_TAU) {
 export function initFan(canvas) {
   let data = null;
   let medianPath = [];
+  let viewMode = 'DECISION';
   const live = { r: null };
   let curR = null;
   let rTrail = [];
   let liveImpulse = 0;
+
+  function updateHorizonControls() {
+    if (typeof document === 'undefined') return;
+    const decision = document.querySelector('#btn-fan-decision');
+    const expiry = document.querySelector('#btn-fan-expiry');
+    decision?.classList.toggle('active', viewMode === 'DECISION');
+    expiry?.classList.toggle('active', viewMode === 'EXPIRY');
+    decision?.setAttribute('aria-pressed', viewMode === 'DECISION' ? 'true' : 'false');
+    expiry?.setAttribute('aria-pressed', viewMode === 'EXPIRY' ? 'true' : 'false');
+    const readout = document.querySelector('#fan-horizon-readout');
+    if (!readout) return;
+    if (!data) { readout.textContent = 'DECISION WINDOW · WAITING FOR TRADE'; return; }
+    const view = computeFanView(data, viewMode);
+    if (viewMode === 'EXPIRY') {
+      readout.textContent = `FULL OPTION HORIZON ${fmtTime(view.horizon_years)} · DECISION VIEW USES LOCAL FIRST-TOUCH CLOCK`;
+    } else if (view.zoomed) {
+      const barrier = data?.touch_clock?.barrier === 'stop' ? 'STOP' : 'TAKE';
+      readout.textContent = `DECISION ${fmtTime(view.horizon_years)} · LOCAL ${barrier} P50 ${fmtTime(data.touch_clock?.median_years)} · EXPIRY ${fmtTime(view.full_horizon_years)}`;
+    } else {
+      readout.textContent = `EXPIRY ${fmtTime(view.horizon_years)} · LOCAL P50 OUTSIDE USEFUL ZOOM`;
+    }
+  }
+
+  function setViewMode(mode) {
+    viewMode = mode === 'EXPIRY' ? 'EXPIRY' : 'DECISION';
+    updateHorizonControls();
+  }
+
+  if (typeof document !== 'undefined') {
+    document.querySelector('#btn-fan-decision')?.addEventListener('click', () => setViewMode('DECISION'));
+    document.querySelector('#btn-fan-expiry')?.addEventListener('click', () => setViewMode('EXPIRY'));
+  }
 
   function setData(cone) {
     data = cone && cone.available ? cone : null;
@@ -130,6 +235,7 @@ export function initFan(canvas) {
       rTrail = [];
       liveImpulse = 0;
     }
+    updateHorizonControls();
   }
 
   function updateLive(p) {
@@ -163,26 +269,29 @@ export function initFan(canvas) {
     if (!data) return;
 
     const T = data.T, r0 = data.r0, sig = data.sigma_R, drift = data.drift_R || 0;
-    const hy = data.horizon_years;
+    const fullHy = data.horizon_years;
+    const view = computeFanView(data, viewMode);
+    const viewFrac = view.horizon_frac;
+    const hy = view.horizon_years;
     const skew = data.skew || 0;
     const ratio = data.rv_iv_ratio;
     const termSlope = data.term_slope || 0;
     const anchored = !!data.option_anchored;
-    const touchTake = data.p_take;
-    const touchStop = data.p_stop;
-    const noTouch = data.unresolved;
+    const touchTake = view.p_take;
+    const touchStop = view.p_stop;
+    const noTouch = view.p_no_touch;
     const rNow = curR != null ? curR : r0;
 
-    const optionCenter = (tau) => {
-      if (medianPath.length) return rNow + interpolateMedianOffset(medianPath, tau);
-      return rNow + drift * tau;
+    const optionCenter = (modelTau) => {
+      if (medianPath.length) return rNow + interpolateMedianOffset(medianPath, modelTau);
+      return rNow + drift * modelTau;
     };
-    const centerAt = (tau) => optionCenter(tau)
-      + liveImpulse * liveImpulseShape(tau, LIVE_DECAY_TAU);
+    const centerAt = (modelTau) => optionCenter(modelTau)
+      + liveImpulse * liveImpulseShape(modelTau, LIVE_DECAY_TAU);
 
     const padL = 58, padR = 16, padT = 40, padB = 34;
     const plotW = w - padL - padR, plotH = H - padT - padB;
-    const centerSamples = Array.from({ length: 17 }, (_, i) => centerAt(i / 16));
+    const centerSamples = Array.from({ length: 17 }, (_, i) => centerAt(i / 16 * viewFrac));
     const centerLo = Math.min(...centerSamples);
     const centerHi = Math.max(...centerSamples);
     const yLo = Math.min(-1.35, rNow - 0.4, centerLo - 0.25);
@@ -213,8 +322,9 @@ export function initFan(canvas) {
     const curve = (z, sign, upFn, dnFn) => {
       const pts = [];
       for (let i = 0; i <= N; i++) {
-        const tau = i / N, m = centerAt(tau);
-        pts.push([X(tau), Y(m + (sign > 0 ? z * upFn(tau) : -z * dnFn(tau)))]);
+        const displayTau = i / N, modelTau = displayTau * viewFrac;
+        const m = centerAt(modelTau);
+        pts.push([X(displayTau), Y(m + (sign > 0 ? z * upFn(modelTau) : -z * dnFn(modelTau)))]);
       }
       return pts;
     };
@@ -247,22 +357,24 @@ export function initFan(canvas) {
       ctx.fillStyle = lblColor || color; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'left';
       ctx.fillText(lbl, padL + 2, Y(R) - 3);
     };
-    hline(T, COLORS.green, [], `ТЕЙК +${T.toFixed(2)}R · TOUCH≤H ${fmtProb(touchTake)}`, COLORS.green);
+    const horizonTag = view.zoomed ? 'D' : 'H';
+    hline(T, COLORS.green, [], `ТЕЙК +${T.toFixed(2)}R · TOUCH≤${horizonTag} ${fmtProb(touchTake)}`, COLORS.green);
     hline(0, COLORS.dim, [3, 3], 'ВХОД (0)', COLORS.dim);
-    hline(-1, COLORS.red, [], `СТОП −1R · TOUCH≤H ${fmtProb(touchStop)}`, COLORS.red);
+    hline(-1, COLORS.red, [], `СТОП −1R · TOUCH≤${horizonTag} ${fmtProb(touchStop)}`, COLORS.red);
 
-    if (hy) {
+    if (hy && fullHy) {
       const hasMedian = data.median_years != null;
-      const tau = hasMedian ? Math.max(0, Math.min(1, data.median_years / hy)) : 1;
+      const medianInside = hasMedian && data.median_years <= hy;
+      const tau = medianInside ? Math.max(0, Math.min(1, data.median_years / hy)) : 1;
       ctx.strokeStyle = COLORS.dim; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(X(tau), padT); ctx.lineTo(X(tau), padT + plotH); ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle = COLORS.dim; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
       const termTag = termSlope > 0.03 ? ' · контанго' : termSlope < -0.03 ? ' · бэквордация' : '';
-      const medianLabel = hasMedian
+      const medianLabel = medianInside
         ? `медиана касания ≈ ${fmtTime(data.median_years)}`
-        : `медиана касания > ${fmtTime(hy)}`;
-      ctx.textAlign = hasMedian ? 'center' : 'right';
-      ctx.fillText(`${medianLabel}${termTag}`, X(tau) - (hasMedian ? 0 : 3), padT - 4);
+        : `${view.zoomed ? 'окно решения' : 'медиана касания >'} ${fmtTime(hy)}`;
+      ctx.textAlign = medianInside ? 'center' : 'right';
+      ctx.fillText(`${medianLabel}${termTag}`, X(tau) - (medianInside ? 0 : 3), padT - 4);
     }
 
     const yr = Y(Math.max(yLo, Math.min(yHi, rNow)));
@@ -273,10 +385,10 @@ export function initFan(canvas) {
     ctx.fillText(`r=${rNow >= 0 ? '+' : ''}${rNow.toFixed(2)}`, X(0) + 8, yr - 7);
 
     ctx.fillStyle = COLORS.dim; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
-    const tlabel = (tau) => hy ? fmtTime(hy * tau) : `${(tau * 100).toFixed(0)}%`;
+    const tlabel = (tau) => hy ? fmtTime(hy * tau) : `${(tau * viewFrac * 100).toFixed(0)}%`;
     [0, 0.25, 0.5, 0.75, 1].forEach((tau) => {
       ctx.textAlign = tau === 0 ? 'left' : tau === 1 ? 'right' : 'center';
-      const label = tau === 0 ? 'сейчас' : tau === 1 ? `H ${tlabel(1)}` : tlabel(tau);
+      const label = tau === 0 ? 'сейчас' : tau === 1 ? `${horizonTag} ${tlabel(1)}` : tlabel(tau);
       ctx.fillText(label, X(tau), H - 12);
       ctx.fillRect(X(tau) - 0.5, H - 28, 1, 4);
     });
@@ -284,14 +396,14 @@ export function initFan(canvas) {
     ctx.textAlign = 'right'; ctx.fillStyle = COLORS.dim;
     [T, 0, -1].forEach((R) => ctx.fillText(`${R >= 0 ? '+' : ''}${R.toFixed(2)}R`, padL - 4, Y(R) + 3));
 
-    const nearTrend = centerAt(0.28) - rNow;
+    const nearTrend = centerAt(0.28 * viewFrac) - rNow;
     const lean = nearTrend > 0.04 ? { t: 'ЖИВОЙ УКЛОН К ТЕЙКУ', c: COLORS.green }
       : nearTrend < -0.04 ? { t: 'ЖИВОЙ УКЛОН К СТОПУ', c: COLORS.red }
       : { t: 'ЖИВОЙ УКЛОН НЕЙТРАЛЕН', c: COLORS.dim };
     ctx.textAlign = 'left'; ctx.font = '700 12px "IBM Plex Mono", monospace'; ctx.fillStyle = lean.c;
     ctx.fillText(anchored ? lean.t : 'СЦЕНАРНЫЙ ВЕЕР · БЕЗ P / EDGE', padL, 14);
     ctx.textAlign = 'right'; ctx.font = '10px "IBM Plex Mono", monospace'; ctx.fillStyle = COLORS.dim;
-    ctx.fillText(`${anchored ? 'FIRST-TOUCH≤H' : 'сценарии'}: ТЕЙК ${fmtProb(touchTake)} · СТОП ${fmtProb(touchStop)} · NO-TOUCH ${fmtProb(noTouch)}`, w - padR, 14);
+    ctx.fillText(`${anchored ? `FIRST-TOUCH≤${horizonTag}` : 'сценарии'}: ТЕЙК ${fmtProb(touchTake)} · СТОП ${fmtProb(touchStop)} · NO-TOUCH ${fmtProb(noTouch)}`, w - padR, 14);
     ctx.font = '9px "IBM Plex Mono", monospace';
     if (ratio != null) {
       const mm = ratio < 0.88 ? { t: `опционы ДОРОЖЕ факта ×${(1 / ratio).toFixed(2)} (RR обманчив)`, c: COLORS.red }
@@ -319,5 +431,5 @@ export function initFan(canvas) {
   }
   requestAnimationFrame(frame);
 
-  return { setData, updateLive };
+  return { setData, updateLive, setViewMode };
 }

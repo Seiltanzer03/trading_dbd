@@ -168,8 +168,19 @@ html, body {
 .cone-holder .modebar { background: transparent !important; }
 /* ---- 2D веер под конусом ---- */
 .cone-fan-wrap { margin-top: 12px; border-top: 1px solid var(--rule); padding-top: 10px; }
+.fan-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 7px; }
+.fan-toolbar .panel-mini-title { margin-bottom: 3px; }
+.fan-horizon-readout { color: var(--dim); font-size: 9px; letter-spacing: .055em; }
+#fan-horizon-mode-group { display: flex; gap: 5px; }
+#fan-horizon-mode-group .btn-toggle.active { background: var(--ink); border-color: var(--ink); color: var(--card); }
 .fan-holder { min-height: 360px; }
 #cone-fan { display: block; width: 100%; }
+
+@media (max-width: 760px) {
+  .fan-toolbar { align-items: stretch; flex-direction: column; gap: 7px; }
+  #fan-horizon-mode-group { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+  #fan-horizon-mode-group .btn-toggle { min-height: 34px; touch-action: manipulation; }
+}
 
 /* ---- практический вывод доски ---- */
 .lat-read { font-size: 10.5px; line-height: 1.5; letter-spacing: .02em; color: var(--ink); }

@@ -99,12 +99,27 @@ export function initCorrelation() {
 }
 
 function setLinkMode(mode) {
-  if (currentLinkMode === mode) return;
+  const changed = currentLinkMode !== mode;
   currentLinkMode = mode;
   for (const name of ['FULL', 'MATERIAL', 'STRESS']) {
-    $(`#btn-corr-${name.toLowerCase()}`)?.classList.toggle('active', mode === name);
+    const button = $(`#btn-corr-${name.toLowerCase()}`);
+    button?.classList.toggle('active', mode === name);
+    button?.setAttribute('aria-pressed', mode === name ? 'true' : 'false');
   }
-  if (currentMode === 'NETWORK') renderForceGraph(true);
+  // FULL/MATERIAL/STRESS are graph views. Previously a click while MATRIX was
+  // selected only changed hidden state, so the UI appeared completely dead.
+  // Open the graph explicitly and make the selected filter immediately visible.
+  if (currentMode !== 'NETWORK') {
+    setMode('NETWORK');
+    return;
+  }
+  if (!changed) return;
+  // Invalidate the old RAF closure before scheduling one with the new link set.
+  // A cancelled frame alone is not sufficient when a callback was already queued.
+  generation += 1;
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = null;
+  renderForceGraph(true);
 }
 
 export function linksForNetworkMode(links = [], mode = 'FULL') {
@@ -123,8 +138,12 @@ export function linksForNetworkMode(links = [], mode = 'FULL') {
 function setMode(mode) {
   if (currentMode === mode) return;
   currentMode = mode;
-  $('#btn-corr-network')?.classList.toggle('active', mode === 'NETWORK');
-  $('#btn-corr-matrix')?.classList.toggle('active', mode === 'MATRIX');
+  const networkButton = $('#btn-corr-network');
+  const matrixButton = $('#btn-corr-matrix');
+  networkButton?.classList.toggle('active', mode === 'NETWORK');
+  matrixButton?.classList.toggle('active', mode === 'MATRIX');
+  networkButton?.setAttribute('aria-pressed', mode === 'NETWORK' ? 'true' : 'false');
+  matrixButton?.setAttribute('aria-pressed', mode === 'MATRIX' ? 'true' : 'false');
   destroyRenderer();
   renderCorrelation(true);
 }
@@ -322,10 +341,15 @@ function renderForceGraph(force = false) {
       const rho = Number(l.correlation || 0), absR = Math.abs(rho);
       const tension = clamp(l.tension || 0, 0, 1.5);
       const alert = l.status === 'BREAK_ALERT';
+      const stressView = currentLinkMode === 'STRESS';
+      const motion = Math.abs(correlationMotionRate(l));
+      const stressSalience = clamp(tension + motion * 1.5 + (alert ? .45 : 0), 0, 1.5);
       const incident = !selectedNodeId || l.source === selectedNodeId || l.target === selectedNodeId;
       const focusAlpha = incident ? 1 : .14;
-      ctx.strokeStyle = alert ? `rgba(255,82,105,${.82*focusAlpha})` : edgeColor(rho, (.20 + absR * .54) * focusAlpha);
-      ctx.lineWidth = ((mobile ? .7 : .9) + absR * (mobile ? 2.2 : 3.0) + tension * (mobile ? .9 : 1.5)) * (selectedNodeId && incident ? 1.5 : 1);
+      const edgeAlpha = stressView ? .18 + stressSalience * .52 : .20 + absR * .54;
+      ctx.strokeStyle = alert ? `rgba(255,82,105,${.82*focusAlpha})` : edgeColor(rho, edgeAlpha * focusAlpha);
+      const edgeWeight = stressView ? stressSalience : absR;
+      ctx.lineWidth = ((mobile ? .7 : .9) + edgeWeight * (mobile ? 2.2 : 3.0) + tension * (mobile ? .9 : 1.5)) * (selectedNodeId && incident ? 1.5 : 1);
       ctx.setLineDash(alert ? [7, 5] : []);
       ctx.shadowColor = alert ? '#ff5269' : (rho >= 0 ? '#43d79f' : '#ff5e78');
       ctx.shadowBlur = (mobile ? 3 + tension * 4 : 4 + tension * 8) * focusAlpha;
@@ -365,14 +389,16 @@ function renderForceGraph(force = false) {
       const stress = clamp(n.stress_normalized || 0, 0, 1);
       const coupling = clamp(n.coupling || 0, 0, 1);
       const incident = links.filter((l) => l.source === n.id || l.target === n.id);
+      const visibleIncident = shownLinks.filter((l) => l.source === n.id || l.target === n.id);
       const noDynamics = incident.every((l) => Math.abs(Number(l.correlation || 0)) < .015 && Number(l.tension || 0) < .015);
+      const filteredOut = currentLinkMode !== 'FULL' && visibleIncident.length === 0;
       const isLive = activeInstrument && (n.id === activeInstrument || (activeInstrument === 'XAU' && n.id === 'GOLD'));
       const selected = n.id === selectedNodeId;
       const dimmed = selectedNodeId && !selected;
       const liveImpulse = isLive ? liveImpulseNow : 0;
       const r = (mobile ? 12 : 15) + coupling * (mobile ? 7 : 10);
 
-      ctx.globalAlpha = dimmed ? .34 : 1;
+      ctx.globalAlpha = dimmed ? .34 : filteredOut ? .20 : 1;
       if (stress > .03 || liveImpulse > .02) {
         const haloR = r + (mobile ? 12 : 20) + stress * (mobile ? 10 : 16) + liveImpulse * (mobile ? 10 : 18);
         const halo = ctx.createRadialGradient(n.x, n.y, r * .6, n.x, n.y, haloR);
@@ -403,7 +429,7 @@ function renderForceGraph(force = false) {
     });
 
     drawHud(ctx, width, height, systemic, frag, links.length, shownLinks.length, mobile);
-    drawHover(ctx, byId, links, width, height);
+    drawHover(ctx, byId, shownLinks, width, height);
     rafId = requestAnimationFrame(draw);
   };
 

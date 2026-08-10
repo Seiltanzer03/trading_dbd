@@ -8,6 +8,10 @@ assert.ok(source.includes("if (mode === 'MATERIAL')"));
 assert.ok(source.includes("if (mode === 'STRESS')"));
 assert.ok(source.includes('return links.slice()'), 'FULL must preserve every observed link');
 assert.ok(source.includes('SHOWN LINKS ${activeLinks.length} / OBSERVED ${links.length}'));
+assert.ok(source.includes("if (currentMode !== 'NETWORK')"),
+  'link filters selected from MATRIX must immediately open their NETWORK view');
+assert.ok(source.includes('generation += 1'),
+  'changing link filters must invalidate the previous animation closure');
 assert.ok(source.includes('const packets = [.5 + .5 * phase, .5 - .5 * phase]'), 'packets must be direction-neutral');
 assert.ok(!source.includes('const speed = .035 +'), 'correlation packets must have no decorative base speed');
 assert.ok(!source.includes('now / 14'), 'live-node ring must not be clock-driven');
