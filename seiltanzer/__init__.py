@@ -15,3 +15,11 @@ from .analytics_runtime import install_analytics_runtime as _install_analytics_r
 
 _install_analytics_runtime()
 del _install_analytics_runtime
+
+# Phase F.3.2a closes passive measurement runtime semantics without rewriting
+# historical observations.  Like analytics_runtime, this only installs adapters;
+# it starts no threads and performs no network I/O at import time.
+from .measurement_runtime import install_measurement_runtime as _install_measurement_runtime
+
+_install_measurement_runtime()
+del _install_measurement_runtime
