@@ -105,6 +105,27 @@ jobs:
             fi
           done
 
+          VALIDATION_BODY=$(curl -fsS http://127.0.0.1:8790/api/validation)
+          VALIDATION_BODY="$VALIDATION_BODY" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          body = json.loads(os.environ["VALIDATION_BODY"])
+          q = body.get("q_calibration") or {}
+          authority = q.get("authority") or {}
+          counterfactual = body.get("counterfactual_replay") or {}
+          assert q.get("promotion_allowed") is False
+          assert q.get("production_replacement_allowed") is False
+          assert authority.get("physical_probability_published") is False
+          assert authority.get("sample_count_auto_promotion") is False
+          assert counterfactual.get("promotion_allowed") is False
+          print(
+              "Q->P OOS evidence: "
+              f"sample_count={authority.get('sample_count', 0)} "
+              f"effective_n={authority.get('effective_independent_n', 0)} "
+              f"event_count={authority.get('event_count', 0)} "
+              f"status={authority.get('status', 'insufficient_evidence')}"
+          )
+          PY
+
           # Exercise the real production AI route, including snapshot
           # persistence and provider/deterministic fallback contract. A terminal
           # without an active trade legitimately returns structured 400.
