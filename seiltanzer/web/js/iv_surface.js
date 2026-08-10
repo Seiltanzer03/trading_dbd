@@ -4,6 +4,7 @@
 
 import { initIVSurface as initCoreIVSurface } from './iv_surface_core.js';
 import { createPlotlyCameraGuard } from './plotly_camera_guard.js';
+import { createLatestPanelTask } from './frame_budget.js';
 
 export {
   projectTotalVariance,
@@ -54,15 +55,14 @@ export function initIVSurface(elId) {
   const core = initCoreIVSurface(el);
   let lastSnapshotSig = null;
 
-  function render(state, surfacePayload, force = false) {
+  const renderTask = createLatestPanelTask('iv-surface:render', el, (state, surfacePayload, force = false) => {
     const payload = normalizePayload(surfacePayload);
     const sig = snapshotSignature(payload);
     const hasSurface = Array.isArray(payload.value) && payload.value.length > 0;
 
     // Most websocket ticks only change spot_current. Reusing the existing mesh is
     // visually identical to a full render because iv_surface_core animates the live
-    // ribbon, curtain, ridge, dot and wake from updateLive(). This avoids repeated
-    // Plotly mesh reconstruction while preserving every current visual technology.
+    // ribbon, curtain, ridge, dot and wake from updateLive().
     if (!force && hasSurface && lastSnapshotSig === sig) {
       core.updateLive(payload);
       return;
@@ -73,9 +73,19 @@ export function initIVSurface(elId) {
     camera.afterWrite();
     lastSnapshotSig = hasSurface ? sig : null;
     return result;
+  }, { margin: 300 });
+
+  function render(state, surfacePayload, force = false) {
+    // Keep only the newest tick and execute the Plotly write when this panel is near
+    // the viewport. No IV data or animation layer is removed; offscreen work is
+    // simply postponed so it cannot interrupt a visible Canvas animation.
+    renderTask.schedule(state, surfacePayload, force);
   }
 
   function setMode(...args) {
+    // A mode button can only be used while the panel is visible; apply the latest
+    // pending state first so mode switching never operates on stale geometry.
+    renderTask.flushNow();
     camera.beforeWrite();
     const result = core.setMode(...args);
     camera.afterWrite();
@@ -83,6 +93,7 @@ export function initIVSurface(elId) {
   }
 
   function destroy(...args) {
+    renderTask.destroy();
     lastSnapshotSig = null;
     camera.destroy();
     return core.destroy(...args);
@@ -90,7 +101,7 @@ export function initIVSurface(elId) {
 
   return {
     render,
-    updateLive: (...args) => core.updateLive(...args),
+    updateLive: (...args) => renderTask.schedule(null, args[0], false),
     setMode,
     destroy,
   };
