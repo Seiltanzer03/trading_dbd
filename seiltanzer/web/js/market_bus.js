@@ -2,10 +2,10 @@
 // app.js already calls updateLiveGex() on every WS price tick; gex.js publishes
 // that packet here so other analytics can react without opening duplicate WS feeds.
 //
-// Performance rule: browser paint, not websocket cadence, defines the maximum
-// useful visual update rate. Incoming ticks are therefore coalesced into the next
-// animation frame while their path/shock information is retained. This removes
-// redundant work without changing any analytical model or visible animation.
+// Performance rule: raw market bursts are coalesced, but analytics listeners must
+// NEVER run inside requestAnimationFrame. The Galton board, Plotly transitions and
+// other motion own that pre-paint frame budget. We use rAF only as a paint boundary,
+// then flush analytics in a macrotask after the browser has had a chance to paint.
 
 const listeners = new Set();
 let lastTs = 0;
@@ -18,7 +18,7 @@ let pendingLastInputPrice = null;
 let pendingPeakShock = 0;
 let pendingAbsPathBp = 0;
 let pendingCount = 0;
-let framePending = false;
+let flushPending = false;
 
 const nowMs = () => (typeof performance !== 'undefined' && typeof performance.now === 'function')
   ? performance.now() : Date.now();
@@ -39,11 +39,19 @@ function requestVisualFrame(fn) {
   return setTimeout(() => fn(nowMs()), 16);
 }
 
+function requestPostPaint(fn) {
+  // rAF callbacks execute before paint. Heavy analytics work inside that callback
+  // caused a visible ~1 Hz hitch in independently animated canvases when WS ticks
+  // arrived at ~1 Hz. Queue a macrotask from rAF so the current visual frame paints
+  // first; the analytics state remains only one event-loop turn behind the tick.
+  requestVisualFrame(() => setTimeout(fn, 0));
+}
+
 function scheduleFlush() {
-  if (framePending || !pendingRaw || pageHidden() || analyticsGestureBusy()) return;
-  framePending = true;
-  requestVisualFrame(() => {
-    framePending = false;
+  if (flushPending || !pendingRaw || pageHidden() || analyticsGestureBusy()) return;
+  flushPending = true;
+  requestPostPaint(() => {
+    flushPending = false;
     flushMarketTick();
     // A new tick may have arrived while listeners were rendering.
     if (pendingRaw) scheduleFlush();
@@ -65,7 +73,7 @@ function flushMarketTick() {
   const shock = Math.max(netShock, pendingPeakShock, pathShock);
 
   // Preserve the old exponential impulse semantics when multiple raw ticks were
-  // collapsed into one visual frame: N input ticks still contribute N decays.
+  // collapsed into one visual update: N input ticks still contribute N decays.
   const decay = Math.pow(0.86, count);
   impulse = impulse * decay + shock * (1 - decay);
   seq += count;
