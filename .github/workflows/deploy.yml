@@ -131,6 +131,25 @@ jobs:
           )
           PY
 
+          PASSIVE_BODY=$(curl -fsS http://127.0.0.1:8790/api/research/passive/calibration)
+          PASSIVE_STATUS=$(curl -fsS http://127.0.0.1:8790/api/research/passive/status)
+          PASSIVE_BODY="$PASSIVE_BODY" PASSIVE_STATUS="$PASSIVE_STATUS" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          calibration = json.loads(os.environ["PASSIVE_BODY"])
+          status = json.loads(os.environ["PASSIVE_STATUS"])
+          assert calibration.get("promotion_allowed") is False
+          assert calibration.get("sample_count_auto_promotion") is False
+          assert calibration.get("authority") == "shadow"
+          assert status.get("active_trade_required") is False
+          assert status.get("promotion_allowed") is False
+          print(
+              "Passive evidence: "
+              f"raw_n={calibration.get('raw_n', 0)} "
+              f"effective_n={calibration.get('effective_n', 0)} "
+              f"status={calibration.get('evidence_status', 'INSUFFICIENT')}"
+          )
+          PY
+
           # Exercise the real production AI route, including snapshot
           # persistence and provider/deterministic fallback contract. A terminal
           # without an active trade legitimately returns structured 400.

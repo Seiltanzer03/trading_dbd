@@ -415,7 +415,8 @@ class PassiveLearningEngine:
         if gaps and max(gaps) > MAX_GAP_SEC:
             return "insufficient_future_data"
         start, end = float(row["market_price"]), float(points[-1]["price"])
-        prices = [start]+[float(p["price"]) for p in points if p["ts"] > captured]
+        future_points = [p for p in points if p["ts"] > captured]
+        prices = [start] + [float(p["price"]) for p in future_points]
         log_path = [math.log(p/start) for p in prices]
         features, forecast = json.loads(row["features_json"]), json.loads(row["forecast_json"])
         annual = _finite(forecast.get("reference_volatility_annual"))
@@ -432,7 +433,7 @@ class PassiveLearningEngine:
             event, event_ts = None, None
             previous = log_path[0]
             previous_ts = captured
-            for value, point in zip(log_path[1:], points):
+            for value, point in zip(log_path[1:], future_points):
                 if (previous <= lower and value >= upper) or (
                         previous >= upper and value <= lower):
                     ambiguous = True
