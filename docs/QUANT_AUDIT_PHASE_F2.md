@@ -55,3 +55,7 @@ time, and deterministic event anchors are anti-clustered and threshold-frozen.
 
 Calibration v2 reports reliability raw/effective N, quantile pinball loss and
 train-frozen base rates on pristine purged/embargoed TEST only.
+
+
+Virtual management is now an immutable, separately counted cohort over recorded
+real paths; it cannot enter the real trade ledger or support real-user claims.
