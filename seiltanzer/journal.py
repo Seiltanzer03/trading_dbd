@@ -19,9 +19,11 @@ from .decision_research import canonical_snapshot, counterfactual_replay
 from .calibration import (
     binary_scorecard,
     calibration_authority,
+    frozen_baseline_scorecard,
     purged_walk_forward_splits,
     quantile_scorecard,
 )
+from .forecast_outcomes import resolve_forecast_outcome
 
 
 MANAGEMENT_POLICIES = {"HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
@@ -119,6 +121,9 @@ class Journal:
                     q75 REAL,
                     q90 REAL,
                     horizon_minutes REAL,
+                    max_r REAL,
+                    take_r REAL,
+                    be_after_r REAL,
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )""")
             self._conn.execute(
@@ -132,6 +137,7 @@ class Journal:
                 "market_regime": "TEXT", "source_quality": "REAL",
                 "q10": "REAL", "q25": "REAL", "q50": "REAL",
                 "q75": "REAL", "q90": "REAL", "horizon_minutes": "REAL",
+                "max_r": "REAL", "take_r": "REAL", "be_after_r": "REAL",
             }
             for column, kind in forecast_migrations.items():
                 if column not in forecast_cols:
@@ -221,6 +227,18 @@ class Journal:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_decision_snapshot_trade_ts "
                 "ON decision_snapshots(trade_id,captured_ts)")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS trade_market_path (
+                    trade_id INTEGER NOT NULL,
+                    ts REAL NOT NULL,
+                    price REAL,
+                    r REAL NOT NULL,
+                    PRIMARY KEY(trade_id,ts),
+                    FOREIGN KEY(trade_id) REFERENCES trades(id)
+                )""")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_trade_market_path_trade_ts "
+                "ON trade_market_path(trade_id,ts)")
             decision_cols = [row[1] for row in self._conn.execute(
                 "PRAGMA table_info(decision_snapshots)")]
             decision_migrations = {
@@ -420,7 +438,10 @@ class Journal:
                                market_regime: str | None = None,
                                source_quality: float | None = None,
                                quantiles: dict | None = None,
-                               horizon_minutes: float | None = None) -> None:
+                               horizon_minutes: float | None = None,
+                               max_r: float | None = None,
+                               take_r: float | None = None,
+                               be_after_r: float | None = None) -> None:
         """Редкий снимок живого опционного прогноза для честной валидации.
 
         Тиковый UI продолжает обновляться каждую секунду; в БД пишем не чаще
@@ -441,13 +462,14 @@ class Journal:
                 "trade_id,ts,price,r,p_take,p_stop,p_unresolved,option_edge,"
                 "option_ev,chain_ts,chain_age_sec,source,probability_measure,"
                 "instrument,direction,market_regime,source_quality,q10,q25,q50,q75,q90,"
-                "horizon_minutes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "horizon_minutes,max_r,take_r,be_after_r) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (trade_id, now, price, r, p_take, p_stop, p_unresolved,
                  option_edge, option_ev, chain_ts, chain_age_sec, source,
                  probability_measure, instrument, direction, market_regime,
                  source_quality, *((quantiles or {}).get(key)
                                    for key in ("q10", "q25", "q50", "q75", "q90")),
-                 horizon_minutes))
+                 horizon_minutes, max_r, take_r, be_after_r))
 
     def option_forecast_history(self, trade_id: int, limit: int = 120) -> list[dict]:
         """Хронология option-метрик активной сделки для динамического разбора."""
@@ -528,6 +550,15 @@ class Journal:
             return 0
         inserted = 0
         with self._lock, self._conn:
+            last_market = self._conn.execute(
+                "SELECT ts FROM trade_market_path WHERE trade_id=? "
+                "ORDER BY ts DESC LIMIT 1", (int(trade_id),)).fetchone()
+            if last_market is None or float(ts) - float(last_market["ts"]) >= min_interval_sec:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO trade_market_path(trade_id,ts,price,r) "
+                    "VALUES(?,?,?,?)",
+                    (int(trade_id), float(ts), float(price), float(r)),
+                )
             reviews = self._conn.execute(
                 "SELECT d.review_id,d.captured_ts,MAX(p.ts) AS last_ts "
                 "FROM decision_snapshots d "
@@ -687,8 +718,14 @@ class Journal:
                  json.dumps(features, ensure_ascii=False), str(formula),
                  json.dumps(thresholds, ensure_ascii=False), *periods),
             )
-        return {"experiment_id": str(experiment_id), "status": "registered",
-                "promotion_allowed": False}
+        return {
+            "experiment_id": str(experiment_id), "status": "registered",
+            "primary_oos_unit": "first_eligible_forecast_per_trade",
+            "secondary_cluster_key": "trade_id",
+            "test_window_consumed": False,
+            "promotion_allowed": False,
+            "production_replacement_allowed": False,
+        }
 
     def record_experiment_result(self, experiment_id: str, result: dict) -> dict:
         """Consume a test window once; it cannot silently remain fresh OOS."""
@@ -722,6 +759,10 @@ class Journal:
                 "result": json.loads(row["result_json"]) if row["result_json"] else None,
             } for row in rows],
             "promotion_allowed": False,
+            "production_replacement_allowed": False,
+            "sample_count_auto_promotion": False,
+            "primary_oos_unit": "first_eligible_forecast_per_trade",
+            "secondary_panel_cluster": "trade_id",
             "contract": "reviewed report required; sample count never auto-promotes",
         }
 
@@ -861,9 +902,32 @@ class Journal:
                 - fractions.get(row["old_policy"], 0.0))
             for row in rows
         ]
+        grouped: dict[int, list] = {}
+        for row in rows:
+            grouped.setdefault(int(row["trade_id"]), []).append(row)
         candidate_transitions = sum(
-            rows[index]["candidate_policy"] != rows[index - 1]["candidate_policy"]
-            for index in range(1, len(rows)))
+            group[index]["candidate_policy"] != group[index - 1]["candidate_policy"]
+            for group in grouped.values() for index in range(1, len(group)))
+        within_trade_transition_opportunities = sum(
+            max(0, len(group) - 1) for group in grouped.values())
+
+        def stability_breakdown(field: str) -> dict:
+            values = {}
+            for value in sorted({str(row[field] or "unknown") for row in rows}):
+                subset = [row for row in rows if str(row[field] or "unknown") == value]
+                by_trade: dict[int, list] = {}
+                for row in subset:
+                    by_trade.setdefault(int(row["trade_id"]), []).append(row)
+                opportunities = sum(max(0, len(group) - 1) for group in by_trade.values())
+                transitions = sum(
+                    group[index]["candidate_policy"] != group[index - 1]["candidate_policy"]
+                    for group in by_trade.values() for index in range(1, len(group)))
+                values[value] = {
+                    "observations": len(subset), "within_trade_transitions": opportunities,
+                    "stability": (1.0 - transitions / opportunities
+                                  if opportunities else None),
+                }
+            return values
         cost_fragile = []
         for row in rows:
             try:
@@ -891,7 +955,11 @@ class Journal:
             "turnover_increase": sum(turnover) / len(turnover),
             "execution_cost_increase_r": average("execution_cost_delta_r", rows),
             "candidate_stability_proxy": (
-                1.0 - candidate_transitions / max(1, len(rows) - 1)),
+                1.0 - candidate_transitions / within_trade_transition_opportunities
+                if within_trade_transition_opportunities else 1.0),
+            "candidate_stability_contract": "within_trade_transitions_only",
+            "candidate_stability_by_instrument": stability_breakdown("instrument"),
+            "candidate_stability_by_regime": stability_breakdown("market_regime"),
             "execution_cost_fragility_rate": len(cost_fragile) / len(rows),
             "time_to_resolution_minutes_avg": (
                 sum(resolution_minutes) / len(resolution_minutes)
@@ -913,113 +981,65 @@ class Journal:
         }
 
     def validation_report(self) -> dict:
-        """Out-of-sample отчёт по ПЕРВОМУ прогнозу каждой закрытой сделки."""
-        with self._lock:
-            rows = self._conn.execute("""
-                SELECT t.id, t.result_r, t.max_r, t.entry, t.stop, t.take,
-                       f.p_take, f.option_edge, f.option_ev, f.source, f.ts
-                FROM trades t
-                JOIN option_forecasts f ON f.id = (
-                    SELECT f2.id FROM option_forecasts f2
-                    WHERE f2.trade_id=t.id ORDER BY f2.ts ASC LIMIT 1
-                )
-                WHERE t.status='closed' AND t.result_r IS NOT NULL
-                ORDER BY t.closed_at
-            """).fetchall()
-        if not rows:
-            return {
-                "n": 0, "brier": None, "log_loss": None,
-                "calibration": [], "censored_n": 0,
-                "message": "нет закрытых сделок с прогнозом",
-                "policy_shadow": self.policy_shadow_report(),
-            }
-        resolved: list[tuple[sqlite3.Row, float]] = []
-        censored = 0
-        for row in rows:
-            risk = abs(float(row["entry"]) - float(row["stop"]))
-            target_r = abs(float(row["take"]) - float(row["entry"])) / risk
-            max_r = row["max_r"]
-            if max_r is not None and float(max_r) >= target_r - 1e-6:
-                resolved.append((row, 1.0))
-            elif float(row["result_r"]) <= -0.95:
-                resolved.append((row, 0.0))
-            else:
-                # Ручной/частичный выход не отвечает на прогноз
-                # «тейк раньше стопа» и не должен портить Brier как ложный loss.
-                censored += 1
-        if not resolved:
-            return {
-                "n": 0, "brier": None, "log_loss": None,
-                "calibration": [], "censored_n": censored,
-                "message": "есть прогнозы, но нет закрытых barrier-исходов",
-                "policy_shadow": self.policy_shadow_report(),
-            }
-        ps = [
-            min(max(float(row["p_take"]), 1e-6), 1 - 1e-6)
-            for row, _ in resolved
-        ]
-        ys = [outcome for _, outcome in resolved]
-        brier = sum((p - y) ** 2 for p, y in zip(ps, ys)) / len(resolved)
-        log_loss = -sum(
-            y * math.log(p) + (1 - y) * math.log(1 - p)
-            for p, y in zip(ps, ys)) / len(resolved)
-        bins = []
-        for lo in (0.0, 0.2, 0.4, 0.6, 0.8):
-            pairs = [(p, y) for p, y in zip(ps, ys) if lo <= p < lo + 0.2]
-            if pairs:
-                bins.append({
-                    "lo": lo, "hi": lo + 0.2, "n": len(pairs),
-                    "forecast": sum(p for p, _ in pairs) / len(pairs),
-                    "actual": sum(y for _, y in pairs) / len(pairs),
-                })
+        """Compatibility view over horizon-aligned, leakage-safe labels."""
+        score = self.q_calibration_report()
+        take = score.get("take") or {}
         return {
-            "n": len(resolved), "brier": brier, "log_loss": log_loss,
-            "calibration": bins,
-            "censored_n": censored,
-            "positive_edge_n": sum(
-                1 for r, _ in resolved
-                if r["option_edge"] is not None and r["option_edge"] > 0),
-            "warning": ("исследовательская статистика; малые выборки не доказывают "
-                        "устойчивое преимущество"),
+            "version": score.get("version"),
+            "n": score.get("n", 0),
+            "brier": take.get("q_model_brier"),
+            "log_loss": take.get("q_model_log_loss"),
+            "calibration": take.get("reliability_curve") or [],
+            "censored_n": score.get("censored_n", 0),
+            "outcome_counts": score.get("outcome_counts") or {},
+            "oos_scorecard": score.get("oos_scorecard") or {},
+            "message": ("horizon-aligned forecast outcomes; manual-close paths "
+                        "without coverage to H are censored"),
             "policy_shadow": self.policy_shadow_report(),
+            "promotion_allowed": False,
         }
 
     def q_calibration_report(self) -> dict:
-        """OOS scorecard for first Q forecast per closed trade."""
+        """Horizon-aligned scorecard for the first eligible Q forecast/trade."""
         with self._lock:
             rows = self._conn.execute("""
-                SELECT t.id AS trade_id,t.instrument,t.direction,t.entry,t.stop,t.take,
-                       t.result_r,t.max_r,f.*
+                SELECT t.id AS trade_id,t.instrument,t.direction,f.*
                 FROM trades t JOIN option_forecasts f ON f.id=(
                     SELECT f2.id FROM option_forecasts f2
-                    WHERE f2.trade_id=t.id ORDER BY f2.ts ASC LIMIT 1)
-                WHERE t.status='closed' AND t.result_r IS NOT NULL
+                    WHERE f2.trade_id=t.id
+                      AND f2.horizon_minutes>0
+                      AND f2.max_r IS NOT NULL
+                      AND f2.take_r IS NOT NULL
+                      AND f2.be_after_r IS NOT NULL
+                      AND f2.probability_measure='risk_neutral_Q'
+                    ORDER BY f2.ts ASC LIMIT 1)
                 ORDER BY f.ts
             """).fetchall()
         records = []
+        outcomes = []
         for source in rows:
             row = dict(source)
-            risk = abs(float(row["entry"]) - float(row["stop"]))
-            target_r = abs(float(row["take"]) - float(row["entry"])) / max(risk, 1e-12)
-            take = bool(row.get("max_r") is not None
-                        and float(row["max_r"]) >= target_r - 1e-6)
-            stop = bool(float(row["result_r"]) <= -0.95 and not take)
-            no_touch = not take and not stop
+            with self._lock:
+                path = [dict(point) for point in self._conn.execute(
+                    "SELECT ts,r FROM trade_market_path WHERE trade_id=? "
+                    "AND ts>=? ORDER BY ts",
+                    (int(row["trade_id"]), float(row["ts"])),
+                ).fetchall()]
+            outcome = resolve_forecast_outcome(row, path)
+            outcomes.append(outcome)
+            if not outcome["resolved"]:
+                continue
+            event = outcome["event"]
             records.append({
-                **row, "take_event": float(take), "stop_event": float(stop),
-                "no_touch_event": float(no_touch),
-                "realized_r": float(row["result_r"]),
+                **row, "take_event": float(event == "take"),
+                "stop_event": float(event == "stop_or_be"),
+                "no_touch_event": float(event == "no_touch"),
+                "realized_r": outcome.get("realized_r_at_resolution"),
                 "prediction_ts": float(row["ts"]),
                 "horizon_sec": float(row.get("horizon_minutes") or 0.0) * 60.0,
+                "outcome": outcome,
             })
-        score = {
-            "version": "q-calibration-scorecard-v1",
-            "probability_semantics": {
-                "stored": "risk_neutral_Q",
-                "physical_probability_published": False,
-                "p_calibrated_shadow": None,
-            },
-            "n": len(records),
+        descriptive = {
             "take": binary_scorecard(
                 [row["p_take"] for row in records],
                 [row["take_event"] for row in records]),
@@ -1029,6 +1049,49 @@ class Journal:
             "no_touch": binary_scorecard(
                 [row["p_unresolved"] for row in records],
                 [row["no_touch_event"] for row in records]),
+        }
+        split_at = max(1, int(len(records) * 0.70)) if records else 0
+        train, test = records[:split_at], records[split_at:]
+        oos = {
+            "split": "chronological_70_30_train_test",
+            "parameters_frozen_before_test": True,
+            "test_window_reusable": False,
+            "take": frozen_baseline_scorecard(
+                [row["take_event"] for row in train],
+                [row["p_take"] for row in test],
+                [row["take_event"] for row in test]),
+            "stop": frozen_baseline_scorecard(
+                [row["stop_event"] for row in train],
+                [row["p_stop"] for row in test],
+                [row["stop_event"] for row in test]),
+            "no_touch": frozen_baseline_scorecard(
+                [row["no_touch_event"] for row in train],
+                [row["p_unresolved"] for row in test],
+                [row["no_touch_event"] for row in test]),
+        }
+        score = {
+            "version": "q-calibration-scorecard-f1-v1",
+            "outcome_resolution_version": "forecast-outcome-f1-v1",
+            "probability_semantics": {
+                "stored": "risk_neutral_Q",
+                "physical_probability_published": False,
+                "p_calibrated_shadow": None,
+            },
+            "n": len(records),
+            "eligible_forecasts": len(rows),
+            "censored_n": sum(not row["resolved"] for row in outcomes),
+            "outcome_counts": {
+                event: sum(row.get("event") == event and row.get("resolved")
+                           for row in outcomes)
+                for event in ("take", "stop_or_be", "no_touch")
+            },
+            "primary_oos_unit": "first_eligible_forecast_per_trade",
+            "descriptive_full_sample": descriptive,
+            "oos_scorecard": oos,
+            # Compatibility aliases remain explicitly descriptive.
+            "take": descriptive["take"],
+            "stop": descriptive["stop"],
+            "no_touch": descriptive["no_touch"],
             "quantiles": quantile_scorecard(records),
             "walk_forward_splits": purged_walk_forward_splits(
                 records, n_splits=3, embargo_sec=3600.0),
@@ -1036,6 +1099,9 @@ class Journal:
                 instrument: sum(row.get("instrument") == instrument for row in records)
                 for instrument in sorted({str(row.get("instrument")) for row in records})
             },
+            "promotion_allowed": False,
+            "production_replacement_allowed": False,
+            "sample_count_auto_promotion": False,
         }
         score["authority"] = calibration_authority(
             len(records), int(sum(row["take_event"] for row in records)),

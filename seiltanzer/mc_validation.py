@@ -8,16 +8,21 @@ from __future__ import annotations
 from collections import Counter
 from typing import Callable, Iterable
 
+import numpy as np
+
 
 DEFAULT_SEEDS = (0xF001, 0xF002, 0xF003, 0xF004, 0xF005)
 
 
 def _ranking(metrics: dict[str, dict]) -> tuple[str, ...]:
+    def value(row: dict, field: str) -> float:
+        raw = row.get(field)
+        return -999.0 if raw is None else float(raw)
     return tuple(sorted(
         metrics,
         key=lambda name: (
-            float(metrics[name].get("expected_final_r") or -999.0),
-            float(metrics[name].get("cvar10_r") or -999.0),
+            value(metrics[name], "expected_final_r"),
+            value(metrics[name], "cvar10_r"),
         ),
         reverse=True,
     ))
@@ -128,9 +133,53 @@ def convergence_study(
             stable_from = row["scenario_count"]
             break
     return {
-        "method": "nested_path_count_fixed_seed",
+        "method": "fixed_seed_path_count_convergence",
+        "path_sets_nested": False,
         "seed": int(seed), "steps": int(n_steps), "rows": rows,
         "reference_winner": final_winner,
         "winner_stable_from_scenarios": stable_from,
         "live_runtime": False,
+    }
+
+
+def execution_step_convergence(
+    inputs, *, run_once: Callable,
+    step_counts: Iterable[int] = (40, 80, 160, 320, 640, 1280),
+    n_paths: int = 12000, seed: int = 0xBE01,
+) -> dict:
+    """Offline bias study for bridge/BE ordering against a high-step reference."""
+    from .ai_policy_base import first_touch_clock
+
+    rows = []
+    for steps in (int(value) for value in step_counts):
+        metrics, simulation = run_once(
+            inputs, n_paths=int(n_paths), n_steps=steps, seed=int(seed))
+        reasons = simulation.strategy_exit_reason
+        clock = first_touch_clock(simulation, inputs)
+        rows.append({
+            "steps": steps,
+            "p_take": float(np.mean(reasons == "take")),
+            "p_stop_or_be": float(np.mean(np.isin(reasons, ("stop", "breakeven")))),
+            "p_no_touch": float(np.mean(reasons == "horizon")),
+            "p50_resolution_minutes": clock.get("median_resolution_minutes"),
+            "expected_r": metrics["HOLD"].get("expected_final_r"),
+            "cvar10_r": metrics["HOLD"].get("cvar10_r"),
+        })
+    reference = rows[-1] if rows else None
+    for row in rows:
+        row["absolute_bias_vs_reference"] = {
+            key: (None if row.get(key) is None or reference.get(key) is None
+                  else abs(float(row[key]) - float(reference[key])))
+            for key in ("p_take", "p_stop_or_be", "p_no_touch",
+                        "p50_resolution_minutes", "expected_r", "cvar10_r")
+        } if reference else {}
+    return {
+        "method": "high_step_execution_reference",
+        "rows": rows,
+        "reference_steps": reference.get("steps") if reference else None,
+        "live_runtime": False,
+        "bridge_assumption": (
+            "Gaussian Brownian-bridge crossing approximation under transformed "
+            "skew increments; empirical high-step bias, not an exact claim"),
+        "authority": "numerical_diagnostic_only",
     }

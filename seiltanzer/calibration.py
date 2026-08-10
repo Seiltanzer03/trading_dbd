@@ -10,7 +10,7 @@ import math
 from typing import Iterable
 
 
-CALIBRATION_VERSION = "q-to-p-shadow-f3-v1"
+CALIBRATION_VERSION = "q-to-p-shadow-f1-oos-v1"
 
 
 def _finite(value):
@@ -100,6 +100,95 @@ def binary_scorecard(probabilities: Iterable[float], outcomes: Iterable[float]) 
     }
 
 
+def frozen_baseline_scorecard(train_outcomes: Iterable[float],
+                              test_probabilities: Iterable[float],
+                              test_outcomes: Iterable[float]) -> dict:
+    """Evaluate TEST against a base rate fitted on TRAIN and then frozen."""
+    train = [float(value) for value in train_outcomes if _finite(value) is not None]
+    pairs = [(float(p), float(y)) for p, y in zip(test_probabilities, test_outcomes)
+             if _finite(p) is not None and _finite(y) is not None]
+    if not train or not pairs:
+        return {
+            "train_n": len(train), "test_n": len(pairs),
+            "frozen_train_base_rate": None, "status": "insufficient_data",
+        }
+    base_rate = sum(train) / len(train)
+    probabilities = [p for p, _ in pairs]
+    outcomes = [y for _, y in pairs]
+    baseline = [base_rate] * len(pairs)
+    model_brier = brier_score(probabilities, outcomes)
+    baseline_brier = brier_score(baseline, outcomes)
+    model_log = log_loss(probabilities, outcomes)
+    baseline_log = log_loss(baseline, outcomes)
+    return {
+        "train_n": len(train), "test_n": len(pairs),
+        "frozen_train_base_rate": base_rate,
+        "q_model_brier": model_brier,
+        "frozen_baseline_brier": baseline_brier,
+        "brier_skill": (
+            1.0 - model_brier / baseline_brier
+            if model_brier is not None and baseline_brier not in (None, 0.0) else None),
+        "q_model_log_loss": model_log,
+        "frozen_baseline_log_loss": baseline_log,
+        "log_loss_skill": (
+            1.0 - model_log / baseline_log
+            if model_log is not None and baseline_log not in (None, 0.0) else None),
+        "status": "descriptive_oos" if len(pairs) < 30 else "oos_evaluable",
+        "test_outcomes_used_for_fit": False,
+    }
+
+
+def simplex_platt_transform(q_probabilities: Iterable[float],
+                            *, intercepts: Iterable[float] = (0.0, 0.0, 0.0),
+                            slopes: Iterable[float] = (1.0, 1.0, 1.0),
+                            epsilon: float = 1e-9) -> list[float]:
+    """Coherent shadow-only Platt-style map for TAKE/STOP/NO_TOUCH.
+
+    Parameters must be fitted on TRAIN elsewhere and frozen before TEST. The
+    identity parameters map any valid Q simplex back to itself.
+    """
+    q = [max(float(value), epsilon) for value in q_probabilities]
+    a, b = list(intercepts), list(slopes)
+    if len(q) != 3 or len(a) != 3 or len(b) != 3:
+        raise ValueError("competing-risk vector and Platt parameters must have length 3")
+    total = sum(q)
+    if not math.isfinite(total) or total <= 0:
+        raise ValueError("Q probability vector must be finite with positive mass")
+    q = [value / total for value in q]
+    logits = [float(ai) + float(bi) * math.log(value)
+              for value, ai, bi in zip(q, a, b)]
+    centre = max(logits)
+    weights = [math.exp(value - centre) for value in logits]
+    normalizer = sum(weights)
+    return [value / normalizer for value in weights]
+
+
+def prospective_dataset_contract(records: Iterable[dict]) -> dict:
+    """Separate headline trade-level OOS units from clustered review panels."""
+    rows = sorted((dict(row) for row in records),
+                  key=lambda row: float(row.get("prediction_ts") or 0.0))
+    eligible = [row for row in rows if row.get("eligible", True) and row.get("trade_id") is not None]
+    first = {}
+    secondary = []
+    for row in eligible:
+        trade_id = int(row["trade_id"])
+        panel_row = {**row, "cluster_id": trade_id}
+        secondary.append(panel_row)
+        first.setdefault(trade_id, panel_row)
+    return {
+        "version": "prospective-q-to-p-g-v1",
+        "primary_oos": list(first.values()),
+        "primary_unit": "first_eligible_forecast_per_trade",
+        "secondary_panel": secondary,
+        "secondary_cluster_key": "trade_id",
+        "effective_independent_n": len(first),
+        "bootstrap_unit": "trade_id",
+        "physical_probability_published": False,
+        "promotion_allowed": False,
+        "production_replacement_allowed": False,
+    }
+
+
 def pinball_loss(forecasts: Iterable[float], outcomes: Iterable[float],
                  quantile: float) -> float | None:
     pairs = [(float(q), float(y)) for q, y in zip(forecasts, outcomes)
@@ -174,7 +263,10 @@ def calibration_authority(sample_count: int, event_count: int,
         "status": "shadow_evaluable" if sufficient else "insufficient_evidence",
         "sample_count": int(sample_count), "event_count": int(event_count),
         "effective_independent_n": effective,
+        "promotion_allowed": False,
         "production_replacement_allowed": False,
+        "sample_count_auto_promotion": False,
+        "physical_probability_published": False,
         "identity_baseline": "P=Q",
         "candidate_models": ["platt_logistic", "isotonic_if_sufficient_n"],
     }

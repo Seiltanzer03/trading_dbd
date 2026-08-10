@@ -3,7 +3,9 @@ import math
 import numpy as np
 
 import seiltanzer.ai_policy as policy
-from seiltanzer.mc_validation import convergence_study, seed_robustness
+from seiltanzer.mc_validation import (
+    convergence_study, execution_step_convergence, seed_robustness,
+)
 
 
 def _inputs():
@@ -58,3 +60,16 @@ def test_convergence_study_keeps_full_policy_metric_contract():
     for row in result["rows"]:
         assert set(row["policies"]) == set(policy.POLICY_FRACTIONS)
         assert math.isfinite(row["policies"]["HOLD"]["expected_final_r"])
+    assert result["method"] == "fixed_seed_path_count_convergence"
+    assert result["path_sets_nested"] is False
+
+
+def test_be_bridge_step_convergence_is_labelled_as_approximation():
+    result = execution_step_convergence(
+        _inputs(), run_once=policy._run_once,
+        step_counts=(40, 80, 160), n_paths=600, seed=101,
+    )
+    assert result["reference_steps"] == 160
+    assert "approximation" in result["bridge_assumption"]
+    for row in result["rows"]:
+        assert abs(row["p_take"] + row["p_stop_or_be"] + row["p_no_touch"] - 1) < 1e-12

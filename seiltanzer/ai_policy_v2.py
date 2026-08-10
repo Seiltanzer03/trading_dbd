@@ -115,7 +115,11 @@ def _raw_policy_choice(metrics: dict[str, dict], r0: float,
             ineligible[name] = {"cvar10_r": cvar, "shortfall_r": (
                 round(floor - cvar, 4) if cvar is not None else None)}
     if not eligible:
-        best = max(metrics.values(), key=lambda x: _base._num(x.get("cvar10_r")) or -999.0)
+        best = max(
+            metrics.values(),
+            key=lambda x: (-999.0 if _base._num(x.get("cvar10_r")) is None
+                           else float(_base._num(x.get("cvar10_r")))),
+        )
         return best["name"], {
             "cvar_floor_r": round(floor, 4), "eligible": [],
             "ineligible": ineligible, "risk_constraint_unmet": True,

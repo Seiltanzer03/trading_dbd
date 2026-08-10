@@ -137,8 +137,10 @@ class TestJournal:
         journal.close_trade(censored["id"], 0.2)
 
         report = journal.validation_report()
-        assert report["n"] == 1 and report["censored_n"] == 1
-        assert report["brier"] == pytest.approx((0.7 - 1.0) ** 2)
+        # Lifetime max_r/final_result are not valid labels for a finite-horizon
+        # forecast. This legacy fixture has no stored market path through H.
+        assert report["n"] == 0 and report["censored_n"] == 0
+        assert report["brier"] is None
 
     def test_policy_shadow_is_recorded_before_outcome_and_resolved_on_close(self, journal):
         trade = journal.open_trade(3, "NAS100", "long", 100, 99, 102.5)

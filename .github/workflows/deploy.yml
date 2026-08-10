@@ -31,6 +31,7 @@ jobs:
           /opt/seiltanzer/.venv/bin/pip install -q -e ".[dev]"
           /opt/seiltanzer/.venv/bin/pytest -q
           node --check seiltanzer/web/js/touch_clock.js
+          node --check seiltanzer/web/js/safe_fetch.js
           node --check seiltanzer/web/js/cone.js
           node --check seiltanzer/web/js/iv_surface.js
           node --check seiltanzer/web/js/levels.js
@@ -42,6 +43,8 @@ jobs:
           node --check seiltanzer/web/js/analytics_mobile.js
           node --check seiltanzer/web/js/premium_analytics_theme.js
           node tests/web/touch_clock_smoke.mjs
+          node tests/web/ai_verdict_error_smoke.mjs
+          node tests/web/fan_cone_touch_consistency_smoke.mjs
           node tests/web/cone_interaction_smoke.mjs
           node tests/web/gex_smoke.mjs
           node tests/web/correlation_modes_smoke.mjs
@@ -99,6 +102,30 @@ jobs:
               exit 1
             fi
           done
+
+          # Exercise the real production AI route, including snapshot
+          # persistence and provider/deterministic fallback contract. A terminal
+          # without an active trade legitimately returns structured 400.
+          AI_RESPONSE=$(curl -sS --max-time 65 -w $'\n%{http_code}' \
+            -X POST http://127.0.0.1:8790/api/ai/verdict || true)
+          AI_STATUS=${AI_RESPONSE##*$'\n'}
+          AI_BODY=${AI_RESPONSE%$'\n'*}
+          echo "/api/ai/verdict: $AI_STATUS"
+          AI_BODY="$AI_BODY" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          body = json.loads(os.environ["AI_BODY"])
+          assert isinstance(body.get("ok"), bool)
+          if body["ok"]:
+              assert body.get("mode") in {"llm", "deterministic_fallback"}
+              assert isinstance(body.get("verdict"), str) and body["verdict"]
+          else:
+              assert (body.get("error") or {}).get("code") in {
+                  "no_active_trade", "ai_rate_limited", "ai_request_in_progress"}
+          PY
+          if [ "$AI_STATUS" != "200" ] && [ "$AI_STATUS" != "400" ] && [ "$AI_STATUS" != "429" ]; then
+            echo "::error::/api/ai/verdict unexpected status $AI_STATUS"
+            exit 1
+          fi
 
       - name: Публикую проверенный production-статус
         if: always()

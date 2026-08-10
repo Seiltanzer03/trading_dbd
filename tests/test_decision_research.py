@@ -89,6 +89,14 @@ def test_counterfactual_replay_uses_same_be_ladder_and_cost_contract():
     assert result["best_realized_policy"] == "HOLD"
     assert result["production_regret_r"] == 0.0
     assert result["shadow_regret_r"] > 0.0
+    assert result["policies"]["EXIT"]["calendar_time_under_risk_minutes"] == 0.0
+    assert result["policies"]["EXIT"]["exposure_weighted_risk_minutes"] == 0.0
+    assert result["policies"]["HOLD"]["calendar_time_under_risk_minutes"] == 2.0
+    assert result["policies"]["CLOSE_50"]["exposure_weighted_risk_minutes"] == pytest.approx(
+        result["policies"]["HOLD"]["exposure_weighted_risk_minutes"] * 0.5)
+    assert [event["type"] for event in result["execution_path"]["events"]] == [
+        "rung", "rung", "be_arm", "breakeven"]
+    assert result["execution_cost_contract"]["rung_costs"] == "not_modelled"
 
 
 def test_journal_persists_immutable_review_path_and_resolution(tmp_path):

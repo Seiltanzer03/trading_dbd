@@ -14,7 +14,7 @@ from .execution_simulator import (
 
 
 DECISION_SCHEMA_VERSION = "decision-snapshot-f2-v1"
-REPLAY_VERSION = "counterfactual-replay-f2-v1"
+REPLAY_VERSION = "counterfactual-replay-f1-exposure-v1"
 POLICY_FRACTIONS = {
     "HOLD": 0.0, "CLOSE_10": 0.10, "CLOSE_25": 0.25,
     "CLOSE_50": 0.50, "EXIT": 1.0,
@@ -144,6 +144,40 @@ def counterfactual_replay(snapshot: dict, path_points: Iterable[dict]) -> dict:
     points.sort(key=lambda row: row["ts"])
     baseline = replay_execution_path([row["r"] for row in points], spec)
 
+    def event_timestamp(event: dict) -> float:
+        step = int(event.get("step") or 0)
+        if step <= 0 or len(points) == 1:
+            return points[0]["ts"]
+        step = min(step, len(points) - 1)
+        left, right = points[step - 1]["ts"], points[step]["ts"]
+        fraction = min(max(float(event.get("segment_fraction") or 0.0), 0.0), 1.0)
+        return left + (right - left) * fraction
+
+    timeline = [
+        {**event, "ts": event_timestamp(event)} for event in baseline.events
+    ]
+
+    def risk_time(close_fraction: float) -> tuple[float, float]:
+        if close_fraction >= 1.0 - 1e-12:
+            return 0.0, 0.0
+        exposure = 1.0 - close_fraction
+        previous_ts = points[0]["ts"]
+        integral_seconds = 0.0
+        exit_ts = points[-1]["ts"]
+        for event in timeline:
+            ts = max(previous_ts, float(event["ts"]))
+            integral_seconds += exposure * (ts - previous_ts)
+            if event.get("type") == "rung":
+                exposure = (1.0 - close_fraction) * max(
+                    0.0, float(event.get("remaining_after") or 0.0))
+            elif event.get("type") in ("take", "stop", "breakeven", "horizon"):
+                exposure = 0.0
+                exit_ts = ts
+                previous_ts = ts
+                break
+            previous_ts = ts
+        return max(0.0, exit_ts - points[0]["ts"]) / 60.0, integral_seconds / 60.0
+
     manager = snapshot.get("policy_manager") or {}
     costs = manager.get("execution_cost_model") or {}
     immediate = max(0.0, _finite(costs.get("immediate_full_close_r")) or 0.0)
@@ -162,6 +196,8 @@ def counterfactual_replay(snapshot: dict, path_points: Iterable[dict]) -> dict:
             "gross_realized_r": round(gross, 6),
             "net_realized_r": round(net, 6),
             "execution_cost_r": round(gross - net, 6),
+            "calendar_time_under_risk_minutes": round(risk_time(fraction)[0], 6),
+            "exposure_weighted_risk_minutes": round(risk_time(fraction)[1], 6),
         }
     best = max(outcomes, key=lambda name: outcomes[name]["net_realized_r"])
     best_value = outcomes[best]["net_realized_r"]
@@ -189,7 +225,14 @@ def counterfactual_replay(snapshot: dict, path_points: Iterable[dict]) -> dict:
         "time_under_risk_minutes": round(duration / 60.0, 4),
         "mfe_r": round(max(path_rs) - spec.current_r, 6),
         "mae_r": round(min(path_rs) - spec.current_r, 6),
-        "execution_path": baseline.as_dict(),
+        "execution_path": {**baseline.as_dict(), "events": timeline},
+        "execution_cost_contract": {
+            "version": costs.get("version") or "unversioned",
+            "immediate_full_close_r": immediate,
+            "deferred_full_close_r": deferred,
+            "rung_costs": "not_modelled",
+            "price_impact": "assumed_zero",
+        },
         "policies": outcomes, "best_realized_policy": best,
         "production_policy": production,
         "shadow_policy": shadow,
