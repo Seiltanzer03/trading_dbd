@@ -80,3 +80,22 @@ def test_dataset_layers_never_merge(passive):
     assert edge["market_forecast_edge"]["dataset"]=="passive_market"
     assert edge["virtual_management_edge"]["dataset"]=="virtual_position"
     assert edge["real_management_edge"]["dataset"]=="real_user_trade"
+
+
+def test_purged_embargo_split_is_chronological_and_non_overlapping(passive):
+    base=1_700_000_000.
+    rows=[{"observation_id":f"o-{i}","instrument":"NAS100",
+           "horizon_minutes":60,"captured_ts":base+i*3600,
+           "target_ts":base+(i+1)*3600} for i in range(30)]
+    split=passive.purged_embargo_split(rows)
+    assert split["random_shuffle"] is False
+    assert split["purge_applied"] is True
+    assert split["embargo_applied"] is True
+    assert split["embargo_seconds"] == 3600
+    by_id={row["observation_id"]:row for row in rows}
+    if split["train_ids"] and split["validation_ids"]:
+        assert max(by_id[x]["target_ts"] for x in split["train_ids"]) < min(
+            by_id[x]["captured_ts"] for x in split["validation_ids"])
+    if split["validation_ids"] and split["test_ids"]:
+        assert max(by_id[x]["target_ts"] for x in split["validation_ids"]) < min(
+            by_id[x]["captured_ts"] for x in split["test_ids"])

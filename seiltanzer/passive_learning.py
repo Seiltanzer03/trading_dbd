@@ -222,30 +222,43 @@ class PassiveLearningEngine:
                    if annual_vol is not None else None)
         q = {str(level): {"up": None, "down": None, "no_touch": None}
              for level in GEOMETRY_SIGMAS}
-        # The identity-Q block is unavailable without actual option state. A
-        # Gaussian volatility reference remains a named baseline, not Q.
-        q_available = bool(option_metrics)
-        if q_available:
-            for level in GEOMETRY_SIGMAS:
-                # Explicit first-touch approximation scaffold; research-only.
-                touch = min(.98, 2*(1-NormalDist().cdf(level)))
-                q[str(level)] = {"up": touch/2, "down": touch/2,
-                                 "no_touch": 1-touch}
-        quantiles = {}
+        # Never relabel a Gaussian/historical-volatility proxy as option Q.
+        # Q is admitted only through an explicit source contract.
+        raw_q = ((option_metrics or {}).get("standardized_barrier_q") or {})
+        q_available = False
+        for level in GEOMETRY_SIGMAS:
+            source = raw_q.get(str(level)) or {}
+            values = {key: _finite(source.get(key))
+                      for key in ("up", "down", "no_touch")}
+            if all(value is not None for value in values.values()):
+                total = sum(values.values())
+                if abs(total-1.0) <= 1e-6 and all(0.0 <= value <= 1.0
+                                                  for value in values.values()):
+                    q[str(level)] = values
+                    q_available = True
+        raw_quantiles = ((option_metrics or {}).get("q_quantiles_log_return") or {})
+        quantiles = {
+            name: _finite(raw_quantiles.get(name))
+            for name in ("q10","q25","q50","q75","q90")}
+        gaussian_reference = {}
         if sigma_h is not None:
             for name, z in (("q10",-1.2815515655),("q25",-.6744897502),
                             ("q50",0.),("q75",.6744897502),("q90",1.2815515655)):
-                quantiles[name] = z*sigma_h
+                gaussian_reference[name] = z*sigma_h
         else:
-            quantiles = {name: None for name in ("q10","q25","q50","q75","q90")}
+            gaussian_reference = {
+                name: None for name in ("q10","q25","q50","q75","q90")}
         return {
             "version": FORECAST_VERSION, "authority": "shadow_prediction",
             "probability_measure": "risk_neutral_Q" if q_available else "unavailable",
+            "q_source_contract": (
+                "explicit_standardized_barrier_q" if q_available else "unavailable"),
             "physical_probability_published": False,
             "reference_volatility_annual": annual_vol,
             "reference_volatility_units": "log_return_per_sqrt_year",
             "sigma_h_return": sigma_h, "standardized_barriers": q,
             "quantiles_log_return": quantiles,
+            "gaussian_reference_quantiles_log_return": gaussian_reference,
             "option_implied_center": (
                 option_metrics.get("mode_price") if option_metrics else None),
             "option_implied_width": (
@@ -532,6 +545,55 @@ class PassiveLearningEngine:
         return effective
 
     @staticmethod
+    def purged_embargo_split(rows: list[dict]) -> dict:
+        """Chronological 60/20/20 manifest with label purge and embargo.
+
+        The method returns IDs/counts only; it never shuffles observations and
+        does not train a model. The maximum observed horizon is the conservative
+        embargo, so overlapping future-label windows cannot cross partitions.
+        """
+        ordered = sorted(rows, key=lambda row: (
+            float(row["captured_ts"]), str(row.get("observation_id", ""))))
+        if len(ordered) < 3:
+            return {
+                "method": "chronological_purged_embargo",
+                "random_shuffle": False, "purge_applied": True,
+                "embargo_applied": True, "embargo_seconds": 0.0,
+                "train_ids": [], "validation_ids": [], "test_ids": [],
+                "consumed_test_interval": False,
+            }
+        val_index = max(1, min(len(ordered)-2, int(len(ordered)*.60)))
+        test_index = max(val_index+1, min(len(ordered)-1, int(len(ordered)*.80)))
+        validation_start = float(ordered[val_index]["captured_ts"])
+        nominal_test_start = float(ordered[test_index]["captured_ts"])
+        embargo = max(float(row["target_ts"])-float(row["captured_ts"])
+                      for row in ordered)
+        train = [row for row in ordered
+                 if float(row["target_ts"]) < validation_start]
+        validation = [
+            row for row in ordered
+            if float(row["captured_ts"]) >= validation_start
+            and float(row["target_ts"]) < nominal_test_start]
+        test_start = nominal_test_start + embargo
+        test = [row for row in ordered
+                if float(row["captured_ts"]) >= test_start]
+        ids = lambda values: [str(row.get("observation_id", ""))
+                              for row in values]
+        return {
+            "method": "chronological_purged_embargo",
+            "random_shuffle": False, "purge_applied": True,
+            "embargo_applied": True, "embargo_seconds": embargo,
+            "validation_start": validation_start,
+            "nominal_test_start": nominal_test_start,
+            "embargoed_test_start": test_start,
+            "train_ids": ids(train), "validation_ids": ids(validation),
+            "test_ids": ids(test), "raw_n": len(ordered),
+            "purged_or_embargoed_n":
+                len(ordered)-len(train)-len(validation)-len(test),
+            "consumed_test_interval": False,
+        }
+
+    @staticmethod
     def _evidence_status(effective_n: int, span_days: float) -> str:
         if effective_n < 30:
             return "INSUFFICIENT"
@@ -591,6 +653,7 @@ class PassiveLearningEngine:
         effective = self._effective_n([row for row,_,_ in eligible])
         span = ((max((r["captured_ts"] for r in rows),default=0)-
                  min((r["captured_ts"] for r in rows),default=0))/86400 if rows else 0)
+        oos_manifest = self.purged_embargo_split(rows)
         return {
             "version": "passive-q-calibration-f2-v1",
             "dataset": "passive_market", "probability_semantics": {
@@ -601,6 +664,12 @@ class PassiveLearningEngine:
             "binary": score, "quantile_coverage": coverage,
             "full_distribution": {"crps": None,
                                   "status": "not_implemented_until_density_contract"},
+            "oos_validation": {
+                **oos_manifest,
+                "train_n": len(oos_manifest["train_ids"]),
+                "validation_n": len(oos_manifest["validation_ids"]),
+                "test_n": len(oos_manifest["test_ids"]),
+            },
             "baselines": {
                 "zero_return": "reported for terminal-return objectives",
                 "historical_base_rate": True, "random_walk_no_drift": True,
