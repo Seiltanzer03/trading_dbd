@@ -411,6 +411,20 @@ class PassiveLearningEngine:
                     if trigger_reason == "test"
                     else _advance_trading_time(instrument, captured_ts, horizon)
                 )
+                frozen_forecast = dict(forecast)
+                annual = _finite(
+                    frozen_forecast.get("reference_volatility_annual"))
+                sigma_h = (
+                    annual*math.sqrt(horizon/(365*24*60))
+                    if annual is not None and annual > 0 else None)
+                frozen_forecast["sigma_h_return"] = sigma_h
+                if sigma_h is not None:
+                    frozen_forecast[
+                        "gaussian_reference_quantiles_log_return"] = {
+                        name:z*sigma_h for name,z in (
+                            ("q10",-1.2815515655),("q25",-.6744897502),
+                            ("q50",0.),("q75",.6744897502),
+                            ("q90",1.2815515655))}
                 self._conn.execute(
                     "INSERT OR IGNORE INTO passive_market_observations("
                     "observation_id,anchor_group_id,captured_ts,target_ts,instrument,"
@@ -434,7 +448,7 @@ class PassiveLearningEngine:
                      features.get("market_regime"), features.get("session"),
                      PASSIVE_SCHEMA_VERSION, forecast.get("version", FORECAST_VERSION),
                      "identity-only-unpromoted", "standardized-geometry-f2-v1",
-                     _json(features), _json({**forecast,
+                     _json(features), _json({**frozen_forecast,
                         "horizon_minutes": horizon,
                         "forecast_made_at": captured_ts}),
                      int(bool(evidence_eligible)), "pending", time.time()))
@@ -680,6 +694,12 @@ class PassiveLearningEngine:
             return
         forecast = json.loads(passive_row["forecast_json"])
         sigma_h = _finite(forecast.get("sigma_h_return"))
+        if sigma_h is None:
+            annual = _finite(forecast.get("reference_volatility_annual"))
+            sigma_h = (
+                annual*math.sqrt(
+                    float(passive_row["horizon_minutes"])/(365*24*60))
+                if annual is not None and annual > 0 else None)
         if sigma_h is None or sigma_h <= 0:
             with self._lock, self._conn:
                 self._conn.execute(
