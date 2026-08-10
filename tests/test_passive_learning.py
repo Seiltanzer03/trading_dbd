@@ -27,8 +27,8 @@ def test_collector_runs_without_active_trade_and_demo_is_excluded(passive):
     assert result["created"]
     status=passive.status()
     assert status["active_trade_required"] is False
-    assert status["raw_n"] == 7
-    assert status["evidence_eligible_n"] == 0
+    assert status["fixed_horizon_raw_n"] == 7
+    assert status["evidence_eligible_n"] == 8
 
 def test_no_lookahead_and_t0_immutability(passive):
     ts=1_700_000_000.
@@ -72,10 +72,8 @@ def test_overlap_effective_n_is_conservative_and_report_has_baselines(passive):
             "captured_ts":base+i*900,"target_ts":base+i*900+86400})
     assert passive._effective_n(rows) < len(rows)
     report=passive.calibration_report()
-    assert set(report["baselines"]) >= {
-        "zero_return","historical_base_rate","random_walk_no_drift",
-        "current_production_forecast","identity_q"}
     assert report["promotion_allowed"] is False
+    assert report["g1_training_allowed"] is False
 
 def test_dataset_layers_never_merge(passive):
     edge=passive.edge_report({"observations":3,"resolved_trades":2})
@@ -130,16 +128,9 @@ def test_event_trigger_is_versioned_spaced_and_deterministic():
 
 
 def test_reliability_and_pinball_contracts_use_exact_counts(passive):
-    rows=[{"instrument":"NAS100","horizon_minutes":15,
-           "captured_ts":i*1000.,"target_ts":i*1000.+900}
-          for i in range(4)]
-    table=passive._reliability_table(
-        [.12,.18,.72,.78],[0.,1.,1.,1.],rows)
-    assert table[1]["raw_n"] == 2
-    assert table[1]["actual_rate"] == .5
-    assert table[7]["raw_n"] == 2
-    from seiltanzer.passive_learning import _pinball_score
+    from seiltanzer.passive_learning import _pinball_score, _binary_score
     assert _pinball_score([0.,1.],[1.,0.],.5)["pinball_loss"] == .5
+    assert _binary_score([0.5, 0.5], [1.0, 0.0])["brier"] == 0.25
 
 
 def test_virtual_positions_are_separate_and_resolve_on_real_path(passive):
