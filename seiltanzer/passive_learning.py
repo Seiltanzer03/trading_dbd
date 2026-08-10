@@ -33,6 +33,12 @@ RESOLVER_VERSION = "passive-resolver-f2-v1"
 SESSION_CONTRACT_VERSION = "market-session-f2-v1"
 EVENT_TRIGGER_CONTRACT_VERSION = "passive-event-trigger-f2-v1"
 EVENT_MIN_SPACING_SEC = 5 * 60
+VIRTUAL_HORIZONS_MINUTES = (60, 240)
+VIRTUAL_R0_STATES = (-.5, 0.0, .5, 1.0)
+VIRTUAL_POLICY_FRACTIONS = {
+    "HOLD": 0.0, "CLOSE_10": .10, "CLOSE_25": .25,
+    "CLOSE_50": .50, "EXIT": 1.0,
+}
 
 # Exchange-local regular sessions. FX/metals use an explicit weekday 24h
 # research clock until a holiday calendar is connected.
@@ -203,6 +209,32 @@ class PassiveLearningEngine:
                     instrument TEXT NOT NULL, ts REAL NOT NULL, price REAL NOT NULL,
                     source TEXT, quality REAL, kind TEXT NOT NULL,
                     PRIMARY KEY(instrument,ts))""")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS virtual_position_observations (
+                    virtual_id TEXT PRIMARY KEY,
+                    passive_observation_id TEXT NOT NULL,
+                    captured_ts REAL NOT NULL, instrument TEXT NOT NULL,
+                    horizon_minutes INTEGER NOT NULL, direction TEXT NOT NULL,
+                    r0 REAL NOT NULL, stop_r REAL NOT NULL, take_r REAL NOT NULL,
+                    position_origin TEXT NOT NULL,
+                    policy_contract_version TEXT NOT NULL,
+                    features_json TEXT NOT NULL, evidence_eligible INTEGER NOT NULL,
+                    resolution_status TEXT NOT NULL DEFAULT 'pending',
+                    resolved_ts REAL, outcome_json TEXT,
+                    created_ts REAL NOT NULL)""")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_virtual_pending "
+                "ON virtual_position_observations(resolution_status,"
+                "passive_observation_id)")
+            self._conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS virtual_t0_immutable
+                BEFORE UPDATE OF passive_observation_id,captured_ts,instrument,
+                    horizon_minutes,direction,r0,stop_r,take_r,position_origin,
+                    policy_contract_version,features_json,evidence_eligible
+                ON virtual_position_observations
+                BEGIN
+                    SELECT RAISE(ABORT,'immutable virtual T0 state');
+                END""")
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS passive_collector_state (
                     key TEXT PRIMARY KEY, value_json TEXT NOT NULL,
@@ -406,6 +438,37 @@ class PassiveLearningEngine:
                         "horizon_minutes": horizon,
                         "forecast_made_at": captured_ts}),
                      int(bool(evidence_eligible)), "pending", time.time()))
+                if horizon in VIRTUAL_HORIZONS_MINUTES:
+                    for direction in ("long", "short"):
+                        for r0 in VIRTUAL_R0_STATES:
+                            virtual_id = (
+                                f"virtual-{observation_id}-{direction}-"
+                                f"{r0:+.1f}r")
+                            virtual_features = {
+                                "passive_observation_id": observation_id,
+                                "position_origin":
+                                    "synthetic_position_state_on_real_market_path",
+                                "direction": direction, "r0": r0,
+                                "stop_r": -1.0, "take_r": 2.5,
+                                "policy_set": list(VIRTUAL_POLICY_FRACTIONS),
+                                "fraction_semantics":
+                                    "fraction_of_current_remaining_position",
+                                "future_path_source":
+                                    "recorded_real_market_path_only",
+                            }
+                            self._conn.execute(
+                                "INSERT OR IGNORE INTO virtual_position_observations("
+                                "virtual_id,passive_observation_id,captured_ts,"
+                                "instrument,horizon_minutes,direction,r0,stop_r,"
+                                "take_r,position_origin,policy_contract_version,"
+                                "features_json,evidence_eligible,resolution_status,"
+                                "created_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                (virtual_id,observation_id,captured_ts,instrument,
+                                 horizon,direction,r0,-1.0,2.5,
+                                 "synthetic_position_state_on_real_market_path",
+                                 "virtual-management-f2-v1",
+                                 _json(virtual_features),
+                                 int(bool(evidence_eligible)),"pending",time.time()))
                 ids.append(observation_id)
         return ids
 
@@ -603,7 +666,128 @@ class PassiveLearningEngine:
                  (_trading_seconds_between(row["instrument"], captured, target)
                   / (target-captured) if target > captured else 0.0),
                  row["observation_id"]))
+        self._resolve_virtual_states(row, points, now)
         return "resolved"
+
+    def _resolve_virtual_states(self, passive_row: dict,
+                                points: list[dict], now: float) -> None:
+        with self._lock:
+            virtual_rows = [dict(row) for row in self._conn.execute(
+                "SELECT * FROM virtual_position_observations "
+                "WHERE passive_observation_id=? AND resolution_status='pending'",
+                (passive_row["observation_id"],)).fetchall()]
+        if not virtual_rows:
+            return
+        forecast = json.loads(passive_row["forecast_json"])
+        sigma_h = _finite(forecast.get("sigma_h_return"))
+        if sigma_h is None or sigma_h <= 0:
+            with self._lock, self._conn:
+                self._conn.execute(
+                    "UPDATE virtual_position_observations "
+                    "SET resolution_status='insufficient_reference_volatility',"
+                    "resolved_ts=? WHERE passive_observation_id=? "
+                    "AND resolution_status='pending'",
+                    (now,passive_row["observation_id"]))
+            return
+        start = float(passive_row["market_price"])
+        market_returns = [math.log(float(point["price"])/start)/sigma_h
+                          for point in points]
+        for virtual in virtual_rows:
+            sign = 1.0 if virtual["direction"] == "long" else -1.0
+            r_path = [float(virtual["r0"])+sign*value
+                      for value in market_returns]
+            stop_r, take_r = float(virtual["stop_r"]), float(virtual["take_r"])
+            terminal_r, event, event_ts = r_path[-1], "horizon", None
+            ambiguous = False
+            previous = r_path[0]
+            for value,point in zip(r_path[1:],points[1:]):
+                if ((previous <= stop_r and value >= take_r)
+                        or (previous >= take_r and value <= stop_r)):
+                    ambiguous, event, event_ts = (
+                        True, "ambiguous_first_touch", float(point["ts"]))
+                    break
+                if value <= stop_r:
+                    terminal_r, event, event_ts = (
+                        stop_r, "stop_exit", float(point["ts"]))
+                    break
+                if value >= take_r:
+                    terminal_r, event, event_ts = (
+                        take_r, "take_exit", float(point["ts"]))
+                    break
+                previous = value
+            if ambiguous:
+                status, outcome = "ambiguous_first_touch", {
+                    "version":"virtual-management-outcome-f2-v1",
+                    "ambiguous_first_touch":True,
+                    "resolved_from":"recorded_real_market_path"}
+            else:
+                policies = {}
+                for policy,fraction in VIRTUAL_POLICY_FRACTIONS.items():
+                    total = (fraction*float(virtual["r0"])
+                             +(1.0-fraction)*terminal_r)
+                    policies[policy] = {
+                        "fraction_closed_at_t0":fraction,
+                        "remaining_fraction":1.0-fraction,
+                        "total_r":round(total,8)}
+                best = max(value["total_r"] for value in policies.values())
+                winners = [name for name,value in policies.items()
+                           if abs(value["total_r"]-best)<=1e-12]
+                for value in policies.values():
+                    value["regret_r"] = round(best-value["total_r"],8)
+                status, outcome = "resolved", {
+                    "version":"virtual-management-outcome-f2-v1",
+                    "resolved_from":"recorded_real_market_path",
+                    "position_origin":
+                        "synthetic_position_state_on_real_market_path",
+                    "event":event, "event_ts":event_ts,
+                    "first_touch_minutes":(
+                        round((event_ts-float(virtual["captured_ts"]))/60,6)
+                        if event_ts else None),
+                    "terminal_r_per_unit":round(terminal_r,8),
+                    "policies":policies, "best_policies":winners,
+                    "claims_real_user_improvement":False}
+            with self._lock, self._conn:
+                self._conn.execute(
+                    "UPDATE virtual_position_observations "
+                    "SET resolution_status=?,resolved_ts=?,outcome_json=? "
+                    "WHERE virtual_id=?",
+                    (status,now,_json(outcome),virtual["virtual_id"]))
+
+    def virtual_management_report(self) -> dict:
+        with self._lock:
+            rows = [dict(row) for row in self._conn.execute(
+                "SELECT v.*,p.target_ts FROM virtual_position_observations v "
+                "JOIN passive_market_observations p "
+                "ON p.observation_id=v.passive_observation_id "
+                "WHERE v.resolution_status='resolved' "
+                "AND v.evidence_eligible=1 ORDER BY v.captured_ts").fetchall()]
+        policy_regret = defaultdict(list)
+        unique_passive = {}
+        for row in rows:
+            outcome = json.loads(row["outcome_json"])
+            for name,value in (outcome.get("policies") or {}).items():
+                policy_regret[name].append(float(value["regret_r"]))
+            unique_passive[row["passive_observation_id"]] = {
+                "instrument":row["instrument"],
+                "horizon_minutes":row["horizon_minutes"],
+                "captured_ts":row["captured_ts"],
+                "target_ts":row["target_ts"],
+            }
+        effective = self._effective_n(list(unique_passive.values()))
+        means = {name:round(sum(values)/len(values),8)
+                 for name,values in policy_regret.items() if values}
+        return {
+            "version":"virtual-management-report-f2-v1",
+            "dataset":"virtual_position",
+            "position_origin":"synthetic_position_state_on_real_market_path",
+            "raw_n":len(rows), "effective_n":effective,
+            "policy_mean_regret_r":means,
+            "evidence":self._evidence_status(effective,0.0),
+            "authority":"research_only",
+            "mixed_with_real_trades":False,
+            "claims_real_user_improvement":False,
+            "promotion_allowed":False,
+        }
 
     def resolve_due(self, *, now: float | None = None, limit: int = 100) -> dict:
         now = float(now or time.time())
@@ -930,9 +1114,7 @@ class PassiveLearningEngine:
                 "effective_n": calibration["effective_n"],
                 "evidence": calibration["evidence_status"],
                 "q_to_p": calibration["binary"]},
-            "virtual_management_edge": {
-                "dataset": "virtual_position", "raw_n": 0, "effective_n": 0,
-                "evidence": "INSUFFICIENT", "authority": "research_only"},
+            "virtual_management_edge": self.virtual_management_report(),
             "real_management_edge": {
                 "dataset": "real_user_trade",
                 "observations": (real_report or {}).get("observations",0),

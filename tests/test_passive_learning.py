@@ -140,3 +140,34 @@ def test_reliability_and_pinball_contracts_use_exact_counts(passive):
     assert table[7]["raw_n"] == 2
     from seiltanzer.passive_learning import _pinball_score
     assert _pinball_score([0.,1.],[1.,0.],.5)["pinball_loss"] == .5
+
+
+def test_virtual_positions_are_separate_and_resolve_on_real_path(passive):
+    ts=1_700_000_000.
+    ids=passive.capture_observation(
+        instrument="NAS100",captured_ts=ts,market_price=100,
+        features={"source_observation_ts":ts},
+        forecast=fixture_forecast(ts),provenance={},trigger_reason="test",
+        evidence_eligible=True)
+    virtual_n=passive._conn.execute(
+        "SELECT COUNT(*) FROM virtual_position_observations").fetchone()[0]
+    assert virtual_n == 16
+    passive.record_market_point("NAS100",ts,100)
+    for minute in range(5,61,5):
+        passive.record_market_point(
+            "NAS100",ts+minute*60,100*(1+minute/3000))
+    report=passive.resolve_due(now=ts+60*60)
+    assert report["resolved"] >= 3
+    rows=passive._conn.execute(
+        "SELECT * FROM virtual_position_observations "
+        "WHERE horizon_minutes=60 AND resolution_status='resolved'").fetchall()
+    assert len(rows) == 8
+    outcome=json.loads(rows[0]["outcome_json"])
+    assert set(outcome["policies"]) == {
+        "HOLD","CLOSE_10","CLOSE_25","CLOSE_50","EXIT"}
+    assert outcome["claims_real_user_improvement"] is False
+    edge=passive.edge_report()
+    virtual=edge["virtual_management_edge"]
+    assert virtual["dataset"] == "virtual_position"
+    assert virtual["raw_n"] == 8
+    assert virtual["mixed_with_real_trades"] is False
