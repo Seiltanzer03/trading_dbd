@@ -47,3 +47,7 @@ defines stale identity by economic geometry, not by audit-event insertion order.
 
 Final research gate: Gaussian reference is not Q; registered OOS datasets use
 chronological purge and maximum-horizon embargo before any challenger scoring.
+
+
+Continuation gate: passive horizons now use versioned exchange-local trading
+time, and deterministic event anchors are anti-clustered and threshold-frozen.
