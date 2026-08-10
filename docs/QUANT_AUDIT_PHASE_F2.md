@@ -39,3 +39,7 @@ The final tree is validated by mandatory `pytest`, Node smoke, WebKit/iPhone and
 The final main validation freezes position decisions only after deterministic
 max-R/BE side effects, keeps isolated provider-contract tests journal-agnostic,
 and routes the STOP/TAKE cockpit through the active v18 renderer.
+
+
+The compatibility pass preserves the established first-line action cockpit and
+defines stale identity by economic geometry, not by audit-event insertion order.
