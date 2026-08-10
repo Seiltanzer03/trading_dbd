@@ -75,6 +75,8 @@ export function initIVSurface(elId) {
     return result;
   }, { margin: 300 });
 
+  const liveTask = createLatestPanelTask('iv-surface:live', el, (...args) => core.updateLive(...args), { margin: 220 });
+
   function render(state, surfacePayload, force = false) {
     // Keep only the newest tick and execute the Plotly write when this panel is near
     // the viewport. No IV data or animation layer is removed; offscreen work is
@@ -94,6 +96,7 @@ export function initIVSurface(elId) {
 
   function destroy(...args) {
     renderTask.destroy();
+    liveTask.destroy();
     lastSnapshotSig = null;
     camera.destroy();
     return core.destroy(...args);
@@ -101,7 +104,7 @@ export function initIVSurface(elId) {
 
   return {
     render,
-    updateLive: (...args) => renderTask.schedule(null, args[0], false),
+    updateLive: (...args) => liveTask.schedule(...args),
     setMode,
     destroy,
   };
