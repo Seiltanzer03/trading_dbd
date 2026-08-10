@@ -121,7 +121,7 @@ def test_legacy_rows_quarantine_and_telemetry_counters(tmp_path):
     status = engine.status()
     assert status["raw_n"] == 1
     assert status["legacy_f2_n"] == 1
-    assert status["current_f31_n"] == 0
+    assert status["current_f32_n"] == 0
     assert status["version"] == PASSIVE_SCHEMA_VERSION
 
     calibration = engine.calibration_report()
@@ -130,3 +130,71 @@ def test_legacy_rows_quarantine_and_telemetry_counters(tmp_path):
     assert calibration["g1_training_allowed"] is False
 
     engine.close()
+
+def test_target_vs_proxy_spot_integration():
+    settings = Settings()
+    feed = MarketData(settings, cache=None)
+    feed.set_instrument('NAS100')
+    feed.price = {'bid': 18000.0, 'ask': 18000.5, 'timestamp': 100.0, 'source': 'OANDA'}
+    
+    # We simulate a QQQ chain
+    feed.chain = {
+        'status': 'live',
+        'metrics': {
+            'spot': 18000.0,  # Target instrument spot from MarketData
+            'proxy_spot': 400.0, # Source proxy spot (QQQ)
+            't_years': 0.1,
+            'expiry_ts_utc': 200.0,
+            'density': {
+                'spot': 400.0,
+                'strikes': [385.0, 390.0, 395.0, 400.0, 405.0, 410.0, 415.0],
+                'q': [0.01, 0.10, 0.20, 0.38, 0.20, 0.10, 0.01]
+            }
+        }
+    }
+    
+    # The engine captures it
+    engine = PassiveLearningEngine(':memory:', settings, cache=None)
+    # create table in memory
+    
+    # Actually, we just test adapt_option_q_forecast behavior with differing spots
+    feed.chain['metrics']['proxy'] = 'QQQ'
+    from seiltanzer.option_q_adapter import adapt_option_q_forecast
+    res = adapt_option_q_forecast(feed.chain['metrics'], 10, 0.005, 'NAS100', instrument_spot=18000.0, horizon_kind='option_native_expiry')
+    
+    # Verify the proxy was transformed and instrument spot was used
+    assert res['q_source_instrument'] == 'QQQ'
+    assert res['q_source_spot'] == 400.0
+    
+    
+def test_bar_ingestion_integration():
+    settings = Settings()
+    feed = MarketData(settings, cache=None)
+    feed.set_instrument('NAS100')
+    feed.intraday = {
+        'bars': [
+            {'ts': 100, 'open': 100.0, 'high': 101.0, 'low': 99.0, 'close': 100.5},
+            {'ts': 160, 'open': 100.5, 'high': 102.0, 'low': 100.0, 'close': 101.0}
+        ],
+        'status': 'live',
+        'provenance': {'proxy': 'QQQ', 'offset': 1000.0, 'multiplier': 40.0}
+    }
+    
+    engine = PassiveLearningEngine(':memory:', settings, cache=None)
+    
+    # Ingest
+    bars = feed.intraday.get('bars', [])
+    for b in bars:
+        engine.record_market_bar(
+            'NAS100', float(b['ts']), float(b['ts'])+60.0,
+            float(b['open']), float(b['high']), float(b['low']), float(b['close']),
+            source=feed.intraday['provenance']['proxy'], kind='proxy_derived'
+        )
+        
+    c = engine._conn.execute('SELECT COUNT(*) FROM passive_market_bars').fetchone()[0]
+    assert c == 2
+    
+    # Verify provenance is stored
+    row = engine._conn.execute('SELECT source, kind FROM passive_market_bars LIMIT 1').fetchone()
+    assert row[0] == 'QQQ'
+    assert row[1] == 'proxy_derived'

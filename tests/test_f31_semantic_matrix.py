@@ -134,8 +134,8 @@ def test_3_legacy_f3_quarantine(tmp_path):
 
     status = engine.status()
     assert status["legacy_f3_n"] == 1
-    assert status["current_f31_n"] == 0
-    assert status["pristine_f31_n"] == 0
+    assert status["legacy_f31_n"] == 0
+    assert status["pristine_f32_n"] == 0
 
     engine.close()
 
@@ -145,11 +145,11 @@ def test_4_terminal_q_semantics():
     spot = 100.0
     density_dict = {
         "strikes": [80.0, 90.0, 95.0, 100.0, 105.0, 110.0, 120.0],
-        "q": [0.001, 0.02, 0.05, 0.10, 0.05, 0.02, 0.001],
+        "q": [0.01, 0.10, 0.20, 0.38, 0.20, 0.10, 0.01],
     }
     option_metrics = {"spot": spot, "t_years": 0.01, "density": density_dict}
 
-    res = adapt_option_q_forecast(option_metrics, 0, 0.01, "NAS100", horizon_kind="option_native_expiry")
+    res = adapt_option_q_forecast(option_metrics, 0, 0.01, "NAS100", instrument_spot=spot, horizon_kind="option_native_expiry")
 
     assert res["probability_measure"] == "risk_neutral_Q_terminal"
     assert res["q_terminal_distribution_available"] is True
@@ -163,11 +163,11 @@ def test_5_first_touch_q_unavailable():
     spot = 100.0
     density_dict = {
         "strikes": [80.0, 90.0, 95.0, 100.0, 105.0, 110.0, 120.0],
-        "q": [0.001, 0.02, 0.05, 0.10, 0.05, 0.02, 0.001],
+        "q": [0.01, 0.10, 0.20, 0.38, 0.20, 0.10, 0.01],
     }
     option_metrics = {"spot": spot, "t_years": 0.01, "density": density_dict}
 
-    res = adapt_option_q_forecast(option_metrics, 15, 0.01, "NAS100", horizon_kind="fixed_trading_time")
+    res = adapt_option_q_forecast(option_metrics, 15, 0.01, "NAS100", instrument_spot=spot, horizon_kind="fixed_trading_time")
     assert res["q_first_touch_available"] is False
 
 
@@ -183,12 +183,13 @@ def test_6_native_expiry_horizon_cohort(tmp_path):
 
     density_dict = {
         "strikes": [80.0, 90.0, 95.0, 100.0, 105.0, 110.0, 120.0],
-        "q": [0.001, 0.02, 0.05, 0.10, 0.05, 0.02, 0.001],
+        "q": [0.01, 0.10, 0.20, 0.38, 0.20, 0.10, 0.01],
     }
     option_metrics = {
         "spot": 100.0,
         "t_years": t_years,
         "expiry": "2026-08-14 21:00 UTC",
+        "expiry_ts_utc": expiry_ts,
         "density": density_dict,
     }
 
@@ -224,11 +225,11 @@ def test_7_fixed_15m_q_unavailable():
     spot = 100.0
     density_dict = {
         "strikes": [80.0, 90.0, 95.0, 100.0, 105.0, 110.0, 120.0],
-        "q": [0.001, 0.02, 0.05, 0.10, 0.05, 0.02, 0.001],
+        "q": [0.01, 0.10, 0.20, 0.38, 0.20, 0.10, 0.01],
     }
     option_metrics = {"spot": spot, "t_years": 2.0 / 252.0, "density": density_dict}
 
-    res = adapt_option_q_forecast(option_metrics, 15, 0.01, "NAS100", horizon_kind="fixed_trading_time")
+    res = adapt_option_q_forecast(option_metrics, 15, 0.01, "NAS100", instrument_spot=spot, horizon_kind="fixed_trading_time")
 
     assert res["q_available"] is False
     assert res["probability_measure"] == "unavailable"
@@ -240,12 +241,12 @@ def test_8_fake_term_scaling_forbidden():
     spot = 100.0
     density_dict = {
         "strikes": [80.0, 90.0, 95.0, 100.0, 105.0, 110.0, 120.0],
-        "q": [0.001, 0.02, 0.05, 0.10, 0.05, 0.02, 0.001],
+        "q": [0.01, 0.10, 0.20, 0.38, 0.20, 0.10, 0.01],
     }
     term_dict = {"pts": [(2, 0.16), (9, 0.18), (30, 0.20)]}
     option_metrics = {"spot": spot, "t_years": 2.0 / 252.0, "density": density_dict, "term": term_dict}
 
-    res = adapt_option_q_forecast(option_metrics, 15, 0.01, "NAS100", horizon_kind="fixed_trading_time")
+    res = adapt_option_q_forecast(option_metrics, 15, 0.01, "NAS100", instrument_spot=spot, horizon_kind="fixed_trading_time")
 
     assert res["q_available"] is False
     assert res["probability_measure"] == "unavailable"
@@ -257,7 +258,7 @@ def test_9_direct_proxy_mapping():
     inst_spot = 18000.0
     density = {
         "strikes": [360.0, 380.0, 400.0, 404.0, 420.0, 440.0],
-        "q": [0.001, 0.02, 0.10, 0.05, 0.02, 0.001],
+        "q": [0.01, 0.10, 0.30, 0.30, 0.10, 0.19],
     }
 
     val_res = validate_and_transform_proxy_density(density, proxy_spot, inst_spot, proxy_transform="direct")
@@ -273,7 +274,7 @@ def test_10_inverse_proxy_mapping():
     inst_spot = 1.3500
     density = {
         "strikes": [70.0, 73.0, 75.0, 75.75, 78.0, 80.0],
-        "q": [0.001, 0.02, 0.10, 0.05, 0.02, 0.001],
+        "q": [0.01, 0.10, 0.30, 0.30, 0.10, 0.19],
     }
 
     val_res = validate_and_transform_proxy_density(density, proxy_spot, inst_spot, proxy_transform="inverse")
@@ -289,7 +290,7 @@ def test_11_probability_mass_conservation():
     inst_spot = 18000.0
     density = {
         "strikes": [360.0, 380.0, 400.0, 420.0, 440.0],
-        "q": [0.001, 0.02, 0.10, 0.02, 0.001],
+        "q": [0.01, 0.10, 0.78, 0.10, 0.01],
     }
 
     val_res = validate_and_transform_proxy_density(density, proxy_spot, inst_spot, proxy_transform="direct")
@@ -303,14 +304,14 @@ def test_12_experimental_proxy_tier():
     spot = 100.0
     density_dict = {
         "strikes": [80.0, 90.0, 95.0, 100.0, 105.0, 110.0, 120.0],
-        "q": [0.001, 0.02, 0.05, 0.10, 0.05, 0.02, 0.001],
+        "q": [0.01, 0.10, 0.20, 0.38, 0.20, 0.10, 0.01],
     }
     option_metrics = {
         "spot": spot, "proxy": "EWG", "experimental": True,
         "t_years": 0.01, "density": density_dict,
     }
 
-    res = adapt_option_q_forecast(option_metrics, 0, 0.01, "GER40", horizon_kind="option_native_expiry")
+    res = adapt_option_q_forecast(option_metrics, 0, 0.01, "GER40", instrument_spot=spot, horizon_kind="option_native_expiry")
 
     assert res["q_evidence_tier"] == "experimental_proxy"
 
@@ -581,7 +582,7 @@ def test_20_full_prospective_cycle_without_lookahead(tmp_path):
     # 4. Calibration & Health Status
     status = engine.status()
     assert status["current_contract_version"] == PASSIVE_SCHEMA_VERSION
-    assert status["pristine_f31_n"] > 0
+    assert status["pristine_f32_n"] > 0
     assert status["g1_training_allowed"] is False
 
     engine.close()

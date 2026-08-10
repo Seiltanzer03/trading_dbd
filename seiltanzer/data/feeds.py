@@ -19,6 +19,7 @@ import statistics
 import time
 import urllib.parse
 import urllib.request
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -246,8 +247,10 @@ class MarketData:
         self._price_anchor_proxy: float | None = None
         self._price_anchor_driver: str | None = None
         self._price_anchor_ts: float | None = None
-        self.intraday: list[tuple[float, float, float]] = []  # (ts, price, volume)
         self.daily = {"bars": None, **_status_dict()}
+        self.intraday: list[tuple[float, float, float]] = []  # (ts, price, volume)
+        self.intraday_ohlcv: list[tuple[float, float, float, float, float, float]] = []
+        self.intraday_is_offset: bool = False
         self.vols = {k: _status_dict() for k in VOL_INDEX_TICKERS}
         self.chain = {"metrics": None, **_status_dict()}
         self._chain_error_detail: str | None = None
@@ -589,6 +592,10 @@ class MarketData:
                     if self._has_direct_price_scale():
                         offset = (float(self.price["value"])
                                   - float(hist["Close"].iloc[-1]))
+                self.intraday_is_offset = (offset != 0.0)
+                self.intraday_ohlcv = [
+                    (ts.timestamp(), float(r["Open"]) + offset, float(r["High"]) + offset, float(r["Low"]) + offset, float(r["Close"]) + offset, float(r["Volume"]))
+                    for ts, r in hist.iterrows()]
                 self.intraday = [
                     (ts.timestamp(), float(r["Close"]) + offset, float(r["Volume"]))
                     for ts, r in hist.iterrows()]
@@ -916,10 +923,10 @@ class MarketData:
                     spot, "delayed", time.time(),
                     source=f"yfinance REST {proxy} (chain snapshot)")
             expiry = expiries[0]
-            exp_dt = dt.datetime.strptime(expiry, "%Y-%m-%d").replace(
-                hour=21, tzinfo=dt.timezone.utc)
-            t_years = max((exp_dt - dt.datetime.now(dt.timezone.utc)).total_seconds(),
-                          3600.0) / (365.0 * 24 * 3600)
+            exp_dt_local = dt.datetime.strptime(expiry, "%Y-%m-%d").replace(
+                hour=16, tzinfo=ZoneInfo("America/New_York"))
+            exp_ts = exp_dt_local.timestamp()
+            t_years = max(exp_ts - time.time(), 3600.0) / (365.0 * 24 * 3600)
             oc = t.option_chain(expiry)
             calls, puts = oc.calls, oc.puts
             merged = calls.merge(puts, on="strike", suffixes=("_c", "_p"))
@@ -945,6 +952,7 @@ class MarketData:
                 "t_years": t_years,
                 "spot": spot,
                 "expiry": expiry,
+                "expiry_ts_utc": exp_ts,
             }
             term = self._fetch_term(t, expiries, spot)
             metrics = self._compute_chain_metrics(
@@ -984,7 +992,14 @@ class MarketData:
             "demo": demo,
             "experimental": experimental,
             "spot": spot,
+            "proxy_spot": spot,
             "expiry": raw.get("expiry", "demo+2d"),
+            "expiry_ts_utc": raw.get("expiry_ts_utc", time.time() + 2 * 86400),
+            "expiry_date": raw.get("expiry", "demo+2d"),
+            "expiry_timezone": "America/New_York" if not demo else "UTC",
+            "expiry_time_assumption": "assumed_market_close_16:00_ET" if not demo else "demo_time",
+            "expiry_time_quality": "assumed_market_close" if not demo else "demo_time",
+            "expiry_contract_version": "option-expiry-contract-f32-v1",
             "t_years": raw["t_years"],
             "skew": skew,
             "term": term,

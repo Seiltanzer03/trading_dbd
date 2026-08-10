@@ -15,8 +15,8 @@ import numpy as np
 from .core.options import _trapezoid
 from .variance_clock import get_variance_clock_spec
 
-OPTION_Q_CONTRACT_VERSION = "option-q-contract-f31-v1"
-EXPIRY_CLOCK_VERSION = "act365-calendar-v1"
+OPTION_Q_CONTRACT_VERSION = "option-q-contract-f32-v1"
+EXPIRY_CLOCK_VERSION = "act365-calendar-f32-v1"
 
 
 def validate_and_transform_proxy_density(
@@ -83,16 +83,20 @@ def validate_and_transform_proxy_density(
         inst_spot_val = float(instrument_spot)
         inst_strikes = inst_spot_val * np.exp(r_inst_sorted)
 
-        # Compute CDF on proxy log-returns
-        cdf = np.zeros_like(q_norm)
+        # Compute CDF on proxy strikes
+        cdf_src = np.zeros_like(q_norm)
         for i in range(1, len(proxy_strikes)):
-            cdf[i] = cdf[i - 1] + float(_trapezoid(q_norm[: i + 1], proxy_strikes[: i + 1])) - float(_trapezoid(q_norm[:i], proxy_strikes[:i]))
+            cdf_src[i] = cdf_src[i - 1] + float(_trapezoid(q_norm[: i + 1], proxy_strikes[: i + 1])) - float(_trapezoid(q_norm[:i], proxy_strikes[:i]))
 
-        if cdf[-1] > 0:
-            cdf = cdf / cdf[-1]
+        if cdf_src[-1] > 0:
+            cdf_src = cdf_src / cdf_src[-1]
 
-        # Sort CDF according to sorted instrument returns
-        cdf_sorted = cdf[sort_idx]
+        # Sort CDF according to sorted instrument returns (reverse diffs for inverse)
+        if str(proxy_transform).lower() == "inverse":
+            cdf_sorted = np.zeros_like(cdf_src)
+            cdf_sorted[1:] = np.cumsum(np.diff(cdf_src)[::-1])
+        else:
+            cdf_sorted = cdf_src
 
         # Re-derive PDF on instrument strikes preserving total mass = 1.0
         q_inst = np.zeros_like(cdf_sorted)
@@ -124,6 +128,7 @@ def adapt_option_q_forecast(
     horizon_minutes: int,
     sigma_h: Optional[float],
     instrument: str,
+    instrument_spot: Optional[float],
     horizon_kind: str = "fixed_trading_time",
 ) -> Dict[str, Any]:
     """Adapts option metrics into risk-neutral Q terminal forecast contract for option-native or fixed horizons."""
@@ -148,17 +153,21 @@ def adapt_option_q_forecast(
             "q_evidence_tier": "unavailable",
         }
 
-    spot = option_metrics.get("spot")
-    proxy_spot = option_metrics.get("proxy_spot", spot)
+    proxy_spot = option_metrics.get("proxy_spot")
+    if proxy_spot is None:
+        proxy_spot = option_metrics.get("spot") # legacy fallback
     t_years = option_metrics.get("t_years")
     density_dict = option_metrics.get("density")
     implied_move = option_metrics.get("implied_move") or {}
     proxy_transform = option_metrics.get("proxy_transform", "direct")
     proxy_experimental = bool(option_metrics.get("experimental", False))
 
-    val_res = validate_and_transform_proxy_density(
-        density_dict, proxy_spot, spot, proxy_transform=proxy_transform
-    )
+    if instrument_spot is None:
+        val_res = {"valid": False, "reason": "missing_target_spot"}
+    else:
+        val_res = validate_and_transform_proxy_density(
+            density_dict, proxy_spot, instrument_spot, proxy_transform=proxy_transform
+        )
 
     if not val_res["valid"]:
         return {
@@ -276,11 +285,20 @@ def adapt_option_q_forecast(
         "calendar_ttm_years_act365": t_yrs_val,
         "expiry_clock_version": EXPIRY_CLOCK_VERSION,
         "source_expiry": option_metrics.get("expiry"),
+        "source_expiry_ts_utc": option_metrics.get("expiry_ts_utc"),
         "proxy_symbol": option_metrics.get("proxy"),
         "proxy_transform": val_res["proxy_transform"],
         "proxy_experimental": proxy_experimental,
+        "q_source_instrument": option_metrics.get("proxy"),
+        "q_target_instrument": instrument,
+        "q_source_spot": float(proxy_spot) if proxy_spot else None,
+        "q_target_spot": float(instrument_spot),
         "q_evidence_tier": evidence_tier,
         "quantiles_log_return": quantiles,
+        "terminal_q_cdf": {
+            "support": [float(r) for r in r_inst],
+            "cdf": [float(p) for p in cdf]
+        },
         "standardized_barriers": barriers,
         "mode_price": mode_price,
         "implied_move_frac": implied_move.get("move_frac"),
