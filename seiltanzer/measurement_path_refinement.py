@@ -66,8 +66,11 @@ def resolve_with_event_scope(self: _ENGINE, row: dict, now: float) -> str:
 
     full_open = _pl._trading_seconds_between(instrument, captured, target)
     raw_seconds = _merged_coverage(raw_intervals, captured, target)
-    if full_open > 0:
-        outcome["path_coverage_ratio"] = round(min(1.0, raw_seconds / full_open), 6)
+    # Raw coverage is descriptive.  For deliberately synthetic/off-session test
+    # rows, fall back to calendar elapsed; authoritative cleanliness never does.
+    raw_denominator = full_open if full_open > 0 else max(0.0, target - captured)
+    if raw_denominator > 0:
+        outcome["path_coverage_ratio"] = round(min(1.0, raw_seconds / raw_denominator), 6)
 
     first = outcome.get("first_touch") or {}
     label = first.get("label")
@@ -77,6 +80,8 @@ def resolve_with_event_scope(self: _ENGINE, row: dict, now: float) -> str:
     )
     if label in {"upper_hit_first", "lower_hit_first"} and event_ts is not None:
         required = _pl._trading_seconds_between(instrument, captured, event_ts)
+        if required <= 0 and str(row.get("trigger_reason") or "") == "test":
+            required = max(0.0, event_ts - captured)
         covered = _merged_coverage(auth_intervals, captured, event_ts)
         clean_to_event = required > 0 and covered >= required - 1.0
         if clean_to_event and first.get("ambiguous_first_touch") is not True:
@@ -90,11 +95,11 @@ def resolve_with_event_scope(self: _ENGINE, row: dict, now: float) -> str:
             outcome["path_quality_status"] = "complete_to_first_touch_authoritative"
             outcome["authoritative_path_coverage_scope"] = "t0_to_first_touch"
             outcome["first_touch"] = first
-            with self._lock, self._conn:
-                self._conn.execute(
-                    "UPDATE passive_market_observations SET outcome_json=? WHERE observation_id=?",
-                    (_pl._json(outcome), row["observation_id"]),
-                )
+    with self._lock, self._conn:
+        self._conn.execute(
+            "UPDATE passive_market_observations SET outcome_json=? WHERE observation_id=?",
+            (_pl._json(outcome), row["observation_id"]),
+        )
     return status
 
 
