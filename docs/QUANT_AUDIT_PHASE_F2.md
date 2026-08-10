@@ -28,3 +28,7 @@ Phase F.2 restores the deterministic management decision workflow, adds an immut
 | Virtual policy cohort | research_only |
 | Human execution | manual |
 | LLM | explanation_only |
+
+## Integration
+
+The final tree is validated by mandatory `pytest`, Node smoke, WebKit/iPhone and production endpoint gates on every `main` update.
