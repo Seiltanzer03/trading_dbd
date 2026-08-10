@@ -23,6 +23,8 @@ _ORIGINAL_METRIC_COVERAGE = _base.metric_coverage
 def baseline_strategy_outcomes(sim: _base.PathSimulation,
                                inputs: _base.PolicyInputs) -> _base.np.ndarray:
     """Outcome per unit of the position remaining at the review moment."""
+    if sim.strategy_outcome is not None:
+        return sim.strategy_outcome.copy()
     past_count = sum(inputs.max_r >= rung - 1e-12 for rung in inputs.rungs)
     original_remaining = max(1.0 - inputs.rung_fraction * past_count, 1e-9)
     future_fraction = min(inputs.rung_fraction / original_remaining, 1.0)
@@ -48,7 +50,7 @@ def policy_metrics(policy: _base.PolicyDistribution, sim: _base.PathSimulation,
     """Policy P/L metrics plus empirical event counts on the shared paths."""
     values = policy.outcomes
     next_rung = _base._next_rung(inputs)
-    stop_t = sim.stop_time
+    stop_t = _base._strategy_risk_exit_time(sim)
     rung_t = sim.rung_times.get(next_rung) if next_rung is not None else sim.take_time
     if rung_t is None:
         rung_t = _base.np.full_like(stop_t, _base.np.nan)
@@ -70,6 +72,14 @@ def policy_metrics(policy: _base.PolicyDistribution, sim: _base.PathSimulation,
             "events": events, "scenarios": n, "estimate": round(estimate, 6),
             "display": ">99.9%" if events == 0 and n >= 1000 else f"{estimate * 100:.1f}%",
         }
+    uncertainty = {
+        "expected_final_r": _base._mean_uncertainty(values),
+        "cvar10_r": _base._cvar_uncertainty(values, 0.10),
+        "p_final_loss": _base._probability_uncertainty(values < 0.0),
+        "p_next_rung_before_stop": _base._probability_uncertainty(rung_first),
+        "p_stop_before_next_rung": _base._probability_uncertainty(stop_first),
+        "effective_path_count": n,
+    }
     return {
         "name": policy.name, "close_fraction": policy.close_fraction,
         "expected_final_r": round(float(_base.np.mean(values)), 4),
@@ -87,6 +97,7 @@ def policy_metrics(policy: _base.PolicyDistribution, sim: _base.PathSimulation,
         "no_event_probability": no_event,
         "no_event_empirical": empirical,
         "scenario_count": n,
+        "monte_carlo_uncertainty": uncertainty,
     }
 
 

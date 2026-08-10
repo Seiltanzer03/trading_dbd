@@ -14,6 +14,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from .execution_simulator import SIMULATOR_VERSION, ExecutionSpec, execution_contract
+
 
 POLICY_FRACTIONS = {
     "HOLD": 0.0,
@@ -64,6 +66,47 @@ def _cvar(values: np.ndarray, alpha: float = 0.10) -> float:
         return float("nan")
     k = max(1, int(math.ceil(values.size * alpha)))
     return float(np.mean(np.partition(values, k - 1)[:k]))
+
+
+def _mean_uncertainty(values: np.ndarray) -> dict:
+    n = int(values.size)
+    if n < 2:
+        return {"standard_error_r": None, "ci95_r": [None, None]}
+    mean = float(np.mean(values))
+    se = float(np.std(values, ddof=1) / math.sqrt(n))
+    return {
+        "standard_error_r": round(se, 6),
+        "ci95_r": [round(mean - 1.96 * se, 6), round(mean + 1.96 * se, 6)],
+    }
+
+
+def _probability_uncertainty(events: np.ndarray) -> dict:
+    n = int(events.size)
+    estimate = float(np.mean(events)) if n else float("nan")
+    se = math.sqrt(max(estimate * (1.0 - estimate), 0.0) / n) if n else None
+    return {
+        "estimate": round(estimate, 6) if n else None,
+        "standard_error": round(se, 6) if se is not None else None,
+        "ci95": ([round(max(0.0, estimate - 1.96 * se), 6),
+                  round(min(1.0, estimate + 1.96 * se), 6)]
+                 if se is not None else [None, None]),
+        "method": "binomial_normal_approximation",
+    }
+
+
+def _cvar_uncertainty(values: np.ndarray, alpha: float = 0.10) -> dict:
+    n = int(values.size)
+    k = max(1, int(math.ceil(n * alpha)))
+    tail = np.partition(values, k - 1)[:k]
+    estimate = float(np.mean(tail))
+    se = (float(np.std(tail, ddof=1) / math.sqrt(k)) if k > 1 else None)
+    return {
+        "tail_path_count": k,
+        "standard_error_r": round(se, 6) if se is not None else None,
+        "ci95_r": ([round(estimate - 1.96 * se, 6), round(estimate + 1.96 * se, 6)]
+                   if se is not None else [None, None]),
+        "method": "conditional_tail_mean_se; seed stability is reported separately",
+    }
 
 
 def _centered_skew_noise(z: np.ndarray, skew: float) -> np.ndarray:
@@ -129,6 +172,12 @@ class PathSimulation:
     take_time: np.ndarray
     rung_times: dict[float, np.ndarray]
     horizon_minutes: float
+    strategy_outcome: np.ndarray | None = None
+    strategy_exit_r: np.ndarray | None = None
+    strategy_exit_time: np.ndarray | None = None
+    strategy_exit_reason: np.ndarray | None = None
+    be_arm_time: np.ndarray | None = None
+    execution_contract: dict | None = None
 
 
 @dataclass
@@ -136,6 +185,16 @@ class PolicyDistribution:
     name: str
     close_fraction: float
     outcomes: np.ndarray
+
+
+def _strategy_risk_exit_time(sim: PathSimulation) -> np.ndarray:
+    """Time of an absorbing adverse/BE exit, excluding take and horizon."""
+    if sim.strategy_exit_time is None or sim.strategy_exit_reason is None:
+        return sim.stop_time
+    return np.where(
+        np.isin(sim.strategy_exit_reason, ("stop", "breakeven")),
+        sim.strategy_exit_time, np.nan,
+    )
 
 
 def extract_policy_inputs(tick: dict) -> PolicyInputs:
@@ -191,6 +250,25 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
     future_rungs = tuple(x for x in inputs.rungs if x > inputs.max_r + 1e-8 and x < inputs.T + 1e-8)
     rung_times = {x: np.full(n_paths, np.nan) for x in future_rungs}
 
+    # Economic execution state is separate from the raw underlying path.  Once
+    # BE/stop/take closes the managed remainder, later market movement must not
+    # resurrect that position.  All policies consume this one shared state.
+    past_count = sum(inputs.max_r >= rung - 1e-12 for rung in inputs.rungs)
+    original_remaining = max(1.0 - inputs.rung_fraction * past_count, 1e-9)
+    future_fraction = min(inputs.rung_fraction / original_remaining, 1.0)
+    strategy_alive = np.ones(n_paths, dtype=bool)
+    strategy_remaining = np.ones(n_paths, dtype=float)
+    strategy_realized = np.zeros(n_paths, dtype=float)
+    strategy_exit_r = np.full(n_paths, np.nan)
+    strategy_exit_time = np.full(n_paths, np.nan)
+    strategy_exit_reason = np.full(n_paths, "", dtype="<U10")
+    be_armed = np.full(n_paths, inputs.max_r >= inputs.be_after - 1e-12,
+                       dtype=bool)
+    be_arm_time = np.full(n_paths, 0.0 if bool(be_armed[0]) else np.nan)
+    # Separate bridge stream prevents added execution bookkeeping from changing
+    # the sampled endpoint paths for an existing seed.
+    execution_rng = np.random.default_rng(int(seed) ^ 0x5E17A0F0)
+
     t_mid = (np.arange(n_steps, dtype=float) + 0.5) / n_steps
     # Positive slope puts more variance later; negative slope spends it earlier.
     vol_shape = np.exp(float(min(max(inputs.term_slope, -0.8), 0.8)) * (t_mid - 0.5))
@@ -210,9 +288,43 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
 
         frac = (step + 1) / n_steps
         for rung, times in rung_times.items():
-            crossed = np.isnan(times[idx]) & (cur >= rung)
+            active = strategy_alive[idx]
+            crossed = active & np.isnan(times[idx]) & (cur >= rung)
             if crossed.any():
-                times[idx[crossed]] = frac
+                target = idx[crossed]
+                times[target] = frac
+                fill = np.minimum(future_fraction, strategy_remaining[target])
+                strategy_realized[target] += fill * rung
+                strategy_remaining[target] -= fill
+
+        active = strategy_alive[idx]
+        newly_armed = active & ~be_armed[idx] & (cur >= inputs.be_after - 1e-12)
+        if newly_armed.any():
+            target = idx[newly_armed]
+            be_armed[target] = True
+            be_arm_time[target] = frac
+
+        # Endpoint crossings are ordered by direction.  An upward segment books
+        # crossed ladder levels before take; a downward segment exits at the
+        # currently active stop (0R after BE, otherwise -1R).
+        active = strategy_alive[idx]
+        economic_take = active & (cur >= inputs.T)
+        if economic_take.any():
+            target = idx[economic_take]
+            strategy_exit_r[target] = inputs.T
+            strategy_exit_time[target] = frac
+            strategy_exit_reason[target] = "take"
+            strategy_alive[target] = False
+        active = strategy_alive[idx]
+        active_floor = np.where(be_armed[idx], 0.0, -1.0)
+        economic_stop = active & (cur <= active_floor)
+        if economic_stop.any():
+            target = idx[economic_stop]
+            strategy_exit_r[target] = active_floor[economic_stop]
+            strategy_exit_time[target] = frac
+            strategy_exit_reason[target] = np.where(
+                be_armed[target], "breakeven", "stop")
+            strategy_alive[target] = False
 
         hit_take = cur >= inputs.T
         hit_stop = cur <= -1.0
@@ -232,7 +344,65 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
                     miss = np.isnan(times[idx[ii[bridge_take]]])
                     if miss.any() and rung <= inputs.T:
                         target = idx[ii[bridge_take]][miss]
+                        economic_target = target[strategy_alive[target]]
+                        if economic_target.size:
+                            times[economic_target] = frac
+                            fill = np.minimum(
+                                future_fraction, strategy_remaining[economic_target])
+                            strategy_realized[economic_target] += fill * rung
+                            strategy_remaining[economic_target] -= fill
+
+            # Use the same raw bridge absorption for economic stop/take.  This
+            # keeps ladder fills, outer barriers and policy cash flows ordered on
+            # a common path.  BE-only crossings are handled just below.
+            raw_bridge_stop = idx[ii[bridge_stop]]
+            econ_stop = raw_bridge_stop[strategy_alive[raw_bridge_stop]]
+            if econ_stop.size:
+                strategy_exit_r[econ_stop] = np.where(be_armed[econ_stop], 0.0, -1.0)
+                strategy_exit_time[econ_stop] = frac
+                strategy_exit_reason[econ_stop] = np.where(
+                    be_armed[econ_stop], "breakeven", "stop")
+                strategy_alive[econ_stop] = False
+            raw_bridge_take = idx[ii[bridge_take]]
+            econ_take = raw_bridge_take[strategy_alive[raw_bridge_take]]
+            if econ_take.size:
+                # A continuous path reaching take necessarily crossed every
+                # pending rung and the BE arm level first.
+                for rung, times in rung_times.items():
+                    missing = np.isnan(times[econ_take])
+                    if missing.any():
+                        target = econ_take[missing]
                         times[target] = frac
+                        fill = np.minimum(future_fraction, strategy_remaining[target])
+                        strategy_realized[target] += fill * rung
+                        strategy_remaining[target] -= fill
+                arm = ~be_armed[econ_take]
+                if arm.any():
+                    target = econ_take[arm]
+                    be_armed[target] = True
+                    be_arm_time[target] = frac
+                strategy_exit_r[econ_take] = inputs.T
+                strategy_exit_time[econ_take] = frac
+                strategy_exit_reason[econ_take] = "take"
+                strategy_alive[econ_take] = False
+
+        # Brownian bridges can cross an armed 0R barrier and return while both
+        # endpoints remain positive.  Sample that event explicitly.  This state
+        # is absorbing and therefore cannot later become a take.
+        bridge_candidates = idx[
+            strategy_alive[idx] & be_armed[idx] & (prev > 0.0) & (cur > 0.0)]
+        if bridge_candidates.size:
+            positions = np.searchsorted(idx, bridge_candidates)
+            p_be = np.exp(
+                -2.0 * prev[positions] * cur[positions]
+                / max(float(var_steps[step]), 1e-12))
+            hit_be = execution_rng.random(bridge_candidates.size) < p_be
+            if hit_be.any():
+                target = bridge_candidates[hit_be]
+                strategy_exit_r[target] = 0.0
+                strategy_exit_time[target] = frac
+                strategy_exit_reason[target] = "breakeven"
+                strategy_alive[target] = False
 
         if hit_take.any():
             j = idx[hit_take]
@@ -246,10 +416,25 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
             alive[j] = False
 
     terminal[alive] = r[alive]
+    strategy_exit_r[strategy_alive] = terminal[strategy_alive]
+    strategy_exit_time[strategy_alive] = 1.0
+    strategy_exit_reason[strategy_alive] = "horizon"
+    strategy_outcome = strategy_realized + strategy_remaining * strategy_exit_r
+    spec = ExecutionSpec.from_values(
+        current_r=inputs.r0, max_r=inputs.max_r, take_r=inputs.T,
+        rungs=inputs.rungs, rung_fraction_original=inputs.rung_fraction,
+        be_after_r=inputs.be_after,
+    )
     return PathSimulation(terminal=terminal, max_r=max_r, min_r=min_r,
                           stop_time=stop_time, take_time=take_time,
                           rung_times=rung_times,
-                          horizon_minutes=inputs.horizon_minutes)
+                          horizon_minutes=inputs.horizon_minutes,
+                          strategy_outcome=strategy_outcome,
+                          strategy_exit_r=strategy_exit_r,
+                          strategy_exit_time=strategy_exit_time,
+                          strategy_exit_reason=strategy_exit_reason,
+                          be_arm_time=be_arm_time,
+                          execution_contract=execution_contract(spec))
 
 
 def baseline_strategy_outcomes(sim: PathSimulation, inputs: PolicyInputs) -> np.ndarray:
@@ -259,6 +444,8 @@ def baseline_strategy_outcomes(sim: PathSimulation, inputs: PolicyInputs) -> np.
     fraction of the *current remainder*. Break-even is treated identically to the
     terminal's existing MC approximation: after 1.5R, a negative final exit is 0R.
     """
+    if sim.strategy_outcome is not None:
+        return sim.strategy_outcome.copy()
     future = np.asarray([x for x in inputs.rungs if x > inputs.max_r + 1e-8], dtype=float)
     if future.size:
         crossed = sim.max_r[:, None] >= future[None, :] - 1e-12
@@ -293,7 +480,7 @@ def policy_metrics(policy: PolicyDistribution, sim: PathSimulation,
                    inputs: PolicyInputs) -> dict:
     values = policy.outcomes
     next_rung = _next_rung(inputs)
-    stop_t = sim.stop_time
+    stop_t = _strategy_risk_exit_time(sim)
     rung_t = sim.rung_times.get(next_rung) if next_rung is not None else sim.take_time
     if rung_t is None:
         rung_t = np.full_like(stop_t, np.nan)
@@ -308,6 +495,15 @@ def policy_metrics(policy: PolicyDistribution, sim: PathSimulation,
         event_by = (~np.isnan(event_t)) & (event_t <= frac + 1e-12)
         no_event[f"{minutes}m"] = round(float(1.0 - np.mean(event_by)), 4)
 
+    p_loss_events = values < 0.0
+    uncertainty = {
+        "expected_final_r": _mean_uncertainty(values),
+        "cvar10_r": _cvar_uncertainty(values, 0.10),
+        "p_final_loss": _probability_uncertainty(p_loss_events),
+        "p_next_rung_before_stop": _probability_uncertainty(rung_first),
+        "p_stop_before_next_rung": _probability_uncertainty(stop_first),
+        "effective_path_count": int(values.size),
+    }
     return {
         "name": policy.name,
         "close_fraction": policy.close_fraction,
@@ -325,6 +521,7 @@ def policy_metrics(policy: PolicyDistribution, sim: PathSimulation,
             round(float(np.mean(resolved)) * inputs.horizon_minutes, 1)
             if resolved.size else None),
         "no_event_probability": no_event,
+        "monte_carlo_uncertainty": uncertainty,
     }
 
 

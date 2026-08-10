@@ -5,6 +5,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from . import ai_policy_v3 as _impl
+from .mc_validation import seed_robustness
 
 globals().update({
     name: value for name, value in vars(_impl).items()
@@ -143,7 +144,7 @@ def _floor_for_r(r_value: float) -> float | None:
 
 def _event_geometry(sim: PathSimulation, inputs: PolicyInputs) -> dict:
     next_rung = _impl._impl._next_rung(inputs)
-    stop_t = sim.stop_time
+    stop_t = _impl._impl._strategy_risk_exit_time(sim)
     rung_t = sim.rung_times.get(next_rung) if next_rung is not None else sim.take_time
     if rung_t is None:
         rung_t = _impl._impl.np.full_like(stop_t, _impl._impl.np.nan)
@@ -167,6 +168,7 @@ def _event_geometry(sim: PathSimulation, inputs: PolicyInputs) -> dict:
         }
     resolved_times = event_t[resolved]
     return {
+        "execution_contract": sim.execution_contract or {},
         "scenario_count": n,
         "next_rung_r": _impl._impl._rnd(next_rung, 3),
         "rung_first_count": rung_count,
@@ -216,6 +218,11 @@ def _run_once(inputs: PolicyInputs, *, n_paths: int, n_steps: int, seed: int):
             "execution_cost_r": round(gross_expected - float(np.mean(net)), 4),
             "outcomes_include_execution_costs": True,
             "event_geometry": geometry,
+            "monte_carlo": {
+                "seed": int(seed), "steps": int(n_steps),
+                "scenarios": int(n_paths),
+                "common_random_numbers": True,
+            },
         })
         metrics[name] = metric
     return metrics, sim
@@ -363,6 +370,10 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
             previous_policy_inputs=previous_policy_inputs,
             previous_evidence=previous_evidence,
         )
+        numerical_validation = seed_robustness(
+            inputs, run_once=_run_once, choose=_raw_policy_choice,
+            n_paths=1200, n_steps=180,
+        )
     finally:
         _COST_CTX.reset(cost_token)
         _RISK_CTX.reset(risk_token)
@@ -375,6 +386,7 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
     result["selection_rule"] = rule
     result["risk_constraint"] = risk
     result["execution_cost_model"] = costs
+    result["monte_carlo_validation"] = numerical_validation
 
     rec = result.get("recommendation") or {}
     gate = result.get("gate") or {}
