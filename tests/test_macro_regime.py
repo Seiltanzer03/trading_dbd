@@ -37,6 +37,8 @@ def test_macro_regime_trajectory_is_rolling_not_origin_interpolation():
     z_values = {round(p["z"], 3) for p in traj}
     assert len(z_values) > 2
     assert "velocity_vector" in res["current"]
+    assert "acceleration_vector" in res["current"]
+    assert res["summary"]["acceleration_vector"] == res["current"]["acceleration_vector"]
     assert "transition_acceleration" in res["summary"]
     assert "stress_components" in res["summary"]
     assert res["summary"]["points"] == len(prices)

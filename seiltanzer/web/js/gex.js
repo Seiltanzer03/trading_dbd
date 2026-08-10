@@ -3,6 +3,8 @@ import { createPlotlyCameraGuard } from './plotly_camera_guard.js';
 import { publishMarketTick } from './market_bus.js';
 import { ensurePremiumAnalyticsTheme } from './premium_analytics_theme.js';
 import { isAnalyticsMobile, analyticsMobileDpr } from './analytics_mobile.js';
+import { attachTerminal3DToolbar } from './plotly_terminal_toolbar.js';
+import { dampedMotion } from './real_market_motion.js';
 
 let emptyEl;
 let statusEl;
@@ -19,6 +21,7 @@ let particles = [];
 let staticCanvas = null;
 let staticKey = '';
 let lastSummaryUpdate = 0;
+let marketMotion = { velocity: 0, phase: 0, turbulence: 0, lastFrame: 0 };
 
 const PRESSURE_CAM = {
   eye: { x: 1.48, y: -1.72, z: 1.18 },
@@ -142,11 +145,14 @@ export function updateLiveGex(packet = {}) {
   const price = live.price;
   const dt = live.tick ? Math.max(0.016, (now - live.tick.now) / 1000) : 0;
   const retBp = prev && price > 0 ? Math.log(price / prev) * 1e4 : 0;
+  const speed = dt ? retBp / dt : 0;
+  const previousSpeed = Number(live.tick?.speed || 0);
   live.tick = {
     price,
     now,
     retBp,
-    speed: dt ? retBp / dt : 0,
+    speed,
+    acceleration: dt ? (speed - previousSpeed) / dt : 0,
     impulse: Math.min(1, Math.abs(retBp) / 3),
   };
   if (currentMode === 'PRESSURE') updatePressureLiveMarker();
@@ -235,6 +241,13 @@ function updateSummary() {
     path.style.color = '#fff';
   }
   set('#gex-sum-pressure', s.obstruction_score == null ? '—' : `${Math.round(Number(s.obstruction_score) * 100)}% OBSTRUCTION`);
+  const headline = $('#gex-human-line');
+  if (headline) {
+    const obstruction = Number(s.obstruction_score || 0);
+    const walls = [s.call_wall, s.put_wall].filter((wall) => Number.isFinite(Number(wall?.price)) && Number.isFinite(Number(wall?.migration_6h)));
+    const approaching = walls.find((wall) => Math.sign(Number(wall.price) - Number(s.current_price || live.price)) === -Math.sign(Number(wall.migration_6h)));
+    headline.textContent = `TAKE PATH: ${obstruction >= .58 ? 'HARDENING' : obstruction >= .28 ? 'MATERIAL FRICTION' : 'CLEAR'}${approaching ? ` · ${(approaching === s.put_wall ? 'PUT' : 'CALL')} WALL APPROACHING` : ' · WALLS STABLE/RECEDING'}`;
+  }
   const card = $('#gex-summary-card');
   if (card) {
     let meta = $('#gex-migration-meta');
@@ -277,11 +290,12 @@ function fmtMigration(v) {
 function resetParticles() {
   const count = isAnalyticsMobile() ? 26 : 58;
   particles = Array.from({ length: count }, (_, i) => ({
-    u: (i + Math.random()) / count,
-    lane: Math.random() * 2 - 1,
-    phase: Math.random() * Math.PI * 2,
-    size: 1 + Math.random() * 1.8,
+    u: (i + .5) / count,
+    lane: (((i * 17) % count) / Math.max(1, count - 1)) * 2 - 1,
+    phase: (i * 2.399963229728653) % (Math.PI * 2),
+    size: 1 + ((i * 7) % 11) / 10 * 1.8,
   }));
+  marketMotion = { velocity: 0, phase: 0, turbulence: 0, lastFrame: 0 };
 }
 
 function chartGeometry() {
@@ -448,10 +462,11 @@ function drawLiveMigrationOverlay(ctx, g, now) {
   const current = live.price || Number(s.current_price || 0);
   if (!current || current < g.pMin || current > g.pMax) return;
   const yPrice = g.Y(current);
-  const pulse = .45 + .35 * Math.sin(now / 170);
+  const tickAge = live.tick ? Math.max(0, (now - Number(live.tick.now || now)) / 1000) : Infinity;
+  const impulse = clamp(Number(live.tick?.impulse || 0) * Math.exp(-tickAge / 1.4), 0, 1);
   ctx.save();
-  ctx.shadowColor = '#ffb24b'; ctx.shadowBlur = (g.mobile ? 5 : 8) + (g.mobile ? 4 : 7) * pulse;
-  ctx.strokeStyle = `rgba(255,178,75,${.78 + .18 * pulse})`; ctx.lineWidth = g.mobile ? 1.7 : 2.2;
+  ctx.shadowColor = '#ffb24b'; ctx.shadowBlur = (g.mobile ? 3 : 5) + (g.mobile ? 5 : 9) * impulse;
+  ctx.strokeStyle = `rgba(255,178,75,${.72 + .24 * impulse})`; ctx.lineWidth = (g.mobile ? 1.5 : 1.9) + impulse * .7;
   ctx.beginPath(); ctx.moveTo(g.margin.left, yPrice); ctx.lineTo(g.margin.left + g.plotW, yPrice); ctx.stroke();
   ctx.shadowBlur = 0; ctx.fillStyle = '#ffb24b'; ctx.font = `bold ${g.mobile ? 8 : 9}px IBM Plex Mono,monospace`; ctx.textAlign = 'right';
   ctx.fillText(`LIVE ${current.toFixed(1)}`, g.margin.left + g.plotW - 4, yPrice - 4);
@@ -469,21 +484,28 @@ function drawLiveMigrationOverlay(ctx, g, now) {
     ctx.beginPath(); ctx.moveTo(stripX, yPrice); ctx.lineTo(stripX, yTake); ctx.stroke(); ctx.setLineDash([]);
 
     const tick = live.tick || {};
-    const towardTake = Math.sign(tick.retBp || 0) === dir ? 1 : -1;
-    const speed = .000035 * (1 - obstruction * .62) * (1 + Math.max(-.3, towardTake * Math.min(.3, Math.abs(tick.retBp || 0) / 8)));
-    const turbulence = 1.5 + obstruction * (g.mobile ? 5 : 7) + Math.abs(field.force) * 4 + Number(tick.impulse || 0) * 4;
+    const towardVelocity = clamp(Number(tick.speed || 0) * dir / 6, -1, 1);
+    const alignment = clamp(.55 + .45 * Number(field.force || 0) * dir, .1, 1);
+    const drive = Math.max(0, towardVelocity) * (1 - obstruction) * alignment * Math.exp(-tickAge / 1.4);
+    const dt = marketMotion.lastFrame ? Math.max(0, Math.min(.25, (now - marketMotion.lastFrame) / 1000)) : 0;
+    marketMotion.lastFrame = now;
+    marketMotion = { ...marketMotion, ...dampedMotion(marketMotion, drive, dt, { response: 8, damping: 2.8, maxSpeed: 1 }), lastFrame: now };
+    const migration = Math.max(Math.abs(Number(s.call_wall?.migration_6h || 0)), Math.abs(Number(s.put_wall?.migration_6h || 0)), Math.abs(Number(s.flip?.migration_6h || 0)));
+    const turbulenceTarget = clamp((Math.abs(field.force) * .38 + obstruction * .25 + Math.min(1, Math.abs(Number(tick.acceleration || 0)) / 24) * .24 + Math.min(1, migration / Math.max(current * .006, 1e-6)) * .13) * Math.exp(-tickAge / 2.0), 0, 1);
+    marketMotion.turbulence += (turbulenceTarget - marketMotion.turbulence) * (1 - Math.exp(-5 * dt));
+    const turbulence = marketMotion.turbulence * (g.mobile ? 9 : 13);
     particles.forEach((p) => {
-      p.u += speed * (16 + Math.min(40, Number(tick.impulse || 0) * 30));
-      if (p.u > 1) { p.u -= 1; p.lane = Math.random() * 2 - 1; }
+      p.u += Math.max(0, marketMotion.velocity) * dt * .45;
+      if (p.u > 1) p.u -= 1;
       const pp = current + (take - current) * p.u;
       const yy = g.Y(pp);
-      const xx = stripX + p.lane * turbulence + Math.sin(now / 350 + p.phase) * turbulence * .35;
-      const alpha = .25 + .65 * (1 - obstruction * .55);
+      const xx = stripX + p.lane * turbulence + Math.sin(p.phase + marketMotion.phase * Math.PI * 2) * turbulence * .35;
+      const alpha = (.10 + .78 * marketMotion.energy) * (1 - obstruction * .55);
       ctx.fillStyle = obstruction > .55 ? `rgba(255,116,100,${alpha})` : `rgba(77,219,202,${alpha})`;
       ctx.beginPath(); ctx.arc(xx, yy, g.mobile ? Math.min(1.7,p.size) : p.size, 0, Math.PI * 2); ctx.fill();
     });
     ctx.fillStyle = 'rgba(214,226,235,.7)'; ctx.font = `${g.mobile ? 7 : 8}px IBM Plex Mono,monospace`; ctx.textAlign = 'center';
-    ctx.fillText(`FLOW ${Math.round((1 - obstruction) * 100)}%`, stripX, Math.min(yPrice, yTake) - 7);
+    ctx.fillText(`FLOW v ${marketMotion.velocity.toFixed(2)} · OBS ${Math.round(obstruction * 100)}%`, stripX, Math.min(yPrice, yTake) - 7);
   }
 
   const gx = g.margin.left + 8, gy = g.margin.top + g.plotH - 14, gw = g.mobile ? 72 : 105;
@@ -585,6 +607,7 @@ function renderPressure3D(force = false) {
   pressureGuard?.beforeWrite?.();
   window.Plotly.newPlot(plot, traces, layout, { responsive: false, displayModeBar: false, scrollZoom: !mobile });
   pressureGuard?.afterWrite?.();
+  attachTerminal3DToolbar({plot,container:containerEl,guard:pressureGuard,homeCamera:PRESSURE_CAM,key:'gex-pressure'});
   updatePressureLiveMarker();
 }
 

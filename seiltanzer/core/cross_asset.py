@@ -99,7 +99,7 @@ def compute_correlation_graph(
     delta = p.get("matrix_delta")
     if not assets or not isinstance(short, list) or len(short) < 2:
         return {
-            "version": "cross-asset-v3-stress-topology", "available": False,
+            "version": "cross-asset-v4-full-stress-topology", "available": False,
             "reason": "Нет реальной rolling cross-asset матрицы",
             "nodes": [], "links": [], "break_alerts": [],
             "summary": {"available": False, "authority": "correlation_family",
@@ -163,7 +163,7 @@ def compute_correlation_graph(
 
     if observed_pairs == 0:
         return {
-            "version": "cross-asset-v3-stress-topology", "available": False,
+            "version": "cross-asset-v4-full-stress-topology", "available": False,
             "reason": "В rolling матрице нет валидных пар",
             "nodes": [], "links": [], "break_alerts": [],
             "summary": {"available": False, "authority": "correlation_family",
@@ -224,15 +224,33 @@ def compute_correlation_graph(
     components = _components(assets, links)
     fragmentation = (components - 1) / max(1, len(assets) - 1)
     top_node = max(nodes, key=lambda n: float(n.get("stress_pressure") or 0.0)) if nodes else None
+    possible_pairs = n * (n - 1) // 2
+    material_pairs = sum(
+        abs(float(link.get("correlation") or 0.0)) >= 0.22
+        or float(link.get("tension") or 0.0) >= 0.08
+        or link.get("status") == "BREAK_ALERT"
+        for link in links
+    )
+    stress_pairs = sum(
+        link.get("status") == "BREAK_ALERT"
+        or float(link.get("tension") or 0.0) >= 0.08
+        or abs(float(link.get("delta_baseline") or 0.0)) >= 0.12
+        or float(link.get("velocity_magnitude") or 0.0) >= 0.015
+        for link in links
+    )
 
     return {
-        "version": "cross-asset-v3-stress-topology",
+        "version": "cross-asset-v4-full-stress-topology",
         "available": True,
         "nodes": nodes, "links": links, "break_alerts": alerts[:8],
         "summary": {
             "regime": "CORRELATION BREAKDOWN" if alerts else "NORMAL CORRELATION",
             "active_breaks_count": len(alerts),
             "observed_pairs": observed_pairs,
+            "possible_pairs": possible_pairs,
+            "complete_topology": observed_pairs == possible_pairs,
+            "material_pairs": material_pairs,
+            "stress_pairs": stress_pairs,
             "history_samples": len(history),
             "velocity_ready": len(history) >= 2,
             "max_break_velocity": round(max(velocity_values), 3) if velocity_values else None,

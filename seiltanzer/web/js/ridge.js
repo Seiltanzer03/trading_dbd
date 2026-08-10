@@ -113,7 +113,7 @@ export function initRidge(canvas) {
       ctx.fillStyle = COLORS.dim; ctx.fillText(cap, padL + 1, ridgeBottom + 10);
     }
 
-    // гряды с дыханием + изометрическая перспектива (3D-объём): старые ряды
+    // Статичные гряды + изометрическая перспектива (3D-объём): старые ряды
     // уходят вглубь-вправо, текущая (нижняя) выровнена с маркерами сделки
     const rowGap = (ridgeBottom - padT) / snaps.length, amp = rowGap * 2.2;
     const DEPTH = plotW * 0.024;
@@ -125,9 +125,8 @@ export function initRidge(canvas) {
       const kk = snap.density.strikes.map((k) => k * scale);
       const qq = isLast && curLatest ? curLatest : snap.density.q;
       const qm = Math.max(...qq) || 1;
-      const breath = 1 + 0.05 * Math.sin(now / 900 + i * 0.7);  // лёгкое дыхание
       ctx.beginPath(); ctx.moveTo(XD(Math.max(kk[0], lo)), baseY);
-      for (let j = 0; j < kk.length; j++) { if (kk[j] < lo || kk[j] > hi) continue; ctx.lineTo(XD(kk[j]), baseY - (qq[j] / qm) * amp * (isLast ? 1 : breath)); }
+      for (let j = 0; j < kk.length; j++) { if (kk[j] < lo || kk[j] > hi) continue; ctx.lineTo(XD(kk[j]), baseY - (qq[j] / qm) * amp); }
       ctx.lineTo(XD(Math.min(kk[kk.length - 1], hi)), baseY); ctx.closePath();
       ctx.fillStyle = isLast ? 'rgba(20,20,15,0.06)' : 'rgba(255,255,255,0.9)'; ctx.fill();
       ctx.strokeStyle = isLast ? COLORS.ink : COLORS.dim; ctx.lineWidth = isLast ? 2 : 0.8;
