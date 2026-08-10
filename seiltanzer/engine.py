@@ -26,6 +26,7 @@ from .core import risk as rk
 from .data.cache import DiskCache
 from .data.feeds import MarketData
 from .journal import Journal
+from .position_state import PositionLedger
 
 
 def clean_nans(obj):
@@ -53,6 +54,7 @@ class Engine:
         self.settings = settings
         self.cache = DiskCache(settings.cache_db)
         self.journal = Journal(settings.trades_db)
+        self.position = PositionLedger(settings.trades_db)
         self.market = MarketData(settings, self.cache)
         self.stream_hub = None
         if settings.stream:
@@ -236,6 +238,9 @@ class Engine:
         now = time.time()
         account = self._account_payload()
         trade = self.journal.active_trade()
+        if trade:
+            self.position.sync_be(trade)
+            trade = {**trade, "position_state": self.position.state(trade)}
         atr = self._atr_payload()
         sigma = self.market.sigma_ratio()
         raw_price = self.market.price.get("value")
@@ -1864,3 +1869,4 @@ class Engine:
     def close(self) -> None:
         self.cache.close()
         self.journal.close()
+        self.position.close()

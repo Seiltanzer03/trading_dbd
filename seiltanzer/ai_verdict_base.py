@@ -244,9 +244,35 @@ def build_snapshot(engine) -> dict:
     switch = cancellation.get("hold_switch") if cancellation.get("available") else None
     if switch:
         switch["price"] = _rnd(_price_from_r(trade, _num(switch.get("r"))), 4)
-    return {
+    position_state = trade.get("position_state") or engine.position.state(trade)
+    clock = policy.get("first_touch_clock") or {}
+    risk_barrier_r = _num(clock.get("risk_barrier_r"))
+    geometry = {
+        "current": _rnd(_at(tick, "feeds", "price", "value")),
+        "entry": _rnd(trade.get("entry")),
+        "original_stop": _rnd(trade.get("stop")),
+        "active_risk_barrier": _rnd(position_state.get("active_stop_price")),
+        "active_risk_barrier_type": position_state.get("active_stop_type"),
+        "final_take": _rnd(trade.get("take")),
+        "current_r": _rnd(_at(tick, "prob", "r")),
+        "r_to_active_stop": _rnd((_num(_at(tick, "prob", "r")) or 0.0)
+                                  - (risk_barrier_r if risk_barrier_r is not None else -1.0)),
+        "r_to_final_take": _rnd((_num(_at(tick, "prob", "T")) or 0.0)
+                                - (_num(_at(tick, "prob", "r")) or 0.0)),
+        "remaining_position_fraction": position_state.get("remaining_position_fraction"),
+        "realized_position_fraction": position_state.get("realized_position_fraction"),
+        "probability_measure": "execution-MC estimate",
+        "take_first": _at(clock, "cause_probability_horizon", "take"),
+        "stop_or_be_first": _at(clock, "cause_probability_horizon", "stop_or_be"),
+        "no_touch": clock.get("survival_probability_horizon"),
+        "p50_resolution_minutes": clock.get("median_resolution_minutes"),
+        "p50_status": clock.get("median_status"),
+    }
+    snapshot = {
         "captured_ts": captured_ts, "trade_id": trade_id,
         "strategy": _strategy(engine, trade),
+        "position_state": position_state,
+        "trade_geometry": geometry,
         "time_context": _time_context(tick, trade, previous_reviews),
         "observation": _observation(tick, policy, trade),
         "metric_history": history,
@@ -256,6 +282,16 @@ def build_snapshot(engine) -> dict:
                              for x in previous_reviews],
         "validation": engine.journal.validation_report(),
     }
+    decision = engine.position.preview_decision(snapshot, trade)
+    snapshot["policy_manager"]["management_decision"] = decision
+    remaining = float(position_state.get("remaining_position_fraction") or 0.0)
+    realized = float(position_state.get("realized_r_weighted") or 0.0)
+    for metrics in (snapshot["policy_manager"].get("policies") or {}).values():
+        future = _num(metrics.get("expected_final_r"))
+        metrics["expected_future_r_on_remaining"] = future
+        metrics["expected_total_trade_r"] = (
+            None if future is None else round(realized + remaining * future, 6))
+    return snapshot
 
 
 def _evidence_line(item: dict) -> str:
@@ -287,7 +323,32 @@ def render_policy_report(snapshot: dict) -> str:
     coverage = manager.get("metric_coverage", {}).get("summary", {})
     inputs = manager.get("inputs") or {}
 
-    lines = [f"**ДЕЙСТВИЕ** — {action}.", "", "**РАСЧЁТ ПОЛИТИК** —"]
+    geometry = snapshot.get("trade_geometry") or {}
+    position = snapshot.get("position_state") or {}
+    p50 = geometry.get("p50_resolution_minutes")
+    p50_text = (f"{float(p50):.0f} мин" if _num(p50) is not None
+                else "за горизонтом / не определена")
+    lines = [
+        f"**ДЕЙСТВИЕ СЕЙЧАС** — {action}.", "",
+        "**ГЕОМЕТРИЯ СДЕЛКИ** —",
+        f"Цена сейчас: {geometry.get('current')}; вход: {geometry.get('entry')}.",
+        f"Исходный STOP: {geometry.get('original_stop')}. "
+        f"Активный риск-барьер: {geometry.get('active_risk_barrier')} · "
+        f"{geometry.get('active_risk_barrier_type')}.",
+        f"FINAL TAKE: {geometry.get('final_take')}.",
+        f"Текущая позиция: {_fmt_r(geometry.get('current_r'))}; "
+        f"до активного стопа: {_fmt_r(geometry.get('r_to_active_stop'))}; "
+        f"до тейка: {_fmt_r(geometry.get('r_to_final_take'))}.",
+        f"Остаток позиции: {_fmt_pct(position.get('remaining_position_fraction'))}; "
+        f"уже зафиксировано: {_fmt_pct(position.get('realized_position_fraction'))}.",
+        "", "**TAKE vs STOP/BE · execution-MC estimate** —",
+        f"TAKE раньше активного risk barrier: {_fmt_pct(geometry.get('take_first'))}; "
+        f"STOP/BE раньше TAKE: {_fmt_pct(geometry.get('stop_or_be_first'))}; "
+        f"NO TOUCH: {_fmt_pct(geometry.get('no_touch'))}.",
+        f"P50 развязки: {p50_text}. Risk-neutral Q и physical calibrated P shadow "
+        "публикуются отдельно и не смешиваются с execution-MC.",
+        "", "**РАСЧЁТ ПОЛИТИК** —"
+    ]
     for name in ("HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"):
         m = policies.get(name) or {}
         lines.append(
@@ -394,7 +455,8 @@ def render_policy_report(snapshot: dict) -> str:
 def _validate_model_report(content: str, snapshot: dict) -> list[str]:
     manager = snapshot.get("policy_manager") or {}
     action = _at(manager, "recommendation", "action_ru")
-    required = ("ДЕЙСТВИЕ", "РАСЧЁТ ПОЛИТИК", "ПОЧЕМУ ВЫБРАНО",
+    required = ("ДЕЙСТВИЕ", "ГЕОМЕТРИЯ СДЕЛКИ", "TAKE VS STOP/BE",
+                "РАСЧЁТ ПОЛИТИК", "ПОЧЕМУ ВЫБРАНО",
                 "ПОДТВЕРЖДЕНИЯ И ПРОТИВОРЕЧИЯ", "РАЗЛОЖЕНИЕ ИЗМЕНЕНИЯ",
                 "ПОСЛЕ ИСПОЛНЕНИЯ", "ГРАНИЦА ОТМЕНЫ", "СЛЕДУЮЩИЙ ПЕРЕСЧЁТ",
                 "КАЧЕСТВО ДАННЫХ")

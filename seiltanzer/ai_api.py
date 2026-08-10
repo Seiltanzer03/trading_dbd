@@ -57,6 +57,9 @@ def success_body(result: dict, req_id: str, *, degraded: bool = False,
         "degraded": bool(degraded),
         "request_id": req_id,
     }
+    decision = result.get("management_decision")
+    if isinstance(decision, dict):
+        body["management_decision"] = decision
     if provider_failure:
         body["provider_error"] = provider_failure
     if result.get("captured_ts") is not None:
@@ -91,4 +94,6 @@ def deterministic_result(snapshot: dict, render: Callable[[dict], str]) -> dict:
         "verdict": render(snapshot),
         "model": "deterministic-policy-fallback",
         "captured_ts": snapshot.get("captured_ts"),
+        "management_decision": ((snapshot.get("policy_manager") or {})
+                                .get("management_decision")),
     }

@@ -1,0 +1,11 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const app=fs.readFileSync('seiltanzer/web/js/app.js','utf8');
+const ui=fs.readFileSync('seiltanzer/web/js/management_ui.js','utf8');
+assert.match(app,/body\.management_decision/);
+assert.match(app,/ai-management-execution/);
+assert.match(ui,/ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ/);
+assert.match(ui,/ВЫПОЛНЕНО/);
+assert.match(ui,/НЕ ВЫПОЛНЕНО/);
+assert.match(ui,/\/api\/ai\/decision\/ack/);
+console.log('ai management decision smoke: PASS');

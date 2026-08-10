@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from .config import INSTRUMENTS, SETUPS, Settings, settings_from_env
 from .decision_research import canonical_snapshot
+from .position_state import StaleDecisionError
 from .engine import Engine
 from .ai_verdict import build_snapshot, render_policy_report, request_verdict
 from .ai_api import (
@@ -95,6 +96,12 @@ class HumanDecisionRecord(BaseModel):
     policy: str
     reason_category: str
     note: str = ""
+
+
+class ManagementExecution(BaseModel):
+    decision_id: str
+    trade_id: int
+    executed: bool
 
 
 class ExperimentRegister(BaseModel):
@@ -400,13 +407,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 quote_source=engine.market.price.get("source"))
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        engine.position.open_trade(trade)
         engine.on_trade_opened(trade)
-        return trade
+        return {**trade, "position_state": engine.position.state(trade)}
 
     @app.post("/api/trade/close")
     def api_trade_close(req: TradeClose):
         try:
-            return engine.journal.close_trade(req.trade_id, req.result_r, req.notes)
+            live_trade = engine.journal.get_trade(req.trade_id)
+            closed = engine.journal.close_trade(req.trade_id, req.result_r, req.notes)
+            engine.position.terminal_exit(
+                live_trade, event_type="MANUAL_EXIT",
+                execution_price=engine._current_instrument_price(live_trade),
+                execution_r=req.result_r)
+            return {**closed, "position_state": engine.position.state(live_trade)}
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 
@@ -420,14 +434,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/trade/edit")
     def api_trade_edit(req: TradeEdit):
         try:
+            previous = engine.journal.get_trade(req.trade_id)
             trade = engine.journal.edit_trade(
                 req.trade_id, setup=req.setup, direction=req.direction,
                 entry=req.entry, stop=req.stop, take=req.take,
                 result_r=req.result_r, notes=req.notes)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        geometry_changed = any(
+            previous.get(key) != trade.get(key)
+            for key in ("setup", "instrument", "direction", "entry", "stop", "take"))
+        if geometry_changed:
+            engine.position.supersede_trade(req.trade_id, "trade_geometry_changed")
         if trade["status"] == "open":
             engine.on_trade_edited(trade)
+            return {**trade, "position_state": engine.position.state(trade)}
         return trade
 
     @app.post("/api/trade/delete")
@@ -496,6 +517,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "snapshot_error", "Снимок сделки не прошёл проверку целостности",
                         req_id, retriable=False),
                 )
+            decision = ((snapshot.get("policy_manager") or {})
+                        .get("management_decision"))
             degraded = False
             provider_failure = None
             try:
@@ -529,6 +552,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         req_id, retriable=False),
                 )
             try:
+                engine.position.register_decision(
+                    snapshot, review_id, engine.journal.get_trade(trade_id))
+                result["management_decision"] = decision
                 engine.journal.record_ai_verdict(
                     trade_id, snapshot,
                     result["verdict"], result.get("model"))
@@ -556,6 +582,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 provider="openrouter", mode=body["mode"],
             )
             return JSONResponse(content=body)
+
+    @app.post("/api/ai/decision/ack")
+    def api_ai_decision_ack(req: ManagementExecution):
+        try:
+            trade = engine.journal.active_trade()
+            if trade is None or int(trade["id"]) != int(req.trade_id):
+                raise StaleDecisionError("active trade changed")
+            tick = engine.tick_payload()
+            return engine.position.acknowledge(
+                decision_id=req.decision_id, trade=trade, executed=req.executed,
+                execution_price=((tick.get("feeds") or {}).get("price") or {}).get("value"),
+                execution_r=((tick.get("prob") or {}).get("r")))
+        except StaleDecisionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/position")
+    def api_position_state():
+        trade = engine.journal.active_trade()
+        return {
+            "trade_id": trade["id"] if trade else None,
+            "position_state": engine.position.state(trade) if trade else None,
+            "events": engine.position.events(trade["id"]) if trade else [],
+        }
 
     # -------------------------------------------------------------------- ws
 

@@ -160,7 +160,7 @@ def counterfactual_replay(snapshot: dict, path_points: Iterable[dict]) -> dict:
     def risk_time(close_fraction: float) -> tuple[float, float]:
         if close_fraction >= 1.0 - 1e-12:
             return 0.0, 0.0
-        exposure = 1.0 - close_fraction
+        exposure = initial_remaining * (1.0 - close_fraction)
         previous_ts = points[0]["ts"]
         integral_seconds = 0.0
         exit_ts = points[-1]["ts"]
@@ -168,7 +168,7 @@ def counterfactual_replay(snapshot: dict, path_points: Iterable[dict]) -> dict:
             ts = max(previous_ts, float(event["ts"]))
             integral_seconds += exposure * (ts - previous_ts)
             if event.get("type") == "rung":
-                exposure = (1.0 - close_fraction) * max(
+                exposure = initial_remaining * (1.0 - close_fraction) * max(
                     0.0, float(event.get("remaining_after") or 0.0))
             elif event.get("type") in ("take", "stop", "breakeven", "horizon"):
                 exposure = 0.0
@@ -179,19 +179,29 @@ def counterfactual_replay(snapshot: dict, path_points: Iterable[dict]) -> dict:
         return max(0.0, exit_ts - points[0]["ts"]) / 60.0, integral_seconds / 60.0
 
     manager = snapshot.get("policy_manager") or {}
+    position = snapshot.get("position_state") or {}
+    initial_remaining = max(0.0, min(1.0, float(
+        position.get("remaining_position_fraction", 1.0))))
+    already_realized = float(position.get("realized_r_weighted") or 0.0)
     costs = manager.get("execution_cost_model") or {}
     immediate = max(0.0, _finite(costs.get("immediate_full_close_r")) or 0.0)
     deferred = max(0.0, _finite(costs.get("deferred_full_close_r")) or 0.0)
     outcomes = {}
     for name, fraction in POLICY_FRACTIONS.items():
         if fraction >= 1.0:
-            gross = spec.current_r
-            net = spec.current_r - immediate
+            future_gross = spec.current_r
+            future_net = spec.current_r - immediate
         else:
-            gross = fraction * spec.current_r + (1.0 - fraction) * baseline.outcome_r
-            net = (fraction * (spec.current_r - immediate)
-                   + (1.0 - fraction) * (baseline.outcome_r - deferred))
+            future_gross = (fraction * spec.current_r
+                            + (1.0 - fraction) * baseline.outcome_r)
+            future_net = (fraction * (spec.current_r - immediate)
+                          + (1.0 - fraction) * (baseline.outcome_r - deferred))
+        gross = already_realized + initial_remaining * future_gross
+        net = already_realized + initial_remaining * future_net
         outcomes[name] = {
+            "initial_remaining_fraction": initial_remaining,
+            "already_realized_r": round(already_realized, 6),
+            "future_r_on_remaining": round(future_net, 6),
             "close_fraction": fraction,
             "gross_realized_r": round(gross, 6),
             "net_realized_r": round(net, 6),
