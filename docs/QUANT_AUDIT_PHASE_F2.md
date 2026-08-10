@@ -17,3 +17,14 @@ Phase F.2 restores the deterministic management decision workflow, adds an immut
 - Raw N and conservative non-overlapping effective N are both reported.
 - Q remains risk-neutral; calibrated P is shadow.
 - Every promotion flag remains false.
+
+## Authority matrix
+
+| Component | Authority |
+|---|---|
+| Production policy | production |
+| Passive forecast | research_only |
+| Q→P calibrator | shadow |
+| Virtual policy cohort | research_only |
+| Human execution | manual |
+| LLM | explanation_only |
