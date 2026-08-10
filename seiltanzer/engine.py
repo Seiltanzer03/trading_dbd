@@ -27,6 +27,7 @@ from .data.cache import DiskCache
 from .data.feeds import MarketData
 from .journal import Journal
 from .position_state import PositionLedger
+from .passive_learning import PassiveLearningEngine
 
 
 def clean_nans(obj):
@@ -55,6 +56,8 @@ class Engine:
         self.cache = DiskCache(settings.cache_db)
         self.journal = Journal(settings.trades_db)
         self.position = PositionLedger(settings.trades_db)
+        self.passive = PassiveLearningEngine(
+            settings.trades_db, settings, self.cache)
         self.market = MarketData(settings, self.cache)
         self.stream_hub = None
         if settings.stream:
@@ -1867,6 +1870,7 @@ class Engine:
         })
 
     def close(self) -> None:
-        self.cache.close()
-        self.journal.close()
+        self.passive.close()
         self.position.close()
+        self.journal.close()
+        self.cache.close()

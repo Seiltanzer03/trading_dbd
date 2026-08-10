@@ -26,6 +26,7 @@ jobs:
           node --check seiltanzer/web/js/plotly_camera_guard.js
           node --check seiltanzer/web/js/touch_clock.js
           node --check seiltanzer/web/js/safe_fetch.js
+          node --check seiltanzer/web/js/management_ui.js
           node --check seiltanzer/web/js/cone.js
           node --check seiltanzer/web/js/cone_core.js
           node --check seiltanzer/web/js/lattice.js
@@ -37,6 +38,7 @@ jobs:
           node --check seiltanzer/web/js/market_bus.js
           node tests/web/touch_clock_smoke.mjs
           node tests/web/ai_verdict_error_smoke.mjs
+          node tests/web/ai_management_decision_smoke.mjs
           node tests/web/fan_cone_touch_consistency_smoke.mjs
           node tests/web/cone_interaction_smoke.mjs
           node tests/web/lattice_scale_smoke.mjs

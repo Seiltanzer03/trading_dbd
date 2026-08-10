@@ -220,15 +220,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if running:
                 await asyncio.gather(*running.values(), return_exceptions=True)
 
+    async def passive_loop():
+        while True:
+            await asyncio.to_thread(engine.passive.step)
+            await asyncio.sleep(2.0 if settings.demo else 10.0)
+
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI):
         if engine.stream_hub is not None:
             engine.stream_hub.start()      # живой WS-стрим цены (нужен event loop)
         task = asyncio.create_task(poll_loop())
+        passive_task = asyncio.create_task(passive_loop())
         yield
         task.cancel()
+        passive_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        with contextlib.suppress(asyncio.CancelledError):
+            await passive_task
         if engine.stream_hub is not None:
             await engine.stream_hub.stop()
         engine.close()
@@ -294,6 +303,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         report["counterfactual_replay"] = engine.journal.counterfactual_report()
         report["q_calibration"] = engine.journal.q_calibration_report()
         return report
+
+    @app.get("/api/research/passive/status")
+    def api_passive_status():
+        return engine.passive.status()
+
+    @app.get("/api/research/passive/calibration")
+    def api_passive_calibration():
+        return engine.passive.calibration_report()
+
+    @app.get("/api/research/passive/observations")
+    def api_passive_observations(limit: int = 100,
+                                 instrument: str | None = None):
+        return engine.passive.observations(limit=limit, instrument=instrument)
+
+    @app.get("/api/research/passive/edge")
+    def api_passive_edge():
+        return engine.passive.edge_report(engine.journal.counterfactual_report())
 
     @app.get("/api/research/counterfactual")
     def api_counterfactual_research(trade_id: int | None = None,

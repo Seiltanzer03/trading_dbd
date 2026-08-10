@@ -32,6 +32,7 @@ jobs:
           /opt/seiltanzer/.venv/bin/pytest -q
           node --check seiltanzer/web/js/touch_clock.js
           node --check seiltanzer/web/js/safe_fetch.js
+          node --check seiltanzer/web/js/management_ui.js
           node --check seiltanzer/web/js/cone.js
           node --check seiltanzer/web/js/iv_surface.js
           node --check seiltanzer/web/js/levels.js
@@ -44,6 +45,7 @@ jobs:
           node --check seiltanzer/web/js/premium_analytics_theme.js
           node tests/web/touch_clock_smoke.mjs
           node tests/web/ai_verdict_error_smoke.mjs
+          node tests/web/ai_management_decision_smoke.mjs
           node tests/web/fan_cone_touch_consistency_smoke.mjs
           node tests/web/cone_interaction_smoke.mjs
           node tests/web/gex_smoke.mjs
@@ -93,6 +95,9 @@ jobs:
           for endpoint in \
             /api/validation \
             /api/research/counterfactual \
+            /api/research/passive/status \
+            /api/research/passive/calibration \
+            /api/research/passive/edge \
             /api/analytics/gex-migration \
             /api/analytics/regime-phase \
             /api/analytics/wavelet \
