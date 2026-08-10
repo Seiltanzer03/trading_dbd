@@ -91,6 +91,8 @@ jobs:
           fi
 
           for endpoint in \
+            /api/validation \
+            /api/research/counterfactual \
             /api/analytics/gex-migration \
             /api/analytics/regime-phase \
             /api/analytics/wavelet \
@@ -135,7 +137,7 @@ jobs:
         run: |
           if [ "$JOB_STATUS" = "success" ]; then
             state="success"
-            description="Production active; analytics endpoints, server HEAD and HTTP 200 verified"
+            description="Production active; validation, research, analytics, server HEAD verified"
           else
             state="failure"
             description="Tests or production verification failed"
