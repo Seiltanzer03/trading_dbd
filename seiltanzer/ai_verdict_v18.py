@@ -124,6 +124,24 @@ def build_snapshot(engine) -> dict:
     # Avoid serializing the same sizeable role matrix twice.
     manager.pop("metric_coverage", None)
     snapshot["policy_manager"] = manager
+    # Full longitudinal validation remains in the journal/research APIs. The
+    # current AI decision needs only the frozen authority/evidence summary.
+    validation = snapshot.get("validation") or {}
+    q_validation = validation.get("q_calibration") or {}
+    snapshot["validation"] = {
+        "observations": validation.get("observations"),
+        "resolved_trades": validation.get("resolved_trades"),
+        "promotion_allowed": validation.get("promotion_allowed", False),
+        "q_calibration": {
+            "authority": deepcopy(q_validation.get("authority") or {}),
+            "promotion_allowed": q_validation.get(
+                "promotion_allowed", False),
+            "production_replacement_allowed": q_validation.get(
+                "production_replacement_allowed", False),
+        },
+        "snapshot_scope": "bounded_authority_summary",
+        "full_report_endpoint": "/api/validation",
+    }
     return snapshot
 
 
