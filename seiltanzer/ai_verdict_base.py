@@ -247,7 +247,12 @@ def build_snapshot(engine) -> dict:
     switch = cancellation.get("hold_switch") if cancellation.get("available") else None
     if switch:
         switch["price"] = _rnd(_price_from_r(trade, _num(switch.get("r"))), 4)
-    position_state = trade.get("position_state") or engine.position.state(trade)
+    # Policy calculation may advance max_r.  Freeze the management decision
+    # only after those deterministic side effects and BE synchronization are
+    # committed, otherwise the just-created decision can already be stale.
+    trade = engine.journal.get_trade(trade_id)
+    position_state = engine.position.sync_be(trade)
+    captured_ts = time.time()
     clock = policy.get("first_touch_clock") or {}
     risk_barrier_r = _num(clock.get("risk_barrier_r"))
     geometry = {

@@ -578,9 +578,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         req_id, retriable=False),
                 )
             try:
-                engine.position.register_decision(
-                    snapshot, review_id, engine.journal.get_trade(trade_id))
-                result["management_decision"] = decision
+                active_trade = engine.journal.active_trade()
+                if (decision and active_trade
+                        and int(active_trade["id"]) == trade_id):
+                    engine.position.register_decision(
+                        snapshot, review_id, active_trade)
+                if decision:
+                    result["management_decision"] = decision
                 engine.journal.record_ai_verdict(
                     trade_id, snapshot,
                     result["verdict"], result.get("model"))

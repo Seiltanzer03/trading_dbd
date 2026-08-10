@@ -277,16 +277,52 @@ def _dynamic_block(manager: dict) -> list[str]:
     ]
 
 
+def _pct(value: Any) -> str:
+    number = _number(value)
+    return "—" if number is None else f"{number * 100:.1f}%"
+
+
+def _geometry_block(snapshot: dict) -> list[str]:
+    geometry = snapshot.get("trade_geometry") or {}
+    position = snapshot.get("position_state") or {}
+    p50 = _number(geometry.get("p50_resolution_minutes"))
+    p50_text = f"{p50:.0f} мин" if p50 is not None else "за горизонтом / не определена"
+    return [
+        "**ГЕОМЕТРИЯ СДЕЛКИ** —",
+        f"Цена сейчас: {geometry.get('current')}; ENTRY: {geometry.get('entry')}.",
+        f"Исходный STOP: {geometry.get('original_stop')}.",
+        f"Активный риск-барьер: {geometry.get('active_risk_barrier')} · "
+        f"{geometry.get('active_risk_barrier_type')}.",
+        f"FINAL TAKE: {geometry.get('final_take')}.",
+        f"CURRENT R: {_r(geometry.get('current_r'))}; "
+        f"R до активного barrier: {_r(geometry.get('r_to_active_stop'))}; "
+        f"R до FINAL TAKE: {_r(geometry.get('r_to_final_take'))}.",
+        f"Остаток позиции: {_pct(position.get('remaining_position_fraction'))}; "
+        f"уже зафиксировано: {_pct(position.get('realized_position_fraction'))}.",
+        "",
+        "**TAKE vs STOP/BE · execution-MC estimate** —",
+        f"TAKE раньше активного risk barrier: {_pct(geometry.get('take_first'))}; "
+        f"STOP/BE раньше TAKE: {_pct(geometry.get('stop_or_be_first'))}; "
+        f"NO TOUCH: {_pct(geometry.get('no_touch'))}.",
+        f"P50 развязки: {p50_text}. Risk-neutral Q и physical calibrated P shadow "
+        "публикуются отдельно.",
+    ]
+
+
 def render_policy_report(snapshot: dict) -> str:
     text = _BASE_RENDER(snapshot)
     manager = snapshot.get("policy_manager") or {}
-    block = _dynamic_block(manager)
-    if not block or "**ГЛАВНАЯ ПРИЧИНА**" in text:
-        return text
     lines = text.splitlines()
-    insert_at = next((index + 1 for index, line in enumerate(lines)
+    action_at = next((index + 1 for index, line in enumerate(lines)
                       if line.startswith("**ДЕЙСТВИЕ")), 0)
-    lines[insert_at:insert_at] = ["", *block]
+    insert_at = action_at
+    if "**ГЕОМЕТРИЯ СДЕЛКИ**" not in text:
+        geometry = ["", *_geometry_block(snapshot)]
+        lines[insert_at:insert_at] = geometry
+        insert_at += len(geometry)
+    block = _dynamic_block(manager)
+    if block and "**ГЛАВНАЯ ПРИЧИНА**" not in text:
+        lines[insert_at:insert_at] = ["", *block]
     return "\n".join(lines).strip()
 
 
@@ -297,12 +333,18 @@ def request_verdict(snapshot: dict) -> dict:
     result = dict(result)
     has_ensemble = bool(
         (snapshot.get("policy_manager") or {}).get("derived_scenario_ensemble"))
-    required = (
+    required = ("**ГЕОМЕТРИЯ СДЕЛКИ**", "**TAKE vs STOP/BE")
+    ensemble_required = (
         "**ГЛАВНАЯ ПРИЧИНА**", "**ЧТО УЛУЧШИЛОСЬ**",
         "**ЧТО УХУДШИЛОСЬ**", "**ЧТО ИГНОРИРУЕМ**",
     )
-    if (result.get("model") == "deterministic-policy-fallback" or (
-            has_ensemble and not all(header in result["verdict"] for header in required))):
+    missing_contract = not all(header in result["verdict"] for header in required)
+    missing_ensemble = (
+        has_ensemble
+        and not all(header in result["verdict"] for header in ensemble_required)
+    )
+    if (result.get("model") == "deterministic-policy-fallback"
+            or missing_contract or missing_ensemble):
         result["verdict"] = render_policy_report(snapshot)
         result["model"] = "deterministic-policy-fallback"
     return result
