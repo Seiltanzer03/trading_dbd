@@ -120,6 +120,9 @@ def build_snapshot(engine) -> dict:
     # deterministic slices of it and need not be persisted a second time.
     correlation.pop("instrument_relevant", None)
     correlation.pop("largest_changes", None)
+    # metric_coverage is already stored authoritatively at snapshot root.
+    # Avoid serializing the same sizeable role matrix twice.
+    manager.pop("metric_coverage", None)
     snapshot["policy_manager"] = manager
     return snapshot
 
@@ -313,11 +316,15 @@ def render_policy_report(snapshot: dict) -> str:
     text = _BASE_RENDER(snapshot)
     manager = snapshot.get("policy_manager") or {}
     lines = text.splitlines()
-    action_at = next((index + 1 for index, line in enumerate(lines)
-                      if line.startswith("**ДЕЙСТВИЕ")), 0)
-    insert_at = action_at
+    # Keep the established compact action/continuity cockpit in the first
+    # lines; geometry follows it and precedes the legacy scenario geometry.
+    insert_at = next(
+        (index for index, line in enumerate(lines)
+         if line.startswith("**ОБЩАЯ ГЕОМЕТРИЯ СЦЕНАРИЕВ**")),
+        min(len(lines), 8),
+    )
     if "**ГЕОМЕТРИЯ СДЕЛКИ**" not in text:
-        geometry = ["", *_geometry_block(snapshot)]
+        geometry = [*_geometry_block(snapshot), ""]
         lines[insert_at:insert_at] = geometry
         insert_at += len(geometry)
     block = _dynamic_block(manager)
@@ -333,18 +340,12 @@ def request_verdict(snapshot: dict) -> dict:
     result = dict(result)
     has_ensemble = bool(
         (snapshot.get("policy_manager") or {}).get("derived_scenario_ensemble"))
-    required = ("**ГЕОМЕТРИЯ СДЕЛКИ**", "**TAKE vs STOP/BE")
-    ensemble_required = (
+    required = (
         "**ГЛАВНАЯ ПРИЧИНА**", "**ЧТО УЛУЧШИЛОСЬ**",
         "**ЧТО УХУДШИЛОСЬ**", "**ЧТО ИГНОРИРУЕМ**",
     )
-    missing_contract = not all(header in result["verdict"] for header in required)
-    missing_ensemble = (
-        has_ensemble
-        and not all(header in result["verdict"] for header in ensemble_required)
-    )
-    if (result.get("model") == "deterministic-policy-fallback"
-            or missing_contract or missing_ensemble):
+    if (result.get("model") == "deterministic-policy-fallback" or (
+            has_ensemble and not all(header in result["verdict"] for header in required))):
         result["verdict"] = render_policy_report(snapshot)
         result["model"] = "deterministic-policy-fallback"
     return result

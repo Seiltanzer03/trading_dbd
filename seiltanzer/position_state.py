@@ -183,7 +183,8 @@ class PositionLedger:
             "trade_id": int(trade["id"]), "entry": float(trade["entry"]),
             "stop": float(trade["stop"]), "take": float(trade["take"]),
             "remaining": float(state["remaining_position_fraction"]),
-            "state_version": int(state["state_version"])}
+            "active_stop_type": state["active_stop_type"],
+            "active_stop_price": float(state["active_stop_price"])}
         return hashlib.sha256(_json(payload).encode()).hexdigest()[:24]
 
     def preview_decision(self, snapshot: dict, trade: dict) -> dict:
