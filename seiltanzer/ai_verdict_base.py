@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .ai_policy import analyze_policies, metric_coverage
+from .source_asof import rows_as_of
 from .strategy_playbooks import PLAYBOOKS as SETUP_PLAYBOOKS
 
 
@@ -107,8 +108,10 @@ def _previous_full_snapshot(engine, trade_id: int) -> dict | None:
         return None
 
 
-def _forecast_history(engine, trade_id: int) -> dict:
+def _forecast_history(engine, trade_id: int, as_of_ts: float | None = None) -> dict:
     rows = engine.journal.option_forecast_history(trade_id, limit=180)
+    if as_of_ts is not None:
+        rows = rows_as_of(rows, as_of_ts)
     if not rows:
         return {"samples": 0, "available": False}
     first, latest = rows[0], rows[-1]
@@ -218,9 +221,10 @@ def _observation(tick: dict, policy: dict, trade: dict) -> dict:
 
 def build_snapshot(engine) -> dict:
     tick = engine.tick_payload()
+    captured_ts = time.time()
     trade = tick.get("trade")
     if not trade:
-        return {"captured_ts": tick.get("ts"), "trade_id": None,
+        return {"captured_ts": captured_ts, "trade_id": None,
                 "message": "нет активной сделки"}
     trade_id = int(trade["id"])
     ridge = engine.ridge_payload()
@@ -230,7 +234,10 @@ def build_snapshot(engine) -> dict:
     policy = analyze_policies(engine, tick, ridge, trade,
                               previous_policy_inputs=previous_inputs,
                               previous_evidence=previous_evidence)
-    history = _forecast_history(engine, trade_id)
+    # Finalize T after every deterministic calculation/write used by the review.
+    # All admitted market observations must be at or before this boundary.
+    captured_ts = time.time()
+    history = _forecast_history(engine, trade_id, captured_ts)
     policy["metric_coverage"] = metric_coverage(policy.get("evidence") or {}, history)
     previous_reviews = engine.journal.recent_ai_contexts(trade_id, limit=3)
     cancellation = policy.get("cancellation_boundary") or {}
@@ -238,7 +245,7 @@ def build_snapshot(engine) -> dict:
     if switch:
         switch["price"] = _rnd(_price_from_r(trade, _num(switch.get("r"))), 4)
     return {
-        "captured_ts": tick.get("ts"), "trade_id": trade_id,
+        "captured_ts": captured_ts, "trade_id": trade_id,
         "strategy": _strategy(engine, trade),
         "time_context": _time_context(tick, trade, previous_reviews),
         "observation": _observation(tick, policy, trade),
@@ -435,9 +442,14 @@ def request_verdict(snapshot: dict) -> dict:
                          "HTTP-Referer": "https://seiltanzer-terminal.local",
                          "X-Title": "Seiltanzer Terminal"})
             resp.raise_for_status()
-            result = resp.json()
+            try:
+                result = resp.json()
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("provider_bad_response: malformed JSON") from exc
     except httpx.HTTPStatusError as exc:
-        raise RuntimeError(f"OpenRouter HTTP {exc.response.status_code}: {exc.response.text[:500]}") from exc
+        # Status is sufficient for normalization. Provider response bodies may
+        # echo request metadata and must not enter user-facing/logged errors.
+        raise RuntimeError(f"OpenRouter HTTP {exc.response.status_code}") from exc
     except httpx.HTTPError as exc:
         raise RuntimeError(f"OpenRouter connection failed: {type(exc).__name__}") from exc
     content = result.get("choices", [{}])[0].get("message", {}).get("content")

@@ -11,13 +11,22 @@ import base64
 import secrets
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import INSTRUMENTS, SETUPS, Settings, settings_from_env
+from .decision_research import canonical_snapshot
 from .engine import Engine
-from .ai_verdict import build_snapshot, request_verdict
+from .ai_verdict import build_snapshot, render_policy_report, request_verdict
+from .ai_api import (
+    deterministic_result,
+    error_body as ai_error_body,
+    log_event as log_ai_event,
+    provider_error as normalize_provider_error,
+    request_id as new_ai_request_id,
+    success_body as ai_success_body,
+)
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 
@@ -439,24 +448,114 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/ai/verdict")
     async def api_ai_verdict():
         nonlocal ai_last_call
+        req_id = new_ai_request_id()
+        started = time.monotonic()
         if ai_lock.locked():
-            raise HTTPException(429, "ИИ уже анализирует предыдущий снимок")
+            return JSONResponse(
+                status_code=429,
+                content=ai_error_body(
+                    "ai_request_in_progress", "ИИ уже анализирует предыдущий снимок",
+                    req_id, retriable=True),
+            )
         if time.monotonic() - ai_last_call < 15:
-            raise HTTPException(429, "Повторный анализ доступен через 15 секунд")
+            return JSONResponse(
+                status_code=429,
+                content=ai_error_body(
+                    "ai_rate_limited", "Повторный анализ доступен через 15 секунд",
+                    req_id, retriable=True),
+            )
         async with ai_lock:
-            snapshot = build_snapshot(engine)
+            try:
+                snapshot = build_snapshot(engine)
+            except Exception as exc:
+                log_ai_event(req_id=req_id, stage="snapshot_error", started=started, exc=exc)
+                return JSONResponse(
+                    status_code=500,
+                    content=ai_error_body(
+                        "snapshot_error", "Не удалось зафиксировать снимок сделки",
+                        req_id, retriable=False),
+                )
             if snapshot.get("trade_id") is None:
-                raise HTTPException(400, "Нет активной сделки для ИИ-разбора")
+                return JSONResponse(
+                    status_code=400,
+                    content=ai_error_body(
+                        "no_active_trade", "Нет активной сделки для ИИ-разбора",
+                        req_id, retriable=False),
+                )
             ai_last_call = time.monotonic()
+            trade_id = int(snapshot["trade_id"])
+            try:
+                review_id = canonical_snapshot(snapshot)["review_id"]
+            except Exception as exc:
+                log_ai_event(
+                    req_id=req_id, trade_id=trade_id, stage="snapshot_error",
+                    started=started, exc=exc)
+                return JSONResponse(
+                    status_code=500,
+                    content=ai_error_body(
+                        "snapshot_error", "Снимок сделки не прошёл проверку целостности",
+                        req_id, retriable=False),
+                )
+            degraded = False
+            provider_failure = None
             try:
                 result = await asyncio.to_thread(request_verdict, snapshot)
-                engine.journal.record_ai_verdict(
-                    int(snapshot["trade_id"]), snapshot,
-                    result["verdict"], result.get("model"))
-                result["context_reviews"] = len(snapshot.get("previous_reviews") or [])
-                return result
+                if not isinstance(result, dict) or not isinstance(result.get("verdict"), str):
+                    raise RuntimeError("provider_invalid_payload")
             except RuntimeError as exc:
-                raise HTTPException(502, str(exc)) from exc
+                provider_failure = normalize_provider_error(exc)
+                if "invalid_payload" in str(exc).lower():
+                    provider_failure = {"code": "provider_invalid_payload", "retriable": True}
+                result = deterministic_result(snapshot, render_policy_report)
+                degraded = True
+                log_ai_event(
+                    req_id=req_id, trade_id=trade_id, stage="provider_fallback",
+                    review_id=review_id,
+                    started=started, provider="openrouter", mode="deterministic_fallback",
+                    exc=exc,
+                )
+            except Exception as exc:
+                # ValueError/TypeError and other unexpected application failures
+                # must remain visible as programming errors, not provider outages.
+                log_ai_event(
+                    req_id=req_id, trade_id=trade_id, stage="internal_error",
+                    review_id=review_id,
+                    started=started, provider="openrouter", exc=exc,
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content=ai_error_body(
+                        "ai_internal_error", "Не удалось сформировать ИИ-разбор",
+                        req_id, retriable=False),
+                )
+            try:
+                engine.journal.record_ai_verdict(
+                    trade_id, snapshot,
+                    result["verdict"], result.get("model"))
+            except Exception as exc:
+                log_ai_event(
+                    req_id=req_id, trade_id=trade_id, stage="journal_error",
+                    review_id=review_id,
+                    started=started, mode=("deterministic_fallback" if degraded else "llm"),
+                    exc=exc,
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content=ai_error_body(
+                        "journal_error", "Разбор рассчитан, но не удалось сохранить снимок",
+                        req_id, retriable=False),
+                )
+            body = ai_success_body(
+                result, req_id, degraded=degraded,
+                provider_failure=provider_failure,
+            )
+            body["context_reviews"] = len(snapshot.get("previous_reviews") or [])
+            log_ai_event(
+                req_id=req_id, trade_id=trade_id, stage="complete", started=started,
+                review_id=review_id,
+                provider="openrouter", mode=body["mode"],
+            )
+            return JSONResponse(content=body)
 
     # -------------------------------------------------------------------- ws
 

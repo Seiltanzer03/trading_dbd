@@ -37,6 +37,14 @@ def build_snapshot(engine) -> dict:
     """
     snapshot = _BASE_BUILD_SNAPSHOT(engine)
     manager = snapshot.get("policy_manager") or {}
+    # ``next_attempt_ts`` is scheduler output in the future, not information
+    # observed from the market at capture time.  Persisting it in the immutable
+    # research snapshot both adds no explanatory value and correctly trips the
+    # no-lookahead validator.  Keep the trigger/reason, but exclude the planned
+    # wall-clock execution time from the decision feature set.
+    triggers = manager.get("recalculation_triggers") or {}
+    chain_refresh = triggers.get("chain_refresh") or {}
+    chain_refresh.pop("next_attempt_ts", None)
     ensemble = manager.get("derived_scenario_ensemble") or {}
     if ensemble:
         compact = deepcopy(ensemble)
@@ -173,6 +181,22 @@ def _dynamic_block(manager: dict) -> list[str]:
         f"ranking agreement {float(mc.get('ranking_agreement') or 0) * 100:.0f}%; "
         + ("decision_uncertain." if mc.get("decision_uncertain") else "numerically stable on tested seeds.")
     ) if mc else "MC robustness: unavailable."
+    clock = manager.get("first_touch_clock") or {}
+    if clock.get("available") and clock.get("median_status") == "identified":
+        clock_line = (
+            "First resolution: P50 "
+            f"{float(clock.get('median_resolution_minutes') or 0.0):.0f} min; "
+            f"{float(clock.get('resolved_probability_horizon') or 0.0) * 100:.1f}% "
+            "resolve within model horizon (TAKE vs STOP/BE)."
+        )
+    elif clock.get("available"):
+        clock_line = (
+            "First resolution: P50 beyond model horizon; "
+            f"{float(clock.get('resolved_probability_horizon') or 0.0) * 100:.1f}% "
+            "resolve within H."
+        )
+    else:
+        clock_line = "First resolution: insufficient authoritative execution-MC data."
     calibration = manager.get("calibration_contract") or {}
     cal_authority = calibration.get("authority") or {}
     calibration_line = (
@@ -240,7 +264,7 @@ def _dynamic_block(manager: dict) -> list[str]:
         "На текущей 0.05 sensitivity grid отдельный driver не переключает shadow candidate."]
 
     return [
-        policy_line, mc_line, calibration_line,
+        policy_line, mc_line, clock_line, calibration_line,
         f"Shadow metrics: Expected {_r(candidate_row.get('expected_net_r'))}; "
         f"CVaR10 {_r(candidate_row.get('cvar10_net_r'))}; "
         f"worst stress {_r(candidate_row.get('worst_stress_r'))}.", "",

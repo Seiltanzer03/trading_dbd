@@ -8,6 +8,7 @@ from seiltanzer.ai_verdict import (
 )
 from seiltanzer.config import Settings
 from seiltanzer.engine import Engine
+from seiltanzer.decision_research import canonical_snapshot
 
 
 def _minimal_policy_snapshot():
@@ -91,6 +92,9 @@ def test_snapshot_contains_quant_policy_and_all_recent_metric_families(tmp_path)
         assert coverage["all_groups_have_explicit_role"] is True
         assert snapshot["metric_history"]["samples"] >= 1
         assert len(json.dumps(snapshot, ensure_ascii=False)) < 60000
+        chain_trigger = (manager.get("recalculation_triggers") or {}).get("chain_refresh") or {}
+        assert "next_attempt_ts" not in chain_trigger
+        assert canonical_snapshot(snapshot)["trade_id"] == trade["id"]
     finally:
         engine.close()
 

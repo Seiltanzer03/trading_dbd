@@ -15,6 +15,7 @@ import { initIVSurface } from './iv_surface.js';
 import { initCorrelation, updateCorrelation } from './correlation.js';
 import { initRegimePhase, updateLiveRegimePhase } from './regime_phase.js';
 import { initWavelet } from './wavelet.js';
+import { fetchStructured } from './safe_fetch.js';
 
 initTooltips();
 
@@ -1053,13 +1054,17 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
   $('#ai-close').addEventListener('click', closeModal);
   const out = $('#ai-verdict-text');
   try {
-    const resp = await fetch('/api/ai/verdict', { method: 'POST' });
-    const body = await resp.json();
-    if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
-    out.textContent = body.verdict;
+    const body = await fetchStructured('/api/ai/verdict', { method: 'POST' });
+    const warning = body.degraded
+      ? 'LLM НЕДОСТУПЕН · ПОКАЗАН DETERMINISTIC РАЗБОР\nID: '
+        + body.request_id + '\n\n'
+      : '';
+    out.textContent = warning + body.verdict;
     await refreshAiHistory();
   } catch (err) {
-    out.textContent = 'ИИ-РАЗБОР НЕДОСТУПЕН: ' + err.message;
+    const status = err.status ? ` · HTTP ${err.status}` : '';
+    const req = err.requestId ? `\nID: ${err.requestId}` : '';
+    out.textContent = `ИИ-РАЗБОР НЕДОСТУПЕН${status}: ${err.message}${req}`;
   }
 });
 
