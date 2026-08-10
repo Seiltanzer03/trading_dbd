@@ -12,6 +12,7 @@ from typing import Any
 from . import ai_policy_v14 as _impl
 from .derived_scenario_ensemble import (
     calibrated_switch_thresholds,
+    execution_cost_sensitivity,
     evaluate_derived_scenarios,
 )
 
@@ -175,7 +176,8 @@ def _compact_option_state(state: dict) -> dict:
     }
 
 
-def _record_shadow(engine, tick: dict, result: dict, ensemble: dict) -> dict:
+def _record_shadow(engine, tick: dict, result: dict, ensemble: dict,
+                   cost_sensitivity: dict | None = None) -> dict:
     journal = getattr(engine, "journal", None)
     report = journal.policy_shadow_report() if journal and hasattr(
         journal, "policy_shadow_report") else {"promotion_allowed": False}
@@ -191,6 +193,25 @@ def _record_shadow(engine, tick: dict, result: dict, ensemble: dict) -> dict:
     candidate_cost = _number((base_policies.get(candidate) or {}).get("execution_cost_r")) or 0.0
     quality = _number((((tick.get("option_derivative_state") or {}).get(
         "source_quality") or {}).get("weight")))
+    derivative_state = tick.get("option_derivative_state") or {}
+    scenario_weights = {
+        row.get("name"): row.get("weight")
+        for row in ensemble.get("scenarios") or [] if row.get("name")
+    }
+    material_scenarios = [
+        {
+            "name": row.get("name"), "weight": row.get("weight"),
+            "driver_confidence": row.get("driver_confidence"),
+            "source_quality": row.get("source_quality"),
+        }
+        for row in ensemble.get("scenarios") or []
+        if row.get("material") and row.get("name") != "BASE"
+    ]
+    selected_derivatives = {
+        name: value for name, value in (
+            derivative_state.get("named_derivatives") or {}).items()
+        if value is not None
+    }
     journal.record_policy_shadow(
         int(trade["id"]), old_policy=old, candidate_policy=candidate,
         reason=(
@@ -205,6 +226,15 @@ def _record_shadow(engine, tick: dict, result: dict, ensemble: dict) -> dict:
             - (_number(old_row.get("cvar10_net_r")) or 0.0)),
         execution_cost_delta_r=candidate_cost - old_cost,
         source_quality=quality,
+        option_state_confidence=_number(
+            derivative_state.get("option_state_confidence")),
+        scenario_weights=scenario_weights,
+        material_scenarios=material_scenarios,
+        derivative_state=selected_derivatives,
+        execution_cost_sensitivity=cost_sensitivity or {},
+        instrument=str(trade.get("instrument") or "") or None,
+        market_regime=str(((tick.get("regime") or {}).get("phase")
+                           or (tick.get("regime") or {}).get("regime") or "")) or None,
     )
     return journal.policy_shadow_report()
 
@@ -237,6 +267,8 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
 
     candidate = ensemble["candidate_policy"]
     thresholds = calibrated_switch_thresholds(ensemble, POLICY_FRACTIONS)
+    cost_sensitivity = execution_cost_sensitivity(
+        ensemble, POLICY_FRACTIONS, costs)
     # Per-scenario policy matrices are an internal calibration workspace.  The
     # aggregate policy table plus winner/weight/floor attribution is sufficient
     # for the persisted snapshot and avoids duplicating 35 metric rows.
@@ -245,7 +277,8 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
     attribution = state_change_attribution(
         tick.get("option_derivative_state") or {}, previous_evidence,
         old_policy, candidate)
-    validation = _record_shadow(engine, tick, result, ensemble)
+    validation = _record_shadow(
+        engine, tick, result, ensemble, cost_sensitivity)
     ensemble["validation_gate"] = validation
     ensemble["promotion_allowed"] = bool(validation.get("promotion_allowed", False))
 
@@ -254,6 +287,7 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
     result["derived_scenario_ensemble"] = ensemble
     result["state_change_attribution"] = attribution
     result["derivative_switch_thresholds"] = thresholds
+    result["execution_cost_sensitivity"] = cost_sensitivity
     result["shadow_policy_contract"] = {
         "old_policy": old_policy,
         "new_candidate_policy": candidate,

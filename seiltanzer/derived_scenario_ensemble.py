@@ -541,3 +541,61 @@ def scenario_weight_sensitivity_thresholds(
 def calibrated_switch_thresholds(ensemble: dict, policy_fractions: dict) -> list[dict]:
     """Deprecated compatibility alias; results explicitly state OOS=false."""
     return scenario_weight_sensitivity_thresholds(ensemble, policy_fractions)
+
+
+def execution_cost_sensitivity(
+        ensemble: dict, policy_fractions: dict, cost_model: dict | None) -> dict:
+    """Conservative turnover-burden proxy around the visible cost assumption.
+
+    The simulator already charges one eventual close cost to every policy.  This
+    check therefore does not re-charge full PnL.  It asks whether the incremental
+    action difference between production and shadow remains supported after a
+    transparent extra-turnover burden.  It is robustness context, not causal PnL.
+    """
+    cost_model = cost_model or {}
+    baseline = _number(cost_model.get("immediate_full_close_r"))
+    if baseline is None:
+        baseline = 0.01
+    levels = [0.005, 0.01, 0.015, 0.02] if cost_model.get("assumed", True) else sorted({
+        max(0.0, baseline * factor) for factor in (0.5, 1.0, 1.5, 2.0)})
+    old = str(ensemble.get("old_policy") or "HOLD")
+    candidate = str(ensemble.get("candidate_policy") or old)
+    rows = ensemble.get("policies") or {}
+    old_row, candidate_row = rows.get(old) or {}, rows.get(candidate) or {}
+    expected_delta = (_number(candidate_row.get("expected_net_r")) or 0.0) - (
+        _number(old_row.get("expected_net_r")) or 0.0)
+    cvar_delta = (_number(candidate_row.get("cvar10_net_r")) or 0.0) - (
+        _number(old_row.get("cvar10_net_r")) or 0.0)
+    turnover_delta = abs(float(policy_fractions.get(candidate, 0.0))
+                         - float(policy_fractions.get(old, 0.0)))
+    grid = []
+    loses_support = False
+    for cost in levels:
+        burden = turnover_delta * cost
+        adjusted_expected = expected_delta - burden
+        adjusted_cvar = cvar_delta - burden
+        supported = (candidate == old) or adjusted_expected > 0.0 or adjusted_cvar > 0.0
+        loses_support = loses_support or not supported
+        grid.append({
+            "full_close_cost_r": round(cost, 6),
+            "incremental_turnover_burden_r": round(burden, 6),
+            "expected_delta_after_burden_r": round(adjusted_expected, 6),
+            "cvar_delta_after_burden_r": round(adjusted_cvar, 6),
+            "candidate_has_expected_or_tail_support": supported,
+        })
+    return {
+        "type": "execution_cost_turnover_burden_sensitivity",
+        "authority": "robustness_context",
+        "independent_vote": False,
+        "assumed_cost": bool(cost_model.get("assumed", True)),
+        "baseline_full_close_cost_r": round(baseline, 6),
+        "old_policy": old, "candidate_policy": candidate,
+        "incremental_close_fraction": round(turnover_delta, 4),
+        "grid": grid,
+        "edge_robust_to_execution_cost": not loses_support,
+        "warning": "EDGE NOT ROBUST TO EXECUTION COST" if loses_support else None,
+        "method": (
+            "current ensemble deltas minus explicit incremental turnover burden; "
+            "scenario paths not re-simulated"),
+        "causal_pnl": False,
+    }

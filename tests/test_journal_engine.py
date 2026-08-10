@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from seiltanzer.config import INSTRUMENTS, Settings
@@ -144,8 +146,28 @@ class TestJournal:
             trade["id"], old_policy="HOLD", candidate_policy="CLOSE_25",
             reason="test divergence", review_r=0.2, expected_delta_r=0.05,
             cvar_delta_r=0.18, execution_cost_delta_r=0.01,
-            source_quality=0.8, min_interval_sec=0,
+            source_quality=0.8, option_state_confidence=0.62,
+            scenario_weights={"BASE": 0.7, "GAMMA_STRESS": 0.3},
+            material_scenarios=[{"name": "GAMMA_STRESS", "weight": 0.3}],
+            derivative_state={"dBarrierEV_dt": {"slope": -0.02}},
+            execution_cost_sensitivity={
+                "edge_robust_to_execution_cost": False,
+                "warning": "EDGE NOT ROBUST TO EXECUTION COST",
+            },
+            instrument="NAS100", market_regime="VOL_EXPANSION",
+            min_interval_sec=0,
         )
+        raw = journal._conn.execute(
+            "SELECT * FROM policy_shadow_reviews WHERE trade_id=?", (trade["id"],)
+        ).fetchone()
+        assert raw["final_result_r"] is None and raw["resolved_at"] is None
+        assert raw["source_quality"] == pytest.approx(0.8)
+        assert raw["option_state_confidence"] == pytest.approx(0.62)
+        assert json.loads(raw["scenario_weights_json"])["GAMMA_STRESS"] == 0.3
+        assert json.loads(raw["material_scenarios_json"])[0]["name"] == "GAMMA_STRESS"
+        assert json.loads(raw["derivative_state_json"])["dBarrierEV_dt"]["slope"] == -0.02
+        assert raw["instrument"] == "NAS100"
+        assert raw["market_regime"] == "VOL_EXPANSION"
         pending = journal.policy_shadow_report()
         assert pending["observations"] == 1
         assert pending["resolved_observations"] == 0
@@ -160,7 +182,32 @@ class TestJournal:
         assert report["tail_loss_improvement_r"] == pytest.approx(0.18)
         assert report["false_early_exit_proxy"] == 1.0
         assert report["turnover_increase"] == pytest.approx(0.25)
+        assert report["execution_cost_fragility_rate"] == 1.0
+        assert report["candidate_stability_proxy"] == 1.0
+        assert report["resolution_counts"] == {"stop": 0, "take": 0, "other": 1}
+        assert report["time_to_resolution_minutes_avg"] is not None
+        resolved = journal._conn.execute(
+            "SELECT * FROM policy_shadow_reviews WHERE trade_id=?", (trade["id"],)
+        ).fetchone()
+        assert resolved["resolution_kind"] == "other"
         assert report["promotion_allowed"] is False
+
+    def test_policy_shadow_take_resolution_uses_observed_mfe(self, journal):
+        trade = journal.open_trade(3, "NAS100", "long", 100, 99, 102.5)
+        journal.record_policy_shadow(
+            trade["id"], old_policy="HOLD", candidate_policy="HOLD",
+            reason="agreement", review_r=0.1, expected_delta_r=0.0,
+            cvar_delta_r=0.0, execution_cost_delta_r=0.0,
+            source_quality=0.7, min_interval_sec=0,
+        )
+        journal.update_max_r(trade["id"], 2.5)
+        journal.close_trade(trade["id"], 1.2)
+        row = journal._conn.execute(
+            "SELECT * FROM policy_shadow_reviews WHERE trade_id=?", (trade["id"],)
+        ).fetchone()
+        assert row["resolution_kind"] == "take"
+        assert row["max_favorable_excursion_r"] == pytest.approx(2.5)
+        assert row["max_adverse_excursion_r"] is None
 
     def test_note_edit_keeps_forecast_when_levels_are_unchanged(self, journal):
         t = journal.open_trade(3, "NAS100", "long", 100, 99, 102.5)

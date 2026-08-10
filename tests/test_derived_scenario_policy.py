@@ -11,6 +11,7 @@ from seiltanzer.derived_scenario_ensemble import (
     _choose_candidate,
     _scenario_inputs,
     evaluate_derived_scenarios,
+    execution_cost_sensitivity,
     scenario_weight_sensitivity_thresholds,
     scenario_materiality,
 )
@@ -242,3 +243,43 @@ def test_switch_threshold_output_is_sensitivity_not_statistical_calibration():
         assert row["llm_generated"] is False
         assert "scenario paths not re-simulated" in row["assumptions"]
         assert "raw_metric_equivalent" in row
+
+
+def test_execution_cost_sensitivity_is_explicit_robustness_context():
+    ensemble = {
+        "old_policy": "HOLD", "candidate_policy": "CLOSE_50",
+        "policies": {
+            "HOLD": {"expected_net_r": 0.10, "cvar10_net_r": -0.30},
+            "CLOSE_50": {"expected_net_r": 0.106, "cvar10_net_r": -0.294},
+        },
+    }
+    result = execution_cost_sensitivity(
+        ensemble, POLICY_FRACTIONS,
+        {"assumed": True, "immediate_full_close_r": 0.01},
+    )
+    assert result["authority"] == "robustness_context"
+    assert result["independent_vote"] is False
+    assert result["causal_pnl"] is False
+    assert [row["full_close_cost_r"] for row in result["grid"]] == [
+        0.005, 0.01, 0.015, 0.02]
+    assert result["grid"][0]["incremental_turnover_burden_r"] == 0.0025
+    assert result["edge_robust_to_execution_cost"] is False
+    assert result["warning"] == "EDGE NOT ROBUST TO EXECUTION COST"
+
+
+def test_execution_cost_sensitivity_retains_robust_candidate_edge():
+    ensemble = {
+        "old_policy": "HOLD", "candidate_policy": "CLOSE_25",
+        "policies": {
+            "HOLD": {"expected_net_r": 0.0, "cvar10_net_r": -0.5},
+            "CLOSE_25": {"expected_net_r": 0.08, "cvar10_net_r": -0.35},
+        },
+    }
+    result = execution_cost_sensitivity(
+        ensemble, POLICY_FRACTIONS,
+        {"assumed": False, "immediate_full_close_r": 0.02},
+    )
+    assert result["edge_robust_to_execution_cost"] is True
+    assert result["warning"] is None
+    assert [row["full_close_cost_r"] for row in result["grid"]] == [
+        0.01, 0.02, 0.03, 0.04]

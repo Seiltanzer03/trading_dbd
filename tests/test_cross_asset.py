@@ -1,4 +1,4 @@
-from seiltanzer.core.cross_asset import compute_correlation_graph
+from seiltanzer.core.cross_asset import compute_correlation_graph, relationship_state
 
 
 def test_cross_asset_empty_is_honest_no_data():
@@ -58,7 +58,16 @@ def test_cross_asset_velocity_requires_real_previous_sample():
     assert res["links"][0]["delta_5m"] == -0.18
     assert res["links"][0]["velocity_magnitude"] == 0.18
     assert res["summary"]["velocity_ready"] is True
+    assert res["summary"]["history_span_minutes"] == 5.0
     assert {n["id"] for n in res["nodes"]} == {"NAS", "SP500"}
+
+
+def test_cross_asset_separates_relationship_level_from_measured_change():
+    assert relationship_state(0.72, 0.70, 0.01, False) == "STABLE_HIGH_COUPLING"
+    assert relationship_state(0.08, 0.10, 0.01, False) == "STABLE_DECOUPLED"
+    assert relationship_state(-0.35, 0.40, 0.20, True) == "CORRELATION_REVERSAL"
+    assert relationship_state(0.70, 0.40, 0.05, False) == "SYSTEMIC_RECOUPLING"
+    assert relationship_state(0.45, 0.70, 0.05, True) == "CORRELATION_BREAK"
 
 
 def test_cross_asset_full_finite_matrix_exposes_every_observed_pair():

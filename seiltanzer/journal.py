@@ -125,13 +125,42 @@ class Journal:
                     cvar_delta_r REAL,
                     execution_cost_delta_r REAL,
                     source_quality REAL,
+                    option_state_confidence REAL,
+                    scenario_weights_json TEXT,
+                    material_scenarios_json TEXT,
+                    derivative_state_json TEXT,
+                    execution_cost_sensitivity_json TEXT,
+                    instrument TEXT,
+                    market_regime TEXT,
                     final_result_r REAL,
                     resolved_at REAL,
+                    resolution_kind TEXT,
+                    max_favorable_excursion_r REAL,
+                    max_adverse_excursion_r REAL,
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )""")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_policy_shadow_trade_ts "
                 "ON policy_shadow_reviews(trade_id, ts)")
+            shadow_cols = [
+                row[1] for row in self._conn.execute(
+                    "PRAGMA table_info(policy_shadow_reviews)")]
+            shadow_migrations = {
+                "option_state_confidence": "REAL",
+                "scenario_weights_json": "TEXT",
+                "material_scenarios_json": "TEXT",
+                "derivative_state_json": "TEXT",
+                "execution_cost_sensitivity_json": "TEXT",
+                "instrument": "TEXT",
+                "market_regime": "TEXT",
+                "resolution_kind": "TEXT",
+                "max_favorable_excursion_r": "REAL",
+                "max_adverse_excursion_r": "REAL",
+            }
+            for column, kind in shadow_migrations.items():
+                if column not in shadow_cols:
+                    self._conn.execute(
+                        f"ALTER TABLE policy_shadow_reviews ADD COLUMN {column} {kind}")
 
     # ---------------------------------------------------------------- trades
 
@@ -187,10 +216,20 @@ class Journal:
                 "UPDATE trades SET status='closed', closed_at=?, result_r=?, "
                 "notes=COALESCE(?, notes) WHERE id=?",
                 (time.time(), result_r, notes, trade_id))
+            risk = abs(float(row["entry"]) - float(row["stop"]))
+            target_r = abs(float(row["take"]) - float(row["entry"])) / max(risk, 1e-12)
+            resolution_kind = (
+                "stop" if float(result_r) <= -0.99 else
+                "take" if (
+                    (row["max_r"] is not None
+                     and float(row["max_r"]) >= target_r - 0.01)
+                    or float(result_r) >= target_r - 0.01
+                ) else "other")
             self._conn.execute(
-                "UPDATE policy_shadow_reviews SET final_result_r=?, resolved_at=? "
+                "UPDATE policy_shadow_reviews SET final_result_r=?, resolved_at=?, "
+                "resolution_kind=?, max_favorable_excursion_r=? "
                 "WHERE trade_id=? AND final_result_r IS NULL",
-                (result_r, time.time(), trade_id))
+                (result_r, time.time(), resolution_kind, row["max_r"], trade_id))
         return self.get_trade(trade_id)
 
     def add_closed(self, setup: int, direction: str, entry: float, stop: float,
@@ -343,6 +382,13 @@ class Journal:
         reason: str, review_r: float, expected_delta_r: float | None,
         cvar_delta_r: float | None, execution_cost_delta_r: float | None,
         source_quality: float | None, min_interval_sec: float = 60.0,
+        option_state_confidence: float | None = None,
+        scenario_weights: dict | None = None,
+        material_scenarios: list | None = None,
+        derivative_state: dict | None = None,
+        execution_cost_sensitivity: dict | None = None,
+        instrument: str | None = None,
+        market_regime: str | None = None,
     ) -> None:
         """Persist old/candidate decisions before their future outcome is known."""
         if not math.isfinite(float(review_r)):
@@ -359,11 +405,18 @@ class Journal:
             self._conn.execute(
                 "INSERT INTO policy_shadow_reviews("
                 "trade_id,ts,old_policy,candidate_policy,reason,review_r,"
-                "expected_delta_r,cvar_delta_r,execution_cost_delta_r,source_quality) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "expected_delta_r,cvar_delta_r,execution_cost_delta_r,source_quality,"
+                "option_state_confidence,scenario_weights_json,material_scenarios_json,"
+                "derivative_state_json,execution_cost_sensitivity_json,instrument,market_regime) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (trade_id, now, old_policy, candidate_policy, reason, review_r,
                  expected_delta_r, cvar_delta_r, execution_cost_delta_r,
-                 source_quality))
+                 source_quality, option_state_confidence,
+                 json.dumps(scenario_weights or {}, ensure_ascii=False),
+                 json.dumps(material_scenarios or [], ensure_ascii=False),
+                 json.dumps(derivative_state or {}, ensure_ascii=False),
+                 json.dumps(execution_cost_sensitivity or {}, ensure_ascii=False),
+                 instrument, market_regime))
 
     def policy_shadow_report(self) -> dict:
         """Observed agreement and conservative outcome proxies; never auto-promotes."""
@@ -378,6 +431,14 @@ class Journal:
                 "tail_loss_improvement_r": None, "false_early_exit_proxy": None,
                 "false_hold_proxy": None, "turnover_increase": None,
                 "execution_cost_increase_r": None,
+                "candidate_stability_proxy": None,
+                "execution_cost_fragility_rate": None,
+                "time_to_resolution_minutes_avg": None,
+                "resolution_counts": {"stop": 0, "take": 0, "other": 0},
+                "proxy_diagnostics": True,
+                "outcome_proxy_warning": (
+                    "final trade R is not a causal counterfactual for an "
+                    "unexecuted policy; false-exit/hold fields are diagnostics only"),
                 "promotion_allowed": False,
                 "promotion_reason": "no resolved out-of-sample shadow observations",
             }
@@ -411,6 +472,21 @@ class Journal:
                 - fractions.get(row["old_policy"], 0.0))
             for row in rows
         ]
+        candidate_transitions = sum(
+            rows[index]["candidate_policy"] != rows[index - 1]["candidate_policy"]
+            for index in range(1, len(rows)))
+        cost_fragile = []
+        for row in rows:
+            try:
+                sensitivity = json.loads(row["execution_cost_sensitivity_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                sensitivity = {}
+            if sensitivity.get("edge_robust_to_execution_cost") is False:
+                cost_fragile.append(row)
+        resolution_minutes = [
+            (float(row["resolved_at"]) - float(row["ts"])) / 60.0
+            for row in resolved if row["resolved_at"] is not None
+        ]
         return {
             "observations": len(rows),
             "resolved_observations": len(resolved),
@@ -425,6 +501,17 @@ class Journal:
                 len(false_hold) / len(resolved_changed) if resolved_changed else None),
             "turnover_increase": sum(turnover) / len(turnover),
             "execution_cost_increase_r": average("execution_cost_delta_r", rows),
+            "candidate_stability_proxy": (
+                1.0 - candidate_transitions / max(1, len(rows) - 1)),
+            "execution_cost_fragility_rate": len(cost_fragile) / len(rows),
+            "time_to_resolution_minutes_avg": (
+                sum(resolution_minutes) / len(resolution_minutes)
+                if resolution_minutes else None),
+            "resolution_counts": {
+                kind: sum(row["resolution_kind"] == kind for row in resolved)
+                for kind in ("stop", "take", "other")
+            },
+            "proxy_diagnostics": True,
             "outcome_proxy_warning": (
                 "final trade R is not a causal counterfactual for an unexecuted policy; "
                 "false-exit/hold fields are diagnostics only"

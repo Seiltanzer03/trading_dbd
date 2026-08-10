@@ -77,6 +77,26 @@ def _components(nodes: list[str], links: list[dict], threshold: float = 0.45) ->
     return count
 
 
+def relationship_state(rho: float, baseline: float | None,
+                       velocity: float, break_now: bool) -> str:
+    """Separate correlation level from measured correlation change semantics."""
+    magnitude = abs(float(rho))
+    base_magnitude = abs(float(baseline)) if baseline is not None else None
+    dislocation = abs(float(rho) - float(baseline)) if baseline is not None else 0.0
+    if baseline is not None and rho * baseline < 0 and dislocation >= 0.25:
+        return "CORRELATION_REVERSAL"
+    if break_now:
+        return "CORRELATION_BREAK"
+    if (base_magnitude is not None and magnitude >= 0.60
+            and magnitude - base_magnitude >= 0.20):
+        return "SYSTEMIC_RECOUPLING"
+    if magnitude >= 0.65 and dislocation < 0.12 and velocity < 0.10:
+        return "STABLE_HIGH_COUPLING"
+    if magnitude <= 0.20 and dislocation < 0.12 and velocity < 0.10:
+        return "STABLE_DECOUPLED"
+    return "TRANSITION"
+
+
 def compute_correlation_graph(
     correlation_payload: Optional[Dict[str, Any]] = None,
     price_feeds: Optional[Dict[str, Any]] = None,
@@ -161,6 +181,8 @@ def compute_correlation_graph(
                 "velocity_magnitude": round(velocity_mag, 3),
                 "tension": round(tension, 3),
                 "status": "BREAK_ALERT" if break_now else "STABLE",
+                "relationship_state": relationship_state(
+                    rho, base, velocity_mag, break_now),
                 "strength": round(abs(rho), 3),
             }
             links.append(link)
@@ -244,6 +266,10 @@ def compute_correlation_graph(
         or float(link.get("velocity_magnitude") or 0.0) >= 0.015
         for link in links
     )
+    relationship_states: dict[str, int] = {}
+    for link in links:
+        state = str(link.get("relationship_state") or "TRANSITION")
+        relationship_states[state] = relationship_states.get(state, 0) + 1
 
     return {
         "version": "cross-asset-v4-full-stress-topology",
@@ -257,6 +283,7 @@ def compute_correlation_graph(
             "complete_topology": observed_pairs == possible_pairs,
             "material_pairs": material_pairs,
             "stress_pairs": stress_pairs,
+            "relationship_states": relationship_states,
             "history_samples": len(history),
             "history_span_minutes": round(history_span_minutes, 3),
             "velocity_ready": len(history) >= 2,

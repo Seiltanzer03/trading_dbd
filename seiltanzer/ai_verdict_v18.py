@@ -1,6 +1,7 @@
 """Verdict v18: concise deterministic trade-management report for Phase E."""
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from . import ai_verdict_v17 as _impl
@@ -15,6 +16,7 @@ globals().update({
 # report.  V18 owns the complete derivative block below.
 _BASE_RENDER = _impl._BASE_RENDER
 _BASE_REQUEST = _impl._BASE_REQUEST
+_BASE_BUILD_SNAPSHOT = _impl.build_snapshot
 SYSTEM_PROMPT = _impl.SYSTEM_PROMPT + """
 Формат Phase E обязателен: отдельно ЧТО УЛУЧШИЛОСЬ и ЧТО УХУДШИЛОСЬ,
 даже если заполнен только один раздел. Не используй заголовок ПОЧЕМУ ИЗМЕНИЛОСЬ,
@@ -23,6 +25,48 @@ material scenarios. derivative_switch_thresholds — deterministic cached-scenar
 sensitivity, не статистическая калибровка и не обещание смены action. Все остальные
 scenario weights при threshold считаются фиксированными. promotion_allowed=false.
 """
+
+
+def build_snapshot(engine) -> dict:
+    """Keep the LLM/history snapshot bounded without hiding decision semantics.
+
+    The live policy API retains the complete deterministic workspace.  The AI
+    snapshot only needs published scenario attribution, not duplicated scenario
+    input vectors, eligibility lists, or the raw driver workspace already present
+    in option_derivative_state and state_change_attribution.
+    """
+    snapshot = _BASE_BUILD_SNAPSHOT(engine)
+    manager = snapshot.get("policy_manager") or {}
+    ensemble = manager.get("derived_scenario_ensemble") or {}
+    if ensemble:
+        compact = deepcopy(ensemble)
+        compact.pop("drivers", None)
+        compact["scenarios"] = [
+            {key: row.get(key) for key in (
+                "name", "weight", "winner",
+                "material", "materiality_reason", "driver_confidence",
+                "source_quality",
+            ) if key in row}
+            for row in compact.get("scenarios") or []
+        ]
+        # The same journal report is already present in snapshot.validation.
+        compact.pop("validation_gate", None)
+        manager["derived_scenario_ensemble"] = compact
+    cost = manager.get("execution_cost_sensitivity") or {}
+    if cost:
+        manager["execution_cost_sensitivity"] = {
+            key: cost.get(key) for key in (
+                "type", "authority", "independent_vote", "assumed_cost",
+                "baseline_full_close_cost_r", "old_policy", "candidate_policy",
+                "incremental_close_fraction", "edge_robust_to_execution_cost",
+                "warning", "method", "causal_pnl",
+            ) if key in cost
+        }
+        manager["execution_cost_sensitivity"]["tested_full_close_costs_r"] = [
+            row.get("full_close_cost_r") for row in cost.get("grid") or []
+        ]
+    snapshot["policy_manager"] = manager
+    return snapshot
 
 
 def _number(value: Any) -> float | None:
@@ -100,6 +144,10 @@ def _dynamic_block(manager: dict) -> list[str]:
         f"quality {float(row.get('source_quality') or 0.0) * 100:.0f}%."
         for row in material[:4]
     ] or ["Нет derived stress, прошедшего опубликованный materiality contract."]
+    cost_sensitivity = manager.get("execution_cost_sensitivity") or {}
+    if cost_sensitivity.get("warning"):
+        pressure.insert(0, str(cost_sensitivity["warning"]) + " — candidate edge "
+                        "исчезает на опубликованной cost grid.")
 
     ignored = [
         f"{row.get('name')}: {row.get('materiality_reason')}."
