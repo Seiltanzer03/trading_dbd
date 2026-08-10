@@ -551,8 +551,68 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
 
     p_take = float(took.sum()) / n_paths
     p_stop = float(stopped.sum()) / n_paths
-    resolved = ~np.isnan(hit_time)
-    med_frac = float(np.median(hit_time[resolved])) if resolved.any() else None
+    resolved_mask = ~np.isnan(hit_time)
+    med_frac = float(np.median(hit_time[resolved_mask])) if resolved_mask.any() else None
+    take_med_frac = float(np.median(hit_time[took])) if took.any() else None
+    stop_med_frac = float(np.median(hit_time[stopped])) if stopped.any() else None
+
+    # Discrete conditional first-touch hazards.  Each interval is conditioned
+    # on neither barrier having been touched at its start, so this reacts to a
+    # price already close to the stop/take instead of diluting the risk over the
+    # full option horizon.  It is derived from the same competing-barrier paths
+    # and therefore remains in the option_distribution family.
+    hazard_intervals = []
+    prev_take = prev_stop = prev_t = 0.0
+    for t_frac, take_cdf, stop_cdf in zip(times, p_take_by_t, p_stop_by_t):
+        survival = max(0.0, 1.0 - prev_take - prev_stop)
+        take_events = max(0.0, take_cdf - prev_take)
+        stop_events = max(0.0, stop_cdf - prev_stop)
+        if survival > 1e-12:
+            h_take = min(1.0, take_events / survival)
+            h_stop = min(1.0, stop_events / survival)
+        else:
+            h_take = h_stop = 0.0
+        # Half-path continuity correction keeps the log ratio finite without
+        # pretending an unobserved event has meaningful probability mass.
+        eps_h = 0.5 / max(round(survival * n_paths), 1)
+        hazard_intervals.append({
+            "start_frac": float(prev_t),
+            "end_frac": float(t_frac),
+            "survival_start": float(survival),
+            "survivor_count": int(round(survival * n_paths)),
+            "take_event_count": int(round(take_events * n_paths)),
+            "stop_event_count": int(round(stop_events * n_paths)),
+            "h_take": float(h_take),
+            "h_stop": float(h_stop),
+            "log_hazard_ratio": float(math.log((h_take + eps_h) / (h_stop + eps_h))),
+        })
+        prev_take, prev_stop, prev_t = take_cdf, stop_cdf, t_frac
+    # A comparable local window must not inherit the adaptive visualization
+    # checkpoints (those get shorter near a barrier).  One nominal slice of the
+    # horizon is fixed across r0, while the interval curve above retains its
+    # high-resolution adaptive timing.
+    local_window_frac = 1.0 / n_slices
+    local_take_count = int(np.sum(took & (hit_time <= local_window_frac)))
+    local_stop_count = int(np.sum(stopped & (hit_time <= local_window_frac)))
+    local_h_take = local_take_count / n_paths
+    local_h_stop = local_stop_count / n_paths
+    local_eps = 0.5 / n_paths
+    local_hazard = {
+        "start_frac": 0.0,
+        "end_frac": local_window_frac,
+        "survival_start": 1.0,
+        "survivor_count": int(n_paths),
+        "take_event_count": local_take_count,
+        "stop_event_count": local_stop_count,
+        "h_take": float(local_h_take),
+        "h_stop": float(local_h_stop),
+        "mc_standard_error_take": float(math.sqrt(
+            local_h_take * (1.0 - local_h_take) / n_paths)),
+        "mc_standard_error_stop": float(math.sqrt(
+            local_h_stop * (1.0 - local_h_stop) / n_paths)),
+        "log_hazard_ratio": float(math.log(
+            (local_h_take + local_eps) / (local_h_stop + local_eps))),
+    }
     # На конечном опционном горизонте есть ТРИ исхода: take-touch, stop-touch и
     # no-touch.  Terminal BL tail-ratio нельзя использовать как first-passage:
     # P(S_T за тейком) / tail mass не говорит, какой барьер был первым, а его
@@ -640,15 +700,33 @@ def rn_cone(r0: float, sigma_R: float, T: float, drift_R: float = 0.0,
         "touch_take_horizon": p_take,
         "touch_stop_horizon": p_stop,
         "no_touch_horizon": unresolved,
+        "first_touch_hazard": {
+            "kind": "discrete_competing_risk_conditional",
+            "family": "option_distribution",
+            "independent_vote": False,
+            "intervals": hazard_intervals,
+            "next_window": local_hazard,
+        },
     }
     if horizon_years and horizon_years > 0:
         out["horizon_years"] = float(horizon_years)
         out["times_years"] = [t * horizon_years for t in times]
         out["median_years"] = med_frac * horizon_years if med_frac is not None else None
+        out["take_first_touch_median_years"] = (
+            take_med_frac * horizon_years if take_med_frac is not None else None)
+        out["stop_first_touch_median_years"] = (
+            stop_med_frac * horizon_years if stop_med_frac is not None else None)
+        for interval in hazard_intervals:
+            interval["start_years"] = interval["start_frac"] * horizon_years
+            interval["end_years"] = interval["end_frac"] * horizon_years
+        local_hazard["start_years"] = 0.0
+        local_hazard["end_years"] = local_window_frac * horizon_years
     else:
         out["horizon_years"] = None
         out["times_years"] = None
         out["median_years"] = None
+        out["take_first_touch_median_years"] = None
+        out["stop_first_touch_median_years"] = None
     return out
 
 
