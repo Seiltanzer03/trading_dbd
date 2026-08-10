@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
@@ -7,7 +8,10 @@ from seiltanzer.ai_policy_base import POLICY_FRACTIONS, PolicyInputs
 from seiltanzer.ai_verdict_v17 import _dynamic_block
 from seiltanzer.derived_scenario_ensemble import (
     SCENARIO_ORDER,
+    _choose_candidate,
+    _scenario_inputs,
     evaluate_derived_scenarios,
+    scenario_materiality,
 )
 
 
@@ -85,6 +89,9 @@ def test_scenario_ensemble_has_required_states_metrics_and_bounded_weights():
     assert ensemble["family"] == "option_distribution"
     assert ensemble["independent_vote"] is False
     assert ensemble["promotion_allowed"] is False
+    assert ensemble["materiality_contract"]["weight_min"] == 0.05
+    assert all("material" in row and "materiality_reason" in row
+               for row in ensemble["scenarios"])
     for row in ensemble["policies"].values():
         assert set(row) >= {
             "expected_net_r", "median_net_r", "cvar10_net_r", "p_loss",
@@ -93,6 +100,53 @@ def test_scenario_ensemble_has_required_states_metrics_and_bounded_weights():
         }
         assert 0 <= row["stress_survival"] <= 1
         assert 0 <= row["policy_stability"] <= 1
+
+
+def test_gamma_and_correlation_stresses_have_distinct_nondirectional_mechanics():
+    inputs = _inputs()
+    inputs = replace(inputs, drift_R=0.12)
+    scenarios = _scenario_inputs(inputs, {
+        "edge_direction": 1.0,
+        "signals": {"gamma_stress": 0.8, "correlation_stress": 0.8},
+    })
+    gamma = scenarios["GAMMA_STRESS"]
+    correlation = scenarios["CORRELATION_STRESS"]
+    assert gamma.drift_R == pytest.approx(inputs.drift_R), (
+        "magnitude-only OI×gamma must not invent adverse directional drift")
+    assert correlation.drift_R == pytest.approx(inputs.drift_R * 0.6), (
+        "correlation stress must shrink drift confidence toward zero")
+    assert gamma.sigma_R != correlation.sigma_R
+    assert (gamma.drift_R, gamma.sigma_R) != (correlation.drift_R, correlation.sigma_R)
+
+
+def test_tiny_nonmaterial_stress_cannot_hard_veto_but_material_stress_can():
+    metadata = {
+        "available": True, "driver_confidence": 0.8,
+        "source_quality": 0.8, "sample_span_minutes": 12,
+    }
+    scenarios = [
+        {
+            "name": "BASE", "cvar_floor_r": -1.0,
+            "driver_metadata": {},
+            "policies": {"HOLD": {"cvar10_r": -0.5}, "EXIT": {"cvar10_r": 0.1}},
+        },
+        {
+            "name": "GAMMA_STRESS", "cvar_floor_r": -1.0,
+            "driver_metadata": metadata,
+            "policies": {"HOLD": {"cvar10_r": -1.5}, "EXIT": {"cvar10_r": 0.1}},
+        },
+    ]
+    policies = {
+        "HOLD": {"expected_net_r": 0.4, "worst_stress_cvar_r": -1.5},
+        "EXIT": {"expected_net_r": 0.2, "worst_stress_cvar_r": 0.1},
+    }
+    fractions = {"HOLD": 0.0, "EXIT": 1.0}
+    tiny = {"BASE": 0.999, "GAMMA_STRESS": 0.001}
+    assert scenario_materiality("GAMMA_STRESS", 0.001, metadata)["material"] is False
+    assert _choose_candidate(policies, scenarios, tiny, fractions, "HOLD", 0.001) == "HOLD"
+    material = {"BASE": 0.9, "GAMMA_STRESS": 0.1}
+    assert scenario_materiality("GAMMA_STRESS", 0.1, metadata)["material"] is True
+    assert _choose_candidate(policies, scenarios, material, fractions, "HOLD", 0.1) == "EXIT"
 
 
 def test_v15_never_changes_production_recommendation_without_promotion(monkeypatch):
@@ -161,4 +215,3 @@ def test_deterministic_verdict_block_states_effect_conflicts_and_thresholds():
         assert header in text
     assert "production action is unchanged" in text
     assert "not LLM" in text
-

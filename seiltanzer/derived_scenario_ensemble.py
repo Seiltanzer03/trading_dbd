@@ -21,6 +21,17 @@ SCENARIO_ORDER = (
     "CORRELATION_STRESS",
 )
 
+# Materiality is a hard-feasibility contract, not another score.  The weight
+# floor equals the existing 0.05 deterministic sensitivity-grid resolution;
+# smaller weights cannot be distinguished by that analysis and therefore must
+# not veto a policy.  Confidence 0.30 is the existing derived-history authority
+# threshold.  Quality 0.48 is the lowest option-anchored snapshot weight in the
+# source-quality contract; scenario-only (0.25) stays diagnostic.
+MATERIAL_WEIGHT_MIN = 0.05
+MATERIAL_CONFIDENCE_MIN = 0.30
+MATERIAL_SOURCE_QUALITY_MIN = 0.48
+MATERIAL_SAMPLE_SPAN_MINUTES = 5.0
+
 
 def _number(value: Any) -> float | None:
     try:
@@ -66,12 +77,13 @@ def derivative_drivers(tick: dict) -> dict:
         continuation = abs(ev_z) * max(0.0, alignment)
         mean_reversion = abs(ev_z) * max(0.0, -alignment)
 
-    interaction_scores = {
-        row.get("name"): max(0.0, _number(row.get("score")) or 0.0)
-        * _clip(_number(row.get("source_quality")) or 0.0)
-        for row in interaction.get("items") or [] if isinstance(row, dict)
+    interaction_rows = {
+        row.get("name"): row for row in interaction.get("items") or []
+        if isinstance(row, dict)
     }
-    gamma = interaction_scores.get("gex_stiffness_x_live_price_impulse", 0.0)
+    gamma_row = interaction_rows.get("gex_stiffness_x_live_price_impulse") or {}
+    gamma_quality = _clip(_number(gamma_row.get("source_quality")) or 0.0)
+    gamma = max(0.0, _number(gamma_row.get("score")) or 0.0) * gamma_quality
 
     cross = ((tick.get("analytics") or {}).get("cross_asset") or {})
     observed = max(int(cross.get("observed_pairs") or 0), 1)
@@ -81,6 +93,50 @@ def derivative_drivers(tick: dict) -> dict:
         math.tanh(abs(_number(cross.get("max_break_velocity")) or 0.0)),
         _clip((int(cross.get("active_breaks_count") or 0)) / observed),
     )
+
+    def metric_meta(name: str) -> dict:
+        metric = (state.get("metrics") or {}).get(name) or {}
+        return {
+            "metric": name,
+            "available": bool(metric.get("available")),
+            "driver_confidence": _clip(_number(metric.get("confidence")) or 0.0),
+            "source_quality": _clip(_number(metric.get("source_quality")) or 0.0),
+            "sample_span_minutes": max(
+                0.0, _number(metric.get("time_span_minutes")) or 0.0),
+        }
+
+    vol_candidates = {
+        "width": max(0.0, width_z or 0.0),
+        "iv": max(0.0, iv_z or 0.0),
+        "rv": max(0.0, rv_z or 0.0),
+    }
+    vol_metric = max(vol_candidates, key=vol_candidates.get)
+    option_quality = _clip(_number((state.get("source_quality") or {}).get(
+        "weight")) or 0.0)
+    r_meta = metric_meta("r")
+    gex_meta = metric_meta("gex_stiffness")
+    gamma_meta = {
+        "metric": "gex_stiffness_x_live_price_impulse",
+        "available": bool(gamma_row.get("available", gamma_row))
+        and r_meta["available"] and gamma > 0.0,
+        "driver_confidence": min(
+            r_meta["driver_confidence"],
+            gex_meta["driver_confidence"] if gex_meta["available"] else r_meta["driver_confidence"],
+        ),
+        "source_quality": gamma_quality,
+        "sample_span_minutes": r_meta["sample_span_minutes"],
+    }
+    cross_source = cross.get("source") or {}
+    cross_status = str(cross_source.get("status") or "no_data")
+    cross_quality = {
+        "live": 0.85, "ok": 0.62, "delayed": 0.62,
+        "indicative": 0.62,
+    }.get(cross_status, 0.0)
+    cross_samples = int(cross.get("history_samples") or 0)
+    cross_span = max(0.0, _number(cross.get("history_span_minutes")) or 0.0)
+    cross_confidence = min(1.0, max(0.0, (cross_samples - 1) / 5.0))
+    if not cross.get("velocity_ready"):
+        cross_confidence = 0.0
 
     direction = 1.0 if (ev_z or 0.0) >= 0.0 else -1.0
     raw = {
@@ -102,10 +158,32 @@ def derivative_drivers(tick: dict) -> dict:
             "time_span_minutes": _number(metric.get("time_span_minutes")),
             "confidence": _number(metric.get("confidence")),
         }
-    vol_signals = {
-        "width": max(0.0, width_z or 0.0),
-        "iv": max(0.0, iv_z or 0.0),
-        "rv": max(0.0, rv_z or 0.0),
+    edge_meta = metric_meta("barrier_ev")
+    skew_meta = metric_meta("skew")
+    vol_meta = metric_meta(vol_metric)
+    for meta in (edge_meta, skew_meta, vol_meta):
+        # Preserve the separately auditable source value but use the canonical
+        # option-source contract when older persisted metrics lack the field.
+        if meta["source_quality"] <= 0.0:
+            meta["source_quality"] = option_quality
+    driver_metadata = {
+        "BASE": {
+            "metric": "authoritative_base", "available": True,
+            "driver_confidence": 1.0, "source_quality": 1.0,
+            "sample_span_minutes": 0.0,
+        },
+        "EDGE_CONTINUATION": dict(edge_meta),
+        "EDGE_MEAN_REVERSION": dict(edge_meta),
+        "VOL_EXPANSION": dict(vol_meta),
+        "SKEW_ADVERSE": dict(skew_meta),
+        "GAMMA_STRESS": gamma_meta,
+        "CORRELATION_STRESS": {
+            "metric": "cross_asset_regime_instability",
+            "available": bool(cross.get("available", cross)) and correlation > 0.0,
+            "driver_confidence": cross_confidence,
+            "source_quality": cross_quality,
+            "sample_span_minutes": cross_span,
+        },
     }
     return {
         "raw_weights": raw,
@@ -123,8 +201,9 @@ def derivative_drivers(tick: dict) -> dict:
             "option_state_confidence": confidence,
         },
         "derived_weight": sum(raw.values()) - raw["BASE"],
+        "driver_metadata": driver_metadata,
         "metric_scales": metric_scales,
-        "vol_driver_metric": max(vol_signals, key=vol_signals.get),
+        "vol_driver_metric": vol_metric,
         "edge_continuation_factor": (
             confidence if ev_acc_z is None else confidence * max(0.0, ev_z * ev_acc_z)
         ),
@@ -139,6 +218,10 @@ def _scenario_inputs(inputs, drivers: dict) -> dict:
     sign = float(drivers.get("edge_direction") or 1.0)
     # Scales are inherited from existing policy robustness contracts:
     # drift ±0.04R, skew ±0.05, sigma ±15%.
+    gamma_magnitude = _clip(_number((drivers.get("signals") or {}).get(
+        "gamma_stress")) or 0.0)
+    correlation_magnitude = _clip(_number((drivers.get("signals") or {}).get(
+        "correlation_stress")) or 0.0)
     return {
         "BASE": inputs,
         "EDGE_CONTINUATION": replace(inputs, drift_R=inputs.drift_R + sign * 0.04),
@@ -147,11 +230,41 @@ def _scenario_inputs(inputs, drivers: dict) -> dict:
         "SKEW_ADVERSE": replace(
             inputs, skew_R=min(max(inputs.skew_R + 0.05, -0.45), 0.45)),
         "GAMMA_STRESS": replace(
-            inputs, sigma_R=max(0.08, inputs.sigma_R * 1.15),
-            drift_R=inputs.drift_R - 0.04),
+            inputs,
+            # OI×gamma reveals concentration/curvature, not dealer direction.
+            # It may widen local variance but never invents adverse drift.
+            sigma_R=max(0.08, inputs.sigma_R * (1.0 + 0.15 * gamma_magnitude))),
         "CORRELATION_STRESS": replace(
-            inputs, sigma_R=max(0.08, inputs.sigma_R * 1.15),
-            drift_R=inputs.drift_R - 0.04),
+            inputs,
+            # Regime breakdown raises broad uncertainty and shrinks directional
+            # confidence toward zero; it does not prove adverse direction.
+            sigma_R=max(0.08, inputs.sigma_R * (1.0 + 0.20 * correlation_magnitude)),
+            drift_R=inputs.drift_R * (1.0 - 0.50 * correlation_magnitude)),
+    }
+
+
+def scenario_materiality(name: str, weight: float, metadata: dict | None) -> dict:
+    """Deterministic hard-veto eligibility with a fully published reason."""
+    metadata = metadata or {}
+    failures = []
+    if name == "BASE":
+        return {"material": True, "materiality_reason": "BASE is always required"}
+    if weight < MATERIAL_WEIGHT_MIN - 1e-12:
+        failures.append("weight below 0.05 sensitivity-grid resolution")
+    if not metadata.get("available"):
+        failures.append("driver unavailable")
+    if float(metadata.get("driver_confidence") or 0.0) < MATERIAL_CONFIDENCE_MIN:
+        failures.append("driver confidence below existing 0.30 threshold")
+    if float(metadata.get("source_quality") or 0.0) < MATERIAL_SOURCE_QUALITY_MIN:
+        failures.append("source quality below option-anchored snapshot floor 0.48")
+    if float(metadata.get("sample_span_minutes") or 0.0) < MATERIAL_SAMPLE_SPAN_MINUTES:
+        failures.append("sample span below derivative minimum 5 minutes")
+    return {
+        "material": not failures,
+        "materiality_reason": (
+            "meets published weight/confidence/quality/span contract"
+            if not failures else "; ".join(failures)
+        ),
     }
 
 
@@ -169,7 +282,8 @@ def _choose_candidate(policy_rows: dict, scenario_rows: list[dict], weights: dic
     eligible = []
     for name, metrics in policy_rows.items():
         base_cvar = float(base["policies"][name]["cvar10_r"])
-        material = [row for row in scenario_rows if weights[row["name"]] > 1e-12]
+        material = [row for row in scenario_rows if scenario_materiality(
+            row["name"], weights[row["name"]], row.get("driver_metadata"))["material"]]
         survives = all(float(row["policies"][name]["cvar10_r"]) >= float(row["cvar_floor_r"]) - 1e-12
                        for row in material)
         if base_cvar >= floor - 1e-12 and survives:
@@ -192,7 +306,8 @@ def _aggregate_policy_rows(scenario_rows: list[dict], weights: dict,
     output = {}
     for policy in policy_fractions:
         rows = [(weights[row["name"]], row["policies"][policy]) for row in scenario_rows]
-        material = [row for row in scenario_rows if weights[row["name"]] > 1e-12]
+        material = [row for row in scenario_rows if scenario_materiality(
+            row["name"], weights[row["name"]], row.get("driver_metadata"))["material"]]
         output[policy] = {
             "expected_net_r": round(sum(
                 weight * float(metric["expected_final_r"]) for weight, metric in rows), 4),
@@ -251,6 +366,8 @@ def evaluate_derived_scenarios(
             }
             for policy, row in metrics.items()
         }
+        metadata = (drivers.get("driver_metadata") or {}).get(name) or {}
+        materiality = scenario_materiality(name, weights[name], metadata)
         scenario_rows.append({
             "name": name,
             "source_family": (
@@ -258,6 +375,15 @@ def evaluate_derived_scenarios(
                 else "option_distribution"),
             "weight": round(weights[name], 7),
             "raw_weight": round(float(drivers["raw_weights"][name]), 7),
+            "material": materiality["material"],
+            "materiality_reason": materiality["materiality_reason"],
+            "driver_confidence": round(float(metadata.get("driver_confidence") or 0.0), 3),
+            "source_quality": round(float(metadata.get("source_quality") or 0.0), 3),
+            "metric_available": bool(metadata.get("available")),
+            "sample_span_minutes": (
+                None if not math.isfinite(float(metadata.get("sample_span_minutes") or 0.0))
+                else round(float(metadata.get("sample_span_minutes") or 0.0), 3)),
+            "driver_metadata": metadata,
             "winner": choice,
             "cvar_floor_r": rule.get("cvar_floor_r"),
             "eligible": list(rule.get("eligible") or []),
@@ -279,7 +405,7 @@ def evaluate_derived_scenarios(
         float(drivers["derived_weight"]),
     )
     return {
-        "version": "derived-scenario-ensemble-v1",
+        "version": "derived-scenario-ensemble-v2-material-stress",
         "family": "option_distribution",
         "independent_vote": False,
         "authority": "shadow_robustness",
@@ -291,6 +417,14 @@ def evaluate_derived_scenarios(
             "sigma_stress_fraction": 0.15,
             "source": "existing policy-v5 and authority-stability perturbation contracts",
         },
+        "materiality_contract": {
+            "weight_min": MATERIAL_WEIGHT_MIN,
+            "driver_confidence_min": MATERIAL_CONFIDENCE_MIN,
+            "source_quality_min": MATERIAL_SOURCE_QUALITY_MIN,
+            "sample_span_minutes_min": MATERIAL_SAMPLE_SPAN_MINUTES,
+            "hard_feasibility_scope": "BASE plus material stresses only",
+            "non_material_role": "weighted diagnostics and attribution; never hard veto",
+        },
         "drivers": drivers,
         "scenarios": scenario_rows,
         "policies": policy_rows,
@@ -298,7 +432,7 @@ def evaluate_derived_scenarios(
         "old_policy": old_policy,
         "candidate_differs": candidate != old_policy,
         "selection_rule": (
-            "net hard-CVaR feasible in BASE and every material weighted stress; "
+            "net hard-CVaR feasible in BASE and every published material stress; "
             "then maximum weighted Expected within the existing 0.03R indifference band"
         ),
     }

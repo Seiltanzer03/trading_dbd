@@ -110,6 +110,12 @@ def compute_correlation_graph(
     assets = [str(a) for a in assets[:n]]
     now_ts = float(p.get("asof")) if _finite(p.get("asof")) else 0.0
     history = list(history or [])
+    history_asof = sorted(
+        float(row["asof"]) for row in history if _finite(row.get("asof")))
+    history_span_minutes = (
+        (history_asof[-1] - history_asof[0]) / 60.0
+        if len(history_asof) >= 2 else 0.0
+    )
     prev5 = _nearest_history(history[:-1], now_ts, 5 * 60) if now_ts else None
     prev15 = _nearest_history(history[:-1], now_ts, 15 * 60) if now_ts else None
     prev60 = _nearest_history(history[:-1], now_ts, 60 * 60) if now_ts else None
@@ -252,6 +258,7 @@ def compute_correlation_graph(
             "material_pairs": material_pairs,
             "stress_pairs": stress_pairs,
             "history_samples": len(history),
+            "history_span_minutes": round(history_span_minutes, 3),
             "velocity_ready": len(history) >= 2,
             "max_break_velocity": round(max(velocity_values), 3) if velocity_values else None,
             "systemic_coupling": round(mean_coupling, 3),
