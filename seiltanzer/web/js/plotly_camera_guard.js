@@ -238,7 +238,8 @@ function touchDistance(touches) {
 }
 
 export function createPlotlyCameraGuard(el, initialCamera) {
-  let savedCamera = cloneValue(initialCamera) || {};
+  const homeCamera = cloneValue(initialCamera) || {};
+  let savedCamera = cloneValue(homeCamera);
   let state = 'idle';
   let internalDepth = 0;
   let destroyed = false;
@@ -343,6 +344,18 @@ export function createPlotlyCameraGuard(el, initialCamera) {
 
   function rememberExternalCamera(camera) {
     if (!camera) return;
+    savedCamera = cloneValue(camera);
+  }
+
+  function rememberGestureCamera(camera) {
+    if (!camera) return;
+    // Plotly/WebKit can publish the chart's initial camera after the user's
+    // final relayout but before the gesture settles.  Treat that exact HOME
+    // value as a stale responsive rebuild when a newer user camera is owned.
+    // An intentional toolbar HOME remains valid because it first calls
+    // rememberExternalCamera(home), making savedCamera equal to homeCamera.
+    if (isProtected() && equalValue(camera, homeCamera)
+        && !equalValue(savedCamera, homeCamera)) return;
     savedCamera = cloneValue(camera);
   }
 
@@ -538,6 +551,10 @@ export function createPlotlyCameraGuard(el, initialCamera) {
 
   function nativeBegin() { beginInteraction(); }
   function nativeEnd() { enterSettling(260); }
+  function nativeTouchEnd(event) {
+    if ((event?.touches || []).length) return;
+    enterSettling(260);
+  }
 
   function installDomListeners() {
     if (!el || typeof window === 'undefined') return;
@@ -563,8 +580,8 @@ export function createPlotlyCameraGuard(el, initialCamera) {
       addDom(window, 'pointerup', nativeEnd, true);
       addDom(window, 'pointercancel', nativeEnd, true);
       addDom(el, 'touchstart', nativeBegin, { passive: true, capture: true });
-      addDom(window, 'touchend', nativeEnd, { passive: true, capture: true });
-      addDom(window, 'touchcancel', nativeEnd, { passive: true, capture: true });
+      addDom(window, 'touchend', nativeTouchEnd, { passive: true, capture: true });
+      addDom(window, 'touchcancel', nativeTouchEnd, { passive: true, capture: true });
       addDom(el, 'wheel', nativeBegin, { passive: true, capture: true });
       addDom(el, 'wheel', () => enterSettling(300), { passive: true });
     }
@@ -590,12 +607,12 @@ export function createPlotlyCameraGuard(el, initialCamera) {
       if (internalDepth > 0 || customIOS) return;
       beginInteraction();
       const camera = cameraFromRelayout(savedCamera, update);
-      if (camera) savedCamera = camera;
+      rememberGestureCamera(camera);
     });
     el.on('plotly_relayout', (update) => {
       if (internalDepth > 0 || customIOS) return;
       const camera = cameraFromRelayout(savedCamera, update);
-      if (camera) savedCamera = camera;
+      rememberGestureCamera(camera);
       enterSettling(220);
     });
     el.on('plotly_afterplot', () => {

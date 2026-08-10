@@ -44,6 +44,10 @@ jobs:
           node tests/web/touch_clock_smoke.mjs
           node tests/web/cone_interaction_smoke.mjs
           node tests/web/gex_smoke.mjs
+          node tests/web/correlation_modes_smoke.mjs
+          node tests/web/plotly_toolbar_smoke.mjs
+          node tests/web/real_market_motion_smoke.mjs
+          node tests/web/plotly_camera_guard_mobile_smoke.mjs
           node tests/web/analytics_mobile_smoke.mjs
           node tests/web/render_budget_smoke.mjs
 

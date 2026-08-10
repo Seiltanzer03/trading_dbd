@@ -36,6 +36,9 @@ jobs:
           node tests/web/gex_svg_smoke.mjs
           node tests/web/fan_center_path_smoke.mjs
           node tests/web/correlation_modes_smoke.mjs
+          node tests/web/plotly_toolbar_smoke.mjs
+          node tests/web/real_market_motion_smoke.mjs
+          node tests/web/plotly_camera_guard_mobile_smoke.mjs
           node tests/web/iv_surface_live_smoke.mjs
           node tests/web/render_budget_smoke.mjs
       - name: Install Playwright WebKit
