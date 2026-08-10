@@ -32,3 +32,10 @@ Phase F.2 restores the deterministic management decision workflow, adds an immut
 ## Integration
 
 The final tree is validated by mandatory `pytest`, Node smoke, WebKit/iPhone and production endpoint gates on every `main` update.
+
+
+## CI remediation
+
+The final main validation freezes position decisions only after deterministic
+max-R/BE side effects, keeps isolated provider-contract tests journal-agnostic,
+and routes the STOP/TAKE cockpit through the active v18 renderer.
