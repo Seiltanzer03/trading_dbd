@@ -545,6 +545,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             decision = ((snapshot.get("policy_manager") or {})
                         .get("management_decision"))
+            # Persist the deterministic instruction before waiting on the LLM.
+            # Provider latency must not turn a valid working decision stale.
+            active_trade = engine.journal.active_trade()
+            try:
+                if (decision and active_trade
+                        and int(active_trade["id"]) == trade_id):
+                    engine.position.register_decision(
+                        snapshot, review_id, active_trade)
+            except StaleDecisionError as exc:
+                log_ai_event(
+                    req_id=req_id, trade_id=trade_id, stage="stale_decision",
+                    review_id=review_id, started=started, exc=exc)
+                return JSONResponse(
+                    status_code=409,
+                    content=ai_error_body(
+                        "stale_decision",
+                        "Состояние позиции изменилось во время расчёта; запросите новый разбор",
+                        req_id, retriable=True),
+                )
             degraded = False
             provider_failure = None
             try:
@@ -578,11 +597,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         req_id, retriable=False),
                 )
             try:
-                active_trade = engine.journal.active_trade()
-                if (decision and active_trade
-                        and int(active_trade["id"]) == trade_id):
-                    engine.position.register_decision(
-                        snapshot, review_id, active_trade)
                 if decision:
                     result["management_decision"] = decision
                 engine.journal.record_ai_verdict(
