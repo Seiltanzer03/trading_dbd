@@ -191,41 +191,28 @@ def _strategy(engine, trade: dict) -> dict:
 
 
 def _observation(tick: dict, policy: dict, trade: dict) -> dict:
-    evidence = policy.get("evidence") or {}
-    market = tick.get("market") or {}
     prob = tick.get("prob") or {}
-    cone = tick.get("cone") or {}
-    levels = tick.get("levels") or {}
     price = _num(_at(tick, "feeds", "price", "value"))
+    # The complete option/IV/levels/correlation/feed blocks already live under
+    # policy_manager.evidence.  Repeating them here added 12-14 kB to every LLM
+    # request and occasionally breached the snapshot budget without adding any
+    # information.  Keep only unique position geometry plus explicit references
+    # so model and deterministic renderers share one canonical metric copy.
     return {
         "position": {
             "price": _rnd(price), "r": _rnd(prob.get("r"), 4),
             "max_r": _rnd(_at(tick, "ladder", "max_r"), 4),
             "to_take_r": _rnd((prob.get("T") or 0) - (prob.get("r") or 0), 4),
             "to_stop_r": _rnd((prob.get("r") or 0) + 1.0, 4),
-            "price_tape": evidence.get("live_price"),
         },
         "exact_levels": {"entry": trade.get("entry"), "stop": trade.get("stop"),
                          "take": trade.get("take"), "current": price},
-        "option_probability": evidence.get("option_barrier"),
-        "probability_cone": {
-            **(evidence.get("cone_rnd") or {}),
-            "sigma_R": _rnd(cone.get("sigma_R")), "drift_R": _rnd(cone.get("drift_R")),
-            "skew_R": _rnd(cone.get("skew")), "term_slope": _rnd(cone.get("term_slope")),
-            "horizon_years": _rnd(market.get("horizon_years"), 8),
+        "canonical_metric_paths": {
+            "market_evidence": "policy_manager.evidence",
+            "option_path_inputs": "policy_manager.inputs",
+            "policy_outcomes": "policy_manager.policies",
+            "execution_and_ladder": "policy_manager.recommendation",
         },
-        "lattice": {"ev_hold": _at(tick, "mc", "ev_hold"),
-                    "ev_ladder": _at(tick, "mc", "ev_ladder"),
-                    "hist": _at(tick, "mc", "hist")},
-        "strike_landscape": evidence.get("strike_oi_gex"),
-        "iv_surface": evidence.get("iv_surface"),
-        "gamma": evidence.get("gamma_context"),
-        "levels": evidence.get("levels"),
-        "volatility": evidence.get("atr_regime"),
-        "correlation": evidence.get("correlation"),
-        "filters": evidence.get("filters"),
-        "execution": tick.get("ladder"),
-        "feed_quality": evidence.get("data_quality"),
     }
 
 
