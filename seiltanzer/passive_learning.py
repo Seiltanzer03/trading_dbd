@@ -1155,6 +1155,7 @@ class PassiveLearningEngine:
                 "status": "terminal_q_distribution_evaluator_ready"},
             "measurement_integrity": measurement_integrity,
             "g1_training_allowed": False,
+            "sample_count_auto_promotion": False,
             "evidence_status": self._evidence_status(effective, 0.0),
             "authority": "shadow", "promotion_allowed": False,
         }
