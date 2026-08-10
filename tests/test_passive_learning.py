@@ -28,7 +28,9 @@ def test_collector_runs_without_active_trade_and_demo_is_excluded(passive):
     status=passive.status()
     assert status["active_trade_required"] is False
     assert status["fixed_horizon_raw_n"] == 7
-    assert status["evidence_eligible_n"] == 8
+    # Demo observations remain visible in raw telemetry but can never count as
+    # pristine/evidence-eligible background measurements.
+    assert status["evidence_eligible_n"] == 0
 
 def test_no_lookahead_and_t0_immutability(passive):
     ts=1_700_000_000.
@@ -62,7 +64,7 @@ def test_pending_then_resolved_only_from_recorded_future(passive):
         (ids[0],)).fetchone()
     outcome=json.loads(row["outcome_json"])
     assert row["resolution_status"]=="resolved"
-    assert outcome["resolved_from"]=="recorded_real_market_path"
+    assert outcome["resolved_from"]=="recorded_market_point"
 
 def test_overlap_effective_n_is_conservative_and_report_has_baselines(passive):
     base=1_700_000_000.

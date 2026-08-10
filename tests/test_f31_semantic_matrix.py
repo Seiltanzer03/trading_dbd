@@ -555,7 +555,7 @@ def test_19_actual_producer_integration():
 
 
 def test_20_full_prospective_cycle_without_lookahead(tmp_path):
-    """Test 20: T0 capture -> immutable DB row -> future data -> resolver -> terminal outcome without lookahead."""
+    """Test 20: T0 capture -> future data -> resolver without lookahead; test-origin stays quarantined."""
     db_path = str(tmp_path / "passive.db")
     settings = Settings()
     engine = PassiveLearningEngine(db_path, settings, cache=None)
@@ -579,10 +579,11 @@ def test_20_full_prospective_cycle_without_lookahead(tmp_path):
     # 3. Resolver
     engine.resolve_due(now=ts + 1000.0)
 
-    # 4. Calibration & Health Status
+    # 4. Health status: test rows resolve, but never enter pristine training evidence.
     status = engine.status()
     assert status["current_contract_version"] == PASSIVE_SCHEMA_VERSION
-    assert status["pristine_f32_n"] > 0
+    assert status["pristine_f32_n"] == 0
+    assert status["observation_origin_counts"]["test"] >= 7
     assert status["g1_training_allowed"] is False
 
     engine.close()
