@@ -278,6 +278,8 @@ plotly_camera_guard_mobile_smoke.mjs
 ```
 
 CI additionally runs real WebKit iPhone camera and Cross-Asset control tests.
+It publishes the independent `ci/full-webkit` commit status only after that
+complete job reaches its final state.
 Production deploy remains push-to-main, runs the complete Python suite and
 frontend smoke gate first, then verifies server HEAD, service state, `/api/state`
 and all analytics endpoints before publishing `production/seiltanzer` success.
@@ -287,4 +289,3 @@ and all analytics endpoints before publishing `production/seiltanzer` success.
 Phase E improves mathematical honesty and observability, not authority. Derived
 states may explain robustness and create an OOS candidate, but cannot alter the
 live recommendation until an explicit, reviewed, separately committed promotion.
-
