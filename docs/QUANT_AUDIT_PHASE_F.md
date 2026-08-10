@@ -60,3 +60,19 @@ outcomes/test results.
 
 All new components remain measurement/shadow infrastructure. Production policy
 authority and automatic deployment mechanics are unchanged.
+
+## Environment follow-up
+
+The successful production run still prints pip warnings for invalid
+distributions named `~%iltanzer` and `~0iltanzer` under
+`/opt/seiltanzer/.venv/lib/python3.12/site-packages`. Service restart, the full
+test gate and HTTP checks all succeeded, so these are stale/corrupt package
+metadata entries rather than an active import failure. They should be inspected
+and removed during an explicit production-venv maintenance window, followed by
+`pip install -e ".[dev]"` and the full deploy gate. The deploy workflow does not
+blindly delete site-packages directories.
+
+`TRADINGVIEW_AUTH_TOKEN` remains an optional deployment secret. When absent,
+the direct TradingView fetch raises an explicit provenance error and the Yahoo
+fallback is labelled as indicative/broker fallback; it is not silently labelled
+authenticated or direct.
