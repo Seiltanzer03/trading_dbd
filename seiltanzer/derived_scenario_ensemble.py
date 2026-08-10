@@ -10,6 +10,8 @@ import math
 from dataclasses import replace
 from typing import Any, Callable
 
+from .option_shadow_state import standardized_derivative_signal
+
 
 SCENARIO_ORDER = (
     "BASE",
@@ -51,10 +53,7 @@ def _metric_z(state: dict, name: str, *, acceleration: bool = False) -> float | 
     value = _number(metric.get(key))
     if not metric.get("available") or value is None:
         return None
-    span = max(_number(metric.get("time_span_minutes")) or 0.0, 1.0)
-    noise = max(_number(metric.get("noise")) or 0.0, 1e-9)
-    scaled = value * (span * span if acceleration else span) / noise
-    return math.tanh(scaled)
+    return standardized_derivative_signal(metric, acceleration=acceleration)
 
 
 def derivative_drivers(tick: dict) -> dict:

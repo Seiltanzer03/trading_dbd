@@ -142,7 +142,10 @@ def _compact_option_state(state: dict) -> dict:
         metrics[name] = {
             key: row.get(key) for key in (
                 "value", "slope", "acceleration", "noise", "sample_count",
-                "time_span_minutes", "confidence", "source_quality", "available",
+                "normalization_noise", "numerical_effect_floor",
+                "normalization_horizon_minutes", "time_span_minutes",
+                "confidence", "source_quality", "available", "units",
+                "value_units", "slope_units", "acceleration_units",
             )
         }
     return {
@@ -155,6 +158,9 @@ def _compact_option_state(state: dict) -> dict:
         "option_state_score": state.get("option_state_score"),
         "option_state_confidence": state.get("option_state_confidence"),
         "option_state_attribution": deepcopy(state.get("option_state_attribution") or {}),
+        "option_state_aggregation": state.get("option_state_aggregation"),
+        "option_state_redundancy_contract": deepcopy(
+            state.get("option_state_redundancy_contract") or {}),
         "named_derivatives": deepcopy(state.get("named_derivatives") or {}),
         "metrics": metrics,
         "first_touch_hazard": deepcopy(state.get("first_touch_hazard") or {}),

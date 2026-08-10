@@ -23,6 +23,8 @@ MIN_SPAN_MINUTES = 5.0
 RECENT_LIMIT = 360
 SAMPLE_INTERVAL_SEC = 30.0
 PERSIST_INTERVAL_SEC = 10.0
+NORMALIZATION_HORIZON_MINUTES = 20.0
+NUMERICAL_EFFECT_FLOOR_FRACTION = 0.005
 
 
 def _number(value: Any) -> float | None:
@@ -49,6 +51,8 @@ def robust_derivative(
     source_quality: float = 1.0,
     min_samples: int = MIN_SAMPLES,
     min_span_minutes: float = MIN_SPAN_MINUTES,
+    reference_ts: float | None = None,
+    stale_after_minutes: float | None = None,
 ) -> dict:
     """Huber IRLS with exponential recency weights; never a two-point slope."""
     points = [
@@ -72,6 +76,12 @@ def robust_derivative(
         "source_quality": round(_clip(source_quality, 0.0, 1.0), 3),
         "estimator": "ewls_huber_irls", "available": False,
     }
+    if (reference_ts is not None and points and stale_after_minutes is not None):
+        stale_minutes = max(0.0, (float(reference_ts) - points[-1][0]) / 60.0)
+        base["staleness_minutes"] = round(stale_minutes, 3)
+        if stale_minutes > float(stale_after_minutes):
+            base["reason"] = f"last observation stale by {stale_minutes:.1f} minutes"
+            return base
     if count < min_samples or span_minutes < min_span_minutes:
         base["reason"] = (
             f"requires >= {min_samples} unique observations over >= "
@@ -112,8 +122,12 @@ def robust_derivative(
         quadratic, _, _ = fit(2)
         acceleration = float(2.0 * quadratic[2])
 
-    signal_change = abs(slope) * span_minutes
-    snr = signal_change / max(noise, 1e-9)
+    canonical_scale = max(1.0, float(np.median(np.abs(y))))
+    numerical_floor = NUMERICAL_EFFECT_FLOOR_FRACTION * canonical_scale
+    normalization_noise = max(noise, numerical_floor)
+    effective_span = min(span_minutes, NORMALIZATION_HORIZON_MINUTES)
+    signal_change = abs(slope) * effective_span
+    snr = signal_change / normalization_noise
     sample_weight = min(1.0, (count - min_samples + 1) / 12.0)
     span_weight = min(1.0, span_minutes / 20.0)
     noise_weight = snr / (1.0 + snr)
@@ -122,6 +136,9 @@ def robust_derivative(
         "slope": _rounded(slope),
         "acceleration": _rounded(acceleration),
         "noise": _rounded(noise),
+        "normalization_noise": _rounded(normalization_noise),
+        "numerical_effect_floor": _rounded(numerical_floor),
+        "normalization_horizon_minutes": NORMALIZATION_HORIZON_MINUTES,
         "confidence": round(_clip(confidence, 0.0, 1.0), 3),
         "available": True,
     })
@@ -201,13 +218,66 @@ _UNITS = {
     "distance_to_call_wall": "R_per_minute", "distance_to_put_wall": "R_per_minute",
 }
 
+_VALUE_UNITS = {
+    "p_take": "probability", "p_stop": "probability",
+    "p_no_touch": "probability", "barrier_ev": "R",
+    "bop": "log_odds", "q10": "R", "q50": "R", "q90": "R",
+    "width": "R", "tail_ratio": "ratio", "tail_log_ratio": "log_ratio",
+    "skew": "skew_R", "term_slope": "term_structure_slope",
+    "iv": "annualized_volatility", "rv": "annualized_volatility",
+    "vrp": "annualized_volatility_spread",
+    "h_take": "conditional_hazard_probability",
+    "h_stop": "conditional_hazard_probability",
+    "hazard_log_ratio": "log_hazard_ratio", "r": "R", "price": "price",
+    "gex_field": "normalized_gex_field", "gex_force": "normalized_score",
+    "gex_stiffness": "normalized_score", "distance_to_zero_gamma": "R",
+    "call_wall": "price", "put_wall": "price",
+    "distance_to_call_wall": "R", "distance_to_put_wall": "R",
+}
+
+
+def unit_contract(field: str) -> dict:
+    value = _VALUE_UNITS.get(field, "units")
+    return {
+        "value_units": value,
+        "slope_units": f"{value}/min",
+        "acceleration_units": f"{value}/min^2",
+        # Compatibility only: historically `units` described the slope while
+        # being attached to the entire metric object.
+        "units": _UNITS.get(field, "units_per_minute"),
+        "units_compatibility": "deprecated_slope_units_alias",
+    }
+
+
+def standardized_derivative_signal(metric: dict | None, *, acceleration: bool = False) -> float | None:
+    """Bound a derivative on a fixed decision horizon with a numerical floor.
+
+    Longer history may improve estimator confidence, but cannot mechanically
+    amplify the signal beyond the 20-minute management horizon.  Exact/near-zero
+    residual noise is regularised by the published 0.5%-of-canonical-unit floor.
+    """
+    if not metric or not metric.get("available"):
+        return None
+    key = "acceleration" if acceleration else "slope"
+    value = _number(metric.get(key))
+    if value is None:
+        return None
+    span = min(
+        max(_number(metric.get("time_span_minutes")) or 0.0, 0.0),
+        _number(metric.get("normalization_horizon_minutes"))
+        or NORMALIZATION_HORIZON_MINUTES,
+    )
+    noise = max(
+        _number(metric.get("normalization_noise")) or 0.0,
+        _number(metric.get("numerical_effect_floor")) or 0.0,
+        1e-9,
+    )
+    effect = value * (span * span if acceleration else span)
+    return math.tanh(effect / noise)
+
 
 def _standardized_slope(metric: dict | None) -> float | None:
-    if not metric or not metric.get("available") or metric.get("slope") is None:
-        return None
-    span = max(float(metric.get("time_span_minutes") or 0.0), 1.0)
-    scale = max(float(metric.get("noise") or 0.0) / span, 1e-9)
-    return math.tanh(float(metric["slope"]) / scale)
+    return standardized_derivative_signal(metric)
 
 
 def _interaction(name: str, formula: str, components: dict, z: float | None,
@@ -266,10 +336,7 @@ def build_interaction_state(payload: dict, metrics: dict, source_quality: float)
         "Magnitude-only instability context; OI×gamma does not prove dealer direction."))
 
     rv_metric = metrics.get("rv") or {}
-    rv_span = max(_number(rv_metric.get("time_span_minutes")) or 0.0, 1.0)
-    rv_acc_z = None if rv_acc is None else math.tanh(
-        rv_acc * rv_span * rv_span
-        / max(_number(rv_metric.get("noise")) or 0.0, 1e-9))
+    rv_acc_z = standardized_derivative_signal(rv_metric, acceleration=True)
     z = None if vrp_z is None or rv_acc_z is None else max(0.0, vrp_z) * max(0.0, rv_acc_z)
     items.append(_interaction(
         "vrp_expansion_x_realized_vol_acceleration",
@@ -335,7 +402,7 @@ class OptionShadowTracker:
         metrics = {
             field: dict(
                 robust_derivative(history, field, source_quality=quality_weight),
-                units=_UNITS.get(field, "units_per_minute"),
+                **unit_contract(field),
             )
             for field in fields
         }
@@ -369,9 +436,7 @@ class OptionShadowTracker:
             },
             "flip_velocity": (metrics.get("distance_to_zero_gamma") or {}).get("slope"),
         }
-        score_components = {
-            # Equal-weight, non-independent descriptions of one family.  These
-            # are attribution components, not evidence votes.
+        descriptive_components = {
             "edge_velocity": _standardized_slope(metrics.get("barrier_ev")),
             "barrier_odds_velocity": _standardized_slope(metrics.get("bop")),
             "tail_geometry_velocity": _standardized_slope(metrics.get("tail_log_ratio")),
@@ -379,18 +444,43 @@ class OptionShadowTracker:
                 None if current.get("hazard_log_ratio") is None
                 else math.tanh(float(current["hazard_log_ratio"]))
             ),
+            "width_velocity": _standardized_slope(metrics.get("width")),
+            "iv_velocity": _standardized_slope(metrics.get("iv")),
+            "rv_velocity": _standardized_slope(metrics.get("rv")),
         }
-        score_values = [value for value in score_components.values() if value is not None]
+
+        def mean_available(names: tuple[str, ...], *, sign: float = 1.0) -> float | None:
+            values = [descriptive_components[name] for name in names
+                      if descriptive_components.get(name) is not None]
+            return sign * sum(values) / len(values) if values else None
+
+        # Correlated transforms are first collapsed into conceptual subfamilies.
+        # Each subfamily contributes at most once to the single option-family
+        # context score; GEX remains magnitude-only context outside this score.
+        score_components = {
+            "EDGE": mean_available(("edge_velocity", "barrier_odds_velocity")),
+            "TAIL": mean_available(("tail_geometry_velocity",)),
+            "LOCAL_HAZARD": mean_available(("hazard_balance",)),
+            "VOLATILITY": mean_available(
+                ("width_velocity", "iv_velocity", "rv_velocity"), sign=-1.0),
+            "GEX_CONTEXT": None,
+        }
+        score_values = [value for name, value in score_components.items()
+                        if name != "GEX_CONTEXT" and value is not None]
         option_score = sum(score_values) / len(score_values) if score_values else None
-        confidence_values = [
-            float(metrics[name]["confidence"])
-            for name in ("barrier_ev", "bop", "tail_log_ratio", "hazard_log_ratio")
-            if name in metrics and metrics[name].get("available")
-        ]
+
+        confidence_groups = []
+        for names in (
+            ("barrier_ev", "bop"), ("tail_log_ratio",),
+            ("hazard_log_ratio",), ("width", "iv", "rv"),
+        ):
+            values = [float(metrics[name]["confidence"]) for name in names
+                      if name in metrics and metrics[name].get("available")]
+            if values:
+                confidence_groups.append(sum(values) / len(values))
         option_confidence = (
-            sum(confidence_values) / len(confidence_values)
-            if confidence_values else 0.0
-        )
+            sum(confidence_groups) / len(confidence_groups)
+            if confidence_groups else 0.0)
         state = {
             "available": True, "version": STATE_VERSION, "family": FAMILY,
             "independent_vote": False, "authority": "shadow_context",
@@ -400,7 +490,20 @@ class OptionShadowTracker:
             "option_state_score": None if option_score is None else round(option_score, 6),
             "option_state_confidence": round(option_confidence, 3),
             "option_state_attribution": score_components,
-            "option_state_aggregation": "arithmetic mean of available same-family components",
+            "option_state_descriptive_components": descriptive_components,
+            "option_state_aggregation": (
+                "EDGE/TAIL/LOCAL_HAZARD/VOLATILITY subfamily mean; each subfamily "
+                "contributes once; GEX_CONTEXT excluded; family authority remains one"),
+            "option_state_redundancy_contract": {
+                "EDGE": ["barrier_ev_velocity", "barrier_odds_velocity"],
+                "TAIL": ["tail_geometry_velocity"],
+                "LOCAL_HAZARD": ["hazard_balance"],
+                "VOLATILITY": ["width_velocity", "iv_velocity", "rv_velocity"],
+                "GEX_CONTEXT": {
+                    "included_in_score": False,
+                    "reason": "OI×gamma dealer sign is unobserved",
+                },
+            },
             "barrier_odds_pressure": metrics.get("bop"),
             "edge_velocity": metrics.get("barrier_ev"),
             "tail_geometry": {
