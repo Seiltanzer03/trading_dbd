@@ -553,17 +553,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         and int(active_trade["id"]) == trade_id):
                     engine.position.register_decision(
                         snapshot, review_id, active_trade)
-            except StaleDecisionError as exc:
-                log_ai_event(
-                    req_id=req_id, trade_id=trade_id, stage="stale_decision",
-                    review_id=review_id, started=started, exc=exc)
-                return JSONResponse(
-                    status_code=409,
-                    content=ai_error_body(
-                        "stale_decision",
-                        "Состояние позиции изменилось во время расчёта; запросите новый разбор",
-                        req_id, retriable=True),
-                )
+            except StaleDecisionError:
+                # A deterministic tick may arm BE while the snapshot is being
+                # calculated. Rebuild exactly once from the new economic state;
+                # repeated movement remains a real 409 stale-decision conflict.
+                snapshot = await asyncio.to_thread(build_snapshot, engine)
+                trade_id = int(snapshot["trade_id"])
+                review_id = canonical_snapshot(snapshot)["review_id"]
+                decision = ((snapshot.get("policy_manager") or {})
+                            .get("management_decision"))
+                active_trade = engine.journal.active_trade()
+                try:
+                    if (decision and active_trade
+                            and int(active_trade["id"]) == trade_id):
+                        engine.position.register_decision(
+                            snapshot, review_id, active_trade)
+                except StaleDecisionError as exc:
+                    log_ai_event(
+                        req_id=req_id, trade_id=trade_id, stage="stale_decision",
+                        review_id=review_id, started=started, exc=exc)
+                    return JSONResponse(
+                        status_code=409,
+                        content=ai_error_body(
+                            "stale_decision",
+                            "Состояние позиции изменилось во время расчёта; запросите новый разбор",
+                            req_id, retriable=True),
+                    )
             degraded = False
             provider_failure = None
             try:
