@@ -229,6 +229,7 @@
         <span class="badge" id="gex-evol-status">○ ОЖИДАНИЕ СНАПШОТОВ</span>
       </div>
     </div>
+    <div class="analytics-human-line" id="gex-human-line">TAKE PATH: WAITING FOR REAL GEX STATE</div>
     <div class="panel-body" style="display: flex; flex-wrap: wrap; gap: 12px; padding: 12px;">
       <div class="canvas-holder gex-evol-holder" style="flex: 1 1 65%; min-width: 300px; height: 420px; position: relative;">
         <div id="gex-evol-canvas" style="width: 100%; height: 100%;"></div>
@@ -264,6 +265,7 @@
         <span class="badge" id="regime-status">○ CALM TREND</span>
       </div>
     </div>
+    <div class="analytics-human-line" id="regime-human-line">REGIME STATE: WAITING FOR REAL MARKET HISTORY</div>
     <div class="panel-body" style="display: flex; flex-wrap: wrap; gap: 12px; padding: 12px;">
       <div class="canvas-holder" style="flex: 1 1 65%; min-width: 300px; height: 420px; position: relative;">
         <div id="regime-phase-plot" style="width: 100%; height: 100%;"></div>
@@ -296,6 +298,7 @@
         <span class="badge" id="wavelet-status">○ DOMINANT 12.0H</span>
       </div>
     </div>
+    <div class="analytics-human-line" id="wavelet-human-line">ENERGY STATE: WAITING FOR REAL CWT HISTORY</div>
     <div class="panel-body" style="display: flex; flex-wrap: wrap; gap: 12px; padding: 12px;">
       <div class="canvas-holder" id="wavelet-canvas-holder" style="flex: 1 1 65%; min-width: 300px; height: 420px; position: relative;">
         <div class="canvas-empty" id="wavelet-empty">○ WAVELET SPECTRUM UNAVAILABLE</div>
@@ -419,6 +422,11 @@
     <div class="panel-head">
       <h2>CROSS-ASSET CORRELATION · МАТРИЦА И ГРАФ СВЯЗЕЙ</h2>
       <div class="panel-head-right" style="display: flex; gap: 8px; align-items: center;">
+        <div class="btn-group" id="corr-link-mode-group">
+          <button class="btn-toggle active" id="btn-corr-full">FULL</button>
+          <button class="btn-toggle" id="btn-corr-material">MATERIAL</button>
+          <button class="btn-toggle" id="btn-corr-stress">STRESS</button>
+        </div>
         <div class="btn-group" id="corr-mode-group">
           <button class="btn-toggle active" id="btn-corr-network">NETWORK</button>
           <button class="btn-toggle" id="btn-corr-matrix">MATRIX</button>
@@ -426,6 +434,7 @@
         <span class="badge" id="corr-status">○ ОЖИДАНИЕ ДАННЫХ</span>
       </div>
     </div>
+    <div class="analytics-human-line" id="corr-human-line">CROSS-ASSET STATE: WAITING FOR OBSERVED PAIRS</div>
     <div class="panel-body">
       <div class="canvas-holder corr-holder" style="height: 350px;">
         <div id="corr-chart" style="width: 100%; height: 100%;"></div>

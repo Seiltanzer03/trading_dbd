@@ -59,3 +59,23 @@ def test_cross_asset_velocity_requires_real_previous_sample():
     assert res["links"][0]["velocity_magnitude"] == 0.18
     assert res["summary"]["velocity_ready"] is True
     assert {n["id"] for n in res["nodes"]} == {"NAS", "SP500"}
+
+
+def test_cross_asset_full_finite_matrix_exposes_every_observed_pair():
+    assets = ["NAS", "SP500", "VXN", "GOLD", "DXY", "OIL", "BTC", "US30"]
+    n = len(assets)
+    matrix = [
+        [1.0 if i == j else round((i - j) / (n + 1), 3) for j in range(n)]
+        for i in range(n)
+    ]
+    # Correlation matrices are symmetric; values can be weak but remain real
+    # observed links and must never disappear from the FULL topology.
+    for i in range(n):
+        for j in range(i + 1, n):
+            matrix[j][i] = matrix[i][j]
+    res = compute_correlation_graph({"assets": assets, "matrix_short": matrix, "asof": 10_000.0})
+    expected = n * (n - 1) // 2
+    assert len(res["links"]) == expected
+    assert res["summary"]["observed_pairs"] == expected
+    assert res["summary"]["possible_pairs"] == expected
+    assert res["summary"]["complete_topology"] is True

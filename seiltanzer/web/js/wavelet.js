@@ -3,6 +3,8 @@ import { createPlotlyCameraGuard } from './plotly_camera_guard.js';
 import { subscribeMarketTick } from './market_bus.js';
 import { ensurePremiumAnalyticsTheme } from './premium_analytics_theme.js';
 import { isAnalyticsMobile, analyticsMobileDpr } from './analytics_mobile.js';
+import { attachTerminal3DToolbar } from './plotly_terminal_toolbar.js';
+import { advanceMeasuredPhase, observedMotionDecay, waveletEnergyTransfer } from './real_market_motion.js';
 
 let containerEl;
 let statusEl;
@@ -17,6 +19,10 @@ let unsubscribeTick = null;
 let liveBursts = [];
 let liveTick = null;
 let rendererGeneration = 0;
+let flowPhase = 0;
+let lastFlowFrame = 0;
+let lastFlowSignature = null;
+let flowObservedAt = 0;
 
 const SURFACE_CAM = { eye: { x: 1.55, y: -1.82, z: 1.25 }, up: { x: 0, y: 0, z: 1 } };
 
@@ -72,13 +78,18 @@ function destroyRenderer() {
   const plot = containerEl?.querySelector('[data-renderer="wavelet-surface"]');
   if (plot && window.Plotly) { try { window.Plotly.purge(plot); } catch {} }
   containerEl?.querySelectorAll('[data-wavelet-renderer]').forEach((n) => n.remove());
+  containerEl?.querySelector('[data-terminal-3d-toolbar="wavelet-surface"]')?.remove();
 }
 
 export async function fetchWaveletData() {
   try {
     const res = await fetch('/api/analytics/wavelet', { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    waveletData = await res.json();
+    const next = await res.json();
+    const latestFlow = next.energy_flow?.at(-1);
+    const signature = latestFlow ? `${latestFlow.ts}:${latestFlow.micro}:${latestFlow.intraday}:${latestFlow.macro}` : 'none';
+    if (signature !== lastFlowSignature) { lastFlowSignature = signature; flowObservedAt = performance.now(); }
+    waveletData = next;
     renderWavelet(true);
   } catch (err) {
     console.warn('Wavelet fetch error:', err);
@@ -130,6 +141,11 @@ function updateSummary(summary) {
   set('#wavelet-val-intra', `${Number(summary.intraday_energy_pct || 0).toFixed(1)}%`);
   set('#wavelet-val-macro', `${Number(summary.macro_energy_pct || 0).toFixed(1)}%`);
   set('#wavelet-val-persist', `${Math.round(Number(summary.persistence || 0) * 100)}%`);
+  const transfer = waveletEnergyTransfer(waveletData?.energy_flow || []);
+  const headline = $('#wavelet-human-line');
+  if (headline) headline.textContent = transfer.source
+    ? `ENERGY MIGRATING ${transfer.source.toUpperCase()} → ${transfer.destination.toUpperCase()} · +${transfer.ratePpPer30m.toFixed(1)} pp / 30m`
+    : 'ENERGY DISTRIBUTION STABLE · MEASURED FLOW ≈ 0';
   if (statusEl) statusEl.textContent = `● ${dom.toFixed(1)}H · ${summary.cycle_shift || '—'} · PHASE ${Math.round(Number(summary.phase_stability || 0)*100)}%`;
   const card=$('#wavelet-summary-card'); if(!card)return;
   let extra=$('#wavelet-extra-metrics');
@@ -178,9 +194,12 @@ function renderCanvasMode(force=false){
   const state=ensureCanvas();
   const generation=rendererGeneration;
   let lastDraw=0;
-  const minFrame=state.mobile?32:15;
   const draw=(now)=>{
     if(generation!==rendererGeneration||currentMode==='SURFACE')return;
+    const transfer=currentMode==='FLOW'?waveletEnergyTransfer(waveletData?.energy_flow||[]):null;
+    const measuredMotion=Number(transfer?.magnitude||0)*observedMotionDecay((now-flowObservedAt)/1000,7);
+    const dynamic=liveBursts.length>0||measuredMotion>.005;
+    const minFrame=dynamic?(state.mobile?32:15):(state.mobile?160:100);
     if(now-lastDraw>=minFrame){
       lastDraw=now;
       if(currentMode==='FLOW')drawFlow(state,now);else drawSpectrogram(state,now);
@@ -217,8 +236,6 @@ function drawSpectrogram({cv,dpr,width,height,mobile},now){
   ctx.strokeStyle='rgba(203,219,229,.25)';ctx.strokeRect(margin.left,margin.top,plotW,plotH);
 }
 
-function flowDerivatives(flow){if(!flow?.length)return {micro:0,intraday:0,macro:0};const a=flow[Math.max(0,flow.length-7)],b=flow.at(-1);return {micro:Number(b.micro||0)-Number(a.micro||0),intraday:Number(b.intraday||0)-Number(a.intraday||0),macro:Number(b.macro||0)-Number(a.macro||0)};}
-
 function drawFlow({cv,dpr,width,height,mobile},now){
   const ctx=cv.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,width,height);drawBackground(ctx,width,height);
   const flow=waveletData.energy_flow||[];if(!flow.length)return;const margin=mobile?{left:45,right:12,top:28,bottom:34}:{left:58,right:24,top:28,bottom:42},plotW=width-margin.left-margin.right,plotH=height-margin.top-margin.bottom;
@@ -226,8 +243,10 @@ function drawFlow({cv,dpr,width,height,mobile},now){
   const baseY={MACRO:margin.top+plotH*.18,INTRADAY:margin.top+plotH*.50,MICRO:margin.top+plotH*.82};
   const xAt=i=>margin.left+i/Math.max(1,flow.length-1)*plotW;
   bands.forEach(([label,key,color])=>{const y0=baseY[label];ctx.strokeStyle='rgba(194,211,223,.12)';ctx.beginPath();ctx.moveTo(margin.left,y0);ctx.lineTo(margin.left+plotW,y0);ctx.stroke();ctx.fillStyle='rgba(214,225,233,.72)';ctx.font=`${mobile?8:9}px IBM Plex Mono,monospace`;ctx.textAlign='right';ctx.fillText(mobile?label.slice(0,5):label,margin.left-5,y0+3);ctx.beginPath();flow.forEach((p,i)=>{const y=y0-(Number(p[key]||0)-33)*(mobile?1.05:1.4);const x=xAt(i);if(!i)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.strokeStyle=color;ctx.shadowColor=color;ctx.shadowBlur=mobile?4:7;ctx.lineWidth=mobile?1.8:2.3;ctx.stroke();ctx.shadowBlur=0;});
-  const d=flowDerivatives(flow);const entries=[['MICRO',d.micro],['INTRADAY',d.intraday],['MACRO',d.macro]];const sources=entries.filter(e=>e[1]<-1).sort((a,b)=>a[1]-b[1]),sinks=entries.filter(e=>e[1]>1).sort((a,b)=>b[1]-a[1]);
-  if(sources.length&&sinks.length){const src=sources[0],dst=sinks[0],mag=Math.min(1,Math.min(-src[1],dst[1])/14);const x=margin.left+plotW*.80,y1=baseY[src[0]],y2=baseY[dst[0]];ctx.strokeStyle=`rgba(255,198,91,${.35+.55*mag})`;ctx.lineWidth=2+(mobile?3:5)*mag;ctx.shadowColor='#ffc65b';ctx.shadowBlur=(mobile?6:10)*mag;ctx.beginPath();ctx.moveTo(x,y1);ctx.bezierCurveTo(x+25,y1,x+25,y2,x,y2);ctx.stroke();ctx.shadowBlur=0;const phase=(now/900)%1;for(let k=0;k<(mobile?3:5);k++){const t=(phase+k/(mobile?3:5))%1;const omt=1-t;const px=omt*omt*omt*x+3*omt*omt*t*(x+25)+3*omt*t*t*(x+25)+t*t*t*x;const py=omt*omt*omt*y1+3*omt*omt*t*y1+3*omt*t*t*y2+t*t*t*y2;ctx.fillStyle='#ffd47a';ctx.beginPath();ctx.arc(px,py,1.6+1.7*mag,0,Math.PI*2);ctx.fill();}ctx.fillStyle='rgba(224,232,237,.8)';ctx.font=`bold ${mobile?8:9}px IBM Plex Mono,monospace`;ctx.textAlign='left';ctx.fillText(`${src[0]} → ${dst[0]}`,Math.max(margin.left,x-65),Math.min(y1,y2)-10);}
+  const transfer=waveletEnergyTransfer(flow);const mag=transfer.magnitude*observedMotionDecay((now-flowObservedAt)/1000,7);
+  const dt=lastFlowFrame?Math.max(0,Math.min(.25,(now-lastFlowFrame)/1000)):0;lastFlowFrame=now;
+  flowPhase=advanceMeasuredPhase(flowPhase,mag*.72,dt);
+  if(transfer.source&&transfer.destination){const src=transfer.source.toUpperCase(),dst=transfer.destination.toUpperCase();const x=margin.left+plotW*.80,y1=baseY[src],y2=baseY[dst];ctx.strokeStyle=`rgba(255,198,91,${.20+.70*mag})`;ctx.lineWidth=.8+(mobile?4:6)*mag;ctx.shadowColor='#ffc65b';ctx.shadowBlur=(mobile?6:11)*mag;ctx.beginPath();ctx.moveTo(x,y1);ctx.bezierCurveTo(x+25,y1,x+25,y2,x,y2);ctx.stroke();ctx.shadowBlur=0;const count=mag<.025?0:Math.max(1,Math.round((mobile?3:6)*mag));for(let k=0;k<count;k++){const t=(flowPhase+k/count)%1;const omt=1-t;const px=omt*omt*omt*x+3*omt*omt*t*(x+25)+3*omt*t*t*(x+25)+t*t*t*x;const py=omt*omt*omt*y1+3*omt*omt*t*y1+3*omt*t*t*y2+t*t*t*y2;ctx.fillStyle=`rgba(255,212,122,${.25+.75*mag})`;ctx.beginPath();ctx.arc(px,py,1+2.2*mag,0,Math.PI*2);ctx.fill();}ctx.fillStyle='rgba(224,232,237,.8)';ctx.font=`bold ${mobile?8:9}px IBM Plex Mono,monospace`;ctx.textAlign='left';ctx.fillText(`${src} → ${dst}  +${transfer.ratePpPer30m.toFixed(1)} pp / 30m`,Math.max(margin.left,x-(mobile?100:155)),Math.min(y1,y2)-10);}
   ctx.fillStyle='rgba(208,222,231,.65)';ctx.font=`${mobile?8:9}px IBM Plex Mono,monospace`;const ticks=mobile?3:4;for(let i=0;i<ticks;i++){const idx=Math.round(i*(flow.length-1)/Math.max(1,ticks-1));ctx.textAlign='center';ctx.fillText(fmtTime(flow[idx].ts,!mobile),xAt(idx),height-16);}
   const last=flow.at(-1);ctx.textAlign='left';ctx.fillStyle='rgba(224,232,237,.85)';ctx.fillText(mobile?`NOW · μ ${Number(last.micro||0).toFixed(0)} · I ${Number(last.intraday||0).toFixed(0)} · M ${Number(last.macro||0).toFixed(0)}%`:`NOW · MICRO ${Number(last.micro||0).toFixed(1)}%   INTRA ${Number(last.intraday||0).toFixed(1)}%   MACRO ${Number(last.macro||0).toFixed(1)}%`,margin.left,16);
 }
@@ -247,7 +266,8 @@ function renderSurface(force=false){
     {type:'scatter3d',mode:'lines',name:'SECONDARY RIDGE',x:ridge.map(p=>(Number(p.ts)-latest)/3600),y:ridge.map(p=>Number(p.secondary_period_hours)),z:ridge.map(p=>1.02),line:{color:'rgba(244,192,79,.72)',width:mobile?3:4,dash:'dot'},hoverinfo:'skip',showlegend:false},
     {type:'scatter3d',mode:'markers+text',name:'LIVE TICK PROBE',x:[0],y:[Number(waveletData.summary?.dominant_period_hours||periods.at(-1)||1)],z:[1.08],marker:{size:mobile?6:8,color:'#ffbf55',line:{color:'#fff',width:1}},text:['LIVE'],textposition:'top center',hoverinfo:'skip',showlegend:false}];
   const layout={margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'transparent',plot_bgcolor:'transparent',showlegend:false,hovermode:mobile?false:undefined,uirevision:'wavelet-surface-premium-v3',scene:{xaxis:{title:mobile?'TIME':'TIME · HOURS TO NOW',gridcolor:'rgba(188,208,222,.14)',color:'#b8cad5',zerolinecolor:'#f2b956',tickfont:{size:mobile?8:10}},yaxis:{title:mobile?'PERIOD':'PERIOD · HOURS',type:'log',gridcolor:'rgba(188,208,222,.14)',color:'#b8cad5',tickfont:{size:mobile?8:10}},zaxis:{title:mobile?'POWER':'SPECTRAL POWER',range:[0,1.16],gridcolor:'rgba(188,208,222,.12)',color:'#b8cad5',tickfont:{size:mobile?8:10}},bgcolor:'rgba(4,12,20,0)',aspectmode:'manual',aspectratio:{x:1.55,y:1.08,z:.72}}};
-  surfaceGuard?.beforeWrite?.();window.Plotly.newPlot(plot,traces,layout,{responsive:false,displayModeBar:false,scrollZoom:!mobile});surfaceGuard?.afterWrite?.();updateSurfaceProbe();
+  surfaceGuard?.beforeWrite?.();window.Plotly.newPlot(plot,traces,layout,{responsive:false,displayModeBar:false,scrollZoom:!mobile});surfaceGuard?.afterWrite?.();
+  attachTerminal3DToolbar({plot,container:containerEl,guard:surfaceGuard,homeCamera:SURFACE_CAM,key:'wavelet-surface'});updateSurfaceProbe();
 }
 
 function updateSurfaceProbe(){

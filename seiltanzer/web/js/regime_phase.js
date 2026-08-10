@@ -3,6 +3,7 @@ import { createPlotlyCameraGuard } from './plotly_camera_guard.js';
 import { subscribeMarketTick } from './market_bus.js';
 import { ensurePremiumAnalyticsTheme } from './premium_analytics_theme.js';
 import { isAnalyticsMobile } from './analytics_mobile.js';
+import { attachTerminal3DToolbar } from './plotly_terminal_toolbar.js';
 
 let plotEl;
 let statusEl;
@@ -217,6 +218,14 @@ function renderRegimePlot() {
   if ($('#regime-val-conf')) $('#regime-val-conf').textContent = `${Number(current.confidence || 0).toFixed(0)}%`;
   if ($('#regime-val-dist')) $('#regime-val-dist').textContent = Number(summary.boundary_distance || 0).toFixed(2);
   if (statusEl) statusEl.textContent = `● ${current.regime || 'CHOP'} · Z ${Number(current.z_stress || 0).toFixed(2)} · ${currentHorizon}`;
+  const headline = $('#regime-human-line');
+  if (headline) {
+    const vector = current.velocity_vector || {};
+    const acceleration = Number(summary.transition_acceleration || 0);
+    const target = Number(vector.y || 0) > .08 || Number(vector.z || 0) > .08
+      ? 'VOL SHOCK' : Math.abs(Number(vector.x || 0)) > .12 ? 'TREND EXPANSION' : (current.regime || 'CHOP');
+    headline.textContent = `REGIME MOVING TOWARD ${target} · SPEED ${Number(vector.speed || 0) < .01 ? 'FLAT' : acceleration > .08 ? '↑' : '→'}`;
+  }
   ensureExtraSummary(summary);
 
   const traj = trajectoryForHorizon();
@@ -242,15 +251,33 @@ function renderRegimePlot() {
     { type: 'scatter3d', mode: 'markers+text', name: 'MODEL STATE', x: [Number(current.x_trend || 0)], y: [Number(current.y_vol || 0)], z: [Number(current.z_stress || 0)], marker: { size: mobile ? 7 : 9, color: regimeColor(current.regime), line: { color: '#fff', width: 1.4 } }, text: [mobile ? 'STATE' : (current.regime || 'STATE')], textposition: 'bottom center', hoverinfo: 'skip', showlegend: false },
   );
 
+  const references = regimeData.reference_points || {};
+  const addReference = (point, name, color, symbol) => {
+    if (!point || ![point.x, point.y, point.z].every((value) => Number.isFinite(Number(value)))) return;
+    traces.push({type:'scatter3d',mode:'markers+text',name,x:[Number(point.x)],y:[Number(point.y)],z:[Number(point.z)],marker:{size:mobile?5:7,color,symbol,line:{color:'#fff',width:1}},text:[mobile?name.split(' ')[0]:name],textposition:'top center',hoverinfo:'skip',showlegend:false});
+  };
+  addReference(references.entry, 'ENTRY', '#d7dce0', 'diamond');
+  addReference(references.previous_ai_review, 'PREV AI', '#c79cff', 'square');
+
   const vv = current.velocity_vector || summary.velocity_vector || {}; const speed = Number(vv.speed || 0);
   if (speed > .001) { const s = .72 / speed; traces.push({ type: 'cone', showlegend: false, hoverinfo: 'skip', anchor: 'tail', sizemode: 'absolute', sizeref: mobile ? .23 : .30, x: [Number(current.x_trend || 0)], y: [Number(current.y_vol || 0)], z: [Number(current.z_stress || 0)], u: [Number(vv.x || 0) * s], v: [Number(vv.y || 0) * s], w: [Number(vv.z || 0) * s], colorscale: [[0,'#ffbb50'],[1,'#ef5268']], showscale: false }); }
+  const av = current.acceleration_vector || summary.acceleration_vector || {}; const accel = Number(av.magnitude || 0);
+  if (accel > .001) { const s = .48 / accel; traces.push({type:'cone',name:'ACCELERATION',showlegend:false,hoverinfo:'skip',anchor:'tail',sizemode:'absolute',sizeref:mobile?.17:.22,x:[Number(current.x_trend||0)],y:[Number(current.y_vol||0)],z:[Number(current.z_stress||0)],u:[Number(av.x||0)*s],v:[Number(av.y||0)*s],w:[Number(av.z||0)*s],colorscale:[[0,'#b88cff'],[1,'#f0c4ff']],showscale:false}); }
 
   const xr = rangeFor([...x, Number(current.x_trend || 0)], [-3, 3], 2.4), yr = rangeFor([...y, Number(current.y_vol || 0)], [-3, 3], 2.4);
   const maxZ = Math.max(0, ...z.filter(Number.isFinite), Number(current.z_stress || 0)); const zr = [0, Math.min(3, Math.max(1.45, maxZ + .62))];
+  traces.push(
+    {type:'scatter3d',mode:'lines',name:'XZ GHOST',x,y:y.map(()=>yr[0]),z,line:{color:'rgba(90,172,208,.15)',width:mobile?1:2,dash:'dot'},hoverinfo:'skip',showlegend:false},
+    {type:'scatter3d',mode:'lines',name:'YZ GHOST',x:x.map(()=>xr[0]),y,z,line:{color:'rgba(90,172,208,.15)',width:mobile?1:2,dash:'dot'},hoverinfo:'skip',showlegend:false},
+  );
   const layout = { margin: { l: 0, r: 0, b: 0, t: 0 }, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', showlegend: false, hovermode: mobile ? false : undefined, uirevision: 'macro-phase-premium-live-v3', scene: { xaxis: { title: mobile ? 'TREND' : 'TREND · X', range: xr, gridcolor: 'rgba(182,207,222,.16)', zerolinecolor: 'rgba(230,238,243,.38)', color: '#b8cad5', showspikes: false, tickfont:{size:mobile?8:10} }, yaxis: { title: mobile ? 'VOL' : 'VOL REGIME · Y', range: yr, gridcolor: 'rgba(182,207,222,.16)', zerolinecolor: 'rgba(230,238,243,.38)', color: '#b8cad5', showspikes: false, tickfont:{size:mobile?8:10} }, zaxis: { title: mobile ? 'STRESS' : 'FRAGILITY / STRESS · Z', range: zr, gridcolor: 'rgba(182,207,222,.14)', zerolinecolor: 'rgba(230,238,243,.32)', color: '#b8cad5', showspikes: false, tickfont:{size:mobile?8:10} }, bgcolor: 'rgba(4,12,20,0)', aspectmode: 'manual', aspectratio: mobile ? { x: 1.08, y: 1.0, z: .94 } : { x: 1.25, y: 1.08, z: .86 } } };
   cameraGuard?.beforeWrite?.();
   window.Plotly.react(plotEl, traces, layout, { responsive: false, displayModeBar: false, scrollZoom: !mobile });
   cameraGuard?.afterWrite?.();
+  attachTerminal3DToolbar({
+    plot: plotEl, container: plotEl.parentElement, guard: cameraGuard,
+    homeCamera: INIT_CAM, key: 'macro-regime',
+  });
   if (!liveProbe) liveProbe = { x: Number(current.x_trend || 0), y: Number(current.y_vol || 0), z: Number(current.z_stress || 0), impulse: 0 };
   updateLiveHud();
 }

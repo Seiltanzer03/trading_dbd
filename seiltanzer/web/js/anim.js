@@ -51,7 +51,8 @@ const numEls = new Set();
 export function registerNumber(el) { if (el) numEls.add(el); }
 requestAnimationFrame(tick);
 
-// Пульс: 0..1 синус для «живых» акцентов (мигание точки LIVE, свечение тейла).
+// Слабый UI-only pulse: допускается для маркера LIVE/зоны, но не для частиц,
+// траекторий или иных движений, которые пользователь читает как рынок.
 export function pulse(now = performance.now(), periodMs = 1600) {
   return 0.5 + 0.5 * Math.sin((now / periodMs) * Math.PI * 2);
 }

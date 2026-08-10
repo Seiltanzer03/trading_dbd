@@ -323,6 +323,7 @@ def compute_macro_regime(
 
     v_now = {"x": 0.0, "y": 0.0, "z": 0.0, "speed": 0.0, "hours": 0.0}
     acceleration = 0.0
+    acceleration_vector = {"x": 0.0, "y": 0.0, "z": 0.0, "magnitude": 0.0}
     if len(states) >= 2:
         v_now = _velocity(states[-2], states[-1])
     if len(states) >= 3:
@@ -333,6 +334,12 @@ def compute_macro_regime(
             (v_now["y"] - v_prev["y"]) ** 2 +
             (v_now["z"] - v_prev["z"]) ** 2
         ) / dt_h
+        acceleration_vector = {
+            "x": (v_now["x"] - v_prev["x"]) / dt_h,
+            "y": (v_now["y"] - v_prev["y"]) / dt_h,
+            "z": (v_now["z"] - v_prev["z"]) / dt_h,
+            "magnitude": acceleration,
+        }
 
     boundary = _boundary_distance(current["x"], current["y"], current["z"])
     coverage = min(1.0, len(pts) / 240.0)
@@ -345,6 +352,9 @@ def compute_macro_regime(
             "x": round(v_now["x"], 3), "y": round(v_now["y"], 3),
             "z": round(v_now["z"], 3), "speed": round(v_now["speed"], 3),
         },
+        "acceleration_vector": {
+            key: round(value, 3) for key, value in acceleration_vector.items()
+        },
         "stress_components": current.get("stress_components") or {},
     }
     summary = {
@@ -355,6 +365,7 @@ def compute_macro_regime(
         "transition_velocity": round(v_now["speed"], 3),
         "transition_acceleration": round(acceleration, 3),
         "velocity_vector": result_current["velocity_vector"],
+        "acceleration_vector": result_current["acceleration_vector"],
         "stress_components": current.get("stress_components") or {},
         "stress_source": current.get("stress_source"),
         "confidence": confidence,
@@ -366,7 +377,7 @@ def compute_macro_regime(
         "authority": "strategy_context", "independent_vote": False,
     }
     return {
-        "version": "macro-regime-v3-fragility-3d",
+        "version": "macro-regime-v4-real-vectors-3d",
         "available": True,
         "current": result_current,
         "trajectory_6h": traj6, "trajectory_24h": traj24, "trajectory_3d": traj72,

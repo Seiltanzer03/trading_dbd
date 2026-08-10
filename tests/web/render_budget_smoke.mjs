@@ -118,11 +118,33 @@ assert.ok(iv.includes("createLatestPanelTask('iv-surface:render'"), 'IV writes m
 const corr = fs.readFileSync('seiltanzer/web/js/correlation.js', 'utf8');
 assert.ok(corr.includes('IntersectionObserver'), 'network should pause only when offscreen');
 assert.ok(corr.includes('canAnimateNetwork'), 'network visibility/gesture budget must exist');
-assert.ok(corr.includes('const packets = mobile ? [phase] : [phase, (phase + .5) % 1]'), 'animated correlation packets must remain');
+assert.ok(corr.includes('const packets = [.5 + .5 * phase, .5 - .5 * phase]'), 'direction-neutral correlation packets must remain');
+assert.ok(corr.includes('correlationMotionRate'), 'packet speed must remain tied to observed relationship change');
 assert.ok(corr.includes('drawNetworkBackground'), 'premium network canvas must remain');
-assert.ok(corr.includes('FULL TOPOLOGY'), 'all observed links must remain visible');
+assert.ok(corr.includes('return links.slice()'), 'FULL mode must keep all observed links visible');
 assert.ok(corr.includes("if (!chart) chart=window.echarts.init"), 'matrix renderer should be reused');
 assert.ok(corr.includes('lazyUpdate:true'), 'matrix updates should remain incremental');
+assert.ok(corr.includes("if (mode === 'MATERIAL')"), 'material network mode must remain');
+assert.ok(corr.includes("if (mode === 'STRESS')"), 'stress network mode must remain');
+assert.ok(corr.includes('SHOWN LINKS ${activeLinks.length} / OBSERVED ${links.length}'), 'honest shown/observed count must remain');
+
+const toolbar = fs.readFileSync('seiltanzer/web/js/plotly_terminal_toolbar.js', 'utf8');
+for (const mode of ['orbit', 'turntable', 'pan', 'zoom']) {
+  assert.ok(toolbar.includes(`'scene.dragmode': '${mode}'`), `${mode} user drag mode must remain`);
+}
+assert.ok(!toolbar.includes('requestAnimationFrame'), '3D toolbar must never auto-rotate');
+
+const motion = await import('../../seiltanzer/web/js/real_market_motion.js?render-budget-smoke');
+let decayState = { velocity: 0, phase: 0 };
+for (let i = 0; i < 8; i++) decayState = motion.dampedMotion(decayState, .9, .1);
+const shockVelocity = decayState.velocity;
+for (let i = 0; i < 60; i++) decayState = motion.dampedMotion(decayState, 0, .1);
+assert.ok(shockVelocity > 0 && Math.abs(decayState.velocity) < shockVelocity * .02, 'market shock must move, then damp to rest');
+assert.ok(Math.abs(motion.advanceMeasuredPhase(.42, 0, .2) - .42) < 1e-12, 'time alone must not move a packet');
+const transfer = motion.waveletEnergyTransfer([{ts:1000,micro:52,intraday:31,macro:17},{ts:2800,micro:44,intraday:39,macro:17}]);
+assert.equal(transfer.source, 'micro');
+assert.equal(transfer.destination, 'intraday');
+assert.equal(transfer.ratePpPer30m, 8);
 
 console.log(JSON.stringify({
   marketBusCoalescing: true,
@@ -134,4 +156,6 @@ console.log(JSON.stringify({
   ivLiveAnimationPreserved: true,
   correlationPhysicsPreserved: true,
   correlationMatrixReused: true,
+  realMotionDecays: true,
+  unified3dToolbar: true,
 }));

@@ -2,6 +2,7 @@ import { $ } from './util.js';
 import { subscribeMarketTick } from './market_bus.js';
 import { ensurePremiumAnalyticsTheme } from './premium_analytics_theme.js';
 import { isAnalyticsMobile, analyticsMobileDpr } from './analytics_mobile.js';
+import { advanceMeasuredPhase, correlationMotionRate, observedMotionDecay } from './real_market_motion.js';
 
 let chart = null;
 let emptyEl = null;
@@ -9,6 +10,7 @@ let statusEl = null;
 let payload = null;
 let graphData = null;
 let currentMode = 'NETWORK';
+let currentLinkMode = 'FULL';
 let resizeObserver = null;
 let visibilityObserver = null;
 let panelVisible = true;
@@ -16,11 +18,16 @@ let refreshTimer = null;
 let rafId = null;
 let draggedNodeId = null;
 let hoveredNodeId = null;
+let selectedNodeId = null;
 let liveTick = null;
+let liveTickAt = 0;
 let unsubscribeTick = null;
 let generation = 0;
 let lastMatrixSig = null;
+let lastGraphSig = null;
+let graphObservedAt = 0;
 const positions = new Map();
+const packetPhases = new Map();
 
 function threeDBusy() {
   if (typeof window === 'undefined') return false;
@@ -54,6 +61,9 @@ export function initCorrelation() {
   statusEl = $('#corr-status');
   $('#btn-corr-network')?.addEventListener('click', () => setMode('NETWORK'));
   $('#btn-corr-matrix')?.addEventListener('click', () => setMode('MATRIX'));
+  $('#btn-corr-full')?.addEventListener('click', () => setLinkMode('FULL'));
+  $('#btn-corr-material')?.addEventListener('click', () => setLinkMode('MATERIAL'));
+  $('#btn-corr-stress')?.addEventListener('click', () => setLinkMode('STRESS'));
   const holder = $('#corr-chart');
   if (holder && typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => renderCorrelation(true));
@@ -83,9 +93,31 @@ export function initCorrelation() {
       rafId = null;
     } else ensureNetworkAnimation();
   }, { passive: true });
-  unsubscribeTick = subscribeMarketTick((tick) => { liveTick = tick; ensureNetworkAnimation(); });
+  unsubscribeTick = subscribeMarketTick((tick) => { liveTick = tick; liveTickAt = performance.now(); ensureNetworkAnimation(); });
   fetchGraphData();
   refreshTimer = setInterval(fetchGraphData, 300000);
+}
+
+function setLinkMode(mode) {
+  if (currentLinkMode === mode) return;
+  currentLinkMode = mode;
+  for (const name of ['FULL', 'MATERIAL', 'STRESS']) {
+    $(`#btn-corr-${name.toLowerCase()}`)?.classList.toggle('active', mode === name);
+  }
+  if (currentMode === 'NETWORK') renderForceGraph(true);
+}
+
+export function linksForNetworkMode(links = [], mode = 'FULL') {
+  if (mode === 'MATERIAL') return links.filter((link) =>
+    Math.abs(Number(link.correlation || 0)) >= .22
+    || Number(link.tension || 0) >= .08
+    || link.status === 'BREAK_ALERT');
+  if (mode === 'STRESS') return links.filter((link) =>
+    link.status === 'BREAK_ALERT'
+    || Number(link.tension || 0) >= .08
+    || Math.abs(correlationMotionRate(link)) >= .015
+    || Math.abs(Number(link.delta_baseline || 0)) >= .12);
+  return links.slice();
 }
 
 function setMode(mode) {
@@ -110,7 +142,10 @@ export async function fetchGraphData() {
   try {
     const res = await fetch('/api/analytics/correlation-graph', { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    graphData = await res.json();
+    const next = await res.json();
+    const signature = JSON.stringify((next.links || []).map((link) => [link.source, link.target, link.correlation, link.delta_5m, link.delta_15m, link.delta_1h]));
+    if (signature !== lastGraphSig) { lastGraphSig = signature; graphObservedAt = performance.now(); }
+    graphData = next;
     renderCorrelation(true);
   } catch (err) {
     console.warn('Correlation graph fetch error:', err);
@@ -248,55 +283,67 @@ function renderForceGraph(force = false) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   const activeInstrument = aliasForInstrument(liveTick?.trade?.instrument);
-  const allActive = links.filter((l) => Math.abs(Number(l.correlation || 0)) >= .22 || Number(l.tension || 0) >= .08 || l.status === 'BREAK_ALERT');
-  const linkDynamics = allActive.some((l) => Number(l.velocity_magnitude || 0) > .01 || l.status === 'BREAK_ALERT');
+  const shownLinks = linksForNetworkMode(links, currentLinkMode);
+  const linkDynamics = shownLinks.some((l) => Math.abs(correlationMotionRate(l)) > .01);
   let lastDraw = 0;
+  let lastPhaseFrame = 0;
   const activeFrame = mobile ? 32 : 16;
   const idleFrame = mobile ? 110 : 80;
 
   const draw = (now) => {
     if (generationNow !== generation || currentMode !== 'NETWORK') return;
     if (!canAnimateNetwork()) { rafId = null; return; }
-    const liveImpulseNow = clamp(Number(liveTick?.impulse || 0), 0, 1);
-    const dynamicNow = linkDynamics || liveImpulseNow > .015 || draggedNodeId || hoveredNodeId;
+    const observationDecay = observedMotionDecay((now - graphObservedAt) / 1000, 7);
+    const liveImpulseNow = clamp(Number(liveTick?.impulse || 0), 0, 1)
+      * observedMotionDecay((now - liveTickAt) / 1000, 1.2);
+    const dynamicNow = (linkDynamics && observationDecay > .01) || liveImpulseNow > .015 || draggedNodeId || hoveredNodeId;
     const minFrame = dynamicNow ? activeFrame : idleFrame;
     if (now - lastDraw < minFrame) { rafId = requestAnimationFrame(draw); return; }
     lastDraw = now;
     ctx.clearRect(0, 0, width, height);
     drawNetworkBackground(ctx, width, height, mobile);
 
-    links.forEach((l) => {
+    const dt = lastPhaseFrame ? Math.max(0, Math.min(.25, (now - lastPhaseFrame) / 1000)) : 0;
+    lastPhaseFrame = now;
+    shownLinks.forEach((l) => {
       const a = byId.get(l.source), b = byId.get(l.target); if (!a || !b) return;
       const rho = Number(l.correlation || 0), absR = Math.abs(rho);
-      const alpha = .045 + absR * .17;
+      const incident = !selectedNodeId || l.source === selectedNodeId || l.target === selectedNodeId;
+      const alpha = (.045 + absR * .17) * (incident ? 1 : .16);
       ctx.strokeStyle = edgeColor(rho, alpha);
-      ctx.lineWidth = .55 + absR * .8;
+      ctx.lineWidth = (.55 + absR * .8) * (selectedNodeId && incident ? 1.8 : 1);
       ctx.setLineDash(absR < .08 ? [2, 5] : []);
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
       ctx.setLineDash([]);
     });
 
-    allActive.forEach((l, li) => {
+    shownLinks.forEach((l) => {
       const a = byId.get(l.source), b = byId.get(l.target); if (!a || !b) return;
       const rho = Number(l.correlation || 0), absR = Math.abs(rho);
       const tension = clamp(l.tension || 0, 0, 1.5);
       const alert = l.status === 'BREAK_ALERT';
-      ctx.strokeStyle = alert ? 'rgba(255,82,105,.82)' : edgeColor(rho, .26 + absR * .54);
-      ctx.lineWidth = (mobile ? .9 : 1.1) + absR * (mobile ? 2.2 : 3.0) + tension * (mobile ? .9 : 1.5);
+      const incident = !selectedNodeId || l.source === selectedNodeId || l.target === selectedNodeId;
+      const focusAlpha = incident ? 1 : .14;
+      ctx.strokeStyle = alert ? `rgba(255,82,105,${.82*focusAlpha})` : edgeColor(rho, (.20 + absR * .54) * focusAlpha);
+      ctx.lineWidth = ((mobile ? .7 : .9) + absR * (mobile ? 2.2 : 3.0) + tension * (mobile ? .9 : 1.5)) * (selectedNodeId && incident ? 1.5 : 1);
       ctx.setLineDash(alert ? [7, 5] : []);
       ctx.shadowColor = alert ? '#ff5269' : (rho >= 0 ? '#43d79f' : '#ff5e78');
-      ctx.shadowBlur = mobile ? 3 + tension * 4 : 4 + tension * 8;
+      ctx.shadowBlur = (mobile ? 3 + tension * 4 : 4 + tension * 8) * focusAlpha;
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
       ctx.shadowBlur = 0; ctx.setLineDash([]);
 
-      const velocity = clamp(Number(l.velocity_magnitude || 0) / .35, 0, 1);
-      if (velocity > .03 || alert) {
-        const speed = .035 + velocity * .22;
-        const phase = (now / 1000 * speed + li * .173) % 1;
-        const packets = mobile ? [phase] : [phase, (phase + .5) % 1];
+      const measuredRate = correlationMotionRate(l) * observationDecay;
+      const velocity = Math.abs(measuredRate);
+      if (velocity > .012 && incident) {
+        const key = `${l.source}|${l.target}`;
+        const phase = advanceMeasuredPhase(packetPhases.get(key) || 0, velocity * .72, dt);
+        packetPhases.set(key, phase);
+        // Mirrored packets make relationship change visible without claiming a
+        // causal source/target direction that has not been estimated.
+        const packets = [.5 + .5 * phase, .5 - .5 * phase];
         for (const t of packets) {
           const x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t;
-          const r = (mobile ? 1.5 : 2) + (mobile ? 3 : 4.5) * Math.max(velocity, tension * .5);
+          const r = (mobile ? 1.3 : 1.7) + (mobile ? 3 : 4.5) * Math.max(velocity, tension * .5);
           const grad = ctx.createRadialGradient(x, y, 0, x, y, r * 2.4);
           grad.addColorStop(0, alert ? 'rgba(255,99,115,.96)' : (rho >= 0 ? 'rgba(74,232,177,.92)' : 'rgba(255,103,124,.92)'));
           grad.addColorStop(1, 'rgba(255,255,255,0)');
@@ -320,9 +367,12 @@ function renderForceGraph(force = false) {
       const incident = links.filter((l) => l.source === n.id || l.target === n.id);
       const noDynamics = incident.every((l) => Math.abs(Number(l.correlation || 0)) < .015 && Number(l.tension || 0) < .015);
       const isLive = activeInstrument && (n.id === activeInstrument || (activeInstrument === 'XAU' && n.id === 'GOLD'));
+      const selected = n.id === selectedNodeId;
+      const dimmed = selectedNodeId && !selected;
       const liveImpulse = isLive ? liveImpulseNow : 0;
       const r = (mobile ? 12 : 15) + coupling * (mobile ? 7 : 10);
 
+      ctx.globalAlpha = dimmed ? .34 : 1;
       if (stress > .03 || liveImpulse > .02) {
         const haloR = r + (mobile ? 12 : 20) + stress * (mobile ? 10 : 16) + liveImpulse * (mobile ? 10 : 18);
         const halo = ctx.createRadialGradient(n.x, n.y, r * .6, n.x, n.y, haloR);
@@ -333,14 +383,14 @@ function renderForceGraph(force = false) {
 
       ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
       ctx.fillStyle = noDynamics ? '#314355' : groupColor(n.group); ctx.fill();
-      ctx.strokeStyle = n.break_count ? '#ff5b72' : isLive ? '#ffbf55' : 'rgba(238,245,249,.88)';
-      ctx.lineWidth = n.break_count ? (mobile ? 2 : 3) : isLive ? (mobile ? 2 : 2.8) : 1.3; ctx.stroke();
+      ctx.strokeStyle = selected ? '#fff4bd' : n.break_count ? '#ff5b72' : isLive ? '#ffbf55' : 'rgba(238,245,249,.88)';
+      ctx.lineWidth = selected ? (mobile ? 3 : 4) : n.break_count ? (mobile ? 2 : 3) : isLive ? (mobile ? 2 : 2.8) : 1.3; ctx.stroke();
       if (noDynamics && !mobile) { ctx.setLineDash([3,3]); ctx.strokeStyle = 'rgba(190,206,216,.45)'; ctx.beginPath(); ctx.arc(n.x,n.y,r+4,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]); }
 
       ctx.beginPath(); ctx.arc(n.x, n.y, r + (mobile ? 4 : 5), -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * stress);
       ctx.strokeStyle = stress > .65 ? '#ff5b72' : stress > .35 ? '#e2aa45' : '#48c7b0'; ctx.lineWidth = mobile ? 2 : 3; ctx.stroke();
       if (liveImpulse > .02) {
-        const rr = r + 8 + ((now / 14) % (mobile ? 14 : 20));
+        const rr = r + 8 + liveImpulse * (mobile ? 10 : 16);
         ctx.beginPath(); ctx.arc(n.x, n.y, rr, 0, Math.PI * 2);
         ctx.strokeStyle = `rgba(255,191,85,${Math.max(0, .45 - (rr-r-8)/38) * liveImpulse})`; ctx.lineWidth = 1.2; ctx.stroke();
       }
@@ -349,17 +399,18 @@ function renderForceGraph(force = false) {
         ctx.fillStyle = 'rgba(201,216,226,.66)'; ctx.font = '8px IBM Plex Mono,monospace';
         ctx.fillText(noDynamics ? 'NO PAIR DYN' : `σ ${Number(n.stress_pressure || 0).toFixed(2)}`, n.x, n.y + r + 15);
       }
+      ctx.globalAlpha = 1;
     });
 
-    drawHud(ctx, width, height, systemic, frag, links.length, allActive.length, mobile);
-    if (!mobile) drawHover(ctx, byId, links, width, height);
+    drawHud(ctx, width, height, systemic, frag, links.length, shownLinks.length, mobile);
+    drawHover(ctx, byId, links, width, height);
     rafId = requestAnimationFrame(draw);
   };
 
   bindNetworkPointer(cv, nodes, byId, width, height, mobile);
   if (rafId) cancelAnimationFrame(rafId);
   if (canAnimateNetwork()) rafId = requestAnimationFrame(draw);
-  updateNetworkText(links, allActive);
+  updateNetworkText(links, shownLinks);
 }
 
 function drawNetworkBackground(ctx, width, height, mobile) {
@@ -375,28 +426,30 @@ function drawHud(ctx, width, height, systemic, frag, allPairs, activePairs, mobi
   ctx.strokeStyle='rgba(184,207,222,.14)';ctx.strokeRect(8,8,boxW,boxH);
   ctx.fillStyle='#cbdce5';ctx.font=`${mobile?7:9}px IBM Plex Mono,monospace`;ctx.textAlign='left';
   ctx.fillText(`COUP ${systemic.toFixed(2)}  TENS ${Number(s.network_tension||0).toFixed(2)}`,14,mobile?23:26);
-  ctx.fillText(`FRAG ${frag.toFixed(2)}  LINKS ${allPairs}/${activePairs}`,14,mobile?37:42);
+  ctx.fillText(`FRAG ${frag.toFixed(2)}  SHOWN ${activePairs}/${allPairs}`,14,mobile?37:42);
   if(!mobile){ctx.fillStyle='#f0bd58';ctx.fillText(`STRESS NODE ${s.dominant_stress_node||'—'}`,18,57);}
 }
 
 function drawHover(ctx, byId, links, width, height) {
-  if (!hoveredNodeId) return;
-  const n = byId.get(hoveredNodeId); if (!n) return;
+  const focusId = selectedNodeId || hoveredNodeId;
+  if (!focusId) return;
+  const n = byId.get(focusId); if (!n) return;
   const incident = links.filter((l) => l.source === n.id || l.target === n.id).sort((a,b)=>Math.abs(Number(b.correlation||0))-Math.abs(Number(a.correlation||0))).slice(0,4);
-  const boxW=190,boxH=42+incident.length*15;let x=Math.min(width-boxW-8,n.x+22),y=Math.max(8,Math.min(height-boxH-8,n.y-boxH/2));
+  const mobile=isAnalyticsMobile();const boxW=mobile?176:190,boxH=42+incident.length*15;let x=Math.min(width-boxW-8,n.x+22),y=Math.max(8,Math.min(height-boxH-8,n.y-boxH/2));
   ctx.fillStyle='rgba(4,12,20,.94)';ctx.fillRect(x,y,boxW,boxH);ctx.strokeStyle='rgba(214,228,236,.18)';ctx.strokeRect(x,y,boxW,boxH);ctx.fillStyle='#fff';ctx.font='bold 10px IBM Plex Mono,monospace';ctx.textAlign='left';ctx.fillText(`${n.id} · COUPLING ${Number(n.coupling||0).toFixed(2)}`,x+9,y+16);ctx.font='9px IBM Plex Mono,monospace';ctx.fillStyle='#b9ccd7';incident.forEach((l,i)=>{const other=l.source===n.id?l.target:l.source;ctx.fillText(`${other.padEnd(7)} ρ ${Number(l.correlation||0)>=0?'+':''}${Number(l.correlation||0).toFixed(2)} · Δ ${Number(l.delta_baseline||0).toFixed(2)}`,x+9,y+34+i*15);});
 }
 
 function bindNetworkPointer(cv, nodes, byId, width, height, mobile) {
   const pointer=(e)=>{const r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)*width/r.width,y:(e.clientY-r.top)*height/r.height};};
-  cv.onpointerdown=(e)=>{const p=pointer(e),hit=nodes.find(n=>Math.hypot(n.x-p.x,n.y-p.y)<=(mobile?25:30));if(!hit)return;draggedNodeId=hit.id;cv.setPointerCapture?.(e.pointerId);cv.style.cursor='grabbing';ensureNetworkAnimation();};
+  cv.onpointerdown=(e)=>{const p=pointer(e),hit=nodes.find(n=>Math.hypot(n.x-p.x,n.y-p.y)<=(mobile?25:30));if(!hit){selectedNodeId=null;ensureNetworkAnimation();return;}selectedNodeId=selectedNodeId===hit.id?null:hit.id;draggedNodeId=hit.id;cv.setPointerCapture?.(e.pointerId);cv.style.cursor='grabbing';ensureNetworkAnimation();};
   cv.onpointermove=(e)=>{const p=pointer(e);if(draggedNodeId){const n=byId.get(draggedNodeId);if(n){n.x=Math.max(24,Math.min(width-24,p.x));n.y=Math.max(24,Math.min(height-24,p.y));positions.set(n.id,{x:n.x,y:n.y});}}else if(!mobile){const hit=nodes.find(n=>Math.hypot(n.x-p.x,n.y-p.y)<=30);hoveredNodeId=hit?.id||null;cv.style.cursor=hit?'pointer':'grab';}ensureNetworkAnimation();};
   const release=(e)=>{if(draggedNodeId){draggedNodeId=null;cv.releasePointerCapture?.(e.pointerId);cv.style.cursor='grab';ensureNetworkAnimation();}};cv.onpointerup=release;cv.onpointercancel=release;cv.onpointerleave=()=>{if(!draggedNodeId)hoveredNodeId=null;};
 }
 
 function updateNetworkText(links, activeLinks) {
-  const s=graphData.summary||{};if(statusEl)statusEl.textContent=s.active_breaks_count?`⚠ ${s.active_breaks_count} BREAK · TENSION ${Number(s.network_tension||0).toFixed(2)} · ${links.length} LINKS`:`● ${links.length} LINKS · COUPLING ${Number(s.systemic_coupling||0).toFixed(2)}${s.velocity_ready?'':' · ΔV BUILDING'}`;
-  const interpret=$('#corr-interpretation');if(interpret){const top=(graphData.break_alerts||[])[0];interpret.innerHTML=top?`<b>NETWORK TENSION:</b> ${top.source}↔${top.target} · ρ ${Number(top.correlation).toFixed(2)} · Δbaseline ${top.delta_baseline==null?'—':Number(top.delta_baseline).toFixed(2)} · Δ15m ${top.delta_15m==null?'—':Number(top.delta_15m).toFixed(2)}. <b>Все ${links.length} наблюдаемых связи</b> показаны фоновым слоем; активный слой выделяет ${activeLinks.length} сильных/быстро меняющихся.`:`<b>FULL TOPOLOGY:</b> все ${links.length} наблюдаемых пары показаны; ${activeLinks.length} находятся в активном слое.`;interpret.style.display='block';}
+  const s=graphData.summary||{};if(statusEl)statusEl.textContent=`${s.active_breaks_count?'⚠':'●'} ${currentLinkMode} · SHOWN LINKS ${activeLinks.length} / OBSERVED ${links.length} · TENSION ${Number(s.network_tension||0).toFixed(2)}`;
+  const headline=$('#corr-human-line');if(headline){const velocity=Number(s.max_break_velocity||0);headline.textContent=s.active_breaks_count?`NETWORK BREAKS ${s.active_breaks_count} · ${s.dominant_stress_node||'SYSTEM'} STRESS DOMINANT`:velocity>.02?`CROSS-ASSET RELATIONSHIPS CHANGING · Δρ VELOCITY ${velocity.toFixed(2)}`:`CROSS-ASSET COUPLING STABLE · Δρ VELOCITY ≈ 0`;}
+  const interpret=$('#corr-interpretation');if(interpret){const top=(graphData.break_alerts||[])[0];const detail=top?`<b>TOP STRESS:</b> ${top.source}↔${top.target} · ρ ${Number(top.correlation).toFixed(2)} · Δbaseline ${top.delta_baseline==null?'—':Number(top.delta_baseline).toFixed(2)} · Δ15m ${top.delta_15m==null?'—':Number(top.delta_15m).toFixed(2)}. `:'';interpret.innerHTML=`${detail}<b>${currentLinkMode}:</b> SHOWN LINKS ${activeLinks.length} / OBSERVED ${links.length}. Width = |ρ| · green/red = sign · glow = tension · mirrored packet speed = measured |dρ/dt| (no causal direction) · node radius = coupling · halo = stress.`;interpret.style.display='block';}
 }
 
 function ensureNetworkAnimation(){

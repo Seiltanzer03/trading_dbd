@@ -164,6 +164,30 @@ def _macro_regime_payload(self: Engine) -> dict:
         source_meta=meta,
         correlation_history=corr_history,
     )
+    if res.get("available"):
+        trajectory = res.get("trajectory_3d") or []
+        references: dict[str, dict] = {}
+
+        def nearest_state(label: str, ts: object) -> None:
+            if not _finite(ts) or not trajectory:
+                return
+            point = min(trajectory, key=lambda item: abs(float(item.get("ts") or 0) - float(ts)))
+            # A reference is honest only when the model trajectory actually has
+            # a nearby observed state; never place a synthetic marker.
+            if abs(float(point.get("ts") or 0) - float(ts)) <= 30 * 60:
+                references[label] = {
+                    "requested_ts": float(ts), "state_ts": point.get("ts"),
+                    "x": point.get("x"), "y": point.get("y"), "z": point.get("z"),
+                    "regime": point.get("regime"),
+                }
+
+        trade = self.journal.active_trade()
+        if trade:
+            nearest_state("entry", trade.get("opened_at"))
+            reviews = self.journal.recent_ai_contexts(int(trade["id"]), limit=1)
+            if reviews:
+                nearest_state("previous_ai_review", reviews[-1].get("ts"))
+        res["reference_points"] = references
     if res.get("available") and res.get("summary"):
         self._last_macro_regime = res["summary"].get("regime")
         self._macro_regime_summary_cache = res.get("summary")

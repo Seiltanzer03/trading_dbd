@@ -40,6 +40,7 @@ export function ensurePremiumAnalyticsTheme() {
       color: #fff !important;
       box-shadow: 0 2px 8px rgba(16,40,63,.18);
     }
+    .analytics-human-line{padding:8px 13px 7px;border-top:1px solid rgba(75,104,120,.12);border-bottom:1px solid rgba(75,104,120,.10);background:linear-gradient(90deg,rgba(10,31,44,.055),rgba(72,201,190,.035),transparent);color:#314d5b;font:700 10px/1.35 'IBM Plex Mono',monospace;letter-spacing:.055em}
     .analytics-hud-pill {
       display:inline-flex;align-items:center;gap:5px;padding:3px 7px;border-radius:999px;
       border:1px solid rgba(44,62,80,.14);background:rgba(255,255,255,.86);font-size:9px;color:#5f6872;
@@ -100,6 +101,8 @@ export function ensurePremiumAnalyticsTheme() {
         max-width:100% !important;
         gap:4px !important;
       }
+      #corr-link-mode-group{order:3;width:100%;justify-content:flex-end}
+      .analytics-human-line{font-size:8px;padding:7px 10px;letter-spacing:.035em}
       #panel-gex-evol .btn-toggle,
       #panel-macro-regime .btn-toggle,
       #panel-wavelet .btn-toggle,
