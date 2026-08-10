@@ -58,6 +58,7 @@ jobs:
         run: |
           node tests/web/plotly_camera_webkit_e2e.mjs
           node tests/web/correlation_controls_webkit_e2e.mjs
+          node tests/web/ai_management_decision_webkit_e2e.mjs
       - name: Publish full CI status
         if: always()
         env:
