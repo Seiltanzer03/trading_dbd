@@ -14,6 +14,10 @@ def install_measurement_runtime() -> None:
     # surface while replacing only resolution/cohort/readiness behavior.
     from .measurement_path_runtime import install_path_runtime
     install_path_runtime()
+    # A confirmed first touch only needs authoritative coverage through the event;
+    # NO_TOUCH still needs the complete horizon.
+    from .measurement_path_refinement import install_path_refinement
+    install_path_refinement()
 
     # Keep the legacy readiness key as a read-only compatibility alias while the
     # authoritative current name is pristine_f32_dataset_ready.
