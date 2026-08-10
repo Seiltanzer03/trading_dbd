@@ -5,6 +5,7 @@ pipeline but is never eligible research evidence.
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import math
@@ -14,8 +15,8 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from statistics import NormalDist
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -29,6 +30,70 @@ MAX_GAP_SEC = 5 * 60
 PASSIVE_SCHEMA_VERSION = "passive-observation-f2-v1"
 FORECAST_VERSION = "passive-forecast-f2-v1"
 RESOLVER_VERSION = "passive-resolver-f2-v1"
+SESSION_CONTRACT_VERSION = "market-session-f2-v1"
+EVENT_TRIGGER_CONTRACT_VERSION = "passive-event-trigger-f2-v1"
+EVENT_MIN_SPACING_SEC = 5 * 60
+
+# Exchange-local regular sessions. FX/metals use an explicit weekday 24h
+# research clock until a holiday calendar is connected.
+_SESSION_SPECS = {
+    "NAS100": ("America/New_York", ((9*60+30, 16*60),)),
+    "SP500": ("America/New_York", ((9*60+30, 16*60),)),
+    "US30": ("America/New_York", ((9*60+30, 16*60),)),
+    "GER40": ("Europe/Berlin", ((9*60, 17*60+30),)),
+    "UK100": ("Europe/London", ((8*60, 16*60+30),)),
+    "JPY100": ("Asia/Tokyo", ((9*60, 11*60+30), (12*60+30, 15*60))),
+    "XAU": ("UTC", ((0, 24*60),)),
+    "XAG": ("UTC", ((0, 24*60),)),
+    "EURUSD": ("UTC", ((0, 24*60),)),
+    "USDCAD": ("UTC", ((0, 24*60),)),
+}
+
+
+def _session_state(instrument: str, timestamp: float) -> dict:
+    zone_name, windows = _SESSION_SPECS[instrument]
+    local = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).astimezone(
+        ZoneInfo(zone_name))
+    minute = local.hour*60 + local.minute + local.second/60
+    weekday_open = local.weekday() < 5
+    active = weekday_open and any(start <= minute < end for start, end in windows)
+    label = "OPEN" if active else (
+        "WEEKEND_CLOSED" if not weekday_open else "OUT_OF_SESSION")
+    return {
+        "contract_version": SESSION_CONTRACT_VERSION,
+        "timezone": zone_name, "session": label, "is_open": active,
+        "local_date": local.date().isoformat(),
+    }
+
+
+def _trading_seconds_between(instrument: str, start: float, end: float) -> float:
+    if end <= start:
+        return 0.0
+    cursor = math.floor(start/60)*60.0
+    total = 0.0
+    while cursor < end:
+        left, right = max(start, cursor), min(end, cursor+60.0)
+        if right > left and _session_state(instrument, (left+right)/2)["is_open"]:
+            total += right-left
+        cursor += 60.0
+    return total
+
+
+def _advance_trading_time(instrument: str, start: float,
+                          trading_minutes: int) -> float:
+    required = float(trading_minutes)*60.0
+    cursor, accumulated = float(start), 0.0
+    # 24 trading hours can cross a weekend. Ten calendar days is a safe hard
+    # bound for the current maximum horizon without silently looping forever.
+    deadline = cursor + 10*86400
+    while accumulated < required and cursor < deadline:
+        right = min(math.floor(cursor/60)*60+60.0, deadline)
+        if _session_state(instrument, (cursor+right)/2)["is_open"]:
+            accumulated += right-cursor
+        cursor = right
+    if accumulated + 1e-6 < required:
+        raise ValueError("unable to advance trading horizon")
+    return cursor
 
 
 def _json(value: Any) -> str:
@@ -300,7 +365,11 @@ class PassiveLearningEngine:
             ids = []
             for horizon in HORIZONS_MINUTES:
                 observation_id = f"{anchor}-{horizon}m"
-                target = captured_ts + horizon*60.
+                target = (
+                    captured_ts + horizon*60.
+                    if trigger_reason == "test"
+                    else _advance_trading_time(instrument, captured_ts, horizon)
+                )
                 self._conn.execute(
                     "INSERT OR IGNORE INTO passive_market_observations("
                     "observation_id,anchor_group_id,captured_ts,target_ts,instrument,"
@@ -331,6 +400,24 @@ class PassiveLearningEngine:
                 ids.append(observation_id)
         return ids
 
+    @staticmethod
+    def _event_trigger_reason(*, now: float, last: dict | None,
+                              price: float) -> str | None:
+        if not last:
+            return "cadence"
+        age = now-float(last["captured_ts"])
+        if age >= OBSERVATION_CADENCE_SEC:
+            return "cadence"
+        if age < EVENT_MIN_SPACING_SEC:
+            return None
+        forecast = json.loads(last.get("forecast_json") or "{}")
+        sigma = _finite(forecast.get("sigma_h_return"))
+        threshold = max(.001, .75*sigma) if sigma is not None else .003
+        previous = _finite(last.get("market_price"))
+        if previous and abs(math.log(price/previous)) >= threshold:
+            return "large_price_displacement"
+        return None
+
     def _collect_instrument(self, instrument: str, now: float) -> list[str]:
         feed = self._feed(instrument)
         feed.refresh_price()
@@ -339,15 +426,22 @@ class PassiveLearningEngine:
         ts = _finite(state.get("ts")) or now
         if price is None or price <= 0:
             return []
+        session_state = _session_state(instrument, now)
+        if not self.settings.demo and not session_state["is_open"]:
+            return []
         kind = self._source_kind(state.get("source"), self.settings.demo)
         quality = self._quality(state)
         self.record_market_point(instrument, ts, price, source=state.get("source") or "",
                                  quality=quality, kind=kind)
         with self._lock:
-            last = self._conn.execute(
-                "SELECT MAX(captured_ts) FROM passive_market_observations "
-                "WHERE instrument=?", (instrument,)).fetchone()[0]
-        if last is not None and now-float(last) < OBSERVATION_CADENCE_SEC:
+            source_row = self._conn.execute(
+                "SELECT captured_ts,market_price,forecast_json "
+                "FROM passive_market_observations WHERE instrument=? "
+                "ORDER BY captured_ts DESC LIMIT 1", (instrument,)).fetchone()
+            last = dict(source_row) if source_row else None
+        trigger_reason = self._event_trigger_reason(
+            now=now, last=last, price=price)
+        if trigger_reason is None:
             return []
         # These calls occur in the isolated passive feed and low-priority thread.
         # They cannot change the live UI instrument.
@@ -388,14 +482,21 @@ class PassiveLearningEngine:
             "cross_asset": {"available": False},
             "market_regime": "UNCLASSIFIED",
             "wavelet_context": {"available": False},
-            "session": "continuous_observed_clock",
+            "session": session_state["session"],
+            "session_state": session_state,
             "missing_is_not_zero": True,
-            "trigger_contract_version": "passive-trigger-f2-v1",
+            "trigger_contract_version": EVENT_TRIGGER_CONTRACT_VERSION,
+            "trigger_thresholds": {
+                "large_price_displacement_sigma_15m": .75,
+                "absolute_floor_log_return": .001,
+                "minimum_event_spacing_sec": EVENT_MIN_SPACING_SEC,
+            },
         }
         return self.capture_observation(
             instrument=instrument, captured_ts=ts, market_price=price,
             features=features, forecast=forecast, provenance=provenance,
-            trigger_reason="cadence", evidence_eligible=not self.settings.demo)
+            trigger_reason=trigger_reason,
+            evidence_eligible=not self.settings.demo)
 
     def step(self, now: float | None = None) -> dict:
         now = float(now or time.time())
@@ -422,9 +523,12 @@ class PassiveLearningEngine:
                 (row["instrument"], captured-1e-6, target+1e-6)).fetchall()]
         if not points or points[-1]["ts"] < target-1e-6:
             return "pending" if now <= target+MAX_GAP_SEC else "insufficient_future_data"
-        if points[0]["ts"] > captured+MAX_GAP_SEC:
+        if _trading_seconds_between(
+                row["instrument"], captured, float(points[0]["ts"])) > MAX_GAP_SEC:
             return "insufficient_future_data"
-        gaps = [float(b["ts"])-float(a["ts"]) for a,b in zip(points,points[1:])]
+        gaps = [_trading_seconds_between(
+                    row["instrument"], float(a["ts"]), float(b["ts"]))
+                for a,b in zip(points,points[1:])]
         if gaps and max(gaps) > MAX_GAP_SEC:
             return "insufficient_future_data"
         start, end = float(row["market_price"]), float(points[-1]["price"])
@@ -485,7 +589,10 @@ class PassiveLearningEngine:
                 "UPDATE passive_market_observations SET resolution_status='resolved',"
                 "resolved_ts=?,outcome_json=?,calendar_elapsed=?,trading_elapsed=?,"
                 "market_open_fraction=? WHERE observation_id=?",
-                (now, _json(outcome), target-captured, target-captured, 1.0,
+                (now, _json(outcome), target-captured,
+                 _trading_seconds_between(row["instrument"], captured, target),
+                 (_trading_seconds_between(row["instrument"], captured, target)
+                  / (target-captured) if target > captured else 0.0),
                  row["observation_id"]))
         return "resolved"
 

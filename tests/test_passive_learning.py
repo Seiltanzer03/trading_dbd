@@ -2,7 +2,10 @@ import json, sqlite3
 import pytest
 from seiltanzer.config import Settings
 from seiltanzer.data.cache import DiskCache
-from seiltanzer.passive_learning import PassiveLearningEngine
+from seiltanzer.passive_learning import (
+    PassiveLearningEngine, _advance_trading_time, _session_state,
+    _trading_seconds_between,
+)
 
 @pytest.fixture
 def passive(tmp_path):
@@ -99,3 +102,28 @@ def test_purged_embargo_split_is_chronological_and_non_overlapping(passive):
     if split["validation_ids"] and split["test_ids"]:
         assert max(by_id[x]["target_ts"] for x in split["validation_ids"]) < min(
             by_id[x]["captured_ts"] for x in split["test_ids"])
+
+
+def test_exchange_session_and_trading_horizon_skip_weekend():
+    # Friday 15:50 New York during standard time.
+    import datetime as dt
+    start=dt.datetime(2026,1,9,20,50,tzinfo=dt.timezone.utc).timestamp()
+    assert _session_state("NAS100",start)["is_open"] is True
+    target=_advance_trading_time("NAS100",start,20)
+    local=dt.datetime.fromtimestamp(target,dt.timezone.utc)
+    assert local.weekday() == 0
+    assert _trading_seconds_between("NAS100",start,target) == pytest.approx(1200)
+
+
+def test_event_trigger_is_versioned_spaced_and_deterministic():
+    import json
+    last={"captured_ts":1000.,"market_price":100.,
+          "forecast_json":json.dumps({"sigma_h_return":.01})}
+    assert PassiveLearningEngine._event_trigger_reason(
+        now=1100.,last=last,price=102.) is None
+    assert PassiveLearningEngine._event_trigger_reason(
+        now=1400.,last=last,price=100.2) is None
+    assert PassiveLearningEngine._event_trigger_reason(
+        now=1400.,last=last,price=101.) == "large_price_displacement"
+    assert PassiveLearningEngine._event_trigger_reason(
+        now=2000.,last=last,price=100.) == "cadence"
