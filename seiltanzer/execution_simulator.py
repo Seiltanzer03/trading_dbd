@@ -75,6 +75,7 @@ class ExecutionResult:
     be_armed_step: int | None
     filled_rungs: tuple[float, ...]
     remaining_fraction: float
+    events: tuple[dict, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -88,6 +89,7 @@ class ExecutionResult:
             "be_armed_step": self.be_armed_step,
             "filled_rungs": list(self.filled_rungs),
             "remaining_fraction": self.remaining_fraction,
+            "events": [dict(event) for event in self.events],
         }
 
 
@@ -115,18 +117,23 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
     remaining = 1.0
     realized = 0.0
     filled: list[float] = []
+    event_timeline: list[dict] = []
     pending = list(spec.future_rungs)
     be_armed = spec.max_r >= spec.be_after_r - EPSILON
     be_step: int | None = 0 if be_armed else None
 
     def finish(exit_r: float, reason: str, step: int,
                fraction: float) -> ExecutionResult:
+        events = [*event_timeline, {
+            "type": reason, "r": float(exit_r), "step": int(step),
+            "segment_fraction": float(fraction), "remaining_after": 0.0,
+        }]
         return ExecutionResult(
             outcome_r=float(realized + remaining * exit_r),
             exit_r=float(exit_r), exit_reason=reason, exit_step=step,
             exit_fraction=float(fraction), be_armed=be_armed,
             be_armed_step=be_step, filled_rungs=tuple(filled),
-            remaining_fraction=float(remaining),
+            remaining_fraction=float(remaining), events=tuple(events),
         )
 
     if values.size == 1:
@@ -157,9 +164,24 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
                     remaining -= fill
                     filled.append(level)
                     pending.remove(level)
+                    event_timeline.append({
+                        "type": "rung", "r": float(level), "step": int(step),
+                        "segment_fraction": float(fraction),
+                        "fill_fraction": float(fill),
+                        "remaining_after": float(remaining),
+                    })
+                    if remaining <= EPSILON:
+                        # A fully exhausted ladder is a favourable terminal
+                        # resolution even when the geometric final TAKE lies above it.
+                        return finish(level, "take", step, fraction)
                 elif kind == "be_arm":
                     be_armed = True
                     be_step = step
+                    event_timeline.append({
+                        "type": "be_arm", "r": float(level), "step": int(step),
+                        "segment_fraction": float(fraction),
+                        "remaining_after": float(remaining),
+                    })
                 elif kind == "take":
                     return finish(spec.take_r, "take", step, fraction)
         else:

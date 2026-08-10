@@ -45,7 +45,7 @@ assert.ok(Math.abs(cumulativeAt([0.1, 0.5, 1], [0.04, 0.24, 0.44], 0.3) - 0.14) 
 
 const fastTradeCone = {
   horizon_years: 5 / 365,
-  touch_clock: { barrier: 'stop', median_years: 2 / (365 * 24) },
+  touch_clock: { median_status: 'identified', median_years: 2 / (365 * 24) },
   times_frac: [0.05, 0.25, 0.5, 1],
   p_take_by_t: [0.01, 0.06, 0.14, 0.31],
   p_stop_by_t: [0.03, 0.15, 0.27, 0.48],
@@ -61,5 +61,13 @@ assert.ok(decisionView.horizon_years < fastTradeCone.horizon_years / 10,
 assert.ok(decisionView.p_stop < expiryView.p_stop,
   'decision view must report touch probability only through its displayed window');
 assert.equal(expiryView.horizon_frac, 1, 'expiry view must preserve the full option horizon');
+
+const beyondHorizon = computeFanView({
+  ...fastTradeCone,
+  touch_clock: { median_status: 'beyond_horizon', median_years: null,
+    resolved_probability_horizon: 0.37 },
+}, 'DECISION');
+assert.equal(beyondHorizon.zoomed, false, 'unidentified P50 must not create artificial zoom');
+assert.equal(beyondHorizon.source, 'model_horizon_p50_not_identified');
 
 console.log(JSON.stringify({ path, impulseAtHorizon: liveImpulseShape(1), decisionView }));

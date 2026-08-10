@@ -178,6 +178,7 @@ class PathSimulation:
     strategy_exit_reason: np.ndarray | None = None
     be_arm_time: np.ndarray | None = None
     execution_contract: dict | None = None
+    step_count: int | None = None
 
 
 @dataclass
@@ -296,6 +297,12 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
                 fill = np.minimum(future_fraction, strategy_remaining[target])
                 strategy_realized[target] += fill * rung
                 strategy_remaining[target] -= fill
+                fully_closed = target[strategy_remaining[target] <= 1e-10]
+                if fully_closed.size:
+                    strategy_exit_r[fully_closed] = rung
+                    strategy_exit_time[fully_closed] = frac
+                    strategy_exit_reason[fully_closed] = "take"
+                    strategy_alive[fully_closed] = False
 
         active = strategy_alive[idx]
         newly_armed = active & ~be_armed[idx] & (cur >= inputs.be_after - 1e-12)
@@ -434,7 +441,95 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
                           strategy_exit_time=strategy_exit_time,
                           strategy_exit_reason=strategy_exit_reason,
                           be_arm_time=be_arm_time,
-                          execution_contract=execution_contract(spec))
+                          execution_contract=execution_contract(spec),
+                          step_count=n_steps)
+
+
+FIRST_TOUCH_CLOCK_VERSION = "first-touch-clock-f1-v1"
+
+
+def first_touch_clock(sim: PathSimulation, inputs: PolicyInputs) -> dict:
+    """Measure competing-risk resolution from the existing execution paths."""
+    base = {
+        "version": FIRST_TOUCH_CLOCK_VERSION,
+        "available": False,
+        "source": "authoritative_execution_mc",
+        "time_basis": "calendar_elapsed",
+        "horizon_minutes": round(float(inputs.horizon_minutes), 6),
+        "path_count": int(np.asarray(sim.terminal).size),
+        "step_count": int(sim.step_count or 0),
+        "risk_barrier_r": 0.0 if inputs.max_r >= inputs.be_after - 1e-12 else -1.0,
+        "authority": "measurement_only",
+        "changes_distribution": False,
+    }
+    if not inputs.option_available:
+        return {**base, "reason": "option_distribution_unavailable",
+                "median_status": "unavailable"}
+    if sim.strategy_exit_time is None or sim.strategy_exit_reason is None:
+        return {**base, "reason": "execution_event_state_unavailable",
+                "median_status": "unavailable"}
+
+    times = np.asarray(sim.strategy_exit_time, dtype=float)
+    reasons = np.asarray(sim.strategy_exit_reason)
+    if times.size == 0 or reasons.size != times.size:
+        return {**base, "reason": "invalid_execution_event_state",
+                "median_status": "unavailable"}
+    take = reasons == "take"
+    risk = np.isin(reasons, ("stop", "breakeven"))
+    resolved = take | risk
+    n = int(times.size)
+    resolved_probability = float(np.count_nonzero(resolved) / n)
+
+    def unconditional_quantile(q: float) -> float | None:
+        # The denominator is every path. Horizon-censored paths therefore do
+        # not silently become a conditional-on-resolution time statistic.
+        if resolved_probability + 1e-12 < q:
+            return None
+        ordered = np.sort(times[resolved])
+        rank = max(0, int(math.ceil(q * n - 1e-12)) - 1)
+        return float(ordered[min(rank, ordered.size - 1)] * inputs.horizon_minutes)
+
+    p25, p50, p75 = (unconditional_quantile(q) for q in (0.25, 0.50, 0.75))
+    conditional = (
+        float(np.median(times[resolved]) * inputs.horizon_minutes)
+        if np.any(resolved) else None
+    )
+    grid_count = max(1, int(sim.step_count or 40))
+    grid = np.arange(1, grid_count + 1, dtype=float) / grid_count
+    take_cdf = [float(np.mean(take & (times <= frac + 1e-12))) for frac in grid]
+    risk_cdf = [float(np.mean(risk & (times <= frac + 1e-12))) for frac in grid]
+    survival = [max(0.0, 1.0 - a - b) for a, b in zip(take_cdf, risk_cdf)]
+    restricted_times = np.where(resolved, times, 1.0)
+    return {
+        **base,
+        "available": True,
+        "resolved_probability_horizon": round(resolved_probability, 6),
+        "survival_probability_horizon": round(1.0 - resolved_probability, 6),
+        "resolution_time": {
+            "p25_minutes": None if p25 is None else round(p25, 6),
+            "p50_minutes": None if p50 is None else round(p50, 6),
+            "p75_minutes": None if p75 is None else round(p75, 6),
+        },
+        "median_resolution_minutes": None if p50 is None else round(p50, 6),
+        "median_resolution_years": (
+            None if p50 is None else round(p50 / (365.0 * 24.0 * 60.0), 12)),
+        "median_status": "identified" if p50 is not None else "beyond_horizon",
+        "conditional_median_given_resolved_minutes": (
+            None if conditional is None else round(conditional, 6)),
+        "conditional_label": "P50 among paths resolved within horizon",
+        "restricted_mean_time_to_resolution_minutes": round(
+            float(np.mean(restricted_times)) * inputs.horizon_minutes, 6),
+        "cause_probability_horizon": {
+            "take": round(float(np.mean(take)), 6),
+            "stop_or_be": round(float(np.mean(risk)), 6),
+        },
+        "cdf": {
+            "times_frac": grid.tolist(),
+            "take": take_cdf,
+            "stop_or_be": risk_cdf,
+            "survival": survival,
+        },
+    }
 
 
 def baseline_strategy_outcomes(sim: PathSimulation, inputs: PolicyInputs) -> np.ndarray:
@@ -528,9 +623,10 @@ def policy_metrics(policy: PolicyDistribution, sim: PathSimulation,
 def _raw_policy_choice(metrics: dict[str, dict], r0: float,
                        *, cvar_floor: float | None = None) -> tuple[str, dict]:
     floor = max(-0.60, r0 - 0.80) if cvar_floor is None else float(cvar_floor)
-    eligible = [m for m in metrics.values() if (m.get("cvar10_r") or -999.0) >= floor]
+    score = lambda row: -999.0 if row.get("cvar10_r") is None else float(row["cvar10_r"])
+    eligible = [m for m in metrics.values() if score(m) >= floor]
     if not eligible:
-        best = max(metrics.values(), key=lambda x: x.get("cvar10_r") or -999.0)
+        best = max(metrics.values(), key=score)
         return best["name"], {"cvar_floor_r": round(floor, 3), "eligible": []}
     best_mean = max(m["expected_final_r"] for m in eligible)
     # Do not trade a difference smaller than 0.03R: choose the least intervention.
@@ -1268,7 +1364,13 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
                      *, previous_policy_inputs: dict | None = None,
                      previous_evidence: dict | None = None) -> dict:
     inputs = extract_policy_inputs(tick)
-    metrics, sim = _run_once(inputs, n_paths=6500, n_steps=340, seed=0xA17E)
+    if hasattr(engine, "authoritative_execution_mc"):
+        sim = engine.authoritative_execution_mc(inputs)
+        distributions = build_policy_distributions(sim, inputs)
+        metrics = {name: policy_metrics(policy, sim, inputs)
+                   for name, policy in distributions.items()}
+    else:
+        metrics, sim = _run_once(inputs, n_paths=6500, n_steps=340, seed=0xA17E)
     raw_choice, selection_rule = _raw_policy_choice(metrics, inputs.r0)
     evidence = build_metric_evidence(engine, tick, ridge, trade, inputs, sim, metrics)
     stability = stability_analysis(inputs, raw_choice)
@@ -1318,6 +1420,7 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
         "counterfactual_attribution": attribution,
         "metric_changes": metric_changes,
         "cancellation_boundary": cancellation,
+        "first_touch_clock": first_touch_clock(sim, inputs),
         "assumptions": [
             "policies are evaluated for the currently remaining position",
             "future ladder rungs close the configured fraction; already crossed rungs are not paid twice",

@@ -57,7 +57,7 @@ export function cumulativeAt(times, values, tau) {
 
 /**
  * Pick a management window without changing the option distribution itself.
- * DECISION uses the local first-touch variance clock and adds room around its
+ * DECISION uses the authoritative execution-MC first-resolution clock and adds room around its
  * P50. EXPIRY remains the untouched option horizon for deep inspection.
  */
 export function computeFanView(cone, mode = 'DECISION') {
@@ -73,17 +73,19 @@ export function computeFanView(cone, mode = 'DECISION') {
     };
   }
 
-  const clockYears = finite(cone?.touch_clock?.median_years)
+  const identified = cone?.touch_clock?.median_status === 'identified';
+  const clockYears = identified && finite(cone?.touch_clock?.median_years)
     && Number(cone.touch_clock.median_years) > 0
     ? Number(cone.touch_clock.median_years) : null;
   let decisionYears = fullYears;
-  let source = 'option_expiry_no_local_p50';
+  let source = cone?.touch_clock?.median_status === 'beyond_horizon'
+    ? 'model_horizon_p50_not_identified' : 'option_expiry_no_authoritative_p50';
   if (clockYears != null) {
     const minimum = Math.min(fullYears, MIN_DECISION_MINUTES / (365 * 24 * 60));
     // Put the operational P50 at the midpoint: half the chart shows the run-up
     // to median touch and half shows what happens if the trade survives it.
     decisionYears = Math.min(fullYears, Math.max(minimum, clockYears / DECISION_P50_POSITION));
-    source = 'local_first_touch_p50';
+    source = 'authoritative_first_resolution_p50';
   }
   // A tiny crop creates visual churn without adding decision value.
   const horizonFrac = decisionYears / fullYears < 0.90
@@ -209,12 +211,13 @@ export function initFan(canvas) {
     if (!data) { readout.textContent = 'DECISION WINDOW · WAITING FOR TRADE'; return; }
     const view = computeFanView(data, viewMode);
     if (viewMode === 'EXPIRY') {
-      readout.textContent = `FULL OPTION HORIZON ${fmtTime(view.horizon_years)} · DECISION VIEW USES LOCAL FIRST-TOUCH CLOCK`;
+      readout.textContent = `FULL MODEL HORIZON ${fmtTime(view.horizon_years)} · DECISION VIEW USES EXECUTION-MC CLOCK`;
     } else if (view.zoomed) {
-      const barrier = data?.touch_clock?.barrier === 'stop' ? 'STOP' : 'TAKE';
-      readout.textContent = `DECISION ${fmtTime(view.horizon_years)} · LOCAL ${barrier} P50 ${fmtTime(data.touch_clock?.median_years)} · EXPIRY ${fmtTime(view.full_horizon_years)}`;
+      readout.textContent = `DECISION ${fmtTime(view.horizon_years)} · P50 FIRST RESOLUTION ${fmtTime(data.touch_clock?.median_years)} · HORIZON ${fmtTime(view.full_horizon_years)}`;
+    } else if (data?.touch_clock?.median_status === 'beyond_horizon') {
+      readout.textContent = `P50 РАЗВЯЗКИ > ГОРИЗОНТА · ${fmtProb(data.touch_clock?.resolved_probability_horizon)} ПУТЕЙ РАЗРЕШАЮТСЯ ВНУТРИ H`;
     } else {
-      readout.textContent = `EXPIRY ${fmtTime(view.horizon_years)} · LOCAL P50 OUTSIDE USEFUL ZOOM`;
+      readout.textContent = `MODEL HORIZON ${fmtTime(view.horizon_years)} · FIRST-RESOLUTION CLOCK НЕДОСТУПЕН`;
     }
   }
 
@@ -371,8 +374,8 @@ export function initFan(canvas) {
       ctx.fillStyle = COLORS.dim; ctx.font = '9px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
       const termTag = termSlope > 0.03 ? ' · контанго' : termSlope < -0.03 ? ' · бэквордация' : '';
       const medianLabel = medianInside
-        ? `медиана касания ≈ ${fmtTime(data.median_years)}`
-        : `${view.zoomed ? 'окно решения' : 'медиана касания >'} ${fmtTime(hy)}`;
+        ? `P50 развязки ≈ ${fmtTime(data.median_years)}`
+        : `${view.zoomed ? 'окно решения' : 'P50 развязки >'} ${fmtTime(hy)}`;
       ctx.textAlign = medianInside ? 'center' : 'right';
       ctx.fillText(`${medianLabel}${termTag}`, X(tau) - (medianInside ? 0 : 3), padT - 4);
     }

@@ -352,8 +352,8 @@ export function initCone(elId) {
     const hy = tgt.hy, T = tgt.T;
     const termNote = tgt.term_slope > 0.03 ? ' · контанго (вола дышит позже)'
       : tgt.term_slope < -0.03 ? ' · бэквордация (движение скоро)' : '';
-    const medText = tgt.median != null ? `медиана ≈ ${fmtTime(tgt.median)}`
-      : hy ? `медиана касания > ${fmtTime(hy)}` : 'медиана н/д';
+    const medText = tgt.median != null ? `P50 развязки ≈ ${fmtTime(tgt.median)}`
+      : hy ? `P50 развязки > ${fmtTime(hy)}` : 'P50 развязки н/д';
     const yTitle = (hy ? `ВРЕМЯ → развязка · ${medText}`
       : 'ВРЕМЯ → развязка (модельное)') + termNote;
     const yTicktext = hy ? ['сейчас', fmtTime(hy * 0.5), fmtTime(hy)]
@@ -459,8 +459,8 @@ export function initCone(elId) {
     const P = window.Plotly;
     const termNote = tgt.term_slope > 0.03 ? ' · контанго (вола дышит позже)'
       : tgt.term_slope < -0.03 ? ' · бэквордация (движение скоро)' : '';
-    const medText = tgt.median != null ? `медиана ≈ ${fmtTime(tgt.median)}`
-      : tgt.hy ? `медиана касания > ${fmtTime(tgt.hy)}` : 'медиана н/д';
+    const medText = tgt.median != null ? `P50 развязки ≈ ${fmtTime(tgt.median)}`
+      : tgt.hy ? `P50 развязки > ${fmtTime(tgt.hy)}` : 'P50 развязки н/д';
     const yTitle = (tgt.hy ? `ВРЕМЯ → развязка · ${medText}`
       : 'ВРЕМЯ → развязка (модельное)') + termNote;
       

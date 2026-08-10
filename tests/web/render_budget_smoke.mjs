@@ -102,7 +102,7 @@ assert.ok(budget.includes('elementNearViewport'), 'offscreen heavy plots must be
 
 const cone = fs.readFileSync('seiltanzer/web/js/cone.js', 'utf8');
 assert.ok(cone.includes('createPlotlyCameraGuard'), 'Cone camera guard must remain');
-assert.ok(cone.includes('applyLocalTouchClock'), 'Cone local touch clock must remain');
+assert.ok(cone.includes('applyAuthoritativeTouchClock'), 'Cone backend touch-clock adapter must remain');
 assert.ok(cone.includes("createLatestPanelTask('cone:set-data'"), 'Cone heavy writes must respect frame budget');
 assert.ok(cone.includes('core.setData(...args)'), 'full Cone render path must remain');
 assert.ok(cone.includes('core.updateLive(...args)'), 'Cone live marker path must remain');

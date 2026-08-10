@@ -71,6 +71,10 @@ class Engine:
         self._mc_cache: dict | None = None
         self._cone_cache_key: tuple | None = None
         self._cone_cache: dict | None = None
+        self._execution_mc_cache_key: tuple | None = None
+        self._execution_mc_cache = None
+        self._live_clock_mc_cache_key: tuple | None = None
+        self._live_clock_mc_cache = None
         trade = self.journal.active_trade()
         if trade:
             self.market.set_instrument(trade["instrument"])
@@ -82,6 +86,38 @@ class Engine:
         self._mc_cache = None
         self._cone_cache_key = None
         self._cone_cache = None
+        self._execution_mc_cache_key = None
+        self._execution_mc_cache = None
+        self._live_clock_mc_cache_key = None
+        self._live_clock_mc_cache = None
+
+    def authoritative_execution_mc(self, inputs, *, purpose: str = "policy"):
+        """Return one cached path bank shared by policy and clock metrics."""
+        from .ai_policy_base import simulate_option_paths
+
+        live_clock = purpose == "live_clock"
+        key = (
+            round(float(inputs.r0), 2 if live_clock else 4), round(float(inputs.T), 4),
+            round(float(inputs.sigma_R), 4), round(float(inputs.drift_R), 4),
+            round(float(inputs.skew_R), 4), round(float(inputs.term_slope), 4),
+            round(float(inputs.horizon_minutes), 3),
+            round(float(inputs.max_r), 2 if live_clock else 4),
+            tuple(round(float(x), 4) for x in inputs.rungs),
+            round(float(inputs.rung_fraction), 6), round(float(inputs.be_after), 4),
+            bool(inputs.option_available),
+            bool(inputs.max_r >= inputs.be_after - 1e-12),
+        )
+        if live_clock:
+            if key != self._live_clock_mc_cache_key or self._live_clock_mc_cache is None:
+                self._live_clock_mc_cache = simulate_option_paths(
+                    inputs, n_paths=6500, n_steps=340, seed=0xA17E)
+                self._live_clock_mc_cache_key = key
+            return self._live_clock_mc_cache
+        if key != self._execution_mc_cache_key or self._execution_mc_cache is None:
+            self._execution_mc_cache = simulate_option_paths(
+                inputs, n_paths=6500, n_steps=340, seed=0xA17E)
+            self._execution_mc_cache_key = key
+        return self._execution_mc_cache
 
     def on_trade_opened(self, trade: dict) -> None:
         self.market.set_instrument(trade["instrument"])
@@ -781,7 +817,49 @@ class Engine:
                 horizon_minutes=(
                     float(horizon_years) * 365.0 * 24.0 * 60.0
                     if horizon_years else None),
+                max_r=ladder.get("max_r"), take_r=T,
+                be_after_r=ladder.get("be_after"),
             )
+        # Cone and Fan consume one authoritative managed-position clock.  The
+        # same cached execution path bank is subsequently reused by the policy
+        # manager, so this extraction adds no independent stochastic model.
+        from .ai_policy_base import extract_policy_inputs, first_touch_clock
+        clock_inputs = extract_policy_inputs({
+            "prob": prob, "cone": cone, "market": market, "ladder": ladder,
+            "feeds": {"chain": {k: v for k, v in self.market.chain.items()
+                                if k != "metrics"}},
+        })
+        if clock_inputs.option_available:
+            execution_sim = self.authoritative_execution_mc(
+                clock_inputs, purpose="live_clock")
+            clock = first_touch_clock(execution_sim, clock_inputs)
+        else:
+            clock = {
+                "version": "first-touch-clock-f1-v1", "available": False,
+                "source": "authoritative_execution_mc",
+                "time_basis": "calendar_elapsed",
+                "horizon_minutes": clock_inputs.horizon_minutes,
+                "path_count": 0, "step_count": 0,
+                "risk_barrier_r": (
+                    0.0 if clock_inputs.max_r >= clock_inputs.be_after - 1e-12 else -1.0),
+                "authority": "measurement_only", "changes_distribution": False,
+                "reason": "option_distribution_unavailable",
+                "median_status": "unavailable",
+            }
+        cone["first_touch_clock"] = clock
+        # Compatibility name; unlike the removed browser estimator, this object
+        # is a read-only adapter over backend MC output.
+        cone["touch_clock"] = {
+            "median_years": clock.get("median_resolution_years"),
+            "median_minutes": clock.get("median_resolution_minutes"),
+            "median_status": clock.get("median_status"),
+            "resolved_probability_horizon": clock.get(
+                "resolved_probability_horizon"),
+            "horizon_minutes": clock.get("horizon_minutes"),
+            "source": clock.get("source"),
+            "time_basis": clock.get("time_basis"),
+        }
+        market["first_touch_clock"] = clock
         return {"prob": prob, "mc": mc, "ladder": ladder, "market": market,
                 "gamma": gamma_info, "cone": cone,
                 "levels": self._levels_payload(trade, price, sigma, gamma_info)}

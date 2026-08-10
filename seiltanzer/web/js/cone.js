@@ -4,7 +4,7 @@
 
 import { initCone as initCoreCone } from './cone_core.js';
 import { createPlotlyCameraGuard } from './plotly_camera_guard.js';
-import { applyLocalTouchClock } from './touch_clock.js';
+import { applyAuthoritativeTouchClock } from './touch_clock.js';
 import { createLatestPanelTask } from './frame_budget.js';
 
 const INIT_CAM = {
@@ -38,11 +38,9 @@ export function initCone(elId) {
   }, { margin: 220 });
 
   function setData(...args) {
-    // Probability stays option-implied. Only the displayed calendar touch clock
-    // is re-mapped to the current local variance pace (term structure + RV/IV).
-    // Keep this synchronous mutation because app.js sends the same cone object to
-    // Fan immediately afterwards; both panels must always share one touch clock.
-    if (args[0]) applyLocalTouchClock(args[0]);
+    // Synchronous display adapter only: Cone and Fan receive the same backend
+    // competing-risk P50 object. No browser-side stochastic model remains.
+    if (args[0]) applyAuthoritativeTouchClock(args[0]);
     setDataTask.schedule(...args);
   }
 
