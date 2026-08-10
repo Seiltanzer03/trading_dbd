@@ -437,8 +437,9 @@ def evaluate_derived_scenarios(
     }
 
 
-def calibrated_switch_thresholds(ensemble: dict, policy_fractions: dict) -> list[dict]:
-    """Reweight already-simulated stresses; no LLM or invented raw threshold."""
+def scenario_weight_sensitivity_thresholds(
+        ensemble: dict, policy_fractions: dict) -> list[dict]:
+    """Reweight cached scenario outcomes; this is sensitivity, not OOS calibration."""
     scenarios = ensemble.get("scenarios") or []
     if not scenarios:
         return []
@@ -508,12 +509,35 @@ def calibrated_switch_thresholds(ensemble: dict, policy_fractions: dict) -> list
                 threshold = level
                 break
         if threshold is not None:
+            equivalent = raw_equivalent(driver, threshold)
             output.append({
+                "type": "scenario_weight_sensitivity_threshold",
                 "driver": driver,
                 "bounded_weight_threshold": threshold,
+                "grid_step": 0.05,
                 "candidate_policy": candidate,
-                "derivation": "minimum 0.05 grid crossing from deterministic stress reweighting",
+                "method": "deterministic_cached_scenario_reweighting",
+                "derivation": (
+                    "minimum 0.05 bounded-weight grid crossing; cached scenario "
+                    "paths are not re-simulated"),
+                "raw_metric_equivalent": equivalent,
+                "assumptions": [
+                    "all other current scenario raw weights held fixed",
+                    "scenario paths not re-simulated",
+                    "current noise estimate held fixed",
+                    "current confidence relationship held fixed",
+                ],
+                "oos_calibrated": False,
                 "llm_generated": False,
-                **raw_equivalent(driver, threshold),
+                # Compatibility fields for the existing deterministic renderer.
+                "metric": equivalent.get("metric"),
+                "raw_slope_threshold_per_minute": equivalent.get(
+                    "raw_slope_threshold_per_minute"),
+                "operator": equivalent.get("operator"),
             })
     return output
+
+
+def calibrated_switch_thresholds(ensemble: dict, policy_fractions: dict) -> list[dict]:
+    """Deprecated compatibility alias; results explicitly state OOS=false."""
+    return scenario_weight_sensitivity_thresholds(ensemble, policy_fractions)

@@ -5,12 +5,13 @@ import pytest
 
 from seiltanzer import ai_policy_v15
 from seiltanzer.ai_policy_base import POLICY_FRACTIONS, PolicyInputs
-from seiltanzer.ai_verdict_v17 import _dynamic_block
+from seiltanzer.ai_verdict_v18 import _dynamic_block
 from seiltanzer.derived_scenario_ensemble import (
     SCENARIO_ORDER,
     _choose_candidate,
     _scenario_inputs,
     evaluate_derived_scenarios,
+    scenario_weight_sensitivity_thresholds,
     scenario_materiality,
 )
 
@@ -185,8 +186,9 @@ def test_deterministic_verdict_block_states_effect_conflicts_and_thresholds():
                 "worst_stress_r": -0.2,
             }},
             "scenarios": [
-                {"name": "BASE", "weight": 0.7, "winner": "HOLD"},
-                {"name": "SKEW_ADVERSE", "weight": 0.3, "winner": "CLOSE_25"},
+                {"name": "BASE", "weight": 0.7, "winner": "HOLD", "material": True},
+                {"name": "SKEW_ADVERSE", "weight": 0.3, "winner": "CLOSE_25",
+                 "material": True, "driver_confidence": .8, "source_quality": .8},
             ],
             "validation_gate": {
                 "promotion_reason": "manual reviewed calibration is required"},
@@ -194,7 +196,8 @@ def test_deterministic_verdict_block_states_effect_conflicts_and_thresholds():
         "shadow_policy_contract": {
             "old_policy": "HOLD", "new_candidate_policy": "CLOSE_25"},
         "state_change_attribution": {
-            "what_improved": [],
+            "what_improved": [
+                {"metric": "p_stop", "delta": -0.04, "reference": "ENTRY"}],
             "what_deteriorated": [
                 {"metric": "barrier_ev_r", "delta": -0.21, "reference": "PREVIOUS_AI_REVIEW"}],
             "what_did_not_influence_low_confidence": [
@@ -203,15 +206,39 @@ def test_deterministic_verdict_block_states_effect_conflicts_and_thresholds():
                 "derived state changed only the shadow candidate; production action is unchanged"),
         },
         "derivative_switch_thresholds": [{
+            "type": "scenario_weight_sensitivity_threshold",
             "driver": "skew_adverse", "bounded_weight_threshold": 0.4,
-            "candidate_policy": "CLOSE_25",
+            "candidate_policy": "CLOSE_25", "grid_step": .05,
+            "method": "deterministic_cached_scenario_reweighting",
+            "assumptions": ["all other current scenario raw weights held fixed"],
+            "oos_calibrated": False,
         }],
     }
     text = "\n".join(_dynamic_block(manager))
     for header in (
-        "ПОЧЕМУ ИЗМЕНИЛОСЬ", "ЧТО ПОДТВЕРЖДАЕТ", "ЧТО ПРОТИВОРЕЧИТ",
-        "ЧТО НЕ ИМЕЕТ ДОСТАТОЧНОГО ВЕСА", "DERIVATIVE THRESHOLDS",
+        "ГЛАВНАЯ ПРИЧИНА", "ЧТО УЛУЧШИЛОСЬ", "ЧТО УХУДШИЛОСЬ",
+        "ЧТО РЕАЛЬНО ДАВИТ НА РЕШЕНИЕ", "ЧТО ИГНОРИРУЕМ", "SENSITIVITY",
     ):
         assert header in text
-    assert "production action is unchanged" in text
-    assert "not LLM" in text
+    assert "production остаётся HOLD" in text
+    assert "p_stop" in text and "barrier_ev_r" in text
+    assert "ПОЧЕМУ ИЗМЕНИЛОСЬ" not in text
+    assert "OOS calibrated: no" in text
+
+
+def test_switch_threshold_output_is_sensitivity_not_statistical_calibration():
+    ensemble = evaluate_derived_scenarios(
+        inputs=_inputs(), tick=_tick(), old_policy="EXIT",
+        run_once=_run_once, raw_policy_choice=_choice,
+        floor_for_r=lambda _r: -1.0, policy_fractions=POLICY_FRACTIONS,
+    )
+    rows = scenario_weight_sensitivity_thresholds(ensemble, POLICY_FRACTIONS)
+    assert rows
+    for row in rows:
+        assert row["type"] == "scenario_weight_sensitivity_threshold"
+        assert row["grid_step"] == 0.05
+        assert row["method"] == "deterministic_cached_scenario_reweighting"
+        assert row["oos_calibrated"] is False
+        assert row["llm_generated"] is False
+        assert "scenario paths not re-simulated" in row["assumptions"]
+        assert "raw_metric_equivalent" in row

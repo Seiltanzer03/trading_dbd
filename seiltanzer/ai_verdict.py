@@ -1,7 +1,7 @@
-"""Stable public facade for the quantitative AI verdict v17."""
+"""Stable public facade for the quantitative AI verdict v18."""
 from __future__ import annotations
 
-from . import ai_verdict_v17 as _impl
+from . import ai_verdict_v18 as _impl
 
 
 globals().update({

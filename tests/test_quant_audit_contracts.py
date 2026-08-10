@@ -53,10 +53,10 @@ def test_known_audit_defects_cannot_be_silently_relabelled_keep():
 
 
 def test_public_runtime_facades_resolve_to_current_policy_and_verdict():
-    assert ai_policy._impl.__name__.endswith("ai_policy_v15")
-    assert ai_verdict._impl.__name__.endswith("ai_verdict_v17")
-    assert ai_policy.analyze_policies.__module__.endswith("ai_policy_v15")
-    assert ai_verdict.render_policy_report.__module__.endswith("ai_verdict_v17")
+    assert ai_policy._impl.__name__.endswith("ai_policy_v16")
+    assert ai_verdict._impl.__name__.endswith("ai_verdict_v18")
+    assert ai_policy.analyze_policies.__module__.endswith("ai_policy_v16")
+    assert ai_verdict.render_policy_report.__module__.endswith("ai_verdict_v18")
 
 
 def test_real_analytics_adapters_replace_synthetic_engine_prototypes():
