@@ -15,6 +15,20 @@ from dataclasses import dataclass
 
 from .config import SETUPS
 from .core.risk import setup_efficiency
+from .decision_research import canonical_snapshot, counterfactual_replay
+from .calibration import (
+    binary_scorecard,
+    calibration_authority,
+    purged_walk_forward_splits,
+    quantile_scorecard,
+)
+
+
+MANAGEMENT_POLICIES = {"HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
+HUMAN_REASON_CATEGORIES = {
+    "technical_structure", "macro_context", "news_risk", "price_action",
+    "execution_reason", "model_disagreement", "risk_reduction", "other",
+}
 
 
 @dataclass
@@ -94,11 +108,35 @@ class Journal:
                     chain_ts REAL,
                     chain_age_sec REAL,
                     source TEXT NOT NULL,
+                    probability_measure TEXT NOT NULL DEFAULT 'risk_neutral_Q',
+                    instrument TEXT,
+                    direction TEXT,
+                    market_regime TEXT,
+                    source_quality REAL,
+                    q10 REAL,
+                    q25 REAL,
+                    q50 REAL,
+                    q75 REAL,
+                    q90 REAL,
+                    horizon_minutes REAL,
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )""")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_forecast_trade_ts "
                 "ON option_forecasts(trade_id, ts)")
+            forecast_cols = [row[1] for row in self._conn.execute(
+                "PRAGMA table_info(option_forecasts)")]
+            forecast_migrations = {
+                "probability_measure": "TEXT NOT NULL DEFAULT 'risk_neutral_Q'",
+                "instrument": "TEXT", "direction": "TEXT",
+                "market_regime": "TEXT", "source_quality": "REAL",
+                "q10": "REAL", "q25": "REAL", "q50": "REAL",
+                "q75": "REAL", "q90": "REAL", "horizon_minutes": "REAL",
+            }
+            for column, kind in forecast_migrations.items():
+                if column not in forecast_cols:
+                    self._conn.execute(
+                        f"ALTER TABLE option_forecasts ADD COLUMN {column} {kind}")
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS ai_verdicts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,6 +199,90 @@ class Journal:
                 if column not in shadow_cols:
                     self._conn.execute(
                         f"ALTER TABLE policy_shadow_reviews ADD COLUMN {column} {kind}")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS decision_snapshots (
+                    review_id TEXT PRIMARY KEY,
+                    trade_id INTEGER NOT NULL,
+                    captured_ts REAL NOT NULL,
+                    recorded_ts REAL NOT NULL,
+                    schema_version TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    snapshot_sha256 TEXT NOT NULL,
+                    production_policy TEXT NOT NULL,
+                    shadow_candidate TEXT,
+                    policy_version TEXT,
+                    simulator_version TEXT NOT NULL,
+                    calibration_version TEXT NOT NULL,
+                    scenario_version TEXT NOT NULL,
+                    feature_contract_version TEXT NOT NULL,
+                    simulation_seed INTEGER,
+                    FOREIGN KEY(trade_id) REFERENCES trades(id)
+                )""")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_decision_snapshot_trade_ts "
+                "ON decision_snapshots(trade_id,captured_ts)")
+            decision_cols = [row[1] for row in self._conn.execute(
+                "PRAGMA table_info(decision_snapshots)")]
+            decision_migrations = {
+                "scenario_version": "TEXT NOT NULL DEFAULT 'production-base'",
+                "feature_contract_version": (
+                    "TEXT NOT NULL DEFAULT 'phase-f-feature-contract-v1'"),
+                "simulation_seed": "INTEGER",
+            }
+            for column, kind in decision_migrations.items():
+                if column not in decision_cols:
+                    self._conn.execute(
+                        f"ALTER TABLE decision_snapshots ADD COLUMN {column} {kind}")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS decision_path_points (
+                    review_id TEXT NOT NULL,
+                    ts REAL NOT NULL,
+                    price REAL,
+                    r REAL NOT NULL,
+                    PRIMARY KEY(review_id,ts),
+                    FOREIGN KEY(review_id) REFERENCES decision_snapshots(review_id)
+                )""")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS decision_replays (
+                    review_id TEXT PRIMARY KEY,
+                    trade_id INTEGER NOT NULL,
+                    resolved_ts REAL NOT NULL,
+                    resolution_kind TEXT NOT NULL,
+                    replay_version TEXT NOT NULL,
+                    replay_json TEXT NOT NULL,
+                    FOREIGN KEY(review_id) REFERENCES decision_snapshots(review_id),
+                    FOREIGN KEY(trade_id) REFERENCES trades(id)
+                )""")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS human_decisions (
+                    review_id TEXT PRIMARY KEY,
+                    trade_id INTEGER NOT NULL,
+                    recorded_ts REAL NOT NULL,
+                    ai_policy TEXT NOT NULL,
+                    human_policy TEXT NOT NULL,
+                    reason_category TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(review_id) REFERENCES decision_snapshots(review_id),
+                    FOREIGN KEY(trade_id) REFERENCES trades(id)
+                )""")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS experiment_registry (
+                    experiment_id TEXT PRIMARY KEY,
+                    registered_ts REAL NOT NULL,
+                    hypothesis TEXT NOT NULL,
+                    features_json TEXT NOT NULL,
+                    formula TEXT NOT NULL,
+                    thresholds_json TEXT NOT NULL,
+                    train_start REAL NOT NULL,
+                    train_end REAL NOT NULL,
+                    validation_start REAL NOT NULL,
+                    validation_end REAL NOT NULL,
+                    test_start REAL NOT NULL,
+                    test_end REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'registered',
+                    result_json TEXT,
+                    oos_consumed_at REAL
+                )""")
 
     # ---------------------------------------------------------------- trades
 
@@ -230,6 +352,7 @@ class Journal:
                 "resolution_kind=?, max_favorable_excursion_r=? "
                 "WHERE trade_id=? AND final_result_r IS NULL",
                 (result_r, time.time(), resolution_kind, row["max_r"], trade_id))
+        self.resolve_decision_replays(trade_id, resolution_kind=resolution_kind)
         return self.get_trade(trade_id)
 
     def add_closed(self, setup: int, direction: str, entry: float, stop: float,
@@ -290,7 +413,14 @@ class Journal:
                                p_unresolved: float, option_edge: float | None,
                                option_ev: float | None, chain_ts: float | None,
                                chain_age_sec: float | None, source: str,
-                               min_interval_sec: float = 60.0) -> None:
+                               min_interval_sec: float = 60.0,
+                               probability_measure: str = "risk_neutral_Q",
+                               instrument: str | None = None,
+                               direction: str | None = None,
+                               market_regime: str | None = None,
+                               source_quality: float | None = None,
+                               quantiles: dict | None = None,
+                               horizon_minutes: float | None = None) -> None:
         """Редкий снимок живого опционного прогноза для честной валидации.
 
         Тиковый UI продолжает обновляться каждую секунду; в БД пишем не чаще
@@ -309,17 +439,24 @@ class Journal:
             self._conn.execute(
                 "INSERT INTO option_forecasts("
                 "trade_id,ts,price,r,p_take,p_stop,p_unresolved,option_edge,"
-                "option_ev,chain_ts,chain_age_sec,source) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "option_ev,chain_ts,chain_age_sec,source,probability_measure,"
+                "instrument,direction,market_regime,source_quality,q10,q25,q50,q75,q90,"
+                "horizon_minutes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (trade_id, now, price, r, p_take, p_stop, p_unresolved,
-                 option_edge, option_ev, chain_ts, chain_age_sec, source))
+                 option_edge, option_ev, chain_ts, chain_age_sec, source,
+                 probability_measure, instrument, direction, market_regime,
+                 source_quality, *((quantiles or {}).get(key)
+                                   for key in ("q10", "q25", "q50", "q75", "q90")),
+                 horizon_minutes))
 
     def option_forecast_history(self, trade_id: int, limit: int = 120) -> list[dict]:
         """Хронология option-метрик активной сделки для динамического разбора."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT ts,price,r,p_take,p_stop,p_unresolved,option_edge,"
-                "option_ev,chain_ts,chain_age_sec,source FROM option_forecasts "
+                "option_ev,chain_ts,chain_age_sec,source,probability_measure,"
+                "instrument,direction,market_regime,source_quality,q10,q25,q50,q75,q90,"
+                "horizon_minutes FROM option_forecasts "
                 "WHERE trade_id=? ORDER BY ts DESC LIMIT ?",
                 (trade_id, max(1, int(limit)))).fetchall()
         return [dict(row) for row in reversed(rows)]
@@ -329,12 +466,264 @@ class Journal:
         """Сохраняет наблюдение ИИ только в контексте конкретной сделки."""
         if not verdict.strip():
             return
+        decision_record = (
+            canonical_snapshot(snapshot)
+            if snapshot.get("captured_ts") is not None
+            and isinstance(snapshot.get("policy_manager"), dict)
+            else None
+        )
+        if decision_record is not None and decision_record["trade_id"] != int(trade_id):
+            raise ValueError("decision snapshot trade_id mismatch")
         payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
         with self._lock, self._conn:
+            existing = (self._conn.execute(
+                "SELECT snapshot_sha256 FROM decision_snapshots WHERE review_id=?",
+                (decision_record["review_id"],)).fetchone()
+                if decision_record is not None else None)
+            if (decision_record is not None and existing is not None
+                    and existing["snapshot_sha256"] != decision_record["snapshot_sha256"]):
+                raise ValueError("immutable decision snapshot collision")
+            if decision_record is not None:
+                self._conn.execute(
+                "INSERT OR IGNORE INTO decision_snapshots("
+                "review_id,trade_id,captured_ts,recorded_ts,schema_version,"
+                "snapshot_json,snapshot_sha256,production_policy,shadow_candidate,"
+                "policy_version,simulator_version,calibration_version,scenario_version,"
+                "feature_contract_version,simulation_seed) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    decision_record["review_id"], decision_record["trade_id"],
+                    decision_record["captured_ts"], time.time(),
+                    decision_record["schema_version"],
+                    decision_record["snapshot_json"],
+                    decision_record["snapshot_sha256"],
+                    decision_record["production_policy"],
+                    decision_record["shadow_candidate"],
+                    decision_record["policy_version"],
+                    decision_record["simulator_version"],
+                    decision_record["calibration_version"],
+                    decision_record["scenario_version"],
+                    decision_record["feature_contract_version"],
+                    decision_record["simulation_seed"],
+                ),
+                )
+            if decision_record is not None and decision_record["initial_r"] is not None:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO decision_path_points(review_id,ts,price,r) "
+                    "VALUES(?,?,?,?)",
+                    (decision_record["review_id"], decision_record["captured_ts"],
+                     decision_record["initial_price"], decision_record["initial_r"]),
+                )
             self._conn.execute(
                 "INSERT INTO ai_verdicts(trade_id,ts,snapshot_json,verdict,model) "
                 "VALUES(?,?,?,?,?)",
                 (trade_id, time.time(), payload, verdict.strip(), model))
+
+    def record_decision_market_point(self, trade_id: int, *, ts: float,
+                                     price: float, r: float,
+                                     min_interval_sec: float = 2.0) -> int:
+        """Append one real post-review point to every unresolved review."""
+        values = (ts, price, r)
+        if not all(math.isfinite(float(value)) for value in values):
+            return 0
+        inserted = 0
+        with self._lock, self._conn:
+            reviews = self._conn.execute(
+                "SELECT d.review_id,d.captured_ts,MAX(p.ts) AS last_ts "
+                "FROM decision_snapshots d "
+                "LEFT JOIN decision_path_points p ON p.review_id=d.review_id "
+                "LEFT JOIN decision_replays x ON x.review_id=d.review_id "
+                "WHERE d.trade_id=? AND d.captured_ts<=? AND x.review_id IS NULL "
+                "GROUP BY d.review_id,d.captured_ts",
+                (int(trade_id), float(ts)),
+            ).fetchall()
+            for review in reviews:
+                last = review["last_ts"]
+                if last is not None and float(ts) - float(last) < min_interval_sec:
+                    continue
+                inserted += self._conn.execute(
+                    "INSERT OR IGNORE INTO decision_path_points(review_id,ts,price,r) "
+                    "VALUES(?,?,?,?)",
+                    (review["review_id"], float(ts), float(price), float(r)),
+                ).rowcount
+        return inserted
+
+    def resolve_decision_replays(self, trade_id: int,
+                                 resolution_kind: str = "manual_close") -> int:
+        """Freeze realized counterfactuals for every unresolved review."""
+        resolved = 0
+        now = time.time()
+        with self._lock, self._conn:
+            reviews = self._conn.execute(
+                "SELECT d.* FROM decision_snapshots d "
+                "LEFT JOIN decision_replays x ON x.review_id=d.review_id "
+                "WHERE d.trade_id=? AND x.review_id IS NULL ORDER BY d.captured_ts",
+                (int(trade_id),),
+            ).fetchall()
+            for review in reviews:
+                try:
+                    snapshot = json.loads(review["snapshot_json"])
+                    points = [dict(row) for row in self._conn.execute(
+                        "SELECT ts,price,r FROM decision_path_points "
+                        "WHERE review_id=? ORDER BY ts", (review["review_id"],)
+                    ).fetchall()]
+                    replay = counterfactual_replay(snapshot, points)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                self._conn.execute(
+                    "INSERT INTO decision_replays(review_id,trade_id,resolved_ts,"
+                    "resolution_kind,replay_version,replay_json) VALUES(?,?,?,?,?,?)",
+                    (review["review_id"], int(trade_id), now, resolution_kind,
+                     replay["version"], json.dumps(
+                         replay, ensure_ascii=False, separators=(",", ":"))),
+                )
+                resolved += 1
+        return resolved
+
+    def counterfactual_report(self, trade_id: int | None = None,
+                              limit: int = 100) -> dict:
+        params: tuple = ()
+        where = ""
+        if trade_id is not None:
+            where = "WHERE d.trade_id=?"
+            params = (int(trade_id),)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT d.review_id,d.trade_id,d.captured_ts,d.production_policy,"
+                "d.shadow_candidate,d.policy_version,d.simulator_version,"
+                "x.resolved_ts,x.resolution_kind,x.replay_json,"
+                "h.human_policy,h.reason_category,h.note AS human_note,h.recorded_ts AS human_recorded_ts "
+                "FROM decision_snapshots d LEFT JOIN decision_replays x "
+                "ON x.review_id=d.review_id "
+                "LEFT JOIN human_decisions h ON h.review_id=d.review_id " + where +
+                " ORDER BY d.captured_ts DESC LIMIT ?", (*params, max(1, int(limit))),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = {key: row[key] for key in row.keys() if key != "replay_json"}
+            item["resolved"] = row["replay_json"] is not None
+            item["replay"] = (
+                json.loads(row["replay_json"]) if row["replay_json"] else None)
+            replay = item["replay"] or {}
+            human_policy = row["human_policy"]
+            human_row = (replay.get("policies") or {}).get(human_policy) or {}
+            production_r = replay.get("production_realized_r")
+            human_r = human_row.get("net_realized_r")
+            item["human_decision"] = ({
+                "policy": human_policy,
+                "reason_category": row["reason_category"],
+                "note": row["human_note"],
+                "recorded_ts": row["human_recorded_ts"],
+                "realized_r": human_r,
+                "override_delta_vs_model_r": (
+                    round(float(human_r) - float(production_r), 6)
+                    if human_r is not None and production_r is not None else None),
+            } if human_policy else None)
+            items.append(item)
+        resolved_items = [item for item in items if item["resolved"]]
+        return {
+            "observations": len(items), "resolved_observations": len(resolved_items),
+            "items": items, "promotion_allowed": False,
+            "authority": "research_measurement_only",
+        }
+
+    def record_human_decision(self, review_id: str, human_policy: str,
+                              reason_category: str, note: str = "") -> dict:
+        """Freeze a human override before its future outcome is known."""
+        if human_policy not in MANAGEMENT_POLICIES:
+            raise ValueError("unknown human management policy")
+        if reason_category not in HUMAN_REASON_CATEGORIES:
+            raise ValueError("unknown human decision reason category")
+        with self._lock, self._conn:
+            review = self._conn.execute(
+                "SELECT d.trade_id,d.production_policy,t.status "
+                "FROM decision_snapshots d JOIN trades t ON t.id=d.trade_id "
+                "WHERE d.review_id=?", (str(review_id),)).fetchone()
+            if review is None:
+                raise ValueError("decision review not found")
+            if review["status"] != "open" or self._conn.execute(
+                    "SELECT 1 FROM decision_replays WHERE review_id=?",
+                    (str(review_id),)).fetchone() is not None:
+                raise ValueError("human decision must be recorded before outcome")
+            if self._conn.execute(
+                    "SELECT 1 FROM human_decisions WHERE review_id=?",
+                    (str(review_id),)).fetchone() is not None:
+                raise ValueError("human decision is immutable once recorded")
+            self._conn.execute(
+                "INSERT INTO human_decisions(review_id,trade_id,recorded_ts,"
+                "ai_policy,human_policy,reason_category,note) VALUES(?,?,?,?,?,?,?)",
+                (str(review_id), int(review["trade_id"]), time.time(),
+                 review["production_policy"], human_policy, reason_category,
+                 str(note or "")[:1000]),
+            )
+        return {
+            "review_id": str(review_id), "ai_policy": review["production_policy"],
+            "human_policy": human_policy, "reason_category": reason_category,
+            "outcome_known_at_record": False,
+        }
+
+    def register_experiment(self, *, experiment_id: str, hypothesis: str,
+                            features: list[str], formula: str, thresholds: dict,
+                            train_period: tuple[float, float],
+                            validation_period: tuple[float, float],
+                            test_period: tuple[float, float]) -> dict:
+        periods = (*train_period, *validation_period, *test_period)
+        if not all(math.isfinite(float(value)) for value in periods):
+            raise ValueError("experiment periods must be finite")
+        if not (train_period[0] < train_period[1] <= validation_period[0]
+                < validation_period[1] <= test_period[0] < test_period[1]):
+            raise ValueError("experiment periods must be ordered TRAIN→VALIDATION→TEST")
+        with self._lock, self._conn:
+            if self._conn.execute(
+                    "SELECT 1 FROM experiment_registry WHERE experiment_id=?",
+                    (str(experiment_id),)).fetchone() is not None:
+                raise ValueError("experiment_id already registered and immutable")
+            self._conn.execute(
+                "INSERT INTO experiment_registry(experiment_id,registered_ts,"
+                "hypothesis,features_json,formula,thresholds_json,train_start,train_end,"
+                "validation_start,validation_end,test_start,test_end) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (str(experiment_id), time.time(), str(hypothesis),
+                 json.dumps(features, ensure_ascii=False), str(formula),
+                 json.dumps(thresholds, ensure_ascii=False), *periods),
+            )
+        return {"experiment_id": str(experiment_id), "status": "registered",
+                "promotion_allowed": False}
+
+    def record_experiment_result(self, experiment_id: str, result: dict) -> dict:
+        """Consume a test window once; it cannot silently remain fresh OOS."""
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT status FROM experiment_registry WHERE experiment_id=?",
+                (str(experiment_id),)).fetchone()
+            if row is None:
+                raise ValueError("experiment not registered")
+            if row["status"] != "registered":
+                raise ValueError("experiment test window was already consumed")
+            self._conn.execute(
+                "UPDATE experiment_registry SET status='evaluated',result_json=?,"
+                "oos_consumed_at=? WHERE experiment_id=?",
+                (json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+                 time.time(), str(experiment_id)),
+            )
+        return {"experiment_id": str(experiment_id), "status": "evaluated",
+                "oos_consumed": True, "promotion_allowed": False}
+
+    def experiment_report(self) -> dict:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM experiment_registry ORDER BY registered_ts").fetchall()
+        return {
+            "experiments": [{
+                **{key: row[key] for key in row.keys()
+                   if key not in {"features_json", "thresholds_json", "result_json"}},
+                "features": json.loads(row["features_json"]),
+                "thresholds": json.loads(row["thresholds_json"]),
+                "result": json.loads(row["result_json"]) if row["result_json"] else None,
+            } for row in rows],
+            "promotion_allowed": False,
+            "contract": "reviewed report required; sample count never auto-promotes",
+        }
 
     def recent_ai_verdicts(self, trade_id: int, limit: int = 3) -> list[dict]:
         """Последние разборы текущей сделки, от старого к новому."""
@@ -595,6 +984,65 @@ class Journal:
             "policy_shadow": self.policy_shadow_report(),
         }
 
+    def q_calibration_report(self) -> dict:
+        """OOS scorecard for first Q forecast per closed trade."""
+        with self._lock:
+            rows = self._conn.execute("""
+                SELECT t.id AS trade_id,t.instrument,t.direction,t.entry,t.stop,t.take,
+                       t.result_r,t.max_r,f.*
+                FROM trades t JOIN option_forecasts f ON f.id=(
+                    SELECT f2.id FROM option_forecasts f2
+                    WHERE f2.trade_id=t.id ORDER BY f2.ts ASC LIMIT 1)
+                WHERE t.status='closed' AND t.result_r IS NOT NULL
+                ORDER BY f.ts
+            """).fetchall()
+        records = []
+        for source in rows:
+            row = dict(source)
+            risk = abs(float(row["entry"]) - float(row["stop"]))
+            target_r = abs(float(row["take"]) - float(row["entry"])) / max(risk, 1e-12)
+            take = bool(row.get("max_r") is not None
+                        and float(row["max_r"]) >= target_r - 1e-6)
+            stop = bool(float(row["result_r"]) <= -0.95 and not take)
+            no_touch = not take and not stop
+            records.append({
+                **row, "take_event": float(take), "stop_event": float(stop),
+                "no_touch_event": float(no_touch),
+                "realized_r": float(row["result_r"]),
+                "prediction_ts": float(row["ts"]),
+                "horizon_sec": float(row.get("horizon_minutes") or 0.0) * 60.0,
+            })
+        score = {
+            "version": "q-calibration-scorecard-v1",
+            "probability_semantics": {
+                "stored": "risk_neutral_Q",
+                "physical_probability_published": False,
+                "p_calibrated_shadow": None,
+            },
+            "n": len(records),
+            "take": binary_scorecard(
+                [row["p_take"] for row in records],
+                [row["take_event"] for row in records]),
+            "stop": binary_scorecard(
+                [row["p_stop"] for row in records],
+                [row["stop_event"] for row in records]),
+            "no_touch": binary_scorecard(
+                [row["p_unresolved"] for row in records],
+                [row["no_touch_event"] for row in records]),
+            "quantiles": quantile_scorecard(records),
+            "walk_forward_splits": purged_walk_forward_splits(
+                records, n_splits=3, embargo_sec=3600.0),
+            "instrument_counts": {
+                instrument: sum(row.get("instrument") == instrument for row in records)
+                for instrument in sorted({str(row.get("instrument")) for row in records})
+            },
+        }
+        score["authority"] = calibration_authority(
+            len(records), int(sum(row["take_event"] for row in records)),
+            effective_independent_n=len({row["trade_id"] for row in records}),
+        )
+        return score
+
     def update_zones(self, trade_id: int, zones: list) -> dict:
         with self._lock, self._conn:
             self._conn.execute("UPDATE trades SET zones=? WHERE id=?",
@@ -649,6 +1097,18 @@ class Journal:
             self._conn.execute(f"UPDATE trades SET {sets} WHERE id=?",
                                (*upd.values(), trade_id))
             if scenario_changed:
+                review_ids = [row[0] for row in self._conn.execute(
+                    "SELECT review_id FROM decision_snapshots WHERE trade_id=?",
+                    (trade_id,)).fetchall()]
+                for review_id in review_ids:
+                    self._conn.execute(
+                        "DELETE FROM human_decisions WHERE review_id=?", (review_id,))
+                    self._conn.execute(
+                        "DELETE FROM decision_path_points WHERE review_id=?", (review_id,))
+                    self._conn.execute(
+                        "DELETE FROM decision_replays WHERE review_id=?", (review_id,))
+                self._conn.execute(
+                    "DELETE FROM decision_snapshots WHERE trade_id=?", (trade_id,))
                 self._conn.execute(
                     "DELETE FROM option_forecasts WHERE trade_id=?", (trade_id,))
                 self._conn.execute(
@@ -664,6 +1124,18 @@ class Journal:
 
     def delete_trade(self, trade_id: int) -> None:
         with self._lock, self._conn:
+            review_ids = [row[0] for row in self._conn.execute(
+                "SELECT review_id FROM decision_snapshots WHERE trade_id=?",
+                (trade_id,)).fetchall()]
+            for review_id in review_ids:
+                self._conn.execute(
+                    "DELETE FROM human_decisions WHERE review_id=?", (review_id,))
+                self._conn.execute(
+                    "DELETE FROM decision_path_points WHERE review_id=?", (review_id,))
+                self._conn.execute(
+                    "DELETE FROM decision_replays WHERE review_id=?", (review_id,))
+            self._conn.execute(
+                "DELETE FROM decision_snapshots WHERE trade_id=?", (trade_id,))
             self._conn.execute("DELETE FROM option_forecasts WHERE trade_id=?",
                                (trade_id,))
             self._conn.execute("DELETE FROM ai_verdicts WHERE trade_id=?",

@@ -253,6 +253,12 @@ class Engine:
             payload.update(self._trade_payloads(trade, price, sigma, atr))
             payload["verdict"] = self._verdict(payload)
             payload["state"] = self._state_payload(payload)
+            current_r = (payload.get("prob") or {}).get("r")
+            if current_r is not None:
+                self.journal.record_decision_market_point(
+                    int(trade["id"]), ts=now, price=float(price),
+                    r=float(current_r),
+                )
         return clean_nans(payload)
 
     def _verdict(self, p: dict) -> dict:
@@ -751,13 +757,31 @@ class Engine:
         # обещание преимущества по одному красивому кадру.
         self.journal.update_edge_at_open(trade["id"], option_edge)
         if option_p is not None:
+            quantiles = {
+                "q10": cone.get("slice_p10_r"),
+                "q25": pb._hist_quantile(
+                    cone.get("slice_probs") or [],
+                    cone.get("slice_edges") or [], 0.25),
+                "q50": cone.get("slice_median_r"),
+                "q75": pb._hist_quantile(
+                    cone.get("slice_probs") or [],
+                    cone.get("slice_edges") or [], 0.75),
+                "q90": cone.get("slice_p90_r"),
+            }
             self.journal.record_option_forecast(
                 trade["id"], price=price, r=r,
                 p_take=option_p, p_stop=cone.get("p_stop", 0.0),
                 p_unresolved=cone.get("unresolved", 0.0),
                 option_edge=option_edge, option_ev=option_ev,
                 chain_ts=self.market.chain.get("ts"), chain_age_sec=chain_age,
-                source=cone.get("hit_source") or "unknown")
+                source=cone.get("hit_source") or "unknown",
+                probability_measure="risk_neutral_Q",
+                instrument=trade.get("instrument"), direction=direction,
+                market_regime=atr.get("phase"), quantiles=quantiles,
+                horizon_minutes=(
+                    float(horizon_years) * 365.0 * 24.0 * 60.0
+                    if horizon_years else None),
+            )
         return {"prob": prob, "mc": mc, "ladder": ladder, "market": market,
                 "gamma": gamma_info, "cone": cone,
                 "levels": self._levels_payload(trade, price, sigma, gamma_info)}

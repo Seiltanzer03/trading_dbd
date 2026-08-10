@@ -65,6 +65,53 @@ def build_snapshot(engine) -> dict:
         manager["execution_cost_sensitivity"]["tested_full_close_costs_r"] = [
             row.get("full_close_cost_r") for row in cost.get("grid") or []
         ]
+    mc_validation = manager.get("monte_carlo_validation") or {}
+    if mc_validation:
+        compact_mc = deepcopy(mc_validation)
+        compact_mc["rows"] = [
+            {key: row.get(key) for key in ("seed", "winner", "eligible")}
+            for row in compact_mc.get("rows") or []
+        ]
+        manager["monte_carlo_validation"] = compact_mc
+    for name, policy in (manager.get("policies") or {}).items():
+        # scenario_geometry is identical for all five policies and already
+        # published once at manager root.  Keep seed only on HOLD for exact
+        # reproduction; policy comparison still shares that same path set.
+        policy.pop("event_geometry", None)
+        if name != "HOLD":
+            policy.pop("monte_carlo", None)
+        uncertainty = policy.get("monte_carlo_uncertainty") or {}
+        if uncertainty:
+            policy["monte_carlo_uncertainty"] = {
+                key: uncertainty.get(key) for key in (
+                    "expected_final_r", "cvar10_r", "effective_path_count")
+            }
+    q_calibration = engine.journal.q_calibration_report()
+    manager["calibration_contract"] = {
+        "version": (q_calibration.get("authority") or {}).get("version"),
+        "q_probability": "risk_neutral_Q",
+        "p_calibrated_shadow": None,
+        "physical_probability_published": False,
+        "authority": deepcopy(q_calibration.get("authority") or {}),
+        "take_scorecard": {
+            key: (q_calibration.get("take") or {}).get(key)
+            for key in (
+                "n", "event_count", "q_model_brier",
+                "naive_base_rate_brier", "q_model_brier_improvement",
+            )
+        },
+        "production_replacement_allowed": False,
+    }
+    evidence = manager.get("evidence") or {}
+    # These are exact duplicates of canonical manager-root objects.  Retaining
+    # both inflated every immutable review without adding reproducibility.
+    evidence.pop("derived_scenario_ensemble", None)
+    evidence.pop("lattice_revaluation", None)
+    correlation = evidence.get("correlation") or {}
+    # all_pairs is the authoritative full topology. The two display subsets are
+    # deterministic slices of it and need not be persisted a second time.
+    correlation.pop("instrument_relevant", None)
+    correlation.pop("largest_changes", None)
     snapshot["policy_manager"] = manager
     return snapshot
 
@@ -119,6 +166,19 @@ def _dynamic_block(manager: dict) -> list[str]:
         if not candidate_changed else
         f"Shadow ensemble предпочёл {candidate}, но production остаётся {production}: "
         "derived state shadow-only."
+    )
+    mc = manager.get("monte_carlo_validation") or {}
+    mc_line = (
+        f"MC robustness: winner stability {float(mc.get('winner_stability') or 0) * 100:.0f}%; "
+        f"ranking agreement {float(mc.get('ranking_agreement') or 0) * 100:.0f}%; "
+        + ("decision_uncertain." if mc.get("decision_uncertain") else "numerically stable on tested seeds.")
+    ) if mc else "MC robustness: unavailable."
+    calibration = manager.get("calibration_contract") or {}
+    cal_authority = calibration.get("authority") or {}
+    calibration_line = (
+        "Calibration: probabilities are Q/option-implied; physical P is not "
+        f"published ({cal_authority.get('status', 'insufficient_evidence')}, "
+        f"N={cal_authority.get('sample_count', 0)})."
     )
     if material:
         top = material[0]
@@ -180,7 +240,7 @@ def _dynamic_block(manager: dict) -> list[str]:
         "На текущей 0.05 sensitivity grid отдельный driver не переключает shadow candidate."]
 
     return [
-        policy_line,
+        policy_line, mc_line, calibration_line,
         f"Shadow metrics: Expected {_r(candidate_row.get('expected_net_r'))}; "
         f"CVaR10 {_r(candidate_row.get('cvar10_net_r'))}; "
         f"worst stress {_r(candidate_row.get('worst_stress_r'))}.", "",

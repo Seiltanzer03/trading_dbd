@@ -81,6 +81,29 @@ class JournalAdd(BaseModel):
     opened_at: float | None = None
 
 
+class HumanDecisionRecord(BaseModel):
+    review_id: str
+    policy: str
+    reason_category: str
+    note: str = ""
+
+
+class ExperimentRegister(BaseModel):
+    experiment_id: str
+    hypothesis: str
+    features: list[str] = Field(default_factory=list)
+    formula: str
+    thresholds: dict = Field(default_factory=dict)
+    train_period: tuple[float, float]
+    validation_period: tuple[float, float]
+    test_period: tuple[float, float]
+
+
+class ExperimentResult(BaseModel):
+    experiment_id: str
+    result: dict = Field(default_factory=dict)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or settings_from_env()
     engine = Engine(settings)
@@ -251,7 +274,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/validation")
     def api_validation():
-        return engine.journal.validation_report()
+        report = engine.journal.validation_report()
+        report["counterfactual_replay"] = engine.journal.counterfactual_report()
+        report["q_calibration"] = engine.journal.q_calibration_report()
+        return report
+
+    @app.get("/api/research/counterfactual")
+    def api_counterfactual_research(trade_id: int | None = None,
+                                    limit: int = 100):
+        return engine.journal.counterfactual_report(trade_id, limit=limit)
+
+    @app.post("/api/research/human-decision")
+    def api_human_decision(req: HumanDecisionRecord):
+        try:
+            return engine.journal.record_human_decision(
+                req.review_id, req.policy, req.reason_category, req.note)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/research/experiments")
+    def api_experiment_report():
+        return engine.journal.experiment_report()
+
+    @app.post("/api/research/experiments")
+    def api_experiment_register(req: ExperimentRegister):
+        try:
+            return engine.journal.register_experiment(
+                experiment_id=req.experiment_id, hypothesis=req.hypothesis,
+                features=req.features, formula=req.formula,
+                thresholds=req.thresholds, train_period=req.train_period,
+                validation_period=req.validation_period,
+                test_period=req.test_period,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/research/experiments/result")
+    def api_experiment_result(req: ExperimentResult):
+        try:
+            return engine.journal.record_experiment_result(
+                req.experiment_id, req.result)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/chain")
     def api_chain(ticker: str | None = None):
