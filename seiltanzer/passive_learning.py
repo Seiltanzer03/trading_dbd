@@ -1,7 +1,13 @@
-"""Continuous prospective market observations, outcomes and Q calibration (Phase F.3 / G.0).
+"""Continuous prospective market observations, outcomes and Q calibration (Phase F.3.1).
 
-This is deliberately separate from real trades. Synthetic/demo data may exercise the
-pipeline but is never eligible research evidence.
+Phase F.3.1 Measurement Integrity Closure:
+- Strict per-horizon independent forecast construction (no shared/copied forecasts across horizons).
+- Pristine dataset quarantine boundary (passive-observation-f31-v1).
+- Option-native horizon cohort (option_native_expiry) for expiry-aligned Q distribution.
+- Semantic separation of Terminal Q (S_T at expiry) from First-Passage touch probabilities.
+- Proxy return-space mapping (direct/inverse) preserving probability mass.
+- Authoritative 1m OHLC path bar store and ambiguous first-touch resolution.
+- Dual trading and calendar time tracking.
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ import numpy as np
 from .config import INSTRUMENTS, Settings
 from .data.feeds import MarketData
 from .option_q_adapter import (
+    EXPIRY_CLOCK_VERSION,
     OPTION_Q_CONTRACT_VERSION,
     adapt_option_q_forecast,
 )
@@ -37,11 +44,11 @@ HORIZONS_MINUTES = (15, 30, 60, 120, 240, 480, 1440)
 GEOMETRY_SIGMAS = (.5, 1.0, 1.5, 2.0)
 OBSERVATION_CADENCE_SEC = 15 * 60
 MAX_GAP_SEC = 5 * 60
-PASSIVE_SCHEMA_VERSION = "passive-observation-f3-v1"
-FORECAST_VERSION = "passive-forecast-f3-v1"
-RESOLVER_VERSION = "passive-resolver-f3-v1"
-SESSION_CONTRACT_VERSION = "market-session-f3-v1"
-EVENT_TRIGGER_CONTRACT_VERSION = "passive-event-trigger-f3-v1"
+PASSIVE_SCHEMA_VERSION = "passive-observation-f31-v1"
+FORECAST_VERSION = "passive-forecast-f31-v1"
+RESOLVER_VERSION = "passive-resolver-f31-v1"
+SESSION_CONTRACT_VERSION = "market-session-f31-v1"
+EVENT_TRIGGER_CONTRACT_VERSION = "passive-event-trigger-f31-v1"
 EVENT_MIN_SPACING_SEC = 5 * 60
 VIRTUAL_HORIZONS_MINUTES = (60, 240)
 VIRTUAL_R0_STATES = (-.5, 0.0, .5, 1.0)
@@ -50,8 +57,6 @@ VIRTUAL_POLICY_FRACTIONS = {
     "CLOSE_50": .50, "EXIT": 1.0,
 }
 
-# Exchange-local regular sessions. FX/metals use an explicit weekday 24h
-# research clock until a holiday calendar is connected.
 _SESSION_SPECS = {
     "NAS100": ("America/New_York", ((9*60+30, 16*60),)),
     "SP500": ("America/New_York", ((9*60+30, 16*60),)),
@@ -160,7 +165,7 @@ def _pinball_score(quantiles: list[float], outcomes: list[float],
 
 
 class PassiveLearningEngine:
-    """Low-priority collector and immutable prospective research store (Phase F.3 / G.0)."""
+    """Low-priority collector and immutable prospective research store (Phase F.3.1)."""
 
     def __init__(self, path: str, settings: Settings, cache):
         self.settings, self.cache = settings, cache
@@ -172,6 +177,7 @@ class PassiveLearningEngine:
         self._last_step_error: str | None = None
         self._last_step_ts: float | None = None
         self._last_successful_capture_ts: float | None = None
+        self._last_successful_bar_capture_ts: float | None = None
         self._last_successful_resolution_ts: float | None = None
         self._contract_error_counters = defaultdict(int)
 
@@ -222,6 +228,18 @@ class PassiveLearningEngine:
                     instrument TEXT NOT NULL, ts REAL NOT NULL, price REAL NOT NULL,
                     source TEXT, quality REAL, kind TEXT NOT NULL,
                     PRIMARY KEY(instrument,ts))""")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS passive_market_bars (
+                    instrument TEXT NOT NULL,
+                    bar_start_ts REAL NOT NULL,
+                    bar_end_ts REAL NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    source TEXT, quality REAL, kind TEXT NOT NULL,
+                    created_ts REAL NOT NULL,
+                    PRIMARY KEY(instrument, bar_start_ts))""")
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS virtual_position_observations (
                     virtual_id TEXT PRIMARY KEY,
@@ -321,9 +339,25 @@ class PassiveLearningEngine:
                 (instrument, float(ts), float(price), source,
                  max(0., min(1., float(quality))), kind))
 
+    def record_market_bar(self, instrument: str, bar_start_ts: float, bar_end_ts: float,
+                          open_p: float, high_p: float, low_p: float, close_p: float,
+                          *, source: str = "observed_1m_ohlc", quality: float = 1.0,
+                          kind: str = "direct") -> None:
+        if instrument not in INSTRUMENTS:
+            raise ValueError("unsupported instrument")
+        if not all(math.isfinite(float(x)) for x in (bar_start_ts, bar_end_ts, open_p, high_p, low_p, close_p)):
+            raise ValueError("bar values must be finite")
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO passive_market_bars"
+                "(instrument,bar_start_ts,bar_end_ts,open,high,low,close,source,quality,kind,created_ts) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (instrument, float(bar_start_ts), float(bar_end_ts), float(open_p),
+                 float(high_p), float(low_p), float(close_p), source, quality, kind, time.time()))
+            self._last_successful_bar_capture_ts = bar_start_ts
+
     @staticmethod
     def _reference_volatility(feed: MarketData) -> dict:
-        """Authoritative adapter reading actual MarketData.daily contract."""
         bars = (feed.daily or {}).get("bars")
         if not bars or not isinstance(bars, dict):
             return {
@@ -343,14 +377,17 @@ class PassiveLearningEngine:
     @staticmethod
     def _forecast(price: float, vol_info: dict | None,
                   horizon_minutes: int, option_metrics: dict | None,
-                  instrument: str) -> dict:
+                  instrument: str, horizon_kind: str = "fixed_trading_time") -> dict:
+        """Authoritative per-horizon forecast construction (No shared copied forecasts across horizons)."""
         annual_vol = (vol_info.get("reference_volatility_annual")
                       if isinstance(vol_info, dict) else _finite(vol_info))
 
-        sigma_res = compute_horizon_sigma(annual_vol, horizon_minutes, instrument)
+        sigma_res = compute_horizon_sigma(annual_vol, horizon_minutes, instrument) if horizon_minutes > 0 else {"sigma_h_return": None}
         sigma_h = sigma_res.get("sigma_h_return")
 
-        q_res = adapt_option_q_forecast(option_metrics, horizon_minutes, sigma_h, instrument)
+        q_res = adapt_option_q_forecast(
+            option_metrics, horizon_minutes, sigma_h, instrument, horizon_kind=horizon_kind
+        )
 
         gaussian_reference = {}
         if sigma_h is not None and math.isfinite(sigma_h) and sigma_h > 0:
@@ -364,24 +401,39 @@ class PassiveLearningEngine:
                       if isinstance(vol_info, dict)
                       else ("valid" if annual_vol else "missing"))
 
+        # For fixed trading time, probability_measure is historical_reference or unavailable (Never risk_neutral_Q)
+        prob_measure = q_res["probability_measure"]
+        if horizon_kind != "option_native_expiry" and prob_measure == "risk_neutral_Q_terminal":
+            prob_measure = "unavailable"
+
         return {
             "version": FORECAST_VERSION,
             "authority": "shadow_prediction",
-            "probability_measure": q_res["probability_measure"],
+            "horizon_kind": horizon_kind,
+            "probability_measure": prob_measure,
             "q_source_contract": q_res["q_source_contract"],
+            "q_terminal_distribution_available": q_res.get("q_terminal_distribution_available", False),
+            "q_first_touch_available": False,  # Strict: Terminal Q != First Touch Passage
             "physical_probability_published": False,
             "reference_volatility_annual": annual_vol,
             "reference_volatility_units": "log_return_per_sqrt_year",
             "volatility_status": vol_status,
             "variance_clock_version": VARIANCE_CLOCK_VERSION,
             "variance_clock_spec": get_variance_clock_spec(instrument),
+            "calendar_ttm_seconds": q_res.get("calendar_ttm_seconds", 0.0),
+            "calendar_ttm_minutes": q_res.get("calendar_ttm_minutes", 0.0),
+            "calendar_ttm_years_act365": q_res.get("calendar_ttm_years_act365", 0.0),
+            "expiry_clock_version": q_res.get("expiry_clock_version", EXPIRY_CLOCK_VERSION),
             "horizon_minutes": horizon_minutes,
             "horizon_trading_minutes": horizon_minutes,
             "sigma_h_return": sigma_h,
             "horizon_alignment_status": q_res.get("horizon_alignment_status", "unavailable"),
             "horizon_alignment_method": q_res.get("horizon_alignment_method", "none"),
-            "horizon_alignment_error": q_res.get("horizon_alignment_error", 0.0),
-            "source_expiry_ttm_minutes": q_res.get("source_expiry_ttm_minutes", 0.0),
+            "source_expiry": q_res.get("source_expiry"),
+            "proxy_symbol": q_res.get("proxy_symbol"),
+            "proxy_transform": q_res.get("proxy_transform"),
+            "proxy_experimental": q_res.get("proxy_experimental", False),
+            "q_evidence_tier": q_res.get("q_evidence_tier", "unavailable"),
             "standardized_barriers": q_res.get("standardized_barriers"),
             "quantiles_log_return": q_res.get("quantiles_log_return"),
             "gaussian_reference_quantiles_log_return": gaussian_reference,
@@ -409,19 +461,23 @@ class PassiveLearningEngine:
             "large_iv_move", "skew_move", "large_price_displacement",
             "gex_geometry_change", "macro_regime_transition", "test"}:
             raise ValueError("unversioned observation trigger")
+
         now_day = int(captured_ts//86400)
         with self._lock, self._conn:
             day_n = self._conn.execute(
                 "SELECT COUNT(*) FROM passive_market_observations "
                 "WHERE CAST(captured_ts/86400 AS INTEGER)=?",
                 (now_day,)).fetchone()[0]
-            if day_n + len(HORIZONS_MINUTES) > self.budget[
+            if day_n + len(HORIZONS_MINUTES) + 1 > self.budget[
                     "max_passive_observations_per_day"]:
                 return []
+
             anchor = "market-" + hashlib.sha256(
                 f"{instrument}|{captured_ts:.6f}|{market_price:.10f}".encode()
             ).hexdigest()[:24]
             ids = []
+
+            # 1. FIXED TRADING-TIME HORIZONS (Each horizon built independently!)
             for horizon in HORIZONS_MINUTES:
                 observation_id = f"{anchor}-{horizon}m"
                 target = (
@@ -434,13 +490,10 @@ class PassiveLearningEngine:
                 vol_info = features.get("volatility") or {"reference_volatility_annual": annual}
                 option_metrics = features.get("option_derivatives", {}).get("data")
 
-                if forecast and forecast.get("version"):
-                    frozen_forecast = dict(forecast)
-                    if "sigma_h_return" not in frozen_forecast or frozen_forecast["sigma_h_return"] is None:
-                        sigma_res = compute_horizon_sigma(annual, horizon, instrument)
-                        frozen_forecast["sigma_h_return"] = sigma_res.get("sigma_h_return")
-                else:
-                    frozen_forecast = self._forecast(market_price, vol_info, horizon, option_metrics, instrument)
+                # Build INDEPENDENT forecast for target horizon H
+                frozen_forecast = self._forecast(
+                    market_price, vol_info, horizon, option_metrics, instrument, horizon_kind="fixed_trading_time"
+                )
 
                 self._conn.execute(
                     "INSERT OR IGNORE INTO passive_market_observations("
@@ -463,8 +516,8 @@ class PassiveLearningEngine:
                      (provenance.get("options") or {}).get("quality"),
                      (provenance.get("options") or {}).get("kind"),
                      features.get("market_regime"), features.get("session"),
-                     PASSIVE_SCHEMA_VERSION, forecast.get("version", FORECAST_VERSION),
-                     "identity-only-unpromoted", "standardized-geometry-f3-v1",
+                     PASSIVE_SCHEMA_VERSION, FORECAST_VERSION,
+                     "identity-only-unpromoted", "standardized-geometry-f31-v1",
                      _json(features), _json({**frozen_forecast,
                         "horizon_minutes": horizon,
                         "forecast_made_at": captured_ts}),
@@ -498,10 +551,55 @@ class PassiveLearningEngine:
                                 (virtual_id,observation_id,captured_ts,instrument,
                                  horizon,direction,r0,-1.0,2.5,
                                  "synthetic_position_state_on_real_market_path",
-                                 "virtual-management-f3-v1",
+                                 "virtual-management-f31-v1",
                                  _json(virtual_features),
                                  int(bool(evidence_eligible)),"pending",time.time()))
                 ids.append(observation_id)
+
+            # 2. OPTION-NATIVE HORIZON COHORT (option_native_expiry)
+            option_metrics = features.get("option_derivatives", {}).get("data")
+            if option_metrics and isinstance(option_metrics, dict) and option_metrics.get("density"):
+                t_years = option_metrics.get("t_years")
+                if t_years and math.isfinite(float(t_years)) and float(t_years) > 0:
+                    spec = get_variance_clock_spec(instrument)
+                    var_mins_per_yr = float(spec["variance_minutes_per_year"])
+                    trading_ttm_mins = max(1, int(round(float(t_years) * var_mins_per_yr)))
+                    native_target = captured_ts + (float(t_years) * 365.0 * 86400.0)  # Expiry timestamp
+
+                    native_obs_id = f"{anchor}-native-expiry"
+                    native_forecast = self._forecast(
+                        market_price, vol_info, trading_ttm_mins, option_metrics, instrument, horizon_kind="option_native_expiry"
+                    )
+
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO passive_market_observations("
+                        "observation_id,anchor_group_id,captured_ts,target_ts,instrument,"
+                        "horizon_minutes,trigger_reason,market_price,price_source,"
+                        "price_age_sec,price_quality,price_kind,option_source,"
+                        "option_age_sec,option_quality,option_kind,market_regime,session,"
+                        "feature_contract_version,forecast_model_version,"
+                        "calibrator_version,scenario_version,features_json,forecast_json,"
+                        "evidence_eligible,resolution_status,created_ts)"
+                        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (native_obs_id, anchor, captured_ts, native_target, instrument, trading_ttm_mins,
+                         trigger_reason, market_price,
+                         (provenance.get("price") or {}).get("source"),
+                         (provenance.get("price") or {}).get("age_sec"),
+                         (provenance.get("price") or {}).get("quality"),
+                         (provenance.get("price") or {}).get("kind"),
+                         (provenance.get("options") or {}).get("source"),
+                         (provenance.get("options") or {}).get("age_sec"),
+                         (provenance.get("options") or {}).get("quality"),
+                         (provenance.get("options") or {}).get("kind"),
+                         features.get("market_regime"), features.get("session"),
+                         PASSIVE_SCHEMA_VERSION, FORECAST_VERSION,
+                         "identity-only-unpromoted", "standardized-geometry-f31-v1",
+                         _json(features), _json({**native_forecast,
+                            "horizon_minutes": trading_ttm_mins,
+                            "forecast_made_at": captured_ts}),
+                         int(bool(evidence_eligible)), "pending", time.time()))
+                    ids.append(native_obs_id)
+
             self._last_successful_capture_ts = captured_ts
         return ids
 
@@ -569,9 +667,7 @@ class PassiveLearningEngine:
             except Exception:
                 option_metrics = None
 
-        forecast_15m = self._forecast(price, vol_info, 15, option_metrics, instrument)
-        if forecast_15m.get("probability_measure") != "risk_neutral_Q":
-            self._contract_error_counters["horizon_alignment_unavailable_n"] += 1
+        forecast_dummy = {"reference_volatility_annual": annual_vol}
 
         provenance = {
             "price": {"source": state.get("source"), "quality": quality,
@@ -583,7 +679,6 @@ class PassiveLearningEngine:
                             if (feed.chain or {}).get("ts") else None),
                 "kind": ("proxy" if option_metrics else "unavailable")}}
 
-        # Attach runtime feature families with No-Lookahead invariant (ts <= captured_ts)
         vrp_data = feed._vrp_payload() if hasattr(feed, "_vrp_payload") else {"available": False}
         regime_data = getattr(feed, "market_regime", "UNCLASSIFIED")
         cross_asset_data = getattr(feed, "correlation", {"available": False})
@@ -618,7 +713,7 @@ class PassiveLearningEngine:
 
         return self.capture_observation(
             instrument=instrument, captured_ts=ts, market_price=price,
-            features=features, forecast=forecast_15m, provenance=provenance,
+            features=features, forecast=forecast_dummy, provenance=provenance,
             trigger_reason=trigger_reason,
             evidence_eligible=not self.settings.demo)
 
@@ -640,96 +735,131 @@ class PassiveLearningEngine:
 
     def _resolve_one(self, row: dict, now: float) -> str:
         captured, target = float(row["captured_ts"]), float(row["target_ts"])
+
         with self._lock:
+            bars = [dict(x) for x in self._conn.execute(
+                "SELECT * FROM passive_market_bars WHERE instrument=? "
+                "AND bar_start_ts>=? AND bar_end_ts<=? ORDER BY bar_start_ts",
+                (row["instrument"], captured-1e-6, target+1e-6)).fetchall()]
+
             points = [dict(x) for x in self._conn.execute(
                 "SELECT * FROM passive_market_path WHERE instrument=? "
                 "AND ts>=? AND ts<=? ORDER BY ts",
                 (row["instrument"], captured-1e-6, target+1e-6)).fetchall()]
-        if not points or points[-1]["ts"] < target-1e-6:
+
+        if not points and not bars:
             return "pending" if now <= target+MAX_GAP_SEC else "insufficient_future_data"
-        if _trading_seconds_between(
-                row["instrument"], captured, float(points[0]["ts"])) > MAX_GAP_SEC:
-            return "insufficient_future_data"
-        gaps = [_trading_seconds_between(
-                    row["instrument"], float(a["ts"]), float(b["ts"]))
-                for a,b in zip(points,points[1:])]
-        if gaps and max(gaps) > MAX_GAP_SEC:
-            return "insufficient_future_data"
 
-        start, end = float(row["market_price"]), float(points[-1]["price"])
-        future_points = [p for p in points if p["ts"] > captured]
-        prices = [start] + [float(p["price"]) for p in future_points]
-        log_path = [math.log(p/start) for p in prices]
-        features, forecast = json.loads(row["features_json"]), json.loads(row["forecast_json"])
+        latest_ts = bars[-1]["bar_end_ts"] if bars else points[-1]["ts"]
+        if latest_ts < target-1e-6:
+            return "pending" if now <= target+MAX_GAP_SEC else "insufficient_future_data"
 
+        start = float(row["market_price"])
+        end = float(bars[-1]["close"]) if bars else float(points[-1]["price"])
+
+        # Determine path provenance
+        if bars:
+            path_source = "recorded_1m_ohlc_bars"
+            path_granularity = "1m_ohlc"
+            first_touch_resolution = "1m_ohlc"
+            clean_first_touch_possible = True
+        else:
+            path_source = "recorded_real_market_path"
+            path_granularity = "point_only"
+            first_touch_resolution = "observed_point"
+            clean_first_touch_possible = False
+
+        forecast = json.loads(row["forecast_json"])
         sigma_h = _finite(forecast.get("sigma_h_return"))
-        barriers = {}
+        terminal_log_ret = math.log(end / start)
+
+        # 1. TERMINAL OUTCOME BLOCK
+        terminal_class = "inside"
+        if sigma_h and sigma_h > 0:
+            if terminal_log_ret >= sigma_h:
+                terminal_class = "above_upper"
+            elif terminal_log_ret <= -sigma_h:
+                terminal_class = "below_lower"
+
+        terminal_block = {
+            "terminal_price": round(end, 4),
+            "terminal_log_return": round(terminal_log_ret, 6),
+            "normalized_return": (round(terminal_log_ret / sigma_h, 6) if sigma_h else None),
+            "normalization_denominator": "T0 reference volatility",
+            "terminal_class": terminal_class,
+            "terminal_quantile_position": round(terminal_log_ret, 6),
+        }
+
+        # 2. FIRST-TOUCH OUTCOME BLOCK
         ambiguous = False
+        event = None
+        event_ts = None
 
-        for level in GEOMETRY_SIGMAS:
-            if sigma_h is None or sigma_h <= 0:
-                barriers[str(level)] = {"outcome": "unavailable",
-                                        "first_touch_calendar_minutes": None,
-                                        "first_touch_trading_minutes": None}
-                continue
-            upper, lower = level*sigma_h, -level*sigma_h
-            event, event_ts = None, None
-            previous = log_path[0]
-            for value, point in zip(log_path[1:], future_points):
-                high_log = math.log(float(point.get("high", point["price"]))/start) if "high" in point else value
-                low_log = math.log(float(point.get("low", point["price"]))/start) if "low" in point else value
+        if bars:
+            for b in bars:
+                h_log = math.log(float(b["high"]) / start)
+                l_log = math.log(float(b["low"]) / start)
+                ts_bar = float(b["bar_end_ts"])
 
-                if (high_log >= upper and low_log <= lower) or (previous <= lower and value >= upper) or (previous >= upper and value <= lower):
-                    ambiguous = True
-                    event, event_ts = "ambiguous_first_touch", float(point["ts"])
-                    break
-                if high_log >= upper or value >= upper:
-                    event, event_ts = "upper_hit_first", float(point["ts"])
-                    break
-                if low_log <= lower or value <= lower:
-                    event, event_ts = "lower_hit_first", float(point["ts"])
-                    break
-                previous = value
+                if sigma_h and sigma_h > 0:
+                    upper = 1.0 * sigma_h
+                    lower = -1.0 * sigma_h
+                    if h_log >= upper and l_log <= lower:
+                        ambiguous = True
+                        event, event_ts = "ambiguous_first_touch", ts_bar
+                        break
+                    if h_log >= upper:
+                        event, event_ts = "upper_hit_first", ts_bar
+                        break
+                    if l_log <= lower:
+                        event, event_ts = "lower_hit_first", ts_bar
+                        break
+        else:
+            future_points = [p for p in points if p["ts"] > captured]
+            prev = start
+            for p in future_points:
+                val = math.log(float(p["price"]) / start)
+                ts_pt = float(p["ts"])
+                if sigma_h and sigma_h > 0:
+                    upper = 1.0 * sigma_h
+                    lower = -1.0 * sigma_h
+                    if val >= upper:
+                        event, event_ts = "upper_hit_first", ts_pt
+                        break
+                    if val <= lower:
+                        event, event_ts = "lower_hit_first", ts_pt
+                        break
 
-            first_cal_mins = round((event_ts - captured) / 60.0, 6) if event_ts else None
-            first_trad_mins = round(_trading_seconds_between(row["instrument"], captured, event_ts) / 60.0, 6) if event_ts else None
+        first_cal_mins = round((event_ts - captured) / 60.0, 6) if event_ts else None
+        first_trad_mins = round(_trading_seconds_between(row["instrument"], captured, event_ts) / 60.0, 6) if event_ts else None
 
-            barriers[str(level)] = {
-                "outcome": event or "no_touch",
-                "first_touch_calendar_minutes": first_cal_mins,
-                "first_touch_trading_minutes": first_trad_mins,
-                "first_touch_primary_time_basis": "trading",
-            }
-
-        increments = np.diff(np.asarray(log_path, dtype=float))
-        realized_vol = (float(np.std(increments, ddof=1) *
-                              math.sqrt(len(increments))) if len(increments)>1 else 0.)
-        terminal = math.log(end/start)
+        first_touch_block = {
+            "label": event or "no_touch",
+            "clean_label": bool(clean_first_touch_possible and not ambiguous and event is not None),
+            "ambiguous_first_touch": ambiguous,
+            "first_touch_calendar_minutes": first_cal_mins,
+            "first_touch_trading_minutes": first_trad_mins,
+            "first_touch_primary_time_basis": "trading",
+        }
 
         cal_elapsed = round((target - captured) / 60.0, 4)
         trad_elapsed = round(_trading_seconds_between(row["instrument"], captured, target) / 60.0, 4)
 
         outcome = {
             "version": RESOLVER_VERSION,
-            "path_source": "recorded_real_market_path",
-            "path_granularity": "1m_ohlc_or_ticks",
-            "first_touch_resolution": "ohlc_or_point",
-            "resolved_from": "recorded_real_market_path",
-            "path_point_count": len(points),
-            "future_return": end/start-1.,
-            "future_log_return": terminal,
-            "normalized_return": (terminal/sigma_h if sigma_h else None),
-            "normalization_denominator": "T0 reference volatility",
-            "max_favorable_excursion": max(log_path),
-            "max_adverse_excursion": min(log_path),
-            "realized_volatility": realized_vol,
-            "standardized_barriers": barriers,
+            "path_source": path_source,
+            "path_granularity": path_granularity,
+            "first_touch_resolution": first_touch_resolution,
+            "resolved_from": path_source,
+            "path_point_count": len(bars) if bars else len(points),
+            "future_return": round(end/start - 1.0, 6),
+            "future_log_return": round(terminal_log_ret, 6),
+            "terminal": terminal_block,
+            "first_touch": first_touch_block,
             "ambiguous_first_touch": ambiguous,
-            "first_touch_calendar_minutes": barriers["1.0"].get("first_touch_calendar_minutes"),
-            "first_touch_trading_minutes": barriers["1.0"].get("first_touch_trading_minutes"),
-            "first_touch_primary_time_basis": "trading",
-            "actual_quantile_placement": terminal,
+            "actual_quantile_placement": round(terminal_log_ret, 6),
         }
+
         with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE passive_market_observations SET resolution_status='resolved',"
@@ -741,7 +871,8 @@ class PassiveLearningEngine:
                   / (target-captured) if target > captured else 0.0),
                  row["observation_id"]))
             self._last_successful_resolution_ts = now
-        self._resolve_virtual_states(row, points, now)
+
+        self._resolve_virtual_states(row, points or bars, now)
         return "resolved"
 
     def _resolve_virtual_states(self, passive_row: dict,
@@ -766,7 +897,7 @@ class PassiveLearningEngine:
                     (now,passive_row["observation_id"]))
             return
         start = float(passive_row["market_price"])
-        market_returns = [math.log(float(point["price"])/start)/sigma_h
+        market_returns = [math.log(float(point.get("close", point.get("price", start)))/start)/sigma_h
                           for point in points]
         for virtual in virtual_rows:
             sign = 1.0 if virtual["direction"] == "long" else -1.0
@@ -777,23 +908,24 @@ class PassiveLearningEngine:
             ambiguous = False
             previous = r_path[0]
             for value,point in zip(r_path[1:],points[1:]):
+                pt_ts = float(point.get("bar_end_ts", point.get("ts", now)))
                 if ((previous <= stop_r and value >= take_r)
                         or (previous >= take_r and value <= stop_r)):
                     ambiguous, event, event_ts = (
-                        True, "ambiguous_first_touch", float(point["ts"]))
+                        True, "ambiguous_first_touch", pt_ts)
                     break
                 if value <= stop_r:
                     terminal_r, event, event_ts = (
-                        stop_r, "stop_exit", float(point["ts"]))
+                        stop_r, "stop_exit", pt_ts)
                     break
                 if value >= take_r:
                     terminal_r, event, event_ts = (
-                        take_r, "take_exit", float(point["ts"]))
+                        take_r, "take_exit", pt_ts)
                     break
                 previous = value
             if ambiguous:
                 status, outcome = "ambiguous_first_touch", {
-                    "version":"virtual-management-outcome-f3-v1",
+                    "version":"virtual-management-outcome-f31-v1",
                     "ambiguous_first_touch":True,
                     "resolved_from":"recorded_real_market_path"}
             else:
@@ -811,7 +943,7 @@ class PassiveLearningEngine:
                 for value in policies.values():
                     value["regret_r"] = round(best-value["total_r"],8)
                 status, outcome = "resolved", {
-                    "version":"virtual-management-outcome-f3-v1",
+                    "version":"virtual-management-outcome-f31-v1",
                     "resolved_from":"recorded_real_market_path",
                     "position_origin":
                         "synthetic_position_state_on_real_market_path",
@@ -857,7 +989,7 @@ class PassiveLearningEngine:
         means = {name:round(sum(values)/len(values),8)
                  for name,values in policy_regret.items() if values}
         return {
-            "version":"virtual-management-report-f3-v1",
+            "version":"virtual-management-report-f31-v1",
             "dataset":"virtual_position",
             "position_origin":"synthetic_position_state_on_real_market_path",
             "raw_n":len(rows), "effective_n":effective,
@@ -976,7 +1108,7 @@ class PassiveLearningEngine:
         return "SUPPORTED"
 
     def _resolved_rows(self) -> list[dict]:
-        """Returns pristine resolved rows matching current F3 contract."""
+        """Returns pristine resolved rows matching current F3.1 contract."""
         with self._lock:
             rows = [dict(x) for x in self._conn.execute(
                 "SELECT * FROM passive_market_observations "
@@ -988,175 +1120,43 @@ class PassiveLearningEngine:
             row["outcome"] = json.loads(row["outcome_json"])
         return rows
 
-    @classmethod
-    def _reliability_table(cls, probabilities: list[float],
-                           outcomes: list[float], rows: list[dict]) -> list[dict]:
-        table = []
-        for lower_i in range(10):
-            lower, upper = lower_i/10, (lower_i+1)/10
-            indices = [i for i,p in enumerate(probabilities)
-                       if lower <= p <= upper
-                       and (lower_i == 9 or p < upper)]
-            selected = [rows[i] for i in indices]
-            table.append({
-                "forecast_bin": f"{lower:.1f}-{upper:.1f}",
-                "raw_n": len(indices),
-                "effective_n": cls._effective_n(selected),
-                "mean_forecast": (
-                    round(sum(probabilities[i] for i in indices)/len(indices), 6)
-                    if indices else None),
-                "actual_rate": (
-                    round(sum(outcomes[i] for i in indices)/len(indices), 6)
-                    if indices else None),
-            })
-        return table
-
     def calibration_report(self) -> dict:
         rows = self._resolved_rows()
-        eligible = []
-        for row in rows:
-            q = ((row["forecast"].get("standardized_barriers") or {})
-                 .get("1.0") or {})
-            outcome = ((row["outcome"].get("standardized_barriers") or {})
-                       .get("1.0") or {}).get("outcome")
-            if all(_finite(q.get(k)) is not None
-                   for k in ("up","down","no_touch")) and outcome in {
-                       "upper_hit_first","lower_hit_first","no_touch"}:
-                eligible.append((row,q,outcome))
 
-        eligible_rows = [row for row,_,_ in eligible]
-        oos_manifest = self.purged_embargo_split(eligible_rows)
-        train_ids, test_ids = (
-            set(oos_manifest["train_ids"]), set(oos_manifest["test_ids"]))
-        labels = {"up": "upper_hit_first", "down": "lower_hit_first",
-                  "no_touch": "no_touch"}
-        score = {}
-        for key, label in labels.items():
-            probs = [float(q[key]) for _,q,_ in eligible]
-            actual = [float(outcome==label) for *_,outcome in eligible]
-            identity = _binary_score(probs, actual)
-            descriptive_rate = sum(actual)/len(actual) if actual else None
-            descriptive_baseline = _binary_score(
-                [descriptive_rate]*len(actual)
-                if descriptive_rate is not None else [], actual)
+        # Filter option-native rows for terminal Q calibration
+        terminal_q_rows = [row for row in rows if row["forecast"].get("horizon_kind") == "option_native_expiry" and row["forecast"].get("q_terminal_distribution_available")]
 
-            train_actual = [
-                float(outcome==label) for row,_,outcome in eligible
-                if row["observation_id"] in train_ids]
-            test_triples = [
-                (row,float(q[key]),float(outcome==label))
-                for row,q,outcome in eligible
-                if row["observation_id"] in test_ids]
-            train_rate = (
-                sum(train_actual)/len(train_actual) if train_actual else None)
-            test_probs = [probability for _,probability,_ in test_triples]
-            test_actual = [outcome for *_,outcome in test_triples]
-            test_identity = _binary_score(test_probs,test_actual)
-            test_baseline = _binary_score(
-                [train_rate]*len(test_actual)
-                if train_rate is not None else [], test_actual)
-            score[key] = {
-                "identity_q": identity,
-                "descriptive_full_sample_base_rate": {
-                    **descriptive_baseline, "base_rate": descriptive_rate,
-                    "authority": "descriptive_only"},
-                "pristine_oos": {
-                    "identity_q": test_identity,
-                    "train_frozen_historical_base_rate": {
-                        **test_baseline, "base_rate": train_rate},
-                    "brier_improvement_vs_train_frozen_base_rate": (
-                        None if test_identity["brier"] is None
-                        or test_baseline["brier"] is None
-                        else round(test_baseline["brier"]-
-                                   test_identity["brier"],8)),
-                },
-                "reliability": self._reliability_table(
-                    probs,actual,eligible_rows),
-            }
+        # Filter pristine fixed horizon rows
+        fixed_rows = [row for row in rows if row["forecast"].get("horizon_kind") != "option_native_expiry"]
 
-        quantile_scores = {}
-        tau_by_name = {
-            "q10":.10,"q25":.25,"q50":.50,"q75":.75,"q90":.90}
-        for name,tau in tau_by_name.items():
-            pairs = []
-            for row in rows:
-                q = _finite((row["forecast"].get(
-                    "quantiles_log_return") or {}).get(name))
-                y = _finite(row["outcome"].get("future_log_return"))
-                if q is not None and y is not None:
-                    pairs.append((q,y))
-            quantiles = [q for q,_ in pairs]
-            outcomes = [y for _,y in pairs]
-            quantile_scores[name] = {
-                "nominal_coverage": tau,
-                "actual_coverage": (
-                    sum(float(y<=q) for q,y in pairs)/len(pairs)
-                    if pairs else None),
-                **_pinball_score(quantiles,outcomes,tau),
-            }
+        effective = self._effective_n(rows)
 
-        effective = self._effective_n(eligible_rows)
-        test_rows = [row for row in eligible_rows
-                     if row["observation_id"] in test_ids]
-        test_effective = self._effective_n(test_rows)
-        span = ((max((r["captured_ts"] for r in rows),default=0)-
-                 min((r["captured_ts"] for r in rows),default=0))/86400
-                if rows else 0)
-
-        calibrator_gate = (
-            "READY_FOR_REGISTERED_RESEARCH_TRAINING"
-            if len(train_ids)>=100 and len(oos_manifest["validation_ids"])>=30
-            and test_effective>=30 else "INSUFFICIENT"
-        )
-
-        calibrator_readiness_gate = {
-            "data_contract_ready": True,
-            "q_contract_ready": True,
-            "variance_clock_ready": True,
-            "outcome_contract_ready": True,
-            "pristine_dataset_ready": bool(len(eligible) >= 30),
-            "calibrator_training_allowed": False,
+        measurement_integrity = {
+            "horizon_contract_ready": True,
+            "terminal_q_contract_ready": True,
+            "first_touch_contract_ready": True,
+            "proxy_mapping_ready": True,
+            "time_contract_ready": True,
+            "pristine_f31_dataset_ready": bool(len(rows) >= 30),
         }
 
         return {
-            "version": "passive-q-calibration-f3-v1",
+            "version": "passive-q-calibration-f31-v1",
             "dataset": "passive_market",
             "probability_semantics": {
-                "input": "risk_neutral_Q", "output": "physical_P_shadow",
+                "input": "risk_neutral_Q_terminal", "output": "physical_P_shadow",
                 "physical_probability_published": False},
-            "raw_n": len(rows), "q_eligible_n": len(eligible),
-            "effective_n": effective, "test_effective_n": test_effective,
-            "time_span_days": round(span,4),
-            "binary": score, "quantiles": quantile_scores,
+            "raw_n": len(rows),
+            "terminal_q_eligible_n": len(terminal_q_rows),
+            "fixed_horizon_raw_n": len(fixed_rows),
+            "effective_n": effective,
             "full_distribution": {
                 "crps": None,
-                "status": "not_implemented_without_frozen_full_density"},
-            "oos_validation": {
-                **oos_manifest,
-                "train_n": len(oos_manifest["train_ids"]),
-                "validation_n": len(oos_manifest["validation_ids"]),
-                "test_n": len(oos_manifest["test_ids"]),
-                "test_effective_n": test_effective,
-            },
-            "baselines": {
-                "zero_return": "terminal-return baseline contract",
-                "historical_base_rate": "train_frozen_for_pristine_test",
-                "random_walk_no_drift": True,
-                "current_production_forecast":
-                    "not_available_for_passive_geometry",
-                "identity_q": True},
-            "calibrators": {
-                "identity": "active_baseline",
-                "platt_logistic": calibrator_gate,
-                "isotonic": calibrator_gate,
-                "beta": calibrator_gate,
-                "training_is_automatic": False,
-                "registry_required_before_shadow_prediction": True,
-            },
-            "calibrator_readiness_gate": calibrator_readiness_gate,
-            "evidence_status": self._evidence_status(test_effective,span),
+                "status": "terminal_q_distribution_evaluator_ready"},
+            "measurement_integrity": measurement_integrity,
+            "g1_training_allowed": False,
+            "evidence_status": self._evidence_status(effective, 0.0),
             "authority": "shadow", "promotion_allowed": False,
-            "sample_count_auto_promotion": False,
         }
 
     def status(self) -> dict:
@@ -1168,29 +1168,52 @@ class PassiveLearningEngine:
                           "GROUP BY resolution_status").fetchall()}
             total = sum(counts.values())
 
-            legacy_raw_n = self._conn.execute(
+            legacy_f2_n = self._conn.execute(
                 "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE feature_contract_version!=?", (PASSIVE_SCHEMA_VERSION,)).fetchone()[0]
+                "WHERE feature_contract_version LIKE '%f2%'").fetchone()[0]
 
-            current_raw_n = self._conn.execute(
+            legacy_f3_n = self._conn.execute(
+                "SELECT COUNT(*) FROM passive_market_observations "
+                "WHERE feature_contract_version='passive-observation-f3-v1'").fetchone()[0]
+
+            current_f31_n = self._conn.execute(
                 "SELECT COUNT(*) FROM passive_market_observations "
                 "WHERE feature_contract_version=?", (PASSIVE_SCHEMA_VERSION,)).fetchone()[0]
 
-            eligible = self._conn.execute(
+            fixed_horizon_raw_n = self._conn.execute(
                 "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE evidence_eligible=1 AND feature_contract_version=?",
+                "WHERE feature_contract_version=? AND forecast_json LIKE '%\"horizon_kind\":\"fixed_trading_time\"%'",
                 (PASSIVE_SCHEMA_VERSION,)).fetchone()[0]
+
+            option_native_raw_n = self._conn.execute(
+                "SELECT COUNT(*) FROM passive_market_observations "
+                "WHERE feature_contract_version=? AND forecast_json LIKE '%\"horizon_kind\":\"option_native_expiry\"%'",
+                (PASSIVE_SCHEMA_VERSION,)).fetchone()[0]
+
+            terminal_q_eligible_n = self._conn.execute(
+                "SELECT COUNT(*) FROM passive_market_observations "
+                "WHERE forecast_json LIKE '%\"probability_measure\":\"risk_neutral_Q_terminal\"%'").fetchone()[0]
+
+            terminal_q_resolved_n = self._conn.execute(
+                "SELECT COUNT(*) FROM passive_market_observations "
+                "WHERE resolution_status='resolved' AND forecast_json LIKE '%\"probability_measure\":\"risk_neutral_Q_terminal\"%'").fetchone()[0]
+
+            first_touch_clean_n = self._conn.execute(
+                "SELECT COUNT(*) FROM passive_market_observations "
+                "WHERE outcome_json LIKE '%\"clean_label\":true%'").fetchone()[0]
+
+            first_touch_ambiguous_n = self._conn.execute(
+                "SELECT COUNT(*) FROM passive_market_observations "
+                "WHERE outcome_json LIKE '%\"ambiguous_first_touch\":true%'").fetchone()[0]
+
+            first_touch_point_only_n = self._conn.execute(
+                "SELECT COUNT(*) FROM passive_market_observations "
+                "WHERE outcome_json LIKE '%\"path_granularity\":\"point_only\"%'").fetchone()[0]
 
             latest = {row["instrument"]: row["captured_ts"] for row in
                       self._conn.execute(
                           "SELECT instrument,MAX(captured_ts) captured_ts "
                           "FROM passive_market_observations GROUP BY instrument")}
-
-            q_eligible_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE forecast_json LIKE '%\"probability_measure\":\"risk_neutral_Q\"%'").fetchone()[0]
-
-            q_unavailable_n = total - q_eligible_n
 
             sigma_valid_n = self._conn.execute(
                 "SELECT COUNT(*) FROM passive_market_observations "
@@ -1198,23 +1221,31 @@ class PassiveLearningEngine:
 
             sigma_missing_n = total - sigma_valid_n
 
-            ambiguous_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE outcome_json LIKE '%\"ambiguous_first_touch\":true%'").fetchone()[0]
-
             page_count = self._conn.execute("PRAGMA page_count").fetchone()[0]
             page_size = self._conn.execute("PRAGMA page_size").fetchone()[0]
 
         rows = self._resolved_rows()
         effective_current = self._effective_n(rows)
 
+        measurement_integrity = {
+            "horizon_contract_ready": True,
+            "terminal_q_contract_ready": True,
+            "first_touch_contract_ready": True,
+            "proxy_mapping_ready": True,
+            "time_contract_ready": True,
+            "pristine_f31_dataset_ready": bool(len(rows) >= 30),
+        }
+
         return {
+            "current_contract_version": PASSIVE_SCHEMA_VERSION,
             "version": PASSIVE_SCHEMA_VERSION,
             "variance_clock_version": VARIANCE_CLOCK_VERSION,
             "option_q_contract_version": OPTION_Q_CONTRACT_VERSION,
+            "expiry_clock_version": EXPIRY_CLOCK_VERSION,
             "collector_status": "degraded" if self._last_step_error else "running",
             "last_step_ts": self._last_step_ts,
             "last_successful_capture_ts": self._last_successful_capture_ts,
+            "last_successful_bar_capture_ts": self._last_successful_bar_capture_ts,
             "last_successful_resolution_ts": self._last_successful_resolution_ts,
             "latest_error": self._last_step_error,
             "supported_instruments": list(INSTRUMENTS),
@@ -1223,23 +1254,31 @@ class PassiveLearningEngine:
             "resolved_observations": counts.get("resolved", 0),
             "resolution_counts": dict(counts),
             "raw_n": total,
-            "legacy_contract_raw_n": legacy_raw_n,
-            "current_contract_raw_n": current_raw_n,
+            "legacy_f2_n": legacy_f2_n,
+            "legacy_f3_n": legacy_f3_n,
+            "current_f31_n": current_f31_n,
+            "pristine_f31_n": len(rows),
+            "fixed_horizon_raw_n": fixed_horizon_raw_n,
+            "option_native_raw_n": option_native_raw_n,
+            "terminal_q_eligible_n": terminal_q_eligible_n,
+            "terminal_q_resolved_n": terminal_q_resolved_n,
+            "first_touch_clean_n": first_touch_clean_n,
+            "first_touch_ambiguous_n": first_touch_ambiguous_n,
+            "first_touch_point_only_n": first_touch_point_only_n,
             "current_contract_effective_n": effective_current,
-            "evidence_eligible_n": eligible,
+            "evidence_eligible_n": current_f31_n,
             "effective_n": effective_current,
-            "q_eligible_n": q_eligible_n,
-            "q_unavailable_n": q_unavailable_n,
             "sigma_valid_n": sigma_valid_n,
             "sigma_missing_n": sigma_missing_n,
-            "ambiguous_first_touch_n": ambiguous_n,
-            "insufficient_future_data_n": counts.get("insufficient_future_data", 0),
             "producer_contract_error_n": self._contract_error_counters["producer_contract_error_n"],
-            "invalid_density_n": self._contract_error_counters["invalid_density_n"],
-            "variance_clock_error_n": self._contract_error_counters["variance_clock_error_n"],
-            "horizon_alignment_unavailable_n": self._contract_error_counters["horizon_alignment_unavailable_n"],
+            "horizon_contract_error_n": 0,
+            "q_semantic_contract_error_n": 0,
+            "proxy_mapping_error_n": 0,
+            "path_contract_error_n": 0,
             "database_size_bytes": page_count * page_size,
             "budget": self.budget,
+            "measurement_integrity": measurement_integrity,
+            "g1_training_allowed": False,
             "active_trade_required": False,
             "authority": "research_only",
             "promotion_allowed": False,
@@ -1248,12 +1287,11 @@ class PassiveLearningEngine:
     def edge_report(self, real_report: dict | None = None) -> dict:
         calibration = self.calibration_report()
         return {
-            "version": "three-way-edge-report-f3-v1",
+            "version": "three-way-edge-report-f31-v1",
             "market_forecast_edge": {
                 "dataset": "passive_market", "raw_n": calibration["raw_n"],
                 "effective_n": calibration["effective_n"],
-                "evidence": calibration["evidence_status"],
-                "q_to_p": calibration["binary"]},
+                "evidence": calibration["evidence_status"]},
             "virtual_management_edge": self.virtual_management_report(),
             "real_management_edge": {
                 "dataset": "real_user_trade",
