@@ -176,6 +176,15 @@ Phase B must preserve the existing frame-budget scheduler, staggered analytics, 
 - **PR A:** this audit, machine contracts and guard tests only.
 - **PR B:** real-market visual dynamics, full Cross-Asset topology and unified camera controls.
 - **PR C:** robust option derivatives, split touch-time statistics, local hazards, GEX curvature and transparent interactions in shadow mode.
+
+### PR C resolution note
+
+PR C resolves audit findings 1–2 without breaking the legacy clock: separate
+take/stop conditional medians and discrete competing-risk hazards are now
+published, while `median_years` remains the compatibility field. Robust option
+derivatives, analytic GEX curvature and formula-attributed interactions are
+implemented under the non-authoritative shadow contract documented in
+`OPTION_DERIVATIVE_SHADOW_CONTRACT.md`.
 - **PR D:** named stress ensemble, validated derived-state integration and deterministic verdict attribution.
 
 No derived metric receives live policy authority merely because it is mathematically plausible.

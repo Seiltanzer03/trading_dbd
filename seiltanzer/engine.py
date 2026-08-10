@@ -718,6 +718,9 @@ class Engine:
             "p_model": band.p,
             "horizon_years": horizon_years,
             "median_years": cone.get("median_years"),
+            "take_first_touch_median_years": cone.get("take_first_touch_median_years"),
+            "stop_first_touch_median_years": cone.get("stop_first_touch_median_years"),
+            "first_touch_hazard": cone.get("first_touch_hazard"),
             "source": cone.get("hit_source"), "has_chain": terminal is not None,
             "demo": (terminal or {}).get("demo", self.settings.demo),
             "terminal_p_take": (terminal or {}).get("p_take"),
@@ -900,6 +903,20 @@ class Engine:
         flip = flip_levels[0] if flip_levels else None
         res = gamma_pin(strikes_instr, gex["net"], flip, price,
                         trade["entry"], trade["stop"], trade["take"], trade["direction"])
+        from .core.gex_field import analytic_gex_field
+        field = analytic_gex_field(strikes_instr, gex["net"], price)
+        if field.get("available"):
+            risk = abs(float(trade["entry"]) - float(trade["stop"])) or 1.0
+            direction_sign = 1.0 if trade["direction"] == "long" else -1.0
+            field["distance_to_zero_gamma"] = (
+                None if flip is None else (float(flip) - price) * direction_sign / risk)
+            field["distance_to_call_wall_r"] = (
+                None if field.get("call_wall") is None
+                else (float(field["call_wall"]) - price) * direction_sign / risk)
+            field["distance_to_put_wall_r"] = (
+                None if field.get("put_wall") is None
+                else (float(field["put_wall"]) - price) * direction_sign / risk)
+        res["field_geometry"] = field
         res["demo"] = m.get("demo", False)
         res["decision_weight"] = False
         res["quality"] = "oi_heuristic_not_observed_dealer_position"

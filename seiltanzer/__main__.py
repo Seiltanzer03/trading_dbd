@@ -11,6 +11,7 @@ from .app import create_app
 from .app_extensions import install_ai_decision_routes, install_lattice_revaluation
 from .config import Settings
 from .lattice_visual_history import install_lattice_visual_history
+from .option_shadow_state import install_option_shadow_state
 
 
 def main() -> None:
@@ -46,6 +47,7 @@ def main() -> None:
     install_ai_decision_routes(app)
     install_lattice_revaluation(app)
     install_lattice_visual_history(app)
+    install_option_shadow_state(app)
     print(f"Seiltanzer Terminal -> http://{args.host}:{args.port}"
           f"{' [DEMO]' if args.demo else ''}{' [STREAM]' if args.stream else ''}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

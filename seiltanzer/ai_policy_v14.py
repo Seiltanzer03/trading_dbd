@@ -7,6 +7,7 @@ net selection floor separately, so older strategy consumers are not broken.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from . import ai_policy_v13 as _impl
@@ -79,7 +80,45 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
         rule["gross_cvar_floor_r"] = risk.get("gross_cvar_floor_r")
         rule["cvar_floor_basis"] = "net"
         result["selection_rule"] = rule
-    result["version"] = "quant-policy-v14-net-hard-risk-floor"
+    # PR-C shadow contract: expose the derivative family to deterministic and
+    # LLM attribution without changing policy scores, confirmations, hard-risk
+    # gates or the selected action.  Promotion requires later OOS validation.
+    option_state = deepcopy(tick.get("option_derivative_state") or {})
+    interaction_state = deepcopy(tick.get("interaction_state") or {})
+    if option_state:
+        option_state.update({
+            "family": "option_distribution", "independent_vote": False,
+            "authority": "shadow_context", "shadow_mode": True,
+            "policy_influence": "none",
+        })
+        evidence = result.setdefault("evidence", {})
+        evidence["option_derivative_state"] = option_state
+        evidence["interaction_state"] = interaction_state
+        context = evidence.setdefault("context_observations", [])
+        context.append({
+            "metric": "option_derivative_state",
+            "family": "option_distribution",
+            "independent_vote": False,
+            "authority": "shadow_context",
+            "direction": "context",
+            "meaning": (
+                "Robust option-distribution derivatives are logged in shadow mode; "
+                "they did not alter this policy action."
+            ),
+        })
+        roles = evidence.setdefault("decision_roles", {})
+        context_roles = roles.setdefault("context_only", [])
+        if "option_derivative_state_shadow" not in context_roles:
+            context_roles.append("option_derivative_state_shadow")
+        result["option_derivative_state"] = option_state
+        result["interaction_state"] = interaction_state
+        result["shadow_policy_contract"] = {
+            "old_policy": result.get("recommendation", {}).get("policy"),
+            "new_candidate_policy": None,
+            "reason_for_difference": "not evaluated in PR C; context-only collection",
+            "action_changed": False,
+        }
+    result["version"] = "quant-policy-v14-net-hard-risk-floor-shadow-derivatives"
     return result
 
 
