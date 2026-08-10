@@ -127,3 +127,16 @@ def test_event_trigger_is_versioned_spaced_and_deterministic():
         now=1400.,last=last,price=101.) == "large_price_displacement"
     assert PassiveLearningEngine._event_trigger_reason(
         now=2000.,last=last,price=100.) == "cadence"
+
+
+def test_reliability_and_pinball_contracts_use_exact_counts(passive):
+    rows=[{"instrument":"NAS100","horizon_minutes":15,
+           "captured_ts":i*1000.,"target_ts":i*1000.+900}
+          for i in range(4)]
+    table=passive._reliability_table(
+        [.12,.18,.72,.78],[0.,1.,1.,1.],rows)
+    assert table[1]["raw_n"] == 2
+    assert table[1]["actual_rate"] == .5
+    assert table[7]["raw_n"] == 2
+    from seiltanzer.passive_learning import _pinball_score
+    assert _pinball_score([0.,1.],[1.,0.],.5)["pinball_loss"] == .5

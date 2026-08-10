@@ -135,6 +135,15 @@ def _binary_score(probabilities: list[float], outcomes: list[float]) -> dict:
             "log_loss": round(logloss, 8)}
 
 
+def _pinball_score(quantiles: list[float], outcomes: list[float],
+                   tau: float) -> dict:
+    if not quantiles:
+        return {"n": 0, "pinball_loss": None}
+    loss = sum(max(tau*(y-q), (tau-1.0)*(y-q))
+               for q,y in zip(quantiles,outcomes))/len(outcomes)
+    return {"n": len(outcomes), "pinball_loss": round(loss, 10)}
+
+
 class PassiveLearningEngine:
     """Low-priority collector and immutable prospective research store."""
 
@@ -721,6 +730,29 @@ class PassiveLearningEngine:
             row["outcome"] = json.loads(row["outcome_json"])
         return rows
 
+    @classmethod
+    def _reliability_table(cls, probabilities: list[float],
+                           outcomes: list[float], rows: list[dict]) -> list[dict]:
+        table = []
+        for lower_i in range(10):
+            lower, upper = lower_i/10, (lower_i+1)/10
+            indices = [i for i,p in enumerate(probabilities)
+                       if lower <= p <= upper
+                       and (lower_i == 9 or p < upper)]
+            selected = [rows[i] for i in indices]
+            table.append({
+                "forecast_bin": f"{lower:.1f}-{upper:.1f}",
+                "raw_n": len(indices),
+                "effective_n": cls._effective_n(selected),
+                "mean_forecast": (
+                    round(sum(probabilities[i] for i in indices)/len(indices), 6)
+                    if indices else None),
+                "actual_rate": (
+                    round(sum(outcomes[i] for i in indices)/len(indices), 6)
+                    if indices else None),
+            })
+        return table
+
     def calibration_report(self) -> dict:
         rows = self._resolved_rows()
         eligible = []
@@ -729,9 +761,15 @@ class PassiveLearningEngine:
                  .get("1.0") or {})
             outcome = ((row["outcome"].get("standardized_barriers") or {})
                        .get("1.0") or {}).get("outcome")
-            if all(_finite(q.get(k)) is not None for k in ("up","down","no_touch")) \
-                    and outcome in {"upper_hit_first","lower_hit_first","no_touch"}:
+            if all(_finite(q.get(k)) is not None
+                   for k in ("up","down","no_touch")) and outcome in {
+                       "upper_hit_first","lower_hit_first","no_touch"}:
                 eligible.append((row,q,outcome))
+
+        eligible_rows = [row for row,_,_ in eligible]
+        oos_manifest = self.purged_embargo_split(eligible_rows)
+        train_ids, test_ids = (
+            set(oos_manifest["train_ids"]), set(oos_manifest["test_ids"]))
         labels = {"up": "upper_hit_first", "down": "lower_hit_first",
                   "no_touch": "no_touch"}
         score = {}
@@ -739,53 +777,113 @@ class PassiveLearningEngine:
             probs = [float(q[key]) for _,q,_ in eligible]
             actual = [float(outcome==label) for *_,outcome in eligible]
             identity = _binary_score(probs, actual)
-            base_rate = sum(actual)/len(actual) if actual else None
-            baseline = _binary_score(
-                [base_rate]*len(actual) if base_rate is not None else [], actual)
-            score[key] = {"identity_q": identity,
-                          "historical_base_rate": baseline,
-                          "base_rate": base_rate,
-                          "brier_improvement_vs_base_rate": (
-                              None if identity["brier"] is None or baseline["brier"] is None
-                              else round(baseline["brier"]-identity["brier"],8))}
-        coverage = {}
-        for name in ("q10","q25","q50","q75","q90"):
-            values = []
+            descriptive_rate = sum(actual)/len(actual) if actual else None
+            descriptive_baseline = _binary_score(
+                [descriptive_rate]*len(actual)
+                if descriptive_rate is not None else [], actual)
+
+            train_actual = [
+                float(outcome==label) for row,_,outcome in eligible
+                if row["observation_id"] in train_ids]
+            test_triples = [
+                (row,float(q[key]),float(outcome==label))
+                for row,q,outcome in eligible
+                if row["observation_id"] in test_ids]
+            train_rate = (
+                sum(train_actual)/len(train_actual) if train_actual else None)
+            test_probs = [probability for _,probability,_ in test_triples]
+            test_actual = [outcome for *_,outcome in test_triples]
+            test_identity = _binary_score(test_probs,test_actual)
+            test_baseline = _binary_score(
+                [train_rate]*len(test_actual)
+                if train_rate is not None else [], test_actual)
+            score[key] = {
+                "identity_q": identity,
+                "descriptive_full_sample_base_rate": {
+                    **descriptive_baseline, "base_rate": descriptive_rate,
+                    "authority": "descriptive_only"},
+                "pristine_oos": {
+                    "identity_q": test_identity,
+                    "train_frozen_historical_base_rate": {
+                        **test_baseline, "base_rate": train_rate},
+                    "brier_improvement_vs_train_frozen_base_rate": (
+                        None if test_identity["brier"] is None
+                        or test_baseline["brier"] is None
+                        else round(test_baseline["brier"]-
+                                   test_identity["brier"],8)),
+                },
+                "reliability": self._reliability_table(
+                    probs,actual,eligible_rows),
+            }
+
+        quantile_scores = {}
+        tau_by_name = {
+            "q10":.10,"q25":.25,"q50":.50,"q75":.75,"q90":.90}
+        for name,tau in tau_by_name.items():
+            pairs = []
             for row in rows:
-                q = _finite((row["forecast"].get("quantiles_log_return") or {}).get(name))
+                q = _finite((row["forecast"].get(
+                    "quantiles_log_return") or {}).get(name))
                 y = _finite(row["outcome"].get("future_log_return"))
                 if q is not None and y is not None:
-                    values.append(float(y <= q))
-            coverage[name] = sum(values)/len(values) if values else None
-        effective = self._effective_n([row for row,_,_ in eligible])
+                    pairs.append((q,y))
+            quantiles = [q for q,_ in pairs]
+            outcomes = [y for _,y in pairs]
+            quantile_scores[name] = {
+                "nominal_coverage": tau,
+                "actual_coverage": (
+                    sum(float(y<=q) for q,y in pairs)/len(pairs)
+                    if pairs else None),
+                **_pinball_score(quantiles,outcomes,tau),
+            }
+
+        effective = self._effective_n(eligible_rows)
+        test_rows = [row for row in eligible_rows
+                     if row["observation_id"] in test_ids]
+        test_effective = self._effective_n(test_rows)
         span = ((max((r["captured_ts"] for r in rows),default=0)-
-                 min((r["captured_ts"] for r in rows),default=0))/86400 if rows else 0)
-        oos_manifest = self.purged_embargo_split(rows)
+                 min((r["captured_ts"] for r in rows),default=0))/86400
+                if rows else 0)
+        calibrator_gate = (
+            "READY_FOR_REGISTERED_RESEARCH_TRAINING"
+            if len(train_ids)>=100 and len(oos_manifest["validation_ids"])>=30
+            and test_effective>=30 else "INSUFFICIENT"
+        )
         return {
-            "version": "passive-q-calibration-f2-v1",
+            "version": "passive-q-calibration-f2-v2",
             "dataset": "passive_market", "probability_semantics": {
                 "input": "risk_neutral_Q", "output": "physical_P_shadow",
                 "physical_probability_published": False},
             "raw_n": len(rows), "q_eligible_n": len(eligible),
-            "effective_n": effective, "time_span_days": round(span,4),
-            "binary": score, "quantile_coverage": coverage,
-            "full_distribution": {"crps": None,
-                                  "status": "not_implemented_until_density_contract"},
+            "effective_n": effective, "test_effective_n": test_effective,
+            "time_span_days": round(span,4),
+            "binary": score, "quantiles": quantile_scores,
+            "full_distribution": {
+                "crps": None,
+                "status": "not_implemented_without_frozen_full_density"},
             "oos_validation": {
                 **oos_manifest,
                 "train_n": len(oos_manifest["train_ids"]),
                 "validation_n": len(oos_manifest["validation_ids"]),
                 "test_n": len(oos_manifest["test_ids"]),
+                "test_effective_n": test_effective,
             },
             "baselines": {
-                "zero_return": "reported for terminal-return objectives",
-                "historical_base_rate": True, "random_walk_no_drift": True,
-                "current_production_forecast": "not_available_for_passive_geometry",
+                "zero_return": "terminal-return baseline contract",
+                "historical_base_rate": "train_frozen_for_pristine_test",
+                "random_walk_no_drift": True,
+                "current_production_forecast":
+                    "not_available_for_passive_geometry",
                 "identity_q": True},
             "calibrators": {
-                "identity": "active_baseline", "platt_logistic": "research_scaffold",
-                "isotonic": "research_scaffold", "beta": "research_scaffold"},
-            "evidence_status": self._evidence_status(effective,span),
+                "identity": "active_baseline",
+                "platt_logistic": calibrator_gate,
+                "isotonic": calibrator_gate,
+                "beta": calibrator_gate,
+                "training_is_automatic": False,
+                "registry_required_before_shadow_prediction": True,
+            },
+            "evidence_status": self._evidence_status(test_effective,span),
             "authority": "shadow", "promotion_allowed": False,
             "sample_count_auto_promotion": False,
         }
