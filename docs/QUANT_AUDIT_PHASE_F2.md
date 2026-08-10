@@ -59,3 +59,8 @@ train-frozen base rates on pristine purged/embargoed TEST only.
 
 Virtual management is now an immutable, separately counted cohort over recorded
 real paths; it cannot enter the real trade ledger or support real-user claims.
+
+
+The final continuation gate exercises CLOSE_25 through real mobile WebKit and
+asserts that a deliberately slow passive collector does not block state, AI
+no-trade handling or initial WebSocket delivery.
