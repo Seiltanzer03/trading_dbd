@@ -7,6 +7,7 @@ from seiltanzer.analytics_runtime import (
     _wavelet_payload,
 )
 from seiltanzer.engine import Engine
+from seiltanzer.ai_verdict_base import _observation
 from seiltanzer.metric_contracts import CONTRACTS, metric_contract, validate_contracts
 
 
@@ -64,3 +65,28 @@ def test_real_analytics_adapters_replace_synthetic_engine_prototypes():
     assert Engine.macro_regime_payload is _macro_regime_payload
     assert Engine.wavelet_payload is _wavelet_payload
     assert Engine.cross_asset_payload is _cross_asset_payload
+
+
+def test_ai_observation_does_not_duplicate_canonical_metric_families():
+    tick = {
+        "prob": {"r": 0.2, "T": 2.5},
+        "ladder": {"max_r": 0.4},
+        "feeds": {"price": {"value": 101.0}},
+    }
+    evidence = {
+        "option_barrier": {"p_take": 0.2},
+        "iv_surface": {"large": list(range(100))},
+        "correlation": {"all_pairs": list(range(100))},
+    }
+    observation = _observation(
+        tick, {"evidence": evidence},
+        {"entry": 100.0, "stop": 90.0, "take": 125.0},
+    )
+    assert observation["canonical_metric_paths"]["market_evidence"] == (
+        "policy_manager.evidence"
+    )
+    for duplicate in (
+        "option_probability", "probability_cone", "strike_landscape",
+        "iv_surface", "correlation", "feed_quality",
+    ):
+        assert duplicate not in observation
