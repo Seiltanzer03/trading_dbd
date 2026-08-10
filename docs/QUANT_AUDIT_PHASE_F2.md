@@ -43,3 +43,7 @@ and routes the STOP/TAKE cockpit through the active v18 renderer.
 
 The compatibility pass preserves the established first-line action cockpit and
 defines stale identity by economic geometry, not by audit-event insertion order.
+
+
+Final research gate: Gaussian reference is not Q; registered OOS datasets use
+chronological purge and maximum-horizon embargo before any challenger scoring.
