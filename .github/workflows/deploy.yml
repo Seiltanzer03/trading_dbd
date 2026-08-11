@@ -32,9 +32,10 @@ jobs:
           PY
           )
           # Bounded cleanup: only malformed ~*ltanzer* artifacts are eligible.
-          # Old root-owned remnants are reported rather than broad-deleted.
-          /opt/seiltanzer/.venv/bin/python scripts/g1e1_cleanup_venv.py \
-            --site-packages "$SITE" --apply || true
+          # Import maintenance code from this exact checkout, not from whatever
+          # Seiltanzer version happened to be installed before delivery.
+          PYTHONPATH="$GITHUB_WORKSPACE" /opt/seiltanzer/.venv/bin/python \
+            scripts/g1e1_cleanup_venv.py --site-packages "$SITE" --apply || true
 
       - name: Pre-deploy regression
         run: |
