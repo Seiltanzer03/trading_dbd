@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from .g1_intelligence_page import intelligence_page
+from .g1_intelligence_page_refinement import intelligence_page
 from .g1_intelligence_refinement import install_g1_intelligence_refinement
 
 # Keep the presentation contract aligned with G.1C's semantic-scope readiness
