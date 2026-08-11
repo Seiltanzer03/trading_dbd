@@ -1,9 +1,9 @@
 """Integrity refinements for Phase G.1B.1 Q evidence admission.
 
-The base G.1B.1 runtime records every attempt.  This layer makes a successful
+The base G.1B.1 runtime records every attempt. This layer makes a successful
 Q capture fail-closed on source freshness and target-price provenance, and
 verifies the frozen source/target/proxy mapping before the attempt can be
-counted as successful.  G.1A itself remains unchanged.
+counted as successful. G.1A itself remains unchanged.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ _REFINED_CONTRACT_VERSION = "g1-q-evidence-integrity-v1"
 _PRE_BLOCKER_KEY = "_g1b1_refined_pre_blocker"
 _ORIGINAL_CLASSIFY = _q._classify_pre_capture
 _ORIGINAL_VALIDATE = _q._validate_created_q
+_ORIGINAL_STATUS = _q.g1_q_status
 
 
 def _finite(value: Any) -> float | None:
@@ -54,7 +55,7 @@ def _refined_classify_pre_capture(
         elif source_age > _q.Q_SOURCE_SNAPSHOT_MAX_AGE_SEC:
             blocker = "OPTION_CHAIN_STALE"
 
-    # Q->P return geometry needs a real, current target spot at T0.  A Yahoo
+    # Q->P return geometry needs a real, current target spot at T0. A Yahoo
     # fallback/index proxy is still useful elsewhere in the terminal but cannot
     # establish a pristine Q evidence capture.
     if blocker is None:
@@ -151,10 +152,17 @@ def _refined_validate_created_q(
     return True, native_id, None, detail
 
 
+def _refined_status(self) -> dict:
+    status = _ORIGINAL_STATUS(self)
+    status["q_evidence_integrity_contract_version"] = _REFINED_CONTRACT_VERSION
+    return status
+
+
 def install_g1_q_evidence_refinement() -> None:
     if getattr(_q, "_g1_q_evidence_integrity", None) == _REFINED_CONTRACT_VERSION:
         return
     _q._BLOCKERS.add("TARGET_PRICE_NON_DIRECT")
     _q._classify_pre_capture = _refined_classify_pre_capture
     _q._validate_created_q = _refined_validate_created_q
+    _q._ENGINE.g1_q_status = _refined_status
     _q._g1_q_evidence_integrity = _REFINED_CONTRACT_VERSION
