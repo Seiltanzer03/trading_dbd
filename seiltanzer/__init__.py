@@ -88,3 +88,11 @@ from .g1_shadow_runtime import install_g1_shadow_runtime as _install_g1_shadow_r
 
 _install_g1_shadow_runtime()
 del _install_g1_shadow_runtime
+
+# Prospective shadow predictions require the same clean T0 Q semantics as the
+# eventual G.1A dataset; internal/manual calls cannot bypass the source/runtime
+# contract merely because they present a syntactically valid CDF.
+from .g1_shadow_refinement import install_g1_shadow_refinement as _install_g1_shadow_refinement
+
+_install_g1_shadow_refinement()
+del _install_g1_shadow_refinement
