@@ -13,7 +13,7 @@ The core question is:
 G.1-M does not create a second execution simulator. It consumes:
 
 - immutable `decision_snapshots` for T0;
-- `management_decisions` for frozen recommendation/execution state;
+- `management_decisions` for frozen recommendation and user-ack state;
 - `decision_path_points` for the observed post-T0 path;
 - authoritative `decision_replays`, which already use `execution-simulator-f0-v1` first-crossing STOP/TAKE/BE/ladder semantics;
 - `position_management_events` as the real economic position ledger.
@@ -85,13 +85,15 @@ Also stored:
 
 ## Policy, execution and compliance
 
-Recommendation and user action are deliberately separate.
+Recommendation, user acknowledgement and economic execution are deliberately separate.
 
-- **Policy edge**: result of the frozen production recommendation versus comparators.
-- **Execution edge**: result corresponding to what was actually executed when execution is known.
-- **Compliance attribution**: difference between the frozen recommendation and the observed user action.
+- **Policy edge**: result of the frozen production recommendation versus comparators, as if the frozen action were applied at T0.
+- **Execution edge**: result of the actually observed position-management event path when a terminal position result is known.
+- **Compliance attribution**: whether the user acknowledgement and the corresponding position event agree with the recommendation, without treating that acknowledgement as broker truth.
 
-If production recommended `CLOSE_50` and the user marked it `recommended_not_executed`, production policy is still evaluated as CLOSE_50 while actual action is attributed to HOLD for that decision point. The policy is not falsely recorded as executed.
+A click on `ВЫПОЛНЕНО` is stored as `USER_ACK_LEDGER` evidence only. It is **not** a broker fill. Actual execution PnL is reconstructed from immutable `position_management_events`, including the event's real `execution_r` and subsequent position reductions/exits. If the position is still open, or the event ledger cannot establish terminal economic truth, actual execution PnL remains `null` rather than being replaced by a HOLD counterfactual.
+
+If production recommended `CLOSE_50` and the user marked it `recommended_not_executed`, production policy is still evaluated as the frozen CLOSE_50 counterfactual, while actual execution attribution follows the observed position ledger if that ledger eventually resolves. The policy is never falsely recorded as executed. `broker_confirmed=false` remains explicit until a future broker/execution source exists.
 
 ## Dependency and effective N
 
@@ -149,6 +151,7 @@ Read-only endpoints:
 - `/api/research/g1/management/policies`
 - `/api/research/g1/management/cohorts`
 - `/api/research/g1/management/edge`
+- `/api/research/g1/management/cuts`
 - `/api/research/g1/management/decision/{observation_id}`
 
 Research cockpit: `/management-edge`.
