@@ -110,5 +110,9 @@ def install_g1_shadow_refinement() -> None:
     if getattr(_ENGINE, "_g1_shadow_refinement", None) == REFINEMENT_VERSION:
         return
     _ENGINE.g1c_predict_observation = predict_with_t0_admission
+    # collect_with_g1c resolves this module-global at call time, so replace it
+    # too; automatic collector predictions must pass the same T0 gate as direct
+    # internal calls and tests.
+    _g1c.g1c_predict_observation = predict_with_t0_admission
     _ENGINE._g1c_prediction_t0_blocker = _t0_blocker
     _ENGINE._g1_shadow_refinement = REFINEMENT_VERSION
