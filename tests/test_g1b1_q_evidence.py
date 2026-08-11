@@ -130,10 +130,10 @@ def test_native_q_capture_creates_immutable_attempt_and_frozen_cdf(tmp_path, mon
     engine.close()
 
 
-def test_invalid_density_is_diagnosed_without_relaxing_q_contract(tmp_path, monkeypatch):
+def test_invalid_density_is_diagnosed_without_creating_native_q(tmp_path, monkeypatch):
     engine = PassiveLearningEngine(str(tmp_path / "qbad.db"), Settings(), cache=None)
     _, _, ids = _background_capture(engine, monkeypatch, points=4)
-    assert any(item.endswith("-native-expiry") for item in ids)
+    assert not any(item.endswith("-native-expiry") for item in ids)
     attempt = dict(engine._conn.execute(
         "SELECT * FROM g1_q_capture_attempts WHERE attempt_origin='background_collector'"
     ).fetchone())
@@ -227,6 +227,7 @@ def test_q_routes_are_read_only_and_expose_stage(tmp_path):
     body = status.json()
     assert body["g1_stage"] == G1B1_STAGE
     assert body["q_evidence_contract_version"] == Q_EVIDENCE_CONTRACT_VERSION
+    assert body["q_evidence_integrity_contract_version"] == "g1-q-evidence-integrity-v1"
     assert body["calibrator_fitted"] is False
     assert client.get("/api/research/g1/q/instruments").status_code == 200
     assert client.get("/api/research/g1/q/blockers").status_code == 200
