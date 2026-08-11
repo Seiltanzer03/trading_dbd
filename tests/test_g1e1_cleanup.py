@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from scripts.g1e1_cleanup_venv import cleanup, discover
+from seiltanzer.maintenance.venv_cleanup import cleanup, discover
 
 
 def test_cleanup_only_removes_malformed_seiltanzer_artifacts(tmp_path):
