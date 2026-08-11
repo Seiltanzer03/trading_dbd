@@ -80,3 +80,11 @@ from .g1_q_collector_refinement import install_g1_q_collector_refinement as _ins
 
 _install_g1_q_collector_refinement()
 del _install_g1_q_collector_refinement
+
+# Phase G.1C is the first trainable layer, but remains strictly research-only.
+# It consumes only immutable G.1A Q-eligible cuts, freezes challenger model
+# artifacts, and records prospective shadow predictions for later G.1D OOS.
+from .g1_shadow_runtime import install_g1_shadow_runtime as _install_g1_shadow_runtime
+
+_install_g1_shadow_runtime()
+del _install_g1_shadow_runtime
