@@ -41,6 +41,8 @@ def test_intelligence_model_readiness_explains_missing_evidence(tmp_path):
         assert beta["ready"] is False
         assert isotonic["ready"] is False
         assert platt["deficits"]["raw_n"] >= 60
+        assert platt["semantic_pooling"] is False
+        assert platt["semantic_scope_n"] >= 1
         assert any("наблюден" in text.lower() for text in platt["explanations"])
     finally:
         engine.close()
@@ -92,12 +94,20 @@ def test_intelligence_routes_return_aggregated_backend_state(tmp_path):
             page = client.get("/intelligence")
             assert page.status_code == 200
             assert "INTELLIGENCE LAB" in page.text
+            assert "RAW Q → OBSERVED FREQUENCY" in page.text
+            assert "reliability" in page.text.lower()
+            assert page.headers["x-seiltanzer-intelligence-page"] == "g1e-reliability-presentation-v1"
             status = client.get("/api/research/g1/intelligence/status")
             assert status.status_code == 200
             body = status.json()
             assert body["authority"]["production_authority"] is False
+            assert body["authority"]["shadow_p_used_for_trading"] is False
+            quality = client.get("/api/research/g1/intelligence/forecast-quality")
+            assert quality.status_code == 200
+            q_identity = quality.json()["status"]["terminal_q_identity"]
+            reliability = q_identity["direction_event"]["q_identity"]["reliability"]
+            assert reliability["contract_version"] == "g1-reliability-10bin-v1"
             assert client.get("/api/research/g1/intelligence/pipeline").status_code == 200
-            assert client.get("/api/research/g1/intelligence/forecast-quality").status_code == 200
             assert client.get("/api/research/g1/intelligence/calibration").status_code == 200
             assert client.get("/api/research/g1/intelligence/pending").status_code == 200
             assert client.get("/api/research/g1/intelligence/resolved").status_code == 200
