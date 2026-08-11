@@ -51,3 +51,10 @@ from .g1_baseline_refinement import install_g1_baseline_refinement as _install_g
 
 _install_g1_baseline_refinement()
 del _install_g1_baseline_refinement
+
+# Phase G.1B.1 makes every prospective option-native Q capture attempt
+# observable and immutable. It does not relax G.1A admission or fit Q->P.
+from .g1_q_evidence_runtime import install_g1_q_evidence_runtime as _install_g1_q_evidence_runtime
+
+_install_g1_q_evidence_runtime()
+del _install_g1_q_evidence_runtime
