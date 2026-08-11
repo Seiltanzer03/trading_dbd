@@ -50,8 +50,9 @@ export function mountManagementDecision(container, decision, post, onApplied = (
       await onApplied(result);
     } catch (error) {
       status.className = 'tiny red';
-      const message = (typeof error?.message === 'string' && error.message !== '[object Object]')
-        ? error.message
+      const rawMessage = typeof error?.message === 'string' ? error.message : '';
+      const message = rawMessage && !rawMessage.includes('[object Object]')
+        ? rawMessage
         : 'Не удалось сохранить исполнение. Обновите разбор и повторите попытку.';
       status.textContent = message;
       yes.disabled = false; no.disabled = false;
