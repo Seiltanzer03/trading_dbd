@@ -51,3 +51,17 @@ from .g1_baseline_refinement import install_g1_baseline_refinement as _install_g
 
 _install_g1_baseline_refinement()
 del _install_g1_baseline_refinement
+
+# Phase G.1B.1 makes every prospective option-native Q capture attempt
+# observable and immutable. It does not relax G.1A admission or fit Q->P.
+from .g1_q_evidence_runtime import install_g1_q_evidence_runtime as _install_g1_q_evidence_runtime
+
+_install_g1_q_evidence_runtime()
+del _install_g1_q_evidence_runtime
+
+# Fail closed on source freshness, direct target-price provenance and the frozen
+# source/target/proxy mapping before a Q attempt is counted as successful.
+from .g1_q_evidence_refinement import install_g1_q_evidence_refinement as _install_g1_q_evidence_refinement
+
+_install_g1_q_evidence_refinement()
+del _install_g1_q_evidence_refinement

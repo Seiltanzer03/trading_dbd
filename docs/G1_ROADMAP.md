@@ -23,8 +23,8 @@ G.1A does **not** fit or select a calibrator. `g1_training_allowed`,
 
 ## G.1B — Baselines + Calibration Metrics
 
-**Current stage.** Consumes only the G.1A dataset contract and measures frozen
-reference forecasts without fitting a challenger calibrator:
+**DONE.** Consumes only the G.1A dataset contract and measures frozen reference
+forecasts without fitting a challenger calibrator:
 
 - Q_IDENTITY for mathematically valid terminal risk-neutral Q only;
 - uninformed 0.5 directional baseline;
@@ -44,12 +44,33 @@ P. Terminal Q is evaluated as risk-neutral Q identity and is **not** relabeled a
 physical probability. CRPS remains unavailable until a proper distributional
 implementation is explicitly added.
 
-G.1B still fits no calibrator, writes no model coefficients, publishes no
-physical P and grants no production authority.
+G.1B fits no calibrator, writes no model coefficients, publishes no physical P
+and grants no production authority.
+
+## G.1B.1 — Q Evidence Bring-Up
+
+**Current stage.** Makes real option-native Q acquisition observable and starts a
+prospective evidence stream without weakening G.1A:
+
+- versioned target/source capability matrix;
+- explicit native/direct/inverse/none relation and frozen proxy transform;
+- append-only capture-attempt ledger;
+- deterministic blocker taxonomy for provider, chain, expiry, CDF, proxy and
+  persistence failures;
+- successful capture only when the immutable T0 forecast contains a valid
+  terminal risk-neutral Q CDF;
+- separate attempted/captured/resolved/Q-eligible/metrics-eligible counters;
+- read-only per-instrument, blocker and attempt telemetry;
+- runtime validation only after an observed real background Q capture;
+- existing F.3.2a resolution, PIT and G.1A admission remain authoritative.
+
+G.1B.1 must never manufacture fixed-horizon Q or synthetic production samples.
+It fits no calibrator and grants no production authority.
 
 ## G.1C — Shadow Q→P Calibrators
 
-Only after G.1B audit. Planned shadow challengers:
+Only after G.1B.1 audit and sufficient prospective Q evidence. Planned shadow
+challengers:
 
 - Platt/logistic calibration;
 - beta calibration;
