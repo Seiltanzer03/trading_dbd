@@ -44,3 +44,10 @@ from .g1_baseline_runtime import install_g1_baseline_runtime as _install_g1_base
 
 _install_g1_baseline_runtime()
 del _install_g1_baseline_runtime
+
+# Keep G.1B evidence N consistent with G.1A aggregate dependency semantics and
+# make historical baselines respect recorded outcome-availability timestamps.
+from .g1_baseline_refinement import install_g1_baseline_refinement as _install_g1_baseline_refinement
+
+_install_g1_baseline_refinement()
+del _install_g1_baseline_refinement
