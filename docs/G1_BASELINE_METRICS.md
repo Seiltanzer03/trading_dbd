@@ -12,10 +12,16 @@ Only `g1-prospective-dataset-v1` members with `forecast_eval_eligible=1` are
 consumed. Source-mutated observations are excluded. Reports may evaluate either
 the live G.1A eligible view or a frozen immutable G.1A dataset cut.
 
-Primary metrics use a deterministic cohort-local non-overlap subset. One T0
-dependency group contributes at most one representative per cohort and an
+Per-cohort metric diagnostics use deterministic cohort-local non-overlap samples.
+One T0 dependency group contributes at most one representative per cohort and an
 observation whose future window overlaps the previously accepted window in that
-cohort/instrument does not increment primary effective N.
+cohort/instrument does not increment that cohort's metric-task N.
+
+Top-level evidence N is stricter: it reuses the G.1A aggregate
+instrument/dependency non-overlap contract across all horizons and cohorts. Thus
+seven horizon tasks from the same T0 cannot become seven independent pieces of
+system evidence. The report keeps both `pooled_metric_task_n` and the stricter
+system `effective_n` so the distinction is visible.
 
 ## Directional event
 
@@ -33,15 +39,19 @@ A fixed `p=0.5` reference for the terminal-return-positive event.
 
 ### Prequential base rate
 
-`g1-prequential-base-rate-laplace-v1` is cohort-local and chronological. Before
-each prediction it uses only prior effective observations in that cohort:
+The current integrity contract is
+`g1-prequential-base-rate-resolved-time-v2`. It is cohort-local,
+chronological and Laplace-smoothed:
 
-`p_t = (successes_before_t + 1) / (n_before_t + 2)`
+`p_t = (successes_available_before_t + 1) / (n_available_before_t + 2)`
 
-The first prediction is therefore 0.5. The current observation outcome is added
-to state only after its prediction has been emitted. G.1A non-overlap sampling
-ensures the previous accepted outcome window has ended before the next accepted
-sample in that cohort.
+A prior outcome may enter the historical state only when its recorded
+`resolved_ts <= current captured_ts`. Merely reaching the prior target time is
+not enough. If `resolved_ts` is absent, that outcome never enters historical
+state. The current observation is added to the history only for later T0s.
+
+This prevents a retrospective report from using an outcome that was not actually
+available when the next forecast was made.
 
 ### Q identity
 
@@ -63,7 +73,9 @@ G.1B reports:
 - ECE;
 - MCE.
 
-Any Q-vs-baseline deltas are explicitly descriptive. Positive improvement means
+Pooled cross-cohort metrics are diagnostic task-level summaries; top-level
+system evidence status uses the stricter G.1A aggregate effective N. Any
+Q-vs-baseline deltas are explicitly descriptive. Positive improvement means
 baseline loss minus Q loss. They are not an edge claim.
 
 ## PIT
@@ -90,6 +102,13 @@ For fixed horizons the already-frozen Gaussian reference quantiles are evaluated
 only as `historical_gaussian_reference_geometry_not_Q_not_physical_P`.
 
 CRPS remains `null` in G.1B.
+
+## Reproducibility
+
+The top-level report includes a deterministic aggregate dependency-evidence
+manifest hash. Pooled metric-task rows retain a separate task-level manifest.
+Frozen G.1A dataset cuts can be supplied by `cut_id` for exact historical
+reproduction.
 
 ## Evidence language
 
