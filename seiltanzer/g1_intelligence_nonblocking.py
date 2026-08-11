@@ -1,8 +1,8 @@
 """Non-blocking lifecycle/materialization for the G.1E Intelligence Cockpit.
 
 The underlying G.1A/B/B.1/C research scans are intentionally conservative and can
-be expensive on a growing prospective dataset.  They must never delay terminal
-startup or monopolise an HTTP request.  This refinement keeps those authoritative
+be expensive on a growing prospective dataset. They must never delay terminal
+startup or monopolise an HTTP request. This refinement keeps those authoritative
 calculations unchanged, warms them in a worker thread after the server is ready,
 and serves a persisted/zero-safe presentation snapshot while the live cache warms.
 """
@@ -20,7 +20,7 @@ from . import g1_intelligence_performance as _perf
 from . import g1_intelligence_runtime as _g1e
 
 
-NONBLOCKING_CONTRACT_VERSION = "g1e-nonblocking-materialization-v1"
+NONBLOCKING_CONTRACT_VERSION = "g1e-nonblocking-materialization-v2"
 WARM_INTERVAL_SEC = 60.0
 
 
@@ -36,10 +36,15 @@ def _authority() -> dict[str, bool]:
 
 
 def _cached_value(runtime, key: str):
+    """Read presentation cache without ever waiting for a background builder."""
     lock, values = _perf._state(runtime)
-    with lock:
+    if not lock.acquire(blocking=False):
+        return None
+    try:
         entry = values.get(key)
         return None if entry is None else copy.deepcopy(entry[1])
+    finally:
+        lock.release()
 
 
 def _store_value(runtime, key: str, value: Any) -> None:
@@ -49,22 +54,29 @@ def _store_value(runtime, key: str, value: Any) -> None:
 
 
 def _latest_persisted(runtime) -> dict:
-    """Return the latest immutable six-hour compact snapshot without research scans."""
+    """Return latest immutable snapshot only if its SQLite lock is immediately free."""
+    lock = runtime.passive._lock
+    if not lock.acquire(blocking=False):
+        return {}
     try:
-        with runtime.passive._lock:
-            row = runtime.passive._conn.execute(
-                "SELECT captured_ts,snapshot_json FROM g1e_intelligence_snapshots "
-                "ORDER BY bucket_ts DESC LIMIT 1"
-            ).fetchone()
-        if row is None:
-            return {}
-        payload = json.loads(row["snapshot_json"])
-        return {
-            "captured_ts": float(row["captured_ts"]),
-            "snapshot": payload if isinstance(payload, dict) else {},
-        }
+        row = runtime.passive._conn.execute(
+            "SELECT captured_ts,snapshot_json FROM g1e_intelligence_snapshots "
+            "ORDER BY bucket_ts DESC LIMIT 1"
+        ).fetchone()
     except Exception:
         return {}
+    finally:
+        lock.release()
+    if row is None:
+        return {}
+    try:
+        payload = json.loads(row["snapshot_json"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return {
+        "captured_ts": float(row["captured_ts"]),
+        "snapshot": payload if isinstance(payload, dict) else {},
+    }
 
 
 def _fallback_status(runtime) -> dict:
@@ -74,17 +86,14 @@ def _fallback_status(runtime) -> dict:
     models = snap.get("models") or {}
     evidence = snap.get("evidence") or {}
     maturity = snap.get("maturity_state") or "COLLECTING"
-    if maturity == "COLLECTING":
-        headline = "Система запускается; live research-метрики прогреваются в фоне."
-    else:
-        headline = "Показан последний сохранённый intelligence snapshot; live-метрики прогреваются."
+    headline = (
+        "Система запускается; live research-метрики прогреваются в фоне."
+        if maturity == "COLLECTING"
+        else "Показан последний сохранённый intelligence snapshot; live-метрики прогреваются."
+    )
     empty_readiness = {
-        "status": "WARMING",
-        "ready": False,
-        "required": {},
-        "observed": {},
-        "deficits": {},
-        "blockers": [],
+        "status": "WARMING", "ready": False, "required": {}, "observed": {},
+        "deficits": {}, "blockers": [],
         "explanations": ["Live research-агрегация ещё прогревается после запуска."],
         "semantic_pooling": False,
     }
@@ -153,8 +162,7 @@ def pipeline_nonblocking(runtime) -> dict:
                 {"name": "Q→P ELIGIBLE", "n": int(exp.get("q_clean_eligible") or 0)},
                 {"name": "EFFECTIVE Q N", "n": int(exp.get("q_effective_n") or 0)},
             ],
-            "instruments": {"items": []},
-            "q_blockers": {"items": []},
+            "instruments": {"items": []}, "q_blockers": {"items": []},
             "dataset_exclusions": {"primary_reason_counts": {}},
             "forecast_eval_eligible_n": int(exp.get("forecast_eval_n") or 0),
             "explanations": {},
@@ -170,9 +178,7 @@ def forecast_quality_nonblocking(runtime) -> dict:
         return {
             "contract_version": _g1e.INTELLIGENCE_CONTRACT_VERSION,
             "nonblocking_contract_version": NONBLOCKING_CONTRACT_VERSION,
-            "presentation_state": "WARMING",
-            "status": {},
-            "cohorts": {"items": []},
+            "presentation_state": "WARMING", "status": {}, "cohorts": {"items": []},
             "presentation_note": "Live G.1B metrics are warming in the background.",
         }
     result = _perf.cached_forecast_quality(runtime)
@@ -186,10 +192,10 @@ def calibration_nonblocking(runtime) -> dict:
         return {
             "contract_version": _g1e.INTELLIGENCE_CONTRACT_VERSION,
             "nonblocking_contract_version": NONBLOCKING_CONTRACT_VERSION,
-            "presentation_state": "WARMING",
-            "status": {}, "models": {"items": []}, "cohorts": {"items": []},
-            "predictions": {"items": []},
-            "research_only": True, "production_used": False,
+            "presentation_state": "WARMING", "status": {},
+            "models": {"items": []}, "cohorts": {"items": []},
+            "predictions": {"items": []}, "research_only": True,
+            "production_used": False,
         }
     result = _perf.cached_calibration(runtime)
     result["presentation_state"] = "LIVE_CACHE"
@@ -198,7 +204,7 @@ def calibration_nonblocking(runtime) -> dict:
 
 
 def _warm_live(runtime) -> None:
-    """Build the expensive authoritative aggregate once, outside request threads."""
+    """Build expensive authoritative aggregate once, outside request threads."""
     live = _perf._ORIGINAL_STATUS(runtime)
     live["presentation_cache"] = {
         "contract_version": _perf.PERFORMANCE_CONTRACT_VERSION,
@@ -207,7 +213,6 @@ def _warm_live(runtime) -> None:
         "presentation_aggregation_cached": True,
     }
     _store_value(runtime, "status", live)
-    # Warm the secondary panels while the shared source bundle is hot.
     with contextlib.suppress(Exception):
         _perf.cached_pipeline(runtime)
     with contextlib.suppress(Exception):
@@ -227,9 +232,6 @@ def install_nonblocking_runtime(runtime) -> None:
     runtime._g1e_startup_snapshot_skipped = False
 
     def snapshot_wrapper(self, *, force: bool = False):
-        # install_intelligence_runtime() calls snapshot_if_due synchronously before
-        # yielding the HTTP server. Skip only that first non-forced call. The
-        # background loop below performs the same authoritative snapshot in a worker.
         if not force and not self._g1e_startup_snapshot_skipped:
             self._g1e_startup_snapshot_skipped = True
             return False
