@@ -104,6 +104,10 @@ jobs:
             /api/research/g1/dataset/cuts \
             /api/research/g1/baselines/status \
             /api/research/g1/baselines/cohorts \
+            /api/research/g1/q/status \
+            /api/research/g1/q/instruments \
+            /api/research/g1/q/blockers \
+            /api/research/g1/q/attempts \
             /api/analytics/gex-migration \
             /api/analytics/regime-phase \
             /api/analytics/wavelet \
@@ -217,6 +221,39 @@ jobs:
               f"q_metrics={q.get('metrics_eligible_n', 0)} "
               f"pit_mismatch={q.get('pit_contract_mismatch_n', 0)} "
               f"status={status.get('evidence_status', 'INSUFFICIENT')}"
+          )
+          PY
+
+          G1Q_STATUS=$(curl -fsS http://127.0.0.1:8790/api/research/g1/q/status)
+          G1Q_STATUS="$G1Q_STATUS" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          status = json.loads(os.environ["G1Q_STATUS"])
+          assert status.get("g1_stage") == "G.1B.1"
+          assert status.get("q_evidence_contract_version") == "g1-q-evidence-v1"
+          assert status.get("capability_contract_version") == "q-source-capability-v1"
+          assert status.get("capture_attempt_contract_version") == "q-capture-attempt-v1"
+          assert status.get("dataset_contract_version") == "g1-prospective-dataset-v1"
+          assert status.get("authority") == "research_only"
+          assert status.get("production_authority") is False
+          assert status.get("calibrator_fitted") is False
+          assert status.get("calibrator_registry_writes") is False
+          assert status.get("g1_training_allowed") is False
+          assert status.get("physical_probability_published") is False
+          assert status.get("promotion_allowed") is False
+          assert status.get("production_replacement_allowed") is False
+          assert status.get("sample_count_auto_promotion") is False
+          print(
+              "G1B.1 Q evidence: "
+              f"attempts={status.get('capture_attempt_n', 0)} "
+              f"captured={status.get('successful_q_capture_n', 0)} "
+              f"unresolved={status.get('unresolved_q_capture_n', 0)} "
+              f"resolved={status.get('resolved_q_observation_n', 0)} "
+              f"q_eligible={status.get('q_to_p_eligible_n', 0)} "
+              f"q_metrics={status.get('g1b_q_metrics_eligible_n', 0)} "
+              f"effective_q_n={status.get('effective_q_n', 0)} "
+              f"runtime_validated={status.get('runtime_validated', False)} "
+              f"status={status.get('evidence_status', 'INSUFFICIENT')} "
+              f"top_blockers={status.get('top_blockers', {})}"
           )
           PY
 
