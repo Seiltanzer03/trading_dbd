@@ -30,3 +30,10 @@ from .g1_dataset_runtime import install_g1_dataset_runtime as _install_g1_datase
 
 _install_g1_dataset_runtime()
 del _install_g1_dataset_runtime
+
+# Keep measurement-validity distinct from research-evidence admission and make
+# runtime readiness depend on observed current-contract evidence, not legacy rows.
+from .g1_dataset_refinement import install_g1_dataset_refinement as _install_g1_dataset_refinement
+
+_install_g1_dataset_refinement()
+del _install_g1_dataset_refinement
