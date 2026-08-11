@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -43,8 +44,22 @@ def test_prepare_storage_creates_verified_prestart_backup(tmp_path):
     assert "passive_market_observations" in latest["critical_table_counts"]
     assert "g1_q_capture_attempts" in latest["critical_table_counts"]
     assert latest["encryption_verified"] is False
+    assert latest["previous_backup_id"] is None
+    assert len(latest["schema_sha256"]) == 64
+    assert len(latest["manifest_payload_sha256"]) == 64
     backup_path = manager.local_dir / latest["database_file"]
     assert backup_path.exists()
+
+
+def test_verified_backups_form_previous_snapshot_chain(tmp_path):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _minimal_db(Path(settings.trades_db))
+    manager = StorageManager(settings)
+    first = manager.create_backup(kind="local", reason="first")
+    second = manager.create_backup(kind="local", reason="second")
+    manifests = manager.backups()["local"]
+    newest = next(item for item in manifests if item["backup_id"] == second.backup_id)
+    assert newest["previous_backup_id"] == first.backup_id
 
 
 def test_unclean_then_clean_shutdown_marker_is_detected(tmp_path):
@@ -78,6 +93,8 @@ def test_verified_backup_can_restore_destroyed_database(tmp_path):
         preserve_existing=True,
     )
     assert restored["ok"] is True
+    assert len(restored["schema_sha256"]) == 64
+    assert len(restored["manifest_payload_sha256"]) == 64
     conn = sqlite3.connect(db)
     try:
         assert conn.execute("SELECT result_r FROM trades WHERE id=1").fetchone()[0] == 1.25
@@ -104,6 +121,29 @@ def test_backup_sha_tamper_is_rejected(tmp_path):
         assert "SHA256" in str(exc)
     else:
         raise AssertionError("tampered backup must be rejected")
+
+
+def test_manifest_tamper_is_rejected_before_restore(tmp_path):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    db = Path(settings.trades_db)
+    _minimal_db(db)
+    manager = StorageManager(settings)
+    result = manager.create_backup(kind="local", reason="test")
+    manifest_path = Path(result.manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["reason"] = "tampered-after-verification"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    try:
+        StorageManager.restore_verified_backup(
+            backup_db=result.database_path,
+            manifest_path=result.manifest_path,
+            destination_db=tmp_path / "restored.db",
+        )
+    except ValueError as exc:
+        assert "manifest SHA256" in str(exc)
+    else:
+        raise AssertionError("tampered manifest must be rejected")
 
 
 def test_reconcile_repairs_closed_trade_position_gap_after_crash(tmp_path):
