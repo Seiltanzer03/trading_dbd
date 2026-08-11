@@ -136,14 +136,20 @@ jobs:
           print(f"Restore drill PASS: {body.get('backup_id')}")
           PY
 
-          STORAGE=$(curl -fsS --max-time 10 http://127.0.0.1:8790/api/system/storage/status)
-          STORAGE="$STORAGE" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          # Read back only the persisted drill state. Do not invoke the heavier
+          # full storage health scan a second time after a successful restore.
+          RESTORE_STATUS=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/system/storage/restore-drill/status)
+          DRILL="$DRILL" RESTORE_STATUS="$RESTORE_STATUS" /opt/seiltanzer/.venv/bin/python - <<'PY'
           import json, os
-          storage = json.loads(os.environ["STORAGE"])
-          drill = storage.get("last_restore_drill") or {}
-          assert drill.get("ok") is True
-          assert drill.get("restore_drill_contract_version") == "seiltanzer-restore-drill-v1"
-          assert drill.get("live_database_replaced") is False
+          drill = json.loads(os.environ["DRILL"])
+          status = json.loads(os.environ["RESTORE_STATUS"])
+          persisted = status.get("last_restore_drill") or {}
+          assert status.get("restore_drill_contract_version") == "seiltanzer-restore-drill-v1"
+          assert status.get("status") == "PASS"
+          assert persisted.get("ok") is True
+          assert persisted.get("backup_id") == drill.get("backup_id")
+          assert persisted.get("restore_drill_contract_version") == "seiltanzer-restore-drill-v1"
+          assert persisted.get("live_database_replaced") is False
           PY
 
       - name: Publish readiness statuses
