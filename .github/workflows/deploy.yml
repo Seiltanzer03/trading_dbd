@@ -108,6 +108,10 @@ jobs:
             /api/research/g1/q/instruments \
             /api/research/g1/q/blockers \
             /api/research/g1/q/attempts \
+            /api/research/g1/calibrators/status \
+            /api/research/g1/calibrators/models \
+            /api/research/g1/calibrators/cohorts \
+            /api/research/g1/calibrators/predictions \
             /api/analytics/gex-migration \
             /api/analytics/regime-phase \
             /api/analytics/wavelet \
@@ -254,6 +258,38 @@ jobs:
               f"runtime_validated={status.get('runtime_validated', False)} "
               f"status={status.get('evidence_status', 'INSUFFICIENT')} "
               f"top_blockers={status.get('top_blockers', {})}"
+          )
+          PY
+
+          G1C_STATUS=$(curl -fsS http://127.0.0.1:8790/api/research/g1/calibrators/status)
+          G1C_STATUS="$G1C_STATUS" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          status = json.loads(os.environ["G1C_STATUS"])
+          assert status.get("g1_stage") == "G.1C"
+          assert status.get("g1c_contract_version") == "g1-shadow-calibration-v1"
+          assert status.get("dataset_contract_version") == "g1-prospective-dataset-v1"
+          assert status.get("authority") == "research_only"
+          assert status.get("production_authority") is False
+          assert status.get("production_model_training_allowed") is False
+          assert status.get("physical_probability_published") is False
+          assert status.get("promotion_allowed") is False
+          assert status.get("production_replacement_allowed") is False
+          assert status.get("sample_count_auto_promotion") is False
+          assert status.get("edge_claim") is False
+          assert status.get("oos_validated") is False
+          print(
+              "G1C shadow calibration: "
+              f"q_captured={status.get('q_captured', 0)} "
+              f"q_resolved={status.get('q_resolved', 0)} "
+              f"q_eligible={status.get('q_eligible', 0)} "
+              f"effective_q_n={status.get('effective_q_n', 0)} "
+              f"platt={((status.get('fit_readiness') or {}).get('platt') or {}).get('status')} "
+              f"beta={((status.get('fit_readiness') or {}).get('beta') or {}).get('status')} "
+              f"isotonic={((status.get('fit_readiness') or {}).get('isotonic') or {}).get('status')} "
+              f"models={status.get('frozen_model_n', 0)} "
+              f"predictions={status.get('prospective_shadow_prediction_n', 0)} "
+              f"ready_for_g1d={status.get('ready_for_g1d', False)} "
+              f"blockers={status.get('top_fit_blockers', {})}"
           )
           PY
 
