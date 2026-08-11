@@ -19,12 +19,16 @@ def _json(value):
 
 
 def _cdf_value(value):
-    if value <= -0.2:
-        return 0.0
-    if value <= 0.0:
-        return (value + 0.2) / 0.2 * 0.4
-    if value <= 0.2:
-        return 0.4 + (value / 0.2) * 0.6
+    support = [-0.2, -0.1, 0.0, 0.1, 0.2]
+    cdf = [0.0, 0.2, 0.4, 0.75, 1.0]
+    if value <= support[0]:
+        return cdf[0]
+    if value >= support[-1]:
+        return cdf[-1]
+    for index in range(1, len(support)):
+        if value <= support[index]:
+            weight = (value - support[index - 1]) / (support[index] - support[index - 1])
+            return cdf[index - 1] + weight * (cdf[index] - cdf[index - 1])
     return 1.0
 
 
@@ -62,8 +66,8 @@ def _q_forecast(captured, target, *, instrument="USDCAD"):
         "q_first_touch_available": False,
         "physical_probability_published": False,
         "terminal_q_cdf": {
-            "support": [-0.2, 0.0, 0.2],
-            "cdf": [0.0, 0.4, 1.0],
+            "support": [-0.2, -0.1, 0.0, 0.1, 0.2],
+            "cdf": [0.0, 0.2, 0.4, 0.75, 1.0],
         },
         "source_expiry_ts_utc": target,
         "calendar_ttm_seconds": target - captured,
