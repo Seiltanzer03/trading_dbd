@@ -3,8 +3,8 @@
 The underlying G.1A/B/B.1/C research scans are intentionally conservative and can
 be expensive on a growing prospective dataset. They must never delay terminal
 startup or monopolise an HTTP request. This refinement keeps those authoritative
-calculations unchanged, warms them in a worker thread after the server is ready,
-and serves a persisted/zero-safe presentation snapshot while the live cache warms.
+calculations unchanged, materializes them in a worker thread after the server is
+ready, and serves persisted/zero-safe state while that worker is busy.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from . import g1_intelligence_performance as _perf
 from . import g1_intelligence_runtime as _g1e
 
 
-NONBLOCKING_CONTRACT_VERSION = "g1e-nonblocking-materialization-v2"
+NONBLOCKING_CONTRACT_VERSION = "g1e-nonblocking-materialization-v3"
 WARM_INTERVAL_SEC = 60.0
 
 
@@ -54,7 +54,7 @@ def _store_value(runtime, key: str, value: Any) -> None:
 
 
 def _latest_persisted(runtime) -> dict:
-    """Return latest immutable snapshot only if its SQLite lock is immediately free."""
+    """Read latest immutable snapshot only when the DB lock is immediately free."""
     lock = runtime.passive._lock
     if not lock.acquire(blocking=False):
         return {}
@@ -138,7 +138,7 @@ def _fallback_status(runtime) -> dict:
 
 
 def status_nonblocking(runtime) -> dict:
-    live = _cached_value(runtime, "status")
+    live = _cached_value(runtime, "panel_status")
     if live is None:
         return _fallback_status(runtime)
     live["presentation_state"] = "LIVE_CACHE"
@@ -146,49 +146,53 @@ def status_nonblocking(runtime) -> dict:
     return live
 
 
+def _fallback_pipeline(runtime) -> dict:
+    status = status_nonblocking(runtime)
+    exp = status.get("experience") or {}
+    return {
+        "contract_version": _g1e.INTELLIGENCE_CONTRACT_VERSION,
+        "nonblocking_contract_version": NONBLOCKING_CONTRACT_VERSION,
+        "presentation_state": "WARMING",
+        "funnel": [
+            {"name": "ATTEMPTS", "n": int(exp.get("q_attempts") or 0)},
+            {"name": "CAPTURED", "n": int(exp.get("q_captured") or 0)},
+            {"name": "RESOLVED", "n": int(exp.get("q_resolved") or 0)},
+            {"name": "Q→P ELIGIBLE", "n": int(exp.get("q_clean_eligible") or 0)},
+            {"name": "EFFECTIVE Q N", "n": int(exp.get("q_effective_n") or 0)},
+        ],
+        "instruments": {"items": []}, "q_blockers": {"items": []},
+        "dataset_exclusions": {"primary_reason_counts": {}},
+        "forecast_eval_eligible_n": int(exp.get("forecast_eval_n") or 0),
+        "explanations": {},
+    }
+
+
 def pipeline_nonblocking(runtime) -> dict:
-    sources = _cached_value(runtime, "sources")
-    if sources is None:
-        status = status_nonblocking(runtime)
-        exp = status.get("experience") or {}
-        return {
-            "contract_version": _g1e.INTELLIGENCE_CONTRACT_VERSION,
-            "nonblocking_contract_version": NONBLOCKING_CONTRACT_VERSION,
-            "presentation_state": "WARMING",
-            "funnel": [
-                {"name": "ATTEMPTS", "n": int(exp.get("q_attempts") or 0)},
-                {"name": "CAPTURED", "n": int(exp.get("q_captured") or 0)},
-                {"name": "RESOLVED", "n": int(exp.get("q_resolved") or 0)},
-                {"name": "Q→P ELIGIBLE", "n": int(exp.get("q_clean_eligible") or 0)},
-                {"name": "EFFECTIVE Q N", "n": int(exp.get("q_effective_n") or 0)},
-            ],
-            "instruments": {"items": []}, "q_blockers": {"items": []},
-            "dataset_exclusions": {"primary_reason_counts": {}},
-            "forecast_eval_eligible_n": int(exp.get("forecast_eval_n") or 0),
-            "explanations": {},
-        }
-    result = _perf.cached_pipeline(runtime)
+    result = _cached_value(runtime, "panel_pipeline")
+    if result is None:
+        return _fallback_pipeline(runtime)
     result["presentation_state"] = "LIVE_CACHE"
     result["nonblocking_contract_version"] = NONBLOCKING_CONTRACT_VERSION
     return result
 
 
 def forecast_quality_nonblocking(runtime) -> dict:
-    if _cached_value(runtime, "sources") is None:
+    result = _cached_value(runtime, "panel_quality")
+    if result is None:
         return {
             "contract_version": _g1e.INTELLIGENCE_CONTRACT_VERSION,
             "nonblocking_contract_version": NONBLOCKING_CONTRACT_VERSION,
             "presentation_state": "WARMING", "status": {}, "cohorts": {"items": []},
             "presentation_note": "Live G.1B metrics are warming in the background.",
         }
-    result = _perf.cached_forecast_quality(runtime)
     result["presentation_state"] = "LIVE_CACHE"
     result["nonblocking_contract_version"] = NONBLOCKING_CONTRACT_VERSION
     return result
 
 
 def calibration_nonblocking(runtime) -> dict:
-    if _cached_value(runtime, "sources") is None:
+    result = _cached_value(runtime, "panel_calibration")
+    if result is None:
         return {
             "contract_version": _g1e.INTELLIGENCE_CONTRACT_VERSION,
             "nonblocking_contract_version": NONBLOCKING_CONTRACT_VERSION,
@@ -197,14 +201,13 @@ def calibration_nonblocking(runtime) -> dict:
             "predictions": {"items": []}, "research_only": True,
             "production_used": False,
         }
-    result = _perf.cached_calibration(runtime)
     result["presentation_state"] = "LIVE_CACHE"
     result["nonblocking_contract_version"] = NONBLOCKING_CONTRACT_VERSION
     return result
 
 
 def _warm_live(runtime) -> None:
-    """Build expensive authoritative aggregate once, outside request threads."""
+    """Materialize every heavy panel outside request threads, then publish atomically."""
     live = _perf._ORIGINAL_STATUS(runtime)
     live["presentation_cache"] = {
         "contract_version": _perf.PERFORMANCE_CONTRACT_VERSION,
@@ -212,13 +215,16 @@ def _warm_live(runtime) -> None:
         "authoritative_math_cached": False,
         "presentation_aggregation_cached": True,
     }
-    _store_value(runtime, "status", live)
-    with contextlib.suppress(Exception):
-        _perf.cached_pipeline(runtime)
-    with contextlib.suppress(Exception):
-        _perf.cached_forecast_quality(runtime)
-    with contextlib.suppress(Exception):
-        _perf.cached_calibration(runtime)
+    pipeline = _perf.cached_pipeline(runtime)
+    quality = _perf.cached_forecast_quality(runtime)
+    calibration = _perf.cached_calibration(runtime)
+
+    # Publish complete panels only after all builders return. HTTP handlers never
+    # execute these builders and never wait on their lock.
+    _store_value(runtime, "panel_status", live)
+    _store_value(runtime, "panel_pipeline", pipeline)
+    _store_value(runtime, "panel_quality", quality)
+    _store_value(runtime, "panel_calibration", calibration)
     runtime._g1e_last_warm_ts = time.time()
 
 
