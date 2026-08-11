@@ -23,3 +23,17 @@ from .measurement_runtime import install_measurement_runtime as _install_measure
 
 _install_measurement_runtime()
 del _install_measurement_runtime
+
+# Phase G.1A adds a deterministic prospective research-dataset boundary on top
+# of F.3.2a.  It creates no calibrator and grants no production authority.
+from .g1_dataset_runtime import install_g1_dataset_runtime as _install_g1_dataset_runtime
+
+_install_g1_dataset_runtime()
+del _install_g1_dataset_runtime
+
+# Keep measurement-validity distinct from research-evidence admission and make
+# runtime readiness depend on observed current-contract evidence, not legacy rows.
+from .g1_dataset_refinement import install_g1_dataset_refinement as _install_g1_dataset_refinement
+
+_install_g1_dataset_refinement()
+del _install_g1_dataset_refinement
