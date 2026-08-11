@@ -111,6 +111,13 @@ from .g1_management_refinement import install_g1_management_refinement as _insta
 _install_g1_management_refinement()
 del _install_g1_management_refinement
 
+# User acknowledgement is compliance evidence, not broker truth. Keep that
+# provenance explicit before any G.1-M observation can resolve.
+from .g1_management_execution_refinement import install_g1_management_execution_refinement as _install_g1_management_execution_refinement
+
+_install_g1_management_execution_refinement()
+del _install_g1_management_execution_refinement
+
 # Phase G.1-M measures whether already-open-position management adds value over
 # frozen HOLD/original-plan/exit comparators. It is prospective research only:
 # no result from this layer may change production policy or execute an order.
