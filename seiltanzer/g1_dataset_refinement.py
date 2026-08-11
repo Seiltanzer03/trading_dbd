@@ -15,7 +15,7 @@ from .measurement_q_runtime import MEASUREMENT_RUNTIME_VERSION, finite
 _ENGINE = _pl.PassiveLearningEngine
 _ORIGINAL_EVALUATE = _g1._evaluate_row
 _ORIGINAL_STATUS = _g1.g1_dataset_status
-_REFINEMENT_VERSION = "g1a-readiness-refinement-v1"
+_REFINEMENT_VERSION = "g1a-readiness-refinement-v2"
 
 
 def _loads(value, default):
@@ -28,17 +28,16 @@ def _loads(value, default):
 
 
 def _measurement_valid(row: dict) -> bool:
-    """Technical measurement validity, deliberately distinct from evidence admission."""
+    """Technical F.3.2a validity, distinct from prospective evidence admission."""
     if row.get("feature_contract_version") != _pl.PASSIVE_SCHEMA_VERSION:
         return False
     if row.get("resolution_status") != "resolved":
         return False
+    # The authoritative F.3.2a pristine boundary is the frozen forecast marker.
+    # Do not let a legacy/current-schema row inherit runtime provenance from
+    # features_json: that would silently promote pre-runtime evidence.
     forecast = _loads(row.get("forecast_json"), {})
-    features = _loads(row.get("features_json"), {})
-    runtime = forecast.get("measurement_runtime_contract") or features.get(
-        "measurement_runtime_contract"
-    )
-    if runtime != MEASUREMENT_RUNTIME_VERSION:
+    if forecast.get("measurement_runtime_contract") != MEASUREMENT_RUNTIME_VERSION:
         return False
     captured = finite(row.get("captured_ts"))
     target = finite(row.get("target_ts"))
@@ -65,6 +64,12 @@ def evaluate_refined(row: dict) -> dict:
     decision = dict(_ORIGINAL_EVALUATE(row))
     base = list(decision.get("base_exclusion_reasons") or [])
     q_reasons = list(decision.get("q_exclusion_reasons") or [])
+    forecast = _loads(row.get("forecast_json"), {})
+    # Tighten the original evaluator's transitional features fallback. G.1A
+    # admission follows F.3.2a pristine semantics exactly: runtime provenance
+    # must be frozen in forecast_json at T0.
+    if forecast.get("measurement_runtime_contract") != MEASUREMENT_RUNTIME_VERSION:
+        base.append("WRONG_MEASUREMENT_RUNTIME")
     kind = str(row.get("price_kind") or "").lower()
     origin = str(row.get("observation_origin") or "").lower()
     if kind == "demo":
