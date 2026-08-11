@@ -73,3 +73,10 @@ from .g1_q_collector import install_g1_q_collector as _install_g1_q_collector
 
 _install_g1_q_collector()
 del _install_g1_q_collector
+
+# Freeze the native Q ACT/365 clock from exact expiry minus the independent
+# collector's T0, matching the F.3.2a expiry contract end-to-end.
+from .g1_q_collector_refinement import install_g1_q_collector_refinement as _install_g1_q_collector_refinement
+
+_install_g1_q_collector_refinement()
+del _install_g1_q_collector_refinement
