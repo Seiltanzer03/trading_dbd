@@ -7,6 +7,7 @@ from . import storage_runtime as _storage
 G1M_CRITICAL_TABLES = (
     "g1m_runtime_activation",
     "g1m_management_observations",
+    "g1m_observation_context",
     "g1m_counterfactual_policies",
     "g1m_t0_policy_metrics",
     "g1m_resolutions",
