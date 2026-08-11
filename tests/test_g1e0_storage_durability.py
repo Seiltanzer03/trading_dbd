@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
 from seiltanzer.config import Settings
 from seiltanzer.engine import Engine
+from seiltanzer.storage_refinement import install_storage_refinement
 from seiltanzer.storage_runtime import (
     BACKUP_CONTRACT_VERSION,
     StorageManager,
     prepare_storage,
 )
+
+install_storage_refinement()
 
 
 def _minimal_db(path: Path) -> None:
@@ -38,6 +40,9 @@ def test_prepare_storage_creates_verified_prestart_backup(tmp_path):
     assert latest["reason"] == "prestart"
     assert latest["git_commit"] == "test-sha"
     assert latest["critical_table_counts"]["trades"] == 1
+    assert "passive_market_observations" in latest["critical_table_counts"]
+    assert "g1_q_capture_attempts" in latest["critical_table_counts"]
+    assert latest["encryption_verified"] is False
     backup_path = manager.local_dir / latest["database_file"]
     assert backup_path.exists()
 
@@ -121,6 +126,33 @@ def test_reconcile_repairs_closed_trade_position_gap_after_crash(tmp_path):
         after = engine.position.state(trade)
         assert after["remaining_position_fraction"] == 0.0
         assert any(item["action"] == "RECOVER_CLOSED_POSITION_REMAINDER" for item in actions)
+    finally:
+        engine.close()
+
+
+def test_reconcile_does_not_create_position_events_for_historical_backfill(tmp_path):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    engine = Engine(settings)
+    try:
+        historic = engine.journal.add_closed(
+            setup=1, direction="long", entry=100.0, stop=90.0,
+            take=125.0, result_r=1.0, notes="historic-backfill",
+        )
+        with engine.position._lock:
+            before = engine.position._conn.execute(
+                "SELECT COUNT(*) FROM position_management_events WHERE trade_id=?",
+                (int(historic["id"]),),
+            ).fetchone()[0]
+        assert before == 0
+
+        actions = StorageManager(settings).reconcile_economic_state(engine)
+        with engine.position._lock:
+            after = engine.position._conn.execute(
+                "SELECT COUNT(*) FROM position_management_events WHERE trade_id=?",
+                (int(historic["id"]),),
+            ).fetchone()[0]
+        assert after == 0
+        assert not any(item.get("trade_id") == int(historic["id"]) for item in actions)
     finally:
         engine.close()
 
