@@ -17,7 +17,7 @@ _install_analytics_runtime()
 del _install_analytics_runtime
 
 # Phase F.3.2a closes passive measurement runtime semantics without rewriting
-# historical observations.  Like analytics_runtime, this only installs adapters;
+# historical observations. Like analytics_runtime, this only installs adapters;
 # it starts no threads and performs no network I/O at import time.
 from .measurement_runtime import install_measurement_runtime as _install_measurement_runtime
 
@@ -25,7 +25,7 @@ _install_measurement_runtime()
 del _install_measurement_runtime
 
 # Phase G.1A adds a deterministic prospective research-dataset boundary on top
-# of F.3.2a.  It creates no calibrator and grants no production authority.
+# of F.3.2a. It creates no calibrator and grants no production authority.
 from .g1_dataset_runtime import install_g1_dataset_runtime as _install_g1_dataset_runtime
 
 _install_g1_dataset_runtime()
@@ -65,3 +65,11 @@ from .g1_q_evidence_refinement import install_g1_q_evidence_refinement as _insta
 
 _install_g1_q_evidence_refinement()
 del _install_g1_q_evidence_refinement
+
+# Q evidence has an independent persisted cadence so a fresh fixed-horizon row
+# cannot hide option-source availability after restart. Successful runs write
+# only the native-expiry Q row; fixed horizons retain their own cadence.
+from .g1_q_collector import install_g1_q_collector as _install_g1_q_collector
+
+_install_g1_q_collector()
+del _install_g1_q_collector
