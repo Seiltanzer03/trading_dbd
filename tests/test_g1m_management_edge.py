@@ -7,12 +7,15 @@ import threading
 import pytest
 
 from seiltanzer.decision_research import counterfactual_replay
+from seiltanzer.g1_management_refinement import install_g1_management_refinement
 from seiltanzer.g1_management_runtime import (
     G1M_CONTRACT_VERSION,
     ManagementEdgeRuntime,
     _json,
     _sha_text,
 )
+
+install_g1_management_refinement()
 
 
 class _Passive:
@@ -53,7 +56,7 @@ def _source_schema(conn):
         );
         CREATE TABLE trades(
             id INTEGER PRIMARY KEY, instrument TEXT, direction TEXT,
-            entry REAL, stop REAL, take REAL, status TEXT
+            setup INTEGER, entry REAL, stop REAL, take REAL, status TEXT
         );
     """)
     conn.commit()
@@ -110,11 +113,15 @@ def _snapshot(ts: float, *, trade_id: int = 1, policy: str = "CLOSE_50",
 def _insert_decision(runtime: ManagementEdgeRuntime, snapshot: dict, *,
                      status: str = "pending_execution", old: bool = False):
     conn = runtime._conn
-    ts = runtime.activation_ts - 100.0 if old else runtime.activation_ts + 1.0
+    existing_n = int(conn.execute("SELECT COUNT(*) FROM decision_snapshots").fetchone()[0])
+    ts = (runtime.activation_ts - 100.0 - existing_n if old
+          else runtime.activation_ts + 1.0 + existing_n)
     snapshot = dict(snapshot)
     snapshot["captured_ts"] = ts
     snapshot["policy_manager"] = json.loads(json.dumps(snapshot["policy_manager"]))
     decision_id = snapshot["policy_manager"]["management_decision"]["decision_id"]
+    decision_id = f"{decision_id}-{existing_n}"
+    snapshot["policy_manager"]["management_decision"]["decision_id"] = decision_id
     review_id = f"review-{snapshot['trade_id']}-{int(ts * 1000)}"
     raw = _json(snapshot)
     sha = _sha_text(raw)
@@ -129,8 +136,8 @@ def _insert_decision(runtime: ManagementEdgeRuntime, snapshot: dict, *,
          100.0, 90.0, 120.0),
     )
     conn.execute(
-        "INSERT OR IGNORE INTO trades VALUES(?,?,?,?,?,?,?)",
-        (snapshot["trade_id"], "NAS100", "long", 100.0, 90.0, 120.0, "open"),
+        "INSERT OR IGNORE INTO trades VALUES(?,?,?,?,?,?,?,?)",
+        (snapshot["trade_id"], "NAS100", "long", 1, 100.0, 90.0, 120.0, "open"),
     )
     conn.commit()
     return review_id, snapshot
@@ -194,6 +201,27 @@ def test_backfill_is_measurement_visible_but_never_policy_edge_eligible(tmp_path
     assert runtime.status()["prospective_resolved"] == 0
 
 
+def test_decision_with_outcome_already_known_at_t0_is_rejected(tmp_path):
+    runtime = _runtime(tmp_path)
+    review_id, snap = _insert_decision(runtime, _snapshot(0))
+    replay = counterfactual_replay(snap, [{
+        "ts": snap["captured_ts"], "price": 102.0, "r": 0.2,
+    }])
+    runtime._conn.execute(
+        "INSERT INTO decision_replays VALUES(?,?,?,?,?,?)",
+        (review_id, snap["trade_id"], snap["captured_ts"] - 1.0,
+         "invalid_known_outcome", replay["version"], _json(replay)),
+    )
+    runtime._conn.commit()
+    assert runtime.capture_new() == 0
+    assert runtime.observations()["items"] == []
+    row = runtime._conn.execute(
+        "SELECT error_code,critical FROM g1m_contract_errors ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["error_code"] == "DECISION_AFTER_OUTCOME"
+    assert row["critical"] == 1
+
+
 def test_pre_t0_realized_pnl_is_not_double_counted(tmp_path):
     runtime = _runtime(tmp_path)
     review_id, snap = _insert_decision(
@@ -203,10 +231,8 @@ def test_pre_t0_realized_pnl_is_not_double_counted(tmp_path):
     obs = runtime.observations()["items"][0]
     detail = runtime.decision(obs["observation_id"])
     outcomes = {row["policy_name"]: row for row in detail["realized_outcomes"]}
-    # HOLD = already-realized 0.3 + remaining 0.5 * future -1R.
     assert outcomes["HOLD"]["terminal_r"] == pytest.approx(-0.2)
     assert outcomes["HOLD"]["management_incremental_r"] == pytest.approx(-0.5)
-    # CLOSE50 future on remaining = .5*.2 + .5*-1 = -.4, weighted by remaining .5.
     assert outcomes["CLOSE_50"]["terminal_r"] == pytest.approx(0.1)
     assert outcomes["CLOSE_50"]["mva_vs_hold_r"] == pytest.approx(0.3)
 
@@ -215,7 +241,6 @@ def test_original_plan_is_distinct_from_managed_be_ladder_continuation(tmp_path)
     runtime = _runtime(tmp_path)
     review_id, snap = _insert_decision(runtime, _snapshot(0, policy="HOLD"), status="not_required")
     runtime.capture_new()
-    # Managed continuation arms BE at 1.5R; original plan has only -1/TAKE barriers.
     _resolve(runtime, review_id, snap, path=(0.2, 1.6, 0.0, 2.0))
     obs = runtime.observations()["items"][0]
     outcomes = {row["policy_name"]: row for row in runtime.decision(obs["observation_id"])["realized_outcomes"]}
@@ -242,15 +267,56 @@ def test_dependency_weighting_counts_trade_not_repeated_decisions(tmp_path):
     runtime = _runtime(tmp_path)
     for trade_id in (1, 1, 2):
         snap = _snapshot(0, trade_id=trade_id, policy="CLOSE_50")
-        # unique decision ids/review timestamps for repeated observations
-        snap["policy_manager"]["management_decision"]["decision_id"] += f"-{len(runtime.observations()['items'])}"
         review_id, frozen = _insert_decision(runtime, snap, status="executed")
         runtime.capture_new()
         _resolve(runtime, review_id, frozen)
     status = runtime.status()
     assert status["prospective_resolved"] == 3
     assert status["unique_trades"] == 2
+    assert status["dependency_groups"] == 2
     assert status["effective_n"] == pytest.approx(2.0)
+
+
+def test_cohort_identity_is_frozen_at_t0_not_read_from_mutated_trade(tmp_path):
+    runtime = _runtime(tmp_path)
+    review_id, snap = _insert_decision(runtime, _snapshot(0), status="executed")
+    runtime.capture_new()
+    runtime._conn.execute(
+        "UPDATE trades SET instrument='SP500',direction='short',setup=2 WHERE id=1"
+    )
+    runtime._conn.commit()
+    cohort = runtime.cohorts()["items"][0]
+    assert cohort["instrument"] == "NAS100"
+    assert cohort["direction"] == "long"
+    assert cohort["setup"] == 1
+
+
+def test_research_cut_is_immutable_and_contains_only_resolved_prospective_rows(tmp_path):
+    runtime = _runtime(tmp_path)
+    old_review, old_snap = _insert_decision(runtime, _snapshot(0, trade_id=1), old=True)
+    runtime.capture_new()
+    _resolve(runtime, old_review, old_snap)
+    live_review, live_snap = _insert_decision(runtime, _snapshot(0, trade_id=2), status="executed")
+    runtime.capture_new()
+    _resolve(runtime, live_review, live_snap)
+    cut = runtime.create_research_cut(cutoff_ts=live_snap["captured_ts"] + 400)
+    assert cut["raw_n"] == 1
+    assert cut["unique_trade_n"] == 1
+    assert cut["effective_n"] == pytest.approx(1.0)
+    assert len(cut["source_ids"]) == 1
+    with pytest.raises(sqlite3.DatabaseError, match="immutable G1M"):
+        runtime._conn.execute(
+            "UPDATE g1m_research_cuts SET raw_n=99 WHERE cut_id=?", (cut["cut_id"],)
+        )
+    runtime._conn.rollback()
+
+
+def test_contract_errors_are_append_only(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime._error(code="TEST_ERROR", detail="x")
+    with pytest.raises(sqlite3.DatabaseError, match="immutable G1M"):
+        runtime._conn.execute("DELETE FROM g1m_contract_errors")
+    runtime._conn.rollback()
 
 
 def test_g1m_ledger_is_immutable_and_restart_idempotent(tmp_path):
