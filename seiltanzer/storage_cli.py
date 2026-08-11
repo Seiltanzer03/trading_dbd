@@ -16,10 +16,12 @@ import json
 from pathlib import Path
 
 from .config import Settings
+from .storage_refinement import install_storage_refinement
 from .storage_runtime import StorageManager, _read_json, _sha256, _sqlite_integrity
 
 
 def main() -> None:
+    install_storage_refinement()
     parser = argparse.ArgumentParser(prog="seiltanzer-storage")
     parser.add_argument("--data-dir", default=".")
     sub = parser.add_subparsers(dest="command", required=True)
