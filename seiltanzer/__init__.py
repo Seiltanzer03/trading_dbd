@@ -89,10 +89,16 @@ from .g1_shadow_runtime import install_g1_shadow_runtime as _install_g1_shadow_r
 _install_g1_shadow_runtime()
 del _install_g1_shadow_runtime
 
-# Prospective shadow predictions require the same clean T0 Q semantics as the
-# eventual G.1A dataset; internal/manual calls cannot bypass the source/runtime
-# contract merely because they present a syntactically valid CDF.
+# Prospective predictions fail closed on exact T0 provenance and model scopes
+# separate native/direct/inverse semantics rather than pooling unlike Q sources.
 from .g1_shadow_refinement import install_g1_shadow_refinement as _install_g1_shadow_refinement
 
 _install_g1_shadow_refinement()
 del _install_g1_shadow_refinement
+
+# Model rows are immutable in normal operation, but prediction also re-hashes
+# the artifact so storage corruption cannot silently enter the prospective OOS ledger.
+from .g1_shadow_artifact_refinement import install_g1_shadow_artifact_refinement as _install_g1_shadow_artifact_refinement
+
+_install_g1_shadow_artifact_refinement()
+del _install_g1_shadow_artifact_refinement
