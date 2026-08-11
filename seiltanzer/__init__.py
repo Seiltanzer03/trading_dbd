@@ -80,3 +80,25 @@ from .g1_q_collector_refinement import install_g1_q_collector_refinement as _ins
 
 _install_g1_q_collector_refinement()
 del _install_g1_q_collector_refinement
+
+# Phase G.1C is the first trainable layer, but remains strictly research-only.
+# It consumes only immutable G.1A Q-eligible cuts, freezes challenger model
+# artifacts, and records prospective shadow predictions for later G.1D OOS.
+from .g1_shadow_runtime import install_g1_shadow_runtime as _install_g1_shadow_runtime
+
+_install_g1_shadow_runtime()
+del _install_g1_shadow_runtime
+
+# Prospective predictions fail closed on exact T0 provenance and model scopes
+# separate native/direct/inverse semantics rather than pooling unlike Q sources.
+from .g1_shadow_refinement import install_g1_shadow_refinement as _install_g1_shadow_refinement
+
+_install_g1_shadow_refinement()
+del _install_g1_shadow_refinement
+
+# Model rows are immutable in normal operation, but prediction also re-hashes
+# the artifact so storage corruption cannot silently enter the prospective OOS ledger.
+from .g1_shadow_artifact_refinement import install_g1_shadow_artifact_refinement as _install_g1_shadow_artifact_refinement
+
+_install_g1_shadow_artifact_refinement()
+del _install_g1_shadow_artifact_refinement

@@ -57,6 +57,8 @@ await page.goto(`http://127.0.0.1:${server.address().port}/fixture`,
 await page.getByText('ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ').waitFor();
 assert.match(await page.locator('.ai-execution-instruction').innerText(),
   /Закрыть 25% текущего остатка/);
+assert.equal(await page.getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).count(),1);
+assert.equal(await page.getByRole('button',{name:'НЕ ВЫПОЛНЕНО',exact:true}).count(),1);
 await page.getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).tap();
 await page.getByText('Исполнение записано. Остаток: 75.0%.').waitFor();
 const state=await page.evaluate(()=>({calls:window.__calls,applied:window.__applied}));
@@ -65,7 +67,8 @@ assert.equal(state.calls[0].url,'/api/ai/decision/ack');
 assert.deepEqual(state.calls[0].payload,{
   decision_id:'decision-e2e-close25',trade_id:7,executed:true});
 assert.equal(state.applied.position_state.remaining_position_fraction,.75);
-assert.equal(await page.getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).isDisabled(),true);
+assert.equal(await page.getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).count(),0);
+assert.equal(await page.getByRole('button',{name:'НЕ ВЫПОЛНЕНО',exact:true}).count(),0);
 await browser.close();
 await new Promise(resolve=>server.close(resolve));
 console.log('AI management CLOSE_25 WebKit E2E: PASS');

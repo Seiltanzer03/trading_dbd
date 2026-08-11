@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readResponseSafely } from '../../seiltanzer/web/js/safe_fetch.js';
+import { readResponseSafely, structuredErrorMessage } from '../../seiltanzer/web/js/safe_fetch.js';
 
 function response(status, contentType, body) {
   return {
@@ -25,5 +25,13 @@ for (const [status, type, text] of [
 const malformed = await readResponseSafely(response(500, 'application/json', 'Internal Server Error'));
 assert.equal(malformed.body, null);
 assert.equal(malformed.text, 'Internal Server Error');
+
+const pydantic = structuredErrorMessage([
+  { type: 'missing', loc: ['body', 'executed'], msg: 'Field required' },
+]);
+assert.match(pydantic, /Field required/);
+assert.doesNotMatch(pydantic, /\[object Object\]/);
+const nested = structuredErrorMessage({ detail: { message: 'Состояние позиции устарело' } });
+assert.equal(nested, 'Состояние позиции устарело');
 
 console.log('ai verdict defensive parsing ok');
