@@ -37,8 +37,6 @@ jobs:
             test "$code" = "200"
           done
 
-          # Intelligence is a presentation/research layer. Cold requests must be
-          # fast even while heavy authoritative history scans warm asynchronously.
           for endpoint in \
             /api/research/g1/intelligence/status \
             /api/research/g1/intelligence/pipeline \
@@ -105,39 +103,27 @@ jobs:
       - name: Restore-drill newest verified snapshot outside live database
         run: |
           set -euo pipefail
-          cd /opt/seiltanzer
-          BACKUPS=$(curl -fsS --max-time 30 http://127.0.0.1:8790/api/system/storage/backups)
-          # Preserve restrictive backup ownership; drill through the privileged
-          # deployment boundary instead of chmod'ing research/trade history.
-          sudo env BACKUPS="$BACKUPS" /opt/seiltanzer/.venv/bin/python - <<'PY'
-          import json, os, pathlib, tempfile
-          from seiltanzer.storage_refinement import install_storage_refinement
-          from seiltanzer.storage_runtime import StorageManager, _table_counts
+          # The service process owns the protected backup files and restores only
+          # to a disposable tempfile. CI never receives backup-file permissions.
+          DRILL=$(curl -fsS --max-time 90 -X POST http://127.0.0.1:8790/api/system/storage/restore-drill)
+          DRILL="$DRILL" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          body = json.loads(os.environ["DRILL"])
+          assert body.get("ok") is True, body
+          assert body.get("restore_drill_contract_version") == "seiltanzer-restore-drill-v1"
+          assert body.get("live_database_replaced") is False
+          assert not (body.get("critical_table_mismatches") or {})
+          assert int(body.get("critical_tables_verified_n") or 0) > 0
+          print(f"Restore drill PASS: {body.get('backup_id')}")
+          PY
 
-          install_storage_refinement()
-          backups = json.loads(os.environ["BACKUPS"])
-          latest = (backups.get("local") or [])[0]
-          manifest = pathlib.Path(latest["manifest_path"])
-          backup_db = manifest.parent / latest["database_file"]
-          fd, destination = tempfile.mkstemp(prefix="seiltanzer-restore-drill-", suffix=".sqlite3")
-          os.close(fd)
-          os.unlink(destination)
-          try:
-              result = StorageManager.restore_verified_backup(
-                  backup_db=backup_db,
-                  manifest_path=manifest,
-                  destination_db=destination,
-                  preserve_existing=False,
-              )
-              assert result["ok"] is True
-              restored = _table_counts(pathlib.Path(destination))
-              expected = latest.get("critical_table_counts") or {}
-              for table, count in expected.items():
-                  if count is not None:
-                      assert restored.get(table) == count, (table, restored.get(table), count)
-              print(f"Restore drill PASS: {latest['backup_id']}")
-          finally:
-              pathlib.Path(destination).unlink(missing_ok=True)
+          STORAGE=$(curl -fsS --max-time 10 http://127.0.0.1:8790/api/system/storage/status)
+          STORAGE="$STORAGE" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          storage = json.loads(os.environ["STORAGE"])
+          drill = storage.get("last_restore_drill") or {}
+          assert drill.get("ok") is True
+          assert drill.get("restore_drill_contract_version") == "seiltanzer-restore-drill-v1"
           PY
 
       - name: Publish G.1E production acceptance status
