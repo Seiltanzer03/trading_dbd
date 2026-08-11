@@ -11,11 +11,16 @@ from .app import create_app
 from .app_extensions import install_lattice_revaluation
 from .config import Settings
 from .g1_baseline_routes import install_g1_baseline_routes
+from .g1_intelligence_routes import install_g1_intelligence_routes
+from .g1_intelligence_runtime import install_intelligence_runtime
 from .g1_q_routes import install_g1_q_routes
 from .g1_routes import install_g1_dataset_routes
 from .g1_shadow_routes import install_g1_shadow_routes
 from .lattice_visual_history import install_lattice_visual_history
 from .option_shadow_state import install_option_shadow_state
+from .storage_refinement import install_storage_refinement
+from .storage_routes import install_storage_routes
+from .storage_runtime import install_storage_runtime, prepare_storage
 
 
 def main() -> None:
@@ -40,14 +45,21 @@ def main() -> None:
         run_check()
         return
 
-    # Advanced analytics keep the public Engine/API contract but use real
-    # observed/history data instead of the temporary synthetic placeholders
-    # that were used by the first visualization prototype.
     install_analytics_runtime()
+    # Tighten manifest table identity, git provenance, exact retention and honest
+    # encryption reporting before the first pre-start snapshot is created.
+    install_storage_refinement()
 
     settings = Settings(demo=args.demo, stream=args.stream, host=args.host,
                         port=args.port, data_dir=args.data_dir)
+
+    # G.1E-0: snapshot the existing source-of-truth before Engine constructors
+    # can run schema migrations. A failed pre-start backup is intentionally fatal.
+    storage = prepare_storage(settings)
     app = create_app(settings)
+    install_storage_runtime(app, storage)
+    install_storage_routes(app)
+
     # /api/ai/decision/ack is canonical inside create_app. Do not install the
     # retired legacy acknowledgement route with a conflicting request schema.
     install_lattice_revaluation(app)
@@ -57,8 +69,15 @@ def main() -> None:
     install_g1_baseline_routes(app)
     install_g1_q_routes(app)
     install_g1_shadow_routes(app)
+
+    # G.1E presentation layer. It reuses authoritative G.1A/B/B.1/C calculations
+    # and remains research-only; no shadow probability enters production policy.
+    install_intelligence_runtime(app)
+    install_g1_intelligence_routes(app)
+
     print(f"Seiltanzer Terminal -> http://{args.host}:{args.port}"
           f"{' [DEMO]' if args.demo else ''}{' [STREAM]' if args.stream else ''}")
+    print(f"Intelligence Lab -> http://{args.host}:{args.port}/intelligence")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

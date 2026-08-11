@@ -3,9 +3,13 @@ __pycache__/
 .venv/
 *.egg-info/
 trades.db
+trades.db-wal
+trades.db-shm
 cache.db
 .pytest_cache/
 dist/
+backups/
+.storage_state.json
 deploy/server.env
 # webull-сессия (токены/устройство) — секреты, не коммитить
 webull_credentials.json

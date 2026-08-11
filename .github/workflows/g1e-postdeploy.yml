@@ -1,0 +1,151 @@
+name: g1e-postdeploy
+
+on:
+  workflow_run:
+    workflows: ["deploy"]
+    types: [completed]
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  verify:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: [self-hosted, linux, x64, seiltanzer-prod]
+    timeout-minutes: 10
+    steps:
+      - name: Verify deployed commit and G.1E APIs
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory /opt/seiltanzer || true
+          SERVER_SHA=$(git -C /opt/seiltanzer rev-parse HEAD)
+          echo "Expected SHA: $EXPECTED_SHA"
+          echo "Server SHA:   $SERVER_SHA"
+          test "$SERVER_SHA" = "$EXPECTED_SHA"
+          test "$(systemctl is-active seiltanzer)" = "active"
+
+          for endpoint in \
+            /api/state \
+            /api/system/storage/status \
+            /api/system/storage/backups \
+            /api/system/storage/integrity \
+            /api/research/g1/intelligence/status \
+            /api/research/g1/intelligence/pipeline \
+            /api/research/g1/intelligence/forecast-quality \
+            /api/research/g1/intelligence/calibration \
+            /api/research/g1/intelligence/pending \
+            /api/research/g1/intelligence/resolved \
+            /api/research/g1/intelligence/history \
+            /intelligence; do
+            code=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8790${endpoint}")
+            echo "$endpoint: $code"
+            test "$code" = "200"
+          done
+
+      - name: Assert storage integrity and research authority
+        run: |
+          set -euo pipefail
+          STORAGE=$(curl -fsS http://127.0.0.1:8790/api/system/storage/status)
+          BACKUPS=$(curl -fsS http://127.0.0.1:8790/api/system/storage/backups)
+          INTEL=$(curl -fsS http://127.0.0.1:8790/api/research/g1/intelligence/status)
+          STORAGE="$STORAGE" BACKUPS="$BACKUPS" INTEL="$INTEL" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          storage = json.loads(os.environ["STORAGE"])
+          backups = json.loads(os.environ["BACKUPS"])
+          intel = json.loads(os.environ["INTEL"])
+
+          assert storage.get("storage_contract_version") == "seiltanzer-storage-v1"
+          assert (storage.get("sqlite_integrity") or {}).get("ok") is True
+          assert storage.get("health") in {
+              "HEALTHY", "LOCAL_BACKUP_ONLY", "DISASTER_RECOVERY_DEGRADED"
+          }, storage.get("health")
+          local = backups.get("local") or []
+          assert local, "no verified local backup exists"
+          assert local[0].get("verified") is True
+          assert float(storage.get("last_local_backup_age_sec") or 1e99) <= 1800.0
+          counts = local[0].get("critical_table_counts") or {}
+          for table in ("trades", "passive_market_observations", "g1_q_capture_attempts"):
+              assert table in counts, table
+
+          assert intel.get("g1_stage") == "G.1E"
+          authority = intel.get("authority") or {}
+          assert authority.get("research_only") is True
+          assert authority.get("production_authority") is False
+          assert authority.get("production_replacement_allowed") is False
+          assert authority.get("promotion_allowed") is False
+          assert authority.get("physical_probability_published") is False
+          assert authority.get("shadow_p_used_for_trading") is False
+          assert ((intel.get("storage") or {}).get("sqlite_integrity") or {}).get("ok") is True
+          exp = intel.get("experience") or {}
+          print(
+              "G1E intelligence: "
+              f"state={intel.get('maturity_state')} "
+              f"q_attempts={exp.get('q_attempts', 0)} "
+              f"q_captured={exp.get('q_captured', 0)} "
+              f"q_resolved={exp.get('q_resolved', 0)} "
+              f"q_eligible={exp.get('q_clean_eligible', 0)} "
+              f"effective_q_n={exp.get('q_effective_n', 0)} "
+              f"storage={storage.get('health')} "
+              f"dr_verified={storage.get('disaster_recovery_verified', False)}"
+          )
+          PY
+
+      - name: Restore-drill newest verified snapshot outside live database
+        run: |
+          set -euo pipefail
+          cd /opt/seiltanzer
+          BACKUPS=$(curl -fsS http://127.0.0.1:8790/api/system/storage/backups)
+          BACKUPS="$BACKUPS" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os, pathlib, tempfile
+          from seiltanzer.storage_refinement import install_storage_refinement
+          from seiltanzer.storage_runtime import StorageManager, _table_counts
+
+          install_storage_refinement()
+          backups = json.loads(os.environ["BACKUPS"])
+          latest = (backups.get("local") or [])[0]
+          manifest = pathlib.Path(latest["manifest_path"])
+          backup_db = manifest.parent / latest["database_file"]
+          fd, destination = tempfile.mkstemp(prefix="seiltanzer-restore-drill-", suffix=".sqlite3")
+          os.close(fd)
+          os.unlink(destination)
+          try:
+              result = StorageManager.restore_verified_backup(
+                  backup_db=backup_db,
+                  manifest_path=manifest,
+                  destination_db=destination,
+                  preserve_existing=False,
+              )
+              assert result["ok"] is True
+              restored = _table_counts(pathlib.Path(destination))
+              expected = latest.get("critical_table_counts") or {}
+              for table, count in expected.items():
+                  if count is not None:
+                      assert restored.get(table) == count, (table, restored.get(table), count)
+              print(f"Restore drill PASS: {latest['backup_id']}")
+          finally:
+              pathlib.Path(destination).unlink(missing_ok=True)
+          PY
+
+      - name: Publish G.1E production acceptance status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ "$JOB_STATUS" = "success" ]; then
+            state="success"
+            description="Durability, verified restore drill and Intelligence Lab passed"
+          else
+            state="failure"
+            description="G.1E storage or Intelligence production acceptance failed"
+          fi
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${EXPECTED_SHA}" \
+            -d "{\"state\":\"$state\",\"context\":\"g1e/storage-intelligence\",\"description\":\"$description\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
