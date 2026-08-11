@@ -79,19 +79,19 @@ def _capture(
     attempt = dict(engine._conn.execute(
         "SELECT * FROM g1_q_capture_attempts WHERE attempt_origin='background_collector'"
     ).fetchone())
-    native_id = next(item for item in ids if item.endswith("-native-expiry"))
     stored_features = json.loads(engine._conn.execute(
         "SELECT features_json FROM passive_market_observations WHERE observation_id=?",
-        (native_id,),
+        (ids[0],),
     ).fetchone()[0])
-    return attempt, stored_features
+    return attempt, stored_features, ids
 
 
-def test_stale_option_snapshot_cannot_count_as_success(tmp_path, monkeypatch):
+def test_stale_option_snapshot_cannot_count_or_create_native_q(tmp_path, monkeypatch):
     engine = PassiveLearningEngine(str(tmp_path / "stale-option.db"), Settings(), cache=None)
-    attempt, stored_features = _capture(engine, monkeypatch, option_age=3601.0)
+    attempt, stored_features, ids = _capture(engine, monkeypatch, option_age=3601.0)
     assert attempt["observation_created"] == 0
     assert attempt["blocker_code"] == "OPTION_CHAIN_STALE"
+    assert not any(item.endswith("-native-expiry") for item in ids)
     assert "_g1b1_refined_pre_blocker" not in stored_features
     status = engine.g1_q_status()
     assert status["successful_q_capture_n"] == 0
@@ -101,27 +101,30 @@ def test_stale_option_snapshot_cannot_count_as_success(tmp_path, monkeypatch):
 
 def test_unknown_option_freshness_fails_closed(tmp_path, monkeypatch):
     engine = PassiveLearningEngine(str(tmp_path / "unknown-option-age.db"), Settings(), cache=None)
-    attempt, _ = _capture(engine, monkeypatch, option_age=None)
+    attempt, _, ids = _capture(engine, monkeypatch, option_age=None)
     assert attempt["observation_created"] == 0
     assert attempt["blocker_code"] == "Q_SOURCE_STALE"
+    assert not any(item.endswith("-native-expiry") for item in ids)
     assert engine.g1_q_status()["runtime_validated"] is False
     engine.close()
 
 
 def test_proxy_target_price_cannot_establish_pristine_q_capture(tmp_path, monkeypatch):
     engine = PassiveLearningEngine(str(tmp_path / "proxy-target.db"), Settings(), cache=None)
-    attempt, _ = _capture(engine, monkeypatch, price_kind="proxy")
+    attempt, _, ids = _capture(engine, monkeypatch, price_kind="proxy")
     assert attempt["observation_created"] == 0
     assert attempt["blocker_code"] == "TARGET_PRICE_NON_DIRECT"
+    assert not any(item.endswith("-native-expiry") for item in ids)
     assert engine.g1_q_status()["data_available"] is False
     engine.close()
 
 
 def test_stale_target_price_cannot_establish_pristine_q_capture(tmp_path, monkeypatch):
     engine = PassiveLearningEngine(str(tmp_path / "stale-target.db"), Settings(), cache=None)
-    attempt, _ = _capture(engine, monkeypatch, price_age=61.0)
+    attempt, _, ids = _capture(engine, monkeypatch, price_age=61.0)
     assert attempt["observation_created"] == 0
     assert attempt["blocker_code"] == "TARGET_PRICE_STALE"
+    assert not any(item.endswith("-native-expiry") for item in ids)
     status = engine.g1_q_status()
     assert status["capture_attempt_n"] == 1
     assert status["successful_q_capture_n"] == 0
