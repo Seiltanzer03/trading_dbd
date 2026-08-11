@@ -1,8 +1,9 @@
-"""Fail-closed T0 admission for Phase G.1C prospective shadow predictions."""
+"""Fail-closed refinements for Phase G.1C shadow calibration."""
 from __future__ import annotations
 
 import json
 import math
+from collections import Counter, defaultdict
 from typing import Any
 
 from . import g1_shadow_runtime as _g1c
@@ -11,8 +12,22 @@ from .measurement_q_runtime import MEASUREMENT_RUNTIME_VERSION, valid_terminal_c
 from .option_q_adapter import EXPIRY_CLOCK_VERSION, OPTION_Q_CONTRACT_VERSION
 
 _ENGINE = _pl.PassiveLearningEngine
-REFINEMENT_VERSION = "g1c-shadow-t0-admission-v1"
+REFINEMENT_VERSION = "g1c-shadow-integrity-v2"
 _PREVIOUS_PREDICT = _ENGINE.g1c_predict_observation
+_PREVIOUS_REFIT = _ENGINE.g1c_refit
+_PREVIOUS_STATUS = _ENGINE.g1c_status
+
+_CRITICAL_ERRORS = {
+    "TRAINING_CUT_INVALID",
+    "TRAINING_CUT_MUTATED",
+    "Q_CONTRACT_MISMATCH",
+    "TARGET_CONTRACT_MISMATCH",
+    "DEPENDENCY_CONTRACT_MISMATCH",
+    "MODEL_ARTIFACT_INVALID",
+    "MODEL_SHA_MISMATCH",
+    "NONFINITE_PARAMETERS",
+    "NON_MONOTONE_MAPPING",
+}
 
 
 def _loads(value: Any) -> dict:
@@ -31,6 +46,178 @@ def _finite(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return out if math.isfinite(out) else None
+
+
+def _semantic_tuple(row: dict) -> tuple[str, str]:
+    base = row.get("base_cohort") if isinstance(row.get("base_cohort"), dict) else {}
+    relation = str(base.get("q_relation") or "unknown").lower()
+    transform = str(base.get("proxy_transform") or "unknown").lower()
+    return relation, transform
+
+
+def _semantic_scope_definitions(rows: list[dict]) -> list[tuple[str, dict, list[dict]]]:
+    """Never pool native/direct/inverse observations behind an unlabeled model."""
+    by_semantic: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    by_instrument_semantic: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    by_cohort: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        relation, transform = _semantic_tuple(row)
+        instrument = str(row.get("instrument"))
+        by_semantic[(relation, transform)].append(row)
+        by_instrument_semantic[(instrument, relation, transform)].append(row)
+        by_cohort[str(row.get("base_cohort_id"))].append(row)
+
+    scopes: list[tuple[str, dict, list[dict]]] = []
+    for relation, transform in sorted(by_semantic):
+        scopes.append((
+            f"GLOBAL_TERMINAL_Q:{relation}:{transform}",
+            {
+                "kind": "global_terminal_q_semantic",
+                "q_relation": relation,
+                "proxy_transform": transform,
+            },
+            by_semantic[(relation, transform)],
+        ))
+    for instrument, relation, transform in sorted(by_instrument_semantic):
+        scopes.append((
+            f"INSTRUMENT:{instrument}:{relation}:{transform}",
+            {
+                "kind": "instrument_semantic",
+                "instrument": instrument,
+                "q_relation": relation,
+                "proxy_transform": transform,
+            },
+            by_instrument_semantic[(instrument, relation, transform)],
+        ))
+    for cohort_id in sorted(by_cohort):
+        base = by_cohort[cohort_id][0].get("base_cohort") or {}
+        scopes.append((
+            f"COHORT:{cohort_id}",
+            {
+                "kind": "g1a_cohort",
+                "cohort_id": cohort_id,
+                "instrument": base.get("instrument"),
+                "horizon_bucket": base.get("horizon_bucket"),
+                "q_relation": base.get("q_relation"),
+                "proxy_transform": base.get("proxy_transform"),
+            },
+            by_cohort[cohort_id],
+        ))
+    return scopes
+
+
+def _semantic_model_matches(model: dict, observation: dict) -> bool:
+    scope = _loads(model.get("scope_json"))
+    relation, transform = _semantic_tuple(observation)
+    kind = scope.get("kind")
+    if kind == "global_terminal_q_semantic":
+        return (
+            str(scope.get("q_relation") or "").lower() == relation
+            and str(scope.get("proxy_transform") or "").lower() == transform
+        )
+    if kind == "instrument_semantic":
+        return (
+            str(scope.get("instrument")) == str(observation.get("instrument"))
+            and str(scope.get("q_relation") or "").lower() == relation
+            and str(scope.get("proxy_transform") or "").lower() == transform
+        )
+    if kind == "g1a_cohort":
+        return str(scope.get("cohort_id")) == str(observation.get("base_cohort_id"))
+    return False
+
+
+def _scope_fit_readiness(self: _ENGINE, rows: list[dict]) -> dict:
+    scopes = _semantic_scope_definitions(rows)
+    output = {}
+    for family in ("PLATT", "BETA", "ISOTONIC", "PIT_ISOTONIC_CDF"):
+        statuses = []
+        for scope_key, _scope, members in scopes:
+            stats = _g1c._stats(self, members)
+            item = _g1c._threshold_status(stats, family)
+            item = {**item, "scope_key": scope_key}
+            statuses.append(item)
+        if not statuses:
+            base = _g1c._threshold_status(_g1c._stats(self, []), family)
+            statuses = [{**base, "scope_key": None}]
+        ready = [item for item in statuses if item["ready"]]
+        blocker_counts = Counter()
+        for item in statuses:
+            blocker_counts.update(item["blockers"])
+        output[family.lower().replace("pit_isotonic_cdf", "full_cdf")] = {
+            "family": family,
+            "threshold_contract_version": _g1c.G1C_FIT_THRESHOLD_VERSION,
+            "ready": bool(ready),
+            "status": "READY_TO_FIT" if ready else "INSUFFICIENT_EVIDENCE",
+            "ready_scope_n": len(ready),
+            "scope_n": len(statuses),
+            "blockers": dict(blocker_counts),
+            "scopes": statuses,
+        }
+    return output
+
+
+def _semantic_refit(self: _ENGINE, *, force: bool = False, cutoff_ts: float | None = None) -> dict:
+    rows = _g1c._q_rows(self)
+    scopes = _semantic_scope_definitions(rows)
+    ready_candidates = []
+    for scope_key, _scope, members in scopes:
+        stats = _g1c._stats(self, members)
+        for family in ("PLATT", "BETA", "ISOTONIC", "PIT_ISOTONIC_CDF"):
+            threshold = _g1c._threshold_status(stats, family)
+            if threshold["ready"]:
+                ready_candidates.append((scope_key, family, stats["effective_n"]))
+    if not ready_candidates:
+        return {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "models_created": 0,
+            "stats": _g1c._stats(self, rows),
+            "semantic_scope_n": len(scopes),
+        }
+    if not force and not any(
+        _g1c._refit_delta_ready(self, scope_key, family, effective_n)
+        for scope_key, family, effective_n in ready_candidates
+    ):
+        return {
+            "status": "REFIT_DELTA_NOT_REACHED",
+            "models_created": 0,
+            "stats": _g1c._stats(self, rows),
+            "semantic_scope_n": len(scopes),
+        }
+    # The predecessor's aggregate precheck is necessarily satisfied when any
+    # semantic subgroup satisfies the same threshold. Its actual fitting loop
+    # resolves `_scope_definitions` dynamically, replaced below with ours.
+    return _PREVIOUS_REFIT(self, force=True, cutoff_ts=cutoff_ts)
+
+
+def _critical_error_count(self: _ENGINE) -> int:
+    placeholders = ",".join("?" for _ in _CRITICAL_ERRORS)
+    with self._lock:
+        return int(self._conn.execute(
+            f"SELECT COUNT(*) FROM g1c_contract_errors WHERE error_type IN ({placeholders})",
+            tuple(sorted(_CRITICAL_ERRORS)),
+        ).fetchone()[0])
+
+
+def _status_with_semantic_integrity(self: _ENGINE) -> dict:
+    status = _PREVIOUS_STATUS(self)
+    rows = _g1c._q_rows(self)
+    stats = _g1c._stats(self, rows)
+    readiness = _scope_fit_readiness(self, rows)
+    critical_n = _critical_error_count(self)
+    g1d = _g1c._g1d_status(stats, critical_contract_errors=critical_n)
+    blocker_counts = Counter()
+    for family in readiness.values():
+        blocker_counts.update(family.get("blockers") or {})
+    status["fit_readiness"] = readiness
+    status["shadow_model_fitting_allowed"] = any(item["ready"] for item in readiness.values())
+    status["top_fit_blockers"] = dict(blocker_counts.most_common())
+    status["critical_contract_error_n"] = critical_n
+    status["critical_contract_error_types"] = sorted(_CRITICAL_ERRORS)
+    status["g1d_readiness"] = g1d
+    status["ready_for_g1d"] = g1d["ready"]
+    status["q_semantic_pooling"] = "separated_by_q_relation_and_proxy_transform"
+    status["refinement_contract_version"] = REFINEMENT_VERSION
+    return status
 
 
 def _t0_blocker(self: _ENGINE, observation_id: str) -> str | None:
@@ -109,10 +296,16 @@ def predict_with_t0_admission(self: _ENGINE, observation_id: str) -> dict:
 def install_g1_shadow_refinement() -> None:
     if getattr(_ENGINE, "_g1_shadow_refinement", None) == REFINEMENT_VERSION:
         return
-    _ENGINE.g1c_predict_observation = predict_with_t0_admission
-    # collect_with_g1c resolves this module-global at call time, so replace it
-    # too; automatic collector predictions must pass the same T0 gate as direct
-    # internal calls and tests.
+    # Runtime functions resolve these module globals dynamically. Replace both
+    # the direct engine methods and runtime globals so collector/refit paths use
+    # exactly the same semantic and no-lookahead gates.
+    _g1c._scope_definitions = _semantic_scope_definitions
+    _g1c._model_matches = _semantic_model_matches
+    _g1c.g1c_refit = _semantic_refit
     _g1c.g1c_predict_observation = predict_with_t0_admission
+    _ENGINE.g1c_refit = _semantic_refit
+    _ENGINE.g1c_status = _status_with_semantic_integrity
+    _ENGINE.g1c_predict_observation = predict_with_t0_admission
     _ENGINE._g1c_prediction_t0_blocker = _t0_blocker
+    _ENGINE._g1c_semantic_scope_definitions = staticmethod(_semantic_scope_definitions)
     _ENGINE._g1_shadow_refinement = REFINEMENT_VERSION
