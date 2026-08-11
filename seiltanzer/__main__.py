@@ -13,6 +13,7 @@ from .config import Settings
 from .g1_baseline_routes import install_g1_baseline_routes
 from .g1_intelligence_routes import install_g1_intelligence_routes
 from .g1_intelligence_runtime import install_intelligence_runtime
+from .g1_management_routes import install_g1_management_routes
 from .g1_q_routes import install_g1_q_routes
 from .g1_routes import install_g1_dataset_routes
 from .g1_shadow_routes import install_g1_shadow_routes
@@ -69,6 +70,7 @@ def main() -> None:
     install_g1_baseline_routes(app)
     install_g1_q_routes(app)
     install_g1_shadow_routes(app)
+    install_g1_management_routes(app)
 
     # G.1E presentation layer. It reuses authoritative G.1A/B/B.1/C calculations
     # and remains research-only; no shadow probability enters production policy.
@@ -78,6 +80,7 @@ def main() -> None:
     print(f"Seiltanzer Terminal -> http://{args.host}:{args.port}"
           f"{' [DEMO]' if args.demo else ''}{' [STREAM]' if args.stream else ''}")
     print(f"Intelligence Lab -> http://{args.host}:{args.port}/intelligence")
+    print(f"Management Edge -> http://{args.host}:{args.port}/management-edge")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
