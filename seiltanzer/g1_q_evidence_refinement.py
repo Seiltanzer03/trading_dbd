@@ -208,6 +208,19 @@ def _capture_observation_refined(
     evidence_eligible: bool = True,
     observation_origin: str | None = None,
 ) -> list[str]:
+    # Strict source/provenance admission belongs only to the trusted internal
+    # prospective collector. Unit-test and manual calls preserve the historical
+    # capture semantics; the base G.1B.1 ledger classifies them as test/manual
+    # and excludes them from production Q evidence.
+    strict_background = bool(getattr(self, "_f32a_background_capture", False)) and trigger_reason != "test"
+    if not strict_background:
+        return _ORIGINAL_CAPTURE_METHOD(
+            self, instrument=instrument, captured_ts=captured_ts,
+            market_price=market_price, features=features, forecast=forecast,
+            provenance=provenance, trigger_reason=trigger_reason,
+            evidence_eligible=evidence_eligible, observation_origin=observation_origin,
+        )
+
     probe_features = deepcopy(features) if isinstance(features, dict) else {}
     probe_provenance = deepcopy(provenance) if isinstance(provenance, dict) else {}
     blocker, detail = _refined_classify_pre_capture(
