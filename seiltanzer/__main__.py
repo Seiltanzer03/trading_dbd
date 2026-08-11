@@ -14,6 +14,7 @@ from .g1_baseline_routes import install_g1_baseline_routes
 from .g1_intelligence_routes import install_g1_intelligence_routes
 from .g1_intelligence_runtime import install_intelligence_runtime
 from .g1_management_routes import install_g1_management_routes
+from .g1_management_storage import install_g1_management_storage
 from .g1_q_routes import install_g1_q_routes
 from .g1_routes import install_g1_dataset_routes
 from .g1_shadow_routes import install_g1_shadow_routes
@@ -50,6 +51,7 @@ def main() -> None:
     # Tighten manifest table identity, git provenance, exact retention and honest
     # encryption reporting before the first pre-start snapshot is created.
     install_storage_refinement()
+    install_g1_management_storage()
 
     settings = Settings(demo=args.demo, stream=args.stream, host=args.host,
                         port=args.port, data_dir=args.data_dir)
