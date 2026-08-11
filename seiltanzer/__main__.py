@@ -18,6 +18,7 @@ from .g1_routes import install_g1_dataset_routes
 from .g1_shadow_routes import install_g1_shadow_routes
 from .lattice_visual_history import install_lattice_visual_history
 from .option_shadow_state import install_option_shadow_state
+from .storage_refinement import install_storage_refinement
 from .storage_routes import install_storage_routes
 from .storage_runtime import install_storage_runtime, prepare_storage
 
@@ -44,10 +45,10 @@ def main() -> None:
         run_check()
         return
 
-    # Advanced analytics keep the public Engine/API contract but use real
-    # observed/history data instead of the temporary synthetic placeholders
-    # that were used by the first visualization prototype.
     install_analytics_runtime()
+    # Tighten manifest table identity, git provenance, exact retention and honest
+    # encryption reporting before the first pre-start snapshot is created.
+    install_storage_refinement()
 
     settings = Settings(demo=args.demo, stream=args.stream, host=args.host,
                         port=args.port, data_dir=args.data_dir)
