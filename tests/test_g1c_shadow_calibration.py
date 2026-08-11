@@ -257,6 +257,18 @@ def test_source_mutation_rejects_training_cut(tmp_path):
             "SELECT observation_id FROM g1_dataset_cut_members WHERE cut_id=? AND q_to_p_eligible=1 LIMIT 1",
             (cut["cut_id"],),
         ).fetchone()
+        # F.3.2a normally makes source rows immutable. This test deliberately
+        # simulates storage tampering beyond that first defence so G.1C's own
+        # source-hash revalidation is exercised independently.
+        trigger_names = [
+            value[0] for value in engine._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND tbl_name='passive_market_observations' AND sql LIKE '%BEFORE UPDATE%'"
+            ).fetchall()
+        ]
+        assert trigger_names
+        for trigger_name in trigger_names:
+            engine._conn.execute(f'DROP TRIGGER "{trigger_name}"')
         engine._conn.execute(
             "UPDATE passive_market_observations SET market_price=market_price+1 WHERE observation_id=?",
             (row[0],),
