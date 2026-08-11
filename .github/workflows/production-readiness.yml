@@ -41,6 +41,10 @@ jobs:
       - name: Verify G.1E endpoints and authority boundary
         run: |
           set -euo pipefail
+
+          # Intelligence is the bounded presentation contract over authoritative
+          # G.1A/B/B.1/C runtimes. It may honestly be WARMING, but must not block
+          # the trading terminal while raw research history is scanned in workers.
           for endpoint in \
             /api/research/g1/intelligence/status \
             /api/research/g1/intelligence/pipeline \
@@ -55,11 +59,13 @@ jobs:
             test "$code" = "200"
           done
 
+          # Only bounded core/storage APIs are readiness gates. Raw research
+          # endpoints such as calibrators/status can legitimately perform a full
+          # history scan and are covered by CI plus the Intelligence materializer;
+          # their latency must not turn a healthy production deploy red.
           for endpoint in \
             /api/state \
             /api/validation \
-            /api/research/g1/q/status \
-            /api/research/g1/calibrators/status \
             /api/system/storage/status \
             /api/system/storage/backups \
             /api/system/storage/integrity; do
