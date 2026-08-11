@@ -4,11 +4,13 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from .g1_intelligence_page_refinement import intelligence_page
+from .g1_intelligence_performance import install_g1_intelligence_performance
 from .g1_intelligence_refinement import install_g1_intelligence_refinement
 
-# Keep the presentation contract aligned with G.1C's semantic-scope readiness
-# whenever this route module is imported (CLI and tests both use this path).
+# Keep the presentation contract aligned with G.1C's semantic-scope readiness and
+# coalesce repeated read-only scans when one cockpit page opens several panels.
 install_g1_intelligence_refinement()
+install_g1_intelligence_performance()
 
 
 def install_g1_intelligence_routes(app: FastAPI) -> None:
