@@ -14,7 +14,7 @@ from .g1_baseline_routes import install_g1_baseline_routes
 from .g1_intelligence_routes import install_g1_intelligence_routes
 from .g1_intelligence_runtime import install_intelligence_runtime
 from .g1_management_routes import install_g1_management_routes
-from .g1_management_storage import install_g1_management_storage
+from .g1_management_storage import ensure_g1m_schema_backup, install_g1_management_storage
 from .g1_q_routes import install_g1_q_routes
 from .g1_routes import install_g1_dataset_routes
 from .g1_shadow_routes import install_g1_shadow_routes
@@ -48,18 +48,18 @@ def main() -> None:
         return
 
     install_analytics_runtime()
-    # Tighten manifest table identity, git provenance, exact retention and honest
-    # encryption reporting before the first pre-start snapshot is created.
     install_storage_refinement()
     install_g1_management_storage()
 
     settings = Settings(demo=args.demo, stream=args.stream, host=args.host,
                         port=args.port, data_dir=args.data_dir)
 
-    # G.1E-0: snapshot the existing source-of-truth before Engine constructors
-    # can run schema migrations. A failed pre-start backup is intentionally fatal.
+    # Preserve the old source-of-truth before schema constructors run.
     storage = prepare_storage(settings)
     app = create_app(settings)
+    # On the first G.1-M activation, create one additional verified snapshot after
+    # the new immutable ledgers exist. Later restarts stay on normal backup cadence.
+    ensure_g1m_schema_backup(storage)
     install_storage_runtime(app, storage)
     install_storage_routes(app)
 
@@ -74,8 +74,7 @@ def main() -> None:
     install_g1_shadow_routes(app)
     install_g1_management_routes(app)
 
-    # G.1E presentation layer. It reuses authoritative G.1A/B/B.1/C calculations
-    # and remains research-only; no shadow probability enters production policy.
+    # G.1E presentation layer remains research-only.
     install_intelligence_runtime(app)
     install_g1_intelligence_routes(app)
 
