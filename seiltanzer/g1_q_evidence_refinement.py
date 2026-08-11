@@ -1,23 +1,27 @@
 """Integrity refinements for Phase G.1B.1 Q evidence admission.
 
 The base G.1B.1 runtime records every attempt. This layer makes a successful
-Q capture fail-closed on source freshness and target-price provenance, and
-verifies the frozen source/target/proxy mapping before the attempt can be
-counted as successful. G.1A itself remains unchanged.
+Q capture fail-closed on source freshness and target-price provenance, verifies
+the frozen source/target/proxy mapping, and prevents an invalid Q attempt from
+creating an option-native dataset row. G.1A itself remains unchanged.
 """
 from __future__ import annotations
 
 import json
 import math
+from copy import deepcopy
 from typing import Any
 
 from . import g1_q_evidence_runtime as _q
 
 _REFINED_CONTRACT_VERSION = "g1-q-evidence-integrity-v1"
 _PRE_BLOCKER_KEY = "_g1b1_refined_pre_blocker"
+_FORCED_BLOCKER_KEY = "_g1b1_forced_blocker"
+_FORCED_DETAIL_KEY = "_g1b1_forced_detail"
 _ORIGINAL_CLASSIFY = _q._classify_pre_capture
 _ORIGINAL_VALIDATE = _q._validate_created_q
 _ORIGINAL_STATUS = _q.g1_q_status
+_ORIGINAL_CAPTURE_METHOD = _q._ENGINE.capture_observation
 
 
 def _finite(value: Any) -> float | None:
@@ -32,6 +36,15 @@ def _refined_classify_pre_capture(
     *, instrument: str, captured_ts: float, market_price: float,
     features: dict, provenance: dict,
 ) -> tuple[str | None, dict]:
+    forced = provenance.get(_FORCED_BLOCKER_KEY) if isinstance(provenance, dict) else None
+    if forced:
+        detail = deepcopy(provenance.get(_FORCED_DETAIL_KEY) or {})
+        detail["integrity_contract_version"] = _REFINED_CONTRACT_VERSION
+        detail["refined_pre_blocker"] = str(forced)
+        if isinstance(features, dict):
+            features[_PRE_BLOCKER_KEY] = str(forced)
+        return str(forced), detail
+
     blocker, detail = _ORIGINAL_CLASSIFY(
         instrument=instrument,
         captured_ts=captured_ts,
@@ -46,8 +59,6 @@ def _refined_classify_pre_capture(
                if isinstance(features, dict) else None)
 
     # A configured Q source is not runtime-valid unless freshness is provable.
-    # Cached chains can still be stored by the lower layer for diagnostics, but
-    # they are not counted as successful prospective Q captures here.
     if blocker is None and capability.get("configured") and isinstance(metrics, dict):
         source_age = _finite((options_meta or {}).get("age_sec"))
         if source_age is None:
@@ -55,15 +66,40 @@ def _refined_classify_pre_capture(
         elif source_age > _q.Q_SOURCE_SNAPSHOT_MAX_AGE_SEC:
             blocker = "OPTION_CHAIN_STALE"
 
-    # Q->P return geometry needs a real, current target spot at T0. A Yahoo
-    # fallback/index proxy is still useful elsewhere in the terminal but cannot
-    # establish a pristine Q evidence capture.
+    # Q->P return geometry needs a real, current target spot at T0.
     if blocker is None:
         target_age = _finite((price_meta or {}).get("age_sec"))
         if target_age is None or target_age > 60.0:
             blocker = "TARGET_PRICE_STALE"
         elif (price_meta or {}).get("kind") != "direct":
             blocker = "TARGET_PRICE_NON_DIRECT"
+
+    # Probe the exact F.3.2a terminal-Q adapter before the lower capture layer can
+    # create an option-native row. This catches malformed/non-normalizable CDFs
+    # and mapping drift prospectively instead of leaving a failed Q row behind.
+    if blocker is None and isinstance(metrics, dict):
+        probe = _q.adapt_option_q_forecast_f32a(
+            metrics, 1, None, instrument, instrument_spot=market_price,
+            horizon_kind="option_native_expiry",
+        )
+        method = str(probe.get("horizon_alignment_method") or "")
+        if (
+            probe.get("probability_measure") != "risk_neutral_Q_terminal"
+            or probe.get("q_terminal_distribution_available") is not True
+        ):
+            blocker = "CDF_INVALID" if "cdf" in method else "CDF_BUILD_FAILED"
+        elif not _q.valid_terminal_cdf(probe.get("terminal_q_cdf")):
+            blocker = "CDF_INVALID"
+        elif str(probe.get("q_source_instrument") or probe.get("proxy_symbol")) != str(
+            capability.get("q_source_instrument")
+        ):
+            blocker = "SOURCE_CONTRACT_ERROR"
+        elif str(probe.get("q_target_instrument")) != str(instrument):
+            blocker = "SOURCE_CONTRACT_ERROR"
+        elif str(probe.get("proxy_transform") or "").lower() != str(
+            capability.get("proxy_transform") or ""
+        ).lower():
+            blocker = "PROXY_TRANSFORM_UNKNOWN"
 
     detail = dict(detail or {})
     detail["integrity_contract_version"] = _REFINED_CONTRACT_VERSION
@@ -72,8 +108,8 @@ def _refined_classify_pre_capture(
     detail["target_price_age_sec"] = _finite((price_meta or {}).get("age_sec"))
     detail["option_age_sec"] = _finite((options_meta or {}).get("age_sec"))
 
-    # This mutates only the private deep-copied diagnostic snapshot created by
-    # capture_observation_g1b1; it never enters the immutable passive T0 row.
+    # This marker is used only on the private diagnostic copy owned by the base
+    # G.1B.1 wrapper. It must never be written into passive features_json.
     if isinstance(features, dict):
         features[_PRE_BLOCKER_KEY] = blocker
     return blocker, detail
@@ -103,13 +139,20 @@ def _refined_validate_created_q(
     market_price: float,
     features: dict,
 ) -> tuple[bool, str | None, str | None, dict]:
+    native_ids = [str(item) for item in ids if str(item).endswith("-native-expiry")]
+    pre_blocker = features.get(_PRE_BLOCKER_KEY) if isinstance(features, dict) else None
+    if pre_blocker and not native_ids:
+        return False, None, str(pre_blocker), {
+            "integrity_contract_version": _REFINED_CONTRACT_VERSION,
+            "native_row_suppressed": True,
+        }
+
     success, native_id, blocker, detail = _ORIGINAL_VALIDATE(
         self, ids, instrument, captured_ts, market_price, features,
     )
     detail = dict(detail or {})
     detail["integrity_contract_version"] = _REFINED_CONTRACT_VERSION
 
-    pre_blocker = features.get(_PRE_BLOCKER_KEY) if isinstance(features, dict) else None
     if success and pre_blocker:
         detail["success_rejected_by_pre_capture_integrity"] = True
         return False, native_id, str(pre_blocker), detail
@@ -152,6 +195,56 @@ def _refined_validate_created_q(
     return True, native_id, None, detail
 
 
+def _capture_observation_refined(
+    self,
+    *,
+    instrument: str,
+    captured_ts: float,
+    market_price: float,
+    features: dict,
+    forecast: dict,
+    provenance: dict,
+    trigger_reason: str = "cadence",
+    evidence_eligible: bool = True,
+    observation_origin: str | None = None,
+) -> list[str]:
+    probe_features = deepcopy(features) if isinstance(features, dict) else {}
+    probe_provenance = deepcopy(provenance) if isinstance(provenance, dict) else {}
+    blocker, detail = _refined_classify_pre_capture(
+        instrument=instrument,
+        captured_ts=float(captured_ts),
+        market_price=float(market_price),
+        features=probe_features,
+        provenance=probe_provenance,
+    )
+    if blocker is None:
+        return _ORIGINAL_CAPTURE_METHOD(
+            self, instrument=instrument, captured_ts=captured_ts,
+            market_price=market_price, features=features, forecast=forecast,
+            provenance=provenance, trigger_reason=trigger_reason,
+            evidence_eligible=evidence_eligible, observation_origin=observation_origin,
+        )
+
+    # Keep ordinary fixed-horizon collection alive, but remove unusable option
+    # geometry from the copy passed to the lower layer. This makes the failed Q
+    # attempt observable while preventing creation of a native-expiry Q row.
+    safe_features = deepcopy(features) if isinstance(features, dict) else {}
+    safe_features["option_derivatives"] = {"available": False, "data": None}
+    safe_features["option_distribution"] = {
+        "available": False,
+        "reason": "q_capture_blocked",
+    }
+    safe_provenance = deepcopy(provenance) if isinstance(provenance, dict) else {}
+    safe_provenance[_FORCED_BLOCKER_KEY] = blocker
+    safe_provenance[_FORCED_DETAIL_KEY] = detail
+    return _ORIGINAL_CAPTURE_METHOD(
+        self, instrument=instrument, captured_ts=captured_ts,
+        market_price=market_price, features=safe_features, forecast=forecast,
+        provenance=safe_provenance, trigger_reason=trigger_reason,
+        evidence_eligible=evidence_eligible, observation_origin=observation_origin,
+    )
+
+
 def _refined_status(self) -> dict:
     status = _ORIGINAL_STATUS(self)
     status["q_evidence_integrity_contract_version"] = _REFINED_CONTRACT_VERSION
@@ -164,5 +257,6 @@ def install_g1_q_evidence_refinement() -> None:
     _q._BLOCKERS.add("TARGET_PRICE_NON_DIRECT")
     _q._classify_pre_capture = _refined_classify_pre_capture
     _q._validate_created_q = _refined_validate_created_q
+    _q._ENGINE.capture_observation = _capture_observation_refined
     _q._ENGINE.g1_q_status = _refined_status
     _q._g1_q_evidence_integrity = _REFINED_CONTRACT_VERSION
