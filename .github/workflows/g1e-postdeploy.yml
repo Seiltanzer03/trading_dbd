@@ -88,13 +88,15 @@ jobs:
               f"q_resolved={exp.get('q_resolved', 0)} "
               f"q_eligible={exp.get('q_clean_eligible', 0)} "
               f"effective_q_n={exp.get('q_effective_n', 0)} "
-              f"storage={storage.get('health')}"
+              f"storage={storage.get('health')} "
+              f"dr_verified={storage.get('disaster_recovery_verified', False)}"
           )
           PY
 
       - name: Restore-drill newest verified snapshot outside live database
         run: |
           set -euo pipefail
+          cd /opt/seiltanzer
           BACKUPS=$(curl -fsS http://127.0.0.1:8790/api/system/storage/backups)
           BACKUPS="$BACKUPS" /opt/seiltanzer/.venv/bin/python - <<'PY'
           import json, os, pathlib, tempfile
