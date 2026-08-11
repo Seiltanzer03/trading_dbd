@@ -49,14 +49,15 @@ and grants no production authority.
 
 ## G.1B.1 — Q Evidence Bring-Up
 
-**Current stage.** Makes real option-native Q acquisition observable and starts a
-prospective evidence stream without weakening G.1A:
+**DONE.** Real option-native Q acquisition is observable and accumulates
+prospective evidence without weakening G.1A:
 
 - versioned target/source capability matrix;
 - explicit native/direct/inverse/none relation and frozen proxy transform;
 - append-only capture-attempt ledger;
 - deterministic blocker taxonomy for provider, chain, expiry, CDF, proxy and
   persistence failures;
+- independent persisted 15-minute Q cadence, decoupled from fixed-horizon capture;
 - successful capture only when the immutable T0 forecast contains a valid
   terminal risk-neutral Q CDF;
 - separate attempted/captured/resolved/Q-eligible/metrics-eligible counters;
@@ -64,23 +65,32 @@ prospective evidence stream without weakening G.1A:
 - runtime validation only after an observed real background Q capture;
 - existing F.3.2a resolution, PIT and G.1A admission remain authoritative.
 
-G.1B.1 must never manufacture fixed-horizon Q or synthetic production samples.
-It fits no calibrator and grants no production authority.
+G.1B.1 never manufactures fixed-horizon Q or synthetic production samples. It
+fits no calibrator and grants no production authority.
 
 ## G.1C — Shadow Q→P Calibrators
 
-Only after G.1B.1 audit and sufficient prospective Q evidence. Planned shadow
-challengers:
+**CURRENT.** First trainable research layer. It consumes only immutable G.1A
+Q-eligible cuts and builds simple frozen challengers without selecting a winner:
 
-- Platt/logistic calibration;
-- beta calibration;
-- isotonic calibration behind an explicit effective-N gate;
-- immutable fitted-parameter/model manifests;
-- no online self-modifying production behavior.
+- dependency-aware monotonic Platt calibration;
+- dependency-aware beta calibration;
+- weighted isotonic calibration behind a larger evidence gate;
+- PIT-isotonic foundation for future calibrated terminal CDF research;
+- immutable fit runs, model artifacts and SHA256 identities;
+- explicit evidence thresholds and refit deltas;
+- prospective-only shadow prediction ledger using models frozen before T0;
+- strict T0 admission for schema/runtime/background/direct-price/Q/expiry/CDF;
+- no hindsight backfill, OOS claim, edge claim, physical-P publication or
+  production authority.
+
+Current live Q evidence is still resolving, so zero fitted models is an expected
+healthy state until the minimum evidence contract is satisfied.
 
 ## G.1D — Purged Walk-Forward OOS Validation
 
-Only after G.1C. Chronological validation contract:
+Only after G.1C has enough frozen prospective predictions. Chronological
+validation contract:
 
 `TRAIN → PURGE → EMBARGO → FROZEN MODEL → FUTURE TEST`
 
