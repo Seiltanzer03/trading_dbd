@@ -1,8 +1,9 @@
-"""Integrity refinements for Phase G.1-M.
+"""Integrity and query-plan refinements for Phase G.1-M.
 
 Keeps the base runtime compact while tightening prospective admission, freezing
-cohort context at capture time, making contract errors immutable and exposing
-reproducible research cuts.  No production action logic is touched.
+cohort context at capture time, making contract errors immutable, indexing the
+actual source-query patterns and exposing reproducible research cuts. No
+production action logic is touched.
 """
 from __future__ import annotations
 
@@ -10,13 +11,10 @@ import hashlib
 import json
 import time
 
-from .g1_management_runtime import (
-    G1M_RESEARCH_CUT_VERSION,
-    ManagementEdgeRuntime,
-)
+from .g1_management_runtime import G1M_RESEARCH_CUT_VERSION, ManagementEdgeRuntime
 
 
-REFINEMENT_VERSION = "g1m-integrity-refinement-v1"
+REFINEMENT_VERSION = "g1m-integrity-refinement-v2"
 
 
 def _json(value):
@@ -51,6 +49,17 @@ def ensure_tables_refined(self) -> None:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS ix_g1m_context_instrument "
             "ON g1m_observation_context(instrument,observation_id)")
+        # These indices correspond to concrete G.1-M hot queries. They avoid
+        # global history scans as the immutable source ledgers grow.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_g1m_source_snapshot_capture "
+            "ON decision_snapshots(captured_ts,review_id)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_g1m_source_management_review "
+            "ON management_decisions(review_id,created_ts)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_g1m_source_replay_resolved "
+            "ON decision_replays(resolved_ts,review_id)")
         for table in ("g1m_contract_errors", "g1m_observation_context"):
             self._conn.execute(f"""
                 CREATE TRIGGER IF NOT EXISTS {table}_immutable_update
@@ -66,10 +75,6 @@ def capture_observation_refined(self, source) -> bool:
     review_id = str(source["review_id"])
     trade_id = int(source["trade_id"])
     captured_ts = float(source["captured_ts"])
-
-    # A prospective T0 cannot be admitted if its outcome was already known by T0.
-    # Historical replays normally resolve after capture and remain backfill; only
-    # a resolution timestamp <= capture is a true temporal-contract violation.
     with self._lock:
         replay = self._conn.execute(
             "SELECT resolved_ts FROM decision_replays WHERE review_id=?",
@@ -166,8 +171,6 @@ def create_research_cut(self, *, cutoff_ts: float | None = None) -> dict:
         for row in rows
     ]
     trade_ids = {row["trade_id"] for row in members}
-    # Under the published v1 dependency contract, all decisions from one trade
-    # share total weight 1, therefore the exact aggregate effective N is trades N.
     effective_n = float(len(trade_ids))
     source_sha = _sha(members)
     cut_payload = {
@@ -214,8 +217,9 @@ def status_refined(self) -> dict:
     body = _ORIGINAL_STATUS(self)
     body["integrity_refinement_version"] = REFINEMENT_VERSION
     body["dependency_groups"] = body.get("unique_trades", 0)
-    body["research_cut_count"] = int(self._conn.execute(
-        "SELECT COUNT(*) FROM g1m_research_cuts").fetchone()[0])
+    with self._lock:
+        body["research_cut_count"] = int(self._conn.execute(
+            "SELECT COUNT(*) FROM g1m_research_cuts").fetchone()[0])
     return body
 
 
