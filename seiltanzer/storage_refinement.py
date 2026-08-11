@@ -13,7 +13,7 @@ from pathlib import Path
 from . import storage_runtime as _s
 
 
-REFINEMENT_VERSION = "seiltanzer-storage-refinement-v3"
+REFINEMENT_VERSION = "seiltanzer-storage-refinement-v4"
 
 # Exact tables that carry economic/research identity today. Missing tables on an
 # old DB are still reported as None, but current production manifests should see
@@ -34,6 +34,11 @@ CRITICAL_TABLES = (
 _ORIGINAL_INIT = _s.StorageManager.__init__
 _ORIGINAL_CREATE = _s.StorageManager.create_backup
 _ORIGINAL_RESTORE = _s.StorageManager.restore_verified_backup
+_ORIGINAL_STATUS = _s.StorageManager.status
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
 
 
 def _detect_git_commit() -> str:
@@ -82,7 +87,6 @@ def apply_retention_exact(self, kind: str) -> None:
     manifests = self._verified_manifests(directory)
     if not manifests:
         return
-    # Local cadence is 15m => 96 snapshots / 24h. Off-host cadence is 1h => 24.
     dense_n = 96 if kind == "local" else 24
     keep: set[str] = {str(m.get("backup_id")) for m in manifests[:dense_n]}
     now = time.time()
@@ -100,18 +104,15 @@ def apply_retention_exact(self, kind: str) -> None:
         if age_days <= 14.0:
             key = time.strftime("%Y-%m-%d", tm)
             if key not in daily and len(daily) < 14:
-                daily.add(key)
-                keep.add(bid)
+                daily.add(key); keep.add(bid)
         elif age_days <= 70.0:
             key = time.strftime("%Y-W%W", tm)
             if key not in weekly and len(weekly) < 8:
-                weekly.add(key)
-                keep.add(bid)
+                weekly.add(key); keep.add(bid)
         elif age_days <= 366.0:
             key = time.strftime("%Y-%m", tm)
             if key not in monthly and len(monthly) < 12:
-                monthly.add(key)
-                keep.add(bid)
+                monthly.add(key); keep.add(bid)
 
     for manifest in manifests:
         bid = str(manifest.get("backup_id"))
@@ -143,16 +144,17 @@ def create_backup_honest_encryption(self, *, kind: str = "local", reason: str = 
     manifest["schema_sha256"] = schema_sha
 
     if kind == "offhost":
-        encrypted = os.environ.get(
-            "SEILTANZER_OFFHOST_ENCRYPTION_VERIFIED", ""
-        ).lower() in {"1", "true", "yes"}
+        encrypted = _truthy_env("SEILTANZER_OFFHOST_ENCRYPTION_VERIFIED")
+        target_verified = _truthy_env("SEILTANZER_OFFHOST_TARGET_VERIFIED")
         manifest["encryption_status"] = (
             "verified_external_target" if encrypted else "external_target_not_verified"
         )
         manifest["encryption_verified"] = encrypted
+        manifest["offhost_target_verified"] = target_verified
     else:
         manifest["encryption_status"] = "local_filesystem_permissions_only"
         manifest["encryption_verified"] = False
+        manifest["offhost_target_verified"] = False
     manifest["storage_refinement_version"] = REFINEMENT_VERSION
     manifest["manifest_payload_sha256"] = _manifest_hash(manifest)
     _s._atomic_json(manifest_path, manifest)
@@ -186,13 +188,38 @@ def restore_verified_backup_refined(*, backup_db, manifest_path, destination_db,
     return result
 
 
-def reconcile_only_tracked_positions(self, engine) -> list[dict]:
-    """Repair a close crash gap without inventing ledgers for historical trades.
+def status_with_verified_disaster_recovery(self, *, engine=None) -> dict:
+    status = _ORIGINAL_STATUS(self, engine=engine)
+    latest = status.get("last_offhost_backup") or {}
+    target_verified = bool(latest.get("offhost_target_verified")) and _truthy_env(
+        "SEILTANZER_OFFHOST_TARGET_VERIFIED"
+    )
+    encryption_verified = bool(latest.get("encryption_verified")) and _truthy_env(
+        "SEILTANZER_OFFHOST_ENCRYPTION_VERIFIED"
+    )
+    dr_verified = bool(
+        status.get("offhost_configured")
+        and latest
+        and target_verified
+        and encryption_verified
+        and status.get("last_offhost_backup_age_sec") is not None
+        and float(status["last_offhost_backup_age_sec"]) <= self.offhost_interval * 2
+    )
+    status["offhost_target_verified"] = target_verified
+    status["offhost_encryption_verified"] = encryption_verified
+    status["disaster_recovery_verified"] = dr_verified
+    status["rpo_scope"] = (
+        "separate_verified_offhost" if dr_verified
+        else "local_server_only" if not status.get("offhost_configured")
+        else "offhost_configured_but_not_fully_verified"
+    )
+    if status.get("health") == "HEALTHY" and not dr_verified:
+        status["health"] = "DISASTER_RECOVERY_DEGRADED"
+    return status
 
-    `Journal.add_closed()` is legitimate historical/backfill data and was never an
-    actively managed PositionLedger state. Only a trade that already had a
-    position event before the crash is eligible for cross-ledger reconciliation.
-    """
+
+def reconcile_only_tracked_positions(self, engine) -> list[dict]:
+    """Repair a close crash gap without inventing ledgers for historical trades."""
     actions: list[dict] = []
     for trade in engine.journal.list_trades():
         trade_id = int(trade["id"])
@@ -209,9 +236,7 @@ def reconcile_only_tracked_positions(self, engine) -> list[dict]:
             if remaining <= 1e-12:
                 continue
             engine.position.terminal_exit(
-                trade,
-                event_type="MANUAL_EXIT",
-                execution_price=None,
+                trade, event_type="MANUAL_EXIT", execution_price=None,
                 execution_r=trade.get("result_r"),
             )
             actions.append({
@@ -224,9 +249,7 @@ def reconcile_only_tracked_positions(self, engine) -> list[dict]:
             })
         except Exception as exc:
             actions.append({
-                "trade_id": trade_id,
-                "action": "RECOVERY_ERROR",
-                "error": str(exc),
+                "trade_id": trade_id, "action": "RECOVERY_ERROR", "error": str(exc),
                 "recovery_contract_version": _s.RECOVERY_CONTRACT_VERSION,
             })
     self._recovery_actions = actions
@@ -241,5 +264,6 @@ def install_storage_refinement() -> None:
     _s.StorageManager._apply_retention = apply_retention_exact
     _s.StorageManager.create_backup = create_backup_honest_encryption
     _s.StorageManager.restore_verified_backup = staticmethod(restore_verified_backup_refined)
+    _s.StorageManager.status = status_with_verified_disaster_recovery
     _s.StorageManager.reconcile_economic_state = reconcile_only_tracked_positions
     _s.StorageManager._storage_refinement_version = REFINEMENT_VERSION
