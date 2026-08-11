@@ -6,8 +6,8 @@ later, explicit promotion phase proves otherwise.
 
 ## G.1A — Prospective Dataset Contract
 
-**Current stage.** Build the deterministic boundary between F.3.2a measurement
-records and future calibration research:
+**DONE.** Deterministic boundary between F.3.2a measurement records and future
+calibration research:
 
 - prospective eligibility and explicit exclusion reasons;
 - separate forecast-evaluation vs terminal-Q-to-P eligibility;
@@ -23,17 +23,29 @@ G.1A does **not** fit or select a calibrator. `g1_training_allowed`,
 
 ## G.1B — Baselines + Calibration Metrics
 
-Consumes only the G.1A dataset contract. Planned measurement layer:
+**Current stage.** Consumes only the G.1A dataset contract and measures frozen
+reference forecasts without fitting a challenger calibrator:
 
-- Q_IDENTITY baseline;
-- historical/train-frozen base-rate baseline;
-- Brier score and log loss;
-- PIT evaluation and reliability bins;
-- ECE/MCE;
-- quantile coverage and pinball loss.
+- Q_IDENTITY for mathematically valid terminal risk-neutral Q only;
+- uninformed 0.5 directional baseline;
+- chronological cohort-local prequential base-rate baseline using only outcomes
+  that are already in the past of the next effective observation;
+- Brier score and log loss for the terminal-return-positive event;
+- Q reliability bins, ECE and MCE;
+- terminal-Q PIT histogram and distance-to-uniform diagnostics;
+- Q and fixed Gaussian-reference quantile coverage;
+- pinball loss and central interval coverage;
+- primary metrics on G.1A-style conservative non-overlap effective samples;
+- optional evaluation against immutable G.1A dataset cuts;
+- deterministic sample-manifest hashes.
 
-Goal: measure how well the unmodified risk-neutral terminal Q predicts realized
-market outcomes. G.1B still does not fit challenger calibrators.
+Fixed-horizon Gaussian geometry is explicitly **not** relabeled as Q or physical
+P. Terminal Q is evaluated as risk-neutral Q identity and is **not** relabeled as
+physical probability. CRPS remains unavailable until a proper distributional
+implementation is explicitly added.
+
+G.1B still fits no calibrator, writes no model coefficients, publishes no
+physical P and grants no production authority.
 
 ## G.1C — Shadow Q→P Calibrators
 
