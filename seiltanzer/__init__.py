@@ -37,3 +37,17 @@ from .g1_dataset_refinement import install_g1_dataset_refinement as _install_g1_
 
 _install_g1_dataset_refinement()
 del _install_g1_dataset_refinement
+
+# Phase G.1B measures frozen baselines and Q identity calibration on top of the
+# G.1A boundary. It is read-only research: no calibrator fitting or authority.
+from .g1_baseline_runtime import install_g1_baseline_runtime as _install_g1_baseline_runtime
+
+_install_g1_baseline_runtime()
+del _install_g1_baseline_runtime
+
+# Keep G.1B evidence N consistent with G.1A aggregate dependency semantics and
+# make historical baselines respect recorded outcome-availability timestamps.
+from .g1_baseline_refinement import install_g1_baseline_refinement as _install_g1_baseline_refinement
+
+_install_g1_baseline_refinement()
+del _install_g1_baseline_refinement

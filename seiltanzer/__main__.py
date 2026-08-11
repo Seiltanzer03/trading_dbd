@@ -10,6 +10,7 @@ from .analytics_runtime import install_analytics_runtime
 from .app import create_app
 from .app_extensions import install_ai_decision_routes, install_lattice_revaluation
 from .config import Settings
+from .g1_baseline_routes import install_g1_baseline_routes
 from .g1_routes import install_g1_dataset_routes
 from .lattice_visual_history import install_lattice_visual_history
 from .option_shadow_state import install_option_shadow_state
@@ -50,6 +51,7 @@ def main() -> None:
     install_lattice_visual_history(app)
     install_option_shadow_state(app)
     install_g1_dataset_routes(app)
+    install_g1_baseline_routes(app)
     print(f"Seiltanzer Terminal -> http://{args.host}:{args.port}"
           f"{' [DEMO]' if args.demo else ''}{' [STREAM]' if args.stream else ''}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

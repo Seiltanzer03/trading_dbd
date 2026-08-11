@@ -102,6 +102,8 @@ jobs:
             /api/research/g1/dataset/cohorts \
             /api/research/g1/dataset/exclusions \
             /api/research/g1/dataset/cuts \
+            /api/research/g1/baselines/status \
+            /api/research/g1/baselines/cohorts \
             /api/analytics/gex-migration \
             /api/analytics/regime-phase \
             /api/analytics/wavelet \
@@ -185,6 +187,36 @@ jobs:
               "G1A exclusions: "
               f"total={exclusions.get('total_excluded_n', 0)} "
               f"primary={exclusions.get('primary_reason_counts', {})}"
+          )
+          PY
+
+          G1B_STATUS=$(curl -fsS http://127.0.0.1:8790/api/research/g1/baselines/status)
+          G1B_STATUS="$G1B_STATUS" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          status = json.loads(os.environ["G1B_STATUS"])
+          q = status.get("terminal_q_identity") or {}
+          assert status.get("g1_stage") == "G.1B"
+          assert status.get("baseline_contract_version") == "g1-baseline-metrics-v1"
+          assert status.get("dataset_contract_version") == "g1-prospective-dataset-v1"
+          assert status.get("authority") == "research_only"
+          assert status.get("production_authority") is False
+          assert status.get("calibrator_fitted") is False
+          assert status.get("calibrator_registry_writes") is False
+          assert status.get("g1_training_allowed") is False
+          assert status.get("physical_probability_published") is False
+          assert status.get("promotion_allowed") is False
+          assert status.get("production_replacement_allowed") is False
+          assert status.get("sample_count_auto_promotion") is False
+          assert q.get("physical_probability_published") is False
+          print(
+              "G1B baselines: "
+              f"forecast_n={status.get('raw_forecast_eval_n', 0)} "
+              f"effective_n={status.get('effective_n', 0)} "
+              f"q_raw={q.get('raw_q_eligible_n', 0)} "
+              f"q_effective={q.get('effective_q_n', 0)} "
+              f"q_metrics={q.get('metrics_eligible_n', 0)} "
+              f"pit_mismatch={q.get('pit_contract_mismatch_n', 0)} "
+              f"status={status.get('evidence_status', 'INSUFFICIENT')}"
           )
           PY
 
