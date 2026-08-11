@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import os
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -10,7 +13,7 @@ from pathlib import Path
 from . import storage_runtime as _s
 
 
-REFINEMENT_VERSION = "seiltanzer-storage-refinement-v2"
+REFINEMENT_VERSION = "seiltanzer-storage-refinement-v3"
 
 # Exact tables that carry economic/research identity today. Missing tables on an
 # old DB are still reported as None, but current production manifests should see
@@ -30,6 +33,7 @@ CRITICAL_TABLES = (
 
 _ORIGINAL_INIT = _s.StorageManager.__init__
 _ORIGINAL_CREATE = _s.StorageManager.create_backup
+_ORIGINAL_RESTORE = _s.StorageManager.restore_verified_backup
 
 
 def _detect_git_commit() -> str:
@@ -44,6 +48,28 @@ def _detect_git_commit() -> str:
         ).strip()
     except Exception:
         return "unknown"
+
+
+def _manifest_hash(manifest: dict) -> str:
+    payload = {k: v for k, v in manifest.items() if k != "manifest_payload_sha256"}
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _schema_identity(database_path: Path) -> tuple[int, str]:
+    conn = sqlite3.connect(str(database_path), timeout=30)
+    try:
+        user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        rows = conn.execute(
+            "SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name,tbl_name"
+        ).fetchall()
+        encoded = json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return user_version, hashlib.sha256(encoded).hexdigest()
+    finally:
+        conn.close()
 
 
 def init_with_identity(self, settings, *, git_commit: str | None = None):
@@ -104,7 +130,18 @@ def apply_retention_exact(self, kind: str) -> None:
 def create_backup_honest_encryption(self, *, kind: str = "local", reason: str = "scheduled"):
     result = _ORIGINAL_CREATE(self, kind=kind, reason=reason)
     manifest_path = Path(result.manifest_path)
+    database_path = Path(result.database_path)
     manifest = _s._read_json(manifest_path) or {}
+
+    previous = [
+        item for item in self._verified_manifests(self._backup_dir(kind))
+        if str(item.get("backup_id")) != result.backup_id
+    ]
+    user_version, schema_sha = _schema_identity(database_path)
+    manifest["previous_backup_id"] = previous[0].get("backup_id") if previous else None
+    manifest["sqlite_user_version"] = user_version
+    manifest["schema_sha256"] = schema_sha
+
     if kind == "offhost":
         encrypted = os.environ.get(
             "SEILTANZER_OFFHOST_ENCRYPTION_VERIFIED", ""
@@ -117,7 +154,35 @@ def create_backup_honest_encryption(self, *, kind: str = "local", reason: str = 
         manifest["encryption_status"] = "local_filesystem_permissions_only"
         manifest["encryption_verified"] = False
     manifest["storage_refinement_version"] = REFINEMENT_VERSION
+    manifest["manifest_payload_sha256"] = _manifest_hash(manifest)
     _s._atomic_json(manifest_path, manifest)
+    return result
+
+
+def restore_verified_backup_refined(*, backup_db, manifest_path, destination_db,
+                                    preserve_existing=True):
+    manifest_path = Path(manifest_path)
+    manifest = _s._read_json(manifest_path)
+    if not manifest:
+        raise ValueError("backup manifest is missing")
+    expected_manifest_sha = str(manifest.get("manifest_payload_sha256") or "")
+    if not expected_manifest_sha or _manifest_hash(manifest) != expected_manifest_sha:
+        raise ValueError("backup manifest SHA256 mismatch")
+    result = _ORIGINAL_RESTORE(
+        backup_db=backup_db,
+        manifest_path=manifest_path,
+        destination_db=destination_db,
+        preserve_existing=preserve_existing,
+    )
+    user_version, schema_sha = _schema_identity(Path(destination_db))
+    if user_version != int(manifest.get("sqlite_user_version") or 0):
+        raise ValueError("restored SQLite user_version mismatch")
+    if schema_sha != str(manifest.get("schema_sha256") or ""):
+        raise ValueError("restored schema SHA256 mismatch")
+    result["manifest_payload_sha256"] = expected_manifest_sha
+    result["schema_sha256"] = schema_sha
+    result["previous_backup_id"] = manifest.get("previous_backup_id")
+    result["storage_refinement_version"] = REFINEMENT_VERSION
     return result
 
 
@@ -137,9 +202,7 @@ def reconcile_only_tracked_positions(self, engine) -> list[dict]:
                     "SELECT 1 FROM position_management_events WHERE trade_id=? LIMIT 1",
                     (trade_id,),
                 ).fetchone()
-            if tracked is None:
-                continue
-            if trade.get("status") != "closed":
+            if tracked is None or trade.get("status") != "closed":
                 continue
             state = engine.position.state(trade)
             remaining = float(state.get("remaining_position_fraction") or 0.0)
@@ -177,5 +240,6 @@ def install_storage_refinement() -> None:
     _s.StorageManager.__init__ = init_with_identity
     _s.StorageManager._apply_retention = apply_retention_exact
     _s.StorageManager.create_backup = create_backup_honest_encryption
+    _s.StorageManager.restore_verified_backup = staticmethod(restore_verified_backup_refined)
     _s.StorageManager.reconcile_economic_state = reconcile_only_tracked_positions
     _s.StorageManager._storage_refinement_version = REFINEMENT_VERSION
