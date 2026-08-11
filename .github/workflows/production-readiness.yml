@@ -41,14 +41,11 @@ jobs:
       - name: Verify G.1E endpoints and authority boundary
         run: |
           set -euo pipefail
+
+          # Cockpit endpoints must be safe immediately after HTTP readiness. They
+          # may honestly return presentation_state=WARMING, but may not block the
+          # trading terminal while full-history research aggregation runs.
           for endpoint in \
-            /api/state \
-            /api/validation \
-            /api/research/g1/q/status \
-            /api/research/g1/calibrators/status \
-            /api/system/storage/status \
-            /api/system/storage/backups \
-            /api/system/storage/integrity \
             /api/research/g1/intelligence/status \
             /api/research/g1/intelligence/pipeline \
             /api/research/g1/intelligence/forecast-quality \
@@ -57,6 +54,20 @@ jobs:
             /api/research/g1/intelligence/resolved \
             /api/research/g1/intelligence/history \
             /intelligence; do
+            code=$(curl --max-time 5 -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8790${endpoint}" || true)
+            echo "$endpoint: $code"
+            test "$code" = "200"
+          done
+
+          # Existing research endpoints retain their own heavier contracts.
+          for endpoint in \
+            /api/state \
+            /api/validation \
+            /api/research/g1/q/status \
+            /api/research/g1/calibrators/status \
+            /api/system/storage/status \
+            /api/system/storage/backups \
+            /api/system/storage/integrity; do
             code=$(curl --max-time 20 -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8790${endpoint}" || true)
             echo "$endpoint: $code"
             test "$code" = "200"
@@ -64,7 +75,7 @@ jobs:
 
           STORAGE=$(curl -fsS --max-time 30 http://127.0.0.1:8790/api/system/storage/status)
           BACKUPS=$(curl -fsS --max-time 30 http://127.0.0.1:8790/api/system/storage/backups)
-          INTEL=$(curl -fsS --max-time 30 http://127.0.0.1:8790/api/research/g1/intelligence/status)
+          INTEL=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1/intelligence/status)
           STORAGE="$STORAGE" BACKUPS="$BACKUPS" INTEL="$INTEL" /opt/seiltanzer/.venv/bin/python - <<'PY'
           import json, os
           storage = json.loads(os.environ["STORAGE"])
@@ -85,6 +96,7 @@ jobs:
               assert table in counts, table
 
           assert intel.get("g1_stage") == "G.1E"
+          assert intel.get("presentation_state") in {"WARMING", "LIVE_CACHE"}
           authority = intel.get("authority") or {}
           assert authority.get("research_only") is True
           assert authority.get("production_authority") is False
@@ -92,11 +104,11 @@ jobs:
           assert authority.get("promotion_allowed") is False
           assert authority.get("physical_probability_published") is False
           assert authority.get("shadow_p_used_for_trading") is False
-          assert ((intel.get("storage") or {}).get("sqlite_integrity") or {}).get("ok") is True
 
           exp = intel.get("experience") or {}
           print(
               "G1E production: "
+              f"presentation={intel.get('presentation_state')} "
               f"state={intel.get('maturity_state')} "
               f"q_attempts={exp.get('q_attempts', 0)} "
               f"q_captured={exp.get('q_captured', 0)} "
@@ -113,7 +125,10 @@ jobs:
           set -euo pipefail
           cd /opt/seiltanzer
           BACKUPS=$(curl -fsS --max-time 30 http://127.0.0.1:8790/api/system/storage/backups)
-          BACKUPS="$BACKUPS" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          # Backup files deliberately remain unreadable to the runner user. Run
+          # the drill with the same privileged boundary used by production deploy
+          # rather than weakening backup filesystem permissions.
+          sudo env BACKUPS="$BACKUPS" /opt/seiltanzer/.venv/bin/python - <<'PY'
           import json, os, pathlib, tempfile
           from seiltanzer.storage_refinement import install_storage_refinement
           from seiltanzer.storage_runtime import StorageManager, _table_counts

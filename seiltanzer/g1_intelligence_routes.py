@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from .g1_intelligence_nonblocking import install_nonblocking_runtime
 from .g1_intelligence_page_refinement import intelligence_page
 from .g1_intelligence_performance import install_g1_intelligence_performance
 from .g1_intelligence_refinement import install_g1_intelligence_refinement
@@ -17,6 +18,9 @@ def install_g1_intelligence_routes(app: FastAPI) -> None:
     if getattr(app.state, "g1_intelligence_routes_installed", False):
         return
     runtime = app.state.intelligence
+    # Heavy G.1A/B/B.1/C aggregation must not delay service startup or a cold
+    # browser request. The app-specific runtime is warmed in the background.
+    install_nonblocking_runtime(runtime)
 
     app.add_api_route(
         "/intelligence", intelligence_page,

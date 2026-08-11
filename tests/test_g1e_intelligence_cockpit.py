@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from seiltanzer.config import Settings
 from seiltanzer.engine import Engine
+from seiltanzer.g1_intelligence_nonblocking import _warm_live
 from seiltanzer.g1_intelligence_page import INTELLIGENCE_HTML
 from seiltanzer.g1_intelligence_routes import install_g1_intelligence_routes
 from seiltanzer.g1_intelligence_runtime import IntelligenceRuntime
@@ -80,7 +81,7 @@ def test_intelligence_page_has_human_cockpit_and_research_boundary():
     assert "setInterval(load,60000)" in INTELLIGENCE_HTML
 
 
-def test_intelligence_routes_return_aggregated_backend_state(tmp_path):
+def test_intelligence_routes_are_zero_safe_cold_then_warm_live(tmp_path):
     settings = Settings(demo=True, data_dir=str(tmp_path))
     engine = Engine(settings)
     app = FastAPI()
@@ -90,6 +91,25 @@ def test_intelligence_routes_return_aggregated_backend_state(tmp_path):
     app.state.intelligence = IntelligenceRuntime(engine, storage=app.state.storage)
     install_g1_intelligence_routes(app)
     try:
+        # First route call is explicitly non-blocking: no authoritative full-history
+        # scan is needed merely to open the cockpit after a service restart.
+        cold = app.state.intelligence.status()
+        assert cold["presentation_state"] == "WARMING"
+        assert cold["authority"]["production_authority"] is False
+        assert cold["authority"]["shadow_p_used_for_trading"] is False
+        assert app.state.intelligence.forecast_quality()["presentation_state"] == "WARMING"
+
+        # Simulate the background worker completing its authoritative materialization.
+        _warm_live(app.state.intelligence)
+        warm = app.state.intelligence.status()
+        assert warm["presentation_state"] == "LIVE_CACHE"
+        assert warm["authority"]["production_authority"] is False
+        quality = app.state.intelligence.forecast_quality()
+        assert quality["presentation_state"] == "LIVE_CACHE"
+        q_identity = quality["status"]["terminal_q_identity"]
+        reliability = q_identity["direction_event"]["q_identity"]["reliability"]
+        assert reliability["contract_version"] == "g1-reliability-10bin-v1"
+
         with TestClient(app) as client:
             page = client.get("/intelligence")
             assert page.status_code == 200
@@ -102,15 +122,29 @@ def test_intelligence_routes_return_aggregated_backend_state(tmp_path):
             body = status.json()
             assert body["authority"]["production_authority"] is False
             assert body["authority"]["shadow_p_used_for_trading"] is False
-            quality = client.get("/api/research/g1/intelligence/forecast-quality")
-            assert quality.status_code == 200
-            q_identity = quality.json()["status"]["terminal_q_identity"]
-            reliability = q_identity["direction_event"]["q_identity"]["reliability"]
-            assert reliability["contract_version"] == "g1-reliability-10bin-v1"
             assert client.get("/api/research/g1/intelligence/pipeline").status_code == 200
+            assert client.get("/api/research/g1/intelligence/forecast-quality").status_code == 200
             assert client.get("/api/research/g1/intelligence/calibration").status_code == 200
             assert client.get("/api/research/g1/intelligence/pending").status_code == 200
             assert client.get("/api/research/g1/intelligence/resolved").status_code == 200
             assert client.get("/api/research/g1/intelligence/history").status_code == 200
+    finally:
+        engine.close()
+
+
+def test_first_lifespan_snapshot_is_skipped_until_background_worker(tmp_path):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    engine = Engine(settings)
+    app = FastAPI()
+    app.state.engine = engine
+    app.state.settings = settings
+    app.state.storage = StorageManager(settings)
+    app.state.intelligence = IntelligenceRuntime(engine, storage=app.state.storage)
+    install_g1_intelligence_routes(app)
+    try:
+        assert app.state.intelligence.snapshot_if_due() is False
+        # Forced shutdown/audit snapshots still use the authoritative heavy path.
+        assert app.state.intelligence.snapshot_if_due(force=True) is True
+        assert len(app.state.intelligence.history()["items"]) == 1
     finally:
         engine.close()
