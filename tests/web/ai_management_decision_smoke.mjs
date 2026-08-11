@@ -6,6 +6,7 @@ const main=fs.readFileSync('seiltanzer/__main__.py','utf8');
 const extensions=fs.readFileSync('seiltanzer/app_extensions.py','utf8');
 assert.match(app,/body\.management_decision/);
 assert.match(app,/ai-management-execution/);
+assert.equal((app.match(/id="ai-management-execution"/g) || []).length, 1);
 assert.match(ui,/ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ У БРОКЕРА/);
 assert.match(ui,/ВЫПОЛНЕНО/);
 assert.match(ui,/НЕ ВЫПОЛНЕНО/);
