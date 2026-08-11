@@ -36,6 +36,23 @@ def _manager_with_backup(tmp_path: Path) -> tuple[StorageManager, Path]:
     return manager, live_db
 
 
+def _request(path: str, *, method: str = "GET", host: str = "127.0.0.1") -> Request:
+    return Request({
+        "type": "http",
+        "method": method,
+        "path": path,
+        "headers": [],
+        "client": (host, 12345),
+        "server": ("127.0.0.1", 8790),
+        "scheme": "http",
+        "query_string": b"",
+    })
+
+
+def _route(app: FastAPI, path: str):
+    return next(route for route in app.routes if getattr(route, "path", None) == path)
+
+
 def test_service_restore_drill_restores_disposable_copy_without_touching_live_db(tmp_path):
     manager, live_db = _manager_with_backup(tmp_path)
     live_before = live_db.read_bytes()
@@ -94,47 +111,66 @@ def test_restore_drill_route_runs_inside_service_boundary(tmp_path):
     app.state.storage = manager
     install_storage_routes(app)
 
-    route = next(
-        route for route in app.routes
-        if getattr(route, "path", None) == "/api/system/storage/restore-drill"
+    body = _route(app, "/api/system/storage/restore-drill").endpoint(
+        _request("/api/system/storage/restore-drill", method="POST")
     )
-    request = Request({
-        "type": "http",
-        "method": "POST",
-        "path": "/api/system/storage/restore-drill",
-        "headers": [],
-        "client": ("127.0.0.1", 12345),
-        "server": ("127.0.0.1", 8790),
-        "scheme": "http",
-        "query_string": b"",
-    })
-    body = route.endpoint(request)
 
     assert body["ok"] is True
     assert body["live_database_replaced"] is False
     assert live_db.read_bytes() == live_before
 
 
-def test_restore_drill_route_rejects_non_loopback_client(tmp_path):
+def test_restore_drill_status_is_fast_semantic_readback_before_and_after_success(tmp_path):
     manager, _ = _manager_with_backup(tmp_path)
     app = FastAPI()
     app.state.storage = manager
     install_storage_routes(app)
-    route = next(
-        route for route in app.routes
-        if getattr(route, "path", None) == "/api/system/storage/restore-drill"
-    )
-    request = Request({
-        "type": "http",
-        "method": "POST",
-        "path": "/api/system/storage/restore-drill",
-        "headers": [],
-        "client": ("203.0.113.10", 5555),
-        "server": ("127.0.0.1", 8790),
-        "scheme": "http",
-        "query_string": b"",
-    })
+    status_route = _route(app, "/api/system/storage/restore-drill/status")
 
-    with pytest.raises(HTTPException) as exc:
-        route.endpoint(request)
-    assert exc.value.status_code == 403
+    before = status_route.endpoint(_request("/api/system/storage/restore-drill/status"))
+    assert before == {
+        "restore_drill_contract_version": RESTORE_DRILL_CONTRACT_VERSION,
+        "status": "NEVER_RUN",
+        "last_restore_drill": None,
+    }
+
+    report = run_restore_drill(manager)
+    after = status_route.endpoint(_request("/api/system/storage/restore-drill/status"))
+    assert after["status"] == "PASS"
+    assert after["last_restore_drill"] == report
+    assert after["last_restore_drill"]["live_database_replaced"] is False
+
+
+def test_restore_drill_status_reports_failed_attempt_without_scanning_storage(tmp_path):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _minimal_db(Path(settings.trades_db))
+    manager = StorageManager(settings)
+    app = FastAPI()
+    app.state.storage = manager
+    install_storage_routes(app)
+
+    with pytest.raises(RuntimeError):
+        run_restore_drill(manager)
+
+    body = _route(app, "/api/system/storage/restore-drill/status").endpoint(
+        _request("/api/system/storage/restore-drill/status")
+    )
+    assert body["status"] == "FAIL"
+    assert body["last_restore_drill"]["ok"] is False
+    assert body["last_restore_drill"]["live_database_replaced"] is False
+
+
+def test_restore_drill_routes_reject_non_loopback_client(tmp_path):
+    manager, _ = _manager_with_backup(tmp_path)
+    app = FastAPI()
+    app.state.storage = manager
+    install_storage_routes(app)
+
+    for path, method in (
+        ("/api/system/storage/restore-drill", "POST"),
+        ("/api/system/storage/restore-drill/status", "GET"),
+    ):
+        route = _route(app, path)
+        with pytest.raises(HTTPException) as exc:
+            route.endpoint(_request(path, method=method, host="203.0.113.10"))
+        assert exc.value.status_code == 403
