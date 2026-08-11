@@ -92,6 +92,7 @@ def test_independent_q_collector_creates_only_native_expiry_row(tmp_path, monkey
     assert status["successful_q_capture_n"] == 1
     assert status["q_collector_contract_version"] == Q_COLLECTOR_CONTRACT_VERSION
     assert status["q_collector_cadence_sec"] == Q_COLLECTOR_CADENCE_SEC
+    assert status["q_collector_refinement_version"] == "q-independent-collector-calendar-v1"
     engine.close()
 
 
@@ -152,4 +153,43 @@ def test_non_direct_target_is_attempted_but_never_creates_q_row(tmp_path, monkey
     status = engine.g1_q_status()
     assert status["capture_attempt_n"] == 1
     assert status["successful_q_capture_n"] == 0
+    engine.close()
+
+
+def test_independent_q_row_resolves_through_g1a_and_g1b(tmp_path, monkeypatch):
+    import seiltanzer.g1_q_collector as collector
+
+    now = _tuesday_utc(10)
+    monkeypatch.setattr(collector.time, "time", lambda: now)
+    engine = PassiveLearningEngine(str(tmp_path / "q-resolve.db"), Settings(), cache=None)
+    engine._feeds["XAU"] = FakeQFeed("XAU", now)
+
+    result = engine.g1_q_collect_instrument("XAU", now)
+    obs_id = result["observation_id"]
+    row = dict(engine._conn.execute(
+        "SELECT * FROM passive_market_observations WHERE observation_id=?", (obs_id,)
+    ).fetchone())
+    forecast = json.loads(row["forecast_json"])
+    assert forecast["calendar_ttm_seconds"] == row["target_ts"] - row["captured_ts"]
+
+    target = float(row["target_ts"])
+    engine.record_market_point(
+        "XAU", target, 2525.0,
+        source="Swissquote XAU/USD", quality=0.99, kind="direct",
+    )
+    assert engine._resolve_one(row, target) == "resolved"
+    engine._g1_sync_membership(limit=5000)
+    membership = dict(engine._conn.execute(
+        "SELECT * FROM g1_dataset_membership WHERE observation_id=?", (obs_id,)
+    ).fetchone())
+    assert membership["q_to_p_eligible"] == 1
+
+    outcome = json.loads(engine._conn.execute(
+        "SELECT outcome_json FROM passive_market_observations WHERE observation_id=?", (obs_id,)
+    ).fetchone()[0])
+    assert outcome["terminal"]["terminal_pit_q"] is not None
+    status = engine.g1_q_status()
+    assert status["resolved_q_observation_n"] == 1
+    assert status["q_to_p_eligible_n"] == 1
+    assert status["g1b_q_metrics_eligible_n"] == 1
     engine.close()
