@@ -102,3 +102,11 @@ from .g1_shadow_artifact_refinement import install_g1_shadow_artifact_refinement
 
 _install_g1_shadow_artifact_refinement()
 del _install_g1_shadow_artifact_refinement
+
+# Phase G.1-M measures whether already-open-position management adds value over
+# frozen HOLD/original-plan/exit comparators. It is prospective research only:
+# no result from this layer may change production policy or execute an order.
+from .g1_management_integration import install_g1_management_integration as _install_g1_management_integration
+
+_install_g1_management_integration()
+del _install_g1_management_integration
