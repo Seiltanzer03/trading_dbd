@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import site
 from pathlib import Path
 
 
@@ -57,3 +58,27 @@ def cleanup(site_packages: Path, *, apply: bool = False) -> dict:
         "remaining": remaining,
         "clean": len(remaining) == 0,
     }
+
+
+def remediate_current_environment() -> dict:
+    """Try the same narrow cleanup under the service process identity.
+
+    Production's legacy root-owned deployment created the malformed entries, so
+    the unprivileged Actions runner can enumerate but not remove them. The service
+    process is the correct existing ownership boundary to perform this one-time
+    remediation. Failure is reported but never broadens the deletion contract or
+    prevents the trading service from starting.
+    """
+    roots = [Path(p) for p in site.getsitepackages()]
+    if not roots:
+        return {
+            "contract_version": CONTRACT_VERSION,
+            "apply": True,
+            "clean": True,
+            "candidate_n": 0,
+            "removed_n": 0,
+            "remaining_n": 0,
+            "failed": [],
+            "site_packages": None,
+        }
+    return cleanup(roots[0], apply=True)

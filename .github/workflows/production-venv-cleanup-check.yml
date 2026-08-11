@@ -1,0 +1,54 @@
+name: production-venv-cleanup-check
+
+on:
+  workflow_run:
+    workflows: ["production-readiness"]
+    types: [completed]
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  verify:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: [self-hosted, linux, x64, seiltanzer-prod]
+    timeout-minutes: 3
+    steps:
+      - name: Verify exact SHA and malformed distribution cleanup
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory /opt/seiltanzer || true
+          SERVER_SHA=$(git -C /opt/seiltanzer rev-parse HEAD)
+          test "$SERVER_SHA" = "$EXPECTED_SHA"
+          SITE=$(/opt/seiltanzer/.venv/bin/python - <<'PY'
+          import site
+          print(site.getsitepackages()[0])
+          PY
+          )
+          PYTHONPATH=/opt/seiltanzer /opt/seiltanzer/.venv/bin/python \
+            /opt/seiltanzer/scripts/g1e1_cleanup_venv.py \
+            --site-packages "$SITE" --require-clean
+
+      - name: Publish cleanup status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ "$JOB_STATUS" = "success" ]; then
+            state="success"
+            description="Production venv malformed Seiltanzer remnants removed"
+          else
+            state="failure"
+            description="Production venv still contains malformed Seiltanzer remnants"
+          fi
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${EXPECTED_SHA}" \
+            -d "{\"state\":\"$state\",\"context\":\"g1e1/venv-cleanup\",\"description\":\"$description\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"

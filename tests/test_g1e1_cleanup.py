@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from seiltanzer.maintenance import venv_cleanup
 from seiltanzer.maintenance.venv_cleanup import cleanup, discover
 
 
@@ -45,3 +46,18 @@ def test_cleanup_never_follows_symlink(tmp_path):
     result = cleanup(tmp_path, apply=True)
     assert result["clean"] is True
     assert outside.exists()
+
+
+def test_service_owned_remediation_uses_current_environment_site_packages(tmp_path, monkeypatch):
+    (tmp_path / "~1iltanzer").mkdir()
+    (tmp_path / "seiltanzer-0.1.0.dist-info").mkdir()
+    monkeypatch.setattr(venv_cleanup.site, "getsitepackages", lambda: [str(tmp_path)])
+
+    result = venv_cleanup.remediate_current_environment()
+
+    assert result["candidate_n"] == 1
+    assert result["removed_n"] == 1
+    assert result["remaining_n"] == 0
+    assert result["clean"] is True
+    assert not (tmp_path / "~1iltanzer").exists()
+    assert (tmp_path / "seiltanzer-0.1.0.dist-info").exists()
