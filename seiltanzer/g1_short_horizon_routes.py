@@ -49,6 +49,8 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
                       methods=["GET"], name="g1s_horizons")
     app.add_api_route("/api/research/g1s/final-report", final_report,
                       methods=["GET"], name="g1s_final_report")
+    app.add_api_route("/api/research/g1s/historical-wf", runtime.historical_walkforward_status,
+                      methods=["GET"], name="g1s_historical_walkforward")
     app.add_api_route(
         "/api/research/g1s/observations",
         lambda limit=100: runtime.observations(limit=int(limit)),
@@ -118,9 +120,11 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
             "worker": worker,
             "short_horizon": runtime.materializer_status(),
             "evidence_materialization": runtime.evidence_materialization_status(),
+            "historical_walk_forward": runtime.historical_walkforward_status(),
             "management_local": local.status(),
             "market_collection_separate_from_research": True,
             "request_time_full_history_evidence_scan": False,
+            "request_time_historical_network_fetch": False,
             "production_authority": False,
         }
 
