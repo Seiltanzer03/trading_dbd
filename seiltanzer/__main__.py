@@ -17,6 +17,7 @@ from .g1_intelligence_runtime import install_intelligence_runtime
 from .g1_management_routes import install_g1_management_routes
 from .g1_management_storage import ensure_g1m_schema_backup, install_g1_management_storage
 from .g1_q_routes import install_g1_q_routes
+from .g1_research_worker import install_research_worker
 from .g1_routes import install_g1_dataset_routes
 from .g1_shadow_routes import install_g1_shadow_routes
 from .g1_short_horizon_integration import ensure_g1s_schema_backup
@@ -69,6 +70,10 @@ def main() -> None:
     install_storage_runtime(app, storage)
     install_storage_routes(app)
     install_database_authority(app)
+
+    # G.1S/G.1-M.1 consume already-frozen source rows on their own low-priority
+    # worker. A slow refit must never delay the market collector or AI Verdict.
+    install_research_worker(app)
 
     # G.1E.2: request-time research APIs become bounded/materialized. This also
     # decouples storage health from G.1 scans and fast-gates impossible G.1C fits.
