@@ -3,6 +3,10 @@
 Market collection is owned by the existing passive loop. This worker only consumes
 already-frozen source rows and may lag/fail without delaying quotes, trade writes or
 AI Verdict. It shares SQLite durability but has no production decision authority.
+
+Work is deliberately split into bounded batches.  The research worker shares the
+SQLite source of truth with the market collector, so one iteration must not hold the
+process around a multi-thousand-row research burst merely because backlog exists.
 """
 from __future__ import annotations
 
@@ -11,8 +15,41 @@ import contextlib
 import time
 
 
-RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
+RESEARCH_WORKER_VERSION = "g1-research-worker-v2"
 RESEARCH_INTERVAL_SEC = 10.0
+G1S_BATCH = 500
+G1M_LOCAL_BATCH = 100
+
+
+def _run_g1s_bounded(runtime) -> dict:
+    materialized = runtime.materialize_new(limit=G1S_BATCH)
+    resolved = runtime.resolve_new(limit=G1S_BATCH)
+    links = runtime.materialize_trade_links()
+    models = runtime.fit_if_ready()
+    barrier_rows = 0
+    # The barrier refinement is intentionally optional here.  When installed it
+    # exposes its work through the regular step wrapper, but invoking that wrapper
+    # would repeat the large default materialization batch.  Barriers are therefore
+    # allowed to lag until their dedicated materializer path runs; forecast evidence
+    # and T0 capture remain authoritative regardless.
+    return {
+        "materialized": materialized,
+        "resolved": resolved,
+        "trade_links": links,
+        "models_created": models,
+        "barrier_rows_created": barrier_rows,
+        "batch_limit": G1S_BATCH,
+    }
+
+
+def _run_g1m_local_bounded(runtime) -> dict:
+    windows = runtime.materialize_windows(limit=G1M_LOCAL_BATCH)
+    outcomes = runtime.resolve_due(limit=G1M_LOCAL_BATCH)
+    return {
+        "windows_created": windows,
+        "outcomes_resolved": outcomes,
+        "batch_limit": G1M_LOCAL_BATCH,
+    }
 
 
 def install_research_worker(app) -> None:
@@ -27,6 +64,8 @@ def install_research_worker(app) -> None:
         "last_duration_ms": None,
         "last_result": None,
         "last_error": None,
+        "g1s_batch_limit": G1S_BATCH,
+        "g1m_local_batch_limit": G1M_LOCAL_BATCH,
     }
     original_lifespan = app.router.lifespan_context
 
@@ -38,13 +77,18 @@ def install_research_worker(app) -> None:
                 started = time.time()
                 state["last_started_ts"] = started
                 try:
-                    def run_once():
-                        return {
-                            "g1s": engine.short_horizon.step(),
-                            "g1m_local": engine.management_local.step(),
-                        }
-                    result = await asyncio.to_thread(run_once)
-                    state["last_result"] = result
+                    # Separate thread turns make the G.1S and G.1-M.1 workloads
+                    # independently yielding.  A slow local replay cannot extend
+                    # the same critical section as the short-horizon materializer.
+                    g1s_result = await asyncio.to_thread(
+                        _run_g1s_bounded, engine.short_horizon)
+                    await asyncio.sleep(0)
+                    g1m_result = await asyncio.to_thread(
+                        _run_g1m_local_bounded, engine.management_local)
+                    state["last_result"] = {
+                        "g1s": g1s_result,
+                        "g1m_local": g1m_result,
+                    }
                     state["last_error"] = None
                 except Exception as exc:  # fail visible; production service stays alive
                     state["last_error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
