@@ -174,3 +174,9 @@ del _install_g1_broad_market_evidence_v3
 from .g1_operational_integrity import install_g1_operational_integrity as _install_g1_operational_integrity
 _install_g1_operational_integrity()
 del _install_g1_operational_integrity
+
+# P1 touches only the G.1S research runtime.  It is installed after the passive
+# P0 wrapper so no later import can replace the frozen champion prediction hook.
+from .g1_short_horizon_champion_runtime import install_g1_short_horizon_champion_runtime as _install_g1_short_horizon_champion_runtime
+_install_g1_short_horizon_champion_runtime()
+del _install_g1_short_horizon_champion_runtime
