@@ -1,18 +1,13 @@
-// Single-owner camera controller for Plotly gl3d.
+// Single-owner camera + interaction controller for Plotly gl3d.
 //
 // iOS Chrome uses WebKit and its native Plotly touch event order differs from
-// desktop emulation.  The terminal used to have three competing owners of the
-// camera: Plotly's native touch handler, the chart core's live restyles/reacts,
-// and a delayed restore guard.  Under real iPhone load they raced and the last
-// writer frequently restored the initial camera.
-//
-// This module now owns iOS touch rotation/zoom itself, pauses every external
-// Plotly write while a gesture is active, injects the saved camera into every
-// structural react/resize, and disables Plotly's automatic responsive listener
-// for registered 3D charts.  Container resizing is handled by ResizeObserver.
+// desktop emulation. The guard owns camera persistence, structural-write
+// deferral and the selected drag mode so toolbar recreation or data refresh can
+// never silently reset interaction semantics.
 
 const REGISTRY = new WeakMap();
 const ALL_GUARDS = new Set();
+const VALID_DRAG_MODES = new Set(['orbit', 'turntable', 'pan', 'zoom']);
 let PATCHED_PLOTLY = null;
 let ORIGINAL = null;
 let GLOBAL_INTERACTIONS = 0;
@@ -48,6 +43,11 @@ export function cameraFromRelayout(baseCamera, update) {
     touched = true;
   }
   return touched ? next : null;
+}
+
+function normalizeDragMode(mode) {
+  const value = String(mode || '').toLowerCase();
+  return VALID_DRAG_MODES.has(value) ? value : 'orbit';
 }
 
 function equalValue(a, b, eps = 1e-7) {
@@ -95,9 +95,6 @@ function publishGlobalBusy() {
 }
 
 function prepareConfig(config) {
-  // responsive:true installs Plotly's own window resize handler. On iOS the
-  // browser chrome changes visualViewport height while touching the page, so
-  // that handler can rebuild gl3d and restore INIT_CAM mid-gesture.
   return { ...(config || {}), responsive: false };
 }
 
@@ -150,8 +147,10 @@ function installPlotlyPatch() {
     const guard = REGISTRY.get(el);
     if (guard && !guard.isInternalWrite()) {
       const camera = cameraFromRelayout(guard.getSavedCamera(), update);
+      const hasMode = update && Object.prototype.hasOwnProperty.call(update, 'scene.dragmode');
       if (camera) guard.rememberExternalCamera(camera);
-      else if (guard.isProtected()) return resolved(el);
+      if (hasMode) guard.rememberExternalDragMode(update['scene.dragmode']);
+      if (!camera && !hasMode && guard.isProtected()) return resolved(el);
     }
     return resolved(ORIGINAL.relayout(el, update))
       .then((value) => { guard?.afterPlotWrite(); return value; });
@@ -161,7 +160,7 @@ function installPlotlyPatch() {
     P.Plots.resize = (el) => {
       const guard = REGISTRY.get(el);
       const run = () => {
-        guard?.pinLayoutCamera();
+        guard?.pinLayoutState();
         return resolved(ORIGINAL.resize(el))
           .then((value) => { guard?.afterPlotWrite(); return value; });
       };
@@ -192,13 +191,13 @@ function cameraVector(camera) {
   return { center, eye, x, y, z, radius: Math.max(Math.hypot(x, y, z), 0.05) };
 }
 
-function rotateCamera(camera, dx, dy, width, height) {
+function rotateCamera(camera, dx, dy, width, height, elevationScale = 1) {
   const base = cloneValue(camera) || {};
   const v = cameraVector(base);
   let azimuth = Math.atan2(v.y, v.x);
   let elevation = Math.asin(Math.max(-1, Math.min(1, v.z / v.radius)));
   azimuth -= (dx / Math.max(width, 180)) * Math.PI * 2.15;
-  elevation += (dy / Math.max(height, 180)) * Math.PI * 1.25;
+  elevation += (dy / Math.max(height, 180)) * Math.PI * 1.25 * elevationScale;
   elevation = Math.max(-1.42, Math.min(1.42, elevation));
   const planar = v.radius * Math.cos(elevation);
   base.center = cloneValue(v.center);
@@ -209,6 +208,10 @@ function rotateCamera(camera, dx, dy, width, height) {
   };
   if (!base.up) base.up = { x: 0, y: 0, z: 1 };
   return base;
+}
+
+function turntableCamera(camera, dx, dy, width, height) {
+  return rotateCamera(camera, dx, dy, width, height, 0.28);
 }
 
 function zoomCamera(camera, ratio) {
@@ -222,6 +225,33 @@ function zoomCamera(camera, ratio) {
     y: Number(v.center.y || 0) + v.y * scale,
     z: Number(v.center.z || 0) + v.z * scale,
   };
+  if (!base.up) base.up = { x: 0, y: 0, z: 1 };
+  return base;
+}
+
+function vec(x = 0, y = 0, z = 0) { return { x, y, z }; }
+function norm(v) { return Math.max(Math.hypot(v.x, v.y, v.z), 1e-9); }
+function unit(v) { const n = norm(v); return vec(v.x/n, v.y/n, v.z/n); }
+function cross(a, b) {
+  return vec(a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x);
+}
+
+function panCamera(camera, dx, dy, width, height) {
+  const base = cloneValue(camera) || {};
+  const v = cameraVector(base);
+  const center = vec(Number(v.center.x || 0), Number(v.center.y || 0), Number(v.center.z || 0));
+  const view = unit(vec(-v.x, -v.y, -v.z));
+  let up = unit(base.up || { x: 0, y: 0, z: 1 });
+  let right = cross(view, up);
+  if (norm(right) < 1e-6) right = cross(view, { x: 0, y: 1, z: 0 });
+  right = unit(right);
+  up = unit(cross(right, view));
+  const scale = v.radius * 1.55;
+  const sx = -dx / Math.max(width, 180) * scale;
+  const sy = dy / Math.max(height, 180) * scale;
+  const delta = vec(right.x*sx + up.x*sy, right.y*sx + up.y*sy, right.z*sx + up.z*sy);
+  base.center = vec(center.x+delta.x, center.y+delta.y, center.z+delta.z);
+  base.eye = vec(Number(v.eye.x || 0)+delta.x, Number(v.eye.y || 0)+delta.y, Number(v.eye.z || 0)+delta.z);
   if (!base.up) base.up = { x: 0, y: 0, z: 1 };
   return base;
 }
@@ -240,6 +270,7 @@ function touchDistance(touches) {
 export function createPlotlyCameraGuard(el, initialCamera) {
   const homeCamera = cloneValue(initialCamera) || {};
   let savedCamera = cloneValue(homeCamera);
+  let dragMode = normalizeDragMode(el?.layout?.scene?.dragmode || 'orbit');
   let state = 'idle';
   let internalDepth = 0;
   let destroyed = false;
@@ -258,6 +289,7 @@ export function createPlotlyCameraGuard(el, initialCamera) {
   let lastCameraWriteAt = 0;
   const restyleTimes = new Map();
   const idleCallbacks = new Set();
+  const dragModeCallbacks = new Set();
   const removers = [];
   const customIOS = isIOSWebKit();
 
@@ -267,17 +299,22 @@ export function createPlotlyCameraGuard(el, initialCamera) {
     afterWrite: arm,
     prepareLayout,
     pinLayoutCamera,
+    pinLayoutState,
     afterPlotWrite,
     isProtected,
     isInternalWrite: () => internalDepth > 0,
     getSavedCamera: () => cloneValue(savedCamera),
     getState: () => state,
+    getDragMode: () => dragMode,
+    setDragMode,
     rememberExternalCamera,
+    rememberExternalDragMode,
     allowRestyle,
     deferStructuralWrite,
     deferResize,
     flushDeferred,
     onIdle,
+    onDragMode,
     destroy,
     usesCustomIOSTouch: () => customIOS,
   };
@@ -349,32 +386,50 @@ export function createPlotlyCameraGuard(el, initialCamera) {
 
   function rememberGestureCamera(camera) {
     if (!camera) return;
-    // Plotly/WebKit can publish the chart's initial camera after the user's
-    // final relayout but before the gesture settles.  Treat that exact HOME
-    // value as a stale responsive rebuild when a newer user camera is owned.
-    // An intentional toolbar HOME remains valid because it first calls
-    // rememberExternalCamera(home), making savedCamera equal to homeCamera.
     if (isProtected() && equalValue(camera, homeCamera)
         && !equalValue(savedCamera, homeCamera)) return;
     savedCamera = cloneValue(camera);
+  }
+
+  function notifyDragMode() {
+    for (const callback of [...dragModeCallbacks]) callback(dragMode);
+  }
+
+  function rememberExternalDragMode(mode) {
+    const next = normalizeDragMode(mode);
+    if (next === dragMode) return dragMode;
+    dragMode = next;
+    notifyDragMode();
+    return dragMode;
+  }
+
+  function setDragMode(mode) {
+    const next = rememberExternalDragMode(mode);
+    if (!window.Plotly || !el?._fullLayout?.scene) return resolved(el);
+    return window.Plotly.relayout(el, { 'scene.dragmode': next });
   }
 
   function prepareLayout(layout) {
     const next = layout || {};
     if (!next.scene) next.scene = {};
     next.scene.camera = cloneValue(savedCamera);
+    next.scene.dragmode = dragMode;
     return next;
   }
 
-  function pinLayoutCamera() {
+  function pinLayoutState() {
     if (!el) return;
     if (!el.layout) el.layout = {};
     if (!el.layout.scene) el.layout.scene = {};
     el.layout.scene.camera = cloneValue(savedCamera);
+    el.layout.scene.dragmode = dragMode;
   }
+
+  function pinLayoutCamera() { pinLayoutState(); }
 
   function afterPlotWrite() {
     arm();
+    pinLayoutState();
     verifyCamera(customIOS ? 80 : 20);
   }
 
@@ -392,7 +447,7 @@ export function createPlotlyCameraGuard(el, initialCamera) {
     if (destroyed || !window.Plotly || !el?._fullLayout?.scene) return resolved(el);
     savedCamera = cloneValue(camera);
     internalDepth += 1;
-    pinLayoutCamera();
+    pinLayoutState();
     let result;
     try {
       result = window.Plotly.relayout(el, { 'scene.camera': cloneValue(savedCamera) });
@@ -436,8 +491,6 @@ export function createPlotlyCameraGuard(el, initialCamera) {
     const key = restyleKey(traces);
     const now = nowMs();
     const previous = restyleTimes.get(key) || -Infinity;
-    // Real iPhones were spending most of the main thread in gl3d restyle. Cap
-    // every independent trace group to 20Hz; desktop remains unchanged.
     if (now - previous < 50) return false;
     restyleTimes.set(key, now);
     return true;
@@ -482,19 +535,21 @@ export function createPlotlyCameraGuard(el, initialCamera) {
     return () => idleCallbacks.delete(callback);
   }
 
+  function onDragMode(callback) {
+    dragModeCallbacks.add(callback);
+    callback(dragMode);
+    return () => dragModeCallbacks.delete(callback);
+  }
+
   function updateTouchSession(touches) {
     const camera = currentCamera() || savedCamera;
     if (touches.length >= 2) {
       touchSession = {
-        mode: 'pinch',
-        camera: cloneValue(camera),
-        distance: touchDistance(touches),
+        mode: 'pinch', camera: cloneValue(camera), distance: touchDistance(touches),
       };
     } else if (touches.length === 1) {
       touchSession = {
-        mode: 'rotate',
-        camera: cloneValue(camera),
-        point: touchPoint(touches[0]),
+        mode: dragMode, camera: cloneValue(camera), point: touchPoint(touches[0]),
       };
     } else {
       touchSession = null;
@@ -519,18 +574,25 @@ export function createPlotlyCameraGuard(el, initialCamera) {
     if (!touchSession) updateTouchSession(touches);
     if (!touchSession) return;
     const rect = el.getBoundingClientRect?.() || { width: el.clientWidth, height: el.clientHeight };
+    const width = rect.width || 320;
+    const height = rect.height || 430;
     if (touchSession.mode === 'pinch' && touches.length >= 2) {
       const distance = touchDistance(touches);
       queueCamera(zoomCamera(touchSession.camera, touchSession.distance / distance));
-    } else if (touchSession.mode === 'rotate' && touches.length === 1) {
-      const point = touchPoint(touches[0]);
-      queueCamera(rotateCamera(
-        touchSession.camera,
-        point.x - touchSession.point.x,
-        point.y - touchSession.point.y,
-        rect.width || 320,
-        rect.height || 430,
-      ));
+      return;
+    }
+    if (touches.length !== 1) return;
+    const point = touchPoint(touches[0]);
+    const dx = point.x - touchSession.point.x;
+    const dy = point.y - touchSession.point.y;
+    if (touchSession.mode === 'pan') {
+      queueCamera(panCamera(touchSession.camera, dx, dy, width, height));
+    } else if (touchSession.mode === 'zoom') {
+      queueCamera(zoomCamera(touchSession.camera, Math.exp(dy / Math.max(height, 180) * 1.8)));
+    } else if (touchSession.mode === 'turntable') {
+      queueCamera(turntableCamera(touchSession.camera, dx, dy, width, height));
+    } else {
+      queueCamera(rotateCamera(touchSession.camera, dx, dy, width, height));
     }
   }
 
@@ -564,9 +626,6 @@ export function createPlotlyCameraGuard(el, initialCamera) {
     el.style.webkitTouchCallout = 'none';
 
     if (customIOS) {
-      // Installed before Plotly.newPlot, capture phase, non-passive: iOS touch
-      // never reaches Plotly's native gl3d handler. We therefore avoid the
-      // browser-specific pointerup/relayout race completely.
       addDom(el, 'touchstart', iosTouchStart, { passive: false, capture: true });
       addDom(el, 'touchmove', iosTouchMove, { passive: false, capture: true });
       addDom(el, 'touchend', iosTouchEnd, { passive: false, capture: true });
@@ -608,11 +667,17 @@ export function createPlotlyCameraGuard(el, initialCamera) {
       beginInteraction();
       const camera = cameraFromRelayout(savedCamera, update);
       rememberGestureCamera(camera);
+      if (Object.prototype.hasOwnProperty.call(update || {}, 'scene.dragmode')) {
+        rememberExternalDragMode(update['scene.dragmode']);
+      }
     });
     el.on('plotly_relayout', (update) => {
       if (internalDepth > 0 || customIOS) return;
       const camera = cameraFromRelayout(savedCamera, update);
       rememberGestureCamera(camera);
+      if (Object.prototype.hasOwnProperty.call(update || {}, 'scene.dragmode')) {
+        rememberExternalDragMode(update['scene.dragmode']);
+      }
       enterSettling(220);
     });
     el.on('plotly_afterplot', () => {
@@ -628,8 +693,8 @@ export function createPlotlyCameraGuard(el, initialCamera) {
       if (!box) return;
       const next = { width: Math.round(box.width), height: Math.round(box.height) };
       if (!lastSize) { lastSize = next; return; }
-      if (Math.abs(next.width - lastSize.width) < 3
-          && Math.abs(next.height - lastSize.height) < 3) return;
+      if (Math.abs(next.width-lastSize.width) < 3
+          && Math.abs(next.height-lastSize.height) < 3) return;
       lastSize = next;
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
@@ -648,6 +713,8 @@ export function createPlotlyCameraGuard(el, initialCamera) {
     clearTimeout(resizeTimer);
     resizeObserver?.disconnect();
     for (const remove of removers) remove();
+    dragModeCallbacks.clear();
+    idleCallbacks.clear();
     if (localBusyPublished) {
       localBusyPublished = false;
       GLOBAL_INTERACTIONS = Math.max(0, GLOBAL_INTERACTIONS - 1);
