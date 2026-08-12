@@ -76,3 +76,9 @@ del _install_g1_management_integration
 from .g1_short_horizon_integration import install_g1_short_horizon_integration as _install_g1_short_horizon_integration
 _install_g1_short_horizon_integration()
 del _install_g1_short_horizon_integration
+
+# New background T0 captures freeze ATR before future outcomes; existing rows are
+# never hindsight-enriched. Four ablation feature families remain research-only.
+from .g1_short_horizon_refinement import install_g1_short_horizon_refinement as _install_g1_short_horizon_refinement
+_install_g1_short_horizon_refinement()
+del _install_g1_short_horizon_refinement
