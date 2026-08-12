@@ -9,6 +9,7 @@ from __future__ import annotations
 from .engine import Engine
 from .g1_short_horizon_runtime import ShortHorizonRuntime
 from .g1_management_local_runtime import ManagementLocalRuntime
+from .g1_management_local_diagnostics import install_g1_management_local_diagnostics
 from . import storage_runtime as _storage
 
 
@@ -30,6 +31,7 @@ def install_g1_short_horizon_integration() -> None:
         return
     _INSTALLED = True
 
+    install_g1_management_local_diagnostics()
     _storage.CRITICAL_TABLES = tuple(dict.fromkeys(
         (*_storage.CRITICAL_TABLES, *G1S_CRITICAL_TABLES)))
 

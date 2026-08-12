@@ -10,6 +10,7 @@ def install_g1_management_routes(app: FastAPI) -> None:
     if getattr(app.state, "g1_management_routes_installed", False):
         return
     runtime = app.state.engine.management
+    local = getattr(app.state.engine, "management_local", None)
 
     app.add_api_route(
         "/management-edge", management_edge_page,
@@ -51,6 +52,12 @@ def install_g1_management_routes(app: FastAPI) -> None:
         lambda limit=50: runtime.research_cuts(limit=limit),
         methods=["GET"], name="g1m_cuts",
     )
+    if local is not None and hasattr(local, "eligibility_diagnostics"):
+        app.add_api_route(
+            "/api/research/g1/management/local-eligibility",
+            local.eligibility_diagnostics,
+            methods=["GET"], name="g1m_local_eligibility",
+        )
 
     def decision(observation_id: str):
         body = runtime.decision(observation_id)
