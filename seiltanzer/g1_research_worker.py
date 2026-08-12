@@ -15,20 +15,43 @@ import contextlib
 import time
 
 
-# Keep the externally asserted worker API contract stable; the bounded scheduling
-# behaviour is an additive scalability refinement, exposed separately below.
 RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
-RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v3"
+RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v4"
 RESEARCH_INTERVAL_SEC = 10.0
 G1S_BATCH = 500
 G1M_LOCAL_BATCH = 100
+FIT_GATE_INTERVAL_SEC = 15 * 60.0
+TRADE_LINK_INTERVAL_SEC = 60.0
 
 
 def _run_g1s_bounded(runtime) -> dict:
     materialized = runtime.materialize_new(limit=G1S_BATCH)
     resolved = runtime.resolve_new(limit=G1S_BATCH)
-    links = runtime.materialize_trade_links()
-    models = runtime.fit_if_ready()
+
+    # Incremental counters are refreshed from immutable rowid watermarks.  This is
+    # the authoritative fast source for request-time G.1S status/readiness.
+    status_refresh = runtime.refresh_materialized_status(limit=10000)
+    now = time.time()
+
+    links = 0
+    last_links = float(getattr(runtime, "_g1s_worker_last_trade_links_ts", 0.0) or 0.0)
+    if now-last_links >= TRADE_LINK_INTERVAL_SEC:
+        links = runtime.materialize_trade_links()
+        runtime._g1s_worker_last_trade_links_ts = now
+
+    # Fitting requires a full training cut by definition. Never perform that scan
+    # every ten seconds. The cheap materialized evidence gate decides whether a fit
+    # attempt is even possible, then the existing 6h/delta refit contract remains
+    # authoritative inside fit_if_ready().
+    models = 0
+    last_fit = float(getattr(runtime, "_g1s_worker_last_fit_gate_ts", 0.0) or 0.0)
+    fit_due = now-last_fit >= FIT_GATE_INTERVAL_SEC
+    fit_ready = any(bool(item.get("fit_allowed"))
+                    for item in runtime.status().get("horizons", []))
+    if fit_due:
+        runtime._g1s_worker_last_fit_gate_ts = now
+        if fit_ready:
+            models = runtime.fit_if_ready()
 
     # Derived outcome materializers are intentionally separate from runtime.step().
     # Calling step() here would repeat the default 2,500-row source scan and defeat
@@ -40,8 +63,11 @@ def _run_g1s_bounded(runtime) -> dict:
     return {
         "materialized": materialized,
         "resolved": resolved,
+        "status_refresh": status_refresh,
         "trade_links": links,
         "models_created": models,
+        "fit_gate_due": fit_due,
+        "fit_gate_ready": fit_ready,
         "barrier_rows_created": barrier_rows,
         "path_metrics_created": path_metric_rows,
         "batch_limit": G1S_BATCH,
@@ -73,6 +99,8 @@ def install_research_worker(app) -> None:
         "last_error": None,
         "g1s_batch_limit": G1S_BATCH,
         "g1m_local_batch_limit": G1M_LOCAL_BATCH,
+        "fit_gate_interval_sec": FIT_GATE_INTERVAL_SEC,
+        "trade_link_interval_sec": TRADE_LINK_INTERVAL_SEC,
     }
     original_lifespan = app.router.lifespan_context
 
@@ -84,9 +112,6 @@ def install_research_worker(app) -> None:
                 started = time.time()
                 state["last_started_ts"] = started
                 try:
-                    # Separate thread turns make the G.1S and G.1-M.1 workloads
-                    # independently yielding. A slow local replay cannot extend
-                    # the same worker turn as the short-horizon materializer.
                     g1s_result = await asyncio.to_thread(
                         _run_g1s_bounded, engine.short_horizon)
                     await asyncio.sleep(0)
