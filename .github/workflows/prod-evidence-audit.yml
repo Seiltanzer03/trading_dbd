@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
-      - name: Read production research evidence over SSH
+      - name: Read latest production trade evidence over SSH
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -23,97 +23,29 @@ jobs:
           script: |
             set -euo pipefail
             /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import collections
-            import json
-            import time
-            import urllib.request
-
-            BASE = "http://127.0.0.1:8790"
-
+            import json, sqlite3, urllib.request
+            db = sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro', uri=True)
+            db.row_factory = sqlite3.Row
+            rows = [dict(r) for r in db.execute('SELECT id,opened_at,closed_at,setup,instrument,direction,entry,stop,take,result_r,status FROM trades ORDER BY COALESCE(closed_at,opened_at) DESC,id DESC LIMIT 5')]
+            print('LATEST_TRADES', json.dumps(rows, sort_keys=True))
+            latest_closed = db.execute("SELECT id FROM trades WHERE status='closed' ORDER BY closed_at DESC,id DESC LIMIT 1").fetchone()
+            if latest_closed:
+                trade_id = int(latest_closed['id'])
+                print('LATEST_CLOSED_ID', trade_id)
+                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if 'g1s_trade_links' in tables:
+                    links = [dict(r) for r in db.execute('SELECT trade_id,observation_id,horizon_minutes,forecast_age_sec FROM g1s_trade_links WHERE trade_id=? ORDER BY horizon_minutes',(trade_id,))]
+                    print('LATEST_CLOSED_G1S_LINKS', json.dumps(links, sort_keys=True))
+                if 'g1m_local_windows' in tables:
+                    w = db.execute('SELECT COUNT(*) n, SUM(CASE WHEN evidence_eligible=1 THEN 1 ELSE 0 END) eligible FROM g1m_local_windows WHERE trade_id=?',(trade_id,)).fetchone()
+                    o = db.execute('SELECT COUNT(*) n FROM g1m_local_outcomes o JOIN g1m_local_windows w USING(window_id) WHERE w.trade_id=?',(trade_id,)).fetchone()
+                    print('LATEST_CLOSED_G1M', json.dumps({'windows':int(w['n'] or 0),'eligible_windows':int(w['eligible'] or 0),'resolved_outcomes':int(o['n'] or 0)}, sort_keys=True))
+            db.close()
             def get(path):
-                with urllib.request.urlopen(BASE + path, timeout=15) as response:
-                    return json.loads(response.read().decode("utf-8"))
-
-            def age(ts):
-                return None if not ts else round(max(0.0, time.time() - float(ts)), 1)
-
-            passive = get("/api/research/passive/status")
-            g1s = get("/api/research/g1s/status")
-            horizons = get("/api/research/g1s/horizons")
-            final = get("/api/research/g1s/final-report")
-            observations = (get("/api/research/g1s/observations?limit=1000").get("items") or [])
-            g1ml = get("/api/research/g1/management/local-status")
-            runtime = get("/api/research/runtime/status")
-
-            print("PASSIVE", json.dumps({
-                "collector_status": passive.get("collector_status"),
-                "last_step_age_sec": age(passive.get("last_step_ts")),
-                "last_skip_reason": passive.get("last_skip_reason"),
-                "last_successful_capture_age_sec": age(passive.get("last_successful_capture_ts")),
-                "last_successful_resolution_age_sec": age(passive.get("last_successful_resolution_ts")),
-                "latest_error": passive.get("latest_error"),
-                "raw_n": passive.get("raw_n"),
-                "current_f32_n": passive.get("current_f32_n"),
-                "fixed_horizon_raw_n": passive.get("fixed_horizon_raw_n"),
-                "effective_n": passive.get("effective_n"),
-                "last_observation_per_instrument": passive.get("last_observation_per_instrument"),
-            }, sort_keys=True))
-
-            exclusion = collections.Counter(str(x.get("exclusion_reason") or "NONE") for x in observations)
-            origin = collections.Counter(str(x.get("origin") or "NONE") for x in observations)
-            eligibility = collections.Counter(str(x.get("measurement_eligible")) for x in observations)
-            by_horizon = collections.defaultdict(lambda: {"n": 0, "eligible": 0, "latest": 0.0})
-            for row in observations:
-                h = str(row.get("horizon_minutes"))
-                bucket = by_horizon[h]
-                bucket["n"] += 1
-                bucket["eligible"] += int(row.get("measurement_eligible") or 0)
-                bucket["latest"] = max(bucket["latest"], float(row.get("captured_ts") or 0.0))
-            for bucket in by_horizon.values():
-                bucket["latest_age_sec"] = age(bucket.pop("latest"))
-
-            print("G1S_RECENT", json.dumps({
-                "sample_n": len(observations),
-                "origins": dict(origin),
-                "measurement_eligible": dict(eligibility),
-                "exclusion_reasons": dict(exclusion),
-                "by_horizon": dict(by_horizon),
-            }, sort_keys=True))
-
-            compact_horizons = []
-            for row in horizons.get("items") or []:
-                compact_horizons.append({k: row.get(k) for k in (
-                    "horizon_minutes", "raw_resolved", "effective_n", "positive_n", "negative_n",
-                    "trading_days", "pending", "state", "oos_candidate", "oos_candidate_blockers",
-                    "volatility_regime_count", "unique_temporal_anchors", "model_n"
-                )})
-            print("G1S_HORIZONS", json.dumps(compact_horizons, sort_keys=True))
-            print("G1S_TOTAL", json.dumps({k: g1s.get(k) for k in (
-                "observations", "resolved", "pending", "models", "prospective_shadow_predictions",
-                "critical_errors"
-            )}, sort_keys=True))
-            print("FINAL", json.dumps({
-                "does_model_beat_baseline_oos": final.get("does_model_beat_baseline_oos"),
-                "oos_status": final.get("oos_status"),
-                "economic_plausibility": final.get("economic_plausibility"),
-                "g1m_local": final.get("g1m_local"),
-                "real_trade_relevance": final.get("real_trade_relevance"),
-                "learned_models": final.get("learned_models"),
-                "best_preliminary_probability_model": final.get("best_preliminary_probability_model"),
-                "edge_claim_allowed": final.get("edge_claim_allowed"),
-                "production_authority": final.get("production_authority"),
-            }, sort_keys=True))
-            print("G1M_LOCAL", json.dumps({k: g1ml.get(k) for k in (
-                "windows", "resolved", "evidence_eligible", "eligible_resolved", "critical_errors"
-            )}, sort_keys=True))
-            worker = runtime.get("worker") or {}
-            print("WORKER", json.dumps({k: worker.get(k) for k in (
-                "running", "last_started_ts", "last_finished_ts", "last_duration_ms", "last_error",
-                "scalability_refinement_version"
-            )}, sort_keys=True))
+                with urllib.request.urlopen('http://127.0.0.1:8790'+path, timeout=15) as response:
+                    return json.loads(response.read().decode('utf-8'))
+            final = get('/api/research/g1s/final-report')
+            local = get('/api/research/g1/management/local-status')
+            print('FINAL_ECON', json.dumps({'trade':final.get('real_trade_relevance'),'management':final.get('g1m_local'),'overall':final.get('does_model_beat_baseline_oos')}, sort_keys=True))
+            print('G1M_STATUS', json.dumps({k:local.get(k) for k in ('windows','resolved','evidence_eligible','eligible_resolved')}, sort_keys=True))
             PY
-
-            echo '--- compute_wavelet_analysis call sites ---'
-            grep -R -n --include='*.py' 'compute_wavelet_analysis' /opt/seiltanzer/seiltanzer || true
-            echo '--- scale keyword near analytics code ---'
-            grep -R -n --include='*.py' 'scale=' /opt/seiltanzer/seiltanzer | head -100 || true
