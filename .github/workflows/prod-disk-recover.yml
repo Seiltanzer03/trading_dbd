@@ -1,0 +1,163 @@
+name: prod-disk-recover
+
+# One-shot operational recovery for the full production root filesystem.  It
+# never deletes or replaces the authoritative trades.db; only old verified
+# local backup pairs and interrupted hidden backup temporaries are reclaimed.
+on:
+  push:
+    branches: [agent/prod-disk-recovery-continue]
+    paths: [.github/workflows/prod-disk-recover.yml]
+  workflow_dispatch:
+
+concurrency:
+  group: production-seiltanzer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Reclaim local backup storage over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 8m
+          script: |
+            set -euo pipefail
+            ROOT=/opt/seiltanzer
+            DB="$ROOT/data/trades.db"
+            BACKUPS="$ROOT/data/backups/local"
+            test -f "$DB"
+            test -d "$BACKUPS"
+
+            echo '=== BEFORE ==='
+            df -h /
+            du -sh "$BACKUPS" || true
+
+            python3 - "$DB" <<'PY'
+            import sqlite3, sys
+            db=sys.argv[1]
+            conn=sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)
+            try:
+                result=conn.execute("PRAGMA quick_check").fetchall()
+            finally:
+                conn.close()
+            if result != [('ok',)]:
+                raise SystemExit(f"live database quick_check failed before cleanup: {result[:10]}")
+            print('live_database_precheck=ok')
+            PY
+
+            # Prevent the old process from starting another full snapshot while
+            # the backup directory is being pruned.
+            systemctl stop seiltanzer
+            trap 'systemctl start seiltanzer || true' EXIT
+
+            python3 - "$BACKUPS" <<'PY'
+            from pathlib import Path
+            import hashlib, json, sqlite3, sys
+
+            directory=Path(sys.argv[1])
+            manifests=[]
+            for path in directory.glob('*.manifest.json'):
+                try:
+                    item=json.loads(path.read_text(encoding='utf-8'))
+                except Exception:
+                    continue
+                if item.get('verified') is not True:
+                    continue
+                db_name=str(item.get('database_file') or '')
+                db_path=directory/db_name if db_name else None
+                if not db_name or not db_path.exists():
+                    continue
+                item['_manifest_path']=path
+                item['_db_path']=db_path
+                manifests.append(item)
+            manifests.sort(key=lambda x: float(x.get('created_ts') or 0.0), reverse=True)
+            if not manifests:
+                raise SystemExit('no verified local backup available; refusing cleanup')
+
+            latest=manifests[0]
+            latest_db=latest['_db_path']
+            conn=sqlite3.connect(f"file:{latest_db}?mode=ro", uri=True, timeout=30)
+            try:
+                check=conn.execute('PRAGMA quick_check').fetchall()
+            finally:
+                conn.close()
+            if check != [('ok',)]:
+                raise SystemExit(f"latest verified backup quick_check failed: {check[:10]}")
+            expected=str(latest.get('database_sha256') or '')
+            if expected:
+                h=hashlib.sha256()
+                with latest_db.open('rb') as fh:
+                    for chunk in iter(lambda: fh.read(1024*1024), b''):
+                        h.update(chunk)
+                if h.hexdigest() != expected:
+                    raise SystemExit('latest verified backup SHA256 mismatch; refusing cleanup')
+
+            keep_n=min(8, len(manifests))
+            keep=manifests[:keep_n]
+            remove=manifests[keep_n:]
+            before=sum(p.stat().st_size for p in directory.iterdir() if p.is_file())
+            removed_files=0
+            removed_bytes=0
+            for item in remove:
+                for path in (item['_db_path'], item['_manifest_path']):
+                    try:
+                        size=path.stat().st_size
+                        path.unlink()
+                        removed_bytes += size
+                        removed_files += 1
+                    except FileNotFoundError:
+                        pass
+
+            tmp_files=0
+            tmp_bytes=0
+            for path in directory.glob('.*.tmp.sqlite3'):
+                try:
+                    size=path.stat().st_size
+                    path.unlink()
+                    tmp_bytes += size
+                    tmp_files += 1
+                except FileNotFoundError:
+                    pass
+
+            after=sum(p.stat().st_size for p in directory.iterdir() if p.is_file())
+            print('verified_before=',len(manifests))
+            print('verified_kept=',len(keep))
+            print('verified_removed=',len(remove))
+            print('removed_verified_files=',removed_files,'removed_verified_bytes=',removed_bytes)
+            print('removed_tmp_files=',tmp_files,'removed_tmp_bytes=',tmp_bytes)
+            print('backup_dir_bytes_before=',before,'backup_dir_bytes_after=',after)
+            print('latest_verified_backup=',latest.get('backup_id'))
+            PY
+
+            python3 - "$DB" <<'PY'
+            import sqlite3, sys
+            db=sys.argv[1]
+            conn=sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)
+            try:
+                result=conn.execute("PRAGMA quick_check").fetchall()
+            finally:
+                conn.close()
+            if result != [('ok',)]:
+                raise SystemExit(f"live database quick_check failed after cleanup: {result[:10]}")
+            print('live_database_postcheck=ok')
+            PY
+
+            systemctl start seiltanzer
+            trap - EXIT
+            test "$(systemctl is-active seiltanzer)" = active
+
+            echo '=== AFTER ==='
+            df -h /
+            du -sh "$BACKUPS" || true
+            avail=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+            test "$avail" -ge $((4 * 1024 * 1024 * 1024))
+            echo "production_free_bytes=$avail"
