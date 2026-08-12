@@ -15,6 +15,11 @@ G1M_CRITICAL_TABLES = (
     "g1m_execution_attribution",
     "g1m_contract_errors",
     "g1m_research_cuts",
+    # Phase H2 is a future-only T0 evidence ledger. It is research-only, but once
+    # created it is economically useful history and must be in the verified
+    # post-schema identity just like the other immutable G.1-M ledgers.
+    "g1m_feature_context_v2_activation",
+    "g1m_t0_feature_context_v2",
 )
 
 
