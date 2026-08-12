@@ -6,7 +6,7 @@ using only persisted immutable ledgers and bounded aggregate SQL.
 """
 from __future__ import annotations
 
-from .g1_management_local_runtime import ManagementLocalRuntime
+from .g1_management_local_runtime import G1M_LOCAL_CONTRACT_VERSION, ManagementLocalRuntime
 
 
 DIAGNOSTICS_VERSION = "g1m-local-eligibility-diagnostics-v1"
@@ -138,8 +138,7 @@ def eligibility_diagnostics(self: ManagementLocalRuntime) -> dict:
 
     return {
         "contract_version": DIAGNOSTICS_VERSION,
-        "local_contract_version": getattr(self, "activation_ts", None) is not None
-            and "g1m-local-feedback-v1" or None,
+        "local_contract_version": G1M_LOCAL_CONTRACT_VERSION,
         "activation_ts": activation,
         "eligibility_formula": "upstream policy_edge_eligible AND captured_ts >= local activation_ts",
         "state": state,
