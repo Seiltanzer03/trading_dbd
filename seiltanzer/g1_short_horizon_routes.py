@@ -39,6 +39,10 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         lambda limit=100: runtime.return_models(limit=int(limit)),
         methods=["GET"], name="g1s_return_models")
     app.add_api_route(
+        "/api/research/g1s/calibrators",
+        lambda limit=100: runtime.calibrators(limit=int(limit)),
+        methods=["GET"], name="g1s_calibrators")
+    app.add_api_route(
         "/api/research/g1s/cuts",
         lambda limit=100: runtime.cuts(limit=int(limit)),
         methods=["GET"], name="g1s_cuts")
@@ -54,6 +58,8 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
                       methods=["GET"], name="g1s_oos")
     app.add_api_route("/api/research/g1s/continuous-oos", runtime.continuous_oos,
                       methods=["GET"], name="g1s_continuous_oos")
+    app.add_api_route("/api/research/g1s/calibration-oos", runtime.calibration_oos,
+                      methods=["GET"], name="g1s_calibration_oos")
     app.add_api_route("/api/research/g1s/ablation", runtime.ablation,
                       methods=["GET"], name="g1s_ablation")
     app.add_api_route("/api/research/g1s/trade-relevance", runtime.trade_relevance,
