@@ -152,3 +152,9 @@ del _install_g1_short_horizon_evidence_materialization
 from .g1_short_horizon_walkforward import install_g1_short_horizon_walkforward as _install_g1_short_horizon_walkforward
 _install_g1_short_horizon_walkforward()
 del _install_g1_short_horizon_walkforward
+
+# A mature raw forecast is allowed to remain the selected representation when
+# causal Platt scaling adds no benefit; both still must beat causal baselines.
+from .g1_short_horizon_probability_selection import install_g1_short_horizon_probability_selection as _install_g1_short_horizon_probability_selection
+_install_g1_short_horizon_probability_selection()
+del _install_g1_short_horizon_probability_selection
