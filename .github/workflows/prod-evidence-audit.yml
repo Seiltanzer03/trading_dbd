@@ -10,141 +10,76 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-22.04
-    timeout-minutes: 9
+    timeout-minutes: 12
     steps:
-      - name: Verify P1 frozen champion on production
+      - name: Audit historical market-data depth on production
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 8m
+          command_timeout: 11m
           script: |
             set -euo pipefail
-            EXPECTED=120a505e03363639242a6d2457db2ea13a6122f4
             echo "PROD_SHA $(git -C /opt/seiltanzer rev-parse HEAD)"
             echo "SERVICE $(systemctl is-active seiltanzer)"
+            cd /opt/seiltanzer
             /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import json, sqlite3, time, urllib.request
-            BASE='http://127.0.0.1:8790'
-            EXPECTED='120a505e03363639242a6d2457db2ea13a6122f4'
-            def get(path):
-                with urllib.request.urlopen(BASE+path, timeout=20) as r:
-                    return json.loads(r.read().decode())
-            now=time.time()
-            passive=get('/api/research/passive/status')
-            health=passive.get('collector_health') or {}
-            print('COLLECTOR',json.dumps({
-                'operational':passive.get('operational_collector_status'),
-                'eligible_age_sec':health.get('eligible_capture_age_sec'),
-                'eligible_1h':health.get('eligible_captures_1h'),
-                'eligible_24h':health.get('eligible_captures_24h'),
-                'failed_cycles':health.get('consecutive_failed_capture_cycles'),
-                'last_error':health.get('last_error'),
-                'full_history_scan':health.get('request_time_full_history_scan'),
-            },sort_keys=True))
+            import json, sqlite3, time
+            import yfinance as yf
+            from seiltanzer.config import INSTRUMENTS
 
-            g1s=get('/api/research/g1s/status')
-            champ=g1s.get('champion_validation') or {}
-            items=champ.get('items') or []
-            print('CHAMPION_STATUS',json.dumps({
-                'contract':champ.get('contract_version'),
-                'count':len(items),
-                'frozen':champ.get('champion_frozen'),
-                'challenger_can_stop':champ.get('challenger_can_stop_champion_stream'),
-                'can_train_on_oos':champ.get('champion_can_train_on_own_oos'),
-                'prediction_precedes_target':champ.get('prediction_must_precede_target'),
-                'auto_promotion':champ.get('auto_promotion'),
-                'production_authority':champ.get('production_authority'),
-                'linked':sum(int(x.get('linked_prediction_n') or 0) for x in items),
-                'targets':sorted({str(x.get('target')) for x in items}),
-                'horizons':sorted({int(x.get('horizon_minutes')) for x in items}),
-                'families':sorted({str(x.get('model_family')) for x in items}),
-            },sort_keys=True))
-            bad=[x for x in items if not (
-                x.get('champion_is_frozen') is True and
-                x.get('challenger_does_not_replace_champion') is True and
-                x.get('champion_training_excludes_live_oos') is True and
-                float(x.get('training_cutoff_ts') or 0)<float(x.get('oos_start_ts') or 0) and
-                x.get('production_authority') is False and
-                x.get('auto_promotion') is False)]
-            print('CHAMPION_BAD_ITEMS',len(bad))
+            out=[]
+            for code,inst in INSTRUMENTS.items():
+                item={'code':code,'ticker':inst.yahoo}
+                for interval,period in [('5m','60d'),('1m','7d')]:
+                    key=f'{interval}_{period}'
+                    try:
+                        hist=yf.Ticker(inst.yahoo).history(period=period,interval=interval,auto_adjust=False)
+                        if len(hist):
+                            index=hist.index
+                            item[key]={
+                                'n':int(len(hist)),
+                                'first':index[0].isoformat(),
+                                'last':index[-1].isoformat(),
+                                'days':round((index[-1].timestamp()-index[0].timestamp())/86400,2),
+                                'non_null_close':int(hist['Close'].notna().sum()),
+                                'non_null_volume':int(hist['Volume'].notna().sum()) if 'Volume' in hist else 0,
+                            }
+                        else:
+                            item[key]={'n':0}
+                    except Exception as exc:
+                        item[key]={'error':f'{type(exc).__name__}: {exc}'[:300]}
+                out.append(item)
+            print('BAR_DEPTH',json.dumps(out,sort_keys=True))
+
+            cache=sqlite3.connect('file:/opt/seiltanzer/data/cache.db?mode=ro',uri=True)
+            cache.row_factory=sqlite3.Row
+            tables={r['name'] for r in cache.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            chain=[]
+            if 'chain_snapshots' in tables:
+                chain=[dict(r) for r in cache.execute("""
+                    SELECT ticker,COUNT(*) n,MIN(ts) first_ts,MAX(ts) last_ts,
+                           (MAX(ts)-MIN(ts))/86400.0 span_days
+                    FROM chain_snapshots GROUP BY ticker ORDER BY ticker
+                """)]
+            kv=[]
+            if 'kv' in tables:
+                kv=[dict(r) for r in cache.execute("SELECT key,ts FROM kv ORDER BY key")]
+            print('CHAIN_CACHE',json.dumps(chain,sort_keys=True))
+            print('CACHE_KEYS',json.dumps(kv,sort_keys=True))
+            cache.close()
 
             db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True)
             db.row_factory=sqlite3.Row
             tables={r['name'] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            required={'g1s_validation_cohorts','g1s_champion_prediction_links','g1s_champion_progress'}
-            print('CHAMPION_TABLES',json.dumps({'required':sorted(required),'present':sorted(required & tables)},sort_keys=True))
-            cohorts=[dict(r) for r in db.execute("SELECT target,horizon_minutes,feature_set,model_family,champion_model_id,frozen_at,training_cutoff_ts,oos_start_ts,source,status,auto_promotion,production_authority FROM g1s_validation_cohorts ORDER BY target,horizon_minutes,feature_set,model_family")]
-            print('COHORTS',json.dumps({'n':len(cohorts),'sample':cohorts[:8]},sort_keys=True))
-            violations=db.execute("SELECT COUNT(*) n FROM g1s_validation_cohorts WHERE training_cutoff_ts>=oos_start_ts OR auto_promotion!=0 OR production_authority!=0").fetchone()['n']
-            print('COHORT_VIOLATIONS',int(violations))
-
-            # Allow the low-priority research worker to materialize at least one
-            # post-freeze eligible T0 into the frozen champion stream.
-            links_n=0
-            latest=None
-            for attempt in range(1,25):
-                row=db.execute("SELECT COUNT(*) n,MAX(prediction_created_ts) latest FROM g1s_champion_prediction_links").fetchone()
-                links_n=int(row['n'] or 0); latest=row['latest']
-                if links_n>0:
-                    break
-                time.sleep(5)
-            print('CHAMPION_LINKS',json.dumps({'n':links_n,'latest_prediction_ts':latest},sort_keys=True))
-            link_violations=db.execute("""
-                SELECT COUNT(*) n
-                FROM g1s_champion_prediction_links l
-                JOIN g1s_observations g USING(observation_id)
-                JOIN g1s_validation_cohorts c USING(validation_cohort_id)
-                WHERE l.model_id!=c.champion_model_id
-                   OR l.captured_ts<c.oos_start_ts
-                   OR l.prediction_created_ts>=g.target_ts
-                   OR c.training_cutoff_ts>=l.captured_ts
-            """).fetchone()['n']
-            print('LINK_CAUSALITY_VIOLATIONS',int(link_violations))
-            newest=[dict(r) for r in db.execute("""
-                SELECT l.validation_cohort_id,l.target,l.observation_id,l.model_id,
-                       l.captured_ts,l.prediction_created_ts,g.target_ts,c.oos_start_ts,c.training_cutoff_ts
-                FROM g1s_champion_prediction_links l
-                JOIN g1s_observations g USING(observation_id)
-                JOIN g1s_validation_cohorts c USING(validation_cohort_id)
-                ORDER BY l.prediction_created_ts DESC LIMIT 12
-            """)]
-            print('NEWEST_LINKS',json.dumps(newest,sort_keys=True))
-
-            # Existing challenger refits must not have rewritten champion ids.
-            challenger_pairs=[]
-            for c in cohorts:
-                table='g1s_models' if c['target']=='direction_up' else 'g1s_return_models'
-                row=db.execute(f"SELECT model_id,created_ts FROM {table} WHERE horizon_minutes=? AND feature_set=? AND model_family=? AND created_ts>? ORDER BY created_ts DESC LIMIT 1",
-                               (c['horizon_minutes'],c['feature_set'],c['model_family'],c['frozen_at'])).fetchone()
-                if row:
-                    challenger_pairs.append({'champion':c['champion_model_id'],'challenger':row['model_id'],'same':row['model_id']==c['champion_model_id']})
-            print('POST_FREEZE_CHALLENGERS',json.dumps({'n':len(challenger_pairs),'sample':challenger_pairs[:8]},sort_keys=True))
+            candidates=[]
+            for table in sorted(tables):
+                cols={r['name'] for r in db.execute(f'PRAGMA table_info({table})')}
+                if {'captured_ts','instrument'} <= cols:
+                    row=db.execute(f'SELECT COUNT(*) n,MIN(captured_ts) first_ts,MAX(captured_ts) last_ts FROM {table}').fetchone()
+                    candidates.append({'table':table,**dict(row)})
+            print('TIMESTAMPED_MARKET_TABLES',json.dumps(candidates,sort_keys=True))
             db.close()
-
-            backups=get('/api/system/storage/backups')
-            complete=[]
-            for m in backups.get('local') or []:
-                counts=m.get('critical_table_counts') or {}
-                if m.get('verified') is True and all(t in counts and counts.get(t) is not None for t in ('g1s_validation_cohorts','g1s_champion_prediction_links')):
-                    complete.append(m)
-            print('CHAMPION_BACKUP',json.dumps({'n':len(complete),'latest_id':complete[0].get('backup_id') if complete else None,'latest_age_sec':(max(0,now-float(complete[0].get('created_ts') or 0)) if complete else None)},sort_keys=True))
-
-            assert champ.get('champion_frozen') is True
-            assert champ.get('challenger_can_stop_champion_stream') is False
-            assert champ.get('champion_can_train_on_own_oos') is False
-            assert champ.get('prediction_must_precede_target') is True
-            assert champ.get('auto_promotion') is False
-            assert champ.get('production_authority') is False
-            assert items and not bad
-            assert required <= tables
-            assert int(violations)==0
-            assert links_n>0
-            assert int(link_violations)==0
-            assert complete
-            assert passive.get('operational_collector_status')=='RUNNING'
-            assert health.get('request_time_full_history_scan') is False
             PY
-            /opt/seiltanzer/.venv/bin/python /opt/seiltanzer/scripts/production_readiness_check.py --expected-sha "$EXPECTED"
