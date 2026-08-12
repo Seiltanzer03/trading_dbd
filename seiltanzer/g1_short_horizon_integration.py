@@ -1,13 +1,12 @@
-"""Install G.1S and G.1-M.1 on the existing passive research scheduler.
+"""Install G.1S and G.1-M.1 runtimes without touching the market collector loop.
 
-Import order matters: this installer runs after G.1-M, therefore it wraps the
-already-integrated Engine/PassiveLearningEngine rather than bypassing management
-measurement. Market/decision authority is untouched.
+The runtimes share the durable passive SQLite source of truth, but their expensive
+materialization/model work is scheduled by a separate research worker. Production
+market collection and decision authority therefore remain independent.
 """
 from __future__ import annotations
 
 from .engine import Engine
-from .passive_learning import PassiveLearningEngine
 from .g1_short_horizon_runtime import ShortHorizonRuntime
 from .g1_management_local_runtime import ManagementLocalRuntime
 from . import storage_runtime as _storage
@@ -30,16 +29,11 @@ def install_g1_short_horizon_integration() -> None:
         return
     _INSTALLED = True
 
-    # Include every economically/research-authoritative fast-learning ledger in
-    # verified backup manifests. Later refinements create the barrier/cut tables;
-    # missing tables are initially reported as None and become mandatory after the
-    # first schema-aware backup on production.
     _storage.CRITICAL_TABLES = tuple(dict.fromkeys(
         (*_storage.CRITICAL_TABLES, *G1S_CRITICAL_TABLES)))
 
     previous_engine_init = Engine.__init__
     previous_engine_close = Engine.close
-    previous_passive_step = PassiveLearningEngine.step
 
     def engine_init(self, *args, **kwargs):
         previous_engine_init(self, *args, **kwargs)
@@ -52,29 +46,12 @@ def install_g1_short_horizon_integration() -> None:
         # Runtimes share the passive SQLite connection, so they do not close it.
         return previous_engine_close(self, *args, **kwargs)
 
-    def passive_step(self, *args, **kwargs):
-        result = previous_passive_step(self, *args, **kwargs)
-        g1s = getattr(self, "_g1s_runtime", None)
-        local = getattr(self, "_g1m_local_runtime", None)
-        if g1s is not None:
-            result["g1s"] = g1s.step()
-        if local is not None:
-            result["g1m_local"] = local.step()
-        return result
-
     Engine.__init__ = engine_init
     Engine.close = engine_close
-    PassiveLearningEngine.step = passive_step
 
 
 def ensure_g1s_schema_backup(storage) -> str | None:
-    """Create one verified snapshot after first G.1S/G.1-M.1 schema creation.
-
-    `prepare_storage` intentionally snapshots before Engine constructors. On the
-    first deploy that snapshot therefore cannot contain the new research ledgers.
-    Once `create_app` has created them, emit exactly one schema-identity snapshot;
-    subsequent restarts return to the normal backup cadence.
-    """
+    """Create one verified snapshot after first G.1S/G.1-M.1 schema creation."""
     latest = storage._last_verified("local")
     counts = (latest or {}).get("critical_table_counts") or {}
     if latest and all(counts.get(table) is not None for table in G1S_CRITICAL_TABLES):
