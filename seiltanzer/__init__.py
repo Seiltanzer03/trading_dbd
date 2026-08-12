@@ -118,3 +118,9 @@ del _install_g1_fast_learning_integrity_refinement
 from .g1_short_horizon_metrics_refinement import install_g1_short_horizon_metrics_refinement as _install_g1_short_horizon_metrics_refinement
 _install_g1_short_horizon_metrics_refinement()
 del _install_g1_short_horizon_metrics_refinement
+
+# The effectiveness verdict must use dependency-adjusted loss and real-trade
+# validation may consume only model/prediction artifacts persisted before entry.
+from .g1_short_horizon_metrics_integrity import install_g1_short_horizon_metrics_integrity as _install_g1_short_horizon_metrics_integrity
+_install_g1_short_horizon_metrics_integrity()
+del _install_g1_short_horizon_metrics_integrity
