@@ -112,3 +112,9 @@ del _install_g1_short_horizon_cut_refinement
 from .g1_fast_learning_integrity_refinement import install_g1_fast_learning_integrity_refinement as _install_g1_fast_learning_integrity_refinement
 _install_g1_fast_learning_integrity_refinement()
 del _install_g1_fast_learning_integrity_refinement
+
+# Append richer resolved-path statistics, finalize overlap dependency weights, and
+# report model effectiveness against simple OOS baselines without promotion.
+from .g1_short_horizon_metrics_refinement import install_g1_short_horizon_metrics_refinement as _install_g1_short_horizon_metrics_refinement
+_install_g1_short_horizon_metrics_refinement()
+del _install_g1_short_horizon_metrics_refinement
