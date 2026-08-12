@@ -1,0 +1,143 @@
+name: emergency-production-disk-recovery
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/emergency-production-disk-recovery.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Recover production disk over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 12m
+          script: |
+            set -euo pipefail
+            echo "DISK_BEFORE"
+            df -h /
+
+            journalctl --vacuum-size=500M
+            if [ -d /root/.cache/pip ]; then
+              find /root/.cache/pip -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+            fi
+            apt-get clean
+            if [ -d /opt/actions-runner/_work/_update ]; then
+              find /opt/actions-runner/_work/_update -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+            fi
+
+            echo "DISK_AFTER_SYSTEM_CLEAN"
+            df -h /
+            avail_kb=$(df -Pk / | awk 'NR==2 {print $4}')
+            if [ "$avail_kb" -lt 1048576 ]; then
+              echo "Less than 1 GiB available after safe system cleanup"
+              exit 20
+            fi
+
+            systemctl stop seiltanzer
+            restart_needed=1
+            trap 'if [ "${restart_needed:-0}" = 1 ]; then systemctl start seiltanzer || true; fi' EXIT
+
+            /usr/bin/python3 - <<'PY'
+            import hashlib, json
+            from pathlib import Path
+
+            root = Path("/opt/seiltanzer/data/backups/local").resolve()
+            authoritative = Path("/opt/seiltanzer/data/trades.db").resolve()
+            verified = []
+
+            def confined(path: Path) -> bool:
+                try:
+                    path.resolve().relative_to(root)
+                    return True
+                except ValueError:
+                    return False
+
+            for manifest in root.glob("*.manifest.json"):
+                try:
+                    data = json.loads(manifest.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if data.get("verified") is not True:
+                    continue
+                raw = data.get("database_file")
+                if not raw:
+                    continue
+                database = Path(raw)
+                if not database.is_absolute():
+                    database = root / database
+                database = database.resolve()
+                if database == authoritative or not confined(database) or not database.is_file():
+                    continue
+                stamp = data.get("created_at") or data.get("timestamp") or manifest.stat().st_mtime
+                verified.append((str(stamp), manifest.resolve(), database, data))
+
+            if not verified:
+                raise SystemExit("STOP: no verified backup pair found")
+            verified.sort(key=lambda row: (row[0], row[1].stat().st_mtime), reverse=True)
+            _, newest_manifest, newest_database, newest_data = verified[0]
+            expected = str(newest_data.get("database_sha256") or "").lower()
+            if len(expected) != 64:
+                raise SystemExit("STOP: newest verified manifest has no valid database_sha256")
+            digest = hashlib.sha256()
+            with newest_database.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                    digest.update(chunk)
+            actual = digest.hexdigest()
+            print(f"NEWEST_BACKUP={newest_database.name}")
+            print(f"NEWEST_SHA_MATCH={actual == expected}")
+            if actual != expected:
+                raise SystemExit("STOP: newest verified backup SHA256 mismatch")
+
+            keep = verified[:8]
+            remove = verified[8:]
+            keep_paths = {p for row in keep for p in (row[1], row[2])}
+            removed_pairs = 0
+            for _, manifest, database, _ in remove:
+                if manifest in keep_paths or database in keep_paths:
+                    continue
+                database.unlink(missing_ok=True)
+                manifest.unlink(missing_ok=True)
+                removed_pairs += 1
+
+            removed_tmp = 0
+            for tmp in root.glob(".*.tmp.sqlite3"):
+                if tmp.is_file() and confined(tmp):
+                    tmp.unlink()
+                    removed_tmp += 1
+            print(f"VERIFIED_PAIRS_TOTAL={len(verified)}")
+            print(f"VERIFIED_PAIRS_KEPT={len(keep)}")
+            print(f"VERIFIED_PAIRS_REMOVED={removed_pairs}")
+            print(f"STALE_TMP_REMOVED={removed_tmp}")
+            PY
+
+            systemctl start seiltanzer
+            restart_needed=0
+            test "$(systemctl is-active seiltanzer)" = active
+
+            db_check=$(/usr/bin/python3 - <<'PY'
+            import sqlite3
+            con=sqlite3.connect("file:/opt/seiltanzer/data/trades.db?mode=ro", uri=True)
+            try:
+                print(con.execute("PRAGMA quick_check").fetchone()[0])
+            finally:
+                con.close()
+            PY
+            )
+            echo "DB_QUICK_CHECK=$db_check"
+            test "$db_check" = ok
+
+            echo "DISK_AFTER"
+            df -h /
+            du -sh /opt/seiltanzer/data/backups/local
+            systemctl is-active seiltanzer
