@@ -187,3 +187,10 @@ del _install_g1_short_horizon_champion_runtime
 from .g1_short_horizon_historical_wf import install_g1_short_horizon_historical_wf as _install_g1_short_horizon_historical_wf
 _install_g1_short_horizon_historical_wf()
 del _install_g1_short_horizon_historical_wf
+
+# Immutable retries may leave older source sets in the audit ledger.  Install the
+# source-set filter globally so worker/CLI/API all expose only the current
+# finalized set while preserving old artifacts for audit/recovery.
+from .g1_short_horizon_historical_wf_integrity import install_g1_short_horizon_historical_wf_integrity as _install_g1_short_horizon_historical_wf_integrity
+_install_g1_short_horizon_historical_wf_integrity()
+del _install_g1_short_horizon_historical_wf_integrity
