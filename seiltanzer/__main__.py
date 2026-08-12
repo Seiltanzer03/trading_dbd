@@ -26,6 +26,7 @@ from .lattice_visual_history import install_lattice_visual_history
 from .maintenance.venv_cleanup import remediate_current_environment
 from .option_shadow_state import install_option_shadow_state
 from .research_scalability_bootstrap import install_research_scalability
+from .storage_disk_guard import install_storage_disk_guard
 from .storage_fast_status_refinement import install_storage_fast_status
 from .storage_refinement import install_storage_refinement
 from .storage_routes import install_storage_routes
@@ -60,6 +61,7 @@ def main() -> None:
 
     install_analytics_runtime()
     install_storage_refinement()
+    install_storage_disk_guard()
     install_g1_management_storage()
 
     settings = Settings(demo=args.demo, stream=args.stream, host=args.host,
