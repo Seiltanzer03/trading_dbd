@@ -23,51 +23,90 @@ function ensureToolbarStyles() {
   document.head?.appendChild(style);
 }
 
+function modeFrom(plot, guard) {
+  return guard?.getDragMode?.() || plot?._fullLayout?.scene?.dragmode || 'orbit';
+}
+
+function syncToolbarMode(toolbar, mode) {
+  toolbar?.querySelectorAll?.('button[data-drag-mode]').forEach((node) => {
+    node.classList.toggle('active', node.dataset.dragMode === mode);
+    node.setAttribute('aria-pressed', node.dataset.dragMode === mode ? 'true' : 'false');
+  });
+}
+
 export function attachTerminal3DToolbar({ plot, container, guard, homeCamera, key = 'plot' } = {}) {
   if (!plot || !container || typeof document === 'undefined') return null;
   ensureToolbarStyles();
   container.style.position = container.style.position || 'relative';
-  container.querySelector(`[data-terminal-3d-toolbar="${key}"]`)?.remove();
+
+  const selector = `[data-terminal-3d-toolbar="${key}"]`;
+  const existing = container.querySelector(selector);
+  if (existing?.__terminal3dPlot === plot) {
+    existing.__terminal3dGuard = guard || existing.__terminal3dGuard;
+    syncToolbarMode(existing, modeFrom(plot, existing.__terminal3dGuard));
+    return existing;
+  }
+  if (existing) {
+    existing.__terminal3dUnsubscribe?.();
+    existing.remove();
+  }
+
   const toolbar = document.createElement('div');
   toolbar.className = 'terminal-3d-toolbar';
   toolbar.dataset.terminal3dToolbar = key;
   toolbar.setAttribute('role', 'toolbar');
   toolbar.setAttribute('aria-label', '3D view controls');
-  let dragMode = 'orbit';
+  toolbar.__terminal3dPlot = plot;
+  toolbar.__terminal3dGuard = guard;
 
   const relayout = (update) => {
     if (!window.Plotly || !plot?._fullLayout) return;
-    window.Plotly.relayout(plot, update);
+    return window.Plotly.relayout(plot, update);
   };
   const button = (label, title, action, mode = null) => {
     const el = document.createElement('button');
     el.type = 'button'; el.textContent = label; el.title = title;
     el.setAttribute('aria-label', title);
-    if (mode === dragMode) el.classList.add('active');
     el.addEventListener('click', (event) => {
       event.preventDefault(); event.stopPropagation();
       action();
-      if (mode) {
-        dragMode = mode;
-        toolbar.querySelectorAll('button[data-drag-mode]').forEach((node) => node.classList.toggle('active', node.dataset.dragMode === mode));
-      }
+      if (mode) syncToolbarMode(toolbar, modeFrom(plot, toolbar.__terminal3dGuard));
     });
-    if (mode) el.dataset.dragMode = mode;
+    if (mode) {
+      el.dataset.dragMode = mode;
+      el.setAttribute('aria-pressed', 'false');
+    }
     toolbar.appendChild(el);
     return el;
   };
 
-  button('ORBIT', 'Orbit drag mode', () => relayout({ 'scene.dragmode': 'orbit' }), 'orbit');
-  button('TURNTABLE', 'Turntable drag mode', () => relayout({ 'scene.dragmode': 'turntable' }), 'turntable');
-  button('PAN', 'Pan drag mode', () => relayout({ 'scene.dragmode': 'pan' }), 'pan');
-  button('ZOOM', 'Zoom drag mode', () => relayout({ 'scene.dragmode': 'zoom' }), 'zoom');
-  const separator = document.createElement('span'); separator.className = 'toolbar-separator'; separator.setAttribute('aria-hidden', 'true'); toolbar.appendChild(separator);
+  const setMode = (mode) => {
+    const owner = toolbar.__terminal3dGuard;
+    if (owner?.setDragMode) return owner.setDragMode(mode);
+    return relayout({ 'scene.dragmode': mode });
+  };
+  button('ORBIT', 'Orbit drag mode', () => setMode('orbit'), 'orbit');
+  button('TURNTABLE', 'Turntable drag mode', () => setMode('turntable'), 'turntable');
+  button('PAN', 'Pan drag mode', () => setMode('pan'), 'pan');
+  button('ZOOM', 'Zoom drag mode', () => setMode('zoom'), 'zoom');
+  const separator = document.createElement('span');
+  separator.className = 'toolbar-separator';
+  separator.setAttribute('aria-hidden', 'true');
+  toolbar.appendChild(separator);
   button('RESET', 'Reset to Plotly default view', () => {
-    const camera = clone(DEFAULT_CAMERA); guard?.rememberExternalCamera?.(camera); relayout({ 'scene.camera': camera });
+    const camera = clone(DEFAULT_CAMERA);
+    toolbar.__terminal3dGuard?.rememberExternalCamera?.(camera);
+    relayout({ 'scene.camera': camera });
   });
   button('HOME', 'Return to terminal home view', () => {
-    const camera = clone(homeCamera || DEFAULT_CAMERA); guard?.rememberExternalCamera?.(camera); relayout({ 'scene.camera': camera });
+    const camera = clone(homeCamera || DEFAULT_CAMERA);
+    toolbar.__terminal3dGuard?.rememberExternalCamera?.(camera);
+    relayout({ 'scene.camera': camera });
   });
+
   container.appendChild(toolbar);
+  toolbar.__terminal3dUnsubscribe = guard?.onDragMode?.(
+    (mode) => syncToolbarMode(toolbar, mode));
+  syncToolbarMode(toolbar, modeFrom(plot, guard));
   return toolbar;
 }
