@@ -24,8 +24,11 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         return {"contract_version": status["contract_version"],
                 "items": [runtime.horizon_report(h) for h in (15,30,60,120,240)]}
 
+    def cached(name: str):
+        return runtime.materialized_evidence_report(name)
+
     def final_report():
-        body = runtime.final_report()
+        body = cached("final_report")
         storage = getattr(app.state, "storage", None)
         if storage is None:
             body["backup_restore"] = {"status": "UNAVAILABLE"}
@@ -78,16 +81,23 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         "/api/research/g1s/path-metrics",
         lambda limit=500: runtime.path_metrics(limit=int(limit)),
         methods=["GET"], name="g1s_path_metrics")
-    app.add_api_route("/api/research/g1s/oos", runtime.prospective_oos,
+
+    # Full-history metrics are worker-materialized.  A request can never trigger
+    # an OOS scan, refit or economic replay merely because the UI opened.
+    app.add_api_route("/api/research/g1s/oos", lambda: cached("probability_oos"),
                       methods=["GET"], name="g1s_oos")
-    app.add_api_route("/api/research/g1s/continuous-oos", runtime.continuous_oos,
+    app.add_api_route("/api/research/g1s/continuous-oos", lambda: cached("continuous_oos"),
                       methods=["GET"], name="g1s_continuous_oos")
-    app.add_api_route("/api/research/g1s/calibration-oos", runtime.calibration_oos,
+    app.add_api_route("/api/research/g1s/calibration-oos", lambda: cached("calibration_oos"),
                       methods=["GET"], name="g1s_calibration_oos")
-    app.add_api_route("/api/research/g1s/ablation", runtime.ablation,
+    app.add_api_route("/api/research/g1s/ablation", lambda: cached("ablation"),
                       methods=["GET"], name="g1s_ablation")
-    app.add_api_route("/api/research/g1s/trade-relevance", runtime.trade_relevance,
+    app.add_api_route("/api/research/g1s/trade-relevance", lambda: cached("trade_relevance"),
                       methods=["GET"], name="g1s_trade_relevance")
+    app.add_api_route("/api/research/g1s/evidence-materialization",
+                      runtime.evidence_materialization_status,
+                      methods=["GET"], name="g1s_evidence_materialization")
+
     app.add_api_route("/api/research/g1/q/audit", runtime.q_audit,
                       methods=["GET"], name="g1_q_maturity_audit")
     app.add_api_route(
@@ -104,11 +114,13 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
     def runtime_status():
         worker = dict(getattr(app.state, "g1_research_worker", {}) or {})
         return {
-            "contract_version": "research-runtime-status-v1",
+            "contract_version": "research-runtime-status-v2",
             "worker": worker,
             "short_horizon": runtime.materializer_status(),
+            "evidence_materialization": runtime.evidence_materialization_status(),
             "management_local": local.status(),
             "market_collection_separate_from_research": True,
+            "request_time_full_history_evidence_scan": False,
             "production_authority": False,
         }
 
