@@ -10,37 +10,89 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 7
     steps:
-      - name: Read latest production AI snapshot over SSH
+      - name: Verify P0 production evidence over SSH
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 4m
+          command_timeout: 6m
           script: |
             set -euo pipefail
+            echo "PROD_SHA $(git -C /opt/seiltanzer rev-parse HEAD)"
+            echo "SERVICE $(systemctl is-active seiltanzer)"
             /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import json, sqlite3
-            db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro', uri=True); db.row_factory=sqlite3.Row
-            active=db.execute("SELECT id,entry,stop,take,status FROM trades WHERE status='open' ORDER BY opened_at DESC,id DESC LIMIT 1").fetchone()
-            print('ACTIVE', json.dumps(dict(active) if active else None, sort_keys=True))
+            import json, sqlite3, time, urllib.request
+            BASE='http://127.0.0.1:8790'
+            def get(path):
+                with urllib.request.urlopen(BASE+path, timeout=20) as r:
+                    return json.loads(r.read().decode())
+            def compact_age(ts):
+                return None if ts is None else round(max(0.0,time.time()-float(ts)),1)
+
+            passive=get('/api/research/passive/status')
+            health=passive.get('collector_health') or {}
+            print('COLLECTOR',json.dumps({
+                'operational':passive.get('operational_collector_status'),
+                'collector_status':passive.get('collector_status'),
+                'last_step_ts':health.get('last_step_ts'),
+                'latest_eligible':health.get('last_successful_eligible_capture_ts'),
+                'eligible_age_sec':health.get('eligible_capture_age_sec'),
+                'eligible_1h':health.get('eligible_captures_1h'),
+                'eligible_24h':health.get('eligible_captures_24h'),
+                'last_error_ts':health.get('last_error_ts'),
+                'last_error':health.get('last_error'),
+                'errors_by_family':health.get('errors_by_feature_family'),
+                'failed_cycles':health.get('consecutive_failed_capture_cycles'),
+                'market_open':health.get('market_open_any_supported_instrument'),
+                'cadence':health.get('expected_capture_cadence_sec'),
+            },sort_keys=True))
+
+            g1s=get('/api/research/g1s/status')
+            print('G1S',json.dumps({k:g1s.get(k) for k in ('observations','resolved','pending','models','prospective_shadow_predictions','critical_errors')},sort_keys=True))
+            obs=(get('/api/research/g1s/observations?limit=50').get('items') or [])
+            if obs:
+                latest=max(obs,key=lambda x:float(x.get('captured_ts') or 0))
+                print('LATEST_G1S',json.dumps({
+                    'id':latest.get('observation_id'),'instrument':latest.get('instrument'),
+                    'horizon':latest.get('horizon_minutes'),'captured_ts':latest.get('captured_ts'),
+                    'age_sec':compact_age(latest.get('captured_ts')),
+                    'measurement_eligible':latest.get('measurement_eligible'),
+                    'exclusion_reason':latest.get('exclusion_reason'),
+                },sort_keys=True))
+
+            db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True); db.row_factory=sqlite3.Row
+            trade112=db.execute("SELECT id,status,result_r FROM trades WHERE id=112").fetchone()
+            if trade112:
+                links=[dict(r) for r in db.execute('SELECT trade_id,observation_id,horizon_minutes,forecast_age_sec FROM g1s_trade_links WHERE trade_id=112 ORDER BY horizon_minutes')]
+                w=db.execute('SELECT COUNT(*) n,SUM(CASE WHEN evidence_eligible=1 THEN 1 ELSE 0 END) e FROM g1m_local_windows WHERE trade_id=112').fetchone()
+                o=db.execute('SELECT COUNT(*) n FROM g1m_local_outcomes o JOIN g1m_local_windows w USING(window_id) WHERE w.trade_id=112').fetchone()
+                print('TRADE112',json.dumps({'trade':dict(trade112),'g1s_links':links,'g1m_windows':int(w['n'] or 0),'g1m_eligible':int(w['e'] or 0),'g1m_resolved':int(o['n'] or 0)},sort_keys=True))
+
+            active=db.execute("SELECT id FROM trades WHERE status='open' ORDER BY opened_at DESC,id DESC LIMIT 1").fetchone()
             if active:
-                row=db.execute('SELECT id,ts,snapshot_json,verdict,model FROM ai_verdicts WHERE trade_id=? ORDER BY ts DESC,id DESC LIMIT 1',(int(active['id']),)).fetchone()
+                tid=int(active['id'])
+                row=db.execute('SELECT id,ts,snapshot_json,verdict,model FROM ai_verdicts WHERE trade_id=? ORDER BY ts DESC,id DESC LIMIT 1',(tid,)).fetchone()
                 if row:
-                    s=json.loads(row['snapshot_json']); m=s.get('policy_manager') or {}; ev=m.get('evidence') or {}; rootcov=s.get('metric_coverage') or {}; mcov=m.get('metric_coverage')
-                    print('AI_META', json.dumps({'id':row['id'],'ts':row['ts'],'model':row['model'],'root_metric_coverage_present':bool(rootcov),'manager_metric_coverage_present':bool(mcov)}, sort_keys=True))
-                    print('ROOT_COVERAGE', json.dumps(rootcov.get('summary') or rootcov, sort_keys=True)[:10000])
-                    audit=m.get('input_audit') or {}; print('INPUT_AUDIT', json.dumps({'available_count':audit.get('available_count'),'total_count':audit.get('total_count'),'rows':audit.get('rows')}, sort_keys=True)[:16000])
-                    risk=m.get('risk_constraint') or {}; rule=m.get('selection_rule') or {}; print('RISK_FLOORS',json.dumps({'risk':risk,'selection_floor':rule.get('cvar_floor_r'),'eligible':rule.get('eligible'),'ineligible':rule.get('ineligible')},sort_keys=True)[:8000])
-                    ods=m.get('option_derivative_state') or ev.get('option_derivative_state') or {}; metrics=ods.get('metrics') or {}
-                    compact={k:{x:v.get(x) for x in ('available','value','slope','acceleration','confidence','sample_count','time_span_minutes','source_quality','reason','units','value_units','slope_units')} for k,v in metrics.items() if isinstance(v,dict)}
-                    print('OPTION_DERIVATIVE_METRICS',json.dumps(compact,sort_keys=True)[:24000])
-                    print('EVIDENCE_KEYS', json.dumps(sorted(ev.keys())))
-                    print('MANAGER_KEYS', json.dumps(sorted(m.keys())))
-                    dq=((ev.get('data_quality') or {}).get('reliability') or {}); print('RELIABILITY',json.dumps(dq,sort_keys=True))
-                    print('GEOMETRY',json.dumps({'trade_geometry':s.get('trade_geometry'),'scenario_geometry':m.get('scenario_geometry')},sort_keys=True)[:10000])
+                    verdict=str(row['verdict'] or '')
+                    print('REPORT_CHECK',json.dumps({
+                        'trade_id':tid,'ai_id':int(row['id']),'model':row['model'],
+                        'has_coverage_0_0':'Покрытие: 0/0' in verdict,
+                        'has_structured_coverage':'Покрытие decision metrics:' in verdict,
+                        'has_bad_cvar':'-1.010R >= -1.000R' in verdict,
+                        'has_gross_floor':'Gross strategy CVaR floor:' in verdict,
+                        'has_net_floor':'Net selection floor:' in verdict,
+                        'has_62_2':'62.2% (4042/6500)' in verdict,
+                        'has_decimal_break':'62.\n' in verdict,
+                        'has_strategy_authority':'Авторитет плана: STRATEGY' in verdict,
+                        'has_plus_zero':'+0.00000' in verdict,
+                        'has_minus_zero':'-0.00000' in verdict,
+                        'has_metric_audit':'**FULL METRIC AUDIT**' in verdict,
+                        'has_unavailable_take_stop':'Authoritative execution-MC TAKE vs active STOP: UNAVAILABLE.' in verdict,
+                    },sort_keys=True))
+                    print('REPORT_HEAD',verdict[:12000].replace('\n','\\n'))
             db.close()
             PY
