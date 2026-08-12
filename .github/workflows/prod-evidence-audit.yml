@@ -104,3 +104,8 @@ jobs:
                 "scalability_refinement_version"
             )}, sort_keys=True))
             PY
+
+            echo '--- compute_wavelet_analysis call sites ---'
+            grep -R -n --include='*.py' 'compute_wavelet_analysis' /opt/seiltanzer/seiltanzer || true
+            echo '--- scale keyword near analytics code ---'
+            grep -R -n --include='*.py' 'scale=' /opt/seiltanzer/seiltanzer | head -100 || true
