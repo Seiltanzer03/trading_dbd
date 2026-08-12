@@ -28,8 +28,6 @@ def _run_g1s_bounded(runtime) -> dict:
     materialized = runtime.materialize_new(limit=G1S_BATCH)
     resolved = runtime.resolve_new(limit=G1S_BATCH)
 
-    # Incremental counters are refreshed from immutable rowid watermarks.  This is
-    # the authoritative fast source for request-time G.1S status/readiness.
     status_refresh = runtime.refresh_materialized_status(limit=10000)
     now = time.time()
 
@@ -39,10 +37,6 @@ def _run_g1s_bounded(runtime) -> dict:
         links = runtime.materialize_trade_links()
         runtime._g1s_worker_last_trade_links_ts = now
 
-    # Fitting requires a full training cut by definition. Never perform that scan
-    # every ten seconds. The cheap materialized evidence gate decides whether a fit
-    # attempt is even possible, then the existing 6h/delta refit contract remains
-    # authoritative inside fit_if_ready().
     models = 0
     last_fit = float(getattr(runtime, "_g1s_worker_last_fit_gate_ts", 0.0) or 0.0)
     fit_due = now-last_fit >= FIT_GATE_INTERVAL_SEC
@@ -53,18 +47,19 @@ def _run_g1s_bounded(runtime) -> dict:
         if fit_ready:
             models = runtime.fit_if_ready()
 
-    # Derived outcome materializers are intentionally separate from runtime.step().
-    # Calling step() here would repeat the default source scan and defeat the
-    # bounded-worker contract.
     from .g1_short_horizon_refinement import _materialize_barriers
     from .g1_short_horizon_metrics_refinement import _materialize_path_metrics
     barrier_rows = _materialize_barriers(runtime, limit=G1S_BATCH)
     path_metric_rows = _materialize_path_metrics(runtime, limit=G1S_BATCH)
 
-    # Expensive full-history OOS/economic reports are explicitly worker-owned.
-    # The materializer itself enforces a >=5m refresh interval and returns quickly
-    # when source rowid signatures are unchanged. HTTP endpoints read frozen JSON.
-    evidence_reports = runtime.materialize_evidence_reports()
+    # Production ShortHorizonRuntime always has this method after package install.
+    # Minimal test doubles and compatibility callers are allowed to omit it; the
+    # evidence cache is presentation-only and must never make core resolution fail.
+    evidence_fn = getattr(runtime, "materialize_evidence_reports", None)
+    evidence_reports = (
+        evidence_fn() if callable(evidence_fn)
+        else {"refreshed": False, "reason": "MATERIALIZER_UNAVAILABLE"}
+    )
     return {
         "materialized": materialized,
         "resolved": resolved,
@@ -129,7 +124,7 @@ def install_research_worker(app) -> None:
                         "g1m_local": g1m_result,
                     }
                     state["last_error"] = None
-                except Exception as exc:  # fail visible; production service stays alive
+                except Exception as exc:
                     state["last_error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
                 state["last_finished_ts"] = time.time()
                 state["last_duration_ms"] = (
