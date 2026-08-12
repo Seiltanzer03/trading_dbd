@@ -62,6 +62,16 @@ def _run_g1s_bounded(runtime) -> dict:
         evidence_fn() if callable(evidence_fn)
         else {"refreshed": False, "reason": "MATERIALIZER_UNAVAILABLE"}
     )
+
+    # P1B historical walk-forward is a one-time/versioned research bootstrap.
+    # The first run may perform network I/O and large numpy fits, therefore it
+    # lives only on this low-priority worker.  Subsequent calls are a persisted
+    # O(1) ALREADY_MATERIALIZED check.  Failure cannot stop the market collector.
+    historical_fn = getattr(runtime, "materialize_historical_walkforward", None)
+    historical_wf = (
+        historical_fn() if callable(historical_fn)
+        else {"refreshed": False, "reason": "HISTORICAL_WF_UNAVAILABLE"}
+    )
     return {
         "materialized": materialized,
         "resolved": resolved,
@@ -73,6 +83,7 @@ def _run_g1s_bounded(runtime) -> dict:
         "barrier_rows_created": barrier_rows,
         "path_metrics_created": path_metric_rows,
         "evidence_reports": evidence_reports,
+        "historical_walk_forward": historical_wf,
         "batch_limit": G1S_BATCH,
     }
 
@@ -105,6 +116,8 @@ def install_research_worker(app) -> None:
         "fit_gate_interval_sec": FIT_GATE_INTERVAL_SEC,
         "trade_link_interval_sec": TRADE_LINK_INTERVAL_SEC,
         "evidence_reports_request_time_scan": False,
+        "historical_walkforward_runs_on_research_worker": True,
+        "historical_walkforward_request_time_network_fetch": False,
     }
     original_lifespan = app.router.lifespan_context
 
