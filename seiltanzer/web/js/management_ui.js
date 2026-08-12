@@ -1,3 +1,9 @@
+import { mountG1SEvidencePanel } from './g1s_evidence.js';
+
+// Mount once from an already-loaded main-dashboard module. The evidence panel is
+// independent from management execution and reads research-only bounded APIs.
+mountG1SEvidencePanel();
+
 // Pure management-decision UI. The backend remains authoritative.
 export function mountManagementDecision(container, decision, post, onApplied = () => {}) {
   container.replaceChildren();
