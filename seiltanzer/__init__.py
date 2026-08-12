@@ -180,3 +180,10 @@ del _install_g1_operational_integrity
 from .g1_short_horizon_champion_runtime import install_g1_short_horizon_champion_runtime as _install_g1_short_horizon_champion_runtime
 _install_g1_short_horizon_champion_runtime()
 del _install_g1_short_horizon_champion_runtime
+
+# P1B is installed after the champion layer because a historical winner is only
+# a provisional artifact.  It receives a new LIVE_PROSPECTIVE_OOS cohort and
+# never rewrites or counts historical folds as live validation evidence.
+from .g1_short_horizon_historical_wf import install_g1_short_horizon_historical_wf as _install_g1_short_horizon_historical_wf
+_install_g1_short_horizon_historical_wf()
+del _install_g1_short_horizon_historical_wf
