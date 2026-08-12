@@ -11,7 +11,7 @@ import urllib.request
 
 BASE = "http://127.0.0.1:8790"
 FAST_TIMEOUT = 5.0
-SCHEMA_BACKUP_MAX_AGE_SEC = 1800.0
+SCHEMA_BACKUP_MAX_AGE_SEC = 15 * 60.0
 EVIDENCE_REPORTS = {
     "probability_oos", "continuous_oos", "calibration_oos",
     "ablation", "trade_relevance", "final_report",
@@ -163,6 +163,7 @@ def verify(expected_sha: str) -> None:
     assert storage.get("research_health_decoupled") is True, storage
     assert storage.get("request_time_integrity_scan") is False, storage
     assert storage.get("health") in {"HEALTHY", "LOCAL_BACKUP_ONLY", "DISASTER_RECOVERY_DEGRADED"}, storage
+    assert float(storage.get("rpo_target_sec") or 1e9) <= SCHEMA_BACKUP_MAX_AGE_SEC, storage
 
     worker = runtime.get("worker") or {}
     assert runtime.get("market_collection_separate_from_research") is True, runtime
