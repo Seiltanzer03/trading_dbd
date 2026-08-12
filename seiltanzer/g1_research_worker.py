@@ -16,7 +16,9 @@ import time
 
 
 RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
-RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v5"
+# Preserve the published scalability contract. Evidence-report materialization has
+# its own versioned contract and does not require an incompatible worker version.
+RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v4"
 RESEARCH_INTERVAL_SEC = 10.0
 G1S_BATCH = 500
 G1M_LOCAL_BATCH = 100
