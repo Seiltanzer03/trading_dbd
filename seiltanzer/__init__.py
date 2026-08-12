@@ -158,3 +158,13 @@ del _install_g1_short_horizon_walkforward
 from .g1_short_horizon_probability_selection import install_g1_short_horizon_probability_selection as _install_g1_short_horizon_probability_selection
 _install_g1_short_horizon_probability_selection()
 del _install_g1_short_horizon_probability_selection
+
+# Phase H2 collects a much wider immutable T0 state for future family ablation.
+# It deliberately does not change V1/V2 model dimensions or production authority.
+from .g1_management_feature_context_v2 import install_g1_management_feature_context_v2 as _install_g1_management_feature_context_v2
+_install_g1_management_feature_context_v2()
+del _install_g1_management_feature_context_v2
+
+from .g1_broad_market_evidence_v3 import install_g1_broad_market_evidence_v3 as _install_g1_broad_market_evidence_v3
+_install_g1_broad_market_evidence_v3()
+del _install_g1_broad_market_evidence_v3
