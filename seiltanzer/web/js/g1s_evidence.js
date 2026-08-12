@@ -47,6 +47,14 @@ function firstModel(report) {
     .sort((a, b) => Number(b.oos?.effective_n || 0) - Number(a.oos?.effective_n || 0))[0] || null;
 }
 
+function firstCalibration(report) {
+  const items = Array.isArray(report?.items) ? report.items : [];
+  if (!items.length) return null;
+  return items
+    .filter((item) => item)
+    .sort((a, b) => Number(b.effective_n || 0) - Number(a.effective_n || 0))[0] || null;
+}
+
 function injectStyles() {
   if (document.getElementById('g1s-evidence-style')) return;
   const style = document.createElement('style');
@@ -144,18 +152,23 @@ function render(payload) {
 
   const pModel = firstModel(probability);
   const cModel = firstModel(continuous);
-  const calModel = firstModel(calibration);
+  const calModel = firstCalibration(calibration);
   const pOos = pModel?.oos || {};
   const cOos = cModel?.oos || {};
+  const probabilityRepresentation = calibration?.does_best_probability_representation_beat_baselines_oos || finalReport?.oos_status?.best_probability_representation || 'INSUFFICIENT';
+  const calibrationValue = calibration?.does_calibration_add_value_oos || finalReport?.oos_status?.calibration_value_added || 'INSUFFICIENT';
+  const selectedRepresentation = calModel?.selected_probability_representation || '—';
+  const selectedBrier = selectedRepresentation === 'CALIBRATED' ? calModel?.calibrated_brier : (calModel?.raw_brier ?? pOos.brier);
+  const selectedLogLoss = selectedRepresentation === 'CALIBRATED' ? calModel?.calibrated_log_loss : (calModel?.raw_log_loss ?? pOos.log_loss);
 
   const summary = el('div', 'g1s-ev-summary');
   summary.append(
     metricCard('FINAL EDGE', overall, 'OOS + real-trade + G1-M.1', overall),
-    metricCard('STATISTICAL OOS', statistical, `P=${probability?.does_model_beat_baseline_oos || '—'} · R=${continuous?.does_continuous_model_beat_baseline_oos || '—'}`, statistical),
+    metricCard('STATISTICAL OOS', statistical, `P*=${probabilityRepresentation} · R=${continuous?.does_continuous_model_beat_baseline_oos || '—'} · rawP=${probability?.does_model_beat_baseline_oos || '—'}`, statistical),
     metricCard('ECONOMIC CHECK', economic, `trades ${trade.unique_trades ?? 0} · G1M ${management.unique_trades ?? 0}`, economic),
-    metricCard('PROBABILITY', pOos.brier == null ? '—' : `Brier ${value(pOos.brier, 4)}`, `logloss ${value(pOos.log_loss, 4)} · n_eff ${pOos.effective_n ?? 0}`, pModel?.does_model_beat_baseline_oos || 'INSUFFICIENT'),
+    metricCard('PROBABILITY · SELECTED', selectedBrier == null ? '—' : `Brier ${value(selectedBrier, 4)}`, `${selectedRepresentation} · logloss ${value(selectedLogLoss, 4)} · n_eff ${calModel?.effective_n ?? pOos.effective_n ?? 0}`, probabilityRepresentation),
     metricCard('CONTINUOUS RETURN', cOos.mae == null ? '—' : `MAE ${value(cOos.mae, 5)}`, `RMSE ${value(cOos.rmse, 5)} · n_eff ${cOos.effective_n ?? 0}`, cModel?.does_continuous_model_beat_baseline_oos || 'INSUFFICIENT'),
-    metricCard('CALIBRATION', calModel?.calibrated_ece == null ? '—' : `ECE ${value(calModel.calibrated_ece, 4)}`, `raw/cal Brier ${value(calModel?.raw_brier, 4)} / ${value(calModel?.calibrated_brier, 4)}`, calModel?.does_calibration_beat_raw_and_baselines_oos || calibration?.does_calibration_beat_raw_and_baselines_oos || 'INSUFFICIENT')
+    metricCard('CALIBRATION VALUE', calModel?.calibrated_ece == null ? '—' : `ECE ${value(calModel.calibrated_ece, 4)}`, `value-add ${calibrationValue} · raw/cal Brier ${value(calModel?.raw_brier, 4)} / ${value(calModel?.calibrated_brier, 4)}`, calibrationValue)
   );
   body.append(summary);
   renderHorizons(body, status, finalReport);
