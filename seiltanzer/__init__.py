@@ -131,3 +131,9 @@ del _install_g1_short_horizon_continuous_learning
 from .g1_short_horizon_calibration import install_g1_short_horizon_calibration as _install_g1_short_horizon_calibration
 _install_g1_short_horizon_calibration()
 del _install_g1_short_horizon_calibration
+
+# Additive V2 features preserve every V1 model artifact/dimension while future
+# observations receive strict pre-T0 market/option/cross-asset/wavelet context.
+from .g1_short_horizon_feature_contract_v2 import install_g1_short_horizon_feature_contract_v2 as _install_g1_short_horizon_feature_contract_v2
+_install_g1_short_horizon_feature_contract_v2()
+del _install_g1_short_horizon_feature_contract_v2
