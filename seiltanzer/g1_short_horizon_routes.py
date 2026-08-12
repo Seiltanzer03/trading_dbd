@@ -35,6 +35,10 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         lambda limit=100: runtime.models(limit=int(limit)),
         methods=["GET"], name="g1s_models")
     app.add_api_route(
+        "/api/research/g1s/return-models",
+        lambda limit=100: runtime.return_models(limit=int(limit)),
+        methods=["GET"], name="g1s_return_models")
+    app.add_api_route(
         "/api/research/g1s/cuts",
         lambda limit=100: runtime.cuts(limit=int(limit)),
         methods=["GET"], name="g1s_cuts")
@@ -42,8 +46,14 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         "/api/research/g1s/barriers",
         lambda limit=500: runtime.barriers(limit=int(limit)),
         methods=["GET"], name="g1s_barriers")
+    app.add_api_route(
+        "/api/research/g1s/path-metrics",
+        lambda limit=500: runtime.path_metrics(limit=int(limit)),
+        methods=["GET"], name="g1s_path_metrics")
     app.add_api_route("/api/research/g1s/oos", runtime.prospective_oos,
                       methods=["GET"], name="g1s_oos")
+    app.add_api_route("/api/research/g1s/continuous-oos", runtime.continuous_oos,
+                      methods=["GET"], name="g1s_continuous_oos")
     app.add_api_route("/api/research/g1s/ablation", runtime.ablation,
                       methods=["GET"], name="g1s_ablation")
     app.add_api_route("/api/research/g1s/trade-relevance", runtime.trade_relevance,
