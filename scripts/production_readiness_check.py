@@ -12,6 +12,10 @@ import urllib.request
 BASE = "http://127.0.0.1:8790"
 FAST_TIMEOUT = 5.0
 SCHEMA_BACKUP_MAX_AGE_SEC = 1800.0
+EVIDENCE_REPORTS = {
+    "probability_oos", "continuous_oos", "calibration_oos",
+    "ablation", "trade_relevance", "final_report",
+}
 REQUIRED_BACKUP_TABLES = (
     "trades", "passive_market_observations", "g1_q_capture_attempts",
     "g1m_management_observations", "g1m_resolutions", "g1m_policy_outcomes",
@@ -100,6 +104,25 @@ def wait_fast_resolved() -> dict:
     raise AssertionError("H15/H30/H60 did not materialize resolved evidence within 90 seconds")
 
 
+def wait_evidence_materialized() -> tuple[dict, dict]:
+    """Wait for worker-owned frozen evidence; never request a live full-history scan."""
+    latest_status: dict = {}
+    latest_final: dict = {}
+    for attempt in range(1, 31):
+        latest_status = assert_fast("/api/research/g1s/evidence-materialization", budget_ms=3000)
+        reports = latest_status.get("reports") or []
+        names = {str(row.get("report_name")) for row in reports}
+        complete = EVIDENCE_REPORTS.issubset(names)
+        latest_final = assert_fast("/api/research/g1s/final-report", budget_ms=3000)
+        final_ready = latest_final.get("status") != "BUILDING"
+        print("evidence attempt=", attempt, "reports=", sorted(names),
+              "final=", latest_final.get("does_model_beat_baseline_oos") or latest_final.get("status"))
+        if complete and final_ready:
+            return latest_status, latest_final
+        time.sleep(3)
+    raise AssertionError("worker did not materialize complete G1S evidence within 90 seconds")
+
+
 def verify(expected_sha: str) -> None:
     wait_core(expected_sha)
     fast_paths = [
@@ -108,9 +131,11 @@ def verify(expected_sha: str) -> None:
         ("/api/system/storage/backups", None), ("/api/research/runtime/status", 3000),
         ("/api/research/runtime/materializers", None), ("/api/research/g1s/status", 3000),
         ("/api/research/g1s/horizons", None), ("/api/research/g1s/barriers", None),
-        ("/api/research/g1s/cuts", None), ("/api/research/g1s/oos", None),
-        ("/api/research/g1s/continuous-oos", None), ("/api/research/g1s/calibration-oos", None),
-        ("/api/research/g1s/ablation", None), ("/api/research/g1s/trade-relevance", None),
+        ("/api/research/g1s/cuts", None), ("/api/research/g1s/oos", 3000),
+        ("/api/research/g1s/continuous-oos", 3000), ("/api/research/g1s/calibration-oos", 3000),
+        ("/api/research/g1s/ablation", 3000), ("/api/research/g1s/trade-relevance", 3000),
+        ("/api/research/g1s/evidence-materialization", 3000),
+        ("/api/research/g1s/final-report", 3000),
         ("/api/research/g1/q/audit?limit=5000", None),
         ("/api/research/g1/intelligence/status", None),
         ("/api/research/g1/management/status", 3000),
@@ -124,6 +149,7 @@ def verify(expected_sha: str) -> None:
     assert integrity.get("check_kind") == "quick_check", integrity
 
     g1s = wait_fast_resolved()
+    evidence_status, final_report = wait_evidence_materialized()
     storage = bodies["/api/system/storage/status"]
     backups = bodies["/api/system/storage/backups"]
     db_auth = bodies["/api/system/database-authority"]
@@ -140,8 +166,19 @@ def verify(expected_sha: str) -> None:
 
     worker = runtime.get("worker") or {}
     assert runtime.get("market_collection_separate_from_research") is True, runtime
+    assert runtime.get("request_time_full_history_evidence_scan") is False, runtime
     assert worker.get("contract_version") == "g1-research-worker-v1", worker
+    assert worker.get("scalability_refinement_version") == "g1-research-worker-bounded-v4", worker
+    assert worker.get("evidence_reports_request_time_scan") is False, worker
     assert worker.get("running") is True, worker
+    assert evidence_status.get("request_time_full_history_scan") is False, evidence_status
+    assert {str(row.get("report_name")) for row in evidence_status.get("reports") or []} >= EVIDENCE_REPORTS
+
+    assert final_report.get("production_authority") is False, final_report
+    assert final_report.get("production_authority_changed") is False, final_report
+    assert final_report.get("edge_claim_allowed") is False, final_report
+    assert final_report.get("auto_promotion_allowed") is False, final_report
+    assert final_report.get("does_model_beat_baseline_oos") in {"YES", "NO", "INSUFFICIENT"}, final_report
 
     local = backups.get("local") or []
     assert local and local[0].get("verified") is True, backups
@@ -174,6 +211,7 @@ def verify(expected_sha: str) -> None:
     print("G1S", json.dumps({h: {"raw": by[h].get("raw_resolved"),
         "effective": by[h].get("effective_n"), "state": by[h].get("state")}
         for h in sorted(by)}, sort_keys=True))
+    print("EDGE_VERDICT", final_report.get("does_model_beat_baseline_oos"))
     print("Q_AUDIT", json.dumps(q.get("counts") or {}, sort_keys=True))
     print("G1M_LOCAL", json.dumps({k: g1ml.get(k) for k in
         ("windows", "resolved", "evidence_eligible", "eligible_resolved")}, sort_keys=True))
