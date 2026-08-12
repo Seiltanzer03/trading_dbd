@@ -115,25 +115,18 @@ from .g1_short_horizon_status_integrity import install_g1_short_horizon_status_i
 _install_g1_short_horizon_status_integrity()
 del _install_g1_short_horizon_status_integrity
 
-# Conservative OOS evidence must be installed after older descriptive layers.
 from .g1_short_horizon_evidence_completion import install_g1_short_horizon_evidence_completion as _install_g1_short_horizon_evidence_completion
 _install_g1_short_horizon_evidence_completion()
 del _install_g1_short_horizon_evidence_completion
 
-# Continuous return learning wraps the completed evidence/status contracts but
-# remains research-only and cannot relax any OOS or production-authority gate.
 from .g1_short_horizon_continuous_learning import install_g1_short_horizon_continuous_learning as _install_g1_short_horizon_continuous_learning
 _install_g1_short_horizon_continuous_learning()
 del _install_g1_short_horizon_continuous_learning
 
-# Platt calibration is trained only from already-resolved prospective predictions
-# and may be applied only to later T0 observations.
 from .g1_short_horizon_calibration import install_g1_short_horizon_calibration as _install_g1_short_horizon_calibration
 _install_g1_short_horizon_calibration()
 del _install_g1_short_horizon_calibration
 
-# Additive V2 features preserve every V1 model artifact/dimension while future
-# observations receive strict pre-T0 market/option/cross-asset/wavelet context.
 from .g1_short_horizon_feature_contract_v2 import install_g1_short_horizon_feature_contract_v2 as _install_g1_short_horizon_feature_contract_v2
 _install_g1_short_horizon_feature_contract_v2()
 del _install_g1_short_horizon_feature_contract_v2
@@ -141,3 +134,9 @@ del _install_g1_short_horizon_feature_contract_v2
 from .g1_short_horizon_feature_v2_integrity import install_g1_short_horizon_feature_v2_integrity as _install_g1_short_horizon_feature_v2_integrity
 _install_g1_short_horizon_feature_v2_integrity()
 del _install_g1_short_horizon_feature_v2_integrity
+
+# Installed last: V2 continuous predictions run after V2 direction and reapply
+# only causal pre-T0 calibrators, closing wrapper ordering without touching V1.
+from .g1_short_horizon_continuous_v2 import install_g1_short_horizon_continuous_v2 as _install_g1_short_horizon_continuous_v2
+_install_g1_short_horizon_continuous_v2()
+del _install_g1_short_horizon_continuous_v2
