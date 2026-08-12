@@ -92,9 +92,17 @@ jobs:
                 "observations", "resolved", "pending", "models", "prospective_shadow_predictions",
                 "critical_errors"
             )}, sort_keys=True))
-            print("FINAL", json.dumps({k: final.get(k) for k in (
-                "status", "does_model_beat_baseline_oos", "edge_claim_allowed", "production_authority"
-            )}, sort_keys=True))
+            print("FINAL", json.dumps({
+                "does_model_beat_baseline_oos": final.get("does_model_beat_baseline_oos"),
+                "oos_status": final.get("oos_status"),
+                "economic_plausibility": final.get("economic_plausibility"),
+                "g1m_local": final.get("g1m_local"),
+                "real_trade_relevance": final.get("real_trade_relevance"),
+                "learned_models": final.get("learned_models"),
+                "best_preliminary_probability_model": final.get("best_preliminary_probability_model"),
+                "edge_claim_allowed": final.get("edge_claim_allowed"),
+                "production_authority": final.get("production_authority"),
+            }, sort_keys=True))
             print("G1M_LOCAL", json.dumps({k: g1ml.get(k) for k in (
                 "windows", "resolved", "evidence_eligible", "eligible_resolved", "critical_errors"
             )}, sort_keys=True))
