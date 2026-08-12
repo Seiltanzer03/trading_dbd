@@ -93,11 +93,18 @@ def test_existing_prospective_fixed_horizons_become_fast_g1s_evidence(runtime):
     assert source_resolution["resolved"] >= 3
     assert rt.resolve_new() >= 3
 
+    # Status is deliberately read-only/materialized now; the low-priority worker
+    # performs this incremental watermark refresh rather than status() rescanning
+    # all resolved observations on every HTTP request.
+    refreshed = rt.refresh_materialized_status(limit=10000)
+    assert refreshed["observations_processed"] == 5
+    assert refreshed["resolutions_processed"] >= 3
     status = rt.status()
     by_horizon = {row["horizon_minutes"]: row for row in status["horizons"]}
     assert by_horizon[15]["raw_resolved"] >= 1
     assert by_horizon[30]["raw_resolved"] >= 1
     assert by_horizon[60]["raw_resolved"] >= 1
+    assert status["status_materialization"]["lag_rows"] == 0
     assert status["authority"]["production_authority"] is False
     assert status["authority"]["edge_claim_allowed"] is False
 
