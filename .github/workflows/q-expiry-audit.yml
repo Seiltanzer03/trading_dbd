@@ -1,0 +1,79 @@
+name: q-expiry-audit
+
+on:
+  push:
+    branches: [agent/prod-telemetry-snapshot-20260812]
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux, x64, seiltanzer-prod]
+    timeout-minutes: 3
+    steps:
+      - name: Audit authoritative Q maturity read-only
+        run: |
+          set -euo pipefail
+          DB=/opt/seiltanzer/data/trades.db
+          DB="$DB" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import os, sqlite3, time, json, statistics, datetime
+          now=time.time(); db=os.environ['DB']
+          con=sqlite3.connect(f'file:{db}?mode=ro',uri=True,timeout=5); con.row_factory=sqlite3.Row
+          rows=con.execute('''
+            SELECT q.attempt_id,q.attempt_ts,q.target_instrument,q.created_observation_id,
+                   q.observation_created,q.blocker_code,q.requested_expiry_ts,
+                   p.target_ts,p.resolution_status,p.instrument
+            FROM g1_q_capture_attempts q
+            LEFT JOIN passive_market_observations p ON p.observation_id=q.created_observation_id
+            WHERE q.observation_created=1
+            ORDER BY p.target_ts
+          ''').fetchall()
+          counts={}
+          targets=[]; overdue=[]
+          for r in rows:
+              target=float(r['target_ts']) if r['target_ts'] is not None else None
+              status=str(r['resolution_status'] or '')
+              if status=='resolved': state='RESOLVED'
+              elif status!='pending': state='BLOCKED_'+status.upper()
+              elif target is None: state='NO_TARGET'
+              elif target>now: state='NOT_DUE_YET'; targets.append(target)
+              else: state='DUE_PENDING'; overdue.append((r['attempt_id'],r['target_instrument'],target,now-target))
+              counts[state]=counts.get(state,0)+1
+          print('NOW',now,datetime.datetime.fromtimestamp(now,datetime.timezone.utc).isoformat())
+          print('CAPTURED',len(rows))
+          print('COUNTS',json.dumps(counts,sort_keys=True))
+          if targets:
+              st=sorted(targets)
+              print('PENDING_TARGETS',json.dumps({
+                'earliest':st[0], 'earliest_utc':datetime.datetime.fromtimestamp(st[0],datetime.timezone.utc).isoformat(),
+                'median':statistics.median(st), 'median_utc':datetime.datetime.fromtimestamp(statistics.median(st),datetime.timezone.utc).isoformat(),
+                'latest':st[-1], 'latest_utc':datetime.datetime.fromtimestamp(st[-1],datetime.timezone.utc).isoformat(),
+                'hours_to_earliest':(st[0]-now)/3600,
+              },sort_keys=True))
+          print('OVERDUE_SAMPLE',json.dumps(overdue[:20]))
+          by_inst={}
+          for r in rows:
+              inst=str(r['target_instrument']); target=r['target_ts']; status=str(r['resolution_status'] or '')
+              d=by_inst.setdefault(inst,{'captured':0,'resolved':0,'pending_future':0,'due_pending':0,'blocked':0,'earliest':None})
+              d['captured']+=1
+              if status=='resolved': d['resolved']+=1
+              elif status!='pending': d['blocked']+=1
+              elif target is not None and float(target)>now:
+                  d['pending_future']+=1; d['earliest']=float(target) if d['earliest'] is None else min(d['earliest'],float(target))
+              else: d['due_pending']+=1
+          print('BY_INSTRUMENT',json.dumps(by_inst,sort_keys=True))
+          con.close()
+          PY
+      - name: Publish locator
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+            -d "{\"state\":\"success\",\"context\":\"diag/q-expiry-audit\",\"description\":\"Read-only production Q expiry audit complete\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
