@@ -1,0 +1,106 @@
+name: prod-evidence-audit
+
+on:
+  push:
+    branches: [agent/evidence-audit-20260812]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Read production research evidence over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 4m
+          script: |
+            set -euo pipefail
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import collections
+            import json
+            import time
+            import urllib.request
+
+            BASE = "http://127.0.0.1:8790"
+
+            def get(path):
+                with urllib.request.urlopen(BASE + path, timeout=15) as response:
+                    return json.loads(response.read().decode("utf-8"))
+
+            def age(ts):
+                return None if not ts else round(max(0.0, time.time() - float(ts)), 1)
+
+            passive = get("/api/research/passive/status")
+            g1s = get("/api/research/g1s/status")
+            horizons = get("/api/research/g1s/horizons")
+            final = get("/api/research/g1s/final-report")
+            observations = (get("/api/research/g1s/observations?limit=1000").get("items") or [])
+            g1ml = get("/api/research/g1/management/local-status")
+            runtime = get("/api/research/runtime/status")
+
+            print("PASSIVE", json.dumps({
+                "collector_status": passive.get("collector_status"),
+                "last_step_age_sec": age(passive.get("last_step_ts")),
+                "last_skip_reason": passive.get("last_skip_reason"),
+                "last_successful_capture_age_sec": age(passive.get("last_successful_capture_ts")),
+                "last_successful_resolution_age_sec": age(passive.get("last_successful_resolution_ts")),
+                "latest_error": passive.get("latest_error"),
+                "raw_n": passive.get("raw_n"),
+                "current_f32_n": passive.get("current_f32_n"),
+                "fixed_horizon_raw_n": passive.get("fixed_horizon_raw_n"),
+                "effective_n": passive.get("effective_n"),
+                "last_observation_per_instrument": passive.get("last_observation_per_instrument"),
+            }, sort_keys=True))
+
+            exclusion = collections.Counter(str(x.get("exclusion_reason") or "NONE") for x in observations)
+            origin = collections.Counter(str(x.get("origin") or "NONE") for x in observations)
+            eligibility = collections.Counter(str(x.get("measurement_eligible")) for x in observations)
+            by_horizon = collections.defaultdict(lambda: {"n": 0, "eligible": 0, "latest": 0.0})
+            for row in observations:
+                h = str(row.get("horizon_minutes"))
+                bucket = by_horizon[h]
+                bucket["n"] += 1
+                bucket["eligible"] += int(row.get("measurement_eligible") or 0)
+                bucket["latest"] = max(bucket["latest"], float(row.get("captured_ts") or 0.0))
+            for bucket in by_horizon.values():
+                bucket["latest_age_sec"] = age(bucket.pop("latest"))
+
+            print("G1S_RECENT", json.dumps({
+                "sample_n": len(observations),
+                "origins": dict(origin),
+                "measurement_eligible": dict(eligibility),
+                "exclusion_reasons": dict(exclusion),
+                "by_horizon": dict(by_horizon),
+            }, sort_keys=True))
+
+            compact_horizons = []
+            for row in horizons.get("items") or []:
+                compact_horizons.append({k: row.get(k) for k in (
+                    "horizon_minutes", "raw_resolved", "effective_n", "positive_n", "negative_n",
+                    "trading_days", "pending", "state", "oos_candidate", "oos_candidate_blockers",
+                    "volatility_regime_count", "unique_temporal_anchors", "model_n"
+                )})
+            print("G1S_HORIZONS", json.dumps(compact_horizons, sort_keys=True))
+            print("G1S_TOTAL", json.dumps({k: g1s.get(k) for k in (
+                "observations", "resolved", "pending", "models", "prospective_shadow_predictions",
+                "critical_errors"
+            )}, sort_keys=True))
+            print("FINAL", json.dumps({k: final.get(k) for k in (
+                "status", "does_model_beat_baseline_oos", "edge_claim_allowed", "production_authority"
+            )}, sort_keys=True))
+            print("G1M_LOCAL", json.dumps({k: g1ml.get(k) for k in (
+                "windows", "resolved", "evidence_eligible", "eligible_resolved", "critical_errors"
+            )}, sort_keys=True))
+            worker = runtime.get("worker") or {}
+            print("WORKER", json.dumps({k: worker.get(k) for k in (
+                "running", "last_started_ts", "last_finished_ts", "last_duration_ms", "last_error",
+                "scalability_refinement_version"
+            )}, sort_keys=True))
+            PY
