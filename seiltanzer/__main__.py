@@ -31,6 +31,7 @@ from .storage_fast_status_refinement import install_storage_fast_status
 from .storage_refinement import install_storage_refinement
 from .storage_routes import install_storage_routes
 from .storage_runtime import install_storage_runtime, prepare_storage
+from .storage_schema_registry_integrity import install_storage_schema_registry_integrity
 
 
 def main() -> None:
@@ -63,6 +64,9 @@ def main() -> None:
     install_storage_refinement()
     install_storage_disk_guard()
     install_g1_management_storage()
+    # storage_refinement is legacy and replaces the registry it sees. Re-union
+    # every currently registered G.1S/G.1-M table before the first manifest.
+    install_storage_schema_registry_integrity()
 
     settings = Settings(demo=args.demo, stream=args.stream, host=args.host,
                         port=args.port, data_dir=args.data_dir)
