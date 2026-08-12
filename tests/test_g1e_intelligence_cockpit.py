@@ -115,8 +115,12 @@ def test_intelligence_routes_are_zero_safe_cold_then_warm_live(tmp_path):
             assert page.status_code == 200
             assert "INTELLIGENCE LAB" in page.text
             assert "RAW Q → OBSERVED FREQUENCY" in page.text
+            assert "FAST MARKET LEARNING" in page.text
+            assert "OPTION Q · SLOW STRUCTURAL" in page.text
+            assert "LOCAL MANAGEMENT FEEDBACK" in page.text
             assert "reliability" in page.text.lower()
-            assert page.headers["x-seiltanzer-intelligence-page"] == "g1e-reliability-presentation-v1"
+            assert page.headers["x-seiltanzer-intelligence-page"] == \
+                "g1e-two-speed-learning-presentation-v1"
             status = client.get("/api/research/g1/intelligence/status")
             assert status.status_code == 200
             body = status.json()
