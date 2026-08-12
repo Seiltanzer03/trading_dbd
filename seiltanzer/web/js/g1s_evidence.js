@@ -155,18 +155,20 @@ function render(payload) {
   const calModel = firstCalibration(calibration);
   const pOos = pModel?.oos || {};
   const cOos = cModel?.oos || {};
+  const rawProbability = probability?.does_model_beat_baseline_oos || finalReport?.oos_status?.raw_probability || 'INSUFFICIENT';
   const probabilityRepresentation = calibration?.does_best_probability_representation_beat_baselines_oos || finalReport?.oos_status?.best_probability_representation || 'INSUFFICIENT';
+  const probabilityGate = finalReport?.oos_status?.probability_gate || (probabilityRepresentation !== 'INSUFFICIENT' ? probabilityRepresentation : rawProbability);
   const calibrationValue = calibration?.does_calibration_add_value_oos || finalReport?.oos_status?.calibration_value_added || 'INSUFFICIENT';
-  const selectedRepresentation = calModel?.selected_probability_representation || '—';
+  const selectedRepresentation = calModel?.selected_probability_representation || ((probabilityRepresentation === 'INSUFFICIENT' && rawProbability !== 'INSUFFICIENT') ? 'RAW' : '—');
   const selectedBrier = selectedRepresentation === 'CALIBRATED' ? calModel?.calibrated_brier : (calModel?.raw_brier ?? pOos.brier);
   const selectedLogLoss = selectedRepresentation === 'CALIBRATED' ? calModel?.calibrated_log_loss : (calModel?.raw_log_loss ?? pOos.log_loss);
 
   const summary = el('div', 'g1s-ev-summary');
   summary.append(
     metricCard('FINAL EDGE', overall, 'OOS + real-trade + G1-M.1', overall),
-    metricCard('STATISTICAL OOS', statistical, `P*=${probabilityRepresentation} · R=${continuous?.does_continuous_model_beat_baseline_oos || '—'} · rawP=${probability?.does_model_beat_baseline_oos || '—'}`, statistical),
+    metricCard('STATISTICAL OOS', statistical, `P=${probabilityGate} · R=${continuous?.does_continuous_model_beat_baseline_oos || '—'} · calP=${probabilityRepresentation}`, statistical),
     metricCard('ECONOMIC CHECK', economic, `trades ${trade.unique_trades ?? 0} · G1M ${management.unique_trades ?? 0}`, economic),
-    metricCard('PROBABILITY · SELECTED', selectedBrier == null ? '—' : `Brier ${value(selectedBrier, 4)}`, `${selectedRepresentation} · logloss ${value(selectedLogLoss, 4)} · n_eff ${calModel?.effective_n ?? pOos.effective_n ?? 0}`, probabilityRepresentation),
+    metricCard('PROBABILITY · EFFECTIVE', selectedBrier == null ? '—' : `Brier ${value(selectedBrier, 4)}`, `${selectedRepresentation} · logloss ${value(selectedLogLoss, 4)} · n_eff ${calModel?.effective_n ?? pOos.effective_n ?? 0}`, probabilityGate),
     metricCard('CONTINUOUS RETURN', cOos.mae == null ? '—' : `MAE ${value(cOos.mae, 5)}`, `RMSE ${value(cOos.rmse, 5)} · n_eff ${cOos.effective_n ?? 0}`, cModel?.does_continuous_model_beat_baseline_oos || 'INSUFFICIENT'),
     metricCard('CALIBRATION VALUE', calModel?.calibrated_ece == null ? '—' : `ECE ${value(calModel.calibrated_ece, 4)}`, `value-add ${calibrationValue} · raw/cal Brier ${value(calModel?.raw_brier, 4)} / ${value(calModel?.calibrated_brier, 4)}`, calibrationValue)
   );
