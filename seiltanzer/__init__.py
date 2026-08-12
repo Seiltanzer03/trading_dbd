@@ -168,3 +168,9 @@ del _install_g1_management_feature_context_v2
 from .g1_broad_market_evidence_v3 import install_g1_broad_market_evidence_v3 as _install_g1_broad_market_evidence_v3
 _install_g1_broad_market_evidence_v3()
 del _install_g1_broad_market_evidence_v3
+
+# P0 must be the final passive wrapper: optional H2/V3 research features may
+# degrade individually, but they can never cancel the immutable core T0 capture.
+from .g1_operational_integrity import install_g1_operational_integrity as _install_g1_operational_integrity
+_install_g1_operational_integrity()
+del _install_g1_operational_integrity
