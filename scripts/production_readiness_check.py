@@ -24,6 +24,7 @@ REQUIRED_BACKUP_TABLES = (
     "g1s_path_metrics", "g1s_dependency_groups",
     "g1s_return_models", "g1s_return_predictions",
     "g1s_probability_calibrators", "g1s_calibrated_predictions",
+    "g1s_validation_cohorts", "g1s_champion_prediction_links",
     "g1m_local_windows", "g1m_local_outcomes", "g1m_local_policy_outcomes",
     "g1m_local_contract_errors", "research_materialization_state",
 )
@@ -181,6 +182,22 @@ def verify(expected_sha: str) -> None:
     assert final_report.get("auto_promotion_allowed") is False, final_report
     assert final_report.get("does_model_beat_baseline_oos") in {"YES", "NO", "INSUFFICIENT"}, final_report
 
+    champion = g1s.get("champion_validation") or {}
+    champion_items = champion.get("items") or []
+    assert champion.get("champion_frozen") is True, champion
+    assert champion.get("challenger_can_stop_champion_stream") is False, champion
+    assert champion.get("champion_can_train_on_own_oos") is False, champion
+    assert champion.get("prediction_must_precede_target") is True, champion
+    assert champion.get("auto_promotion") is False, champion
+    assert champion.get("production_authority") is False, champion
+    assert champion_items, champion
+    for item in champion_items:
+        assert item.get("champion_is_frozen") is True, item
+        assert item.get("challenger_does_not_replace_champion") is True, item
+        assert item.get("champion_training_excludes_live_oos") is True, item
+        assert float(item.get("training_cutoff_ts") or 0.0) < float(item.get("oos_start_ts") or 0.0), item
+        assert item.get("production_authority") is False, item
+
     local = backups.get("local") or []
     assert local and local[0].get("verified") is True, backups
     selected = schema_complete_backup(backups)
@@ -212,6 +229,9 @@ def verify(expected_sha: str) -> None:
     print("G1S", json.dumps({h: {"raw": by[h].get("raw_resolved"),
         "effective": by[h].get("effective_n"), "state": by[h].get("state")}
         for h in sorted(by)}, sort_keys=True))
+    print("CHAMPION", json.dumps({"n": len(champion_items),
+        "linked": sum(int(x.get("linked_prediction_n") or 0) for x in champion_items),
+        "authority": champion.get("production_authority")}, sort_keys=True))
     print("EDGE_VERDICT", final_report.get("does_model_beat_baseline_oos"))
     print("Q_AUDIT", json.dumps(q.get("counts") or {}, sort_keys=True))
     print("G1M_LOCAL", json.dumps({k: g1ml.get(k) for k in
