@@ -135,8 +135,14 @@ from .g1_short_horizon_feature_v2_integrity import install_g1_short_horizon_feat
 _install_g1_short_horizon_feature_v2_integrity()
 del _install_g1_short_horizon_feature_v2_integrity
 
-# Installed last: V2 continuous predictions run after V2 direction and reapply
-# only causal pre-T0 calibrators, closing wrapper ordering without touching V1.
+# V2 continuous predictions run after V2 direction and reapply only causal
+# pre-T0 calibrators, closing wrapper ordering without touching V1.
 from .g1_short_horizon_continuous_v2 import install_g1_short_horizon_continuous_v2 as _install_g1_short_horizon_continuous_v2
 _install_g1_short_horizon_continuous_v2()
 del _install_g1_short_horizon_continuous_v2
+
+# Presentation snapshots are computed by the low-priority worker; HTTP reads
+# frozen JSON instead of triggering full-history OOS scans.
+from .g1_short_horizon_evidence_materialization import install_g1_short_horizon_evidence_materialization as _install_g1_short_horizon_evidence_materialization
+_install_g1_short_horizon_evidence_materialization()
+del _install_g1_short_horizon_evidence_materialization
