@@ -3,10 +3,14 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from .g1_short_horizon_final_report import install_g1_short_horizon_final_report
+from .storage_restore_drill import last_restore_drill
+
 
 def install_g1_short_horizon_routes(app: FastAPI) -> None:
     if getattr(app.state, "g1s_routes_installed", False):
         return
+    install_g1_short_horizon_final_report()
     runtime = getattr(app.state.engine, "short_horizon", None)
     local = getattr(app.state.engine, "management_local", None)
     if runtime is None or local is None:
@@ -20,8 +24,28 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         return {"contract_version": status["contract_version"],
                 "items": [runtime.horizon_report(h) for h in (15,30,60,120,240)]}
 
+    def final_report():
+        body = runtime.final_report()
+        storage = getattr(app.state, "storage", None)
+        if storage is None:
+            body["backup_restore"] = {"status": "UNAVAILABLE"}
+            return body
+        storage_status = storage.status(engine=app.state.engine)
+        drill = last_restore_drill(storage)
+        body["backup_restore"] = {
+            "storage_health": storage_status.get("health"),
+            "last_local_backup_age_sec": storage_status.get("last_local_backup_age_sec"),
+            "offhost_configured": storage_status.get("offhost_configured"),
+            "startup_integrity": storage_status.get("sqlite_integrity"),
+            "restore_drill": drill,
+            "rpo_target_sec": storage_status.get("rpo_target_sec"),
+        }
+        return body
+
     app.add_api_route("/api/research/g1s/horizons", horizons,
                       methods=["GET"], name="g1s_horizons")
+    app.add_api_route("/api/research/g1s/final-report", final_report,
+                      methods=["GET"], name="g1s_final_report")
     app.add_api_route(
         "/api/research/g1s/observations",
         lambda limit=100: runtime.observations(limit=int(limit)),
