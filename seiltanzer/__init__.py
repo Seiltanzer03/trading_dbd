@@ -115,8 +115,13 @@ from .g1_short_horizon_status_integrity import install_g1_short_horizon_status_i
 _install_g1_short_horizon_status_integrity()
 del _install_g1_short_horizon_status_integrity
 
-# Final conservative evidence layer.  It must remain last so no older descriptive
-# patch can silently weaken the serious OOS gate or replace dependency weighting.
+# Conservative OOS evidence must be installed after older descriptive layers.
 from .g1_short_horizon_evidence_completion import install_g1_short_horizon_evidence_completion as _install_g1_short_horizon_evidence_completion
 _install_g1_short_horizon_evidence_completion()
 del _install_g1_short_horizon_evidence_completion
+
+# Continuous return learning wraps the completed evidence/status contracts but
+# remains research-only and cannot relax any OOS or production-authority gate.
+from .g1_short_horizon_continuous_learning import install_g1_short_horizon_continuous_learning as _install_g1_short_horizon_continuous_learning
+_install_g1_short_horizon_continuous_learning()
+del _install_g1_short_horizon_continuous_learning
