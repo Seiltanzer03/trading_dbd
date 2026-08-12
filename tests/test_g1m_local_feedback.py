@@ -142,7 +142,9 @@ def _make_runtime(tmp_path):
 
 def test_preexisting_g1m_decision_is_descriptive_but_new_window_is_evidence_eligible(tmp_path):
     engine, management = _make_runtime(tmp_path)
-    old_ts = management.activation_ts + 1.0
+    # Captured exactly at the G.1-M activation boundary: valid prospective G.1-M
+    # evidence, but necessarily older than the subsequently-created G.1-M.1 runtime.
+    old_ts = management.activation_ts
     _insert_source(engine, management, trade_id=1, captured_ts=old_ts)
 
     local = ManagementLocalRuntime(engine)
@@ -176,7 +178,6 @@ def test_local_h15_resolves_on_truncated_real_path_without_waiting_trade_termina
     ).fetchone()
     target = float(window["target_ts"])
 
-    # No future horizon observation -> no local outcome.
     engine.passive._conn.execute(
         "INSERT INTO decision_path_points VALUES(?,?,?,?)",
         (review_id, captured, 102.0, 0.2),
@@ -184,8 +185,6 @@ def test_local_h15_resolves_on_truncated_real_path_without_waiting_trade_termina
     engine.passive._conn.commit()
     assert local.resolve_due(now=target + 1) == 0
 
-    # Add only points <= frozen horizon, including exact target. No terminal trade
-    # replay/close exists; G.1-M.1 must still produce local feedback.
     mid = captured + (target-captured) / 2.0
     engine.passive._conn.execute(
         "INSERT INTO decision_path_points VALUES(?,?,?,?)",
@@ -211,7 +210,7 @@ def test_local_window_and_outcome_are_immutable(tmp_path):
     engine, management = _make_runtime(tmp_path)
     local = ManagementLocalRuntime(engine)
     captured = local.activation_ts + 1
-    review, _ = _insert_source(engine, management, trade_id=20, captured_ts=captured)
+    _insert_source(engine, management, trade_id=20, captured_ts=captured)
     local.materialize_windows()
     window = engine.passive._conn.execute(
         "SELECT * FROM g1m_local_windows WHERE trade_id=20 AND horizon_minutes=15"
