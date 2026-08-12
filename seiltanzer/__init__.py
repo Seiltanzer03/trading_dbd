@@ -88,6 +88,12 @@ from .g1_short_horizon_market_features import install_g1_short_horizon_market_fe
 _install_g1_short_horizon_market_features()
 del _install_g1_short_horizon_market_features
 
+# A fixed untuned momentum baseline prevents learned challengers from claiming
+# value merely by rediscovering the sign of the recent 15m move.
+from .g1_short_horizon_baseline_refinement import install_g1_short_horizon_baseline_refinement as _install_g1_short_horizon_baseline_refinement
+_install_g1_short_horizon_baseline_refinement()
+del _install_g1_short_horizon_baseline_refinement
+
 # Every shadow fit receives an exact immutable source manifest (T0 + resolution
 # hashes). A model cannot later reconstruct or silently change its training set.
 from .g1_short_horizon_cut_refinement import install_g1_short_horizon_cut_refinement as _install_g1_short_horizon_cut_refinement
