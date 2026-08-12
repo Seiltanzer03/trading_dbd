@@ -105,3 +105,10 @@ del _install_g1_short_horizon_gbt_refinement
 from .g1_short_horizon_cut_refinement import install_g1_short_horizon_cut_refinement as _install_g1_short_horizon_cut_refinement
 _install_g1_short_horizon_cut_refinement()
 del _install_g1_short_horizon_cut_refinement
+
+# Final research-integrity pass: local management time fails closed, Q maturity is
+# audited only on successfully captured observations, and trade relevance uses
+# only model predictions that existed before the real trade entry.
+from .g1_fast_learning_integrity_refinement import install_g1_fast_learning_integrity_refinement as _install_g1_fast_learning_integrity_refinement
+_install_g1_fast_learning_integrity_refinement()
+del _install_g1_fast_learning_integrity_refinement
