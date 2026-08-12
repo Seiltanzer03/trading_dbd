@@ -1,9 +1,8 @@
 name: deploy
 
-# Delivery only. GitHub-hosted CI proves the exact SHA first; the tiny production
-# VPS must not repeat the full pytest/WebKit/frontend regression and risk starving
-# its own self-hosted runner. Final runtime health remains owned by
-# production-readiness after delivery.
+# GitHub-hosted orchestration keeps delivery independent from the GitHub runner
+# process installed on the production VPS. Application secrets stay on the VPS;
+# this workflow only updates the exact code SHA, installs it and restarts service.
 on:
   push:
     branches: [main]
@@ -11,8 +10,6 @@ on:
 
 concurrency:
   group: production-seiltanzer
-  # A newer main supersedes a queued/stuck delivery of an older SHA. This is
-  # especially important if the self-hosted runner temporarily loses contact.
   cancel-in-progress: true
 
 permissions:
@@ -20,12 +17,12 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, linux, x64, seiltanzer-prod]
-    timeout-minutes: 12
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Wait for exact-SHA GitHub CI instead of rerunning it on production
+      - name: Wait for exact-SHA GitHub CI
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ github.sha }}
@@ -38,7 +35,7 @@ jobs:
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/${{ github.repository }}/commits/${EXPECTED_SHA}/status")
-            verdict=$(BODY="$body" /opt/seiltanzer/.venv/bin/python - <<'PY'
+            verdict=$(BODY="$body" python3 - <<'PY'
           import json, os
           body=json.loads(os.environ['BODY'])
           states={str(x.get('context')):str(x.get('state')) for x in body.get('statuses',[])}
@@ -55,48 +52,35 @@ jobs:
           done
           test "$verdict" = "success"
 
-      - name: Clean stale Seiltanzer editable-install remnants
-        run: |
-          set -euo pipefail
-          SITE=$(/opt/seiltanzer/.venv/bin/python - <<'PY'
-          import site
-          print(site.getsitepackages()[0])
-          PY
-          )
-          PYTHONPATH="$GITHUB_WORKSPACE" /opt/seiltanzer/.venv/bin/python \
-            scripts/g1e1_cleanup_venv.py --site-packages "$SITE" --apply || true
-
-      - name: Deliver current main to production
+      - name: Deliver exact SHA over SSH
+        uses: appleboy/ssh-action@v1
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENROUTER_PROXY: ${{ secrets.OPENROUTER_PROXY }}
-          TRADINGVIEW_AUTH_TOKEN: ${{ secrets.TRADINGVIEW_AUTH_TOKEN }}
-          TERMINAL_USER: ${{ secrets.TERMINAL_USER }}
-          TERMINAL_PASS: ${{ secrets.TERMINAL_PASS }}
-        run: |
-          set -euo pipefail
-          # The root-owned script still has an eager HTTP probe. A non-zero exit
-          # after exact SHA delivery + active systemd is a warning; bounded
-          # production-readiness owns HTTP/storage/research/restore acceptance.
-          set +e
-          sudo /usr/local/sbin/deploy-seiltanzer
-          DEPLOY_RC=$?
-          set -e
+          EXPECTED_SHA: ${{ github.sha }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 10m
+          envs: EXPECTED_SHA
+          script: |
+            set -euo pipefail
+            git config --global --add safe.directory /opt/seiltanzer || true
+            cd /opt/seiltanzer
+            git fetch origin main
+            git cat-file -e "${EXPECTED_SHA}^{commit}"
+            git reset --hard "$EXPECTED_SHA"
 
-          git config --global --add safe.directory /opt/seiltanzer || true
-          EXPECTED=$(git rev-parse HEAD)
-          SERVER=$(git -C /opt/seiltanzer rev-parse HEAD 2>/dev/null || true)
-          ACTIVE=$(systemctl is-active seiltanzer 2>/dev/null || true)
-          echo "expected=$EXPECTED server=${SERVER:-missing} active=${ACTIVE:-unknown} root_script_rc=$DEPLOY_RC"
+            SITE=$(/opt/seiltanzer/.venv/bin/python - <<'PY'
+            import site
+            print(site.getsitepackages()[0])
+            PY
+            )
+            PYTHONPATH=/opt/seiltanzer /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/g1e1_cleanup_venv.py --site-packages "$SITE" --apply || true
+            /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
+            systemctl restart seiltanzer
 
-          if [ "$SERVER" != "$EXPECTED" ]; then
-            echo "::error::Production checkout did not reach expected SHA"
-            exit 1
-          fi
-          if [ "$ACTIVE" != "active" ]; then
-            echo "::error::Production service is not active after delivery"
-            exit 1
-          fi
-          if [ "$DEPLOY_RC" != "0" ]; then
-            echo "::warning::Legacy deploy probe returned $DEPLOY_RC after exact SHA delivery; bounded production-readiness owns final health."
-          fi
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            test "$(systemctl is-active seiltanzer)" = "active"
+            echo "Delivered exact production SHA: $EXPECTED_SHA"
