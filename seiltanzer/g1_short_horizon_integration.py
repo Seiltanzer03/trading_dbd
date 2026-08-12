@@ -2,7 +2,7 @@
 
 Import order matters: this installer runs after G.1-M, therefore it wraps the
 already-integrated Engine/PassiveLearningEngine rather than bypassing management
-measurement.  Market/decision authority is untouched.
+measurement. Market/decision authority is untouched.
 """
 from __future__ import annotations
 
@@ -22,11 +22,14 @@ def install_g1_short_horizon_integration() -> None:
         return
     _INSTALLED = True
 
-    # Include new immutable research ledgers in verified backup manifests.  This
-    # only extends count verification; StorageManager remains the backup authority.
+    # Include every economically/research-authoritative fast-learning ledger in
+    # verified backup manifests. Later refinements create the barrier/cut tables;
+    # missing tables are initially reported as None and become mandatory after the
+    # first schema-aware backup on production.
     extra = (
         "g1s_observations", "g1s_resolutions", "g1s_models",
-        "g1s_shadow_predictions", "g1s_trade_links",
+        "g1s_shadow_predictions", "g1s_trade_links", "g1s_barrier_outcomes",
+        "g1s_training_cuts", "g1s_model_cut_links",
         "g1m_local_windows", "g1m_local_outcomes", "g1m_local_policy_outcomes",
         "research_materialization_state",
     )
