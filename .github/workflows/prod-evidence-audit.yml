@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 7
     steps:
-      - name: Verify P0 acceptance over SSH
+      - name: Verify P0 production evidence over SSH
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -23,8 +23,7 @@ jobs:
           script: |
             set -euo pipefail
             echo "PROD_SHA $(git -C /opt/seiltanzer rev-parse HEAD)"
-            echo '--- PASSIVE ROUTE LOCATORS ---'
-            grep -R -n --include='*.py' -E 'research/passive/status|fixed_horizon_raw_n|current_f32_n|last_successful_capture_ts' /opt/seiltanzer/seiltanzer | head -120 || true
+            echo "SERVICE $(systemctl is-active seiltanzer)"
             /opt/seiltanzer/.venv/bin/python - <<'PY'
             import json, sqlite3, time, urllib.request
             from seiltanzer.ai_verdict_v19 import normalize_structured_report
@@ -34,26 +33,62 @@ jobs:
                 with urllib.request.urlopen(BASE+path, timeout=20) as r:
                     return json.loads(r.read().decode())
 
+            now=time.time()
             passive=get('/api/research/passive/status')
-            print('PUBLIC_PASSIVE_KEYS',json.dumps(sorted(passive.keys())))
-            print('PUBLIC_COLLECTOR_HEALTH',json.dumps(passive.get('collector_health'),sort_keys=True))
+            health=passive.get('collector_health') or {}
+            print('COLLECTOR',json.dumps({
+                'public':bool(health),
+                'operational':passive.get('operational_collector_status'),
+                'collector_status':passive.get('collector_status'),
+                'last_step_ts':health.get('last_step_ts'),
+                'latest_eligible':health.get('last_successful_eligible_capture_ts'),
+                'eligible_age_sec':health.get('eligible_capture_age_sec'),
+                'eligible_1h':health.get('eligible_captures_1h'),
+                'eligible_24h':health.get('eligible_captures_24h'),
+                'last_error_ts':health.get('last_error_ts'),
+                'last_error':health.get('last_error'),
+                'errors_by_family':health.get('errors_by_feature_family'),
+                'failed_cycles':health.get('consecutive_failed_capture_cycles'),
+                'market_open':health.get('market_open_any_supported_instrument'),
+                'cadence':health.get('expected_capture_cadence_sec'),
+                'full_history_scan':health.get('request_time_full_history_scan'),
+            },sort_keys=True))
+
+            g1s=get('/api/research/g1s/status')
+            print('G1S',json.dumps({k:g1s.get(k) for k in ('observations','resolved','pending','models','prospective_shadow_predictions','critical_errors')},sort_keys=True))
+            obs=(get('/api/research/g1s/observations?limit=100').get('items') or [])
+            eligible=[x for x in obs if int(x.get('measurement_eligible') or 0)==1]
+            if eligible:
+                latest=max(eligible,key=lambda x:float(x.get('captured_ts') or 0))
+                print('LATEST_ELIGIBLE_G1S',json.dumps({
+                    'id':latest.get('observation_id'),'instrument':latest.get('instrument'),
+                    'horizon':latest.get('horizon_minutes'),'captured_ts':latest.get('captured_ts'),
+                    'age_sec':round(max(0,now-float(latest.get('captured_ts') or 0)),1),
+                    'exclusion_reason':latest.get('exclusion_reason')},sort_keys=True))
+            else:
+                print('LATEST_ELIGIBLE_G1S null')
 
             db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True); db.row_factory=sqlite3.Row
-            now=time.time()
-            rows=db.execute("SELECT instrument,evidence_eligible,exclusion_reason,COUNT(*) n,MAX(captured_ts) latest FROM passive_market_observations WHERE captured_ts>=? GROUP BY instrument,evidence_eligible,exclusion_reason ORDER BY instrument,evidence_eligible DESC",(now-3600,)).fetchall()
+            pcols={r['name'] for r in db.execute('PRAGMA table_info(passive_market_observations)')}
+            print('PASSIVE_COLUMNS',json.dumps(sorted(pcols)))
+            rows=db.execute("SELECT instrument,evidence_eligible,COUNT(*) n,MAX(captured_ts) latest FROM passive_market_observations WHERE captured_ts>=? GROUP BY instrument,evidence_eligible ORDER BY instrument,evidence_eligible DESC",(now-3600,)).fetchall()
             print('PASSIVE_LAST_1H',json.dumps([dict(r) for r in rows],sort_keys=True))
             total=db.execute("SELECT SUM(CASE WHEN evidence_eligible=1 THEN 1 ELSE 0 END) eligible,COUNT(*) total,MAX(CASE WHEN evidence_eligible=1 THEN captured_ts END) latest_eligible FROM passive_market_observations WHERE captured_ts>=?",(now-3600,)).fetchone()
             print('ELIGIBLE_LAST_1H',json.dumps(dict(total),sort_keys=True))
 
-            g1rows=db.execute("SELECT instrument,measurement_eligible,exclusion_reason,COUNT(*) n,MAX(captured_ts) latest FROM g1s_observations WHERE captured_ts>=? GROUP BY instrument,measurement_eligible,exclusion_reason ORDER BY instrument,measurement_eligible DESC",(now-3600,)).fetchall()
-            print('G1S_LAST_1H',json.dumps([dict(r) for r in g1rows],sort_keys=True))
+            trade112=db.execute("SELECT id,status,result_r FROM trades WHERE id=112").fetchone()
+            if trade112:
+                links=[dict(r) for r in db.execute('SELECT trade_id,observation_id,horizon_minutes,forecast_age_sec FROM g1s_trade_links WHERE trade_id=112 ORDER BY horizon_minutes')]
+                w=db.execute('SELECT COUNT(*) n,SUM(CASE WHEN evidence_eligible=1 THEN 1 ELSE 0 END) e FROM g1m_local_windows WHERE trade_id=112').fetchone()
+                o=db.execute('SELECT COUNT(*) n FROM g1m_local_outcomes o JOIN g1m_local_windows w USING(window_id) WHERE w.trade_id=112').fetchone()
+                print('TRADE112',json.dumps({'trade':dict(trade112),'g1s_links':links,'g1m_windows':int(w['n'] or 0),'g1m_eligible':int(w['e'] or 0),'g1m_resolved':int(o['n'] or 0)},sort_keys=True))
 
             row=db.execute('SELECT id,trade_id,ts,snapshot_json,verdict,model FROM ai_verdicts WHERE id=107').fetchone()
             if row:
                 snapshot=json.loads(row['snapshot_json']); old=str(row['verdict'] or '')
                 new=normalize_structured_report(old,snapshot)
                 checks={
-                    'changed':new!=old,
+                    'trade_id':int(row['trade_id']), 'changed':new!=old,
                     'has_coverage_0_0':'Покрытие: 0/0' in new,
                     'has_structured_coverage':'Покрытие decision metrics: 12/12' in new,
                     'has_bad_cvar':'-1.010R >= -1.000R' in new,
@@ -69,6 +104,5 @@ jobs:
                     'has_unavailable_take_stop':'Authoritative execution-MC TAKE vs active STOP: UNAVAILABLE.' in new,
                 }
                 print('FROZEN_RENDER_CHECK',json.dumps(checks,sort_keys=True))
-                print('FROZEN_RENDER_HEAD',new[:16000].replace('\n','\\n'))
             db.close()
             PY
