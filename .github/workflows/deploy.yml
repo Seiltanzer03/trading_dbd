@@ -1,9 +1,9 @@
 name: deploy
 
-# Delivery only. The authoritative production health verdict is published by
-# production-readiness after this workflow completes. Expensive research scans
-# and application warm-up must not turn a successful code delivery into a false
-# deployment failure.
+# Delivery only. GitHub-hosted CI proves the exact SHA first; the tiny production
+# VPS must not repeat the full pytest/WebKit/frontend regression and risk starving
+# its own self-hosted runner. Final runtime health remains owned by
+# production-readiness after delivery.
 on:
   push:
     branches: [main]
@@ -11,7 +11,9 @@ on:
 
 concurrency:
   group: production-seiltanzer
-  cancel-in-progress: false
+  # A newer main supersedes a queued/stuck delivery of an older SHA. This is
+  # especially important if the self-hosted runner temporarily loses contact.
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -19,9 +21,39 @@ permissions:
 jobs:
   deploy:
     runs-on: [self-hosted, linux, x64, seiltanzer-prod]
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
+
+      - name: Wait for exact-SHA GitHub CI instead of rerunning it on production
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          verdict=""
+          for attempt in $(seq 1 90); do
+            body=$(curl -fsS --max-time 5 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/${EXPECTED_SHA}/status")
+            verdict=$(BODY="$body" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          body=json.loads(os.environ['BODY'])
+          states={str(x.get('context')):str(x.get('state')) for x in body.get('statuses',[])}
+          print(states.get('ci/full-webkit','pending'))
+          PY
+            )
+            echo "ci/full-webkit attempt=$attempt state=$verdict"
+            if [ "$verdict" = "success" ]; then break; fi
+            if [ "$verdict" = "failure" ] || [ "$verdict" = "error" ]; then
+              echo "::error::Exact-SHA CI failed; refusing production delivery"
+              exit 1
+            fi
+            sleep 2
+          done
+          test "$verdict" = "success"
 
       - name: Clean stale Seiltanzer editable-install remnants
         run: |
@@ -31,42 +63,8 @@ jobs:
           print(site.getsitepackages()[0])
           PY
           )
-          # Bounded cleanup: only malformed ~*ltanzer* artifacts are eligible.
-          # Import maintenance code from this exact checkout, not from whatever
-          # Seiltanzer version happened to be installed before delivery.
           PYTHONPATH="$GITHUB_WORKSPACE" /opt/seiltanzer/.venv/bin/python \
             scripts/g1e1_cleanup_venv.py --site-packages "$SITE" --apply || true
-
-      - name: Pre-deploy regression
-        run: |
-          set -euo pipefail
-          /opt/seiltanzer/.venv/bin/pip install -q -e ".[dev]"
-          /opt/seiltanzer/.venv/bin/pytest -q
-          node --check seiltanzer/web/js/touch_clock.js
-          node --check seiltanzer/web/js/safe_fetch.js
-          node --check seiltanzer/web/js/management_ui.js
-          node --check seiltanzer/web/js/cone.js
-          node --check seiltanzer/web/js/iv_surface.js
-          node --check seiltanzer/web/js/levels.js
-          node --check seiltanzer/web/js/gex.js
-          node --check seiltanzer/web/js/regime_phase.js
-          node --check seiltanzer/web/js/wavelet.js
-          node --check seiltanzer/web/js/correlation.js
-          node --check seiltanzer/web/js/market_bus.js
-          node --check seiltanzer/web/js/analytics_mobile.js
-          node --check seiltanzer/web/js/premium_analytics_theme.js
-          node tests/web/touch_clock_smoke.mjs
-          node tests/web/ai_verdict_error_smoke.mjs
-          node tests/web/ai_management_decision_smoke.mjs
-          node tests/web/fan_cone_touch_consistency_smoke.mjs
-          node tests/web/cone_interaction_smoke.mjs
-          node tests/web/gex_smoke.mjs
-          node tests/web/correlation_modes_smoke.mjs
-          node tests/web/plotly_toolbar_smoke.mjs
-          node tests/web/real_market_motion_smoke.mjs
-          node tests/web/plotly_camera_guard_mobile_smoke.mjs
-          node tests/web/analytics_mobile_smoke.mjs
-          node tests/web/render_budget_smoke.mjs
 
       - name: Deliver current main to production
         env:
@@ -78,9 +76,8 @@ jobs:
         run: |
           set -euo pipefail
           # The root-owned script still has an eager HTTP probe. A non-zero exit
-          # after exact SHA delivery + active systemd is therefore a warning, not
-          # the final health verdict. production-readiness owns bounded HTTP,
-          # storage, authority and restore acceptance.
+          # after exact SHA delivery + active systemd is a warning; bounded
+          # production-readiness owns HTTP/storage/research/restore acceptance.
           set +e
           sudo /usr/local/sbin/deploy-seiltanzer
           DEPLOY_RC=$?
