@@ -129,9 +129,13 @@ assert.ok(corr.includes("if (mode === 'STRESS')"), 'stress network mode must rem
 assert.ok(corr.includes('SHOWN LINKS ${activeLinks.length} / OBSERVED ${links.length}'), 'honest shown/observed count must remain');
 
 const toolbar = fs.readFileSync('seiltanzer/web/js/plotly_terminal_toolbar.js', 'utf8');
+const cameraGuard = fs.readFileSync('seiltanzer/web/js/plotly_camera_guard.js', 'utf8');
 for (const mode of ['orbit', 'turntable', 'pan', 'zoom']) {
-  assert.ok(toolbar.includes(`'scene.dragmode': '${mode}'`), `${mode} user drag mode must remain`);
+  assert.ok(toolbar.includes(`setMode('${mode}')`), `${mode} toolbar control must remain`);
+  assert.ok(cameraGuard.includes(`'${mode}'`), `${mode} guard-owned drag mode must remain`);
 }
+assert.ok(toolbar.includes('owner?.setDragMode'), 'toolbar must route drag mode through the guard owner');
+assert.ok(cameraGuard.includes('next.scene.dragmode = dragMode'), 'guard must restore mode across structural Plotly writes');
 assert.ok(!toolbar.includes('requestAnimationFrame'), '3D toolbar must never auto-rotate');
 
 const motion = await import('../../seiltanzer/web/js/real_market_motion.js?render-budget-smoke');

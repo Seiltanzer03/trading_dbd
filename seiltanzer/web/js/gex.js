@@ -35,16 +35,25 @@ export function initGex() {
   containerEl = $('#gex-evol-canvas');
   ensureModeButtons();
   if (containerEl && typeof ResizeObserver !== 'undefined') {
-    resizeObserver = new ResizeObserver(() => {
-      staticKey = '';
-      renderActive(true);
-    });
+    resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(containerEl);
   }
   window.addEventListener?.('seiltanzer:analytics-mobile-resize', () => {
     staticKey = '';
     renderActive(true);
   });
+}
+
+function handleResize() {
+  staticKey = '';
+  if (currentMode === 'PRESSURE') {
+    const plot = containerEl?.querySelector('[data-renderer="pressure"]');
+    if (plot?._fullLayout && window.Plotly?.Plots?.resize) {
+      window.Plotly.Plots.resize(plot);
+      return;
+    }
+  }
+  renderActive(true);
 }
 
 function ensureModeButtons() {
@@ -87,6 +96,8 @@ function destroyRenderer() {
   if (containerEl && window.Plotly && containerEl.querySelector('.js-plotly-plot')) {
     try { window.Plotly.purge(containerEl.querySelector('.js-plotly-plot')); } catch {}
   }
+  const toolbar = containerEl?.querySelector('[data-terminal-3d-toolbar="gex-pressure"]');
+  toolbar?.__terminal3dUnsubscribe?.();
   containerEl?.replaceChildren();
 }
 
@@ -529,14 +540,18 @@ function renderPressure3D(force = false) {
   }
   if (emptyEl) emptyEl.style.display = 'none';
   updateSummary();
-  if (containerEl.querySelector('[data-renderer="pressure"]') && !force) return;
-  destroyRenderer();
+  let plot = containerEl.querySelector('[data-renderer="pressure"]');
+  if (plot && !force) return;
+  const firstRender = !plot;
   const mobile = isAnalyticsMobile();
-  const plot = document.createElement('div');
-  plot.dataset.renderer = 'pressure';
-  plot.style.cssText = 'width:100%;height:100%;touch-action:none';
-  containerEl.appendChild(plot);
-  pressureGuard = createPlotlyCameraGuard(plot, PRESSURE_CAM);
+  if (firstRender) {
+    destroyRenderer();
+    plot = document.createElement('div');
+    plot.dataset.renderer = 'pressure';
+    plot.style.cssText = 'width:100%;height:100%;touch-action:none';
+    containerEl.appendChild(plot);
+    pressureGuard = createPlotlyCameraGuard(plot, PRESSURE_CAM);
+  }
   const times0 = migrationData.timestamps || [];
   const prices0 = migrationData.price_grid || [];
   const heat0 = migrationData.heatmap || [];
@@ -605,7 +620,8 @@ function renderPressure3D(force = false) {
     },
   };
   pressureGuard?.beforeWrite?.();
-  window.Plotly.newPlot(plot, traces, layout, { responsive: false, displayModeBar: false, scrollZoom: !mobile });
+  if (firstRender) window.Plotly.newPlot(plot, traces, layout, { responsive: false, displayModeBar: false, scrollZoom: !mobile });
+  else window.Plotly.react(plot, traces, layout, { responsive: false, displayModeBar: false, scrollZoom: !mobile });
   pressureGuard?.afterWrite?.();
   attachTerminal3DToolbar({plot,container:containerEl,guard:pressureGuard,homeCamera:PRESSURE_CAM,key:'gex-pressure'});
   updatePressureLiveMarker();

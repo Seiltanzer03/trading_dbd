@@ -34,12 +34,23 @@ export function initWavelet() {
   ensureButtons();
   unsubscribeTick = subscribeMarketTick(onMarketTick);
   if (containerEl && typeof ResizeObserver !== 'undefined') {
-    resizeObserver = new ResizeObserver(() => renderWavelet(true));
+    resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(containerEl);
   }
   window.addEventListener?.('seiltanzer:analytics-mobile-resize', () => renderWavelet(true));
   fetchWaveletData();
   refreshTimer = setInterval(fetchWaveletData, 300000);
+}
+
+function handleResize() {
+  if (currentMode === 'SURFACE') {
+    const plot = containerEl?.querySelector('[data-renderer="wavelet-surface"]');
+    if (plot?._fullLayout && window.Plotly?.Plots?.resize) {
+      window.Plotly.Plots.resize(plot);
+      return;
+    }
+  }
+  renderWavelet(true);
 }
 
 function ensureButtons() {
@@ -78,7 +89,9 @@ function destroyRenderer() {
   const plot = containerEl?.querySelector('[data-renderer="wavelet-surface"]');
   if (plot && window.Plotly) { try { window.Plotly.purge(plot); } catch {} }
   containerEl?.querySelectorAll('[data-wavelet-renderer]').forEach((n) => n.remove());
-  containerEl?.querySelector('[data-terminal-3d-toolbar="wavelet-surface"]')?.remove();
+  const toolbar = containerEl?.querySelector('[data-terminal-3d-toolbar="wavelet-surface"]');
+  toolbar?.__terminal3dUnsubscribe?.();
+  toolbar?.remove();
 }
 
 export async function fetchWaveletData() {
@@ -253,10 +266,19 @@ function drawFlow({cv,dpr,width,height,mobile},now){
 
 function renderSurface(force=false){
   if(!window.Plotly)return;
-  if(containerEl.querySelector('[data-renderer="wavelet-surface"]')&&!force)return;
-  destroyRenderer();
+  let plot=containerEl.querySelector('[data-renderer="wavelet-surface"]');
+  if(plot&&!force)return;
   const mobile=isAnalyticsMobile();
-  const plot=document.createElement('div');plot.dataset.waveletRenderer='plot';plot.dataset.renderer='wavelet-surface';plot.style.cssText='width:100%;height:100%;touch-action:none';containerEl.insertBefore(plot,emptyEl||null);surfaceGuard=createPlotlyCameraGuard(plot,SURFACE_CAM);
+  const firstRender=!plot;
+  if(firstRender){
+    destroyRenderer();
+    plot=document.createElement('div');
+    plot.dataset.waveletRenderer='plot';
+    plot.dataset.renderer='wavelet-surface';
+    plot.style.cssText='width:100%;height:100%;touch-action:none';
+    containerEl.insertBefore(plot,emptyEl||null);
+    surfaceGuard=createPlotlyCameraGuard(plot,SURFACE_CAM);
+  }
   const periods=waveletData.period_grid_hours||[],ts0=waveletData.timestamps||[],spec0=waveletData.spectrogram||[],ridge0=waveletData.dominant_ridge||[];
   const stride=mobile?Math.max(1,Math.ceil(ts0.length/110)):1;
   const keep=(arr)=>arr.filter((_,i)=>i%stride===0||i===arr.length-1);
@@ -266,8 +288,12 @@ function renderSurface(force=false){
     {type:'scatter3d',mode:'lines',name:'SECONDARY RIDGE',x:ridge.map(p=>(Number(p.ts)-latest)/3600),y:ridge.map(p=>Number(p.secondary_period_hours)),z:ridge.map(p=>1.02),line:{color:'rgba(244,192,79,.72)',width:mobile?3:4,dash:'dot'},hoverinfo:'skip',showlegend:false},
     {type:'scatter3d',mode:'markers+text',name:'LIVE TICK PROBE',x:[0],y:[Number(waveletData.summary?.dominant_period_hours||periods.at(-1)||1)],z:[1.08],marker:{size:mobile?6:8,color:'#ffbf55',line:{color:'#fff',width:1}},text:['LIVE'],textposition:'top center',hoverinfo:'skip',showlegend:false}];
   const layout={margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'transparent',plot_bgcolor:'transparent',showlegend:false,hovermode:mobile?false:undefined,uirevision:'wavelet-surface-premium-v3',scene:{xaxis:{title:mobile?'TIME':'TIME · HOURS TO NOW',gridcolor:'rgba(188,208,222,.14)',color:'#b8cad5',zerolinecolor:'#f2b956',tickfont:{size:mobile?8:10}},yaxis:{title:mobile?'PERIOD':'PERIOD · HOURS',type:'log',gridcolor:'rgba(188,208,222,.14)',color:'#b8cad5',tickfont:{size:mobile?8:10}},zaxis:{title:mobile?'POWER':'SPECTRAL POWER',range:[0,1.16],gridcolor:'rgba(188,208,222,.12)',color:'#b8cad5',tickfont:{size:mobile?8:10}},bgcolor:'rgba(4,12,20,0)',aspectmode:'manual',aspectratio:{x:1.55,y:1.08,z:.72}}};
-  surfaceGuard?.beforeWrite?.();window.Plotly.newPlot(plot,traces,layout,{responsive:false,displayModeBar:false,scrollZoom:!mobile});surfaceGuard?.afterWrite?.();
-  attachTerminal3DToolbar({plot,container:containerEl,guard:surfaceGuard,homeCamera:SURFACE_CAM,key:'wavelet-surface'});updateSurfaceProbe();
+  surfaceGuard?.beforeWrite?.();
+  if(firstRender) window.Plotly.newPlot(plot,traces,layout,{responsive:false,displayModeBar:false,scrollZoom:!mobile});
+  else window.Plotly.react(plot,traces,layout,{responsive:false,displayModeBar:false,scrollZoom:!mobile});
+  surfaceGuard?.afterWrite?.();
+  attachTerminal3DToolbar({plot,container:containerEl,guard:surfaceGuard,homeCamera:SURFACE_CAM,key:'wavelet-surface'});
+  updateSurfaceProbe();
 }
 
 function updateSurfaceProbe(){
