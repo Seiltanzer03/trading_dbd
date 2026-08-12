@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
-      - name: Read latest production trade evidence over SSH
+      - name: Read latest production AI snapshot over SSH
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -23,29 +23,24 @@ jobs:
           script: |
             set -euo pipefail
             /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import json, sqlite3, urllib.request
-            db = sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro', uri=True)
-            db.row_factory = sqlite3.Row
-            rows = [dict(r) for r in db.execute('SELECT id,opened_at,closed_at,setup,instrument,direction,entry,stop,take,result_r,status FROM trades ORDER BY COALESCE(closed_at,opened_at) DESC,id DESC LIMIT 5')]
-            print('LATEST_TRADES', json.dumps(rows, sort_keys=True))
-            latest_closed = db.execute("SELECT id FROM trades WHERE status='closed' ORDER BY closed_at DESC,id DESC LIMIT 1").fetchone()
-            if latest_closed:
-                trade_id = int(latest_closed['id'])
-                print('LATEST_CLOSED_ID', trade_id)
-                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                if 'g1s_trade_links' in tables:
-                    links = [dict(r) for r in db.execute('SELECT trade_id,observation_id,horizon_minutes,forecast_age_sec FROM g1s_trade_links WHERE trade_id=? ORDER BY horizon_minutes',(trade_id,))]
-                    print('LATEST_CLOSED_G1S_LINKS', json.dumps(links, sort_keys=True))
-                if 'g1m_local_windows' in tables:
-                    w = db.execute('SELECT COUNT(*) n, SUM(CASE WHEN evidence_eligible=1 THEN 1 ELSE 0 END) eligible FROM g1m_local_windows WHERE trade_id=?',(trade_id,)).fetchone()
-                    o = db.execute('SELECT COUNT(*) n FROM g1m_local_outcomes o JOIN g1m_local_windows w USING(window_id) WHERE w.trade_id=?',(trade_id,)).fetchone()
-                    print('LATEST_CLOSED_G1M', json.dumps({'windows':int(w['n'] or 0),'eligible_windows':int(w['eligible'] or 0),'resolved_outcomes':int(o['n'] or 0)}, sort_keys=True))
+            import json, sqlite3
+            db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro', uri=True); db.row_factory=sqlite3.Row
+            active=db.execute("SELECT id,entry,stop,take,status FROM trades WHERE status='open' ORDER BY opened_at DESC,id DESC LIMIT 1").fetchone()
+            print('ACTIVE', json.dumps(dict(active) if active else None, sort_keys=True))
+            if active:
+                row=db.execute('SELECT id,ts,snapshot_json,verdict,model FROM ai_verdicts WHERE trade_id=? ORDER BY ts DESC,id DESC LIMIT 1',(int(active['id']),)).fetchone()
+                if row:
+                    s=json.loads(row['snapshot_json']); m=s.get('policy_manager') or {}; ev=m.get('evidence') or {}; rootcov=s.get('metric_coverage') or {}; mcov=m.get('metric_coverage')
+                    print('AI_META', json.dumps({'id':row['id'],'ts':row['ts'],'model':row['model'],'root_metric_coverage_present':bool(rootcov),'manager_metric_coverage_present':bool(mcov)}, sort_keys=True))
+                    print('ROOT_COVERAGE', json.dumps(rootcov.get('summary') or rootcov, sort_keys=True)[:10000])
+                    audit=m.get('input_audit') or {}; print('INPUT_AUDIT', json.dumps({'available_count':audit.get('available_count'),'total_count':audit.get('total_count'),'rows':audit.get('rows')}, sort_keys=True)[:16000])
+                    risk=m.get('risk_constraint') or {}; rule=m.get('selection_rule') or {}; print('RISK_FLOORS',json.dumps({'risk':risk,'selection_floor':rule.get('cvar_floor_r'),'eligible':rule.get('eligible'),'ineligible':rule.get('ineligible')},sort_keys=True)[:8000])
+                    ods=m.get('option_derivative_state') or ev.get('option_derivative_state') or {}; metrics=ods.get('metrics') or {}
+                    compact={k:{x:v.get(x) for x in ('available','value','slope','acceleration','confidence','sample_count','time_span_minutes','source_quality','reason','units','value_units','slope_units')} for k,v in metrics.items() if isinstance(v,dict)}
+                    print('OPTION_DERIVATIVE_METRICS',json.dumps(compact,sort_keys=True)[:24000])
+                    print('EVIDENCE_KEYS', json.dumps(sorted(ev.keys())))
+                    print('MANAGER_KEYS', json.dumps(sorted(m.keys())))
+                    dq=((ev.get('data_quality') or {}).get('reliability') or {}); print('RELIABILITY',json.dumps(dq,sort_keys=True))
+                    print('GEOMETRY',json.dumps({'trade_geometry':s.get('trade_geometry'),'scenario_geometry':m.get('scenario_geometry')},sort_keys=True)[:10000])
             db.close()
-            def get(path):
-                with urllib.request.urlopen('http://127.0.0.1:8790'+path, timeout=15) as response:
-                    return json.loads(response.read().decode('utf-8'))
-            final = get('/api/research/g1s/final-report')
-            local = get('/api/research/g1/management/local-status')
-            print('FINAL_ECON', json.dumps({'trade':final.get('real_trade_relevance'),'management':final.get('g1m_local'),'overall':final.get('does_model_beat_baseline_oos')}, sort_keys=True))
-            print('G1M_STATUS', json.dumps({k:local.get(k) for k in ('windows','resolved','evidence_eligible','eligible_resolved')}, sort_keys=True))
             PY
