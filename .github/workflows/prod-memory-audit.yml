@@ -1,0 +1,32 @@
+name: prod-memory-audit
+
+on:
+  push:
+    branches: [agent/evidence-audit-20260812]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Read-only VPS memory audit
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 3m
+          script: |
+            set -euo pipefail
+            echo "PROD_SHA $(git -C /opt/seiltanzer rev-parse HEAD)"
+            echo "SERVICE $(systemctl is-active seiltanzer)"
+            echo '--- free -m ---'
+            free -m
+            echo '--- meminfo ---'
+            grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo
+            echo '--- seiltanzer process ---'
+            ps -eo pid,rss,vsz,%mem,%cpu,cmd --sort=-rss | head -15
