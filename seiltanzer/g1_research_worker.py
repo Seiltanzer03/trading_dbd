@@ -18,7 +18,7 @@ import time
 # Keep the externally asserted worker API contract stable; the bounded scheduling
 # behaviour is an additive scalability refinement, exposed separately below.
 RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
-RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v2"
+RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v3"
 RESEARCH_INTERVAL_SEC = 10.0
 G1S_BATCH = 500
 G1M_LOCAL_BATCH = 100
@@ -29,17 +29,21 @@ def _run_g1s_bounded(runtime) -> dict:
     resolved = runtime.resolve_new(limit=G1S_BATCH)
     links = runtime.materialize_trade_links()
     models = runtime.fit_if_ready()
-    # Barrier outcomes are a separate research materialization. Invoke them
-    # directly with the same bounded batch instead of calling runtime.step(),
-    # which would repeat the default 2,500-row materialize/resolve burst.
+
+    # Derived outcome materializers are intentionally separate from runtime.step().
+    # Calling step() here would repeat the default 2,500-row source scan and defeat
+    # the bounded-worker contract.
     from .g1_short_horizon_refinement import _materialize_barriers
+    from .g1_short_horizon_metrics_refinement import _materialize_path_metrics
     barrier_rows = _materialize_barriers(runtime, limit=G1S_BATCH)
+    path_metric_rows = _materialize_path_metrics(runtime, limit=G1S_BATCH)
     return {
         "materialized": materialized,
         "resolved": resolved,
         "trade_links": links,
         "models_created": models,
         "barrier_rows_created": barrier_rows,
+        "path_metrics_created": path_metric_rows,
         "batch_limit": G1S_BATCH,
     }
 
