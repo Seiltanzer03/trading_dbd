@@ -114,3 +114,9 @@ del _install_g1_short_horizon_status_materialization
 from .g1_short_horizon_status_integrity import install_g1_short_horizon_status_integrity as _install_g1_short_horizon_status_integrity
 _install_g1_short_horizon_status_integrity()
 del _install_g1_short_horizon_status_integrity
+
+# Final conservative evidence layer.  It must remain last so no older descriptive
+# patch can silently weaken the serious OOS gate or replace dependency weighting.
+from .g1_short_horizon_evidence_completion import install_g1_short_horizon_evidence_completion as _install_g1_short_horizon_evidence_completion
+_install_g1_short_horizon_evidence_completion()
+del _install_g1_short_horizon_evidence_completion
