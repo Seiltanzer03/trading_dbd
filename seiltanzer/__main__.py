@@ -19,6 +19,7 @@ from .g1_management_storage import ensure_g1m_schema_backup, install_g1_manageme
 from .g1_q_routes import install_g1_q_routes
 from .g1_routes import install_g1_dataset_routes
 from .g1_shadow_routes import install_g1_shadow_routes
+from .g1_short_horizon_integration import ensure_g1s_schema_backup
 from .g1_short_horizon_routes import install_g1_short_horizon_routes
 from .lattice_visual_history import install_lattice_visual_history
 from .maintenance.venv_cleanup import remediate_current_environment
@@ -64,6 +65,7 @@ def main() -> None:
     storage = prepare_storage(settings)
     app = create_app(settings)
     ensure_g1m_schema_backup(storage)
+    ensure_g1s_schema_backup(storage)
     install_storage_runtime(app, storage)
     install_storage_routes(app)
     install_database_authority(app)
