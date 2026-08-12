@@ -10,76 +10,68 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-22.04
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
-      - name: Audit historical market-data depth on production
-        uses: appleboy/ssh-action@v1
+      - name: Checkout exact P1B feature branch
+        uses: actions/checkout@v4
         with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 11m
-          script: |
-            set -euo pipefail
-            echo "PROD_SHA $(git -C /opt/seiltanzer rev-parse HEAD)"
-            echo "SERVICE $(systemctl is-active seiltanzer)"
-            cd /opt/seiltanzer
-            /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import json, sqlite3, time
-            import yfinance as yf
-            from seiltanzer.config import INSTRUMENTS
+          ref: agent/g1s-historical-wf-20260812
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+      - name: Real Yahoo 5m historical walk-forward in temporary DB
+        run: |
+          python - <<'PY'
+          import json, os, resource, tempfile, time
+          from seiltanzer.config import Settings
+          from seiltanzer.engine import Engine
 
-            out=[]
-            for code,inst in INSTRUMENTS.items():
-                item={'code':code,'ticker':inst.yahoo}
-                for interval,period in [('5m','60d'),('1m','7d')]:
-                    key=f'{interval}_{period}'
-                    try:
-                        hist=yf.Ticker(inst.yahoo).history(period=period,interval=interval,auto_adjust=False)
-                        if len(hist):
-                            index=hist.index
-                            item[key]={
-                                'n':int(len(hist)),
-                                'first':index[0].isoformat(),
-                                'last':index[-1].isoformat(),
-                                'days':round((index[-1].timestamp()-index[0].timestamp())/86400,2),
-                                'non_null_close':int(hist['Close'].notna().sum()),
-                                'non_null_volume':int(hist['Volume'].notna().sum()) if 'Volume' in hist else 0,
-                            }
-                        else:
-                            item[key]={'n':0}
-                    except Exception as exc:
-                        item[key]={'error':f'{type(exc).__name__}: {exc}'[:300]}
-                out.append(item)
-            print('BAR_DEPTH',json.dumps(out,sort_keys=True))
-
-            cache=sqlite3.connect('file:/opt/seiltanzer/data/cache.db?mode=ro',uri=True)
-            cache.row_factory=sqlite3.Row
-            tables={r['name'] for r in cache.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            chain=[]
-            if 'chain_snapshots' in tables:
-                chain=[dict(r) for r in cache.execute("""
-                    SELECT ticker,COUNT(*) n,MIN(ts) first_ts,MAX(ts) last_ts,
-                           (MAX(ts)-MIN(ts))/86400.0 span_days
-                    FROM chain_snapshots GROUP BY ticker ORDER BY ticker
-                """)]
-            kv=[]
-            if 'kv' in tables:
-                kv=[dict(r) for r in cache.execute("SELECT key,ts FROM kv ORDER BY key")]
-            print('CHAIN_CACHE',json.dumps(chain,sort_keys=True))
-            print('CACHE_KEYS',json.dumps(kv,sort_keys=True))
-            cache.close()
-
-            db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True)
-            db.row_factory=sqlite3.Row
-            tables={r['name'] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            candidates=[]
-            for table in sorted(tables):
-                cols={r['name'] for r in db.execute(f'PRAGMA table_info({table})')}
-                if {'captured_ts','instrument'} <= cols:
-                    row=db.execute(f'SELECT COUNT(*) n,MIN(captured_ts) first_ts,MAX(captured_ts) last_ts FROM {table}').fetchone()
-                    candidates.append({'table':table,**dict(row)})
-            print('TIMESTAMPED_MARKET_TABLES',json.dumps(candidates,sort_keys=True))
-            db.close()
-            PY
+          with tempfile.TemporaryDirectory() as td:
+              settings=Settings(demo=True,data_dir=td)
+              engine=Engine(settings)
+              try:
+                  runtime=engine.short_horizon
+                  started=time.time()
+                  result=runtime.materialize_historical_walkforward(force=True)
+                  elapsed=time.time()-started
+                  status=runtime.historical_walkforward_status()
+                  print('REAL_WF_RESULT',json.dumps(result,sort_keys=True))
+                  print('REAL_WF_STATUS',json.dumps({
+                      'state':status.get('state'),
+                      'source_count':status.get('source_count'),
+                      'run_count':status.get('run_count'),
+                      'provisional_count':status.get('provisional_count'),
+                      'source_set':status.get('source_set_sha256'),
+                      'source_set_isolated':status.get('current_source_set_isolated'),
+                      'sources':[{k:x.get(k) for k in ('instrument','ticker','bar_count','calendar_span_days')} for x in status.get('sources') or []],
+                      'runs':status.get('runs'),
+                      'elapsed_sec':round(elapsed,2),
+                      'max_rss_mb':round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1),
+                      'historical_option_features':status.get('historical_option_features'),
+                      'production_authority':status.get('production_authority'),
+                      'auto_promotion':status.get('auto_promotion'),
+                  },sort_keys=True))
+                  assert status.get('state')=='COMPLETE', status
+                  assert status.get('source_count')==10, status
+                  assert status.get('run_count')==10, status
+                  assert len(status.get('sources') or [])==10, status
+                  assert all(int(x.get('bar_count') or 0)>=1000 for x in status.get('sources') or []), status
+                  assert {int(x.get('horizon_minutes')) for x in status.get('runs') or []}=={15,30,60,120,240}, status
+                  assert {str(x.get('target')) for x in status.get('runs') or []}=={'direction_up','terminal_log_return'}, status
+                  assert status.get('historical_option_features')=='UNAVAILABLE_NOT_SYNTHESIZED', status
+                  assert status.get('production_authority') is False, status
+                  assert status.get('auto_promotion') is False, status
+                  cohorts=runtime.champion_status().get('items') or []
+                  hist=[x for x in cohorts if x.get('source')=='HISTORICAL_WALK_FORWARD']
+                  winners={str(x.get('provisional_model_id')) for x in status.get('runs') or [] if x.get('historical_winner')}
+                  assert {str(x.get('champion_model_id')) for x in hist}==winners, (hist,winners)
+                  assert all(float(x.get('training_cutoff_ts') or 0)<float(x.get('oos_start_ts') or 0) for x in hist), hist
+                  print('REAL_WF_COHORTS',json.dumps({'winner_ids':sorted(winners),'cohort_n':len(hist)},sort_keys=True))
+              finally:
+                  engine.close()
+          PY
