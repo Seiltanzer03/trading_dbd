@@ -1,9 +1,9 @@
 """Bounded presentation cache for expensive G.1S evidence reports.
 
-Immutable ledgers remain authoritative.  Full-history OOS/trade/economic scans run
-only on the low-priority research worker, never because a browser requested an
-endpoint.  HTTP reads the latest frozen JSON snapshot and exposes BUILDING when a
-snapshot does not exist yet.
+Immutable ledgers remain authoritative. Full-history OOS, ablation, trade and
+economic scans run only on the low-priority research worker, never because a
+browser requested an endpoint. HTTP reads the latest frozen JSON snapshot and
+exposes BUILDING when a snapshot does not exist yet.
 """
 from __future__ import annotations
 
@@ -17,7 +17,10 @@ from .g1_short_horizon_runtime import ShortHorizonRuntime
 EVIDENCE_MATERIALIZATION_VERSION = "g1s-evidence-materialization-v1"
 EVIDENCE_MIN_REFRESH_SEC = 5 * 60.0
 EVIDENCE_MAX_STALE_SEC = 20 * 60.0
-REPORT_NAMES = ("probability_oos", "continuous_oos", "calibration_oos", "final_report")
+REPORT_NAMES = (
+    "probability_oos", "continuous_oos", "calibration_oos",
+    "ablation", "trade_relevance", "final_report",
+)
 _SOURCE_TABLES = (
     "g1s_resolutions", "g1s_shadow_predictions", "g1s_return_predictions",
     "g1s_calibrated_predictions", "g1s_trade_links", "g1m_local_outcomes",
@@ -108,6 +111,8 @@ def _writers(runtime: ShortHorizonRuntime) -> tuple[tuple[str, Callable[[], dict
         ("probability_oos", runtime.prospective_oos),
         ("continuous_oos", runtime.continuous_oos),
         ("calibration_oos", runtime.calibration_oos),
+        ("ablation", runtime.ablation),
+        ("trade_relevance", runtime.trade_relevance),
     ]
     if hasattr(runtime, "final_report"):
         writers.append(("final_report", runtime.final_report))
@@ -130,12 +135,12 @@ def materialize_evidence_reports(
         }
     names = [name for name, _ in _writers(runtime)]
     if not force and names and all(name in existing for name in names):
-        newest_age = max(0.0, now-min(float(existing[name]["generated_ts"]) for name in names))
+        oldest_age = max(0.0, now-min(float(existing[name]["generated_ts"]) for name in names))
         signatures_current = all(str(existing[name]["source_signature"]) == signature for name in names)
-        if signatures_current and newest_age < EVIDENCE_MAX_STALE_SEC:
-            return {"refreshed": False, "reason": "SOURCE_UNCHANGED", "age_sec": newest_age}
-        if newest_age < EVIDENCE_MIN_REFRESH_SEC:
-            return {"refreshed": False, "reason": "REFRESH_INTERVAL", "age_sec": newest_age}
+        if signatures_current and oldest_age < EVIDENCE_MAX_STALE_SEC:
+            return {"refreshed": False, "reason": "SOURCE_UNCHANGED", "age_sec": oldest_age}
+        if oldest_age < EVIDENCE_MIN_REFRESH_SEC:
+            return {"refreshed": False, "reason": "REFRESH_INTERVAL", "age_sec": oldest_age}
 
     results: dict[str, Any] = {}
     for name, fn in _writers(runtime):
