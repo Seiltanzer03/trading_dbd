@@ -146,3 +146,9 @@ del _install_g1_short_horizon_continuous_v2
 from .g1_short_horizon_evidence_materialization import install_g1_short_horizon_evidence_materialization as _install_g1_short_horizon_evidence_materialization
 _install_g1_short_horizon_evidence_materialization()
 del _install_g1_short_horizon_evidence_materialization
+
+# Historical diagnostics are true expanding walk-forward folds with fixed-horizon
+# purge/embargo. Prospective OOS remains the only evidence allowed to support edge.
+from .g1_short_horizon_walkforward import install_g1_short_horizon_walkforward as _install_g1_short_horizon_walkforward
+_install_g1_short_horizon_walkforward()
+del _install_g1_short_horizon_walkforward
