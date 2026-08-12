@@ -36,8 +36,6 @@ def test_dependency_adjusted_oos_gives_each_overlap_group_total_weight_one():
     assert report["weight_sum"] == pytest.approx(2.0)
     assert report["dependency_group_total_weight_one"] is True
     assert report["verdict"] == "INSUFFICIENT"
-    # First two overlapping rows jointly carry the same total evidence weight as
-    # the single independent third row.
     expected = (0.5 * (0.9-1) ** 2 + 0.5 * (0.8-1) ** 2 + (0.2-0) ** 2) / 2.0
     assert report["model_brier"] == pytest.approx(expected)
 
@@ -103,6 +101,12 @@ class _WorkerRuntime:
     def resolve_new(self, limit):
         self.calls.append(("resolve", limit)); return 2
 
+    def refresh_materialized_status(self, limit):
+        self.calls.append(("status_refresh", limit)); return {"observations_processed": 1}
+
+    def status(self):
+        return {"horizons": [{"fit_allowed": False}]}
+
     def materialize_trade_links(self):
         self.calls.append(("links", None)); return 3
 
@@ -132,3 +136,4 @@ def test_bounded_worker_keeps_barrier_and_path_metric_materializers(monkeypatch)
     assert metric_calls == [500]
     assert ("materialize", 500) in runtime.calls
     assert ("resolve", 500) in runtime.calls
+    assert ("status_refresh", 10000) in runtime.calls

@@ -41,13 +41,15 @@ jobs:
       - name: Verify bounded core, Intelligence, G1S and management APIs
         run: |
           set -euo pipefail
+          # Explicit SQLite integrity is intentionally NOT in this bounded loop.
+          # Routine status APIs must remain fast; the real PRAGMA check is verified
+          # separately with a larger budget and again by the restore drill.
           for endpoint in \
             /api/state \
             /api/validation \
             /api/system/database-authority \
             /api/system/storage/status \
             /api/system/storage/backups \
-            /api/system/storage/integrity \
             /api/research/runtime/status \
             /api/research/runtime/materializers \
             /api/research/g1s/status \
@@ -79,6 +81,22 @@ jobs:
                 test "$elapsed" -lt 3000 ;;
             esac
           done
+
+      - name: Verify explicit SQLite integrity outside fast path
+        run: |
+          set -euo pipefail
+          start=$(date +%s%3N)
+          body=$(curl -fsS --max-time 45 'http://127.0.0.1:8790/api/system/storage/integrity?full=false')
+          stop=$(date +%s%3N)
+          echo "/api/system/storage/integrity: $((stop-start))ms"
+          BODY="$body" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          body=json.loads(os.environ['BODY'])
+          assert body.get('storage_contract_version') == 'seiltanzer-storage-v1', body
+          assert body.get('ok') is True, body
+          assert body.get('check_kind') == 'quick_check', body
+          print('SQLite quick_check PASS')
+          PY
 
       - name: Wait for historical prospective short-horizon materialization
         run: |
@@ -122,6 +140,7 @@ jobs:
           assert storage.get('storage_contract_version') == 'seiltanzer-storage-v1'
           assert (storage.get('sqlite_integrity') or {}).get('ok') is True
           assert storage.get('research_health_decoupled') is True
+          assert storage.get('request_time_integrity_scan') is False
           assert storage.get('health') in {'HEALTHY','LOCAL_BACKUP_ONLY','DISASTER_RECOVERY_DEGRADED'}
           assert db_auth.get('contract_version') == 'database-authority-v1'
           assert db_auth.get('authoritative_database_path') == '/opt/seiltanzer/data/trades.db', db_auth
