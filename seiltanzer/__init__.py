@@ -82,3 +82,9 @@ del _install_g1_short_horizon_integration
 from .g1_short_horizon_refinement import install_g1_short_horizon_refinement as _install_g1_short_horizon_refinement
 _install_g1_short_horizon_refinement()
 del _install_g1_short_horizon_refinement
+
+# Every shadow fit receives an exact immutable source manifest (T0 + resolution
+# hashes). A model cannot later reconstruct or silently change its training set.
+from .g1_short_horizon_cut_refinement import install_g1_short_horizon_cut_refinement as _install_g1_short_horizon_cut_refinement
+_install_g1_short_horizon_cut_refinement()
+del _install_g1_short_horizon_cut_refinement
