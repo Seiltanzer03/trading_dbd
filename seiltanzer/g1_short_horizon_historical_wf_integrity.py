@@ -17,6 +17,10 @@ from .g1_short_horizon_historical_wf import (
     HISTORICAL_WF_CONTRACT_VERSION,
     _historical_status,
 )
+from .g1_short_horizon_historical_wf_memory import (
+    HISTORICAL_WF_MEMORY_VERSION,
+    install_g1_short_horizon_historical_wf_memory,
+)
 from .g1_short_horizon_runtime import ShortHorizonRuntime
 
 
@@ -26,6 +30,8 @@ HISTORICAL_WF_INTEGRITY_VERSION = "g1s-historical-wf-source-set-integrity-v1"
 def _current_source_set_runs(runtime: ShortHorizonRuntime,
                              base: dict[str, Any]) -> dict[str, Any]:
     source_set = base.get("source_set_sha256")
+    base["memory_contract_version"] = HISTORICAL_WF_MEMORY_VERSION
+    base["horizons_materialized_sequentially"] = True
     if not source_set:
         base["source_set_integrity_version"] = HISTORICAL_WF_INTEGRITY_VERSION
         base["current_source_set_isolated"] = False
@@ -58,6 +64,7 @@ def install_g1_short_horizon_historical_wf_integrity() -> None:
     if getattr(ShortHorizonRuntime, "_historical_wf_integrity_version", None) == HISTORICAL_WF_INTEGRITY_VERSION:
         return
 
+    install_g1_short_horizon_historical_wf_memory()
     previous_status = ShortHorizonRuntime.status
 
     def status(self):
