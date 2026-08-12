@@ -4,7 +4,7 @@ Market collection is owned by the existing passive loop. This worker only consum
 already-frozen source rows and may lag/fail without delaying quotes, trade writes or
 AI Verdict. It shares SQLite durability but has no production decision authority.
 
-Work is deliberately split into bounded batches.  The research worker shares the
+Work is deliberately split into bounded batches. The research worker shares the
 SQLite source of truth with the market collector, so one iteration must not hold the
 process around a multi-thousand-row research burst merely because backlog exists.
 """
@@ -15,7 +15,10 @@ import contextlib
 import time
 
 
-RESEARCH_WORKER_VERSION = "g1-research-worker-v2"
+# Keep the externally asserted worker API contract stable; the bounded scheduling
+# behaviour is an additive scalability refinement, exposed separately below.
+RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
+RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v2"
 RESEARCH_INTERVAL_SEC = 10.0
 G1S_BATCH = 500
 G1M_LOCAL_BATCH = 100
@@ -26,7 +29,7 @@ def _run_g1s_bounded(runtime) -> dict:
     resolved = runtime.resolve_new(limit=G1S_BATCH)
     links = runtime.materialize_trade_links()
     models = runtime.fit_if_ready()
-    # Barrier outcomes are a separate research materialization.  Invoke them
+    # Barrier outcomes are a separate research materialization. Invoke them
     # directly with the same bounded batch instead of calling runtime.step(),
     # which would repeat the default 2,500-row materialize/resolve burst.
     from .g1_short_horizon_refinement import _materialize_barriers
@@ -57,6 +60,7 @@ def install_research_worker(app) -> None:
     engine = app.state.engine
     app.state.g1_research_worker = {
         "contract_version": RESEARCH_WORKER_VERSION,
+        "scalability_refinement_version": RESEARCH_WORKER_SCALABILITY_VERSION,
         "running": False,
         "last_started_ts": None,
         "last_finished_ts": None,
