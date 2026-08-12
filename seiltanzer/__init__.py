@@ -125,3 +125,9 @@ del _install_g1_short_horizon_evidence_completion
 from .g1_short_horizon_continuous_learning import install_g1_short_horizon_continuous_learning as _install_g1_short_horizon_continuous_learning
 _install_g1_short_horizon_continuous_learning()
 del _install_g1_short_horizon_continuous_learning
+
+# Platt calibration is trained only from already-resolved prospective predictions
+# and may be applied only to later T0 observations.
+from .g1_short_horizon_calibration import install_g1_short_horizon_calibration as _install_g1_short_horizon_calibration
+_install_g1_short_horizon_calibration()
+del _install_g1_short_horizon_calibration
