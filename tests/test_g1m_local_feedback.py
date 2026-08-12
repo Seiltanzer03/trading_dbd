@@ -220,3 +220,78 @@ def test_local_window_and_outcome_are_immutable(tmp_path):
             engine.passive._conn.execute(
                 "UPDATE g1m_local_windows SET target_ts=target_ts+1 WHERE window_id=?",
                 (window["window_id"],))
+
+
+def test_fresh_prospective_review_reaches_eligible_resolved_and_explains_funnel(tmp_path):
+    engine, management = _make_runtime(tmp_path)
+
+    # A truly pre-G.1-M record stays upstream-ineligible and must be explained,
+    # never retroactively admitted.
+    _insert_source(
+        engine, management, trade_id=30,
+        captured_ts=management.activation_ts - 10.0,
+    )
+    old_obs = engine.passive._conn.execute(
+        "SELECT policy_edge_eligible,exclusion_reason FROM g1m_management_observations "
+        "WHERE trade_id=30"
+    ).fetchone()
+    assert old_obs["policy_edge_eligible"] == 0
+    assert old_obs["exclusion_reason"] == "NON_PROSPECTIVE_ORIGIN"
+
+    # Valid G.1-M evidence captured before local activation remains descriptive.
+    _insert_source(
+        engine, management, trade_id=31,
+        captured_ts=management.activation_ts,
+    )
+
+    local = ManagementLocalRuntime(engine)
+    engine.management_local = local
+    assert local.materialize_windows() == 8
+
+    # Fresh real-like management review after both activation boundaries.
+    captured = local.activation_ts + 1.0
+    review_id, _ = _insert_source(
+        engine, management, trade_id=32, captured_ts=captured,
+    )
+    source = engine.passive._conn.execute(
+        "SELECT policy_edge_eligible,exclusion_reason FROM g1m_management_observations "
+        "WHERE trade_id=32"
+    ).fetchone()
+    assert source["policy_edge_eligible"] == 1
+    assert source["exclusion_reason"] is None
+    assert local.materialize_windows() == 4
+
+    local_windows = engine.passive._conn.execute(
+        "SELECT horizon_minutes,evidence_eligible,origin,target_ts "
+        "FROM g1m_local_windows WHERE trade_id=32 ORDER BY horizon_minutes"
+    ).fetchall()
+    assert [row["horizon_minutes"] for row in local_windows] == [15, 30, 60, 120]
+    assert all(row["evidence_eligible"] == 1 for row in local_windows)
+    assert all(row["origin"] == "LIVE_PROSPECTIVE" for row in local_windows)
+
+    h15 = local_windows[0]
+    target = float(h15["target_ts"])
+    mid = captured + (target-captured) / 2.0
+    engine.passive._conn.executemany(
+        "INSERT INTO decision_path_points(review_id,ts,price,r) VALUES(?,?,?,?)",
+        [
+            (review_id, captured, 102.0, 0.2),
+            (review_id, mid, 105.0, 0.5),
+            (review_id, target, 108.0, 0.8),
+        ],
+    )
+    engine.passive._conn.commit()
+    assert local.resolve_due(now=target + 1.0) == 1
+
+    diagnostics = local.eligibility_diagnostics()
+    assert diagnostics["semantics_changed"] is False
+    assert diagnostics["retroactive_eligibility_allowed"] is False
+    assert diagnostics["state"] == "ELIGIBLE_EVIDENCE_ACTIVE"
+    assert diagnostics["counts"]["UPSTREAM_ELIGIBLE"] == 2
+    assert diagnostics["counts"]["UPSTREAM_INELIGIBLE"] == 1
+    assert diagnostics["counts"]["PRE_LOCAL_ACTIVATION"] == 1
+    assert diagnostics["counts"]["NON_PROSPECTIVE_ORIGIN"] == 1
+    assert diagnostics["counts"]["ELIGIBLE_RESOLVED"] == 1
+    assert diagnostics["counts"]["ELIGIBLE_PENDING"] == 3
+    assert diagnostics["window_counts"]["ELIGIBLE_OBSERVATIONS"] == 1
+    assert diagnostics["authority"]["production_authority"] is False
