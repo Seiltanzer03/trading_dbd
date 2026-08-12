@@ -101,6 +101,11 @@ const vector = (camera) => {
   return {x:camera.eye.x-c.x,y:camera.eye.y-c.y,z:camera.eye.z-c.z};
 };
 const distance = (a, b) => Math.hypot(a.x-b.x, a.y-b.y, a.z-b.z);
+const cameraGeometry = (camera) => ({
+  eye: camera.eye,
+  center: camera.center || {x:0,y:0,z:0},
+  up: camera.up || {x:0,y:0,z:1},
+});
 
 const initial = await page.evaluate(() => structuredClone(window.__fixture.el._fullLayout.scene.camera));
 await dispatchTouch('touchstart', [{ id: 1, x: 170, y: 240 }]);
@@ -123,7 +128,6 @@ assert.equal(rotated.mode, 'orbit');
 assert.equal(rotated.state, 'idle');
 assert.equal(rotated.busy, false);
 
-// PAN must move center and eye together instead of silently orbiting.
 await page.getByRole('button', { name: 'Pan drag mode' }).click();
 assert.equal(await page.evaluate(() => window.__fixture.guard.getDragMode()), 'pan');
 const beforePan = await page.evaluate(() => structuredClone(window.__fixture.el._fullLayout.scene.camera));
@@ -136,8 +140,6 @@ const afterPan = await page.evaluate(() => structuredClone(window.__fixture.el._
 assert(distance(afterPan.center, beforePan.center) > 0.05, 'PAN must move scene.camera.center');
 assert(distance(vector(afterPan), vector(beforePan)) < 1e-5, 'PAN must preserve the eye-center vector');
 
-// A structural react deliberately asks for INIT + orbit. The guard must keep the
-// user's camera AND selected PAN mode, and toolbar attach must reuse one DOM node.
 const toolbarIdentity = await page.evaluate(async () => {
   const { el, holder, traces, INIT, toolbar, guard, attachTerminal3DToolbar } = window.__fixture;
   await Plotly.react(el, traces, {
@@ -159,7 +161,6 @@ assert.equal(toolbarIdentity.mode, 'pan', 'react must not reset selected drag mo
 assert.equal(toolbarIdentity.active, 'pan', 'toolbar active state must follow guard owner');
 assert.deepEqual(toolbarIdentity.camera, afterPan, 'react must preserve the panned camera');
 
-// ZOOM mode on custom WebKit is a one-finger vertical radius gesture.
 await page.getByRole('button', { name: 'Zoom drag mode' }).click();
 const beforeOneFingerZoom = await page.evaluate(() => structuredClone(window.__fixture.el._fullLayout.scene.camera));
 await dispatchTouch('touchstart', [{ id: 1, x: 210, y: 280 }]);
@@ -171,7 +172,6 @@ const afterOneFingerZoom = await page.evaluate(() => structuredClone(window.__fi
 assert(radius(afterOneFingerZoom) < radius(beforeOneFingerZoom) * 0.8,
   'ZOOM one-finger upward drag must reduce eye radius');
 
-// TURNTABLE remains distinct and persists through the real ResizeObserver path.
 await page.getByRole('button', { name: 'Turntable drag mode' }).click();
 const beforeTurntable = await page.evaluate(() => structuredClone(window.__fixture.el._fullLayout.scene.camera));
 await dispatchTouch('touchstart', [{ id: 1, x: 165, y: 240 }]);
@@ -183,7 +183,6 @@ const afterTurntable = await page.evaluate(() => structuredClone(window.__fixtur
 assert.notDeepEqual(afterTurntable.eye, beforeTurntable.eye, 'TURNTABLE must move the camera');
 assert.equal(await page.evaluate(() => window.__fixture.guard.getDragMode()), 'turntable');
 
-// Two-finger pinch remains zoom regardless of selected one-finger mode.
 await dispatchTouch('touchstart', [
   { id: 1, x: 135, y: 230 },
   { id: 2, x: 255, y: 230 },
@@ -216,7 +215,6 @@ assert.deepEqual(afterResize.camera, pinch.saved, 'ResizeObserver resize must pr
 assert.equal(afterResize.mode, 'turntable', 'resize must preserve selected drag mode');
 assert.equal(afterResize.active, 'turntable', 'toolbar must still display guard mode');
 
-// HOME/RESET are explicit user actions only and must not reset the selected mode.
 await page.getByRole('button', { name: 'Return to terminal home view' }).click();
 await page.waitForTimeout(120);
 const home = await page.evaluate(() => ({
@@ -225,8 +223,10 @@ const home = await page.evaluate(() => ({
   init: window.__fixture.INIT,
   mode: window.__fixture.guard.getDragMode(),
 }));
-assert.deepEqual(home.camera, home.init);
-assert.deepEqual(home.saved, home.init);
+assert.deepEqual(cameraGeometry(home.camera), cameraGeometry(home.init),
+  'HOME must restore the requested eye/center/up geometry');
+assert.deepEqual(cameraGeometry(home.saved), cameraGeometry(home.init),
+  'guard must own the HOME eye/center/up geometry');
 assert.equal(home.mode, 'turntable');
 
 await page.getByRole('button', { name: 'Reset to Plotly default view' }).click();
