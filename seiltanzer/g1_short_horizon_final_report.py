@@ -6,7 +6,7 @@ from typing import Any
 from .g1_short_horizon_runtime import HORIZONS, ShortHorizonRuntime, _finite
 
 
-FINAL_REPORT_VERSION = "g1s-final-evidence-report-v2"
+FINAL_REPORT_VERSION = "g1s-final-evidence-report-v3"
 ECONOMIC_VALIDATION_MIN_TRADES = 20
 
 
@@ -115,21 +115,28 @@ def _trade_economics(runtime: ShortHorizonRuntime) -> dict[str, Any]:
     }
 
 
+def _probability_gate(raw_probability: str, best_probability_representation: str) -> str:
+    """Use mature calibration cohort when available; otherwise use mature raw OOS.
+
+    Raw probability OOS already includes Brier, log loss, ECE/reliability and the
+    serious prospective sample gate. A separate Platt cohort is an optional
+    representation challenger, not a reason to wait for a second 1000-sample
+    cohort before recognizing already-mature raw evidence.
+    """
+    if best_probability_representation in {"YES", "NO"}:
+        return best_probability_representation
+    return raw_probability if raw_probability in {"YES", "NO"} else "INSUFFICIENT"
+
+
 def _combine_statistical(
     raw_probability: str,
     continuous: str,
     best_probability_representation: str,
 ) -> str:
-    """Fail closed while allowing calibrated probability to rescue/replace raw.
-
-    Raw directional performance remains visible evidence, but the probability
-    gate is the best causally selected RAW/CALIBRATED representation.  Requiring
-    Platt itself to improve an already-good raw forecast would be an invalid
-    statistical veto.
-    """
-    if continuous == "NO" or best_probability_representation == "NO":
+    probability = _probability_gate(raw_probability, best_probability_representation)
+    if continuous == "NO" or probability == "NO":
         return "NO"
-    if continuous == "YES" and best_probability_representation == "YES":
+    if continuous == "YES" and probability == "YES":
         return "YES"
     return "INSUFFICIENT"
 
@@ -165,6 +172,9 @@ def _final_report(runtime: ShortHorizonRuntime) -> dict[str, Any]:
     probability_representation_verdict = str(
         calibration.get("does_best_probability_representation_beat_baselines_oos")
         or "INSUFFICIENT"
+    )
+    probability_gate = _probability_gate(
+        raw_probability_verdict, probability_representation_verdict
     )
     continuous_verdict = str(
         continuous.get("does_continuous_model_beat_baseline_oos") or "INSUFFICIENT"
@@ -212,6 +222,7 @@ def _final_report(runtime: ShortHorizonRuntime) -> dict[str, Any]:
         "oos_status": {
             "raw_probability": raw_probability_verdict,
             "best_probability_representation": probability_representation_verdict,
+            "probability_gate": probability_gate,
             "continuous_primary": continuous_verdict,
             "calibration_value_added": calibration_value_added,
             "statistical_combined": statistical,
@@ -220,9 +231,10 @@ def _final_report(runtime: ShortHorizonRuntime) -> dict[str, Any]:
         "performance": runtime.materializer_status(),
         "does_model_beat_baseline_oos": overall,
         "verdict_semantics": {
-            "YES": "serious prospective OOS superiority of the selected probability representation and continuous target, plus non-worse real-trade and local-management evidence",
-            "NO": "selected probability/continuous baseline failure or economic contradiction",
+            "YES": "serious prospective OOS superiority of probability and continuous targets, plus non-worse real-trade and local-management evidence",
+            "NO": "mature probability/continuous baseline failure or economic contradiction",
             "INSUFFICIENT": "one or more required evidence layers are not mature",
+            "probability_gate": "mature calibrated selection overrides raw; while calibration cohort is immature, serious raw probability OOS remains valid evidence",
             "calibration": "Platt value-add is reported separately; RAW may remain selected when already superior to causal baselines",
         },
         "auto_promotion_allowed": False,
