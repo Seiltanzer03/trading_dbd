@@ -7,10 +7,12 @@ from seiltanzer.g1_short_horizon_final_report import (
 )
 
 
-def test_statistical_verdict_requires_probability_continuous_and_calibration_yes():
+def test_statistical_verdict_requires_continuous_and_selected_probability_yes():
     assert _combine_statistical("YES", "YES", "YES") == "YES"
     assert _combine_statistical("YES", "YES", "INSUFFICIENT") == "INSUFFICIENT"
     assert _combine_statistical("YES", "NO", "YES") == "NO"
+    assert _combine_statistical("NO", "YES", "YES") == "YES"
+    assert _combine_statistical("YES", "YES", "NO") == "NO"
 
 
 def test_economic_verdict_fails_closed_on_real_world_contradiction():
