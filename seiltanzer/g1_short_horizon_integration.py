@@ -15,6 +15,14 @@ from . import storage_runtime as _storage
 
 _INSTALLED = False
 
+G1S_CRITICAL_TABLES = (
+    "g1s_observations", "g1s_resolutions", "g1s_models",
+    "g1s_shadow_predictions", "g1s_trade_links", "g1s_barrier_outcomes",
+    "g1s_training_cuts", "g1s_model_cut_links",
+    "g1m_local_windows", "g1m_local_outcomes", "g1m_local_policy_outcomes",
+    "research_materialization_state",
+)
+
 
 def install_g1_short_horizon_integration() -> None:
     global _INSTALLED
@@ -26,14 +34,8 @@ def install_g1_short_horizon_integration() -> None:
     # verified backup manifests. Later refinements create the barrier/cut tables;
     # missing tables are initially reported as None and become mandatory after the
     # first schema-aware backup on production.
-    extra = (
-        "g1s_observations", "g1s_resolutions", "g1s_models",
-        "g1s_shadow_predictions", "g1s_trade_links", "g1s_barrier_outcomes",
-        "g1s_training_cuts", "g1s_model_cut_links",
-        "g1m_local_windows", "g1m_local_outcomes", "g1m_local_policy_outcomes",
-        "research_materialization_state",
-    )
-    _storage.CRITICAL_TABLES = tuple(dict.fromkeys((*_storage.CRITICAL_TABLES, *extra)))
+    _storage.CRITICAL_TABLES = tuple(dict.fromkeys(
+        (*_storage.CRITICAL_TABLES, *G1S_CRITICAL_TABLES)))
 
     previous_engine_init = Engine.__init__
     previous_engine_close = Engine.close
@@ -63,3 +65,19 @@ def install_g1_short_horizon_integration() -> None:
     Engine.__init__ = engine_init
     Engine.close = engine_close
     PassiveLearningEngine.step = passive_step
+
+
+def ensure_g1s_schema_backup(storage) -> str | None:
+    """Create one verified snapshot after first G.1S/G.1-M.1 schema creation.
+
+    `prepare_storage` intentionally snapshots before Engine constructors. On the
+    first deploy that snapshot therefore cannot contain the new research ledgers.
+    Once `create_app` has created them, emit exactly one schema-identity snapshot;
+    subsequent restarts return to the normal backup cadence.
+    """
+    latest = storage._last_verified("local")
+    counts = (latest or {}).get("critical_table_counts") or {}
+    if latest and all(counts.get(table) is not None for table in G1S_CRITICAL_TABLES):
+        return None
+    result = storage.create_backup(kind="local", reason="g1s-schema-identity")
+    return result.backup_id
