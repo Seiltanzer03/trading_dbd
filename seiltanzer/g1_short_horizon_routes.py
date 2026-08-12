@@ -62,8 +62,10 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
                       methods=["GET"], name="research_materializers")
 
     def runtime_status():
+        worker = dict(getattr(app.state, "g1_research_worker", {}) or {})
         return {
             "contract_version": "research-runtime-status-v1",
+            "worker": worker,
             "short_horizon": runtime.materializer_status(),
             "management_local": local.status(),
             "market_collection_separate_from_research": True,
