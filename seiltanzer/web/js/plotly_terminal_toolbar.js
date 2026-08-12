@@ -53,7 +53,7 @@ export function attachTerminal3DToolbar({ plot, container, guard, homeCamera, ke
 
   const toolbar = document.createElement('div');
   toolbar.className = 'terminal-3d-toolbar';
-  toolbar.dataset.terminal3dToolbar = key;
+  toolbar.setAttribute('data-terminal-3d-toolbar', key);
   toolbar.setAttribute('role', 'toolbar');
   toolbar.setAttribute('aria-label', '3D view controls');
   toolbar.__terminal3dPlot = plot;
