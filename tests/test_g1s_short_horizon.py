@@ -12,6 +12,7 @@ from seiltanzer.g1_short_horizon_runtime import (
     ShortHorizonRuntime,
 )
 from seiltanzer.passive_learning import PassiveLearningEngine
+from seiltanzer import measurement_q_runtime as _mq
 
 
 class _Engine:
@@ -33,11 +34,12 @@ def runtime(tmp_path):
     passive.close(); cache.close()
 
 
-def _capture(passive, ts, *, price=100.0):
+def _capture(passive, ts, *, price=100.0, instrument="XAU"):
     features = {
         "source_observation_ts": ts,
+        "price_state": {"price": price, "ts": ts, "available": True},
         "market_regime": "test-regime",
-        "session": "test-session",
+        "session": "OPEN",
         "volatility": {"reference_volatility_annual": 0.20},
     }
     forecast = {
@@ -50,31 +52,41 @@ def _capture(passive, ts, *, price=100.0):
         "options": {"source": None, "age_sec": None,
                     "quality": 0.0, "kind": "unavailable"},
     }
-    return passive.capture_observation(
-        instrument="NAS100", captured_ts=ts, market_price=price,
-        features=features, forecast=forecast, provenance=provenance,
-        trigger_reason="test", evidence_eligible=True,
-        observation_origin="background_collector",
-    )
+    # Exercise the real F.3.2a background-capture contract, not trigger_reason=test:
+    # test-origin rows are intentionally ineligible for research training.
+    old_time = _mq.time.time
+    passive._f32a_background_capture = True
+    _mq.time.time = lambda: float(ts)
+    try:
+        return passive.capture_observation(
+            instrument=instrument, captured_ts=ts, market_price=price,
+            features=features, forecast=forecast, provenance=provenance,
+            trigger_reason="cadence", evidence_eligible=True,
+            observation_origin="background_collector",
+        )
+    finally:
+        passive._f32a_background_capture = False
+        _mq.time.time = old_time
 
 
 def test_existing_prospective_fixed_horizons_become_fast_g1s_evidence(runtime):
     rt, passive = runtime
-    ts = 1_700_000_000.0
+    ts = 1_700_000_000.0  # weekday; XAU session contract is 24h on weekdays.
     source_ids = _capture(passive, ts)
     assert len(source_ids) >= 5
     assert rt.materialize_new() == 5
 
     before = rt._conn.execute(
-        "SELECT observation_id,t0_sha256 FROM g1s_observations "
+        "SELECT observation_id,t0_sha256,training_eligible FROM g1s_observations "
         "WHERE horizon_minutes=15").fetchone()
     assert before is not None
+    assert before["training_eligible"] == 1
 
-    passive.record_market_point("NAS100", ts, 100.0,
+    passive.record_market_point("XAU", ts, 100.0,
                                 source="test-direct", quality=1.0, kind="direct")
     for minute in range(5, 61, 5):
         passive.record_market_point(
-            "NAS100", ts + minute * 60.0, 100.0 + minute / 100.0,
+            "XAU", ts + minute * 60.0, 100.0 + minute / 100.0,
             source="test-direct", quality=1.0, kind="direct")
 
     source_resolution = passive.resolve_due(now=ts + 60 * 60.0)
@@ -105,8 +117,8 @@ def test_g1s_never_materializes_option_native_row_as_short_horizon(runtime):
     ts = 1_700_000_000.0
     _capture(passive, ts)
     # Make one option-native-looking source row by copying a fixed row but changing
-    # only its frozen forecast semantics before G1S sees it. Passive test DB is
-    # append-only, so insert a new source row rather than mutating an existing one.
+    # only its frozen forecast semantics before G1S sees it. Passive source rows are
+    # append-only, so insert a distinct row instead of mutating the frozen T0.
     src = passive._conn.execute(
         "SELECT * FROM passive_market_observations WHERE horizon_minutes=15 LIMIT 1").fetchone()
     forecast = json.loads(src["forecast_json"])
@@ -119,7 +131,6 @@ def test_g1s_never_materializes_option_native_row_as_short_horizon(runtime):
     columns = [r[1] for r in passive._conn.execute(
         "PRAGMA table_info(passive_market_observations)").fetchall()]
     insert_cols = [c for c in columns if c in values and c != "resolved_ts" and c != "outcome_json"]
-    # SQLite source table has immutable UPDATE/DELETE but append remains allowed.
     passive._conn.execute(
         f"INSERT INTO passive_market_observations({','.join(insert_cols)}) "
         f"VALUES({','.join('?' for _ in insert_cols)})",
@@ -136,7 +147,7 @@ def test_overlap_dependency_groups_do_not_equal_raw_n(runtime):
     rt, _ = runtime
     base = 1_700_000_040.0
     rows = [
-        {"instrument": "NAS100", "horizon_minutes": 60,
+        {"instrument": "XAU", "horizon_minutes": 60,
          "captured_ts": base + i * 60.0, "direction_label": "UP" if i % 2 else "DOWN"}
         for i in range(10)
     ]
@@ -148,7 +159,7 @@ def test_overlap_dependency_groups_do_not_equal_raw_n(runtime):
 
 def test_no_model_backfill_for_observation_created_before_model(runtime):
     rt, passive = runtime
-    ts = time.time() - 10_000
+    ts = 1_700_000_000.0
     _capture(passive, ts)
     rt.materialize_new()
     old = rt._conn.execute(
@@ -157,6 +168,6 @@ def test_no_model_backfill_for_observation_created_before_model(runtime):
     assert rt._conn.execute(
         "SELECT COUNT(*) FROM g1s_shadow_predictions WHERE observation_id=?", (old,)
     ).fetchone()[0] == 0
-    # Fitting later is allowed, but the old T0 is never retrospectively populated
-    # by _create_prospective_predictions because that path runs only at capture.
+    # Fitting later is allowed, but old T0 rows never receive retrospective
+    # predictions because prediction creation happens only during T0 materialization.
     assert rt.status()["contract_version"] == G1S_CONTRACT_VERSION
