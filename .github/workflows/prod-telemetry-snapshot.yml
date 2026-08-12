@@ -14,17 +14,33 @@ jobs:
     runs-on: [self-hosted, linux, x64, seiltanzer-prod]
     timeout-minutes: 3
     steps:
-      - name: Exact read-only SQLite evidence counts
+      - name: Locate and inspect authoritative SQLite read-only
         run: |
           set -euo pipefail
           git config --global --add safe.directory /opt/seiltanzer || true
           echo "SERVER_SHA=$(git -C /opt/seiltanzer rev-parse HEAD)"
           echo "SERVICE=$(systemctl is-active seiltanzer 2>/dev/null || true)"
-          DB=$(find /opt/seiltanzer -maxdepth 3 -type f -name trades.db -print -quit)
-          echo "DB=$DB"
-          DB="$DB" /opt/seiltanzer/.venv/bin/python - <<'PY'
-          import os, sqlite3, json, time
-          db=os.environ['DB']
+          echo "SERVICE_CMD=$(systemctl show -p ExecStart --value seiltanzer 2>/dev/null || true)"
+          DBS=$(find /opt/seiltanzer -type f -name trades.db -print | tr '\n' ':')
+          echo "DBS=$DBS"
+          DBS="$DBS" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import os, sqlite3, json
+          paths=[p for p in os.environ.get('DBS','').split(':') if p]
+          inspected=[]
+          for db in paths:
+              try:
+                  conn=sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=5)
+                  names={r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                  marker=sum(n.startswith(('g1','passive','decision_','management_')) for n in names)
+                  inspected.append((marker,len(names),db,names))
+                  print('DB_CANDIDATE', db, 'tables', len(names), 'research_tables', marker)
+                  conn.close()
+              except Exception as e:
+                  print('DB_ERROR', db, repr(e))
+          if not inspected:
+              raise SystemExit('no trades.db found')
+          marker,total,db,names=max(inspected,key=lambda x:(x[0],x[1]))
+          print('AUTHORITATIVE_DB', db)
           conn=sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=5)
           conn.row_factory=sqlite3.Row
           names={r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -33,9 +49,7 @@ jobs:
           print('COUNTS', json.dumps(counts, sort_keys=True))
           if 'g1_q_capture_attempts' in names:
               cols=[r[1] for r in conn.execute('PRAGMA table_info("g1_q_capture_attempts")')]
-              print('Q_SCHEMA', json.dumps(cols))
-              q={}
-              q['attempts']=conn.execute('SELECT COUNT(*) FROM g1_q_capture_attempts').fetchone()[0]
+              q={'attempts':conn.execute('SELECT COUNT(*) FROM g1_q_capture_attempts').fetchone()[0]}
               if 'observation_created' in cols:
                   q['captured']=conn.execute('SELECT SUM(CASE WHEN observation_created=1 THEN 1 ELSE 0 END) FROM g1_q_capture_attempts').fetchone()[0] or 0
               if 'created_observation_id' in cols and 'passive_market_observations' in names:
@@ -43,22 +57,19 @@ jobs:
                   q['pending']=conn.execute("SELECT COUNT(*) FROM g1_q_capture_attempts q JOIN passive_market_observations p ON p.observation_id=q.created_observation_id WHERE q.created_observation_id IS NOT NULL AND p.resolution_status='pending'").fetchone()[0]
               print('Q_EXACT', json.dumps(q, sort_keys=True))
           if 'g1m_management_observations' in names:
-              cols=[r[1] for r in conn.execute('PRAGMA table_info("g1m_management_observations")')]
-              print('G1M_SCHEMA', json.dumps(cols))
-              m={}
-              m['observations']=conn.execute('SELECT COUNT(*) FROM g1m_management_observations').fetchone()[0]
-              m['measurement_eligible']=conn.execute('SELECT SUM(measurement_eligible) FROM g1m_management_observations').fetchone()[0] or 0
-              m['policy_edge_eligible']=conn.execute('SELECT SUM(policy_edge_eligible) FROM g1m_management_observations').fetchone()[0] or 0
-              m['execution_edge_eligible']=conn.execute('SELECT SUM(execution_edge_eligible) FROM g1m_management_observations').fetchone()[0] or 0
-              m['unique_trades_all']=conn.execute('SELECT COUNT(DISTINCT trade_id) FROM g1m_management_observations').fetchone()[0]
+              m={
+                'observations':conn.execute('SELECT COUNT(*) FROM g1m_management_observations').fetchone()[0],
+                'measurement_eligible':conn.execute('SELECT SUM(measurement_eligible) FROM g1m_management_observations').fetchone()[0] or 0,
+                'policy_edge_eligible':conn.execute('SELECT SUM(policy_edge_eligible) FROM g1m_management_observations').fetchone()[0] or 0,
+                'execution_edge_eligible':conn.execute('SELECT SUM(execution_edge_eligible) FROM g1m_management_observations').fetchone()[0] or 0,
+                'unique_trades_all':conn.execute('SELECT COUNT(DISTINCT trade_id) FROM g1m_management_observations').fetchone()[0]
+              }
               if 'g1m_resolutions' in names:
                   m['resolved']=conn.execute('SELECT COUNT(*) FROM g1m_resolutions').fetchone()[0]
                   m['prospective_resolved']=conn.execute('SELECT COUNT(*) FROM g1m_resolutions r JOIN g1m_management_observations o USING(observation_id) WHERE o.policy_edge_eligible=1').fetchone()[0]
               print('G1M_EXACT', json.dumps(m, sort_keys=True))
-          if 'g1c_shadow_models' in names:
-              print('G1C_MODELS', conn.execute('SELECT COUNT(*) FROM g1c_shadow_models').fetchone()[0])
-          if 'g1c_shadow_predictions' in names:
-              print('G1C_PREDICTIONS', conn.execute('SELECT COUNT(*) FROM g1c_shadow_predictions').fetchone()[0])
+          print('G1C_MODELS', conn.execute('SELECT COUNT(*) FROM g1c_shadow_models').fetchone()[0] if 'g1c_shadow_models' in names else None)
+          print('G1C_PREDICTIONS', conn.execute('SELECT COUNT(*) FROM g1c_shadow_predictions').fetchone()[0] if 'g1c_shadow_predictions' in names else None)
           conn.close()
           PY
       - name: Publish diagnostic run locator
@@ -71,4 +82,4 @@ jobs:
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
-            -d "{\"state\":\"success\",\"context\":\"diag/prod-telemetry\",\"description\":\"Exact read-only SQLite telemetry completed\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+            -d "{\"state\":\"success\",\"context\":\"diag/prod-telemetry\",\"description\":\"Authoritative read-only SQLite telemetry completed\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
