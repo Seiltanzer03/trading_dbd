@@ -52,6 +52,8 @@ jobs:
             /api/research/runtime/materializers \
             /api/research/g1s/status \
             /api/research/g1s/horizons \
+            /api/research/g1s/barriers \
+            /api/research/g1s/cuts \
             /api/research/g1s/oos \
             /api/research/g1s/ablation \
             /api/research/g1s/trade-relevance \
@@ -72,7 +74,6 @@ jobs:
             elapsed=$((stop-start))
             echo "$endpoint: $code ${elapsed}ms"
             test "$code" = "200"
-            # Status/control surfaces must remain bounded as the research DB grows.
             case "$endpoint" in
               /api/state|/api/system/database-authority|/api/system/storage/status|/api/research/runtime/status|/api/research/g1s/status|/api/research/g1/management/status|/api/research/g1/management/local-status)
                 test "$elapsed" -lt 3000 ;;
@@ -104,17 +105,19 @@ jobs:
           STORAGE=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/system/storage/status)
           BACKUPS=$(curl -fsS --max-time 10 http://127.0.0.1:8790/api/system/storage/backups)
           DB_AUTH=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/system/database-authority)
+          RUNTIME=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/runtime/status)
           INTEL=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1/intelligence/status)
           G1S=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1s/status)
           Q_AUDIT=$(curl -fsS --max-time 5 'http://127.0.0.1:8790/api/research/g1/q/audit?limit=5000')
           G1M=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1/management/status)
           G1ML=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1/management/local-status)
-          STORAGE="$STORAGE" BACKUPS="$BACKUPS" DB_AUTH="$DB_AUTH" INTEL="$INTEL" G1S="$G1S" Q_AUDIT="$Q_AUDIT" G1M="$G1M" G1ML="$G1ML" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          STORAGE="$STORAGE" BACKUPS="$BACKUPS" DB_AUTH="$DB_AUTH" RUNTIME="$RUNTIME" INTEL="$INTEL" G1S="$G1S" Q_AUDIT="$Q_AUDIT" G1M="$G1M" G1ML="$G1ML" /opt/seiltanzer/.venv/bin/python - <<'PY'
           import json, os
           storage=json.loads(os.environ['STORAGE']); backups=json.loads(os.environ['BACKUPS'])
-          db_auth=json.loads(os.environ['DB_AUTH']); intel=json.loads(os.environ['INTEL'])
-          g1s=json.loads(os.environ['G1S']); q=json.loads(os.environ['Q_AUDIT'])
-          g1m=json.loads(os.environ['G1M']); g1ml=json.loads(os.environ['G1ML'])
+          db_auth=json.loads(os.environ['DB_AUTH']); runtime=json.loads(os.environ['RUNTIME'])
+          intel=json.loads(os.environ['INTEL']); g1s=json.loads(os.environ['G1S'])
+          q=json.loads(os.environ['Q_AUDIT']); g1m=json.loads(os.environ['G1M'])
+          g1ml=json.loads(os.environ['G1ML'])
 
           assert storage.get('storage_contract_version') == 'seiltanzer-storage-v1'
           assert (storage.get('sqlite_integrity') or {}).get('ok') is True
@@ -122,6 +125,11 @@ jobs:
           assert storage.get('health') in {'HEALTHY','LOCAL_BACKUP_ONLY','DISASTER_RECOVERY_DEGRADED'}
           assert db_auth.get('contract_version') == 'database-authority-v1'
           assert db_auth.get('authoritative_database_path') == '/opt/seiltanzer/data/trades.db', db_auth
+
+          worker=runtime.get('worker') or {}
+          assert runtime.get('market_collection_separate_from_research') is True
+          assert worker.get('contract_version') == 'g1-research-worker-v1', worker
+          assert worker.get('running') is True, worker
 
           local=backups.get('local') or []
           assert local and local[0].get('verified') is True
@@ -131,8 +139,9 @@ jobs:
               'trades','passive_market_observations','g1_q_capture_attempts',
               'g1m_management_observations','g1m_resolutions','g1m_policy_outcomes',
               'g1s_observations','g1s_resolutions','g1s_models','g1s_shadow_predictions',
-              'g1s_trade_links','g1m_local_windows','g1m_local_outcomes',
-              'g1m_local_policy_outcomes','research_materialization_state'):
+              'g1s_trade_links','g1s_barrier_outcomes','g1s_training_cuts','g1s_model_cut_links',
+              'g1m_local_windows','g1m_local_outcomes','g1m_local_policy_outcomes',
+              'research_materialization_state'):
               assert table in counts and counts[table] is not None, (table, counts.get(table))
 
           assert intel.get('g1_stage') == 'G.1E'
@@ -163,6 +172,7 @@ jobs:
           print('G1S:', {h:{'raw':by[h].get('raw_resolved'),'effective':by[h].get('effective_n'),'state':by[h].get('state')} for h in sorted(by)})
           print('Q_AUDIT:', q.get('counts'))
           print('G1M_LOCAL:', {k:g1ml.get(k) for k in ('windows','resolved','evidence_eligible','eligible_resolved')})
+          print('RESEARCH_WORKER:', {k:worker.get(k) for k in ('running','last_duration_ms','last_error')})
           print('G1E:', {'presentation':intel.get('presentation_state'),'q_attempts':exp.get('q_attempts'),'q_captured':exp.get('q_captured'),'q_resolved':exp.get('q_resolved'),'storage':storage.get('health')})
           PY
 
