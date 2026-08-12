@@ -1,9 +1,8 @@
 """Future-only broad T0 context for G.1-M / G.1-M.1 research.
 
 The authoritative decision snapshot already contains the state used by the AI at
-T0.  This layer does not recompute that state and does not change the action.  It
-materializes a compact, immutable research context so later management-edge
-analysis can ask which *already-known-at-T0* families were useful.
+T0. This layer does not recompute that state and does not change the action. It
+materializes a compact immutable research context for later family ablation.
 """
 from __future__ import annotations
 
@@ -92,10 +91,12 @@ def _position_geometry(snapshot: dict, observation_row: Any, context_row: Any,
     observation = snapshot.get("observation") or {}
     manager = snapshot.get("policy_manager") or {}
     inputs = manager.get("inputs") or {}
-    current_r = (_finite(_at(observation, "position", "r"))
-                 or _finite(inputs.get("r0")))
+    current_r = _finite(_at(observation, "position", "r"))
+    if current_r is None:
+        current_r = _finite(inputs.get("r0"))
     take_r = _finite(inputs.get("T"))
-    entry = _finite(decision_row["entry"]) if decision_row is not None else _finite(position.get("entry"))
+    entry = (_finite(decision_row["entry"]) if decision_row is not None
+             else _finite(position.get("entry")))
     original_stop = (_finite(decision_row["original_stop"])
                      if decision_row is not None else _finite(position.get("original_stop")))
     active_stop = _finite(position.get("active_stop_price"))
@@ -106,13 +107,10 @@ def _position_geometry(snapshot: dict, observation_row: Any, context_row: Any,
         "current_r": current_r,
         "remaining_position_fraction": _finite(position.get("remaining_position_fraction")),
         "realized_r_weighted": _finite(position.get("realized_r_weighted")),
-        "entry": entry,
-        "original_stop": original_stop,
-        "active_stop": active_stop,
-        "take_price": take_price,
-        "current_price": current_price,
-        "distance_to_original_stop_r": (current_r + 1.0 if current_r is not None else None),
-        "distance_to_take_r": (take_r - current_r
+        "entry": entry, "original_stop": original_stop, "active_stop": active_stop,
+        "take_price": take_price, "current_price": current_price,
+        "distance_to_original_stop_r": (current_r+1.0 if current_r is not None else None),
+        "distance_to_take_r": (take_r-current_r
                                if current_r is not None and take_r is not None else None),
         "take_r": take_r,
         "instrument": context_row["instrument"] if context_row is not None else None,
@@ -120,7 +118,8 @@ def _position_geometry(snapshot: dict, observation_row: Any, context_row: Any,
         "setup": context_row["setup"] if context_row is not None else None,
         "trade_id": int(observation_row["trade_id"]),
         "captured_ts": float(observation_row["captured_ts"]),
-        "geometry_note": "R distances use original-risk normalization; active stop remains an exact price",
+        "geometry_note": (
+            "R distances use original-risk normalization; active stop remains an exact price"),
     }
 
 
@@ -141,8 +140,7 @@ def _option_barrier(state: dict) -> dict:
         "available": any(row.get("available") for row in metrics.values()),
         "metrics": metrics,
         "first_touch_hazard": state.get("first_touch_hazard") or {},
-        "family": "option_distribution",
-        "independent_vote": False,
+        "family": "option_distribution", "independent_vote": False,
         "authority": "frozen_t0_context",
     }
 
@@ -150,41 +148,31 @@ def _option_barrier(state: dict) -> dict:
 def _option_derivatives(state: dict) -> dict:
     metrics = {}
     for name, row in (state.get("metrics") or {}).items():
-        if not isinstance(row, dict):
-            continue
-        if any(row.get(key) is not None for key in ("slope", "acceleration")):
+        if isinstance(row, dict) and any(
+                row.get(key) is not None for key in ("slope", "acceleration")):
             metrics[str(name)] = _metric(state, str(name))
     return {
-        "available": bool(metrics),
-        "metrics": metrics,
+        "available": bool(metrics), "metrics": metrics,
         "named_derivatives": state.get("named_derivatives") or {},
         "option_state_score": state.get("option_state_score"),
         "option_state_confidence": state.get("option_state_confidence"),
         "option_state_attribution": state.get("option_state_attribution") or {},
         "redundancy_contract": state.get("option_state_redundancy_contract") or {},
-        "family": "option_distribution",
-        "independent_vote": False,
+        "family": "option_distribution", "independent_vote": False,
         "authority": "frozen_t0_shadow_context",
     }
 
 
 def _gex(state: dict) -> dict:
     geometry = state.get("gex_geometry") or {}
-    metrics = {
-        name: _metric(state, name)
-        for name in (
-            "gex_field", "gex_force", "gex_stiffness",
-            "distance_to_zero_gamma", "distance_to_call_wall", "distance_to_put_wall",
-        )
-    }
+    metrics = {name: _metric(state, name) for name in (
+        "gex_field", "gex_force", "gex_stiffness",
+        "distance_to_zero_gamma", "distance_to_call_wall", "distance_to_put_wall")}
     return {
         "available": bool(geometry) or any(row.get("available") for row in metrics.values()),
-        "geometry": geometry,
-        "metrics": metrics,
-        "family": "option_distribution",
-        "independent_vote": False,
-        "dealer_inventory_claim": False,
-        "authority": "frozen_t0_context",
+        "geometry": geometry, "metrics": metrics,
+        "family": "option_distribution", "independent_vote": False,
+        "dealer_inventory_claim": False, "authority": "frozen_t0_context",
     }
 
 
@@ -193,27 +181,19 @@ def _market_context(snapshot: dict) -> dict:
     manager = snapshot.get("policy_manager") or {}
     evidence = manager.get("evidence") or {}
 
-    def first_dict(*candidates):
-        for value in candidates:
-            if isinstance(value, dict) and value:
-                return value
-        return {}
+    def first_dict(*values):
+        return next((value for value in values if isinstance(value, dict) and value), {})
 
-    cross = first_dict(
-        observation.get("cross_asset"), evidence.get("cross_asset"),
-        manager.get("cross_asset"))
-    macro = first_dict(
-        observation.get("macro_regime"), observation.get("regime"),
-        evidence.get("macro_regime"), manager.get("regime"))
-    wavelet = first_dict(
-        observation.get("wavelet"), evidence.get("wavelet"), manager.get("wavelet"))
+    cross = first_dict(observation.get("cross_asset"), evidence.get("cross_asset"),
+                       manager.get("cross_asset"))
+    macro = first_dict(observation.get("macro_regime"), observation.get("regime"),
+                       evidence.get("macro_regime"), manager.get("regime"))
+    wavelet = first_dict(observation.get("wavelet"), evidence.get("wavelet"),
+                         manager.get("wavelet"))
     return {
         "available": bool(cross or macro or wavelet),
-        "cross_asset": cross,
-        "macro": macro,
-        "wavelet": wavelet,
-        "family_authority": "context_only",
-        "independent_vote": False,
+        "cross_asset": cross, "macro": macro, "wavelet": wavelet,
+        "family_authority": "context_only", "independent_vote": False,
         "missing_means_not_frozen_not_zero": True,
     }
 
@@ -221,28 +201,17 @@ def _market_context(snapshot: dict) -> dict:
 def _interactions(snapshot: dict, state: dict) -> dict:
     manager = snapshot.get("policy_manager") or {}
     direct = state.get("interactions") or manager.get("option_interactions") or {}
-    ensemble = manager.get("derived_scenario_ensemble") or {}
-    drivers = ensemble.get("drivers") or {}
+    drivers = (manager.get("derived_scenario_ensemble") or {}).get("drivers") or {}
     if direct:
-        source = "frozen_option_derivative_state"
-        value = direct
+        source, value = "frozen_option_derivative_state", direct
     elif drivers:
-        # The v15 compact snapshot may intentionally omit the full interaction
-        # workspace. Preserve only the already-frozen ensemble drivers; do not
-        # reconstruct interactions after T0.
-        source = "frozen_derived_scenario_drivers"
-        value = drivers
+        source, value = "frozen_derived_scenario_drivers", drivers
     else:
-        source = "not_frozen_in_decision_snapshot"
-        value = {}
+        source, value = "not_frozen_in_decision_snapshot", {}
     return {
-        "available": bool(value),
-        "source": source,
-        "value": value,
-        "recomputed_after_t0": False,
-        "family": "option_distribution",
-        "independent_vote": False,
-        "authority": "frozen_t0_context",
+        "available": bool(value), "source": source, "value": value,
+        "recomputed_after_t0": False, "family": "option_distribution",
+        "independent_vote": False, "authority": "frozen_t0_context",
     }
 
 
@@ -251,15 +220,10 @@ def _policy_state(snapshot: dict, observation_row: Any) -> dict:
     decision = manager.get("management_decision") or {}
     ensemble = manager.get("derived_scenario_ensemble") or {}
     shadow = manager.get("shadow_policy_contract") or {}
-    scenarios = []
-    for row in ensemble.get("scenarios") or []:
-        if not isinstance(row, dict):
-            continue
-        scenarios.append({
-            key: row.get(key) for key in (
-                "name", "weight", "material", "driver_confidence", "source_quality",
-            ) if key in row
-        })
+    scenarios = [{key: row.get(key) for key in (
+        "name", "weight", "material", "driver_confidence", "source_quality") if key in row}
+                 for row in ensemble.get("scenarios") or [] if isinstance(row, dict)]
+    attribution = manager.get("state_change_attribution") or {}
     return {
         "production_policy": str(observation_row["production_policy"]),
         "shadow_candidate_policy": (
@@ -269,9 +233,8 @@ def _policy_state(snapshot: dict, observation_row: Any) -> dict:
         "scenario_version": ensemble.get("version"),
         "scenario_drivers": ensemble.get("drivers") or {},
         "scenarios": scenarios,
-        "state_change_attribution": manager.get("state_change_attribution") or {},
-        "entry_avg_prev_now": (
-            (manager.get("state_change_attribution") or {}).get("snapshots") or {}),
+        "state_change_attribution": attribution,
+        "entry_avg_prev_now": attribution.get("snapshots") or {},
         "management_decision_id": decision.get("decision_id"),
         "production_action_changed_by_context_v2": False,
         "production_authority": False,
@@ -282,13 +245,9 @@ def build_management_context_v2(snapshot: dict, observation_row: Any,
                                 context_row: Any, decision_row: Any) -> dict:
     state = _option_state(snapshot)
     families = {
-        name: {
-            "members": list(members),
-            "training_enabled": False,
-            "auto_fit": False,
-            "ablation_required": True,
-            "independent_vote": False,
-        }
+        name: {"members": list(members), "training_enabled": False,
+               "auto_fit": False, "ablation_required": True,
+               "independent_vote": False}
         for name, members in MANAGEMENT_FEATURE_FAMILIES.items()
     }
     return {
@@ -297,8 +256,7 @@ def build_management_context_v2(snapshot: dict, observation_row: Any,
         "captured_ts": float(observation_row["captured_ts"]),
         "observation_id": str(observation_row["observation_id"]),
         "review_id": str(observation_row["review_id"]),
-        "position_geometry": _position_geometry(
-            snapshot, observation_row, context_row, decision_row),
+        "position_geometry": _position_geometry(snapshot, observation_row, context_row, decision_row),
         "option_barrier": _option_barrier(state),
         "option_derivatives": _option_derivatives(state),
         "gex": _gex(state),
@@ -333,19 +291,16 @@ def install_g1_management_feature_context_v2() -> None:
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS g1m_feature_context_v2_activation(
                     id INTEGER PRIMARY KEY CHECK(id=1),
-                    activation_ts REAL NOT NULL,
-                    contract_version TEXT NOT NULL)""")
+                    activation_ts REAL NOT NULL, contract_version TEXT NOT NULL)""")
             self._conn.execute(
-                "INSERT OR IGNORE INTO g1m_feature_context_v2_activation(id,activation_ts,contract_version) "
-                "VALUES(1,?,?)", (time.time(), MANAGEMENT_CONTEXT_ACTIVATION))
+                "INSERT OR IGNORE INTO g1m_feature_context_v2_activation"
+                "(id,activation_ts,contract_version) VALUES(1,?,?)",
+                (time.time(), MANAGEMENT_CONTEXT_ACTIVATION))
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS g1m_t0_feature_context_v2(
-                    observation_id TEXT PRIMARY KEY,
-                    review_id TEXT NOT NULL UNIQUE,
-                    captured_ts REAL NOT NULL,
-                    source_snapshot_sha256 TEXT NOT NULL,
-                    context_json TEXT NOT NULL,
-                    context_sha256 TEXT NOT NULL,
+                    observation_id TEXT PRIMARY KEY, review_id TEXT NOT NULL UNIQUE,
+                    captured_ts REAL NOT NULL, source_snapshot_sha256 TEXT NOT NULL,
+                    context_json TEXT NOT NULL, context_sha256 TEXT NOT NULL,
                     created_ts REAL NOT NULL)""")
             for table in CRITICAL_TABLES:
                 self._conn.execute(f"""
@@ -361,8 +316,7 @@ def install_g1_management_feature_context_v2() -> None:
         inserted = previous_capture(self, source)
         if not inserted:
             return False
-        review_id = str(source["review_id"])
-        captured_ts = float(source["captured_ts"])
+        review_id, captured_ts = str(source["review_id"]), float(source["captured_ts"])
         with self._lock:
             activation = self._conn.execute(
                 "SELECT activation_ts FROM g1m_feature_context_v2_activation WHERE id=1").fetchone()
@@ -376,12 +330,9 @@ def install_g1_management_feature_context_v2() -> None:
                 "ORDER BY created_ts DESC,rowid DESC LIMIT 1", (review_id,)).fetchone()
         if obs is None or activation is None:
             return True
-        # Never retrofit an older decision just because a worker first sees it
-        # after this code is deployed.
-        if captured_ts < float(activation["activation_ts"]) - 1e-9:
+        if captured_ts < float(activation["activation_ts"])-1e-9:
             return True
-        raw_snapshot = str(source["snapshot_json"])
-        snapshot = _loads(raw_snapshot, {})
+        snapshot = _loads(str(source["snapshot_json"]), {})
         if not isinstance(snapshot, dict):
             return True
         payload = build_management_context_v2(snapshot, obs, context, decision)
@@ -401,13 +352,12 @@ def install_g1_management_feature_context_v2() -> None:
         with self._lock:
             activation = self._conn.execute(
                 "SELECT activation_ts FROM g1m_feature_context_v2_activation WHERE id=1").fetchone()
-            count = int(self._conn.execute(
-                "SELECT COUNT(*) FROM g1m_t0_feature_context_v2").fetchone()[0])
         body["management_context_v2"] = {
             "contract_version": MANAGEMENT_CONTEXT_V2,
             "activation_ts": float(activation["activation_ts"]) if activation else None,
             "future_captures_only": True,
-            "observations": count,
+            "collection_count": None,
+            "collection_count_source": "not_scanned_on_request",
             "feature_families": list(MANAGEMENT_FEATURE_FAMILIES),
             "training_enabled": False,
             "ablation_required_before_training": True,
