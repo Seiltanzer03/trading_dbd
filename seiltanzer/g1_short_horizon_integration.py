@@ -19,7 +19,7 @@ G1S_CRITICAL_TABLES = (
     "g1s_shadow_predictions", "g1s_trade_links", "g1s_barrier_outcomes",
     "g1s_training_cuts", "g1s_model_cut_links",
     "g1m_local_windows", "g1m_local_outcomes", "g1m_local_policy_outcomes",
-    "research_materialization_state",
+    "g1m_local_contract_errors", "research_materialization_state",
 )
 
 
