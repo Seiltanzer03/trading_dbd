@@ -192,6 +192,12 @@ def materialization_status(runtime: ShortHorizonRuntime) -> dict[str, Any]:
 def install_g1_short_horizon_evidence_materialization() -> None:
     if getattr(ShortHorizonRuntime, "_evidence_materialization_version", None) == EVIDENCE_MATERIALIZATION_VERSION:
         return
+    # This module is imported after the strict V2 feature layer and before the
+    # service worker starts. Activate the purged chronological V2 fitter here so
+    # no V2 artifact can be created with the earlier placeholder diagnostics.
+    from .g1_short_horizon_v2_diagnostics import install_g1_short_horizon_v2_diagnostics
+    install_g1_short_horizon_v2_diagnostics()
+
     previous_init = ShortHorizonRuntime.__init__
 
     def init(self, *args, **kwargs):
