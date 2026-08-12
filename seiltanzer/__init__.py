@@ -72,16 +72,21 @@ _install_g1_management_integration()
 del _install_g1_management_integration
 
 # G.1S / G.1-M.1 add fast research feedback on already-frozen prospective rows.
-# They wrap the G.1-M-aware passive scheduler and cannot change production policy.
 from .g1_short_horizon_integration import install_g1_short_horizon_integration as _install_g1_short_horizon_integration
 _install_g1_short_horizon_integration()
 del _install_g1_short_horizon_integration
 
-# New background T0 captures freeze ATR before future outcomes; existing rows are
-# never hindsight-enriched. Four ablation feature families remain research-only.
+# New T0 rows freeze ATR and standardized barrier geometry. Existing rows are never
+# hindsight-enriched and remain usable only for fields that genuinely existed.
 from .g1_short_horizon_refinement import install_g1_short_horizon_refinement as _install_g1_short_horizon_refinement
 _install_g1_short_horizon_refinement()
 del _install_g1_short_horizon_refinement
+
+# Freeze intraday returns/range/realized-vol features using only 1m bars whose end
+# precedes T0. Missing legacy features stay explicit missing/availability=0.
+from .g1_short_horizon_market_features import install_g1_short_horizon_market_features as _install_g1_short_horizon_market_features
+_install_g1_short_horizon_market_features()
+del _install_g1_short_horizon_market_features
 
 # Every shadow fit receives an exact immutable source manifest (T0 + resolution
 # hashes). A model cannot later reconstruct or silently change its training set.
