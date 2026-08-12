@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from .g1_short_horizon_final_report import install_g1_short_horizon_final_report
+from .g1_short_horizon_historical_wf_integrity import install_g1_short_horizon_historical_wf_integrity
 from .storage_restore_drill import last_restore_drill
 
 
@@ -11,6 +12,7 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
     if getattr(app.state, "g1s_routes_installed", False):
         return
     install_g1_short_horizon_final_report()
+    install_g1_short_horizon_historical_wf_integrity()
     runtime = getattr(app.state.engine, "short_horizon", None)
     local = getattr(app.state.engine, "management_local", None)
     if runtime is None or local is None:
