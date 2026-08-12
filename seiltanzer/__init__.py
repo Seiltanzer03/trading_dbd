@@ -7,121 +7,120 @@
 
 __version__ = "0.1.0"
 
-# Keep analytics behavior identical whether production is started through the
-# console script, `python -m seiltanzer`, uvicorn, or tests importing create_app.
-# The installer only replaces the three prototype analytics payload methods;
-# it does not start threads or perform network I/O at import time.
 from .analytics_runtime import install_analytics_runtime as _install_analytics_runtime
-
 _install_analytics_runtime()
 del _install_analytics_runtime
 
-# Phase F.3.2a closes passive measurement runtime semantics without rewriting
-# historical observations. Like analytics_runtime, this only installs adapters;
-# it starts no threads and performs no network I/O at import time.
 from .measurement_runtime import install_measurement_runtime as _install_measurement_runtime
-
 _install_measurement_runtime()
 del _install_measurement_runtime
 
-# Phase G.1A adds a deterministic prospective research-dataset boundary on top
-# of F.3.2a. It creates no calibrator and grants no production authority.
 from .g1_dataset_runtime import install_g1_dataset_runtime as _install_g1_dataset_runtime
-
 _install_g1_dataset_runtime()
 del _install_g1_dataset_runtime
 
-# Keep measurement-validity distinct from research-evidence admission and make
-# runtime readiness depend on observed current-contract evidence, not legacy rows.
 from .g1_dataset_refinement import install_g1_dataset_refinement as _install_g1_dataset_refinement
-
 _install_g1_dataset_refinement()
 del _install_g1_dataset_refinement
 
-# Phase G.1B measures frozen baselines and Q identity calibration on top of the
-# G.1A boundary. It is read-only research: no calibrator fitting or authority.
 from .g1_baseline_runtime import install_g1_baseline_runtime as _install_g1_baseline_runtime
-
 _install_g1_baseline_runtime()
 del _install_g1_baseline_runtime
 
-# Keep G.1B evidence N consistent with G.1A aggregate dependency semantics and
-# make historical baselines respect recorded outcome-availability timestamps.
 from .g1_baseline_refinement import install_g1_baseline_refinement as _install_g1_baseline_refinement
-
 _install_g1_baseline_refinement()
 del _install_g1_baseline_refinement
 
-# Phase G.1B.1 makes every prospective option-native Q capture attempt
-# observable and immutable. It does not relax G.1A admission or fit Q->P.
 from .g1_q_evidence_runtime import install_g1_q_evidence_runtime as _install_g1_q_evidence_runtime
-
 _install_g1_q_evidence_runtime()
 del _install_g1_q_evidence_runtime
 
-# Fail closed on source freshness, direct target-price provenance and the frozen
-# source/target/proxy mapping before a Q attempt is counted as successful.
 from .g1_q_evidence_refinement import install_g1_q_evidence_refinement as _install_g1_q_evidence_refinement
-
 _install_g1_q_evidence_refinement()
 del _install_g1_q_evidence_refinement
 
-# Q evidence has an independent persisted cadence so a fresh fixed-horizon row
-# cannot hide option-source availability after restart. Successful runs write
-# only the native-expiry Q row; fixed horizons retain their own cadence.
 from .g1_q_collector import install_g1_q_collector as _install_g1_q_collector
-
 _install_g1_q_collector()
 del _install_g1_q_collector
 
-# Freeze the native Q ACT/365 clock from exact expiry minus the independent
-# collector's T0, matching the F.3.2a expiry contract end-to-end.
 from .g1_q_collector_refinement import install_g1_q_collector_refinement as _install_g1_q_collector_refinement
-
 _install_g1_q_collector_refinement()
 del _install_g1_q_collector_refinement
 
-# Phase G.1C is the first trainable layer, but remains strictly research-only.
-# It consumes only immutable G.1A Q-eligible cuts, freezes challenger model
-# artifacts, and records prospective shadow predictions for later G.1D OOS.
 from .g1_shadow_runtime import install_g1_shadow_runtime as _install_g1_shadow_runtime
-
 _install_g1_shadow_runtime()
 del _install_g1_shadow_runtime
 
-# Prospective predictions fail closed on exact T0 provenance and model scopes
-# separate native/direct/inverse semantics rather than pooling unlike Q sources.
 from .g1_shadow_refinement import install_g1_shadow_refinement as _install_g1_shadow_refinement
-
 _install_g1_shadow_refinement()
 del _install_g1_shadow_refinement
 
-# Model rows are immutable in normal operation, but prediction also re-hashes
-# the artifact so storage corruption cannot silently enter the prospective OOS ledger.
 from .g1_shadow_artifact_refinement import install_g1_shadow_artifact_refinement as _install_g1_shadow_artifact_refinement
-
 _install_g1_shadow_artifact_refinement()
 del _install_g1_shadow_artifact_refinement
 
-# G.1-M integrity rules patch the research runtime class before the Engine
-# constructor creates its ManagementEdgeRuntime instance. They add no threads and
-# cannot alter production actions.
 from .g1_management_refinement import install_g1_management_refinement as _install_g1_management_refinement
-
 _install_g1_management_refinement()
 del _install_g1_management_refinement
 
-# User acknowledgement is compliance evidence, not broker truth. Keep that
-# provenance explicit before any G.1-M observation can resolve.
 from .g1_management_execution_refinement import install_g1_management_execution_refinement as _install_g1_management_execution_refinement
-
 _install_g1_management_execution_refinement()
 del _install_g1_management_execution_refinement
 
-# Phase G.1-M measures whether already-open-position management adds value over
-# frozen HOLD/original-plan/exit comparators. It is prospective research only:
-# no result from this layer may change production policy or execute an order.
 from .g1_management_integration import install_g1_management_integration as _install_g1_management_integration
-
 _install_g1_management_integration()
 del _install_g1_management_integration
+
+# G.1S / G.1-M.1 add fast research feedback on already-frozen prospective rows.
+from .g1_short_horizon_integration import install_g1_short_horizon_integration as _install_g1_short_horizon_integration
+_install_g1_short_horizon_integration()
+del _install_g1_short_horizon_integration
+
+# New T0 rows freeze ATR and standardized barrier geometry. Existing rows are never
+# hindsight-enriched and remain usable only for fields that genuinely existed.
+from .g1_short_horizon_refinement import install_g1_short_horizon_refinement as _install_g1_short_horizon_refinement
+_install_g1_short_horizon_refinement()
+del _install_g1_short_horizon_refinement
+
+# Freeze intraday returns/range/realized-vol features using only 1m bars whose end
+# precedes T0. Missing legacy features stay explicit missing/availability=0.
+from .g1_short_horizon_market_features import install_g1_short_horizon_market_features as _install_g1_short_horizon_market_features
+_install_g1_short_horizon_market_features()
+del _install_g1_short_horizon_market_features
+
+# Fixed untuned momentum baseline prevents learned challengers from claiming value
+# merely by rediscovering the sign of the recent 15m move.
+from .g1_short_horizon_baseline_refinement import install_g1_short_horizon_baseline_refinement as _install_g1_short_horizon_baseline_refinement
+_install_g1_short_horizon_baseline_refinement()
+del _install_g1_short_horizon_baseline_refinement
+
+# A deterministic depth-1 boosted challenger tests nonlinear structure without any
+# hyperparameter search or automatic champion selection.
+from .g1_short_horizon_gbt_refinement import install_g1_short_horizon_gbt_refinement as _install_g1_short_horizon_gbt_refinement
+_install_g1_short_horizon_gbt_refinement()
+del _install_g1_short_horizon_gbt_refinement
+
+# Every shadow fit receives an exact immutable source manifest (T0 + resolution
+# hashes). A model cannot later reconstruct or silently change its training set.
+from .g1_short_horizon_cut_refinement import install_g1_short_horizon_cut_refinement as _install_g1_short_horizon_cut_refinement
+_install_g1_short_horizon_cut_refinement()
+del _install_g1_short_horizon_cut_refinement
+
+# Final research-integrity pass: local management time fails closed, Q maturity is
+# audited only on successfully captured observations, and trade relevance uses
+# only model predictions that existed before the real trade entry.
+from .g1_fast_learning_integrity_refinement import install_g1_fast_learning_integrity_refinement as _install_g1_fast_learning_integrity_refinement
+_install_g1_fast_learning_integrity_refinement()
+del _install_g1_fast_learning_integrity_refinement
+
+# Append richer resolved-path statistics, finalize overlap dependency weights, and
+# report model effectiveness against simple OOS baselines without promotion.
+from .g1_short_horizon_metrics_refinement import install_g1_short_horizon_metrics_refinement as _install_g1_short_horizon_metrics_refinement
+_install_g1_short_horizon_metrics_refinement()
+del _install_g1_short_horizon_metrics_refinement
+
+# The effectiveness verdict must use dependency-adjusted loss and real-trade
+# validation may consume only model/prediction artifacts persisted before entry.
+from .g1_short_horizon_metrics_integrity import install_g1_short_horizon_metrics_integrity as _install_g1_short_horizon_metrics_integrity
+_install_g1_short_horizon_metrics_integrity()
+del _install_g1_short_horizon_metrics_integrity

@@ -1,5 +1,4 @@
 """Точка входа: `python -m seiltanzer [--demo] [--port 8790]`."""
-
 from __future__ import annotations
 
 import argparse
@@ -11,17 +10,22 @@ from .analytics_runtime import install_analytics_runtime
 from .app import create_app
 from .app_extensions import install_lattice_revaluation
 from .config import Settings
+from .database_authority import install_database_authority
 from .g1_baseline_routes import install_g1_baseline_routes
 from .g1_intelligence_routes import install_g1_intelligence_routes
 from .g1_intelligence_runtime import install_intelligence_runtime
 from .g1_management_routes import install_g1_management_routes
 from .g1_management_storage import ensure_g1m_schema_backup, install_g1_management_storage
 from .g1_q_routes import install_g1_q_routes
+from .g1_research_worker import install_research_worker
 from .g1_routes import install_g1_dataset_routes
 from .g1_shadow_routes import install_g1_shadow_routes
+from .g1_short_horizon_integration import ensure_g1s_schema_backup
+from .g1_short_horizon_routes import install_g1_short_horizon_routes
 from .lattice_visual_history import install_lattice_visual_history
 from .maintenance.venv_cleanup import remediate_current_environment
 from .option_shadow_state import install_option_shadow_state
+from .research_scalability_bootstrap import install_research_scalability
 from .storage_refinement import install_storage_refinement
 from .storage_routes import install_storage_routes
 from .storage_runtime import install_storage_runtime, prepare_storage
@@ -49,10 +53,6 @@ def main() -> None:
         run_check()
         return
 
-    # The Actions runner intentionally cannot delete root/service-owned malformed
-    # dist-info remnants. Run the same narrow contract under the existing service
-    # identity. This never broadens beyond ~*ltanzer* and is non-fatal if the
-    # service identity also lacks permission.
     cleanup = remediate_current_environment()
     if cleanup.get("candidate_n") or cleanup.get("remaining_n"):
         print("G1E1 venv cleanup -> " + json.dumps(cleanup, ensure_ascii=False, sort_keys=True))
@@ -63,18 +63,23 @@ def main() -> None:
 
     settings = Settings(demo=args.demo, stream=args.stream, host=args.host,
                         port=args.port, data_dir=args.data_dir)
-
-    # Preserve the old source-of-truth before schema constructors run.
     storage = prepare_storage(settings)
     app = create_app(settings)
-    # On the first G.1-M activation, create one additional verified snapshot after
-    # the new immutable ledgers exist. Later restarts stay on normal backup cadence.
     ensure_g1m_schema_backup(storage)
+    ensure_g1s_schema_backup(storage)
     install_storage_runtime(app, storage)
     install_storage_routes(app)
+    install_database_authority(app)
 
-    # /api/ai/decision/ack is canonical inside create_app. Do not install the
-    # retired legacy acknowledgement route with a conflicting request schema.
+    # G.1S/G.1-M.1 consume already-frozen source rows on their own low-priority
+    # worker. A slow refit must never delay the market collector or AI Verdict.
+    install_research_worker(app)
+
+    # G.1E.2: request-time research APIs become bounded/materialized. This also
+    # decouples storage health from G.1 scans and fast-gates impossible G.1C fits.
+    install_research_scalability(app)
+
+    # /api/ai/decision/ack is canonical inside create_app.
     install_lattice_revaluation(app)
     install_lattice_visual_history(app)
     install_option_shadow_state(app)
@@ -83,8 +88,10 @@ def main() -> None:
     install_g1_q_routes(app)
     install_g1_shadow_routes(app)
     install_g1_management_routes(app)
+    install_g1_short_horizon_routes(app)
 
-    # G.1E presentation layer remains research-only.
+    # Intelligence remains presentation/research only; its background builder is
+    # replaced by the bounded G.1E.2 materializer before lifespan starts.
     install_intelligence_runtime(app)
     install_g1_intelligence_routes(app)
 
@@ -92,6 +99,7 @@ def main() -> None:
           f"{' [DEMO]' if args.demo else ''}{' [STREAM]' if args.stream else ''}")
     print(f"Intelligence Lab -> http://{args.host}:{args.port}/intelligence")
     print(f"Management Edge -> http://{args.host}:{args.port}/management-edge")
+    print(f"Fast Market Learning -> /api/research/g1s/status")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

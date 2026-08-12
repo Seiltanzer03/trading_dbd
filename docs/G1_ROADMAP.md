@@ -1,120 +1,98 @@
-# Seiltanzer G.1 Roadmap
+# G.1 Research Roadmap
 
-The G.1 program measures forecast edge before any production authority changes.
-Every stage is gated by the previous stage and remains research/shadow unless a
-later, explicit promotion phase proves otherwise.
+## Core principle
 
-## G.1A — Prospective Dataset Contract
+Seiltanzer measures edge before increasing decision authority. Every learned
+component remains research/shadow until a separate prospective OOS contract proves
+that it adds value over frozen baselines.
 
-**DONE.** Deterministic boundary between F.3.2a measurement records and future
-calibration research:
+The research system now has **two clocks**:
 
-- prospective eligibility and explicit exclusion reasons;
-- separate forecast-evaluation vs terminal-Q-to-P eligibility;
-- deterministic cohort IDs with direct/proxy/inverse provenance;
-- T0 anchor dependency and conservative non-overlap effective N;
-- source-record hashes and mutation detection;
-- immutable cutoff-safe dataset cuts and manifest hashes;
-- read-only research telemetry.
+1. **Fast physical-market learning (G.1S)** — frozen 15/30/60/120/240 minute
+   observations resolve from the real future market path and provide feedback that
+   matches intraday trade horizons.
+2. **Slow structural option-Q learning (G.1C)** — native option-expiry risk-neutral
+   Q remains separate and resolves only at its mathematically correct expiry before
+   Q→P calibration.
 
-G.1A does **not** fit or select a calibrator. `g1_training_allowed`,
-`physical_probability_published`, `promotion_allowed`, and
-`production_replacement_allowed` remain false.
+Neither clock automatically changes AI Verdict or production management.
 
-## G.1B — Baselines + Calibration Metrics
+## Current roadmap
 
-**DONE.** Consumes only the G.1A dataset contract and measures frozen reference
-forecasts without fitting a challenger calibrator:
+| Phase | Purpose | State |
+|---|---|---|
+| F.3.2a | strict terminal measurement / PIT / no-lookahead | DONE |
+| G.1A | immutable prospective dataset integrity | DONE |
+| G.1B | baselines, Brier/log-loss/reliability/PIT | DONE |
+| G.1B.1 | real option-Q capture and capability diagnostics | DONE |
+| G.1C | slow native-expiry Q→P shadow calibration | ACTIVE · COLLECTING |
+| G.1E-0 | durable SQLite, verified backup/restore | DONE |
+| G.1E | Intelligence Lab | DONE |
+| G.1E.1 | production/runtime cleanup | DONE |
+| **G.1E.2** | bounded/materialized research runtime | **CURRENT** |
+| **G.1S** | short-horizon physical learning | **CURRENT** |
+| **G.1S-T** | validation on real user trades | **CURRENT / EVIDENCE-GATED** |
+| G.1S.OOS | purged prospective short-horizon OOS | EVIDENCE-GATED |
+| G.1-M | terminal management-edge measurement | ACTIVE · COLLECTING |
+| **G.1-M.1** | 15/30/60/120m local management feedback | **CURRENT** |
+| G.1-M.OOS | purged management-policy validation | EVIDENCE-GATED |
+| G.1D | terminal option-Q purged walk-forward OOS | EVIDENCE-GATED |
+| G.2 | policy promotion research | FUTURE |
 
-- Q_IDENTITY for mathematically valid terminal risk-neutral Q only;
-- uninformed 0.5 directional baseline;
-- chronological cohort-local prequential base-rate baseline using only outcomes
-  that are already in the past of the next effective observation;
-- Brier score and log loss for the terminal-return-positive event;
-- Q reliability bins, ECE and MCE;
-- terminal-Q PIT histogram and distance-to-uniform diagnostics;
-- Q and fixed Gaussian-reference quantile coverage;
-- pinball loss and central interval coverage;
-- primary metrics on G.1A-style conservative non-overlap effective samples;
-- optional evaluation against immutable G.1A dataset cuts;
-- deterministic sample-manifest hashes.
+## G.1S evidence lifecycle
 
-Fixed-horizon Gaussian geometry is explicitly **not** relabeled as Q or physical
-P. Terminal Q is evaluated as risk-neutral Q identity and is **not** relabeled as
-physical probability. CRPS remains unavailable until a proper distributional
-implementation is explicitly added.
+`COLLECTING → EARLY → SHADOW_FIT_ALLOWED → prospective shadow predictions → G.1S.OOS`
 
-G.1B fits no calibrator, writes no model coefficients, publishes no physical P
-and grants no production authority.
+Initial shadow-fit gate is versioned and conservative:
 
-## G.1B.1 — Q Evidence Bring-Up
+- raw resolved >= 120;
+- dependency-adjusted effective N >= 60;
+- positive >= 20;
+- negative >= 20;
+- >= 3 trading days.
 
-**DONE.** Real option-native Q acquisition is observable and accumulates
-prospective evidence without weakening G.1A:
+G.1S uses chronological/purged evaluation only. Random shuffle is forbidden for
+edge claims because horizons overlap in time.
 
-- versioned target/source capability matrix;
-- explicit native/direct/inverse/none relation and frozen proxy transform;
-- append-only capture-attempt ledger;
-- deterministic blocker taxonomy for provider, chain, expiry, CDF, proxy and
-  persistence failures;
-- independent persisted 15-minute Q cadence, decoupled from fixed-horizon capture;
-- successful capture only when the immutable T0 forecast contains a valid
-  terminal risk-neutral Q CDF;
-- separate attempted/captured/resolved/Q-eligible/metrics-eligible counters;
-- read-only per-instrument, blocker and attempt telemetry;
-- runtime validation only after an observed real background Q capture;
-- existing F.3.2a resolution, PIT and G.1A admission remain authoritative.
+Real user trades are primarily a **relevance/validation set**. Market observations
+provide learning volume; trades answer whether that market forecast actually
+helps the user's entries and holding horizons.
 
-G.1B.1 never manufactures fixed-horizon Q or synthetic production samples. It
-fits no calibrator and grants no production authority.
+## G.1C / G.1D remain unchanged
 
-## G.1C — Shadow Q→P Calibrators
+Native option-expiry Q is not shortened merely to obtain faster labels. G.1C may
+fit only from strict G.1A `q_to_p_eligible` observations. G.1D readiness remains:
 
-**CURRENT.** First trainable research layer. It consumes only immutable G.1A
-Q-eligible cuts and builds simple frozen challengers without selecting a winner:
+- raw >= 200;
+- effective N >= 100;
+- positive >= 30;
+- negative >= 30;
+- >= 3 temporal periods;
+- >1 expiry cluster;
+- no critical contract errors.
 
-- dependency-aware monotonic Platt calibration;
-- dependency-aware beta calibration;
-- weighted isotonic calibration behind a larger evidence gate;
-- PIT-isotonic foundation for future calibrated terminal CDF research;
-- immutable fit runs, model artifacts and SHA256 identities;
-- explicit evidence thresholds and refit deltas;
-- prospective-only shadow prediction ledger using models frozen before T0;
-- strict T0 admission for schema/runtime/background/direct-price/Q/expiry/CDF;
-- no hindsight backfill, OOS claim, edge claim, physical-P publication or
-  production authority.
+G.1D starts only when the evidence contract says it is ready. G.1S may reach its
+own OOS stage earlier without weakening G.1C.
 
-Current live Q evidence is still resolving, so zero fitted models is an expected
-healthy state until the minimum evidence contract is satisfied.
+## G.1-M and G.1-M.1
 
-## G.1D — Purged Walk-Forward OOS Validation
+G.1-M remains the terminal economic truth for management decisions: production
+policy versus HOLD / partial exits / EXIT / ORIGINAL PLAN on the complete realized
+trade path.
 
-Only after G.1C has enough frozen prospective predictions. Chronological
-validation contract:
+G.1-M.1 adds a separate diagnostic clock at 15/30/60/120 trading minutes. It may
+show that a defensive action helped the next hour while still hurting terminal
+upside. Therefore local decision quality never replaces terminal management edge.
 
-`TRAIN → PURGE → EMBARGO → FROZEN MODEL → FUTURE TEST`
+## Production authority boundary
 
-No random shuffle. Planned comparisons include Q_IDENTITY, base rate and all
-eligible shadow challengers using ΔBrier, ΔLogLoss, PIT/quantile improvement,
-fold stability, regime stability, degradation rate and confidence intervals.
-A single good fold is never sufficient for promotion.
+For G.1C, G.1S and learned G.1-M components:
 
-## G.1E — Intelligence Cockpit + Research Registry
+- `production_authority = false`
+- `auto_execution_allowed = false`
+- `policy_promotion_allowed = false`
+- `edge_claim_allowed = false`
 
-Only after the backend evidence chain exists. The cockpit will display pristine
-N, effective N, cohort coverage, baseline scores, challenger OOS deltas, PIT,
-reliability, quantile coverage, walk-forward folds, evidence status and explicit
-promotion blockers. It must explain evidence, not decorate it.
-
-## G.1-M — Real Trade Management Edge Engine
-
-Separate later program. It uses real trade-management data to compare actual
-management with HOLD/CLOSE_10/CLOSE_25/CLOSE_50/EXIT using regret, MFE, MAE,
-risk time, drawdown and human-override impact. It must never be mixed with the
-G.1 market-forecast dataset.
-
-## Promotion boundary
-
-No G.1 stage automatically changes production action authority. A later explicit
-production-promotion research phase is required even if evidence becomes
-SUPPORTED.
+A future G.2 promotion phase must explicitly decide whether a validated model may
+influence deterministic production policy, on which instruments/horizons/regimes,
+and with what fail-closed rollback rules.

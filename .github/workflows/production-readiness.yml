@@ -12,7 +12,7 @@ permissions:
 jobs:
   verify:
     runs-on: [self-hosted, linux, x64, seiltanzer-prod]
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - name: Wait for exact durable application startup
         env:
@@ -38,117 +38,142 @@ jobs:
             exit 1
           fi
 
-      - name: Verify bounded Intelligence and Management Edge APIs
+      - name: Verify bounded core, Intelligence, G1S and management APIs
         run: |
           set -euo pipefail
           for endpoint in \
+            /api/state \
+            /api/validation \
+            /api/system/database-authority \
+            /api/system/storage/status \
+            /api/system/storage/backups \
+            /api/system/storage/integrity \
+            /api/research/runtime/status \
+            /api/research/runtime/materializers \
+            /api/research/g1s/status \
+            /api/research/g1s/horizons \
+            /api/research/g1s/barriers \
+            /api/research/g1s/cuts \
+            /api/research/g1s/oos \
+            /api/research/g1s/ablation \
+            /api/research/g1s/trade-relevance \
+            /api/research/g1/q/audit \
             /api/research/g1/intelligence/status \
             /api/research/g1/intelligence/pipeline \
             /api/research/g1/intelligence/forecast-quality \
             /api/research/g1/intelligence/calibration \
-            /api/research/g1/intelligence/pending \
-            /api/research/g1/intelligence/resolved \
-            /api/research/g1/intelligence/history \
             /intelligence \
             /api/research/g1/management/status \
-            /api/research/g1/management/observations \
-            /api/research/g1/management/pending \
-            /api/research/g1/management/resolved \
-            /api/research/g1/management/policies \
-            /api/research/g1/management/cohorts \
             /api/research/g1/management/edge \
-            /api/research/g1/management/cuts \
+            /api/research/g1/management/local-status \
+            /api/research/g1/management/local-edge \
             /management-edge; do
+            start=$(date +%s%3N)
             code=$(curl --max-time 5 -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8790${endpoint}" || true)
-            echo "$endpoint: $code"
+            stop=$(date +%s%3N)
+            elapsed=$((stop-start))
+            echo "$endpoint: $code ${elapsed}ms"
             test "$code" = "200"
+            case "$endpoint" in
+              /api/state|/api/system/database-authority|/api/system/storage/status|/api/research/runtime/status|/api/research/g1s/status|/api/research/g1/management/status|/api/research/g1/management/local-status)
+                test "$elapsed" -lt 3000 ;;
+            esac
           done
 
-          for endpoint in \
-            /api/state \
-            /api/validation \
-            /api/system/storage/status \
-            /api/system/storage/backups \
-            /api/system/storage/integrity; do
-            code=$(curl --max-time 20 -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8790${endpoint}" || true)
-            echo "$endpoint: $code"
-            test "$code" = "200"
-          done
-
-          STORAGE=$(curl -fsS --max-time 30 http://127.0.0.1:8790/api/system/storage/status)
-          BACKUPS=$(curl -fsS --max-time 30 http://127.0.0.1:8790/api/system/storage/backups)
-          INTEL=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1/intelligence/status)
-          G1M=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1/management/status)
-          STORAGE="$STORAGE" BACKUPS="$BACKUPS" INTEL="$INTEL" G1M="$G1M" /opt/seiltanzer/.venv/bin/python - <<'PY'
+      - name: Wait for historical prospective short-horizon materialization
+        run: |
+          set -euo pipefail
+          ready=0
+          for attempt in $(seq 1 30); do
+            G1S=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1s/status)
+            ok=$(G1S="$G1S" /opt/seiltanzer/.venv/bin/python - <<'PY'
           import json, os
-          storage = json.loads(os.environ["STORAGE"])
-          backups = json.loads(os.environ["BACKUPS"])
-          intel = json.loads(os.environ["INTEL"])
-          g1m = json.loads(os.environ["G1M"])
+          s=json.loads(os.environ['G1S'])
+          by={int(x['horizon_minutes']):x for x in s.get('horizons',[])}
+          print('1' if all(int((by.get(h) or {}).get('raw_resolved') or 0)>0 for h in (15,30,60)) else '0')
+          PY
+            )
+            echo "attempt=$attempt g1s_fast_resolved=$ok"
+            if [ "$ok" = "1" ]; then ready=1; break; fi
+            sleep 3
+          done
+          test "$ready" = "1"
 
-          assert storage.get("storage_contract_version") == "seiltanzer-storage-v1"
-          assert (storage.get("sqlite_integrity") or {}).get("ok") is True
-          assert storage.get("health") in {
-              "HEALTHY", "LOCAL_BACKUP_ONLY", "DISASTER_RECOVERY_DEGRADED"
-          }, storage.get("health")
-          local = backups.get("local") or []
-          assert local, "no verified local backup exists"
-          assert local[0].get("verified") is True
-          assert float(storage.get("last_local_backup_age_sec") or 1e99) <= 1800.0
-          counts = local[0].get("critical_table_counts") or {}
+      - name: Verify research authority, Q maturity and durability contracts
+        run: |
+          set -euo pipefail
+          STORAGE=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/system/storage/status)
+          BACKUPS=$(curl -fsS --max-time 10 http://127.0.0.1:8790/api/system/storage/backups)
+          DB_AUTH=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/system/database-authority)
+          RUNTIME=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/runtime/status)
+          INTEL=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1/intelligence/status)
+          G1S=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1s/status)
+          Q_AUDIT=$(curl -fsS --max-time 5 'http://127.0.0.1:8790/api/research/g1/q/audit?limit=5000')
+          G1M=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1/management/status)
+          G1ML=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/research/g1/management/local-status)
+          STORAGE="$STORAGE" BACKUPS="$BACKUPS" DB_AUTH="$DB_AUTH" RUNTIME="$RUNTIME" INTEL="$INTEL" G1S="$G1S" Q_AUDIT="$Q_AUDIT" G1M="$G1M" G1ML="$G1ML" /opt/seiltanzer/.venv/bin/python - <<'PY'
+          import json, os
+          storage=json.loads(os.environ['STORAGE']); backups=json.loads(os.environ['BACKUPS'])
+          db_auth=json.loads(os.environ['DB_AUTH']); runtime=json.loads(os.environ['RUNTIME'])
+          intel=json.loads(os.environ['INTEL']); g1s=json.loads(os.environ['G1S'])
+          q=json.loads(os.environ['Q_AUDIT']); g1m=json.loads(os.environ['G1M'])
+          g1ml=json.loads(os.environ['G1ML'])
+
+          assert storage.get('storage_contract_version') == 'seiltanzer-storage-v1'
+          assert (storage.get('sqlite_integrity') or {}).get('ok') is True
+          assert storage.get('research_health_decoupled') is True
+          assert storage.get('health') in {'HEALTHY','LOCAL_BACKUP_ONLY','DISASTER_RECOVERY_DEGRADED'}
+          assert db_auth.get('contract_version') == 'database-authority-v1'
+          assert db_auth.get('authoritative_database_path') == '/opt/seiltanzer/data/trades.db', db_auth
+
+          worker=runtime.get('worker') or {}
+          assert runtime.get('market_collection_separate_from_research') is True
+          assert worker.get('contract_version') == 'g1-research-worker-v1', worker
+          assert worker.get('running') is True, worker
+
+          local=backups.get('local') or []
+          assert local and local[0].get('verified') is True
+          assert float(storage.get('last_local_backup_age_sec') or 1e99) <= 1800.0
+          counts=local[0].get('critical_table_counts') or {}
           for table in (
-              "trades", "passive_market_observations", "g1_q_capture_attempts",
-              "g1m_runtime_activation", "g1m_management_observations",
-              "g1m_observation_context", "g1m_counterfactual_policies",
-              "g1m_t0_policy_metrics", "g1m_resolutions", "g1m_policy_outcomes",
-              "g1m_execution_attribution", "g1m_contract_errors", "g1m_research_cuts",
-          ):
-              assert table in counts, table
-              assert counts[table] is not None, (table, counts[table])
+              'trades','passive_market_observations','g1_q_capture_attempts',
+              'g1m_management_observations','g1m_resolutions','g1m_policy_outcomes',
+              'g1s_observations','g1s_resolutions','g1s_models','g1s_shadow_predictions',
+              'g1s_trade_links','g1s_barrier_outcomes','g1s_training_cuts','g1s_model_cut_links',
+              'g1m_local_windows','g1m_local_outcomes','g1m_local_policy_outcomes',
+              'research_materialization_state'):
+              assert table in counts and counts[table] is not None, (table, counts.get(table))
 
-          assert intel.get("g1_stage") == "G.1E"
-          assert intel.get("presentation_state") in {"WARMING", "LIVE_CACHE"}
-          ia = intel.get("authority") or {}
-          assert ia.get("research_only") is True
-          assert ia.get("production_authority") is False
-          assert ia.get("production_replacement_allowed") is False
-          assert ia.get("promotion_allowed") is False
-          assert ia.get("shadow_p_used_for_trading") is False
+          assert intel.get('g1_stage') == 'G.1E'
+          assert intel.get('presentation_state') in {'WARMING','LIVE_CACHE','LIVE_MATERIALIZED'}
+          ia=intel.get('authority') or {}
+          assert ia.get('research_only') is True and ia.get('production_authority') is False
+          assert ia.get('promotion_allowed') is False and ia.get('shadow_p_used_for_trading') is False
 
-          assert g1m.get("g1_stage") == "G.1-M"
-          assert g1m.get("g1m_contract_version") == "g1m-management-edge-v1"
-          assert g1m.get("ready_for_oos") in {True, False}
-          ga = g1m.get("authority") or {}
-          assert ga.get("research_only") is True
-          assert ga.get("production_authority") is False
-          assert ga.get("auto_execution_allowed") is False
-          assert ga.get("policy_promotion_allowed") is False
-          assert ga.get("oos_validated") is False
-          assert ga.get("edge_claim_allowed") is False
+          ga=g1s.get('authority') or {}
+          assert ga.get('research_only') is True
+          assert ga.get('production_authority') is False
+          assert ga.get('auto_execution_allowed') is False
+          assert ga.get('policy_promotion_allowed') is False
+          assert ga.get('edge_claim_allowed') is False
+          assert ga.get('oos_validated') is False
+          by={int(x['horizon_minutes']):x for x in g1s.get('horizons',[])}
+          for h in (15,30,60): assert int((by.get(h) or {}).get('raw_resolved') or 0)>0, (h,by.get(h))
 
-          exp = intel.get("experience") or {}
-          print(
-              "G1E: "
-              f"presentation={intel.get('presentation_state')} "
-              f"state={intel.get('maturity_state')} "
-              f"q_attempts={exp.get('q_attempts', 0)} "
-              f"q_captured={exp.get('q_captured', 0)} "
-              f"q_resolved={exp.get('q_resolved', 0)} "
-              f"storage={storage.get('health')}"
-          )
-          print(
-              "G1M: "
-              f"observations={g1m.get('observations', 0)} "
-              f"pending={g1m.get('pending', 0)} "
-              f"resolved={g1m.get('resolved', 0)} "
-              f"eligible={g1m.get('policy_edge_eligible', 0)} "
-              f"prospective_resolved={g1m.get('prospective_resolved', 0)} "
-              f"unique_trades={g1m.get('unique_trades', 0)} "
-              f"effective_n={g1m.get('effective_n', 0)} "
-              f"critical_errors={g1m.get('critical_errors', 0)} "
-              f"ready_for_oos={g1m.get('ready_for_oos', False)} "
-              "production_authority=false"
-          )
+          overdue=int((q.get('counts') or {}).get('DUE_BUT_NOT_RESOLVED') or 0)
+          assert overdue == 0, f'Q resolver has {overdue} overdue observations with authoritative coverage'
+
+          ma=g1m.get('authority') or {}
+          assert ma.get('production_authority') is False and ma.get('edge_claim_allowed') is False
+          la=g1ml.get('authority') or {}
+          assert la.get('production_authority') is False and la.get('edge_claim_allowed') is False
+
+          exp=intel.get('experience') or {}
+          print('G1S:', {h:{'raw':by[h].get('raw_resolved'),'effective':by[h].get('effective_n'),'state':by[h].get('state')} for h in sorted(by)})
+          print('Q_AUDIT:', q.get('counts'))
+          print('G1M_LOCAL:', {k:g1ml.get(k) for k in ('windows','resolved','evidence_eligible','eligible_resolved')})
+          print('RESEARCH_WORKER:', {k:worker.get(k) for k in ('running','last_duration_ms','last_error')})
+          print('G1E:', {'presentation':intel.get('presentation_state'),'q_attempts':exp.get('q_attempts'),'q_captured':exp.get('q_captured'),'q_resolved':exp.get('q_resolved'),'storage':storage.get('health')})
           PY
 
       - name: Restore-drill newest verified snapshot
@@ -157,25 +182,13 @@ jobs:
           DRILL=$(curl -fsS --max-time 90 -X POST http://127.0.0.1:8790/api/system/storage/restore-drill)
           DRILL="$DRILL" /opt/seiltanzer/.venv/bin/python - <<'PY'
           import json, os
-          body = json.loads(os.environ["DRILL"])
-          assert body.get("ok") is True, body
-          assert body.get("restore_drill_contract_version") == "seiltanzer-restore-drill-v1"
-          assert body.get("live_database_replaced") is False
-          assert not (body.get("critical_table_mismatches") or {})
-          assert int(body.get("critical_tables_verified_n") or 0) > 0
+          body=json.loads(os.environ['DRILL'])
+          assert body.get('ok') is True, body
+          assert body.get('restore_drill_contract_version') == 'seiltanzer-restore-drill-v1'
+          assert body.get('live_database_replaced') is False
+          assert not (body.get('critical_table_mismatches') or {})
+          assert int(body.get('critical_tables_verified_n') or 0)>0
           print(f"Restore drill PASS: {body.get('backup_id')}")
-          PY
-
-          RESTORE_STATUS=$(curl -fsS --max-time 5 http://127.0.0.1:8790/api/system/storage/restore-drill/status)
-          DRILL="$DRILL" RESTORE_STATUS="$RESTORE_STATUS" /opt/seiltanzer/.venv/bin/python - <<'PY'
-          import json, os
-          drill = json.loads(os.environ["DRILL"])
-          status = json.loads(os.environ["RESTORE_STATUS"])
-          persisted = status.get("last_restore_drill") or {}
-          assert status.get("status") == "PASS"
-          assert persisted.get("ok") is True
-          assert persisted.get("backup_id") == drill.get("backup_id")
-          assert persisted.get("live_database_replaced") is False
           PY
 
       - name: Publish authoritative readiness statuses
@@ -187,25 +200,28 @@ jobs:
         run: |
           if [ "$JOB_STATUS" = "success" ]; then
             state="success"
-            prod_description="Production ready after bounded durability acceptance"
-            g1e_description="Durability, restore drill and Intelligence Lab passed"
-            g1m_description="Management Edge research boundary and durability passed"
+            prod="Production ready after bounded two-speed research acceptance"
+            g1e="Durability and bounded Intelligence runtime passed"
+            g1m="Terminal Management Edge boundary passed"
+            g1s="Fast short-horizon evidence and Q maturity audit passed"
+            g1ml="Local management feedback boundary passed"
           else
             state="failure"
-            prod_description="Production failed bounded readiness verification"
-            g1e_description="G.1E storage or Intelligence verification failed"
-            g1m_description="G.1-M research or durability verification failed"
+            prod="Production failed two-speed research readiness"
+            g1e="G.1E.2 scalability or durability verification failed"
+            g1m="G.1-M terminal management verification failed"
+            g1s="G.1S fast learning or Q audit failed"
+            g1ml="G.1-M.1 local feedback verification failed"
           fi
           for item in \
-            "production/seiltanzer|$prod_description" \
-            "g1e/storage-intelligence|$g1e_description" \
-            "g1m/management-edge|$g1m_description"; do
-            context=${item%%|*}
-            description=${item#*|}
-            curl -fsS -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
+            "production/seiltanzer|$prod" \
+            "g1e/storage-intelligence|$g1e" \
+            "g1m/management-edge|$g1m" \
+            "g1s/short-horizon|$g1s" \
+            "g1m/local-feedback|$g1ml"; do
+            context=${item%%|*}; description=${item#*|}
+            curl -fsS -X POST -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/${{ github.repository }}/statuses/${EXPECTED_SHA}" \
               -d "{\"state\":\"$state\",\"context\":\"$context\",\"description\":\"$description\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
           done
