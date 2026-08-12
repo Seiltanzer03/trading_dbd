@@ -35,6 +35,10 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         lambda limit=100: runtime.models(limit=int(limit)),
         methods=["GET"], name="g1s_models")
     app.add_api_route(
+        "/api/research/g1s/cuts",
+        lambda limit=100: runtime.cuts(limit=int(limit)),
+        methods=["GET"], name="g1s_cuts")
+    app.add_api_route(
         "/api/research/g1s/barriers",
         lambda limit=500: runtime.barriers(limit=int(limit)),
         methods=["GET"], name="g1s_barriers")
