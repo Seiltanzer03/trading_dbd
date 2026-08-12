@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   recover:
@@ -141,3 +142,23 @@ jobs:
             df -h /
             du -sh /opt/seiltanzer/data/backups/local
             systemctl is-active seiltanzer
+
+      - name: Publish recovery status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ "$JOB_STATUS" = success ]; then
+            state=success
+            description="Disk recovered; backup SHA, DB integrity and service verified"
+          else
+            state=failure
+            description="Emergency disk recovery failed safely"
+          fi
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+            -d "{\"state\":\"$state\",\"context\":\"ops/disk-recovery\",\"description\":\"$description\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
