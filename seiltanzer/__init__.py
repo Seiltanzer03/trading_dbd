@@ -71,56 +71,44 @@ from .g1_management_integration import install_g1_management_integration as _ins
 _install_g1_management_integration()
 del _install_g1_management_integration
 
-# G.1S / G.1-M.1 add fast research feedback on already-frozen prospective rows.
 from .g1_short_horizon_integration import install_g1_short_horizon_integration as _install_g1_short_horizon_integration
 _install_g1_short_horizon_integration()
 del _install_g1_short_horizon_integration
 
-# New T0 rows freeze ATR and standardized barrier geometry. Existing rows are never
-# hindsight-enriched and remain usable only for fields that genuinely existed.
 from .g1_short_horizon_refinement import install_g1_short_horizon_refinement as _install_g1_short_horizon_refinement
 _install_g1_short_horizon_refinement()
 del _install_g1_short_horizon_refinement
 
-# Freeze intraday returns/range/realized-vol features using only 1m bars whose end
-# precedes T0. Missing legacy features stay explicit missing/availability=0.
 from .g1_short_horizon_market_features import install_g1_short_horizon_market_features as _install_g1_short_horizon_market_features
 _install_g1_short_horizon_market_features()
 del _install_g1_short_horizon_market_features
 
-# Fixed untuned momentum baseline prevents learned challengers from claiming value
-# merely by rediscovering the sign of the recent 15m move.
 from .g1_short_horizon_baseline_refinement import install_g1_short_horizon_baseline_refinement as _install_g1_short_horizon_baseline_refinement
 _install_g1_short_horizon_baseline_refinement()
 del _install_g1_short_horizon_baseline_refinement
 
-# A deterministic depth-1 boosted challenger tests nonlinear structure without any
-# hyperparameter search or automatic champion selection.
 from .g1_short_horizon_gbt_refinement import install_g1_short_horizon_gbt_refinement as _install_g1_short_horizon_gbt_refinement
 _install_g1_short_horizon_gbt_refinement()
 del _install_g1_short_horizon_gbt_refinement
 
-# Every shadow fit receives an exact immutable source manifest (T0 + resolution
-# hashes). A model cannot later reconstruct or silently change its training set.
 from .g1_short_horizon_cut_refinement import install_g1_short_horizon_cut_refinement as _install_g1_short_horizon_cut_refinement
 _install_g1_short_horizon_cut_refinement()
 del _install_g1_short_horizon_cut_refinement
 
-# Final research-integrity pass: local management time fails closed, Q maturity is
-# audited only on successfully captured observations, and trade relevance uses
-# only model predictions that existed before the real trade entry.
 from .g1_fast_learning_integrity_refinement import install_g1_fast_learning_integrity_refinement as _install_g1_fast_learning_integrity_refinement
 _install_g1_fast_learning_integrity_refinement()
 del _install_g1_fast_learning_integrity_refinement
 
-# Append richer resolved-path statistics, finalize overlap dependency weights, and
-# report model effectiveness against simple OOS baselines without promotion.
 from .g1_short_horizon_metrics_refinement import install_g1_short_horizon_metrics_refinement as _install_g1_short_horizon_metrics_refinement
 _install_g1_short_horizon_metrics_refinement()
 del _install_g1_short_horizon_metrics_refinement
 
-# The effectiveness verdict must use dependency-adjusted loss and real-trade
-# validation may consume only model/prediction artifacts persisted before entry.
 from .g1_short_horizon_metrics_integrity import install_g1_short_horizon_metrics_integrity as _install_g1_short_horizon_metrics_integrity
 _install_g1_short_horizon_metrics_integrity()
 del _install_g1_short_horizon_metrics_integrity
+
+# Status counters are incrementally materialized from immutable rowid watermarks.
+# Request-time /g1s/status never loads the full resolved observation history.
+from .g1_short_horizon_status_materialization import install_g1_short_horizon_status_materialization as _install_g1_short_horizon_status_materialization
+_install_g1_short_horizon_status_materialization()
+del _install_g1_short_horizon_status_materialization
