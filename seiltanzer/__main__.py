@@ -26,6 +26,7 @@ from .lattice_visual_history import install_lattice_visual_history
 from .maintenance.venv_cleanup import remediate_current_environment
 from .option_shadow_state import install_option_shadow_state
 from .research_scalability_bootstrap import install_research_scalability
+from .storage_fast_status_refinement import install_storage_fast_status
 from .storage_refinement import install_storage_refinement
 from .storage_routes import install_storage_routes
 from .storage_runtime import install_storage_runtime, prepare_storage
@@ -76,8 +77,10 @@ def main() -> None:
     install_research_worker(app)
 
     # G.1E.2: request-time research APIs become bounded/materialized. This also
-    # decouples storage health from G.1 scans and fast-gates impossible G.1C fits.
+    # fast-gates impossible G.1C fits. The final storage override is installed
+    # afterwards so routine health reads never execute PRAGMA quick_check or Q scans.
     install_research_scalability(app)
+    install_storage_fast_status(app)
 
     # /api/ai/decision/ack is canonical inside create_app.
     install_lattice_revaluation(app)
