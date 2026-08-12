@@ -107,8 +107,10 @@ from .g1_short_horizon_metrics_integrity import install_g1_short_horizon_metrics
 _install_g1_short_horizon_metrics_integrity()
 del _install_g1_short_horizon_metrics_integrity
 
-# Status counters are incrementally materialized from immutable rowid watermarks.
-# Request-time /g1s/status never loads the full resolved observation history.
 from .g1_short_horizon_status_materialization import install_g1_short_horizon_status_materialization as _install_g1_short_horizon_status_materialization
 _install_g1_short_horizon_status_materialization()
 del _install_g1_short_horizon_status_materialization
+
+from .g1_short_horizon_status_integrity import install_g1_short_horizon_status_integrity as _install_g1_short_horizon_status_integrity
+_install_g1_short_horizon_status_integrity()
+del _install_g1_short_horizon_status_integrity
