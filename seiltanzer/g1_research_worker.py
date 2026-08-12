@@ -16,7 +16,7 @@ import time
 
 
 RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
-RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v4"
+RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v5"
 RESEARCH_INTERVAL_SEC = 10.0
 G1S_BATCH = 500
 G1M_LOCAL_BATCH = 100
@@ -54,12 +54,17 @@ def _run_g1s_bounded(runtime) -> dict:
             models = runtime.fit_if_ready()
 
     # Derived outcome materializers are intentionally separate from runtime.step().
-    # Calling step() here would repeat the default 2,500-row source scan and defeat
-    # the bounded-worker contract.
+    # Calling step() here would repeat the default source scan and defeat the
+    # bounded-worker contract.
     from .g1_short_horizon_refinement import _materialize_barriers
     from .g1_short_horizon_metrics_refinement import _materialize_path_metrics
     barrier_rows = _materialize_barriers(runtime, limit=G1S_BATCH)
     path_metric_rows = _materialize_path_metrics(runtime, limit=G1S_BATCH)
+
+    # Expensive full-history OOS/economic reports are explicitly worker-owned.
+    # The materializer itself enforces a >=5m refresh interval and returns quickly
+    # when source rowid signatures are unchanged. HTTP endpoints read frozen JSON.
+    evidence_reports = runtime.materialize_evidence_reports()
     return {
         "materialized": materialized,
         "resolved": resolved,
@@ -70,6 +75,7 @@ def _run_g1s_bounded(runtime) -> dict:
         "fit_gate_ready": fit_ready,
         "barrier_rows_created": barrier_rows,
         "path_metrics_created": path_metric_rows,
+        "evidence_reports": evidence_reports,
         "batch_limit": G1S_BATCH,
     }
 
@@ -101,6 +107,7 @@ def install_research_worker(app) -> None:
         "g1m_local_batch_limit": G1M_LOCAL_BATCH,
         "fit_gate_interval_sec": FIT_GATE_INTERVAL_SEC,
         "trade_link_interval_sec": TRADE_LINK_INTERVAL_SEC,
+        "evidence_reports_request_time_scan": False,
     }
     original_lifespan = app.router.lifespan_context
 
