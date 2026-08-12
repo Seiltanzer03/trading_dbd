@@ -24,6 +24,9 @@ jobs:
       - name: Check frontend modules
         run: |
           node --check seiltanzer/web/js/plotly_camera_guard.js
+          node --check seiltanzer/web/js/plotly_terminal_toolbar.js
+          node --check seiltanzer/web/js/wavelet.js
+          node --check seiltanzer/web/js/regime_phase.js
           node --check seiltanzer/web/js/touch_clock.js
           node --check seiltanzer/web/js/safe_fetch.js
           node --check seiltanzer/web/js/management_ui.js
@@ -59,6 +62,7 @@ jobs:
       - name: Real WebKit iPhone camera test
         run: |
           node tests/web/plotly_camera_webkit_e2e.mjs
+          node tests/web/analytics_3d_controls_webkit_e2e.mjs
           node tests/web/correlation_controls_webkit_e2e.mjs
           node tests/web/ai_management_decision_webkit_e2e.mjs
       - name: Publish full CI status
