@@ -51,14 +51,13 @@ def _ensure(runtime):
 def _manifest(runtime, horizon):
     with runtime._lock:
         rows=runtime._conn.execute("""
-            SELECT g.observation_id,g.t0_sha256,r.resolution_sha256,g.trade_id
+            SELECT g.observation_id,g.t0_sha256,r.resolution_sha256
             FROM g1s_observations g JOIN g1s_resolutions r USING(observation_id)
             WHERE g.training_eligible=1 AND r.direction_label!='FLAT'
               AND g.horizon_minutes=? ORDER BY g.captured_ts,g.observation_id
         """, (int(horizon),)).fetchall()
-    items=[{"observation_id":r["observation_id"],"t0_sha256":r["t0_sha256"],
-            "resolution_sha256":r["resolution_sha256"]} for r in rows]
-    return items
+    return [{"observation_id":r["observation_id"],"t0_sha256":r["t0_sha256"],
+             "resolution_sha256":r["resolution_sha256"]} for r in rows]
 
 
 def install_g1_short_horizon_cut_refinement():
