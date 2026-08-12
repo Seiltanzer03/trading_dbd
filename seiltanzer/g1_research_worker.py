@@ -26,12 +26,11 @@ def _run_g1s_bounded(runtime) -> dict:
     resolved = runtime.resolve_new(limit=G1S_BATCH)
     links = runtime.materialize_trade_links()
     models = runtime.fit_if_ready()
-    barrier_rows = 0
-    # The barrier refinement is intentionally optional here.  When installed it
-    # exposes its work through the regular step wrapper, but invoking that wrapper
-    # would repeat the large default materialization batch.  Barriers are therefore
-    # allowed to lag until their dedicated materializer path runs; forecast evidence
-    # and T0 capture remain authoritative regardless.
+    # Barrier outcomes are a separate research materialization.  Invoke them
+    # directly with the same bounded batch instead of calling runtime.step(),
+    # which would repeat the default 2,500-row materialize/resolve burst.
+    from .g1_short_horizon_refinement import _materialize_barriers
+    barrier_rows = _materialize_barriers(runtime, limit=G1S_BATCH)
     return {
         "materialized": materialized,
         "resolved": resolved,
@@ -78,8 +77,8 @@ def install_research_worker(app) -> None:
                 state["last_started_ts"] = started
                 try:
                     # Separate thread turns make the G.1S and G.1-M.1 workloads
-                    # independently yielding.  A slow local replay cannot extend
-                    # the same critical section as the short-horizon materializer.
+                    # independently yielding. A slow local replay cannot extend
+                    # the same worker turn as the short-horizon materializer.
                     g1s_result = await asyncio.to_thread(
                         _run_g1s_bounded, engine.short_horizon)
                     await asyncio.sleep(0)
