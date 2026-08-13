@@ -1,0 +1,33 @@
+name: production-post-research
+
+on:
+  workflow_run:
+    workflows: ["production-ede-v12-audit"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Verify health after research maintenance completed
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 13m
+          envs: EXPECTED_SHA
+          script: |
+            set -euo pipefail
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/production_post_research_check.py \
+              --expected-sha "$EXPECTED_SHA"

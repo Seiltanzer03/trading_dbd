@@ -1,7 +1,7 @@
 {
   "auto_promotion": false,
   "candidate_depth_max": 3,
-  "contract_version": "g1s-edge-discovery-engine-v1.1",
+  "contract_version": "g1s-edge-discovery-engine-v1.2",
   "dataset_label": "RESEARCH_DISCOVERY_DATASET",
   "false_discovery_control": {
     "diagnostic_status": "EXPLORATORY_FDR_FAIL",
@@ -17,7 +17,7 @@
     "categorical asset/family/session/macro regime",
     "train-only quintile RV and trend efficiency",
     "train-only above/below-median prospective option/cross features",
-    "causally aligned external cross-asset confirmation",
+    "nearest causal peer observation with peer.asof <= T0 and maximum age 1200 seconds",
     "leave-one-out family and market breadth"
   ],
   "first_signal": "ret5_persistence",
@@ -26,6 +26,7 @@
   "missing_is_not_zero": true,
   "outer_folds": 4,
   "outer_selection_limit_per_fold": 10,
+  "diagnostic_outer_evaluation_limit_per_fold": 10,
   "primary_baseline": {
     "name": "GLOBAL_RET5_PERSISTENCE",
     "fit": "complete causal train cut",
@@ -36,7 +37,10 @@
     "input": "existing immutable g1s_observations plus g1s_resolutions",
     "no_second_collector": true,
     "no_retrospective_options_reconstruction": true,
-    "outcome_visibility": "target_ts must have passed and resolved_ts must be >= target_ts"
+    "outcome_visibility": "target_ts must have passed and resolved_ts must be >= target_ts",
+    "causal_price_recomputation": "bar_end_ts <= T0 and bar created_ts <= immutable capture record created_ts",
+    "causal_recomputation_provenance": "CAUSAL_RECOMPUTED",
+    "future_points_used": false
   },
   "registry": {
     "append_only": true,
@@ -52,13 +56,26 @@
     "positive_n": 120,
     "raw_n": 1000
   },
+  "evidence_maturity": {
+    "EARLY_CONTEXT": {"raw_n": 100, "effective_n": 50, "temporal_blocks": 2},
+    "RESEARCH_SIGNAL": {"raw_n": 250, "effective_n": 100, "temporal_blocks": 2, "positive_incremental_result": true},
+    "PROVISIONAL_EDGE": {"raw_n": 500, "effective_n": 200, "temporal_blocks": 3, "positive_incremental_result": true, "max_q_value": 0.1, "minimum_positive_fold_fraction": 0.5},
+    "ROBUST_EDGE": {"raw_n": 1000, "effective_n": 400, "positive_n": 120, "negative_n": 120, "folds_evaluated": 4, "folds_positive": 3, "max_q_value": 0.1}
+  },
+  "terminal_maturity_use": {
+    "EARLY_CONTEXT": "explanation/confidence context only",
+    "RESEARCH_SIGNAL": "weak confirmation/contradiction only",
+    "PROVISIONAL_EDGE": "bounded shadow contribution; production weight remains zero",
+    "ROBUST_EDGE": "eligible only after separate explicit promotion",
+    "one_early_metric_can_trigger_exit_or_close": false
+  },
   "sanity_baselines": ["constant_0_5", "causal_base_rate", "ret15_momentum"],
   "search_space": {
     "availability_routing_uses_outcomes": false,
     "max_conditions": 3,
     "max_templates_per_audit": 248
   },
-  "source": "fresh real Yahoo 5m/60d bars frozen in a temporary runner DB, or explicitly supplied offline read-only database copies",
+  "source": "fresh real Yahoo 5m/60d bars frozen in a temporary runner DB, or immutable read-only copies of production G1S SQLite",
   "stability_gate": "at least 3 of 4 positive outer folds and all 4 evaluated",
   "synthetic_option_history": false,
   "validated_relative_improvement_each_primary_metric": 0.005

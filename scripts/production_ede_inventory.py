@@ -54,7 +54,7 @@ def inventory(database: Path) -> dict:
     assert {row["feature_id"] for row in features} == {
         definition.feature_id for definition in FEATURES}
     return {
-        "contract_version": "g1s-ede-production-inventory-v1.1",
+        "contract_version": "g1s-ede-production-inventory-v1.2",
         "database": str(database),
         "database_open_mode": "READ_ONLY",
         "g1s_observations_total": total,

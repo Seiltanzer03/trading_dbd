@@ -23,6 +23,8 @@ from seiltanzer.edge_discovery.filters import (
 from seiltanzer.edge_discovery.registry import feature_registry
 from seiltanzer.edge_discovery.historical import aligned_cross_asset_context
 from seiltanzer.edge_discovery.prospective import ProspectiveFeatureAdapter
+from seiltanzer.edge_discovery.maturity import evidence_maturity, maturity_contract
+from seiltanzer.edge_discovery.ablation import family_ablation
 from seiltanzer.edge_discovery.scoring import benjamini_hochberg
 from seiltanzer.edge_discovery.validation import LiveShadowLedger
 from seiltanzer.g1_short_horizon_historical_wf import _weights
@@ -163,6 +165,21 @@ def test_ready_prospective_features_replace_templates_without_expanding_search_s
     features = {condition.feature_id for template in templates
                 for condition in template.conditions}
     assert ready <= features
+
+
+def test_all_available_g1s_features_enter_bounded_search_space():
+    registry = feature_registry()
+    ready = {
+        row["feature_id"] for row in registry["features"]
+        if row["research_scope"] == "G1S" and row["training_eligibility"]
+        and row["feature_id"] != "price.ret_5m"
+    }
+    templates = candidate_templates(ready)
+    represented = {condition.feature_id for template in templates
+                   for condition in template.conditions}
+    assert len(templates) <= 248
+    assert max(template.complexity for template in templates) <= 3
+    assert ready <= represented
 
 
 def test_dependency_group_weights_sum_to_one():
@@ -380,6 +397,137 @@ def test_prospective_outcome_hidden_until_target_and_missing_options_stay_missin
     assert rows[0]["feature_values"]["option.iv"]["availability"] == "UNAVAILABLE"
     assert rows[0]["feature_values"]["option.iv"]["value"] is None
     assert adapter.rows(resolved_only=True) == []
+
+
+def test_nearest_causal_cross_join_accepts_past_and_rejects_future_and_stale():
+    sp = _row(98.0, instrument="SP500")
+    nas = _row(100.0, instrument="NAS100")
+    aligned_cross_asset_context([nas, sp], max_staleness_seconds=5.0)
+    meta = nas["ede_features"]["cross_join_metadata"]
+    assert meta["peer_asof"] == 98.0
+    assert meta["peer_age_sec"] == 2.0
+    assert meta["future_peer_used"] is False
+    assert sp["ede_features"]["cross_peer_count"] == 0  # NAS=100 is future at SP=98
+
+    stale_peer = _row(50.0, instrument="SP500")
+    later = _row(100.0, instrument="NAS100")
+    aligned_cross_asset_context([stale_peer, later], max_staleness_seconds=20.0)
+    assert later["ede_features"]["cross_peer_count"] == 0
+    assert later["ede_features"]["cross_stale"] is True
+
+
+def test_causal_cross_correlation_and_leave_one_out_become_available():
+    rows = []
+    for index in range(12):
+        sp = _row(1000.0+index*10.0, instrument="SP500")
+        nas = _row(1002.0+index*10.0, instrument="NAS100")
+        sp["features"]["ret_5m"] = 0.001*(index+1)
+        nas["features"]["ret_5m"] = 0.002*(index+1)
+        rows.extend((sp, nas))
+    aligned_cross_asset_context(rows, max_staleness_seconds=30.0)
+    latest = rows[-1]
+    assert latest["ede_features"]["cross_correlation"] == pytest.approx(1.0)
+    assert latest["ede_features"]["market_breadth_peer_count"] == 1
+    assert "NAS100" not in latest["ede_features"]["cross_join_metadata"]["external_instruments"]
+
+
+def test_causal_bar_recomputation_marks_provenance_and_ignores_future_points():
+    runtime = _ProspectiveRuntime()
+    runtime._conn.execute("""
+        CREATE TABLE passive_market_bars(
+            instrument TEXT, bar_start_ts REAL, bar_end_ts REAL,
+            open REAL, high REAL, low REAL, close REAL,
+            source TEXT, quality REAL, kind TEXT, created_ts REAL)
+    """)
+    t0 = 10_000.0
+    bars = []
+    for index in range(61):
+        end = t0-3600.0+index*60.0
+        close = 100.0+index*0.1
+        bars.append(("NAS100", end-60.0, end, close-0.1, close+0.2,
+                     close-0.2, close, "direct", 1.0, "direct", t0-1.0))
+    # This extreme bar exists after T0 and must not affect the recomputation.
+    bars.append(("NAS100", t0, t0+60.0, 9999.0, 10000.0, 1.0, 9999.0,
+                 "direct", 1.0, "direct", t0-1.0))
+    runtime._conn.executemany(
+        "INSERT INTO passive_market_bars VALUES(?,?,?,?,?,?,?,?,?,?,?)", bars)
+    runtime._conn.execute(
+        "INSERT INTO g1s_observations VALUES(?,?,?,?,?,?)",
+        ("bar-o1", t0, t0+900.0, "NAS100", 15,
+         _prospective_features(t0, include_options=False)))
+    runtime._conn.commit()
+    row = ProspectiveFeatureAdapter(runtime, available_asof=t0).rows(
+        resolved_only=False)[0]
+    for feature_id in (
+            "price.trend_efficiency_60", "price.range_60",
+            "price.drawdown_60", "price.drawup_60", "regime.trend",
+            "regime.volatility"):
+        value = row["feature_values"][feature_id]
+        assert value["availability"] == "AVAILABLE"
+        assert value["provenance"] == "CAUSAL_RECOMPUTED"
+        assert value["future_points_used"] is False
+        assert value["source_window_end_ts"] <= t0
+
+
+def test_frozen_raw_rr_skew_mapping_repairs_missing_adapter_field():
+    runtime = _ProspectiveRuntime()
+    t0 = 100.0
+    frozen = json.loads(_prospective_features(t0, option_asof=t0))
+    frozen["g1s_evidence_v3"]["option_static"].pop("skew", None)
+    frozen["option_distribution"] = {"skew": {"rr": -0.075}}
+    runtime._conn.execute(
+        "INSERT INTO g1s_observations VALUES(?,?,?,?,?,?)",
+        ("skew-o1", t0, 200.0, "NAS100", 15, json.dumps(frozen)))
+    runtime._conn.commit()
+    row = ProspectiveFeatureAdapter(runtime, available_asof=150.0).rows(
+        resolved_only=False)[0]
+    assert row["feature_values"]["option.skew"]["value"] == pytest.approx(-0.075)
+    assert row["feature_values"]["option.skew"]["asof"] == t0
+
+
+def test_recovered_skew_builds_causal_velocity_without_chain_backfill():
+    runtime = _ProspectiveRuntime()
+    for index, t0 in enumerate((100.0, 110.0, 120.0)):
+        frozen = json.loads(_prospective_features(t0, option_asof=t0))
+        frozen["g1s_evidence_v3"]["option_static"].pop("skew", None)
+        frozen["option_distribution"] = {"skew": {"rr": -0.08+index*0.01}}
+        runtime._conn.execute(
+            "INSERT INTO g1s_observations VALUES(?,?,?,?,?,?)",
+            (f"skew-{index}", t0, t0+900.0, "NAS100", 15, json.dumps(frozen)))
+    runtime._conn.commit()
+    rows = ProspectiveFeatureAdapter(runtime, available_asof=120.0).rows(
+        resolved_only=False)
+    velocity = rows[-1]["feature_values"]["option_dynamics.skew_velocity"]
+    assert velocity["availability"] == "AVAILABLE"
+    assert velocity["value"] == pytest.approx(0.001)
+    assert velocity["future_points_used"] is False
+
+
+def test_maturity_tiers_are_predeclared_and_fdr_caps_provisional_claims():
+    assert evidence_maturity(raw_n=100, effective_n=50, temporal_blocks=2) == \
+        "EARLY_CONTEXT"
+    assert evidence_maturity(
+        raw_n=250, effective_n=100, temporal_blocks=2,
+        brier_improvement=.01, logloss_improvement=.01) == "RESEARCH_SIGNAL"
+    assert evidence_maturity(
+        raw_n=600, effective_n=250, temporal_blocks=3,
+        brier_improvement=.01, logloss_improvement=.01, q_value=.01,
+        folds_evaluated=3, folds_positive=2, inner_fdr_passed=False) == \
+        "RESEARCH_SIGNAL"
+    assert evidence_maturity(
+        raw_n=600, effective_n=250, temporal_blocks=3,
+        brier_improvement=.01, logloss_improvement=.01, q_value=.01,
+        folds_evaluated=3, folds_positive=2, inner_fdr_passed=True) == \
+        "PROVISIONAL_EDGE"
+    assert maturity_contract()["one_early_metric_may_trigger_exit_or_close"] is False
+
+
+def test_g1m_and_quality_features_are_not_counted_as_g1s_predictor_failures():
+    by_id = {row["feature_id"]: row for row in feature_registry()["features"]}
+    assert by_id["option.barrier_probability"]["research_scope"] == "G1M_ONLY"
+    assert by_id["option.rnd_geometry"]["research_scope"] == "G1M_ONLY"
+    assert by_id["quality.availability"]["research_scope"] == "QUALITY_ONLY"
+    assert by_id["quality.staleness"]["training_eligibility"] is False
 
 
 def test_prospective_adapter_rejects_resolution_written_before_target():

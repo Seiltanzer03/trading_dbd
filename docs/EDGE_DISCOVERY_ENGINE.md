@@ -1,4 +1,4 @@
-# Edge Discovery Engine v1.1
+# Edge Discovery Engine v1.2
 
 EDE is an offline, research-only layer for finding interpretable conditional
 market edge. It does not run in the web request path and cannot change the AI
@@ -21,9 +21,10 @@ conditions drawn from asset/family/session, train-only volatility and trend
 quintiles, aligned cross-asset confirmation, and breadth. Each outer fold runs
 its own purged inner discovery. Outer tests only evaluate selected rules.
 Benjamini-Hochberg correction is applied to actually tested hypotheses. An
-inner rule must pass both the sample gate and `q <= 0.10` before outer
-evaluation. Interesting FDR failures remain visible as
-`EXPLORATORY_FDR_FAIL` and can never become historical candidates.
+inner rule must pass both the sample gate and `q <= 0.10` before primary outer
+selection. A separately labelled, bounded diagnostic tail may be evaluated on
+the outer fold to populate the early map, but remains
+`EXPLORATORY_FDR_FAIL` and can never become a provisional/robust candidate.
 
 Candidate and live-shadow ledgers are append-only. Hypothesis identity is
 separate from evaluation identity: a stable signal/horizon/template receives
@@ -62,3 +63,27 @@ history has sufficient coverage. Ready prospective features replace a
 deterministic tail of the original template set without increasing the hard cap
 of 248 templates or three conditions. Availability routing uses no outcomes.
 Synthetic or current-snapshot backfill is forbidden.
+
+EDE v1.2 adds predeclared evidence maturity without weakening the confirmatory
+contract. `EARLY_CONTEXT` requires 100 raw / 50 effective observations across
+two temporal blocks; `RESEARCH_SIGNAL` requires 250 / 100 and positive
+incremental Brier and LogLoss; `PROVISIONAL_EDGE` requires 500 / 200, FDR
+`q <= 0.10` and temporal stability. `ROBUST_EDGE` retains 1000 / 400,
+120 positive / 120 negative outcomes and the full four-fold validation. Early
+tiers are descriptive research context only. Their production decision weight
+is zero and one early metric cannot cause EXIT or CLOSE.
+
+Sequential instruments are joined by the nearest external observation satisfying
+`peer.asof <= T0` and a fixed 20-minute age limit. Exact timestamp equality is
+not required. The join remains leave-one-out and stores peer as-of, age, count,
+coverage and staleness. Rolling cross correlation and its change are computed
+only from these admitted causal pairs.
+
+Price path state that was missing from frozen JSON may be recomputed from
+retained completed bars only when both `bar_end_ts <= T0` and the bar's
+`created_ts` is no later than the immutable capture record. Such values carry
+`provenance=CAUSAL_RECOMPUTED` and `future_points_used=false`. This is causal
+recomputation of observed data, not synthetic history. Option skew reads the
+already-frozen `rr` risk-reversal field; absent chain history remains absent.
+Barrier probability and RND geometry are explicitly `G1M_ONLY`; availability
+and staleness are `QUALITY_ONLY`, not G1S trading predictors.

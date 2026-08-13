@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Verify production after the research worker has completed a real cycle."""
+from __future__ import annotations
+
+import argparse
+import json
+import socket
+import subprocess
+import time
+import urllib.error
+import urllib.request
+
+
+BASE = "http://127.0.0.1:8790"
+
+
+def sh(*args: str) -> str:
+    return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT).strip()
+
+
+def request(path: str, *, method: str = "GET", timeout: float = 5.0):
+    started = time.monotonic()
+    req = urllib.request.Request(BASE+path, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            raw = response.read(); code = int(response.status)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read(); code = int(exc.code)
+    elapsed = (time.monotonic()-started)*1000.0
+    return code, json.loads(raw.decode()) if raw else None, elapsed
+
+
+def _transient(exc: BaseException) -> bool:
+    return isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)) or (
+        isinstance(exc, urllib.error.URLError)
+        and isinstance(exc.reason, (TimeoutError, socket.timeout, ConnectionError)))
+
+
+def assert_route(path: str, budget_ms: float = 3000.0):
+    for attempt in range(1, 4):
+        try:
+            code, body, elapsed = request(path)
+        except Exception as exc:
+            if not _transient(exc) or attempt == 3:
+                raise
+            time.sleep(1); continue
+        print(f"{path}: {code} {elapsed:.0f}ms")
+        assert code == 200, (path, code, body)
+        assert elapsed < budget_ms, (path, elapsed, budget_ms)
+        return body
+    raise AssertionError(path)
+
+
+def verify(expected_sha: str) -> None:
+    assert sh("git", "-C", "/opt/seiltanzer", "rev-parse", "HEAD") == expected_sha
+    assert sh("systemctl", "is-active", "seiltanzer") == "active"
+    worker = None
+    for attempt in range(1, 73):
+        runtime = assert_route("/api/research/runtime/status")
+        worker = runtime.get("worker") or {}
+        print("worker cycle", attempt, {
+            "first_cycle_not_before_ts": worker.get("first_cycle_not_before_ts"),
+            "last_started_ts": worker.get("last_started_ts"),
+            "last_finished_ts": worker.get("last_finished_ts"),
+            "last_error": worker.get("last_error"),
+        })
+        if (worker.get("last_started_ts") is not None
+                and worker.get("last_finished_ts") is not None
+                and isinstance(worker.get("last_result"), dict)):
+            break
+        time.sleep(10)
+    else:
+        raise AssertionError("research worker did not complete first cycle")
+    assert worker is not None
+    assert worker.get("running") is True, worker
+    assert worker.get("last_error") is None, worker
+    assert float(worker["last_started_ts"]) >= float(worker["first_cycle_not_before_ts"])-1.0
+    result = worker.get("last_result") or {}
+    assert isinstance(result.get("g1s"), dict) and isinstance(result.get("g1m_local"), dict), result
+    assert int((result["g1s"] or {}).get("batch_limit") or 0) > 0, result
+
+    assert_route("/api/state")
+    assert_route("/api/analytics/gex-migration")
+    assert_route("/api/analytics/regime-phase")
+    assert_route("/api/analytics/wavelet")
+    assert_route("/api/analytics/correlation-graph")
+    code, body, elapsed = request("/api/ai/verdict", method="POST", timeout=65.0)
+    print(f"/api/ai/verdict: {code} {elapsed:.0f}ms")
+    assert code in {200, 400, 429}, (code, body)
+    assert isinstance((body or {}).get("ok"), bool), body
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--expected-sha", required=True)
+    args = parser.parse_args(argv)
+    verify(args.expected_sha)
+    print("POST-RESEARCH PRODUCTION CHECK PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
