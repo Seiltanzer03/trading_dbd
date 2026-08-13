@@ -9,6 +9,7 @@ from seiltanzer.ai_verdict import (
 from seiltanzer.config import Settings
 from seiltanzer.engine import Engine
 from seiltanzer.decision_research import canonical_snapshot
+from seiltanzer import ai_verdict_v18
 
 
 def _minimal_policy_snapshot():
@@ -91,12 +92,49 @@ def test_snapshot_contains_quant_policy_and_all_recent_metric_families(tmp_path)
         assert coverage["total_groups"] == 12
         assert coverage["all_groups_have_explicit_role"] is True
         assert snapshot["metric_history"]["samples"] >= 1
-        assert len(json.dumps(snapshot, ensure_ascii=False)) < 60000
+        size = len(json.dumps(
+            snapshot, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode("utf-8"))
+        assert size <= ai_verdict_v18.SNAPSHOT_TARGET_BYTES
+        assert snapshot["snapshot_budget"]["final_bytes"] == size
         chain_trigger = (manager.get("recalculation_triggers") or {}).get("chain_refresh") or {}
         assert "next_attempt_ts" not in chain_trigger
         assert canonical_snapshot(snapshot)["trade_id"] == trade["id"]
     finally:
         engine.close()
+
+
+def test_saturated_metric_payload_is_deterministically_below_snapshot_limit():
+    huge_rows = [{
+        "symbol": f"METRIC_{index}", "available": True, "status": "available",
+        "source": "x" * 500, "value": index, "detail": "y" * 2000,
+    } for index in range(400)]
+    snapshot = _minimal_policy_snapshot()
+    snapshot.update({
+        "trade_id": "trade-1", "metric_history": {"samples": 9999, "rows": huge_rows},
+        "metric_coverage": {"summary": {"total_groups": 12}},
+        "ede_causal_context": {"families": {"OPTIONS": {"metrics": huge_rows}}},
+    })
+    manager = snapshot["policy_manager"]
+    manager["management_decision"] = {
+        "policy": "CLOSE_25", "action": "CLOSE_25", "remaining_fraction": .75}
+    manager["input_audit"] = {"rows": {"options": {"items": huge_rows}}}
+    manager["option_derivative_state"] = {"metrics": {str(i): row for i, row in enumerate(huge_rows)}}
+    manager["evidence"].update({
+        "iv_surface": {"available": True, "frontend_formula_match": True,
+                       "local_24h": huge_rows, "real_expiries": huge_rows},
+        "correlation": {"available": True, "all_pairs": huge_rows},
+        "unknown_saturated_research_payload": huge_rows,
+    })
+    decision_before = dict(manager["management_decision"])
+    ai_verdict_v18._enforce_snapshot_budget(snapshot)
+    first = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    assert len(first.encode("utf-8")) <= ai_verdict_v18.SNAPSHOT_TARGET_BYTES
+    assert manager["management_decision"] == decision_before
+    copy = json.loads(first)
+    ai_verdict_v18._enforce_snapshot_budget(copy)
+    second = json.dumps(copy, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    assert len(second.encode("utf-8")) < ai_verdict_v18.SNAPSHOT_LIMIT_BYTES
 
 
 def test_deterministic_report_is_concrete_and_contains_every_policy():

@@ -4,10 +4,28 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .maturity import data_maturity
+from seiltanzer.g1_short_horizon_p2e_segmented_persistence import (
+    ASSET_FAMILY_BY_INSTRUMENT,
+    session_utc,
+)
+
+from .evidence_ledger import (
+    FAMILIES,
+    MATURITY_RANK,
+    evidence_ledger_path,
+    latest_frozen_evidence,
+)
+from .filters import FittedCondition, condition_matches
+from .prospective import EXTRACTORS
 
 
-CONTRACT_VERSION = "g1s-ede-ai-causal-context-v1.2"
+CONTRACT_VERSION = "g1s-ede-ai-causal-context-v1.2.1"
+CONFIDENCE_CAP = {
+    "INSUFFICIENT_DATA": 0.0,
+    "RESEARCH_SIGNAL": 0.05,
+    "PROVISIONAL_EDGE": 0.15,
+    "ROBUST_EDGE": 0.25,
+}
 
 
 def _available(value: Any) -> bool:
@@ -24,10 +42,13 @@ def _pick(source: Any, names: tuple[str, ...]) -> dict[str, Any]:
 def _compact_derivatives(source: Any) -> dict[str, Any]:
     source = source if isinstance(source, dict) else {}
     keys = ("available", "value", "slope", "acceleration", "rolling_rank",
-            "rolling_zscore", "direction_consistency", "sample_count",
-            "time_span_minutes", "confidence", "source_quality")
+            "rolling_zscore", "direction_consistency", "sample_count")
+    allowed = {
+        "iv", "skew", "gex_force_score", "vanna", "charm_per_day",
+        "gex_zero_gamma_log_moneyness",
+    }
     return {name: _pick(row, keys) if isinstance(row, dict) else row
-            for name, row in source.items()}
+            for name, row in source.items() if name in allowed}
 
 
 def _compact_policy_regime(source: Any) -> dict[str, Any]:
@@ -40,35 +61,6 @@ def _compact_policy_regime(source: Any) -> dict[str, Any]:
     }
 
 
-def _data_readiness(engine: Any) -> tuple[str, list[dict[str, Any]]]:
-    runtime = getattr(engine, "short_horizon", None)
-    if runtime is None:
-        return "INSUFFICIENT_DATA", []
-    try:
-        from seiltanzer.g1_short_horizon_status_materialization import _horizon_summary
-        horizons = [_horizon_summary(runtime, horizon) for horizon in (15, 30, 60, 120, 240)]
-    except Exception:
-        return "INSUFFICIENT_DATA", []
-    statuses = [
-        data_maturity(
-            raw_n=int(row.get("raw_resolved") or 0),
-            effective_n=int(row.get("effective_n") or 0),
-            temporal_blocks=int(row.get("trading_days") or 0))
-        for row in horizons]
-    rank = {
-        "INSUFFICIENT_DATA": 0, "DATA_READY_EARLY": 1,
-        "DATA_READY_RESEARCH": 2, "DATA_READY_PROVISIONAL": 3,
-        "DATA_READY_ROBUST": 4,
-    }
-    best = max(statuses, key=lambda item: rank[item], default="INSUFFICIENT_DATA")
-    compact = [{
-        "horizon_minutes": row["horizon_minutes"],
-        "raw": row.get("raw_resolved"), "effective": row.get("effective_n"),
-        "temporal_blocks": row.get("trading_days"), "data_maturity": status,
-    } for row, status in zip(horizons, statuses)]
-    return best, compact
-
-
 def _latest_frozen_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
     runtime = getattr(engine, "short_horizon", None)
     instrument = str((snapshot.get("strategy") or {}).get("instrument") or "")
@@ -76,40 +68,133 @@ def _latest_frozen_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, A
     if runtime is None or not instrument or cutoff is None:
         return {}
     try:
+        cutoff = float(cutoff)
         with runtime._lock:
             row = runtime._conn.execute(
                 "SELECT captured_ts,frozen_features_json FROM g1s_observations "
                 "WHERE instrument=? AND captured_ts<=? "
-                "ORDER BY captured_ts DESC LIMIT 1", (instrument, float(cutoff))).fetchone()
+                "ORDER BY captured_ts DESC LIMIT 1", (instrument, cutoff)).fetchone()
         if row is None:
             return {}
         captured = float(row["captured_ts"])
         frozen = json.loads(row["frozen_features_json"])
         block = frozen.get("g1s_evidence_v3") or {}
-        if float(block.get("captured_ts", captured)) > captured+1e-6:
+        if float(block.get("captured_ts", captured)) > captured + 1e-6:
             return {}
         result = dict(block)
         result["observation_t0"] = captured
         result["v2_option_context"] = (
             (frozen.get("g1s_evidence_v2") or {}).get("option_context") or {})
+        result["_raw_frozen"] = frozen
         return result
     except Exception:
         return {}
 
 
-def build_ai_ede_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Expose already-observed context after the action has been frozen.
+def _current_feature_values(frozen: dict[str, Any], instrument: str) -> dict[str, Any]:
+    raw = frozen.get("_raw_frozen") or {}
+    family = ASSET_FAMILY_BY_INSTRUMENT.get(instrument, "UNKNOWN")
+    values: dict[str, Any] = {
+        "asset": instrument, "regime.asset": instrument,
+        "asset_family": family, "regime.asset_family": family,
+    }
+    t0 = frozen.get("observation_t0")
+    if t0 is not None:
+        values["session_utc"] = session_utc(float(t0))
+        values["regime.session_utc"] = values["session_utc"]
+    for feature_id, extractor in EXTRACTORS.items():
+        try:
+            value, _block = extractor(raw)
+            if value is not None:
+                values[feature_id] = value
+        except Exception:
+            continue
+    price = frozen.get("price_volatility") or {}
+    values["rv15_over_rv60"] = price.get("rv15_over_rv60")
+    values["trend_efficiency_60"] = price.get("trend_efficiency_60")
+    return values
 
-    No edge candidate is inferred from coverage. Until a separately promoted
-    artifact is wired in, EDGE_MATURITY is deliberately insufficient and the
-    confidence modifier is exactly zero.
-    """
+
+def _condition_matches_values(values: dict[str, Any], condition: dict[str, Any]) -> bool:
+    try:
+        fitted = FittedCondition(
+            feature_id=str(condition["feature_id"]),
+            kind=str(condition["kind"]), state=str(condition["state"]),
+            lower=condition.get("lower"), upper=condition.get("upper"),
+            train_cutoff_ts=condition.get("train_cutoff_ts"),
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return condition_matches({"ede_features": values}, fitted)
+
+
+def _candidate_for_context(record: dict[str, Any] | None,
+                           values: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+    def eligible(candidate: dict[str, Any]) -> bool:
+        if candidate.get("aggregate_scope") != "PRIMARY_FDR_PASS_OUTER_FOLDS_ONLY":
+            return False
+        primary_folds = int(candidate.get("primary_folds") or 0)
+        maturity = candidate.get("edge_maturity")
+        if maturity == "PROVISIONAL_EDGE" and primary_folds < 2:
+            return False
+        if maturity == "ROBUST_EDGE" and primary_folds < 4:
+            return False
+        return primary_folds > 0
+
+    candidates = (record or {}).get("edge_candidates") or []
+    for candidate in candidates:
+        if not eligible(candidate):
+            continue
+        conditions = candidate.get("conditions") or []
+        if conditions and all(_condition_matches_values(values, row) for row in conditions):
+            return candidate, True
+    primary = [candidate for candidate in candidates if eligible(candidate)]
+    return (primary[0], False) if primary else (None, False)
+
+
+def _position_relation(snapshot: dict[str, Any], values: dict[str, Any],
+                       candidate: dict[str, Any] | None, applies: bool) -> str:
+    if not candidate or not applies:
+        return "NOT_APPLICABLE"
+    if candidate.get("directional_evidence") != "SUPPORTS_PERSISTENCE":
+        return "MIXED"
+    direction = str((snapshot.get("strategy") or {}).get("direction") or "").lower()
+    try:
+        ret5 = float(values["price.ret_5m"])
+    except (KeyError, TypeError, ValueError):
+        return "UNKNOWN"
+    supports = (direction in {"long", "buy"} and ret5 > 0) or (
+        direction in {"short", "sell"} and ret5 < 0)
+    if direction not in {"long", "buy", "short", "sell"} or ret5 == 0:
+        return "UNKNOWN"
+    return "SUPPORTS_POSITION" if supports else "OPPOSES_POSITION"
+
+
+def _family_evidence(record: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
+    ledger_families = (record or {}).get("family_data_maturity") or {}
+    output: dict[str, Any] = {}
+    for name in FAMILIES:
+        source = ledger_families.get(name) or {}
+        output[name] = {
+            "data_maturity": source.get("data_maturity", "INSUFFICIENT_DATA"),
+            "horizons": source.get("horizons") or {},
+        }
+    summary = max(
+        (row["data_maturity"] for row in output.values()),
+        key=lambda name: MATURITY_RANK.get(name, 0), default="INSUFFICIENT_DATA")
+    return summary, output
+
+
+def build_ai_ede_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Attach frozen context after the management action has been calculated."""
     manager = snapshot.get("policy_manager") or {}
     evidence = manager.get("evidence") or {}
     option_state = (manager.get("option_derivative_state")
                     or evidence.get("option_derivative_state") or {})
     metrics = option_state.get("metrics") or {}
     frozen = _latest_frozen_context(engine, snapshot)
+    instrument = str((snapshot.get("strategy") or {}).get("instrument") or "")
+    values = _current_feature_values(frozen, instrument)
     frozen_options = frozen.get("option_static") or {}
     frozen_dynamics = frozen.get("option_dynamics") or {}
     frozen_gex = frozen.get("gex") or {}
@@ -122,83 +207,83 @@ def build_ai_ede_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any
     policy_regime = evidence.get("atr_regime") or {}
     frozen_price = frozen.get("price_volatility") or {}
     policy_price = evidence.get("live_price") or {}
-    families = {
+
+    try:
+        cutoff = float(snapshot.get("captured_ts"))
+        frozen_evidence = latest_frozen_evidence(evidence_ledger_path(engine), cutoff)
+    except (TypeError, ValueError):
+        frozen_evidence = None
+    readiness, family_evidence = _family_evidence(frozen_evidence)
+    current = {
         "OPTIONS": {
             "available": bool(option_state.get("available") or metrics
                               or frozen_options.get("available")),
-            "metrics": {name: {
-                key: row.get(key) for key in (
-                    "value", "slope", "acceleration", "sample_count",
-                    "confidence", "source_quality")
-            } for name, row in metrics.items()
-                        if name in {
-                            "iv", "skew", "term_slope", "gex_force", "gex_stiffness",
-                            "distance_to_zero_gamma", "barrier_ev", "bop",
-                        } and isinstance(row, dict)},
-            "frozen_t0": {
-                "iv": frozen_options.get("iv"), "iv_rv_ratio": frozen_options.get("iv_rv_ratio"),
-                "skew": frozen_options.get("skew"), "term_slope": frozen_options.get("term_slope"),
+            "metrics": {name: _pick(row, (
+                "value", "slope", "acceleration", "sample_count", "confidence"))
+                for name, row in metrics.items()
+                if name in {"iv", "skew", "term_slope", "gex_force", "gex_stiffness",
+                            "distance_to_zero_gamma"} and isinstance(row, dict)},
+            "t0": {
+                "iv": frozen_options.get("iv"),
+                "iv_rv_ratio": frozen_options.get("iv_rv_ratio"),
+                "skew": frozen_options.get("skew"),
+                "term_slope": frozen_options.get("term_slope"),
                 "delta": frozen_options.get("delta"), "vanna": frozen_options.get("vanna"),
                 "charm": frozen_options.get("charm_per_day"),
-                "gex_net_balance": frozen_v2_options.get("gex_net_balance"),
-                "gex_field": frozen_gex.get("field_score"),
+                "gex": frozen_v2_options.get("gex_net_balance"),
                 "gex_force": frozen_gex.get("force_score"),
-                "gex_stiffness": frozen_gex.get("stiffness_score"),
                 "zero_gamma": frozen_gex.get("zero_gamma_log_moneyness"),
                 "asof": frozen.get("observation_t0"),
             },
         },
         "OPTION_DYNAMICS": {
-            "available": bool(option_state.get("named_derivatives")
-                              or frozen_dynamics.get("derivatives")),
+            "available": bool(derivatives),
             "metrics": _compact_derivatives(derivatives),
         },
         "CROSS_ASSET": {
-            "available": _available(frozen.get("cross_asset"))
-                         or _available(evidence.get("correlation")),
-            "context": _pick(
-                frozen_cross or policy_cross,
-                ("available", "source_ts", "status", "source", "systemic_coupling",
-                 "network_tension", "fragmentation", "active_breaks_count",
-                 "dominant_stress_node", "instrument_node")),
+            "available": _available(frozen_cross) or _available(policy_cross),
+            "context": _pick(frozen_cross or policy_cross, (
+                "available", "source_ts", "status", "systemic_coupling",
+                "network_tension", "fragmentation", "active_breaks_count")),
         },
         "REGIME": {
-            "available": _available(frozen.get("macro"))
-                         or _available(evidence.get("atr_regime")),
-            "context": (_pick(
-                frozen_regime,
-                ("available", "regime", "x", "y", "z", "boundary_distance",
-                 "transition_velocity", "transition_acceleration"))
-                if frozen_regime else _compact_policy_regime(policy_regime)),
+            "available": _available(frozen_regime) or _available(policy_regime),
+            "context": (_pick(frozen_regime, (
+                "available", "regime", "boundary_distance", "transition_velocity",
+                "transition_acceleration")) if frozen_regime
+                else _compact_policy_regime(policy_regime)),
         },
         "PRICE": {
-            "available": _available(frozen.get("price_volatility"))
-                         or _available(evidence.get("live_price")),
-            "context": _pick(
-                frozen_price or policy_price,
-                ("available", "ret_5m", "ret_15m", "realized_vol_15m",
-                 "realized_vol_60m", "trend_efficiency_60", "range_60",
-                 "drawdown_60", "drawup_60", "move_5m", "move_15m", "move_60m")),
+            "available": _available(frozen_price) or _available(policy_price),
+            "context": _pick(frozen_price or policy_price, (
+                "available", "ret_5m", "ret_15m", "realized_vol_15m",
+                "realized_vol_60m", "trend_efficiency_60", "range_60m",
+                "drawdown_60m", "drawup_60m")),
         },
         "VOLATILITY": {
             "available": _available(evidence.get("iv_surface"))
-                         or _available(evidence.get("atr_regime"))
-                         or _available(frozen.get("price_volatility")),
+                         or _available(policy_regime) or _available(frozen_price),
             "context": {
                 "iv_surface": _pick(evidence.get("iv_surface"),
                                     ("available", "atm_iv", "skew", "term_slope")),
                 "atr_sigma_vrp": _compact_policy_regime(policy_regime),
-                "frozen_t0": _pick(frozen_price, (
+                "t0": _pick(frozen_price, (
                     "realized_vol_15m", "realized_vol_60m", "rv15_over_rv60")),
             },
         },
     }
-    readiness, horizons = _data_readiness(engine)
-    # Dataset readiness is a ceiling. A family absent in this causal snapshot
-    # is not advertised as context-ready merely because history exists.
-    for family in families.values():
-        family["data_maturity"] = readiness if family["available"] else "INSUFFICIENT_DATA"
+    for name, family in current.items():
+        family.update(family_evidence[name])
         family["edge_maturity"] = "INSUFFICIENT_DATA"
+
+    candidate, applies = _candidate_for_context(frozen_evidence, values)
+    edge_status = str((candidate or {}).get("edge_maturity") or "INSUFFICIENT_DATA")
+    relation = _position_relation(snapshot, values, candidate, applies)
+    cap = CONFIDENCE_CAP.get(edge_status, 0.0)
+    modifier = cap if relation == "SUPPORTS_POSITION" else -cap if relation == "OPPOSES_POSITION" else 0.0
+    for family in (candidate or {}).get("feature_families") or []:
+        if family in current:
+            current[family]["edge_maturity"] = edge_status
 
     score = option_state.get("option_state_score")
     try:
@@ -206,37 +291,47 @@ def build_ai_ede_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any
     except (TypeError, ValueError):
         score = None
     if score is not None and score >= 0.05:
-        option_read = "IV/GEX/skew подтверждают удержание как causal context."
+        lines = ["IV/GEX/skew подтверждают удержание как causal context."]
         stance = "SUPPORTS_HOLD"
     elif score is not None and score <= -0.05:
-        option_read = "Опционный контекст против позиции."
+        lines = ["Опционный контекст против позиции."]
         stance = "OPPOSES_POSITION"
-    elif families["OPTIONS"]["available"]:
-        option_read = "IV/GEX/skew дают смешанный контекст без самостоятельного сигнала."
+    elif current["OPTIONS"]["available"]:
+        lines = ["IV/GEX/skew дают смешанный контекст без самостоятельного сигнала."]
         stance = "MIXED"
     else:
-        option_read = "Опционный контекст сейчас недоступен."
+        lines = ["Опционный контекст сейчас недоступен."]
         stance = "UNAVAILABLE"
-    lines = [option_read]
-    if readiness != "INSUFFICIENT_DATA":
-        lines.append("Данных достаточно для контекста, но edge ещё не доказан.")
-    else:
-        lines.append("Накопленных causal T0 данных пока недостаточно даже для раннего data-ready статуса.")
+    lines.append(
+        "Conditional edge подтверждён замороженным primary evidence."
+        if edge_status != "INSUFFICIENT_DATA"
+        else "Данных может быть достаточно для контекста, но edge ещё не доказан.")
 
-    edge_status = "INSUFFICIENT_DATA"
+    edge = None
+    if candidate:
+        edge = {key: candidate.get(key) for key in (
+            "candidate_id", "hypothesis_id", "horizon_minutes", "conditions",
+            "edge_maturity", "delta_brier", "delta_logloss", "q_value",
+            "primary_folds", "folds_evaluated", "folds_positive",
+            "directional_evidence", "feature_families", "aggregate_scope")}
+        edge.update({"applies_to_current_context": applies, "position_relation": relation})
     return {
         "contract_version": CONTRACT_VERSION,
         "asof": snapshot.get("captured_ts"),
-        "families": families,
+        "evidence_frozen_at": (frozen_evidence or {}).get("frozen_at"),
+        "evidence_cutoff_ts": (frozen_evidence or {}).get("evidence_cutoff_ts"),
+        "dataset_sha256": (frozen_evidence or {}).get("dataset_sha256"),
+        "families": current,
         "data_maturity": readiness,
         "edge_maturity": edge_status,
-        "horizon_data_maturity": {
-            str(row["horizon_minutes"]): row["data_maturity"] for row in horizons},
+        "edge": edge,
         "option_context_stance": stance,
         "context_lines_ru": lines,
-        "confidence_modifier": 0.0,
+        "confidence_modifier": round(modifier, 6),
+        "confidence_modifier_cap": cap,
         "authority": {
             "role": "EXPLANATION_AND_CONFIDENCE_CONTEXT",
+            "production_authority": False,
             "production_directional_authority": False,
             "may_trigger_exit_or_close": False,
             "explicit_promotion_required": True,
