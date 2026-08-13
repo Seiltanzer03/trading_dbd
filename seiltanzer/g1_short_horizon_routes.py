@@ -115,6 +115,41 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
     app.add_api_route("/api/research/runtime/materializers", runtime.materializer_status,
                       methods=["GET"], name="research_materializers")
 
+    def worker_status():
+        """Lock-free worker lifecycle view.
+
+        The full runtime status intentionally includes several SQLite-backed
+        materializer summaries. Polling it while the research cycle owns those
+        runtimes can make a health probe compete with maintenance. Lifecycle
+        polling needs only in-memory state, so keep that path independent from
+        every database connection and runtime lock.
+        """
+        state = getattr(app.state, "g1_research_worker", {}) or {}
+        result = state.get("last_result")
+        result_summary = None
+        if isinstance(result, dict):
+            g1s = result.get("g1s") or {}
+            g1m_local = result.get("g1m_local") or {}
+            result_summary = {
+                "g1s": {"batch_limit": g1s.get("batch_limit")},
+                "g1m_local": {"batch_limit": g1m_local.get("batch_limit")},
+            }
+        keys = (
+            "contract_version", "scalability_refinement_version", "running",
+            "startup_grace_sec", "first_cycle_not_before_ts", "last_started_ts",
+            "last_finished_ts", "last_duration_ms", "last_error",
+        )
+        return {
+            "contract_version": "research-worker-status-v1",
+            "worker": {key: state.get(key) for key in keys},
+            "last_result": result_summary,
+            "sqlite_access": False,
+            "production_authority": False,
+        }
+
+    app.add_api_route("/api/research/runtime/worker-status", worker_status,
+                      methods=["GET"], name="research_worker_status")
+
     def runtime_status():
         worker = dict(getattr(app.state, "g1_research_worker", {}) or {})
         return {

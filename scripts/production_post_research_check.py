@@ -55,9 +55,12 @@ def verify(expected_sha: str) -> None:
     assert sh("git", "-C", "/opt/seiltanzer", "rev-parse", "HEAD") == expected_sha
     assert sh("systemctl", "is-active", "seiltanzer") == "active"
     worker = None
+    result = None
     for attempt in range(1, 73):
-        runtime = assert_route("/api/research/runtime/status")
-        worker = runtime.get("worker") or {}
+        lifecycle = assert_route("/api/research/runtime/worker-status")
+        assert lifecycle.get("sqlite_access") is False, lifecycle
+        worker = lifecycle.get("worker") or {}
+        result = lifecycle.get("last_result")
         print("worker cycle", attempt, {
             "first_cycle_not_before_ts": worker.get("first_cycle_not_before_ts"),
             "last_started_ts": worker.get("last_started_ts"),
@@ -66,7 +69,7 @@ def verify(expected_sha: str) -> None:
         })
         if (worker.get("last_started_ts") is not None
                 and worker.get("last_finished_ts") is not None
-                and isinstance(worker.get("last_result"), dict)):
+                and isinstance(result, dict)):
             break
         time.sleep(10)
     else:
@@ -75,10 +78,13 @@ def verify(expected_sha: str) -> None:
     assert worker.get("running") is True, worker
     assert worker.get("last_error") is None, worker
     assert float(worker["last_started_ts"]) >= float(worker["first_cycle_not_before_ts"])-1.0
-    result = worker.get("last_result") or {}
+    result = result or {}
     assert isinstance(result.get("g1s"), dict) and isinstance(result.get("g1m_local"), dict), result
     assert int((result["g1s"] or {}).get("batch_limit") or 0) > 0, result
 
+    # Now that maintenance released its runtime locks, verify both the full
+    # SQLite-backed status and all functional routes under their original gates.
+    assert_route("/api/research/runtime/status")
     assert_route("/api/state")
     assert_route("/api/analytics/gex-migration")
     assert_route("/api/analytics/regime-phase")
