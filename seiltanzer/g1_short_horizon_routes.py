@@ -53,6 +53,10 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
                       methods=["GET"], name="g1s_final_report")
     app.add_api_route("/api/research/g1s/historical-wf", runtime.historical_walkforward_status,
                       methods=["GET"], name="g1s_historical_walkforward")
+    app.add_api_route("/api/research/g1s/volatility-live", runtime.volatility_live_status,
+                      methods=["GET"], name="g1s_volatility_live")
+    app.add_api_route("/api/research/g1s/volatility-live/evidence", runtime.volatility_live_evidence,
+                      methods=["GET"], name="g1s_volatility_live_evidence")
     app.add_api_route(
         "/api/research/g1s/observations",
         lambda limit=100: runtime.observations(limit=int(limit)),
@@ -86,8 +90,6 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         lambda limit=500: runtime.path_metrics(limit=int(limit)),
         methods=["GET"], name="g1s_path_metrics")
 
-    # Full-history metrics are worker-materialized.  A request can never trigger
-    # an OOS scan, refit or economic replay merely because the UI opened.
     app.add_api_route("/api/research/g1s/oos", lambda: cached("probability_oos"),
                       methods=["GET"], name="g1s_oos")
     app.add_api_route("/api/research/g1s/continuous-oos", lambda: cached("continuous_oos"),
@@ -123,10 +125,12 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
             "short_horizon": runtime.materializer_status(),
             "evidence_materialization": runtime.evidence_materialization_status(),
             "historical_walk_forward": runtime.historical_walkforward_status(),
+            "volatility_live_oos": runtime.volatility_live_status(),
             "management_local": local.status(),
             "market_collection_separate_from_research": True,
             "request_time_full_history_evidence_scan": False,
             "request_time_historical_network_fetch": False,
+            "request_time_volatility_network_fetch": False,
             "production_authority": False,
         }
 
