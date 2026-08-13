@@ -10,7 +10,7 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - name: Checkout exact P2 branch
         uses: actions/checkout@v4
@@ -24,14 +24,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .
-      - name: Run P1B then nested P2 on real Yahoo 5m data in temporary DB
+      - name: Run P1B then exact-fast nested P2 on real Yahoo 5m data
         run: |
           python - <<'PY'
           import json, resource, tempfile, time
           from seiltanzer.config import Settings
           from seiltanzer.engine import Engine
-          from seiltanzer.g1_short_horizon_p2_regime_research import (
-              run_p2_nested_research, p2_status,
+          from seiltanzer.g1_short_horizon_p2_regime_research import p2_status
+          from seiltanzer.g1_short_horizon_p2_fast_gbt import (
+              FAST_GBT_VERSION, run_p2_nested_research_fast,
           )
 
           with tempfile.TemporaryDirectory() as td:
@@ -48,7 +49,7 @@ jobs:
                   assert p1.get('source_count')==10 and p1.get('run_count')==10
 
                   started=time.time()
-                  result=run_p2_nested_research(rt,force=True)
+                  result=run_p2_nested_research_fast(rt,force=True)
                   elapsed=time.time()-started
                   status=p2_status(rt)
                   compact=[]
@@ -60,6 +61,7 @@ jobs:
                           'selection_counts')})
                   print('P2_RESULT',json.dumps({
                       'contract':result.get('contract_version'),
+                      'gbt_compute_contract':result.get('gbt_compute_contract'),
                       'source_set':result.get('source_set_sha256'),
                       'run_count':result.get('run_count'),
                       'winner_count':result.get('winner_count'),
@@ -76,6 +78,7 @@ jobs:
                       'auto_promotion':status.get('auto_promotion'),
                       'production_authority':status.get('production_authority'),
                   },sort_keys=True))
+                  assert result.get('gbt_compute_contract')==FAST_GBT_VERSION,result
                   assert status.get('state')=='COMPLETE',status
                   assert result.get('run_count')==10,result
                   assert status.get('outer_test_used_for_selection') is False,status
