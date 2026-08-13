@@ -16,8 +16,6 @@ import time
 
 
 RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
-# Preserve the published scalability contract. Evidence-report materialization has
-# its own versioned contract and does not require an incompatible worker version.
 RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v4"
 RESEARCH_INTERVAL_SEC = 10.0
 G1S_BATCH = 500
@@ -29,7 +27,6 @@ TRADE_LINK_INTERVAL_SEC = 60.0
 def _run_g1s_bounded(runtime) -> dict:
     materialized = runtime.materialize_new(limit=G1S_BATCH)
     resolved = runtime.resolve_new(limit=G1S_BATCH)
-
     status_refresh = runtime.refresh_materialized_status(limit=10000)
     now = time.time()
 
@@ -54,19 +51,11 @@ def _run_g1s_bounded(runtime) -> dict:
     barrier_rows = _materialize_barriers(runtime, limit=G1S_BATCH)
     path_metric_rows = _materialize_path_metrics(runtime, limit=G1S_BATCH)
 
-    # Production ShortHorizonRuntime always has this method after package install.
-    # Minimal test doubles and compatibility callers are allowed to omit it; the
-    # evidence cache is presentation-only and must never make core resolution fail.
     evidence_fn = getattr(runtime, "materialize_evidence_reports", None)
     evidence_reports = (
         evidence_fn() if callable(evidence_fn)
         else {"refreshed": False, "reason": "MATERIALIZER_UNAVAILABLE"}
     )
-
-    # P1B historical walk-forward is a one-time/versioned research bootstrap.
-    # The first run may perform network I/O and large numpy fits, therefore it
-    # lives only on this low-priority worker.  Subsequent calls are a persisted
-    # O(1) ALREADY_MATERIALIZED check.  Failure cannot stop the market collector.
     historical_fn = getattr(runtime, "materialize_historical_walkforward", None)
     historical_wf = (
         historical_fn() if callable(historical_fn)
@@ -98,6 +87,23 @@ def _run_g1m_local_bounded(runtime) -> dict:
     }
 
 
+def _run_p3l_optional(runtime, passive) -> dict:
+    """Optional research must never fail the core G1S/G1M worker iteration."""
+    fn = getattr(runtime, "run_volatility_live_cycle", None)
+    if not callable(fn):
+        return {"available": False, "reason": "P3L_UNAVAILABLE"}
+    try:
+        result = fn(passive)
+        return {"available": True, "ok": True, **(result or {})}
+    except Exception as exc:
+        return {
+            "available": True,
+            "ok": False,
+            "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+            "production_authority": False,
+        }
+
+
 def install_research_worker(app) -> None:
     if getattr(app.state, "g1_research_worker_installed", False):
         return
@@ -118,6 +124,9 @@ def install_research_worker(app) -> None:
         "evidence_reports_request_time_scan": False,
         "historical_walkforward_runs_on_research_worker": True,
         "historical_walkforward_request_time_network_fetch": False,
+        "p3l_runs_on_research_worker": True,
+        "p3l_owns_market_network_request": False,
+        "p3l_failure_isolated_from_core_worker": True,
     }
     original_lifespan = app.router.lifespan_context
 
@@ -134,9 +143,13 @@ def install_research_worker(app) -> None:
                     await asyncio.sleep(0)
                     g1m_result = await asyncio.to_thread(
                         _run_g1m_local_bounded, engine.management_local)
+                    await asyncio.sleep(0)
+                    p3l_result = await asyncio.to_thread(
+                        _run_p3l_optional, engine.short_horizon, engine.passive)
                     state["last_result"] = {
                         "g1s": g1s_result,
                         "g1m_local": g1m_result,
+                        "p3l_volatility": p3l_result,
                     }
                     state["last_error"] = None
                 except Exception as exc:
