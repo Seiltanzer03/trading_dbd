@@ -1,0 +1,173 @@
+"""Immutable P1B adapter for the first EDE discovery audit."""
+from __future__ import annotations
+
+import json
+import math
+from collections import defaultdict
+from typing import Any
+
+from seiltanzer.config import INSTRUMENTS
+from seiltanzer.g1_short_horizon_historical_wf import (
+    _build_horizon_rows,
+    _load_source_bars,
+)
+from seiltanzer.g1_short_horizon_p2e_segmented_persistence import (
+    ASSET_FAMILY_BY_INSTRUMENT,
+    _source_context,
+    session_utc,
+)
+
+
+PEER_BY_INSTRUMENT = {
+    "NAS100": "SP500", "SP500": "NAS100", "US30": "SP500",
+    "GER40": "UK100", "UK100": "GER40", "JPY100": "NAS100",
+    "XAU": "XAG", "XAG": "XAU", "EURUSD": "USDCAD", "USDCAD": "EURUSD",
+}
+
+
+def load_p1b_sources(runtime: Any) -> tuple[list[dict[str, Any]], str]:
+    """Read the current COMPLETE immutable source set without writing the DB."""
+    with runtime._lock:
+        state = runtime._conn.execute(
+            "SELECT state,source_set_sha256 FROM g1s_historical_wf_state WHERE id=1"
+        ).fetchone()
+    if state is None or str(state["state"]) != "COMPLETE" or not state["source_set_sha256"]:
+        raise RuntimeError("P1B historical source set is not COMPLETE")
+    source_set = str(state["source_set_sha256"])
+    with runtime._lock:
+        run = runtime._conn.execute(
+            "SELECT artifact_json FROM g1s_historical_wf_runs WHERE source_set_sha256=? "
+            "ORDER BY created_ts LIMIT 1", (source_set,)
+        ).fetchone()
+    if run is None:
+        raise RuntimeError("P1B current run artifact unavailable")
+    artifact = json.loads(str(run["artifact_json"]))
+    source_ids = [str(item["source_id"]) for item in artifact.get("source_summary") or []]
+    if len(source_ids) != len(INSTRUMENTS):
+        raise RuntimeError(f"expected {len(INSTRUMENTS)} source ids, got {len(source_ids)}")
+    placeholders = ",".join("?" for _ in source_ids)
+    with runtime._lock:
+        rows = runtime._conn.execute(
+            f"SELECT * FROM g1s_historical_sources WHERE source_id IN ({placeholders})",
+            tuple(source_ids),
+        ).fetchall()
+    by_id = {str(row["source_id"]): dict(row) for row in rows}
+    sources: list[dict[str, Any]] = []
+    for source_id in source_ids:
+        item = by_id.get(source_id)
+        if item is None:
+            raise RuntimeError(f"missing immutable source {source_id}")
+        item["bars"] = _load_source_bars(item)
+        sources.append(item)
+    return sources, source_set
+
+
+def _sign(value: float) -> int:
+    return 1 if value > 0 else -1 if value < 0 else 0
+
+
+def aligned_cross_asset_context(rows: list[dict[str, Any]]) -> None:
+    """Attach peer confirmation/breadth from observations aligned at the same T0."""
+    by_time: dict[float, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in rows:
+        by_time[float(row["captured_ts"])][str(row["instrument"])] = row
+    for timestamp_rows in by_time.values():
+        signs = {
+            instrument: _sign(float(row["features"]["ret_5m"]))
+            for instrument, row in timestamp_rows.items()
+        }
+        market_nonzero = [value for value in signs.values() if value]
+        market_breadth = (sum(value > 0 for value in market_nonzero)/len(market_nonzero)
+                          if market_nonzero else None)
+        family_signs: dict[str, list[int]] = defaultdict(list)
+        for instrument, value in signs.items():
+            if value:
+                family_signs[ASSET_FAMILY_BY_INSTRUMENT[instrument]].append(value)
+        for instrument, row in timestamp_rows.items():
+            own = signs[instrument]
+            peer = signs.get(PEER_BY_INSTRUMENT[instrument])
+            if not own or peer is None or not peer:
+                confirmation = "NEUTRAL"
+            else:
+                confirmation = "SAME" if own == peer else "OPPOSITE"
+            family_values = family_signs.get(ASSET_FAMILY_BY_INSTRUMENT[instrument]) or []
+            family_breadth = (sum(value > 0 for value in family_values)/len(family_values)
+                              if family_values else None)
+            row["ede_features"].update({
+                "cross_confirmation": confirmation,
+                "family_breadth": family_breadth,
+                "market_breadth": market_breadth,
+            })
+
+
+def build_discovery_rows(sources: list[dict[str, Any]], horizon: int) -> list[dict[str, Any]]:
+    contexts = {str(source["instrument"]): _source_context(source) for source in sources}
+    rows: list[dict[str, Any]] = []
+    for source in sources:
+        instrument = str(source["instrument"])
+        context_by_ts = contexts[instrument]
+        for row in _build_horizon_rows(source, horizon):
+            if row["direction_label"] == "FLAT":
+                continue
+            context = context_by_ts.get(float(row["captured_ts"]))
+            if context is None:
+                continue
+            item = dict(row)
+            current = float(context.get("path_high_60") or 0.0)
+            low = float(context.get("path_low_60") or 0.0)
+            item["ede_features"] = {
+                "asset": instrument,
+                "asset_family": ASSET_FAMILY_BY_INSTRUMENT[instrument],
+                "session_utc": session_utc(float(row["captured_ts"])),
+                "rv15_over_rv60": float(context["rv15_over_rv60"]),
+                "trend_efficiency_60": float(context["trend_efficiency_60"]),
+                "range_60": (math.log(current/low) if current > 0 and low > 0 else None),
+                "cross_confirmation": "NEUTRAL",
+                "family_breadth": None,
+                "market_breadth": None,
+            }
+            rows.append(item)
+    rows.sort(key=lambda row: (float(row["captured_ts"]), str(row["instrument"])))
+    aligned_cross_asset_context(rows)
+    return rows
+
+
+def option_t0_coverage(runtime: Any) -> dict[str, Any]:
+    """Inventory actual immutable T0 option coverage without retrofitting it."""
+    with runtime._lock:
+        tables = {str(row[0]) for row in runtime._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+    if "g1s_observations" not in tables:
+        return {"observation_count": 0, "v2_count": 0, "v3_count": 0,
+                "option_static_available": 0, "option_dynamics_available": 0,
+                "eligible_for_current_p1b_discovery": False,
+                "reason": "g1s_observations table unavailable"}
+    with runtime._lock:
+        rows = runtime._conn.execute(
+            "SELECT frozen_features_json FROM g1s_observations ORDER BY captured_ts"
+        ).fetchall()
+    counts = {"observation_count": len(rows), "v2_count": 0, "v3_count": 0,
+              "option_static_available": 0, "option_dynamics_available": 0}
+    for row in rows:
+        try:
+            frozen = json.loads(str(row[0] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        v2 = frozen.get("g1s_evidence_v2") or {}
+        v3 = frozen.get("g1s_evidence_v3") or {}
+        counts["v2_count"] += int(bool(v2))
+        counts["v3_count"] += int(bool(v3))
+        static = (v3.get("option_static") or v2.get("option_context") or {})
+        dynamics = v3.get("option_dynamics") or {}
+        counts["option_static_available"] += int(bool(static.get("available")))
+        counts["option_dynamics_available"] += int(bool(dynamics.get("available")))
+    counts.update({
+        "eligible_for_current_p1b_discovery": False,
+        "reason": (
+            "future-only immutable T0 captures are inventoried separately; they are not "
+            "retrofitted onto the 60d P1B bar source set"
+        ),
+        "synthetic_option_history_used": False,
+    })
+    return counts
