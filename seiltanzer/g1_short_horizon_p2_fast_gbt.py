@@ -1,17 +1,17 @@
-"""Exact fast path for the P2 dependency-weighted stump search.
+"""Exact fast paths for the P2 nested historical experiment.
 
-The research contract/candidates/folds are unchanged.  The slow reference fitter
-recomputed a boolean split and weighted SSE for every threshold on every boosting
-round.  This implementation precomputes the fixed quantile split masks once and
-uses the identity
+Two hot loops are optimized without changing the evidence contract:
+1) fixed weighted GBT stump candidates are scored by precomputed split masks;
+2) 60m same-T0 pair correlations use sliding sufficient statistics instead of
+   one ``np.corrcoef`` call for every pair at every timestamp.
 
-  SSE_after_group_means = sum(w*r^2) - sum_left(w*r)^2/sum_left(w)
-                                      - sum_right(w*r)^2/sum_right(w)
-
-to rank exactly the same fixed candidates.  Ties retain reference iteration order.
+Candidate families, timestamps, minimum samples, folds, baselines and gates stay
+unchanged.  Tests compare these fast paths to the reference implementation.
 """
 from __future__ import annotations
 
+import math
+from collections import deque
 from typing import Any
 
 import numpy as np
@@ -21,6 +21,7 @@ from .g1_short_horizon_historical_wf import _clip_probability, _weighted_mean
 
 
 FAST_GBT_VERSION = "g1s-p2-weighted-gbt-vectorized-v1"
+FAST_CROSS_VERSION = "g1s-p2-cross-rolling-sufficient-stats-v1"
 
 
 def _logit(p: float) -> float:
@@ -78,7 +79,8 @@ def fit_weighted_gbt_fast(x: np.ndarray, y: np.ndarray,
             left_wr[valid] * left_wr[valid] / left_weight[valid]
             + right_wr[valid] * right_wr[valid] / right_weight[valid]
         )
-        # Reference minimizes total_sse-improvement, so maximizing improvement is exact.
+        # Reference minimizes total_sse-improvement, therefore the first maximum
+        # in fixed feature/threshold iteration order is the same deterministic tie.
         best_index = int(np.argmax(improvement))
         if not np.isfinite(improvement[best_index]):
             break
@@ -104,12 +106,109 @@ def fit_weighted_gbt_fast(x: np.ndarray, y: np.ndarray,
     }
 
 
+def _pair_corr_series(a: dict[float, dict[str, float]],
+                      b: dict[float, dict[str, float]]) -> dict[float, float]:
+    common = sorted(set(a).intersection(b))
+    window: deque[tuple[float, float, float]] = deque()
+    sx = sy = sxx = syy = sxy = 0.0
+    result: dict[float, float] = {}
+    for ts in common:
+        lower = float(ts) - 60.0 * 60.0 - 1e-6
+        while window and window[0][0] < lower:
+            _old_ts, x, y = window.popleft()
+            sx -= x; sy -= y; sxx -= x*x; syy -= y*y; sxy -= x*y
+        x = float(a[ts]["ret_5m"]); y = float(b[ts]["ret_5m"])
+        window.append((float(ts), x, y))
+        sx += x; sy += y; sxx += x*x; syy += y*y; sxy += x*y
+        n = len(window)
+        if n < 6:
+            continue
+        varx = sxx - sx*sx/n
+        vary = syy - sy*sy/n
+        if varx / n < 1e-24 or vary / n < 1e-24:
+            continue
+        cov = sxy - sx*sy/n
+        rho = cov / math.sqrt(max(varx*vary, 1e-300))
+        if math.isfinite(rho):
+            result[float(ts)] = max(-1.0, min(1.0, float(rho)))
+    return result
+
+
+def _pair_key(a: str, b: str) -> tuple[str, str]:
+    return (a, b) if a < b else (b, a)
+
+
+def build_contexts_fast(sources: list[dict[str, Any]]) -> dict[str, dict[float, dict[str, float]]]:
+    contexts = {str(source["instrument"]): _p2._source_context(source) for source in sources}
+    instruments = sorted(contexts)
+    pair_corr: dict[tuple[str, str], dict[float, float]] = {}
+    for i, left in enumerate(instruments):
+        for right in instruments[i+1:]:
+            pair_corr[(left, right)] = _pair_corr_series(contexts[left], contexts[right])
+
+    for instrument, rows in contexts.items():
+        group = _p2._instrument_group(instrument)
+        total_possible = max(1, len(contexts)-1)
+        family_possible = max(1, sum(
+            code != instrument and _p2._instrument_group(code) == group for code in contexts))
+        for captured_ts, own in rows.items():
+            peers = [(code, values[captured_ts]) for code, values in contexts.items()
+                     if code != instrument and captured_ts in values]
+            family = [(code, row) for code, row in peers
+                      if _p2._instrument_group(code) == group]
+
+            def vals(name: str, members):
+                return [float(row[name]) for _code, row in members]
+
+            def breadth(name: str, members) -> float:
+                values = vals(name, members)
+                return float(np.mean([_p2._sign(value) for value in values])) if values else 0.0
+
+            peer15 = vals("ret_15m", peers); peer60 = vals("ret_60m", peers)
+            family15 = vals("ret_15m", family)
+            median15 = float(np.median(peer15)) if peer15 else 0.0
+            median60 = float(np.median(peer60)) if peer60 else 0.0
+            family_median15 = float(np.median(family15)) if family15 else 0.0
+            correlations: list[float] = []
+            family_correlations: list[float] = []
+            for code, _row in peers:
+                rho = pair_corr.get(_pair_key(instrument, code), {}).get(float(captured_ts))
+                if rho is None:
+                    continue
+                correlations.append(float(rho))
+                if _p2._instrument_group(code) == group:
+                    family_correlations.append(float(rho))
+            own.update({
+                "cross_peer_fraction": len(peers)/total_possible,
+                "cross_breadth_ret5": breadth("ret_5m", peers),
+                "cross_breadth_ret15": breadth("ret_15m", peers),
+                "cross_breadth_ret60": breadth("ret_60m", peers),
+                "cross_median_ret15": median15,
+                "cross_median_ret60": median60,
+                "cross_relative_ret15": float(own["ret_15m"])-median15,
+                "cross_relative_ret60": float(own["ret_60m"])-median60,
+                "cross_dispersion_ret15": float(np.std(peer15)) if len(peer15) >= 2 else 0.0,
+                "cross_dispersion_ret60": float(np.std(peer60)) if len(peer60) >= 2 else 0.0,
+                "cross_mean_corr_60": float(np.mean(correlations)) if correlations else 0.0,
+                "cross_mean_abs_corr_60": float(np.mean(np.abs(correlations))) if correlations else 0.0,
+                "family_peer_fraction": len(family)/family_possible,
+                "family_breadth_ret15": breadth("ret_15m", family),
+                "family_relative_ret15": float(own["ret_15m"])-family_median15,
+                "family_mean_corr_60": float(np.mean(family_correlations)) if family_correlations else 0.0,
+            })
+    return contexts
+
+
 def run_p2_nested_research_fast(runtime, *, force: bool = False):
-    previous = _p2._fit_weighted_gbt
+    previous_gbt = _p2._fit_weighted_gbt
+    previous_contexts = _p2._build_contexts
     _p2._fit_weighted_gbt = fit_weighted_gbt_fast
+    _p2._build_contexts = build_contexts_fast
     try:
         result = _p2.run_p2_nested_research(runtime, force=force)
         result["gbt_compute_contract"] = FAST_GBT_VERSION
+        result["cross_compute_contract"] = FAST_CROSS_VERSION
         return result
     finally:
-        _p2._fit_weighted_gbt = previous
+        _p2._fit_weighted_gbt = previous_gbt
+        _p2._build_contexts = previous_contexts
