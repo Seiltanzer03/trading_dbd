@@ -159,6 +159,10 @@ class Settings:
     proxy_poll_sec: float = 60.0    # REST-прокси; при --stream обновляется тиково
     vol_poll_sec: float = 60.0
     journal_min_trades: int = 20    # порог перекалибровки на журнал (ТЗ, п.2 ядра)
+    # Maximum admissible age of an immutable T0 observation and every feature
+    # used by an EDE shadow deployment rule. Explicitly configurable/testable.
+    ede_context_max_age_sec: float = field(default_factory=lambda: float(
+        os.environ.get("SEILTANZER_EDE_CONTEXT_MAX_AGE_SEC", "900")))
 
     @property
     def trades_db(self) -> str:

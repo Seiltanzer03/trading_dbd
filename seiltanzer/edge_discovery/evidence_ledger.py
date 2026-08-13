@@ -15,9 +15,11 @@ from typing import Any
 
 from .maturity import data_maturity
 from .registry import FEATURES
+from .filters import CandidateTemplate, ConditionTemplate, fit_rule
 
 
-CONTRACT_VERSION = "g1s-ede-frozen-evidence-v1.2.1"
+CONTRACT_VERSION = "g1s-ede-frozen-evidence-v1.2.2"
+DEPLOYMENT_RULE_VERSION = "ede-post-validation-causal-refit-v1"
 HORIZONS = (15, 30, 60, 120, 240)
 FAMILIES = (
     "PRICE", "VOLATILITY", "OPTIONS", "OPTION_DYNAMICS",
@@ -35,6 +37,18 @@ EDGE_RANK = {
     "RESEARCH_SIGNAL": 1,
     "PROVISIONAL_EDGE": 2,
     "ROBUST_EDGE": 3,
+}
+
+# Historical discovery templates used these short names. They remain valid
+# validation/debug identities, but every deployable refit is canonicalized to
+# the exact feature IDs stored by ProspectiveFeatureAdapter.
+CANONICAL_FEATURE_ID = {
+    "asset": "regime.asset",
+    "asset_family": "regime.asset_family",
+    "session_utc": "regime.session_utc",
+    "rv15_over_rv60": "vol.rv15_over_rv60",
+    "trend_efficiency_60": "price.trend_efficiency_60",
+    "cross_confirmation": "cross.confirmation",
 }
 
 
@@ -124,7 +138,62 @@ def _candidate_families(candidate: dict[str, Any]) -> list[str]:
     } - {"UNKNOWN"})
 
 
-def compact_primary_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
+def _deployment_refit(candidate: dict[str, Any], rows: list[dict[str, Any]], *,
+                      evidence_cutoff_ts: float, fitted_at: float,
+                      dataset_sha256: str) -> dict[str, Any] | None:
+    """Fit a live rule after validation without touching validation metrics."""
+    template_conditions = candidate.get("template") or []
+    canonical: list[ConditionTemplate] = []
+    for condition in template_conditions:
+        feature_id = CANONICAL_FEATURE_ID.get(
+            str(condition.get("feature_id")), str(condition.get("feature_id")))
+        # This virtual display category has no canonical immutable live feature.
+        if feature_id == "family_breadth_state":
+            return None
+        canonical.append(ConditionTemplate(
+            feature_id=feature_id, kind=str(condition.get("kind")),
+            state=str(condition.get("state"))))
+    if not canonical:
+        return None
+    horizon = int(candidate.get("horizon_minutes") or 0)
+    training_rows = [
+        row for row in rows
+        if int(row.get("horizon_minutes") or 0) == horizon
+        and float(row.get("captured_ts") or 0.0) <= evidence_cutoff_ts + 1e-6
+        and row.get("resolved_ts") is not None
+        and float(row["resolved_ts"]) <= evidence_cutoff_ts + 1e-6
+    ]
+    rule = fit_rule(CandidateTemplate(tuple(canonical)), training_rows)
+    if rule is None:
+        return None
+    fitted = rule.as_dict()
+    training_cutoff = max(
+        (float(row["captured_ts"]) for row in training_rows), default=None)
+    if training_cutoff is None or training_cutoff > evidence_cutoff_ts + 1e-6:
+        return None
+    return {
+        "candidate_id": candidate.get("candidate_id"),
+        "hypothesis_id": candidate.get("hypothesis_id"),
+        "deployment_rule": fitted["conditions"],
+        "feature_ids": [condition.feature_id for condition in canonical],
+        "thresholds_or_categories": [{
+            "feature_id": row["feature_id"], "kind": row["kind"],
+            "state": row["state"], "lower": row.get("lower"),
+            "upper": row.get("upper"),
+        } for row in fitted["conditions"]],
+        "fitted_at": float(fitted_at),
+        "training_cutoff": training_cutoff,
+        "evidence_cutoff_ts": float(evidence_cutoff_ts),
+        "dataset_hash": str(dataset_sha256),
+        "rule_version": DEPLOYMENT_RULE_VERSION,
+        "provenance": "POST_VALIDATION_CAUSAL_REFIT",
+        "validation_metrics_recomputed": False,
+    }
+
+
+def compact_primary_candidate(
+        candidate: dict[str, Any], *, deployment_refit: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
     maturity = str(candidate.get("edge_maturity") or "INSUFFICIENT_DATA")
     if maturity not in EDGE_RANK or maturity == "INSUFFICIENT_DATA":
         return None
@@ -148,7 +217,8 @@ def compact_primary_candidate(candidate: dict[str, Any]) -> dict[str, Any] | Non
         "candidate_id": candidate.get("candidate_id"),
         "hypothesis_id": candidate.get("hypothesis_id"),
         "horizon_minutes": int(candidate.get("horizon_minutes") or 0),
-        "conditions": candidate.get("conditions") or [],
+        "validation_conditions": candidate.get("conditions") or [],
+        "deployment_refit": deployment_refit,
         "edge_maturity": maturity,
         "delta_brier": _finite(comparison.get("brier_delta")),
         "delta_logloss": _finite(comparison.get("logloss_delta")),
@@ -167,13 +237,20 @@ def compact_primary_candidate(candidate: dict[str, Any]) -> dict[str, Any] | Non
 
 def build_frozen_evidence(*, inventory: dict[str, Any], discovery: dict[str, Any],
                           dataset_sha256: str, evidence_cutoff_ts: float,
-                          frozen_at: float) -> dict[str, Any]:
+                          frozen_at: float,
+                          prospective_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     candidates = []
     for horizon in discovery.get("horizons") or []:
         for candidate in horizon.get("candidates") or []:
             compact = compact_primary_candidate(candidate)
-            if compact is not None:
-                candidates.append(compact)
+            if compact is None:
+                continue
+            refit = _deployment_refit(
+                candidate, prospective_rows or [],
+                evidence_cutoff_ts=evidence_cutoff_ts, fitted_at=frozen_at,
+                dataset_sha256=dataset_sha256)
+            compact["deployment_refit"] = refit
+            candidates.append(compact)
     candidates.sort(key=lambda row: (
         -EDGE_RANK[row["edge_maturity"]],
         -(float(row.get("delta_brier") or 0.0)

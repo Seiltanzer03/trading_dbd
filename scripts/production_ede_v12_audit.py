@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only production snapshot audit for EDE v1.2.1."""
+"""Read-only production snapshot audit for EDE v1.2.2."""
 from __future__ import annotations
 
 import argparse
@@ -127,7 +127,7 @@ def audit(database: Path) -> dict[str, Any]:
         (item.get("edge_score") or {}).get("score") or -1e9))
     materialized_at = time.time()
     return {
-        "contract_version": "g1s-ede-production-audit-v1.2.1",
+        "contract_version": "g1s-ede-production-audit-v1.2.2",
         "source_database": str(database),
         "source_database_open_mode": "READ_ONLY_SNAPSHOT",
         "dataset_sha256": source_sha,
@@ -148,7 +148,7 @@ def audit(database: Path) -> dict[str, Any]:
             evidence_cutoff_ts=max(
                 (float(row.get("resolved_ts") or row["target_ts"]) for row in rows),
                 default=materialized_at),
-            frozen_at=materialized_at),
+            frozen_at=materialized_at, prospective_rows=rows),
         "synthetic_data_used": False,
         "retrospective_options_reconstruction": False,
         "production_authority": False,
