@@ -28,12 +28,12 @@ evaluation. Interesting FDR failures remain visible as
 Candidate and live-shadow ledgers are append-only. Hypothesis identity is
 separate from evaluation identity: a stable signal/horizon/template receives
 one `hypothesis_id`, while each new dataset/source hash receives a new immutable
-`evaluation_id`. The reviewed ledger lives as the gzip-compressed JSONL file
-`docs/research/EDGE_DISCOVERY_NEGATIVE_REGISTRY.jsonl.gz` and can be advanced
-only through a normal code-review PR. Actions has read-only repository
-permission; its JSONL output is an append delta for review, not the permanent
-registry. Compression changes storage only; the restored ledger remains the
-same append-only JSONL event stream.
+`evaluation_id`. The reviewed ledger lives as the split gzip-compressed JSONL
+files `docs/research/EDGE_DISCOVERY_NEGATIVE_REGISTRY.jsonl.gz.part-*` and can
+be advanced only through a normal code-review PR. Actions has read-only
+repository permission; its JSONL output is an append delta for review, not the
+permanent registry. Splitting and compression change storage only; concatenating
+and decompressing the parts restores the same append-only JSONL event stream.
 Thirty-day artifacts are convenient report copies only. A historical candidate must
 be explicitly frozen before future predictions can be written; outcomes cannot
 be attached before their target timestamp. Rejected candidates remain recorded.
