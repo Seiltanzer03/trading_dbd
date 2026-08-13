@@ -1,0 +1,85 @@
+name: G1S P2E segmented persistence research
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  historical-p2e:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install research runtime
+        run: |
+          pip install -e ".[dev]"
+          pip install paramiko
+      - name: Download newest verified immutable production backup
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          OUTPUT_DB: ${{ runner.temp }}/p2e-source.sqlite3
+        run: |
+          python - <<'PY'
+          import os, pathlib, textwrap
+          import paramiko
+
+          client = paramiko.SSHClient()
+          client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+          client.connect("94.241.171.182", username="root", password=os.environ["SSH_PASSWORD"])
+          remote_python = textwrap.dedent(r'''
+              import json, pathlib
+              root=pathlib.Path('/opt/seiltanzer/data/backups/local')
+              valid=[]
+              for path in root.glob('*.manifest.json'):
+                  try:
+                      item=json.loads(path.read_text())
+                      db=pathlib.Path(str(item.get('database_file') or ''))
+                      if not db.is_absolute(): db=root/db
+                      if item.get('verified') is True and db.is_file():
+                          valid.append((float(item.get('created_ts') or path.stat().st_mtime),str(db)))
+                  except Exception:
+                      pass
+              if not valid: raise SystemExit('no verified backup')
+              print(max(valid)[1])
+          ''')
+          command = "python3 - <<'REMOTE'\n" + remote_python + "REMOTE\n"
+          _stdin, stdout, stderr = client.exec_command(command)
+          remote = stdout.read().decode().strip()
+          error = stderr.read().decode().strip()
+          if not remote or error:
+              raise RuntimeError(error or "verified backup path unavailable")
+          sftp = client.open_sftp()
+          sftp.get(remote, os.environ["OUTPUT_DB"])
+          sftp.close(); client.close()
+          print("downloaded verified immutable backup", pathlib.Path(os.environ["OUTPUT_DB"]).stat().st_size)
+          PY
+      - name: Verify source DB and run one frozen outer cycle
+        env:
+          SOURCE_DB: ${{ runner.temp }}/p2e-source.sqlite3
+        run: |
+          python - <<'PY'
+          import os, sqlite3
+          conn=sqlite3.connect(os.environ['SOURCE_DB'])
+          assert conn.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
+          state=conn.execute('SELECT state,source_set_sha256 FROM g1s_historical_wf_state WHERE id=1').fetchone()
+          assert state and state[0] == 'COMPLETE' and state[1]
+          assert conn.execute('SELECT COUNT(*) FROM g1s_historical_sources').fetchone()[0] >= 10
+          conn.close()
+          PY
+          python scripts/run_g1s_p2e_segmented_persistence.py \
+            --database "$SOURCE_DB" \
+            --output p2e-segmented-persistence-report.json | tee p2e-summary.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g1s-p2e-segmented-persistence-${{ github.sha }}
+          path: |
+            p2e-segmented-persistence-report.json
+            p2e-summary.json
+          retention-days: 30
