@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
 from seiltanzer import g1_short_horizon_p2_regime_research as p2
 from seiltanzer.g1_short_horizon_p2_fast_gbt import (
+    FAST_CROSS_VERSION,
     FAST_GBT_VERSION,
+    build_contexts_fast,
     fit_weighted_gbt_fast,
 )
 
@@ -33,3 +37,32 @@ def test_fast_weighted_gbt_matches_reference_fixed_candidate_search():
     p_ref=p2._predict_weighted_gbt(x,reference)
     p_fast=p2._predict_weighted_gbt(x,fast)
     assert np.max(np.abs(p_ref-p_fast)) < 1e-9
+
+
+def _source(code: str, phase: float):
+    bars=[]; previous=100.0; start=1_700_000_000.0
+    for i in range(180):
+        ts=start+i*300.0
+        close=100.0*math.exp(0.00015*i+0.0015*math.sin(i/8.0+phase))
+        bars.append({
+            "bar_start_ts":ts,"bar_end_ts":ts+300.0,"open":previous,
+            "high":max(previous,close)*1.0003,"low":min(previous,close)*0.9997,
+            "close":close,"volume":1000+i,
+        })
+        previous=close
+    return {"instrument":code,"ticker":code,"source_id":f"src-{code}","bars":bars}
+
+
+def test_fast_cross_context_matches_reference_same_t0_semantics():
+    sources=[_source("NAS100",0.0),_source("SP500",0.4),_source("US30",0.8)]
+    reference=p2._build_contexts(sources)
+    fast=build_contexts_fast(sources)
+    assert FAST_CROSS_VERSION.endswith("v1")
+    assert set(reference)==set(fast)
+    for instrument in reference:
+        assert set(reference[instrument])==set(fast[instrument])
+        # Compare the final 30 contexts, including rolling correlation values.
+        for ts in sorted(reference[instrument])[-30:]:
+            for name in p2.CROSS_FEATURES:
+                assert fast[instrument][ts][name] == pytest.approx(
+                    reference[instrument][ts][name], abs=1e-9)
