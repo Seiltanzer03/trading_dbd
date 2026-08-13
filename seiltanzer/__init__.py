@@ -180,3 +180,17 @@ del _install_g1_operational_integrity
 from .g1_short_horizon_champion_runtime import install_g1_short_horizon_champion_runtime as _install_g1_short_horizon_champion_runtime
 _install_g1_short_horizon_champion_runtime()
 del _install_g1_short_horizon_champion_runtime
+
+# P1B is installed after the champion layer because a historical winner is only
+# a provisional artifact.  It receives a new LIVE_PROSPECTIVE_OOS cohort and
+# never rewrites or counts historical folds as live validation evidence.
+from .g1_short_horizon_historical_wf import install_g1_short_horizon_historical_wf as _install_g1_short_horizon_historical_wf
+_install_g1_short_horizon_historical_wf()
+del _install_g1_short_horizon_historical_wf
+
+# Immutable retries may leave older source sets in the audit ledger.  Install the
+# source-set filter globally so worker/CLI/API all expose only the current
+# finalized set while preserving old artifacts for audit/recovery.
+from .g1_short_horizon_historical_wf_integrity import install_g1_short_horizon_historical_wf_integrity as _install_g1_short_horizon_historical_wf_integrity
+_install_g1_short_horizon_historical_wf_integrity()
+del _install_g1_short_horizon_historical_wf_integrity

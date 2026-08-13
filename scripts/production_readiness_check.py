@@ -25,6 +25,7 @@ REQUIRED_BACKUP_TABLES = (
     "g1s_return_models", "g1s_return_predictions",
     "g1s_probability_calibrators", "g1s_calibrated_predictions",
     "g1s_validation_cohorts", "g1s_champion_prediction_links",
+    "g1s_historical_sources", "g1s_historical_wf_runs",
     "g1m_local_windows", "g1m_local_outcomes", "g1m_local_policy_outcomes",
     "g1m_local_contract_errors", "research_materialization_state",
 )
@@ -124,6 +125,42 @@ def wait_evidence_materialized() -> tuple[dict, dict]:
     raise AssertionError("worker did not materialize complete G1S evidence within 90 seconds")
 
 
+def verify_historical_contract(hist: dict) -> None:
+    assert hist.get("contract_version") == "g1s-historical-wf-real-bars-v1", hist
+    assert hist.get("evidence_label") == "HISTORICAL_WALK_FORWARD", hist
+    assert hist.get("live_validation_label") == "LIVE_PROSPECTIVE_OOS", hist
+    assert hist.get("interval") == "5m", hist
+    assert hist.get("requested_period") == "60d", hist
+    assert hist.get("historical_option_features") == "UNAVAILABLE_NOT_SYNTHESIZED", hist
+    assert hist.get("synthetic_option_history") is False, hist
+    assert hist.get("expanding_chronological_walk_forward") is True, hist
+    assert hist.get("purge_embargo") is True, hist
+    assert hist.get("shuffle") is False, hist
+    assert hist.get("dependency_group_total_weight_one") is True, hist
+    assert hist.get("historical_fold_outcomes_count_as_live_oos") is False, hist
+    assert hist.get("provisional_artifact_starts_separate_live_oos") is True, hist
+    assert hist.get("request_time_network_fetch") is False, hist
+    assert hist.get("request_time_full_history_scan") is False, hist
+    assert hist.get("auto_promotion") is False, hist
+    assert hist.get("production_authority") is False, hist
+    assert hist.get("state") in {"PENDING", "RUNNING", "COMPLETE", "ERROR"}, hist
+    if hist.get("state") == "COMPLETE":
+        assert int(hist.get("source_count") or 0) == 10, hist
+        assert int(hist.get("run_count") or 0) == 10, hist
+        sources = hist.get("sources") or []
+        assert len(sources) == 10, sources
+        assert all(int(row.get("bar_count") or 0) >= 1000 for row in sources), sources
+        runs = hist.get("runs") or []
+        assert len(runs) == 10, runs
+        assert {int(row.get("horizon_minutes")) for row in runs} == {15,30,60,120,240}, runs
+        assert {str(row.get("target")) for row in runs} == {"direction_up","terminal_log_return"}, runs
+        for row in runs:
+            assert int(row.get("fold_count") or 0) == 4, row
+            assert row.get("verdict") in {"PROVISIONAL_LEARNED","HISTORICAL_BASELINE_NOT_BEATEN"}, row
+            if row.get("historical_winner"):
+                assert row.get("provisional_model_id"), row
+
+
 def verify(expected_sha: str) -> None:
     wait_core(expected_sha)
     fast_paths = [
@@ -131,6 +168,7 @@ def verify(expected_sha: str) -> None:
         ("/api/system/database-authority", 3000), ("/api/system/storage/status", 3000),
         ("/api/system/storage/backups", None), ("/api/research/runtime/status", 3000),
         ("/api/research/runtime/materializers", None), ("/api/research/g1s/status", 3000),
+        ("/api/research/g1s/historical-wf", 3000),
         ("/api/research/g1s/horizons", None), ("/api/research/g1s/barriers", None),
         ("/api/research/g1s/cuts", None), ("/api/research/g1s/oos", 3000),
         ("/api/research/g1s/continuous-oos", 3000), ("/api/research/g1s/calibration-oos", 3000),
@@ -155,6 +193,7 @@ def verify(expected_sha: str) -> None:
     backups = bodies["/api/system/storage/backups"]
     db_auth = bodies["/api/system/database-authority"]
     runtime = bodies["/api/research/runtime/status"]
+    historical = bodies["/api/research/g1s/historical-wf"]
     q = bodies["/api/research/g1/q/audit?limit=5000"]
     intel = bodies["/api/research/g1/intelligence/status"]
     g1m = bodies["/api/research/g1/management/status"]
@@ -169,12 +208,16 @@ def verify(expected_sha: str) -> None:
     worker = runtime.get("worker") or {}
     assert runtime.get("market_collection_separate_from_research") is True, runtime
     assert runtime.get("request_time_full_history_evidence_scan") is False, runtime
+    assert runtime.get("request_time_historical_network_fetch") is False, runtime
     assert worker.get("contract_version") == "g1-research-worker-v1", worker
     assert worker.get("scalability_refinement_version") == "g1-research-worker-bounded-v4", worker
     assert worker.get("evidence_reports_request_time_scan") is False, worker
+    assert worker.get("historical_walkforward_runs_on_research_worker") is True, worker
+    assert worker.get("historical_walkforward_request_time_network_fetch") is False, worker
     assert worker.get("running") is True, worker
     assert evidence_status.get("request_time_full_history_scan") is False, evidence_status
     assert {str(row.get("report_name")) for row in evidence_status.get("reports") or []} >= EVIDENCE_REPORTS
+    verify_historical_contract(historical)
 
     assert final_report.get("production_authority") is False, final_report
     assert final_report.get("production_authority_changed") is False, final_report
@@ -197,6 +240,17 @@ def verify(expected_sha: str) -> None:
         assert item.get("champion_training_excludes_live_oos") is True, item
         assert float(item.get("training_cutoff_ts") or 0.0) < float(item.get("oos_start_ts") or 0.0), item
         assert item.get("production_authority") is False, item
+
+    if historical.get("state") == "COMPLETE":
+        provisional_ids = {str(row.get("provisional_model_id")) for row in historical.get("runs") or []
+                           if row.get("historical_winner") and row.get("provisional_model_id")}
+        historical_cohorts = [row for row in champion_items
+                              if row.get("source") == "HISTORICAL_WALK_FORWARD"]
+        assert {str(row.get("champion_model_id")) for row in historical_cohorts} == provisional_ids, (
+            provisional_ids, historical_cohorts)
+        for item in historical_cohorts:
+            assert item.get("status") == "LIVE_VALIDATING", item
+            assert item.get("production_authority") is False, item
 
     local = backups.get("local") or []
     assert local and local[0].get("verified") is True, backups
@@ -232,6 +286,10 @@ def verify(expected_sha: str) -> None:
     print("CHAMPION", json.dumps({"n": len(champion_items),
         "linked": sum(int(x.get("linked_prediction_n") or 0) for x in champion_items),
         "authority": champion.get("production_authority")}, sort_keys=True))
+    print("HISTORICAL_WF", json.dumps({
+        "state": historical.get("state"), "sources": historical.get("source_count"),
+        "runs": historical.get("run_count"), "provisional": historical.get("provisional_count"),
+        "authority": historical.get("production_authority")}, sort_keys=True))
     print("EDGE_VERDICT", final_report.get("does_model_beat_baseline_oos"))
     print("Q_AUDIT", json.dumps(q.get("counts") or {}, sort_keys=True))
     print("G1M_LOCAL", json.dumps({k: g1ml.get(k) for k in
