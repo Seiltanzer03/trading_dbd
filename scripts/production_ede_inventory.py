@@ -75,7 +75,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--database", type=Path,
                         default=Path("/opt/seiltanzer/data/trades.db"))
     args = parser.parse_args(argv)
-    print(json.dumps(inventory(args.database), sort_keys=True))
+    report = inventory(args.database)
+    # Keep every Actions log line bounded. A single 69-feature JSON line can
+    # exceed drone-ssh's scanner buffer and disappear from the audit log.
+    print("EDE_INVENTORY_SUMMARY=" + json.dumps({
+        key: value for key, value in report.items() if key != "features"
+    }, sort_keys=True))
+    for feature in report["features"]:
+        print("EDE_INVENTORY_FEATURE=" + json.dumps(feature, sort_keys=True))
     return 0
 
 

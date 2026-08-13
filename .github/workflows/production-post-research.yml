@@ -2,7 +2,9 @@ name: production-post-research
 
 on:
   workflow_run:
-    workflows: ["production-ede-v12-audit"]
+    # Start from the green smoke boundary as a sibling of the DB audits. The
+    # verifier itself waits for the first post-grace worker cycle to finish.
+    workflows: ["production-functional-smoke"]
     types: [completed]
   workflow_dispatch:
 

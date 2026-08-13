@@ -2,7 +2,9 @@ name: production-ede-v12-audit
 
 on:
   workflow_run:
-    workflows: ["production-ede-inventory"]
+    # Keep this at the same workflow_run depth as inventory. GitHub silently
+    # refuses chains deeper than three levels (deploy -> readiness -> smoke).
+    workflows: ["production-functional-smoke"]
     types: [completed]
   workflow_dispatch:
 

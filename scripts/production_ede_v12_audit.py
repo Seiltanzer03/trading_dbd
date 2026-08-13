@@ -180,15 +180,17 @@ def main(argv: list[str] | None = None) -> int:
         "historical_candidate_count": discovery["historical_candidate_count"],
         "feature_summary": report["inventory"]["summary"],
     }, sort_keys=True))
-    print("EDE_V12_TOP15=" + json.dumps([
-        _compact_candidate(item) for item in report["top_15_maturity_edges"]],
-        sort_keys=True))
-    print("EDE_V12_ABLATION=" + json.dumps(report["ablation"], sort_keys=True))
-    print("EDE_V12_CROSS=" + json.dumps(report["cross_asset_results"], sort_keys=True))
-    print("EDE_V12_ZERO=" + json.dumps(
-        report["inventory"]["zero_feature_diagnosis"], sort_keys=True))
-    print("EDE_V12_FEATURE_MATRIX=" + json.dumps(
-        report["feature_horizon_edge_map"], sort_keys=True))
+    for item in report["top_15_maturity_edges"]:
+        print("EDE_V12_TOP=" + json.dumps(_compact_candidate(item), sort_keys=True))
+    for name, item in report["ablation"]["groups"].items():
+        print("EDE_V12_ABLATION_GROUP=" + json.dumps(
+            {"group": name, "result": item}, sort_keys=True))
+    for item in report["cross_asset_results"]:
+        print("EDE_V12_CROSS=" + json.dumps(item, sort_keys=True))
+    for item in report["inventory"]["zero_feature_diagnosis"]:
+        print("EDE_V12_ZERO=" + json.dumps(item, sort_keys=True))
+    for item in report["feature_horizon_edge_map"]:
+        print("EDE_V12_FEATURE=" + json.dumps(item, sort_keys=True))
     return 0
 
 
