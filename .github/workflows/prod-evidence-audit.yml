@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
-      - name: Checkout frozen P3 branch
+      - name: Checkout frozen P3B branch
         uses: actions/checkout@v4
         with:
           ref: agent/g1s-path-geometry-wf-20260813
@@ -24,22 +24,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .
-      - name: Run real Yahoo 60d P3 path-geometry audit
+      - name: Run real Yahoo 60d P3B volatility hardening audit
         run: |
           python - <<'PY'
           import json, resource, subprocess, tempfile, time
           from seiltanzer.config import Settings
           from seiltanzer.engine import Engine
-          from seiltanzer.g1_short_horizon_p3_path_geometry import (
-              P3_CONTRACT_VERSION, TARGET_FUTURE_RV,
-          )
-          from seiltanzer.g1_short_horizon_p3_fast import (
-              P3_FAST_CONTRACT, run_p3_path_geometry_fast,
+          from seiltanzer.g1_short_horizon_p3_volatility_hardening import (
+              P3B_CONTRACT_VERSION, run_p3b_volatility_hardening,
           )
 
-          expected_sha='8787f4bee0b71291682d6e8ab9026990515b240f'
+          expected_sha='fc627238f1000e0c10ca7eda860f5cfd6c408fbd'
           branch_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-          print('P3_BRANCH_SHA',branch_sha)
+          print('P3B_BRANCH_SHA',branch_sha)
           assert branch_sha==expected_sha,(branch_sha,expected_sha)
           with tempfile.TemporaryDirectory() as td:
               engine=Engine(Settings(demo=True,data_dir=td))
@@ -55,44 +52,50 @@ jobs:
                   assert p1.get('source_count')==10 and p1.get('run_count')==10
 
                   started=time.time()
-                  result=run_p3_path_geometry_fast(rt)
+                  result=run_p3b_volatility_hardening(rt)
                   elapsed=time.time()-started
-                  compact=[{k:row.get(k) for k in (
-                      'target','horizon_minutes','historical_winner','raw_n','effective_n',
-                      'mae_relative_improvement','rmse_relative_improvement',
-                      'fold_joint_non_degrade_n','best_mae_baseline','best_rmse_baseline')}
-                      for row in result.get('results') or []]
-                  print('P3_RESULT',json.dumps({
+                  compact=[]
+                  for row in result.get('results') or []:
+                      compact.append({
+                          'horizon_minutes':row.get('horizon_minutes'),
+                          'historical_winner':row.get('historical_winner'),
+                          'raw_n':row.get('raw_n'),'effective_n':row.get('effective_n'),
+                          'mae_relative_improvement':row.get('mae_relative_improvement'),
+                          'rmse_relative_improvement':row.get('rmse_relative_improvement'),
+                          'fold_joint_non_degrade_n':row.get('fold_joint_non_degrade_n'),
+                          'best_mae_baseline':row.get('best_mae_baseline'),
+                          'best_rmse_baseline':row.get('best_rmse_baseline'),
+                          'instrument_positive_both_n':row.get('instrument_positive_both_n'),
+                          'instrument_count':row.get('instrument_count'),
+                          'instrument_heterogeneity':row.get('instrument_heterogeneity'),
+                      })
+                  print('P3B_RESULT',json.dumps({
                       'branch_sha':branch_sha,
                       'contract':result.get('contract_version'),
-                      'builder_contract':result.get('builder_compute_contract'),
+                      'parent_contract':result.get('parent_contract_version'),
                       'source_set':result.get('source_set_sha256'),
                       'run_count':result.get('run_count'),
                       'winner_count':result.get('winner_count'),
                       'duration_sec':round(elapsed,2),
                       'max_rss_mb':round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1),
-                      'historical_sampling_interval':result.get('historical_sampling_interval'),
-                      'live_path_sampling_interval':result.get('live_path_sampling_interval'),
-                      'historical_future_volatility_name':result.get('historical_future_volatility_name'),
-                      'historical_future_volatility_is_live_1m_metric':result.get('historical_future_volatility_is_live_1m_metric'),
-                      'mfe_mae_semantics_match_live_high_low_geometry':result.get('mfe_mae_semantics_match_live_high_low_geometry'),
-                      'path_resolution_matches_live':result.get('path_resolution_matches_live'),
+                      'strong_baselines':result.get('strong_baselines'),
+                      'har_contract':result.get('har_contract'),
+                      'ewma_contract':result.get('ewma_contract'),
+                      'instrument_heterogeneity_is_descriptive_only':result.get('instrument_heterogeneity_is_descriptive_only'),
+                      'posthoc_instrument_selection_allowed':result.get('posthoc_instrument_selection_allowed'),
                       'outer_test_used_for_model_selection':result.get('outer_test_used_for_model_selection'),
-                      'fixed_model_family':result.get('fixed_model_family'),
                       'historical_options_used':result.get('historical_options_used'),
                       'live_parity_ready':result.get('live_parity_ready'),
                       'auto_promotion':result.get('auto_promotion'),
                       'production_authority':result.get('production_authority'),
                       'results':compact,
                   },sort_keys=True))
-                  assert result.get('contract_version')==P3_CONTRACT_VERSION,result
-                  assert result.get('builder_compute_contract')==P3_FAST_CONTRACT,result
-                  assert result.get('run_count')==15,result
-                  assert result.get('historical_sampling_interval')=='5m',result
-                  assert result.get('historical_future_volatility_name')==TARGET_FUTURE_RV,result
-                  assert result.get('historical_future_volatility_is_live_1m_metric') is False,result
-                  assert result.get('mfe_mae_semantics_match_live_high_low_geometry') is True,result
-                  assert result.get('path_resolution_matches_live') is False,result
+                  assert result.get('contract_version')==P3B_CONTRACT_VERSION,result
+                  assert result.get('run_count')==5,result
+                  assert 'har_5m_log_vol_ridge' in (result.get('strong_baselines') or []),result
+                  assert 'ewma240_persistence' in (result.get('strong_baselines') or []),result
+                  assert result.get('instrument_heterogeneity_is_descriptive_only') is True,result
+                  assert result.get('posthoc_instrument_selection_allowed') is False,result
                   assert result.get('outer_test_used_for_model_selection') is False,result
                   assert result.get('historical_options_used') is False,result
                   assert result.get('live_parity_ready') is False,result
