@@ -243,6 +243,8 @@ def verify(expected_sha: str) -> None:
     assert worker.get("historical_walkforward_runs_on_research_worker") is True, worker
     assert worker.get("historical_walkforward_request_time_network_fetch") is False, worker
     assert worker.get("running") is True, worker
+    assert float(worker.get("startup_grace_sec") or 0.0) >= 60.0, worker
+    assert worker.get("first_cycle_not_before_ts") is not None, worker
     assert evidence_status.get("request_time_full_history_scan") is False, evidence_status
     assert {str(row.get("report_name")) for row in evidence_status.get("reports") or []} >= EVIDENCE_REPORTS
     verify_historical_contract(historical)
