@@ -10,68 +10,130 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 18
     steps:
-      - name: Checkout exact P1B feature branch
-        uses: actions/checkout@v4
+      - name: Verify P1B on production
+        uses: appleboy/ssh-action@v1
         with:
-          ref: agent/g1s-historical-wf-20260812
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install project
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-      - name: Real Yahoo 5m historical walk-forward in temporary DB
-        run: |
-          python - <<'PY'
-          import json, os, resource, tempfile, time
-          from seiltanzer.config import Settings
-          from seiltanzer.engine import Engine
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 17m
+          script: |
+            set -euo pipefail
+            EXPECTED=33bbd33ea70ba56b902e9b104b0a55953c9b4caa
+            for i in $(seq 1 90); do
+              SHA=$(git -C /opt/seiltanzer rev-parse HEAD)
+              ACTIVE=$(systemctl is-active seiltanzer || true)
+              if [ "$SHA" = "$EXPECTED" ] && [ "$ACTIVE" = "active" ]; then break; fi
+              echo "WAIT_DEPLOY attempt=$i sha=$SHA service=$ACTIVE"
+              sleep 5
+            done
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED"
+            test "$(systemctl is-active seiltanzer)" = active
+            echo "PROD_SHA $EXPECTED"
+            echo '--- memory before audit ---'
+            free -m
+            cd /opt/seiltanzer
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import json, sqlite3, time, urllib.request
+            BASE='http://127.0.0.1:8790'
+            def get(path):
+                with urllib.request.urlopen(BASE+path,timeout=20) as r:
+                    return json.loads(r.read().decode())
 
-          with tempfile.TemporaryDirectory() as td:
-              settings=Settings(demo=True,data_dir=td)
-              engine=Engine(settings)
-              try:
-                  runtime=engine.short_horizon
-                  started=time.time()
-                  result=runtime.materialize_historical_walkforward(force=True)
-                  elapsed=time.time()-started
-                  status=runtime.historical_walkforward_status()
-                  print('REAL_WF_RESULT',json.dumps(result,sort_keys=True))
-                  print('REAL_WF_STATUS',json.dumps({
-                      'state':status.get('state'),
-                      'source_count':status.get('source_count'),
-                      'run_count':status.get('run_count'),
-                      'provisional_count':status.get('provisional_count'),
-                      'source_set':status.get('source_set_sha256'),
-                      'source_set_isolated':status.get('current_source_set_isolated'),
-                      'sources':[{k:x.get(k) for k in ('instrument','ticker','bar_count','calendar_span_days')} for x in status.get('sources') or []],
-                      'runs':status.get('runs'),
-                      'elapsed_sec':round(elapsed,2),
-                      'max_rss_mb':round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1),
-                      'historical_option_features':status.get('historical_option_features'),
-                      'production_authority':status.get('production_authority'),
-                      'auto_promotion':status.get('auto_promotion'),
-                  },sort_keys=True))
-                  assert status.get('state')=='COMPLETE', status
-                  assert status.get('source_count')==10, status
-                  assert status.get('run_count')==10, status
-                  assert len(status.get('sources') or [])==10, status
-                  assert all(int(x.get('bar_count') or 0)>=1000 for x in status.get('sources') or []), status
-                  assert {int(x.get('horizon_minutes')) for x in status.get('runs') or []}=={15,30,60,120,240}, status
-                  assert {str(x.get('target')) for x in status.get('runs') or []}=={'direction_up','terminal_log_return'}, status
-                  assert status.get('historical_option_features')=='UNAVAILABLE_NOT_SYNTHESIZED', status
-                  assert status.get('production_authority') is False, status
-                  assert status.get('auto_promotion') is False, status
-                  cohorts=runtime.champion_status().get('items') or []
-                  hist=[x for x in cohorts if x.get('source')=='HISTORICAL_WALK_FORWARD']
-                  winners={str(x.get('provisional_model_id')) for x in status.get('runs') or [] if x.get('historical_winner')}
-                  assert {str(x.get('champion_model_id')) for x in hist}==winners, (hist,winners)
-                  assert all(float(x.get('training_cutoff_ts') or 0)<float(x.get('oos_start_ts') or 0) for x in hist), hist
-                  print('REAL_WF_COHORTS',json.dumps({'winner_ids':sorted(winners),'cohort_n':len(hist)},sort_keys=True))
-              finally:
-                  engine.close()
-          PY
+            # Wait for one-time historical bootstrap; ERROR is a real failure here
+            # because the production source audit already proved Yahoo is reachable.
+            hist={}
+            for i in range(1,73):
+                hist=get('/api/research/g1s/historical-wf')
+                print('HIST_WAIT',i,hist.get('state'),hist.get('run_count'),hist.get('provisional_count'))
+                if hist.get('state') in {'COMPLETE','ERROR'}:
+                    break
+                time.sleep(5)
+            print('HISTORICAL_WF',json.dumps({
+                'state':hist.get('state'),'source_count':hist.get('source_count'),
+                'run_count':hist.get('run_count'),'provisional_count':hist.get('provisional_count'),
+                'source_set':hist.get('source_set_sha256'),
+                'source_set_isolated':hist.get('current_source_set_isolated'),
+                'memory_contract':hist.get('memory_contract_version'),
+                'sequential':hist.get('horizons_materialized_sequentially'),
+                'historical_option_features':hist.get('historical_option_features'),
+                'synthetic_option_history':hist.get('synthetic_option_history'),
+                'production_authority':hist.get('production_authority'),
+                'auto_promotion':hist.get('auto_promotion'),
+                'runs':hist.get('runs'),
+            },sort_keys=True))
+            assert hist.get('state')=='COMPLETE',hist
+            assert int(hist.get('source_count') or 0)==10,hist
+            assert int(hist.get('run_count') or 0)==10,hist
+            assert int(hist.get('provisional_count') or 0)==0,hist
+            assert hist.get('current_source_set_isolated') is True,hist
+            assert hist.get('memory_contract_version')=='g1s-historical-wf-memory-bounded-v1',hist
+            assert hist.get('horizons_materialized_sequentially') is True,hist
+            assert hist.get('historical_option_features')=='UNAVAILABLE_NOT_SYNTHESIZED',hist
+            assert hist.get('synthetic_option_history') is False,hist
+            assert hist.get('production_authority') is False,hist
+            assert hist.get('auto_promotion') is False,hist
+            runs=hist.get('runs') or []
+            assert len(runs)==10,runs
+            assert {int(x.get('horizon_minutes')) for x in runs}=={15,30,60,120,240},runs
+            assert {str(x.get('target')) for x in runs}=={'direction_up','terminal_log_return'},runs
+            assert all(int(x.get('fold_count') or 0)==4 for x in runs),runs
+            assert all(x.get('historical_winner') in (0,False) for x in runs),runs
+            assert all(x.get('provisional_model_id') is None for x in runs),runs
+
+            passive=get('/api/research/passive/status')
+            health=passive.get('collector_health') or {}
+            print('COLLECTOR',json.dumps({
+                'operational':passive.get('operational_collector_status'),
+                'eligible_age_sec':health.get('eligible_capture_age_sec'),
+                'eligible_1h':health.get('eligible_captures_1h'),
+                'eligible_24h':health.get('eligible_captures_24h'),
+                'failed_cycles':health.get('consecutive_failed_capture_cycles'),
+                'last_error':health.get('last_error'),
+                'full_history_scan':health.get('request_time_full_history_scan'),
+            },sort_keys=True))
+            assert passive.get('operational_collector_status')=='RUNNING',passive
+            assert int(health.get('consecutive_failed_capture_cycles') or 0)==0,health
+            assert health.get('request_time_full_history_scan') is False,health
+
+            g1s=get('/api/research/g1s/status')
+            champ=g1s.get('champion_validation') or {}
+            items=champ.get('items') or []
+            print('CHAMPION',json.dumps({
+                'count':len(items),'linked':sum(int(x.get('linked_prediction_n') or 0) for x in items),
+                'frozen':champ.get('champion_frozen'),
+                'challenger_can_stop':champ.get('challenger_can_stop_champion_stream'),
+                'production_authority':champ.get('production_authority'),
+                'historical_cohorts':sum(x.get('source')=='HISTORICAL_WALK_FORWARD' for x in items),
+            },sort_keys=True))
+            assert champ.get('champion_frozen') is True,champ
+            assert champ.get('challenger_can_stop_champion_stream') is False,champ
+            assert champ.get('production_authority') is False,champ
+            assert not [x for x in items if x.get('source')=='HISTORICAL_WALK_FORWARD'],items
+
+            db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True); db.row_factory=sqlite3.Row
+            source_count=db.execute('SELECT COUNT(*) n FROM g1s_historical_sources').fetchone()['n']
+            run_count=db.execute('SELECT COUNT(*) n FROM g1s_historical_wf_runs').fetchone()['n']
+            winner_count=db.execute('SELECT COUNT(*) n FROM g1s_historical_wf_runs WHERE historical_winner!=0 OR provisional_model_id IS NOT NULL').fetchone()['n']
+            print('DB_HIST',json.dumps({'sources':source_count,'runs':run_count,'winner_rows':winner_count},sort_keys=True))
+            assert int(source_count)>=10
+            assert int(run_count)>=10
+            assert int(winner_count)==0
+            db.close()
+
+            backups=get('/api/system/storage/backups')
+            complete=[]
+            for m in backups.get('local') or []:
+                c=m.get('critical_table_counts') or {}
+                if m.get('verified') is True and all(t in c and c.get(t) is not None for t in ('g1s_historical_sources','g1s_historical_wf_runs','g1s_validation_cohorts','g1s_champion_prediction_links')):
+                    complete.append(m)
+            print('BACKUP',json.dumps({'schema_complete':len(complete),'latest':complete[0].get('backup_id') if complete else None},sort_keys=True))
+            assert complete
+            PY
+            echo '--- memory after bootstrap ---'
+            free -m
+            ps -eo pid,rss,vsz,%mem,%cpu,cmd --sort=-rss | head -12
+            /opt/seiltanzer/.venv/bin/python /opt/seiltanzer/scripts/production_readiness_check.py --expected-sha "$EXPECTED"
