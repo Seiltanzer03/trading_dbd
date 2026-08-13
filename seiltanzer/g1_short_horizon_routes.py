@@ -109,7 +109,7 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
     def ede_frozen_evidence():
         record = latest_frozen_evidence(evidence_ledger_path(app.state.engine), float("inf"))
         return record or {
-            "contract_version": "g1s-ede-frozen-evidence-v1.2.1",
+            "contract_version": "g1s-ede-frozen-evidence-v1.2.2",
             "status": "INSUFFICIENT_DATA", "edge_candidates": [],
             "production_authority": False,
             "production_directional_authority": False,
