@@ -35,10 +35,13 @@ jobs:
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             mkdir -p /opt/seiltanzer/data/research
+            # The audit freezes/refits rules. It deliberately does not create a
+            # shadow prediction for older pending T0 rows. The low-priority
+            # runtime worker starts predictions only on T0 captured after this
+            # frozen audit exists.
             /opt/seiltanzer/.venv/bin/python \
               /opt/seiltanzer/scripts/production_ede_v13_audit.py \
               --database /opt/seiltanzer/data/trades.db \
               --output /opt/seiltanzer/data/research/ede_v13_latest_audit.json \
               --evidence-ledger /opt/seiltanzer/data/research/ede_frozen_evidence.jsonl \
-              --shadow-ledger /opt/seiltanzer/data/research/ede_shadow_v13.jsonl \
               --candidate-registry /opt/seiltanzer/data/research/ede_v13_candidate_registry.jsonl
