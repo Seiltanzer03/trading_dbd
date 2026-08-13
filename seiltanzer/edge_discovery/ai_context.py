@@ -227,13 +227,21 @@ def _candidate_for_context(record: dict[str, Any] | None,
         return primary_folds > 0
 
     candidates = (record or {}).get("edge_candidates") or []
+    fallback_candidate: dict[str, Any] | None = None
+    fallback_reason = "NO_PRIMARY_EDGE_EVIDENCE"
+
     for candidate in candidates:
         if not eligible(candidate):
             continue
+
         refit = candidate.get("deployment_refit") or {}
         conditions = refit.get("deployment_rule") or []
         if not conditions:
-            return candidate, False, "DEPLOYMENT_RULE_MISSING"
+            if fallback_candidate is None:
+                fallback_candidate = candidate
+                fallback_reason = "DEPLOYMENT_RULE_MISSING"
+            continue
+
         required = [str(row.get("feature_id")) for row in conditions]
         fresh = observation_t0 is not None and observation_t0 <= snapshot_ts + 1e-6
         fresh = fresh and 0.0 <= snapshot_ts-observation_t0 <= max_age_sec
@@ -253,13 +261,21 @@ def _candidate_for_context(record: dict[str, Any] | None,
                 fresh = False
                 break
         if not fresh:
-            return candidate, False, "STALE_OR_UNAVAILABLE_CONTEXT"
+            if fallback_candidate is None:
+                fallback_candidate = candidate
+                fallback_reason = "STALE_OR_UNAVAILABLE_CONTEXT"
+            continue
+
         if all(_condition_matches_values(values, row) for row in conditions):
             return candidate, True, "MATCHED_FRESH_DEPLOYMENT_RULE"
-        return candidate, False, "CONDITIONS_NOT_MATCHED"
-    primary = [candidate for candidate in candidates if eligible(candidate)]
-    return ((primary[0], False, "DEPLOYMENT_RULE_MISSING")
-            if primary else (None, False, "NO_PRIMARY_EDGE_EVIDENCE"))
+
+        if fallback_candidate is None:
+            fallback_candidate = candidate
+            fallback_reason = "CONDITIONS_NOT_MATCHED"
+
+    if fallback_candidate is not None:
+        return fallback_candidate, False, fallback_reason
+    return None, False, "NO_PRIMARY_EDGE_EVIDENCE"
 
 
 def _position_relation(snapshot: dict[str, Any], values: dict[str, dict[str, Any]],
