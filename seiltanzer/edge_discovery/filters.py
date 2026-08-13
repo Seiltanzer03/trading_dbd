@@ -17,6 +17,26 @@ from seiltanzer.g1_short_horizon_p2e_segmented_persistence import ASSET_FAMILIES
 QUANTILE_LABELS = ("Q0_20", "Q20_40", "Q40_60", "Q60_80", "Q80_100")
 QUANTILE_FEATURES = ("rv15_over_rv60", "trend_efficiency_60")
 MAX_CONDITIONS = 3
+MAX_TEMPLATES = 248
+PROSPECTIVE_NUMERIC_FEATURES = (
+    "option.iv", "option.iv_rv_ratio", "option.skew", "option.term_slope",
+    "option.gex_net_balance", "option.zero_gamma_distance", "option.delta",
+    "option.vanna", "option.charm", "option_dynamics.iv_velocity",
+    "option_dynamics.skew_velocity", "option_dynamics.gex_velocity",
+    "option_dynamics.vanna_velocity", "option_dynamics.charm_velocity",
+    "option_dynamics.zero_gamma_velocity", "cross.correlation",
+    "cross.correlation_change", "regime.wavelet_phase",
+    *tuple(
+        f"option_dynamics.{metric}_{transform}"
+        for metric in ("iv", "skew", "gex", "vanna", "charm", "zero_gamma")
+        for transform in (
+            "acceleration", "rolling_rank", "rolling_zscore", "direction_consistency")
+    ),
+)
+MACRO_REGIMES = (
+    "VOL SHOCK", "TREND EXPANSION", "COMPRESSION",
+    "CALM TREND", "RECOVERY", "CHOP",
+)
 
 
 @dataclass(frozen=True)
@@ -78,7 +98,8 @@ def _templates(*groups: list[ConditionTemplate]) -> list[CandidateTemplate]:
     return [CandidateTemplate(tuple(items)) for items in product(*groups)]
 
 
-def candidate_templates() -> tuple[CandidateTemplate, ...]:
+def candidate_templates(
+        eligible_feature_ids: Iterable[str] | None = None) -> tuple[CandidateTemplate, ...]:
     asset = _categorical("asset", tuple(INSTRUMENTS))
     family = _categorical("asset_family", ASSET_FAMILIES)
     session = _categorical("session_utc", SESSIONS)
@@ -100,7 +121,36 @@ def candidate_templates() -> tuple[CandidateTemplate, ...]:
     if any(item.complexity > MAX_CONDITIONS for item in values):
         raise RuntimeError("EDE candidate depth exceeded")
     unique = {item.template_id: item for item in values}
-    return tuple(unique[key] for key in sorted(unique))
+    base = [unique[key] for key in sorted(unique)]
+    if eligible_feature_ids is None:
+        return tuple(base)
+    eligible = set(eligible_feature_ids)
+    prospective: list[CandidateTemplate] = []
+    for feature_id in PROSPECTIVE_NUMERIC_FEATURES:
+        if feature_id not in eligible:
+            continue
+        prospective.extend((
+            CandidateTemplate((ConditionTemplate(
+                feature_id, "train_relative", "ABOVE_MEDIAN"),)),
+            CandidateTemplate((ConditionTemplate(
+                feature_id, "train_relative", "BELOW_MEDIAN"),)),
+        ))
+    if "regime.macro" in eligible:
+        prospective.extend(CandidateTemplate((condition,)) for condition in _categorical(
+            "regime.macro", MACRO_REGIMES))
+    prospective_by_id = {item.template_id: item for item in prospective}
+    prospective = [prospective_by_id[key] for key in sorted(prospective_by_id)]
+    if len(prospective) > MAX_TEMPLATES:
+        raise RuntimeError("predeclared prospective EDE templates exceed bounded cap")
+    # Availability is measured without outcomes.  Ready prospective templates
+    # replace a deterministic tail of the original v1 universe; total search
+    # size never grows beyond the predeclared 248 hypotheses.
+    keep = max(0, MAX_TEMPLATES-len(prospective))
+    combined = base[:keep]+prospective
+    if len(combined) < MAX_TEMPLATES:
+        existing = {item.template_id for item in combined}
+        combined.extend(item for item in base if item.template_id not in existing)
+    return tuple(combined[:MAX_TEMPLATES])
 
 
 def _feature(row: dict[str, Any], feature_id: str) -> Any:

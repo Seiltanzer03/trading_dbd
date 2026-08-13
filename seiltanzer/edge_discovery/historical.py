@@ -67,22 +67,23 @@ def _sign(value: float) -> int:
 
 
 def aligned_cross_asset_context(rows: list[dict[str, Any]]) -> None:
-    """Attach peer confirmation/breadth from observations aligned at the same T0."""
+    """Attach strictly external peer context aligned at the same T0.
+
+    Breadth is leave-one-out: an instrument can never confirm itself through a
+    market or family aggregate.  Metadata is frozen alongside the value so a
+    missing peer cannot later be mistaken for neutral market evidence.
+    """
     by_time: dict[float, dict[str, dict[str, Any]]] = defaultdict(dict)
     for row in rows:
         by_time[float(row["captured_ts"])][str(row["instrument"])] = row
     for timestamp_rows in by_time.values():
-        signs = {
-            instrument: _sign(float(row["features"]["ret_5m"]))
-            for instrument, row in timestamp_rows.items()
-        }
-        market_nonzero = [value for value in signs.values() if value]
-        market_breadth = (sum(value > 0 for value in market_nonzero)/len(market_nonzero)
-                          if market_nonzero else None)
-        family_signs: dict[str, list[int]] = defaultdict(list)
-        for instrument, value in signs.items():
-            if value:
-                family_signs[ASSET_FAMILY_BY_INSTRUMENT[instrument]].append(value)
+        signs = {}
+        for instrument, row in timestamp_rows.items():
+            try:
+                value = float((row.get("features") or {}).get("ret_5m"))
+            except (TypeError, ValueError):
+                value = 0.0
+            signs[instrument] = _sign(value) if math.isfinite(value) else 0
         for instrument, row in timestamp_rows.items():
             own = signs[instrument]
             peer = signs.get(PEER_BY_INSTRUMENT[instrument])
@@ -90,13 +91,35 @@ def aligned_cross_asset_context(rows: list[dict[str, Any]]) -> None:
                 confirmation = "NEUTRAL"
             else:
                 confirmation = "SAME" if own == peer else "OPPOSITE"
-            family_values = family_signs.get(ASSET_FAMILY_BY_INSTRUMENT[instrument]) or []
+            family = ASSET_FAMILY_BY_INSTRUMENT[instrument]
+            family_values = [
+                value for other, value in signs.items()
+                if other != instrument and ASSET_FAMILY_BY_INSTRUMENT[other] == family and value
+            ]
+            market_values = [
+                value for other, value in signs.items() if other != instrument and value
+            ]
             family_breadth = (sum(value > 0 for value in family_values)/len(family_values)
                               if family_values else None)
+            market_breadth = (sum(value > 0 for value in market_values)/len(market_values)
+                              if market_values else None)
+            t0 = float(row["captured_ts"])
             row["ede_features"].update({
                 "cross_confirmation": confirmation,
                 "family_breadth": family_breadth,
                 "market_breadth": market_breadth,
+                "cross_peer_count": int(peer is not None and bool(peer)),
+                "family_breadth_peer_count": len(family_values),
+                "market_breadth_peer_count": len(market_values),
+                "family_breadth_coverage": (
+                    len(family_values)/max(1, sum(
+                        other != instrument
+                        and ASSET_FAMILY_BY_INSTRUMENT[other] == family
+                        for other in timestamp_rows))
+                    if family_values else 0.0),
+                "market_breadth_coverage": len(market_values)/max(1, len(timestamp_rows)-1),
+                "cross_asof": t0,
+                "cross_stale": False,
             })
 
 

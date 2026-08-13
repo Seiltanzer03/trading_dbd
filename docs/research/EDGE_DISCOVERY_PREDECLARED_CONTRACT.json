@@ -1,22 +1,24 @@
 {
   "auto_promotion": false,
-  "baseline_rule": "best_non_signal_causal_baseline_selected_inside_inner_discovery",
   "candidate_depth_max": 3,
-  "contract_version": "g1s-edge-discovery-engine-v1",
+  "contract_version": "g1s-edge-discovery-engine-v1.1",
   "dataset_label": "RESEARCH_DISCOVERY_DATASET",
   "false_discovery_control": {
+    "diagnostic_status": "EXPLORATORY_FDR_FAIL",
     "max_q_value": 0.1,
     "method": "Benjamini-Hochberg",
+    "primary_selection_requires": ["inner sample gate PASS", "inner q <= 0.10"],
     "scopes": [
       "inner-fold candidate discovery",
       "aggregated outer candidate evidence"
     ]
   },
   "filter_primitives": [
-    "categorical asset/family/session",
+    "categorical asset/family/session/macro regime",
     "train-only quintile RV and trend efficiency",
-    "causally aligned cross-asset confirmation",
-    "family breadth state"
+    "train-only above/below-median prospective option/cross features",
+    "causally aligned external cross-asset confirmation",
+    "leave-one-out family and market breadth"
   ],
   "first_signal": "ret5_persistence",
   "horizons_minutes": [15, 30, 60, 120, 240],
@@ -24,14 +26,39 @@
   "missing_is_not_zero": true,
   "outer_folds": 4,
   "outer_selection_limit_per_fold": 10,
+  "primary_baseline": {
+    "name": "GLOBAL_RET5_PERSISTENCE",
+    "fit": "complete causal train cut",
+    "comparison": "conditional and global ret5 scored on the identical filtered validation/test rows"
+  },
   "production_authority": false,
+  "prospective_adapter": {
+    "input": "existing immutable g1s_observations plus g1s_resolutions",
+    "no_second_collector": true,
+    "no_retrospective_options_reconstruction": true,
+    "outcome_visibility": "target_ts must have passed and resolved_ts must be >= target_ts"
+  },
+  "registry": {
+    "append_only": true,
+    "durable_path": "docs/research/EDGE_DISCOVERY_NEGATIVE_REGISTRY.jsonl",
+    "evaluation_identity": "hypothesis_id + dataset/source hash + measurement contract",
+    "hypothesis_identity": "signal + horizon + predeclared template",
+    "persistence": "reviewed append-only pull request; Actions repository permission is read-only",
+    "versioned": true
+  },
   "sample_gates": {
     "effective_n": 400,
     "negative_n": 120,
     "positive_n": 120,
     "raw_n": 1000
   },
-  "source": "fresh real Yahoo 5m/60d bars frozen in a temporary runner DB, or explicitly supplied offline P1B read-only copy",
+  "sanity_baselines": ["constant_0_5", "causal_base_rate", "ret15_momentum"],
+  "search_space": {
+    "availability_routing_uses_outcomes": false,
+    "max_conditions": 3,
+    "max_templates_per_audit": 248
+  },
+  "source": "fresh real Yahoo 5m/60d bars frozen in a temporary runner DB, or explicitly supplied offline read-only database copies",
   "stability_gate": "at least 3 of 4 positive outer folds and all 4 evaluated",
   "synthetic_option_history": false,
   "validated_relative_improvement_each_primary_metric": 0.005

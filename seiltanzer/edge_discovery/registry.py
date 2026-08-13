@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 
-EDE_CONTRACT_VERSION = "g1s-edge-discovery-engine-v1"
+EDE_CONTRACT_VERSION = "g1s-edge-discovery-engine-v1.1"
 RegistryAvailability = Literal["AVAILABLE", "LIMITED", "UNAVAILABLE"]
 
 INVENTORY_SOURCES = (
@@ -117,10 +117,12 @@ FEATURES: tuple[FeatureDefinition, ...] = (
        frequency="option-chain snapshot", historical="UNAVAILABLE", dependency="option_distribution"),
     _f("option.barrier_probability", "OPTIONS", "metric_contracts.CONTRACTS",
        frequency="accepted option scenario snapshot", historical="UNAVAILABLE",
-       dependency="option_distribution"),
+       dependency="option_distribution", live="LIMITED",
+       notes="captured in immutable G1M trade-management context, not yet in per-instrument G1S EDE rows"),
     _f("option.rnd_geometry", "OPTIONS", "metric_contracts.CONTRACTS",
        frequency="accepted option scenario snapshot", historical="UNAVAILABLE",
-       dependency="option_distribution"),
+       dependency="option_distribution", live="UNAVAILABLE",
+       notes="no immutable per-instrument G1S T0 materialization contract found"),
     _f("option_dynamics.iv_velocity", "OPTION_DYNAMICS", "g1_broad_market_evidence_v3._option_blocks",
        frequency="accepted sequential option snapshots", historical="UNAVAILABLE",
        dependency="option_distribution"),
@@ -136,6 +138,21 @@ FEATURES: tuple[FeatureDefinition, ...] = (
     _f("option_dynamics.charm_velocity", "OPTION_DYNAMICS", "g1_broad_market_evidence_v3._option_blocks",
        frequency="accepted sequential option snapshots", historical="UNAVAILABLE",
        dependency="option_distribution"),
+    _f("option_dynamics.zero_gamma_velocity", "OPTION_DYNAMICS", "g1_broad_market_evidence_v3._option_blocks",
+       frequency="accepted sequential option snapshots", historical="UNAVAILABLE",
+       dependency="option_distribution"),
+    *tuple(
+        _f(
+            f"option_dynamics.{metric}_{transform}", "OPTION_DYNAMICS",
+            "edge_discovery.feature_view.causal_dynamics",
+            frequency="accepted sequential immutable T0 observations",
+            historical="UNAVAILABLE", dependency="option_distribution",
+            notes="causal transform materialized by the prospective feature adapter",
+        )
+        for metric in ("iv", "skew", "gex", "vanna", "charm", "zero_gamma")
+        for transform in (
+            "acceleration", "rolling_rank", "rolling_zscore", "direction_consistency")
+    ),
     _f("cross.confirmation", "CROSS_ASSET", "edge_discovery.historical.aligned_cross_asset_context",
        notes="causally aligned observed peer return, not reconstructed correlation"),
     _f("cross.family_breadth", "CROSS_ASSET", "edge_discovery.historical.aligned_cross_asset_context"),

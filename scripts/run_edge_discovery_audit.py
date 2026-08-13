@@ -5,14 +5,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sqlite3
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from seiltanzer.edge_discovery.candidate_registry import CandidateRegistry
 from seiltanzer.edge_discovery.discovery import run_discovery
 from seiltanzer.edge_discovery.historical import load_p1b_sources, option_t0_coverage
+from seiltanzer.edge_discovery.prospective import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.registry import feature_registry
 from seiltanzer.g1_short_horizon_historical_wf import _ensure_tables, _fetch_sources
 
@@ -94,9 +97,14 @@ def main() -> int:
         "--database",
         help="optional immutable offline P1B DB copy; otherwise fetch fresh real Yahoo 5m/60d bars",
     )
+    parser.add_argument(
+        "--prospective-database",
+        help="optional immutable offline G.1S DB copy for T0 coverage and resolved prospective EDE",
+    )
     parser.add_argument("--output", default="edge-discovery-report.json")
     parser.add_argument("--feature-registry", default="edge-discovery-feature-registry.json")
     parser.add_argument("--candidate-registry", default="edge-discovery-candidates.jsonl")
+    parser.add_argument("--research-run", default=None)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="seiltanzer-ede-") as temporary:
         if args.database:
@@ -135,18 +143,68 @@ def main() -> int:
             }
         report = run_discovery(sources, source_set_sha256=source_set)
         inventory = feature_registry()
+    prospective_audit = {
+        "contract_version": "g1s-ede-prospective-adapter-v1.1",
+        "observation_count": 0, "resolved_outcome_count": 0,
+        "features": [],
+        "summary": {
+            "feature_definitions": inventory["feature_count"],
+            "live_capture_implemented": 0, "with_real_observations": 0,
+            "with_prospective_coverage": 0, "unavailable": inventory["feature_count"],
+        },
+        "retrospective_options_reconstruction": False,
+        "production_authority": False, "auto_promotion": False,
+    }
+    prospective_report = None
+    prospective_source = None
+    if args.prospective_database:
+        prospective_runtime = ReadOnlyRuntime(Path(args.prospective_database).resolve())
+        try:
+            adapter = ProspectiveFeatureAdapter(prospective_runtime)
+            prospective_audit = adapter.feature_capture_audit()
+            prospective_rows = adapter.rows(resolved_only=True, strict=True)
+        finally:
+            prospective_runtime.close()
+        prospective_source = hashlib.sha256("|".join(
+            f"{row['observation_id']}:{row['captured_ts']}:{row['target_ts']}"
+            for row in prospective_rows
+        ).encode()).hexdigest()
+        eligible_features = {
+            str(row["feature_id"]) for row in prospective_audit["features"]
+            if bool(row["usable_for_ede"])
+        }
+        prospective_report = run_discovery(
+            [], source_set_sha256=prospective_source,
+            prospective_rows=prospective_rows,
+            eligible_feature_ids=eligible_features)
+    option_ids = {
+        "option.iv", "option.iv_rv_ratio", "option.skew", "option.term_slope",
+        "option.gex_net_balance", "option.zero_gamma_distance", "option.delta",
+        "option.vanna", "option.charm", "option_dynamics.iv_velocity",
+        "option_dynamics.skew_velocity", "option_dynamics.gex_velocity",
+        "option_dynamics.vanna_velocity", "option_dynamics.charm_velocity",
+        "option_dynamics.zero_gamma_velocity",
+    }
+    option_coverage = [row for row in prospective_audit["features"]
+                       if row["feature_id"] in option_ids]
+    option_eligible = any(bool(row["usable_for_ede"]) for row in option_coverage)
     report.update({
         "feature_inventory": {
             "feature_count": inventory["feature_count"],
             "family_count": inventory["family_count"],
             "families": inventory["families"],
             "historically_unavailable": inventory["historically_unavailable"],
+            "prospective_capture_audit": prospective_audit,
         },
         "options": {
             "coverage": options,
-            "incremental_edge_verdict": "INSUFFICIENT_DATA",
+            "real_t0_feature_coverage": option_coverage,
+            "incremental_edge_verdict": (
+                prospective_report["verdict"] if option_eligible and prospective_report
+                else "INSUFFICIENT_DATA"),
             "synthetic_history_used": False,
         },
+        "prospective_discovery": prospective_report,
         "source_fetch": source_fetch,
         "ablation": _ablation(report),
         "production_authority": False, "auto_promotion": False,
@@ -157,21 +215,32 @@ def main() -> int:
     candidates_path = Path(args.candidate_registry).resolve()
     _write(output, report)
     _write(registry_path, inventory)
-    if candidates_path.exists():
-        candidates_path.unlink()
     registry = CandidateRegistry(candidates_path)
-    for horizon in report["horizons"]:
-        for candidate in horizon["candidates"]:
-            registry.register(candidate)
+    research_run = str(args.research_run or os.environ.get("GITHUB_RUN_ID")
+                       or f"local-{int(time.time())}")
+    for evaluation in report["hypothesis_evaluations"]:
+        registry.register_evaluation(
+            evaluation, dataset_sha256=source_set, research_run=research_run,
+            measurement_contract=report["contract_version"])
+    if prospective_report is not None and prospective_source is not None:
+        for evaluation in prospective_report["hypothesis_evaluations"]:
+            registry.register_evaluation(
+                evaluation, dataset_sha256=prospective_source,
+                research_run=research_run,
+                measurement_contract=prospective_report["contract_version"])
     summary = {
         "verdict": report["verdict"],
         "observations_by_horizon": report["observations_by_horizon"],
         "feature_count_used": report["feature_count_used"],
         "hypotheses_tested": report["hypotheses_tested"],
         "sample_gate_passed": report["sample_gate_passed"],
+        "fdr_passed": report["fdr_passed"],
+        "aggregated_sample_gate_passed": report["aggregated_sample_gate_passed"],
         "stability_gate_passed": report["stability_gate_passed"],
         "historical_candidate_count": report["historical_candidate_count"],
         "options_incremental_edge": report["options"]["incremental_edge_verdict"],
+        "prospective_observations": prospective_audit["observation_count"],
+        "prospective_resolved": prospective_audit["resolved_outcome_count"],
         "production_authority": False, "auto_promotion": False,
     }
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True, allow_nan=False))
