@@ -405,6 +405,7 @@ class ProspectiveFeatureAdapter:
                 "observation_id": str(source["observation_id"]),
                 "instrument": str(source["instrument"]),
                 "captured_ts": t0, "target_ts": target,
+                "resolved_ts": resolved_ts if outcome_available else None,
                 "horizon_minutes": int(source["horizon_minutes"]),
                 "direction_label": source.get("direction_label") if outcome_available else None,
                 "terminal_log_return": (
@@ -589,6 +590,7 @@ class ProspectiveFeatureAdapter:
                     "raw": len(eligible_rows),
                     "effective": int(effective),
                     "resolved": len(resolved_rows),
+                    "temporal_blocks": temporal_blocks,
                     "coverage_pct": 100.0*len(eligible_rows)/max(1, len(horizon_rows)),
                     "data_maturity": maturity,
                     "edge_maturity": "INSUFFICIENT_DATA",

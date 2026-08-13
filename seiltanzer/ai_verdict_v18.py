@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from typing import Any
 
 from . import ai_verdict_v17 as _impl
@@ -29,6 +30,166 @@ DATA_MATURITY и EDGE_MATURITY. DATA_READY/EARLY/RESEARCH/PROVISIONAL не им�
 production directional authority и не могут самостоятельно вызвать CLOSE/EXIT.
 Не называй отсутствие validated edge отсутствием полезной рыночной информации.
 """
+
+SNAPSHOT_LIMIT_BYTES = 60_000
+SNAPSHOT_TARGET_BYTES = 54_000
+
+
+def _snapshot_bytes(snapshot: dict) -> int:
+    return len(json.dumps(
+        snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode("utf-8"))
+
+
+def _small_row(row: Any, keys: tuple[str, ...]) -> Any:
+    if not isinstance(row, dict):
+        return row
+    return {key: row.get(key) for key in keys if key in row}
+
+
+def _bounded(value: Any, *, depth: int = 0) -> Any:
+    """Bound untrusted metric detail while keeping deterministic semantics."""
+    if depth >= 5:
+        return "[bounded]"
+    if isinstance(value, str):
+        return value if len(value) <= 256 else value[:253] + "..."
+    if isinstance(value, list):
+        return [_bounded(item, depth=depth+1) for item in value[:20]]
+    if isinstance(value, dict):
+        return {
+            key: _bounded(value[key], depth=depth+1)
+            for key in sorted(value)[:40]
+        }
+    return value
+
+
+def _compact_snapshot_payload(snapshot: dict) -> None:
+    """Remove API/research detail which is redundant for the verdict model."""
+    manager = snapshot.get("policy_manager") or {}
+    audit = manager.get("input_audit") or {}
+    if isinstance(audit.get("rows"), dict):
+        compact_rows = {}
+        for name, row in audit["rows"].items():
+            compact = _small_row(row, (
+                "available", "status", "source", "role", "age_sec", "symbol"))
+            if isinstance(row, dict) and isinstance(row.get("items"), list):
+                compact["items"] = [
+                    _small_row(item, ("symbol", "available", "status", "source", "age_sec"))
+                    for item in row["items"][:12]
+                ]
+                compact["item_count"] = len(row["items"])
+            compact_rows[name] = compact
+        manager["input_audit"] = {
+            "rows": compact_rows,
+            **{key: audit.get(key) for key in (
+                "all_required_available", "missing_required", "degraded_inputs")
+               if key in audit},
+        }
+    evidence = manager.get("evidence") or {}
+    iv = evidence.get("iv_surface") or {}
+    if iv:
+        compact_iv = {key: iv.get(key) for key in (
+            "available", "kind", "frontend_formula_match", "live_moneyness_pct",
+            "moneyness_range_pct", "snapshot_age_sec", "spot_status", "spot_source",
+            "wing_coverage") if key in iv}
+        compact_iv["local_24h"] = [
+            _small_row(row, (
+                "hours", "expiry_hours", "atm_iv_pct", "atm_iv", "skew",
+                "rr_25", "term_slope", "curvature", "source"))
+            for row in (iv.get("local_24h") or [])[:12]
+        ]
+        evidence["iv_surface"] = compact_iv
+    correlation = evidence.get("correlation") or {}
+    if correlation:
+        pair_count = len(correlation.get("all_pairs") or [])
+        correlation["all_pairs"] = [
+            _small_row(row, (
+                "pair", "a", "b", "correlation", "corr", "change", "status",
+                "source", "asof", "age_sec"))
+            for row in (correlation.get("all_pairs") or [])[:16]
+        ]
+        correlation["pair_count"] = pair_count
+    thresholds = manager.get("derivative_switch_thresholds") or []
+    if thresholds:
+        manager["derivative_switch_thresholds"] = [
+            _small_row(row, (
+                "driver", "metric", "direction", "current_value", "threshold",
+                "candidate_policy", "status", "bounded", "reachable"))
+            for row in thresholds[:12]
+        ]
+    gate = manager.get("gate") or {}
+    authority = gate.get("authority_stability") or {}
+    if isinstance(authority.get("variants"), list):
+        authority["variants"] = [
+            _small_row(row, ("variant", "winner", "eligible", "cvar10_r"))
+            for row in authority["variants"][:16]
+        ]
+    snapshot["policy_manager"] = manager
+
+
+def _enforce_snapshot_budget(snapshot: dict) -> None:
+    """Deterministically preserve decision semantics under the byte ceiling."""
+    original = _snapshot_bytes(snapshot)
+    _compact_snapshot_payload(snapshot)
+    manager = snapshot.get("policy_manager") or {}
+    if _snapshot_bytes(snapshot) > SNAPSHOT_TARGET_BYTES:
+        # These are full research/debug replicas. Their authoritative versions
+        # remain available through policy and validation APIs.
+        manager.pop("raw_optimizer_stability", None)
+        manager.pop("monte_carlo_validation", None)
+        manager.pop("scenario_geometry", None)
+        metric_history = snapshot.get("metric_history") or {}
+        snapshot["metric_history"] = _small_row(
+            metric_history, ("samples", "first_ts", "latest_ts", "status"))
+    if _snapshot_bytes(snapshot) > SNAPSHOT_TARGET_BYTES:
+        evidence = manager.get("evidence") or {}
+        keep = (
+            "live_price", "atr_regime", "iv_surface", "correlation", "strike_oi_gex",
+            "option_derivative_state", "cone_rnd", "levels", "data_quality",
+            "adverse_confirmations", "supportive_contradictions", "uncertainty_flags",
+            "decision_roles",
+        )
+        manager["evidence"] = {key: evidence.get(key) for key in keep if key in evidence}
+    if _snapshot_bytes(snapshot) > SNAPSHOT_TARGET_BYTES:
+        # Last-resort deterministic allowlist. Management decision and every
+        # compared policy stay intact; only explanatory workspaces are omitted.
+        keep_manager = (
+            "version", "management_decision", "recommendation", "policies",
+            "selection_rule", "gate", "evidence", "inputs", "risk_constraint",
+            "management_arbiter", "state_change_attribution", "input_audit",
+            "option_derivative_state", "calibration_contract", "recalculation_triggers",
+            "cancellation_boundary", "phase_e_authority_contract",
+        )
+        snapshot["policy_manager"] = {
+            key: manager.get(key) for key in keep_manager if key in manager}
+        manager = snapshot["policy_manager"]
+    if _snapshot_bytes(snapshot) > SNAPSHOT_TARGET_BYTES:
+        manager["evidence"] = _bounded(manager.get("evidence") or {})
+        manager["input_audit"] = _bounded(manager.get("input_audit") or {})
+        manager["option_derivative_state"] = _bounded(
+            manager.get("option_derivative_state") or {})
+        manager["gate"] = _bounded(manager.get("gate") or {})
+        policies = manager.get("policies") or {}
+        manager["policies"] = {
+            name: _small_row(policy, (
+                "expected_final_r", "median_final_r", "cvar10_r",
+                "p_next_rung_before_stop", "p_stop_before_next_rung",
+                "no_event_probability", "eligible", "reason"))
+            for name, policy in policies.items()
+        }
+        snapshot["ede_causal_context"] = _bounded(
+            snapshot.get("ede_causal_context") or {})
+    snapshot["snapshot_budget"] = {
+        "contract_version": "ai-snapshot-byte-budget-v1",
+        "limit_bytes": SNAPSHOT_LIMIT_BYTES,
+        "target_bytes": SNAPSHOT_TARGET_BYTES,
+        "original_bytes": original,
+        "compacted": True,
+    }
+    snapshot["snapshot_budget"]["final_bytes"] = _snapshot_bytes(snapshot)
+    snapshot["snapshot_budget"]["final_bytes"] = _snapshot_bytes(snapshot)
+    if snapshot["snapshot_budget"]["final_bytes"] >= SNAPSHOT_LIMIT_BYTES:
+        raise RuntimeError("AI snapshot byte budget exceeded")
 
 
 def build_snapshot(engine) -> dict:
@@ -150,6 +311,7 @@ def build_snapshot(engine) -> dict:
     # before this explanatory-only research context is attached.
     from .edge_discovery.ai_context import build_ai_ede_context
     snapshot["ede_causal_context"] = build_ai_ede_context(engine, snapshot)
+    _enforce_snapshot_budget(snapshot)
     return snapshot
 
 

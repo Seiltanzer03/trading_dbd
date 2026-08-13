@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only production snapshot audit for EDE v1.2."""
+"""Read-only production snapshot audit for EDE v1.2.1."""
 from __future__ import annotations
 
 import argparse
@@ -8,11 +8,16 @@ import json
 import sqlite3
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from seiltanzer.edge_discovery.ablation import family_ablation
 from seiltanzer.edge_discovery.discovery import run_discovery
+from seiltanzer.edge_discovery.evidence_ledger import (
+    append_frozen_evidence,
+    build_frozen_evidence,
+)
 from seiltanzer.edge_discovery.prospective import ProspectiveFeatureAdapter
 
 
@@ -120,8 +125,9 @@ def audit(database: Path) -> dict[str, Any]:
                   for item in horizon["candidates"]]
     candidates.sort(key=lambda item: -float(
         (item.get("edge_score") or {}).get("score") or -1e9))
+    materialized_at = time.time()
     return {
-        "contract_version": "g1s-ede-production-audit-v1.2",
+        "contract_version": "g1s-ede-production-audit-v1.2.1",
         "source_database": str(database),
         "source_database_open_mode": "READ_ONLY_SNAPSHOT",
         "dataset_sha256": source_sha,
@@ -136,6 +142,13 @@ def audit(database: Path) -> dict[str, Any]:
         "ablation": ablation,
         "cross_asset_results": [item for item in matrix
                                 if item["feature"].startswith("cross.")],
+        "frozen_evidence": build_frozen_evidence(
+            inventory=inventory, discovery=discovery,
+            dataset_sha256=source_sha,
+            evidence_cutoff_ts=max(
+                (float(row.get("resolved_ts") or row["target_ts"]) for row in rows),
+                default=materialized_at),
+            frozen_at=materialized_at),
         "synthetic_data_used": False,
         "retrospective_options_reconstruction": False,
         "production_authority": False,
@@ -166,12 +179,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--database", type=Path,
                         default=Path("/opt/seiltanzer/data/trades.db"))
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--evidence-ledger", type=Path, default=None)
     args = parser.parse_args(argv)
     report = audit(args.database)
+    if args.evidence_ledger:
+        appended = append_frozen_evidence(
+            args.evidence_ledger, report["frozen_evidence"])
+        print("EDE_V121_EVIDENCE=" + json.dumps({
+            "path": str(args.evidence_ledger),
+            "appended": appended,
+            "frozen_at": report["frozen_evidence"]["frozen_at"],
+            "evidence_cutoff_ts": report["frozen_evidence"]["evidence_cutoff_ts"],
+            "edge_maturity": report["frozen_evidence"]["edge_maturity"],
+            "candidate_count": len(report["frozen_evidence"]["edge_candidates"]),
+        }, sort_keys=True))
     if args.output:
-        args.output.write_text(json.dumps(
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        temporary_output = args.output.with_suffix(args.output.suffix + ".tmp")
+        temporary_output.write_text(json.dumps(
             report, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
             allow_nan=False), encoding="utf-8")
+        temporary_output.replace(args.output)
     discovery = report["discovery"]
     print("EDE_V12_SUMMARY=" + json.dumps({
         "dataset_sha256": report["dataset_sha256"],

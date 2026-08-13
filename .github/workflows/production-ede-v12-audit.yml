@@ -33,4 +33,6 @@ jobs:
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             /opt/seiltanzer/.venv/bin/python \
               /opt/seiltanzer/scripts/production_ede_v12_audit.py \
-              --database /opt/seiltanzer/data/trades.db
+              --database /opt/seiltanzer/data/trades.db \
+              --output /opt/seiltanzer/data/research/ede_v121_latest_audit.json \
+              --evidence-ledger /opt/seiltanzer/data/research/ede_frozen_evidence.jsonl

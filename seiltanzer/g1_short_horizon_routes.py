@@ -1,11 +1,15 @@
 """Read-only APIs for G.1S, Q maturity diagnostics and G.1-M.1 local feedback."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from fastapi import FastAPI
 
 from .g1_short_horizon_final_report import install_g1_short_horizon_final_report
 from .g1_short_horizon_historical_wf_integrity import install_g1_short_horizon_historical_wf_integrity
 from .storage_restore_drill import last_restore_drill
+from .edge_discovery.evidence_ledger import evidence_ledger_path, latest_frozen_evidence
 
 
 def install_g1_short_horizon_routes(app: FastAPI) -> None:
@@ -101,6 +105,34 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
     app.add_api_route("/api/research/g1s/evidence-materialization",
                       runtime.evidence_materialization_status,
                       methods=["GET"], name="g1s_evidence_materialization")
+
+    def ede_frozen_evidence():
+        record = latest_frozen_evidence(evidence_ledger_path(app.state.engine), float("inf"))
+        return record or {
+            "contract_version": "g1s-ede-frozen-evidence-v1.2.1",
+            "status": "INSUFFICIENT_DATA", "edge_candidates": [],
+            "production_authority": False,
+            "production_directional_authority": False,
+            "auto_promotion": False, "may_trigger_exit_or_close": False,
+        }
+
+    app.add_api_route("/api/research/ede/frozen-evidence", ede_frozen_evidence,
+                      methods=["GET"], name="ede_frozen_evidence")
+
+    def ede_latest_audit():
+        data_dir = Path(getattr(app.state.engine.settings, "data_dir", "."))
+        path = data_dir / "research" / "ede_v121_latest_audit.json"
+        if not path.exists():
+            return {"status": "INSUFFICIENT_DATA", "report_available": False,
+                    "production_authority": False, "auto_promotion": False}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {"status": "UNAVAILABLE", "report_available": False,
+                    "production_authority": False, "auto_promotion": False}
+
+    app.add_api_route("/api/research/ede/audit", ede_latest_audit,
+                      methods=["GET"], name="ede_latest_audit")
 
     app.add_api_route("/api/research/g1/q/audit", runtime.q_audit,
                       methods=["GET"], name="g1_q_maturity_audit")
