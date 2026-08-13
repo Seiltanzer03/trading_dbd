@@ -88,11 +88,13 @@ def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict
         and int(row.get("horizon_minutes") or 0) in SELECTIVE_HORIZONS
         and row.get("resolved_ts") is not None
         and float(row["resolved_ts"]) <= current+1e-6]
+    rule_active_since = float(
+        (audit.get("frozen_evidence") or {}).get("frozen_at") or current)
     pending_rows = [
         row for row in rows
         if not row.get("outcome_available")
         and int(row.get("horizon_minutes") or 0) in SELECTIVE_HORIZONS
-        and float(row.get("captured_ts") or 0.0) <= current+1e-6]
+        and rule_active_since <= float(row.get("captured_ts") or 0.0) <= current+1e-6]
 
     ledger = ShadowLedger(shadow_ledger_path(engine))
     resolution = resolve_shadow_predictions(
@@ -109,6 +111,8 @@ def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict
         "contract_version": SHADOW_RUNTIME_VERSION,
         "refreshed": True,
         "audit_path": str(audit_path),
+        "rule_active_since": rule_active_since,
+        "rule_must_preexist_t0": True,
         "resolved_rows_seen": len(resolved_rows),
         "pending_rows_seen": len(pending_rows),
         "resolution": resolution,
