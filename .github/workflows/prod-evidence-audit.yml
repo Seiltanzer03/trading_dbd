@@ -27,14 +27,16 @@ jobs:
       - name: Run P1B then exact-fast nested P2 on real Yahoo 5m data
         run: |
           python - <<'PY'
-          import json, resource, tempfile, time
+          import json, resource, subprocess, tempfile, time
           from seiltanzer.config import Settings
           from seiltanzer.engine import Engine
           from seiltanzer.g1_short_horizon_p2_regime_research import p2_status
           from seiltanzer.g1_short_horizon_p2_fast_gbt import (
-              FAST_GBT_VERSION, run_p2_nested_research_fast,
+              FAST_CROSS_VERSION, FAST_GBT_VERSION, run_p2_nested_research_fast,
           )
 
+          branch_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          print('P2_BRANCH_SHA',branch_sha)
           with tempfile.TemporaryDirectory() as td:
               engine=Engine(Settings(demo=True,data_dir=td))
               try:
@@ -60,8 +62,10 @@ jobs:
                           'second_relative_improvement','fold_joint_non_degrade_n',
                           'selection_counts')})
                   print('P2_RESULT',json.dumps({
+                      'branch_sha':branch_sha,
                       'contract':result.get('contract_version'),
                       'gbt_compute_contract':result.get('gbt_compute_contract'),
+                      'cross_compute_contract':result.get('cross_compute_contract'),
                       'source_set':result.get('source_set_sha256'),
                       'run_count':result.get('run_count'),
                       'winner_count':result.get('winner_count'),
@@ -79,6 +83,7 @@ jobs:
                       'production_authority':status.get('production_authority'),
                   },sort_keys=True))
                   assert result.get('gbt_compute_contract')==FAST_GBT_VERSION,result
+                  assert result.get('cross_compute_contract')==FAST_CROSS_VERSION,result
                   assert status.get('state')=='COMPLETE',status
                   assert result.get('run_count')==10,result
                   assert status.get('outer_test_used_for_selection') is False,status
