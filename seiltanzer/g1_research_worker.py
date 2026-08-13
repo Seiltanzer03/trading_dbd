@@ -20,6 +20,10 @@ RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
 # its own versioned contract and does not require an incompatible worker version.
 RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v4"
 RESEARCH_INTERVAL_SEC = 10.0
+# Deployment validation and the independent market collector must get an
+# uncontended startup window.  This delays research maintenance only; frozen T0
+# capture and every production decision path start with the service as before.
+RESEARCH_STARTUP_GRACE_SEC = 5 * 60.0
 G1S_BATCH = 500
 G1M_LOCAL_BATCH = 100
 FIT_GATE_INTERVAL_SEC = 15 * 60.0
@@ -115,6 +119,8 @@ def install_research_worker(app) -> None:
         "g1m_local_batch_limit": G1M_LOCAL_BATCH,
         "fit_gate_interval_sec": FIT_GATE_INTERVAL_SEC,
         "trade_link_interval_sec": TRADE_LINK_INTERVAL_SEC,
+        "startup_grace_sec": RESEARCH_STARTUP_GRACE_SEC,
+        "first_cycle_not_before_ts": None,
         "evidence_reports_request_time_scan": False,
         "historical_walkforward_runs_on_research_worker": True,
         "historical_walkforward_request_time_network_fetch": False,
@@ -125,6 +131,8 @@ def install_research_worker(app) -> None:
         state = app.state.g1_research_worker
         state["running"] = True
         try:
+            state["first_cycle_not_before_ts"] = time.time() + RESEARCH_STARTUP_GRACE_SEC
+            await asyncio.sleep(RESEARCH_STARTUP_GRACE_SEC)
             while True:
                 started = time.time()
                 state["last_started_ts"] = started

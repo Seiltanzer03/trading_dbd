@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import subprocess
 import time
 import urllib.error
@@ -11,6 +12,8 @@ import urllib.request
 
 BASE = "http://127.0.0.1:8790"
 FAST_TIMEOUT = 5.0
+TRANSIENT_ATTEMPTS = 3
+TRANSIENT_RETRY_DELAY_SEC = 1.0
 SCHEMA_BACKUP_MAX_AGE_SEC = 15 * 60.0
 EVIDENCE_REPORTS = {
     "probability_oos", "continuous_oos", "calibration_oos",
@@ -63,13 +66,38 @@ def wait_core(expected_sha: str) -> None:
     raise AssertionError("production did not become ready within 90 seconds")
 
 
-def assert_fast(path: str, *, budget_ms: float | None = None):
-    code, body, elapsed = request(path, timeout=FAST_TIMEOUT)
-    print(f"{path}: {code} {elapsed:.0f}ms")
-    assert code == 200, (path, code, body)
-    if budget_ms is not None:
-        assert elapsed < budget_ms, (path, elapsed, budget_ms)
-    return body
+def _is_transient_transport_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)):
+        return True
+    return isinstance(exc, urllib.error.URLError) and isinstance(
+        exc.reason, (TimeoutError, socket.timeout, ConnectionError))
+
+
+def assert_fast(path: str, *, budget_ms: float | None = None,
+                attempts: int = TRANSIENT_ATTEMPTS):
+    """Verify one bounded route, retrying transport contention only.
+
+    A research materializer can briefly hold the shared SQLite/runtime lock.
+    Retrying a socket timeout does not relax the response-time assertion: the
+    successful attempt must still satisfy the original per-route budget.
+    HTTP errors, malformed bodies and assertion failures remain immediate.
+    """
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        try:
+            code, body, elapsed = request(path, timeout=FAST_TIMEOUT)
+        except Exception as exc:
+            if not _is_transient_transport_error(exc) or attempt >= attempts:
+                raise
+            print(f"{path}: transient {type(exc).__name__} "
+                  f"attempt={attempt}/{attempts}; retrying")
+            time.sleep(TRANSIENT_RETRY_DELAY_SEC)
+            continue
+        print(f"{path}: {code} {elapsed:.0f}ms attempt={attempt}/{attempts}")
+        assert code == 200, (path, code, body)
+        if budget_ms is not None:
+            assert elapsed < budget_ms, (path, elapsed, budget_ms)
+        return body
+    raise AssertionError((path, "retry loop exhausted"))
 
 
 def assert_authority_off(authority: dict, label: str) -> None:
@@ -215,6 +243,8 @@ def verify(expected_sha: str) -> None:
     assert worker.get("historical_walkforward_runs_on_research_worker") is True, worker
     assert worker.get("historical_walkforward_request_time_network_fetch") is False, worker
     assert worker.get("running") is True, worker
+    assert float(worker.get("startup_grace_sec") or 0.0) >= 60.0, worker
+    assert worker.get("first_cycle_not_before_ts") is not None, worker
     assert evidence_status.get("request_time_full_history_scan") is False, evidence_status
     assert {str(row.get("report_name")) for row in evidence_status.get("reports") or []} >= EVIDENCE_REPORTS
     verify_historical_contract(historical)

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import subprocess
 import time
 import urllib.error
 import urllib.request
 
 BASE = "http://127.0.0.1:8790"
+TRANSIENT_ATTEMPTS = 3
+TRANSIENT_RETRY_DELAY_SEC = 1.0
 
 
 def sh(*args: str) -> str:
@@ -29,6 +32,30 @@ def request(path: str, *, method: str = "GET", timeout: float = 5.0):
     return code, body, elapsed
 
 
+def _is_transient_transport_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)):
+        return True
+    return isinstance(exc, urllib.error.URLError) and isinstance(
+        exc.reason, (TimeoutError, socket.timeout, ConnectionError))
+
+
+def assert_route(path: str) -> dict | list | None:
+    for attempt in range(1, TRANSIENT_ATTEMPTS + 1):
+        try:
+            code, body, elapsed = request(path, timeout=5.0)
+        except Exception as exc:
+            if not _is_transient_transport_error(exc) or attempt >= TRANSIENT_ATTEMPTS:
+                raise
+            print(f"{path}: transient {type(exc).__name__} "
+                  f"attempt={attempt}/{TRANSIENT_ATTEMPTS}; retrying")
+            time.sleep(TRANSIENT_RETRY_DELAY_SEC)
+            continue
+        print(f"{path}: {code} {elapsed:.0f}ms attempt={attempt}/{TRANSIENT_ATTEMPTS}")
+        assert code == 200, (path, code)
+        return body
+    raise AssertionError((path, "retry loop exhausted"))
+
+
 def verify(expected_sha: str) -> None:
     actual = sh("git", "-C", "/opt/seiltanzer", "rev-parse", "HEAD")
     assert actual == expected_sha, (actual, expected_sha)
@@ -46,9 +73,7 @@ def verify(expected_sha: str) -> None:
         "/api/analytics/correlation-graph",
     )
     for path in paths:
-        code, _, elapsed = request(path, timeout=5.0)
-        print(f"{path}: {code} {elapsed:.0f}ms")
-        assert code == 200, (path, code)
+        assert_route(path)
 
     code, body, elapsed = request("/api/ai/verdict", method="POST", timeout=65.0)
     print(f"/api/ai/verdict: {code} {elapsed:.0f}ms")
