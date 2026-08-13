@@ -102,6 +102,24 @@ def _run_g1m_local_bounded(runtime) -> dict:
     }
 
 
+def _run_ede_shadow_bounded(engine) -> dict:
+    """Materialize only pre-existing v1.3 shadow rules, never full discovery."""
+    try:
+        from .edge_discovery.shadow_runtime import materialize_runtime_shadow
+        return materialize_runtime_shadow(engine)
+    except Exception as exc:
+        # Shadow evidence is research-only. A failure must never abort the core
+        # G1S/G1M worker cycle or affect the production decision path.
+        return {
+            "contract_version": "g1s-ede-shadow-runtime-v1.3",
+            "refreshed": False,
+            "reason": "SHADOW_MATERIALIZER_ERROR",
+            "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+            "production_authority": False,
+            "auto_promotion": False,
+        }
+
+
 def install_research_worker(app) -> None:
     if getattr(app.state, "g1_research_worker_installed", False):
         return
@@ -124,6 +142,8 @@ def install_research_worker(app) -> None:
         "evidence_reports_request_time_scan": False,
         "historical_walkforward_runs_on_research_worker": True,
         "historical_walkforward_request_time_network_fetch": False,
+        "ede_v13_shadow_runs_on_research_worker": True,
+        "ede_v13_full_discovery_runs_on_request_path": False,
     }
     original_lifespan = app.router.lifespan_context
 
@@ -142,9 +162,13 @@ def install_research_worker(app) -> None:
                     await asyncio.sleep(0)
                     g1m_result = await asyncio.to_thread(
                         _run_g1m_local_bounded, engine.management_local)
+                    await asyncio.sleep(0)
+                    shadow_result = await asyncio.to_thread(
+                        _run_ede_shadow_bounded, engine)
                     state["last_result"] = {
                         "g1s": g1s_result,
                         "g1m_local": g1m_result,
+                        "ede_v13_shadow": shadow_result,
                     }
                     state["last_error"] = None
                 except Exception as exc:
