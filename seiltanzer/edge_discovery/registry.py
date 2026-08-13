@@ -12,8 +12,9 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 
-EDE_CONTRACT_VERSION = "g1s-edge-discovery-engine-v1.1"
+EDE_CONTRACT_VERSION = "g1s-edge-discovery-engine-v1.2"
 RegistryAvailability = Literal["AVAILABLE", "LIMITED", "UNAVAILABLE"]
+ResearchScope = Literal["G1S", "G1M_ONLY", "QUALITY_ONLY"]
 
 INVENTORY_SOURCES = (
     "seiltanzer/metric_contracts.py",
@@ -46,6 +47,7 @@ class FeatureDefinition:
     live_availability: RegistryAvailability
     training_eligibility: bool
     dependency_family: str
+    research_scope: ResearchScope = "G1S"
     notes: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -58,14 +60,16 @@ def _f(feature_id: str, family: str, source: str, *, datatype: str = "float",
        staleness: str = "stale when source age exceeds feature contract",
        historical: RegistryAvailability = "AVAILABLE",
        live: RegistryAvailability = "AVAILABLE", eligible: bool = True,
-       dependency: str | None = None, notes: str = "") -> FeatureDefinition:
+       dependency: str | None = None, scope: ResearchScope = "G1S",
+       notes: str = "") -> FeatureDefinition:
     return FeatureDefinition(
         feature_id=feature_id, family=family, source=source, datatype=datatype,
         t0_availability="causal value only; absent value is UNAVAILABLE, never zero",
         sampling_frequency=frequency, asof_timestamp=asof, quality=quality,
         staleness=staleness, historical_availability=historical,
         live_availability=live, training_eligibility=eligible,
-        dependency_family=dependency or family.lower(), notes=notes,
+        dependency_family=dependency or family.lower(), research_scope=scope,
+        notes=notes,
     )
 
 
@@ -117,11 +121,13 @@ FEATURES: tuple[FeatureDefinition, ...] = (
        frequency="option-chain snapshot", historical="UNAVAILABLE", dependency="option_distribution"),
     _f("option.barrier_probability", "OPTIONS", "metric_contracts.CONTRACTS",
        frequency="accepted option scenario snapshot", historical="UNAVAILABLE",
-       dependency="option_distribution", live="LIMITED",
+       dependency="option_distribution", live="LIMITED", eligible=False,
+       scope="G1M_ONLY",
        notes="captured in immutable G1M trade-management context, not yet in per-instrument G1S EDE rows"),
     _f("option.rnd_geometry", "OPTIONS", "metric_contracts.CONTRACTS",
        frequency="accepted option scenario snapshot", historical="UNAVAILABLE",
-       dependency="option_distribution", live="UNAVAILABLE",
+       dependency="option_distribution", live="UNAVAILABLE", eligible=False,
+       scope="G1M_ONLY",
        notes="no immutable per-instrument G1S T0 materialization contract found"),
     _f("option_dynamics.iv_velocity", "OPTION_DYNAMICS", "g1_broad_market_evidence_v3._option_blocks",
        frequency="accepted sequential option snapshots", historical="UNAVAILABLE",
@@ -176,11 +182,81 @@ FEATURES: tuple[FeatureDefinition, ...] = (
        datatype="category", historical="LIMITED", live="AVAILABLE"),
     _f("quality.availability", "DATA_QUALITY", "edge_discovery.feature_view.FeatureValue",
        datatype="category", eligible=False, dependency="data_quality",
+       scope="QUALITY_ONLY",
        notes="never interpreted as a market predictor"),
     _f("quality.staleness", "DATA_QUALITY", "edge_discovery.feature_view.FeatureValue",
        datatype="boolean", eligible=False, dependency="data_quality",
+       scope="QUALITY_ONLY",
        notes="provider outage/staleness never interpreted as market state"),
 )
+
+
+# Pre-result classification of the 21 v1.1 zero-coverage rows.  This is a
+# measurement contract, not a conclusion inferred after seeing an edge result.
+ZERO_COVERAGE_DIAGNOSIS: dict[str, dict[str, Any]] = {
+    **{
+        feature_id: {
+            "root_cause_class": "A+B",
+            "root_cause": "missing EDE mapping; causally computable from retained completed bars",
+            "causal_backfill": True,
+            "fix": "causal recomputation from bars admitted by bar_end_ts<=T0 and created_ts<=capture record",
+            "expected_coverage_after_fix": "all T0 rows whose retained pre-T0 60m bar window is complete",
+        }
+        for feature_id in (
+            "price.trend_efficiency_60", "price.range_60",
+            "price.drawdown_60", "price.drawup_60", "regime.trend",
+            "regime.volatility",
+        )
+    },
+    **{
+        feature_id: {
+            "root_cause_class": "A+B",
+            "root_cause": "collector stored skew under risk-reversal key rr but EDE did not map it",
+            "causal_backfill": True,
+            "fix": "read rr from immutable frozen option_distribution and capture it prospectively",
+            "expected_coverage_after_fix": "same causal option-snapshot cohort as IV where rr is present",
+        }
+        for feature_id in (
+            "option.skew", "option_dynamics.skew_velocity",
+            "option_dynamics.skew_acceleration", "option_dynamics.skew_rolling_rank",
+            "option_dynamics.skew_rolling_zscore",
+            "option_dynamics.skew_direction_consistency",
+        )
+    },
+    **{
+        feature_id: {
+            "root_cause_class": "A+B",
+            "root_cause": "exact timestamp equality rejected sequential real peer captures",
+            "causal_backfill": True,
+            "fix": "nearest causal leave-one-out peer join with explicit maximum staleness",
+            "expected_coverage_after_fix": "T0 rows with at least one eligible external peer at or before T0",
+        }
+        for feature_id in (
+            "cross.confirmation", "cross.family_breadth", "cross.market_breadth",
+            "cross.correlation", "cross.correlation_change",
+        )
+    },
+    "option.barrier_probability": {
+        "root_cause_class": "D", "root_cause": "trade-specific G1M state",
+        "causal_backfill": False, "fix": "classify G1M_ONLY; do not mix cohorts",
+        "expected_coverage_after_fix": "not applicable to G1S",
+    },
+    "option.rnd_geometry": {
+        "root_cause_class": "D", "root_cause": "trade-specific G1M state",
+        "causal_backfill": False, "fix": "classify G1M_ONLY; do not mix cohorts",
+        "expected_coverage_after_fix": "not applicable to G1S",
+    },
+    "quality.availability": {
+        "root_cause_class": "E", "root_cause": "technical quality dimension, not a market predictor",
+        "causal_backfill": False, "fix": "classify QUALITY_ONLY and report as metadata",
+        "expected_coverage_after_fix": "not applicable as predictor",
+    },
+    "quality.staleness": {
+        "root_cause_class": "E", "root_cause": "technical quality dimension, not a market predictor",
+        "causal_backfill": False, "fix": "classify QUALITY_ONLY and report as metadata",
+        "expected_coverage_after_fix": "not applicable as predictor",
+    },
+}
 
 
 def feature_registry() -> dict[str, Any]:
@@ -195,6 +271,11 @@ def feature_registry() -> dict[str, Any]:
         "family_count": len(families),
         "families": families,
         "features": [feature.as_dict() for feature in FEATURES],
+        "research_scope_counts": {
+            scope: sum(feature.research_scope == scope for feature in FEATURES)
+            for scope in ("G1S", "G1M_ONLY", "QUALITY_ONLY")
+        },
+        "zero_coverage_diagnosis": ZERO_COVERAGE_DIAGNOSIS,
         "historically_unavailable": unavailable,
         "missing_is_not_zero": True,
         "provider_outage_is_not_market_signal": True,

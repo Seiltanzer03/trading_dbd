@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from seiltanzer.edge_discovery.candidate_registry import CandidateRegistry
+from seiltanzer.edge_discovery.ablation import family_ablation
 from seiltanzer.edge_discovery.discovery import run_discovery
 from seiltanzer.edge_discovery.historical import load_p1b_sources, option_t0_coverage
 from seiltanzer.edge_discovery.prospective import ProspectiveFeatureAdapter
@@ -144,7 +145,7 @@ def main() -> int:
         report = run_discovery(sources, source_set_sha256=source_set)
         inventory = feature_registry()
     prospective_audit = {
-        "contract_version": "g1s-ede-prospective-adapter-v1.1",
+        "contract_version": "g1s-ede-prospective-adapter-v1.2",
         "observation_count": 0, "resolved_outcome_count": 0,
         "features": [],
         "summary": {
@@ -205,6 +206,8 @@ def main() -> int:
             "synthetic_history_used": False,
         },
         "prospective_discovery": prospective_report,
+        "prospective_ablation": (
+            family_ablation(prospective_report) if prospective_report else None),
         "source_fetch": source_fetch,
         "ablation": _ablation(report),
         "production_authority": False, "auto_promotion": False,

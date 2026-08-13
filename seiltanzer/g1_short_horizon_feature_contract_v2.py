@@ -309,7 +309,11 @@ def _option_scalars(option: dict[str, Any], annual_vol: float | None,
     metrics = option.get("metrics") or {}
     implied = metrics.get("implied_move") or {}
     implied_vol = _finite(implied.get("sigma_annual"))
-    skew = _numeric_by_keys(metrics.get("skew"), ("rr_25", "risk_reversal", "skew", "value"))
+    # ``risk_reversal_skew`` publishes the observed chain value as ``rr``.
+    # Earlier adapters omitted that authoritative key and therefore froze a
+    # false missing value even though the raw option block was present.
+    skew = _numeric_by_keys(
+        metrics.get("skew"), ("rr", "rr_25", "risk_reversal", "skew", "value"))
     term_slope = _numeric_by_keys(metrics.get("term"), ("slope", "slope_per_day", "annualized_slope"))
     gex = metrics.get("gex") or {}
     strikes = gex.get("strikes") or []

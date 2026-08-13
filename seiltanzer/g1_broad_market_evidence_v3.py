@@ -135,6 +135,40 @@ def _price_block(rows: list[dict], captured_ts: float) -> dict:
     returns = {f"ret_{m}m": ret(end_ts, end_price, m*60.0) for m in windows}
     realized = {f"realized_vol_{m}m": rv(end_ts, m*60.0) for m in windows}
 
+    window_60 = [row for row in usable
+                 if end_ts-60*60.0 < float(row["bar_end_ts"]) <= end_ts+1e-6]
+    path_stats: dict[str, Any] = {
+        "trend_efficiency_60": None, "range_60m": None,
+        "drawdown_60m": None, "drawup_60m": None,
+        "trend_regime": None, "volatility_regime": None,
+    }
+    ret60 = returns.get("ret_60m")
+    rv15 = realized.get("realized_vol_15m")
+    rv60 = realized.get("realized_vol_60m")
+    if len(window_60) >= 10 and ret60 is not None:
+        path_steps = [value for step_ts, value in steps
+                      if end_ts-60*60.0 < step_ts <= end_ts+1e-6]
+        path_abs = sum(abs(value) for value in path_steps)
+        high = max(float(row["high"]) for row in window_60)
+        low = min(float(row["low"]) for row in window_60)
+        efficiency = abs(float(ret60))/path_abs if path_abs > 1e-12 else 0.0
+        path_stats.update({
+            "trend_efficiency_60": max(0.0, min(1.0, efficiency)),
+            "range_60m": math.log(high/low) if high > 0 and low > 0 else None,
+            "drawdown_60m": math.log(end_price/high) if high > 0 else None,
+            "drawup_60m": math.log(end_price/low) if low > 0 else None,
+            "trend_regime": (
+                "TREND_UP" if ret60 > 0 and efficiency >= 0.35
+                else "TREND_DOWN" if ret60 < 0 and efficiency >= 0.35
+                else "CHOP"),
+        })
+    if rv15 is not None and rv60 is not None and rv60 > 0:
+        ratio = 2.0*float(rv15)/float(rv60)
+        path_stats["volatility_regime"] = (
+            "EXPANDING" if ratio >= 1.15
+            else "CONTRACTING" if ratio <= 0.85
+            else "NORMAL")
+
     state_points = _five_minute_points(usable, captured_ts)[-36:]
     ret_series, rv_series = [], []
     for point in state_points:
@@ -151,7 +185,7 @@ def _price_block(rows: list[dict], captured_ts: float) -> dict:
     return {
         "available": True, "price": end_price,
         "source_last_bar_end_ts": end_ts,
-        **returns, **realized,
+        **returns, **realized, **path_stats,
         "return_state_for_derivative": "rolling_15m_log_return",
         "return_dynamics": robust_derivative(
             ret_series, "value", source_quality=source_quality,
@@ -252,7 +286,7 @@ def _option_blocks(engine: PassiveLearningEngine, features: dict, captured_ts: f
         static = {
             "iv": _finite(implied.get("sigma_annual")),
             "skew": _nested_number(metrics.get("skew"),
-                                   ("rr_25", "risk_reversal", "skew", "value")),
+                                   ("rr", "rr_25", "risk_reversal", "skew", "value")),
             "term_slope": _nested_number(metrics.get("term"),
                                          ("slope", "slope_per_day", "annualized_slope")),
             "delta": _finite(greeks.get("net_delta_oi_weighted")),

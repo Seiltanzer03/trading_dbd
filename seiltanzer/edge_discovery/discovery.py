@@ -20,6 +20,12 @@ from seiltanzer.g1_short_horizon_p2e_segmented_persistence import _inner_split
 
 from .filters import CandidateTemplate, FittedRule, candidate_templates, fit_rule, rule_mask
 from .historical import build_discovery_rows
+from .maturity import (
+    MATURITY_CONTRACT_VERSION,
+    TERMINAL_USE_BY_MATURITY,
+    evidence_maturity,
+    maturity_contract,
+)
 from .scoring import (
     benjamini_hochberg,
     edge_score,
@@ -32,11 +38,11 @@ from .scoring import (
 SIGNAL = "ret5_persistence"
 HORIZONS = (15, 30, 60, 120, 240)
 OUTER_SELECTION_LIMIT = 10
-MIN_INNER_TRAIN_RAW = 400
-MIN_INNER_TRAIN_EFFECTIVE = 150
-MIN_INNER_VALIDATION_RAW = 100
-MIN_INNER_VALIDATION_EFFECTIVE = 40
-MIN_INNER_CLASS = 20
+MIN_INNER_TRAIN_RAW = 80
+MIN_INNER_TRAIN_EFFECTIVE = 40
+MIN_INNER_VALIDATION_RAW = 20
+MIN_INNER_VALIDATION_EFFECTIVE = 10
+MIN_INNER_CLASS = 5
 MIN_RAW = 1000
 MIN_EFFECTIVE = 400
 MIN_CLASS = 120
@@ -251,6 +257,7 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
     aggregated: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"rows": [], "model": [], "baseline": [], "folds": [],
                  "sanity": defaultdict(list), "rules": [],
+                 "inner_sources": [],
                  "funnel": defaultdict(
                      lambda: {"rows": [], "model": [], "baseline": [],
                               "sanity": defaultdict(list)})})
@@ -276,17 +283,25 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
                 "fdr_pass": float(inner["q_value"]) <= MAX_Q_VALUE,
             })
         selected_ids: list[str] = []
-        for rank, item in enumerate(discovery["selected"], 1):
+        diagnostic_evaluated_ids: list[str] = []
+        evaluation_items = (
+            [("PRIMARY_FDR_PASS", item) for item in discovery["selected"]]
+            + [("DIAGNOSTIC_FDR_FAIL", item) for item in discovery.get("diagnostics", [])])
+        for rank, (selection_source, item) in enumerate(evaluation_items, 1):
             template = by_id[str(item["template_id"])]
             evaluation = _outer_evaluation(item, template, fold["train"], fold["test"])
             if evaluation is None:
                 continue
-            selected_ids.append(template.template_id)
+            if selection_source == "PRIMARY_FDR_PASS":
+                selected_ids.append(template.template_id)
+            else:
+                diagnostic_evaluated_ids.append(template.template_id)
             bucket = aggregated[template.template_id]
             bucket["rows"].extend(evaluation["rows"])
             bucket["model"].extend(evaluation["model_prediction"].tolist())
             bucket["baseline"].extend(evaluation["baseline_prediction"].tolist())
             bucket["rules"].append(evaluation["rule"].as_dict())
+            bucket["inner_sources"].append(selection_source)
             for name, values in evaluation["sanity_predictions"].items():
                 bucket["sanity"][name].extend(values.tolist())
             for stage in evaluation["funnel"]:
@@ -298,6 +313,7 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
                     funnel_bucket["sanity"][name].extend(values.tolist())
             bucket["folds"].append({
                 "fold_index": fold["fold_index"], "selection_rank": rank,
+                "inner_selection_source": selection_source,
                 "outer_test_start_ts": fold["test_start_ts"],
                 "outer_test_end_ts": fold["test_end_ts"],
                 "selection_end_ts": discovery.get("inner_validation_end_ts"),
@@ -321,6 +337,7 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
             "selected_template_ids": selected_ids,
             "diagnostic_template_ids": [
                 str(item["template_id"]) for item in discovery.get("diagnostics", [])],
+            "diagnostic_outer_evaluated_template_ids": diagnostic_evaluated_ids,
             "outer_test_used_for_selection": False,
         })
 
@@ -364,6 +381,8 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
             })
         folds_evaluated = len(bucket["folds"])
         folds_positive = sum(bool(fold["joint_positive"]) for fold in bucket["folds"])
+        inner_primary_folds = sum(
+            source == "PRIMARY_FDR_PASS" for source in bucket["inner_sources"])
         counts = _sample_counts(candidate_rows)
         candidates.append({
             "template_id": template_id, "horizon_minutes": horizon, "signal": SIGNAL,
@@ -382,6 +401,7 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
             "sanity_baselines": sanity_baselines,
             "improvement": improvement, "p_value": p_value,
             "folds_evaluated": folds_evaluated, "folds_positive": folds_positive,
+            "inner_primary_folds": inner_primary_folds,
             "folds": bucket["folds"],
             "funnel": funnel_report,
             "assets": sorted({str(row["instrument"]) for row in candidate_rows}),
@@ -399,11 +419,22 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
         metric_gate = (item["improvement"]["brier"] >= MIN_RELATIVE_IMPROVEMENT
                        and item["improvement"]["logloss"] >= MIN_RELATIVE_IMPROVEMENT)
         multiple_testing_gate = q_value <= MAX_Q_VALUE
-        if not multiple_testing_gate:
+        inner_fdr_gate = int(item.get("inner_primary_folds") or 0) > 0
+        maturity = evidence_maturity(
+            raw_n=int(item["raw_n"]), effective_n=int(item["effective_n"]),
+            positive_n=int(item["positive_n"]), negative_n=int(item["negative_n"]),
+            temporal_blocks=int(item["temporal_blocks"]),
+            brier_improvement=float(item["improvement"]["brier"]),
+            logloss_improvement=float(item["improvement"]["logloss"]),
+            q_value=q_value, folds_evaluated=int(item["folds_evaluated"]),
+            folds_positive=int(item["folds_positive"]),
+            inner_fdr_passed=inner_fdr_gate)
+        if not inner_fdr_gate:
             status = "EXPLORATORY_FDR_FAIL"
         elif not sample_gate:
             status = "EXPLORATORY"
-        elif stability_gate and metric_gate and multiple_testing_gate:
+        elif (maturity == "ROBUST_EDGE" and stability_gate and metric_gate
+              and multiple_testing_gate):
             status = "HISTORICAL_CANDIDATE"
         else:
             status = "REJECTED"
@@ -417,9 +448,20 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
             q_value=q_value,
         )
         item.update({
-            "status": status, "gates": {
+            "status": status,
+            "evidence_maturity": maturity,
+            "maturity_contract_version": MATURITY_CONTRACT_VERSION,
+            "terminal_use": TERMINAL_USE_BY_MATURITY[maturity],
+            "where_it_helps": bool(
+                item["improvement"]["brier"] > 0
+                and item["improvement"]["logloss"] > 0),
+            "where_it_hurts": bool(
+                item["improvement"]["brier"] < 0
+                and item["improvement"]["logloss"] < 0),
+            "gates": {
                 "sample": sample_gate, "stability": stability_gate,
                 "metric": metric_gate, "multiple_testing": multiple_testing_gate,
+                "inner_fdr": inner_fdr_gate,
             }, "edge_score": score,
         })
         raw = json.dumps({key: item[key] for key in
@@ -471,6 +513,8 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
             "conditions": ([] if best is None else best["rule"]["conditions"]),
             "thresholds": [row["rule"] for row in records],
             "status": status, "reason_rejected": reason,
+            "evidence_maturity": "INSUFFICIENT_DATA",
+            "terminal_use": TERMINAL_USE_BY_MATURITY["INSUFFICIENT_DATA"],
             "q_value": (None if best is None else best["q_value"]),
             "p_value": (None if best is None else best["p_value"]),
             "conditional_ret5": (None if best is None else best["conditional_ret5"]),
@@ -503,6 +547,10 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
         "fdr_passed": sum(bool(item["gates"]["multiple_testing"]) for item in candidates),
         "stability_gate_passed": sum(bool(item["gates"]["stability"]) for item in candidates),
         "historical_candidate_count": sum(item["status"] == "HISTORICAL_CANDIDATE" for item in candidates),
+        "maturity_counts": {
+            maturity: sum(item.get("evidence_maturity") == maturity for item in candidates)
+            for maturity in TERMINAL_USE_BY_MATURITY
+        },
     }
 
 
@@ -533,7 +581,7 @@ def run_discovery(sources: list[dict[str, Any]], *, source_set_sha256: str,
     else:
         verdict = "INSUFFICIENT DATA"
     return {
-        "contract_version": "g1s-edge-discovery-engine-v1.1",
+        "contract_version": "g1s-edge-discovery-engine-v1.2",
         "evidence_label": (
             "PROSPECTIVE_T0_RESOLVED_DATASET" if prospective_rows is not None
             else "RESEARCH_DISCOVERY_DATASET"),
@@ -542,6 +590,8 @@ def run_discovery(sources: list[dict[str, Any]], *, source_set_sha256: str,
         "verdict": verdict,
         "horizons": horizons,
         "top_edge_candidates": all_candidates[:10],
+        "top_maturity_edges": [item for item in all_candidates
+                               if item.get("evidence_maturity") != "INSUFFICIENT_DATA"][:15],
         "top_diagnostic_fdr_failures": sorted(
             all_diagnostics,
             key=lambda item: -(
@@ -563,13 +613,20 @@ def run_discovery(sources: list[dict[str, Any]], *, source_set_sha256: str,
         "aggregated_sample_gate_passed": sum(item["sample_gate_passed"] for item in horizons),
         "stability_gate_passed": sum(item["stability_gate_passed"] for item in horizons),
         "historical_candidate_count": len(winners),
+        "maturity_counts": {
+            maturity: sum(item.get("evidence_maturity") == maturity
+                          for item in all_candidates)
+            for maturity in TERMINAL_USE_BY_MATURITY
+        },
+        "maturity_contract": maturity_contract(),
         "multiple_testing": {
             "method": "Benjamini-Hochberg false-discovery-rate correction",
             "max_q_value": MAX_Q_VALUE,
             "scope": "inner-fold discovery and aggregated outer candidate evidence",
         },
         "bounded_search": {"max_conditions": 3, "templates": len(templates),
-                           "outer_selection_limit_per_fold": OUTER_SELECTION_LIMIT},
+                           "outer_selection_limit_per_fold": OUTER_SELECTION_LIMIT,
+                           "diagnostic_outer_limit_per_fold": OUTER_SELECTION_LIMIT},
         "research_dataset_is_pristine_oos": prospective_rows is not None,
         "outer_test_used_for_selection": False,
         "synthetic_options_used": False,

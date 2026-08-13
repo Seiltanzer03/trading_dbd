@@ -12,31 +12,28 @@ import numpy as np
 
 from seiltanzer.config import INSTRUMENTS
 from seiltanzer.g1_short_horizon_p2e_segmented_persistence import ASSET_FAMILIES, SESSIONS
+from .registry import FEATURES
 
 
 QUANTILE_LABELS = ("Q0_20", "Q20_40", "Q40_60", "Q60_80", "Q80_100")
 QUANTILE_FEATURES = ("rv15_over_rv60", "trend_efficiency_60")
 MAX_CONDITIONS = 3
 MAX_TEMPLATES = 248
-PROSPECTIVE_NUMERIC_FEATURES = (
-    "option.iv", "option.iv_rv_ratio", "option.skew", "option.term_slope",
-    "option.gex_net_balance", "option.zero_gamma_distance", "option.delta",
-    "option.vanna", "option.charm", "option_dynamics.iv_velocity",
-    "option_dynamics.skew_velocity", "option_dynamics.gex_velocity",
-    "option_dynamics.vanna_velocity", "option_dynamics.charm_velocity",
-    "option_dynamics.zero_gamma_velocity", "cross.correlation",
-    "cross.correlation_change", "regime.wavelet_phase",
-    *tuple(
-        f"option_dynamics.{metric}_{transform}"
-        for metric in ("iv", "skew", "gex", "vanna", "charm", "zero_gamma")
-        for transform in (
-            "acceleration", "rolling_rank", "rolling_zscore", "direction_consistency")
-    ),
+PROSPECTIVE_NUMERIC_FEATURES = tuple(
+    item.feature_id for item in FEATURES
+    if item.research_scope == "G1S" and item.training_eligibility
+    and item.feature_id not in {
+        "price.ret_5m", "regime.asset", "regime.asset_family",
+        "regime.session_utc", "regime.trend", "regime.volatility", "regime.macro",
+        "cross.confirmation",
+    }
 )
 MACRO_REGIMES = (
     "VOL SHOCK", "TREND EXPANSION", "COMPRESSION",
     "CALM TREND", "RECOVERY", "CHOP",
 )
+TREND_REGIMES = ("TREND_UP", "TREND_DOWN", "CHOP")
+VOLATILITY_REGIMES = ("EXPANDING", "CONTRACTING", "NORMAL")
 
 
 @dataclass(frozen=True)
@@ -135,21 +132,46 @@ def candidate_templates(
             CandidateTemplate((ConditionTemplate(
                 feature_id, "train_relative", "BELOW_MEDIAN"),)),
         ))
-    if "regime.macro" in eligible:
-        prospective.extend(CandidateTemplate((condition,)) for condition in _categorical(
-            "regime.macro", MACRO_REGIMES))
-    prospective_by_id = {item.template_id: item for item in prospective}
-    prospective = [prospective_by_id[key] for key in sorted(prospective_by_id)]
-    if len(prospective) > MAX_TEMPLATES:
-        raise RuntimeError("predeclared prospective EDE templates exceed bounded cap")
-    # Availability is measured without outcomes.  Ready prospective templates
-    # replace a deterministic tail of the original v1 universe; total search
-    # size never grows beyond the predeclared 248 hypotheses.
-    keep = max(0, MAX_TEMPLATES-len(prospective))
-    combined = base[:keep]+prospective
-    if len(combined) < MAX_TEMPLATES:
-        existing = {item.template_id for item in combined}
-        combined.extend(item for item in base if item.template_id not in existing)
+    categorical = {
+        "regime.asset": tuple(INSTRUMENTS),
+        "regime.asset_family": ASSET_FAMILIES,
+        "regime.session_utc": SESSIONS,
+        "regime.trend": TREND_REGIMES,
+        "regime.volatility": VOLATILITY_REGIMES,
+        "regime.macro": MACRO_REGIMES,
+        "cross.confirmation": ("SAME", "OPPOSITE"),
+    }
+    for feature_id, states in categorical.items():
+        if feature_id in eligible:
+            prospective.extend(CandidateTemplate((condition,))
+                               for condition in _categorical(feature_id, states))
+
+    # Predeclared mixed-family ablation templates.  They allow the bounded
+    # PRICE+OPTIONS+CROSS question without constructing arbitrary combinations.
+    option_conditions = [item.conditions[0] for item in prospective
+                         if item.conditions[0].feature_id.startswith("option.")]
+    cross_conditions = [item.conditions[0] for item in prospective
+                        if item.conditions[0].feature_id == "cross.confirmation"]
+    mixed = [CandidateTemplate((option, cross))
+             for option in option_conditions for cross in cross_conditions]
+    dynamic_conditions = [item.conditions[0] for item in prospective
+                          if item.conditions[0].feature_id.startswith("option_dynamics.")]
+    mixed.extend(CandidateTemplate((condition, cross))
+                 for condition in dynamic_conditions[:12] for cross in cross_conditions)
+
+    mandatory_by_id = {item.template_id: item for item in prospective}
+    if len(mandatory_by_id) > MAX_TEMPLATES:
+        raise RuntimeError("available feature singles exceed bounded EDE cap")
+    combined = [mandatory_by_id[key] for key in sorted(mandatory_by_id)]
+    existing = set(mandatory_by_id)
+    for item in sorted(mixed+base, key=lambda candidate: candidate.template_id):
+        if item.template_id in existing:
+            continue
+        combined.append(item); existing.add(item.template_id)
+        if len(combined) >= MAX_TEMPLATES:
+            break
+    if any(item.complexity > MAX_CONDITIONS for item in combined):
+        raise RuntimeError("EDE candidate depth exceeded")
     return tuple(combined[:MAX_TEMPLATES])
 
 

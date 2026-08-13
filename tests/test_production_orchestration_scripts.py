@@ -18,6 +18,8 @@ def test_production_orchestration_scripts_compile():
         "scripts/production_readiness_check.py",
         "scripts/production_functional_smoke.py",
         "scripts/production_ede_inventory.py",
+        "scripts/production_ede_v12_audit.py",
+        "scripts/production_post_research_check.py",
     ):
         source = (root / relative).read_text(encoding="utf-8")
         compile(source, relative, "exec")
@@ -99,4 +101,8 @@ def test_production_ede_inventory_is_read_only_and_lists_all_69(tmp_path):
     assert result["database_open_mode"] == "READ_ONLY"
     assert result["g1s_observations_total"] == 0
     assert len(result["features"]) == 69
+    assert set(result["features"][0]["by_horizon"]) == {"15", "30", "60", "120", "240"}
+    by_id = {row["feature_id"]: row for row in result["features"]}
+    assert by_id["option.barrier_probability"]["status"] == "G1M_ONLY"
+    assert by_id["quality.availability"]["status"] == "QUALITY_ONLY"
     assert result["production_authority"] is False
