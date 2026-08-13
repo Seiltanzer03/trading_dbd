@@ -7,6 +7,14 @@ on:
       - "seiltanzer/edge_discovery/**"
       - "scripts/run_edge_discovery_audit.py"
       - "docs/research/EDGE_DISCOVERY_PREDECLARED_CONTRACT.json"
+      - "docs/research/EDGE_DISCOVERY_NEGATIVE_REGISTRY.jsonl"
+      - ".github/workflows/edge-discovery-engine.yml"
+  pull_request:
+    paths:
+      - "seiltanzer/edge_discovery/**"
+      - "scripts/run_edge_discovery_audit.py"
+      - "docs/research/EDGE_DISCOVERY_PREDECLARED_CONTRACT.json"
+      - "docs/research/EDGE_DISCOVERY_NEGATIVE_REGISTRY.jsonl"
       - ".github/workflows/edge-discovery-engine.yml"
   workflow_dispatch:
 
@@ -24,6 +32,10 @@ jobs:
           python-version: "3.11"
       - name: Install research runtime
         run: pip install -e ".[dev]"
+      - name: Restore reviewed versioned negative registry
+        run: |
+          cp docs/research/EDGE_DISCOVERY_NEGATIVE_REGISTRY.jsonl \
+            edge-discovery-candidates.jsonl
       - name: Fetch real 5m/60d bars and run bounded nested discovery
         run: |
           python scripts/run_edge_discovery_audit.py \
