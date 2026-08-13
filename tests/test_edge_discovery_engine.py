@@ -23,7 +23,12 @@ from seiltanzer.edge_discovery.filters import (
 from seiltanzer.edge_discovery.registry import feature_registry
 from seiltanzer.edge_discovery.historical import aligned_cross_asset_context
 from seiltanzer.edge_discovery.prospective import ProspectiveFeatureAdapter
-from seiltanzer.edge_discovery.maturity import evidence_maturity, maturity_contract
+from seiltanzer.edge_discovery.maturity import (
+    TERMINAL_USE_BY_MATURITY,
+    data_maturity,
+    edge_maturity,
+    maturity_contract,
+)
 from seiltanzer.edge_discovery.ablation import family_ablation
 from seiltanzer.edge_discovery.scoring import benjamini_hochberg
 from seiltanzer.edge_discovery.validation import LiveShadowLedger
@@ -503,23 +508,123 @@ def test_recovered_skew_builds_causal_velocity_without_chain_backfill():
     assert velocity["future_points_used"] is False
 
 
-def test_maturity_tiers_are_predeclared_and_fdr_caps_provisional_claims():
-    assert evidence_maturity(raw_n=100, effective_n=50, temporal_blocks=2) == \
-        "EARLY_CONTEXT"
-    assert evidence_maturity(
+def test_data_and_edge_maturity_are_separate_and_fdr_caps_provisional_claims():
+    assert data_maturity(raw_n=100, effective_n=50, temporal_blocks=2) == \
+        "DATA_READY_EARLY"
+    assert edge_maturity(
+        raw_n=100, effective_n=50, temporal_blocks=2,
+        candidate_tested=False) == "INSUFFICIENT_DATA"
+    assert edge_maturity(
         raw_n=250, effective_n=100, temporal_blocks=2,
-        brier_improvement=.01, logloss_improvement=.01) == "RESEARCH_SIGNAL"
-    assert evidence_maturity(
+        brier_improvement=.01, logloss_improvement=.01,
+        candidate_tested=True) == "RESEARCH_SIGNAL"
+    assert edge_maturity(
         raw_n=600, effective_n=250, temporal_blocks=3,
         brier_improvement=.01, logloss_improvement=.01, q_value=.01,
-        folds_evaluated=3, folds_positive=2, inner_fdr_passed=False) == \
+        folds_evaluated=3, folds_positive=2, inner_fdr_passed=False,
+        candidate_tested=True) == \
         "RESEARCH_SIGNAL"
-    assert evidence_maturity(
+    assert edge_maturity(
         raw_n=600, effective_n=250, temporal_blocks=3,
         brier_improvement=.01, logloss_improvement=.01, q_value=.01,
-        folds_evaluated=3, folds_positive=2, inner_fdr_passed=True) == \
+        folds_evaluated=3, folds_positive=2, inner_fdr_passed=True,
+        candidate_tested=True) == \
         "PROVISIONAL_EDGE"
     assert maturity_contract()["one_early_metric_may_trigger_exit_or_close"] is False
+
+
+def test_primary_only_aggregate_excludes_three_diagnostic_folds():
+    primary = discovery._aggregate_bucket()
+    diagnostic = discovery._aggregate_bucket()
+
+    def fill(bucket, count, fold_index, source):
+        rows = [_row(float(fold_index*10000+index+1)) for index in range(count)]
+        bucket["rows"].extend(rows)
+        bucket["model"].extend([0.55 if row["direction_label"] == "UP" else 0.45
+                                for row in rows])
+        bucket["baseline"].extend([0.5]*count)
+        bucket["rules"].append({"conditions": [{"feature_id": "session_utc"}]})
+        bucket["inner_sources"].append(source)
+        bucket["folds"].append({"fold_index": fold_index, "joint_positive": True})
+
+    fill(primary, 600, 1, "PRIMARY_FDR_PASS")
+    for fold_index in (2, 3, 4):
+        fill(diagnostic, 600, fold_index, "DIAGNOSTIC_FDR_FAIL")
+    primary_summary = discovery._bucket_summary(primary)
+    diagnostic_summary = discovery._bucket_summary(diagnostic)
+    assert primary_summary["raw_n"] == 600
+    assert primary_summary["folds_evaluated"] == 1
+    assert diagnostic_summary["raw_n"] == 1800
+    assert diagnostic_summary["folds_evaluated"] == 3
+    status = edge_maturity(
+        raw_n=primary_summary["raw_n"],
+        effective_n=primary_summary["effective_n"], temporal_blocks=3,
+        positive_n=300, negative_n=300, brier_improvement=.01,
+        logloss_improvement=.01, q_value=.01, folds_evaluated=1,
+        folds_positive=1, inner_fdr_passed=True, candidate_tested=True)
+    assert status not in {"PROVISIONAL_EDGE", "ROBUST_EDGE"}
+
+
+def test_discover_horizon_one_primary_three_diagnostic_never_provisional(monkeypatch):
+    template = candidate_templates()[:1][0]
+    folds = [{
+        "fold_index": index, "train": [_row(float(index))],
+        "test": [_row(float(100+index))], "test_start_ts": 100.0+index,
+        "test_end_ts": 101.0+index, "train_target_max_ts": 50.0,
+        "purge_boundary_ts": 75.0,
+    } for index in range(1, 5)]
+    monkeypatch.setattr(discovery, "_historical_folds", lambda rows, horizon: folds)
+    calls = {"count": 0}
+
+    def inner(rows, horizon, templates):
+        calls["count"] += 1
+        item = {"template_id": template.template_id}
+        primary = calls["count"] == 1
+        return {
+            "tested": 1, "sample_gate_passed": 1,
+            "fdr_passed": 1 if primary else 0, "evaluated": [],
+            "selected": [item] if primary else [],
+            "diagnostics": [] if primary else [item],
+            "inner_validation_end_ts": 60.0,
+        }
+
+    class Rule:
+        def as_dict(self):
+            return {"conditions": [{"feature_id": "session_utc", "state": "US"}]}
+
+    def outer(item, template, train, test):
+        fold = calls["count"]
+        rows = [_row(float(fold*10000+index+1)) for index in range(600)]
+        model = np.asarray([.55 if row["direction_label"] == "UP" else .45 for row in rows])
+        baseline = np.asarray([.5]*len(rows))
+        return {
+            "rows": rows, "model_prediction": model,
+            "baseline_prediction": baseline, "sanity_predictions": {},
+            "rule": Rule(), "funnel": [],
+            "model": {"effective_n": 300}, "baseline": {"effective_n": 300},
+            "improvement": {"brier": .01, "logloss": .01},
+            "joint_positive": True,
+            "global_ret5_comparison": {"brier_delta": .01, "logloss_delta": .01},
+        }
+
+    monkeypatch.setattr(discovery, "_inner_discovery", inner)
+    monkeypatch.setattr(discovery, "_outer_evaluation", outer)
+    result = discovery.discover_horizon([], 15, (template,), rows_override=[])
+    candidate = result["candidates"][0]
+    assert candidate["raw_n"] == 600
+    assert candidate["folds_evaluated"] == 1
+    assert candidate["primary_only_aggregate"]["raw_n"] == 600
+    assert candidate["diagnostic_aggregate"]["raw_n"] == 1800
+    assert candidate["diagnostic_aggregate"]["folds_evaluated"] == 3
+    assert candidate["edge_maturity"] not in {"PROVISIONAL_EDGE", "ROBUST_EDGE"}
+    assert candidate["gates"]["stability"] is False
+
+
+def test_non_promoted_maturity_components_cannot_trigger_close_or_exit():
+    for maturity in ("EARLY_CONTEXT", "RESEARCH_SIGNAL", "PROVISIONAL_EDGE"):
+        authority = TERMINAL_USE_BY_MATURITY[maturity]
+        assert authority["production_decision_score_weight"] == 0.0
+        assert authority["may_trigger_exit_or_close"] is False
 
 
 def test_g1m_and_quality_features_are_not_counted_as_g1s_predictor_failures():

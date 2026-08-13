@@ -23,7 +23,8 @@ from .historical import build_discovery_rows
 from .maturity import (
     MATURITY_CONTRACT_VERSION,
     TERMINAL_USE_BY_MATURITY,
-    evidence_maturity,
+    data_maturity,
+    edge_maturity,
     maturity_contract,
 )
 from .scoring import (
@@ -245,6 +246,106 @@ def _conditions_text(rule: FittedRule | None) -> list[dict[str, Any]]:
     return [] if rule is None else rule.as_dict()["conditions"]
 
 
+def _aggregate_bucket() -> dict[str, Any]:
+    return {
+        "rows": [], "model": [], "baseline": [], "folds": [],
+        "sanity": defaultdict(list), "rules": [], "inner_sources": [],
+        "funnel": defaultdict(
+            lambda: {"rows": [], "model": [], "baseline": [],
+                     "sanity": defaultdict(list)}),
+    }
+
+
+def _append_outer(bucket: dict[str, Any], evaluation: dict[str, Any], *,
+                  selection_source: str, rank: int, fold: dict[str, Any],
+                  selection_end_ts: float | None) -> None:
+    bucket["rows"].extend(evaluation["rows"])
+    bucket["model"].extend(evaluation["model_prediction"].tolist())
+    bucket["baseline"].extend(evaluation["baseline_prediction"].tolist())
+    bucket["rules"].append(evaluation["rule"].as_dict())
+    bucket["inner_sources"].append(selection_source)
+    for name, values in evaluation["sanity_predictions"].items():
+        bucket["sanity"][name].extend(values.tolist())
+    for stage in evaluation["funnel"]:
+        funnel_bucket = bucket["funnel"][int(stage["depth"])]
+        funnel_bucket["rows"].extend(stage["rows"])
+        funnel_bucket["model"].extend(stage["model_prediction"].tolist())
+        funnel_bucket["baseline"].extend(stage["baseline_prediction"].tolist())
+        for name, values in stage["sanity_predictions"].items():
+            funnel_bucket["sanity"][name].extend(values.tolist())
+    bucket["folds"].append({
+        "fold_index": fold["fold_index"], "selection_rank": rank,
+        "inner_selection_source": selection_source,
+        "outer_test_start_ts": fold["test_start_ts"],
+        "outer_test_end_ts": fold["test_end_ts"],
+        "selection_end_ts": selection_end_ts,
+        "outer_test_used_for_selection": False,
+        "purge_embargo_valid": fold["train_target_max_ts"] < fold["purge_boundary_ts"],
+        "raw_n": len(evaluation["rows"]),
+        "effective_n": evaluation["model"]["effective_n"],
+        "improvement": evaluation["improvement"],
+        "joint_positive": evaluation["joint_positive"],
+        "primary_baseline_name": "GLOBAL_RET5_PERSISTENCE",
+        "conditional_ret5": evaluation["model"],
+        "global_ret5": evaluation["baseline"],
+        "global_ret5_comparison": evaluation["global_ret5_comparison"],
+    })
+
+
+def _bucket_summary(bucket: dict[str, Any]) -> dict[str, Any] | None:
+    rows = bucket["rows"]
+    if not rows:
+        return None
+    model_prediction = np.asarray(bucket["model"], dtype=float)
+    baseline_prediction = np.asarray(bucket["baseline"], dtype=float)
+    model = metrics(rows, model_prediction)
+    baseline = metrics(rows, baseline_prediction)
+    conditions = list(bucket["rules"][0]["conditions"])
+    funnel_report = []
+    funnel_base_n = len(bucket["funnel"].get(0, {}).get("rows", []))
+    for depth, stage in sorted(bucket["funnel"].items()):
+        stage_rows = stage["rows"]
+        stage_model = metrics(stage_rows, np.asarray(stage["model"], dtype=float))
+        stage_baseline = metrics(stage_rows, np.asarray(stage["baseline"], dtype=float))
+        funnel_report.append({
+            "step": "ALL_OBSERVATIONS" if depth == 0 else f"CONDITION_{depth}",
+            "conditions": conditions[:depth],
+            "raw_n": len(stage_rows), "effective_n": stage_model["effective_n"],
+            "coverage": len(stage_rows)/max(1, funnel_base_n),
+            "conditional_ret5_brier": stage_model["brier"],
+            "global_ret5_brier": stage_baseline["brier"],
+            "conditional_ret5_logloss": stage_model["logloss"],
+            "global_ret5_logloss": stage_baseline["logloss"],
+            "signed_expectancy": stage_model["signed_expectancy"],
+            "improvement": relative_improvement(stage_model, stage_baseline),
+            "sanity_baselines": {
+                name: metrics(stage_rows, np.asarray(values, dtype=float))
+                for name, values in stage["sanity"].items()},
+            "post_hoc_used_for_selection": False,
+        })
+    counts = _sample_counts(rows)
+    return {
+        "rows": rows, "raw_n": len(rows), **counts,
+        "model": model, "baseline": baseline,
+        "conditional_ret5": model, "global_ret5": baseline,
+        "global_ret5_comparison": _global_ret5_comparison(model, baseline),
+        "sanity_baselines": {
+            name: metrics(rows, np.asarray(values, dtype=float))
+            for name, values in bucket["sanity"].items()},
+        "improvement": relative_improvement(model, baseline),
+        "p_value": paired_loss_pvalue(rows, model_prediction, baseline_prediction),
+        "folds_evaluated": len(bucket["folds"]),
+        "folds_positive": sum(bool(fold["joint_positive"]) for fold in bucket["folds"]),
+        "folds": bucket["folds"], "funnel": funnel_report,
+        "conditions": conditions, "thresholds": list(bucket["rules"]),
+        "assets": sorted({str(row["instrument"]) for row in rows}),
+        "sessions": sorted({str(row["ede_features"]["session_utc"]) for row in rows}),
+        "temporal_blocks": len({
+            time.strftime("%Y-%m-%d", time.gmtime(float(row["captured_ts"])))
+            for row in rows}),
+    }
+
+
 def discover_horizon(sources: list[dict[str, Any]], horizon: int,
                      templates: tuple[CandidateTemplate, ...] | None = None, *,
                      rows_override: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -255,12 +356,11 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
                 float(row["captured_ts"]), str(row["instrument"]))))
     folds = _historical_folds(rows, horizon)
     aggregated: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"rows": [], "model": [], "baseline": [], "folds": [],
-                 "sanity": defaultdict(list), "rules": [],
-                 "inner_sources": [],
-                 "funnel": defaultdict(
-                     lambda: {"rows": [], "model": [], "baseline": [],
-                              "sanity": defaultdict(list)})})
+        lambda: {
+            "all_outer": _aggregate_bucket(),
+            "primary_only": _aggregate_bucket(),
+            "diagnostic_only": _aggregate_bucket(),
+        })
     inner_hypotheses = 0
     inner_sample_passed = 0
     inner_fdr_passed = 0
@@ -296,38 +396,17 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
                 selected_ids.append(template.template_id)
             else:
                 diagnostic_evaluated_ids.append(template.template_id)
-            bucket = aggregated[template.template_id]
-            bucket["rows"].extend(evaluation["rows"])
-            bucket["model"].extend(evaluation["model_prediction"].tolist())
-            bucket["baseline"].extend(evaluation["baseline_prediction"].tolist())
-            bucket["rules"].append(evaluation["rule"].as_dict())
-            bucket["inner_sources"].append(selection_source)
-            for name, values in evaluation["sanity_predictions"].items():
-                bucket["sanity"][name].extend(values.tolist())
-            for stage in evaluation["funnel"]:
-                funnel_bucket = bucket["funnel"][int(stage["depth"])]
-                funnel_bucket["rows"].extend(stage["rows"])
-                funnel_bucket["model"].extend(stage["model_prediction"].tolist())
-                funnel_bucket["baseline"].extend(stage["baseline_prediction"].tolist())
-                for name, values in stage["sanity_predictions"].items():
-                    funnel_bucket["sanity"][name].extend(values.tolist())
-            bucket["folds"].append({
-                "fold_index": fold["fold_index"], "selection_rank": rank,
-                "inner_selection_source": selection_source,
-                "outer_test_start_ts": fold["test_start_ts"],
-                "outer_test_end_ts": fold["test_end_ts"],
-                "selection_end_ts": discovery.get("inner_validation_end_ts"),
-                "outer_test_used_for_selection": False,
-                "purge_embargo_valid": fold["train_target_max_ts"] < fold["purge_boundary_ts"],
-                "raw_n": len(evaluation["rows"]),
-                "effective_n": evaluation["model"]["effective_n"],
-                "improvement": evaluation["improvement"],
-                "joint_positive": evaluation["joint_positive"],
-                "primary_baseline_name": "GLOBAL_RET5_PERSISTENCE",
-                "conditional_ret5": evaluation["model"],
-                "global_ret5": evaluation["baseline"],
-                "global_ret5_comparison": evaluation["global_ret5_comparison"],
-            })
+            buckets = aggregated[template.template_id]
+            _append_outer(
+                buckets["all_outer"], evaluation, selection_source=selection_source,
+                rank=rank, fold=fold,
+                selection_end_ts=discovery.get("inner_validation_end_ts"))
+            scoped = (buckets["primary_only"] if selection_source == "PRIMARY_FDR_PASS"
+                      else buckets["diagnostic_only"])
+            _append_outer(
+                scoped, evaluation, selection_source=selection_source,
+                rank=rank, fold=fold,
+                selection_end_ts=discovery.get("inner_validation_end_ts"))
         fold_reports.append({
             "fold_index": fold["fold_index"], "test_raw_n": len(fold["test"]),
             "test_start_ts": fold["test_start_ts"], "test_end_ts": fold["test_end_ts"],
@@ -342,85 +421,67 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
         })
 
     candidates: list[dict[str, Any]] = []
-    for template_id, bucket in aggregated.items():
-        candidate_rows = bucket["rows"]
-        model_prediction = np.asarray(bucket["model"], dtype=float)
-        baseline_prediction = np.asarray(bucket["baseline"], dtype=float)
-        model = metrics(candidate_rows, model_prediction)
-        baseline = metrics(candidate_rows, baseline_prediction)
-        sanity_baselines = {
-            name: metrics(candidate_rows, np.asarray(values, dtype=float))
-            for name, values in bucket["sanity"].items()
-        }
-        improvement = relative_improvement(model, baseline)
-        p_value = paired_loss_pvalue(candidate_rows, model_prediction, baseline_prediction)
-        representative_conditions = list(bucket["rules"][0]["conditions"])
-        funnel_report = []
-        funnel_base_n = len(bucket["funnel"].get(0, {}).get("rows", []))
-        for depth, stage in sorted(bucket["funnel"].items()):
-            stage_rows = stage["rows"]
-            stage_model = metrics(stage_rows, np.asarray(stage["model"], dtype=float))
-            stage_baseline = metrics(stage_rows, np.asarray(stage["baseline"], dtype=float))
-            stage_sanity = {
-                name: metrics(stage_rows, np.asarray(values, dtype=float))
-                for name, values in stage["sanity"].items()
-            }
-            funnel_report.append({
-                "step": "ALL_OBSERVATIONS" if depth == 0 else f"CONDITION_{depth}",
-                "conditions": representative_conditions[:depth],
-                "raw_n": len(stage_rows), "effective_n": stage_model["effective_n"],
-                "coverage": len(stage_rows)/max(1, funnel_base_n),
-                "conditional_ret5_brier": stage_model["brier"],
-                "global_ret5_brier": stage_baseline["brier"],
-                "conditional_ret5_logloss": stage_model["logloss"],
-                "global_ret5_logloss": stage_baseline["logloss"],
-                "signed_expectancy": stage_model["signed_expectancy"],
-                "improvement": relative_improvement(stage_model, stage_baseline),
-                "sanity_baselines": stage_sanity,
-                "post_hoc_used_for_selection": False,
-            })
-        folds_evaluated = len(bucket["folds"])
-        folds_positive = sum(bool(fold["joint_positive"]) for fold in bucket["folds"])
-        inner_primary_folds = sum(
-            source == "PRIMARY_FDR_PASS" for source in bucket["inner_sources"])
-        counts = _sample_counts(candidate_rows)
+    for template_id, buckets in aggregated.items():
+        primary = _bucket_summary(buckets["primary_only"])
+        diagnostic = _bucket_summary(buckets["diagnostic_only"])
+        combined = _bucket_summary(buckets["all_outer"])
+        # Root candidate statistics are confirmatory when any primary fold
+        # exists. Diagnostic folds never enlarge primary N or stability.
+        root = primary or diagnostic
+        assert root is not None
+        candidate_rows = root.pop("rows")
+        if primary is not None:
+            primary.pop("rows", None)
+        if diagnostic is not None:
+            diagnostic.pop("rows", None)
+        if combined is not None:
+            combined.pop("rows", None)
+        inner_primary_folds = len((primary or {}).get("folds") or [])
         candidates.append({
             "template_id": template_id, "horizon_minutes": horizon, "signal": SIGNAL,
             "template": [
                 {"feature_id": condition.feature_id, "kind": condition.kind,
                  "state": condition.state}
                 for condition in by_id[template_id].conditions],
-            "conditions": representative_conditions,
-            "thresholds": list(bucket["rules"]),
+            "conditions": root["conditions"],
+            "thresholds": root["thresholds"],
             "complexity": by_id[template_id].complexity,
             "primary_baseline_name": "GLOBAL_RET5_PERSISTENCE",
+            "aggregate_scope": ("PRIMARY_FDR_PASS_OUTER_FOLDS_ONLY"
+                                if primary is not None else "DIAGNOSTIC_DISPLAY_ONLY"),
             "coverage": len(candidate_rows)/max(1, sum(fold["test_raw_n"] for fold in fold_reports)),
-            **counts, "model": model, "baseline": baseline,
-            "conditional_ret5": model, "global_ret5": baseline,
-            "global_ret5_comparison": _global_ret5_comparison(model, baseline),
-            "sanity_baselines": sanity_baselines,
-            "improvement": improvement, "p_value": p_value,
-            "folds_evaluated": folds_evaluated, "folds_positive": folds_positive,
+            **{key: value for key, value in root.items()
+               if key not in {"conditions", "thresholds"}},
             "inner_primary_folds": inner_primary_folds,
-            "folds": bucket["folds"],
-            "funnel": funnel_report,
-            "assets": sorted({str(row["instrument"]) for row in candidate_rows}),
-            "sessions": sorted({str(row["ede_features"]["session_utc"]) for row in candidate_rows}),
-            "temporal_blocks": len({time.strftime("%Y-%m-%d", time.gmtime(float(row["captured_ts"])))
-                                    for row in candidate_rows}),
+            "primary_only_aggregate": primary,
+            "diagnostic_aggregate": diagnostic,
+            "all_outer_diagnostic_display": combined,
         })
-    q_values = benjamini_hochberg([float(item["p_value"]) for item in candidates])
-    for item, q_value in zip(candidates, q_values):
+    primary_candidates = [item for item in candidates if item["inner_primary_folds"] > 0]
+    primary_q_values = benjamini_hochberg(
+        [float(item["p_value"]) for item in primary_candidates])
+    q_by_template = {
+        str(item["template_id"]): q for item, q in zip(primary_candidates, primary_q_values)}
+    diagnostic_candidates = [item for item in candidates if item.get("diagnostic_aggregate")]
+    diagnostic_q_values = benjamini_hochberg([
+        float(item["diagnostic_aggregate"]["p_value"]) for item in diagnostic_candidates])
+    diagnostic_q_by_template = {
+        str(item["template_id"]): q
+        for item, q in zip(diagnostic_candidates, diagnostic_q_values)}
+    for item in candidates:
+        q_value = q_by_template.get(str(item["template_id"]), 1.0)
         item["q_value"] = q_value
-        sample_gate = (item["raw_n"] >= MIN_RAW and item["effective_n"] >= MIN_EFFECTIVE
+        item["diagnostic_q_value"] = diagnostic_q_by_template.get(str(item["template_id"]))
+        inner_fdr_gate = int(item.get("inner_primary_folds") or 0) > 0
+        sample_gate = (inner_fdr_gate and item["raw_n"] >= MIN_RAW
+                       and item["effective_n"] >= MIN_EFFECTIVE
                        and item["positive_n"] >= MIN_CLASS and item["negative_n"] >= MIN_CLASS)
-        stability_gate = (item["folds_evaluated"] == 4
+        stability_gate = (inner_fdr_gate and item["folds_evaluated"] == 4
                           and item["folds_positive"] >= MIN_FOLD_POSITIVE)
         metric_gate = (item["improvement"]["brier"] >= MIN_RELATIVE_IMPROVEMENT
                        and item["improvement"]["logloss"] >= MIN_RELATIVE_IMPROVEMENT)
-        multiple_testing_gate = q_value <= MAX_Q_VALUE
-        inner_fdr_gate = int(item.get("inner_primary_folds") or 0) > 0
-        maturity = evidence_maturity(
+        multiple_testing_gate = inner_fdr_gate and q_value <= MAX_Q_VALUE
+        edge_status = edge_maturity(
             raw_n=int(item["raw_n"]), effective_n=int(item["effective_n"]),
             positive_n=int(item["positive_n"]), negative_n=int(item["negative_n"]),
             temporal_blocks=int(item["temporal_blocks"]),
@@ -428,12 +489,16 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
             logloss_improvement=float(item["improvement"]["logloss"]),
             q_value=q_value, folds_evaluated=int(item["folds_evaluated"]),
             folds_positive=int(item["folds_positive"]),
-            inner_fdr_passed=inner_fdr_gate)
+            inner_fdr_passed=inner_fdr_gate,
+            candidate_tested=inner_fdr_gate)
+        data_status = data_maturity(
+            raw_n=int(item["raw_n"]), effective_n=int(item["effective_n"]),
+            temporal_blocks=int(item["temporal_blocks"]))
         if not inner_fdr_gate:
             status = "EXPLORATORY_FDR_FAIL"
         elif not sample_gate:
             status = "EXPLORATORY"
-        elif (maturity == "ROBUST_EDGE" and stability_gate and metric_gate
+        elif (edge_status == "ROBUST_EDGE" and stability_gate and metric_gate
               and multiple_testing_gate):
             status = "HISTORICAL_CANDIDATE"
         else:
@@ -449,9 +514,11 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
         )
         item.update({
             "status": status,
-            "evidence_maturity": maturity,
+            "data_maturity": data_status,
+            "edge_maturity": edge_status,
+            "evidence_maturity": edge_status,
             "maturity_contract_version": MATURITY_CONTRACT_VERSION,
-            "terminal_use": TERMINAL_USE_BY_MATURITY[maturity],
+            "terminal_use": TERMINAL_USE_BY_MATURITY[edge_status],
             "where_it_helps": bool(
                 item["improvement"]["brier"] > 0
                 and item["improvement"]["logloss"] > 0),
@@ -513,6 +580,8 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
             "conditions": ([] if best is None else best["rule"]["conditions"]),
             "thresholds": [row["rule"] for row in records],
             "status": status, "reason_rejected": reason,
+            "data_maturity": "INSUFFICIENT_DATA",
+            "edge_maturity": "INSUFFICIENT_DATA",
             "evidence_maturity": "INSUFFICIENT_DATA",
             "terminal_use": TERMINAL_USE_BY_MATURITY["INSUFFICIENT_DATA"],
             "q_value": (None if best is None else best["q_value"]),
@@ -547,8 +616,18 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
         "fdr_passed": sum(bool(item["gates"]["multiple_testing"]) for item in candidates),
         "stability_gate_passed": sum(bool(item["gates"]["stability"]) for item in candidates),
         "historical_candidate_count": sum(item["status"] == "HISTORICAL_CANDIDATE" for item in candidates),
-        "maturity_counts": {
+        "edge_maturity_counts": {
             maturity: sum(item.get("evidence_maturity") == maturity for item in candidates)
+            for maturity in TERMINAL_USE_BY_MATURITY
+        },
+        "data_maturity_counts": {
+            maturity: sum(item.get("data_maturity") == maturity for item in candidates)
+            for maturity in (
+                "INSUFFICIENT_DATA", "DATA_READY_EARLY", "DATA_READY_RESEARCH",
+                "DATA_READY_PROVISIONAL", "DATA_READY_ROBUST")
+        },
+        "maturity_counts": {
+            maturity: sum(item.get("edge_maturity") == maturity for item in candidates)
             for maturity in TERMINAL_USE_BY_MATURITY
         },
     }
@@ -613,8 +692,19 @@ def run_discovery(sources: list[dict[str, Any]], *, source_set_sha256: str,
         "aggregated_sample_gate_passed": sum(item["sample_gate_passed"] for item in horizons),
         "stability_gate_passed": sum(item["stability_gate_passed"] for item in horizons),
         "historical_candidate_count": len(winners),
+        "edge_maturity_counts": {
+            maturity: sum(item.get("edge_maturity") == maturity
+                          for item in all_candidates)
+            for maturity in TERMINAL_USE_BY_MATURITY
+        },
+        "data_maturity_counts": {
+            maturity: sum(item.get("data_maturity") == maturity for item in all_candidates)
+            for maturity in (
+                "INSUFFICIENT_DATA", "DATA_READY_EARLY", "DATA_READY_RESEARCH",
+                "DATA_READY_PROVISIONAL", "DATA_READY_ROBUST")
+        },
         "maturity_counts": {
-            maturity: sum(item.get("evidence_maturity") == maturity
+            maturity: sum(item.get("edge_maturity") == maturity
                           for item in all_candidates)
             for maturity in TERMINAL_USE_BY_MATURITY
         },

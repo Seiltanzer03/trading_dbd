@@ -24,6 +24,10 @@ SYSTEM_PROMPT = _impl.SYSTEM_PROMPT + """
 material scenarios. derivative_switch_thresholds — deterministic cached-scenario
 sensitivity, не статистическая калибровка и не обещание смены action. Все остальные
 scenario weights при threshold считаются фиксированными. promotion_allowed=false.
+EDE causal context используй для объяснения и confidence context. Всегда различай
+DATA_MATURITY и EDGE_MATURITY. DATA_READY/EARLY/RESEARCH/PROVISIONAL не имеют
+production directional authority и не могут самостоятельно вызвать CLOSE/EXIT.
+Не называй отсутствие validated edge отсутствием полезной рыночной информации.
 """
 
 
@@ -142,6 +146,10 @@ def build_snapshot(engine) -> dict:
         "snapshot_scope": "bounded_authority_summary",
         "full_report_endpoint": "/api/validation",
     }
+    # The authoritative management decision was frozen by the base builder
+    # before this explanatory-only research context is attached.
+    from .edge_discovery.ai_context import build_ai_ede_context
+    snapshot["ede_causal_context"] = build_ai_ede_context(engine, snapshot)
     return snapshot
 
 
