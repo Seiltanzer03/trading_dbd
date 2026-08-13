@@ -1,0 +1,73 @@
+{
+  "contract_version": "g1s-p2e-segmented-persistence-nested-wf-v1",
+  "hypothesis": "asset-family, UTC-session or shrunk instrument conditioning can improve causal ret5 persistence probability",
+  "status_before_outer_test": "PREDECLARED_NOT_YET_RUN",
+  "target": "direction_up",
+  "horizons_minutes": [15, 30, 60, 120, 240],
+  "asset_family_by_instrument": {
+    "NAS100": "EQUITY_INDICES",
+    "SP500": "EQUITY_INDICES",
+    "US30": "EQUITY_INDICES",
+    "GER40": "EQUITY_INDICES",
+    "UK100": "EQUITY_INDICES",
+    "JPY100": "EQUITY_INDICES",
+    "XAU": "METALS",
+    "XAG": "METALS",
+    "EURUSD": "FX",
+    "USDCAD": "FX"
+  },
+  "session_utc_intervals": {
+    "ASIA": [0, 8],
+    "EUROPE": [8, 13],
+    "US": [13, 21],
+    "LATE": [21, 24]
+  },
+  "candidates": [
+    "C0_NO_CORRECTION",
+    "C1_ASSET_FAMILY_OFFSET",
+    "C2_SESSION_OFFSET",
+    "C3_INSTRUMENT_SHRUNK_OFFSET",
+    "C4_FAMILY_SESSION_OFFSET",
+    "C5_FAMILY_SESSION_SMALL_REGIME"
+  ],
+  "small_regime_block": [
+    "rv15_over_rv60",
+    "ret5_over_rv15",
+    "ret15_over_rv60",
+    "trend_agreement_5_15",
+    "trend_efficiency_60"
+  ],
+  "l2_grid": [1, 4, 16, 64],
+  "inner_selection": {
+    "method": "purged_tail_20pct_inside_outer_train",
+    "practical_tie_relative": 0.001,
+    "tie_winner": "C0_NO_CORRECTION"
+  },
+  "outer": {
+    "folds": 4,
+    "expanding_chronological": true,
+    "shuffle": false,
+    "target_overlap_purge": true,
+    "embargo_seconds": 300,
+    "outer_test_used_for_selection": false
+  },
+  "winner_gate": {
+    "raw_n_min": 1000,
+    "effective_n_min": 400,
+    "positive_n_min": 120,
+    "negative_n_min": 120,
+    "temporal_blocks_min": 20,
+    "regimes_min": 2,
+    "valid_outer_folds": 4,
+    "joint_non_degrade_folds_min": 3,
+    "brier_relative_improvement_min": 0.005,
+    "logloss_relative_improvement_min": 0.005,
+    "comparison": "best causal baseline"
+  },
+  "authority": {
+    "research_only": true,
+    "production_authority": false,
+    "auto_promotion": false,
+    "live_cohort_created": false
+  }
+}
