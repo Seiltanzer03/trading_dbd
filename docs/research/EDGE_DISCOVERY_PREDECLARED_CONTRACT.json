@@ -1,0 +1,38 @@
+{
+  "auto_promotion": false,
+  "baseline_rule": "best_non_signal_causal_baseline_selected_inside_inner_discovery",
+  "candidate_depth_max": 3,
+  "contract_version": "g1s-edge-discovery-engine-v1",
+  "dataset_label": "RESEARCH_DISCOVERY_DATASET",
+  "false_discovery_control": {
+    "max_q_value": 0.1,
+    "method": "Benjamini-Hochberg",
+    "scopes": [
+      "inner-fold candidate discovery",
+      "aggregated outer candidate evidence"
+    ]
+  },
+  "filter_primitives": [
+    "categorical asset/family/session",
+    "train-only quintile RV and trend efficiency",
+    "causally aligned cross-asset confirmation",
+    "family breadth state"
+  ],
+  "first_signal": "ret5_persistence",
+  "horizons_minutes": [15, 30, 60, 120, 240],
+  "inner_selection": "purged trailing 20 percent of each outer train",
+  "missing_is_not_zero": true,
+  "outer_folds": 4,
+  "outer_selection_limit_per_fold": 10,
+  "production_authority": false,
+  "sample_gates": {
+    "effective_n": 400,
+    "negative_n": 120,
+    "positive_n": 120,
+    "raw_n": 1000
+  },
+  "source": "fresh real Yahoo 5m/60d bars frozen in a temporary runner DB, or explicitly supplied offline P1B read-only copy",
+  "stability_gate": "at least 3 of 4 positive outer folds and all 4 evaluated",
+  "synthetic_option_history": false,
+  "validated_relative_improvement_each_primary_metric": 0.005
+}

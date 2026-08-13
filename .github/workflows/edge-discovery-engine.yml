@@ -1,0 +1,41 @@
+name: G1S Edge Discovery Engine audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "seiltanzer/edge_discovery/**"
+      - "scripts/run_edge_discovery_audit.py"
+      - "docs/research/EDGE_DISCOVERY_PREDECLARED_CONTRACT.json"
+      - ".github/workflows/edge-discovery-engine.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bounded-discovery:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install research runtime
+        run: pip install -e ".[dev]"
+      - name: Fetch real 5m/60d bars and run bounded nested discovery
+        run: |
+          python scripts/run_edge_discovery_audit.py \
+            --output edge-discovery-report.json \
+            --feature-registry edge-discovery-feature-registry.json \
+            --candidate-registry edge-discovery-candidates.jsonl | tee edge-discovery-summary.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g1s-edge-discovery-${{ github.sha }}
+          path: |
+            edge-discovery-report.json
+            edge-discovery-summary.json
+            edge-discovery-feature-registry.json
+            edge-discovery-candidates.jsonl
+          retention-days: 30
