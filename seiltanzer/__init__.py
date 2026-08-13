@@ -135,32 +135,22 @@ from .g1_short_horizon_feature_v2_integrity import install_g1_short_horizon_feat
 _install_g1_short_horizon_feature_v2_integrity()
 del _install_g1_short_horizon_feature_v2_integrity
 
-# V2 continuous predictions run after V2 direction and reapply only causal
-# pre-T0 calibrators, closing wrapper ordering without touching V1.
 from .g1_short_horizon_continuous_v2 import install_g1_short_horizon_continuous_v2 as _install_g1_short_horizon_continuous_v2
 _install_g1_short_horizon_continuous_v2()
 del _install_g1_short_horizon_continuous_v2
 
-# Presentation snapshots are computed by the low-priority worker; HTTP reads
-# frozen JSON instead of triggering full-history OOS scans.
 from .g1_short_horizon_evidence_materialization import install_g1_short_horizon_evidence_materialization as _install_g1_short_horizon_evidence_materialization
 _install_g1_short_horizon_evidence_materialization()
 del _install_g1_short_horizon_evidence_materialization
 
-# Historical diagnostics are true expanding walk-forward folds with fixed-horizon
-# purge/embargo. Prospective OOS remains the only evidence allowed to support edge.
 from .g1_short_horizon_walkforward import install_g1_short_horizon_walkforward as _install_g1_short_horizon_walkforward
 _install_g1_short_horizon_walkforward()
 del _install_g1_short_horizon_walkforward
 
-# A mature raw forecast is allowed to remain the selected representation when
-# causal Platt scaling adds no benefit; both still must beat causal baselines.
 from .g1_short_horizon_probability_selection import install_g1_short_horizon_probability_selection as _install_g1_short_horizon_probability_selection
 _install_g1_short_horizon_probability_selection()
 del _install_g1_short_horizon_probability_selection
 
-# Phase H2 collects a much wider immutable T0 state for future family ablation.
-# It deliberately does not change V1/V2 model dimensions or production authority.
 from .g1_management_feature_context_v2 import install_g1_management_feature_context_v2 as _install_g1_management_feature_context_v2
 _install_g1_management_feature_context_v2()
 del _install_g1_management_feature_context_v2
@@ -169,28 +159,28 @@ from .g1_broad_market_evidence_v3 import install_g1_broad_market_evidence_v3 as 
 _install_g1_broad_market_evidence_v3()
 del _install_g1_broad_market_evidence_v3
 
-# P0 must be the final passive wrapper: optional H2/V3 research features may
-# degrade individually, but they can never cancel the immutable core T0 capture.
 from .g1_operational_integrity import install_g1_operational_integrity as _install_g1_operational_integrity
 _install_g1_operational_integrity()
 del _install_g1_operational_integrity
 
-# P1 touches only the G.1S research runtime.  It is installed after the passive
-# P0 wrapper so no later import can replace the frozen champion prediction hook.
 from .g1_short_horizon_champion_runtime import install_g1_short_horizon_champion_runtime as _install_g1_short_horizon_champion_runtime
 _install_g1_short_horizon_champion_runtime()
 del _install_g1_short_horizon_champion_runtime
 
-# P1B is installed after the champion layer because a historical winner is only
-# a provisional artifact.  It receives a new LIVE_PROSPECTIVE_OOS cohort and
-# never rewrites or counts historical folds as live validation evidence.
 from .g1_short_horizon_historical_wf import install_g1_short_horizon_historical_wf as _install_g1_short_horizon_historical_wf
 _install_g1_short_horizon_historical_wf()
 del _install_g1_short_horizon_historical_wf
 
-# Immutable retries may leave older source sets in the audit ledger.  Install the
-# source-set filter globally so worker/CLI/API all expose only the current
-# finalized set while preserving old artifacts for audit/recovery.
 from .g1_short_horizon_historical_wf_integrity import install_g1_short_horizon_historical_wf_integrity as _install_g1_short_horizon_historical_wf_integrity
 _install_g1_short_horizon_historical_wf_integrity()
 del _install_g1_short_horizon_historical_wf_integrity
+
+# P3L keeps raw Yahoo 1m bars from the same intraday request before any broker
+# basis offset, then validates only the historically proven 5m volatility target.
+from .g1_short_horizon_p3_live_feed import install_g1_short_horizon_p3_live_feed as _install_g1_short_horizon_p3_live_feed
+_install_g1_short_horizon_p3_live_feed()
+del _install_g1_short_horizon_p3_live_feed
+
+from .g1_short_horizon_p3_live import install_g1_short_horizon_p3_live as _install_g1_short_horizon_p3_live
+_install_g1_short_horizon_p3_live()
+del _install_g1_short_horizon_p3_live
