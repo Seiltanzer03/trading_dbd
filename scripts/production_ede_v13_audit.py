@@ -158,13 +158,24 @@ def audit(
         ledger = ShadowLedger(shadow_ledger)
         resolution = resolve_shadow_predictions(
             ledger, resolved_rows=resolved_rows, asof_ts=materialized_at)
+        # A rule frozen by this audit did not exist for any T0 captured before
+        # materialized_at. Never back-apply it merely because that T0 is still
+        # unresolved. Runtime shadow creation starts with observations captured
+        # after the frozen audit exists.
+        causal_pending_rows = [
+            row for row in pending_rows
+            if float(row.get("captured_ts") or 0.0) >= materialized_at - 1e-6]
         prediction_creation = create_shadow_predictions(
             ledger, frozen_evidence=frozen, selective_report=selective,
-            resolved_rows=resolved_rows, pending_rows=pending_rows,
+            resolved_rows=resolved_rows, pending_rows=causal_pending_rows,
             created_ts=materialized_at)
         shadow_report = {
             "enabled": True,
-            "prediction_creation": prediction_creation,
+            "prediction_creation": {
+                **prediction_creation,
+                "rule_must_preexist_t0": True,
+                "eligible_pending_rows": len(causal_pending_rows),
+            },
             "resolution": resolution,
             "summary": shadow_summary(ledger, cutoff_ts=materialized_at),
         }
