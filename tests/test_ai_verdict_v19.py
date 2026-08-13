@@ -15,6 +15,24 @@ def _snapshot():
             "remaining_position_fraction": 1.0,
             "realized_position_fraction": 0.0,
         },
+        "ede_causal_context": {
+            "data_maturity": "DATA_READY_EARLY",
+            "edge_maturity": "INSUFFICIENT_DATA",
+            "context_lines_ru": [
+                "IV/GEX/skew подтверждают удержание как causal context.",
+                "Данных достаточно для контекста, но edge ещё не доказан.",
+            ],
+            "families": {
+                "OPTIONS": {"available": True},
+                "CROSS_ASSET": {"available": True},
+                "REGIME": {"available": True},
+            },
+            "authority": {
+                "production_directional_authority": False,
+                "may_trigger_exit_or_close": False,
+                "auto_promotion": False,
+            },
+        },
         "trade_geometry": {
             "current": 29795.4863, "entry": 29808.295,
             "original_stop": 29750.0, "active_risk_barrier": 29750.0,
@@ -217,3 +235,16 @@ def test_v19_metric_audit_keeps_current_value_when_derivative_is_unavailable():
     assert "p_take: current=0.3415 probability; slope=UNAVAILABLE" in report
     assert "N=1; span=0.0m; confidence=0.0%; source_quality=85.0%." in report
     assert "barrier_ev: current=-0.004117 R; slope=UNAVAILABLE" in report
+
+
+def test_early_ede_context_reaches_verdict_without_action_authority():
+    snapshot = _snapshot()
+    before = dict(snapshot["policy_manager"]["management_decision"])
+    report = v19.normalize_final_report(_legacy_text(), snapshot)
+    assert "**EDE CAUSAL MARKET CONTEXT**" in report
+    assert "IV/GEX/skew подтверждают удержание" in report
+    assert "данных достаточно для контекста, но edge ещё не доказан" in report.lower()
+    assert "DATA_MATURITY=DATA_READY_EARLY" in report
+    assert "EDGE_MATURITY=INSUFFICIENT_DATA" in report
+    assert "may_trigger_exit_or_close=false" in report
+    assert snapshot["policy_manager"]["management_decision"] == before

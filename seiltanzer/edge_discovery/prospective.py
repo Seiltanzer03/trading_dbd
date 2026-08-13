@@ -20,7 +20,7 @@ from seiltanzer.g1_short_horizon_historical_wf import _weights
 
 from .feature_view import FeatureValue, causal_dynamics, feature_value
 from .historical import aligned_cross_asset_context
-from .maturity import evidence_maturity
+from .maturity import data_maturity
 from .registry import FEATURES, ZERO_COVERAGE_DIAGNOSIS
 
 
@@ -556,8 +556,9 @@ class ProspectiveFeatureAdapter:
         totals = len(rows)
         records: list[dict[str, Any]] = []
         maturity_rank = {
-            "INSUFFICIENT_DATA": 0, "EARLY_CONTEXT": 1,
-            "RESEARCH_SIGNAL": 2, "PROVISIONAL_EDGE": 3, "ROBUST_EDGE": 4,
+            "INSUFFICIENT_DATA": 0, "DATA_READY_EARLY": 1,
+            "DATA_READY_RESEARCH": 2, "DATA_READY_PROVISIONAL": 3,
+            "DATA_READY_ROBUST": 4,
         }
         for definition in FEATURES:
             values = [row["feature_values"].get(definition.feature_id) for row in rows]
@@ -581,7 +582,7 @@ class ProspectiveFeatureAdapter:
                 temporal_blocks = len({
                     time.strftime("%Y-%m-%d", time.gmtime(float(row["captured_ts"])))
                     for row in resolved_rows})
-                maturity = evidence_maturity(
+                maturity = data_maturity(
                     raw_n=len(resolved_rows), effective_n=int(effective),
                     temporal_blocks=temporal_blocks)
                 by_horizon[str(horizon)] = {
@@ -589,10 +590,11 @@ class ProspectiveFeatureAdapter:
                     "effective": int(effective),
                     "resolved": len(resolved_rows),
                     "coverage_pct": 100.0*len(eligible_rows)/max(1, len(horizon_rows)),
-                    "maturity_status": maturity,
+                    "data_maturity": maturity,
+                    "edge_maturity": "INSUFFICIENT_DATA",
                 }
             best_maturity = max(
-                (item["maturity_status"] for item in by_horizon.values()),
+                (item["data_maturity"] for item in by_horizon.values()),
                 key=lambda item: maturity_rank[item], default="INSUFFICIENT_DATA")
             if definition.research_scope == "G1M_ONLY":
                 status = "G1M_ONLY"
@@ -618,6 +620,8 @@ class ProspectiveFeatureAdapter:
                 "usable_for_ede": bool(
                     definition.research_scope == "G1S"
                     and best_maturity != "INSUFFICIENT_DATA"),
+                "data_maturity": best_maturity,
+                "edge_maturity": "INSUFFICIENT_DATA",
                 "status": status,
                 "by_horizon": by_horizon,
                 "zero_coverage_diagnosis": ZERO_COVERAGE_DIAGNOSIS.get(

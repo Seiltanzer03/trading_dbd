@@ -83,8 +83,11 @@ def _edge_map(discovery: dict[str, Any], inventory: dict[str, Any]) -> list[dict
                     "temporal_blocks": best.get("temporal_blocks"),
                 } if best else None),
                 "assets": (best or {}).get("assets") or [],
-                "status": ((best or {}).get("evidence_maturity")
-                           or coverage.get("maturity_status") or "INSUFFICIENT_DATA"),
+                "data_maturity": coverage.get("data_maturity", "INSUFFICIENT_DATA"),
+                "edge_maturity": ((best or {}).get("edge_maturity")
+                                  or "INSUFFICIENT_DATA"),
+                "status": ((best or {}).get("edge_maturity")
+                           or "INSUFFICIENT_DATA"),
                 "where_it_helps": bool((best or {}).get("where_it_helps")),
                 "where_it_hurts": bool((best or {}).get("where_it_hurts")),
             })
@@ -127,7 +130,7 @@ def audit(database: Path) -> dict[str, Any]:
         "discovery": discovery,
         "feature_horizon_edge_map": matrix,
         "top_15_maturity_edges": [item for item in candidates
-                                  if item.get("evidence_maturity") != "INSUFFICIENT_DATA"][:15],
+                                  if item.get("edge_maturity") != "INSUFFICIENT_DATA"][:15],
         "where_it_helps": [item for item in candidates if item.get("where_it_helps")][:15],
         "where_it_hurts": [item for item in candidates if item.get("where_it_hurts")][:15],
         "ablation": ablation,
@@ -152,7 +155,8 @@ def _compact_candidate(item: dict[str, Any]) -> dict[str, Any]:
         "delta_logloss": comparison.get("logloss_delta"),
         "q": item.get("q_value"), "folds_positive": item.get("folds_positive"),
         "folds_evaluated": item.get("folds_evaluated"),
-        "assets": item.get("assets"), "status": item.get("evidence_maturity"),
+        "assets": item.get("assets"), "data_maturity": item.get("data_maturity"),
+        "status": item.get("edge_maturity"),
         "discovery_status": item.get("status"),
     }
 
@@ -176,7 +180,9 @@ def main(argv: list[str] | None = None) -> int:
         "hypotheses_tested": discovery["hypotheses_tested"],
         "sample_gate_passed": discovery["sample_gate_passed"],
         "fdr_passed": discovery["fdr_passed"],
-        "maturity_counts": discovery["maturity_counts"],
+        "data_maturity_counts": discovery["data_maturity_counts"],
+        "edge_maturity_counts": discovery["edge_maturity_counts"],
+        "maturity_counts": discovery["edge_maturity_counts"],
         "historical_candidate_count": discovery["historical_candidate_count"],
         "feature_summary": report["inventory"]["summary"],
     }, sort_keys=True))

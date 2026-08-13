@@ -57,7 +57,7 @@ def family_ablation(report: dict[str, Any]) -> dict[str, Any]:
     for name in names:
         items = [item for item in candidates if _belongs(name, _families(item))]
         items.sort(key=lambda item: (
-            -_MATURITY_RANK.get(str(item.get("evidence_maturity")), 0),
+            -_MATURITY_RANK.get(str(item.get("edge_maturity")), 0),
             -float((item.get("edge_score") or {}).get("score") or -1e9),
             str(item.get("candidate_id"))))
         best = items[0] if items else None
@@ -65,7 +65,9 @@ def family_ablation(report: dict[str, Any]) -> dict[str, Any]:
             "candidate_count": len(items),
             "best_candidate_id": best.get("candidate_id") if best else None,
             "horizon_minutes": best.get("horizon_minutes") if best else None,
-            "evidence_maturity": best.get("evidence_maturity") if best else "INSUFFICIENT_DATA",
+            "data_maturity": best.get("data_maturity") if best else "INSUFFICIENT_DATA",
+            "edge_maturity": best.get("edge_maturity") if best else "INSUFFICIENT_DATA",
+            "evidence_maturity": best.get("edge_maturity") if best else "INSUFFICIENT_DATA",
             "delta_brier": ((best.get("global_ret5_comparison") or {}).get("brier_delta")
                             if best else None),
             "delta_logloss": ((best.get("global_ret5_comparison") or {}).get("logloss_delta")
@@ -82,18 +84,18 @@ def family_ablation(report: dict[str, Any]) -> dict[str, Any]:
                 "folds_evaluated": best.get("folds_evaluated"),
             } if best else None),
             "edge_claim_allowed": bool(
-                best and best.get("evidence_maturity") == "ROBUST_EDGE"),
+                best and best.get("edge_maturity") == "ROBUST_EDGE"),
         }
     option_groups = ("PRICE_OPTIONS", "PRICE_OPTION_DYNAMICS", "PRICE_OPTIONS_CROSS")
     output["options_incremental_edge_summary"] = {
         "positive_early_or_better": any(
-            output[name]["evidence_maturity"] in {
+            output[name]["edge_maturity"] in {
                 "RESEARCH_SIGNAL", "PROVISIONAL_EDGE", "ROBUST_EDGE"}
             and float(output[name]["relative_brier_improvement"] or 0.0) > 0.0
             and float(output[name]["relative_logloss_improvement"] or 0.0) > 0.0
             for name in option_groups),
         "validated_edge_claim": any(
-            output[name]["evidence_maturity"] == "ROBUST_EDGE"
+            output[name]["edge_maturity"] == "ROBUST_EDGE"
             for name in option_groups),
     }
     return {

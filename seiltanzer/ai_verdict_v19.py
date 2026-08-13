@@ -216,6 +216,24 @@ def _metric_audit_lines(snapshot: dict) -> list[str]:
     return lines
 
 
+def _ede_context_lines(snapshot: dict) -> list[str]:
+    context = snapshot.get("ede_causal_context") or {}
+    if not context:
+        return ["EDE causal context отсутствует в этом snapshot."]
+    lines = list(context.get("context_lines_ru") or [])
+    lines.append(
+        f"DATA_MATURITY={context.get('data_maturity', 'INSUFFICIENT_DATA')}; "
+        f"EDGE_MATURITY={context.get('edge_maturity', 'INSUFFICIENT_DATA')}.")
+    available = [name for name, row in (context.get("families") or {}).items()
+                 if row.get("available")]
+    lines.append("Доступные causal families: " + (", ".join(available) if available else "нет") + ".")
+    authority = context.get("authority") or {}
+    lines.append(
+        "Authority: production_directional_authority=false; auto_promotion=false; "
+        f"may_trigger_exit_or_close={str(bool(authority.get('may_trigger_exit_or_close'))).lower()}.")
+    return lines
+
+
 def normalize_structured_report(text: str, snapshot: dict) -> str:
     if not _structured_contract(snapshot): return text
     lines = text.splitlines()
@@ -226,6 +244,7 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
     if bounds is not None:
         start, _ = bounds; label = "Base production policy distribution (common execution-MC paths):"
         if start + 1 >= len(lines) or lines[start + 1] != label: lines.insert(start + 1, label)
+    if not any(line.startswith("**EDE CAUSAL MARKET CONTEXT**") for line in lines): lines.extend(["", "**EDE CAUSAL MARKET CONTEXT** —", *_ede_context_lines(snapshot)])
     if not any(line.startswith("**FULL METRIC AUDIT**") for line in lines): lines.extend(["", "**FULL METRIC AUDIT** —", *_metric_audit_lines(snapshot)])
     return "\n".join(lines).strip()
 
