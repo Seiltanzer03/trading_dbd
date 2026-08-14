@@ -188,16 +188,17 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         if isinstance(result, dict):
             g1s = result.get("g1s") or {}
             g1m_local = result.get("g1m_local") or {}
-            ede_shadow = result.get("ede_v13_shadow") or {}
             result_summary = {
                 "g1s": {"batch_limit": g1s.get("batch_limit")},
                 "g1m_local": {"batch_limit": g1m_local.get("batch_limit")},
-                "ede_v13_shadow": {
+            }
+            if "ede_v13_shadow" in result:
+                ede_shadow = result.get("ede_v13_shadow") or {}
+                result_summary["ede_v13_shadow"] = {
                     "refreshed": ede_shadow.get("refreshed"),
                     "reason": ede_shadow.get("reason"),
                     "summary": ede_shadow.get("summary"),
-                },
-            }
+                }
         keys = (
             "contract_version", "scalability_refinement_version", "running",
             "startup_grace_sec", "first_cycle_not_before_ts", "last_started_ts",
