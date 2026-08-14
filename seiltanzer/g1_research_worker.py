@@ -1,12 +1,9 @@
 """Low-priority research worker for G.1S and G.1-M.1.
 
-Market collection is owned by the existing passive loop. This worker only consumes
-already-frozen source rows and may lag/fail without delaying quotes, trade writes or
-AI Verdict. It shares SQLite durability but has no production decision authority.
-
-Work is deliberately split into bounded batches. The research worker shares the
-SQLite source of truth with the market collector, so one iteration must not hold the
-process around a multi-thousand-row research burst merely because backlog exists.
+The acceptance-visible core is deliberately small and bounded. Full-history or
+presentation/research maintenance runs only after that core has completed, one
+phase at a time, and never while the exact-SHA production acceptance gate is active.
+No production decision authority lives here.
 """
 from __future__ import annotations
 
@@ -18,100 +15,51 @@ from .research_acceptance_gate import worker_acceptance_gate_state
 
 
 RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
-# Preserve the published scalability contract. Evidence-report materialization has
-# its own versioned contract and does not require an incompatible worker version.
-RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v4"
+RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v5"
 RESEARCH_INTERVAL_SEC = 10.0
-# Deployment validation and the independent market collector must get an
-# uncontended startup window.  This delays research maintenance only; frozen T0
-# capture and every production decision path start with the service as before.
 RESEARCH_STARTUP_GRACE_SEC = 5 * 60.0
 G1S_BATCH = 500
 G1M_LOCAL_BATCH = 100
+STATUS_REFRESH_BATCH = 1000
+TRADE_LINK_BATCH = 50
+AUX_BATCH = 500
 FIT_GATE_INTERVAL_SEC = 15 * 60.0
-TRADE_LINK_INTERVAL_SEC = 60.0
+EVIDENCE_INTERVAL_SEC = 5 * 60.0
+HISTORICAL_WF_INTERVAL_SEC = 15 * 60.0
+MAINTENANCE_PHASES = (
+    "status_refresh",
+    "trade_links",
+    "barriers",
+    "path_metrics",
+    "ede_shadow",
+    "evidence_reports",
+    "historical_walk_forward",
+    "fit_models",
+)
 
 
-def _run_g1s_bounded(runtime) -> dict:
-    materialized = runtime.materialize_new(limit=G1S_BATCH)
-    resolved = runtime.resolve_new(limit=G1S_BATCH)
-
-    status_refresh = runtime.refresh_materialized_status(limit=10000)
-    now = time.time()
-
-    links = 0
-    last_links = float(getattr(runtime, "_g1s_worker_last_trade_links_ts", 0.0) or 0.0)
-    if now-last_links >= TRADE_LINK_INTERVAL_SEC:
-        links = runtime.materialize_trade_links()
-        runtime._g1s_worker_last_trade_links_ts = now
-
-    models = 0
-    last_fit = float(getattr(runtime, "_g1s_worker_last_fit_gate_ts", 0.0) or 0.0)
-    fit_due = now-last_fit >= FIT_GATE_INTERVAL_SEC
-    fit_ready = any(bool(item.get("fit_allowed"))
-                    for item in runtime.status().get("horizons", []))
-    if fit_due:
-        runtime._g1s_worker_last_fit_gate_ts = now
-        if fit_ready:
-            models = runtime.fit_if_ready()
-
-    from .g1_short_horizon_refinement import _materialize_barriers
-    from .g1_short_horizon_metrics_refinement import _materialize_path_metrics
-    barrier_rows = _materialize_barriers(runtime, limit=G1S_BATCH)
-    path_metric_rows = _materialize_path_metrics(runtime, limit=G1S_BATCH)
-
-    # Production ShortHorizonRuntime always has this method after package install.
-    # Minimal test doubles and compatibility callers are allowed to omit it; the
-    # evidence cache is presentation-only and must never make core resolution fail.
-    evidence_fn = getattr(runtime, "materialize_evidence_reports", None)
-    evidence_reports = (
-        evidence_fn() if callable(evidence_fn)
-        else {"refreshed": False, "reason": "MATERIALIZER_UNAVAILABLE"}
-    )
-
-    # P1B historical walk-forward is a one-time/versioned research bootstrap.
-    # The first run may perform network I/O and large numpy fits, therefore it
-    # lives only on this low-priority worker.  Subsequent calls are a persisted
-    # O(1) ALREADY_MATERIALIZED check.  Failure cannot stop the market collector.
-    historical_fn = getattr(runtime, "materialize_historical_walkforward", None)
-    historical_wf = (
-        historical_fn() if callable(historical_fn)
-        else {"refreshed": False, "reason": "HISTORICAL_WF_UNAVAILABLE"}
-    )
+def _run_g1s_core(runtime) -> dict:
+    """Only bounded source materialization/resolution required for worker health."""
     return {
-        "materialized": materialized,
-        "resolved": resolved,
-        "status_refresh": status_refresh,
-        "trade_links": links,
-        "models_created": models,
-        "fit_gate_due": fit_due,
-        "fit_gate_ready": fit_ready,
-        "barrier_rows_created": barrier_rows,
-        "path_metrics_created": path_metric_rows,
-        "evidence_reports": evidence_reports,
-        "historical_walk_forward": historical_wf,
+        "materialized": runtime.materialize_new(limit=G1S_BATCH),
+        "resolved": runtime.resolve_new(limit=G1S_BATCH),
         "batch_limit": G1S_BATCH,
     }
 
 
-def _run_g1m_local_bounded(runtime) -> dict:
-    windows = runtime.materialize_windows(limit=G1M_LOCAL_BATCH)
-    outcomes = runtime.resolve_due(limit=G1M_LOCAL_BATCH)
+def _run_g1m_local_core(runtime) -> dict:
     return {
-        "windows_created": windows,
-        "outcomes_resolved": outcomes,
+        "windows_created": runtime.materialize_windows(limit=G1M_LOCAL_BATCH),
+        "outcomes_resolved": runtime.resolve_due(limit=G1M_LOCAL_BATCH),
         "batch_limit": G1M_LOCAL_BATCH,
     }
 
 
 def _run_ede_shadow_bounded(engine) -> dict:
-    """Materialize only pre-existing v1.3 shadow rules, never full discovery."""
     try:
         from .edge_discovery.shadow_runtime import materialize_runtime_shadow
         return materialize_runtime_shadow(engine)
     except Exception as exc:
-        # Shadow evidence is research-only. A failure must never abort the core
-        # G1S/G1M worker cycle or affect the production decision path.
         return {
             "contract_version": "g1s-ede-shadow-runtime-v1.3",
             "refreshed": False,
@@ -120,6 +68,83 @@ def _run_ede_shadow_bounded(engine) -> dict:
             "production_authority": False,
             "auto_promotion": False,
         }
+
+
+def _cadence_due(runtime, attr: str, interval_sec: float, now: float) -> bool:
+    previous = float(getattr(runtime, attr, 0.0) or 0.0)
+    if now - previous < interval_sec:
+        return False
+    setattr(runtime, attr, now)
+    return True
+
+
+def _run_maintenance_phase(runtime, engine, phase: str) -> dict:
+    """Run exactly one optional phase; heavy phases never belong to core health."""
+    now = time.time()
+    if phase == "status_refresh":
+        return {
+            "phase": phase,
+            "result": runtime.refresh_materialized_status(limit=STATUS_REFRESH_BATCH),
+            "batch_limit": STATUS_REFRESH_BATCH,
+        }
+    if phase == "trade_links":
+        from .g1_trade_link_catchup import materialize_trade_links_bounded
+        return {
+            "phase": phase,
+            "result": materialize_trade_links_bounded(runtime, limit=TRADE_LINK_BATCH),
+        }
+    if phase == "barriers":
+        from .g1_short_horizon_refinement import _materialize_barriers
+        return {
+            "phase": phase,
+            "rows_created": _materialize_barriers(runtime, limit=AUX_BATCH),
+            "batch_limit": AUX_BATCH,
+        }
+    if phase == "path_metrics":
+        from .g1_short_horizon_metrics_refinement import _materialize_path_metrics
+        return {
+            "phase": phase,
+            "rows_created": _materialize_path_metrics(runtime, limit=AUX_BATCH),
+            "batch_limit": AUX_BATCH,
+        }
+    if phase == "ede_shadow":
+        return {"phase": phase, "result": _run_ede_shadow_bounded(engine)}
+    if phase == "evidence_reports":
+        if not _cadence_due(runtime, "_g1s_worker_last_evidence_ts", EVIDENCE_INTERVAL_SEC, now):
+            return {"phase": phase, "skipped": True, "reason": "CADENCE_NOT_DUE"}
+        fn = getattr(runtime, "materialize_evidence_reports", None)
+        return {
+            "phase": phase,
+            "result": fn() if callable(fn) else {
+                "refreshed": False, "reason": "MATERIALIZER_UNAVAILABLE"
+            },
+        }
+    if phase == "historical_walk_forward":
+        if not _cadence_due(runtime, "_g1s_worker_last_historical_wf_ts", HISTORICAL_WF_INTERVAL_SEC, now):
+            return {"phase": phase, "skipped": True, "reason": "CADENCE_NOT_DUE"}
+        fn = getattr(runtime, "materialize_historical_walkforward", None)
+        return {
+            "phase": phase,
+            "result": fn() if callable(fn) else {
+                "refreshed": False, "reason": "HISTORICAL_WF_UNAVAILABLE"
+            },
+        }
+    if phase == "fit_models":
+        if not _cadence_due(runtime, "_g1s_worker_last_fit_gate_ts", FIT_GATE_INTERVAL_SEC, now):
+            return {"phase": phase, "skipped": True, "reason": "CADENCE_NOT_DUE"}
+        # Mathematical fit is unchanged. It is merely removed from the mandatory
+        # acceptance core and isolated as one optional maintenance phase.
+        return {"phase": phase, "models_created": runtime.fit_if_ready()}
+    raise ValueError(f"unknown research maintenance phase: {phase}")
+
+
+def _apply_gate_state(state: dict, gate: dict) -> None:
+    state["acceptance_gate_active"] = bool(gate["active"])
+    state["acceptance_pause_active"] = bool(gate["pause"])
+    state["acceptance_gate_reason"] = gate["reason"]
+    state["acceptance_gate_smoke_run_id"] = gate["smoke_run_id"]
+    state["acceptance_gate_expected_sha"] = gate["expected_sha"]
+    state["acceptance_gate_expires_at"] = gate["expires_at"]
 
 
 def install_research_worker(app) -> None:
@@ -131,15 +156,27 @@ def install_research_worker(app) -> None:
         "scalability_refinement_version": RESEARCH_WORKER_SCALABILITY_VERSION,
         "running": False,
         "process_started_ts": None,
+        # Compatibility: these now describe the bounded core cycle, not optional
+        # maintenance. This is the cycle production-post-research must observe.
         "last_started_ts": None,
         "last_finished_ts": None,
         "last_duration_ms": None,
         "last_result": None,
         "last_error": None,
+        "current_phase": "startup_grace",
+        "maintenance_running": False,
+        "maintenance_phase": None,
+        "last_maintenance_started_ts": None,
+        "last_maintenance_finished_ts": None,
+        "last_maintenance_duration_ms": None,
+        "last_maintenance_result": None,
+        "last_maintenance_error": None,
+        "maintenance_phase_index": 0,
         "g1s_batch_limit": G1S_BATCH,
         "g1m_local_batch_limit": G1M_LOCAL_BATCH,
+        "trade_link_batch_limit": TRADE_LINK_BATCH,
+        "status_refresh_batch_limit": STATUS_REFRESH_BATCH,
         "fit_gate_interval_sec": FIT_GATE_INTERVAL_SEC,
-        "trade_link_interval_sec": TRADE_LINK_INTERVAL_SEC,
         "startup_grace_sec": RESEARCH_STARTUP_GRACE_SEC,
         "first_cycle_not_before_ts": None,
         "acceptance_gate_active": False,
@@ -169,43 +206,78 @@ def install_research_worker(app) -> None:
                     process_started_ts=process_started_ts,
                     last_finished_ts=state.get("last_finished_ts"),
                 )
-                state["acceptance_gate_active"] = bool(gate["active"])
-                state["acceptance_pause_active"] = bool(gate["pause"])
-                state["acceptance_gate_reason"] = gate["reason"]
-                state["acceptance_gate_smoke_run_id"] = gate["smoke_run_id"]
-                state["acceptance_gate_expected_sha"] = gate["expected_sha"]
-                state["acceptance_gate_expires_at"] = gate["expires_at"]
+                _apply_gate_state(state, gate)
                 if gate["pause"]:
-                    # Cooperative pause only: do not cancel a cycle already in
-                    # progress and never delay market collection/decision paths.
+                    state["current_phase"] = "acceptance_pause"
                     await asyncio.sleep(RESEARCH_INTERVAL_SEC)
                     continue
 
                 started = time.time()
+                state["current_phase"] = "core"
                 state["last_started_ts"] = started
                 try:
-                    g1s_result = await asyncio.to_thread(
-                        _run_g1s_bounded, engine.short_horizon)
+                    g1s_result = await asyncio.to_thread(_run_g1s_core, engine.short_horizon)
                     await asyncio.sleep(0)
                     g1m_result = await asyncio.to_thread(
-                        _run_g1m_local_bounded, engine.management_local)
-                    await asyncio.sleep(0)
-                    shadow_result = await asyncio.to_thread(
-                        _run_ede_shadow_bounded, engine)
+                        _run_g1m_local_core, engine.management_local
+                    )
                     state["last_result"] = {
                         "g1s": g1s_result,
                         "g1m_local": g1m_result,
-                        "ede_v13_shadow": shadow_result,
                     }
                     state["last_error"] = None
                 except Exception as exc:
                     state["last_error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
-                state["last_finished_ts"] = time.time()
-                state["last_duration_ms"] = (
-                    state["last_finished_ts"] - started) * 1000.0
+                finally:
+                    state["last_finished_ts"] = time.time()
+                    state["last_duration_ms"] = (
+                        state["last_finished_ts"] - started
+                    ) * 1000.0
+
+                # Acceptance may have been acquired while core was executing.
+                # Re-read immediately; a completed required core must never fall
+                # through into full-history/optional maintenance under that gate.
+                gate = worker_acceptance_gate_state(
+                    process_started_ts=process_started_ts,
+                    last_finished_ts=state.get("last_finished_ts"),
+                )
+                _apply_gate_state(state, gate)
+                if gate["pause"]:
+                    state["current_phase"] = "acceptance_pause"
+                    await asyncio.sleep(RESEARCH_INTERVAL_SEC)
+                    continue
+
+                phase_index = int(state.get("maintenance_phase_index") or 0)
+                phase = MAINTENANCE_PHASES[phase_index % len(MAINTENANCE_PHASES)]
+                state["maintenance_phase_index"] = (phase_index + 1) % len(MAINTENANCE_PHASES)
+                state["maintenance_running"] = True
+                state["maintenance_phase"] = phase
+                state["current_phase"] = f"maintenance:{phase}"
+                maintenance_started = time.time()
+                state["last_maintenance_started_ts"] = maintenance_started
+                try:
+                    state["last_maintenance_result"] = await asyncio.to_thread(
+                        _run_maintenance_phase, engine.short_horizon, engine, phase
+                    )
+                    state["last_maintenance_error"] = None
+                except Exception as exc:
+                    state["last_maintenance_error"] = (
+                        f"{type(exc).__name__}: {str(exc)[:500]}"
+                    )
+                finally:
+                    state["last_maintenance_finished_ts"] = time.time()
+                    state["last_maintenance_duration_ms"] = (
+                        state["last_maintenance_finished_ts"] - maintenance_started
+                    ) * 1000.0
+                    state["maintenance_running"] = False
+                    state["maintenance_phase"] = None
+                    state["current_phase"] = "idle"
+
                 await asyncio.sleep(RESEARCH_INTERVAL_SEC)
         finally:
             state["running"] = False
+            state["maintenance_running"] = False
+            state["current_phase"] = "stopped"
 
     @contextlib.asynccontextmanager
     async def research_lifespan(inner_app):
