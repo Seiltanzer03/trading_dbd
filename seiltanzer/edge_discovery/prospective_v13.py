@@ -2,7 +2,7 @@
 
 The base prospective adapter already recomputes 60m price/regime context from
 retained passive bars that were demonstrably available when the T0 observation
-was recorded.  This refinement applies the same causal source contract to the
+was recorded. This refinement applies the same causal source contract to the
 short returns and realized-volatility fields required by
 GLOBAL_RET5_PERSISTENCE when older immutable T0 rows predate the V3 frozen
 price block.
@@ -22,9 +22,11 @@ class ProspectiveFeatureAdapter(_BaseAdapter):
     """Recover missing baseline price fields from already-retained causal bars."""
 
     def _recomputed_price_context(self, row: dict[str, Any]) -> dict[str, Any]:
+        # Preserve the existing 60m causal price/regime calculation when its
+        # stricter window contract is satisfiable. Baseline ret5/ret15 recovery
+        # is deliberately independent of that 60m gate: a short return should
+        # not be discarded merely because a full hour is not retained.
         result = dict(super()._recomputed_price_context(row))
-        if not result:
-            return result
 
         instrument = str(row["instrument"])
         t0 = float(row["captured_ts"])
@@ -53,6 +55,10 @@ class ProspectiveFeatureAdapter(_BaseAdapter):
                 ends, anchor_ts + 1e-6, hi=end_index) - 1
             if index < 0:
                 return None
+            # Reject an anchor that is materially older than one retained bar;
+            # otherwise a data gap would masquerade as a 5m/15m return.
+            if anchor_ts - ends[index] > 5 * 60.0 + 1e-6:
+                return None
             start_price = float(eligible[index]["close"])
             if start_price <= 0.0 or end_price <= 0.0:
                 return None
@@ -62,7 +68,8 @@ class ProspectiveFeatureAdapter(_BaseAdapter):
         for index in range(1, end_index + 1):
             previous = float(eligible[index - 1]["close"])
             current = float(eligible[index]["close"])
-            if previous <= 0.0 or current <= 0.0:
+            dt = ends[index] - ends[index - 1]
+            if previous <= 0.0 or current <= 0.0 or dt <= 0.0 or dt > 10 * 60.0:
                 continue
             steps.append((ends[index], math.log(current / previous)))
 
@@ -82,12 +89,25 @@ class ProspectiveFeatureAdapter(_BaseAdapter):
             "vol.rv_15m": realized_vol(15 * 60.0),
             "vol.rv_60m": realized_vol(60 * 60.0),
         }
+        recovered_any = False
         for feature_id, value in recovered.items():
             if value is not None and math.isfinite(float(value)):
                 result[feature_id] = float(value)
+                recovered_any = True
+        if not recovered_any:
+            return result
 
         meta = dict(result.get("_meta") or {})
+        quality = dict(meta.get("quality") or {})
+        quality.setdefault("source_ts", end_ts)
+        quality.setdefault("source_quality", None)
+        quality["stale"] = False
         meta.update({
+            "quality": quality,
+            "provenance": "CAUSAL_RECOMPUTED",
+            "source": "passive_market_bars",
+            "source_created_cutoff_ts": capture_recorded_ts,
+            "source_window_end_ts": end_ts,
             "baseline_price_backfill": True,
             "baseline_price_backfill_version": "g1s-ede-baseline-price-backfill-v1.3",
             "future_points_used": False,
