@@ -83,16 +83,17 @@ jobs:
             audit_pid=$!
 
             # Measure the real production API while the CPU-heavy audit is alive.
-            # This is intentionally bounded and does not make request paths perform research.
+            # Use read-only routes; do not trigger an external AI call from research validation.
             probes=0
             while kill -0 "$audit_pid" 2>/dev/null && [ "$probes" -lt 12 ]; do
               sleep 5
               probe_api /api/state
               if [ $((probes % 3)) -eq 0 ]; then
-                probe_api /api/analytics/gex
-                probe_api /api/analytics/regime
+                probe_api /api/analytics/gex-migration
+                probe_api /api/analytics/regime-phase
                 probe_api /api/analytics/wavelet
-                probe_api /api/analytics/correlation
+                probe_api /api/analytics/correlation-graph
+                probe_api /api/ai/history
               fi
               probes=$((probes + 1))
             done
