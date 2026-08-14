@@ -20,8 +20,9 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-22.04
     # 20% CPU intentionally makes research slower than the former 40% cap.
-    # Give the bounded research enough wall time without raising its CPU share.
-    timeout-minutes: 90
+    # The post-smoke job now includes bounded upstream marker waits before EDE,
+    # so reserve wall time for orchestration without increasing CPU share.
+    timeout-minutes: 110
     steps:
       - name: Run EDE v1.3 selective search on immutable production DB copy
         uses: appleboy/ssh-action@v1
@@ -34,7 +35,7 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 85m
+          command_timeout: 105m
           envs: EXPECTED_SHA,EVENT_NAME,INVENTORY_MARKER_ID
           script: |
             set -euo pipefail
@@ -69,10 +70,15 @@ jobs:
               echo "Exact-run EDE inventory completed for $EXPECTED_SHA"
             fi
 
-            # One heavy EDE search at a time on the production VPS. A scheduled,
-            # post-deploy or manual EDE/EDE overlap is research-only and may be skipped.
+            # One heavy EDE search at a time on the production VPS. Scheduled or
+            # manual research may skip an overlap. Exact post-smoke acceptance may
+            # not: a green result must prove that this SHA actually ran its audit.
             exec 9>/var/lock/seiltanzer-ede-v13-audit.lock
             if ! flock -n 9; then
+              if [ "$EVENT_NAME" = "workflow_run" ]; then
+                echo "EDE_ACCEPTANCE_LOCK_BUSY: exact-run audit cannot be skipped"
+                exit 1
+              fi
               echo "Another EDE audit is already running; skipping overlapping research run."
               exit 0
             fi
