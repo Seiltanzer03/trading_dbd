@@ -23,7 +23,6 @@ class _Runtime:
 
 def _runtime_with_bars(t0: float = 10_000.0) -> _Runtime:
     runtime = _Runtime()
-    # 13 completed 5m bars cover the full pre-T0 hour.
     for index in range(13):
         end = t0 - 3600.0 + index * 300.0
         close = 100.0 + index
@@ -31,8 +30,6 @@ def _runtime_with_bars(t0: float = 10_000.0) -> _Runtime:
             "INSERT INTO passive_market_bars VALUES (?,?,?,?,?,?,?)",
             ("NAS100", end, close + 0.25, close - 0.25, close, 1.0, end),
         )
-    # Neither a future bar nor a bar written after the immutable observation
-    # record may alter the recovered T0 features.
     runtime._conn.execute(
         "INSERT INTO passive_market_bars VALUES (?,?,?,?,?,?,?)",
         ("NAS100", t0 + 300.0, 9999.0, 9998.0, 9998.5, 1.0, t0 + 300.0),
@@ -100,3 +97,21 @@ def test_frozen_t0_baseline_values_remain_authoritative_over_backfill():
     assert values["price.ret_15m"].value == 0.456
     assert provenance["price.ret_5m"]["provenance"] == "FROZEN_T0"
     assert provenance["price.ret_15m"]["provenance"] == "FROZEN_T0"
+
+
+def test_same_t0_on_next_horizon_reuses_backfill_without_rescanning_bars():
+    runtime = _runtime_with_bars()
+    adapter = ProspectiveFeatureAdapter(runtime, available_asof=20_000.0)
+    first = adapter._recomputed_price_context(_source())
+    assert (first.get("_meta") or {}).get("baseline_price_backfill") is True
+
+    class _NoSecondScan(dict):
+        def get(self, *args, **kwargs):
+            raise AssertionError("retained bars were rescanned for the same T0")
+
+    adapter._causal_bars = _NoSecondScan(adapter._causal_bars)
+    second_source = _source()
+    second_source["horizon_minutes"] = 60
+    second = adapter._recomputed_price_context(second_source)
+    assert second["price.ret_5m"] == first["price.ret_5m"]
+    assert second["price.ret_15m"] == first["price.ret_15m"]
