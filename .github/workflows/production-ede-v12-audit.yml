@@ -48,14 +48,13 @@ jobs:
               local label="$1"
               shift
               local unit="seiltanzer-ede-${label}-$$"
-              # A dedicated transient cgroup gives research a hard CPU ceiling.
-              # Run #21 at 40% produced one 3087 ms /api/state timeout against
-              # the 3000 ms production acceptance, so keep the architecture and
-              # make only the bounded quota correction required by that evidence.
-              # Research may run slower; API/collector/AI latency has priority.
+              # Production evidence at both 40% (#21/#22) and 30% (#23) still
+              # produced >3000 ms /api/state timeouts. Keep the same bounded
+              # cgroup architecture and make only the next conservative quota
+              # correction. Research speed remains subordinate to live API.
               systemd-run --quiet --collect --wait --pipe \
                 --unit="$unit" \
-                --property=CPUQuota=30% \
+                --property=CPUQuota=20% \
                 --property=Nice=15 \
                 --setenv=OMP_NUM_THREADS=1 \
                 --setenv=OPENBLAS_NUM_THREADS=1 \
@@ -85,19 +84,36 @@ jobs:
               --evidence-ledger /opt/seiltanzer/data/research/ede_frozen_evidence.jsonl \
               --candidate-registry /opt/seiltanzer/data/research/ede_v13_candidate_registry.jsonl &
             audit_pid=$!
+            audit_unit="seiltanzer-ede-primary-$$"
 
-            # Verify the live API repeatedly throughout the real CPU-heavy audit,
-            # not only after it finishes. All probes are read-only.
+            abort_primary() {
+              # A failed acceptance probe must not leave the transient research
+              # unit running until the SSH timeout; stop only this audit unit.
+              systemctl stop "$audit_unit" >/dev/null 2>&1 || true
+              kill "$audit_pid" >/dev/null 2>&1 || true
+              wait "$audit_pid" >/dev/null 2>&1 || true
+              exit 1
+            }
+
+            probe_or_abort() {
+              if ! probe_api "$1"; then
+                abort_primary
+              fi
+            }
+
+            # Verify the live API throughout the complete CPU-heavy primary
+            # audit. Do not stop probing after a fixed iteration count merely
+            # because a lower CPU quota makes research intentionally slower.
             probes=0
-            while kill -0 "$audit_pid" 2>/dev/null && [ "$probes" -lt 100 ]; do
+            while kill -0 "$audit_pid" 2>/dev/null; do
               sleep 15
-              probe_api /api/state
+              probe_or_abort /api/state
               if [ $((probes % 4)) -eq 0 ]; then
-                probe_api /api/analytics/gex-migration
-                probe_api /api/analytics/regime-phase
-                probe_api /api/analytics/wavelet
-                probe_api /api/analytics/correlation-graph
-                probe_api /api/ai/history
+                probe_or_abort /api/analytics/gex-migration
+                probe_or_abort /api/analytics/regime-phase
+                probe_or_abort /api/analytics/wavelet
+                probe_or_abort /api/analytics/correlation-graph
+                probe_or_abort /api/ai/history
               fi
               probes=$((probes + 1))
             done
