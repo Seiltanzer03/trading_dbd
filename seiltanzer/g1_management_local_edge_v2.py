@@ -187,6 +187,75 @@ def _pairwise_rows(runtime: ManagementLocalRuntime) -> list[dict[str, Any]]:
     return list(pivot.values())
 
 
+def _dataset_summary(runtime: ManagementLocalRuntime,
+                     resolved_windows: list[dict[str, Any]]) -> dict:
+    """Expose enough causal inventory to diagnose small prospective evidence."""
+    with runtime._lock:
+        observation_row = runtime._conn.execute("""
+            SELECT COUNT(*) AS observation_n,
+                   COUNT(DISTINCT trade_id) AS unique_trade_n
+            FROM g1m_management_observations
+        """).fetchone()
+        context_row = runtime._conn.execute("""
+            SELECT COUNT(*) AS context_n
+            FROM g1m_management_observations g
+            JOIN g1m_t0_feature_context_v2 v2 USING(observation_id)
+        """).fetchone()
+        horizon_rows = runtime._conn.execute("""
+            SELECT w.horizon_minutes,
+                   COUNT(*) AS materialized_windows,
+                   COUNT(o.window_id) AS resolved_windows,
+                   SUM(CASE WHEN w.evidence_eligible=1 THEN 1 ELSE 0 END)
+                       AS materialized_evidence_windows,
+                   SUM(CASE WHEN w.evidence_eligible=1 AND o.window_id IS NOT NULL
+                            THEN 1 ELSE 0 END) AS resolved_evidence_windows
+            FROM g1m_local_windows w
+            LEFT JOIN g1m_local_outcomes o USING(window_id)
+            GROUP BY w.horizon_minutes
+            ORDER BY w.horizon_minutes
+        """).fetchall()
+        origin_rows = runtime._conn.execute("""
+            SELECT w.origin,
+                   COUNT(*) AS materialized_windows,
+                   COUNT(o.window_id) AS resolved_windows,
+                   SUM(CASE WHEN w.evidence_eligible=1 THEN 1 ELSE 0 END)
+                       AS materialized_evidence_windows,
+                   SUM(CASE WHEN w.evidence_eligible=1 AND o.window_id IS NOT NULL
+                            THEN 1 ELSE 0 END) AS resolved_evidence_windows
+            FROM g1m_local_windows w
+            LEFT JOIN g1m_local_outcomes o USING(window_id)
+            GROUP BY w.origin
+            ORDER BY w.origin
+        """).fetchall()
+
+    by_horizon = [{
+        "horizon_minutes": int(row["horizon_minutes"]),
+        "materialized_windows": int(row["materialized_windows"] or 0),
+        "resolved_windows": int(row["resolved_windows"] or 0),
+        "materialized_evidence_windows": int(row["materialized_evidence_windows"] or 0),
+        "resolved_evidence_windows": int(row["resolved_evidence_windows"] or 0),
+    } for row in horizon_rows]
+    by_origin = [{
+        "origin": str(row["origin"]),
+        "materialized_windows": int(row["materialized_windows"] or 0),
+        "resolved_windows": int(row["resolved_windows"] or 0),
+        "materialized_evidence_windows": int(row["materialized_evidence_windows"] or 0),
+        "resolved_evidence_windows": int(row["resolved_evidence_windows"] or 0),
+    } for row in origin_rows]
+    return {
+        "management_observations": int(observation_row["observation_n"] or 0),
+        "management_unique_trades": int(observation_row["unique_trade_n"] or 0),
+        "t0_feature_context_rows": int(context_row["context_n"] or 0),
+        "resolved_windows": len(resolved_windows),
+        "prospective_evidence_windows": sum(
+            bool(row["evidence_eligible"]) for row in resolved_windows),
+        "by_horizon": by_horizon,
+        "by_origin": by_origin,
+        "descriptive_rows_never_raise_prospective_maturity": True,
+        "context_scan_limit_per_comparison_horizon": CONTEXT_SCAN_LIMIT,
+    }
+
+
 def _comparison_records(windows: list[dict[str, Any]], left: str, right: str,
                         *, horizon: int, prospective_only: bool) -> list[dict[str, Any]]:
     records = []
@@ -208,6 +277,8 @@ def _comparison_records(windows: list[dict[str, Any]], left: str, right: str,
         delta = float(lhs["terminal_r"]) - float(rhs["terminal_r"])
         records.append({
             **row,
+            "left_action": left,
+            "right_action": right,
             "delta_r": delta,
             "regret_reduction_r": float(rhs["regret_r"]) - float(lhs["regret_r"]),
         })
@@ -253,18 +324,31 @@ def _summarize(records: list[dict[str, Any]], *, maturity_from_sample: bool) -> 
 
 
 def _context_map(records: list[dict[str, Any]]) -> dict[str, list[dict]]:
-    """Bounded descriptive WHERE_IT_HELPS/HURTS map; never a promotion gate."""
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for row in records[-CONTEXT_SCAN_LIMIT:]:
-        for dimension, value in _context_labels(row).items():
-            groups[(dimension, value)].append(row)
+    """Descriptive action-relative WHERE_IT_HELPS/HURTS; never a promotion gate."""
+    comparison_rows: dict[tuple[int, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in records:
+        key = (
+            int(row["horizon_minutes"]),
+            str(row["left_action"]),
+            str(row["right_action"]),
+        )
+        comparison_rows[key].append(row)
+
+    groups: dict[tuple[int, str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for (horizon, left, right), rows in comparison_rows.items():
+        for row in rows[-CONTEXT_SCAN_LIMIT:]:
+            for dimension, value in _context_labels(row).items():
+                groups[(horizon, left, right, dimension, value)].append(row)
 
     summaries = []
-    for (dimension, value), group in groups.items():
+    for (horizon, left, right, dimension, value), group in groups.items():
         if len(group) < CONTEXT_MIN_RAW:
             continue
         summary = _summarize(group, maturity_from_sample=False)
         summaries.append({
+            "horizon_minutes": horizon,
+            "left_action": left,
+            "right_action": right,
             "dimension": dimension,
             "value": value,
             **summary,
@@ -285,14 +369,13 @@ def _context_map(records: list[dict[str, Any]]) -> dict[str, list[dict]]:
 def management_edge_v2(self: ManagementLocalRuntime) -> dict:
     windows = _pairwise_rows(self)
     legacy_items = []
-    prospective_policy_records: list[dict[str, Any]] = []
+    descriptive_context_records: list[dict[str, Any]] = []
     pairwise = []
 
     for horizon in LOCAL_HORIZONS:
         actual_vs_hold = _comparison_records(
             windows, "PRODUCTION_POLICY", "HOLD", horizon=horizon,
             prospective_only=True)
-        prospective_policy_records.extend(actual_vs_hold)
         actual_summary = _summarize(actual_vs_hold, maturity_from_sample=True)
         legacy_items.append({
             "horizon_minutes": horizon,
@@ -311,6 +394,7 @@ def management_edge_v2(self: ManagementLocalRuntime) -> dict:
                 windows, left, right, horizon=horizon, prospective_only=False)
             eligible_rows = _comparison_records(
                 windows, left, right, horizon=horizon, prospective_only=True)
+            descriptive_context_records.extend(all_rows)
             pairwise.append({
                 "horizon_minutes": horizon,
                 "left_action": left,
@@ -322,26 +406,21 @@ def management_edge_v2(self: ManagementLocalRuntime) -> dict:
                 "edge_claim_allowed": False,
             })
 
-    contexts = _context_map(prospective_policy_records)
+    contexts = _context_map(descriptive_context_records)
     prospective_effective = max((int(row["effective_n"]) for row in legacy_items), default=0)
     overall_maturity = _maturity(prospective_effective)
-    if prospective_effective == 0:
-        verdict = "INSUFFICIENT_MANAGEMENT_DATA"
-    elif overall_maturity == "INSUFFICIENT":
+    if overall_maturity in {"INSUFFICIENT", "EARLY"}:
         verdict = "INSUFFICIENT_MANAGEMENT_DATA"
     else:
-        verdict = "DESCRIPTIVE_MANAGEMENT_EVIDENCE_AVAILABLE"
+        # Maturity alone is not a promotion/significance gate. Until a separately
+        # reviewed management signal exists, the endpoint must not imply edge.
+        verdict = "NO_MATERIAL_MANAGEMENT_EDGE_YET"
 
     return {
         "contract_version": EDGE_V2_VERSION,
         "local_contract_version": G1M_LOCAL_CONTRACT_VERSION,
         "semantics": "LOCAL_DECISION_QUALITY_NOT_TERMINAL_MANAGEMENT_EDGE",
-        "dataset": {
-            "resolved_windows": len(windows),
-            "prospective_evidence_windows": sum(bool(row["evidence_eligible"]) for row in windows),
-            "descriptive_rows_never_raise_prospective_maturity": True,
-            "context_scan_limit": CONTEXT_SCAN_LIMIT,
-        },
+        "dataset": _dataset_summary(self, windows),
         "maturity_contract": {
             "thresholds_effective_trades": MATURITY_THRESHOLDS,
             "ROBUST": "REQUIRES_SEPARATE_PURGED_PROSPECTIVE_OOS_VALIDATION",
