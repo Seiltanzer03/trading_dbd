@@ -4,15 +4,19 @@ on:
   push:
     branches: [ops/recover-production-after-ede-timeout]
 
+concurrency:
+  group: production-emergency-recovery
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   recover:
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 8
     steps:
-      - name: Diagnose and recover production after EDE SSH timeout
+      - name: Hard-bound recovery after EDE SSH timeout
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: 8eae1a14c3d0f6dbf9d2dd06b600ef119e9b098b
@@ -22,34 +26,29 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 8m
+          command_timeout: 6m
           envs: EXPECTED_SHA,SMOKE_RUN_ID
           script: |
             set -euo pipefail
-            echo '=== BEFORE RECOVERY ==='
+            echo '=== BEFORE HARD RECOVERY ==='
             date -u
             echo "deployed_sha=$(git -C /opt/seiltanzer rev-parse HEAD)"
             systemctl is-active seiltanzer || true
             systemctl list-units --all --plain --no-legend 'seiltanzer-ede-*' || true
-            echo '-- listeners --'
             ss -ltnp | grep -E ':(8790|80|443)\b' || true
-            echo '-- top cpu --'
             ps -eo pid,ppid,ni,pcpu,pmem,etime,cmd --sort=-pcpu | head -n 20 || true
-            echo '-- local probes before --'
-            curl -sS -o /dev/null -w 'state code=%{http_code} time=%{time_total}\n' --max-time 5 http://127.0.0.1:8790/api/state || true
-            curl -sS -o /dev/null -w 'root code=%{http_code} time=%{time_total}\n' --max-time 5 http://127.0.0.1:8790/ || true
+            curl -sS -o /dev/null -w 'before state code=%{http_code} time=%{time_total}\n' --max-time 3 http://127.0.0.1:8790/api/state || true
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
 
-            # A remote systemd-run service can survive when appleboy/drone-ssh
-            # terminates the client at command_timeout. EDE units are research-only;
-            # stop only those transient units, never market collection or application data.
             mapfile -t ede_units < <(systemctl list-units --all --plain --no-legend 'seiltanzer-ede-*' | awk '{print $1}' | sed '/^$/d')
             if [ "${#ede_units[@]}" -gt 0 ]; then
-              printf 'Stopping orphan EDE units: %s\n' "${ede_units[*]}"
-              systemctl stop "${ede_units[@]}" || true
-            else
-              echo 'No EDE transient units found.'
+              printf 'EDE units before kill: %s\n' "${ede_units[*]}"
+              timeout 8s systemctl stop "${ede_units[@]}" || true
+              for unit in "${ede_units[@]}"; do
+                systemctl kill --kill-who=all --signal=KILL "$unit" || true
+                systemctl reset-failed "$unit" || true
+              done
             fi
 
             PY=/opt/seiltanzer/.venv/bin/python
@@ -58,14 +57,24 @@ jobs:
               --smoke-run-id "$SMOKE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA" || true
 
-            systemctl restart seiltanzer
+            # The service is active-but-wedged: bound graceful stop, then force
+            # only the application cgroup if it does not leave promptly.
+            timeout 12s systemctl stop seiltanzer || true
+            if [ "$(systemctl is-active seiltanzer || true)" != inactive ]; then
+              systemctl kill --kill-who=all --signal=KILL seiltanzer || true
+              sleep 1
+            fi
+            systemctl reset-failed seiltanzer || true
+            systemctl start seiltanzer
 
             ok=0
             for attempt in $(seq 1 30); do
               active=$(systemctl is-active seiltanzer || true)
+              started=$(date +%s%3N)
               code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8790/api/state || true)
-              echo "recovery_probe attempt=$attempt active=$active code=$code"
-              if [ "$active" = active ] && [ "$code" = 200 ]; then
+              elapsed=$(( $(date +%s%3N) - started ))
+              echo "recovery_probe attempt=$attempt active=$active code=$code elapsed_ms=$elapsed"
+              if [ "$active" = active ] && [ "$code" = 200 ] && [ "$elapsed" -lt 3000 ]; then
                 ok=1
                 break
               fi
@@ -73,7 +82,7 @@ jobs:
             done
             test "$ok" = 1
 
-            echo '=== AFTER RECOVERY ==='
+            echo '=== AFTER HARD RECOVERY ==='
             systemctl list-units --all --plain --no-legend 'seiltanzer-ede-*' || true
             ss -ltnp | grep -E ':(8790|80|443)\b' || true
             curl -sS -o /dev/null -w 'state code=%{http_code} time=%{time_total}\n' --max-time 3 http://127.0.0.1:8790/api/state
