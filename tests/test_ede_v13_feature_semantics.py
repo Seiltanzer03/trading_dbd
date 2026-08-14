@@ -13,9 +13,10 @@ def test_registry_matches_materialized_cross_and_wavelet_types():
     assert _definition("regime.wavelet_phase").datatype == "float"
 
 
-def test_selective_map_uses_categorical_cross_and_macro_states():
+def test_selective_map_uses_cross_category_and_wavelet_numeric_semantics():
     templates = selective_templates({
-        "cross.confirmation", "regime.macro", "regime.wavelet_phase",
+        "cross.confirmation", "regime.wavelet_phase",
+        "regime.asset", "regime.asset_family", "regime.session_utc",
     })
     conditions = [condition for template in templates for condition in template.conditions]
 
@@ -24,11 +25,11 @@ def test_selective_map_uses_categorical_cross_and_macro_states():
     assert {item.kind for item in cross} == {"categorical"}
     assert {item.state for item in cross} >= {"SAME", "OPPOSITE"}
 
-    macro = [item for item in conditions if item.feature_id == "regime.macro"]
-    assert macro
-    assert {item.kind for item in macro} == {"categorical"}
-    assert "CHOP" in {item.state for item in macro}
-
     wavelet = [item for item in conditions if item.feature_id == "regime.wavelet_phase"]
     assert wavelet
     assert {item.kind for item in wavelet} == {"train_relative"}
+
+    searched = {item.feature_id for item in conditions}
+    assert "regime.asset" not in searched
+    assert "regime.asset_family" not in searched
+    assert "regime.session_utc" not in searched
