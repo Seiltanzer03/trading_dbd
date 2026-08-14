@@ -189,6 +189,26 @@ def _feature(row: dict[str, Any], feature_id: str) -> Any:
     return value
 
 
+def _finite_numeric_values(rows: list[dict[str, Any]], feature_id: str) -> list[float]:
+    """Collect numeric train values without treating categorical/malformed values as zero.
+
+    A registry/type mismatch must make that numeric rule inapplicable, not abort the
+    entire discovery audit.  Categorical rules continue to use their exact strings.
+    """
+    values: list[float] = []
+    for row in rows:
+        value = _feature(row, feature_id)
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            values.append(numeric)
+    return values
+
+
 def fit_rule(template: CandidateTemplate, train: list[dict[str, Any]]) -> FittedRule | None:
     if not train:
         return None
@@ -200,9 +220,7 @@ def fit_rule(template: CandidateTemplate, train: list[dict[str, Any]]) -> Fitted
                 condition.feature_id, condition.kind, condition.state,
                 train_cutoff_ts=cutoff))
             continue
-        values = [float(value) for row in train
-                  if (value := _feature(row, condition.feature_id)) is not None
-                  and math.isfinite(float(value))]
+        values = _finite_numeric_values(train, condition.feature_id)
         if len(values) < 20:
             return None
         if condition.kind == "train_relative":
