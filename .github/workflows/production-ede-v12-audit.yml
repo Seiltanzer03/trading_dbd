@@ -44,21 +44,24 @@ jobs:
               exit 0
             fi
 
-            # Bound numerical libraries even if numpy/scipy decides to use BLAS.
-            export OMP_NUM_THREADS=1
-            export OPENBLAS_NUM_THREADS=1
-            export MKL_NUM_THREADS=1
-            export NUMEXPR_NUM_THREADS=1
-            export VECLIB_MAXIMUM_THREADS=1
-
             run_research() {
-              # Keep research below API/collector priority. On multi-core hosts,
-              # confine heavy search to one CPU so it cannot consume the whole VPS.
-              if [ "$(nproc)" -gt 1 ]; then
-                nice -n 15 ionice -c2 -n7 taskset -c 0 "$@"
-              else
-                nice -n 15 ionice -c2 -n7 "$@"
-              fi
+              local label="$1"
+              shift
+              local unit="seiltanzer-ede-${label}-$$"
+              # A dedicated transient cgroup gives research a hard CPU ceiling,
+              # rather than relying only on nice/taskset while the API is busy.
+              # 40% of one CPU is intentionally conservative: slower research is
+              # acceptable; starving quotes/AI/API is not.
+              systemd-run --quiet --collect --wait --pipe \
+                --unit="$unit" \
+                --property=CPUQuota=40% \
+                --property=Nice=15 \
+                --setenv=OMP_NUM_THREADS=1 \
+                --setenv=OPENBLAS_NUM_THREADS=1 \
+                --setenv=MKL_NUM_THREADS=1 \
+                --setenv=NUMEXPR_NUM_THREADS=1 \
+                --setenv=VECLIB_MAXIMUM_THREADS=1 \
+                /usr/bin/ionice -c2 -n7 "$@"
             }
 
             probe_api() {
@@ -74,7 +77,7 @@ jobs:
 
             # The primary audit freezes/refits canonical rules. It deliberately
             # does not back-apply a new rule to older pending T0 rows.
-            run_research /opt/seiltanzer/.venv/bin/python \
+            run_research primary /opt/seiltanzer/.venv/bin/python \
               /opt/seiltanzer/scripts/production_ede_v13_audit.py \
               --database /opt/seiltanzer/data/trades.db \
               --output /opt/seiltanzer/data/research/ede_v13_latest_audit.json \
@@ -82,13 +85,13 @@ jobs:
               --candidate-registry /opt/seiltanzer/data/research/ede_v13_candidate_registry.jsonl &
             audit_pid=$!
 
-            # Measure the real production API while the CPU-heavy audit is alive.
-            # Use read-only routes; do not trigger an external AI call from research validation.
+            # Verify the live API repeatedly throughout the real CPU-heavy audit,
+            # not only after it finishes. All probes are read-only.
             probes=0
-            while kill -0 "$audit_pid" 2>/dev/null && [ "$probes" -lt 12 ]; do
-              sleep 5
+            while kill -0 "$audit_pid" 2>/dev/null && [ "$probes" -lt 100 ]; do
+              sleep 15
               probe_api /api/state
-              if [ $((probes % 3)) -eq 0 ]; then
+              if [ $((probes % 4)) -eq 0 ]; then
                 probe_api /api/analytics/gex-migration
                 probe_api /api/analytics/regime-phase
                 probe_api /api/analytics/wavelet
@@ -102,7 +105,7 @@ jobs:
             # v1.3.4: use additional macro/wavelet transition metrics that were
             # already frozen by g1s_evidence_v3. This is a separate bounded
             # diagnostic universe: no canonical promotion, no shadow authority.
-            run_research /opt/seiltanzer/.venv/bin/python \
+            run_research transition /opt/seiltanzer/.venv/bin/python \
               /opt/seiltanzer/scripts/production_ede_transition_audit.py \
               --database /opt/seiltanzer/data/trades.db \
               --output /opt/seiltanzer/data/research/ede_transition_latest_audit.json
