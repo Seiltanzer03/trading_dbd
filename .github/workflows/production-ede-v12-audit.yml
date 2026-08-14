@@ -48,13 +48,14 @@ jobs:
               local label="$1"
               shift
               local unit="seiltanzer-ede-${label}-$$"
-              # A dedicated transient cgroup gives research a hard CPU ceiling,
-              # rather than relying only on nice/taskset while the API is busy.
-              # 40% of one CPU is intentionally conservative: slower research is
-              # acceptable; starving quotes/AI/API is not.
+              # A dedicated transient cgroup gives research a hard CPU ceiling.
+              # Run #21 at 40% produced one 3087 ms /api/state timeout against
+              # the 3000 ms production acceptance, so keep the architecture and
+              # make only the bounded quota correction required by that evidence.
+              # Research may run slower; API/collector/AI latency has priority.
               systemd-run --quiet --collect --wait --pipe \
                 --unit="$unit" \
-                --property=CPUQuota=40% \
+                --property=CPUQuota=30% \
                 --property=Nice=15 \
                 --setenv=OMP_NUM_THREADS=1 \
                 --setenv=OPENBLAS_NUM_THREADS=1 \
