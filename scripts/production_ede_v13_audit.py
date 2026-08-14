@@ -30,6 +30,7 @@ from seiltanzer.edge_discovery.shadow import (
     resolve_shadow_predictions,
     shadow_summary,
 )
+from seiltanzer.edge_discovery.stratified import augment_selective_report_with_strata
 
 
 class ReadOnlyRuntime:
@@ -144,6 +145,7 @@ def audit(
         prospective_rows=resolved_rows,
         source_set_sha256=source_sha,
         eligible_feature_ids=eligible)
+    augment_selective_report_with_strata(selective, resolved_rows)
     evidence_cutoff = max(
         (float(row.get("resolved_ts") or row["target_ts"]) for row in resolved_rows),
         default=materialized_at)
@@ -195,7 +197,7 @@ def audit(
             run_id=f"production-{int(materialized_at)}-{source_sha[:12]}")
 
     return {
-        "contract_version": "g1s-ede-production-audit-v1.3.1",
+        "contract_version": "g1s-ede-production-audit-v1.3.3",
         "source_database": str(database),
         "source_database_open_mode": "READ_ONLY_SNAPSHOT",
         "dataset_sha256": source_sha,
@@ -236,6 +238,9 @@ def _compact_candidate(item: dict[str, Any]) -> dict[str, Any]:
         "edge_maturity": item.get("edge_maturity"),
         "research_rank": (item.get("research_rank") or {}).get("score"),
         "baseline_failure_regime": item.get("baseline_failure_regime"),
+        "cross_instrument_stability": (
+            (item.get("stratified_diagnostics") or {}).get("cross_instrument_stability")
+        ),
     }
 
 
@@ -275,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         "stable_candidates": selective["stable_candidates"],
         "edge_maturity_counts": selective["edge_maturity_counts"],
         "verdict": selective["verdict"],
+        "where_it_helps_contexts": len(selective.get("where_it_helps_contexts") or []),
+        "where_it_hurts_contexts": len(selective.get("where_it_hurts_contexts") or []),
         "shadow": report["prospective_shadow"].get("summary"),
     }, sort_keys=True))
     for item in selective["top_20_research_candidates"]:
