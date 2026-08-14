@@ -165,6 +165,13 @@ from .g1_management_feature_context_v2 import install_g1_management_feature_cont
 _install_g1_management_feature_context_v2()
 del _install_g1_management_feature_context_v2
 
+# Final practical G.1-M.1 pass: evaluate the existing frozen HOLD/partial/EXIT
+# action set on local 15/30/60/120m paths. This only enriches research reporting;
+# it does not introduce a collector, execution simulator or production policy.
+from .g1_management_local_edge_v2 import install_g1_management_local_edge_v2 as _install_g1_management_local_edge_v2
+_install_g1_management_local_edge_v2()
+del _install_g1_management_local_edge_v2
+
 from .g1_broad_market_evidence_v3 import install_g1_broad_market_evidence_v3 as _install_g1_broad_market_evidence_v3
 _install_g1_broad_market_evidence_v3()
 del _install_g1_broad_market_evidence_v3
