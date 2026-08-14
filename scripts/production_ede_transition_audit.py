@@ -10,7 +10,7 @@ from pathlib import Path
 
 from production_ede_v13_audit import ReadOnlyRuntime, _source_sha, immutable_snapshot
 from seiltanzer.edge_discovery.baseline_rows import baseline_eligible_rows
-from seiltanzer.edge_discovery.prospective import ProspectiveFeatureAdapter
+from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.transition_search import (
     TRANSITION_HORIZONS,
     augment_rows_from_frozen_v3,
@@ -39,8 +39,15 @@ def audit(database: Path) -> dict:
     rows, baseline_gate = baseline_eligible_rows(resolved_all)
     source_sha = _source_sha(rows)
     transition = run_transition_search(rows, source_set_sha256=source_sha)
+    # discover_horizon publishes the actual inner search count under
+    # inner_hypotheses_tested. Keep the transition summary truthful instead of
+    # reporting zero while sample/FDR counters are nonzero.
+    transition["hypotheses_tested"] = sum(
+        int(horizon.get("inner_hypotheses_tested") or 0)
+        for horizon in transition.get("horizons") or []
+    )
     return {
-        "contract_version": "g1s-ede-production-regime-transition-v1.3.4",
+        "contract_version": "g1s-ede-production-regime-transition-v1.3.6",
         "source_database": str(database),
         "source_database_open_mode": "READ_ONLY_SNAPSHOT",
         "dataset_sha256": source_sha,
@@ -50,6 +57,7 @@ def audit(database: Path) -> dict:
         "transition_feature_coverage": transition_coverage,
         "transition_search": transition,
         "runtime_seconds": time.time() - started,
+        "causal_baseline_adapter": "prospective_v13",
         "existing_frozen_v3_fields_only": True,
         "synthetic_data_used": False,
         "retrospective_reconstruction": False,
