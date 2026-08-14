@@ -238,7 +238,7 @@ def verify(expected_sha: str) -> None:
     assert runtime.get("request_time_full_history_evidence_scan") is False, runtime
     assert runtime.get("request_time_historical_network_fetch") is False, runtime
     assert worker.get("contract_version") == "g1-research-worker-v1", worker
-    assert worker.get("scalability_refinement_version") == "g1-research-worker-bounded-v4", worker
+    assert worker.get("scalability_refinement_version") == "g1-research-worker-bounded-v5", worker
     assert worker.get("evidence_reports_request_time_scan") is False, worker
     assert worker.get("historical_walkforward_runs_on_research_worker") is True, worker
     assert worker.get("historical_walkforward_request_time_network_fetch") is False, worker
