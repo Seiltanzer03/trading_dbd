@@ -70,6 +70,7 @@ def test_missing_baseline_returns_are_recovered_from_only_causal_retained_bars()
     assert provenance["price.ret_5m"]["bar_created_ts_lte_capture_record"] is True
 
     accepted, gate = baseline_eligible_rows([{
+        "direction_label": "UP",
         "features": {
             "ret_5m": values["price.ret_5m"].value,
             "ret_15m": values["price.ret_15m"].value,
