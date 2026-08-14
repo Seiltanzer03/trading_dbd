@@ -1,0 +1,89 @@
+name: production-recovery-openssh
+
+on:
+  push:
+    branches: [ops/recover-production-after-ede-timeout]
+
+concurrency:
+  group: production-emergency-openssh
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 6
+    steps:
+      - name: Recover with bounded OpenSSH attempts
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if ! command -v sshpass >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq sshpass
+          fi
+
+          cat > /tmp/recover.sh <<'REMOTE'
+          set -eu
+          echo "RECOVERY_CONNECTED $(date -u +%FT%TZ)"
+          echo "sha=$(git -C /opt/seiltanzer rev-parse HEAD 2>/dev/null || true)"
+
+          # Kill only stale EDE transient research units first. Avoid potentially
+          # blocking graceful stops on an overloaded host.
+          systemctl list-units --all --plain --no-legend 'seiltanzer-ede-*' 2>/dev/null \
+            | awk '{print $1}' \
+            | while read -r unit; do
+                [ -n "$unit" ] || continue
+                echo "kill_ede=$unit"
+                systemctl kill --kill-who=all --signal=KILL "$unit" 2>/dev/null || true
+                systemctl reset-failed "$unit" 2>/dev/null || true
+              done
+
+          # The application was proven active-but-unresponsive. Kill only its
+          # cgroup, then start a fresh process. SQLite/database files are untouched.
+          systemctl kill --kill-who=all --signal=KILL seiltanzer 2>/dev/null || true
+          sleep 1
+          systemctl reset-failed seiltanzer 2>/dev/null || true
+          systemctl start seiltanzer
+
+          for i in $(seq 1 20); do
+            active=$(systemctl is-active seiltanzer 2>/dev/null || true)
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:8790/api/state || true)
+            echo "probe=$i active=$active code=$code"
+            if [ "$active" = active ] && [ "$code" = 200 ]; then
+              echo "PRODUCTION_RECOVERY_PASS"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PRODUCTION_RECOVERY_NO_HTTP"
+          exit 1
+          REMOTE
+
+          chmod 600 /tmp/recover.sh
+          rc=1
+          for attempt in $(seq 1 8); do
+            echo "ssh_recovery_attempt=$attempt"
+            set +e
+            timeout 25s sshpass -p "$SSH_PASSWORD" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o PreferredAuthentications=password \
+              -o PubkeyAuthentication=no \
+              -o ConnectTimeout=8 \
+              -o ConnectionAttempts=1 \
+              -o ServerAliveInterval=3 \
+              -o ServerAliveCountMax=2 \
+              root@94.241.171.182 'bash -s' < /tmp/recover.sh
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              exit 0
+            fi
+            echo "ssh_recovery_attempt=$attempt rc=$rc"
+            sleep 3
+          done
+          exit "$rc"
