@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from seiltanzer.g1_research_worker import _run_g1s_bounded
+from seiltanzer.g1_research_worker import _run_g1s_core, _run_maintenance_phase
 from seiltanzer.g1_short_horizon_metrics_integrity import (
     _dependency_adjusted_for_model,
     _preentry_trade_metrics,
@@ -101,24 +101,11 @@ class _WorkerRuntime:
     def resolve_new(self, limit):
         self.calls.append(("resolve", limit)); return 2
 
-    def refresh_materialized_status(self, limit):
-        self.calls.append(("status_refresh", limit)); return {"observations_processed": 1}
 
-    def status(self):
-        return {"horizons": [{"fit_allowed": False}]}
-
-    def materialize_trade_links(self):
-        self.calls.append(("links", None)); return 3
-
-    def fit_if_ready(self):
-        self.calls.append(("fit", None)); return 4
-
-
-def test_bounded_worker_keeps_barrier_and_path_metric_materializers(monkeypatch):
+def test_worker_core_excludes_barrier_and_path_metric_maintenance(monkeypatch):
     runtime = _WorkerRuntime()
     barrier_calls = []
     metric_calls = []
-
     monkeypatch.setattr(
         "seiltanzer.g1_short_horizon_refinement._materialize_barriers",
         lambda _runtime, limit: barrier_calls.append(limit) or 5,
@@ -127,13 +114,16 @@ def test_bounded_worker_keeps_barrier_and_path_metric_materializers(monkeypatch)
         "seiltanzer.g1_short_horizon_metrics_refinement._materialize_path_metrics",
         lambda _runtime, limit: metric_calls.append(limit) or 6,
     )
-    result = _run_g1s_bounded(runtime)
-    assert result["materialized"] == 1
-    assert result["resolved"] == 2
-    assert result["barrier_rows_created"] == 5
-    assert result["path_metrics_created"] == 6
+
+    core = _run_g1s_core(runtime)
+    assert core == {"materialized": 1, "resolved": 2, "batch_limit": 500}
+    assert barrier_calls == []
+    assert metric_calls == []
+
+    barrier = _run_maintenance_phase(runtime, object(), "barriers")
+    metric = _run_maintenance_phase(runtime, object(), "path_metrics")
+    assert barrier["rows_created"] == 5
+    assert metric["rows_created"] == 6
     assert barrier_calls == [500]
     assert metric_calls == [500]
-    assert ("materialize", 500) in runtime.calls
-    assert ("resolve", 500) in runtime.calls
-    assert ("status_refresh", 10000) in runtime.calls
+    assert runtime.calls == [("materialize", 500), ("resolve", 500)]
