@@ -11,9 +11,6 @@ import statistics
 from collections import Counter, defaultdict
 from typing import Any, Iterable
 
-from seiltanzer.config import INSTRUMENTS
-from seiltanzer.g1_short_horizon_p2e_segmented_persistence import ASSET_FAMILIES, SESSIONS
-
 from .ablation import family_ablation
 from .discovery import discover_horizon
 from .filters import (
@@ -21,7 +18,6 @@ from .filters import (
     ConditionTemplate,
     FittedCondition,
     FittedRule,
-    MACRO_REGIMES,
     condition_matches,
 )
 from .registry import FEATURES
@@ -62,15 +58,6 @@ QUANTILE_STATES = ("Q0_20", "Q20_40", "Q40_60", "Q60_80", "Q80_100")
 TREND_STATES = ("TREND_UP", "TREND_DOWN", "CHOP")
 VOL_STATES = ("EXPANDING", "CONTRACTING", "NORMAL")
 CROSS_STATES = ("SAME", "OPPOSITE")
-CATEGORICAL_STATES: dict[str, tuple[str, ...]] = {
-    "regime.asset": tuple(INSTRUMENTS),
-    "regime.asset_family": tuple(ASSET_FAMILIES),
-    "regime.session_utc": tuple(SESSIONS),
-    "regime.trend": TREND_STATES,
-    "regime.volatility": VOL_STATES,
-    "regime.macro": tuple(MACRO_REGIMES),
-    "cross.confirmation": CROSS_STATES,
-}
 
 
 def _single_numeric(feature_id: str, *, quintiles: bool) -> list[CandidateTemplate]:
@@ -109,7 +96,13 @@ def selective_templates(
         ):
             continue
         if definition.datatype == "category":
-            states = CATEGORICAL_STATES.get(feature_id)
+            states: tuple[str, ...] | None = None
+            if feature_id == "regime.trend":
+                states = TREND_STATES
+            elif feature_id == "regime.volatility":
+                states = VOL_STATES
+            elif feature_id == "cross.confirmation":
+                states = CROSS_STATES
             if states:
                 singles.extend(
                     CandidateTemplate((condition,))
@@ -296,7 +289,7 @@ def _economic(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _temporal(candidate: dict[str,Any]) -> dict[str, Any]:
+def _temporal(candidate: dict[str, Any]) -> dict[str, Any]:
     fold_rows = candidate.get("folds") or []
     deltas = [
         (
