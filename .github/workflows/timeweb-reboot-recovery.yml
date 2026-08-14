@@ -1,0 +1,74 @@
+name: timeweb-reboot-recovery
+
+on:
+  push:
+    branches: [ops/timeweb-hard-reboot]
+
+permissions:
+  contents: read
+
+jobs:
+  reboot:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Reboot exact VPS through Timeweb control plane if token is configured
+        env:
+          TIMEWEB_CLOUD_TOKEN: ${{ secrets.TIMEWEB_CLOUD_TOKEN }}
+          TIMEWEB_TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+          TARGET_IP: 94.241.171.182
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.request, urllib.error
+
+          token = os.environ.get("TIMEWEB_CLOUD_TOKEN") or os.environ.get("TIMEWEB_TOKEN")
+          if not token:
+              print("TIMEWEB_API_TOKEN_NOT_CONFIGURED")
+              raise SystemExit(2)
+
+          target = os.environ["TARGET_IP"]
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Content-Type": "application/json",
+          }
+
+          def request(method, url):
+              req = urllib.request.Request(url, method=method, headers=headers)
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as response:
+                      raw = response.read()
+                      return response.status, json.loads(raw) if raw else None
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode("utf-8", "replace")
+                  print(f"TIMEWEB_API_HTTP_ERROR status={exc.code} body={body[:300]}")
+                  raise
+
+          status, body = request("GET", "https://api.timeweb.cloud/api/v1/servers")
+          assert status == 200, status
+          servers = (body or {}).get("servers") or []
+
+          def contains_target(value):
+              if isinstance(value, dict):
+                  return any(contains_target(v) for v in value.values())
+              if isinstance(value, list):
+                  return any(contains_target(v) for v in value)
+              return isinstance(value, str) and target in value
+
+          matches = [server for server in servers if contains_target(server)]
+          if len(matches) != 1:
+              print(f"TIMEWEB_TARGET_MATCH_COUNT={len(matches)} server_count={len(servers)}")
+              raise SystemExit(3)
+
+          server = matches[0]
+          server_id = server.get("id")
+          if not server_id:
+              print("TIMEWEB_TARGET_HAS_NO_ID")
+              raise SystemExit(4)
+          print(f"TIMEWEB_REBOOT_TARGET id={server_id} name={server.get('name','')} ip={target}")
+
+          status, _ = request("POST", f"https://api.timeweb.cloud/api/v1/servers/{server_id}/reboot")
+          if status not in (200, 202, 204):
+              print(f"TIMEWEB_REBOOT_UNEXPECTED_STATUS={status}")
+              raise SystemExit(5)
+          print(f"TIMEWEB_REBOOT_ACCEPTED status={status}")
+          PY
