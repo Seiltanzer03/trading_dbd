@@ -166,9 +166,10 @@ def _contexts(report: dict[str, Any], positive: bool) -> list[dict[str, Any]]:
                 for row in rows:
                     if not row.get("descriptive_ready"):
                         continue
-                    if positive != bool(row.get("joint_positive")):
-                        if positive or not row.get("joint_negative"):
-                            continue
+                    if positive and not row.get("joint_positive"):
+                        continue
+                    if not positive and not row.get("joint_negative"):
+                        continue
                     output.append({
                         "candidate_id": candidate.get("candidate_id"),
                         "hypothesis_id": candidate.get("hypothesis_id"),
