@@ -2,7 +2,9 @@ name: production-ede-v13-audit
 
 on:
   workflow_run:
-    # Same workflow_run depth as inventory: deploy -> readiness -> smoke.
+    # Keep the same workflow_run depth as inventory: deploy -> readiness -> smoke.
+    # The two sibling workflows synchronize on a smoke-run marker on the VPS so
+    # their heavy research reads never overlap.
     workflows: ["production-functional-smoke"]
     types: [completed]
   workflow_dispatch:
@@ -18,26 +20,57 @@ jobs:
   audit:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    # 20% CPU intentionally makes research slower than the former 40% cap.
+    # Give the bounded research enough wall time without raising its CPU share.
+    timeout-minutes: 90
     steps:
       - name: Run EDE v1.3 selective search on immutable production DB copy
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          INVENTORY_MARKER_ID: ${{ github.event.workflow_run.id || github.run_id }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 40m
-          envs: EXPECTED_SHA
+          command_timeout: 85m
+          envs: EXPECTED_SHA,EVENT_NAME,INVENTORY_MARKER_ID
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             mkdir -p /opt/seiltanzer/data/research /var/lock
 
+            # Post-smoke inventory and the EDE load audit are sibling workflows.
+            # Inventory is an unbounded read-heavy scan and previously overlapped
+            # the first EDE probe. Wait for completion of this exact upstream
+            # smoke-run before starting CPU-heavy EDE. Scheduled/manual audits do
+            # not depend on a sibling inventory run.
+            if [ "$EVENT_NAME" = "workflow_run" ]; then
+              inventory_marker="/var/lock/seiltanzer-ede-inventory-${INVENTORY_MARKER_ID}.done"
+              inventory_ready=0
+              for _ in $(seq 1 120); do
+                if [ -f "$inventory_marker" ]; then
+                  marker_sha=$(cat "$inventory_marker")
+                  if [ "$marker_sha" != "$EXPECTED_SHA" ]; then
+                    echo "Inventory marker SHA mismatch: marker=$marker_sha expected=$EXPECTED_SHA"
+                    exit 1
+                  fi
+                  inventory_ready=1
+                  break
+                fi
+                sleep 2
+              done
+              if [ "$inventory_ready" -ne 1 ]; then
+                echo "Timed out waiting for post-smoke EDE inventory marker: $inventory_marker"
+                exit 1
+              fi
+              echo "Post-smoke EDE inventory completed for $EXPECTED_SHA"
+            fi
+
             # One heavy EDE search at a time on the production VPS. A scheduled,
-            # post-deploy or manual overlap is research-only and may be skipped.
+            # post-deploy or manual EDE/EDE overlap is research-only and may be skipped.
             exec 9>/var/lock/seiltanzer-ede-v13-audit.lock
             if ! flock -n 9; then
               echo "Another EDE audit is already running; skipping overlapping research run."
@@ -48,10 +81,9 @@ jobs:
               local label="$1"
               shift
               local unit="seiltanzer-ede-${label}-$$"
-              # Production evidence at both 40% (#21/#22) and 30% (#23) still
-              # produced >3000 ms /api/state timeouts. Keep the same bounded
-              # cgroup architecture and make only the next conservative quota
-              # correction. Research speed remains subordinate to live API.
+              # Keep the conservative production-safe cap. The post-smoke
+              # orchestration fix removes the independent inventory workload
+              # rather than buying research speed with more production CPU.
               systemd-run --quiet --collect --wait --pipe \
                 --unit="$unit" \
                 --property=CPUQuota=20% \
@@ -71,8 +103,13 @@ jobs:
               code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:8790${path}" || true)
               elapsed=$(( $(date +%s%3N) - started ))
               echo "research-load-probe path=${path} code=${code} elapsed_ms=${elapsed}"
-              test "$code" = "200"
-              test "$elapsed" -lt 3000
+              # Fail closed. With `probe_api` evaluated under `if !`, separate
+              # `test` commands could previously return success when HTTP failed
+              # quickly but the elapsed-time test passed.
+              if [ "$code" != "200" ] || [ "$elapsed" -ge 3000 ]; then
+                return 1
+              fi
+              return 0
             }
 
             # The primary audit freezes/refits canonical rules. It deliberately

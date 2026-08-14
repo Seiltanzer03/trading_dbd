@@ -17,14 +17,30 @@ jobs:
     steps:
       - name: Audit real immutable G1S observations and all EDE features
         uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          INVENTORY_MARKER_ID: ${{ github.event.workflow_run.id || github.run_id }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
           command_timeout: 6m
+          envs: EXPECTED_SHA,INVENTORY_MARKER_ID
           script: |
             set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            mkdir -p /var/lock
+
             /opt/seiltanzer/.venv/bin/python \
               /opt/seiltanzer/scripts/production_ede_inventory.py \
               --database /opt/seiltanzer/data/trades.db
+
+            # The sibling EDE load audit must not start until this exact
+            # post-smoke inventory has finished. Key the marker by the upstream
+            # smoke run, not only by SHA, so reruns on the same commit cannot
+            # consume stale completion state.
+            marker="/var/lock/seiltanzer-ede-inventory-${INVENTORY_MARKER_ID}.done"
+            tmp="${marker}.$$"
+            printf '%s\n' "$EXPECTED_SHA" > "$tmp"
+            mv "$tmp" "$marker"
