@@ -8,7 +8,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from seiltanzer.edge_discovery.prospective import ProspectiveFeatureAdapter
+from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.registry import FEATURES
 
 
@@ -54,7 +54,7 @@ def inventory(database: Path) -> dict:
     assert {row["feature_id"] for row in features} == {
         definition.feature_id for definition in FEATURES}
     return {
-        "contract_version": "g1s-ede-production-inventory-v1.2",
+        "contract_version": "g1s-ede-production-inventory-v1.3.5",
         "database": str(database),
         "database_open_mode": "READ_ONLY",
         "g1s_observations_total": total,
@@ -64,6 +64,7 @@ def inventory(database: Path) -> dict:
         "resolved_outcome_count": audit.get("resolved_outcome_count"),
         "feature_summary": audit.get("summary"),
         "features": features,
+        "causal_baseline_price_backfill": True,
         "retrospective_options_reconstruction": False,
         "production_authority": False,
         "auto_promotion": False,
