@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify production after the research worker has completed a real cycle."""
+"""Verify production after the bounded research worker core has completed."""
 from __future__ import annotations
 
 import argparse
@@ -64,10 +64,10 @@ def _latest_attempt_finished(worker: dict) -> bool:
 def _cycle_finished(worker: dict, result: object) -> bool:
     if not _latest_attempt_finished(worker) or not isinstance(result, dict):
         return False
-    # A previous completed result is not enough when the worker has already
-    # started another maintenance cycle. Acceptance must observe the latest
-    # started cycle fully finished before downstream heavy checks are released.
-    return True
+    # If acceptance was acquired while an optional maintenance phase was already
+    # running, wait for that phase to finish. A new phase cannot start once the
+    # gate is observed after the bounded core.
+    return worker.get("maintenance_running") is not True
 
 
 def verify(expected_sha: str) -> None:
@@ -82,17 +82,22 @@ def verify(expected_sha: str) -> None:
         result = lifecycle.get("last_result")
         print("worker cycle", attempt, {
             "first_cycle_not_before_ts": worker.get("first_cycle_not_before_ts"),
+            "current_phase": worker.get("current_phase"),
             "last_started_ts": worker.get("last_started_ts"),
             "last_finished_ts": worker.get("last_finished_ts"),
+            "last_duration_ms": worker.get("last_duration_ms"),
             "last_error": worker.get("last_error"),
+            "maintenance_running": worker.get("maintenance_running"),
+            "maintenance_phase": worker.get("maintenance_phase"),
+            "last_maintenance_error": worker.get("last_maintenance_error"),
         })
         if _latest_attempt_finished(worker) and worker.get("last_error") is not None:
-            raise AssertionError(f"research worker cycle failed: {worker.get('last_error')}")
+            raise AssertionError(f"research worker core failed: {worker.get('last_error')}")
         if _cycle_finished(worker, result):
             break
         time.sleep(10)
     else:
-        raise AssertionError("research worker did not complete current cycle")
+        raise AssertionError("bounded research worker core did not complete")
     assert worker is not None
     assert worker.get("running") is True, worker
     assert worker.get("last_error") is None, worker
@@ -101,10 +106,6 @@ def verify(expected_sha: str) -> None:
     assert isinstance(result.get("g1s"), dict) and isinstance(result.get("g1m_local"), dict), result
     assert int((result["g1s"] or {}).get("batch_limit") or 0) > 0, result
 
-    # The orchestration lease is acquired before this verifier starts. Once the
-    # current cycle finishes, the worker's next loop observes that lease and
-    # defers new heavy cycles. Verify normal production paths without weakening
-    # their existing latency contracts.
     assert_route("/api/research/runtime/status")
     assert_route("/api/state")
     assert_route("/api/analytics/gex-migration")

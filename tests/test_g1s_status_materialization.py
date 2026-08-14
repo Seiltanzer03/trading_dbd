@@ -4,7 +4,7 @@ import time
 
 from seiltanzer.config import Settings
 from seiltanzer.data.cache import DiskCache
-from seiltanzer.g1_research_worker import _run_g1s_bounded
+from seiltanzer.g1_research_worker import _run_maintenance_phase
 from seiltanzer.g1_short_horizon_runtime import ShortHorizonRuntime
 from seiltanzer.passive_learning import PassiveLearningEngine
 from seiltanzer import measurement_q_runtime as _mq
@@ -64,7 +64,6 @@ def test_status_is_incremental_idempotent_and_does_not_load_full_history(tmp_pat
         assert second["observations_processed"] == 0
         assert second["resolutions_processed"] == 0
 
-        # Request-time status must not fall back to _resolved_eligible/full-row loading.
         monkeypatch.setattr(runtime, "_resolved_eligible", lambda *_a, **_k: (_ for _ in ()).throw(
             AssertionError("full history scan from status")))
         status = runtime.status()
@@ -81,38 +80,24 @@ def test_status_is_incremental_idempotent_and_does_not_load_full_history(tmp_pat
 class _WorkerRuntime:
     def __init__(self):
         self.fit_calls = 0
-        self.ready = False
 
-    def materialize_new(self, limit): return 0
-    def resolve_new(self, limit): return 0
-    def refresh_materialized_status(self, limit): return {"observations_processed": 0, "resolutions_processed": 0}
-    def materialize_trade_links(self): return 0
-    def fit_if_ready(self): self.fit_calls += 1; return 1
-    def status(self): return {"horizons": [{"fit_allowed": self.ready}]}
+    def fit_if_ready(self):
+        self.fit_calls += 1
+        return 1
 
 
-def test_worker_does_not_scan_training_cut_every_ten_seconds(monkeypatch):
+def test_fit_is_isolated_and_cadence_gated_without_status_scan():
     runtime = _WorkerRuntime()
-    monkeypatch.setattr(
-        "seiltanzer.g1_short_horizon_refinement._materialize_barriers",
-        lambda _runtime, limit: 0)
-    monkeypatch.setattr(
-        "seiltanzer.g1_short_horizon_metrics_refinement._materialize_path_metrics",
-        lambda _runtime, limit: 0)
-
-    runtime.ready = False
-    first = _run_g1s_bounded(runtime)
-    assert first["fit_gate_due"] is True
-    assert first["fit_gate_ready"] is False
-    assert runtime.fit_calls == 0
-
-    # Simulate a later gate becoming ready; clear only the gate timestamp once.
-    runtime.ready = True
-    runtime._g1s_worker_last_fit_gate_ts = 0.0
-    second = _run_g1s_bounded(runtime)
-    assert second["fit_gate_ready"] is True
+    first = _run_maintenance_phase(runtime, object(), "fit_models")
+    assert first["models_created"] == 1
     assert runtime.fit_calls == 1
 
-    third = _run_g1s_bounded(runtime)
-    assert third["fit_gate_due"] is False
+    second = _run_maintenance_phase(runtime, object(), "fit_models")
+    assert second["skipped"] is True
+    assert second["reason"] == "CADENCE_NOT_DUE"
     assert runtime.fit_calls == 1
+
+    runtime._g1s_worker_last_fit_gate_ts = time.time() - 16*60
+    third = _run_maintenance_phase(runtime, object(), "fit_models")
+    assert third["models_created"] == 1
+    assert runtime.fit_calls == 2
