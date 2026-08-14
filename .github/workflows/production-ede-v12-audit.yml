@@ -103,8 +103,13 @@ jobs:
               code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:8790${path}" || true)
               elapsed=$(( $(date +%s%3N) - started ))
               echo "research-load-probe path=${path} code=${code} elapsed_ms=${elapsed}"
-              test "$code" = "200"
-              test "$elapsed" -lt 3000
+              # Fail closed. With `probe_api` evaluated under `if !`, separate
+              # `test` commands could previously return success when HTTP failed
+              # quickly but the elapsed-time test passed.
+              if [ "$code" != "200" ] || [ "$elapsed" -ge 3000 ]; then
+                return 1
+              fi
+              return 0
             }
 
             # The primary audit freezes/refits canonical rules. It deliberately
