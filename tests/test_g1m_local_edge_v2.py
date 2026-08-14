@@ -126,6 +126,14 @@ def test_pairwise_action_sign_and_prospective_boundary():
     assert hold_exit["prospective"]["effective_n"] == 1
     assert hold_exit["prospective"]["mean_delta_r"] == 1.0
 
+    close25_close50 = next(
+        row for row in report["pairwise"]
+        if row["horizon_minutes"] == 15
+        and row["left_action"] == "CLOSE_25"
+        and row["right_action"] == "CLOSE_50"
+    )
+    assert close25_close50["prospective"]["mean_delta_r"] == 0.25
+
     production_hold = next(
         row for row in report["pairwise"]
         if row["horizon_minutes"] == 15
@@ -136,6 +144,15 @@ def test_pairwise_action_sign_and_prospective_boundary():
     assert report["production_authority"] is False
     assert report["auto_promotion"] is False
     assert report["may_trigger_exit_or_close"] is False
+
+    dataset = report["dataset"]
+    assert dataset["management_observations"] == 1
+    assert dataset["management_unique_trades"] == 1
+    assert dataset["t0_feature_context_rows"] == 1
+    h15 = next(row for row in dataset["by_horizon"] if row["horizon_minutes"] == 15)
+    assert h15["materialized_windows"] == 1
+    assert h15["resolved_windows"] == 1
+    assert h15["resolved_evidence_windows"] == 1
 
     # An older descriptive row may change descriptive diagnostics but must never
     # raise prospective N/maturity or become hidden prospective evidence.
@@ -155,3 +172,35 @@ def test_pairwise_action_sign_and_prospective_boundary():
     assert hold_exit2["prospective"]["mean_delta_r"] == 1.0
     assert hold_exit2["prospective"]["maturity"] == "INSUFFICIENT"
     assert report2["dataset"]["descriptive_rows_never_raise_prospective_maturity"] is True
+
+
+def test_descriptive_failure_regimes_do_not_require_prospective_rows():
+    runtime = _Runtime()
+    for trade_id in range(1, 6):
+        runtime.add_window(
+            window_id=f"w-old-{trade_id}", trade_id=trade_id, eligible=False,
+            hold=-1.0, close25=0.6, close50=0.2, exit_r=0.0,
+        )
+
+    report = management_edge_v2(runtime)
+    assert report["dataset"]["prospective_evidence_windows"] == 0
+    assert report["verdict"] == "INSUFFICIENT_MANAGEMENT_DATA"
+
+    hold_close25_hurt = next(
+        row for row in report["where_it_hurts"]
+        if row["horizon_minutes"] == 15
+        and row["left_action"] == "HOLD"
+        and row["right_action"] == "CLOSE_25"
+    )
+    assert hold_close25_hurt["mean_delta_r"] == -1.6
+    assert hold_close25_hurt["maturity"] == "DESCRIPTIVE_ONLY"
+    assert hold_close25_hurt["post_selection_descriptive_only"] is True
+
+    production_hold_help = next(
+        row for row in report["where_it_helps"]
+        if row["horizon_minutes"] == 15
+        and row["left_action"] == "PRODUCTION_POLICY"
+        and row["right_action"] == "HOLD"
+    )
+    assert production_hold_help["mean_delta_r"] == 1.6
+    assert production_hold_help["post_selection_descriptive_only"] is True
