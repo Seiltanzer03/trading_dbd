@@ -19,6 +19,54 @@ globals().update({
 _BASE_BUILD_SNAPSHOT_V18 = _impl.build_snapshot
 
 
+_EDE_MATURITY_LINE_RU = {
+    "EARLY_CONTEXT": (
+        "Есть ранний положительный conditional-context; это ещё не edge-сигнал "
+        "и его вес в production decision score равен нулю."
+    ),
+    "RESEARCH_SIGNAL": (
+        "Есть research signal по conditional edge; он может только слабо "
+        "подтверждать или опровергать контекст и не имеет trading authority."
+    ),
+    "PROVISIONAL_EDGE": (
+        "Есть provisional conditional edge; он остаётся shadow evidence и не "
+        "может самостоятельно вызвать CLOSE/EXIT."
+    ),
+    "ROBUST_EDGE": (
+        "Conditional edge прошёл robust evidence gates, но отдельного promotion "
+        "в production authority не было."
+    ),
+    "INSUFFICIENT_DATA": (
+        "Данных может быть достаточно для рыночного контекста, но conditional "
+        "edge ещё не доказан."
+    ),
+}
+
+
+def _normalize_ede_maturity_language(context: dict) -> None:
+    """Keep early/research/provisional evidence from being described as validated."""
+    lines = context.get("context_lines_ru")
+    if not isinstance(lines, list):
+        return
+    maturity = str(context.get("edge_maturity") or "INSUFFICIENT_DATA")
+    replacement = _EDE_MATURITY_LINE_RU.get(
+        maturity, _EDE_MATURITY_LINE_RU["INSUFFICIENT_DATA"])
+    prefixes = (
+        "Conditional edge подтверждён",
+        "Данных может быть достаточно для контекста",
+        "Данных может быть достаточно для рыночного контекста",
+        "Есть ранний положительный conditional-context",
+        "Есть research signal по conditional edge",
+        "Есть provisional conditional edge",
+        "Conditional edge прошёл robust evidence gates",
+    )
+    for index, line in enumerate(lines):
+        if isinstance(line, str) and line.startswith(prefixes):
+            lines[index] = replacement
+            return
+    lines.append(replacement)
+
+
 def _compact_ede_shadow(engine, snapshot: dict) -> dict:
     """Read only worker-materialized bounded evidence; never scan research ledger."""
     try:
@@ -74,6 +122,7 @@ def build_snapshot(engine) -> dict:
     shadow = _compact_ede_shadow(engine, snapshot)
     context = snapshot.get("ede_causal_context")
     if isinstance(context, dict):
+        _normalize_ede_maturity_language(context)
         context["prospective_shadow"] = shadow
         lines = context.get("context_lines_ru")
         selected = shadow.get("selected_candidate") or {}
