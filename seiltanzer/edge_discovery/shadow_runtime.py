@@ -22,8 +22,9 @@ from .shadow import (
     shadow_ledger_path,
     shadow_summary,
 )
+from .shadow_cache import write_shadow_summary_cache
 
-SHADOW_RUNTIME_VERSION = "g1s-ede-shadow-runtime-v1.3"
+SHADOW_RUNTIME_VERSION = "g1s-ede-shadow-runtime-v1.3.1"
 SHADOW_RUNTIME_INTERVAL_SEC = 60.0
 
 
@@ -107,6 +108,8 @@ def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict
         pending_rows=pending_rows,
         created_ts=current)
     summary = shadow_summary(ledger, cutoff_ts=current)
+    summary_cache = write_shadow_summary_cache(
+        engine, summary=summary, cutoff_ts=current)
     return {
         "contract_version": SHADOW_RUNTIME_VERSION,
         "refreshed": True,
@@ -117,6 +120,7 @@ def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict
         "pending_rows_seen": len(pending_rows),
         "resolution": resolution,
         "prediction_creation": prediction_creation,
+        "summary_cache": summary_cache,
         "summary": {
             "prediction_count": summary.get("prediction_count", 0),
             "resolved_count": summary.get("resolved_count", 0),
