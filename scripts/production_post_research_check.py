@@ -51,15 +51,23 @@ def assert_route(path: str, budget_ms: float = 3000.0):
     raise AssertionError(path)
 
 
-def _cycle_finished(worker: dict, result: object) -> bool:
+def _latest_attempt_finished(worker: dict) -> bool:
     started = worker.get("last_started_ts")
     finished = worker.get("last_finished_ts")
-    if started is None or finished is None or not isinstance(result, dict):
+    return (
+        started is not None
+        and finished is not None
+        and float(finished) >= float(started)
+    )
+
+
+def _cycle_finished(worker: dict, result: object) -> bool:
+    if not _latest_attempt_finished(worker) or not isinstance(result, dict):
         return False
     # A previous completed result is not enough when the worker has already
     # started another maintenance cycle. Acceptance must observe the latest
     # started cycle fully finished before downstream heavy checks are released.
-    return float(finished) >= float(started)
+    return True
 
 
 def verify(expected_sha: str) -> None:
@@ -78,6 +86,8 @@ def verify(expected_sha: str) -> None:
             "last_finished_ts": worker.get("last_finished_ts"),
             "last_error": worker.get("last_error"),
         })
+        if _latest_attempt_finished(worker) and worker.get("last_error") is not None:
+            raise AssertionError(f"research worker cycle failed: {worker.get('last_error')}")
         if _cycle_finished(worker, result):
             break
         time.sleep(10)
