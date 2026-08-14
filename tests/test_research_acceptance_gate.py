@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
+import seiltanzer.g1_research_worker as research_worker
 from seiltanzer.research_acceptance_gate import (
     gate_owner_matches,
     release_acceptance_gate,
@@ -83,6 +87,64 @@ def test_new_exact_run_supersedes_old_owner_safely(tmp_path):
     assert gate_owner_matches("smoke-2", "sha-2", path=gate, now=102.0) is True
     assert release_acceptance_gate("smoke-2", "sha-2", path=gate) is True
     assert not gate.exists()
+
+
+def test_worker_runs_required_cycle_once_then_defers_new_cycles(monkeypatch):
+    @asynccontextmanager
+    async def original_lifespan(_app):
+        yield
+
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            engine=SimpleNamespace(short_horizon=object(), management_local=object())
+        ),
+        router=SimpleNamespace(lifespan_context=original_lifespan),
+    )
+    calls = []
+
+    def fake_gate(*, process_started_ts, last_finished_ts):
+        del process_started_ts
+        return {
+            "active": True,
+            "pause": last_finished_ts is not None,
+            "reason": (
+                "PRODUCTION_ACCEPTANCE_ACTIVE"
+                if last_finished_ts is not None
+                else "REQUIRED_WORKER_CYCLE_PENDING"
+            ),
+            "smoke_run_id": "991",
+            "expected_sha": "sha",
+            "expires_at": 99999999999.0,
+        }
+
+    monkeypatch.setattr(research_worker, "RESEARCH_STARTUP_GRACE_SEC", 0.001)
+    monkeypatch.setattr(research_worker, "RESEARCH_INTERVAL_SEC", 0.001)
+    monkeypatch.setattr(research_worker, "worker_acceptance_gate_state", fake_gate)
+    monkeypatch.setattr(
+        research_worker,
+        "_run_g1s_bounded",
+        lambda _runtime: calls.append("g1s") or {"batch_limit": 500},
+    )
+    monkeypatch.setattr(
+        research_worker,
+        "_run_g1m_local_bounded",
+        lambda _runtime: calls.append("g1m") or {"batch_limit": 100},
+    )
+    monkeypatch.setattr(
+        research_worker,
+        "_run_ede_shadow_bounded",
+        lambda _engine: calls.append("shadow") or {"refreshed": False},
+    )
+    research_worker.install_research_worker(app)
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            await asyncio.sleep(0.02)
+
+    asyncio.run(exercise())
+    assert calls == ["g1s", "g1m", "shadow"]
+    assert app.state.g1_research_worker["acceptance_pause_active"] is True
+    assert app.state.g1_research_worker["running"] is False
 
 
 def test_exact_run_markers_reject_sha_mismatch(tmp_path):
