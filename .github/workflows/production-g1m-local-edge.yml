@@ -12,23 +12,51 @@ jobs:
   verify:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
       - name: Verify G1-M.1 local edge on production
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          SMOKE_RUN_ID: ${{ github.event.workflow_run.id }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 3m
-          envs: EXPECTED_SHA
+          command_timeout: 27m
+          envs: EXPECTED_SHA,SMOKE_RUN_ID
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            PY=/opt/seiltanzer/.venv/bin/python
+            ORCH=/opt/seiltanzer/scripts/production_research_acceptance.py
+            keep_gate=0
+
+            cleanup_gate_on_failure() {
+              if [ "$keep_gate" -ne 1 ]; then
+                "$PY" "$ORCH" release-gate \
+                  --smoke-run-id "$SMOKE_RUN_ID" \
+                  --expected-sha "$EXPECTED_SHA" || true
+              fi
+            }
+            trap cleanup_gate_on_failure EXIT
+
+            # Do not execute the expensive local-edge report while the required
+            # worker maintenance cycle is still running. The marker is exact to
+            # this upstream smoke run and its content is the deployed SHA.
+            "$PY" "$ORCH" wait-marker \
+              --stage post-research \
+              --smoke-run-id "$SMOKE_RUN_ID" \
+              --expected-sha "$EXPECTED_SHA" \
+              --timeout-seconds 1500 \
+              --poll-seconds 5
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            "$PY" "$ORCH" validate-gate \
+              --smoke-run-id "$SMOKE_RUN_ID" \
+              --expected-sha "$EXPECTED_SHA"
+
+            "$PY" - <<'PY'
             import json, time, urllib.request
 
             url = "http://127.0.0.1:8790/api/research/g1/management/local-edge"
@@ -71,3 +99,10 @@ jobs:
             }
             print("G1M_LOCAL_EDGE_ACCEPTANCE=" + json.dumps(summary, sort_keys=True))
             PY
+
+            "$PY" "$ORCH" write-marker \
+              --stage g1m-local-edge \
+              --smoke-run-id "$SMOKE_RUN_ID" \
+              --expected-sha "$EXPECTED_SHA"
+            keep_gate=1
+            trap - EXIT

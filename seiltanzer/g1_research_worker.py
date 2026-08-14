@@ -14,6 +14,8 @@ import asyncio
 import contextlib
 import time
 
+from .research_acceptance_gate import worker_acceptance_gate_state
+
 
 RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
 # Preserve the published scalability contract. Evidence-report materialization has
@@ -128,6 +130,7 @@ def install_research_worker(app) -> None:
         "contract_version": RESEARCH_WORKER_VERSION,
         "scalability_refinement_version": RESEARCH_WORKER_SCALABILITY_VERSION,
         "running": False,
+        "process_started_ts": None,
         "last_started_ts": None,
         "last_finished_ts": None,
         "last_duration_ms": None,
@@ -139,6 +142,12 @@ def install_research_worker(app) -> None:
         "trade_link_interval_sec": TRADE_LINK_INTERVAL_SEC,
         "startup_grace_sec": RESEARCH_STARTUP_GRACE_SEC,
         "first_cycle_not_before_ts": None,
+        "acceptance_gate_active": False,
+        "acceptance_pause_active": False,
+        "acceptance_gate_reason": "NO_ACTIVE_ACCEPTANCE_GATE",
+        "acceptance_gate_smoke_run_id": None,
+        "acceptance_gate_expected_sha": None,
+        "acceptance_gate_expires_at": None,
         "evidence_reports_request_time_scan": False,
         "historical_walkforward_runs_on_research_worker": True,
         "historical_walkforward_request_time_network_fetch": False,
@@ -150,10 +159,28 @@ def install_research_worker(app) -> None:
     async def loop():
         state = app.state.g1_research_worker
         state["running"] = True
+        process_started_ts = time.time()
+        state["process_started_ts"] = process_started_ts
         try:
             state["first_cycle_not_before_ts"] = time.time() + RESEARCH_STARTUP_GRACE_SEC
             await asyncio.sleep(RESEARCH_STARTUP_GRACE_SEC)
             while True:
+                gate = worker_acceptance_gate_state(
+                    process_started_ts=process_started_ts,
+                    last_finished_ts=state.get("last_finished_ts"),
+                )
+                state["acceptance_gate_active"] = bool(gate["active"])
+                state["acceptance_pause_active"] = bool(gate["pause"])
+                state["acceptance_gate_reason"] = gate["reason"]
+                state["acceptance_gate_smoke_run_id"] = gate["smoke_run_id"]
+                state["acceptance_gate_expected_sha"] = gate["expected_sha"]
+                state["acceptance_gate_expires_at"] = gate["expires_at"]
+                if gate["pause"]:
+                    # Cooperative pause only: do not cancel a cycle already in
+                    # progress and never delay market collection/decision paths.
+                    await asyncio.sleep(RESEARCH_INTERVAL_SEC)
+                    continue
+
                 started = time.time()
                 state["last_started_ts"] = started
                 try:

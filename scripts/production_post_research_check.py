@@ -51,6 +51,25 @@ def assert_route(path: str, budget_ms: float = 3000.0):
     raise AssertionError(path)
 
 
+def _latest_attempt_finished(worker: dict) -> bool:
+    started = worker.get("last_started_ts")
+    finished = worker.get("last_finished_ts")
+    return (
+        started is not None
+        and finished is not None
+        and float(finished) >= float(started)
+    )
+
+
+def _cycle_finished(worker: dict, result: object) -> bool:
+    if not _latest_attempt_finished(worker) or not isinstance(result, dict):
+        return False
+    # A previous completed result is not enough when the worker has already
+    # started another maintenance cycle. Acceptance must observe the latest
+    # started cycle fully finished before downstream heavy checks are released.
+    return True
+
+
 def verify(expected_sha: str) -> None:
     assert sh("git", "-C", "/opt/seiltanzer", "rev-parse", "HEAD") == expected_sha
     assert sh("systemctl", "is-active", "seiltanzer") == "active"
@@ -67,13 +86,13 @@ def verify(expected_sha: str) -> None:
             "last_finished_ts": worker.get("last_finished_ts"),
             "last_error": worker.get("last_error"),
         })
-        if (worker.get("last_started_ts") is not None
-                and worker.get("last_finished_ts") is not None
-                and isinstance(result, dict)):
+        if _latest_attempt_finished(worker) and worker.get("last_error") is not None:
+            raise AssertionError(f"research worker cycle failed: {worker.get('last_error')}")
+        if _cycle_finished(worker, result):
             break
         time.sleep(10)
     else:
-        raise AssertionError("research worker did not complete first cycle")
+        raise AssertionError("research worker did not complete current cycle")
     assert worker is not None
     assert worker.get("running") is True, worker
     assert worker.get("last_error") is None, worker
@@ -82,8 +101,10 @@ def verify(expected_sha: str) -> None:
     assert isinstance(result.get("g1s"), dict) and isinstance(result.get("g1m_local"), dict), result
     assert int((result["g1s"] or {}).get("batch_limit") or 0) > 0, result
 
-    # Now that maintenance released its runtime locks, verify both the full
-    # SQLite-backed status and all functional routes under their original gates.
+    # The orchestration lease is acquired before this verifier starts. Once the
+    # current cycle finishes, the worker's next loop observes that lease and
+    # defers new heavy cycles. Verify normal production paths without weakening
+    # their existing latency contracts.
     assert_route("/api/research/runtime/status")
     assert_route("/api/state")
     assert_route("/api/analytics/gex-migration")

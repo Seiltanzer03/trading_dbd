@@ -2,9 +2,8 @@ name: production-ede-v13-audit
 
 on:
   workflow_run:
-    # Keep the same workflow_run depth as inventory: deploy -> readiness -> smoke.
-    # The two sibling workflows synchronize on a smoke-run marker on the VPS so
-    # their heavy research reads never overlap.
+    # Keep the same workflow_run depth as the other post-smoke acceptance jobs.
+    # Exact-run markers serialize their heavy work on the production VPS.
     workflows: ["production-functional-smoke"]
     types: [completed]
   workflow_dispatch:
@@ -21,8 +20,9 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-22.04
     # 20% CPU intentionally makes research slower than the former 40% cap.
-    # Give the bounded research enough wall time without raising its CPU share.
-    timeout-minutes: 90
+    # The post-smoke job now includes bounded upstream marker waits before EDE,
+    # so reserve wall time for orchestration without increasing CPU share.
+    timeout-minutes: 110
     steps:
       - name: Run EDE v1.3 selective search on immutable production DB copy
         uses: appleboy/ssh-action@v1
@@ -35,44 +35,50 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 85m
+          command_timeout: 105m
           envs: EXPECTED_SHA,EVENT_NAME,INVENTORY_MARKER_ID
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             mkdir -p /opt/seiltanzer/data/research /var/lock
+            PY=/opt/seiltanzer/.venv/bin/python
+            ORCH=/opt/seiltanzer/scripts/production_research_acceptance.py
 
-            # Post-smoke inventory and the EDE load audit are sibling workflows.
-            # Inventory is an unbounded read-heavy scan and previously overlapped
-            # the first EDE probe. Wait for completion of this exact upstream
-            # smoke-run before starting CPU-heavy EDE. Scheduled/manual audits do
-            # not depend on a sibling inventory run.
+            # The post-smoke path must consume the exact inventory produced only
+            # after post-research and G1M acceptance. Scheduled/manual audits keep
+            # their documented standalone behavior and do not consume smoke markers.
             if [ "$EVENT_NAME" = "workflow_run" ]; then
-              inventory_marker="/var/lock/seiltanzer-ede-inventory-${INVENTORY_MARKER_ID}.done"
-              inventory_ready=0
-              for _ in $(seq 1 120); do
-                if [ -f "$inventory_marker" ]; then
-                  marker_sha=$(cat "$inventory_marker")
-                  if [ "$marker_sha" != "$EXPECTED_SHA" ]; then
-                    echo "Inventory marker SHA mismatch: marker=$marker_sha expected=$EXPECTED_SHA"
-                    exit 1
-                  fi
-                  inventory_ready=1
-                  break
-                fi
-                sleep 2
-              done
-              if [ "$inventory_ready" -ne 1 ]; then
-                echo "Timed out waiting for post-smoke EDE inventory marker: $inventory_marker"
-                exit 1
-              fi
-              echo "Post-smoke EDE inventory completed for $EXPECTED_SHA"
+              "$PY" "$ORCH" wait-marker \
+                --stage ede-inventory \
+                --smoke-run-id "$INVENTORY_MARKER_ID" \
+                --expected-sha "$EXPECTED_SHA" \
+                --timeout-seconds 2400 \
+                --poll-seconds 5
+              test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+              "$PY" "$ORCH" validate-gate \
+                --smoke-run-id "$INVENTORY_MARKER_ID" \
+                --expected-sha "$EXPECTED_SHA"
+
+              release_acceptance_gate() {
+                "$PY" "$ORCH" release-gate \
+                  --smoke-run-id "$INVENTORY_MARKER_ID" \
+                  --expected-sha "$EXPECTED_SHA" || true
+              }
+              # EDE is the final owner of the bounded worker pause. Release it on
+              # both success and failure so research maintenance resumes promptly.
+              trap release_acceptance_gate EXIT
+              echo "Exact-run EDE inventory completed for $EXPECTED_SHA"
             fi
 
-            # One heavy EDE search at a time on the production VPS. A scheduled,
-            # post-deploy or manual EDE/EDE overlap is research-only and may be skipped.
+            # One heavy EDE search at a time on the production VPS. Scheduled or
+            # manual research may skip an overlap. Exact post-smoke acceptance may
+            # not: a green result must prove that this SHA actually ran its audit.
             exec 9>/var/lock/seiltanzer-ede-v13-audit.lock
             if ! flock -n 9; then
+              if [ "$EVENT_NAME" = "workflow_run" ]; then
+                echo "EDE_ACCEPTANCE_LOCK_BUSY: exact-run audit cannot be skipped"
+                exit 1
+              fi
               echo "Another EDE audit is already running; skipping overlapping research run."
               exit 0
             fi
@@ -81,9 +87,9 @@ jobs:
               local label="$1"
               shift
               local unit="seiltanzer-ede-${label}-$$"
-              # Keep the conservative production-safe cap. The post-smoke
-              # orchestration fix removes the independent inventory workload
-              # rather than buying research speed with more production CPU.
+              # Keep the conservative production-safe cap. The final acceptance
+              # orchestration removes independent worker/inventory load rather
+              # than buying research speed with more production CPU.
               systemd-run --quiet --collect --wait --pipe \
                 --unit="$unit" \
                 --property=CPUQuota=20% \
@@ -114,7 +120,7 @@ jobs:
 
             # The primary audit freezes/refits canonical rules. It deliberately
             # does not back-apply a new rule to older pending T0 rows.
-            run_research primary /opt/seiltanzer/.venv/bin/python \
+            run_research primary "$PY" \
               /opt/seiltanzer/scripts/production_ede_v13_audit.py \
               --database /opt/seiltanzer/data/trades.db \
               --output /opt/seiltanzer/data/research/ede_v13_latest_audit.json \
@@ -159,7 +165,7 @@ jobs:
             # v1.3.4: use additional macro/wavelet transition metrics that were
             # already frozen by g1s_evidence_v3. This is a separate bounded
             # diagnostic universe: no canonical promotion, no shadow authority.
-            run_research transition /opt/seiltanzer/.venv/bin/python \
+            run_research transition "$PY" \
               /opt/seiltanzer/scripts/production_ede_transition_audit.py \
               --database /opt/seiltanzer/data/trades.db \
               --output /opt/seiltanzer/data/research/ede_transition_latest_audit.json

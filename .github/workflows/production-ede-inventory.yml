@@ -13,34 +13,64 @@ jobs:
   inventory:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 8
+    timeout-minutes: 40
     steps:
       - name: Audit real immutable G1S observations and all EDE features
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
           INVENTORY_MARKER_ID: ${{ github.event.workflow_run.id || github.run_id }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 6m
-          envs: EXPECTED_SHA,INVENTORY_MARKER_ID
+          command_timeout: 37m
+          envs: EXPECTED_SHA,EVENT_NAME,INVENTORY_MARKER_ID
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             mkdir -p /var/lock
+            PY=/opt/seiltanzer/.venv/bin/python
+            ORCH=/opt/seiltanzer/scripts/production_research_acceptance.py
+            keep_gate=0
 
-            /opt/seiltanzer/.venv/bin/python \
-              /opt/seiltanzer/scripts/production_ede_inventory.py \
+            cleanup_gate_on_failure() {
+              if [ "$EVENT_NAME" = "workflow_run" ] && [ "$keep_gate" -ne 1 ]; then
+                "$PY" "$ORCH" release-gate \
+                  --smoke-run-id "$INVENTORY_MARKER_ID" \
+                  --expected-sha "$EXPECTED_SHA" || true
+              fi
+            }
+            trap cleanup_gate_on_failure EXIT
+
+            # Post-smoke inventory is no longer a sibling heavy scan. It starts
+            # only after exact-run G1M acceptance has completed with the worker
+            # cooperative pause still owned by this same smoke run.
+            if [ "$EVENT_NAME" = "workflow_run" ]; then
+              "$PY" "$ORCH" wait-marker \
+                --stage g1m-local-edge \
+                --smoke-run-id "$INVENTORY_MARKER_ID" \
+                --expected-sha "$EXPECTED_SHA" \
+                --timeout-seconds 1800 \
+                --poll-seconds 5
+              test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+              "$PY" "$ORCH" validate-gate \
+                --smoke-run-id "$INVENTORY_MARKER_ID" \
+                --expected-sha "$EXPECTED_SHA"
+            fi
+
+            "$PY" /opt/seiltanzer/scripts/production_ede_inventory.py \
               --database /opt/seiltanzer/data/trades.db
 
-            # The sibling EDE load audit must not start until this exact
-            # post-smoke inventory has finished. Key the marker by the upstream
-            # smoke run, not only by SHA, so reruns on the same commit cannot
-            # consume stale completion state.
-            marker="/var/lock/seiltanzer-ede-inventory-${INVENTORY_MARKER_ID}.done"
-            tmp="${marker}.$$"
-            printf '%s\n' "$EXPECTED_SHA" > "$tmp"
-            mv "$tmp" "$marker"
+            "$PY" "$ORCH" write-marker \
+              --stage ede-inventory \
+              --smoke-run-id "$INVENTORY_MARKER_ID" \
+              --expected-sha "$EXPECTED_SHA"
+
+            if [ "$EVENT_NAME" = "workflow_run" ]; then
+              # Final EDE takes ownership of releasing the same bounded lease.
+              keep_gate=1
+            fi
+            trap - EXIT
