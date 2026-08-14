@@ -18,7 +18,7 @@ jobs:
   audit:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - name: Run EDE v1.3 selective search on immutable production DB copy
         uses: appleboy/ssh-action@v1
@@ -29,19 +29,25 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 30m
+          command_timeout: 40m
           envs: EXPECTED_SHA
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             mkdir -p /opt/seiltanzer/data/research
-            # The audit freezes/refits rules. It deliberately does not create a
-            # shadow prediction for older pending T0 rows. The low-priority
-            # runtime worker starts predictions only on T0 captured after this
-            # frozen audit exists.
+            # The primary audit freezes/refits canonical rules. It deliberately
+            # does not back-apply a new rule to older pending T0 rows.
             /opt/seiltanzer/.venv/bin/python \
               /opt/seiltanzer/scripts/production_ede_v13_audit.py \
               --database /opt/seiltanzer/data/trades.db \
               --output /opt/seiltanzer/data/research/ede_v13_latest_audit.json \
               --evidence-ledger /opt/seiltanzer/data/research/ede_frozen_evidence.jsonl \
               --candidate-registry /opt/seiltanzer/data/research/ede_v13_candidate_registry.jsonl
+
+            # v1.3.4: use additional macro/wavelet transition metrics that were
+            # already frozen by g1s_evidence_v3. This is a separate bounded
+            # diagnostic universe: no canonical promotion, no shadow authority.
+            nice -n 10 /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/production_ede_transition_audit.py \
+              --database /opt/seiltanzer/data/trades.db \
+              --output /opt/seiltanzer/data/research/ede_transition_latest_audit.json

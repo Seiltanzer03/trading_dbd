@@ -18,9 +18,19 @@ v1.3.3 adds post-selection stratified diagnostics. For each primary candidate, t
 
 Family ablation is also reported separately for 15/30/60m. It means the best bounded conditional candidate inside each family envelope; it is not presented as a separately refitted multivariate ML model.
 
+## Regime-transition sub-audit
+
+v1.3.4 adds a separate bounded sub-audit for transition state that the V3 collector was already freezing before the outcome. It exposes macro boundary distance, transition velocity/acceleration and state coordinates, plus wavelet spectral concentration, persistence, ridge velocity/power slope, dominant period, energy-transfer rate and cycle-shift state.
+
+`regime.wavelet_phase` was aligned in PR #100 to the actual numeric `phase_stability` value already materialized by the base adapter. The transition sub-audit reuses that canonical ID in interactions; it does not duplicate the same phase-stability value under another feature name.
+
+No historical value is reconstructed. The sub-audit reads only `g1s_evidence_v3` frozen at T0 and rejects stale or future-dated source blocks. It uses the same `GLOBAL_RET5_PERSISTENCE`, nested temporal folds and FDR machinery but a separate predeclared universe capped at 120 templates and two conditions. This prevents adding transition variables from silently changing the canonical EDE multiple-testing universe after results are observed.
+
+Any transition signal remains diagnostic until a separate review adds the additional feature IDs to the canonical registry. `shadow_eligible=false` for this sub-audit, even if a research signal is found.
+
 ## Prospective shadow
 
-Candidates that meet the existing research gate and have a causal deployment refit may create immutable `PROSPECTIVE_SHADOW` predictions only after the rule already exists. Prediction records precede the target outcome; resolution is appended separately. Rolling 25/50/100/all evidence tracks decay without auto-promotion.
+Candidates that meet the existing canonical research gate and have a causal deployment refit may create immutable `PROSPECTIVE_SHADOW` predictions only after the rule already exists. Prediction records precede the target outcome; resolution is appended separately. Rolling 25/50/100/all evidence tracks decay without auto-promotion.
 
 ## Safety
 
