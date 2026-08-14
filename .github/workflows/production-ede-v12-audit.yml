@@ -1,23 +1,26 @@
-name: production-ede-v12-audit
+name: production-ede-v13-audit
 
 on:
   workflow_run:
-    # Keep this at the same workflow_run depth as inventory. GitHub silently
-    # refuses chains deeper than three levels (deploy -> readiness -> smoke).
+    # Same workflow_run depth as inventory: deploy -> readiness -> smoke.
     workflows: ["production-functional-smoke"]
     types: [completed]
   workflow_dispatch:
+  # Refresh frozen selective candidates without waiting for another deployment.
+  # Full discovery remains off the request path and runs only every six hours.
+  schedule:
+    - cron: "17 */6 * * *"
 
 permissions:
   contents: read
 
 jobs:
   audit:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 35
     steps:
-      - name: Run EDE v1.2 on an immutable read-only production DB copy
+      - name: Run EDE v1.3 selective search on immutable production DB copy
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
@@ -31,8 +34,14 @@ jobs:
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            mkdir -p /opt/seiltanzer/data/research
+            # The audit freezes/refits rules. It deliberately does not create a
+            # shadow prediction for older pending T0 rows. The low-priority
+            # runtime worker starts predictions only on T0 captured after this
+            # frozen audit exists.
             /opt/seiltanzer/.venv/bin/python \
-              /opt/seiltanzer/scripts/production_ede_v12_audit.py \
+              /opt/seiltanzer/scripts/production_ede_v13_audit.py \
               --database /opt/seiltanzer/data/trades.db \
-              --output /opt/seiltanzer/data/research/ede_v121_latest_audit.json \
-              --evidence-ledger /opt/seiltanzer/data/research/ede_frozen_evidence.jsonl
+              --output /opt/seiltanzer/data/research/ede_v13_latest_audit.json \
+              --evidence-ledger /opt/seiltanzer/data/research/ede_frozen_evidence.jsonl \
+              --candidate-registry /opt/seiltanzer/data/research/ede_v13_candidate_registry.jsonl
