@@ -26,7 +26,8 @@ class _Runtime:
                 window_id TEXT PRIMARY KEY,mfe_r REAL,mae_r REAL
             );
             CREATE TABLE g1m_management_observations(
-                observation_id TEXT PRIMARY KEY,production_policy TEXT,current_r REAL
+                observation_id TEXT PRIMARY KEY,trade_id INTEGER,
+                production_policy TEXT,current_r REAL
             );
             CREATE TABLE g1m_observation_context(
                 observation_id TEXT PRIMARY KEY,instrument TEXT
@@ -54,8 +55,8 @@ class _Runtime:
         self._conn.execute(
             "INSERT INTO g1m_local_outcomes VALUES(?,?,?)", (window_id, 1.2, -0.4))
         self._conn.execute(
-            "INSERT INTO g1m_management_observations VALUES(?,?,?)",
-            (observation_id, production, current_r),
+            "INSERT INTO g1m_management_observations VALUES(?,?,?,?)",
+            (observation_id, trade_id, production, current_r),
         )
         self._conn.execute(
             "INSERT INTO g1m_observation_context VALUES(?,?)", (observation_id, "NAS100"))
