@@ -20,16 +20,19 @@ _BASE_BUILD_SNAPSHOT_V18 = _impl.build_snapshot
 
 
 def _compact_ede_shadow(engine, snapshot: dict) -> dict:
-    """Return bounded prospective evidence only; never execution authority."""
+    """Read only worker-materialized bounded evidence; never scan research ledger."""
     try:
-        from .edge_discovery.shadow import ShadowLedger, shadow_ledger_path, shadow_summary
+        from .edge_discovery.shadow_cache import load_shadow_summary_cache
         cutoff = float(snapshot.get("captured_ts") or 0.0)
-        summary = shadow_summary(
-            ShadowLedger(shadow_ledger_path(engine)), cutoff_ts=cutoff)
+        cached = load_shadow_summary_cache(engine, cutoff_ts=cutoff)
+        if cached is None:
+            raise ValueError("bounded shadow summary unavailable for snapshot cutoff")
+        summary = cached["summary"]
     except Exception:
         return {
             "available": False,
-            "reason": "SHADOW_EVIDENCE_UNAVAILABLE",
+            "reason": "SHADOW_SUMMARY_CACHE_UNAVAILABLE",
+            "request_time_ledger_scan": False,
             "production_authority": False,
             "auto_promotion": False,
         }
@@ -42,6 +45,8 @@ def _compact_ede_shadow(engine, snapshot: dict) -> dict:
         statuses[status] = statuses.get(status, 0) + 1
     return {
         "available": bool(summary.get("prediction_count")),
+        "summary_cutoff_ts": cached.get("summary_cutoff_ts"),
+        "request_time_ledger_scan": False,
         "candidate_count": int(summary.get("candidate_count") or 0),
         "prediction_count": int(summary.get("prediction_count") or 0),
         "resolved_count": int(summary.get("resolved_count") or 0),
