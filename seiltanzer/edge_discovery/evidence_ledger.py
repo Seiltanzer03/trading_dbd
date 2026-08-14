@@ -34,9 +34,10 @@ MATURITY_RANK = {
 }
 EDGE_RANK = {
     "INSUFFICIENT_DATA": 0,
-    "RESEARCH_SIGNAL": 1,
-    "PROVISIONAL_EDGE": 2,
-    "ROBUST_EDGE": 3,
+    "EARLY_CONTEXT": 1,
+    "RESEARCH_SIGNAL": 2,
+    "PROVISIONAL_EDGE": 3,
+    "ROBUST_EDGE": 4,
 }
 
 # Historical discovery templates used these short names. They remain valid
