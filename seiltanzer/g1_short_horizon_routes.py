@@ -10,6 +10,7 @@ from .g1_short_horizon_final_report import install_g1_short_horizon_final_report
 from .g1_short_horizon_historical_wf_integrity import install_g1_short_horizon_historical_wf_integrity
 from .storage_restore_drill import last_restore_drill
 from .edge_discovery.evidence_ledger import evidence_ledger_path, latest_frozen_evidence
+from .edge_discovery.shadow_cache import load_shadow_summary_cache
 
 
 def install_g1_short_horizon_routes(app: FastAPI) -> None:
@@ -121,18 +122,43 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
 
     def ede_latest_audit():
         data_dir = Path(getattr(app.state.engine.settings, "data_dir", "."))
-        path = data_dir / "research" / "ede_v121_latest_audit.json"
-        if not path.exists():
+        paths = (
+            data_dir / "research" / "ede_v13_latest_audit.json",
+            data_dir / "research" / "ede_v121_latest_audit.json",
+        )
+        path = next((candidate for candidate in paths if candidate.exists()), None)
+        if path is None:
             return {"status": "INSUFFICIENT_DATA", "report_available": False,
                     "production_authority": False, "auto_promotion": False}
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            body = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(body, dict):
+                body.setdefault("report_available", True)
+                body.setdefault("report_path_version", "v1.3" if "v13" in path.name else "v1.2.1")
+            return body
         except (OSError, ValueError, json.JSONDecodeError):
             return {"status": "UNAVAILABLE", "report_available": False,
                     "production_authority": False, "auto_promotion": False}
 
     app.add_api_route("/api/research/ede/audit", ede_latest_audit,
                       methods=["GET"], name="ede_latest_audit")
+
+    def ede_shadow_status():
+        cached_shadow = load_shadow_summary_cache(app.state.engine, cutoff_ts=float("inf"))
+        if cached_shadow is None:
+            return {
+                "contract_version": "g1s-ede-shadow-summary-cache-v1.3.1",
+                "available": False, "request_time_ledger_scan": False,
+                "production_authority": False, "auto_promotion": False,
+            }
+        return {
+            **cached_shadow,
+            "available": True,
+            "request_time_ledger_scan": False,
+        }
+
+    app.add_api_route("/api/research/ede/shadow", ede_shadow_status,
+                      methods=["GET"], name="ede_shadow_status")
 
     app.add_api_route("/api/research/g1/q/audit", runtime.q_audit,
                       methods=["GET"], name="g1_q_maturity_audit")
@@ -166,6 +192,13 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
                 "g1s": {"batch_limit": g1s.get("batch_limit")},
                 "g1m_local": {"batch_limit": g1m_local.get("batch_limit")},
             }
+            if "ede_v13_shadow" in result:
+                ede_shadow = result.get("ede_v13_shadow") or {}
+                result_summary["ede_v13_shadow"] = {
+                    "refreshed": ede_shadow.get("refreshed"),
+                    "reason": ede_shadow.get("reason"),
+                    "summary": ede_shadow.get("summary"),
+                }
         keys = (
             "contract_version", "scalability_refinement_version", "running",
             "startup_grace_sec", "first_cycle_not_before_ts", "last_started_ts",
