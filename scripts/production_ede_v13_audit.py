@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from seiltanzer.edge_discovery.baseline_rows import baseline_eligible_rows
 from seiltanzer.edge_discovery.candidate_registry import CandidateRegistry
 from seiltanzer.edge_discovery.evidence_ledger import (
     append_frozen_evidence,
@@ -120,7 +121,7 @@ def audit(
             adapter = ProspectiveFeatureAdapter(runtime)
             inventory = adapter.feature_capture_audit()
             all_rows = adapter.rows(resolved_only=False, strict=False)
-            resolved_rows = [
+            resolved_rows_all = [
                 row for row in all_rows
                 if row.get("outcome_available")
                 and int(row["horizon_minutes"]) in SELECTIVE_HORIZONS]
@@ -131,6 +132,10 @@ def audit(
         finally:
             runtime.close()
 
+    # GLOBAL_RET5_PERSISTENCE is the primary comparator. Missing ret5/ret15 at
+    # T0 is missing evidence, never zero. Gate before temporal folds so the
+    # candidate and its baseline are trained/scored on one identical universe.
+    resolved_rows, baseline_row_gate = baseline_eligible_rows(resolved_rows_all)
     source_sha = _source_sha(resolved_rows)
     eligible = {
         str(row["feature_id"]) for row in inventory["features"]
@@ -156,8 +161,11 @@ def audit(
         "prediction_creation": None, "resolution": None, "summary": None}
     if shadow_ledger is not None:
         ledger = ShadowLedger(shadow_ledger)
+        # Resolution requires only the immutable prior prediction and outcome;
+        # do not discard resolvable events just because a sanity-baseline field
+        # was absent at T0.
         resolution = resolve_shadow_predictions(
-            ledger, resolved_rows=resolved_rows, asof_ts=materialized_at)
+            ledger, resolved_rows=resolved_rows_all, asof_ts=materialized_at)
         # A rule frozen by this audit did not exist for any T0 captured before
         # materialized_at. Never back-apply it merely because that T0 is still
         # unresolved. Runtime shadow creation starts with observations captured
@@ -187,11 +195,13 @@ def audit(
             run_id=f"production-{int(materialized_at)}-{source_sha[:12]}")
 
     return {
-        "contract_version": "g1s-ede-production-audit-v1.3",
+        "contract_version": "g1s-ede-production-audit-v1.3.1",
         "source_database": str(database),
         "source_database_open_mode": "READ_ONLY_SNAPSHOT",
         "dataset_sha256": source_sha,
         "dataset": _dataset_breakdown(resolved_rows),
+        "dataset_before_baseline_gate": _dataset_breakdown(resolved_rows_all),
+        "baseline_row_gate": baseline_row_gate,
         "pending_rows": len(pending_rows),
         "inventory": inventory,
         "selective_search": selective,
@@ -255,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
     print("EDE_V13_SUMMARY=" + json.dumps({
         "dataset_sha256": report["dataset_sha256"],
         "dataset": report["dataset"],
+        "dataset_before_baseline_gate": report["dataset_before_baseline_gate"],
+        "baseline_row_gate": report["baseline_row_gate"],
         "pending_rows": report["pending_rows"],
         "search_budget": selective["search_budget"],
         "hypotheses_tested": selective["hypotheses_tested"],
