@@ -18,7 +18,7 @@ from seiltanzer.edge_discovery.evidence_ledger import (
     append_frozen_evidence,
     build_frozen_evidence,
 )
-from seiltanzer.edge_discovery.prospective import ProspectiveFeatureAdapter
+from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.selective import (
     SELECTIVE_CONTRACT_VERSION,
     SELECTIVE_HORIZONS,
@@ -163,15 +163,8 @@ def audit(
         "prediction_creation": None, "resolution": None, "summary": None}
     if shadow_ledger is not None:
         ledger = ShadowLedger(shadow_ledger)
-        # Resolution requires only the immutable prior prediction and outcome;
-        # do not discard resolvable events just because a sanity-baseline field
-        # was absent at T0.
         resolution = resolve_shadow_predictions(
             ledger, resolved_rows=resolved_rows_all, asof_ts=materialized_at)
-        # A rule frozen by this audit did not exist for any T0 captured before
-        # materialized_at. Never back-apply it merely because that T0 is still
-        # unresolved. Runtime shadow creation starts with observations captured
-        # after the frozen audit exists.
         causal_pending_rows = [
             row for row in pending_rows
             if float(row.get("captured_ts") or 0.0) >= materialized_at - 1e-6]

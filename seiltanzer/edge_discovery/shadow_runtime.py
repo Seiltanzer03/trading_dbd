@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .baseline_rows import baseline_eligible_rows
-from .prospective import ProspectiveFeatureAdapter
+from .prospective_v13 import ProspectiveFeatureAdapter
 from .selective import SELECTIVE_HORIZONS
 from .shadow import (
     ShadowLedger,
@@ -25,11 +25,12 @@ from .shadow import (
 )
 from .shadow_cache import write_shadow_summary_cache
 
-SHADOW_RUNTIME_VERSION = "g1s-ede-shadow-runtime-v1.3.1"
+SHADOW_RUNTIME_VERSION = "g1s-ede-shadow-runtime-v1.3.2"
 SHADOW_RUNTIME_INTERVAL_SEC = 60.0
 AUDIT_CONTRACT_VERSIONS = {
     "g1s-ede-production-audit-v1.3",
     "g1s-ede-production-audit-v1.3.1",
+    "g1s-ede-production-audit-v1.3.3",
 }
 
 
