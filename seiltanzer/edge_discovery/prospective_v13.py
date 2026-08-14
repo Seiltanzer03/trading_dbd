@@ -26,7 +26,14 @@ class ProspectiveFeatureAdapter(_BaseAdapter):
         # stricter window contract is satisfiable. Baseline ret5/ret15 recovery
         # is deliberately independent of that 60m gate: a short return should
         # not be discarded merely because a full hour is not retained.
+        #
+        # Five horizon observations commonly share the same instrument/T0 and
+        # capture record. The base adapter cache therefore returns the exact
+        # subclass-populated causal block on horizons 2..5. Reuse it rather than
+        # scanning the same retained bars again.
         result = dict(super()._recomputed_price_context(row))
+        if (result.get("_meta") or {}).get("baseline_price_backfill") is True:
+            return result
 
         instrument = str(row["instrument"])
         t0 = float(row["captured_ts"])
