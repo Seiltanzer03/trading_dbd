@@ -49,7 +49,7 @@ jobs:
               --stage post-research \
               --smoke-run-id "$SMOKE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA" \
-              --timeout-seconds 1200 \
+              --timeout-seconds 1500 \
               --poll-seconds 5
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             "$PY" "$ORCH" validate-gate \
