@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from scripts.run_universal_outcome_audit import _summarize
+from seiltanzer.edge_discovery.universal_outcome_audit import (
+    summarize_universal_outcomes,
+)
 
 
 def test_universal_outcome_audit_keeps_clean_and_ambiguous_labels_separate():
@@ -32,7 +34,7 @@ def test_universal_outcome_audit_keeps_clean_and_ambiguous_labels_separate():
             },
         },
     ]
-    report = _summarize(rows)
+    report = summarize_universal_outcomes(rows)
     horizon = report["by_horizon"]["30"]
     assert horizon["universal_outcome_available"] == 2
     assert horizon["all_barrier_labels"]["up_1s_down_1s:AMBIGUOUS_SAME_BAR"] == 1
