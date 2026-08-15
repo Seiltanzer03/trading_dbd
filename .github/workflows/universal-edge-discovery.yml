@@ -1,0 +1,70 @@
+name: G1S Universal Structured Edge audit
+
+on:
+  pull_request:
+    paths:
+      - "seiltanzer/edge_discovery/universal_*.py"
+      - "seiltanzer/edge_discovery/rates*.py"
+      - "seiltanzer/edge_discovery/research_policy.py"
+      - "scripts/run_universal_structured_edge_audit.py"
+      - "tests/test_universal_*.py"
+      - "tests/test_edge_discovery_rates*.py"
+      - ".github/workflows/universal-edge-discovery.yml"
+  push:
+    branches: [main]
+    paths:
+      - "seiltanzer/edge_discovery/universal_*.py"
+      - "seiltanzer/edge_discovery/rates*.py"
+      - "seiltanzer/edge_discovery/research_policy.py"
+      - "scripts/run_universal_structured_edge_audit.py"
+      - ".github/workflows/universal-edge-discovery.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  universal-structured-discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install research runtime
+        run: pip install -e ".[dev]"
+      - name: Run fresh real-data universal structured discovery off-host
+        env:
+          OMP_NUM_THREADS: "2"
+          OPENBLAS_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+          NUMEXPR_NUM_THREADS: "2"
+        run: |
+          python scripts/run_universal_structured_edge_audit.py \
+            --output universal-structured-edge-report.json \
+            | tee universal-structured-edge-summary.json
+      - name: Assert research-only safety contract
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          payload = json.loads(Path("universal-structured-edge-report.json").read_text())
+          assert payload["strategy_agnostic"] is True
+          assert payload["discovery_only"] is True
+          assert payload["prospective_confirmation"] is False
+          assert payload["production_authority"] is False
+          assert payload["auto_promotion"] is False
+          assert payload["legacy_directional_ede_changed"] is False
+          assert payload["source_mode"] == "EPHEMERAL_REAL_YAHOO_5M_60D"
+          rates = payload["rates"]
+          assert rates["intraday_velocity_claim"] is False
+          assert rates["prospective_confirmation"] is False
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g1s-universal-structured-edge-${{ github.sha }}
+          path: |
+            universal-structured-edge-report.json
+            universal-structured-edge-summary.json
+          retention-days: 30
