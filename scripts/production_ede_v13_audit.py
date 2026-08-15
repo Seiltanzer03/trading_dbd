@@ -141,7 +141,7 @@ def audit(
     resolved_rows, baseline_row_gate = baseline_eligible_rows(resolved_rows_all)
     eligible = {
         str(row["feature_id"]) for row in inventory["features"]
-        if bool(row["usable_for_ede"])}
+        if bool(row["usable_for_ede"])
     }
     # v2 fingerprints the values actually consumed by research, not merely row
     # identity/timestamps. Outcome resolution, causal feature backfill, adapter
