@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from seiltanzer.edge_discovery.baseline_rows import baseline_eligible_rows
+from seiltanzer.edge_discovery.bottleneck import build_bottleneck_power_audit
 from seiltanzer.edge_discovery.candidate_registry import CandidateRegistry
 from seiltanzer.edge_discovery.dataset_fingerprint import (
     DATASET_FINGERPRINT_CONTRACT_VERSION,
@@ -154,6 +155,8 @@ def audit(
         source_set_sha256=source_sha,
         eligible_feature_ids=eligible)
     augment_selective_report_with_strata(selective, resolved_rows)
+    selective["bottleneck_power_audit"] = build_bottleneck_power_audit(
+        selective, resolved_rows)
     evidence_cutoff = max(
         (float(row.get("resolved_ts") or row["target_ts"]) for row in resolved_rows),
         default=materialized_at)
@@ -270,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
         temporary.replace(args.output)
 
     selective = report["selective_search"]
+    bottleneck = selective.get("bottleneck_power_audit") or {}
     print("EDE_V13_SUMMARY=" + json.dumps({
         "dataset_sha256": report["dataset_sha256"],
         "dataset_fingerprint_contract_version": report["dataset_fingerprint_contract_version"],
@@ -285,6 +289,9 @@ def main(argv: list[str] | None = None) -> int:
         "stable_candidates": selective["stable_candidates"],
         "edge_maturity_counts": selective["edge_maturity_counts"],
         "verdict": selective["verdict"],
+        "bottleneck_funnel": bottleneck.get("candidate_funnel"),
+        "bottleneck_primary_failures": bottleneck.get("primary_failure_reason_counts"),
+        "power_summary": bottleneck.get("power_summary"),
         "where_it_helps_contexts": len(selective.get("where_it_helps_contexts") or []),
         "where_it_hurts_contexts": len(selective.get("where_it_hurts_contexts") or []),
         "shadow": report["prospective_shadow"].get("summary"),
