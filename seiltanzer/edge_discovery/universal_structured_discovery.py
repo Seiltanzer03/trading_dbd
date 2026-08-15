@@ -21,7 +21,6 @@ from seiltanzer.g1_short_horizon_p2e_segmented_persistence import _inner_split
 
 from .filters import CandidateTemplate, fit_rule, rule_mask
 from .rates import RatesState, attach_rates_context
-from .registry import FEATURES
 from .scoring import benjamini_hochberg
 from .universal_outcome_adapter import resolve_historical_universal_outcome
 from .universal_target_scoring import (
@@ -186,6 +185,13 @@ def _inner_discovery(
     }
 
 
+def _candidate_uses_rates(candidate: dict[str, Any]) -> bool:
+    return any(
+        str(condition.get("feature_id") or "").startswith("rates.")
+        for condition in candidate.get("conditions") or []
+    )
+
+
 def _aggregate_candidate(
     template_id: str, occurrences: list[dict[str, Any]], spec: UniversalTargetSpec,
 ) -> dict[str, Any]:
@@ -218,6 +224,11 @@ def _aggregate_candidate(
     improvement = relative_target_improvement(model, baseline, spec)
     p_value = paired_target_pvalue(rows, model_prediction, baseline_prediction, spec)
     fold_positive = sum(bool(item["joint_positive"]) for item in folds)
+    conditions = rules[0]["conditions"] if rules else []
+    uses_rates = any(
+        str(condition.get("feature_id") or "").startswith("rates.")
+        for condition in conditions
+    )
     return {
         "candidate_id": "g1s-universal-" + _sha({
             "target": spec.target_id, "template": template_id})[:24],
@@ -225,7 +236,7 @@ def _aggregate_candidate(
         "target_id": spec.target_id,
         "target_family": spec.family,
         "target_kind": spec.kind,
-        "conditions": rules[0]["conditions"] if rules else [],
+        "conditions": conditions,
         "fold_rules": rules,
         "model": model,
         "baseline": baseline,
@@ -237,6 +248,14 @@ def _aggregate_candidate(
         "folds": folds,
         "raw_n": len(rows),
         "effective_n": _effective_n(rows),
+        "uses_slow_daily_rates": uses_rates,
+        "rates_dependency_correction_complete": not uses_rates,
+        "rates_dependency_note": (
+            "daily Treasury state is shared across many intraday T0 rows; PASS 5 permits "
+            "discovery diagnostics but withholds DISCOVERY_SIGNAL until a dedicated "
+            "Treasury-day dependency correction is implemented"
+            if uses_rates else None
+        ),
         "production_authority": False,
         "prospective_confirmation": False,
         "discovery_only": True,
@@ -308,17 +327,25 @@ def run_universal_structured_discovery(
             q_values = benjamini_hochberg([float(item["p_value"]) for item in candidates])
             for item, q_value in zip(candidates, q_values):
                 item["q_value"] = float(q_value)
-                item["status"] = (
-                    "DISCOVERY_SIGNAL"
-                    if float(q_value) <= MAX_Q_VALUE
+                statistically_qualified = (
+                    float(q_value) <= MAX_Q_VALUE
                     and float(item["primary_improvement"]) >= MIN_RELATIVE_IMPROVEMENT
                     and int(item["fold_positive"]) >= MIN_STABLE_FOLDS
-                    else "RESEARCH_DIAGNOSTIC"
                 )
-                if item["status"] == "DISCOVERY_SIGNAL":
+                if statistically_qualified and _candidate_uses_rates(item):
+                    item["status"] = "RESEARCH_DIAGNOSTIC_RATES_DEPENDENCY_PENDING"
+                elif statistically_qualified:
+                    item["status"] = "DISCOVERY_SIGNAL"
                     all_discovery_signals.append(item)
+                else:
+                    item["status"] = "RESEARCH_DIAGNOSTIC"
+            status_rank = {
+                "DISCOVERY_SIGNAL": 0,
+                "RESEARCH_DIAGNOSTIC_RATES_DEPENDENCY_PENDING": 1,
+                "RESEARCH_DIAGNOSTIC": 2,
+            }
             candidates.sort(key=lambda item: (
-                item["status"] != "DISCOVERY_SIGNAL",
+                status_rank.get(str(item["status"]), 9),
                 -float(item["primary_improvement"]), float(item["q_value"]),
                 str(item["candidate_id"])))
             target_reports.append({
@@ -333,6 +360,9 @@ def run_universal_structured_discovery(
                 "candidate_count": len(candidates),
                 "discovery_signal_count": sum(
                     item["status"] == "DISCOVERY_SIGNAL" for item in candidates),
+                "rates_dependency_pending_count": sum(
+                    item["status"] == "RESEARCH_DIAGNOSTIC_RATES_DEPENDENCY_PENDING"
+                    for item in candidates),
                 "candidates": candidates[:20],
             })
         horizon_reports.append({
@@ -356,6 +386,7 @@ def run_universal_structured_discovery(
             "inner_fdr_q_max": MAX_Q_VALUE,
             "minimum_relative_improvement": MIN_RELATIVE_IMPROVEMENT,
             "minimum_positive_outer_folds": MIN_STABLE_FOLDS,
+            "rates_daily_dependency_signal_gate": "WITHHELD_UNTIL_CLUSTER_CORRECTION",
             "promotion_effect": "NONE_DISCOVERY_ONLY",
         },
         "hypotheses_tested_inner": total_tested,
