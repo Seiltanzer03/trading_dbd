@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from seiltanzer.edge_discovery.filters import (
+    CandidateTemplate,
+    ConditionTemplate,
+    _policy_mixed_templates,
+)
 from seiltanzer.edge_discovery.registry import FEATURES, FeatureDefinition
 from seiltanzer.edge_discovery.research_policy import (
     DEFAULT_HORIZONS,
@@ -93,3 +98,40 @@ def test_current_option_cross_policy_is_declarative_and_restricted_to_confirmati
     ]
     assert len(policies) == 1
     assert policies[0].right_feature_ids == ("cross.confirmation",)
+    assert policies[0].max_feature_pairs == 9
+
+
+def test_current_policy_reproduces_old_36_option_plus_24_dynamic_cross_templates():
+    eligible = {
+        feature.feature_id for feature in FEATURES
+        if feature.research_scope == "G1S" and feature.training_eligibility
+    }
+    prospective: list[CandidateTemplate] = []
+    numeric_ids = [
+        feature.feature_id for feature in FEATURES
+        if feature.feature_id in eligible
+        and feature.datatype == "float"
+        and (feature.feature_id.startswith("option.")
+             or feature.feature_id.startswith("option_dynamics."))
+    ]
+    for feature_id in numeric_ids:
+        for state in ("ABOVE_MEDIAN", "BELOW_MEDIAN"):
+            prospective.append(CandidateTemplate((ConditionTemplate(
+                feature_id, "train_relative", state),)))
+    for state in ("SAME", "OPPOSITE"):
+        prospective.append(CandidateTemplate((ConditionTemplate(
+            "cross.confirmation", "categorical", state),)))
+
+    mixed = _policy_mixed_templates(prospective, eligible)
+    option = [
+        item for item in mixed
+        if item.conditions[0].feature_id.startswith("option.")
+    ]
+    dynamics = [
+        item for item in mixed
+        if item.conditions[0].feature_id.startswith("option_dynamics.")
+    ]
+    assert len(option) == 36
+    assert len(dynamics) == 24
+    assert len(mixed) == 60
+    assert all(item.conditions[1].feature_id == "cross.confirmation" for item in mixed)
