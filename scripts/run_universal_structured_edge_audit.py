@@ -1,24 +1,39 @@
 #!/usr/bin/env python3
-"""Run strategy-agnostic structured edge discovery on an immutable DB copy."""
+"""Run strategy-agnostic structured edge discovery entirely off production.
+
+Two source modes are supported:
+1. ``--database``: consume an immutable production/P1B SQLite copy read-only;
+2. no database: fetch the existing real Yahoo 5m/60d P1B source universe into
+   an ephemeral GitHub-runner SQLite database, then discard it after the audit.
+
+Neither mode grants production authority or performs request-time terminal work.
+"""
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sqlite3
+import tempfile
 import threading
 from pathlib import Path
+from typing import Any
 
 from seiltanzer.edge_discovery.historical import load_p1b_sources
 from seiltanzer.edge_discovery.rates import build_rates_states, fetch_treasury_daily_rates
 from seiltanzer.edge_discovery.universal_structured_discovery import (
     run_universal_structured_discovery,
 )
+from seiltanzer.g1_short_horizon_historical_wf import _ensure_tables, _fetch_sources
 
 
-class ReadOnlyRuntime:
-    def __init__(self, path: Path):
-        uri = f"file:{path.as_posix()}?mode=ro"
-        self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=30)
+class SQLiteRuntime:
+    def __init__(self, path: Path, *, read_only: bool):
+        if read_only:
+            uri = f"file:{path.as_posix()}?mode=ro"
+            self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=30)
+        else:
+            self._conn = sqlite3.connect(str(path), check_same_thread=False, timeout=30)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
 
@@ -31,25 +46,64 @@ def _write(path: Path, value: object) -> None:
                                separators=(",", ":"), allow_nan=False), encoding="utf-8")
 
 
+def _source_set_sha(sources: list[dict[str, Any]]) -> str:
+    payload = sorted(
+        (str(source["instrument"]), str(source["source_id"]), str(source["source_sha256"]))
+        for source in sources
+    )
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                     separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _fresh_off_host_sources() -> tuple[list[dict[str, Any]], str, dict[str, str]]:
+    """Fetch real P1B sources into a throwaway local database on the runner."""
+    with tempfile.TemporaryDirectory(prefix="universal-ede-") as directory:
+        runtime = SQLiteRuntime(Path(directory) / "research.sqlite3", read_only=False)
+        try:
+            _ensure_tables(runtime)  # type: ignore[arg-type]
+            sources, errors = _fetch_sources(runtime)  # type: ignore[arg-type]
+            # Return only ordinary Python objects; runtime/database is discarded.
+            detached = [dict(source) for source in sources]
+            return detached, _source_set_sha(detached), dict(errors)
+        finally:
+            runtime.close()
+
+
+def _immutable_database_sources(path: Path) -> tuple[list[dict[str, Any]], str, dict[str, str]]:
+    runtime = SQLiteRuntime(path, read_only=True)
+    try:
+        sources, source_set = load_p1b_sources(runtime)
+        return sources, source_set, {}
+    finally:
+        runtime.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--database", required=True,
-                        help="immutable offline production/P1B SQLite copy")
+    parser.add_argument(
+        "--database",
+        help="optional immutable offline production/P1B SQLite copy; when omitted, fetch real 5m/60d sources on this runner",
+    )
     parser.add_argument("--output", default="universal-structured-edge-report.json")
     parser.add_argument("--skip-rates", action="store_true",
                         help="run without official Treasury daily context")
     args = parser.parse_args()
 
-    runtime = ReadOnlyRuntime(Path(args.database).resolve())
-    try:
-        sources, source_set = load_p1b_sources(runtime)
-    finally:
-        runtime.close()
+    if args.database:
+        sources, source_set, source_errors = _immutable_database_sources(
+            Path(args.database).resolve())
+        source_mode = "IMMUTABLE_OFFLINE_DATABASE"
+    else:
+        sources, source_set, source_errors = _fresh_off_host_sources()
+        source_mode = "EPHEMERAL_REAL_YAHOO_5M_60D"
 
-    first = min(float(source["bars"][0]["bar_end_ts"]) for source in sources if source.get("bars"))
-    last = max(float(source["bars"][-1]["bar_end_ts"]) for source in sources if source.get("bars"))
+    first = min(float(source["bars"][0]["bar_end_ts"])
+                for source in sources if source.get("bars"))
+    last = max(float(source["bars"][-1]["bar_end_ts"])
+               for source in sources if source.get("bars"))
     rates_states = ()
-    rates_metadata = {
+    rates_metadata: dict[str, Any] = {
         "requested": not bool(args.skip_rates),
         "available": False,
         "source": "U.S. Treasury Daily Treasury Par Yield Curve Rates",
@@ -66,13 +120,15 @@ def main() -> int:
                 "daily_observations": len(observations),
                 "states": len(rates_states),
             })
-        except Exception as exc:  # discovery remains useful without optional macro context
+        except Exception as exc:  # optional macro context must not fake/kill baseline research
             rates_metadata["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
 
     report = run_universal_structured_discovery(
         sources, source_set_sha256=source_set, rates_states=rates_states)
     report["rates"] = rates_metadata
-    report["database_authority"] = "OFFLINE_READ_ONLY_IMMUTABLE_COPY"
+    report["source_mode"] = source_mode
+    report["source_fetch_errors"] = source_errors
+    report["database_authority"] = "OFF_HOST_RESEARCH_ONLY"
     report["production_authority"] = False
     report["auto_promotion"] = False
     _write(Path(args.output).resolve(), report)
@@ -83,6 +139,7 @@ def main() -> int:
         "fdr_passed_inner": report["fdr_passed_inner"],
         "discovery_signal_count": report["discovery_signal_count"],
         "rates_available": rates_metadata["available"],
+        "source_mode": source_mode,
         "production_authority": False,
     }, ensure_ascii=False, sort_keys=True))
     return 0
