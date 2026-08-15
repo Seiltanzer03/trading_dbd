@@ -11,9 +11,12 @@ from seiltanzer.edge_discovery.universal_outcome_adapter import (
 
 def test_historical_adapter_uses_immutable_ohlc_and_t0_rv():
     bars = [
-        {"bar_end_ts": 1000.0, "close": 100.0, "high": 100.2, "low": 99.8},
-        {"bar_end_ts": 1300.0, "close": 101.0, "high": 101.2, "low": 99.9},
-        {"bar_end_ts": 1600.0, "close": 102.3, "high": 102.5, "low": 100.8},
+        {"bar_start_ts": 700.0, "bar_end_ts": 1000.0,
+         "close": 100.0, "high": 100.2, "low": 99.8},
+        {"bar_start_ts": 1000.0, "bar_end_ts": 1300.0,
+         "close": 101.0, "high": 101.2, "low": 99.9},
+        {"bar_start_ts": 1300.0, "bar_end_ts": 1600.0,
+         "close": 102.3, "high": 102.5, "low": 100.8},
     ]
     source = {"bars": bars}
     row = {
@@ -80,6 +83,8 @@ def test_prospective_adapter_uses_only_bars_recorded_by_resolution_time():
     result = adapter.attach(rows)[0]["universal_outcome"]
     assert result["available"] is True
     assert result["path_count"] == 2
+    assert result["path_complete"] is False
+    assert result["retained_path_reaches_target"] is False
     assert result["bars_created_no_later_than_resolution"] is True
     assert result["source_path_quality_status"] == "complete"
     # The excluded late-created 105 high cannot affect this result.
