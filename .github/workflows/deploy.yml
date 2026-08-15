@@ -85,10 +85,10 @@ jobs:
             done < <(systemctl list-units --all --type=service --no-legend 'seiltanzer-ede-*' || true)
 
             # Backstop for a legacy controller whose transient unit metadata was
-            # already collected while its child still exists. Scope the pattern
-            # strictly to the two historical EDE audit entry points.
-            pkill -f '/opt/seiltanzer/scripts/production_ede_v13_audit.py' >/dev/null 2>&1 || true
-            pkill -f '/opt/seiltanzer/scripts/production_ede_transition_audit.py' >/dev/null 2>&1 || true
+            # already collected while its child still exists. Bracket the first
+            # character so pkill cannot match this SSH shell's own script text.
+            pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_v13_audit.py' >/dev/null 2>&1 || true
+            pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_transition_audit.py' >/dev/null 2>&1 || true
 
             git fetch origin main
             git cat-file -e "${EXPECTED_SHA}^{commit}"
