@@ -49,11 +49,19 @@ def test_structured_continuous_rule_can_detect_train_fitted_state_shift() -> Non
     train = []
     for index in range(120):
         high = index >= 60
-        train.append(_row(index+1, 4.6 if high else 3.8, 0.8 if high else -0.8))
+        if high:
+            target = 0.72 if index % 2 else 0.88
+        else:
+            target = -0.72 if index % 2 else -0.88
+        train.append(_row(index+1, 4.6 if high else 3.8, target))
     test = []
     for index in range(40):
         high = index >= 20
-        test.append(_row(index+1000, 4.7 if high else 3.7, 0.75 if high else -0.75))
+        if high:
+            target = 0.70 if index % 2 else 0.82
+        else:
+            target = -0.70 if index % 2 else -0.82
+        test.append(_row(index+1000, 4.7 if high else 3.7, target))
     result = _evaluate_rule(template, train, test, spec)
     assert result is not None
     assert result["rule"]["conditions"][0]["train_cutoff_ts"] == max(
