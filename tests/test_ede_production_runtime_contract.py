@@ -12,6 +12,7 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     post = (root / ".github/workflows/production-post-research.yml").read_text(
         encoding="utf-8"
     )
+    deploy = (root / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
 
     # Production is now only a snapshot/transport boundary. The expensive
     # selective and transition audits execute on a GitHub-hosted runner.
@@ -49,3 +50,10 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     # With heavy EDE off production, the lease only covers the short serialized
     # acceptance path and is released immediately after the snapshot.
     assert "--ttl-seconds 7200" in post
+
+    # The first offload deployment must evict any legacy pre-v1.3.13 research
+    # process that was already running on the VPS before the workflow changed.
+    assert "Stopping legacy production EDE unit" in deploy
+    assert "seiltanzer-ede-*.service" in deploy
+    assert "pkill -f '/opt/seiltanzer/scripts/production_ede_v13_audit.py'" in deploy
+    assert "Legacy production EDE unit survived deployment" in deploy
