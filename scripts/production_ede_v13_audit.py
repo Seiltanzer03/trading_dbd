@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sqlite3
 import tempfile
@@ -14,6 +13,10 @@ from typing import Any
 
 from seiltanzer.edge_discovery.baseline_rows import baseline_eligible_rows
 from seiltanzer.edge_discovery.candidate_registry import CandidateRegistry
+from seiltanzer.edge_discovery.dataset_fingerprint import (
+    DATASET_FINGERPRINT_CONTRACT_VERSION,
+    research_dataset_fingerprint,
+)
 from seiltanzer.edge_discovery.evidence_ledger import (
     append_frozen_evidence,
     build_frozen_evidence,
@@ -31,6 +34,11 @@ from seiltanzer.edge_discovery.shadow import (
     shadow_summary,
 )
 from seiltanzer.edge_discovery.stratified import augment_selective_report_with_strata
+
+
+EVALUATION_MEASUREMENT_CONTRACT = (
+    f"{SELECTIVE_CONTRACT_VERSION}+{DATASET_FINGERPRINT_CONTRACT_VERSION}"
+)
 
 
 class ReadOnlyRuntime:
@@ -66,12 +74,6 @@ def immutable_snapshot(source: Path, destination: Path) -> None:
         check.close()
 
 
-def _source_sha(rows: list[dict[str, Any]]) -> str:
-    return hashlib.sha256("|".join(
-        f"{row['observation_id']}:{row['captured_ts']}:{row['target_ts']}:{row.get('resolved_ts')}"
-        for row in rows).encode()).hexdigest()
-
-
 def _dataset_breakdown(rows: list[dict[str, Any]]) -> dict[str, Any]:
     by_horizon: dict[str, int] = {}
     by_instrument: dict[str, int] = {}
@@ -97,7 +99,7 @@ def _register_evaluations(
             registry.register_evaluation(
                 candidate, dataset_sha256=dataset_sha256,
                 research_run=run_id,
-                measurement_contract=SELECTIVE_CONTRACT_VERSION)
+                measurement_contract=EVALUATION_MEASUREMENT_CONTRACT)
             if len(registry.events()) > before:
                 written += 1
             else:
@@ -137,10 +139,16 @@ def audit(
     # T0 is missing evidence, never zero. Gate before temporal folds so the
     # candidate and its baseline are trained/scored on one identical universe.
     resolved_rows, baseline_row_gate = baseline_eligible_rows(resolved_rows_all)
-    source_sha = _source_sha(resolved_rows)
     eligible = {
         str(row["feature_id"]) for row in inventory["features"]
         if bool(row["usable_for_ede"])}
+    }
+    # v2 fingerprints the values actually consumed by research, not merely row
+    # identity/timestamps. Outcome resolution, causal feature backfill, adapter
+    # changes, or eligibility changes therefore cannot collide with an immutable
+    # historical evaluation that was produced from different inputs.
+    source_sha = research_dataset_fingerprint(
+        resolved_rows, eligible_feature_ids=eligible)
     selective = run_selective_search(
         prospective_rows=resolved_rows,
         source_set_sha256=source_sha,
@@ -190,10 +198,12 @@ def audit(
             run_id=f"production-{int(materialized_at)}-{source_sha[:12]}")
 
     return {
-        "contract_version": "g1s-ede-production-audit-v1.3.3",
+        "contract_version": "g1s-ede-production-audit-v1.3.4",
         "source_database": str(database),
         "source_database_open_mode": "READ_ONLY_SNAPSHOT",
         "dataset_sha256": source_sha,
+        "dataset_fingerprint_contract_version": DATASET_FINGERPRINT_CONTRACT_VERSION,
+        "evaluation_measurement_contract": EVALUATION_MEASUREMENT_CONTRACT,
         "dataset": _dataset_breakdown(resolved_rows),
         "dataset_before_baseline_gate": _dataset_breakdown(resolved_rows_all),
         "baseline_row_gate": baseline_row_gate,
@@ -262,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
     selective = report["selective_search"]
     print("EDE_V13_SUMMARY=" + json.dumps({
         "dataset_sha256": report["dataset_sha256"],
+        "dataset_fingerprint_contract_version": report["dataset_fingerprint_contract_version"],
+        "evaluation_measurement_contract": report["evaluation_measurement_contract"],
         "dataset": report["dataset"],
         "dataset_before_baseline_gate": report["dataset_before_baseline_gate"],
         "baseline_row_gate": report["baseline_row_gate"],
