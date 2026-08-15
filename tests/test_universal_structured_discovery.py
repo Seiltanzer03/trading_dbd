@@ -4,7 +4,10 @@ import pytest
 
 from seiltanzer.edge_discovery.filters import CandidateTemplate, ConditionTemplate, candidate_templates
 from seiltanzer.edge_discovery.rates_registry import RATES_FEATURE_DEFINITIONS
-from seiltanzer.edge_discovery.universal_structured_discovery import _evaluate_rule
+from seiltanzer.edge_discovery.universal_structured_discovery import (
+    _candidate_uses_rates,
+    _evaluate_rule,
+)
 from seiltanzer.edge_discovery.universal_target_scoring import UniversalTargetSpec
 from seiltanzer.edge_discovery.universal_templates import (
     MAX_UNIVERSAL_TEMPLATES,
@@ -78,3 +81,10 @@ def test_universal_feature_definitions_include_rates_without_claiming_live_confi
     assert definitions["rates.us10y_yield"].family == "RATES"
     assert definitions["rates.us10y_yield"].live_availability == "LIMITED"
     assert definitions["rates.us10y_yield"].historical_availability == "AVAILABLE"
+
+
+def test_daily_rates_candidates_are_identified_for_dependency_quarantine() -> None:
+    assert _candidate_uses_rates({
+        "conditions": [{"feature_id": "rates.us10y_yield"}]}) is True
+    assert _candidate_uses_rates({
+        "conditions": [{"feature_id": "option_dynamics.gex_velocity"}]}) is False
