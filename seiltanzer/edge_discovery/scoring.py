@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from statistics import NormalDist
 from typing import Any
 
 import numpy as np
 
 from seiltanzer.g1_short_horizon_historical_wf import _prob_metrics, _weights
+
+
+POWER_DIAGNOSTIC_CONTRACT_VERSION = "g1s-ede-paired-loss-power-v1"
 
 
 def metrics(rows: list[dict[str, Any]], prediction: np.ndarray) -> dict[str, Any]:
@@ -24,19 +28,33 @@ def metrics(rows: list[dict[str, Any]], prediction: np.ndarray) -> dict[str, Any
     return result
 
 
-def paired_loss_pvalue(rows: list[dict[str, Any]], model: np.ndarray,
-                       baseline: np.ndarray) -> float:
-    """One-sided normal approximation on dependency-group mean joint losses."""
+def _paired_group_loss_deltas(rows: list[dict[str, Any]], model: np.ndarray,
+                              baseline: np.ndarray) -> np.ndarray:
+    """Return dependency-group mean baseline-minus-model joint loss deltas.
+
+    This is the exact sampling unit used by ``paired_loss_pvalue``.  Keeping the
+    power diagnostic on the same grouped losses prevents an optimistic MDE from
+    treating overlapping observations captured at the same T0 as independent.
+    Positive values mean the candidate beats the baseline.
+    """
     y = np.asarray([1.0 if row["direction_label"] == "UP" else 0.0 for row in rows])
     model = np.clip(np.asarray(model, dtype=float), 1e-6, 1-1e-6)
     baseline = np.clip(np.asarray(baseline, dtype=float), 1e-6, 1-1e-6)
+    if len(rows) != len(model) or len(rows) != len(baseline):
+        raise ValueError("paired loss inputs must have identical lengths")
     model_loss = (model-y)**2 + (-(y*np.log(model)+(1-y)*np.log(1-model)))
     baseline_loss = ((baseline-y)**2
                      + (-(y*np.log(baseline)+(1-y)*np.log(1-baseline))))
     groups: dict[float, list[float]] = defaultdict(list)
     for index, row in enumerate(rows):
         groups[float(row["captured_ts"])].append(float(baseline_loss[index]-model_loss[index]))
-    values = np.asarray([float(np.mean(items)) for items in groups.values()], dtype=float)
+    return np.asarray([float(np.mean(items)) for items in groups.values()], dtype=float)
+
+
+def paired_loss_pvalue(rows: list[dict[str, Any]], model: np.ndarray,
+                       baseline: np.ndarray) -> float:
+    """One-sided normal approximation on dependency-group mean joint losses."""
+    values = _paired_group_loss_deltas(rows, model, baseline)
     if len(values) < 3:
         return 1.0
     mean = float(values.mean())
@@ -45,6 +63,77 @@ def paired_loss_pvalue(rows: list[dict[str, Any]], model: np.ndarray,
         return 0.0 if mean > 0 else 1.0
     z = mean/(std/math.sqrt(len(values)))
     return float(0.5*math.erfc(z/math.sqrt(2.0)))
+
+
+def paired_loss_power_diagnostics(
+    rows: list[dict[str, Any]], model: np.ndarray, baseline: np.ndarray, *,
+    alpha: float = 0.10, target_power: float = 0.80,
+) -> dict[str, Any]:
+    """Estimate detectable joint-loss improvement on the p-value sampling unit.
+
+    The MDE is diagnostic only.  It does not change any EDE gate and is not a
+    substitute for prospective confirmation or FDR correction.  It answers the
+    narrower question: given the observed dispersion of dependency-group loss
+    deltas, how large a positive mean delta would a one-sided normal test need
+    for approximately ``target_power`` at ``alpha``?
+    """
+    if not (0.0 < float(alpha) < 0.5):
+        raise ValueError("alpha must be between 0 and 0.5")
+    if not (0.5 < float(target_power) < 1.0):
+        raise ValueError("target_power must be between 0.5 and 1")
+    values = _paired_group_loss_deltas(rows, model, baseline)
+    count = int(len(values))
+    base = {
+        "contract_version": POWER_DIAGNOSTIC_CONTRACT_VERSION,
+        "sampling_unit": "DEPENDENCY_GROUP_MEAN_JOINT_LOSS_DELTA_BY_CAPTURED_TS",
+        "alpha": float(alpha),
+        "target_power": float(target_power),
+        "group_n": count,
+        "gate_effect": "DIAGNOSTIC_ONLY_DOES_NOT_CHANGE_EDGE_GATES",
+    }
+    if count < 3:
+        return {
+            **base,
+            "status": "INSUFFICIENT_GROUPS",
+            "observed_mean_joint_loss_delta": (float(values.mean()) if count else None),
+            "group_std_joint_loss_delta": None,
+            "standard_error": None,
+            "minimum_detectable_joint_loss_delta": None,
+            "observed_effect_to_mde_ratio": None,
+        }
+    mean = float(values.mean())
+    std = float(values.std(ddof=1))
+    if not math.isfinite(std) or std <= 1e-15:
+        return {
+            **base,
+            "status": "DEGENERATE_VARIANCE",
+            "observed_mean_joint_loss_delta": mean,
+            "group_std_joint_loss_delta": std if math.isfinite(std) else None,
+            "standard_error": 0.0 if math.isfinite(std) else None,
+            "minimum_detectable_joint_loss_delta": 0.0 if math.isfinite(std) else None,
+            "observed_effect_to_mde_ratio": None,
+        }
+    se = std/math.sqrt(count)
+    normal = NormalDist()
+    z_alpha = normal.inv_cdf(1.0-float(alpha))
+    z_power = normal.inv_cdf(float(target_power))
+    mde = float((z_alpha+z_power)*se)
+    ratio = float(mean/mde) if mde > 1e-15 else None
+    if mean <= 0.0:
+        status = "OBSERVED_EFFECT_NON_POSITIVE"
+    elif ratio is not None and ratio >= 1.0:
+        status = "OBSERVED_EFFECT_AT_OR_ABOVE_MDE"
+    else:
+        status = "UNDERPOWERED_FOR_OBSERVED_EFFECT"
+    return {
+        **base,
+        "status": status,
+        "observed_mean_joint_loss_delta": mean,
+        "group_std_joint_loss_delta": std,
+        "standard_error": float(se),
+        "minimum_detectable_joint_loss_delta": mde,
+        "observed_effect_to_mde_ratio": ratio,
+    }
 
 
 def benjamini_hochberg(pvalues: list[float]) -> list[float]:
