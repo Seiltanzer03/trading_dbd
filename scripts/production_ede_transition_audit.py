@@ -7,15 +7,45 @@ import json
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
-from production_ede_v13_audit import ReadOnlyRuntime, _source_sha, immutable_snapshot
+from production_ede_v13_audit import ReadOnlyRuntime, immutable_snapshot
 from seiltanzer.edge_discovery.baseline_rows import baseline_eligible_rows
+from seiltanzer.edge_discovery.dataset_fingerprint import (
+    DATASET_FINGERPRINT_CONTRACT_VERSION,
+    research_dataset_fingerprint,
+)
 from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.transition_search import (
+    TRANSITION_FEATURES,
     TRANSITION_HORIZONS,
     augment_rows_from_frozen_v3,
     run_transition_search,
 )
+
+
+# Canonical non-transition fields that the transition search may use only in
+# explicitly predeclared interactions. Keep this set aligned with
+# run_transition_search; including the actual available universe in the
+# dataset fingerprint makes source identity change when the usable transition
+# research surface changes.
+_TRANSITION_INTERACTION_FEATURE_IDS = (
+    "regime.wavelet_phase",
+    "option_dynamics.gex_velocity",
+    "option_dynamics.iv_velocity",
+    "option.iv_rv_ratio",
+    "cross.confirmation",
+    "regime.trend",
+)
+
+
+def _transition_available_feature_ids(rows: list[dict[str, Any]]) -> set[str]:
+    candidates = set(TRANSITION_FEATURES) | set(_TRANSITION_INTERACTION_FEATURE_IDS)
+    return {
+        feature_id
+        for feature_id in candidates
+        if any((row.get("ede_features") or {}).get(feature_id) is not None for row in rows)
+    }
 
 
 def audit(database: Path) -> dict:
@@ -37,7 +67,11 @@ def audit(database: Path) -> dict:
         and int(row["horizon_minutes"]) in TRANSITION_HORIZONS
     ]
     rows, baseline_gate = baseline_eligible_rows(resolved_all)
-    source_sha = _source_sha(rows)
+    available_feature_ids = _transition_available_feature_ids(rows)
+    source_sha = research_dataset_fingerprint(
+        rows,
+        eligible_feature_ids=available_feature_ids,
+    )
     transition = run_transition_search(rows, source_set_sha256=source_sha)
     # discover_horizon publishes the actual inner search count under
     # inner_hypotheses_tested. Keep the transition summary truthful instead of
@@ -47,10 +81,12 @@ def audit(database: Path) -> dict:
         for horizon in transition.get("horizons") or []
     )
     return {
-        "contract_version": "g1s-ede-production-regime-transition-v1.3.6",
+        "contract_version": "g1s-ede-production-regime-transition-v1.3.7",
         "source_database": str(database),
         "source_database_open_mode": "READ_ONLY_SNAPSHOT",
         "dataset_sha256": source_sha,
+        "dataset_fingerprint_contract_version": DATASET_FINGERPRINT_CONTRACT_VERSION,
+        "available_transition_feature_ids": sorted(available_feature_ids),
         "resolved_before_baseline_gate": len(resolved_all),
         "resolved_after_baseline_gate": len(rows),
         "baseline_row_gate": baseline_gate,
@@ -84,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     transition = report["transition_search"]
     print("EDE_TRANSITION_SUMMARY=" + json.dumps({
         "dataset_sha256": report["dataset_sha256"],
+        "dataset_fingerprint_contract_version": report["dataset_fingerprint_contract_version"],
         "resolved_rows": report["resolved_after_baseline_gate"],
         "search_budget": transition["search_budget"],
         "hypotheses_tested": transition["hypotheses_tested"],
