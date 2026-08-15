@@ -47,16 +47,16 @@ def test_structured_continuous_rule_can_detect_train_fitted_state_shift() -> Non
     template = CandidateTemplate((ConditionTemplate(
         "rates.us10y_yield", "train_relative", "ABOVE_MEDIAN"),))
     train = []
-    for index in range(120):
-        high = index >= 60
+    for index in range(180):
+        high = index >= 90
         if high:
             target = 0.72 if index % 2 else 0.88
         else:
             target = -0.72 if index % 2 else -0.88
         train.append(_row(index+1, 4.6 if high else 3.8, target))
     test = []
-    for index in range(40):
-        high = index >= 20
+    for index in range(60):
+        high = index >= 30
         if high:
             target = 0.70 if index % 2 else 0.82
         else:
@@ -66,8 +66,8 @@ def test_structured_continuous_rule_can_detect_train_fitted_state_shift() -> Non
     assert result is not None
     assert result["rule"]["conditions"][0]["train_cutoff_ts"] == max(
         row["captured_ts"] for row in train)
-    assert result["selected_train_raw_n"] == 60
-    assert result["model"]["raw_n"] == 20
+    assert result["selected_train_raw_n"] == 90
+    assert result["model"]["raw_n"] == 30
     assert result["improvement"]["mae"] > 0.0
     assert result["improvement"]["rmse"] > 0.0
     assert result["p_value"] < 0.10
