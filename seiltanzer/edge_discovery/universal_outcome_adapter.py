@@ -81,18 +81,32 @@ class ProspectiveUniversalOutcomeAdapter:
             grouped[str(row["instrument"])].append(dict(row))
         return dict(grouped)
 
-    def _bars_for(self, row: dict[str, Any]) -> list[dict[str, Any]]:
+    def _resolution_context(self, observation_id: str) -> dict[str, Any]:
+        with self.runtime._lock:
+            row = self.runtime._conn.execute(
+                "SELECT g.market_price,r.resolved_ts,r.path_quality_status "
+                "FROM g1s_observations g LEFT JOIN g1s_resolutions r USING(observation_id) "
+                "WHERE g.observation_id=?",
+                (str(observation_id),),
+            ).fetchone()
+        if row is None:
+            return {}
+        return {
+            "market_price": float(row["market_price"]),
+            "resolved_ts": (float(row["resolved_ts"]) if row["resolved_ts"] is not None else None),
+            "path_quality_status": row["path_quality_status"],
+        }
+
+    def _bars_for(self, row: dict[str, Any], resolved_ts: float | None) -> list[dict[str, Any]]:
         t0 = float(row["captured_ts"])
         target = float(row["target_ts"])
-        resolved_ts = row.get("resolved_ts")
         if resolved_ts is None:
             return []
-        resolved = float(resolved_ts)
         return [
             bar for bar in self._bars.get(str(row["instrument"]), [])
             if float(bar["bar_start_ts"]) >= t0 - 1e-6
             and float(bar["bar_end_ts"]) <= target + 1e-6
-            and float(bar.get("created_ts") or bar["bar_end_ts"]) <= resolved + 1e-6
+            and float(bar.get("created_ts") or bar["bar_end_ts"]) <= resolved_ts + 1e-6
         ]
 
     def attach(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -104,11 +118,13 @@ class ProspectiveUniversalOutcomeAdapter:
                 row["universal_outcome_reason"] = "OUTCOME_NOT_RESOLVED"
                 output.append(row)
                 continue
+            context = self._resolution_context(str(row["observation_id"]))
             rv60 = (row.get("ede_features") or {}).get("vol.rv_60m")
-            bars = self._bars_for(row)
-            path_complete = str(row.get("path_quality_status") or "").lower() == "complete"
+            bars = self._bars_for(row, context.get("resolved_ts"))
+            path_quality = str(context.get("path_quality_status") or "").lower()
+            path_complete = path_quality == "complete"
             result = resolve_universal_market_outcome(
-                start_price=self._t0_market_price(str(row["observation_id"])),
+                start_price=context.get("market_price"),
                 captured_ts=float(row["captured_ts"]),
                 target_ts=float(row["target_ts"]),
                 horizon_minutes=int(row["horizon_minutes"]),
@@ -118,16 +134,9 @@ class ProspectiveUniversalOutcomeAdapter:
             )
             result["adapter_version"] = UNIVERSAL_OUTCOME_ADAPTER_VERSION
             result["evidence_source"] = "RECORDED_PROSPECTIVE_OHLC_AT_RESOLUTION"
+            result["source_path_quality_status"] = context.get("path_quality_status")
             result["bars_created_no_later_than_resolution"] = True
             row["universal_outcome"] = result
             row["universal_outcome_reason"] = None if result.get("available") else result.get("reason")
             output.append(row)
         return output
-
-    def _t0_market_price(self, observation_id: str) -> float | None:
-        with self.runtime._lock:
-            row = self.runtime._conn.execute(
-                "SELECT market_price FROM g1s_observations WHERE observation_id=?",
-                (str(observation_id),),
-            ).fetchone()
-        return float(row[0]) if row is not None else None
