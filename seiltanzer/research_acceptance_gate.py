@@ -26,11 +26,11 @@ DEFAULT_ACCEPTANCE_GATE_PATH = Path(
         "/var/lock/seiltanzer-research-acceptance.json",
     )
 )
-# Final EDE acceptance is intentionally CPU-limited and its independently
-# bounded primary + transition envelope can exceed two hours. The lease is only
-# a crash-safety ceiling; normal workflows release it explicitly on success or
-# failure. Keep this explicit/testable and in parity with production workflow TTL.
-MAX_ACCEPTANCE_GATE_TTL_SEC = 6 * 60 * 60
+# Heavy EDE compute is offloaded from production after the immutable snapshot.
+# The lease therefore only needs to cover the bounded post-research -> G1M ->
+# inventory synchronization path. Two hours is a conservative crash-safety
+# ceiling; normal workflows release it explicitly much earlier.
+MAX_ACCEPTANCE_GATE_TTL_SEC = 2 * 60 * 60
 
 
 def _clean_owner(smoke_run_id: str, expected_sha: str) -> tuple[str, str]:

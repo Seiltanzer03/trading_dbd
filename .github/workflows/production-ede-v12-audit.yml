@@ -2,13 +2,9 @@ name: production-ede-v13-audit
 
 on:
   workflow_run:
-    # Keep the same workflow_run depth as the other post-smoke acceptance jobs.
-    # Exact-run markers serialize their heavy work on the production VPS.
     workflows: ["production-functional-smoke"]
     types: [completed]
   workflow_dispatch:
-  # Refresh frozen selective candidates without waiting for another deployment.
-  # Full discovery remains off the request path and runs only every six hours.
   schedule:
     - cron: "17 */6 * * *"
 
@@ -16,173 +12,124 @@ permissions:
   contents: read
 
 jobs:
-  audit:
+  snapshot:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-22.04
-    # The exact-SHA v1.3.10 production audit proved that a healthy 20%-CPU
-    # primary can exceed the old 105m SSH envelope. Reserve wall time instead of
-    # weakening the production CPU or latency budgets. Individual systemd units
-    # are independently hard-bounded below, so an SSH disconnect cannot orphan
-    # research indefinitely.
-    timeout-minutes: 300
+    timeout-minutes: 50
     steps:
-      - name: Run EDE v1.3 selective search on immutable production DB copy
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install snapshot transport
+        run: pip install paramiko
+      - name: Export immutable production DB and release exact-run gate
         env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           EVENT_NAME: ${{ github.event_name }}
           INVENTORY_MARKER_ID: ${{ github.event.workflow_run.id || github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          OUTPUT_DB: ${{ runner.temp }}/ede-source.sqlite3
+        run: |
+          python scripts/production_ede_offload.py snapshot \
+            --password "$SSH_PASSWORD" \
+            --expected-sha "$EXPECTED_SHA" \
+            --event-name "$EVENT_NAME" \
+            --marker-id "$INVENTORY_MARKER_ID" \
+            --run-id "$RUN_ID" \
+            --output-db "$OUTPUT_DB"
+      - uses: actions/upload-artifact@v4
         with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 285m
-          envs: EXPECTED_SHA,EVENT_NAME,INVENTORY_MARKER_ID
-          script: |
-            set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            mkdir -p /opt/seiltanzer/data/research /var/lock
-            PY=/opt/seiltanzer/.venv/bin/python
-            ORCH=/opt/seiltanzer/scripts/production_research_acceptance.py
-            audit_unit=""
-            transition_unit=""
+          name: ede-production-snapshot-${{ github.run_id }}
+          path: ${{ runner.temp }}/ede-source.sqlite3
+          retention-days: 1
 
-            stop_research_unit() {
-              local unit="$1"
-              [ -n "$unit" ] || return 0
-              if systemctl status "$unit" >/dev/null 2>&1; then
-                timeout 8s systemctl stop "$unit" >/dev/null 2>&1 || true
-                systemctl kill --kill-who=all --signal=KILL "$unit" >/dev/null 2>&1 || true
-                systemctl reset-failed "$unit" >/dev/null 2>&1 || true
-              fi
-            }
+  audit:
+    needs: snapshot
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    concurrency:
+      group: ede-v13-heavy-research
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install research runtime
+        run: |
+          pip install -e ".[dev]"
+          pip install paramiko
+      - uses: actions/download-artifact@v4
+        with:
+          name: ede-production-snapshot-${{ github.run_id }}
+          path: ${{ runner.temp }}/ede-source
+      - name: Fetch latest serialized EDE ledgers
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          OUTPUT_DIR: ${{ runner.temp }}/ede-output
+        run: |
+          python scripts/production_ede_offload.py fetch-ledgers \
+            --password "$SSH_PASSWORD" \
+            --expected-sha "$EXPECTED_SHA" \
+            --output-dir "$OUTPUT_DIR"
+      - name: Run EDE v1.3 research off production VPS
+        env:
+          SOURCE_DB: ${{ runner.temp }}/ede-source/ede-source.sqlite3
+          OUTPUT_DIR: ${{ runner.temp }}/ede-output
+          OMP_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          NUMEXPR_NUM_THREADS: "1"
+          VECLIB_MAXIMUM_THREADS: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT_DIR"
+          python scripts/production_ede_v13_audit.py \
+            --database "$SOURCE_DB" \
+            --output "$OUTPUT_DIR/ede_v13_latest_audit.json" \
+            --evidence-ledger "$OUTPUT_DIR/ede_frozen_evidence.jsonl" \
+            --candidate-registry "$OUTPUT_DIR/ede_v13_candidate_registry.jsonl"
+          python scripts/production_ede_transition_audit.py \
+            --database "$SOURCE_DB" \
+            --output "$OUTPUT_DIR/ede_transition_latest_audit.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ede-v13-research-${{ github.run_id }}
+          path: ${{ runner.temp }}/ede-output
+          retention-days: 30
 
-            cleanup_on_exit() {
-              # The shell normally sees research finish cleanly. On any bounded
-              # workflow failure, make a best effort to remove its own transient
-              # units. RuntimeMaxSec below is the hard backstop if SSH itself dies.
-              stop_research_unit "$audit_unit"
-              stop_research_unit "$transition_unit"
-              if [ "$EVENT_NAME" = "workflow_run" ]; then
-                "$PY" "$ORCH" release-gate \
-                  --smoke-run-id "$INVENTORY_MARKER_ID" \
-                  --expected-sha "$EXPECTED_SHA" || true
-              fi
-            }
-            trap cleanup_on_exit EXIT
-
-            # The post-smoke path must consume the exact inventory produced only
-            # after post-research and G1M acceptance. Scheduled/manual audits keep
-            # their documented standalone behavior and do not consume smoke markers.
-            if [ "$EVENT_NAME" = "workflow_run" ]; then
-              "$PY" "$ORCH" wait-marker \
-                --stage ede-inventory \
-                --smoke-run-id "$INVENTORY_MARKER_ID" \
-                --expected-sha "$EXPECTED_SHA" \
-                --timeout-seconds 2400 \
-                --poll-seconds 5
-              test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-              "$PY" "$ORCH" validate-gate \
-                --smoke-run-id "$INVENTORY_MARKER_ID" \
-                --expected-sha "$EXPECTED_SHA"
-              echo "Exact-run EDE inventory completed for $EXPECTED_SHA"
-            fi
-
-            # One heavy EDE search at a time on the production VPS. Scheduled or
-            # manual research may skip an overlap. Exact post-smoke acceptance may
-            # not: a green result must prove that this SHA actually ran its audit.
-            exec 9>/var/lock/seiltanzer-ede-v13-audit.lock
-            if ! flock -n 9; then
-              if [ "$EVENT_NAME" = "workflow_run" ]; then
-                echo "EDE_ACCEPTANCE_LOCK_BUSY: exact-run audit cannot be skipped"
-                exit 1
-              fi
-              echo "Another EDE audit is already running; skipping overlapping research run."
-              exit 0
-            fi
-
-            run_research() {
-              local label="$1"
-              local runtime_sec="$2"
-              shift 2
-              local unit="seiltanzer-ede-${label}-$$"
-              # Keep the conservative production-safe cap. RuntimeMaxSec ensures
-              # the remote process cannot outlive a lost SSH/GitHub controller.
-              systemd-run --quiet --collect --wait --pipe \
-                --unit="$unit" \
-                --property=CPUQuota=20% \
-                --property=Nice=15 \
-                --property=RuntimeMaxSec="${runtime_sec}s" \
-                --property=TimeoutStopSec=10s \
-                --setenv=OMP_NUM_THREADS=1 \
-                --setenv=OPENBLAS_NUM_THREADS=1 \
-                --setenv=MKL_NUM_THREADS=1 \
-                --setenv=NUMEXPR_NUM_THREADS=1 \
-                --setenv=VECLIB_MAXIMUM_THREADS=1 \
-                /usr/bin/ionice -c2 -n7 "$@"
-            }
-
-            probe_api() {
-              local path="$1"
-              local started elapsed code
-              started=$(date +%s%3N)
-              code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:8790${path}" || true)
-              elapsed=$(( $(date +%s%3N) - started ))
-              echo "research-load-probe path=${path} code=${code} elapsed_ms=${elapsed}"
-              if [ "$code" != "200" ] || [ "$elapsed" -ge 3000 ]; then
-                return 1
-              fi
-              return 0
-            }
-
-            # The primary audit freezes/refits canonical rules. Mathematics and
-            # CPU quota are unchanged; only its controller/runtime envelope grows.
-            audit_unit="seiltanzer-ede-primary-$$"
-            run_research primary 10800 "$PY" \
-              /opt/seiltanzer/scripts/production_ede_v13_audit.py \
-              --database /opt/seiltanzer/data/trades.db \
-              --output /opt/seiltanzer/data/research/ede_v13_latest_audit.json \
-              --evidence-ledger /opt/seiltanzer/data/research/ede_frozen_evidence.jsonl \
-              --candidate-registry /opt/seiltanzer/data/research/ede_v13_candidate_registry.jsonl &
-            audit_pid=$!
-
-            abort_primary() {
-              stop_research_unit "$audit_unit"
-              kill "$audit_pid" >/dev/null 2>&1 || true
-              wait "$audit_pid" >/dev/null 2>&1 || true
-              exit 1
-            }
-
-            probe_or_abort() {
-              if ! probe_api "$1"; then
-                abort_primary
-              fi
-            }
-
-            # Verify the live API throughout the complete CPU-heavy primary
-            # audit. The 3000ms budget remains fail-closed for the entire run.
-            probes=0
-            while kill -0 "$audit_pid" 2>/dev/null; do
-              sleep 15
-              probe_or_abort /api/state
-              if [ $((probes % 4)) -eq 0 ]; then
-                probe_or_abort /api/analytics/gex-migration
-                probe_or_abort /api/analytics/regime-phase
-                probe_or_abort /api/analytics/wavelet
-                probe_or_abort /api/analytics/correlation-graph
-                probe_or_abort /api/ai/history
-              fi
-              probes=$((probes + 1))
-            done
-            wait "$audit_pid"
-            audit_unit=""
-
-            # v1.3.4 transition diagnostics remain non-authoritative and get a
-            # separate much smaller hard runtime bound.
-            transition_unit="seiltanzer-ede-transition-$$"
-            run_research transition 2100 "$PY" \
-              /opt/seiltanzer/scripts/production_ede_transition_audit.py \
-              --database /opt/seiltanzer/data/trades.db \
-              --output /opt/seiltanzer/data/research/ede_transition_latest_audit.json
-            transition_unit=""
+  publish:
+    needs: audit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install paramiko
+      - uses: actions/download-artifact@v4
+        with:
+          name: ede-v13-research-${{ github.run_id }}
+          path: ${{ runner.temp }}/ede-output
+      - name: Publish compact EDE research outputs without production compute
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          OUTPUT_DIR: ${{ runner.temp }}/ede-output
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          python scripts/production_ede_offload.py publish \
+            --password "$SSH_PASSWORD" \
+            --expected-sha "$EXPECTED_SHA" \
+            --output-dir "$OUTPUT_DIR" \
+            --run-id "$RUN_ID"
