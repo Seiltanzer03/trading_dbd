@@ -48,13 +48,14 @@ jobs:
 
             # Acquire before polling the worker. If this process has not yet
             # completed its required post-grace cycle, the worker gate permits
-            # that one cycle and pauses only subsequent heavy cycles. Keep the
-            # lease comfortably longer than the independently hard-bounded EDE
-            # envelope; final EDE still releases it immediately on exit.
+            # that one cycle and pauses only subsequent heavy cycles. Heavy EDE
+            # now leaves production immediately after its immutable snapshot, so
+            # two hours is a conservative crash-safety ceiling for this short
+            # synchronization path rather than a research runtime allowance.
             "$PY" "$ORCH" acquire-gate \
               --smoke-run-id "$SMOKE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA" \
-              --ttl-seconds 21600
+              --ttl-seconds 7200
 
             "$PY" /opt/seiltanzer/scripts/production_post_research_check.py \
               --expected-sha "$EXPECTED_SHA"
@@ -68,6 +69,7 @@ jobs:
               --expected-sha "$EXPECTED_SHA"
 
             # Ownership passes to the downstream exact-run chain. G1M/inventory
-            # release on failure; final EDE always releases the same owned lease.
+            # release on failure; final EDE snapshot releases the owned lease
+            # before any CPU-heavy off-host research begins.
             keep_gate=1
             trap - EXIT
