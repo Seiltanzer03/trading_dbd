@@ -13,6 +13,13 @@ from seiltanzer.edge_discovery.rates import (
     rates_feature_values_at_t0,
     treasury_month_url,
 )
+from seiltanzer.edge_discovery.rates_registry import RATES_FEATURE_DEFINITIONS
+from seiltanzer.edge_discovery.registry import FeatureDefinition
+from seiltanzer.edge_discovery.research_policy import (
+    UNIVERSAL_TARGETS,
+    interaction_feature_pairs,
+    research_policy_inventory,
+)
 
 
 def _ts(year: int, month: int, day: int, hour: int = 0) -> float:
@@ -23,6 +30,24 @@ def _csv(rows: list[tuple[str, float, float]]) -> str:
     body = ["Date,2 Yr,10 Yr"]
     body.extend(f"{date},{two:.2f},{ten:.2f}" for date, two, ten in rows)
     return "\n".join(body) + "\n"
+
+
+def _synthetic_price() -> FeatureDefinition:
+    return FeatureDefinition(
+        feature_id="price.synthetic_state",
+        family="PRICE",
+        source="test",
+        datatype="float",
+        t0_availability="causal",
+        sampling_frequency="test",
+        asof_timestamp="asof<=T0",
+        quality="test",
+        staleness="test",
+        historical_availability="AVAILABLE",
+        live_availability="AVAILABLE",
+        training_eligibility=True,
+        dependency_family="price",
+    )
 
 
 def test_daily_treasury_parser_and_curve_contract() -> None:
@@ -115,3 +140,27 @@ def test_official_month_url_is_fixed_to_treasury_host() -> None:
 
 def test_conservative_asof_is_next_utc_day() -> None:
     assert conservative_daily_asof(_ts(2026, 6, 1, 17)) == _ts(2026, 6, 2)
+
+
+def test_rates_registry_is_explicit_slow_context_not_intraday_signal() -> None:
+    assert {item.feature_id for item in RATES_FEATURE_DEFINITIONS} == set(RATE_FEATURE_IDS)
+    assert all(item.family == "RATES" for item in RATES_FEATURE_DEFINITIONS)
+    assert all(item.dependency_family == "rates_daily" for item in RATES_FEATURE_DEFINITIONS)
+    assert all(item.historical_availability == "AVAILABLE" for item in RATES_FEATURE_DEFINITIONS)
+    assert all(item.live_availability == "LIMITED" for item in RATES_FEATURE_DEFINITIONS)
+    assert all("intraday" in item.notes.lower() for item in RATES_FEATURE_DEFINITIONS)
+
+
+def test_rates_family_uses_existing_declarative_research_policy() -> None:
+    inventory = research_policy_inventory(RATES_FEATURE_DEFINITIONS)
+    assert inventory["scoring_or_maturity_gates_changed"] is False
+    assert all(item["allowed_targets"] == list(UNIVERSAL_TARGETS)
+               for item in inventory["features"])
+
+    price = _synthetic_price()
+    features = tuple(RATES_FEATURE_DEFINITIONS) + (price,)
+    eligible = [item.feature_id for item in features]
+    pairs = interaction_feature_pairs(features, eligible_feature_ids=eligible)
+    rate_price = [(left, right) for left, right, _policy in pairs
+                  if left.startswith("rates.") and right == price.feature_id]
+    assert 0 < len(rate_price) <= 16
