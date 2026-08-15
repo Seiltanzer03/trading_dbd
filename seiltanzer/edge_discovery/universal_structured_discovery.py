@@ -193,7 +193,8 @@ def _candidate_uses_rates(candidate: dict[str, Any]) -> bool:
 
 
 def _aggregate_candidate(
-    template_id: str, occurrences: list[dict[str, Any]], spec: UniversalTargetSpec,
+    template_id: str, occurrences: list[dict[str, Any]], spec: UniversalTargetSpec, *,
+    horizon: int,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     model_parts: list[np.ndarray] = []
@@ -231,11 +232,12 @@ def _aggregate_candidate(
     )
     return {
         "candidate_id": "g1s-universal-" + _sha({
-            "target": spec.target_id, "template": template_id})[:24],
+            "target": spec.target_id, "horizon": int(horizon), "template": template_id})[:24],
         "template_id": template_id,
         "target_id": spec.target_id,
         "target_family": spec.family,
         "target_kind": spec.kind,
+        "horizon_minutes": int(horizon),
         "conditions": conditions,
         "fold_rules": rules,
         "model": model,
@@ -321,7 +323,7 @@ def run_universal_structured_discovery(
                         "evaluation": evaluation,
                     })
             candidates = [
-                _aggregate_candidate(template_id, values, spec)
+                _aggregate_candidate(template_id, values, spec, horizon=horizon)
                 for template_id, values in sorted(occurrences.items()) if values
             ]
             q_values = benjamini_hochberg([float(item["p_value"]) for item in candidates])
