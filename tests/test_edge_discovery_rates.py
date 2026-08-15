@@ -154,7 +154,7 @@ def test_rates_registry_is_explicit_slow_context_not_intraday_signal() -> None:
 def test_rates_family_uses_existing_declarative_research_policy() -> None:
     inventory = research_policy_inventory(RATES_FEATURE_DEFINITIONS)
     assert inventory["scoring_or_maturity_gates_changed"] is False
-    assert all(item["allowed_targets"] == list(UNIVERSAL_TARGETS)
+    assert all(tuple(item["allowed_targets"]) == UNIVERSAL_TARGETS
                for item in inventory["features"])
 
     price = _synthetic_price()
