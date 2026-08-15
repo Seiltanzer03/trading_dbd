@@ -46,6 +46,6 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     assert "actions/download-artifact@v4" in ede
     assert "sftp.posix_rename" in offload
 
-    # Existing gate TTL remains a bounded fallback only; normal offload releases
-    # the gate immediately after the immutable snapshot has been captured.
-    assert "--ttl-seconds 21600" in post
+    # With heavy EDE off production, the lease only covers the short serialized
+    # acceptance path and is released immediately after the snapshot.
+    assert "--ttl-seconds 7200" in post
