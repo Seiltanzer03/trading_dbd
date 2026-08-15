@@ -26,6 +26,9 @@ REMOTE_RESEARCH = REMOTE_ROOT / "data/research"
 REMOTE_DATABASE = REMOTE_ROOT / "data/trades.db"
 REMOTE_PYTHON = REMOTE_ROOT / ".venv/bin/python"
 REMOTE_ORCHESTRATOR = REMOTE_ROOT / "scripts/production_research_acceptance.py"
+API_PROBE_MAX_TIME_SECONDS = 3
+API_PROBE_ATTEMPTS = 3
+API_PROBE_RETRY_DELAY_SECONDS = 2.0
 
 LEDGER_NAMES = (
     "ede_frozen_evidence.jsonl",
@@ -100,12 +103,43 @@ def _verify_sha(client, expected_sha: str) -> None:
         )
 
 
-def _probe_api(client) -> None:
-    _exec(
-        client,
+def _probe_api(
+    client,
+    *,
+    attempts: int = API_PROBE_ATTEMPTS,
+    retry_delay: float = API_PROBE_RETRY_DELAY_SECONDS,
+) -> None:
+    """Fail closed on sustained API latency while tolerating one short spike.
+
+    Each attempt keeps the exact 3-second HTTP budget. Retries only distinguish a
+    transient scheduling/latency spike from a sustained production health defect;
+    they never turn a slow response into a passing response.
+    """
+    if attempts < 1:
+        raise ValueError("API probe attempts must be >= 1")
+    command = (
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
-        "--max-time 3 http://127.0.0.1:8790/api/state)\" = 200",
+        f"--max-time {API_PROBE_MAX_TIME_SECONDS} "
+        "http://127.0.0.1:8790/api/state)\" = 200"
     )
+    for attempt in range(1, attempts + 1):
+        try:
+            _exec(client, command)
+            if attempt > 1:
+                print(f"API probe recovered attempt={attempt}/{attempts}")
+            return
+        except RuntimeError as exc:
+            if attempt == attempts:
+                raise RuntimeError(
+                    "API probe failed after "
+                    f"{attempts} attempts with per-attempt max-time="
+                    f"{API_PROBE_MAX_TIME_SECONDS}s: {exc}"
+                ) from exc
+            print(
+                f"transient API probe failure attempt={attempt}/{attempts}: "
+                f"{exc}; retrying in {retry_delay:g}s"
+            )
+            time.sleep(max(0.0, float(retry_delay)))
 
 
 def _release_gate(password: str, *, marker_id: str, expected_sha: str) -> None:

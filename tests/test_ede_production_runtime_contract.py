@@ -37,7 +37,8 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     # guarded by the same fail-closed 3-second API health budget.
     assert "src.backup(dst, pages=256, sleep=0.05)" in offload
     assert "ionice -c2 -n7 nice -n 15" in offload
-    assert "--max-time 3" in offload
+    assert "API_PROBE_MAX_TIME_SECONDS = 3" in offload
+    assert 'f"--max-time {API_PROBE_MAX_TIME_SECONDS} "' in offload
     assert "PRAGMA quick_check" in offload
 
     # Heavy jobs are serialized off-host; compact outputs are returned atomically
