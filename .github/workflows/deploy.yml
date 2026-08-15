@@ -67,6 +67,29 @@ jobs:
             set -euo pipefail
             git config --global --add safe.directory /opt/seiltanzer || true
             cd /opt/seiltanzer
+
+            # EDE v1.3.13 moves all CPU-heavy EDE work off production. Stop any
+            # legacy transient audit unit started by an older workflow before
+            # installing the new SHA, so an in-flight pre-offload run cannot keep
+            # consuming VPS resources after this deployment.
+            while read -r unit _; do
+              [ -n "$unit" ] || continue
+              case "$unit" in
+                seiltanzer-ede-*.service)
+                  echo "Stopping legacy production EDE unit: $unit"
+                  timeout 8s systemctl stop "$unit" >/dev/null 2>&1 || true
+                  systemctl kill --kill-who=all --signal=KILL "$unit" >/dev/null 2>&1 || true
+                  systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+                  ;;
+              esac
+            done < <(systemctl list-units --all --type=service --no-legend 'seiltanzer-ede-*' || true)
+
+            # Backstop for a legacy controller whose transient unit metadata was
+            # already collected while its child still exists. Scope the pattern
+            # strictly to the two historical EDE audit entry points.
+            pkill -f '/opt/seiltanzer/scripts/production_ede_v13_audit.py' >/dev/null 2>&1 || true
+            pkill -f '/opt/seiltanzer/scripts/production_ede_transition_audit.py' >/dev/null 2>&1 || true
+
             git fetch origin main
             git cat-file -e "${EXPECTED_SHA}^{commit}"
             git reset --hard "$EXPECTED_SHA"
@@ -83,4 +106,8 @@ jobs:
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             test "$(systemctl is-active seiltanzer)" = "active"
+            if systemctl list-units --all --type=service --no-legend 'seiltanzer-ede-*' | grep -q 'running'; then
+              echo "::error::Legacy production EDE unit survived deployment"
+              exit 1
+            fi
             echo "Delivered exact production SHA: $EXPECTED_SHA"
