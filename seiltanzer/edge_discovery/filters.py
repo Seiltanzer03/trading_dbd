@@ -13,6 +13,7 @@ import numpy as np
 from seiltanzer.config import INSTRUMENTS
 from seiltanzer.g1_short_horizon_p2e_segmented_persistence import ASSET_FAMILIES, SESSIONS
 from .registry import FEATURES
+from .research_policy import interaction_feature_pairs
 
 
 QUANTILE_LABELS = ("Q0_20", "Q20_40", "Q40_60", "Q60_80", "Q80_100")
@@ -95,6 +96,26 @@ def _templates(*groups: list[ConditionTemplate]) -> list[CandidateTemplate]:
     return [CandidateTemplate(tuple(items)) for items in product(*groups)]
 
 
+def _policy_mixed_templates(
+    prospective: Iterable[CandidateTemplate], eligible_feature_ids: Iterable[str],
+) -> list[CandidateTemplate]:
+    """Expand only feature pairs admitted by the bounded family policy."""
+    by_feature: dict[str, list[ConditionTemplate]] = {}
+    for item in prospective:
+        if len(item.conditions) != 1:
+            continue
+        condition = item.conditions[0]
+        by_feature.setdefault(condition.feature_id, []).append(condition)
+    mixed: list[CandidateTemplate] = []
+    for left_id, right_id, _policy_id in interaction_feature_pairs(
+        FEATURES, eligible_feature_ids=eligible_feature_ids,
+        activation="CURRENT_SELECTIVE",
+    ):
+        for left, right in product(by_feature.get(left_id, ()), by_feature.get(right_id, ())):
+            mixed.append(CandidateTemplate((left, right)))
+    return mixed
+
+
 def candidate_templates(
         eligible_feature_ids: Iterable[str] | None = None) -> tuple[CandidateTemplate, ...]:
     asset = _categorical("asset", tuple(INSTRUMENTS))
@@ -146,18 +167,10 @@ def candidate_templates(
             prospective.extend(CandidateTemplate((condition,))
                                for condition in _categorical(feature_id, states))
 
-    # Predeclared mixed-family ablation templates.  They allow the bounded
-    # PRICE+OPTIONS+CROSS question without constructing arbitrary combinations.
-    option_conditions = [item.conditions[0] for item in prospective
-                         if item.conditions[0].feature_id.startswith("option.")]
-    cross_conditions = [item.conditions[0] for item in prospective
-                        if item.conditions[0].feature_id == "cross.confirmation"]
-    mixed = [CandidateTemplate((option, cross))
-             for option in option_conditions for cross in cross_conditions]
-    dynamic_conditions = [item.conditions[0] for item in prospective
-                          if item.conditions[0].feature_id.startswith("option_dynamics.")]
-    mixed.extend(CandidateTemplate((condition, cross))
-                 for condition in dynamic_conditions[:12] for cross in cross_conditions)
+    # Mixed-family templates are now generated from a bounded declarative
+    # family policy. Adding a future RATES family therefore does not require a
+    # new prefix check or custom Cartesian product in this discovery module.
+    mixed = _policy_mixed_templates(prospective, eligible)
 
     mandatory_by_id = {item.template_id: item for item in prospective}
     if len(mandatory_by_id) > MAX_TEMPLATES:
