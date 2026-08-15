@@ -122,7 +122,10 @@ class ProspectiveUniversalOutcomeAdapter:
             rv60 = (row.get("ede_features") or {}).get("vol.rv_60m")
             bars = self._bars_for(row, context.get("resolved_ts"))
             path_quality = str(context.get("path_quality_status") or "").lower()
-            path_complete = path_quality == "complete"
+            reaches_target = bool(
+                bars and float(bars[-1]["bar_end_ts"]) >= float(row["target_ts"]) - 1e-6
+            )
+            path_complete = path_quality == "complete" and reaches_target
             result = resolve_universal_market_outcome(
                 start_price=context.get("market_price"),
                 captured_ts=float(row["captured_ts"]),
@@ -135,6 +138,7 @@ class ProspectiveUniversalOutcomeAdapter:
             result["adapter_version"] = UNIVERSAL_OUTCOME_ADAPTER_VERSION
             result["evidence_source"] = "RECORDED_PROSPECTIVE_OHLC_AT_RESOLUTION"
             result["source_path_quality_status"] = context.get("path_quality_status")
+            result["retained_path_reaches_target"] = reaches_target
             result["bars_created_no_later_than_resolution"] = True
             row["universal_outcome"] = result
             row["universal_outcome_reason"] = None if result.get("available") else result.get("reason")
