@@ -4,6 +4,7 @@ import math
 
 from seiltanzer.edge_discovery.universal_outcomes import (
     BARRIER_PAIRS,
+    DIRECTION_EPSILON,
     UNIVERSAL_OUTCOME_CONTRACT_VERSION,
     causal_local_sigma_h,
     resolve_universal_market_outcome,
@@ -70,6 +71,19 @@ def test_lower_first_is_symmetric_market_outcome():
     ])
     assert result["barriers"]["up_1s_down_1s"]["label"] == "DOWN_FIRST"
     assert result["direction_label"] == "DOWN"
+
+
+def test_direction_uses_exact_existing_g1s_two_bp_noise_band():
+    assert DIRECTION_EPSILON == 0.0002
+    tiny_up = math.exp(0.0001) * 100.0
+    result = _resolve([
+        _bar(1, high=100.05, low=99.95, close=100.01),
+        _bar(2, high=100.05, low=99.95, close=100.005),
+        _bar(3, high=100.05, low=99.95, close=tiny_up),
+    ])
+    assert 0.0 < result["terminal_log_return"] < DIRECTION_EPSILON
+    assert result["direction_label"] == "FLAT"
+    assert result["direction_epsilon_log_return"] == DIRECTION_EPSILON
 
 
 def test_same_ohlc_bar_touching_both_sides_is_ambiguous_not_guessed():
