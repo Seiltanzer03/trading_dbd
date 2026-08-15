@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from seiltanzer.edge_discovery.filters import CandidateTemplate, ConditionTemplate, candidate_templates
 from seiltanzer.edge_discovery.rates_registry import RATES_FEATURE_DEFINITIONS
 from seiltanzer.edge_discovery.universal_structured_discovery import (
+    _aggregate_candidate,
     _candidate_uses_rates,
     _evaluate_rule,
 )
@@ -74,6 +76,32 @@ def test_structured_continuous_rule_can_detect_train_fitted_state_shift() -> Non
     assert result["improvement"]["mae"] > 0.0
     assert result["improvement"]["rmse"] > 0.0
     assert result["p_value"] < 0.10
+
+
+def test_universal_candidate_identity_includes_target_horizon() -> None:
+    spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
+                               ("mae", "rmse"))
+    rows = [_row(2000+i, 4.2, target) for i, target in enumerate((0.4, 0.7, 0.6))]
+    evaluation = {
+        "rows": rows,
+        "model_prediction": np.asarray((0.42, 0.68, 0.61)),
+        "baseline_prediction": np.asarray((0.0, 0.0, 0.0)),
+        "rule": {"conditions": [{"feature_id": "trend_efficiency_60"}]},
+        "model": {"raw_n": 3, "effective_n": 3},
+        "improvement": {"mae": 0.8, "rmse": 0.8},
+    }
+    occurrence = [{
+        "fold_index": 0,
+        "test_start_ts": rows[0]["captured_ts"],
+        "test_end_ts": rows[-1]["target_ts"],
+        "purge_embargo_valid": True,
+        "evaluation": evaluation,
+    }]
+    short = _aggregate_candidate("same-template", occurrence, spec, horizon=15)
+    long = _aggregate_candidate("same-template", occurrence, spec, horizon=60)
+    assert short["candidate_id"] != long["candidate_id"]
+    assert short["horizon_minutes"] == 15
+    assert long["horizon_minutes"] == 60
 
 
 def test_universal_feature_definitions_include_rates_without_claiming_live_confirmation() -> None:
