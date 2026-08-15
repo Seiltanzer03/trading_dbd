@@ -101,16 +101,31 @@ FAMILY_INTERACTION_POLICIES: tuple[FamilyInteractionPolicy, ...] = (
 )
 
 
+def _allowed_transforms(feature: FeatureDefinition, *, market_predictor: bool) -> tuple[str, ...]:
+    if not market_predictor:
+        return ()
+    numeric = feature.datatype in {"float", "int", "number"}
+    if not numeric:
+        return ("RAW",)
+    # The first RATES adapter is the official *daily* Treasury CMT source.  A
+    # forward-filled daily print must not silently acquire synthetic intraday
+    # velocity/acceleration just because it is numeric.  The daily change,
+    # z-score and rank are registered as explicit causal features instead.  A
+    # future genuine intraday rates provider may use a different sampling
+    # contract and therefore regain generic causal transforms.
+    if feature.family == "RATES" and "daily" in feature.sampling_frequency.lower():
+        return ("RAW",)
+    return DEFAULT_NUMERIC_TRANSFORMS
+
+
 def feature_research_policy(feature: FeatureDefinition) -> FeatureResearchPolicy:
     market_predictor = feature.research_scope == "G1S" and feature.training_eligibility
-    numeric = feature.datatype in {"float", "int", "number"}
     return FeatureResearchPolicy(
         feature_id=feature.feature_id,
         family=feature.family,
         allowed_targets=UNIVERSAL_TARGETS if market_predictor else (),
         allowed_horizons=DEFAULT_HORIZONS if market_predictor else (),
-        allowed_transforms=(DEFAULT_NUMERIC_TRANSFORMS if market_predictor and numeric else
-                            (("RAW",) if market_predictor else ())),
+        allowed_transforms=_allowed_transforms(feature, market_predictor=market_predictor),
         interaction_policy=("FAMILY_BOUNDED_V1" if market_predictor else "NONE"),
         research_scope=feature.research_scope,
         training_eligible=feature.training_eligibility,
