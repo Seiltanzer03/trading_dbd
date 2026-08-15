@@ -67,18 +67,20 @@ class FamilyInteractionPolicy:
 
 
 # CURRENT_SELECTIVE reproduces the interaction families EDE already allowed,
-# but as data rather than filter.py prefix checks.  RATES policies are dormant
-# until real RATES features are registered; they therefore create no hypotheses
-# today.  Broader interactions are predeclared for the universal-outcome phase
-# and are not silently activated on the current direction-only search.
+# but as data rather than filter.py prefix checks.  9 OPTIONS features and the
+# first 6 primitive OPTION_DYNAMICS features were the old effective limits;
+# keeping those counts here makes this refactor hypothesis-universe neutral.
+# RATES policies are dormant until real RATES features are registered and hence
+# create zero hypotheses today. Broader interactions are predeclared for the
+# universal-outcome phase and are not silently activated now.
 FAMILY_INTERACTION_POLICIES: tuple[FamilyInteractionPolicy, ...] = (
     FamilyInteractionPolicy(
-        "OPTIONS", "CROSS_ASSET", max_feature_pairs=18,
+        "OPTIONS", "CROSS_ASSET", max_feature_pairs=9,
         activation="CURRENT_SELECTIVE",
         right_feature_ids=("cross.confirmation",),
     ),
     FamilyInteractionPolicy(
-        "OPTION_DYNAMICS", "CROSS_ASSET", max_feature_pairs=12,
+        "OPTION_DYNAMICS", "CROSS_ASSET", max_feature_pairs=6,
         activation="CURRENT_SELECTIVE",
         right_feature_ids=("cross.confirmation",),
     ),
