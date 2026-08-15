@@ -55,5 +55,7 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     # process that was already running on the VPS before the workflow changed.
     assert "Stopping legacy production EDE unit" in deploy
     assert "seiltanzer-ede-*.service" in deploy
-    assert "pkill -f '/opt/seiltanzer/scripts/production_ede_v13_audit.py'" in deploy
+    assert "pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_v13_audit.py'" in deploy
+    assert "pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_transition_audit.py'" in deploy
+    assert "pkill -f '/opt/seiltanzer/scripts/production_ede_v13_audit.py'" not in deploy
     assert "Legacy production EDE unit survived deployment" in deploy
