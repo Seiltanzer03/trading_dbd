@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 UNIVERSAL_OUTCOME_CONTRACT_VERSION = "g1s-universal-market-outcome-v1"
 T0_SCALE_CONTRACT_VERSION = "g1s-local-rv60-sqrt-time-scale-v1"
+DIRECTION_EPSILON = 0.0002  # Exact parity with the existing G1S resolution contract.
 
 # (up sigma multiple, down sigma multiple).  These are market geometries, not
 # stop/take or RR definitions.
@@ -250,6 +251,7 @@ def resolve_universal_market_outcome(
         "target_ts": target,
         "t0_realized_vol_60m": _finite(t0_realized_vol_60m),
         "t0_local_sigma_h": sigma_h,
+        "direction_epsilon_log_return": DIRECTION_EPSILON,
         "normalization_uses_future_data": False,
         "production_authority": False,
     }
@@ -278,8 +280,8 @@ def resolve_universal_market_outcome(
     terminal_price = stats["terminal_price"]
     assert terminal_price is not None
     terminal_log_return = float(math.log(float(terminal_price) / start))
-    direction = "UP" if terminal_log_return > 0.0 else (
-        "DOWN" if terminal_log_return < 0.0 else "FLAT"
+    direction = "UP" if terminal_log_return > DIRECTION_EPSILON else (
+        "DOWN" if terminal_log_return < -DIRECTION_EPSILON else "FLAT"
     )
     barriers: dict[str, Any] = {}
     for up_sigma, down_sigma in BARRIER_PAIRS:
