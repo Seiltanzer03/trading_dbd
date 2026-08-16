@@ -1,9 +1,8 @@
-"""Attach the active high-risk research edge to AI Verdict snapshots.
+"""Attach active high-risk research edge to AI Verdict snapshots.
 
-This is decision-support context for the user's manual trading workflow. It does
-not execute orders or replace the deterministic management authority. Reports are
-small files materialized off-host; request time performs only bounded JSON reads
-and current-T0 rule matching.
+This is decision-support context for manual trading. Reports are materialized
+off-host; request time performs bounded JSON reads and current-T0 rule matching.
+The deterministic execution authority is not replaced.
 """
 from __future__ import annotations
 
@@ -16,7 +15,7 @@ from typing import Any
 CONTRACT_VERSION = "ai-active-high-risk-edge-context-v1"
 POLICY_VERSION = "g1s-manual-trader-high-risk-edge-policy-v1"
 MAX_REPORT_AGE_SEC = 8 * 60 * 60
-MAX_SIGNALS = 12
+MAX_SIGNALS = 8
 _INSTALLED = False
 
 
@@ -38,8 +37,6 @@ def _load_report(path: Path, snapshot_ts: float) -> dict[str, Any] | None:
         stat = path.stat()
         if stat.st_size <= 0 or stat.st_size > 8_000_000:
             return None
-        # File publication time is the earliest instant at which this report may
-        # influence a live snapshot. A later snapshot may use it; an older one may not.
         if stat.st_mtime > snapshot_ts + 1.0:
             return None
         age = snapshot_ts-stat.st_mtime
@@ -62,20 +59,14 @@ def _structured_candidates(report: dict[str, Any]) -> list[dict[str, Any]]:
     for horizon in report.get("horizons") or []:
         for target in horizon.get("targets") or []:
             for candidate in target.get("candidates") or []:
-                if candidate.get("status") != "DISCOVERY_SIGNAL":
-                    continue
-                row = dict(candidate)
-                row["source"] = "STRUCTURED"
-                output.append(row)
+                if candidate.get("status") == "DISCOVERY_SIGNAL":
+                    output.append(candidate)
     return output
 
 
 def _ml_candidates(report: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        {**candidate, "source": "ML"}
-        for candidate in report.get("candidates") or []
-        if candidate.get("status") == "ML_DISCOVERY_SIGNAL"
-    ]
+    return [candidate for candidate in report.get("candidates") or []
+            if candidate.get("status") == "ML_DISCOVERY_SIGNAL"]
 
 
 def _current_values(engine: Any, snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -87,8 +78,8 @@ def _current_values(engine: Any, snapshot: dict[str, Any]) -> dict[str, dict[str
         instrument = str((snapshot.get("strategy") or {}).get("instrument") or "")
         if not instrument:
             return {}
-        frozen = _latest_frozen_context(engine, snapshot)
-        return canonical_current_feature_map(frozen, instrument)
+        return canonical_current_feature_map(
+            _latest_frozen_context(engine, snapshot), instrument)
     except Exception:
         return {}
 
@@ -107,17 +98,15 @@ def _conditions_match(values: dict[str, dict[str, Any]], candidate: dict[str, An
 def _bias(candidate: dict[str, Any]) -> str:
     shift = candidate.get("prediction_shift") or {}
     interpretation = str(shift.get("interpretation") or "")
-    bullish = {
+    if interpretation in {
         "MORE_UP", "MORE_UPSIDE_RETURN", "MORE_UPSIDE_EXCURSION",
         "LESS_DOWNSIDE_EXCURSION",
-    }
-    bearish = {
+    }:
+        return "BULLISH"
+    if interpretation in {
         "MORE_DOWN", "MORE_DOWNSIDE_RETURN", "LESS_UPSIDE_EXCURSION",
         "MORE_DOWNSIDE_EXCURSION",
-    }
-    if interpretation in bullish:
-        return "BULLISH"
-    if interpretation in bearish:
+    }:
         return "BEARISH"
     if shift.get("kind") == "MULTICLASS_PROBABILITY_SHIFT":
         strongest = str(shift.get("strongest_class") or "")
@@ -144,16 +133,15 @@ def _relation(direction: str, bias: str) -> str:
 def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
     snapshot_ts = _finite(snapshot.get("captured_ts")) or 0.0
     root = _research_dir(engine)
-    structured_reports = []
-    for horizon in (15, 30, 60, 120, 240):
-        report = _load_report(root / f"active_structured_{horizon}m_latest.json", snapshot_ts)
-        if report:
-            structured_reports.append(report)
+    structured_reports = [report for horizon in (15, 30, 60, 120, 240)
+                          if (report := _load_report(
+                              root / f"active_structured_{horizon}m_latest.json",
+                              snapshot_ts))]
     ml_report = _load_report(root / "active_ml_latest.json", snapshot_ts)
-
     values = _current_values(engine, snapshot)
     direction = str((snapshot.get("strategy") or {}).get("direction") or "")
     rows: list[dict[str, Any]] = []
+
     for report in structured_reports:
         for candidate in _structured_candidates(report):
             matched = _conditions_match(values, candidate)
@@ -171,7 +159,6 @@ def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str
                 "prediction_shift": candidate.get("prediction_shift"),
                 "market_bias": bias,
                 "position_relation": _relation(direction, bias) if matched else "NOT_APPLICABLE",
-                "risk_acceptance": "HIGH_FALSE_DISCOVERY_TOLERANCE",
             })
     if ml_report:
         for candidate in _ml_candidates(ml_report):
@@ -187,7 +174,6 @@ def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str
                 "conditions_match_current_t0": None,
                 "market_bias": "NON_DIRECTIONAL_MODEL_CONFIRMATION",
                 "position_relation": "CONTEXT_ONLY",
-                "risk_acceptance": "HIGH_FALSE_DISCOVERY_TOLERANCE",
             })
 
     rows.sort(key=lambda item: (
@@ -229,29 +215,41 @@ def install_active_edge_ai_integration() -> None:
     def build_snapshot(engine):
         snapshot = original(engine)
         context = build_active_edge_context(engine, snapshot)
-        snapshot["active_high_risk_edge_context"] = context
         ede = snapshot.get("ede_causal_context")
-        if isinstance(ede, dict):
-            ede["active_high_risk"] = context
-            lines = ede.get("context_lines_ru")
-            if isinstance(lines, list):
-                if context["matched_structured_signal_n"]:
-                    lines.append(
-                        "Активный рискованный edge: совпало "
-                        f"{context['matched_structured_signal_n']} ранних OOS-сигналов; "
-                        f"за позицию {context['supporting_position_n']}, против "
-                        f"{context['opposing_position_n']}. Строгий FDR здесь не блокирует."
-                    )
-                elif context["available"]:
-                    lines.append(
-                        "Есть активные ранние edge-кандидаты, но их structured-условия "
-                        "с текущим T0 не совпали; ML используется только как контекст."
-                    )
+        if not isinstance(ede, dict):
+            ede = {}
+            snapshot["ede_causal_context"] = ede
+        ede["active_high_risk"] = context
+        lines = ede.get("context_lines_ru")
+        if isinstance(lines, list):
+            if context["matched_structured_signal_n"]:
+                lines.append(
+                    "Активный рискованный edge: совпало "
+                    f"{context['matched_structured_signal_n']} ранних OOS-сигналов; "
+                    f"за позицию {context['supporting_position_n']}, против "
+                    f"{context['opposing_position_n']}. Строгий FDR не блокирует."
+                )
+            elif context["available"]:
+                lines.append(
+                    "Есть активные ранние edge-кандидаты, но их structured-условия "
+                    "с текущим T0 не совпали; ML остаётся дополнительным контекстом."
+                )
         manager = snapshot.get("policy_manager")
         if isinstance(manager, dict):
             evidence = manager.setdefault("evidence", {})
             if isinstance(evidence, dict):
-                evidence["active_high_risk_edge"] = context
+                evidence["active_high_risk_edge"] = {
+                    key: context[key] for key in (
+                        "edge_policy", "available", "risk_acceptance",
+                        "matched_structured_signal_n", "supporting_position_n",
+                        "opposing_position_n", "net_position_vote",
+                    )
+                }
+        # The base builder compacted before this wrapper. Enforce the same byte
+        # budget again after the bounded active-edge context is attached.
+        enforce = getattr(ai_verdict, "_enforce_snapshot_budget", None)
+        if callable(enforce):
+            enforce(snapshot)
         return snapshot
 
     ai_verdict.build_snapshot = build_snapshot
