@@ -7,7 +7,7 @@ outcomes introduced by PASS 2.
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -21,6 +21,7 @@ DEPENDENCY_PVALUE_METHOD = "HORIZON_BUCKET_PARITY_CLUSTER_MAX_NORMAL_SIGN_V1"
 BASELINE_METHOD = "TRAIN_ONLY_INSTRUMENT_FAMILY_GLOBAL_RESIDUAL_V1"
 MIN_PROBABILITY = 1e-6
 MIN_STRUCTURAL_BASELINE_ROWS = 20
+STRUCTURAL_BASELINE_CACHE_MAX = 12
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,20 @@ class UniversalTargetSpec:
     kind: str  # BINARY, CONTINUOUS, MULTICLASS
     classes: tuple[str, ...] = ()
     primary_metrics: tuple[str, str] = ()
+
+
+@dataclass(frozen=True)
+class StructuralBaselineModel:
+    """Train-only structural constants reused across templates in one fold."""
+    global_value: float | np.ndarray
+    instrument_values: dict[str, float | np.ndarray]
+    family_values: dict[str, float | np.ndarray]
+
+
+_STRUCTURAL_BASELINE_CACHE: OrderedDict[
+    tuple[int, str, str, tuple[str, ...]],
+    tuple[list[dict[str, Any]], StructuralBaselineModel],
+] = OrderedDict()
 
 
 def universal_target_specs(barrier_ids: Iterable[str]) -> tuple[UniversalTargetSpec, ...]:
@@ -183,17 +198,12 @@ def _fit_constant(rows: list[dict[str, Any]], spec: UniversalTargetSpec) -> floa
     raise ValueError(f"unsupported target kind: {spec.kind}")
 
 
-def structural_baseline_predictions(
-    train: list[dict[str, Any]], test: list[dict[str, Any]], spec: UniversalTargetSpec,
-) -> np.ndarray:
-    """Causal structural baseline: instrument -> family -> global, fitted on train only.
-
-    Static cross-sectional differences between instruments are not a market-state
-    edge. A USDCAD rule, for example, must improve over the train-only USDCAD
-    base rate rather than win merely because USDCAD differs from the pooled market.
-    """
-    if not train or not test:
-        raise ValueError("structural baseline sets must be non-empty")
+def fit_structural_baseline(
+    train: list[dict[str, Any]], spec: UniversalTargetSpec,
+) -> StructuralBaselineModel:
+    """Fit instrument/family/global constants from this train cohort only."""
+    if not train:
+        raise ValueError("structural baseline train set must be non-empty")
     by_instrument: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_family: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in train:
@@ -203,24 +213,58 @@ def structural_baseline_predictions(
         family = _asset_family(row)
         if family:
             by_family[family].append(row)
-    global_value = _fit_constant(train, spec)
-    instrument_values = {
-        key: _fit_constant(rows, spec)
-        for key, rows in by_instrument.items() if len(rows) >= MIN_STRUCTURAL_BASELINE_ROWS
-    }
-    family_values = {
-        key: _fit_constant(rows, spec)
-        for key, rows in by_family.items() if len(rows) >= MIN_STRUCTURAL_BASELINE_ROWS
-    }
+    return StructuralBaselineModel(
+        global_value=_fit_constant(train, spec),
+        instrument_values={
+            key: _fit_constant(rows, spec)
+            for key, rows in by_instrument.items()
+            if len(rows) >= MIN_STRUCTURAL_BASELINE_ROWS
+        },
+        family_values={
+            key: _fit_constant(rows, spec)
+            for key, rows in by_family.items()
+            if len(rows) >= MIN_STRUCTURAL_BASELINE_ROWS
+        },
+    )
 
+
+def _cached_structural_baseline(
+    train: list[dict[str, Any]], spec: UniversalTargetSpec,
+) -> StructuralBaselineModel:
+    key = (id(train), spec.target_id, spec.kind, tuple(spec.classes))
+    cached = _STRUCTURAL_BASELINE_CACHE.get(key)
+    if cached is not None and cached[0] is train:
+        _STRUCTURAL_BASELINE_CACHE.move_to_end(key)
+        return cached[1]
+    model = fit_structural_baseline(train, spec)
+    _STRUCTURAL_BASELINE_CACHE[key] = (train, model)
+    _STRUCTURAL_BASELINE_CACHE.move_to_end(key)
+    while len(_STRUCTURAL_BASELINE_CACHE) > STRUCTURAL_BASELINE_CACHE_MAX:
+        _STRUCTURAL_BASELINE_CACHE.popitem(last=False)
+    return model
+
+
+def structural_baseline_predictions(
+    train: list[dict[str, Any]], test: list[dict[str, Any]], spec: UniversalTargetSpec,
+) -> np.ndarray:
+    """Causal structural baseline: instrument -> family -> global, fitted on train only.
+
+    Static cross-sectional differences between instruments are not a market-state
+    edge. A USDCAD rule, for example, must improve over the train-only USDCAD
+    base rate rather than win merely because USDCAD differs from the pooled market.
+    The exact train-fit is memoized only within the research process.
+    """
+    if not train or not test:
+        raise ValueError("structural baseline sets must be non-empty")
+    model = _cached_structural_baseline(train, spec)
     values: list[float | np.ndarray] = []
     for row in test:
         instrument = str(row.get("instrument") or "")
-        value = instrument_values.get(instrument)
+        value = model.instrument_values.get(instrument)
         if value is None:
             family = _asset_family(row)
-            value = family_values.get(family) if family is not None else None
-        values.append(global_value if value is None else value)
+            value = model.family_values.get(family) if family is not None else None
+        values.append(model.global_value if value is None else value)
     if spec.kind == "MULTICLASS":
         return np.vstack([np.asarray(value, dtype=float) for value in values])
     return np.asarray([float(value) for value in values], dtype=float)
