@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from seiltanzer.edge_discovery.universal_target_scoring import (
+    BASELINE_METHOD,
+    DEPENDENCY_CLUSTER_SECONDS,
+    DEPENDENCY_PVALUE_METHOD,
+    UniversalTargetSpec,
+    eligible_target_rows,
+    fitted_constant_predictions,
+    paired_target_dependency_cohorts,
+    paired_target_pvalue,
+    relative_target_improvement,
+    target_metrics,
+    target_value,
+    universal_target_specs,
+)
+
+
+def _row(index: int, value, *, target_id: str = "RETURN_SIGMA") -> dict:
+    return {
+        "instrument": "NAS100",
+        "horizon_minutes": 30,
+        "captured_ts": float(index * 1800),
+        "target_ts": float(index * 1800 + 1800),
+        "universal_target_id": target_id,
+        "universal_target_value": value,
+    }
+
+
+def test_universal_target_extraction_is_strategy_agnostic() -> None:
+    outcome = {
+        "available": True,
+        "path_complete": True,
+        "t0_local_sigma_h": 0.01,
+        "terminal_log_return": 0.005,
+        "direction_label": "UP",
+        "mfe_sigma": 1.2,
+        "mae_sigma": -0.4,
+        "forward_rv_log_return": 0.008,
+        "barriers": {
+            "up_1s_down_1s": {"clean_label": True, "label": "UP_FIRST"},
+        },
+        "contains_user_entry": False,
+        "contains_user_stop": False,
+        "contains_user_take": False,
+        "contains_user_rr": False,
+    }
+    row = {"universal_outcome": outcome}
+    specs = {spec.target_id: spec for spec in universal_target_specs(["up_1s_down_1s"])}
+    assert target_value(row, specs["DIRECTION"]) == "UP"
+    assert target_value(row, specs["RETURN_SIGMA"]) == pytest.approx(0.5)
+    assert target_value(row, specs["MFE_SIGMA"]) == pytest.approx(1.2)
+    assert target_value(row, specs["MAE_SIGMA"]) == pytest.approx(-0.4)
+    assert target_value(row, specs["FORWARD_VOL_RATIO"]) == pytest.approx(0.8)
+    assert target_value(row, specs["FIRST_TOUCH:up_1s_down_1s"]) == "UP_FIRST"
+
+
+def test_censored_or_ambiguous_first_touch_is_not_research_label() -> None:
+    spec = UniversalTargetSpec(
+        "FIRST_TOUCH:up_1s_down_1s", "FIRST_TOUCH", "MULTICLASS",
+        ("DOWN_FIRST", "NO_TOUCH", "UP_FIRST"), ("brier", "logloss"))
+    base = {
+        "available": True, "path_complete": True, "t0_local_sigma_h": 0.01,
+        "barriers": {"up_1s_down_1s": {"clean_label": False,
+                                         "label": "AMBIGUOUS_SAME_BAR"}},
+    }
+    assert target_value({"universal_outcome": base}, spec) is None
+
+
+def test_continuous_conditional_predictor_measures_state_shift_over_baseline() -> None:
+    spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
+                               ("mae", "rmse"))
+    global_train = [_row(index, value) for index, value in enumerate(
+        [-1.0, -0.8, -0.6, 0.6, 0.8, 1.0], start=1)]
+    conditional_train = global_train[3:]
+    test = [_row(index, value) for index, value in enumerate([0.7, 0.9, 0.8], start=20)]
+    model, baseline = fitted_constant_predictions(global_train, conditional_train, test, spec)
+    assert model[0] > baseline[0]
+    model_metrics = target_metrics(test, model, spec)
+    baseline_metrics = target_metrics(test, baseline, spec)
+    improvement = relative_target_improvement(model_metrics, baseline_metrics, spec)
+    assert improvement["mae"] > 0.0
+    assert improvement["rmse"] > 0.0
+
+
+def test_static_asset_identity_is_not_misclassified_as_market_state_edge() -> None:
+    spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
+                               ("mae", "rmse"))
+    train = []
+    for index in range(80):
+        left = _row(index+1, 1.0)
+        left["instrument"] = "USDCAD"
+        train.append(left)
+        right = _row(index+1000, -1.0)
+        right["instrument"] = "NAS100"
+        train.append(right)
+    conditional = [row for row in train if row["instrument"] == "USDCAD"]
+    test = []
+    for index in range(20):
+        row = _row(index+3000, 1.0)
+        row["instrument"] = "USDCAD"
+        test.append(row)
+    model, baseline = fitted_constant_predictions(train, conditional, test, spec)
+    assert np.allclose(model, baseline)
+    assert np.allclose(baseline, 1.0)
+    assert BASELINE_METHOD.startswith("TRAIN_ONLY_INSTRUMENT")
+
+
+def test_multiclass_first_touch_uses_train_only_distribution() -> None:
+    spec = UniversalTargetSpec(
+        "FIRST_TOUCH:x", "FIRST_TOUCH", "MULTICLASS",
+        ("DOWN_FIRST", "NO_TOUCH", "UP_FIRST"), ("brier", "logloss"))
+    values = ["DOWN_FIRST", "NO_TOUCH", "UP_FIRST", "UP_FIRST", "UP_FIRST", "UP_FIRST"]
+    global_train = [_row(index, value, target_id=spec.target_id)
+                    for index, value in enumerate(values, start=1)]
+    conditional_train = global_train[-4:]
+    test = [_row(20, "UP_FIRST", target_id=spec.target_id),
+            _row(21, "UP_FIRST", target_id=spec.target_id)]
+    model, baseline = fitted_constant_predictions(global_train, conditional_train, test, spec)
+    assert model.shape == (2, 3)
+    assert baseline.shape == (2, 3)
+    assert np.allclose(model.sum(axis=1), 1.0)
+    assert model[0, 2] > baseline[0, 2]
+
+
+def test_eligible_target_rows_never_invent_missing_outcomes() -> None:
+    spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
+                               ("mae", "rmse"))
+    rows = [
+        {"universal_outcome": {"available": False}},
+        {"universal_outcome": {
+            "available": True, "path_complete": True,
+            "t0_local_sigma_h": 0.01, "terminal_log_return": 0.002}},
+    ]
+    eligible = eligible_target_rows(rows, spec)
+    assert len(eligible) == 1
+    assert eligible[0]["universal_target_value"] == pytest.approx(0.2)
+
+
+def test_paired_significance_clusters_intraday_t0_and_cross_assets_into_days() -> None:
+    spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
+                               ("mae", "rmse"))
+    rows = []
+    model = []
+    baseline = []
+    # Eight genuinely separate UTC days. Each contains many overlapping 5m T0
+    # rows and two synchronous instruments, but contributes only one daily loss
+    # cluster. Alternating days therefore produce 4+4 independent-ish cohorts.
+    for day in range(8):
+        day_start = day*DEPENDENCY_CLUSTER_SECONDS
+        for offset in range(24):
+            for instrument in ("NAS100", "SP500"):
+                row = _row(day*100+offset, 1.0)
+                row["instrument"] = instrument
+                row["captured_ts"] = float(day_start+3600+offset*300)
+                row["target_ts"] = row["captured_ts"]+1800.0
+                rows.append(row)
+                model.append(0.9)
+                baseline.append(0.0)
+    cohorts = paired_target_dependency_cohorts(
+        rows, np.asarray(model), np.asarray(baseline), spec)
+    assert [len(values) for values in cohorts] == [4, 4]
+    assert paired_target_pvalue(rows, np.asarray(model), np.asarray(baseline), spec) < 0.10
+    assert "DAY_PARITY_CLUSTER" in DEPENDENCY_PVALUE_METHOD
+
+
+def test_paired_significance_refuses_many_intraday_duplicates_on_too_few_days() -> None:
+    spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
+                               ("mae", "rmse"))
+    rows = []
+    model = []
+    baseline = []
+    # Thousands of apparent 5m observations across only two calendar days cannot
+    # manufacture significance. Each parity has only one daily cluster -> p=1.
+    for day in (0, 1):
+        day_start = day*DEPENDENCY_CLUSTER_SECONDS
+        for duplicate in range(300):
+            row = _row(day*1000+duplicate, 1.0)
+            row["captured_ts"] = float(day_start+duplicate*120)
+            row["target_ts"] = row["captured_ts"]+1800.0
+            rows.append(row)
+            model.append(0.9)
+            baseline.append(0.0)
+    cohorts = paired_target_dependency_cohorts(
+        rows, np.asarray(model), np.asarray(baseline), spec)
+    assert [len(values) for values in cohorts] == [1, 1]
+    assert paired_target_pvalue(rows, np.asarray(model), np.asarray(baseline), spec) == 1.0
