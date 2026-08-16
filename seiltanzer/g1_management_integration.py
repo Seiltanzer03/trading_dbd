@@ -1,10 +1,9 @@
-"""Install G.1-M and bounded active-edge AI context without changing execution authority."""
+"""Install G.1-M without changing production decision authority."""
 from __future__ import annotations
 
 from .engine import Engine
 from .passive_learning import PassiveLearningEngine
 from .g1_management_runtime import ManagementEdgeRuntime
-from .active_edge_ai_integration import install_active_edge_ai_integration
 
 
 _INSTALLED = False
@@ -43,7 +42,3 @@ def install_g1_management_integration() -> None:
     Engine.__init__ = engine_init
     Engine.close = engine_close
     PassiveLearningEngine.step = passive_step
-
-    # AI Verdict consumes only compact off-host active-edge reports. This does
-    # not mutate the deterministic position/execution authority.
-    install_active_edge_ai_integration()
