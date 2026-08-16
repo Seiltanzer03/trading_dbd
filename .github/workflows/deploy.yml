@@ -68,6 +68,21 @@ jobs:
             git config --global --add safe.directory /opt/seiltanzer || true
             cd /opt/seiltanzer
 
+            # Capture the state that existed before this deployment. A previous
+            # deploy could look green from an instantaneous systemd check while
+            # the web process died later, so preserve enough evidence to diagnose
+            # crash/OOM/resource failures on the next delivery.
+            echo '=== PRE-DEPLOY SERVICE DIAGNOSTICS ==='
+            systemctl status seiltanzer --no-pager -l || true
+            echo '=== RECENT SEILTANZER JOURNAL ==='
+            journalctl -u seiltanzer --since '-45 minutes' --no-pager -n 220 || true
+            echo '=== RECENT KERNEL OOM / KILL EVENTS ==='
+            journalctl -k --since '-45 minutes' --no-pager 2>/dev/null \
+              | grep -Ei 'out of memory|oom|killed process|memory cgroup' || true
+            echo '=== HOST CAPACITY ==='
+            free -h || true
+            df -h / /opt/seiltanzer || true
+
             # EDE v1.3.13 moves all CPU-heavy EDE work off production. Stop any
             # legacy transient audit unit started by an older workflow before
             # installing the new SHA, so an in-flight pre-offload run cannot keep
@@ -102,10 +117,37 @@ jobs:
             PYTHONPATH=/opt/seiltanzer /opt/seiltanzer/.venv/bin/python \
               /opt/seiltanzer/scripts/g1e1_cleanup_venv.py --site-packages "$SITE" --apply || true
             /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
+            systemctl reset-failed seiltanzer >/dev/null 2>&1 || true
             systemctl restart seiltanzer
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            test "$(systemctl is-active seiltanzer)" = "active"
+
+            # A process being briefly "active" is not readiness. Require the
+            # actual terminal API to answer within the unchanged 3s production
+            # latency budget before declaring the deploy green.
+            ready=0
+            for attempt in $(seq 1 18); do
+              active=$(systemctl is-active seiltanzer 2>/dev/null || true)
+              result=$(curl -sS -o /tmp/seiltanzer-deploy-state.json \
+                --connect-timeout 1 --max-time 3 \
+                -w '%{http_code} %{time_total}' \
+                http://127.0.0.1:8790/api/state 2>/dev/null || true)
+              code=${result%% *}
+              elapsed=${result#* }
+              echo "post-restart attempt=$attempt active=${active:-unknown} http=${code:-000} seconds=${elapsed:-na}"
+              if [ "$active" = "active" ] && [ "$code" = "200" ]; then
+                ready=1
+                break
+              fi
+              sleep 2
+            done
+            if [ "$ready" != "1" ]; then
+              echo '::error::seiltanzer failed real HTTP readiness after restart'
+              systemctl status seiltanzer --no-pager -l || true
+              journalctl -u seiltanzer --since '-10 minutes' --no-pager -n 180 || true
+              exit 1
+            fi
+
             if systemctl list-units --all --type=service --no-legend 'seiltanzer-ede-*' | grep -q 'running'; then
               echo "::error::Legacy production EDE unit survived deployment"
               exit 1
