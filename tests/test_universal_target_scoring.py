@@ -121,9 +121,10 @@ def test_paired_significance_clusters_overlapping_t0_and_cross_asset_rows() -> N
     rows = []
     model = []
     baseline = []
-    # Six 30m dependency buckets, each with 6 overlapping 5m T0 rows and two
-    # synchronous instruments. Repetition must not become 72 independent trials.
-    for bucket in range(6):
+    # Eight 30m dependency buckets, each with 6 overlapping 5m T0 rows and two
+    # synchronous instruments. Repetition must not become 96 independent trials;
+    # it becomes four independent blocks in each alternating cohort.
+    for bucket in range(8):
         for offset in range(6):
             for instrument in ("NAS100", "SP500"):
                 row = _row(bucket*6+offset, 1.0)
@@ -135,7 +136,7 @@ def test_paired_significance_clusters_overlapping_t0_and_cross_asset_rows() -> N
                 baseline.append(0.0)
     cohorts = paired_target_dependency_cohorts(
         rows, np.asarray(model), np.asarray(baseline), spec)
-    assert [len(values) for values in cohorts] == [3, 3]
+    assert [len(values) for values in cohorts] == [4, 4]
     assert paired_target_pvalue(rows, np.asarray(model), np.asarray(baseline), spec) < 0.10
     assert "PARITY_CLUSTER" in DEPENDENCY_PVALUE_METHOD
 
