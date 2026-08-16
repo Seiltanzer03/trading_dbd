@@ -5,6 +5,7 @@ import pytest
 
 from seiltanzer.edge_discovery.universal_target_scoring import (
     BASELINE_METHOD,
+    DEPENDENCY_CLUSTER_SECONDS,
     DEPENDENCY_PVALUE_METHOD,
     UniversalTargetSpec,
     eligible_target_rows,
@@ -139,18 +140,22 @@ def test_eligible_target_rows_never_invent_missing_outcomes() -> None:
     assert eligible[0]["universal_target_value"] == pytest.approx(0.2)
 
 
-def test_paired_significance_clusters_overlapping_t0_and_cross_asset_rows() -> None:
+def test_paired_significance_clusters_intraday_t0_and_cross_assets_into_days() -> None:
     spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
                                ("mae", "rmse"))
     rows = []
     model = []
     baseline = []
-    for bucket in range(8):
-        for offset in range(6):
+    # Eight genuinely separate UTC days. Each contains many overlapping 5m T0
+    # rows and two synchronous instruments, but contributes only one daily loss
+    # cluster. Alternating days therefore produce 4+4 independent-ish cohorts.
+    for day in range(8):
+        day_start = day*DEPENDENCY_CLUSTER_SECONDS
+        for offset in range(24):
             for instrument in ("NAS100", "SP500"):
-                row = _row(bucket*6+offset, 1.0)
+                row = _row(day*100+offset, 1.0)
                 row["instrument"] = instrument
-                row["captured_ts"] = float((bucket*1800)+(offset*300))
+                row["captured_ts"] = float(day_start+3600+offset*300)
                 row["target_ts"] = row["captured_ts"]+1800.0
                 rows.append(row)
                 model.append(0.9)
@@ -159,21 +164,27 @@ def test_paired_significance_clusters_overlapping_t0_and_cross_asset_rows() -> N
         rows, np.asarray(model), np.asarray(baseline), spec)
     assert [len(values) for values in cohorts] == [4, 4]
     assert paired_target_pvalue(rows, np.asarray(model), np.asarray(baseline), spec) < 0.10
-    assert "PARITY_CLUSTER" in DEPENDENCY_PVALUE_METHOD
+    assert "DAY_PARITY_CLUSTER" in DEPENDENCY_PVALUE_METHOD
 
 
-def test_paired_significance_refuses_one_parity_only_pseudo_replication() -> None:
+def test_paired_significance_refuses_many_intraday_duplicates_on_too_few_days() -> None:
     spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
                                ("mae", "rmse"))
     rows = []
     model = []
     baseline = []
-    for bucket in (0, 2, 4, 6, 8, 10):
-        for duplicate in range(20):
-            row = _row(bucket, 1.0)
-            row["captured_ts"] = float(bucket*1800+duplicate)
+    # Thousands of apparent 5m observations across only two calendar days cannot
+    # manufacture significance. Each parity has only one daily cluster -> p=1.
+    for day in (0, 1):
+        day_start = day*DEPENDENCY_CLUSTER_SECONDS
+        for duplicate in range(300):
+            row = _row(day*1000+duplicate, 1.0)
+            row["captured_ts"] = float(day_start+duplicate*120)
             row["target_ts"] = row["captured_ts"]+1800.0
             rows.append(row)
             model.append(0.9)
             baseline.append(0.0)
+    cohorts = paired_target_dependency_cohorts(
+        rows, np.asarray(model), np.asarray(baseline), spec)
+    assert [len(values) for values in cohorts] == [1, 1]
     assert paired_target_pvalue(rows, np.asarray(model), np.asarray(baseline), spec) == 1.0
