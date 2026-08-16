@@ -311,6 +311,11 @@ def test_q_audit_batch_preserves_refined_v2_semantics_for_mixed_candidates(tmp_p
                 "PRAGMA index_list('g1_q_capture_attempts')"
             ).fetchall()
         }
+        path_indexes = {
+            row[1] for row in passive._conn.execute(
+                "PRAGMA index_list('passive_market_path')"
+            ).fetchall()
+        }
         bar_indexes = {
             row[1] for row in passive._conn.execute(
                 "PRAGMA index_list('passive_market_bars')"
@@ -318,6 +323,8 @@ def test_q_audit_batch_preserves_refined_v2_semantics_for_mixed_candidates(tmp_p
         }
         assert "ix_g1_q_attempt_ts" in q_indexes
         assert "ix_passive_bar_instrument_end" in bar_indexes
+        assert "ix_passive_direct_path_terminal" in path_indexes
+        assert "ix_passive_direct_bar_terminal" in bar_indexes
     finally:
         passive.close()
         cache.close()
@@ -344,5 +351,39 @@ def test_terminal_candidate_sql_round_trips_scale_by_batch_not_rows(tmp_path):
         assert len(batch_selects) < 10
     finally:
         passive._conn.set_trace_callback(None)
+        passive.close()
+        cache.close()
+
+
+def test_terminal_candidate_queries_use_direct_partial_indexes(tmp_path):
+    runtime, passive, cache = _runtime(tmp_path)
+    try:
+        path_plan = " ".join(
+            str(row[3]) for row in passive._conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT ts FROM passive_market_path
+                WHERE instrument=? AND ts<=?
+                  AND kind='direct' AND COALESCE(quality,0)>=0.90
+                ORDER BY ts DESC LIMIT 1
+                """,
+                ("XAU", 1_800_000_000.0),
+            ).fetchall()
+        )
+        bar_plan = " ".join(
+            str(row[3]) for row in passive._conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT bar_end_ts FROM passive_market_bars
+                WHERE instrument=? AND bar_end_ts<=?
+                  AND kind='direct' AND COALESCE(quality,0)>=0.90
+                ORDER BY bar_end_ts DESC LIMIT 1
+                """,
+                ("XAU", 1_800_000_000.0),
+            ).fetchall()
+        )
+        assert "ix_passive_direct_path_terminal" in path_plan
+        assert "ix_passive_direct_bar_terminal" in bar_plan
+    finally:
         passive.close()
         cache.close()
