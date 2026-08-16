@@ -1,0 +1,80 @@
+name: G1S ML Challenger audit
+
+on:
+  pull_request:
+    paths:
+      - "seiltanzer/edge_discovery/ml_challenger.py"
+      - "seiltanzer/edge_discovery/universal_*.py"
+      - "scripts/run_ml_challenger_audit.py"
+      - "tests/test_ml_challenger.py"
+      - "pyproject.toml"
+      - ".github/workflows/ml-challenger.yml"
+  push:
+    branches: [main]
+    paths:
+      - "seiltanzer/edge_discovery/ml_challenger.py"
+      - "scripts/run_ml_challenger_audit.py"
+      - "pyproject.toml"
+      - ".github/workflows/ml-challenger.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ml-challenger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install research runtime only on runner
+        run: pip install -e ".[dev,research]"
+      - name: Run ML challenger contract tests
+        run: pytest -q tests/test_ml_challenger.py tests/test_universal_target_scoring.py
+      - name: Run fresh off-host ML challenger
+        env:
+          OMP_NUM_THREADS: "2"
+          OPENBLAS_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+          NUMEXPR_NUM_THREADS: "2"
+        run: |
+          python scripts/run_ml_challenger_audit.py \
+            --output ml-challenger-report.json \
+            | tee ml-challenger-summary.json
+      - name: Assert challenger research and statistical contracts
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          payload = json.loads(Path("ml-challenger-report.json").read_text())
+          assert payload["strategy_agnostic"] is True
+          assert payload["discovery_only"] is True
+          assert payload["prospective_confirmation"] is False
+          assert payload["production_authority"] is False
+          assert payload["auto_promotion"] is False
+          assert payload["hyperparameter_search"] is False
+          assert payload["shap_is_edge_proof"] is False
+          assert payload["rates_dependency_signal_gate"] == "EXCLUDED_FROM_ML_V2"
+          assert payload["source_mode"] == "EPHEMERAL_REAL_YAHOO_5M_60D"
+          assert payload["baseline_method"] == "TRAIN_ONLY_INSTRUMENT_FAMILY_GLOBAL_RESIDUAL_V1"
+          assert "DAY_PARITY_CLUSTER" in payload["dependency_pvalue_method"]
+          assert payload["model_library"] == "scikit-learn"
+          assert payload["model_library_version"]
+          assert payload["fdr_family"] == "ALL_EVALUATED_TARGET_HORIZON_CHALLENGERS"
+          for candidate in payload["candidates"]:
+              assert candidate["baseline_method"] == payload["baseline_method"]
+              assert candidate["dependency_pvalue_method"] == payload["dependency_pvalue_method"]
+              assert candidate["rates_features_excluded"] is True
+              assert candidate["production_authority"] is False
+              assert candidate["auto_promotion"] is False
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g1s-ml-challenger-${{ github.sha }}
+          path: |
+            ml-challenger-report.json
+            ml-challenger-summary.json
+          retention-days: 30
