@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from seiltanzer.edge_discovery.universal_target_scoring import (
+    BASELINE_METHOD,
     DEPENDENCY_PVALUE_METHOD,
     UniversalTargetSpec,
     eligible_target_rows,
@@ -68,7 +69,7 @@ def test_censored_or_ambiguous_first_touch_is_not_research_label() -> None:
     assert target_value({"universal_outcome": base}, spec) is None
 
 
-def test_continuous_conditional_predictor_measures_state_shift_vs_global_baseline() -> None:
+def test_continuous_conditional_predictor_measures_state_shift_over_baseline() -> None:
     spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
                                ("mae", "rmse"))
     global_train = [_row(index, value) for index, value in enumerate(
@@ -82,6 +83,29 @@ def test_continuous_conditional_predictor_measures_state_shift_vs_global_baselin
     improvement = relative_target_improvement(model_metrics, baseline_metrics, spec)
     assert improvement["mae"] > 0.0
     assert improvement["rmse"] > 0.0
+
+
+def test_static_asset_identity_is_not_misclassified_as_market_state_edge() -> None:
+    spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
+                               ("mae", "rmse"))
+    train = []
+    for index in range(80):
+        left = _row(index+1, 1.0)
+        left["instrument"] = "USDCAD"
+        train.append(left)
+        right = _row(index+1000, -1.0)
+        right["instrument"] = "NAS100"
+        train.append(right)
+    conditional = [row for row in train if row["instrument"] == "USDCAD"]
+    test = []
+    for index in range(20):
+        row = _row(index+3000, 1.0)
+        row["instrument"] = "USDCAD"
+        test.append(row)
+    model, baseline = fitted_constant_predictions(train, conditional, test, spec)
+    assert np.allclose(model, baseline)
+    assert np.allclose(baseline, 1.0)
+    assert BASELINE_METHOD.startswith("TRAIN_ONLY_INSTRUMENT")
 
 
 def test_multiclass_first_touch_uses_train_only_distribution() -> None:
@@ -121,9 +145,6 @@ def test_paired_significance_clusters_overlapping_t0_and_cross_asset_rows() -> N
     rows = []
     model = []
     baseline = []
-    # Eight 30m dependency buckets, each with 6 overlapping 5m T0 rows and two
-    # synchronous instruments. Repetition must not become 96 independent trials;
-    # it becomes four independent blocks in each alternating cohort.
     for bucket in range(8):
         for offset in range(6):
             for instrument in ("NAS100", "SP500"):
@@ -147,8 +168,6 @@ def test_paired_significance_refuses_one_parity_only_pseudo_replication() -> Non
     rows = []
     model = []
     baseline = []
-    # Put many duplicate rows into even buckets only. There is no independent
-    # alternating cohort, so the conservative significance contract must refuse it.
     for bucket in (0, 2, 4, 6, 8, 10):
         for duplicate in range(20):
             row = _row(bucket, 1.0)
