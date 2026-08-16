@@ -16,9 +16,11 @@ import numpy as np
 from seiltanzer.g1_short_horizon_historical_wf import _weighted_mean, _weights
 
 
-UNIVERSAL_SCORING_CONTRACT_VERSION = "g1s-universal-target-scoring-v1"
+UNIVERSAL_SCORING_CONTRACT_VERSION = "g1s-universal-target-scoring-v1.1"
 DEPENDENCY_PVALUE_METHOD = "HORIZON_BUCKET_PARITY_CLUSTER_MAX_NORMAL_SIGN_V1"
+BASELINE_METHOD = "TRAIN_ONLY_INSTRUMENT_FAMILY_GLOBAL_RESIDUAL_V1"
 MIN_PROBABILITY = 1e-6
+MIN_STRUCTURAL_BASELINE_ROWS = 20
 
 
 @dataclass(frozen=True)
@@ -152,42 +154,121 @@ def _weighted_class_distribution(rows: list[dict[str, Any]], spec: UniversalTarg
     return distribution/distribution.sum()
 
 
+def _asset_family(row: dict[str, Any]) -> str | None:
+    value = row.get("asset_family")
+    if value is None:
+        features = row.get("ede_features") or {}
+        value = features.get("regime.asset_family")
+        if value is None:
+            value = features.get("asset_family")
+    return None if value in {None, ""} else str(value)
+
+
+def _fit_constant(rows: list[dict[str, Any]], spec: UniversalTargetSpec) -> float | np.ndarray:
+    if not rows:
+        raise ValueError("cannot fit target constant without rows")
+    weights, _effective = _weights(rows)
+    if spec.kind == "CONTINUOUS":
+        y = np.asarray([float(row["universal_target_value"]) for row in rows], dtype=float)
+        return float(_weighted_mean(y, weights))
+    if spec.kind == "BINARY":
+        positive = spec.classes[-1]
+        y = np.asarray([
+            1.0 if str(row["universal_target_value"]) == positive else 0.0 for row in rows
+        ], dtype=float)
+        value = _weighted_mean(y, weights)
+        return float(min(1-MIN_PROBABILITY, max(MIN_PROBABILITY, value)))
+    if spec.kind == "MULTICLASS":
+        return _weighted_class_distribution(rows, spec)
+    raise ValueError(f"unsupported target kind: {spec.kind}")
+
+
+def structural_baseline_predictions(
+    train: list[dict[str, Any]], test: list[dict[str, Any]], spec: UniversalTargetSpec,
+) -> np.ndarray:
+    """Causal structural baseline: instrument -> family -> global, fitted on train only.
+
+    Static cross-sectional differences between instruments are not a market-state
+    edge. A USDCAD rule, for example, must improve over the train-only USDCAD
+    base rate rather than win merely because USDCAD differs from the pooled market.
+    """
+    if not train or not test:
+        raise ValueError("structural baseline sets must be non-empty")
+    by_instrument: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_family: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in train:
+        instrument = str(row.get("instrument") or "")
+        if instrument:
+            by_instrument[instrument].append(row)
+        family = _asset_family(row)
+        if family:
+            by_family[family].append(row)
+    global_value = _fit_constant(train, spec)
+    instrument_values = {
+        key: _fit_constant(rows, spec)
+        for key, rows in by_instrument.items() if len(rows) >= MIN_STRUCTURAL_BASELINE_ROWS
+    }
+    family_values = {
+        key: _fit_constant(rows, spec)
+        for key, rows in by_family.items() if len(rows) >= MIN_STRUCTURAL_BASELINE_ROWS
+    }
+
+    values: list[float | np.ndarray] = []
+    for row in test:
+        instrument = str(row.get("instrument") or "")
+        value = instrument_values.get(instrument)
+        if value is None:
+            family = _asset_family(row)
+            value = family_values.get(family) if family is not None else None
+        values.append(global_value if value is None else value)
+    if spec.kind == "MULTICLASS":
+        return np.vstack([np.asarray(value, dtype=float) for value in values])
+    return np.asarray([float(value) for value in values], dtype=float)
+
+
 def fitted_constant_predictions(
     global_train: list[dict[str, Any]], conditional_train: list[dict[str, Any]],
     test: list[dict[str, Any]], spec: UniversalTargetSpec,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Fit unconditional and conditional state distributions using train only."""
+    """Fit a train-only state residual over the structural asset baseline."""
     if not global_train or not conditional_train or not test:
         raise ValueError("prediction sets must be non-empty")
-    global_weights, _ = _weights(global_train)
     conditional_weights, _ = _weights(conditional_train)
+    baseline_test = structural_baseline_predictions(global_train, test, spec)
+    baseline_conditional = structural_baseline_predictions(global_train, conditional_train, spec)
+    den = max(float(conditional_weights.sum()), 1e-12)
+
     if spec.kind == "CONTINUOUS":
-        global_y = np.asarray([float(row["universal_target_value"]) for row in global_train])
-        conditional_y = np.asarray([float(row["universal_target_value"]) for row in conditional_train])
-        baseline = _weighted_mean(global_y, global_weights)
-        conditional = _weighted_mean(conditional_y, conditional_weights)
-        return np.full(len(test), conditional), np.full(len(test), baseline)
+        y = np.asarray([float(row["universal_target_value"]) for row in conditional_train], dtype=float)
+        residual = y-np.asarray(baseline_conditional, dtype=float)
+        shift = float(np.sum(conditional_weights*residual)/den)
+        return np.asarray(baseline_test, dtype=float)+shift, np.asarray(baseline_test, dtype=float)
+
     if spec.kind == "BINARY":
         positive = spec.classes[-1]
-        global_y = np.asarray([
-            1.0 if row["universal_target_value"] == positive else 0.0 for row in global_train])
-        conditional_y = np.asarray([
-            1.0 if row["universal_target_value"] == positive else 0.0 for row in conditional_train])
-        baseline = min(1-MIN_PROBABILITY, max(MIN_PROBABILITY,
-            _weighted_mean(global_y, global_weights)))
-        den = float(conditional_weights.sum())
-        observed = float(np.sum(conditional_weights*conditional_y))
-        conditional = (observed+2.0*baseline)/(den+2.0)
-        conditional = min(1-MIN_PROBABILITY, max(MIN_PROBABILITY, conditional))
-        return np.full(len(test), conditional), np.full(len(test), baseline)
+        y = np.asarray([
+            1.0 if str(row["universal_target_value"]) == positive else 0.0
+            for row in conditional_train
+        ], dtype=float)
+        residual = y-np.asarray(baseline_conditional, dtype=float)
+        shift = float(np.sum(conditional_weights*residual)/(den+2.0))
+        conditional = np.clip(
+            np.asarray(baseline_test, dtype=float)+shift,
+            MIN_PROBABILITY, 1.0-MIN_PROBABILITY)
+        return conditional, np.asarray(baseline_test, dtype=float)
+
     if spec.kind == "MULTICLASS":
-        baseline = _weighted_class_distribution(global_train, spec)
-        raw = _weighted_class_distribution(conditional_train, spec)
-        den = float(conditional_weights.sum())
-        # Shrink the conditional distribution toward the global train state.
-        conditional = (den*raw+2.0*baseline)/(den+2.0)
-        return (np.tile(conditional, (len(test), 1)),
-                np.tile(baseline, (len(test), 1)))
+        index = {label: idx for idx, label in enumerate(spec.classes)}
+        observed = np.zeros((len(conditional_train), len(spec.classes)), dtype=float)
+        for row_index, row in enumerate(conditional_train):
+            observed[row_index, index[str(row["universal_target_value"])]] = 1.0
+        residual = observed-np.asarray(baseline_conditional, dtype=float)
+        shift = np.sum(residual*conditional_weights[:, None], axis=0)/(den+2.0)
+        conditional = np.asarray(baseline_test, dtype=float)+shift[None, :]
+        conditional = np.maximum(conditional, MIN_PROBABILITY)
+        conditional = conditional/np.maximum(conditional.sum(axis=1, keepdims=True), 1e-12)
+        return conditional, np.asarray(baseline_test, dtype=float)
+
     raise ValueError(f"unsupported target kind: {spec.kind}")
 
 
@@ -225,8 +306,6 @@ def _row_losses(rows: list[dict[str, Any]], prediction: np.ndarray,
     if spec.kind == "CONTINUOUS":
         y = np.asarray([float(row["universal_target_value"]) for row in rows])
         error = np.asarray(prediction, dtype=float)-y
-        # Target values are already volatility-normalized. Joint L1+L2 loss
-        # prevents a single tail point from being the only source of significance.
         return np.abs(error)+error*error
     if spec.kind == "BINARY":
         positive = spec.classes[-1]
@@ -267,25 +346,12 @@ def paired_target_dependency_cohorts(
     rows: list[dict[str, Any]], model: np.ndarray, baseline: np.ndarray,
     spec: UniversalTargetSpec,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build two non-overlapping horizon-block cohorts for significance testing.
-
-    5m T0 rows for a 60/120/240m target overlap heavily. Treating each T0 as an
-    independent loss observation dramatically overstates power. We first average
-    all rows inside one horizon-sized wall-clock bucket, with equal weight per
-    instrument inside the bucket. Adjacent horizon buckets may still overlap at
-    their target windows, so significance is computed separately on even and odd
-    buckets. Buckets within each parity are separated by a full horizon and their
-    future target windows therefore do not overlap. Cross-asset rows sharing the
-    same time bucket are clustered together instead of pretending to be separate
-    trials.
-    """
+    """Build two non-overlapping horizon-block cohorts for significance testing."""
     model_loss = _row_losses(rows, model, spec)
     baseline_loss = _row_losses(rows, baseline, spec)
     if len(model_loss) != len(rows) or len(baseline_loss) != len(rows):
         raise ValueError("paired universal target inputs must have identical lengths")
-
-    grouped: dict[tuple[int, int], dict[str, list[float]]] = defaultdict(
-        lambda: defaultdict(list))
+    grouped: dict[tuple[int, int], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     for index, row in enumerate(rows):
         horizon = max(1, int(row.get("horizon_minutes") or 0))
         captured_ts = float(row["captured_ts"])
@@ -293,13 +359,11 @@ def paired_target_dependency_cohorts(
         instrument = str(row.get("instrument") or "UNKNOWN")
         delta = float(baseline_loss[index]-model_loss[index])
         grouped[(horizon, bucket)][instrument].append(delta)
-
     cohorts: list[list[float]] = [[], []]
     for (_horizon, bucket), instruments in sorted(grouped.items()):
         instrument_means = [float(np.mean(values)) for values in instruments.values() if values]
-        if not instrument_means:
-            continue
-        cohorts[bucket % 2].append(float(np.mean(instrument_means)))
+        if instrument_means:
+            cohorts[bucket % 2].append(float(np.mean(instrument_means)))
     return tuple(np.asarray(values, dtype=float) for values in cohorts)  # type: ignore[return-value]
 
 
@@ -316,7 +380,6 @@ def _normal_mean_pvalue(values: np.ndarray) -> float:
 
 
 def _sign_consistency_pvalue(values: np.ndarray) -> float:
-    """One-sided sign-consistency guard, exact for small cohorts."""
     nonzero = np.asarray([float(value) for value in values if abs(float(value)) > 1e-15])
     n = len(nonzero)
     if n < 3:
@@ -327,29 +390,16 @@ def _sign_consistency_pvalue(values: np.ndarray) -> float:
     if n <= 64:
         tail = sum(math.comb(n, count) for count in range(positive, n+1))
         return float(tail/(2**n))
-    # Normal approximation with continuity correction is sufficient here because
-    # this term is only a conservative guard combined with the clustered mean test.
     z = (positive-0.5*n-0.5)/math.sqrt(0.25*n)
     return float(0.5*math.erfc(z/math.sqrt(2.0)))
 
 
 def paired_target_pvalue(rows: list[dict[str, Any]], model: np.ndarray,
                          baseline: np.ndarray, spec: UniversalTargetSpec) -> float:
-    """Conservative one-sided p-value under overlapping-horizon dependence.
-
-    A candidate must look positive in both alternating non-overlapping horizon
-    cohorts. Within each cohort we require both a positive clustered mean and
-    broad sign consistency, then take the worst p-value. This intentionally gives
-    up nominal power to prevent 5m overlap or synchronous cross-asset rows from
-    manufacturing tiny p-values.
-    """
     cohorts = paired_target_dependency_cohorts(rows, model, baseline, spec)
     cohort_pvalues: list[float] = []
     for values in cohorts:
         if len(values) < 3:
             return 1.0
-        cohort_pvalues.append(max(
-            _normal_mean_pvalue(values),
-            _sign_consistency_pvalue(values),
-        ))
+        cohort_pvalues.append(max(_normal_mean_pvalue(values), _sign_consistency_pvalue(values)))
     return max(cohort_pvalues) if cohort_pvalues else 1.0
