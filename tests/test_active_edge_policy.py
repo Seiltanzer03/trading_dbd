@@ -28,7 +28,7 @@ def test_active_structured_policy_replaces_strict_gate_but_keeps_reference(monke
     }
     candidate = {
         "candidate_id": "candidate-risky",
-        "target_id": "outcome.return_30m",
+        "target_id": "RETURN_SIGMA",
         "target_kind": "CONTINUOUS",
         "horizon_minutes": 30,
         "status": "DISCOVERY_SIGNAL",
@@ -49,35 +49,38 @@ def test_active_structured_policy_replaces_strict_gate_but_keeps_reference(monke
         "discovery_signal_count": 1,
         "verdict": "ignored",
     }
-    monkeypatch.setattr(
-        structured, "run_universal_structured_discovery",
-        lambda *args, **kwargs: fake_report,
-    )
-    try:
-        report = run_active_structured_discovery(
-            [], source_set_sha256="sha", rates_states=(), horizons=(30,))
-        assert structured.MAX_Q_VALUE == 1.0
-        assert structured.MIN_RELATIVE_IMPROVEMENT == 0.010
-        assert structured.MIN_STABLE_FOLDS == 2
-        assert structured.OUTER_SELECTION_LIMIT == 24
-        assert structured.MIN_INNER_TRAIN_RAW == 60
-        assert structured.MIN_INNER_TRAIN_EFFECTIVE == 30
-        assert structured.MIN_INNER_VALIDATION_RAW == 15
-        assert structured.MIN_INNER_VALIDATION_EFFECTIVE == 8
-        assert structured.MIN_INNER_CLASS == 3
-        assert structured.MIN_OUTER_TEST_RAW == 15
-        assert report["edge_policy"] == ACTIVE_EDGE_POLICY_VERSION
-        assert report["fdr_role"] == "DIAGNOSTIC_NOT_BLOCKING"
-        assert report["strict_reference_is_blocking"] is False
-        assert report["discovery_signal_count"] == 1
-        out = report["horizons"][0]["targets"][0]["candidates"][0]
-        assert out["active_policy_qualified"] is True
-        assert out["strict_reference_qualified"] is False
-        assert out["q_value"] > STRICT_REFERENCE["max_q_value"]
-        assert out["risk_acceptance"] == "HIGH_FALSE_DISCOVERY_TOLERANCE"
-    finally:
-        for name, value in original.items():
-            setattr(structured, name, value)
+    seen = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update({name: getattr(structured, name) for name in original})
+        return fake_report
+
+    monkeypatch.setattr(structured, "run_universal_structured_discovery", fake_run)
+    report = run_active_structured_discovery(
+        [], source_set_sha256="sha", rates_states=(), horizons=(30,))
+
+    assert seen["MAX_Q_VALUE"] == 1.0
+    assert seen["MIN_RELATIVE_IMPROVEMENT"] == 0.010
+    assert seen["MIN_STABLE_FOLDS"] == 2
+    assert seen["OUTER_SELECTION_LIMIT"] == 24
+    assert seen["MIN_INNER_TRAIN_RAW"] == 60
+    assert seen["MIN_INNER_TRAIN_EFFECTIVE"] == 30
+    assert seen["MIN_INNER_VALIDATION_RAW"] == 15
+    assert seen["MIN_INNER_VALIDATION_EFFECTIVE"] == 8
+    assert seen["MIN_INNER_CLASS"] == 3
+    assert seen["MIN_OUTER_TEST_RAW"] == 15
+    for name, value in original.items():
+        assert getattr(structured, name) == value
+
+    assert report["edge_policy"] == ACTIVE_EDGE_POLICY_VERSION
+    assert report["fdr_role"] == "DIAGNOSTIC_NOT_BLOCKING"
+    assert report["strict_reference_is_blocking"] is False
+    assert report["discovery_signal_count"] == 1
+    out = report["horizons"][0]["targets"][0]["candidates"][0]
+    assert out["active_policy_qualified"] is True
+    assert out["strict_reference_qualified"] is False
+    assert out["q_value"] > STRICT_REFERENCE["max_q_value"]
+    assert out["risk_acceptance"] == "HIGH_FALSE_DISCOVERY_TOLERANCE"
 
 
 def test_active_ml_policy_relaxes_sample_coverage_and_fdr(monkeypatch):
@@ -94,7 +97,7 @@ def test_active_ml_policy_relaxes_sample_coverage_and_fdr(monkeypatch):
     }
     candidate = {
         "candidate_id": "ml-risky",
-        "target_id": "outcome.mae_60m",
+        "target_id": "MAE_SIGMA",
         "target_kind": "CONTINUOUS",
         "horizon_minutes": 60,
         "status": "ML_DISCOVERY_SIGNAL",
@@ -109,31 +112,36 @@ def test_active_ml_policy_relaxes_sample_coverage_and_fdr(monkeypatch):
         "discovery_signal_count": 1,
         "verdict": "ignored",
     }
-    monkeypatch.setattr(
-        ml, "run_ml_challenger", lambda *args, **kwargs: fake_report)
-    try:
-        report = run_active_ml_challenger([], source_set_sha256="sha")
-        assert ml.MAX_Q_VALUE == 1.0
-        assert ml.MIN_RELATIVE_IMPROVEMENT == 0.010
-        assert ml.MIN_POSITIVE_FOLDS == 2
-        assert ml.MIN_TRAIN_RAW == 300
-        assert ml.MIN_TRAIN_EFFECTIVE == 120
-        assert ml.MIN_TEST_RAW == 60
-        assert ml.MIN_TEST_EFFECTIVE == 25
-        assert ml.MIN_FEATURE_COVERAGE == 0.50
-        assert ml.MAX_FEATURES == 48
-        assert report["edge_policy"] == ACTIVE_EDGE_POLICY_VERSION
-        assert report["discovery_signal_count"] == 1
-        assert report["candidates"][0]["strict_reference_qualified"] is False
-    finally:
-        for name, value in original.items():
-            setattr(ml, name, value)
+    seen = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update({name: getattr(ml, name) for name in original})
+        return fake_report
+
+    monkeypatch.setattr(ml, "run_ml_challenger", fake_run)
+    report = run_active_ml_challenger([], source_set_sha256="sha")
+
+    assert seen["MAX_Q_VALUE"] == 1.0
+    assert seen["MIN_RELATIVE_IMPROVEMENT"] == 0.010
+    assert seen["MIN_POSITIVE_FOLDS"] == 2
+    assert seen["MIN_TRAIN_RAW"] == 300
+    assert seen["MIN_TRAIN_EFFECTIVE"] == 120
+    assert seen["MIN_TEST_RAW"] == 60
+    assert seen["MIN_TEST_EFFECTIVE"] == 25
+    assert seen["MIN_FEATURE_COVERAGE"] == 0.50
+    assert seen["MAX_FEATURES"] == 48
+    for name, value in original.items():
+        assert getattr(ml, name) == value
+
+    assert report["edge_policy"] == ACTIVE_EDGE_POLICY_VERSION
+    assert report["discovery_signal_count"] == 1
+    assert report["candidates"][0]["strict_reference_qualified"] is False
 
 
 def test_active_signal_is_admissible_to_existing_prospective_lifecycle():
     candidate = {
         "candidate_id": "g1s-universal-risky",
-        "target_id": "outcome.return_30m",
+        "target_id": "RETURN_SIGMA",
         "target_kind": "CONTINUOUS",
         "horizon_minutes": 30,
         "status": "DISCOVERY_SIGNAL",
@@ -160,8 +168,7 @@ def test_active_policy_is_materially_less_strict_than_reference():
         "minimum_positive_outer_folds"]
     assert ML_ACTIVE_GATES["minimum_positive_folds"] < STRICT_REFERENCE[
         "minimum_positive_outer_folds"]
-    # We intentionally ask for a more tangible effect while tolerating much
-    # weaker statistical confidence.
+    # Demand a larger effect while tolerating much weaker statistical confidence.
     assert STRUCTURED_ACTIVE_GATES["minimum_relative_improvement"] > STRICT_REFERENCE[
         "minimum_relative_improvement"]
     assert ML_ACTIVE_GATES["minimum_relative_improvement"] > STRICT_REFERENCE[
