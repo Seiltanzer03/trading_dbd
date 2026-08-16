@@ -250,6 +250,7 @@ def q_audit_bounded(
             return result
         result = dict(result)
         result["items"] = []
+        result["scalability_contract_version"] = Q_AUDIT_SCALABILITY_VERSION
         result["items_included"] = False
         result["item_count_total"] = int(result.get("attempt_n") or 0)
         result["summary_semantics_unchanged"] = True
@@ -343,10 +344,9 @@ def q_audit_bounded(
                 items.append(item)
 
         targets = sorted(pending_targets)
-        return {
+        result = {
             "contract_version": G1S_Q_AUDIT_VERSION,
             "refinement_contract_version": Q_AUDIT_REFINEMENT_VERSION,
-            "scalability_contract_version": Q_AUDIT_SCALABILITY_VERSION,
             "now": now,
             "attempt_n": len(rows),
             "captured_n": captured_n,
@@ -363,11 +363,16 @@ def q_audit_bounded(
                 maturity.get("DUE_BUT_NOT_RESOLVED", 0) > 0
             ),
             "items": items,
-            "items_included": include_items,
-            "item_count_total": len(rows),
-            "summary_semantics_unchanged": True,
             "slow_q_semantics_unchanged": True,
         }
+        if not include_items:
+            result.update({
+                "scalability_contract_version": Q_AUDIT_SCALABILITY_VERSION,
+                "items_included": False,
+                "item_count_total": len(rows),
+                "summary_semantics_unchanged": True,
+            })
+        return result
     finally:
         try:
             connection.rollback()
