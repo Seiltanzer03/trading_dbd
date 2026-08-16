@@ -25,6 +25,7 @@ from .g1_short_horizon_routes import install_g1_short_horizon_routes
 from .lattice_visual_history import install_lattice_visual_history
 from .maintenance.venv_cleanup import remediate_current_environment
 from .option_shadow_state import install_option_shadow_state
+from .production_resource_guard import install_production_resource_guard
 from .research_scalability_bootstrap import install_research_scalability
 from .storage_disk_guard import install_storage_disk_guard
 from .storage_fast_status_refinement import install_storage_fast_status
@@ -59,6 +60,13 @@ def main() -> None:
     cleanup = remediate_current_environment()
     if cleanup.get("candidate_n") or cleanup.get("remaining_n"):
         print("G1E1 venv cleanup -> " + json.dumps(cleanup, ensure_ascii=False, sort_keys=True))
+
+    # Production runs on a small shared VPS. Install the concurrency/allocator
+    # guard before Engine/MarketData instances are created so startup refreshes,
+    # passive collection and the live terminal cannot build several large
+    # yfinance/pandas object graphs at the same time. Numerical contracts are
+    # unchanged; this is resource scheduling only.
+    install_production_resource_guard()
 
     install_analytics_runtime()
     install_storage_refinement()
