@@ -18,6 +18,20 @@ MAX_REPORT_AGE_SEC = 8 * 60 * 60
 MAX_SIGNALS = 8
 _INSTALLED = False
 
+LEGACY_TO_CANONICAL_FEATURE_ID = {
+    "asset": "regime.asset",
+    "asset_family": "regime.asset_family",
+    "session_utc": "regime.session_utc",
+    "rv15_over_rv60": "vol.rv15_over_rv60",
+    "trend_efficiency_60": "price.trend_efficiency_60",
+    "cross_confirmation": "cross.confirmation",
+    "family_breadth": "cross.family_breadth",
+    "market_breadth": "cross.market_breadth",
+    "range_60": "price.range_60",
+    "cross_correlation": "cross.correlation",
+    "cross_correlation_change": "cross.correlation_change",
+}
+
 
 def _finite(value: Any) -> float | None:
     try:
@@ -84,13 +98,36 @@ def _current_values(engine: Any, snapshot: dict[str, Any]) -> dict[str, dict[str
         return {}
 
 
+def _values_with_legacy_aliases(
+    values: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    output = dict(values)
+    for legacy, canonical in LEGACY_TO_CANONICAL_FEATURE_ID.items():
+        row = values.get(canonical)
+        if row is not None:
+            output[legacy] = row
+    breadth = values.get("cross.family_breadth") or {}
+    if breadth.get("available"):
+        numeric = _finite(breadth.get("value"))
+        if numeric is not None:
+            state = "POSITIVE" if numeric >= 0.60 else "NEGATIVE" if numeric <= 0.40 else "MIXED"
+            output["family_breadth_state"] = {
+                **breadth,
+                "value": state,
+                "available": True,
+                "feature_id": "family_breadth_state",
+            }
+    return output
+
+
 def _conditions_match(values: dict[str, dict[str, Any]], candidate: dict[str, Any]) -> bool:
     conditions = candidate.get("conditions") or []
     if not conditions:
         return False
     try:
         from .edge_discovery.ai_context import _condition_matches_values
-        return all(_condition_matches_values(values, item) for item in conditions)
+        aliased = _values_with_legacy_aliases(values)
+        return all(_condition_matches_values(aliased, item) for item in conditions)
     except Exception:
         return False
 
@@ -245,8 +282,6 @@ def install_active_edge_ai_integration() -> None:
                         "opposing_position_n", "net_position_vote",
                     )
                 }
-        # The base builder compacted before this wrapper. Enforce the same byte
-        # budget again after the bounded active-edge context is attached.
         enforce = getattr(ai_verdict, "_enforce_snapshot_budget", None)
         if callable(enforce):
             enforce(snapshot)
