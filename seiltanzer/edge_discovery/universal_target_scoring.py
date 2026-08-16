@@ -16,12 +16,13 @@ import numpy as np
 from seiltanzer.g1_short_horizon_historical_wf import _weighted_mean, _weights
 
 
-UNIVERSAL_SCORING_CONTRACT_VERSION = "g1s-universal-target-scoring-v1.1"
-DEPENDENCY_PVALUE_METHOD = "HORIZON_BUCKET_PARITY_CLUSTER_MAX_NORMAL_SIGN_V1"
+UNIVERSAL_SCORING_CONTRACT_VERSION = "g1s-universal-target-scoring-v1.2"
+DEPENDENCY_PVALUE_METHOD = "UTC_DAY_PARITY_CLUSTER_MAX_NORMAL_SIGN_V2"
 BASELINE_METHOD = "TRAIN_ONLY_INSTRUMENT_FAMILY_GLOBAL_RESIDUAL_V1"
 MIN_PROBABILITY = 1e-6
 MIN_STRUCTURAL_BASELINE_ROWS = 20
 STRUCTURAL_BASELINE_CACHE_MAX = 12
+DEPENDENCY_CLUSTER_SECONDS = 86_400.0
 
 
 @dataclass(frozen=True)
@@ -390,24 +391,32 @@ def paired_target_dependency_cohorts(
     rows: list[dict[str, Any]], model: np.ndarray, baseline: np.ndarray,
     spec: UniversalTargetSpec,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build two non-overlapping horizon-block cohorts for significance testing."""
+    """Build alternating UTC-day cohorts after intraday/cross-asset clustering.
+
+    All 5m observations and all instruments sharing one UTC day are first reduced
+    to one daily loss delta, with equal weight per instrument inside the day. The
+    even/odd day split then ensures observations entering the same significance
+    cohort are separated by at least one full calendar day. Since PASS 5 horizons
+    are <=240m, this removes mechanical target-window overlap and deliberately
+    sacrifices nominal N to avoid treating intraday serial dependence as power.
+    """
     model_loss = _row_losses(rows, model, spec)
     baseline_loss = _row_losses(rows, baseline, spec)
     if len(model_loss) != len(rows) or len(baseline_loss) != len(rows):
         raise ValueError("paired universal target inputs must have identical lengths")
-    grouped: dict[tuple[int, int], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+
+    grouped: dict[int, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     for index, row in enumerate(rows):
-        horizon = max(1, int(row.get("horizon_minutes") or 0))
-        captured_ts = float(row["captured_ts"])
-        bucket = int(captured_ts // (horizon*60.0))
+        day_bucket = int(float(row["captured_ts"]) // DEPENDENCY_CLUSTER_SECONDS)
         instrument = str(row.get("instrument") or "UNKNOWN")
         delta = float(baseline_loss[index]-model_loss[index])
-        grouped[(horizon, bucket)][instrument].append(delta)
+        grouped[day_bucket][instrument].append(delta)
+
     cohorts: list[list[float]] = [[], []]
-    for (_horizon, bucket), instruments in sorted(grouped.items()):
+    for day_bucket, instruments in sorted(grouped.items()):
         instrument_means = [float(np.mean(values)) for values in instruments.values() if values]
         if instrument_means:
-            cohorts[bucket % 2].append(float(np.mean(instrument_means)))
+            cohorts[day_bucket % 2].append(float(np.mean(instrument_means)))
     return tuple(np.asarray(values, dtype=float) for values in cohorts)  # type: ignore[return-value]
 
 
@@ -440,6 +449,7 @@ def _sign_consistency_pvalue(values: np.ndarray) -> float:
 
 def paired_target_pvalue(rows: list[dict[str, Any]], model: np.ndarray,
                          baseline: np.ndarray, spec: UniversalTargetSpec) -> float:
+    """Conservative one-sided significance on two daily clustered cohorts."""
     cohorts = paired_target_dependency_cohorts(rows, model, baseline, spec)
     cohort_pvalues: list[float] = []
     for values in cohorts:
