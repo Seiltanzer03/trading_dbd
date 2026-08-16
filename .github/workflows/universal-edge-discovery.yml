@@ -25,8 +25,14 @@ permissions:
 
 jobs:
   universal-structured-discovery:
+    name: universal-structured-${{ matrix.horizon }}m
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        horizon: [15, 30, 60, 120, 240]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,20 +42,28 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Run fresh real-data universal structured discovery off-host
         env:
+          HORIZON: "${{ matrix.horizon }}"
           OMP_NUM_THREADS: "2"
           OPENBLAS_NUM_THREADS: "2"
           MKL_NUM_THREADS: "2"
           NUMEXPR_NUM_THREADS: "2"
         run: |
           python scripts/run_universal_structured_edge_audit.py \
-            --output universal-structured-edge-report.json \
-            | tee universal-structured-edge-summary.json
+            --horizons "$HORIZON" \
+            --output "universal-structured-edge-${HORIZON}m-report.json" \
+            | tee "universal-structured-edge-${HORIZON}m-summary.json"
       - name: Assert research-only safety contract
+        env:
+          HORIZON: "${{ matrix.horizon }}"
         run: |
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
-          payload = json.loads(Path("universal-structured-edge-report.json").read_text())
+          horizon = int(os.environ["HORIZON"])
+          payload = json.loads(Path(
+              f"universal-structured-edge-{horizon}m-report.json").read_text())
+          assert payload["requested_horizons"] == [horizon]
           assert payload["strategy_agnostic"] is True
           assert payload["discovery_only"] is True
           assert payload["prospective_confirmation"] is False
@@ -57,14 +71,15 @@ jobs:
           assert payload["auto_promotion"] is False
           assert payload["legacy_directional_ede_changed"] is False
           assert payload["source_mode"] == "EPHEMERAL_REAL_YAHOO_5M_60D"
+          assert "PARITY_CLUSTER" in payload["gates"]["paired_oos_dependency_pvalue"]
           rates = payload["rates"]
           assert rates["intraday_velocity_claim"] is False
           assert rates["prospective_confirmation"] is False
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: g1s-universal-structured-edge-${{ github.sha }}
+          name: g1s-universal-structured-edge-${{ matrix.horizon }}m-${{ github.sha }}
           path: |
-            universal-structured-edge-report.json
-            universal-structured-edge-summary.json
+            universal-structured-edge-${{ matrix.horizon }}m-report.json
+            universal-structured-edge-${{ matrix.horizon }}m-summary.json
           retention-days: 30
