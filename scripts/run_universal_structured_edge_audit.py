@@ -6,7 +6,10 @@ Two source modes are supported:
 2. no database: fetch the existing real Yahoo 5m/60d P1B source universe into
    an ephemeral GitHub-runner SQLite database, then discard it after the audit.
 
-Neither mode grants production authority or performs request-time terminal work.
+The active manual-trader policy deliberately accepts substantially weaker
+statistical evidence than the former research-grade gate.  Causality,
+purge/embargo, structural baseline and dependency correction remain intact.
+Neither mode grants automatic trade execution or production authority.
 """
 from __future__ import annotations
 
@@ -19,12 +22,13 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from seiltanzer.edge_discovery.active_edge_policy import (
+    ACTIVE_EDGE_POLICY_VERSION,
+    run_active_structured_discovery,
+)
 from seiltanzer.edge_discovery.historical import load_p1b_sources
 from seiltanzer.edge_discovery.rates import build_rates_states, fetch_treasury_daily_rates
-from seiltanzer.edge_discovery.universal_structured_discovery import (
-    UNIVERSAL_HORIZONS,
-    run_universal_structured_discovery,
-)
+from seiltanzer.edge_discovery.universal_structured_discovery import UNIVERSAL_HORIZONS
 from seiltanzer.edge_discovery.universal_target_scoring import BASELINE_METHOD
 from seiltanzer.g1_short_horizon_historical_wf import _ensure_tables, _fetch_sources
 
@@ -140,7 +144,7 @@ def main() -> int:
         except Exception as exc:
             rates_metadata["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
 
-    report = run_universal_structured_discovery(
+    report = run_active_structured_discovery(
         sources,
         source_set_sha256=source_set,
         rates_states=rates_states,
@@ -156,6 +160,7 @@ def main() -> int:
     _write(Path(args.output).resolve(), report)
     print(json.dumps({
         "verdict": report["verdict"],
+        "edge_policy": report.get("edge_policy", ACTIVE_EDGE_POLICY_VERSION),
         "requested_horizons": report["requested_horizons"],
         "baseline_method": report["baseline_method"],
         "hypotheses_tested_inner": report["hypotheses_tested_inner"],
