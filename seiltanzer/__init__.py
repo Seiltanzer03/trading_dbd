@@ -207,3 +207,10 @@ del _install_g1_short_horizon_historical_wf_integrity
 from .g1_q_audit_scalability import install_g1_q_audit_scalability as _install_g1_q_audit_scalability
 _install_g1_q_audit_scalability()
 del _install_g1_q_audit_scalability
+
+# Active high-risk edge context must be the final AI snapshot wrapper so it sees
+# every previously installed G1/refinement field instead of freezing an early
+# facade. It adds manual-decision context only; execution authority is unchanged.
+from .active_edge_ai_integration import install_active_edge_ai_integration as _install_active_edge_ai_integration
+_install_active_edge_ai_integration()
+del _install_active_edge_ai_integration
