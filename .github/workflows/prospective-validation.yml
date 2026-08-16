@@ -1,0 +1,58 @@
+name: EDE Prospective Validation contract
+
+on:
+  pull_request:
+    paths:
+      - "seiltanzer/edge_discovery/candidate_admission.py"
+      - "seiltanzer/edge_discovery/candidate_registry.py"
+      - "seiltanzer/edge_discovery/frozen_candidate.py"
+      - "seiltanzer/edge_discovery/frozen_ml_candidate.py"
+      - "seiltanzer/edge_discovery/prospective_*.py"
+      - "tests/test_candidate_admission.py"
+      - "tests/test_universal_prospective_confirmation.py"
+      - "tests/test_prospective_comparison.py"
+      - "tests/test_frozen_ml_candidate.py"
+      - ".github/workflows/prospective-validation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "seiltanzer/edge_discovery/candidate_admission.py"
+      - "seiltanzer/edge_discovery/candidate_registry.py"
+      - "seiltanzer/edge_discovery/frozen_candidate.py"
+      - "seiltanzer/edge_discovery/frozen_ml_candidate.py"
+      - "seiltanzer/edge_discovery/prospective_*.py"
+      - ".github/workflows/prospective-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  immutable-prospective-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install research validation runtime
+        run: pip install -e ".[dev,research]"
+      - name: Run PASS 7 immutable/prospective tests
+        run: |
+          pytest -q \
+            tests/test_candidate_admission.py \
+            tests/test_universal_prospective_confirmation.py \
+            tests/test_prospective_comparison.py \
+            tests/test_frozen_ml_candidate.py \
+            tests/test_ml_challenger.py \
+            tests/test_universal_target_scoring.py
+      - name: Assert production runtime does not require sklearn
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path("pyproject.toml").read_text()
+          main = text.split("[project.optional-dependencies]", 1)[0]
+          assert "scikit-learn" not in main
+          assert "research = [\"scikit-learn" in text
+          PY
