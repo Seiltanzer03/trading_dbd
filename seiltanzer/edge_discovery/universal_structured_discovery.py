@@ -24,6 +24,7 @@ from .rates import RatesState, attach_rates_context
 from .scoring import benjamini_hochberg
 from .universal_outcome_adapter import resolve_historical_universal_outcome
 from .universal_target_scoring import (
+    DEPENDENCY_PVALUE_METHOD,
     UniversalTargetSpec,
     eligible_target_rows,
     fitted_constant_predictions,
@@ -36,6 +37,7 @@ from .universal_templates import universal_candidate_templates, universal_featur
 
 
 UNIVERSAL_STRUCTURED_DISCOVERY_VERSION = "g1s-universal-structured-discovery-v1"
+UNIVERSAL_HORIZONS = (15, 30, 60, 120, 240)
 MAX_Q_VALUE = 0.10
 MIN_RELATIVE_IMPROVEMENT = 0.005
 OUTER_SELECTION_LIMIT = 8
@@ -264,25 +266,44 @@ def _aggregate_candidate(
     }
 
 
+def _validated_horizons(horizons: Iterable[int]) -> tuple[int, ...]:
+    requested = tuple(dict.fromkeys(int(value) for value in horizons))
+    if not requested:
+        raise ValueError("at least one universal discovery horizon is required")
+    unsupported = [value for value in requested if value not in UNIVERSAL_HORIZONS]
+    if unsupported:
+        raise ValueError(f"unsupported universal discovery horizons: {unsupported}")
+    return requested
+
+
 def run_universal_structured_discovery(
     sources: list[dict[str, Any]], *, source_set_sha256: str,
     rates_states: Iterable[RatesState] = (),
+    horizons: Iterable[int] = UNIVERSAL_HORIZONS,
 ) -> dict[str, Any]:
-    """Run nested, purged, target-aware discovery without production promotion."""
+    """Run nested, purged, target-aware discovery without production promotion.
+
+    ``horizons`` is execution sharding only. Candidate definitions, folds, gates,
+    FDR scope and IDs are unchanged, so one-horizon off-host jobs can be run in
+    parallel without altering the statistical exam for that horizon.
+    """
     rates_states = tuple(rates_states)
+    requested_horizons = _validated_horizons(horizons)
     horizon_reports: list[dict[str, Any]] = []
     total_tested = total_sample = total_fdr = 0
     all_discovery_signals: list[dict[str, Any]] = []
 
     barrier_ids: set[str] = set()
-    sample_rows = build_universal_discovery_rows(sources, 15, rates_states=rates_states)
+    sample_horizon = requested_horizons[0]
+    sample_rows = build_universal_discovery_rows(
+        sources, sample_horizon, rates_states=rates_states)
     for row in sample_rows[:100]:
         barrier_ids.update((row.get("universal_outcome") or {}).get("barriers", {}).keys())
     specs = universal_target_specs(barrier_ids)
     definitions = universal_feature_definitions()
 
-    for horizon in (15, 30, 60, 120, 240):
-        raw_rows = sample_rows if horizon == 15 else build_universal_discovery_rows(
+    for horizon in requested_horizons:
+        raw_rows = sample_rows if horizon == sample_horizon else build_universal_discovery_rows(
             sources, horizon, rates_states=rates_states)
         eligible_features = sorted({
             str(feature_id)
@@ -292,6 +313,7 @@ def run_universal_structured_discovery(
         })
         templates = universal_candidate_templates(
             eligible_feature_ids=eligible_features, feature_definitions=definitions)
+        by_template = {item.template_id: item for item in templates}
         target_reports: list[dict[str, Any]] = []
         for spec in specs:
             rows = eligible_target_rows(raw_rows, spec)
@@ -306,7 +328,6 @@ def run_universal_structured_discovery(
                 total_tested += int(inner["tested"])
                 total_sample += int(inner["sample_gate_passed"])
                 total_fdr += int(inner["fdr_passed"])
-                by_template = {item.template_id: item for item in templates}
                 for selected in inner["selected"]:
                     template = by_template.get(str(selected["template_id"]))
                     if template is None:
@@ -378,6 +399,7 @@ def run_universal_structured_discovery(
     return {
         "contract_version": UNIVERSAL_STRUCTURED_DISCOVERY_VERSION,
         "source_set_sha256": str(source_set_sha256),
+        "requested_horizons": list(requested_horizons),
         "strategy_agnostic": True,
         "discovery_only": True,
         "prospective_confirmation": False,
@@ -388,6 +410,7 @@ def run_universal_structured_discovery(
             "inner_fdr_q_max": MAX_Q_VALUE,
             "minimum_relative_improvement": MIN_RELATIVE_IMPROVEMENT,
             "minimum_positive_outer_folds": MIN_STABLE_FOLDS,
+            "paired_oos_dependency_pvalue": DEPENDENCY_PVALUE_METHOD,
             "rates_daily_dependency_signal_gate": "WITHHELD_UNTIL_CLUSTER_CORRECTION",
             "promotion_effect": "NONE_DISCOVERY_ONLY",
         },
