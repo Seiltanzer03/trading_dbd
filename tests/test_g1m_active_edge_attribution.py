@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
+from types import SimpleNamespace
 
 from seiltanzer.g1_management_active_edge_attribution import (
     ATTRIBUTION_VERSION,
     _decorate_window,
+    _window_records,
     build_active_edge_decision_attribution,
 )
 
@@ -151,6 +155,71 @@ def test_wrong_edge_direction_produces_negative_alignment_utility():
     assert all_60["hold_vs_exit"]["mean_aligned_delta_r"] == -0.7
     assert all_60["hold_vs_exit"]["negative_rate"] == 1.0
     assert report["edge_claim_allowed"] is False
+
+
+def test_window_records_joins_real_sidecar_and_local_policy_tables():
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE g1m_active_edge_t0(
+            observation_id TEXT PRIMARY KEY,
+            review_id TEXT NOT NULL UNIQUE,
+            available INTEGER NOT NULL,
+            context_json TEXT NOT NULL
+        );
+        CREATE TABLE g1m_local_windows(
+            window_id TEXT PRIMARY KEY,
+            observation_id TEXT NOT NULL,
+            horizon_minutes INTEGER NOT NULL,
+            trade_id INTEGER NOT NULL,
+            evidence_eligible INTEGER NOT NULL,
+            origin TEXT NOT NULL,
+            captured_ts REAL NOT NULL
+        );
+        CREATE TABLE g1m_local_outcomes(
+            window_id TEXT PRIMARY KEY,
+            observation_id TEXT NOT NULL
+        );
+        CREATE TABLE g1m_local_policy_outcomes(
+            window_id TEXT NOT NULL,
+            policy_name TEXT NOT NULL,
+            terminal_r REAL NOT NULL,
+            PRIMARY KEY(window_id,policy_name)
+        );
+    """)
+    context = json.dumps(_context(
+        supporting=4, opposing=1, strict_supporting=1, strict_opposing=0))
+    conn.execute(
+        "INSERT INTO g1m_active_edge_t0 VALUES(?,?,?,?)",
+        ("obs-1", "review-1", 1, context),
+    )
+    conn.execute(
+        "INSERT INTO g1m_local_windows VALUES(?,?,?,?,?,?,?)",
+        ("win-1", "obs-1", 60, 42, 1, "LIVE_PROSPECTIVE", 1000.0),
+    )
+    conn.execute("INSERT INTO g1m_local_outcomes VALUES(?,?)", ("win-1", "obs-1"))
+    for policy, terminal in {
+        "HOLD": 1.0, "EXIT": 0.0, "CLOSE_50": 0.5, "CLOSE_25": 0.75,
+    }.items():
+        conn.execute(
+            "INSERT INTO g1m_local_policy_outcomes VALUES(?,?,?)",
+            ("win-1", policy, terminal),
+        )
+    conn.commit()
+
+    runtime = SimpleNamespace(_conn=conn, _lock=threading.RLock())
+    windows, coverage = _window_records(runtime)
+    assert coverage["sidecar_observation_n"] == 1
+    assert coverage["available_sidecar_observation_n"] == 1
+    assert coverage["resolved_prospective_window_n"] == 1
+    assert coverage["resolved_unique_trade_n"] == 1
+    assert len(windows) == 1
+    row = windows[0]
+    assert row["trade_id"] == 42
+    assert row["all_active_net_vote"] == 3
+    assert row["all_active_hold_vs_exit_aligned_r"] == 1.0
+    assert row["strict_reference_net_vote"] == 1
+    assert row["high_risk_only_net_vote"] == 2
 
 
 def test_empty_report_waits_for_prospective_resolved_windows():
