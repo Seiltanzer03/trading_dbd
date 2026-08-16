@@ -32,6 +32,54 @@ jobs:
               /opt/seiltanzer/scripts/production_functional_smoke.py \
               --expected-sha "$EXPECTED_SHA"
 
+      - name: Verify public terminal from GitHub runner
+        run: |
+          set -euo pipefail
+          url="http://94.241.171.182:8790/api/state"
+          for attempt in 1 2 3; do
+            if curl -fsS \
+              --connect-timeout 3 \
+              --max-time 5 \
+              --output /tmp/public-state.json \
+              "$url"; then
+              bytes=$(wc -c < /tmp/public-state.json)
+              echo "public terminal PASS attempt=${attempt} bytes=${bytes}"
+              exit 0
+            fi
+            echo "public terminal attempt=${attempt}/3 failed"
+            sleep 2
+          done
+          echo "::error::Public terminal is unreachable at ${url}"
+          exit 1
+
+      - name: Diagnose public exposure on smoke failure
+        if: failure()
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: |
+            set +e
+            echo '=== listener 8790 ==='
+            ss -ltnp | grep ':8790' || true
+            echo '=== service ==='
+            systemctl status seiltanzer --no-pager -l || true
+            echo '=== local state probe ==='
+            curl -sS -o /dev/null -w 'localhost http=%{http_code} connect=%{time_connect}s total=%{time_total}s\n' \
+              --connect-timeout 3 --max-time 5 http://127.0.0.1:8790/api/state || true
+            echo '=== addresses/routes ==='
+            ip -brief address || true
+            ip route || true
+            echo '=== ufw ==='
+            if command -v ufw >/dev/null 2>&1; then ufw status verbose || true; else echo 'ufw not installed'; fi
+            echo '=== iptables ==='
+            if command -v iptables >/dev/null 2>&1; then iptables -S || true; else echo 'iptables not installed'; fi
+            echo '=== nftables ==='
+            if command -v nft >/dev/null 2>&1; then nft list ruleset || true; else echo 'nft not installed'; fi
+
       - name: Publish functional smoke status
         if: always()
         env:
@@ -41,7 +89,7 @@ jobs:
         run: |
           if [ "$JOB_STATUS" = "success" ]; then
             state="success"
-            description="Bounded analytics, G1S and AI Verdict smoke passed"
+            description="Bounded analytics, public endpoint and AI Verdict smoke passed"
           else
             state="failure"
             description="Production functional smoke failed"
