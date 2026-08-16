@@ -62,6 +62,40 @@ def test_structured_active_edge_is_related_to_current_long(monkeypatch, tmp_path
     assert context["automatic_execution"] is False
 
 
+def test_legacy_structured_ids_match_live_canonical_values():
+    values = {
+        "vol.rv15_over_rv60": {
+            "feature_id": "vol.rv15_over_rv60", "value": 1.2, "available": True,
+        },
+        "cross.family_breadth": {
+            "feature_id": "cross.family_breadth", "value": 0.72, "available": True,
+        },
+        "regime.asset": {
+            "feature_id": "regime.asset", "value": "NAS100", "available": True,
+        },
+    }
+    candidate = {
+        "conditions": [
+            {
+                "feature_id": "rv15_over_rv60", "kind": "train_relative",
+                "state": "ABOVE_MEDIAN", "lower": 0.9, "upper": 0.9,
+                "train_cutoff_ts": 1.0,
+            },
+            {
+                "feature_id": "family_breadth_state", "kind": "categorical",
+                "state": "POSITIVE", "lower": None, "upper": None,
+                "train_cutoff_ts": 1.0,
+            },
+            {
+                "feature_id": "asset", "kind": "categorical",
+                "state": "NAS100", "lower": None, "upper": None,
+                "train_cutoff_ts": 1.0,
+            },
+        ]
+    }
+    assert active._conditions_match(values, candidate) is True
+
+
 def test_stale_active_edge_report_is_not_used(tmp_path):
     research = tmp_path / "research"
     research.mkdir()
