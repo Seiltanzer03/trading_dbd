@@ -5,14 +5,17 @@ on:
     paths:
       - "seiltanzer/edge_discovery/ml_challenger.py"
       - "seiltanzer/edge_discovery/universal_*.py"
+      - "seiltanzer/edge_discovery/active_edge_policy.py"
       - "scripts/run_ml_challenger_audit.py"
       - "tests/test_ml_challenger.py"
+      - "tests/test_active_edge_policy.py"
       - "pyproject.toml"
       - ".github/workflows/ml-challenger.yml"
   push:
     branches: [main]
     paths:
       - "seiltanzer/edge_discovery/ml_challenger.py"
+      - "seiltanzer/edge_discovery/active_edge_policy.py"
       - "scripts/run_ml_challenger_audit.py"
       - "pyproject.toml"
       - ".github/workflows/ml-challenger.yml"
@@ -20,6 +23,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: g1s-ml-challenger-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   ml-challenger:
@@ -32,8 +39,8 @@ jobs:
           python-version: "3.11"
       - name: Install research runtime only on runner
         run: pip install -e ".[dev,research]"
-      - name: Run ML challenger contract tests
-        run: pytest -q tests/test_ml_challenger.py tests/test_universal_target_scoring.py
+      - name: Run active-edge and ML challenger contract tests
+        run: pytest -q tests/test_active_edge_policy.py tests/test_ml_challenger.py tests/test_universal_target_scoring.py
       - name: Run fresh off-host ML challenger
         env:
           OMP_NUM_THREADS: "2"
@@ -44,7 +51,7 @@ jobs:
           python scripts/run_ml_challenger_audit.py \
             --output ml-challenger-report.json \
             | tee ml-challenger-summary.json
-      - name: Assert challenger research and statistical contracts
+      - name: Assert active high-risk challenger contract
         run: |
           python - <<'PY'
           import json
@@ -64,12 +71,23 @@ jobs:
           assert payload["model_library"] == "scikit-learn"
           assert payload["model_library_version"]
           assert payload["fdr_family"] == "ALL_EVALUATED_TARGET_HORIZON_CHALLENGERS"
+          assert payload["edge_policy"] == "g1s-manual-trader-high-risk-edge-policy-v1"
+          assert payload["edge_policy_name"] == "MANUAL_TRADER_HIGH_RISK"
+          assert payload["fdr_role"] == "DIAGNOSTIC_NOT_BLOCKING"
+          assert payload["strict_reference_is_blocking"] is False
+          assert payload["active_gates"]["max_q_value"] == 1.0
+          assert payload["active_gates"]["minimum_relative_improvement"] == 0.01
+          assert payload["active_gates"]["minimum_positive_folds"] == 2
+          assert payload["active_gates"]["minimum_feature_coverage"] == 0.50
+          assert payload["active_gates"]["maximum_features"] == 48
           for candidate in payload["candidates"]:
               assert candidate["baseline_method"] == payload["baseline_method"]
               assert candidate["dependency_pvalue_method"] == payload["dependency_pvalue_method"]
               assert candidate["rates_features_excluded"] is True
               assert candidate["production_authority"] is False
               assert candidate["auto_promotion"] is False
+              assert candidate["edge_policy"] == payload["edge_policy"]
+              assert "strict_reference_qualified" in candidate
           PY
       - uses: actions/upload-artifact@v4
         with:

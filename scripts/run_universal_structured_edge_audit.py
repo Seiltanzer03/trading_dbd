@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Run strategy-agnostic structured edge discovery entirely off production.
-
-Two source modes are supported:
-1. ``--database``: consume an immutable production/P1B SQLite copy read-only;
-2. no database: fetch the existing real Yahoo 5m/60d P1B source universe into
-   an ephemeral GitHub-runner SQLite database, then discard it after the audit.
-
-Neither mode grants production authority or performs request-time terminal work.
-"""
+"""Run strategy-agnostic active structured edge discovery off production."""
 from __future__ import annotations
 
 import argparse
@@ -19,12 +11,13 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from seiltanzer.edge_discovery.active_edge_policy import (
+    ACTIVE_EDGE_POLICY_VERSION,
+    run_active_structured_discovery,
+)
 from seiltanzer.edge_discovery.historical import load_p1b_sources
 from seiltanzer.edge_discovery.rates import build_rates_states, fetch_treasury_daily_rates
-from seiltanzer.edge_discovery.universal_structured_discovery import (
-    UNIVERSAL_HORIZONS,
-    run_universal_structured_discovery,
-)
+from seiltanzer.edge_discovery.universal_structured_discovery import UNIVERSAL_HORIZONS
 from seiltanzer.edge_discovery.universal_target_scoring import BASELINE_METHOD
 from seiltanzer.g1_short_horizon_historical_wf import _ensure_tables, _fetch_sources
 
@@ -59,7 +52,6 @@ def _source_set_sha(sources: list[dict[str, Any]]) -> str:
 
 
 def _fresh_off_host_sources() -> tuple[list[dict[str, Any]], str, dict[str, str]]:
-    """Fetch real P1B sources into a throwaway local database on the runner."""
     with tempfile.TemporaryDirectory(prefix="universal-ede-") as directory:
         runtime = SQLiteRuntime(Path(directory) / "research.sqlite3", read_only=False)
         try:
@@ -93,17 +85,11 @@ def _parse_horizons(raw: str) -> tuple[int, ...]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--database",
-        help="optional immutable offline production/P1B SQLite copy; when omitted, fetch real 5m/60d sources on this runner",
-    )
+    parser.add_argument("--database")
     parser.add_argument("--output", default="universal-structured-edge-report.json")
     parser.add_argument(
-        "--horizons", default=",".join(str(value) for value in UNIVERSAL_HORIZONS),
-        help="comma-separated subset of canonical horizons; execution sharding only",
-    )
-    parser.add_argument("--skip-rates", action="store_true",
-                        help="run without official Treasury daily context")
+        "--horizons", default=",".join(str(value) for value in UNIVERSAL_HORIZONS))
+    parser.add_argument("--skip-rates", action="store_true")
     args = parser.parse_args()
     horizons = _parse_horizons(args.horizons)
 
@@ -140,7 +126,7 @@ def main() -> int:
         except Exception as exc:
             rates_metadata["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
 
-    report = run_universal_structured_discovery(
+    report = run_active_structured_discovery(
         sources,
         source_set_sha256=source_set,
         rates_states=rates_states,
@@ -156,6 +142,7 @@ def main() -> int:
     _write(Path(args.output).resolve(), report)
     print(json.dumps({
         "verdict": report["verdict"],
+        "edge_policy": report.get("edge_policy", ACTIVE_EDGE_POLICY_VERSION),
         "requested_horizons": report["requested_horizons"],
         "baseline_method": report["baseline_method"],
         "hypotheses_tested_inner": report["hypotheses_tested_inner"],

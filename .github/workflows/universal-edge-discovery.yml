@@ -6,8 +6,11 @@ on:
       - "seiltanzer/edge_discovery/universal_*.py"
       - "seiltanzer/edge_discovery/rates*.py"
       - "seiltanzer/edge_discovery/research_policy.py"
+      - "seiltanzer/edge_discovery/active_edge_policy.py"
+      - "seiltanzer/edge_discovery/active_structured_context.py"
       - "scripts/run_universal_structured_edge_audit.py"
       - "tests/test_universal_*.py"
+      - "tests/test_active_edge_policy.py"
       - "tests/test_edge_discovery_rates*.py"
       - ".github/workflows/universal-edge-discovery.yml"
   push:
@@ -16,12 +19,18 @@ on:
       - "seiltanzer/edge_discovery/universal_*.py"
       - "seiltanzer/edge_discovery/rates*.py"
       - "seiltanzer/edge_discovery/research_policy.py"
+      - "seiltanzer/edge_discovery/active_edge_policy.py"
+      - "seiltanzer/edge_discovery/active_structured_context.py"
       - "scripts/run_universal_structured_edge_audit.py"
       - ".github/workflows/universal-edge-discovery.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: g1s-universal-edge-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   universal-structured-discovery:
@@ -40,6 +49,8 @@ jobs:
           python-version: "3.11"
       - name: Install research runtime
         run: pip install -e ".[dev]"
+      - name: Run active-edge policy contract tests
+        run: pytest -q tests/test_active_edge_policy.py tests/test_universal_target_scoring.py
       - name: Run fresh real-data universal structured discovery off-host
         env:
           HORIZON: "${{ matrix.horizon }}"
@@ -52,7 +63,7 @@ jobs:
             --horizons "$HORIZON" \
             --output "universal-structured-edge-${HORIZON}m-report.json" \
             | tee "universal-structured-edge-${HORIZON}m-summary.json"
-      - name: Assert research-only safety contract
+      - name: Assert active high-risk research contract
         env:
           HORIZON: "${{ matrix.horizon }}"
         run: |
@@ -73,9 +84,24 @@ jobs:
           assert payload["source_mode"] == "EPHEMERAL_REAL_YAHOO_5M_60D"
           assert payload["baseline_method"] == "TRAIN_ONLY_INSTRUMENT_FAMILY_GLOBAL_RESIDUAL_V1"
           assert "PARITY_CLUSTER" in payload["gates"]["paired_oos_dependency_pvalue"]
+          assert payload["edge_policy"] == "g1s-manual-trader-high-risk-edge-policy-v1"
+          assert payload["edge_policy_name"] == "MANUAL_TRADER_HIGH_RISK"
+          assert payload["fdr_role"] == "DIAGNOSTIC_NOT_BLOCKING"
+          assert payload["strict_reference_is_blocking"] is False
+          assert payload["active_gates"]["max_q_value"] == 1.0
+          assert payload["active_gates"]["minimum_relative_improvement"] == 0.01
+          assert payload["active_gates"]["minimum_positive_outer_folds"] == 2
           rates = payload["rates"]
           assert rates["intraday_velocity_claim"] is False
           assert rates["prospective_confirmation"] is False
+          for target in payload["horizons"][0]["targets"]:
+              for candidate in target["candidates"]:
+                  assert candidate["production_authority"] is False
+                  assert candidate["auto_promotion"] is False
+                  assert candidate["edge_policy"] == payload["edge_policy"]
+                  assert "strict_reference_qualified" in candidate
+                  if candidate.get("status") == "DISCOVERY_SIGNAL":
+                      assert candidate.get("prediction_shift")
           PY
       - uses: actions/upload-artifact@v4
         with:

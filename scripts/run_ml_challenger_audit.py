@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run the bounded PASS 6 ML challenger on fresh real data off production."""
+"""Run the bounded ML challenger on fresh real data off production.
+
+The active manual-trader policy deliberately accepts weaker evidence than the
+former research-grade PASS 6 gate.  The fixed residual model, causal structural
+baseline and dependency-aware OOS scoring remain unchanged.
+"""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +16,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from seiltanzer.edge_discovery.ml_challenger import run_ml_challenger
+from seiltanzer.edge_discovery.active_edge_policy import (
+    ACTIVE_EDGE_POLICY_VERSION,
+    run_active_ml_challenger,
+)
 from seiltanzer.g1_short_horizon_historical_wf import _ensure_tables, _fetch_sources
 
 
@@ -56,7 +64,7 @@ def main() -> int:
     args = parser.parse_args()
 
     sources, source_set, source_errors = _fresh_sources()
-    report = run_ml_challenger(
+    report = run_active_ml_challenger(
         sources, source_set_sha256=source_set)
     report["source_mode"] = "EPHEMERAL_REAL_YAHOO_5M_60D"
     report["source_fetch_errors"] = source_errors
@@ -67,6 +75,7 @@ def main() -> int:
         separators=(",", ":"), allow_nan=False), encoding="utf-8")
     print(json.dumps({
         "verdict": report["verdict"],
+        "edge_policy": report.get("edge_policy", ACTIVE_EDGE_POLICY_VERSION),
         "hypotheses_tested": report["hypotheses_tested"],
         "discovery_signal_count": report["discovery_signal_count"],
         "model_family": report["model_family"],
