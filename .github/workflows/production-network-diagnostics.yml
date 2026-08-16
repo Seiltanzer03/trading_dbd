@@ -1,0 +1,74 @@
+name: production-network-diagnostics
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/production-network-diagnostics.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    steps:
+      - name: Probe terminal externally before SSH diagnostics
+        run: |
+          set +e
+          echo '=== EXTERNAL TCP/HTTP PROBE ==='
+          curl -v --connect-timeout 3 --max-time 6 \
+            http://94.241.171.182:8790/api/state -o /tmp/external-state.json
+          echo "curl_exit=$?"
+          test -f /tmp/external-state.json && head -c 500 /tmp/external-state.json || true
+          echo
+
+      - name: Inspect VPS listener and firewall read-only
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 5m
+          script: |
+            set +e
+            echo '=== SERVICE ==='
+            systemctl status seiltanzer --no-pager -l
+            echo '=== LISTENERS ==='
+            ss -lntp | grep -E '(:8790\b|State|LISTEN)' || true
+            echo '=== ADDRESSES / ROUTES ==='
+            ip -br addr || true
+            ip route || true
+            echo '=== LOCALHOST HTTP ==='
+            curl -sS -o /tmp/local-state.json --connect-timeout 2 --max-time 5 \
+              -w 'localhost code=%{http_code} time=%{time_total}\n' \
+              http://127.0.0.1:8790/api/state || true
+            echo '=== PUBLIC-IP HTTP FROM VPS ==='
+            curl -sS -o /tmp/public-state.json --connect-timeout 2 --max-time 5 \
+              -w 'public-self code=%{http_code} time=%{time_total}\n' \
+              http://94.241.171.182:8790/api/state || true
+            echo '=== UFW ==='
+            command -v ufw >/dev/null && ufw status verbose || echo 'ufw not installed'
+            echo '=== NFTABLES ==='
+            command -v nft >/dev/null && nft list ruleset || echo 'nft not installed'
+            echo '=== IPTABLES RULES ==='
+            command -v iptables >/dev/null && iptables -S || echo 'iptables not installed'
+            echo '=== IPTABLES INPUT COUNTERS ==='
+            command -v iptables >/dev/null && iptables -L INPUT -n -v --line-numbers || true
+            echo '=== RECENT NETWORK / SERVICE ERRORS ==='
+            journalctl -u seiltanzer --since '-20 minutes' --no-pager -n 120 || true
+            journalctl -k --since '-20 minutes' --no-pager \
+              | grep -Ei 'drop|reject|firewall|oom|killed process' || true
+
+      - name: Probe terminal externally after SSH diagnostics
+        run: |
+          set +e
+          echo '=== EXTERNAL HTTP PROBE AFTER DIAGNOSTICS ==='
+          curl -v --connect-timeout 3 --max-time 6 \
+            http://94.241.171.182:8790/api/state -o /tmp/external-state-after.json
+          echo "curl_exit=$?"
+          test -f /tmp/external-state-after.json && head -c 500 /tmp/external-state-after.json || true
+          echo
