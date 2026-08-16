@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27"]
+research = ["scikit-learn>=1.5,<2"]
 
 [project.scripts]
 seiltanzer = "seiltanzer.__main__:main"
