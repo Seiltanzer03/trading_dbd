@@ -213,6 +213,23 @@ def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str
                 "position_relation": "CONTEXT_ONLY",
             })
 
+    # Every active candidate participates in aggregate context. Only the most
+    # relevant eight rows are serialized for explanation so the fixed snapshot
+    # budget never turns into an accidental information-selection gate.
+    all_rows = list(rows)
+    matched_rows = [item for item in all_rows
+                    if item.get("conditions_match_current_t0") is True]
+    supporting = sum(item.get("position_relation") == "SUPPORTS_POSITION"
+                     for item in matched_rows)
+    opposing = sum(item.get("position_relation") == "OPPOSES_POSITION"
+                   for item in matched_rows)
+    matched = len(matched_rows)
+    structured_n = sum(item.get("source") == "STRUCTURED" for item in all_rows)
+    ml_n = sum(item.get("source") == "ML" for item in all_rows)
+    strict_n = sum(bool(item.get("strict_reference_qualified")) for item in all_rows)
+    matched_strict_n = sum(bool(item.get("strict_reference_qualified"))
+                           for item in matched_rows)
+
     rows.sort(key=lambda item: (
         item.get("conditions_match_current_t0") is not True,
         -float(_finite(item.get("primary_improvement")) or 0.0),
@@ -220,19 +237,24 @@ def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str
         str(item.get("candidate_id") or ""),
     ))
     rows = rows[:MAX_SIGNALS]
-    supporting = sum(item.get("position_relation") == "SUPPORTS_POSITION" for item in rows)
-    opposing = sum(item.get("position_relation") == "OPPOSES_POSITION" for item in rows)
-    matched = sum(item.get("conditions_match_current_t0") is True for item in rows)
     return {
         "contract_version": CONTRACT_VERSION,
         "edge_policy": POLICY_VERSION,
-        "available": bool(rows),
+        "available": bool(all_rows),
         "risk_acceptance": "HIGH_FALSE_DISCOVERY_TOLERANCE",
         "strict_reference_is_blocking": False,
+        "aggregate_scope": "ALL_ACTIVE_CANDIDATES_WITH_ALL_MATCHED_STRUCTURED_VOTES",
+        "total_active_signal_n": len(all_rows),
+        "structured_signal_n": structured_n,
+        "ml_signal_n": ml_n,
+        "strict_reference_signal_n": strict_n,
+        "matched_strict_reference_signal_n": matched_strict_n,
         "matched_structured_signal_n": matched,
         "supporting_position_n": supporting,
         "opposing_position_n": opposing,
         "net_position_vote": supporting-opposing,
+        "serialized_signal_n": len(rows),
+        "details_truncated": len(all_rows) > len(rows),
         "signals": rows,
         "role": "AI_VERDICT_AND_MANUAL_POSITION_CONTEXT",
         "automatic_execution": False,
@@ -277,9 +299,12 @@ def install_active_edge_ai_integration() -> None:
             if isinstance(evidence, dict):
                 evidence["active_high_risk_edge"] = {
                     key: context[key] for key in (
-                        "edge_policy", "available", "risk_acceptance",
+                        "edge_policy", "available", "risk_acceptance", "aggregate_scope",
+                        "total_active_signal_n", "structured_signal_n", "ml_signal_n",
+                        "strict_reference_signal_n", "matched_strict_reference_signal_n",
                         "matched_structured_signal_n", "supporting_position_n",
-                        "opposing_position_n", "net_position_vote",
+                        "opposing_position_n", "net_position_vote", "serialized_signal_n",
+                        "details_truncated",
                     )
                 }
         enforce = getattr(ai_verdict, "_enforce_snapshot_budget", None)

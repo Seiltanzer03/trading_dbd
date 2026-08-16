@@ -4,6 +4,7 @@ from __future__ import annotations
 from .engine import Engine
 from .passive_learning import PassiveLearningEngine
 from .g1_management_runtime import ManagementEdgeRuntime
+from .g1_management_active_edge_t0 import install_g1_management_active_edge_t0
 
 
 _INSTALLED = False
@@ -14,6 +15,10 @@ def install_g1_management_integration() -> None:
     if _INSTALLED:
         return
     _INSTALLED = True
+
+    # Freeze the already-present active-edge context only inside G1-M research.
+    # This patch does not wrap AI Verdict or alter execution authority.
+    install_g1_management_active_edge_t0()
 
     original_engine_init = Engine.__init__
     original_engine_close = Engine.close

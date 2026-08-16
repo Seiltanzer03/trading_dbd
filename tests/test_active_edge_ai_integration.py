@@ -121,3 +121,56 @@ def test_stale_active_edge_report_is_not_used(tmp_path):
     )
     assert context["available"] is False
     assert context["signals"] == []
+
+
+def test_all_matching_candidates_are_aggregated_beyond_top_eight(monkeypatch, tmp_path):
+    research = tmp_path / "research"
+    research.mkdir()
+    candidates = []
+    for index in range(12):
+        candidates.append({
+            "candidate_id": f"risk-{index}",
+            "status": "DISCOVERY_SIGNAL",
+            "target_id": "RETURN_SIGMA",
+            "horizon_minutes": 60,
+            "primary_improvement": 0.01 + index / 1000.0,
+            "q_value": 0.95,
+            "fold_positive": 2,
+            "strict_reference_qualified": index in {0, 1, 2},
+            "conditions": [{"feature_id": "price.ret_5m"}],
+            "prediction_shift": {
+                "kind": "SCALAR_TARGET_SHIFT",
+                "candidate_minus_structural_baseline": -0.1,
+                "interpretation": "MORE_DOWNSIDE_RETURN",
+            },
+        })
+    report = {
+        "edge_policy": active.POLICY_VERSION,
+        "production_authority": False,
+        "horizons": [{"targets": [{"candidates": candidates}]}],
+    }
+    path = research / "active_structured_60m_latest.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    now = time.time()
+    os.utime(path, (now, now))
+    monkeypatch.setattr(active, "_current_values", lambda *_: {})
+    monkeypatch.setattr(active, "_conditions_match", lambda *_: True)
+
+    context = active.build_active_edge_context(
+        _engine(tmp_path),
+        {"captured_ts": now + 1.0, "strategy": {"direction": "long", "instrument": "NAS100"}},
+    )
+
+    assert context["aggregate_scope"] == "ALL_ACTIVE_CANDIDATES_WITH_ALL_MATCHED_STRUCTURED_VOTES"
+    assert context["total_active_signal_n"] == 12
+    assert context["structured_signal_n"] == 12
+    assert context["ml_signal_n"] == 0
+    assert context["matched_structured_signal_n"] == 12
+    assert context["supporting_position_n"] == 0
+    assert context["opposing_position_n"] == 12
+    assert context["net_position_vote"] == -12
+    assert context["strict_reference_signal_n"] == 3
+    assert context["matched_strict_reference_signal_n"] == 3
+    assert context["serialized_signal_n"] == active.MAX_SIGNALS
+    assert context["details_truncated"] is True
+    assert len(context["signals"]) == active.MAX_SIGNALS
