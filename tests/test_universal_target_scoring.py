@@ -4,9 +4,12 @@ import numpy as np
 import pytest
 
 from seiltanzer.edge_discovery.universal_target_scoring import (
+    DEPENDENCY_PVALUE_METHOD,
     UniversalTargetSpec,
     eligible_target_rows,
     fitted_constant_predictions,
+    paired_target_dependency_cohorts,
+    paired_target_pvalue,
     relative_target_improvement,
     target_metrics,
     target_value,
@@ -110,3 +113,47 @@ def test_eligible_target_rows_never_invent_missing_outcomes() -> None:
     eligible = eligible_target_rows(rows, spec)
     assert len(eligible) == 1
     assert eligible[0]["universal_target_value"] == pytest.approx(0.2)
+
+
+def test_paired_significance_clusters_overlapping_t0_and_cross_asset_rows() -> None:
+    spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
+                               ("mae", "rmse"))
+    rows = []
+    model = []
+    baseline = []
+    # Six 30m dependency buckets, each with 6 overlapping 5m T0 rows and two
+    # synchronous instruments. Repetition must not become 72 independent trials.
+    for bucket in range(6):
+        for offset in range(6):
+            for instrument in ("NAS100", "SP500"):
+                row = _row(bucket*6+offset, 1.0)
+                row["instrument"] = instrument
+                row["captured_ts"] = float((bucket*1800)+(offset*300))
+                row["target_ts"] = row["captured_ts"]+1800.0
+                rows.append(row)
+                model.append(0.9)
+                baseline.append(0.0)
+    cohorts = paired_target_dependency_cohorts(
+        rows, np.asarray(model), np.asarray(baseline), spec)
+    assert [len(values) for values in cohorts] == [3, 3]
+    assert paired_target_pvalue(rows, np.asarray(model), np.asarray(baseline), spec) < 0.10
+    assert "PARITY_CLUSTER" in DEPENDENCY_PVALUE_METHOD
+
+
+def test_paired_significance_refuses_one_parity_only_pseudo_replication() -> None:
+    spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
+                               ("mae", "rmse"))
+    rows = []
+    model = []
+    baseline = []
+    # Put many duplicate rows into even buckets only. There is no independent
+    # alternating cohort, so the conservative significance contract must refuse it.
+    for bucket in (0, 2, 4, 6, 8, 10):
+        for duplicate in range(20):
+            row = _row(bucket, 1.0)
+            row["captured_ts"] = float(bucket*1800+duplicate)
+            row["target_ts"] = row["captured_ts"]+1800.0
+            rows.append(row)
+            model.append(0.9)
+            baseline.append(0.0)
+    assert paired_target_pvalue(rows, np.asarray(model), np.asarray(baseline), spec) == 1.0
