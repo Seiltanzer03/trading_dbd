@@ -11,9 +11,9 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from seiltanzer.edge_discovery.active_edge_policy import ACTIVE_EDGE_POLICY_VERSION
-from seiltanzer.edge_discovery.active_structured_context import (
-    run_active_structured_discovery_with_context,
+from seiltanzer.edge_discovery.active_edge_policy import (
+    ACTIVE_EDGE_POLICY_VERSION,
+    run_active_structured_discovery,
 )
 from seiltanzer.edge_discovery.historical import load_p1b_sources
 from seiltanzer.edge_discovery.rates import build_rates_states, fetch_treasury_daily_rates
@@ -126,7 +126,7 @@ def main() -> int:
         except Exception as exc:
             rates_metadata["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
 
-    report = run_active_structured_discovery_with_context(
+    report = run_active_structured_discovery(
         sources,
         source_set_sha256=source_set,
         rates_states=rates_states,
