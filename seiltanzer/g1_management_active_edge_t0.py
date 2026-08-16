@@ -1,6 +1,6 @@
 """Freeze active high-risk edge context beside immutable G.1-M observations.
 
-The active edge is already part of the frozen production decision snapshot.  This
+The active edge is already part of the frozen production decision snapshot. This
 sidecar extracts a small, deterministic T0 record so later G.1-M analysis can
 measure whether the early edge actually improved HOLD/REDUCE/EXIT decisions.
 It never changes the production policy, execution path or promotion authority.
@@ -91,6 +91,8 @@ def compact_active_edge_t0(snapshot: Any) -> dict[str, Any]:
     policy = _bounded_text(summary.get("edge_policy") or context.get("edge_policy"), 160)
     risk = _bounded_text(
         summary.get("risk_acceptance") or context.get("risk_acceptance"), 160)
+    aggregate_scope = _bounded_text(
+        summary.get("aggregate_scope") or context.get("aggregate_scope"), 160)
     available = bool(summary.get("available") or context.get("available"))
     matched = _nonnegative_int(
         summary.get("matched_structured_signal_n", context.get("matched_structured_signal_n")))
@@ -99,11 +101,32 @@ def compact_active_edge_t0(snapshot: Any) -> dict[str, Any]:
     opposing = _nonnegative_int(
         summary.get("opposing_position_n", context.get("opposing_position_n")))
 
-    # Recompute the net vote from the frozen counts rather than trusting a
+    # Aggregate counts come from the full pre-truncation AI context when the
+    # current contract provides them. Older snapshots fall back to the bounded
+    # explanatory rows, preserving forward compatibility without inventing data.
+    total_active_n = _nonnegative_int(
+        summary.get("total_active_signal_n", context.get("total_active_signal_n", len(signals))))
+    structured_n = _nonnegative_int(
+        summary.get("structured_signal_n", context.get(
+            "structured_signal_n", sum(row.get("source") == "STRUCTURED" for row in signals))))
+    ml_signal_n = _nonnegative_int(
+        summary.get("ml_signal_n", context.get(
+            "ml_signal_n", sum(row.get("source") == "ML" for row in signals))))
+    strict_reference_n = _nonnegative_int(
+        summary.get("strict_reference_signal_n", context.get(
+            "strict_reference_signal_n",
+            sum(bool(row.get("strict_reference_qualified")) for row in signals))))
+    matched_strict_reference_n = _nonnegative_int(
+        summary.get("matched_strict_reference_signal_n", context.get(
+            "matched_strict_reference_signal_n",
+            sum(bool(row.get("strict_reference_qualified"))
+                and row.get("conditions_match_current_t0") is True for row in signals))))
+    serialized_n = _nonnegative_int(
+        summary.get("serialized_signal_n", context.get("serialized_signal_n", len(signals))))
+
+    # Recompute the net vote from frozen aggregate counts rather than trusting a
     # potentially inconsistent duplicate field in the source snapshot.
     net_vote = supporting - opposing
-    ml_signal_n = sum(row.get("source") == "ML" for row in signals)
-    strict_reference_n = sum(bool(row.get("strict_reference_qualified")) for row in signals)
 
     return {
         "contract_version": G1M_ACTIVE_EDGE_T0_VERSION,
@@ -111,13 +134,18 @@ def compact_active_edge_t0(snapshot: Any) -> dict[str, Any]:
             context.get("contract_version"), 160),
         "edge_policy": policy,
         "risk_acceptance": risk,
+        "aggregate_scope": aggregate_scope,
         "available": available,
+        "total_active_signal_n": total_active_n,
+        "structured_signal_n": structured_n,
+        "ml_signal_n": ml_signal_n,
+        "strict_reference_signal_n": strict_reference_n,
+        "matched_strict_reference_signal_n": matched_strict_reference_n,
         "matched_structured_signal_n": matched,
         "supporting_position_n": supporting,
         "opposing_position_n": opposing,
         "net_position_vote": net_vote,
-        "ml_signal_n": ml_signal_n,
-        "strict_reference_signal_n": strict_reference_n,
+        "serialized_signal_n": serialized_n,
         "signals": signals,
         "decision_weight_applied": False,
         "research_only": True,
@@ -137,13 +165,18 @@ def _ensure_active_edge_tables(runtime: ManagementEdgeRuntime) -> None:
                 contract_version TEXT NOT NULL,
                 edge_policy TEXT,
                 risk_acceptance TEXT,
+                aggregate_scope TEXT,
                 available INTEGER NOT NULL,
+                total_active_signal_n INTEGER NOT NULL,
+                structured_signal_n INTEGER NOT NULL,
+                ml_signal_n INTEGER NOT NULL,
+                strict_reference_signal_n INTEGER NOT NULL,
+                matched_strict_reference_signal_n INTEGER NOT NULL,
                 matched_structured_signal_n INTEGER NOT NULL,
                 supporting_position_n INTEGER NOT NULL,
                 opposing_position_n INTEGER NOT NULL,
                 net_position_vote INTEGER NOT NULL,
-                ml_signal_n INTEGER NOT NULL,
-                strict_reference_signal_n INTEGER NOT NULL,
+                serialized_signal_n INTEGER NOT NULL,
                 context_json TEXT NOT NULL,
                 context_sha256 TEXT NOT NULL,
                 created_ts REAL NOT NULL
@@ -186,18 +219,23 @@ def _store_active_edge_t0(runtime: ManagementEdgeRuntime, source: Any) -> bool:
         runtime._conn.execute(
             "INSERT OR IGNORE INTO g1m_active_edge_t0("
             "observation_id,review_id,captured_ts,contract_version,edge_policy,"
-            "risk_acceptance,available,matched_structured_signal_n,"
-            "supporting_position_n,opposing_position_n,net_position_vote,ml_signal_n,"
-            "strict_reference_signal_n,context_json,context_sha256,created_ts)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "risk_acceptance,aggregate_scope,available,total_active_signal_n,"
+            "structured_signal_n,ml_signal_n,strict_reference_signal_n,"
+            "matched_strict_reference_signal_n,matched_structured_signal_n,"
+            "supporting_position_n,opposing_position_n,net_position_vote,"
+            "serialized_signal_n,context_json,context_sha256,created_ts)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 str(observation["observation_id"]), review_id,
                 float(observation["captured_ts"]), G1M_ACTIVE_EDGE_T0_VERSION,
                 context["edge_policy"], context["risk_acceptance"],
-                int(context["available"]), context["matched_structured_signal_n"],
-                context["supporting_position_n"], context["opposing_position_n"],
-                context["net_position_vote"], context["ml_signal_n"],
-                context["strict_reference_signal_n"], raw, _sha_text(raw), time.time(),
+                context["aggregate_scope"], int(context["available"]),
+                context["total_active_signal_n"], context["structured_signal_n"],
+                context["ml_signal_n"], context["strict_reference_signal_n"],
+                context["matched_strict_reference_signal_n"],
+                context["matched_structured_signal_n"], context["supporting_position_n"],
+                context["opposing_position_n"], context["net_position_vote"],
+                context["serialized_signal_n"], raw, _sha_text(raw), time.time(),
             ),
         )
     return True
@@ -249,20 +287,28 @@ def install_g1_management_active_edge_t0() -> None:
             row = self._conn.execute("""
                 SELECT COUNT(*) AS captured_n,
                        SUM(CASE WHEN available=1 THEN 1 ELSE 0 END) AS available_n,
+                       SUM(total_active_signal_n) AS total_active_n,
+                       SUM(structured_signal_n) AS structured_n,
+                       SUM(ml_signal_n) AS ml_n,
+                       SUM(strict_reference_signal_n) AS strict_n,
+                       SUM(matched_strict_reference_signal_n) AS matched_strict_n,
                        SUM(matched_structured_signal_n) AS matched_n,
                        SUM(supporting_position_n) AS supporting_n,
-                       SUM(opposing_position_n) AS opposing_n,
-                       SUM(ml_signal_n) AS ml_n
+                       SUM(opposing_position_n) AS opposing_n
                 FROM g1m_active_edge_t0
             """).fetchone()
         body["active_edge_t0"] = {
             "contract_version": G1M_ACTIVE_EDGE_T0_VERSION,
             "captured_n": int(row["captured_n"] or 0),
             "available_n": int(row["available_n"] or 0),
+            "total_active_signal_n": int(row["total_active_n"] or 0),
+            "structured_signal_n": int(row["structured_n"] or 0),
+            "ml_signal_n": int(row["ml_n"] or 0),
+            "strict_reference_signal_n": int(row["strict_n"] or 0),
+            "matched_strict_reference_signal_n": int(row["matched_strict_n"] or 0),
             "matched_structured_signal_n": int(row["matched_n"] or 0),
             "supporting_position_n": int(row["supporting_n"] or 0),
             "opposing_position_n": int(row["opposing_n"] or 0),
-            "ml_signal_n": int(row["ml_n"] or 0),
             "decision_weight_applied": False,
             "production_authority": False,
         }
