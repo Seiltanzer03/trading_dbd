@@ -76,12 +76,35 @@ def test_compact_active_edge_t0_is_bounded_and_recomputes_vote():
     assert frozen["opposing_position_n"] == 1
     assert frozen["net_position_vote"] == 2
     assert len(frozen["signals"]) == MAX_FROZEN_SIGNALS
-    assert frozen["ml_signal_n"] == 3  # ML indices 1,4,7 survive the bounded top-8 freeze.
+    assert frozen["ml_signal_n"] == 3  # Legacy/fallback snapshots use bounded rows.
     assert frozen["strict_reference_signal_n"] == 2
     assert frozen["decision_weight_applied"] is False
     assert frozen["production_authority"] is False
     assert frozen["automatic_execution"] is False
     assert frozen["auto_promotion"] is False
+
+
+def test_compact_active_edge_t0_preserves_full_pretruncation_aggregates():
+    snapshot = _snapshot(signals=[_signal(i) for i in range(8)])
+    summary = snapshot["policy_manager"]["evidence"]["active_high_risk_edge"]
+    summary.update({
+        "aggregate_scope": "ALL_ACTIVE_CANDIDATES_WITH_ALL_MATCHED_STRUCTURED_VOTES",
+        "total_active_signal_n": 143,
+        "structured_signal_n": 127,
+        "ml_signal_n": 16,
+        "strict_reference_signal_n": 19,
+        "matched_strict_reference_signal_n": 5,
+        "serialized_signal_n": 8,
+    })
+    frozen = compact_active_edge_t0(snapshot)
+    assert frozen["aggregate_scope"] == "ALL_ACTIVE_CANDIDATES_WITH_ALL_MATCHED_STRUCTURED_VOTES"
+    assert frozen["total_active_signal_n"] == 143
+    assert frozen["structured_signal_n"] == 127
+    assert frozen["ml_signal_n"] == 16
+    assert frozen["strict_reference_signal_n"] == 19
+    assert frozen["matched_strict_reference_signal_n"] == 5
+    assert frozen["serialized_signal_n"] == 8
+    assert len(frozen["signals"]) == 8
 
 
 def test_compact_active_edge_t0_explicitly_freezes_absence():
