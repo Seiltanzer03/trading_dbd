@@ -26,7 +26,7 @@ from .g1_short_horizon_runtime import (
     _finite,
 )
 
-Q_AUDIT_SCALABILITY_VERSION = "g1s-q-audit-read-snapshot-v4"
+Q_AUDIT_SCALABILITY_VERSION = "g1s-q-audit-read-snapshot-v5"
 Q_AUDIT_CANDIDATE_BATCH_SIZE = 200
 
 _RUNTIME = ShortHorizonRuntime
@@ -39,8 +39,6 @@ _ORIGINAL_Q_AUDIT = _RUNTIME.q_audit
 
 def _main_database_path(connection: sqlite3.Connection) -> str | None:
     for row in connection.execute("PRAGMA database_list").fetchall():
-        # PRAGMA database_list -> seq, name, file. sqlite3.Row and tuple both
-        # support positional access.
         if str(row[1]) == "main":
             path = str(row[2] or "")
             return path or None
@@ -48,14 +46,7 @@ def _main_database_path(connection: sqlite3.Connection) -> str | None:
 
 
 def _install_indexes(runtime: _RUNTIME) -> None:
-    """Install indexes for the exact bounded audit predicates.
-
-    The generic `(instrument, ts)` keys still force SQLite to walk backwards
-    through proxy/low-quality rows when direct market evidence is sparse.  The
-    partial indexes below contain only rows that are admissible under the frozen
-    v2 Q-audit contract, so every predecessor seek lands directly on useful
-    evidence.  They change no data and no evidence eligibility semantics.
-    """
+    """Install indexes for the exact bounded audit predicates."""
     with runtime._lock, runtime._conn:
         runtime._conn.execute(
             "CREATE INDEX IF NOT EXISTS ix_g1_q_attempt_ts "
@@ -117,14 +108,7 @@ def _terminal_candidate_batch_snapshot(
     connection: sqlite3.Connection,
     requests: list[tuple[int, str, float]],
 ) -> dict[int, tuple[float | None, str | None]]:
-    """Resolve many predecessor candidates with bounded SQLite round trips.
-
-    Each request is (row_key, instrument, frozen_target_ts). The correlated
-    subqueries retain the exact v2 predecessor rule but are executed inside a
-    handful of SQLite statements instead of two Python execute() calls per row.
-    The v4 partial indexes make each seek operate on direct, quality>=0.90 rows
-    only, rather than scanning backwards through inadmissible market records.
-    """
+    """Resolve many predecessor candidates with bounded SQLite round trips."""
     if not requests:
         return {}
 
@@ -178,8 +162,15 @@ def _candidate_requests(
     rows: list[sqlite3.Row],
     *,
     now: float,
+    include_diagnostics: bool = True,
 ) -> list[tuple[int, str, float]]:
-    """Return only rows for which refined v2 exposes/uses terminal evidence."""
+    """Return rows whose maturity state or requested diagnostics need evidence.
+
+    An already RESOLUTION_BLOCKED observation is already classified and needs a
+    predecessor seek only to populate per-item diagnostics.  Summary-only health
+    probes intentionally skip those diagnostic-only seeks while still resolving
+    every overdue *pending* row needed to compute the exact maturity counts.
+    """
     requests: list[tuple[int, str, float]] = []
     for row_key, row in enumerate(rows):
         created = (
@@ -190,14 +181,9 @@ def _candidate_requests(
         if not created or target is None:
             continue
         status = str(row["resolution_status"] or "pending")
-        needs_candidate = (
-            status not in {"pending", "resolved"}
-            or (
-                status == "pending"
-                and now > target + float(_pl.MAX_GAP_SEC)
-            )
-        )
-        if needs_candidate:
+        overdue_pending = status == "pending" and now > target + float(_pl.MAX_GAP_SEC)
+        diagnostic_only = status not in {"pending", "resolved"}
+        if overdue_pending or (include_diagnostics and diagnostic_only):
             requests.append((
                 row_key,
                 str(row["instrument"] or row["target_instrument"] or ""),
@@ -211,18 +197,33 @@ def q_audit_bounded(
     *,
     now: float | None = None,
     limit: int = 500,
+    include_items: bool = True,
 ) -> dict:
-    """Serve g1s-q-resolution-audit-v2 without worker-lock/N+1 SQL latency."""
+    """Serve g1s-q-resolution-audit-v2 without worker-lock/N+1 SQL latency.
+
+    ``include_items=False`` is a presentation optimization for health/readiness
+    callers that consume only aggregate maturity counts. It evaluates the same
+    bounded attempt cohort and the same overdue-pending evidence rule; it merely
+    omits per-attempt payloads and predecessor lookups used *only* to decorate
+    rows whose resolution state is already final/blocked.
+    """
     now = float(now or time.time())
     bounded_limit = max(1, min(int(limit), 5000))
+    include_items = bool(include_items)
     connection = _open_read_snapshot(self)
     if connection is None:
         # In-memory tests cannot share state with a second SQLite connection.
-        return _ORIGINAL_Q_AUDIT(self, now=now, limit=bounded_limit)
+        result = _ORIGINAL_Q_AUDIT(self, now=now, limit=bounded_limit)
+        if include_items:
+            return result
+        result = dict(result)
+        result["items"] = []
+        result["items_included"] = False
+        result["item_count_total"] = int(result.get("attempt_n") or 0)
+        result["summary_semantics_unchanged"] = True
+        return result
 
     try:
-        # One explicit read transaction gives the same consistent WAL snapshot
-        # for attempts, observation resolution state and terminal candidates.
         connection.execute("BEGIN")
         rows = connection.execute(
             """
@@ -238,7 +239,11 @@ def q_audit_bounded(
         ).fetchall()
         candidates = _terminal_candidate_batch_snapshot(
             connection,
-            _candidate_requests(rows, now=now),
+            _candidate_requests(
+                rows,
+                now=now,
+                include_diagnostics=include_items,
+            ),
         )
 
         maturity = defaultdict(int)
@@ -275,41 +280,41 @@ def q_audit_bounded(
                     state = "NOT_DUE_YET"
                     pending_targets.append(target)
                 else:
-                    # Exact v2 rule: a later quote is not retrospective evidence;
-                    # the admissible direct observation must reach the frozen target.
                     if candidate_ts is not None and candidate_ts >= target - 1e-6:
                         state = "DUE_BUT_NOT_RESOLVED"
                     else:
                         state = "RESOLUTION_BLOCKED"
                 maturity[state] += 1
 
-            item = {
-                "attempt_id": row["attempt_id"],
-                "attempt_ts": row["attempt_ts"],
-                "instrument": row["target_instrument"],
-                "observation_id": row["created_observation_id"],
-                "requested_expiry_ts": _finite(row["requested_expiry_ts"]),
-                "target_ts": target,
-                "resolution_status": row["resolution_status"],
-                "blocker_code": row["blocker_code"],
-                "audit_state": state,
-            }
-            if (
-                created
-                and target is not None
-                and state in {"DUE_BUT_NOT_RESOLVED", "RESOLUTION_BLOCKED"}
-            ):
-                item["latest_admissible_terminal_candidate_ts"] = candidate_ts
-                item["terminal_candidate_source"] = candidate_source
-                item["terminal_gap_sec"] = (
-                    None if candidate_ts is None else target - candidate_ts
-                )
-            items.append(item)
+            if include_items:
+                item = {
+                    "attempt_id": row["attempt_id"],
+                    "attempt_ts": row["attempt_ts"],
+                    "instrument": row["target_instrument"],
+                    "observation_id": row["created_observation_id"],
+                    "requested_expiry_ts": _finite(row["requested_expiry_ts"]),
+                    "target_ts": target,
+                    "resolution_status": row["resolution_status"],
+                    "blocker_code": row["blocker_code"],
+                    "audit_state": state,
+                }
+                if (
+                    created
+                    and target is not None
+                    and state in {"DUE_BUT_NOT_RESOLVED", "RESOLUTION_BLOCKED"}
+                ):
+                    item["latest_admissible_terminal_candidate_ts"] = candidate_ts
+                    item["terminal_candidate_source"] = candidate_source
+                    item["terminal_gap_sec"] = (
+                        None if candidate_ts is None else target - candidate_ts
+                    )
+                items.append(item)
 
         targets = sorted(pending_targets)
         return {
             "contract_version": G1S_Q_AUDIT_VERSION,
             "refinement_contract_version": Q_AUDIT_REFINEMENT_VERSION,
+            "scalability_contract_version": Q_AUDIT_SCALABILITY_VERSION,
             "now": now,
             "attempt_n": len(rows),
             "captured_n": captured_n,
@@ -326,6 +331,9 @@ def q_audit_bounded(
                 maturity.get("DUE_BUT_NOT_RESOLVED", 0) > 0
             ),
             "items": items,
+            "items_included": include_items,
+            "item_count_total": len(rows),
+            "summary_semantics_unchanged": True,
             "slow_q_semantics_unchanged": True,
         }
     finally:
