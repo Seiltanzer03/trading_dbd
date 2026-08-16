@@ -27,9 +27,15 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
                       methods=["GET"], name="g1s_status")
 
     def horizons():
+        # runtime.status() already materializes horizon_report() for every
+        # canonical horizon.  Re-running those five reports here doubled the
+        # resolved-evidence/SQLite work of this request and could exceed the
+        # production 3s latency budget while the research worker was active.
+        # Reuse the exact reports from the single status snapshot instead; no
+        # evidence/math/threshold semantics change.
         status = runtime.status()
         return {"contract_version": status["contract_version"],
-                "items": [runtime.horizon_report(h) for h in (15,30,60,120,240)]}
+                "items": list(status.get("horizons") or [])}
 
     def cached(name: str):
         return runtime.materialized_evidence_report(name)
