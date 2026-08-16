@@ -77,6 +77,20 @@ def test_functional_smoke_retries_transient_timeout(monkeypatch):
     assert smoke.assert_route("/bounded") == {}
 
 
+def test_functional_smoke_checks_public_terminal_and_keeps_network_diagnostics():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/production-functional-smoke.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "Verify public terminal from GitHub runner" in workflow
+    assert "http://94.241.171.182:8790/api/state" in workflow
+    assert "--connect-timeout 3" in workflow
+    assert "ss -ltnp | grep ':8790'" in workflow
+    assert "ufw status verbose" in workflow
+    assert "iptables -S" in workflow
+    assert "nft list ruleset" in workflow
+
+
 def test_production_ede_inventory_is_read_only_and_lists_all_69(tmp_path):
     inventory = _load_script("production_ede_inventory").inventory
 
