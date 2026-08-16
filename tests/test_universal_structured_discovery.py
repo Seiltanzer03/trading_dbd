@@ -61,14 +61,28 @@ def test_structured_continuous_rule_can_detect_train_fitted_state_shift() -> Non
         else:
             target = -0.72 if index % 2 else -0.88
         train.append(_row(index+1, 4.6 if high else 3.8, target))
+
+    # The production significance gate clusters all intraday observations into
+    # one UTC-day loss delta.  The synthetic OOS fixture therefore spans ten
+    # genuinely distinct days instead of manufacturing power from sixty 30m
+    # observations packed into ~30 hours.  Each day has three below-median and
+    # three above-median rows, preserving selected_test_raw_n == 30 while giving
+    # five independent daily clusters to each parity cohort.
     test = []
-    for index in range(60):
-        high = index >= 30
-        if high:
-            target = 0.70 if index % 2 else 0.82
-        else:
-            target = -0.70 if index % 2 else -0.82
-        test.append(_row(index+1000, 4.7 if high else 3.7, target))
+    base_ts = max(row["target_ts"] for row in train) + 7 * 86_400.0
+    for day in range(10):
+        for intraday in range(6):
+            high = intraday >= 3
+            parity = day * 6 + intraday
+            if high:
+                target = 0.70 if parity % 2 else 0.82
+            else:
+                target = -0.70 if parity % 2 else -0.82
+            row = _row(1000+parity, 4.7 if high else 3.7, target)
+            row["captured_ts"] = base_ts + day * 86_400.0 + intraday * 1800.0
+            row["target_ts"] = row["captured_ts"] + 1800.0
+            test.append(row)
+
     result = _evaluate_rule(template, train, test, spec)
     assert result is not None
     assert result["rule"]["conditions"][0]["train_cutoff_ts"] == max(
