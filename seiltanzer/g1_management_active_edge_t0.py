@@ -18,6 +18,7 @@ from .g1_management_runtime import ManagementEdgeRuntime, _json, _sha_text
 
 G1M_ACTIVE_EDGE_T0_VERSION = "g1m-active-edge-t0-v1"
 MAX_FROZEN_SIGNALS = 8
+MAX_FROZEN_GROUPS = 64
 _INSTALLED = False
 
 
@@ -48,6 +49,11 @@ def _bounded_text(value: Any, limit: int = 160) -> str | None:
     return text[:limit]
 
 
+def _vote_ratio(supporting: int, opposing: int) -> float | None:
+    total = int(supporting) + int(opposing)
+    return ((int(supporting) - int(opposing)) / total) if total > 0 else None
+
+
 def _compact_signal(value: Any) -> dict[str, Any] | None:
     row = _mapping(value)
     if not row:
@@ -71,6 +77,31 @@ def _compact_signal(value: Any) -> dict[str, Any] | None:
     }
 
 
+def _compact_group(value: Any) -> dict[str, Any] | None:
+    row = _mapping(value)
+    if not row:
+        return None
+    supporting = _nonnegative_int(row.get("supporting_n"))
+    opposing = _nonnegative_int(row.get("opposing_n"))
+    strict_supporting = _nonnegative_int(row.get("strict_supporting_n"))
+    strict_opposing = _nonnegative_int(row.get("strict_opposing_n"))
+    return {
+        "target_id": _bounded_text(row.get("target_id"), 96),
+        "target_family": _bounded_text(row.get("target_family"), 48),
+        "signal_horizon_minutes": _nonnegative_int(row.get("signal_horizon_minutes")),
+        "matched_n": _nonnegative_int(row.get("matched_n")),
+        "supporting_n": supporting,
+        "opposing_n": opposing,
+        "net_vote": supporting - opposing,
+        "net_vote_ratio": _vote_ratio(supporting, opposing),
+        "strict_matched_n": _nonnegative_int(row.get("strict_matched_n")),
+        "strict_supporting_n": strict_supporting,
+        "strict_opposing_n": strict_opposing,
+        "strict_net_vote": strict_supporting - strict_opposing,
+        "strict_net_vote_ratio": _vote_ratio(strict_supporting, strict_opposing),
+    }
+
+
 def compact_active_edge_t0(snapshot: Any) -> dict[str, Any]:
     """Return a bounded, deterministic research record from one frozen T0."""
     root = _mapping(snapshot)
@@ -87,6 +118,14 @@ def compact_active_edge_t0(snapshot: Any) -> dict[str, Any]:
             compact = _compact_signal(item)
             if compact is not None:
                 signals.append(compact)
+
+    matched_groups: list[dict[str, Any]] = []
+    raw_groups = context.get("matched_groups")
+    if isinstance(raw_groups, list):
+        for item in raw_groups[:MAX_FROZEN_GROUPS]:
+            compact = _compact_group(item)
+            if compact is not None:
+                matched_groups.append(compact)
 
     policy = _bounded_text(summary.get("edge_policy") or context.get("edge_policy"), 160)
     risk = _bounded_text(
@@ -121,12 +160,25 @@ def compact_active_edge_t0(snapshot: Any) -> dict[str, Any]:
             "matched_strict_reference_signal_n",
             sum(bool(row.get("strict_reference_qualified"))
                 and row.get("conditions_match_current_t0") is True for row in signals))))
+    strict_supporting = _nonnegative_int(
+        summary.get("strict_supporting_position_n", context.get(
+            "strict_supporting_position_n",
+            sum(bool(row.get("strict_reference_qualified"))
+                and row.get("position_relation") == "SUPPORTS_POSITION" for row in signals))))
+    strict_opposing = _nonnegative_int(
+        summary.get("strict_opposing_position_n", context.get(
+            "strict_opposing_position_n",
+            sum(bool(row.get("strict_reference_qualified"))
+                and row.get("position_relation") == "OPPOSES_POSITION" for row in signals))))
     serialized_n = _nonnegative_int(
         summary.get("serialized_signal_n", context.get("serialized_signal_n", len(signals))))
 
-    # Recompute the net vote from frozen aggregate counts rather than trusting a
-    # potentially inconsistent duplicate field in the source snapshot.
+    # Recompute votes from frozen aggregate counts rather than trusting duplicate
+    # fields in the source snapshot.
     net_vote = supporting - opposing
+    strict_net_vote = strict_supporting - strict_opposing
+    high_risk_supporting = max(0, supporting - strict_supporting)
+    high_risk_opposing = max(0, opposing - strict_opposing)
 
     return {
         "contract_version": G1M_ACTIVE_EDGE_T0_VERSION,
@@ -145,6 +197,18 @@ def compact_active_edge_t0(snapshot: Any) -> dict[str, Any]:
         "supporting_position_n": supporting,
         "opposing_position_n": opposing,
         "net_position_vote": net_vote,
+        "net_position_vote_ratio": _vote_ratio(supporting, opposing),
+        "strict_supporting_position_n": strict_supporting,
+        "strict_opposing_position_n": strict_opposing,
+        "strict_net_position_vote": strict_net_vote,
+        "strict_net_position_vote_ratio": _vote_ratio(strict_supporting, strict_opposing),
+        "high_risk_only_supporting_position_n": high_risk_supporting,
+        "high_risk_only_opposing_position_n": high_risk_opposing,
+        "high_risk_only_net_position_vote": high_risk_supporting - high_risk_opposing,
+        "high_risk_only_net_position_vote_ratio": _vote_ratio(
+            high_risk_supporting, high_risk_opposing),
+        "matched_groups": matched_groups,
+        "matched_group_n": len(matched_groups),
         "serialized_signal_n": serialized_n,
         "signals": signals,
         "decision_weight_applied": False,

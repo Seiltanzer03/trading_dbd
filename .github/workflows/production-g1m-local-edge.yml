@@ -72,6 +72,16 @@ jobs:
             assert payload.get("edge_claim_allowed") is False, payload
             assert payload.get("management_shadow", {}).get("auto_activation") is False, payload
 
+            attribution = payload.get("active_edge_decision_attribution") or {}
+            assert attribution, payload
+            assert attribution.get("production_authority") is False, attribution
+            assert attribution.get("production_directional_authority") is False, attribution
+            assert attribution.get("decision_weight_applied") is False, attribution
+            assert attribution.get("auto_promotion") is False, attribution
+            assert attribution.get("automatic_execution") is False, attribution
+            assert attribution.get("may_trigger_exit_or_close") is False, attribution
+            assert attribution.get("edge_claim_allowed") is False, attribution
+
             pairwise = []
             for row in payload.get("pairwise") or []:
                 prospective = row.get("prospective") or {}
@@ -85,6 +95,19 @@ jobs:
                     "descriptive_effective_n": descriptive.get("effective_n"),
                     "descriptive_mean_delta_r": descriptive.get("mean_delta_r"),
                 })
+
+            attribution_variants = []
+            for row in attribution.get("variants") or []:
+                metric = row.get("hold_vs_exit") or {}
+                if metric.get("raw_n"):
+                    attribution_variants.append({
+                        "variant": row.get("variant"),
+                        "h": row.get("local_horizon_minutes"),
+                        "raw_n": metric.get("raw_n"),
+                        "effective_n": metric.get("effective_n"),
+                        "mean_aligned_delta_r": metric.get("mean_aligned_delta_r"),
+                        "maturity": metric.get("maturity"),
+                    })
             summary = {
                 "elapsed_ms": round(elapsed_ms, 1),
                 "contract_version": payload.get("contract_version"),
@@ -96,6 +119,15 @@ jobs:
                 "where_it_helps": payload.get("where_it_helps"),
                 "where_it_hurts": payload.get("where_it_hurts"),
                 "management_shadow": payload.get("management_shadow"),
+                "active_edge_attribution": {
+                    "contract_version": attribution.get("contract_version"),
+                    "coverage": attribution.get("coverage"),
+                    "maturity": attribution.get("maturity_contract"),
+                    "verdict": attribution.get("verdict"),
+                    "variants_with_data": attribution_variants,
+                    "target_horizon_row_n": len(
+                        attribution.get("target_horizon_attribution") or []),
+                },
             }
             print("G1M_LOCAL_EDGE_ACCEPTANCE=" + json.dumps(summary, sort_keys=True))
             PY

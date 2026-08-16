@@ -15,8 +15,9 @@ from seiltanzer.g1_management_active_edge_t0 import (
 )
 
 
-def _snapshot(*, available=True, signals=None):
+def _snapshot(*, available=True, signals=None, groups=None):
     signals = list(signals or [])
+    groups = list(groups or [])
     return {
         "policy_manager": {
             "evidence": {
@@ -38,6 +39,7 @@ def _snapshot(*, available=True, signals=None):
                 "edge_policy": "g1s-manual-trader-high-risk-edge-policy-v1",
                 "available": available,
                 "risk_acceptance": "HIGH_FALSE_DISCOVERY_TOLERANCE",
+                "matched_groups": groups,
                 "signals": signals,
             }
         },
@@ -75,6 +77,7 @@ def test_compact_active_edge_t0_is_bounded_and_recomputes_vote():
     assert frozen["supporting_position_n"] == 3
     assert frozen["opposing_position_n"] == 1
     assert frozen["net_position_vote"] == 2
+    assert frozen["net_position_vote_ratio"] == 0.5
     assert len(frozen["signals"]) == MAX_FROZEN_SIGNALS
     assert frozen["ml_signal_n"] == 3  # Legacy/fallback snapshots use bounded rows.
     assert frozen["strict_reference_signal_n"] == 2
@@ -85,7 +88,18 @@ def test_compact_active_edge_t0_is_bounded_and_recomputes_vote():
 
 
 def test_compact_active_edge_t0_preserves_full_pretruncation_aggregates():
-    snapshot = _snapshot(signals=[_signal(i) for i in range(8)])
+    groups = [{
+        "target_id": "FORWARD_VOL_RATIO",
+        "target_family": "VOLATILITY",
+        "signal_horizon_minutes": 60,
+        "matched_n": 9,
+        "supporting_n": 7,
+        "opposing_n": 2,
+        "strict_matched_n": 3,
+        "strict_supporting_n": 2,
+        "strict_opposing_n": 1,
+    }]
+    snapshot = _snapshot(signals=[_signal(i) for i in range(8)], groups=groups)
     summary = snapshot["policy_manager"]["evidence"]["active_high_risk_edge"]
     summary.update({
         "aggregate_scope": "ALL_ACTIVE_CANDIDATES_WITH_ALL_MATCHED_STRUCTURED_VOTES",
@@ -93,7 +107,9 @@ def test_compact_active_edge_t0_preserves_full_pretruncation_aggregates():
         "structured_signal_n": 127,
         "ml_signal_n": 16,
         "strict_reference_signal_n": 19,
-        "matched_strict_reference_signal_n": 5,
+        "matched_strict_reference_signal_n": 3,
+        "strict_supporting_position_n": 2,
+        "strict_opposing_position_n": 1,
         "serialized_signal_n": 8,
     })
     frozen = compact_active_edge_t0(snapshot)
@@ -102,9 +118,19 @@ def test_compact_active_edge_t0_preserves_full_pretruncation_aggregates():
     assert frozen["structured_signal_n"] == 127
     assert frozen["ml_signal_n"] == 16
     assert frozen["strict_reference_signal_n"] == 19
-    assert frozen["matched_strict_reference_signal_n"] == 5
+    assert frozen["matched_strict_reference_signal_n"] == 3
+    assert frozen["strict_supporting_position_n"] == 2
+    assert frozen["strict_opposing_position_n"] == 1
+    assert frozen["strict_net_position_vote"] == 1
+    assert frozen["high_risk_only_supporting_position_n"] == 1
+    assert frozen["high_risk_only_opposing_position_n"] == 0
+    assert frozen["high_risk_only_net_position_vote"] == 1
     assert frozen["serialized_signal_n"] == 8
     assert len(frozen["signals"]) == 8
+    assert frozen["matched_group_n"] == 1
+    assert frozen["matched_groups"][0]["target_family"] == "VOLATILITY"
+    assert frozen["matched_groups"][0]["net_vote"] == 5
+    assert frozen["matched_groups"][0]["strict_net_vote"] == 1
 
 
 def test_compact_active_edge_t0_explicitly_freezes_absence():
@@ -116,6 +142,7 @@ def test_compact_active_edge_t0_explicitly_freezes_absence():
     assert frozen["net_position_vote"] == 0
     assert frozen["ml_signal_n"] == 0
     assert frozen["signals"] == []
+    assert frozen["matched_groups"] == []
     assert frozen["production_authority"] is False
 
 

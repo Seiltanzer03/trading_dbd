@@ -55,6 +55,10 @@ def test_structured_active_edge_is_related_to_current_long(monkeypatch, tmp_path
     assert context["supporting_position_n"] == 0
     assert context["opposing_position_n"] == 1
     assert context["net_position_vote"] == -1
+    assert context["net_position_vote_ratio"] == -1.0
+    assert context["matched_group_n"] == 1
+    assert context["matched_groups"][0]["target_family"] == "RETURN"
+    assert context["matched_groups"][0]["net_vote"] == -1
     signal = context["signals"][0]
     assert signal["market_bias"] == "BEARISH"
     assert signal["position_relation"] == "OPPOSES_POSITION"
@@ -121,6 +125,7 @@ def test_stale_active_edge_report_is_not_used(tmp_path):
     )
     assert context["available"] is False
     assert context["signals"] == []
+    assert context["matched_groups"] == []
 
 
 def test_all_matching_candidates_are_aggregated_beyond_top_eight(monkeypatch, tmp_path):
@@ -169,8 +174,21 @@ def test_all_matching_candidates_are_aggregated_beyond_top_eight(monkeypatch, tm
     assert context["supporting_position_n"] == 0
     assert context["opposing_position_n"] == 12
     assert context["net_position_vote"] == -12
+    assert context["net_position_vote_ratio"] == -1.0
     assert context["strict_reference_signal_n"] == 3
     assert context["matched_strict_reference_signal_n"] == 3
+    assert context["strict_supporting_position_n"] == 0
+    assert context["strict_opposing_position_n"] == 3
+    assert context["strict_net_position_vote"] == -3
+    assert context["strict_net_position_vote_ratio"] == -1.0
+    assert context["matched_group_n"] == 1
+    group = context["matched_groups"][0]
+    assert group["target_id"] == "RETURN_SIGMA"
+    assert group["target_family"] == "RETURN"
+    assert group["signal_horizon_minutes"] == 60
+    assert group["matched_n"] == 12
+    assert group["opposing_n"] == 12
+    assert group["strict_opposing_n"] == 3
     assert context["serialized_signal_n"] == active.MAX_SIGNALS
     assert context["details_truncated"] is True
     assert len(context["signals"]) == active.MAX_SIGNALS

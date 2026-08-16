@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ CONTRACT_VERSION = "ai-active-high-risk-edge-context-v1"
 POLICY_VERSION = "g1s-manual-trader-high-risk-edge-policy-v1"
 MAX_REPORT_AGE_SEC = 8 * 60 * 60
 MAX_SIGNALS = 8
+MAX_MATCHED_GROUPS = 64
 _INSTALLED = False
 
 LEGACY_TO_CANONICAL_FEATURE_ID = {
@@ -53,7 +55,7 @@ def _load_report(path: Path, snapshot_ts: float) -> dict[str, Any] | None:
             return None
         if stat.st_mtime > snapshot_ts + 1.0:
             return None
-        age = snapshot_ts-stat.st_mtime
+        age = snapshot_ts - stat.st_mtime
         if age < -1.0 or age > MAX_REPORT_AGE_SEC:
             return None
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -167,6 +169,83 @@ def _relation(direction: str, bias: str) -> str:
     return "SUPPORTS_POSITION" if supports else "OPPOSES_POSITION"
 
 
+def _target_family(target_id: Any) -> str:
+    target = str(target_id or "UNKNOWN").upper()
+    if "FIRST_TOUCH" in target:
+        return "PATH_FIRST_TOUCH"
+    if "EXCURSION" in target or "MFE" in target or "MAE" in target:
+        return "PATH_EXCURSION"
+    if "VOL" in target or "IV" in target or "RV" in target:
+        return "VOLATILITY"
+    if "RETURN" in target:
+        return "RETURN"
+    if "DIRECTION" in target or target in {"UP", "DOWN"}:
+        return "DIRECTION"
+    return "OTHER"
+
+
+def _vote_ratio(supporting: int, opposing: int) -> float | None:
+    total = int(supporting) + int(opposing)
+    return ((int(supporting) - int(opposing)) / total) if total > 0 else None
+
+
+def _matched_groups(matched_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, int], dict[str, int | str]] = defaultdict(lambda: {
+        "matched_n": 0,
+        "supporting_n": 0,
+        "opposing_n": 0,
+        "strict_matched_n": 0,
+        "strict_supporting_n": 0,
+        "strict_opposing_n": 0,
+    })
+    for row in matched_rows:
+        target = str(row.get("target_id") or "UNKNOWN")
+        horizon = int(row.get("horizon_minutes") or 0)
+        bucket = grouped[(target, horizon)]
+        bucket["matched_n"] = int(bucket["matched_n"]) + 1
+        relation = str(row.get("position_relation") or "")
+        strict = bool(row.get("strict_reference_qualified"))
+        if relation == "SUPPORTS_POSITION":
+            bucket["supporting_n"] = int(bucket["supporting_n"]) + 1
+        elif relation == "OPPOSES_POSITION":
+            bucket["opposing_n"] = int(bucket["opposing_n"]) + 1
+        if strict:
+            bucket["strict_matched_n"] = int(bucket["strict_matched_n"]) + 1
+            if relation == "SUPPORTS_POSITION":
+                bucket["strict_supporting_n"] = int(bucket["strict_supporting_n"]) + 1
+            elif relation == "OPPOSES_POSITION":
+                bucket["strict_opposing_n"] = int(bucket["strict_opposing_n"]) + 1
+
+    output = []
+    for (target, horizon), counts in grouped.items():
+        supporting = int(counts["supporting_n"])
+        opposing = int(counts["opposing_n"])
+        strict_supporting = int(counts["strict_supporting_n"])
+        strict_opposing = int(counts["strict_opposing_n"])
+        output.append({
+            "target_id": target,
+            "target_family": _target_family(target),
+            "signal_horizon_minutes": horizon,
+            "matched_n": int(counts["matched_n"]),
+            "supporting_n": supporting,
+            "opposing_n": opposing,
+            "net_vote": supporting - opposing,
+            "net_vote_ratio": _vote_ratio(supporting, opposing),
+            "strict_matched_n": int(counts["strict_matched_n"]),
+            "strict_supporting_n": strict_supporting,
+            "strict_opposing_n": strict_opposing,
+            "strict_net_vote": strict_supporting - strict_opposing,
+            "strict_net_vote_ratio": _vote_ratio(strict_supporting, strict_opposing),
+        })
+    output.sort(key=lambda row: (
+        -int(row["matched_n"]),
+        str(row["target_family"]),
+        int(row["signal_horizon_minutes"]),
+        str(row["target_id"]),
+    ))
+    return output[:MAX_MATCHED_GROUPS]
+
+
 def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
     snapshot_ts = _finite(snapshot.get("captured_ts")) or 0.0
     root = _research_dir(engine)
@@ -227,8 +306,13 @@ def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str
     structured_n = sum(item.get("source") == "STRUCTURED" for item in all_rows)
     ml_n = sum(item.get("source") == "ML" for item in all_rows)
     strict_n = sum(bool(item.get("strict_reference_qualified")) for item in all_rows)
-    matched_strict_n = sum(bool(item.get("strict_reference_qualified"))
-                           for item in matched_rows)
+    strict_rows = [item for item in matched_rows if item.get("strict_reference_qualified")]
+    matched_strict_n = len(strict_rows)
+    strict_supporting = sum(item.get("position_relation") == "SUPPORTS_POSITION"
+                            for item in strict_rows)
+    strict_opposing = sum(item.get("position_relation") == "OPPOSES_POSITION"
+                          for item in strict_rows)
+    groups = _matched_groups(matched_rows)
 
     rows.sort(key=lambda item: (
         item.get("conditions_match_current_t0") is not True,
@@ -252,7 +336,14 @@ def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str
         "matched_structured_signal_n": matched,
         "supporting_position_n": supporting,
         "opposing_position_n": opposing,
-        "net_position_vote": supporting-opposing,
+        "net_position_vote": supporting - opposing,
+        "net_position_vote_ratio": _vote_ratio(supporting, opposing),
+        "strict_supporting_position_n": strict_supporting,
+        "strict_opposing_position_n": strict_opposing,
+        "strict_net_position_vote": strict_supporting - strict_opposing,
+        "strict_net_position_vote_ratio": _vote_ratio(strict_supporting, strict_opposing),
+        "matched_groups": groups,
+        "matched_group_n": len(groups),
         "serialized_signal_n": len(rows),
         "details_truncated": len(all_rows) > len(rows),
         "signals": rows,
@@ -303,8 +394,10 @@ def install_active_edge_ai_integration() -> None:
                         "total_active_signal_n", "structured_signal_n", "ml_signal_n",
                         "strict_reference_signal_n", "matched_strict_reference_signal_n",
                         "matched_structured_signal_n", "supporting_position_n",
-                        "opposing_position_n", "net_position_vote", "serialized_signal_n",
-                        "details_truncated",
+                        "opposing_position_n", "net_position_vote", "net_position_vote_ratio",
+                        "strict_supporting_position_n", "strict_opposing_position_n",
+                        "strict_net_position_vote", "strict_net_position_vote_ratio",
+                        "matched_group_n", "serialized_signal_n", "details_truncated",
                     )
                 }
         enforce = getattr(ai_verdict, "_enforce_snapshot_budget", None)
