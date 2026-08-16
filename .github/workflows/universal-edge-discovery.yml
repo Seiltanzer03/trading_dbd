@@ -71,6 +71,7 @@ jobs:
           assert payload["auto_promotion"] is False
           assert payload["legacy_directional_ede_changed"] is False
           assert payload["source_mode"] == "EPHEMERAL_REAL_YAHOO_5M_60D"
+          assert payload["baseline_method"] == "TRAIN_ONLY_INSTRUMENT_FAMILY_GLOBAL_RESIDUAL_V1"
           assert "PARITY_CLUSTER" in payload["gates"]["paired_oos_dependency_pvalue"]
           rates = payload["rates"]
           assert rates["intraday_velocity_claim"] is False
