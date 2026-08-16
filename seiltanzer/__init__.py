@@ -201,3 +201,9 @@ del _install_g1_short_horizon_historical_wf
 from .g1_short_horizon_historical_wf_integrity import install_g1_short_horizon_historical_wf_integrity as _install_g1_short_horizon_historical_wf_integrity
 _install_g1_short_horizon_historical_wf_integrity()
 del _install_g1_short_horizon_historical_wf_integrity
+
+# Q audit is a read-only presentation boundary. Serve it from an independent WAL
+# snapshot so long-running research work can never block the production API.
+from .g1_q_audit_scalability import install_g1_q_audit_scalability as _install_g1_q_audit_scalability
+_install_g1_q_audit_scalability()
+del _install_g1_q_audit_scalability
