@@ -7,6 +7,7 @@ on:
       - "seiltanzer/edge_discovery/rates*.py"
       - "seiltanzer/edge_discovery/research_policy.py"
       - "seiltanzer/edge_discovery/active_edge_policy.py"
+      - "seiltanzer/edge_discovery/active_structured_context.py"
       - "scripts/run_universal_structured_edge_audit.py"
       - "tests/test_universal_*.py"
       - "tests/test_active_edge_policy.py"
@@ -19,12 +20,17 @@ on:
       - "seiltanzer/edge_discovery/rates*.py"
       - "seiltanzer/edge_discovery/research_policy.py"
       - "seiltanzer/edge_discovery/active_edge_policy.py"
+      - "seiltanzer/edge_discovery/active_structured_context.py"
       - "scripts/run_universal_structured_edge_audit.py"
       - ".github/workflows/universal-edge-discovery.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: g1s-universal-edge-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   universal-structured-discovery:
@@ -94,6 +100,8 @@ jobs:
                   assert candidate["auto_promotion"] is False
                   assert candidate["edge_policy"] == payload["edge_policy"]
                   assert "strict_reference_qualified" in candidate
+                  if candidate.get("status") == "DISCOVERY_SIGNAL":
+                      assert candidate.get("prediction_shift")
           PY
       - uses: actions/upload-artifact@v4
         with:
