@@ -25,6 +25,7 @@ from seiltanzer.edge_discovery.universal_structured_discovery import (
     UNIVERSAL_HORIZONS,
     run_universal_structured_discovery,
 )
+from seiltanzer.edge_discovery.universal_target_scoring import BASELINE_METHOD
 from seiltanzer.g1_short_horizon_historical_wf import _ensure_tables, _fetch_sources
 
 
@@ -64,7 +65,6 @@ def _fresh_off_host_sources() -> tuple[list[dict[str, Any]], str, dict[str, str]
         try:
             _ensure_tables(runtime)  # type: ignore[arg-type]
             sources, errors = _fetch_sources(runtime)  # type: ignore[arg-type]
-            # Return only ordinary Python objects; runtime/database is discarded.
             detached = [dict(source) for source in sources]
             return detached, _source_set_sha(detached), dict(errors)
         finally:
@@ -137,7 +137,7 @@ def main() -> int:
                 "daily_observations": len(observations),
                 "states": len(rates_states),
             })
-        except Exception as exc:  # optional macro context must not fake/kill baseline research
+        except Exception as exc:
             rates_metadata["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
 
     report = run_universal_structured_discovery(
@@ -146,6 +146,7 @@ def main() -> int:
         rates_states=rates_states,
         horizons=horizons,
     )
+    report["baseline_method"] = BASELINE_METHOD
     report["rates"] = rates_metadata
     report["source_mode"] = source_mode
     report["source_fetch_errors"] = source_errors
@@ -156,6 +157,7 @@ def main() -> int:
     print(json.dumps({
         "verdict": report["verdict"],
         "requested_horizons": report["requested_horizons"],
+        "baseline_method": report["baseline_method"],
         "hypotheses_tested_inner": report["hypotheses_tested_inner"],
         "sample_gate_passed_inner": report["sample_gate_passed_inner"],
         "fdr_passed_inner": report["fdr_passed_inner"],
