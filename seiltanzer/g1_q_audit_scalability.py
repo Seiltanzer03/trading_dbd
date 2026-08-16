@@ -4,9 +4,10 @@ The G1S Q maturity audit is presentation/diagnostic data. It must not wait for
 long-running passive/research work that owns PassiveLearningEngine._lock, and it
 must not issue O(rows) Python->SQLite round trips. On a file-backed WAL database
 this layer serves the existing refined v2 audit contract from an independent
-read-only snapshot and resolves terminal candidates in bounded SQL batches.
-Classification, authority and successful-capture-only maturity semantics are
-unchanged.
+read-only snapshot, resolves terminal candidates in bounded SQL batches, and
+indexes only the admissible direct-evidence subset used by those predecessor
+queries. Classification, authority and successful-capture-only maturity
+semantics are unchanged.
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ from .g1_short_horizon_runtime import (
     _finite,
 )
 
-Q_AUDIT_SCALABILITY_VERSION = "g1s-q-audit-read-snapshot-v3"
+Q_AUDIT_SCALABILITY_VERSION = "g1s-q-audit-read-snapshot-v4"
 Q_AUDIT_CANDIDATE_BATCH_SIZE = 200
 
 _RUNTIME = ShortHorizonRuntime
@@ -47,7 +48,14 @@ def _main_database_path(connection: sqlite3.Connection) -> str | None:
 
 
 def _install_indexes(runtime: _RUNTIME) -> None:
-    """Install only indexes required by the bounded audit read path."""
+    """Install indexes for the exact bounded audit predicates.
+
+    The generic `(instrument, ts)` keys still force SQLite to walk backwards
+    through proxy/low-quality rows when direct market evidence is sparse.  The
+    partial indexes below contain only rows that are admissible under the frozen
+    v2 Q-audit contract, so every predecessor seek lands directly on useful
+    evidence.  They change no data and no evidence eligibility semantics.
+    """
     with runtime._lock, runtime._conn:
         runtime._conn.execute(
             "CREATE INDEX IF NOT EXISTS ix_g1_q_attempt_ts "
@@ -57,9 +65,16 @@ def _install_indexes(runtime: _RUNTIME) -> None:
             "CREATE INDEX IF NOT EXISTS ix_passive_bar_instrument_end "
             "ON passive_market_bars(instrument,bar_end_ts)"
         )
-        # passive_market_path already has PRIMARY KEY(instrument, ts), which is
-        # the exact predecessor-search index this audit needs. Do not add another
-        # large production index for the same key on the constrained VPS.
+        runtime._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_passive_direct_path_terminal "
+            "ON passive_market_path(instrument,ts) "
+            "WHERE kind='direct' AND COALESCE(quality,0)>=0.90"
+        )
+        runtime._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_passive_direct_bar_terminal "
+            "ON passive_market_bars(instrument,bar_end_ts) "
+            "WHERE kind='direct' AND COALESCE(quality,0)>=0.90"
+        )
 
 
 def init_with_q_audit_snapshot(self: _RUNTIME, *args: Any, **kwargs: Any) -> None:
@@ -107,7 +122,8 @@ def _terminal_candidate_batch_snapshot(
     Each request is (row_key, instrument, frozen_target_ts). The correlated
     subqueries retain the exact v2 predecessor rule but are executed inside a
     handful of SQLite statements instead of two Python execute() calls per row.
-    This keeps memory bounded and lets SQLite reuse its B-tree indexes.
+    The v4 partial indexes make each seek operate on direct, quality>=0.90 rows
+    only, rather than scanning backwards through inadmissible market records.
     """
     if not requests:
         return {}
