@@ -17,6 +17,7 @@ from seiltanzer.g1_short_horizon_historical_wf import _weighted_mean, _weights
 
 
 UNIVERSAL_SCORING_CONTRACT_VERSION = "g1s-universal-target-scoring-v1"
+DEPENDENCY_PVALUE_METHOD = "HORIZON_BUCKET_PARITY_CLUSTER_MAX_NORMAL_SIGN_V1"
 MIN_PROBABILITY = 1e-6
 
 
@@ -251,6 +252,7 @@ def paired_target_loss_deltas(
     rows: list[dict[str, Any]], model: np.ndarray, baseline: np.ndarray,
     spec: UniversalTargetSpec,
 ) -> np.ndarray:
+    """Legacy timestamp-paired deltas retained for diagnostics/backward compatibility."""
     model_loss = _row_losses(rows, model, spec)
     baseline_loss = _row_losses(rows, baseline, spec)
     if len(model_loss) != len(rows) or len(baseline_loss) != len(rows):
@@ -261,13 +263,93 @@ def paired_target_loss_deltas(
     return np.asarray([float(np.mean(values)) for values in groups.values()], dtype=float)
 
 
-def paired_target_pvalue(rows: list[dict[str, Any]], model: np.ndarray,
-                         baseline: np.ndarray, spec: UniversalTargetSpec) -> float:
-    values = paired_target_loss_deltas(rows, model, baseline, spec)
+def paired_target_dependency_cohorts(
+    rows: list[dict[str, Any]], model: np.ndarray, baseline: np.ndarray,
+    spec: UniversalTargetSpec,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build two non-overlapping horizon-block cohorts for significance testing.
+
+    5m T0 rows for a 60/120/240m target overlap heavily. Treating each T0 as an
+    independent loss observation dramatically overstates power. We first average
+    all rows inside one horizon-sized wall-clock bucket, with equal weight per
+    instrument inside the bucket. Adjacent horizon buckets may still overlap at
+    their target windows, so significance is computed separately on even and odd
+    buckets. Buckets within each parity are separated by a full horizon and their
+    future target windows therefore do not overlap. Cross-asset rows sharing the
+    same time bucket are clustered together instead of pretending to be separate
+    trials.
+    """
+    model_loss = _row_losses(rows, model, spec)
+    baseline_loss = _row_losses(rows, baseline, spec)
+    if len(model_loss) != len(rows) or len(baseline_loss) != len(rows):
+        raise ValueError("paired universal target inputs must have identical lengths")
+
+    grouped: dict[tuple[int, int], dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list))
+    for index, row in enumerate(rows):
+        horizon = max(1, int(row.get("horizon_minutes") or 0))
+        captured_ts = float(row["captured_ts"])
+        bucket = int(captured_ts // (horizon*60.0))
+        instrument = str(row.get("instrument") or "UNKNOWN")
+        delta = float(baseline_loss[index]-model_loss[index])
+        grouped[(horizon, bucket)][instrument].append(delta)
+
+    cohorts: list[list[float]] = [[], []]
+    for (_horizon, bucket), instruments in sorted(grouped.items()):
+        instrument_means = [float(np.mean(values)) for values in instruments.values() if values]
+        if not instrument_means:
+            continue
+        cohorts[bucket % 2].append(float(np.mean(instrument_means)))
+    return tuple(np.asarray(values, dtype=float) for values in cohorts)  # type: ignore[return-value]
+
+
+def _normal_mean_pvalue(values: np.ndarray) -> float:
     if len(values) < 3:
         return 1.0
     mean = float(values.mean()); std = float(values.std(ddof=1))
+    if mean <= 0.0:
+        return 1.0
     if std <= 1e-15:
-        return 0.0 if mean > 0.0 else 1.0
+        return 0.0
     z = mean/(std/math.sqrt(len(values)))
     return float(0.5*math.erfc(z/math.sqrt(2.0)))
+
+
+def _sign_consistency_pvalue(values: np.ndarray) -> float:
+    """One-sided sign-consistency guard, exact for small cohorts."""
+    nonzero = np.asarray([float(value) for value in values if abs(float(value)) > 1e-15])
+    n = len(nonzero)
+    if n < 3:
+        return 1.0
+    positive = int(np.sum(nonzero > 0.0))
+    if positive <= n/2:
+        return 1.0
+    if n <= 64:
+        tail = sum(math.comb(n, count) for count in range(positive, n+1))
+        return float(tail/(2**n))
+    # Normal approximation with continuity correction is sufficient here because
+    # this term is only a conservative guard combined with the clustered mean test.
+    z = (positive-0.5*n-0.5)/math.sqrt(0.25*n)
+    return float(0.5*math.erfc(z/math.sqrt(2.0)))
+
+
+def paired_target_pvalue(rows: list[dict[str, Any]], model: np.ndarray,
+                         baseline: np.ndarray, spec: UniversalTargetSpec) -> float:
+    """Conservative one-sided p-value under overlapping-horizon dependence.
+
+    A candidate must look positive in both alternating non-overlapping horizon
+    cohorts. Within each cohort we require both a positive clustered mean and
+    broad sign consistency, then take the worst p-value. This intentionally gives
+    up nominal power to prevent 5m overlap or synchronous cross-asset rows from
+    manufacturing tiny p-values.
+    """
+    cohorts = paired_target_dependency_cohorts(rows, model, baseline, spec)
+    cohort_pvalues: list[float] = []
+    for values in cohorts:
+        if len(values) < 3:
+            return 1.0
+        cohort_pvalues.append(max(
+            _normal_mean_pvalue(values),
+            _sign_consistency_pvalue(values),
+        ))
+    return max(cohort_pvalues) if cohort_pvalues else 1.0
