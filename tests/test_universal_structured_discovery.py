@@ -6,9 +6,11 @@ import pytest
 from seiltanzer.edge_discovery.filters import CandidateTemplate, ConditionTemplate, candidate_templates
 from seiltanzer.edge_discovery.rates_registry import RATES_FEATURE_DEFINITIONS
 from seiltanzer.edge_discovery.universal_structured_discovery import (
+    UNIVERSAL_HORIZONS,
     _aggregate_candidate,
     _candidate_uses_rates,
     _evaluate_rule,
+    _validated_horizons,
 )
 from seiltanzer.edge_discovery.universal_target_scoring import UniversalTargetSpec
 from seiltanzer.edge_discovery.universal_templates import (
@@ -116,3 +118,12 @@ def test_daily_rates_candidates_are_identified_for_dependency_quarantine() -> No
         "conditions": [{"feature_id": "rates.us10y_yield"}]}) is True
     assert _candidate_uses_rates({
         "conditions": [{"feature_id": "option_dynamics.gex_velocity"}]}) is False
+
+
+def test_horizon_sharding_changes_execution_only_not_supported_exam() -> None:
+    assert UNIVERSAL_HORIZONS == (15, 30, 60, 120, 240)
+    assert _validated_horizons((60, 60, 240)) == (60, 240)
+    with pytest.raises(ValueError):
+        _validated_horizons(())
+    with pytest.raises(ValueError):
+        _validated_horizons((45,))
