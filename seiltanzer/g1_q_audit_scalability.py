@@ -26,8 +26,8 @@ from .g1_short_horizon_runtime import (
     _finite,
 )
 
-Q_AUDIT_SCALABILITY_VERSION = "g1s-q-audit-read-snapshot-v5"
-Q_AUDIT_CANDIDATE_BATCH_SIZE = 200
+Q_AUDIT_SCALABILITY_VERSION = "g1s-q-audit-read-snapshot-v6"
+Q_AUDIT_CANDIDATE_BATCH_SIZE = 500
 
 _RUNTIME = ShortHorizonRuntime
 _ORIGINAL_INIT = _RUNTIME.__init__
@@ -104,16 +104,43 @@ def _choose_terminal_candidate(
     return path_ts, "direct_path_point"
 
 
+def _deduplicate_candidate_requests(
+    requests: list[tuple[int, str, float]],
+) -> tuple[list[tuple[int, str, float]], dict[int, list[int]]]:
+    """Collapse identical instrument/target predecessor seeks.
+
+    Q capture can retry the same option expiry/target many times. The terminal
+    evidence predecessor is a pure function of (instrument,target), so doing the
+    same two B-tree seeks once per capture attempt wastes latency without adding
+    information. A representative row key is queried once and fanned back out to
+    every original row key. Float targets are frozen persisted timestamps and are
+    therefore safe exact dictionary keys here.
+    """
+    representative_for: dict[tuple[str, float], int] = {}
+    fanout: dict[int, list[int]] = defaultdict(list)
+    unique: list[tuple[int, str, float]] = []
+    for row_key, instrument, target in requests:
+        identity = (str(instrument), float(target))
+        representative = representative_for.get(identity)
+        if representative is None:
+            representative = int(row_key)
+            representative_for[identity] = representative
+            unique.append((representative, identity[0], identity[1]))
+        fanout[representative].append(int(row_key))
+    return unique, dict(fanout)
+
+
 def _terminal_candidate_batch_snapshot(
     connection: sqlite3.Connection,
     requests: list[tuple[int, str, float]],
 ) -> dict[int, tuple[float | None, str | None]]:
-    """Resolve many predecessor candidates with bounded SQLite round trips."""
+    """Resolve many predecessor candidates with bounded, deduplicated SQL seeks."""
     if not requests:
         return {}
 
-    resolved: dict[int, tuple[float | None, str | None]] = {}
-    for batch in _chunks(requests, Q_AUDIT_CANDIDATE_BATCH_SIZE):
+    unique_requests, fanout = _deduplicate_candidate_requests(requests)
+    representative_results: dict[int, tuple[float | None, str | None]] = {}
+    for batch in _chunks(unique_requests, Q_AUDIT_CANDIDATE_BATCH_SIZE):
         values_sql = ",".join("(?,?,?)" for _ in batch)
         params: list[Any] = []
         for row_key, instrument, target in batch:
@@ -152,9 +179,15 @@ def _terminal_candidate_batch_snapshot(
         for row in rows:
             bar_ts = _finite(row["bar_ts"])
             path_ts = _finite(row["path_ts"])
-            resolved[int(row["row_key"])] = _choose_terminal_candidate(
+            representative_results[int(row["row_key"])] = _choose_terminal_candidate(
                 bar_ts, path_ts
             )
+
+    resolved: dict[int, tuple[float | None, str | None]] = {}
+    for representative, row_keys in fanout.items():
+        value = representative_results.get(representative, (None, None))
+        for row_key in row_keys:
+            resolved[row_key] = value
     return resolved
 
 
@@ -167,7 +200,7 @@ def _candidate_requests(
     """Return rows whose maturity state or requested diagnostics need evidence.
 
     An already RESOLUTION_BLOCKED observation is already classified and needs a
-    predecessor seek only to populate per-item diagnostics.  Summary-only health
+    predecessor seek only to populate per-item diagnostics. Summary-only health
     probes intentionally skip those diagnostic-only seeks while still resolving
     every overdue *pending* row needed to compute the exact maturity counts.
     """
@@ -212,7 +245,6 @@ def q_audit_bounded(
     include_items = bool(include_items)
     connection = _open_read_snapshot(self)
     if connection is None:
-        # In-memory tests cannot share state with a second SQLite connection.
         result = _ORIGINAL_Q_AUDIT(self, now=now, limit=bounded_limit)
         if include_items:
             return result
