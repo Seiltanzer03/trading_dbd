@@ -117,6 +117,22 @@ jobs:
             PYTHONPATH=/opt/seiltanzer /opt/seiltanzer/.venv/bin/python \
               /opt/seiltanzer/scripts/g1e1_cleanup_venv.py --site-packages "$SITE" --apply || true
             /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
+
+            # Bound allocator/thread-pool overhead for the 2 GB production host.
+            # This does not change any numerical formula: it prevents glibc from
+            # keeping many per-thread arenas after pandas/yfinance/numpy bursts
+            # and avoids BLAS spawning memory-hungry worker pools in the web PID.
+            mkdir -p /etc/systemd/system/seiltanzer.service.d
+            cat >/etc/systemd/system/seiltanzer.service.d/20-memory-budget.conf <<'EOF'
+            [Service]
+            Environment=MALLOC_ARENA_MAX=2
+            Environment=MALLOC_TRIM_THRESHOLD_=131072
+            Environment=OMP_NUM_THREADS=1
+            Environment=OPENBLAS_NUM_THREADS=1
+            Environment=MKL_NUM_THREADS=1
+            Environment=NUMEXPR_NUM_THREADS=1
+            EOF
+            systemctl daemon-reload
             systemctl reset-failed seiltanzer >/dev/null 2>&1 || true
             systemctl restart seiltanzer
 
@@ -147,6 +163,11 @@ jobs:
               journalctl -u seiltanzer --since '-10 minutes' --no-pager -n 180 || true
               exit 1
             fi
+
+            echo '=== POST-RESTART MEMORY ==='
+            systemctl show seiltanzer \
+              -p MemoryCurrent -p MemoryPeak -p NRestarts -p ActiveState -p SubState || true
+            ps -o pid,rss,vsz,etime,cmd -p "$(systemctl show -p MainPID --value seiltanzer)" || true
 
             if systemctl list-units --all --type=service --no-legend 'seiltanzer-ede-*' | grep -q 'running'; then
               echo "::error::Legacy production EDE unit survived deployment"
