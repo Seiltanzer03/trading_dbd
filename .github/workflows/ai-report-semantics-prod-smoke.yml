@@ -1,0 +1,83 @@
+name: ai-report-semantics-prod-smoke
+on:
+  push:
+    branches: [agent/verify-ai-report-semantics-prod]
+    paths: [.github/workflows/ai-report-semantics-prod-smoke.yml]
+jobs:
+  deploy-and-smoke:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Deploy exact main SHA and verify current AI report semantics
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 7m
+          script: |
+            set -euo pipefail
+            EXPECTED_SHA=09983042f93c61838e3ab4ae578c573659e90823
+            git config --global --add safe.directory /opt/seiltanzer || true
+            cd /opt/seiltanzer
+            git fetch origin main
+            git cat-file -e "${EXPECTED_SHA}^{commit}"
+            git reset --hard "$EXPECTED_SHA"
+            /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
+            systemctl restart seiltanzer
+            ready=0
+            for attempt in $(seq 1 50); do
+              active=$(systemctl is-active seiltanzer 2>/dev/null || true)
+              code=$(curl -sS -o /tmp/ai-report-state.json --connect-timeout 1 --max-time 3 -w '%{http_code}' http://127.0.0.1:8790/api/state 2>/dev/null || true)
+              echo "readiness attempt=$attempt active=${active:-unknown} http=${code:-000}"
+              if [ "$active" = "active" ] && [ "$code" = "200" ]; then ready=1; break; fi
+              sleep 2
+            done
+            test "$ready" = "1"
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import json, re, time, urllib.error, urllib.request
+            url='http://127.0.0.1:8790/api/ai/verdict'
+            req=urllib.request.Request(url, data=b'', method='POST')
+            started=time.monotonic()
+            try:
+                with urllib.request.urlopen(req, timeout=65) as r:
+                    code=int(r.status); raw=r.read()
+            except urllib.error.HTTPError as e:
+                code=int(e.code); raw=e.read()
+            elapsed=(time.monotonic()-started)*1000
+            body=json.loads(raw.decode('utf-8')) if raw else {}
+            print(f'AI_REPORT_PROD_SMOKE http={code} elapsed={elapsed:.0f}ms ok={body.get("ok")} mode={body.get("mode")}')
+            assert code in {200, 400, 429}, (code, body)
+            if code == 200:
+                assert body.get('ok') is True, body
+                verdict=body.get('verdict') or ''
+                assert verdict, body
+                assert 'Доступно 0/0 групп' not in verdict, verdict
+                assert '[bounded]' not in verdict, verdict
+                if 'BREAK_EVEN' in verdict:
+                    m_cur=re.search(r'CURRENT R:\s*([+-]?\d+(?:\.\d+)?)R', verdict)
+                    m_bar=re.search(r'R до активного barrier:\s*([+-]?\d+(?:\.\d+)?)R', verdict)
+                    assert m_cur and m_bar, verdict
+                    current=float(m_cur.group(1)); to_bar=float(m_bar.group(1))
+                    assert abs(current-to_bar) <= 0.003, (current, to_bar, verdict)
+                if 'Детальная scenario-path geometry: UNAVAILABLE' in verdict:
+                    assert 'Base production policy distribution (common execution-MC paths):' not in verdict, verdict
+                if '**FULL METRIC AUDIT**' in verdict:
+                    assert 'НЕ authoritative execution-MC вероятность FINAL TAKE vs active STOP/BE' in verdict, verdict
+                print('--- AI REPORT CHECKPOINTS ---')
+                for needle in ('CURRENT R:', 'R до активного barrier:', 'Детальная scenario-path geometry:', 'Input audit:', 'p_take/p_stop ниже относятся'):
+                    for line in verdict.splitlines():
+                        if needle in line:
+                            print(line)
+                            break
+                print('AI_REPORT_PROD_SMOKE PASS')
+            elif code == 400:
+                assert (body.get('error') or {}).get('code') == 'no_active_trade', body
+                print('AI_REPORT_PROD_SMOKE NO_ACTIVE_TRADE')
+            else:
+                assert (body.get('error') or {}).get('code') in {'ai_rate_limited','ai_request_in_progress'}, body
+                print('AI_REPORT_PROD_SMOKE RATE_LIMITED')
+            assert elapsed < 65000, elapsed
+            PY
