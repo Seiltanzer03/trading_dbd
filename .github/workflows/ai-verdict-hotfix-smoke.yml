@@ -1,0 +1,48 @@
+name: ai-verdict-hotfix-smoke
+
+on:
+  push:
+    branches: [agent/policy-input-provenance]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - name: Verify production AI Verdict only
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 3m
+          script: |
+            set -euo pipefail
+            EXPECTED_SHA=425a0e6870b023a2930453320b578568e69f5586
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import json, time, urllib.error, urllib.request
+            url='http://127.0.0.1:8790/api/ai/verdict'
+            req=urllib.request.Request(url, data=b'', method='POST')
+            started=time.monotonic()
+            try:
+                with urllib.request.urlopen(req, timeout=70) as r:
+                    code=int(r.status); raw=r.read()
+            except urllib.error.HTTPError as e:
+                code=int(e.code); raw=e.read()
+            elapsed=(time.monotonic()-started)*1000
+            body=json.loads(raw.decode('utf-8')) if raw else {}
+            print(f'AI_VERDICT_HOTFIX_SMOKE http={code} elapsed={elapsed:.0f}ms ok={body.get("ok")} mode={body.get("mode")}')
+            if code == 500:
+                print(json.dumps(body, ensure_ascii=False)[:4000])
+            assert code in {200, 400, 429}, (code, body)
+            if code == 400:
+                assert (body.get('error') or {}).get('code') == 'no_active_trade', body
+            if code == 429:
+                assert (body.get('error') or {}).get('code') in {'ai_rate_limited','ai_request_in_progress'}, body
+            print('AI_VERDICT_HOTFIX_SMOKE PASS')
+            PY
