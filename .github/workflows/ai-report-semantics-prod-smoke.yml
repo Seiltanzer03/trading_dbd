@@ -17,7 +17,7 @@ jobs:
           command_timeout: 7m
           script: |
             set -euo pipefail
-            EXPECTED_SHA=09983042f93c61838e3ab4ae578c573659e90823
+            EXPECTED_SHA=c885c813edf4d0a53a2251901dbab9438668d384
             git config --global --add safe.directory /opt/seiltanzer || true
             cd /opt/seiltanzer
             git fetch origin main
@@ -56,18 +56,40 @@ jobs:
                 assert verdict, body
                 assert 'Доступно 0/0 групп' not in verdict, verdict
                 assert '[bounded]' not in verdict, verdict
+
                 if 'BREAK_EVEN' in verdict:
                     m_cur=re.search(r'CURRENT R:\s*([+-]?\d+(?:\.\d+)?)R', verdict)
                     m_bar=re.search(r'R до активного barrier:\s*([+-]?\d+(?:\.\d+)?)R', verdict)
                     assert m_cur and m_bar, verdict
                     current=float(m_cur.group(1)); to_bar=float(m_bar.group(1))
                     assert abs(current-to_bar) <= 0.003, (current, to_bar, verdict)
+
+                m_take=re.search(r'R до FINAL TAKE:\s*([+-]?\d+(?:\.\d+)?)R', verdict)
+                if m_take and float(m_take.group(1)) <= 0.0:
+                    assert 'FINAL TAKE ДОСТИГНУТ/ПЕРЕСЕЧЁН' in verdict, verdict
+                    assert 'Арбитр: STRATEGY → EXIT' in verdict, verdict
+                    assert 'production policy: EXIT' in verdict, verdict
+                    assert 'Статус исполнения: pending_execution' in verdict, verdict
+
+                for match in re.finditer(
+                    r'Устойчивость к источнику данных для \w+:\s*(\d+)/(\d+) \(([\d.]+)%\)',
+                    verdict,
+                ):
+                    k=int(match.group(1)); n=int(match.group(2)); pct=float(match.group(3))
+                    assert n > 0
+                    assert abs(pct - 100.0*k/n) <= 0.11, (k, n, pct, verdict)
+
                 if 'Детальная scenario-path geometry: UNAVAILABLE' in verdict:
                     assert 'Base production policy distribution (common execution-MC paths):' not in verdict, verdict
                 if '**FULL METRIC AUDIT**' in verdict:
                     assert 'НЕ authoritative execution-MC вероятность FINAL TAKE vs active STOP/BE' in verdict, verdict
+
                 print('--- AI REPORT CHECKPOINTS ---')
-                for needle in ('CURRENT R:', 'R до активного barrier:', 'Детальная scenario-path geometry:', 'Input audit:', 'p_take/p_stop ниже относятся'):
+                for needle in (
+                    '**ДЕЙСТВИЕ СЕЙЧАС**', 'Арбитр:', 'production policy:',
+                    'CURRENT R:', 'R до FINAL TAKE:', 'Устойчивость к источнику данных',
+                    'Input audit:', 'p_take/p_stop ниже относятся',
+                ):
                     for line in verdict.splitlines():
                         if needle in line:
                             print(line)
