@@ -8,49 +8,34 @@ jobs:
   locate-runtime-status-route:
     runs-on: ubuntu-22.04
     steps:
-      - name: Locate blocking research runtime status implementation
+      - name: Locate blocking research runtime status implementation safely
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 4m
+          command_timeout: 2m
           script: |
-            set -euo pipefail
+            set -u
             cd /opt/seiltanzer
-            echo '=== GREP ROUTE ==='
-            grep -RIn --exclude-dir=.git --exclude='*.db*' 'research/runtime/status\|runtime/status' seiltanzer scripts tests || true
-            echo '=== OPENAPI OPERATION ==='
-            curl -sS --max-time 15 http://127.0.0.1:8790/openapi.json -o /tmp/openapi.json
-            python - <<'PY'
+            echo '=== GREP LITERALS ==='
+            timeout 20s grep -RIn --include='*.py' --include='*.js' \
+              -E 'research/runtime/status|runtime/status|runtime_status|research_runtime' \
+              seiltanzer scripts tests 2>/dev/null | head -n 200 || true
+            echo '=== GREP ROUTE BUILDERS ==='
+            timeout 20s grep -RIn --include='*.py' \
+              -E 'research.*runtime|runtime.*status|status.*runtime' \
+              seiltanzer 2>/dev/null | head -n 300 || true
+            echo '=== OPENAPI ==='
+            if curl -sS --connect-timeout 2 --max-time 8 http://127.0.0.1:8790/openapi.json -o /tmp/openapi.json; then
+              python - <<'PY'
             import json
             p=json.load(open('/tmp/openapi.json'))
-            print(json.dumps(p['paths'].get('/api/research/runtime/status'), indent=2, ensure_ascii=False))
+            path='/api/research/runtime/status'
+            print(json.dumps(p.get('paths',{}).get(path), indent=2, ensure_ascii=False))
             PY
-            echo '=== ROUTE OBJECT INTROSPECTION ==='
-            PYTHONPATH=/opt/seiltanzer /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import inspect
-            from seiltanzer.config import Settings
-            from seiltanzer.app import create_app
-            from seiltanzer.storage_runtime import prepare_storage, install_storage_runtime
-            from seiltanzer.storage_routes import install_storage_routes
-            from seiltanzer.research_scalability_bootstrap import install_research_scalability
-            s=Settings(demo=False,stream=False,host='127.0.0.1',port=0,data_dir='/opt/seiltanzer/data')
-            st=prepare_storage(s)
-            app=create_app(s)
-            install_storage_runtime(app,st)
-            install_storage_routes(app)
-            install_research_scalability(app)
-            for r in app.routes:
-                if getattr(r,'path',None)=='/api/research/runtime/status':
-                    ep=r.endpoint
-                    print('endpoint',ep)
-                    print('module',ep.__module__)
-                    print('qualname',ep.__qualname__)
-                    print('file',inspect.getsourcefile(ep))
-                    try: print(inspect.getsource(ep))
-                    except Exception as e: print('source-error',e)
-            try: app.state.engine.close()
-            except Exception: pass
-            PY
+            fi
+            echo '=== SERVICE HEALTH ==='
+            systemctl is-active seiltanzer || true
+            curl -sS -o /dev/null --connect-timeout 2 --max-time 8 -w 'root_http=%{http_code} state_time=%{time_total}\n' http://127.0.0.1:8790/ || true
