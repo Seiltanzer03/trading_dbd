@@ -5,9 +5,13 @@ import time
 from types import SimpleNamespace
 
 from seiltanzer.production_resource_guard import (
+    MEMORY_CRITICAL_MIB,
+    MEMORY_HARD_MIB,
+    MEMORY_SOFT_MIB,
     RESOURCE_GUARD_VERSION,
     _wrap_heavy_refresh,
     install_production_resource_guard,
+    memory_pressure_state,
     resource_guard_status,
 )
 
@@ -65,11 +69,33 @@ def test_install_is_idempotent_and_passive_feed_cache_is_bounded_to_one() -> Non
     assert passive._feed("NAS100") is feed
 
 
+def test_memory_pressure_thresholds_are_monotonic_and_explicit() -> None:
+    mib = 1024 * 1024
+    assert MEMORY_SOFT_MIB < MEMORY_HARD_MIB < MEMORY_CRITICAL_MIB
+    normal = memory_pressure_state((MEMORY_SOFT_MIB - 1) * mib)
+    soft = memory_pressure_state(MEMORY_SOFT_MIB * mib)
+    hard = memory_pressure_state(MEMORY_HARD_MIB * mib)
+    critical = memory_pressure_state(MEMORY_CRITICAL_MIB * mib)
+    assert normal["level"] == "normal"
+    assert normal["pause_background"] is False
+    assert soft["level"] == "soft"
+    assert soft["pause_background"] is True
+    assert soft["shed_optional_feeds"] is False
+    assert hard["level"] == "hard"
+    assert hard["shed_optional_feeds"] is True
+    assert hard["shed_all_heavy_feeds"] is False
+    assert critical["level"] == "critical"
+    assert critical["shed_all_heavy_feeds"] is True
+
+
 def test_resource_guard_status_is_observability_only() -> None:
     status = resource_guard_status()
     assert status["contract_version"] == RESOURCE_GUARD_VERSION
     assert status["heavy_feed_parallelism"] == 1
     assert status["passive_feed_cache_max"] == 1
     assert status["mathematics_changed"] is False
+    assert status["memory_pressure"]["level"] in {
+        "normal", "soft", "hard", "critical", "unknown"
+    }
     if status["rss_bytes"] is not None:
         assert status["rss_bytes"] > 0
