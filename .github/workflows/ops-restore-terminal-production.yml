@@ -5,26 +5,57 @@ on:
     paths: [.github/workflows/ops-restore-terminal-production.yml]
 
 jobs:
-  diagnose-ai-provider:
+  temporary-production-headroom:
     runs-on: ubuntu-22.04
     steps:
-      - name: Inspect OpenRouter configuration and failed request
+      - name: Add swap headroom and restore terminal if degraded
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 3m
+          command_timeout: 5m
           script: |
             set -euo pipefail
+            echo '=== BEFORE ==='
+            free -h
+            swapon --show || true
+            swap_mb=$(free -m | awk '/^Swap:/ {print $2}')
+            if [ "${swap_mb:-0}" -lt 2500 ]; then
+              echo 'Adding 2 GiB emergency swap headroom'
+              if [ ! -f /swapfile-seiltanzer ]; then
+                fallocate -l 2G /swapfile-seiltanzer
+                chmod 600 /swapfile-seiltanzer
+                mkswap /swapfile-seiltanzer
+              fi
+              swapon /swapfile-seiltanzer || true
+              grep -q '^/swapfile-seiltanzer ' /etc/fstab || echo '/swapfile-seiltanzer none swap sw 0 0' >> /etc/fstab
+            fi
             pid=$(systemctl show -p MainPID --value seiltanzer)
-            echo "service_active=$(systemctl is-active seiltanzer) pid=$pid"
-            echo '=== PROVIDER ENV PRESENCE (values hidden) ==='
-            tr '\0' '\n' < /proc/$pid/environ | awk -F= '/^OPENROUTER_|^AI_/ {v=substr($0,index($0,"=")+1); print $1 " set=" (length(v)>0?"yes":"no") " length=" length(v)}' | sort || true
-            echo '=== PROVIDER CODE ENV NAMES ==='
-            grep -RhoE 'OPENROUTER_[A-Z0-9_]+' /opt/seiltanzer/seiltanzer/ai_verdict*.py /opt/seiltanzer/seiltanzer/*.py 2>/dev/null | sort -u || true
-            echo '=== REQUEST LOG ==='
-            journalctl -u seiltanzer --since '-4 hours' --no-pager | grep -F -A12 -B3 'ai-d6a80ac3778b40d5be85' || true
-            echo '=== RECENT PROVIDER FALLBACKS ==='
-            journalctl -u seiltanzer --since '-2 hours' --no-pager | grep -E 'provider_fallback|openrouter|OpenRouter' | tail -n 120 || true
+            rss_kb=0
+            if [ -r "/proc/$pid/status" ]; then
+              rss_kb=$(awk '/^VmRSS:/ {print $2}' /proc/$pid/status)
+            fi
+            code=$(curl -sS -o /dev/null --connect-timeout 2 --max-time 8 -w '%{http_code}' http://127.0.0.1:8790/api/state 2>/dev/null || true)
+            echo "before pid=$pid rss_kb=${rss_kb:-0} state_http=${code:-000}"
+            if [ "$code" != '200' ] || [ "${rss_kb:-0}" -gt 1500000 ]; then
+              systemctl restart seiltanzer
+              ready=0
+              for attempt in $(seq 1 70); do
+                code=$(curl -sS -o /dev/null --connect-timeout 1 --max-time 4 -w '%{http_code}' http://127.0.0.1:8790/api/state 2>/dev/null || true)
+                echo "attempt=$attempt state_http=${code:-000}"
+                if [ "$code" = '200' ]; then ready=1; break; fi
+                sleep 2
+              done
+              test "$ready" = '1'
+            fi
+            echo '=== AFTER ==='
+            free -h
+            swapon --show
+            systemctl is-active seiltanzer
+            curl -sS --resolve seiltanzer.ru:443:127.0.0.1 -o /dev/null --connect-timeout 2 --max-time 12 -w 'sni_https_http=%{http_code}\n' https://seiltanzer.ru/
+      - name: Verify public HTTPS
+        run: |
+          set -euo pipefail
+          test "$(curl -sS -o /dev/null --connect-timeout 5 --max-time 20 -w '%{http_code}' https://seiltanzer.ru/)" = '200'
