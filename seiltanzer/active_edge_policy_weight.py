@@ -283,6 +283,10 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
             )
         return result
 
+    # Preserve the public facade identity contract: this remains v16 behavior
+    # with one installed bounded ranking modifier, not a new policy architecture.
+    analyze_policies.__module__ = policy_module.__name__
+    weighted_raw_policy_choice.__module__ = policy_module.__name__
     policy_module.analyze_policies = analyze_policies
     policy_module._raw_policy_choice = weighted_raw_policy_choice
     policy_module._active_edge_weight_version = CONTRACT_VERSION
