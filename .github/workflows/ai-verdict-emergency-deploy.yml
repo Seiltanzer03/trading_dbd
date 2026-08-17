@@ -1,0 +1,70 @@
+name: ai-verdict-emergency-deploy
+
+on:
+  push:
+    branches: [agent/ai-verdict-emergency-deploy]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-and-smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    steps:
+      - name: Deploy already-verified main SHA and smoke AI Verdict
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 7m
+          script: |
+            set -euo pipefail
+            EXPECTED_SHA=f8d2152b3ce213728f847b5af5c03b86ee4f6c68
+            git config --global --add safe.directory /opt/seiltanzer || true
+            cd /opt/seiltanzer
+            git fetch origin main
+            git cat-file -e "${EXPECTED_SHA}^{commit}"
+            git reset --hard "$EXPECTED_SHA"
+            /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
+            systemctl restart seiltanzer
+            ready=0
+            for attempt in $(seq 1 45); do
+              active=$(systemctl is-active seiltanzer 2>/dev/null || true)
+              code=$(curl -sS -o /tmp/ai-hotfix-state.json --connect-timeout 1 --max-time 3 -w '%{http_code}' http://127.0.0.1:8790/api/state 2>/dev/null || true)
+              echo "readiness attempt=$attempt active=${active:-unknown} http=${code:-000}"
+              if [ "$active" = "active" ] && [ "$code" = "200" ]; then ready=1; break; fi
+              sleep 2
+            done
+            test "$ready" = "1"
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import json, time, urllib.error, urllib.request
+            url='http://127.0.0.1:8790/api/ai/verdict'
+            req=urllib.request.Request(url, data=b'', method='POST')
+            started=time.monotonic()
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    code=int(r.status); raw=r.read()
+            except urllib.error.HTTPError as e:
+                code=int(e.code); raw=e.read()
+            elapsed=(time.monotonic()-started)*1000
+            body=json.loads(raw.decode('utf-8')) if raw else {}
+            print(f'AI_VERDICT_PROD_SMOKE http={code} elapsed={elapsed:.0f}ms ok={body.get("ok")} mode={body.get("mode")} degraded={body.get("degraded") or body.get("degraded_mode")}')
+            if code >= 500:
+                print(json.dumps(body, ensure_ascii=False)[:5000])
+            assert code in {200, 400, 429}, (code, body)
+            if code == 200:
+                assert body.get('ok') is True, body
+                assert body.get('mode') in {'llm','deterministic_fallback'}, body
+                assert isinstance(body.get('verdict'), str) and body.get('verdict'), body
+            elif code == 400:
+                assert (body.get('error') or {}).get('code') == 'no_active_trade', body
+            else:
+                assert (body.get('error') or {}).get('code') in {'ai_rate_limited','ai_request_in_progress'}, body
+            assert elapsed < 60000, elapsed
+            print('AI_VERDICT_PROD_SMOKE PASS')
+            PY
