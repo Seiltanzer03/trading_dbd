@@ -39,10 +39,10 @@ def _is_transient_transport_error(exc: BaseException) -> bool:
         exc.reason, (TimeoutError, socket.timeout, ConnectionError))
 
 
-def assert_route(path: str) -> dict | list | None:
+def assert_route(path: str, *, timeout: float = 5.0) -> dict | list | None:
     for attempt in range(1, TRANSIENT_ATTEMPTS + 1):
         try:
-            code, body, elapsed = request(path, timeout=5.0)
+            code, body, elapsed = request(path, timeout=timeout)
         except Exception as exc:
             if not _is_transient_transport_error(exc) or attempt >= TRANSIENT_ATTEMPTS:
                 raise
@@ -54,6 +54,31 @@ def assert_route(path: str) -> dict | list | None:
         assert code == 200, (path, code)
         return body
     raise AssertionError((path, "retry loop exhausted"))
+
+
+def verify_universe_routes() -> None:
+    # These are removable/read-only visualization contracts. A market source may
+    # legitimately be unavailable; the endpoint itself must still be bounded and
+    # must explicitly preserve no-synthetic/no-production-authority semantics.
+    rates = assert_route("/api/visual/rates-orbit", timeout=15.0)
+    assert isinstance(rates, dict), rates
+    assert rates.get("production_authority") is False, rates
+    semantics = rates.get("semantics") or {}
+    assert semantics.get("synthetic_fallback") is False, rates
+    assert semantics.get("interpolation") is False, rates
+    assert isinstance(rates.get("series"), list), rates
+
+    edge = assert_route("/api/visual/edge-universe", timeout=15.0)
+    assert isinstance(edge, dict), edge
+    assert edge.get("production_authority") is False, edge
+    assert edge.get("visualization_only") is True, edge
+    weight = edge.get("production_weight") or {}
+    assert weight.get("hard_risk_override") is False, edge
+    assert weight.get("cvar_override") is False, edge
+    assert weight.get("may_widen_stop") is False, edge
+    assert weight.get("automatic_execution") is False, edge
+    assert isinstance((edge.get("canonical_features") or {}).get("items"), dict), edge
+    assert isinstance(edge.get("cross_asset"), dict), edge
 
 
 def verify(expected_sha: str) -> None:
@@ -74,6 +99,8 @@ def verify(expected_sha: str) -> None:
     )
     for path in paths:
         assert_route(path)
+
+    verify_universe_routes()
 
     code, body, elapsed = request("/api/ai/verdict", method="POST", timeout=65.0)
     print(f"/api/ai/verdict: {code} {elapsed:.0f}ms")
