@@ -319,6 +319,16 @@ def build_edge_universe_payload(engine: Any, *, now: float | None = None) -> dic
     management_edge = _safe_call(management, "edge") if management is not None else {
         "available": False, "reason": "management_local runtime unavailable"}
 
+    # Cross-asset topology is an already-existing observed analytics family.  It
+    # is computed only on an explicit Universe request (no new background job)
+    # and reduced to its descriptive summary so the experimental page gets the
+    # same systemic-coupling/tension/fragmentation metrics without duplicating
+    # the full correlation visualization or turning them into an extra vote.
+    cross_asset_payload = _safe_call(engine, "cross_asset_payload")
+    cross_asset_summary = cross_asset_payload.get("summary") or {}
+    if not isinstance(cross_asset_summary, dict):
+        cross_asset_summary = {}
+
     return {
         "contract_version": CONTRACT_VERSION,
         "captured_ts": now,
@@ -352,6 +362,14 @@ def build_edge_universe_payload(engine: Any, *, now: float | None = None) -> dic
         "management_attribution": {
             "status": management_status,
             "edge": management_edge,
+        },
+        "cross_asset": {
+            "available": bool(cross_asset_payload.get("available")),
+            "version": cross_asset_payload.get("version"),
+            "summary": cross_asset_summary,
+            "break_alerts": cross_asset_payload.get("break_alerts") or [],
+            "production_authority": False,
+            "independent_vote": False,
         },
         "semantics": {
             "node_height": "net vote ratio relative to current position",

@@ -133,7 +133,20 @@ def test_edge_universe_reuses_active_edge_weight_and_exact_feature_ids(monkeypat
         })
     engine = SimpleNamespace(
         journal=_Journal(), market=SimpleNamespace(instrument_code="NAS100"),
-        short_horizon=_Runtime(), management_local=_Management())
+        short_horizon=_Runtime(), management_local=_Management(),
+        cross_asset_payload=lambda: {
+            "version": "cross-asset-test",
+            "available": True,
+            "summary": {
+                "systemic_coupling": 0.61,
+                "network_tension": 0.22,
+                "fragmentation": 0.10,
+                "active_breaks_count": 2,
+                "stress_pairs": 4,
+            },
+            "break_alerts": [{"source": "NAS100", "target": "VIX"}],
+        },
+    )
 
     payload = universe.build_edge_universe_payload(engine, now=1_700_000_100.0)
 
@@ -147,6 +160,11 @@ def test_edge_universe_reuses_active_edge_weight_and_exact_feature_ids(monkeypat
     assert "option_dynamics.gex_acceleration" in payload["canonical_features"]["items"]
     assert payload["g1s"]["horizons"][0]["resolved_n"] == 42
     assert payload["management_attribution"]["status"]["unique_trade_n"] == 12
+    assert payload["cross_asset"]["available"] is True
+    assert payload["cross_asset"]["summary"]["systemic_coupling"] == 0.61
+    assert payload["cross_asset"]["summary"]["network_tension"] == 0.22
+    assert payload["cross_asset"]["summary"]["fragmentation"] == 0.10
+    assert payload["cross_asset"]["independent_vote"] is False
     assert payload["visualization_only"] is True
     assert payload["production_authority"] is False
 
