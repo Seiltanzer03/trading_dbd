@@ -5,82 +5,30 @@ on:
     paths: [.github/workflows/ops-restore-terminal-production.yml]
 
 jobs:
-  diagnose-and-restore:
+  diagnose-state-memory:
     runs-on: ubuntu-22.04
     steps:
-      - name: Diagnose VPS and restore terminal service if needed
+      - name: Measure one state request memory impact
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 7m
+          command_timeout: 4m
           script: |
-            set -u
-            echo '=== BASIC ==='
-            date
-            uptime
-            free -h || true
-            df -h / /opt || true
-            echo '=== RESOURCE POLICY ==='
-            systemctl show seiltanzer -p MemoryCurrent -p MemoryPeak -p MemoryHigh -p MemoryMax -p MemorySwapMax -p Restart -p RestartUSec -p OOMPolicy || true
-            cat /etc/systemd/system/seiltanzer.service.d/20-memory-budget.conf 2>/dev/null || true
-            echo '=== LISTENERS BEFORE ==='
-            ss -ltnp | grep -E ':(80|443|8790)\b' || true
-            echo '=== SERVICE BEFORE ==='
-            systemctl is-active seiltanzer || true
-            systemctl status seiltanzer --no-pager -l | tail -n 80 || true
-            echo '=== LOCAL HTTP BEFORE ==='
-            curl -sS -o /tmp/root.before -w 'root_http=%{http_code} time=%{time_total}\n' --connect-timeout 2 --max-time 8 http://127.0.0.1:8790/ || true
-            curl -sS -o /tmp/state.before -w 'state_http=%{http_code} time=%{time_total}\n' --connect-timeout 2 --max-time 8 http://127.0.0.1:8790/api/state || true
-            echo '=== KERNEL/OOM ==='
-            journalctl -k --since '-2 hours' --no-pager | grep -Ei 'oom|out of memory|killed process|memory cgroup' | tail -n 80 || true
-
-            healthy=0
-            code=$(curl -sS -o /tmp/state.check --connect-timeout 2 --max-time 8 -w '%{http_code}' http://127.0.0.1:8790/api/state 2>/dev/null || true)
-            active=$(systemctl is-active seiltanzer 2>/dev/null || true)
-            if [ "$active" = 'active' ] && [ "$code" = '200' ]; then healthy=1; fi
-
-            if [ "$healthy" != '1' ]; then
-              echo '=== RESTART SEILTZANZER ==='
-              systemctl reset-failed seiltanzer || true
-              systemctl restart seiltanzer
-              ready=0
-              for attempt in $(seq 1 70); do
-                active=$(systemctl is-active seiltanzer 2>/dev/null || true)
-                code=$(curl -sS -o /tmp/state.after --connect-timeout 1 --max-time 4 -w '%{http_code}' http://127.0.0.1:8790/api/state 2>/dev/null || true)
-                echo "attempt=$attempt active=${active:-unknown} state_http=${code:-000}"
-                if [ "$active" = 'active' ] && [ "$code" = '200' ]; then ready=1; break; fi
-                sleep 2
-              done
-              test "$ready" = '1'
-            fi
-
-            echo '=== REVERSE PROXY ==='
-            if systemctl list-unit-files | grep -q '^caddy.service'; then
-              if [ "$(systemctl is-active caddy 2>/dev/null || true)" != 'active' ]; then
-                systemctl restart caddy
-              fi
-              systemctl status caddy --no-pager -l | tail -n 30 || true
-            fi
-            echo '=== LOCAL HTTP AFTER ==='
-            curl -sS -o /tmp/root.after -w 'root_http=%{http_code} time=%{time_total}\n' --connect-timeout 2 --max-time 10 http://127.0.0.1:8790/
-            curl -sS -o /tmp/state.after2 -w 'state_http=%{http_code} time=%{time_total}\n' --connect-timeout 2 --max-time 10 http://127.0.0.1:8790/api/state
-            echo '=== CADDY SNI LOCAL ==='
-            curl -sS --resolve seiltanzer.ru:443:127.0.0.1 -o /tmp/proxy.sni -w 'sni_https_http=%{http_code} time=%{time_total}\n' --connect-timeout 2 --max-time 10 https://seiltanzer.ru/
-            echo '=== FINAL ==='
-            systemctl is-active seiltanzer
-            test "$(curl -sS -o /dev/null --connect-timeout 2 --max-time 10 -w '%{http_code}' http://127.0.0.1:8790/api/state)" = '200'
-            test "$(curl -sS --resolve seiltanzer.ru:443:127.0.0.1 -o /dev/null --connect-timeout 2 --max-time 10 -w '%{http_code}' https://seiltanzer.ru/)" = '200'
-      - name: Verify public HTTPS from GitHub runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3 4 5; do
-            code=$(curl -sS -o /tmp/public.html --connect-timeout 4 --max-time 15 -w '%{http_code}' https://seiltanzer.ru/ || true)
-            echo "public attempt=$attempt http=${code:-000}"
-            if [ "$code" = '200' ]; then exit 0; fi
-            sleep 3
-          done
-          exit 1
+            set -euo pipefail
+            pid=$(systemctl show -p MainPID --value seiltanzer)
+            echo "pid=$pid"
+            echo '--- before ---'
+            grep -E 'VmRSS|VmHWM|VmSize|RssAnon|RssFile|VmSwap' /proc/$pid/status || true
+            cat /proc/$pid/smaps_rollup | grep -E 'Rss:|Pss:|Private_|Anonymous:|Swap:' || true
+            /usr/bin/time -v curl -sS --connect-timeout 3 --max-time 40 http://127.0.0.1:8790/api/state -o /tmp/state.json 2>/tmp/state.time
+            cat /tmp/state.time
+            wc -c /tmp/state.json
+            echo '--- immediate after ---'
+            grep -E 'VmRSS|VmHWM|VmSize|RssAnon|RssFile|VmSwap' /proc/$pid/status || true
+            sleep 5
+            echo '--- after 5s ---'
+            grep -E 'VmRSS|VmHWM|VmSize|RssAnon|RssFile|VmSwap' /proc/$pid/status || true
+            test "$(curl -sS -o /dev/null --connect-timeout 2 --max-time 10 -w '%{http_code}' http://127.0.0.1:8790/)" = '200'
