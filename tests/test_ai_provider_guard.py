@@ -10,11 +10,13 @@ from seiltanzer import ai_provider_guard
 
 def test_provider_timeout_configuration_is_bounded(monkeypatch):
     monkeypatch.setenv("AI_PROVIDER_TIMEOUT_SEC", "0.1")
-    assert ai_provider_guard.provider_timeout_sec() == 3.0
+    assert ai_provider_guard.provider_timeout_sec() == 5.0
     monkeypatch.setenv("AI_PROVIDER_TIMEOUT_SEC", "999")
-    assert ai_provider_guard.provider_timeout_sec() == 20.0
+    assert ai_provider_guard.provider_timeout_sec() == 45.0
     monkeypatch.setenv("AI_PROVIDER_TIMEOUT_SEC", "bad")
     assert ai_provider_guard.provider_timeout_sec() == ai_provider_guard.DEFAULT_PROVIDER_TIMEOUT_SEC
+    monkeypatch.delenv("AI_PROVIDER_TIMEOUT_SEC", raising=False)
+    assert ai_provider_guard.provider_timeout_sec() == 25.0
 
 
 def test_bounded_provider_call_returns_fast_result():

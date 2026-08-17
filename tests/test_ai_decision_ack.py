@@ -52,12 +52,8 @@ def test_executed_ack_is_persisted_idempotently(tmp_path):
     decision = _pending_decision(trade_id)
     _record_decision(journal, trade_id, decision)
 
-    first = record_ack(
-        journal, trade_id, decision["decision_id"], "executed"
-    )
-    second = record_ack(
-        journal, trade_id, decision["decision_id"], "executed"
-    )
+    first = record_ack(journal, trade_id, decision["decision_id"], "executed")
+    second = record_ack(journal, trade_id, decision["decision_id"], "executed")
 
     assert first["status"] == "executed"
     assert second["status"] == "executed"
@@ -127,9 +123,7 @@ def test_not_executed_keeps_same_decision_id():
         },
     }
 
-    current = policy.resolve_management_sequence(
-        result, previous, trade_id=75, captured_ts=1_020.0
-    )
+    current = policy.resolve_management_sequence(result, previous, trade_id=75, captured_ts=1_020.0)
     assert current["decision_id"] == previous["decision_id"]
     assert current["execution_status"] == "pending_execution"
     assert current["continuity"] == "continue_same_pending_decision"
@@ -150,11 +144,12 @@ def test_executed_ack_prevents_repeating_same_close(tmp_path):
     assert applied["executed_action_count"] == 1
 
 
-def test_frontend_ack_controls_are_loaded():
+def test_frontend_has_one_authoritative_ack_ui():
     util = open("seiltanzer/web/js/util.js", encoding="utf-8").read()
-    ui = open("seiltanzer/web/js/ai_decision_ack.js", encoding="utf-8").read()
-    assert "import './ai_decision_ack.js'" in util
+    app = open("seiltanzer/web/js/app.js", encoding="utf-8").read()
+    ui = open("seiltanzer/web/js/management_ui.js", encoding="utf-8").read()
+    assert "import './ai_decision_ack.js'" not in util
+    assert "mountManagementDecision" in app
     assert "ВЫПОЛНЕНО" in ui
     assert "НЕ ВЫПОЛНЕНО" in ui
     assert "/api/ai/decision/ack" in ui
-    assert "Это не отправляет ордер брокеру" in ui

@@ -3,7 +3,8 @@
 The acceptance-visible core is deliberately small and bounded. Full-history or
 presentation/research maintenance runs only after that core has completed, one
 phase at a time, and never while the exact-SHA production acceptance gate is active.
-No production decision authority lives here.
+No production decision authority lives here. On the small production VPS the
+worker also yields completely to the live terminal under process-memory pressure.
 """
 from __future__ import annotations
 
@@ -11,10 +12,14 @@ import asyncio
 import contextlib
 import time
 
+from .production_resource_guard import memory_pressure_state, trim_memory_for_pressure
 from .research_acceptance_gate import worker_acceptance_gate_state
 
 
 RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
+# Keep the established readiness contract identifier: memory-pressure yielding is
+# an operational guard around the same bounded-v5 research semantics, not a new
+# research/scalability algorithm.
 RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v5"
 RESEARCH_INTERVAL_SEC = 10.0
 RESEARCH_STARTUP_GRACE_SEC = 5 * 60.0
@@ -132,8 +137,6 @@ def _run_maintenance_phase(runtime, engine, phase: str) -> dict:
     if phase == "fit_models":
         if not _cadence_due(runtime, "_g1s_worker_last_fit_gate_ts", FIT_GATE_INTERVAL_SEC, now):
             return {"phase": phase, "skipped": True, "reason": "CADENCE_NOT_DUE"}
-        # Mathematical fit is unchanged. It is merely removed from the mandatory
-        # acceptance core and isolated as one optional maintenance phase.
         return {"phase": phase, "models_created": runtime.fit_if_ready()}
     raise ValueError(f"unknown research maintenance phase: {phase}")
 
@@ -147,6 +150,19 @@ def _apply_gate_state(state: dict, gate: dict) -> None:
     state["acceptance_gate_expires_at"] = gate["expires_at"]
 
 
+def _apply_memory_pressure(state: dict) -> bool:
+    pressure = memory_pressure_state()
+    state["memory_pressure"] = pressure
+    state["memory_pause_active"] = bool(pressure["pause_background"])
+    if not pressure["pause_background"]:
+        return False
+    state["current_phase"] = "memory_pressure_pause"
+    state["maintenance_running"] = False
+    state["maintenance_phase"] = None
+    trim_memory_for_pressure()
+    return True
+
+
 def install_research_worker(app) -> None:
     if getattr(app.state, "g1_research_worker_installed", False):
         return
@@ -156,8 +172,6 @@ def install_research_worker(app) -> None:
         "scalability_refinement_version": RESEARCH_WORKER_SCALABILITY_VERSION,
         "running": False,
         "process_started_ts": None,
-        # Compatibility: these now describe the bounded core cycle, not optional
-        # maintenance. This is the cycle production-post-research must observe.
         "last_started_ts": None,
         "last_finished_ts": None,
         "last_duration_ms": None,
@@ -185,6 +199,8 @@ def install_research_worker(app) -> None:
         "acceptance_gate_smoke_run_id": None,
         "acceptance_gate_expected_sha": None,
         "acceptance_gate_expires_at": None,
+        "memory_pause_active": False,
+        "memory_pressure": memory_pressure_state(),
         "evidence_reports_request_time_scan": False,
         "historical_walkforward_runs_on_research_worker": True,
         "historical_walkforward_request_time_network_fetch": False,
@@ -211,6 +227,9 @@ def install_research_worker(app) -> None:
                     state["current_phase"] = "acceptance_pause"
                     await asyncio.sleep(RESEARCH_INTERVAL_SEC)
                     continue
+                if _apply_memory_pressure(state):
+                    await asyncio.sleep(RESEARCH_INTERVAL_SEC)
+                    continue
 
                 started = time.time()
                 state["current_phase"] = "core"
@@ -234,9 +253,6 @@ def install_research_worker(app) -> None:
                         state["last_finished_ts"] - started
                     ) * 1000.0
 
-                # Acceptance may have been acquired while core was executing.
-                # Re-read immediately; a completed required core must never fall
-                # through into full-history/optional maintenance under that gate.
                 gate = worker_acceptance_gate_state(
                     process_started_ts=process_started_ts,
                     last_finished_ts=state.get("last_finished_ts"),
@@ -244,6 +260,9 @@ def install_research_worker(app) -> None:
                 _apply_gate_state(state, gate)
                 if gate["pause"]:
                     state["current_phase"] = "acceptance_pause"
+                    await asyncio.sleep(RESEARCH_INTERVAL_SEC)
+                    continue
+                if _apply_memory_pressure(state):
                     await asyncio.sleep(RESEARCH_INTERVAL_SEC)
                     continue
 

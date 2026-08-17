@@ -1,6 +1,8 @@
 // Утилиты: форматирование, tooltip, DOM-хелперы.
 
-import './ai_decision_ack.js';
+// Management execution is mounted only by management_ui.js from app.js.
+// The legacy ai_decision_ack.js fetch interceptor used to mount a second set of
+// ВЫПОЛНЕНО/НЕ ВЫПОЛНЕНО controls and is intentionally no longer imported.
 import './option_center_overlay.js';
 
 export const $ = (sel) => document.querySelector(sel);

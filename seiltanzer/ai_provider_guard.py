@@ -12,9 +12,13 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Any, Callable
 
 
-DEFAULT_PROVIDER_TIMEOUT_SEC = 10.0
-MIN_PROVIDER_TIMEOUT_SEC = 3.0
-MAX_PROVIDER_TIMEOUT_SEC = 20.0
+# Production requests with the current rich snapshot regularly need more than
+# the old 10-second wall-clock budget. Keep the call bounded, but give the LLM
+# enough time to answer instead of falling back deterministically on normal
+# provider latency.
+DEFAULT_PROVIDER_TIMEOUT_SEC = 25.0
+MIN_PROVIDER_TIMEOUT_SEC = 5.0
+MAX_PROVIDER_TIMEOUT_SEC = 45.0
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="seiltanzer-ai-provider")
 _INSTALLED = False
