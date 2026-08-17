@@ -158,8 +158,9 @@ def test_v19_renderer_receives_real_counts_after_compaction():
 
 
 def test_prompt_forbids_missing_equals_zero_and_separates_edge_authority():
-    prompt = ai_verdict.SYSTEM_PROMPT
-    assert "missing/unavailable != 0" in prompt
-    assert "active_edge_provisional_weight" in prompt
-    assert "EDE causal/prospective shadow" in prompt
-    assert "execution-MC" in prompt
+    normalized = " ".join(ai_verdict.SYSTEM_PROMPT.split())
+    assert "missing/unavailable != 0" in normalized
+    assert "active_edge_provisional_weight" in normalized
+    assert "EDE causal/prospective shadow" in normalized
+    assert "execution-MC" in normalized
+    assert "PRIMARY → FALLBACK_SOURCE → LAST_GOOD_CACHE → MATHEMATICAL_PROXY" in normalized
