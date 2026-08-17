@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SEILTANZER · UNIVERSE LAB</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/vendor/fonts/ibm-plex-mono.css">
+<link rel="stylesheet" href="/static/css/universe_scenes.css">
+</head>
+<body>
+<div class="universe-shell">
+  <header class="universe-header">
+    <div>
+      <div class="eyebrow">SEILTANZER · EXPERIMENTAL VISUAL LAYER</div>
+      <h1>UNIVERSE LAB</h1>
+      <p>Две изолированные сцены. Только наблюдаемые данные; никакого случайного движения и никакой власти над policy/CVaR.</p>
+    </div>
+    <div class="header-actions">
+      <span class="status-pill no-data" id="universe-ws-status">○ WS OFFLINE</span>
+      <a class="terminal-link" href="/">← ОСНОВНОЙ ТЕРМИНАЛ</a>
+    </div>
+  </header>
+
+  <section class="scene-card" id="rates-scene-card">
+    <div class="scene-head">
+      <div>
+        <div class="scene-kicker">FIXED INCOME · MACRO TRANSMISSION</div>
+        <h2>RATES ORBITAL SYSTEM</h2>
+      </div>
+      <div class="scene-actions">
+        <span class="status-pill no-data" id="rates-status">○ НЕТ ДАННЫХ</span>
+        <button class="scene-toggle" id="rates-toggle" type="button">ON</button>
+      </div>
+    </div>
+    <div class="scene-grid">
+      <div class="scene-stage">
+        <div class="stage-readout" id="rates-readout">КРИВАЯ ОЖИДАЕТ НАБЛЮДАЕМЫЕ ДОХОДНОСТИ</div>
+        <div class="scene-chart" id="rates-orbit-chart"></div>
+        <div class="scene-empty" id="rates-empty">○ НЕТ ДОСТУПНЫХ UST YIELD SERIES</div>
+      </div>
+      <aside class="scene-hud">
+        <div class="hud-title">TREASURY CURVE</div>
+        <div class="metric-grid" id="rates-yields"></div>
+        <div class="hud-separator"></div>
+        <div class="hud-title">CURVE SPREADS</div>
+        <div class="metric-list" id="rates-spreads"></div>
+        <div class="hud-separator"></div>
+        <div class="hud-title">LIVE TRANSMISSION</div>
+        <div class="metric-list" id="rates-live-context"></div>
+        <div class="source-line" id="rates-source">—</div>
+      </aside>
+    </div>
+    <div class="scene-foot">
+      Геометрия не декоративная: угол = log(maturity), радиус = наблюдаемая yield, высота = дневное Δ yield в bp.
+      13W — <b>^IRX Treasury-bill proxy</b>, он не подменяется выдуманной 2Y ставкой. Центр — текущий торгуемый инструмент;
+      live VIX/σ/VRP/option-state берутся из того же terminal tick.
+    </div>
+  </section>
+
+  <section class="scene-card" id="edge-scene-card">
+    <div class="scene-head">
+      <div>
+        <div class="scene-kicker">PROSPECTIVE EDGE · DECISION TOPOLOGY</div>
+        <h2>EDGE NEURAL UNIVERSE</h2>
+      </div>
+      <div class="scene-actions">
+        <span class="status-pill no-data" id="edge-status">○ НЕТ ACTIVE EDGE</span>
+        <button class="scene-toggle" id="edge-toggle" type="button">ON</button>
+      </div>
+    </div>
+    <div class="edge-summary-strip">
+      <div><span>SOFT WEIGHT</span><b id="edge-weight">0.0%</b></div>
+      <div><span>CAP</span><b id="edge-cap">30.0%</b></div>
+      <div><span>DIRECTION</span><b id="edge-direction">0.00</b></div>
+      <div><span>SUPPORT / OPPOSE</span><b id="edge-votes">0 / 0</b></div>
+      <div><span>STRICT SHARE</span><b id="edge-strict">0%</b></div>
+      <div><span>BUCKETS</span><b id="edge-buckets">0</b></div>
+    </div>
+    <div class="scene-grid edge-grid">
+      <div class="scene-stage">
+        <div class="stage-readout" id="edge-readout">ACTIVE EDGE ОЖИДАЕТ CURRENT-T0 MATCH</div>
+        <div class="scene-chart" id="edge-universe-chart"></div>
+        <div class="scene-empty" id="edge-empty">○ НЕТ НАПРАВЛЕННЫХ MATCHED EDGE GROUPS</div>
+      </div>
+      <aside class="scene-hud edge-hud">
+        <div class="hud-title">LIVE DECISION STATE</div>
+        <div class="metric-list" id="edge-live-metrics"></div>
+        <div class="hud-separator"></div>
+        <div class="hud-title">PROSPECTIVE ATTRIBUTION</div>
+        <div class="metric-list" id="edge-attribution"></div>
+        <div class="hud-separator"></div>
+        <div class="hud-title">CANONICAL T0 FEATURES <span id="edge-feature-count"></span></div>
+        <div class="feature-table" id="edge-features"></div>
+      </aside>
+    </div>
+    <div class="scene-foot">
+      Центр = Position Manager. Кольцо = target family, расстояние = horizon, высота = net vote относительно текущей позиции,
+      масса узла = matched candidates, яркость/обод = STRICT_REFERENCE participation. Фактический Active Edge остаётся только
+      <b>0–30% HIGH_RISK_ONLY / до 40% со STRICT_REFERENCE</b> внутри soft ranking hard-risk-eligible policies; CVaR, hard-risk и stop logic не изменяются.
+    </div>
+  </section>
+
+  <footer class="universe-footer">
+    UNIVERSE LAB · removable experimental layer · read-only · no autonomous execution
+  </footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts-gl/2.0.9/echarts-gl.min.js"></script>
+<script type="module" src="/static/js/universe_scenes.js"></script>
+</body>
+</html>
