@@ -44,17 +44,9 @@ def _env_mib(name: str, default: int) -> int:
     return max(128, value)
 
 
-# Production host is ~1.9 GiB RAM. Pause research/passive collection early,
-# before a pandas/yfinance allocation can push the process into global OOM.
 MEMORY_SOFT_MIB = _env_mib("SEILTZANZER_MEMORY_SOFT_MIB", 850)
-MEMORY_HARD_MIB = max(
-    MEMORY_SOFT_MIB + 128,
-    _env_mib("SEILTZANZER_MEMORY_HARD_MIB", 1200),
-)
-MEMORY_CRITICAL_MIB = max(
-    MEMORY_HARD_MIB + 128,
-    _env_mib("SEILTZANZER_MEMORY_CRITICAL_MIB", 1450),
-)
+MEMORY_HARD_MIB = max(MEMORY_SOFT_MIB + 128, _env_mib("SEILTZANZER_MEMORY_HARD_MIB", 1200))
+MEMORY_CRITICAL_MIB = max(MEMORY_HARD_MIB + 128, _env_mib("SEILTZANZER_MEMORY_CRITICAL_MIB", 1450))
 
 
 def _rss_bytes() -> int | None:
@@ -95,7 +87,6 @@ def memory_pressure_state(rss_bytes: int | None = None) -> dict[str, Any]:
 
 
 def _trim_allocator(*, min_interval_sec: float = 15.0) -> None:
-    """Return free glibc arenas to the OS when available."""
     global _LAST_TRIM_TS
     now = time.monotonic()
     if now - _LAST_TRIM_TS < min_interval_sec:
@@ -126,11 +117,7 @@ def trim_memory_for_pressure() -> None:
 
 
 def _mark_pressure_degraded(owner: Any, method_name: str, pressure: dict[str, Any]) -> None:
-    """Never let a skipped refresh masquerade as newly-fresh market data."""
-    message = (
-        f"refresh skipped under {pressure['level']} memory pressure "
-        f"({pressure.get('rss_mib')} MiB RSS)"
-    )
+    message = f"refresh skipped under {pressure['level']} memory pressure ({pressure.get('rss_mib')} MiB RSS)"
     attr_by_method = {
         "refresh_daily": "daily",
         "refresh_chain": "chain",
@@ -154,6 +141,11 @@ def _mark_pressure_degraded(owner: Any, method_name: str, pressure: dict[str, An
                     state["error"] = message[:200]
 
 
+def _production_shedding_enabled(owner: Any) -> bool:
+    settings = getattr(owner, "settings", None)
+    return settings is not None and getattr(settings, "demo", None) is False
+
+
 def _wrap_heavy_refresh(method: Callable[..., Any]) -> Callable[..., Any]:
     if getattr(method, "_production_resource_guard_version", None) == RESOURCE_GUARD_VERSION:
         return method
@@ -162,13 +154,15 @@ def _wrap_heavy_refresh(method: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(method)
     def guarded(*args: Any, **kwargs: Any) -> Any:
         with _HEAVY_LOCK:
+            owner = args[0] if args else None
             pressure = memory_pressure_state()
-            should_shed = pressure["shed_all_heavy_feeds"] or (
-                pressure["shed_optional_feeds"] and method_name in _OPTIONAL_AT_HARD_PRESSURE
+            should_shed = _production_shedding_enabled(owner) and (
+                pressure["shed_all_heavy_feeds"] or (
+                    pressure["shed_optional_feeds"] and method_name in _OPTIONAL_AT_HARD_PRESSURE
+                )
             )
             if should_shed:
-                if args:
-                    _mark_pressure_degraded(args[0], method_name, pressure)
+                _mark_pressure_degraded(owner, method_name, pressure)
                 _trim_allocator(min_interval_sec=0.0)
                 return None
             try:
@@ -186,7 +180,6 @@ def install_production_resource_guard() -> None:
 
     if getattr(MarketData, "_production_resource_guard_version", None) == RESOURCE_GUARD_VERSION:
         return
-
     for name in _HEAVY_FEED_METHODS:
         method = getattr(MarketData, name, None)
         if callable(method):
