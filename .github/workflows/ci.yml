@@ -40,6 +40,7 @@ jobs:
           node --check seiltanzer/web/js/iv_surface_core.js
           node --check seiltanzer/web/js/correlation.js
           node --check seiltanzer/web/js/market_bus.js
+          node --check seiltanzer/web/js/universe_scenes.js
           node tests/web/touch_clock_smoke.mjs
           node tests/web/ai_verdict_error_smoke.mjs
           node tests/web/ai_management_decision_smoke.mjs

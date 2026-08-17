@@ -33,6 +33,8 @@ from .storage_refinement import install_storage_refinement
 from .storage_routes import install_storage_routes
 from .storage_runtime import install_storage_runtime, prepare_storage
 from .storage_schema_registry_integrity import install_storage_schema_registry_integrity
+from .visual_universe_page import install_visual_universe_page
+from .visual_universe_routes import install_visual_universe_routes
 
 
 def main() -> None:
@@ -107,6 +109,12 @@ def main() -> None:
     install_g1_management_routes(app)
     install_g1_short_horizon_routes(app)
 
+    # Universe Lab is deliberately installed after research runtimes and lives
+    # on its own page. Removing these two calls and the isolated files removes
+    # the experiment without changing any existing terminal visualization.
+    install_visual_universe_routes(app)
+    install_visual_universe_page(app)
+
     # Intelligence remains presentation/research only; its background builder is
     # replaced by the bounded G.1E.2 materializer before lifespan starts.
     install_intelligence_runtime(app)
@@ -114,6 +122,7 @@ def main() -> None:
 
     print(f"Seiltanzer Terminal -> http://{args.host}:{args.port}"
           f"{' [DEMO]' if args.demo else ''}{' [STREAM]' if args.stream else ''}")
+    print(f"Universe Lab -> http://{args.host}:{args.port}/universe")
     print(f"Intelligence Lab -> http://{args.host}:{args.port}/intelligence")
     print(f"Management Edge -> http://{args.host}:{args.port}/management-edge")
     print(f"Fast Market Learning -> /api/research/g1s/status")
