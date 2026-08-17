@@ -17,6 +17,225 @@ globals().update({
 })
 
 _BASE_BUILD_SNAPSHOT_V18 = _impl.build_snapshot
+_BASE_ENFORCE_SNAPSHOT_BUDGET_V18 = _impl._enforce_snapshot_budget
+_REPORT_INTEGRITY_VERSION = "ai-verdict-report-integrity-v1"
+
+_POLICY_REPORT_KEYS = (
+    "expected_final_r", "median_final_r", "cvar10_r",
+    "expected_final_r_net", "cvar10_r_net",
+    "p_final_profit", "p_final_loss",
+    "p_giveback_0_25_from_now", "p_giveback_0_50_from_now",
+    "p_next_rung_before_stop", "p_stop_before_next_rung",
+    "next_rung_r", "expected_event_minutes", "no_event_probability",
+    "eligible", "reason",
+)
+_SCENARIO_REPORT_KEYS = (
+    "scenario_count", "next_rung_r", "p_next_rung_before_stop",
+    "rung_first_count", "p_stop_before_next_rung", "stop_first_count",
+    "p_unresolved_full_horizon", "unresolved_count", "resolved_count",
+    "full_horizon_minutes", "mean_event_minutes_given_resolved",
+    "p25_resolution_minutes", "p50_resolution_minutes", "p75_resolution_minutes",
+    "conditional_median_resolution_minutes", "restricted_mean_resolution_minutes",
+    "take_first_probability", "stop_or_be_first_probability",
+)
+_STABILITY_REPORT_KEYS = (
+    "selected_count", "checks", "selected_share", "winner", "status",
+    "required_share", "threshold", "stable", "decision_uncertain",
+)
+_RISK_TRADEOFF_KEYS = (
+    "expected_delta_vs_hold_r", "expected_delta_label",
+    "cvar_improvement_vs_hold_r", "expected_r_sacrifice",
+    "cvar_gain_r", "status", "reason",
+)
+_ACTIVE_EDGE_KEYS = (
+    "contract_version", "available", "weight_fraction", "max_weight_fraction",
+    "direction_score", "agreement", "preferred_close_fraction",
+    "strict_directional_share", "independent_bucket_n",
+    "matched_directional_signal_n", "strict_directional_signal_n",
+    "basis", "high_risk_only_cap", "absolute_cap",
+    "prospective_calibration_pending", "production_role",
+    "hard_risk_override", "may_override_cvar_floor", "may_widen_stop",
+    "automatic_execution_source", "reason",
+)
+_OPTION_BARRIER_KEYS = (
+    "available", "p_take", "p_stop", "no_touch", "barrier_ev_r",
+    "source", "status", "authority", "independent_vote",
+)
+_MC_VALIDATION_KEYS = (
+    "status", "checks", "winner", "winner_share", "ranking_agreement",
+    "decision_uncertain", "expected_r_ci_width", "cvar10_r_ci_width",
+    "effective_paths", "effective_path_count",
+)
+
+
+def _report_row(row, keys):
+    if not isinstance(row, dict):
+        return {}
+    return {key: row.get(key) for key in keys if key in row}
+
+
+def _report_scalar_map(row, *, max_items: int = 24):
+    """Keep only compact scalar audit facts; never copy a research workspace."""
+    if not isinstance(row, dict):
+        return {}
+    output = {}
+    for key in sorted(row):
+        if len(output) >= max_items:
+            break
+        value = row.get(key)
+        if value is None or isinstance(value, (str, int, float, bool)):
+            output[key] = value
+        elif isinstance(value, dict) and len(value) <= 12:
+            nested = {
+                sub_key: sub_value for sub_key, sub_value in value.items()
+                if sub_value is None or isinstance(sub_value, (str, int, float, bool))
+            }
+            if nested:
+                output[key] = nested
+    return output
+
+
+def _capture_report_integrity(snapshot: dict) -> dict:
+    """Freeze presentation-critical facts before v18 removes debug workspaces."""
+    manager = snapshot.get("policy_manager") or {}
+    policies = manager.get("policies") or {}
+    report = {
+        "contract_version": _REPORT_INTEGRITY_VERSION,
+        "role": "PRESENTATION_FACT_PRESERVATION_ONLY",
+        "decision_authority": False,
+        "missing_is_zero": False,
+        "policies": {
+            name: _report_row(row, _POLICY_REPORT_KEYS)
+            for name, row in policies.items() if isinstance(row, dict)
+        },
+        "scenario_geometry": _report_row(
+            manager.get("scenario_geometry") or {}, _SCENARIO_REPORT_KEYS),
+        "raw_optimizer_stability": _report_row(
+            manager.get("raw_optimizer_stability") or {}, _STABILITY_REPORT_KEYS),
+        "stability": _report_row(
+            manager.get("stability") or {}, _STABILITY_REPORT_KEYS),
+        "risk_tradeoff": _report_row(
+            manager.get("risk_tradeoff") or {}, _RISK_TRADEOFF_KEYS),
+        "monte_carlo_validation": _report_row(
+            manager.get("monte_carlo_validation") or {}, _MC_VALIDATION_KEYS),
+        "active_edge_provisional_weight": _report_row(
+            manager.get("active_edge_provisional_weight") or {}, _ACTIVE_EDGE_KEYS),
+        "option_barrier": _report_row(
+            ((manager.get("evidence") or {}).get("option_barrier") or {}),
+            _OPTION_BARRIER_KEYS),
+    }
+    geometry = manager.get("scenario_geometry") or {}
+    windows = geometry.get("no_event_windows") or {}
+    if isinstance(windows, dict):
+        compact_windows = {
+            name: _report_scalar_map(row, max_items=8)
+            for name, row in windows.items() if isinstance(row, dict)
+        }
+        if compact_windows:
+            report["scenario_geometry"]["no_event_windows"] = compact_windows
+    audit = manager.get("input_audit") or {}
+    report["input_audit"] = _report_row(
+        audit,
+        ("available_count", "total_count", "all_required_available",
+         "missing_required", "degraded_inputs"),
+    )
+    mc_quality = snapshot.get("monte_carlo_quality") or {}
+    if isinstance(mc_quality, dict):
+        report["monte_carlo_quality"] = _report_scalar_map(mc_quality)
+    trade_geometry = snapshot.get("trade_geometry") or {}
+    if isinstance(trade_geometry, dict):
+        report["trade_geometry"] = _report_scalar_map(trade_geometry)
+    return {key: value for key, value in report.items() if value not in ({}, [], None)}
+
+
+def _merge_missing(target: dict, preserved: dict) -> None:
+    if not isinstance(target, dict) or not isinstance(preserved, dict):
+        return
+    for key, value in preserved.items():
+        if key not in target or target.get(key) in (None, "[bounded]"):
+            target[key] = value
+
+
+def _restore_report_integrity_views(snapshot: dict, report: dict) -> None:
+    """Restore only the tiny views consumed by the renderer and verdict model."""
+    manager = snapshot.setdefault("policy_manager", {})
+    for key in (
+        "scenario_geometry", "raw_optimizer_stability", "stability",
+        "risk_tradeoff", "monte_carlo_validation", "active_edge_provisional_weight",
+    ):
+        preserved = report.get(key) or {}
+        if not preserved:
+            continue
+        current = manager.get(key)
+        if not isinstance(current, dict):
+            manager[key] = dict(preserved)
+        else:
+            _merge_missing(current, preserved)
+
+    preserved_policies = report.get("policies") or {}
+    policies = manager.setdefault("policies", {})
+    for name, preserved in preserved_policies.items():
+        current = policies.get(name)
+        if not isinstance(current, dict):
+            policies[name] = dict(preserved)
+        else:
+            _merge_missing(current, preserved)
+
+    audit = manager.setdefault("input_audit", {})
+    _merge_missing(audit, report.get("input_audit") or {})
+    evidence = manager.setdefault("evidence", {})
+    barrier = evidence.get("option_barrier")
+    if not isinstance(barrier, dict):
+        if report.get("option_barrier"):
+            evidence["option_barrier"] = dict(report["option_barrier"])
+    else:
+        _merge_missing(barrier, report.get("option_barrier") or {})
+    if report.get("monte_carlo_quality"):
+        quality = snapshot.setdefault("monte_carlo_quality", {})
+        _merge_missing(quality, report["monte_carlo_quality"])
+    if report.get("trade_geometry"):
+        geometry = snapshot.setdefault("trade_geometry", {})
+        _merge_missing(geometry, report["trade_geometry"])
+
+
+def _enforce_snapshot_budget_with_report_integrity(snapshot: dict) -> None:
+    report = _capture_report_integrity(snapshot)
+    snapshot["report_integrity"] = report
+    _BASE_ENFORCE_SNAPSHOT_BUDGET_V18(snapshot)
+    _restore_report_integrity_views(snapshot, report)
+    budget = snapshot.setdefault("snapshot_budget", {})
+    budget["final_bytes"] = _impl._snapshot_bytes(snapshot)
+    if budget["final_bytes"] >= _impl.SNAPSHOT_LIMIT_BYTES:
+        # Keep the authoritative compact copy even in an unusually large
+        # snapshot; duplicate restored views are lower priority.
+        for key in (
+            "scenario_geometry", "raw_optimizer_stability", "stability",
+            "risk_tradeoff", "monte_carlo_validation", "active_edge_provisional_weight",
+        ):
+            (snapshot.get("policy_manager") or {}).pop(key, None)
+        budget["final_bytes"] = _impl._snapshot_bytes(snapshot)
+    if budget["final_bytes"] >= _impl.SNAPSHOT_LIMIT_BYTES:
+        raise RuntimeError("AI snapshot byte budget exceeded after report-integrity preservation")
+
+
+# V18 resolves this module global at build time, so the wrapper captures the
+# rich deterministic workspace before each byte-budget pass (including the
+# second pass after EDE shadow context is attached below).
+_impl._enforce_snapshot_budget = _enforce_snapshot_budget_with_report_integrity
+
+# Make the verdict model prefer preserved facts instead of interpreting a
+# compacted/missing workspace as a numerical zero.
+SYSTEM_PROMPT = _impl.SYSTEM_PROMPT + """
+REPORT_INTEGRITY — компактная копия уже рассчитанных deterministic фактов,
+сохранённая до byte-compaction. Если подробный workspace удалён/сжат, используй
+report_integrity как источник этих же чисел. Отсутствующее значение никогда не
+считай нулём: missing/unavailable != 0. Не смешивай execution-MC physical path
+probabilities, option risk-neutral Q barrier metrics и EDE research context.
+active_edge_provisional_weight — production bounded soft-ranking только внутри
+hard-risk/CVaR eligible policies; EDE causal/prospective shadow сам по себе не
+имеет production directional authority и не может вызвать CLOSE/EXIT.
+"""
+_impl.SYSTEM_PROMPT = SYSTEM_PROMPT
 
 
 _EDE_MATURITY_LINE_RU = {
