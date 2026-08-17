@@ -66,6 +66,7 @@ jobs:
           node tests/web/analytics_3d_controls_webkit_e2e.mjs
           node tests/web/correlation_controls_webkit_e2e.mjs
           node tests/web/ai_management_decision_webkit_e2e.mjs
+          node tests/web/universe_render_webkit_e2e.mjs
       - name: Publish full CI status
         if: always()
         env:
