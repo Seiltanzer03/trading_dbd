@@ -6,6 +6,7 @@ import json
 
 import uvicorn
 
+from .ai_provider_guard import install_ai_provider_guard
 from .analytics_runtime import install_analytics_runtime
 from .app import create_app
 from .app_extensions import install_lattice_revaluation
@@ -69,6 +70,12 @@ def main() -> None:
     # yfinance/pandas object graphs at the same time. Numerical contracts are
     # unchanged; this is resource scheduling only.
     install_production_resource_guard()
+
+    # OpenRouter is explanation-only. Bound it before FastAPI captures the
+    # request path so a slow provider can never block the deterministic Verdict
+    # indefinitely. On timeout the existing API path returns its deterministic
+    # fallback; policy/CVaR/arbiter math remains unchanged.
+    install_ai_provider_guard()
 
     install_analytics_runtime()
     install_storage_refinement()
