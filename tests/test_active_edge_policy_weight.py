@@ -31,7 +31,7 @@ def _context(*, strict: bool, ratios: tuple[float, ...] = (1.0, 1.0)) -> dict:
     }
 
 
-def test_high_risk_only_is_capped_at_fifteen_percent():
+def test_high_risk_only_is_capped_at_thirty_percent():
     profile = edge_weight_profile(_context(strict=False))
     assert profile["available"] is True
     assert profile["weight_fraction"] == HIGH_RISK_ONLY_CAP
@@ -39,7 +39,7 @@ def test_high_risk_only_is_capped_at_fifteen_percent():
     assert profile["preferred_close_fraction"] == 0.0
 
 
-def test_strict_unanimous_edge_can_reach_thirty_percent():
+def test_strict_unanimous_edge_can_reach_forty_percent():
     profile = edge_weight_profile(_context(strict=True))
     assert profile["available"] is True
     assert profile["weight_fraction"] == MAX_EDGE_WEIGHT
@@ -81,8 +81,8 @@ def test_hard_risk_ineligible_policy_never_receives_soft_adjustment():
     }
     profile = {
         "available": True,
-        "weight_fraction": 0.30,
-        "max_weight_fraction": 0.30,
+        "weight_fraction": 0.40,
+        "max_weight_fraction": 0.40,
         "direction_score": -1.0,
         "preferred_close_fraction": 1.0,
         "independent_bucket_n": 2,

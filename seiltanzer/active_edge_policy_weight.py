@@ -3,7 +3,7 @@
 This layer does not change EDE discovery, path simulation, policy definitions,
 CVaR eligibility, hard-risk floors or execution. It only blends the existing
 expected-R soft ranking with the already-materialized active-edge direction.
-The blend is capped at 30%; high-risk-only evidence is capped at 15%.
+The blend is capped at 40%; high-risk-only evidence is capped at 30%.
 """
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ from types import ModuleType
 from typing import Any
 
 
-CONTRACT_VERSION = "active-edge-policy-weight-v1"
-MAX_EDGE_WEIGHT = 0.30
-HIGH_RISK_ONLY_CAP = 0.15
+CONTRACT_VERSION = "active-edge-policy-weight-v2"
+MAX_EDGE_WEIGHT = 0.40
+HIGH_RISK_ONLY_CAP = 0.30
 SOFT_DECISION_SCALE_FLOOR_R = 0.12
 
 _PROFILE_CTX: ContextVar[dict[str, Any] | None] = ContextVar(
@@ -73,8 +73,8 @@ def edge_weight_profile(context: dict[str, Any]) -> dict[str, Any]:
     """Convert matched group votes into one bounded soft-ranking weight.
 
     Correlated target rows are first collapsed to target-family x horizon buckets.
-    Unanimous high-risk-only evidence can use at most 15% of the soft ranking;
-    strict-reference participation raises that cap linearly to at most 30%.
+    Unanimous high-risk-only evidence can use at most 30% of the soft ranking;
+    strict-reference participation raises that cap linearly to at most 40%.
     Disagreement reduces the effective weight toward zero.
     """
     groups = context.get("matched_groups") or []
@@ -276,7 +276,7 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
         phase = result.get("phase_e_authority_contract")
         if isinstance(phase, dict) and profile.get("available"):
             phase["active_edge_soft_weight"] = (
-                "provisional historical-OOS weight, bounded to 30%, inside hard-risk eligible set"
+                "provisional historical-OOS weight, bounded to 40%, inside hard-risk eligible set"
             )
             phase["production_recommendation_source"] = (
                 "authoritative policy path + bounded active-edge soft ranking"
