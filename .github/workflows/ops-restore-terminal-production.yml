@@ -1,0 +1,84 @@
+name: ops-restore-terminal-production
+on:
+  push:
+    branches: [agent/restore-terminal-production]
+    paths: [.github/workflows/ops-restore-terminal-production.yml]
+
+jobs:
+  diagnose-and-restore:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Diagnose VPS and restore terminal service if needed
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 7m
+          script: |
+            set -u
+            echo '=== BASIC ==='
+            date
+            uptime
+            free -h || true
+            df -h / /opt || true
+            echo '=== LISTENERS BEFORE ==='
+            ss -ltnp | grep -E ':(80|443|8790)\b' || true
+            echo '=== SERVICE BEFORE ==='
+            systemctl is-active seiltanzer || true
+            systemctl status seiltanzer --no-pager -l | tail -n 80 || true
+            echo '=== LOCAL HTTP BEFORE ==='
+            curl -sS -o /tmp/root.before -w 'root_http=%{http_code} time=%{time_total}\n' --connect-timeout 2 --max-time 8 http://127.0.0.1:8790/ || true
+            curl -sS -o /tmp/state.before -w 'state_http=%{http_code} time=%{time_total}\n' --connect-timeout 2 --max-time 8 http://127.0.0.1:8790/api/state || true
+            echo '=== RECENT SERVICE LOGS ==='
+            journalctl -u seiltanzer --since '-2 hours' --no-pager -n 180 || true
+            echo '=== KERNEL/OOM ==='
+            journalctl -k --since '-2 hours' --no-pager | grep -Ei 'oom|out of memory|killed process|memory cgroup' | tail -n 80 || true
+
+            healthy=0
+            code=$(curl -sS -o /tmp/state.check --connect-timeout 2 --max-time 8 -w '%{http_code}' http://127.0.0.1:8790/api/state 2>/dev/null || true)
+            active=$(systemctl is-active seiltanzer 2>/dev/null || true)
+            if [ "$active" = 'active' ] && [ "$code" = '200' ]; then healthy=1; fi
+
+            if [ "$healthy" != '1' ]; then
+              echo '=== RESTART SEILTZANZER ==='
+              systemctl reset-failed seiltanzer || true
+              systemctl restart seiltanzer
+              ready=0
+              for attempt in $(seq 1 70); do
+                active=$(systemctl is-active seiltanzer 2>/dev/null || true)
+                code=$(curl -sS -o /tmp/state.after --connect-timeout 1 --max-time 4 -w '%{http_code}' http://127.0.0.1:8790/api/state 2>/dev/null || true)
+                echo "attempt=$attempt active=${active:-unknown} state_http=${code:-000}"
+                if [ "$active" = 'active' ] && [ "$code" = '200' ]; then ready=1; break; fi
+                sleep 2
+              done
+              test "$ready" = '1'
+            fi
+
+            echo '=== REVERSE PROXY ==='
+            if systemctl list-unit-files | grep -q '^nginx.service'; then
+              nginx -t
+              if [ "$(systemctl is-active nginx 2>/dev/null || true)" != 'active' ]; then
+                systemctl restart nginx
+              fi
+              systemctl status nginx --no-pager -l | tail -n 40 || true
+            fi
+            if systemctl list-unit-files | grep -q '^caddy.service'; then
+              if [ "$(systemctl is-active caddy 2>/dev/null || true)" != 'active' ]; then
+                systemctl restart caddy
+              fi
+              systemctl status caddy --no-pager -l | tail -n 40 || true
+            fi
+
+            echo '=== LISTENERS AFTER ==='
+            ss -ltnp | grep -E ':(80|443|8790)\b' || true
+            echo '=== LOCAL HTTP AFTER ==='
+            curl -sS -o /tmp/root.after -w 'root_http=%{http_code} time=%{time_total}\n' --connect-timeout 2 --max-time 10 http://127.0.0.1:8790/
+            curl -sS -o /tmp/state.after2 -w 'state_http=%{http_code} time=%{time_total}\n' --connect-timeout 2 --max-time 10 http://127.0.0.1:8790/api/state
+            echo '=== PROXY LOCALHOST ==='
+            curl -k -sS -o /tmp/proxy.https -w 'https_localhost_http=%{http_code} time=%{time_total}\n' --connect-timeout 2 --max-time 10 https://127.0.0.1/ || true
+            curl -sS -o /tmp/proxy.http -w 'http_localhost_http=%{http_code} time=%{time_total}\n' --connect-timeout 2 --max-time 10 http://127.0.0.1/ || true
+            echo '=== FINAL ==='
+            systemctl is-active seiltanzer
+            test "$(curl -sS -o /dev/null --connect-timeout 2 --max-time 10 -w '%{http_code}' http://127.0.0.1:8790/api/state)" = '200'
