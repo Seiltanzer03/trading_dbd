@@ -81,7 +81,7 @@
       <div class="scene-stage">
         <div class="stage-readout" id="edge-readout">ACTIVE EDGE ОЖИДАЕТ CURRENT-T0 MATCH</div>
         <div class="scene-chart" id="edge-universe-chart"></div>
-        <div class="scene-empty" id="edge-empty">○ НЕТ НАПРАВЛЕННЫХ MATCHED EDGE GROUPS</div>
+        <div class="scene-empty" id="edge-empty">○ ОЖИДАНИЕ CURRENT-T0 FEATURE STATE</div>
       </div>
       <aside class="scene-hud edge-hud">
         <div class="hud-title">LIVE DECISION STATE</div>
@@ -95,9 +95,11 @@
       </aside>
     </div>
     <div class="scene-foot">
-      Центр = Position Manager. Кольцо = target family, расстояние = horizon, высота = net vote относительно текущей позиции,
-      масса узла = matched candidates, яркость/обод = STRICT_REFERENCE participation. Фактический Active Edge остаётся только
-      <b>0–30% HIGH_RISK_ONLY / до 40% со STRICT_REFERENCE</b> внутри soft ranking hard-risk-eligible policies; CVaR, hard-risk и stop logic не изменяются.
+      Центр = Position Manager. Базовое облако = доступные canonical T0 features; сектор = feature family, высота = bounded signed value,
+      непрозрачность = freshness/availability. При появлении Active Edge поверх него добавляются family×horizon узлы:
+      расстояние = horizon, высота = net vote, масса = matched candidates, яркость = STRICT_REFERENCE participation.
+      Фактический Active Edge остаётся только <b>0–30% HIGH_RISK_ONLY / до 40% со STRICT_REFERENCE</b> внутри soft ranking hard-risk-eligible policies;
+      CVaR, hard-risk и stop logic не изменяются.
     </div>
   </section>
 
@@ -106,8 +108,7 @@
   </footer>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts-gl/2.0.9/echarts-gl.min.js"></script>
+<script src="/static/vendor/plotly-gl3d.min.js"></script>
 <script type="module" src="/static/js/universe_scenes.js"></script>
 </body>
 </html>
