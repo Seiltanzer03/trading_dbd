@@ -12,6 +12,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from .ai_verdict_budget_bridge import enforce_public_snapshot_budget
+
 
 CONTRACT_VERSION = "ai-active-high-risk-edge-context-v1"
 POLICY_VERSION = "g1s-manual-trader-high-risk-edge-policy-v1"
@@ -400,9 +402,7 @@ def install_active_edge_ai_integration() -> None:
                         "matched_group_n", "serialized_signal_n", "details_truncated",
                     )
                 }
-        enforce = getattr(ai_verdict, "_enforce_snapshot_budget", None)
-        if callable(enforce):
-            enforce(snapshot)
+        enforce_public_snapshot_budget(snapshot)
         return snapshot
 
     ai_verdict.build_snapshot = build_snapshot
