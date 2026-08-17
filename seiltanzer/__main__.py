@@ -36,6 +36,7 @@ from .storage_refinement import install_storage_refinement
 from .storage_routes import install_storage_routes
 from .storage_runtime import install_storage_runtime, prepare_storage
 from .storage_schema_registry_integrity import install_storage_schema_registry_integrity
+from .strategy_terminal_guard import install_strategy_terminal_guard
 from .visual_universe_page import install_visual_universe_page
 from .visual_universe_routes import install_visual_universe_routes
 
@@ -72,6 +73,11 @@ def main() -> None:
     # yfinance/pandas object graphs at the same time. Numerical contracts are
     # unchanged; this is resource scheduling only.
     install_production_resource_guard()
+
+    # Strategy terminal levels are deterministic and outrank the AI risk-overlay.
+    # If FINAL TAKE is crossed while a real remainder is still open, require a
+    # manual STRATEGY EXIT and record it as TAKE_EXIT after confirmation.
+    install_strategy_terminal_guard()
 
     # Report-integrity/provenance copies are explanation-only and must never
     # turn a valid deterministic management snapshot into HTTP 500 merely by
