@@ -30,6 +30,10 @@ def _number(value: Any) -> float | None:
     return out if out == out and abs(out) != float("inf") else None
 
 
+def _text(value: Any) -> str:
+    return "—" if value is None or value == "" else str(value)
+
+
 def _r(value: Any) -> str:
     value = _number(value)
     return "—" if value is None else f"{value:+.3f}R"
@@ -44,15 +48,37 @@ def _pct(value: Any) -> str:
     return f"{value * 100:.1f}%"
 
 
+def _score(value: Any) -> str:
+    value = _number(value)
+    return "—" if value is None else f"{value:+.3f}"
+
+
+def _fraction_pct(value: Any) -> str:
+    value = _number(value)
+    return "—" if value is None else f"{value * 100:.1f}%"
+
+
+def _count_ratio(count: Any, total: Any, share: Any = None) -> str:
+    k = _number(count)
+    n = _number(total)
+    if k is None or n is None or n <= 0:
+        return "UNAVAILABLE"
+    return f"{int(k)}/{int(n)} ({_pct(share)})"
+
+
 def _prob(value: Any, count: Any, total: Any) -> str:
     probability = _number(value)
-    n = int(_number(total) or 0)
-    k = int(_number(count) or 0)
+    n_value = _number(total)
+    k_value = _number(count)
     if probability is None:
         return "—"
-    if k == 0 and n:
+    if n_value is None or n_value <= 0 or k_value is None:
+        return _pct(probability)
+    n = int(n_value)
+    k = int(k_value)
+    if k == 0:
         return f"0 наблюдений из {n} (<{100 / n:.2f}%)"
-    return f"{probability * 100:.1f}% ({k}/{n})" if n else _pct(probability)
+    return f"{probability * 100:.1f}% ({k}/{n})"
 
 
 def _structured_contract(snapshot: dict) -> bool:
@@ -100,15 +126,15 @@ def _plan_lines(snapshot: dict) -> list[str]:
     arbiter = manager.get("management_arbiter") or {}
     shadow = manager.get("shadow_policy_contract") or {}
     rec = manager.get("recommendation") or {}
-    authority = decision.get("authority") or arbiter.get("winner") or "STRATEGY"
+    authority = decision.get("authority") or arbiter.get("winner") or "—"
     production = decision.get("policy") or rec.get("policy") or "—"
     model_policy = decision.get("model_policy") or shadow.get("new_candidate_policy") or rec.get("raw_optimizer_policy") or production
     continuity = decision.get("continuity") or "—"
     return [
         f"Авторитет плана: {authority}; production policy: {production}; shadow/model candidate: {model_policy}.",
-        f"Статус исполнения: {decision.get('execution_status', '—')}; continuity={continuity}.",
-        f"Новая доля закрытия текущего остатка: {float(_number(decision.get('incremental_close_fraction')) or 0.0) * 100:.1f}%; остаток после действия: {float(_number(decision.get('remaining_fraction_after_action')) or 1.0) * 100:.1f}%.",
-        f"Арбитражный счёт: стратегия {float(_number(arbiter.get('strategy_score')) or 0.0):+.3f}; ИИ до приоритета {float(_number(arbiter.get('ai_score_before_priority')) or 0.0):+.3f}; ИИ после приоритета {float(_number(arbiter.get('ai_score_after_priority')) or 0.0):+.3f}.",
+        f"Статус исполнения: {_text(decision.get('execution_status'))}; continuity={continuity}.",
+        f"Новая доля закрытия текущего остатка: {_fraction_pct(decision.get('incremental_close_fraction'))}; остаток после действия: {_fraction_pct(decision.get('remaining_fraction_after_action'))}.",
+        f"Арбитражный счёт: стратегия {_score(arbiter.get('strategy_score'))}; ИИ до приоритета {_score(arbiter.get('ai_score_before_priority'))}; ИИ после приоритета {_score(arbiter.get('ai_score_after_priority'))}.",
         "Приоритет ИИ действует только после evidence/CVaR/stress gate; после выбора арбитра второй параллельной команды нет; production authority этим отчётом не расширяется.",
     ]
 
@@ -117,10 +143,10 @@ def _trade_geometry_lines(snapshot: dict) -> list[str]:
     g = snapshot.get("trade_geometry") or {}
     position = snapshot.get("position_state") or {}
     return [
-        f"Цена сейчас: {g.get('current')}; ENTRY: {g.get('entry')}.",
-        f"Исходный STOP: {g.get('original_stop')}.",
-        f"Активный риск-барьер: {g.get('active_risk_barrier')} · {g.get('active_risk_barrier_type')}.",
-        f"FINAL TAKE: {g.get('final_take')}.",
+        f"Цена сейчас: {_text(g.get('current'))}; ENTRY: {_text(g.get('entry'))}.",
+        f"Исходный STOP: {_text(g.get('original_stop'))}.",
+        f"Активный риск-барьер: {_text(g.get('active_risk_barrier'))} · {_text(g.get('active_risk_barrier_type'))}.",
+        f"FINAL TAKE: {_text(g.get('final_take'))}.",
         f"CURRENT R: {_r(g.get('current_r'))}; R до активного barrier: {_r(g.get('r_to_active_stop'))}; R до FINAL TAKE: {_r(g.get('r_to_final_take'))}.",
         f"Остаток позиции: {_pct(position.get('remaining_position_fraction'))}; уже зафиксировано: {_pct(position.get('realized_position_fraction'))}.",
     ]
@@ -132,7 +158,7 @@ def _take_stop_lines(snapshot: dict) -> list[str]:
     if take is None or stop is None or no_touch is None:
         return [
             "Authoritative execution-MC TAKE vs active STOP: UNAVAILABLE.",
-            "Причина: insufficient authoritative execution-MC data.",
+            "Причина: insufficient authoritative execution-MC data; ноль не подставляется.",
             "Ниже scenario-path geometry относится к отдельному контракту ближайшей ступени и не подменяет вероятность FINAL TAKE.",
             "Risk-neutral Q и physical calibrated P shadow публикуются отдельно.",
         ]
@@ -144,49 +170,163 @@ def _take_stop_lines(snapshot: dict) -> list[str]:
 
 
 def _scenario_geometry_lines(snapshot: dict) -> list[str]:
-    manager = snapshot.get("policy_manager") or {}; g = manager.get("scenario_geometry") or {}; n = int(_number(g.get("scenario_count")) or 0); rung = _number(g.get("next_rung_r"))
-    lines = [f"Один набор из {n or '—'} путей. Ближайшая ступень {_r(rung)} раньше стопа: {_prob(g.get('p_next_rung_before_stop'), g.get('rung_first_count'), n)}. Стоп раньше ближайшей ступени: {_prob(g.get('p_stop_before_next_rung'), g.get('stop_first_count'), n)}."]
-    barrier = ((manager.get("evidence") or {}).get("option_barrier") or {}); p_take = _number(barrier.get("p_take")); p_stop = _number(barrier.get("p_stop")); no_touch = _number(barrier.get("no_touch")); final_take = _number((manager.get("inputs") or {}).get("T"))
+    manager = snapshot.get("policy_manager") or {}
+    g = manager.get("scenario_geometry") or {}
+    n_value = _number(g.get("scenario_count"))
+    n = int(n_value) if n_value is not None and n_value > 0 else None
+    rung = _number(g.get("next_rung_r"))
+    lines = [
+        f"Один набор из {n if n is not None else '—'} путей. "
+        f"Ближайшая ступень {_r(rung)} раньше стопа: "
+        f"{_prob(g.get('p_next_rung_before_stop'), g.get('rung_first_count'), n)}. "
+        f"Стоп раньше ближайшей ступени: "
+        f"{_prob(g.get('p_stop_before_next_rung'), g.get('stop_first_count'), n)}."
+    ]
+    barrier = ((manager.get("evidence") or {}).get("option_barrier") or {})
+    p_take = _number(barrier.get("p_take")); p_stop = _number(barrier.get("p_stop")); no_touch = _number(barrier.get("no_touch")); final_take = _number((manager.get("inputs") or {}).get("T"))
     if p_take is not None and final_take is not None:
         pieces = [f"По опционной barrier-модели финальный тейк {_r(final_take)} раньше стопа: {_pct(p_take)}"]
         if p_stop is not None: pieces.append(f"стоп раньше финального тейка: {_pct(p_stop)}")
         if no_touch is not None: pieces.append(f"ни один барьер не достигнут: {_pct(no_touch)}")
         lines.append("; ".join(pieces) + ".")
-    lines.append("За полный горизонт ни рубеж, ни стоп не достигнуты: " + _prob(g.get("p_unresolved_full_horizon"), g.get("unresolved_count"), n) + (f"; горизонт {float(g.get('full_horizon_minutes')):.0f} мин." if _number(g.get("full_horizon_minutes")) is not None else "."))
+    lines.append(
+        "За полный горизонт ни рубеж, ни стоп не достигнуты: "
+        + _prob(g.get("p_unresolved_full_horizon"), g.get("unresolved_count"), n)
+        + (f"; горизонт {float(g.get('full_horizon_minutes')):.0f} мин."
+           if _number(g.get("full_horizon_minutes")) is not None else ".")
+    )
     hour = (g.get("no_event_windows") or {}).get("60m") or {}
-    if hour: lines.append(f"За первые 60 минут событие произошло в {hour.get('events', 0)} из {hour.get('scenarios', n)} сценариев; NO-EVENT {_prob(hour.get('no_event_probability'), hour.get('no_event_count'), hour.get('scenarios', n))}.")
+    if hour:
+        events = _number(hour.get("events")); scenarios = _number(hour.get("scenarios"))
+        event_text = (
+            f"{int(events)} из {int(scenarios)}"
+            if events is not None and scenarios is not None else "UNAVAILABLE"
+        )
+        lines.append(
+            f"За первые 60 минут событие произошло в {event_text} сценариев; "
+            f"NO-EVENT {_prob(hour.get('no_event_probability'), hour.get('no_event_count'), hour.get('scenarios'))}."
+        )
     mean_event = _number(g.get("mean_event_minutes_given_resolved"))
-    if mean_event is not None: lines.append(f"Среднее время до события только среди разрешившихся сценариев: {mean_event:.1f} мин. ({int(_number(g.get('resolved_count')) or 0)}/{n}).")
+    if mean_event is not None:
+        resolved = _number(g.get("resolved_count"))
+        resolved_text = (
+            f"{int(resolved)}/{n}" if resolved is not None and n is not None else "UNAVAILABLE"
+        )
+        lines.append(
+            f"Среднее время до события только среди разрешившихся сценариев: "
+            f"{mean_event:.1f} мин. ({resolved_text})."
+        )
     return lines
 
 
 def _risk_lines(snapshot: dict) -> list[str]:
-    manager = snapshot.get("policy_manager") or {}; risk = manager.get("risk_constraint") or {}; rule = manager.get("selection_rule") or {}; rec = manager.get("recommendation") or {}; policies = manager.get("policies") or {}
+    manager = snapshot.get("policy_manager") or {}
+    risk = manager.get("risk_constraint") or {}
+    rule = manager.get("selection_rule") or {}
+    rec = manager.get("recommendation") or {}
+    policies = manager.get("policies") or {}
     raw = rec.get("raw_optimizer_policy") or (manager.get("gate") or {}).get("raw_policy") or rec.get("policy") or "—"
     gross = _number(risk.get("gross_cvar_floor_r")); gross = _number(risk.get("cvar_floor_r")) if gross is None else gross
     deferred = _number(risk.get("unavoidable_deferred_cost_r")); deferred = _number((manager.get("execution_cost_model") or {}).get("deferred_full_close_r")) if deferred is None else deferred
-    net = _number(rule.get("cvar_floor_r")); chosen_cvar = _number((policies.get(raw) or {}).get("cvar10_r")); eligible = list(rule.get("eligible") or []); arithmetic_ok = bool(chosen_cvar is not None and net is not None and chosen_cvar >= net - 1e-12)
-    lines = [f"Расчётный выбор: {raw}. Допустимы по NET CVaR: {', '.join(eligible) if eligible else 'нет'}.", f"Gross strategy CVaR floor: {_r(gross)}.", f"Unavoidable deferred close cost: {_r(deferred)}.", f"Net selection floor: {_r(net)}."]
+    net = _number(rule.get("cvar_floor_r")); chosen_cvar = _number((policies.get(raw) or {}).get("cvar10_r"))
+    eligible_value = rule.get("eligible") if "eligible" in rule else None
+    eligible = list(eligible_value or []) if eligible_value is not None else None
+    arithmetic_ok = bool(chosen_cvar is not None and net is not None and chosen_cvar >= net - 1e-12)
+    eligible_text = "UNAVAILABLE" if eligible is None else (", ".join(eligible) if eligible else "нет")
+    lines = [
+        f"Расчётный выбор: {raw}. Допустимы по NET CVaR: {eligible_text}.",
+        f"Gross strategy CVaR floor: {_r(gross)}.",
+        f"Unavoidable deferred close cost: {_r(deferred)}.",
+        f"Net selection floor: {_r(net)}.",
+    ]
     if chosen_cvar is not None and net is not None:
-        symbol = ">=" if arithmetic_ok else "<"; state = "ELIGIBLE" if arithmetic_ok and raw in eligible else "INELIGIBLE"; lines.append(f"{raw} CVaR10 net: {_r(chosen_cvar)} {symbol} {_r(net)} → {state}.")
-    lines.append(f"Источник gross floor: {risk.get('source', 'не указан')}. Правило: {risk.get('rule', '—')}.")
+        symbol = ">=" if arithmetic_ok else "<"
+        eligible_membership = eligible is not None and raw in eligible
+        state = "ELIGIBLE" if arithmetic_ok and eligible_membership else "INELIGIBLE"
+        lines.append(f"{raw} CVaR10 net: {_r(chosen_cvar)} {symbol} {_r(net)} → {state}.")
+    lines.append(f"Источник gross floor: {_text(risk.get('source'))}. Правило: {_text(risk.get('rule'))}.")
     tradeoff = manager.get("risk_tradeoff") or {}; delta = _number(tradeoff.get("expected_delta_vs_hold_r"))
     if delta is not None:
-        label = tradeoff.get("expected_delta_label") or "расчётное преимущество над HOLD"; lines.append(f"{label}: {_r(delta)}; улучшение CVaR10 относительно HOLD: {_r(tradeoff.get('cvar_improvement_vs_hold_r'))}.")
-    raw_stability = manager.get("raw_optimizer_stability") or {}; final_stability = manager.get("stability") or {}; selected = rec.get("policy") or raw
-    lines.append(f"Параметрическая устойчивость сырого {raw}: {raw_stability.get('selected_count', 0)}/{raw_stability.get('checks', 0)} ({_pct(raw_stability.get('selected_share'))}). Финального {selected}: {final_stability.get('selected_count', 0)}/{final_stability.get('checks', 0)} ({_pct(final_stability.get('selected_share'))}).")
-    authority = (manager.get("gate") or {}).get("authority_stability") or {}; source_count = (authority.get("winner_counts") or {}).get(selected, 0)
-    lines.append(f"Устойчивость к источнику данных для {selected}: {source_count}/{authority.get('checks', 0)} ({_pct((manager.get('gate') or {}).get('source_stability_share'))}).")
-    lines.append(f"Итог gate: {(manager.get('gate') or {}).get('status', '—')}. Рабочее действие: {selected if (manager.get('gate') or {}).get('automatic_execution_allowed') else 'не менять позицию по этому отчёту'}.")
+        label = tradeoff.get("expected_delta_label") or "расчётное преимущество над HOLD"
+        lines.append(f"{label}: {_r(delta)}; улучшение CVaR10 относительно HOLD: {_r(tradeoff.get('cvar_improvement_vs_hold_r'))}.")
+    raw_stability = manager.get("raw_optimizer_stability") or {}
+    final_stability = manager.get("stability") or {}
+    selected = rec.get("policy") or raw
+    lines.append(
+        f"Параметрическая устойчивость сырого {raw}: "
+        f"{_count_ratio(raw_stability.get('selected_count'), raw_stability.get('checks'), raw_stability.get('selected_share'))}. "
+        f"Финального {selected}: "
+        f"{_count_ratio(final_stability.get('selected_count'), final_stability.get('checks'), final_stability.get('selected_share'))}."
+    )
+    gate = manager.get("gate") or {}
+    authority = gate.get("authority_stability") or {}
+    source_checks = _number(authority.get("checks"))
+    winner_counts = authority.get("winner_counts") or {}
+    source_count = _number(winner_counts.get(selected)) if isinstance(winner_counts, dict) else None
+    if source_checks is None or source_checks <= 0 or source_count is None:
+        lines.append(
+            f"Устойчивость к источнику данных для {selected}: UNAVAILABLE "
+            "(authority-stability audit не опубликован в snapshot)."
+        )
+    else:
+        lines.append(
+            f"Устойчивость к источнику данных для {selected}: "
+            f"{int(source_count)}/{int(source_checks)} ({_pct(gate.get('source_stability_share'))})."
+        )
+    auto = gate.get("automatic_execution_allowed") if "automatic_execution_allowed" in gate else None
+    if auto is True:
+        work_action = selected
+    elif auto is False:
+        work_action = "не менять позицию по этому отчёту"
+    else:
+        work_action = "UNAVAILABLE; fail-safe — не менять позицию по этому отчёту"
+    lines.append(f"Итог gate: {_text(gate.get('status'))}. Рабочее действие: {work_action}.")
     return lines
 
 
 def _quality_lines(snapshot: dict) -> list[str]:
-    manager = snapshot.get("policy_manager") or {}; root = snapshot.get("metric_coverage") or {}; coverage = root.get("summary") or root
-    available = int(_number(coverage.get("available_groups")) or 0); total = int(_number(coverage.get("total_groups")) or 0); ratio = _number(coverage.get("coverage_ratio")); ratio = available / total if ratio is None and total else ratio
-    audit = manager.get("input_audit") or {}; evidence = manager.get("evidence") or {}; reliability = ((evidence.get("data_quality") or {}).get("reliability") or {}) or coverage.get("reliability") or {}; inputs = manager.get("inputs") or {}; scope = manager.get("management_model_scope") or {}
-    lines = [f"Покрытие decision metrics: {available}/{total} ({_pct(ratio) if ratio is not None else '—'}). Input audit: {audit.get('available_count', 0)}/{audit.get('total_count', 0)}.", f"Надёжность расчёта: {reliability.get('level', 'не определена')}. Цепочка: {inputs.get('chain_status')}; proxy={inputs.get('proxy_quality')}.", "Причины: " + "; ".join(reliability.get("reasons") or ["существенные ограничения не отмечены"]) + "."]
-    if scope.get("indicator_trailing_modelled") is False: lines.append("Область модели менеджмента: лестница и БУ учтены; индикаторный трейлинг исключён из Expected/CVaR.")
+    manager = snapshot.get("policy_manager") or {}
+    root = snapshot.get("metric_coverage") or {}
+    coverage = root.get("summary") or root
+    available_value = _number(coverage.get("available_groups"))
+    total_value = _number(coverage.get("total_groups"))
+    ratio = _number(coverage.get("coverage_ratio"))
+    if ratio is None and available_value is not None and total_value is not None and total_value > 0:
+        ratio = available_value / total_value
+    coverage_text = (
+        f"{int(available_value)}/{int(total_value)}"
+        if available_value is not None and total_value is not None else "UNAVAILABLE"
+    )
+    audit = manager.get("input_audit") or {}
+    audit_available = _number(audit.get("available_count"))
+    audit_total = _number(audit.get("total_count"))
+    audit_text = (
+        f"{int(audit_available)}/{int(audit_total)}"
+        if audit_available is not None and audit_total is not None else "UNAVAILABLE"
+    )
+    evidence = manager.get("evidence") or {}
+    reliability = ((evidence.get("data_quality") or {}).get("reliability") or {}) or coverage.get("reliability") or {}
+    inputs = manager.get("inputs") or {}
+    scope = manager.get("management_model_scope") or {}
+    reasons = reliability.get("reasons")
+    if isinstance(reasons, list):
+        reason_text = "; ".join(str(item) for item in reasons) if reasons else "существенные ограничения не отмечены"
+    else:
+        reason_text = "не опубликованы"
+    lines = [
+        f"Покрытие decision metrics: {coverage_text} ({_pct(ratio)}). Input audit: {audit_text}.",
+        f"Надёжность расчёта: {_text(reliability.get('level'))}. Цепочка: {_text(inputs.get('chain_status'))}; proxy={_text(inputs.get('proxy_quality'))}.",
+        f"Причины: {reason_text}.",
+    ]
+    availability = snapshot.get("metric_availability_contract") or {}
+    if availability:
+        lines.append(
+            f"Availability contract: {availability.get('contract_version', '—')}; "
+            f"missing_is_zero={str(bool(availability.get('missing_is_zero'))).lower()}; "
+            f"fabrication_allowed={str(bool(availability.get('fabrication_allowed'))).lower()}."
+        )
+    if scope.get("indicator_trailing_modelled") is False:
+        lines.append("Область модели менеджмента: лестница и БУ учтены; индикаторный трейлинг исключён из Expected/CVaR.")
     lines.append("Наличие значения не означает равный голос: optimizer, gate, context-only и shadow роли остаются раздельными.")
     return lines
 
@@ -205,14 +345,14 @@ def _material_change_lines(manager: dict, key: str) -> list[str]:
 def _metric_audit_lines(snapshot: dict) -> list[str]:
     manager = snapshot.get("policy_manager") or {}; evidence = manager.get("evidence") or {}; state = manager.get("option_derivative_state") or evidence.get("option_derivative_state") or {}; metrics = state.get("metrics") or {}
     order = ("p_take", "p_stop", "p_no_touch", "barrier_ev", "bop", "q10", "q50", "q90", "width", "h_take", "h_stop", "hazard_log_ratio", "iv", "rv", "vrp", "skew", "term_slope", "gex_force", "gex_stiffness", "distance_to_zero_gamma")
-    lines = ["Текущие значения и производные разделены: derivative=UNAVAILABLE не означает, что current value отсутствует."]
+    lines = ["Текущие значения и производные разделены: отсутствующее значение не приравнивается к нулю; fallback/proxy должен быть явно помечен источником и качеством."]
     for name in order:
         row = metrics.get(name)
         if not isinstance(row, dict): continue
-        value = _number(row.get("value")); slope = _number(row.get("slope")); acceleration = _number(row.get("acceleration")); current = "—" if value is None else f"{value:.6g} {row.get('value_units') or ''}".strip(); derivative = f"slope={slope:.6g} {row.get('slope_units') or ''}".strip() if slope is not None else "slope=UNAVAILABLE"
+        value = _number(row.get("value")); slope = _number(row.get("slope")); acceleration = _number(row.get("acceleration")); current = "UNAVAILABLE" if value is None else f"{value:.6g} {row.get('value_units') or ''}".strip(); derivative = f"slope={slope:.6g} {row.get('slope_units') or ''}".strip() if slope is not None else "slope=UNAVAILABLE"
         if acceleration is not None: derivative += f"; acceleration={acceleration:.6g}"
-        lines.append(f"{name}: current={current}; {derivative}; N={row.get('sample_count', '—')}; span={row.get('time_span_minutes', '—')}m; confidence={_pct(row.get('confidence'))}; source_quality={_pct(row.get('source_quality'))}.")
-    if len(lines) == 1: lines.append("Option derivative metric workspace отсутствует в этом snapshot.")
+        lines.append(f"{name}: current={current}; {derivative}; N={_text(row.get('sample_count'))}; span={_text(row.get('time_span_minutes'))}m; confidence={_pct(row.get('confidence'))}; source_quality={_pct(row.get('source_quality'))}.")
+    if len(lines) == 1: lines.append("Option derivative metric workspace: UNAVAILABLE; нулевые значения не подставлены.")
     return lines
 
 
