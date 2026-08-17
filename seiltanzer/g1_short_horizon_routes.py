@@ -28,11 +28,9 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
 
     def horizons():
         # runtime.status() already materializes horizon_report() for every
-        # canonical horizon.  Re-running those five reports here doubled the
+        # canonical horizon. Re-running those five reports here doubled the
         # resolved-evidence/SQLite work of this request and could exceed the
         # production 3s latency budget while the research worker was active.
-        # Reuse the exact reports from the single status snapshot instead; no
-        # evidence/math/threshold semantics change.
         status = runtime.status()
         return {"contract_version": status["contract_version"],
                 "items": list(status.get("horizons") or [])}
@@ -97,7 +95,7 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         lambda limit=500: runtime.path_metrics(limit=int(limit)),
         methods=["GET"], name="g1s_path_metrics")
 
-    # Full-history metrics are worker-materialized.  A request can never trigger
+    # Full-history metrics are worker-materialized. A request can never trigger
     # an OOS scan, refit or economic replay merely because the UI opened.
     app.add_api_route("/api/research/g1s/oos", lambda: cached("probability_oos"),
                       methods=["GET"], name="g1s_oos")
@@ -182,11 +180,8 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
     def worker_status():
         """Lock-free worker lifecycle view.
 
-        The full runtime status intentionally includes several SQLite-backed
-        materializer summaries. Polling it while the research cycle owns those
-        runtimes can make a health probe compete with maintenance. Lifecycle
-        polling needs only in-memory state, so keep that path independent from
-        every database connection and runtime lock.
+        Lifecycle polling needs only in-memory state, so keep this path
+        independent from every database connection and runtime lock.
         """
         state = getattr(app.state, "g1_research_worker", {}) or {}
         result = state.get("last_result")
@@ -209,6 +204,12 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
             "contract_version", "scalability_refinement_version", "running",
             "startup_grace_sec", "first_cycle_not_before_ts", "last_started_ts",
             "last_finished_ts", "last_duration_ms", "last_error",
+            "evidence_reports_request_time_scan",
+            "historical_walkforward_runs_on_research_worker",
+            "historical_walkforward_request_time_network_fetch",
+            "ede_v13_shadow_runs_on_research_worker",
+            "ede_v13_full_discovery_runs_on_request_path",
+            "memory_pause_active", "memory_pressure",
         )
         return {
             "contract_version": "research-worker-status-v1",
@@ -222,14 +223,36 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
                       methods=["GET"], name="research_worker_status")
 
     def runtime_status():
-        worker = dict(getattr(app.state, "g1_research_worker", {}) or {})
+        """Fast aggregate health contract; never contend with research SQLite.
+
+        Detailed G.1S/evidence/historical/management status remains available on
+        the dedicated endpoints below. The aggregate route is used as an
+        operational readiness probe, so executing those four SQLite-backed
+        reports again here only created lock contention and false production
+        failures while the research worker was legitimately maintaining data.
+        """
+        worker = worker_status()["worker"]
         return {
             "contract_version": "research-runtime-status-v2",
             "worker": worker,
-            "short_horizon": runtime.materializer_status(),
-            "evidence_materialization": runtime.evidence_materialization_status(),
-            "historical_walk_forward": runtime.historical_walkforward_status(),
-            "management_local": local.status(),
+            "short_horizon": {
+                "status_endpoint": "/api/research/runtime/materializers",
+                "request_time_materialization": False,
+            },
+            "evidence_materialization": {
+                "status_endpoint": "/api/research/g1s/evidence-materialization",
+                "request_time_full_history_scan": False,
+            },
+            "historical_walk_forward": {
+                "status_endpoint": "/api/research/g1s/historical-wf",
+                "request_time_network_fetch": False,
+            },
+            "management_local": {
+                "status_endpoint": "/api/research/g1/management/local-status",
+                "request_time_materialization": False,
+            },
+            "aggregate_status_mode": "LOCK_FREE_LIFECYCLE",
+            "sqlite_access": False,
             "market_collection_separate_from_research": True,
             "request_time_full_history_evidence_scan": False,
             "request_time_historical_network_fetch": False,
