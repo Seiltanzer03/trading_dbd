@@ -5,30 +5,26 @@ on:
     paths: [.github/workflows/ops-restore-terminal-production.yml]
 
 jobs:
-  diagnose-state-memory:
+  diagnose-ai-provider:
     runs-on: ubuntu-22.04
     steps:
-      - name: Measure one state request memory impact
+      - name: Inspect OpenRouter configuration and failed request
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 4m
+          command_timeout: 3m
           script: |
             set -euo pipefail
             pid=$(systemctl show -p MainPID --value seiltanzer)
-            echo "pid=$pid"
-            echo '--- before ---'
-            grep -E 'VmRSS|VmHWM|VmSize|RssAnon|RssFile|VmSwap' /proc/$pid/status || true
-            cat /proc/$pid/smaps_rollup | grep -E 'Rss:|Pss:|Private_|Anonymous:|Swap:' || true
-            /usr/bin/time -v curl -sS --connect-timeout 3 --max-time 40 http://127.0.0.1:8790/api/state -o /tmp/state.json 2>/tmp/state.time
-            cat /tmp/state.time
-            wc -c /tmp/state.json
-            echo '--- immediate after ---'
-            grep -E 'VmRSS|VmHWM|VmSize|RssAnon|RssFile|VmSwap' /proc/$pid/status || true
-            sleep 5
-            echo '--- after 5s ---'
-            grep -E 'VmRSS|VmHWM|VmSize|RssAnon|RssFile|VmSwap' /proc/$pid/status || true
-            test "$(curl -sS -o /dev/null --connect-timeout 2 --max-time 10 -w '%{http_code}' http://127.0.0.1:8790/)" = '200'
+            echo "service_active=$(systemctl is-active seiltanzer) pid=$pid"
+            echo '=== PROVIDER ENV PRESENCE (values hidden) ==='
+            tr '\0' '\n' < /proc/$pid/environ | awk -F= '/^OPENROUTER_|^AI_/ {v=substr($0,index($0,"=")+1); print $1 " set=" (length(v)>0?"yes":"no") " length=" length(v)}' | sort || true
+            echo '=== PROVIDER CODE ENV NAMES ==='
+            grep -RhoE 'OPENROUTER_[A-Z0-9_]+' /opt/seiltanzer/seiltanzer/ai_verdict*.py /opt/seiltanzer/seiltanzer/*.py 2>/dev/null | sort -u || true
+            echo '=== REQUEST LOG ==='
+            journalctl -u seiltanzer --since '-4 hours' --no-pager | grep -F -A12 -B3 'ai-d6a80ac3778b40d5be85' || true
+            echo '=== RECENT PROVIDER FALLBACKS ==='
+            journalctl -u seiltanzer --since '-2 hours' --no-pager | grep -E 'provider_fallback|openrouter|OpenRouter' | tail -n 120 || true
