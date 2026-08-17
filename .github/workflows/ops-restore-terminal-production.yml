@@ -5,57 +5,52 @@ on:
     paths: [.github/workflows/ops-restore-terminal-production.yml]
 
 jobs:
-  post-deploy-soak:
+  locate-runtime-status-route:
     runs-on: ubuntu-22.04
     steps:
-      - name: Verify exact production after research-worker boundary
+      - name: Locate blocking research runtime status implementation
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 8m
+          command_timeout: 4m
           script: |
             set -euo pipefail
-            EXPECTED_SHA=cce31900e92bccb3b9eb8494ea1e2920f5bf570a
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            active_since=$(systemctl show -p ActiveEnterTimestamp --value seiltanzer)
-            started=$(date -d "$active_since" +%s)
-            now=$(date +%s)
-            age=$((now-started))
-            echo "service_age_before_soak=${age}s"
-            # The G1 research worker has a 5-minute startup grace. Validate well
-            # after that boundary, where the old process previously exploded.
-            if [ "$age" -lt 390 ]; then
-              sleep $((390-age))
-            fi
-            pid=$(systemctl show -p MainPID --value seiltanzer)
-            active=$(systemctl is-active seiltanzer)
-            rss_kb=$(awk '/^VmRSS:/ {print $2}' /proc/$pid/status)
-            rss_mb=$((rss_kb/1024))
-            echo "active=$active pid=$pid rss_mb=$rss_mb"
-            systemctl show seiltanzer -p MemoryCurrent -p MemoryPeak -p NRestarts -p ActiveState -p SubState
-            free -h
-            echo '=== HTTP ==='
-            curl -sS -o /dev/null --connect-timeout 2 --max-time 10 -w 'root_http=%{http_code} time=%{time_total}\n' http://127.0.0.1:8790/
-            curl -sS -o /dev/null --connect-timeout 2 --max-time 10 -w 'state_http=%{http_code} time=%{time_total}\n' http://127.0.0.1:8790/api/state
-            curl -sS --resolve seiltanzer.ru:443:127.0.0.1 -o /dev/null --connect-timeout 2 --max-time 10 -w 'sni_https_http=%{http_code} time=%{time_total}\n' https://seiltanzer.ru/
-            echo '=== FIX PRESENCE ==='
-            if grep -q "import './ai_decision_ack.js'" /opt/seiltanzer/seiltanzer/web/js/util.js; then
-              echo 'legacy duplicate ACK import still present'; exit 1
-            fi
-            grep -F 'DEFAULT_PROVIDER_TIMEOUT_SEC = 25.0' /opt/seiltanzer/seiltanzer/ai_provider_guard.py
-            grep -F 'production-resource-guard-v2-memory-pressure' /opt/seiltanzer/seiltanzer/production_resource_guard.py
-            echo '=== OOM SINCE CURRENT SERVICE START ==='
-            oom=$(journalctl -k --since "$active_since" --no-pager 2>/dev/null | grep -Ei 'out of memory|oom-kill|killed process.*python' || true)
-            if [ -n "$oom" ]; then echo "$oom"; exit 1; fi
-            test "$active" = active
-            test "$rss_mb" -lt 1500
-            test "$(curl -sS -o /dev/null --connect-timeout 2 --max-time 10 -w '%{http_code}' http://127.0.0.1:8790/api/state)" = 200
-      - name: Verify public HTTPS from outside VPS
-        run: |
-          set -euo pipefail
-          code=$(curl -sS -o /dev/null --connect-timeout 5 --max-time 20 -w '%{http_code}' https://seiltanzer.ru/)
-          echo "public_https=$code"
-          test "$code" = 200
+            cd /opt/seiltanzer
+            echo '=== GREP ROUTE ==='
+            grep -RIn --exclude-dir=.git --exclude='*.db*' 'research/runtime/status\|runtime/status' seiltanzer scripts tests || true
+            echo '=== OPENAPI OPERATION ==='
+            curl -sS --max-time 15 http://127.0.0.1:8790/openapi.json -o /tmp/openapi.json
+            python - <<'PY'
+            import json
+            p=json.load(open('/tmp/openapi.json'))
+            print(json.dumps(p['paths'].get('/api/research/runtime/status'), indent=2, ensure_ascii=False))
+            PY
+            echo '=== ROUTE OBJECT INTROSPECTION ==='
+            PYTHONPATH=/opt/seiltanzer /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import inspect
+            from seiltanzer.config import Settings
+            from seiltanzer.app import create_app
+            from seiltanzer.storage_runtime import prepare_storage, install_storage_runtime
+            from seiltanzer.storage_routes import install_storage_routes
+            from seiltanzer.research_scalability_bootstrap import install_research_scalability
+            s=Settings(demo=False,stream=False,host='127.0.0.1',port=0,data_dir='/opt/seiltanzer/data')
+            st=prepare_storage(s)
+            app=create_app(s)
+            install_storage_runtime(app,st)
+            install_storage_routes(app)
+            install_research_scalability(app)
+            for r in app.routes:
+                if getattr(r,'path',None)=='/api/research/runtime/status':
+                    ep=r.endpoint
+                    print('endpoint',ep)
+                    print('module',ep.__module__)
+                    print('qualname',ep.__qualname__)
+                    print('file',inspect.getsourcefile(ep))
+                    try: print(inspect.getsource(ep))
+                    except Exception as e: print('source-error',e)
+            try: app.state.engine.close()
+            except Exception: pass
+            PY
