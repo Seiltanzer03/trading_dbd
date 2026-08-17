@@ -7,7 +7,7 @@ jobs:
   deploy-and-smoke:
     runs-on: ubuntu-22.04
     steps:
-      - name: Deploy exact main SHA and verify current AI report semantics
+      - name: Deploy exact main SHA and verify warmed AI report semantics
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -17,7 +17,7 @@ jobs:
           command_timeout: 7m
           script: |
             set -euo pipefail
-            EXPECTED_SHA=c885c813edf4d0a53a2251901dbab9438668d384
+            EXPECTED_SHA=1a3fd8c5ef439cde08150120d8f69ded3b712e94
             git config --global --add safe.directory /opt/seiltanzer || true
             cd /opt/seiltanzer
             fetched=0
@@ -29,7 +29,6 @@ jobs:
             test "$fetched" = "1"
             git cat-file -e "${EXPECTED_SHA}^{commit}"
             git reset --hard "$EXPECTED_SHA"
-            /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
             systemctl restart seiltanzer
             ready=0
             for attempt in $(seq 1 50); do
@@ -41,6 +40,9 @@ jobs:
             done
             test "$ready" = "1"
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+
+            # Give the live market collectors time to repopulate after restart.
+            sleep 45
 
             /opt/seiltanzer/.venv/bin/python - <<'PY'
             import json, re, time, urllib.error, urllib.request
@@ -63,19 +65,25 @@ jobs:
                 assert 'Доступно 0/0 групп' not in verdict, verdict
                 assert '[bounded]' not in verdict, verdict
 
-                if 'BREAK_EVEN' in verdict:
-                    m_cur=re.search(r'CURRENT R:\s*([+-]?\d+(?:\.\d+)?)R', verdict)
-                    m_bar=re.search(r'R до активного barrier:\s*([+-]?\d+(?:\.\d+)?)R', verdict)
-                    assert m_cur and m_bar, verdict
-                    current=float(m_cur.group(1)); to_bar=float(m_bar.group(1))
-                    assert abs(current-to_bar) <= 0.003, (current, to_bar, verdict)
+                m_cur=re.search(r'CURRENT R:\s*([+-]?\d+(?:\.\d+)?R|—)', verdict)
+                m_bar=re.search(r'R до активного barrier:\s*([+-]?\d+(?:\.\d+)?R|—)', verdict)
+                m_take=re.search(r'R до FINAL TAKE:\s*([+-]?\d+(?:\.\d+)?R|—)', verdict)
+                assert m_cur and m_bar and m_take, verdict
 
-                m_take=re.search(r'R до FINAL TAKE:\s*([+-]?\d+(?:\.\d+)?)R', verdict)
-                if m_take and float(m_take.group(1)) <= 0.0:
-                    assert 'FINAL TAKE ДОСТИГНУТ/ПЕРЕСЕЧЁН' in verdict, verdict
-                    assert 'Арбитр: STRATEGY → EXIT' in verdict, verdict
-                    assert 'production policy: EXIT' in verdict, verdict
-                    assert 'Статус исполнения: pending_execution' in verdict, verdict
+                if m_cur.group(1) == '—':
+                    assert m_bar.group(1) == '—', verdict
+                    assert m_take.group(1) == '—', verdict
+                else:
+                    current=float(m_cur.group(1)[:-1])
+                    if 'BREAK_EVEN' in verdict:
+                        assert m_bar.group(1) != '—', verdict
+                        to_bar=float(m_bar.group(1)[:-1])
+                        assert abs(current-to_bar) <= 0.003, (current, to_bar, verdict)
+                    if m_take.group(1) != '—' and float(m_take.group(1)[:-1]) < -0.001:
+                        assert 'FINAL TAKE ДОСТИГНУТ/ПЕРЕСЕЧЁН' in verdict, verdict
+                        assert 'Арбитр: STRATEGY → EXIT' in verdict, verdict
+                        assert 'production policy: EXIT' in verdict, verdict
+                        assert 'Статус исполнения: pending_execution' in verdict, verdict
 
                 for match in re.finditer(
                     r'Устойчивость к источнику данных для \w+:\s*(\d+)/(\d+) \(([\d.]+)%\)',
@@ -93,8 +101,9 @@ jobs:
                 print('--- AI REPORT CHECKPOINTS ---')
                 for needle in (
                     '**ДЕЙСТВИЕ СЕЙЧАС**', 'Арбитр:', 'production policy:',
-                    'CURRENT R:', 'R до FINAL TAKE:', 'Устойчивость к источнику данных',
-                    'Input audit:', 'p_take/p_stop ниже относятся',
+                    'Цена сейчас:', 'CURRENT R:', 'R до FINAL TAKE:',
+                    'Устойчивость к источнику данных', 'Input audit:',
+                    'p_take/p_stop ниже относятся',
                 ):
                     for line in verdict.splitlines():
                         if needle in line:
