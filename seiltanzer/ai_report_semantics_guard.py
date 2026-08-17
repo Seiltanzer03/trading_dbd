@@ -9,6 +9,7 @@ modified here.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Callable
 
 _INSTALLED = False
@@ -25,7 +26,7 @@ def _number(value: Any) -> float | None:
 def repair_snapshot_geometry(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Make displayed active-stop price and R-distance use the same source.
 
-    `trade_geometry.active_risk_barrier` is the stateful stop/BE price.  Older
+    `trade_geometry.active_risk_barrier` is the stateful stop/BE price. Older
     snapshots could combine that price with `first_touch_clock.risk_barrier_r`
     (or its -1R fallback), producing a +1R error after break-even was armed.
     Recompute only the displayed distance from entry/original-risk geometry.
@@ -45,8 +46,6 @@ def repair_snapshot_geometry(snapshot: dict[str, Any]) -> dict[str, Any]:
     if risk <= 0.0:
         return snapshot
 
-    # Infer position-space sign from the original stop: long stops are below
-    # entry, short stops above entry. The original stop is immutable trade risk.
     if float(original_stop) < float(entry):
         sign = 1.0
     elif float(original_stop) > float(entry):
@@ -83,11 +82,27 @@ def _replace_section_body(lines: list[str], title: str, body: list[str]) -> None
     if bounds is None:
         return
     start, end = bounds
-    # Preserve one blank separator before the next section.
     replacement = list(body)
     if end < len(lines) and (not replacement or replacement[-1] != ""):
         replacement.append("")
     lines[start + 1:end] = replacement
+
+
+def _repair_source_stability(lines: list[str], snapshot: dict[str, Any]) -> list[str]:
+    manager = snapshot.get("policy_manager") or {}
+    gate = manager.get("gate") or {}
+    authority = gate.get("authority_stability") or {}
+    checks = _number(authority.get("checks"))
+    winner_counts = authority.get("winner_counts") or {}
+    rec = manager.get("recommendation") or {}
+    selected = str(rec.get("policy") or gate.get("policy") or "HOLD")
+    count = _number(winner_counts.get(selected)) if isinstance(winner_counts, dict) else None
+    if checks is None or checks <= 0 or count is None:
+        return lines
+    share = max(0.0, min(1.0, count / checks))
+    prefix = f"Устойчивость к источнику данных для {selected}:"
+    replacement = f"{prefix} {int(count)}/{int(checks)} ({share * 100:.1f}%)."
+    return [replacement if line.startswith(prefix) else line for line in lines]
 
 
 def repair_report_semantics(text: str, snapshot: dict[str, Any]) -> str:
@@ -132,18 +147,27 @@ def repair_report_semantics(text: str, snapshot: dict[str, Any]) -> str:
                 "Input audit: UNAVAILABLE.",
                 "Input audit: COMPACTED (детали удалены из snapshot по byte-budget, не исходные данные).",
             )
-            if "[bounded]" in line:
-                if line.strip().startswith("[bounded]:"):
-                    continue
-                if "correlation_regime_shift" in line:
-                    line = (
-                        "Ограничения: correlation_regime_shift: детальные пары COMPACTED по byte-budget; "
-                        "сам regime-shift сохранён как uncertainty/regime gate."
-                    )
-                else:
-                    line = line.replace("[bounded]", "COMPACTED")
+            if "correlation_regime_shift" in line and "[bounded]" in line:
+                line = (
+                    "Ограничения: correlation_regime_shift: детальные пары COMPACTED по byte-budget; "
+                    "сам regime-shift сохранён как uncertainty/regime gate."
+                )
             repaired.append(line)
         lines = repaired
+
+    # `[bounded]` is an internal byte/depth marker, never a user-facing metric.
+    # Remove empty bounded rows even when the whole snapshot was not in the
+    # emergency compact mode; replace any residual marker with an explicit label.
+    cleaned: list[str] = []
+    for line in lines:
+        if line.strip().startswith("[bounded]:"):
+            continue
+        if "[bounded]" in line:
+            line = line.replace("[bounded]", "DETAIL_COMPACTED")
+        cleaned.append(line)
+    lines = cleaned
+
+    lines = _repair_source_stability(lines, snapshot)
 
     authority = (snapshot.get("ede_causal_context") or {}).get("authority") or {}
     if authority.get("production_directional_authority") is False:
@@ -155,6 +179,32 @@ def repair_report_semantics(text: str, snapshot: dict[str, Any]) -> str:
             )
             for line in lines
         ]
+
+    # Do not let stale text from a lower presentation layer contradict a
+    # strategy-terminal management decision.
+    decision = manager.get("management_decision") or {}
+    if (
+        decision.get("authority") == "STRATEGY"
+        and decision.get("policy") == "EXIT"
+        and decision.get("strategy_terminal_event") == "FINAL_TAKE_REACHED"
+    ):
+        for index, line in enumerate(lines):
+            if line.startswith("**ДЕЙСТВИЕ СЕЙЧАС**"):
+                lines[index] = (
+                    "**ДЕЙСТВИЕ СЕЙЧАС** — FINAL TAKE ДОСТИГНУТ/ПЕРЕСЕЧЁН: "
+                    "ЗАКРЫТЬ ВЕСЬ ТЕКУЩИЙ ОСТАТОК ПО СТРАТЕГИИ. ИСПОЛНЕНИЕ РУЧНОЕ."
+                )
+            elif line.startswith("Арбитр:"):
+                lines[index] = (
+                    "Арбитр: STRATEGY → EXIT. Причина: достигнут/пересечён FINAL TAKE; "
+                    "терминальное правило стратегии выше AI risk-overlay."
+                )
+            elif re.search(r"Рабочее действие: .*не менять позицию", line):
+                lines[index] = re.sub(
+                    r"Рабочее действие: .*?(?=\.$)",
+                    "Рабочее действие: закрыть весь текущий остаток по стратегии",
+                    line,
+                )
 
     audit_bounds = _section_bounds(lines, "**FULL METRIC AUDIT**")
     clarification = (
@@ -188,8 +238,5 @@ def install_ai_report_semantics_guard() -> None:
         return repair_report_semantics(original_normalize(text, snapshot), snapshot)
 
     app_module.build_snapshot = guarded_build_snapshot
-    # Existing v19 render/request function objects resolve this module-global at
-    # call time, so both deterministic fallback and LLM-normalized output receive
-    # exactly the same semantic repair.
     v19.normalize_structured_report = guarded_normalize
     _INSTALLED = True
