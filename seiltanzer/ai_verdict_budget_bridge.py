@@ -70,27 +70,52 @@ def _limit_bytes(ai_verdict: Any) -> int | None:
     return int(value) if value is not None else None
 
 
-def _fit_post_enrichment_target(ai_verdict: Any, snapshot: dict[str, Any]) -> bool:
+def _sync_final_bytes(ai_verdict: Any, snapshot: dict[str, Any]) -> int | None:
+    """Keep snapshot_budget.final_bytes equal to the final serialized payload."""
+    budget = snapshot.setdefault("snapshot_budget", {})
+    # Setting the field changes serialized size; converge in a few deterministic
+    # iterations so tests/telemetry always report the exact final byte count.
+    last = None
+    for _ in range(4):
+        size = _snapshot_size(ai_verdict, snapshot)
+        if size is None:
+            return None
+        budget["final_bytes"] = size
+        if size == last:
+            return size
+        last = size
+    return _snapshot_size(ai_verdict, snapshot)
+
+
+def _fit_post_enrichment_target(
+    ai_verdict: Any,
+    snapshot: dict[str, Any],
+    *,
+    already_compacted: bool = False,
+) -> bool:
     """Compact only duplicated/verbose presentation fields after a successful pass."""
     size = _snapshot_size(ai_verdict, snapshot)
     target = _target_bytes(ai_verdict)
     limit = _limit_bytes(ai_verdict)
+    compacted = bool(already_compacted)
     if size is None:
+        if compacted:
+            snapshot.setdefault("snapshot_budget", {})["late_enrichment_compacted"] = True
         return True
-    if target is None or size <= target:
-        return limit is None or size < limit
 
-    _compact_active_edge_context(snapshot)
-    _drop_duplicate_integrity_views(snapshot)
-    size = _snapshot_size(ai_verdict, snapshot)
-    if size is not None and target is not None and size > target:
-        _trim_static_availability_explanation(snapshot)
+    if target is not None and size > target:
+        _compact_active_edge_context(snapshot)
+        _drop_duplicate_integrity_views(snapshot)
+        compacted = True
         size = _snapshot_size(ai_verdict, snapshot)
+        if size is not None and size > target:
+            _trim_static_availability_explanation(snapshot)
+            compacted = True
+            size = _snapshot_size(ai_verdict, snapshot)
 
-    budget = snapshot.setdefault("snapshot_budget", {})
-    if size is not None:
-        budget["final_bytes"] = size
-    budget["late_enrichment_compacted"] = True
+    if compacted:
+        snapshot.setdefault("snapshot_budget", {})["late_enrichment_compacted"] = True
+    size = _sync_final_bytes(ai_verdict, snapshot)
     return size is None or limit is None or size < limit
 
 
@@ -124,7 +149,9 @@ def enforce_public_snapshot_budget(snapshot: dict[str, Any]) -> None:
     _drop_duplicate_integrity_views(snapshot)
     try:
         enforce(snapshot)
-        if _fit_post_enrichment_target(ai_verdict, snapshot):
+        if _fit_post_enrichment_target(
+            ai_verdict, snapshot, already_compacted=True
+        ):
             return
     except RuntimeError as exc:
         if "snapshot byte budget exceeded" not in str(exc).lower():
@@ -144,3 +171,4 @@ def enforce_public_snapshot_budget(snapshot: dict[str, Any]) -> None:
     budget = snapshot.setdefault("snapshot_budget", {})
     budget["report_integrity_degraded"] = True
     budget["degrade_reason"] = "LATE_ENRICHMENT_BYTE_BUDGET"
+    _sync_final_bytes(ai_verdict, snapshot)
