@@ -30,6 +30,7 @@ jobs:
           node --check seiltanzer/web/js/touch_clock.js
           node --check seiltanzer/web/js/safe_fetch.js
           node --check seiltanzer/web/js/management_ui.js
+          node --check seiltanzer/web/js/trade_delete_ui_guard.js
           node --check seiltanzer/web/js/g1s_evidence.js
           node --check seiltanzer/web/js/cone.js
           node --check seiltanzer/web/js/cone_core.js
@@ -44,6 +45,7 @@ jobs:
           node tests/web/touch_clock_smoke.mjs
           node tests/web/ai_verdict_error_smoke.mjs
           node tests/web/ai_management_decision_smoke.mjs
+          node tests/web/trade_delete_ui_guard_smoke.mjs
           node tests/web/g1s_evidence_smoke.mjs
           node tests/web/fan_cone_touch_consistency_smoke.mjs
           node tests/web/cone_interaction_smoke.mjs
