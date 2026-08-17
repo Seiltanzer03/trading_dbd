@@ -20,7 +20,13 @@ jobs:
             EXPECTED_SHA=c885c813edf4d0a53a2251901dbab9438668d384
             git config --global --add safe.directory /opt/seiltanzer || true
             cd /opt/seiltanzer
-            git fetch origin main
+            fetched=0
+            for attempt in 1 2 3 4; do
+              if git fetch origin main; then fetched=1; break; fi
+              echo "git fetch transient failure attempt=$attempt"
+              sleep 4
+            done
+            test "$fetched" = "1"
             git cat-file -e "${EXPECTED_SHA}^{commit}"
             git reset --hard "$EXPECTED_SHA"
             /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
