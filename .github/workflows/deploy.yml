@@ -138,11 +138,13 @@ jobs:
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
 
-            # A process being briefly "active" is not readiness. Require the
-            # actual terminal API to answer within the unchanged 3s production
-            # latency budget before declaring the deploy green.
+            # A process being briefly "active" is not readiness. The 2 GB VPS can
+            # spend well over 36s rebuilding bounded research/runtime state before
+            # uvicorn begins listening, while the endpoint latency itself remains
+            # within the same 3s budget once the socket is up. Allow up to ~90s
+            # for that startup phase instead of generating a false deploy failure.
             ready=0
-            for attempt in $(seq 1 18); do
+            for attempt in $(seq 1 45); do
               active=$(systemctl is-active seiltanzer 2>/dev/null || true)
               result=$(curl -sS -o /tmp/seiltanzer-deploy-state.json \
                 --connect-timeout 1 --max-time 3 \
