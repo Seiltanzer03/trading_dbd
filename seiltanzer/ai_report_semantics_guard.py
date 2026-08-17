@@ -24,37 +24,62 @@ def _number(value: Any) -> float | None:
 
 
 def repair_snapshot_geometry(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Make displayed active-stop price and R-distance use the same source.
+    """Keep every displayed R-distance on one live trade geometry source.
 
-    `trade_geometry.active_risk_barrier` is the stateful stop/BE price. Older
-    snapshots could combine that price with `first_touch_clock.risk_barrier_r`
-    (or its -1R fallback), producing a +1R error after break-even was armed.
-    Recompute only the displayed distance from entry/original-risk geometry.
+    Stateful active-stop price, FINAL TAKE and CURRENT R must agree. If current
+    market geometry is unavailable, distances are unavailable too; stale -1R/0R
+    fallbacks must never masquerade as live distances.
     """
     geometry = snapshot.get("trade_geometry")
     if not isinstance(geometry, dict):
         return snapshot
 
-    current_r = _number(geometry.get("current_r"))
     entry = _number(geometry.get("entry"))
     original_stop = _number(geometry.get("original_stop"))
-    active_stop = _number(geometry.get("active_risk_barrier"))
-    if None in (current_r, entry, original_stop, active_stop):
+    if entry is None or original_stop is None:
+        geometry["r_to_active_stop"] = None
+        geometry["r_to_final_take"] = None
         return snapshot
 
-    risk = abs(float(entry) - float(original_stop))
+    risk = abs(entry - original_stop)
     if risk <= 0.0:
+        geometry["r_to_active_stop"] = None
+        geometry["r_to_final_take"] = None
         return snapshot
 
-    if float(original_stop) < float(entry):
+    if original_stop < entry:
         sign = 1.0
-    elif float(original_stop) > float(entry):
+    elif original_stop > entry:
         sign = -1.0
     else:
+        geometry["r_to_active_stop"] = None
+        geometry["r_to_final_take"] = None
         return snapshot
 
-    active_stop_r = sign * (float(active_stop) - float(entry)) / risk
-    geometry["r_to_active_stop"] = round(float(current_r) - active_stop_r, 4)
+    current_r = _number(geometry.get("current_r"))
+    current_price = _number(geometry.get("current"))
+    if current_r is None and current_price is not None:
+        current_r = sign * (current_price - entry) / risk
+        geometry["current_r"] = round(current_r, 6)
+
+    if current_r is None:
+        geometry["r_to_active_stop"] = None
+        geometry["r_to_final_take"] = None
+        return snapshot
+
+    active_stop = _number(geometry.get("active_risk_barrier"))
+    if active_stop is None:
+        geometry["r_to_active_stop"] = None
+    else:
+        active_stop_r = sign * (active_stop - entry) / risk
+        geometry["r_to_active_stop"] = round(current_r - active_stop_r, 4)
+
+    final_take = _number(geometry.get("final_take"))
+    if final_take is None:
+        geometry["r_to_final_take"] = None
+    else:
+        final_take_r = sign * (final_take - entry) / risk
+        geometry["r_to_final_take"] = round(final_take_r - current_r, 4)
     return snapshot
 
 
@@ -155,9 +180,6 @@ def repair_report_semantics(text: str, snapshot: dict[str, Any]) -> str:
             repaired.append(line)
         lines = repaired
 
-    # `[bounded]` is an internal byte/depth marker, never a user-facing metric.
-    # Remove empty bounded rows even when the whole snapshot was not in the
-    # emergency compact mode; replace any residual marker with an explicit label.
     cleaned: list[str] = []
     for line in lines:
         if line.strip().startswith("[bounded]:"):
@@ -180,8 +202,6 @@ def repair_report_semantics(text: str, snapshot: dict[str, Any]) -> str:
             for line in lines
         ]
 
-    # Do not let stale text from a lower presentation layer contradict a
-    # strategy-terminal management decision.
     decision = manager.get("management_decision") or {}
     if (
         decision.get("authority") == "STRATEGY"
