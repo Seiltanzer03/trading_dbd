@@ -1,4 +1,5 @@
 import { mountG1SEvidencePanel } from './g1s_evidence.js';
+import './trade_delete_ui_guard.js';
 
 // Mount once from an already-loaded main-dashboard module. The evidence panel is
 // independent from management execution and reads research-only bounded APIs.
