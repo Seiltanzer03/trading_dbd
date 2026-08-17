@@ -19,6 +19,7 @@ globals().update({
 _BASE_BUILD_SNAPSHOT_V18 = _impl.build_snapshot
 _BASE_ENFORCE_SNAPSHOT_BUDGET_V18 = _impl._enforce_snapshot_budget
 _REPORT_INTEGRITY_VERSION = "ai-verdict-report-integrity-v1"
+_AVAILABILITY_CONTRACT_VERSION = "ai-metric-availability-v1"
 
 _POLICY_REPORT_KEYS = (
     "expected_final_r", "median_final_r", "cvar10_r",
@@ -62,9 +63,14 @@ _OPTION_BARRIER_KEYS = (
     "source", "status", "authority", "independent_vote",
 )
 _MC_VALIDATION_KEYS = (
-    "status", "checks", "winner", "winner_share", "ranking_agreement",
-    "decision_uncertain", "expected_r_ci_width", "cvar10_r_ci_width",
-    "effective_paths", "effective_path_count",
+    "status", "checks", "winner", "winner_share", "winner_stability",
+    "ranking_agreement", "decision_uncertain", "expected_r_ci_width",
+    "cvar10_r_ci_width", "effective_paths", "effective_path_count",
+)
+_AVAILABILITY_ROW_KEYS = (
+    "available", "status", "source", "role", "age_sec", "symbol",
+    "reason", "quality", "quality_score", "proxy_quality", "is_proxy",
+    "proxy", "fallback_tier", "fallback_source",
 )
 
 
@@ -93,6 +99,75 @@ def _report_scalar_map(row, *, max_items: int = 24):
             if nested:
                 output[key] = nested
     return output
+
+
+def _merge_missing(target: dict, preserved: dict) -> None:
+    if not isinstance(target, dict) or not isinstance(preserved, dict):
+        return
+    for key, value in preserved.items():
+        if key not in target or target.get(key) in (None, "[bounded]"):
+            target[key] = value
+        elif isinstance(target.get(key), dict) and isinstance(value, dict):
+            _merge_missing(target[key], value)
+
+
+def _build_metric_availability_contract(snapshot: dict) -> dict:
+    """Publish provenance/fallback semantics without inventing market values.
+
+    The contract makes every audited decision input explicitly inspectable. A
+    primary feed outage is represented as degraded/fallback/unavailable state,
+    never as a numerical zero. Source adapters may populate richer fallback
+    fields; this layer preserves them without guessing missing provenance.
+    """
+    previous = snapshot.get("metric_availability_contract") or {}
+    manager = snapshot.get("policy_manager") or {}
+    audit = manager.get("input_audit") or {}
+    rows = audit.get("rows") or {}
+    inputs = {}
+    if isinstance(rows, dict):
+        for name, row in rows.items():
+            if not isinstance(row, dict):
+                continue
+            compact = _report_row(row, _AVAILABILITY_ROW_KEYS)
+            items = row.get("items") or []
+            if isinstance(items, list) and items:
+                compact["items"] = [
+                    _report_row(item, _AVAILABILITY_ROW_KEYS)
+                    for item in items[:16] if isinstance(item, dict)
+                ]
+                compact["item_count"] = len(items)
+            inputs[str(name)] = compact
+
+    root = snapshot.get("metric_coverage") or {}
+    coverage = root.get("summary") or root
+    contract = {
+        "contract_version": _AVAILABILITY_CONTRACT_VERSION,
+        "goal": "ALL_DECISION_CRITICAL_METRICS_EXPLICITLY_EVALUABLE",
+        "missing_is_zero": False,
+        "fabrication_allowed": False,
+        "fallback_order": [
+            "PRIMARY", "FALLBACK_SOURCE", "LAST_GOOD_CACHE", "MATHEMATICAL_PROXY",
+        ],
+        "fallback_rule": (
+            "use the best valid source allowed by the metric contract; preserve "
+            "source, age, quality and proxy/fallback status"
+        ),
+        "primary_unavailable_semantics": "DEGRADED_OR_UNAVAILABLE_NEVER_ZERO",
+        "required_provenance_fields": [
+            "source", "age_sec", "quality_or_status", "proxy_or_fallback_status",
+        ],
+        "input_audit_available_count": audit.get("available_count"),
+        "input_audit_total_count": audit.get("total_count"),
+        "all_required_available": audit.get("all_required_available"),
+        "missing_required": list(audit.get("missing_required") or []),
+        "degraded_inputs": list(audit.get("degraded_inputs") or []),
+        "coverage_available_groups": coverage.get("available_groups") if isinstance(coverage, dict) else None,
+        "coverage_total_groups": coverage.get("total_groups") if isinstance(coverage, dict) else None,
+        "inputs": inputs,
+    }
+    if isinstance(previous, dict):
+        _merge_missing(contract, previous)
+    return contract
 
 
 def _capture_report_integrity(snapshot: dict) -> dict:
@@ -145,15 +220,10 @@ def _capture_report_integrity(snapshot: dict) -> dict:
     trade_geometry = snapshot.get("trade_geometry") or {}
     if isinstance(trade_geometry, dict):
         report["trade_geometry"] = _report_scalar_map(trade_geometry)
+    previous = snapshot.get("report_integrity") or {}
+    if isinstance(previous, dict):
+        _merge_missing(report, previous)
     return {key: value for key, value in report.items() if value not in ({}, [], None)}
-
-
-def _merge_missing(target: dict, preserved: dict) -> None:
-    if not isinstance(target, dict) or not isinstance(preserved, dict):
-        return
-    for key, value in preserved.items():
-        if key not in target or target.get(key) in (None, "[bounded]"):
-            target[key] = value
 
 
 def _restore_report_integrity_views(snapshot: dict, report: dict) -> None:
@@ -199,6 +269,10 @@ def _restore_report_integrity_views(snapshot: dict, report: dict) -> None:
 
 
 def _enforce_snapshot_budget_with_report_integrity(snapshot: dict) -> None:
+    # Capture both facts and provenance before v18 drops oversized explanatory
+    # workspaces. On a second budget pass, merge the previous richer compact
+    # contract instead of replacing it with a poorer already-compacted view.
+    snapshot["metric_availability_contract"] = _build_metric_availability_contract(snapshot)
     report = _capture_report_integrity(snapshot)
     snapshot["report_integrity"] = report
     _BASE_ENFORCE_SNAPSHOT_BUDGET_V18(snapshot)
@@ -206,8 +280,8 @@ def _enforce_snapshot_budget_with_report_integrity(snapshot: dict) -> None:
     budget = snapshot.setdefault("snapshot_budget", {})
     budget["final_bytes"] = _impl._snapshot_bytes(snapshot)
     if budget["final_bytes"] >= _impl.SNAPSHOT_LIMIT_BYTES:
-        # Keep the authoritative compact copy even in an unusually large
-        # snapshot; duplicate restored views are lower priority.
+        # Keep root compact contracts even in an unusually large snapshot;
+        # duplicate restored manager views are lower priority.
         for key in (
             "scenario_geometry", "raw_optimizer_stability", "stability",
             "risk_tradeoff", "monte_carlo_validation", "active_edge_provisional_weight",
@@ -231,9 +305,13 @@ REPORT_INTEGRITY — компактная копия уже рассчитанн
 report_integrity как источник этих же чисел. Отсутствующее значение никогда не
 считай нулём: missing/unavailable != 0. Не смешивай execution-MC physical path
 probabilities, option risk-neutral Q barrier metrics и EDE research context.
-active_edge_provisional_weight — production bounded soft-ranking только внутри
-hard-risk/CVaR eligible policies; EDE causal/prospective shadow сам по себе не
-имеет production directional authority и не может вызвать CLOSE/EXIT.
+METRIC_AVAILABILITY_CONTRACT задаёт цепочку PRIMARY → FALLBACK_SOURCE →
+LAST_GOOD_CACHE → MATHEMATICAL_PROXY. Используй fallback только когда он явно
+помечен source/age/quality/proxy status; запрещено придумывать значение или
+выдавать proxy за primary. active_edge_provisional_weight — production bounded
+soft-ranking только внутри hard-risk/CVaR eligible policies; EDE causal/prospective
+shadow сам по себе не имеет production directional authority и не может вызвать
+CLOSE/EXIT.
 """
 _impl.SYSTEM_PROMPT = SYSTEM_PROMPT
 
