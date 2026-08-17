@@ -17,7 +17,10 @@ from .research_acceptance_gate import worker_acceptance_gate_state
 
 
 RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
-RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v6-memory-pressure"
+# Keep the established readiness contract identifier: memory-pressure yielding is
+# an operational guard around the same bounded-v5 research semantics, not a new
+# research/scalability algorithm.
+RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v5"
 RESEARCH_INTERVAL_SEC = 10.0
 RESEARCH_STARTUP_GRACE_SEC = 5 * 60.0
 G1S_BATCH = 500
