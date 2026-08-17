@@ -221,3 +221,9 @@ del _install_active_edge_ai_integration
 from .g1_management_active_edge_attribution import install_g1_management_active_edge_attribution as _install_g1_management_active_edge_attribution
 _install_g1_management_active_edge_attribution()
 del _install_g1_management_active_edge_attribution
+
+# Operational deletion is the final Journal lifecycle boundary: hide a trade
+# from user/live management while preserving frozen prospective evidence.
+from .trade_delete_lifecycle import install_trade_delete_lifecycle as _install_trade_delete_lifecycle
+_install_trade_delete_lifecycle()
+del _install_trade_delete_lifecycle
