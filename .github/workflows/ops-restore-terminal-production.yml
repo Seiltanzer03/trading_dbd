@@ -5,57 +5,57 @@ on:
     paths: [.github/workflows/ops-restore-terminal-production.yml]
 
 jobs:
-  temporary-production-headroom:
+  post-deploy-soak:
     runs-on: ubuntu-22.04
     steps:
-      - name: Add swap headroom and restore terminal if degraded
+      - name: Verify exact production after research-worker boundary
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 5m
+          command_timeout: 8m
           script: |
             set -euo pipefail
-            echo '=== BEFORE ==='
-            free -h
-            swapon --show || true
-            swap_mb=$(free -m | awk '/^Swap:/ {print $2}')
-            if [ "${swap_mb:-0}" -lt 2500 ]; then
-              echo 'Adding 2 GiB emergency swap headroom'
-              if [ ! -f /swapfile-seiltanzer ]; then
-                fallocate -l 2G /swapfile-seiltanzer
-                chmod 600 /swapfile-seiltanzer
-                mkswap /swapfile-seiltanzer
-              fi
-              swapon /swapfile-seiltanzer || true
-              grep -q '^/swapfile-seiltanzer ' /etc/fstab || echo '/swapfile-seiltanzer none swap sw 0 0' >> /etc/fstab
+            EXPECTED_SHA=cce31900e92bccb3b9eb8494ea1e2920f5bf570a
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            active_since=$(systemctl show -p ActiveEnterTimestamp --value seiltanzer)
+            started=$(date -d "$active_since" +%s)
+            now=$(date +%s)
+            age=$((now-started))
+            echo "service_age_before_soak=${age}s"
+            # The G1 research worker has a 5-minute startup grace. Validate well
+            # after that boundary, where the old process previously exploded.
+            if [ "$age" -lt 390 ]; then
+              sleep $((390-age))
             fi
             pid=$(systemctl show -p MainPID --value seiltanzer)
-            rss_kb=0
-            if [ -r "/proc/$pid/status" ]; then
-              rss_kb=$(awk '/^VmRSS:/ {print $2}' /proc/$pid/status)
-            fi
-            code=$(curl -sS -o /dev/null --connect-timeout 2 --max-time 8 -w '%{http_code}' http://127.0.0.1:8790/api/state 2>/dev/null || true)
-            echo "before pid=$pid rss_kb=${rss_kb:-0} state_http=${code:-000}"
-            if [ "$code" != '200' ] || [ "${rss_kb:-0}" -gt 1500000 ]; then
-              systemctl restart seiltanzer
-              ready=0
-              for attempt in $(seq 1 70); do
-                code=$(curl -sS -o /dev/null --connect-timeout 1 --max-time 4 -w '%{http_code}' http://127.0.0.1:8790/api/state 2>/dev/null || true)
-                echo "attempt=$attempt state_http=${code:-000}"
-                if [ "$code" = '200' ]; then ready=1; break; fi
-                sleep 2
-              done
-              test "$ready" = '1'
-            fi
-            echo '=== AFTER ==='
+            active=$(systemctl is-active seiltanzer)
+            rss_kb=$(awk '/^VmRSS:/ {print $2}' /proc/$pid/status)
+            rss_mb=$((rss_kb/1024))
+            echo "active=$active pid=$pid rss_mb=$rss_mb"
+            systemctl show seiltanzer -p MemoryCurrent -p MemoryPeak -p NRestarts -p ActiveState -p SubState
             free -h
-            swapon --show
-            systemctl is-active seiltanzer
-            curl -sS --resolve seiltanzer.ru:443:127.0.0.1 -o /dev/null --connect-timeout 2 --max-time 12 -w 'sni_https_http=%{http_code}\n' https://seiltanzer.ru/
-      - name: Verify public HTTPS
+            echo '=== HTTP ==='
+            curl -sS -o /dev/null --connect-timeout 2 --max-time 10 -w 'root_http=%{http_code} time=%{time_total}\n' http://127.0.0.1:8790/
+            curl -sS -o /dev/null --connect-timeout 2 --max-time 10 -w 'state_http=%{http_code} time=%{time_total}\n' http://127.0.0.1:8790/api/state
+            curl -sS --resolve seiltanzer.ru:443:127.0.0.1 -o /dev/null --connect-timeout 2 --max-time 10 -w 'sni_https_http=%{http_code} time=%{time_total}\n' https://seiltanzer.ru/
+            echo '=== FIX PRESENCE ==='
+            if grep -q "import './ai_decision_ack.js'" /opt/seiltanzer/seiltanzer/web/js/util.js; then
+              echo 'legacy duplicate ACK import still present'; exit 1
+            fi
+            grep -F 'DEFAULT_PROVIDER_TIMEOUT_SEC = 25.0' /opt/seiltanzer/seiltanzer/ai_provider_guard.py
+            grep -F 'production-resource-guard-v2-memory-pressure' /opt/seiltanzer/seiltanzer/production_resource_guard.py
+            echo '=== OOM SINCE CURRENT SERVICE START ==='
+            oom=$(journalctl -k --since "$active_since" --no-pager 2>/dev/null | grep -Ei 'out of memory|oom-kill|killed process.*python' || true)
+            if [ -n "$oom" ]; then echo "$oom"; exit 1; fi
+            test "$active" = active
+            test "$rss_mb" -lt 1500
+            test "$(curl -sS -o /dev/null --connect-timeout 2 --max-time 10 -w '%{http_code}' http://127.0.0.1:8790/api/state)" = 200
+      - name: Verify public HTTPS from outside VPS
         run: |
           set -euo pipefail
-          test "$(curl -sS -o /dev/null --connect-timeout 5 --max-time 20 -w '%{http_code}' https://seiltanzer.ru/)" = '200'
+          code=$(curl -sS -o /dev/null --connect-timeout 5 --max-time 20 -w '%{http_code}' https://seiltanzer.ru/)
+          echo "public_https=$code"
+          test "$code" = 200
