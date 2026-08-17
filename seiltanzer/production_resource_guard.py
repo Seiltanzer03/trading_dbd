@@ -1,22 +1,22 @@
 """Production resource guard for the small shared VPS.
 
-This module changes no market/research mathematics.  It only bounds concurrent
-memory-heavy network/dataframe refreshes and the passive collector's retained
-MarketData objects.  The production host has limited RAM, so several yfinance /
-pandas jobs running in parallel can create a transient RSS peak large enough for
-Linux OOM to kill the long-lived web process.
+This module changes no market/research mathematics. It serializes large refreshes,
+trims released allocator arenas and sheds low-priority data/research work when the
+long-lived web process approaches the host RAM limit. Missing/stale data remains
+explicit; preserving terminal availability outranks optional background refreshes.
 """
 from __future__ import annotations
 
 import ctypes
 import gc
+import os
 import threading
 import time
 from functools import wraps
 from typing import Any, Callable
 
 
-RESOURCE_GUARD_VERSION = "production-resource-guard-v1"
+RESOURCE_GUARD_VERSION = "production-resource-guard-v2-memory-pressure"
 _HEAVY_FEED_METHODS = (
     "refresh_intraday",
     "refresh_vols",
@@ -25,9 +25,36 @@ _HEAVY_FEED_METHODS = (
     "refresh_iv_surface",
     "refresh_correlation",
 )
+_OPTIONAL_AT_HARD_PRESSURE = {
+    "refresh_daily",
+    "refresh_chain",
+    "refresh_iv_surface",
+    "refresh_correlation",
+}
 _HEAVY_LOCK = threading.RLock()
 _LAST_TRIM_TS = 0.0
 _TRIM_LOCK = threading.Lock()
+
+
+def _env_mib(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(128, value)
+
+
+# Production host is ~1.9 GiB RAM. Pause research/passive collection early,
+# before a pandas/yfinance allocation can push the process into global OOM.
+MEMORY_SOFT_MIB = _env_mib("SEILTZANZER_MEMORY_SOFT_MIB", 850)
+MEMORY_HARD_MIB = max(
+    MEMORY_SOFT_MIB + 128,
+    _env_mib("SEILTZANZER_MEMORY_HARD_MIB", 1200),
+)
+MEMORY_CRITICAL_MIB = max(
+    MEMORY_HARD_MIB + 128,
+    _env_mib("SEILTZANZER_MEMORY_CRITICAL_MIB", 1450),
+)
 
 
 def _rss_bytes() -> int | None:
@@ -41,13 +68,34 @@ def _rss_bytes() -> int | None:
     return None
 
 
-def _trim_allocator(*, min_interval_sec: float = 15.0) -> None:
-    """Return free glibc arenas to the OS when available.
+def memory_pressure_state(rss_bytes: int | None = None) -> dict[str, Any]:
+    rss = _rss_bytes() if rss_bytes is None else rss_bytes
+    rss_mib = (rss / (1024 * 1024)) if rss is not None else None
+    if rss_mib is None:
+        level = "unknown"
+    elif rss_mib >= MEMORY_CRITICAL_MIB:
+        level = "critical"
+    elif rss_mib >= MEMORY_HARD_MIB:
+        level = "hard"
+    elif rss_mib >= MEMORY_SOFT_MIB:
+        level = "soft"
+    else:
+        level = "normal"
+    return {
+        "level": level,
+        "rss_bytes": rss,
+        "rss_mib": round(rss_mib, 2) if rss_mib is not None else None,
+        "soft_mib": MEMORY_SOFT_MIB,
+        "hard_mib": MEMORY_HARD_MIB,
+        "critical_mib": MEMORY_CRITICAL_MIB,
+        "pause_background": level in {"soft", "hard", "critical"},
+        "shed_optional_feeds": level in {"hard", "critical"},
+        "shed_all_heavy_feeds": level == "critical",
+    }
 
-    ``malloc_trim`` is an allocator housekeeping operation; it does not change
-    Python objects or numerical results.  It is intentionally throttled because
-    feed refreshes can finish several times per minute.
-    """
+
+def _trim_allocator(*, min_interval_sec: float = 15.0) -> None:
+    """Return free glibc arenas to the OS when available."""
     global _LAST_TRIM_TS
     now = time.monotonic()
     if now - _LAST_TRIM_TS < min_interval_sec:
@@ -73,15 +121,56 @@ def _trim_allocator(*, min_interval_sec: float = 15.0) -> None:
         _TRIM_LOCK.release()
 
 
+def trim_memory_for_pressure() -> None:
+    _trim_allocator(min_interval_sec=0.0)
+
+
+def _mark_pressure_degraded(owner: Any, method_name: str, pressure: dict[str, Any]) -> None:
+    """Never let a skipped refresh masquerade as newly-fresh market data."""
+    message = (
+        f"refresh skipped under {pressure['level']} memory pressure "
+        f"({pressure.get('rss_mib')} MiB RSS)"
+    )
+    attr_by_method = {
+        "refresh_daily": "daily",
+        "refresh_chain": "chain",
+        "refresh_iv_surface": "iv_surface",
+        "refresh_correlation": "correlation",
+    }
+    attr = attr_by_method.get(method_name)
+    if attr:
+        state = getattr(owner, attr, None)
+        if isinstance(state, dict):
+            state["status"] = "delayed" if state.get("ts") is not None else "no_data"
+            state["fresh"] = False
+            state["error"] = message[:200]
+    if method_name == "refresh_vols":
+        vols = getattr(owner, "vols", None)
+        if isinstance(vols, dict):
+            for state in vols.values():
+                if isinstance(state, dict):
+                    state["status"] = "delayed" if state.get("ts") is not None else "no_data"
+                    state["fresh"] = False
+                    state["error"] = message[:200]
+
+
 def _wrap_heavy_refresh(method: Callable[..., Any]) -> Callable[..., Any]:
     if getattr(method, "_production_resource_guard_version", None) == RESOURCE_GUARD_VERSION:
         return method
+    method_name = getattr(method, "__name__", "")
 
     @wraps(method)
     def guarded(*args: Any, **kwargs: Any) -> Any:
-        # One dataframe/network-heavy refresh at a time across the main market
-        # object and all passive/research MarketData instances.
         with _HEAVY_LOCK:
+            pressure = memory_pressure_state()
+            should_shed = pressure["shed_all_heavy_feeds"] or (
+                pressure["shed_optional_feeds"] and method_name in _OPTIONAL_AT_HARD_PRESSURE
+            )
+            if should_shed:
+                if args:
+                    _mark_pressure_degraded(args[0], method_name, pressure)
+                _trim_allocator(min_interval_sec=0.0)
+                return None
             try:
                 return method(*args, **kwargs)
             finally:
@@ -110,11 +199,6 @@ def install_production_resource_guard() -> None:
         current = self._feeds.get(instrument)
         if current is not None:
             return current
-        # The collector's declared budget has always been one instrument at a
-        # time.  Retaining a fully-populated MarketData object for every symbol
-        # violated that budget and kept old daily/intraday/option structures in
-        # the long-lived web process.  Persisted evidence lives in SQLite, not
-        # in these feed objects, so eviction is lossless.
         if self._feeds:
             self._feeds.clear()
             _trim_allocator(min_interval_sec=0.0)
@@ -126,13 +210,14 @@ def install_production_resource_guard() -> None:
 
 
 def resource_guard_status() -> dict[str, Any]:
-    rss = _rss_bytes()
+    pressure = memory_pressure_state()
     return {
         "contract_version": RESOURCE_GUARD_VERSION,
         "heavy_feed_parallelism": 1,
         "passive_feed_cache_max": 1,
         "allocator_trim_supported": True,
-        "rss_bytes": rss,
-        "rss_mib": (round(rss / (1024 * 1024), 2) if rss is not None else None),
+        "memory_pressure": pressure,
+        "rss_bytes": pressure["rss_bytes"],
+        "rss_mib": pressure["rss_mib"],
         "mathematics_changed": False,
     }
