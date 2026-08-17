@@ -1,0 +1,25 @@
+name: ai-verdict-trace-0217
+on:
+  push:
+    branches: [agent/ai-verdict-trace-0217]
+    paths: [.github/workflows/ai-verdict-trace-0217.yml]
+jobs:
+  trace:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Read production traceback
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          port: 22
+          command_timeout: 3m
+          script: |
+            set -e
+            echo '=== CURRENT SHA ==='
+            git -C /opt/seiltanzer rev-parse HEAD || true
+            echo '=== TARGET ID CONTEXT ==='
+            journalctl -u seiltanzer --since '2026-08-17 13:40:00 UTC' --no-pager -o short-iso | grep -B 80 -A 120 'ai-0217d89380ae4940b39f' || true
+            echo '=== RECENT AI/SNAPSHOT FAILURES ==='
+            journalctl -u seiltanzer --since '2026-08-17 13:40:00 UTC' --no-pager -o short-iso | grep -E -B 25 -A 80 'snapshot|Сним|ai-[0-9a-f]+|Traceback|RuntimeError|HTTP 500|snapshot_budget' | tail -n 900 || true
