@@ -7,6 +7,7 @@ import json
 import uvicorn
 
 from .ai_provider_guard import install_ai_provider_guard
+from .ai_report_semantics_guard import install_ai_report_semantics_guard
 from .ai_snapshot_budget_guard import install_ai_snapshot_budget_guard
 from .analytics_runtime import install_analytics_runtime
 from .app import create_app
@@ -76,6 +77,11 @@ def main() -> None:
     # turn a valid deterministic management snapshot into HTTP 500 merely by
     # crossing the AI byte ceiling.
     install_ai_snapshot_budget_guard()
+
+    # Keep stateful active-stop geometry and compact-report semantics internally
+    # consistent. This repairs presentation/snapshot metadata only; policy math,
+    # CVaR, Active Edge and execution authority remain untouched.
+    install_ai_report_semantics_guard()
 
     # OpenRouter is explanation-only. Bound it before FastAPI captures the
     # request path so a slow provider can never block the deterministic Verdict
