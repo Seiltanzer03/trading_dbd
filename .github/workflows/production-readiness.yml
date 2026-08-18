@@ -1,0 +1,52 @@
+name: production-readiness
+
+# Manual diagnostic only. Automatic production acceptance is atomic inside
+# deploy.yml so EXPECTED_SHA cannot drift across workflow_run boundaries.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact already-deployed SHA to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - name: Verify exact deployed production from localhost over SSH
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 10m
+          envs: EXPECTED_SHA
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/production_readiness_check.py \
+              --expected-sha "$EXPECTED_SHA"
+
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import time
+            import urllib.request
+
+            url = "http://127.0.0.1:8790/api/research/g1/q/audit?limit=5000"
+            started = time.monotonic()
+            with urllib.request.urlopen(url, timeout=5.0) as response:
+                response.read()
+                code = int(response.status)
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            print(f"Q_AUDIT_3000MS_GATE http={code} elapsed={elapsed_ms:.0f}ms")
+            assert code == 200, (code, url)
+            assert elapsed_ms < 3000.0, (elapsed_ms, 3000.0)
+            PY
