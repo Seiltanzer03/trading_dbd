@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from .llm_edge_evaluator import edge_evaluator_status, evaluate_edge_research_run
 from .llm_edge_researcher import edge_researcher_status, propose_edge_hypotheses
 from .research_llm_cost_guard import guarded_edge_researcher_provider
 
@@ -15,7 +16,10 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
         raise RuntimeError("G.1S integration must be installed before LLM edge researcher")
 
     def status():
-        return edge_researcher_status(runtime)
+        return {
+            **edge_researcher_status(runtime),
+            "deterministic_evaluator": edge_evaluator_status(runtime),
+        }
 
     app.add_api_route(
         "/api/research/g1s/edge-researcher/status",
@@ -37,5 +41,16 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
         propose,
         methods=["POST"],
         name="g1s_llm_edge_researcher_propose",
+    )
+
+    def evaluate(run_id: str | None = None):
+        # Deterministic only: no provider call and no Active Edge write.
+        return evaluate_edge_research_run(runtime, run_id)
+
+    app.add_api_route(
+        "/api/research/g1s/edge-researcher/evaluate",
+        evaluate,
+        methods=["POST"],
+        name="g1s_llm_edge_researcher_evaluate",
     )
     app.state.llm_edge_researcher_routes_installed = True
