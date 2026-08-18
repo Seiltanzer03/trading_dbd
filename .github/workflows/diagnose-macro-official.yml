@@ -14,30 +14,25 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -e .
-      - name: Fetch and inspect current official reports
+      - name: Fetch and parse current official reports
         run: |
           python - <<'PY'
-          import json, httpx
-          from seiltanzer.macro_numeric_data import OfficialNumericMacroSource, ISM_INDEX_URL, _LinkAndTableParser
+          import json
+          from seiltanzer.macro_numeric_data import OfficialNumericMacroSource
+          from seiltanzer.macro_ism_resilience import fetch_latest_direct_ism
           src = OfficialNumericMacroSource(timeout_sec=15)
           fetched, bls = src.fetch_bls()
           print('BLS', fetched, json.dumps(bls, ensure_ascii=False, sort_keys=True))
           assert set(bls) == {'CPI','NFP'}
-          with httpx.Client(timeout=15, follow_redirects=True, headers={'User-Agent':'Seiltanzer-Macro-Research/1.0'}) as client:
-              response = client.get(ISM_INDEX_URL); response.raise_for_status()
-          parser = _LinkAndTableParser(); parser.feed(response.text)
-          print('ISM LINKS')
-          for href in parser.links:
-              if 'pmi' in href.lower() or 'report' in href.lower() or 'service' in href.lower():
-                  print(href)
-          try:
-              fetched, ism = src.fetch_ism()
-          except Exception as exc:
-              print('ISM FETCH ERROR', type(exc).__name__, str(exc))
-              raise
+          fetched, ism = fetch_latest_direct_ism(src)
           print('ISM', fetched, json.dumps(ism, ensure_ascii=False, sort_keys=True))
           assert set(ism) == {'ISM_MANUFACTURING','ISM_SERVICES'}
           assert ism['ISM_MANUFACTURING']['metrics']['pmi']['current'] > 0
           assert ism['ISM_SERVICES']['metrics']['pmi']['current'] > 0
+          assert ism['ISM_MANUFACTURING']['acquisition']['period_validated'] is True
+          assert ism['ISM_SERVICES']['acquisition']['period_validated'] is True
+          for payload in [*bls.values(), *ism.values()]:
+              assert payload['consensus_available'] is False
+              assert payload['surprise_computed'] is False
           print('LIVE OFFICIAL MACRO PARSER PASS')
           PY
