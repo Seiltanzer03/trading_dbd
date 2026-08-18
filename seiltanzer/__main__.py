@@ -15,6 +15,7 @@ from .app_extensions import install_lattice_revaluation
 from .config import Settings
 from .database_authority import install_database_authority
 from .g1_baseline_routes import install_g1_baseline_routes
+from .g1_historical_analog_routes import install_g1_historical_analog_routes
 from .g1_intelligence_routes import install_g1_intelligence_routes
 from .g1_intelligence_runtime import install_intelligence_runtime
 from .g1_management_routes import install_g1_management_routes
@@ -26,6 +27,7 @@ from .g1_shadow_routes import install_g1_shadow_routes
 from .g1_short_horizon_integration import ensure_g1s_schema_backup
 from .g1_short_horizon_routes import install_g1_short_horizon_routes
 from .lattice_visual_history import install_lattice_visual_history
+from .macro_data_factory_routes import install_macro_data_factory_routes
 from .maintenance.venv_cleanup import remediate_current_environment
 from .option_feed_resilience import install_option_feed_resilience
 from .option_shadow_state import install_option_shadow_state
@@ -145,6 +147,12 @@ def main() -> None:
     install_g1_shadow_routes(app)
     install_g1_management_routes(app)
     install_g1_short_horizon_routes(app)
+    # Read-only nearest historical T0 analogs. The route performs no network,
+    # training or LLM work and has no production decision authority.
+    install_g1_historical_analog_routes(app)
+    # Macro extraction is explicit and research-only. Status/latest reads never
+    # call an LLM, and semantic records become causal only after available_at.
+    install_macro_data_factory_routes(app)
 
     # Universe Lab is deliberately installed after research runtimes and lives
     # on its own page. Removing these two calls and the isolated files removes
