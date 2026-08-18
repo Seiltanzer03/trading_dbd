@@ -18,7 +18,7 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +29,12 @@ jobs:
         run: |
           set -euo pipefail
           verdict=""
-          for attempt in $(seq 1 90); do
+          # Full Python + frontend + real WebKit CI is intentionally heavier than
+          # the delivery job. Keep an explicit bounded 12-minute gate so a normal
+          # 5-7 minute WebKit run cannot fail deploy before code ever reaches VPS.
+          # Exact-SHA semantics stay unchanged: a different/newer main commit can
+          # never satisfy this delivery gate.
+          for attempt in $(seq 1 360); do
             body=$(curl -fsS --max-time 5 \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer $GH_TOKEN" \
@@ -42,7 +47,7 @@ jobs:
           print(states.get('ci/full-webkit','pending'))
           PY
             )
-            echo "ci/full-webkit attempt=$attempt state=$verdict"
+            echo "ci/full-webkit attempt=$attempt/360 state=$verdict"
             if [ "$verdict" = "success" ]; then break; fi
             if [ "$verdict" = "failure" ] || [ "$verdict" = "error" ]; then
               echo "::error::Exact-SHA CI failed; refusing production delivery"
@@ -50,7 +55,10 @@ jobs:
             fi
             sleep 2
           done
-          test "$verdict" = "success"
+          if [ "$verdict" != "success" ]; then
+            echo "::error::Exact-SHA CI did not publish success within the bounded 12-minute gate"
+            exit 1
+          fi
 
       - name: Deliver exact SHA over SSH
         uses: appleboy/ssh-action@v1
@@ -68,10 +76,6 @@ jobs:
             git config --global --add safe.directory /opt/seiltanzer || true
             cd /opt/seiltanzer
 
-            # Capture the state that existed before this deployment. A previous
-            # deploy could look green from an instantaneous systemd check while
-            # the web process died later, so preserve enough evidence to diagnose
-            # crash/OOM/resource failures on the next delivery.
             echo '=== PRE-DEPLOY SERVICE DIAGNOSTICS ==='
             systemctl status seiltanzer --no-pager -l || true
             echo '=== RECENT SEILTANZER JOURNAL ==='
@@ -83,10 +87,6 @@ jobs:
             free -h || true
             df -h / /opt/seiltanzer || true
 
-            # EDE v1.3.13 moves all CPU-heavy EDE work off production. Stop any
-            # legacy transient audit unit started by an older workflow before
-            # installing the new SHA, so an in-flight pre-offload run cannot keep
-            # consuming VPS resources after this deployment.
             while read -r unit _; do
               [ -n "$unit" ] || continue
               case "$unit" in
@@ -99,9 +99,6 @@ jobs:
               esac
             done < <(systemctl list-units --all --type=service --no-legend 'seiltanzer-ede-*' || true)
 
-            # Backstop for a legacy controller whose transient unit metadata was
-            # already collected while its child still exists. Bracket the first
-            # character so pkill cannot match this SSH shell's own script text.
             pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_v13_audit.py' >/dev/null 2>&1 || true
             pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_transition_audit.py' >/dev/null 2>&1 || true
 
@@ -118,10 +115,6 @@ jobs:
               /opt/seiltanzer/scripts/g1e1_cleanup_venv.py --site-packages "$SITE" --apply || true
             /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
 
-            # Bound allocator/thread-pool overhead for the 2 GB production host.
-            # This does not change any numerical formula: it prevents glibc from
-            # keeping many per-thread arenas after pandas/yfinance/numpy bursts
-            # and avoids BLAS spawning memory-hungry worker pools in the web PID.
             mkdir -p /etc/systemd/system/seiltanzer.service.d
             cat >/etc/systemd/system/seiltanzer.service.d/20-memory-budget.conf <<'EOF'
             [Service]
@@ -138,11 +131,6 @@ jobs:
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
 
-            # A process being briefly "active" is not readiness. The 2 GB VPS can
-            # spend well over 36s rebuilding bounded research/runtime state before
-            # uvicorn begins listening, while the endpoint latency itself remains
-            # within the same 3s budget once the socket is up. Allow up to ~90s
-            # for that startup phase instead of generating a false deploy failure.
             ready=0
             for attempt in $(seq 1 45); do
               active=$(systemctl is-active seiltanzer 2>/dev/null || true)
