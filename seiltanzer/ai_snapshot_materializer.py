@@ -2,13 +2,13 @@
 
 The Position Manager already tells the trader when a new review is useful:
 new option chain, roughly +/-0.15R from the reviewed state, a strategy/risk
-boundary, cancellation boundary, or a trade edit.  Re-running the full 6,500-path
-policy stack every few seconds would only burn the 2 GB VPS.  This module therefore
+boundary, cancellation boundary, or a trade edit. Re-running the full 6,500-path
+policy stack every few seconds would only burn the 2 GB VPS. This module therefore
 keeps one full snapshot and rebuilds it only when one of those review events occurs.
 
-The heavy policy/CVaR math is unchanged and remains authoritative.  The HTTP route
+The heavy policy/CVaR math is unchanged and remains authoritative. The HTTP route
 only reads a same-trade, non-invalidated snapshot and then optionally asks the LLM
-to explain it.  While an event-triggered rebuild is in progress callers receive a
+to explain it. While an event-triggered rebuild is in progress callers receive a
 fast retryable 503 rather than sitting behind the reverse proxy until HTTP 504.
 """
 from __future__ import annotations
@@ -19,6 +19,8 @@ import math
 import threading
 import time
 from typing import Any, Callable
+
+from fastapi.responses import JSONResponse
 
 
 MATERIALIZER_VERSION = "ai-snapshot-materializer-v2-event-driven"
@@ -141,11 +143,7 @@ class AISnapshotMaterializer:
         return _r_from_price(trade or {}, self._current_price(trade))
 
     def _current_chain_marker(self) -> str | None:
-        """Return a cheap identity for the already-fetched option chain.
-
-        No network call is made here.  The market collector owns refresh cadence;
-        we only notice when its current in-memory chain changes.
-        """
+        """Return a cheap identity for the already-fetched option chain."""
         market = getattr(self.engine, "market", None)
         chain = getattr(market, "chain", None)
         if not isinstance(chain, dict):
@@ -157,8 +155,6 @@ class AISnapshotMaterializer:
         source = chain.get("source")
         age = _finite(chain.get("age_sec"))
         if source not in (None, "") and age is not None:
-            # Coarse fallback: 60-second bucket prevents age ticking itself from
-            # generating a rebuild every watcher iteration.
             bucket = int(max(0.0, time.time() - age) // 60)
             return f"source:{source}|minute:{bucket}"
         return None
@@ -192,6 +188,8 @@ class AISnapshotMaterializer:
             baseline_r = self._current_r(trade)
         lower_r = baseline_r - self.review_delta_r if baseline_r is not None else None
         upper_r = baseline_r + self.review_delta_r if baseline_r is not None else None
+        lower_price = _price_from_r(trade, lower_r)
+        upper_price = _price_from_r(trade, upper_r)
         boundaries = self._snapshot_boundaries(snapshot, trade)
         return {
             "contract_version": "ai-next-review-trigger-v1",
@@ -199,8 +197,8 @@ class AISnapshotMaterializer:
             "movement_delta_r": self.review_delta_r,
             "lower_r": round(lower_r, 6) if lower_r is not None else None,
             "upper_r": round(upper_r, 6) if upper_r is not None else None,
-            "lower_price": round(_price_from_r(trade, lower_r), 6) if lower_r is not None and _price_from_r(trade, lower_r) is not None else None,
-            "upper_price": round(_price_from_r(trade, upper_r), 6) if upper_r is not None and _price_from_r(trade, upper_r) is not None else None,
+            "lower_price": round(lower_price, 6) if lower_price is not None else None,
+            "upper_price": round(upper_price, 6) if upper_price is not None else None,
             "boundary_r": [round(x, 6) for x in boundaries],
             "also_on": [
                 "NEW_OPTION_CHAIN", "STRATEGY_OR_RISK_BOUNDARY",
@@ -298,10 +296,17 @@ class AISnapshotMaterializer:
             self._build_started_at = started_wall
         try:
             snapshot = self.builder(self.engine)
-            snapshot_trade = str(snapshot.get("trade_id")) if isinstance(snapshot, dict) and snapshot.get("trade_id") is not None else None
-            if not isinstance(snapshot, dict) or snapshot_trade != current_trade or not isinstance(snapshot.get("policy_manager"), dict):
+            snapshot_trade = (
+                str(snapshot.get("trade_id"))
+                if isinstance(snapshot, dict) and snapshot.get("trade_id") is not None
+                else None
+            )
+            if (
+                not isinstance(snapshot, dict)
+                or snapshot_trade != current_trade
+                or not isinstance(snapshot.get("policy_manager"), dict)
+            ):
                 raise RuntimeError("BUILT_SNAPSHOT_TRADE_MISMATCH_OR_UNAVAILABLE")
-            # Re-read trade because policy construction may synchronize BE/state.
             final_trade = self.current_trade() or current_trade_row or {}
             trigger = self._annotate_review_trigger(snapshot, final_trade)
             finished = time.time()
@@ -335,8 +340,6 @@ class AISnapshotMaterializer:
         except Exception as exc:
             with self._lock:
                 self._last_error = f"{type(exc).__name__}:{str(exc)[:220]}"
-                # Keep invalidated=true so the worker retries; never silently
-                # mark an old crossed-threshold snapshot current again.
                 if self._invalidated_reason is None:
                     self._invalidated_reason = "BUILD_FAILED_RETRYING"
         finally:
@@ -346,8 +349,9 @@ class AISnapshotMaterializer:
 
     def status(self) -> dict[str, Any]:
         now = time.time()
-        current_trade = self.current_trade_id()
-        live_r = self._current_r(self.current_trade())
+        trade = self.current_trade()
+        current_trade = _trade_id(trade)
+        live_r = self._current_r(trade)
         with self._lock:
             age = max(0.0, now - self._built_at) if self._built_at is not None else None
             ready = bool(
@@ -407,6 +411,23 @@ def _engine_from_ai_route(app: Any) -> Any:
     raise RuntimeError("AI_VERDICT_ENGINE_NOT_FOUND")
 
 
+def _warming_response(status: dict[str, Any]) -> JSONResponse:
+    reason = status.get("reason") or status.get("invalidated_reason") or "SNAPSHOT_WARMING"
+    return JSONResponse(
+        {
+            "error": {
+                "code": "ai_snapshot_warming",
+                "message": "Детерминированный пересчёт сделки выполняется по достигнутому уровню; результат будет запрошен повторно автоматически.",
+                "retriable": True,
+            },
+            "retry_after_sec": 2,
+            "snapshot": {**status, "reason": reason},
+        },
+        status_code=503,
+        headers={"Retry-After": "2"},
+    )
+
+
 def install_ai_snapshot_materializer(app: Any) -> AISnapshotMaterializer:
     """Install one production materializer without changing deterministic math."""
     existing = getattr(app.state, "ai_snapshot_materializer", None)
@@ -419,6 +440,26 @@ def install_ai_snapshot_materializer(app: Any) -> AISnapshotMaterializer:
     materializer = AISnapshotMaterializer(engine, original_builder)
     app.state.ai_snapshot_materializer = materializer
     app_module.build_snapshot = materializer.cached_build_snapshot
+
+    @app.middleware("http")
+    async def _ai_materializer_gate(request, call_next):
+        if request.url.path == "/api/ai/verdict" and request.method.upper() == "POST":
+            reason = materializer._event_reason()
+            if reason:
+                if reason != "NO_ACTIVE_TRADE":
+                    materializer.request_refresh(reason)
+                return _warming_response({**materializer.status(), "reason": reason})
+            response = await call_next(request)
+            # Race backstop: if the event crossed after preflight but before the
+            # route read its snapshot, convert only that warm-up failure to 503.
+            if response.status_code == 500:
+                status = materializer.status()
+                if not status.get("ready") and (
+                    status.get("building") or status.get("invalidated_reason")
+                ):
+                    return _warming_response(status)
+            return response
+        return await call_next(request)
 
     @app.get("/api/ai/snapshot/status")
     def ai_snapshot_status():
