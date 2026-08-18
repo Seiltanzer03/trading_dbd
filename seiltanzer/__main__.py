@@ -9,6 +9,7 @@ import uvicorn
 from .ai_provider_guard import install_ai_provider_guard
 from .ai_report_semantics_guard import install_ai_report_semantics_guard
 from .ai_snapshot_budget_guard import install_ai_snapshot_budget_guard
+from .ai_snapshot_causality_refinement import install_ai_snapshot_causality_refinement
 from .ai_snapshot_materializer import install_ai_snapshot_materializer
 from .ai_snapshot_runtime_guard import install_ai_snapshot_runtime_guard
 from .analytics_runtime import install_analytics_runtime
@@ -98,6 +99,9 @@ def main() -> None:
     # bounded cache read + optional OpenRouter explanation. Heavy recomputation
     # is event-driven by the review geometry (normally +/-0.15R), not a timer.
     materializer = install_ai_snapshot_materializer(app)
+    # Materializer completion time is operational telemetry and occurs after T0;
+    # keep it in /api/ai/snapshot/status, never inside canonical decision evidence.
+    install_ai_snapshot_causality_refinement(materializer)
     # A deterministic calculation failure must not hot-loop every 2 seconds, and
     # an empty journal must preserve the existing fast no_active_trade response.
     install_ai_snapshot_runtime_guard(app, materializer)

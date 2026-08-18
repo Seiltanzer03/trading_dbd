@@ -9,11 +9,16 @@ from fastapi import FastAPI
 from .fomc_official_source import refresh_latest_fomc
 from .macro_data_factory import MacroDataFactory
 from .macro_data_factory_causality_refinement import install_macro_data_factory_causality_refinement
+from .macro_fomc_extraction_refinement import install_fomc_extraction_refinement
 from .macro_fomc_runtime import FOMCOfficialRuntime
 from .macro_ism_parser_refinement import install_ism_roundup_parser_refinement
 from .macro_ism_resilience import install_ism_source_resilience
 from .macro_numeric_data import NumericMacroRuntime, NumericMacroStore, research_context
 from .macro_t0_context import install_macro_t0_context
+from .macro_transport_refinement import (
+    install_macro_transport_refinement,
+    macro_transport_status,
+)
 from .research_llm_cost_guard import (
     cost_guard_status,
     guarded_macro_extractor,
@@ -29,6 +34,13 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         raise RuntimeError("G.1S integration must be installed before macro data factory")
     os.environ.setdefault("DATA_FACTORY_MODEL", "openai/gpt-4o-mini")
     install_macro_data_factory_causality_refinement()
+    # A rejected v1 extraction stays immutable audit evidence. V2 changes the
+    # prompt/cache key and asks OpenRouter for a strict six-field JSON schema.
+    install_fomc_extraction_refinement()
+    # The production VPS can be 403-blocked by public BLS/ISM endpoints while a
+    # hosted runner succeeds. Reuse the configured outbound transport only; the
+    # official URLs, parsers, first-seen timestamps and provenance remain exact.
+    install_macro_transport_refinement()
     # The current Services roundup uses "increasing 0.1 percentage point to 54.1";
     # install the narrow official-prose refinement before the source wrapper.
     install_ism_roundup_parser_refinement()
@@ -59,6 +71,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         return {
             **factory.status(),
             "numeric": numeric_runtime.status(),
+            "numeric_transport": macro_transport_status(),
             "fomc_runtime": fomc_runtime.status(),
             "llm_cost_guard": cost_guard_status(),
             "official_families": [
