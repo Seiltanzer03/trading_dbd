@@ -1,6 +1,10 @@
 import pytest
 
+from seiltanzer.macro_ism_parser_refinement import install_ism_roundup_parser_refinement
 from seiltanzer.macro_ism_resilience import parse_ism_roundup
+
+
+install_ism_roundup_parser_refinement()
 
 
 PREVIOUS_MFG = {
@@ -35,7 +39,7 @@ def test_manufacturing_roundup_joins_only_previous_official_values():
     <p>The July data confirmed demand: The New Orders (56.7 percent) index increased.</p>
     <p>The Production Index registered 58.5 percent.</p>
     <p>The Employment Index registered 52.8 percent.</p>
-    <p>The Prices Index (71.1 percent) remained elevated.</p>
+    <p>The Prices Index showed continuing cooling, down 1.9 percentage points to 71.1 percent.</p>
     </html>
     """
     report = parse_ism_roundup(
@@ -52,6 +56,7 @@ def test_manufacturing_roundup_joins_only_previous_official_values():
     }
     assert report["metrics"]["production"]["change_pp"] == pytest.approx(6.3)
     assert report["metrics"]["employment"]["change_pp"] == pytest.approx(3.1)
+    assert report["metrics"]["prices"]["change_pp"] == pytest.approx(-1.9)
     assert report["consensus_available"] is False
     assert report["surprise_computed"] is False
 
