@@ -3,6 +3,7 @@ import threading
 import time
 
 from seiltanzer.macro_data_factory import EXTRACTOR_SYSTEM_PROMPT, MacroDataFactory
+from seiltanzer.macro_data_factory_causality_refinement import install_macro_data_factory_causality_refinement
 from seiltanzer.macro_t0_context import build_macro_t0_context
 
 
@@ -34,6 +35,7 @@ def semantic(*, previous=False):
 
 
 def live_factory():
+    install_macro_data_factory_causality_refinement()
     runtime = FakeRuntime()
     factory = MacroDataFactory(runtime)
     now = time.time()
@@ -139,7 +141,7 @@ def test_available_at_gate_prevents_semantic_feature_from_appearing_before_extra
 
     assert before["status"] == "UNAVAILABLE"
     assert after["status"] == "VALID"
-    assert after["causal_admission"] == "available_at<=captured_ts AND retrospective_only=false"
+    assert after["causal_admission"] == "available_at<=captured_ts"
 
 
 def test_future_t0_context_freezes_only_semantics_already_available_at_capture():
@@ -157,11 +159,12 @@ def test_future_t0_context_freezes_only_semantics_already_available_at_capture()
     assert after["available"] is True
     assert after["available_at"] <= after["captured_ts"]
     assert after["semantic"]["policy_tone"] == 0.2
+    assert after["historical_backfill_allowed"] is False
     assert after["current_ml_feature_vector_reads_macro_context"] is False
     assert after["production_authority"] is False
 
 
-def test_historical_document_is_retrospective_only_and_never_admitted_to_prospective_t0():
+def test_pre_activation_document_stays_marked_retrospective_but_is_only_usable_after_real_extraction():
     _runtime, factory, now = live_factory()
     result = factory.extract_document({
         "family": "FOMC_STATEMENT", "source": "Federal Reserve archive",
@@ -171,11 +174,35 @@ def test_historical_document_is_retrospective_only_and_never_admitted_to_prospec
 
     assert result["status"] == "VALID"
     assert result["retrospective_only"] is True
-    later = factory.latest_admissible(time.time() + 1000)
-    assert later["status"] == "UNAVAILABLE"
-    assert later["reason"] == "NO_CAUSALLY_AVAILABLE_SEMANTIC_OBSERVATION"
-    context = build_macro_t0_context(factory, time.time() + 1000)
-    assert context["available"] is False
+    available_at = result["available_at"]
+    before = factory.latest_admissible(available_at - 0.001)
+    after = factory.latest_admissible(available_at + 0.001)
+    assert before["status"] == "UNAVAILABLE"
+    assert after["status"] == "VALID"
+    assert after["retrospective_only"] is True
+    assert after["retrospective_publication_never_backfilled"] is True
+    context = build_macro_t0_context(factory, available_at + 0.001)
+    assert context["available"] is True
+    assert context["retrospective_publication"] is True
+    assert context["prospectively_usable_since"] == available_at
+    assert context["historical_backfill_allowed"] is False
+
+
+def test_latest_admissible_prefers_newest_publication_not_latest_extraction_time():
+    _runtime, factory, now = live_factory()
+    newer = factory.extract_document({
+        "family": "FOMC_STATEMENT", "source": "Federal Reserve",
+        "published_at": now - 10, "fetched_at": now - 9,
+        "text": statement("Newer publication."),
+    }, extractor=lambda *_: semantic(previous=False))
+    older = factory.extract_document({
+        "family": "FOMC_STATEMENT", "source": "Federal Reserve archive",
+        "published_at": factory.activation_ts - 3600, "fetched_at": now,
+        "text": statement("Older publication extracted later."),
+    }, extractor=lambda *_: semantic(previous=False))
+
+    latest = factory.latest_admissible(max(newer["available_at"], older["available_at"]) + 0.001)
+    assert latest["document_id"] == newer["document_id"]
 
 
 def test_untrusted_document_prompt_explicitly_blocks_prompt_injection_and_tools():
