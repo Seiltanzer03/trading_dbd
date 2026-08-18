@@ -64,6 +64,7 @@ def test_fomc_v2_requests_strict_six_field_json_schema(monkeypatch):
     result = refinement._extract_v2("current statement text", "previous statement text", "test/model")
 
     assert result == semantic
+    assert captured["body"]["provider"]["require_parameters"] is True
     response_format = captured["body"]["response_format"]
     assert response_format["type"] == "json_schema"
     schema = response_format["json_schema"]
