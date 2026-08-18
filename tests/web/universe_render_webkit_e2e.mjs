@@ -22,10 +22,20 @@ const rates = {
 };
 const edge = {
   instrument:'NAS100', production_authority:false, visualization_only:true,
-  active_edge:{available:true,matched_structured_signal_n:0,supporting_position_n:0,opposing_position_n:0,matched_groups:[]},
+  active_edge:{
+    available:true,matched_structured_signal_n:8,supporting_position_n:0,opposing_position_n:0,
+    directional_matched_signal_n:0,non_directional_matched_signal_n:8,matched_group_n:2,
+    directional_matched_group_n:0,non_directional_matched_group_n:2,
+    directional_weight_available:false,directional_weight_reason:'CURRENT_T0_MATCHES_ARE_NON_DIRECTIONAL',
+    matched_groups:[
+      {target_family:'VOLATILITY',signal_horizon_minutes:15,supporting_n:0,opposing_n:0,net_vote:0,net_vote_ratio:0,matched_n:4,strict_n:0},
+      {target_family:'VOLATILITY',signal_horizon_minutes:60,supporting_n:0,opposing_n:0,net_vote:0,net_vote_ratio:0,matched_n:4,strict_n:0},
+    ]
+  },
   production_weight:{weight_fraction:0,max_weight_fraction:.30,high_risk_only_cap:.30,direction_score:0,strict_directional_share:0,independent_bucket_n:0,hard_risk_override:false,cvar_override:false,may_widen_stop:false,automatic_execution:false},
-  canonical_features:{available_n:6,total_n:8,items:{
+  canonical_features:{available_n:7,total_n:9,items:{
     'price.ret_15m':{feature_id:'price.ret_15m',value:.003,available:true,stale:false},
+    'price.momentum':{feature_id:'price.momentum',value:4e-7,available:true,stale:false},
     'price.trend_efficiency_60':{feature_id:'price.trend_efficiency_60',value:.22,available:true,stale:false},
     'vol.rv15_over_rv60':{feature_id:'vol.rv15_over_rv60',value:.75,available:true,stale:false},
     'option.iv':{feature_id:'option.iv',value:.105,available:true,stale:false},
@@ -77,6 +87,7 @@ await page.addInitScript(()=>{
 page.on('console',(msg)=>{if(msg.type()==='error') console.error('[universe webkit]',msg.text());});
 await page.goto(`http://127.0.0.1:${port}/universe`,{waitUntil:'networkidle'});
 await page.waitForFunction(()=>document.querySelector('#rates-orbit-chart')?._fullLayout?.scene?.camera && document.querySelector('#edge-universe-chart')?._fullLayout?.scene?.camera);
+await page.waitForFunction(()=>document.querySelector('#edge-readout')?.textContent?.includes('NON-DIRECTIONAL'));
 const state=await page.evaluate(()=>({
   ratesButton:document.querySelector('#rates-toggle')?.textContent,
   edgeButton:document.querySelector('#edge-toggle')?.textContent,
@@ -84,21 +95,32 @@ const state=await page.evaluate(()=>({
   edgeTraces:document.querySelector('#edge-universe-chart')?.data?.length||0,
   edgeEmpty:getComputedStyle(document.querySelector('#edge-empty')).display,
   edgeStatus:document.querySelector('#edge-status')?.textContent||'',
+  edgeReadout:document.querySelector('#edge-readout')?.textContent||'',
+  directionalBuckets:document.querySelector('#edge-buckets')?.textContent||'',
+  matchedGroups:document.querySelector('#edge-matched-groups')?.textContent||'',
+  nonDirectional:document.querySelector('#edge-nondirectional')?.textContent||'',
+  momentum:[...document.querySelectorAll('#edge-features .feature-row')].find((row)=>row.querySelector('.id')?.textContent==='price.momentum')?.querySelector('.fv')?.textContent||'',
   featureIds:(document.querySelector('#edge-universe-chart')?.data||[]).flatMap((t)=>Array.isArray(t.customdata)?t.customdata.map((v)=>Array.isArray(v)?v[0]:null):[]).filter(Boolean),
 }));
 assert.equal(state.ratesButton,'ON','rates must start ON on every page load');
 assert.equal(state.edgeButton,'ON','edge must start ON on every page load');
 assert(state.ratesTraces>=4,'rates 3D must render observed curve and nodes');
-assert(state.edgeTraces>=5,'edge 3D must render canonical feature topology even with NO MATCH');
-assert.equal(state.edgeEmpty,'none','NO MATCH must not blank the Edge Universe when canonical T0 exists');
-assert(state.edgeStatus.includes('T0 FEATURES · NO MATCH'),'status must distinguish feature topology from active match');
+assert(state.edgeTraces>=5,'edge 3D must render canonical feature topology');
+assert.equal(state.edgeEmpty,'none','matched/non-matched state must not blank canonical T0 topology');
+assert(state.edgeStatus.includes('8 CURRENT-T0 MATCHES'),'status must preserve total matched conditions');
+assert(state.edgeReadout.includes('8 NON-DIRECTIONAL'),'readout must explain why matched conditions produce no directional weight');
+assert.equal(state.directionalBuckets,'0','non-directional matches must not fabricate directional buckets');
+assert.equal(state.matchedGroups,'2','matched group topology remains visible separately');
+assert.equal(state.nonDirectional,'8','non-directional match count must be explicit');
+assert.equal(state.momentum,'4.000e-7','tiny observed values must not be rounded to visual zero');
 assert(state.featureIds.includes('vol.rv15_over_rv60'),'exact canonical feature IDs must be present in 3D trace data');
 assert(state.featureIds.includes('option_dynamics.gex_velocity'),'option dynamics must be present in 3D trace data');
 
 const html=await readFile(path.join(ROOT,'seiltanzer/web/universe.html'),'utf8');
 assert(html.includes('/static/vendor/plotly-gl3d.min.js'),'Universe must use repository-local Plotly');
+assert(html.includes('/static/js/universe_precision.js'),'Universe precision semantics must load locally');
 assert(!html.includes('cdnjs.cloudflare.com'),'Universe must not depend on external chart CDN');
 
 await browser.close();
 await new Promise((resolve)=>server.close(resolve));
-console.log(JSON.stringify({ratesVisible:true,edgeVisibleWithoutMatch:true,localPlotly:true,canonicalFeatureTopology:true}));
+console.log(JSON.stringify({ratesVisible:true,edgeNonDirectionalSemantics:true,tinyValuesPreserved:true,localPlotly:true,canonicalFeatureTopology:true}));
