@@ -37,6 +37,44 @@ jobs:
               find /opt/actions-runner/_work/_update -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
             fi
 
+            # EDE production audits create immutable SQLite working copies in /tmp.
+            # They are research scratch files, not authoritative state. Keep anything
+            # recent or currently open and remove only snapshots older than six hours.
+            ede_removed=0
+            ede_bytes=0
+            while IFS= read -r -d '' candidate; do
+              if lsof -- "$candidate" >/dev/null 2>&1; then
+                echo "KEEP_OPEN_EDE_FILE=$candidate"
+                continue
+              fi
+              size=$(stat -c '%s' "$candidate" 2>/dev/null || echo 0)
+              rm -f -- "$candidate"
+              ede_removed=$((ede_removed + 1))
+              ede_bytes=$((ede_bytes + size))
+            done < <(find /tmp -maxdepth 1 -type f \
+              \( -name 'seiltanzer-ede-source-*.sqlite3' \
+                 -o -name 'seiltanzer-ede-source-*.sqlite3-wal' \
+                 -o -name 'seiltanzer-ede-source-*.sqlite3-shm' \) \
+              -mmin +360 -print0 2>/dev/null)
+
+            ede_dirs_removed=0
+            while IFS= read -r -d '' candidate; do
+              if lsof +D "$candidate" 2>/dev/null | tail -n +2 | grep -q .; then
+                echo "KEEP_OPEN_EDE_DIR=$candidate"
+                continue
+              fi
+              size=$(du -sb "$candidate" 2>/dev/null | awk '{print $1}')
+              size=${size:-0}
+              rm -rf -- "$candidate"
+              ede_dirs_removed=$((ede_dirs_removed + 1))
+              ede_bytes=$((ede_bytes + size))
+            done < <(find /tmp -mindepth 1 -maxdepth 1 -type d \
+              -name 'ede-v*-production-*' -mmin +360 -print0 2>/dev/null)
+
+            echo "STALE_EDE_FILES_REMOVED=$ede_removed"
+            echo "STALE_EDE_DIRS_REMOVED=$ede_dirs_removed"
+            echo "STALE_EDE_BYTES_REMOVED=$ede_bytes"
+
             echo "DISK_AFTER_SYSTEM_CLEAN"
             df -h /
             avail_kb=$(df -Pk / | awk 'NR==2 {print $4}')
@@ -50,7 +88,7 @@ jobs:
             trap 'if [ "${restart_needed:-0}" = 1 ]; then systemctl start seiltanzer || true; fi' EXIT
 
             /usr/bin/python3 - <<'PY'
-            import hashlib, json
+            import hashlib, json, time
             from pathlib import Path
 
             root = Path("/opt/seiltanzer/data/backups/local").resolve()
@@ -111,9 +149,13 @@ jobs:
                 manifest.unlink(missing_ok=True)
                 removed_pairs += 1
 
+            # Incomplete backup files are never research evidence. Be conservative:
+            # retain anything newer than 30 minutes in case a separate backup job is
+            # still finalizing it, even though the terminal service is stopped here.
             removed_tmp = 0
+            cutoff = time.time() - 30 * 60
             for tmp in root.glob(".*.tmp.sqlite3"):
-                if tmp.is_file() and confined(tmp):
+                if tmp.is_file() and confined(tmp) and tmp.stat().st_mtime < cutoff:
                     tmp.unlink()
                     removed_tmp += 1
             print(f"VERIFIED_PAIRS_TOTAL={len(verified)}")
