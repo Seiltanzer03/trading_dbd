@@ -10,6 +10,7 @@ from .fomc_official_source import refresh_latest_fomc
 from .macro_data_factory import MacroDataFactory
 from .macro_data_factory_causality_refinement import install_macro_data_factory_causality_refinement
 from .macro_fomc_runtime import FOMCOfficialRuntime
+from .macro_ism_resilience import install_ism_source_resilience
 from .macro_numeric_data import NumericMacroRuntime, NumericMacroStore, research_context
 from .macro_t0_context import install_macro_t0_context
 from .research_llm_cost_guard import (
@@ -27,6 +28,11 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         raise RuntimeError("G.1S integration must be installed before macro data factory")
     os.environ.setdefault("DATA_FACTORY_MODEL", "openai/gpt-4o-mini")
     install_macro_data_factory_causality_refinement()
+    # ISM's public landing page can send non-browser clients to SSO. Install the
+    # direct-month official report probe before constructing the runtime source.
+    # Every accepted document is still validated by host, report family, period
+    # and parsed PMI table; no missing report is replaced with a synthetic value.
+    install_ism_source_resilience()
     factory = MacroDataFactory(runtime)
     numeric_store = NumericMacroStore(runtime)
     numeric_runtime = NumericMacroRuntime(numeric_store)
