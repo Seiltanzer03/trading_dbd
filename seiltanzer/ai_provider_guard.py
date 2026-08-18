@@ -19,10 +19,12 @@ from typing import Any, Callable
 # The public route has a materially tighter SLA than the provider's own HTTP
 # timeout. Keep enough time for a fast explanation, but fail over well before a
 # gateway can terminate the browser request. The full deterministic policy report
-# is already available and remains authoritative on every timeout.
+# is already available and remains authoritative on every timeout. The hard cap
+# also prevents a stale server environment override from restoring the old 25s
+# behavior after deployment.
 DEFAULT_PROVIDER_TIMEOUT_SEC = 6.0
 MIN_PROVIDER_TIMEOUT_SEC = 3.0
-MAX_PROVIDER_TIMEOUT_SEC = 15.0
+MAX_PROVIDER_TIMEOUT_SEC = 8.0
 DEFAULT_PROVIDER_CIRCUIT_SEC = 50.0
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="seiltanzer-ai-provider")
