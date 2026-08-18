@@ -6,6 +6,7 @@ import time
 from fastapi import Body, FastAPI
 
 from .macro_data_factory import MacroDataFactory
+from .macro_t0_context import install_macro_t0_context
 
 
 def install_macro_data_factory_routes(app: FastAPI) -> None:
@@ -16,6 +17,10 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         raise RuntimeError("G.1S integration must be installed before macro data factory")
     factory = MacroDataFactory(runtime)
     app.state.macro_data_factory = factory
+    app.state.engine.macro_data_factory = factory
+    # Future T0 rows receive only already-completed causal semantic records.
+    # Existing ML feature vectors do not read macro_context_v1.
+    install_macro_t0_context(app.state.engine, factory)
 
     app.add_api_route(
         "/api/research/macro/status",
