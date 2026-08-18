@@ -1,0 +1,44 @@
+name: diagnose-production-ai
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Inspect production AI latency and gateway
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          script: |
+            set +e
+            echo '=== HEAD / SERVICE ==='
+            git -C /opt/seiltanzer rev-parse HEAD || true
+            systemctl is-active seiltanzer || true
+            systemctl show seiltanzer -p MainPID -p MemoryCurrent -p MemoryPeak -p NRestarts || true
+            echo '=== RECENT AI VERDICT EVENTS ==='
+            journalctl -u seiltanzer --since '-8 hours' --no-pager \
+              | grep 'ai_verdict_event' | tail -n 120 || true
+            echo '=== RECENT 504 / TIMEOUT SIGNALS ==='
+            journalctl -u seiltanzer --since '-8 hours' --no-pager \
+              | grep -Ei '504|gateway|timeout|timed out|provider_circuit' | tail -n 120 || true
+            echo '=== LISTENERS ==='
+            ss -ltnp | grep -E ':8790|:80|:443' || true
+            echo '=== NGINX TIMEOUTS IF PRESENT ==='
+            if command -v nginx >/dev/null 2>&1; then
+              nginx -T 2>/dev/null | grep -Ei 'proxy_(connect|read|send)_timeout|send_timeout|listen|proxy_pass' | tail -n 120 || true
+            else
+              echo 'nginx not installed'
+            fi
+            echo '=== CADDY/TUNNEL PROCESSES ==='
+            ps -eo pid,etime,cmd | grep -Ei '[c]addy|[c]loudflared|[t]raefik|[n]ginx|[h]aproxy' || true
