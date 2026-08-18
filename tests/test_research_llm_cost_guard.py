@@ -23,6 +23,8 @@ def test_provider_gate_is_monotonic_and_does_not_extend_on_rejected_call():
 def test_cost_guard_is_separate_from_verdict_and_has_bounded_defaults():
     status = cost_guard_status()
     assert status["separate_from_ai_verdict_provider_guard"] is True
-    assert status["cache_checked_before_gate"] is True
+    assert status["cache_checked_before_provider_gate"] is True
+    assert status["macro_write_burst_protection"] is True
+    assert status["macro_min_ingest_interval_sec"] >= 30.0
     assert status["macro_min_provider_interval_sec"] >= 30.0
     assert status["analog_min_provider_interval_sec"] >= 5.0
