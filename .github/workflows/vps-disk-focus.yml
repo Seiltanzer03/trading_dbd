@@ -1,0 +1,48 @@
+name: vps-disk-focus
+
+on:
+  push:
+    branches: [codex/vps-disk-diagnostic]
+    paths:
+      - '.github/workflows/vps-disk-focus.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/vps-disk-diagnostic
+      - name: Install sshpass
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+      - name: Inspect temporary storage metadata only
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 root@94.241.171.182 '
+            set +e
+            echo "=== NOW ==="; date -u
+            echo "=== DISK ==="; df -h /
+            echo "=== TMP DEPTH1 ==="; du -x -B1 -d1 /tmp 2>/dev/null | sort -n | tail -100
+            echo "=== TMP DEPTH2 LARGEST ==="; du -x -B1 -d2 /tmp 2>/dev/null | sort -n | tail -120
+            echo "=== TMP FILES >=100MB ==="; find /tmp -xdev -type f -size +100M -printf "%s %TY-%Tm-%TdT%TH:%TM:%TS %p\n" 2>/dev/null | sort -n | tail -120
+            echo "=== TMP TOPLEVEL AGE/TYPE ==="; find /tmp -mindepth 1 -maxdepth 1 -printf "%y %TY-%Tm-%TdT%TH:%TM:%TS %s %p\n" 2>/dev/null | sort
+            echo "=== TMP OPEN HANDLES ==="; lsof +D /tmp 2>/dev/null | head -200 || true
+            echo "=== LOCAL BACKUPS ==="; find /opt/seiltanzer/data/backups/local -maxdepth 1 -type f -printf "%s %TY-%Tm-%TdT%TH:%TM:%TS %p\n" 2>/dev/null | sort -n
+            echo "=== BACKUP OPEN HANDLES ==="; lsof +D /opt/seiltanzer/data/backups/local 2>/dev/null || true
+          ' > diagnostics/vps_disk_focus.txt
+          cat diagnostics/vps_disk_focus.txt
+      - name: Commit report on diagnostic branch
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add diagnostics/vps_disk_focus.txt
+          git commit -m 'Record focused temporary disk metadata'
+          git push origin HEAD:codex/vps-disk-diagnostic
