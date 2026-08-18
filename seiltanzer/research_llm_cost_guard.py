@@ -1,8 +1,8 @@
-"""Tiny process-local spend guard for optional research LLM calls.
+"""Tiny process-local guards for optional research LLM/write paths.
 
-Caching remains the primary cost control.  These gates are a second line of
-defence for public POST routes: they reserve a slot immediately before an actual
-provider call, so concurrent unique requests cannot create an LLM burst.  They
+Caching remains the primary cost control. These gates are a second line of
+defence for public POST routes: macro ingestion is bounded before arbitrary text
+can be persisted, and uncached provider calls have their own burst gates. They
 are intentionally separate from the latency-critical AI verdict circuit.
 """
 from __future__ import annotations
@@ -39,7 +39,7 @@ class ProviderRateGate:
         self._last_reserved_mono: float | None = None
 
     def reserve(self, *, now_mono: float | None = None) -> float:
-        """Reserve one provider call or raise with a bounded retry-after value."""
+        """Reserve one guarded action or raise with a bounded retry-after value."""
         now = float(time.monotonic() if now_mono is None else now_mono)
         with self._lock:
             if self._last_reserved_mono is not None:
@@ -53,19 +53,27 @@ class ProviderRateGate:
         return self.interval_sec
 
 
-_MACRO_GATE = ProviderRateGate(_interval(
+_MACRO_INTERVAL = _interval(
     "DATA_FACTORY_MIN_PROVIDER_INTERVAL_SEC",
     DEFAULT_MACRO_INTERVAL_SEC, 30.0, 3600.0,
-))
+)
+# Separate gates deliberately share the same interval but not state: one bounds
+# incoming DB writes, the other bounds the actual provider call after validation/cache.
+_MACRO_INGEST_GATE = ProviderRateGate(_MACRO_INTERVAL)
+_MACRO_PROVIDER_GATE = ProviderRateGate(_MACRO_INTERVAL)
 _ANALOG_GATE = ProviderRateGate(_interval(
     "ANALOG_LLM_MIN_PROVIDER_INTERVAL_SEC",
     DEFAULT_ANALOG_INTERVAL_SEC, 5.0, 300.0,
 ))
 
 
+def reserve_macro_ingest_request() -> float:
+    return _MACRO_INGEST_GATE.reserve()
+
+
 def guarded_macro_extractor(current_text: str, previous_text: str | None,
                             model: str) -> dict[str, Any]:
-    _MACRO_GATE.reserve()
+    _MACRO_PROVIDER_GATE.reserve()
     return _macro_provider(current_text, previous_text, model)
 
 
@@ -77,8 +85,10 @@ def guarded_analog_provider(summary: dict[str, Any], model: str) -> str:
 def cost_guard_status() -> dict[str, Any]:
     return {
         "contract_version": COST_GUARD_VERSION,
-        "macro_min_provider_interval_sec": _MACRO_GATE.interval_sec,
+        "macro_min_ingest_interval_sec": _MACRO_INGEST_GATE.interval_sec,
+        "macro_min_provider_interval_sec": _MACRO_PROVIDER_GATE.interval_sec,
         "analog_min_provider_interval_sec": _ANALOG_GATE.interval_sec,
-        "cache_checked_before_gate": True,
+        "macro_write_burst_protection": True,
+        "cache_checked_before_provider_gate": True,
         "separate_from_ai_verdict_provider_guard": True,
     }
