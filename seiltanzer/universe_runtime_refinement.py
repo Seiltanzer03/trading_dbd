@@ -84,6 +84,35 @@ def _prepare_correlation_before_t0(engine: PassiveLearningEngine, instrument: st
         feed.correlation = cached
 
 
+def _annotate_active_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Expose match-vs-directional semantics without changing edge weight math."""
+    matched = max(0, int(context.get("matched_structured_signal_n") or 0))
+    supporting = max(0, int(context.get("supporting_position_n") or 0))
+    opposing = max(0, int(context.get("opposing_position_n") or 0))
+    directional = min(matched, supporting + opposing)
+    groups = context.get("matched_groups") or []
+    directional_groups = sum(
+        1 for row in groups
+        if isinstance(row, dict) and int(row.get("net_vote") or 0) != 0)
+    nondirectional_groups = sum(
+        1 for row in groups
+        if isinstance(row, dict) and int(row.get("supporting_n") or 0) == 0
+        and int(row.get("opposing_n") or 0) == 0
+    )
+    context.update({
+        "directional_matched_signal_n": directional,
+        "non_directional_matched_signal_n": max(0, matched-directional),
+        "directional_matched_group_n": directional_groups,
+        "non_directional_matched_group_n": nondirectional_groups,
+        "directional_weight_available": directional_groups > 0,
+        "directional_weight_reason": (
+            "DIRECTIONAL_MATCHES_AVAILABLE" if directional_groups > 0
+            else "CURRENT_T0_MATCHES_ARE_NON_DIRECTIONAL" if matched > 0
+            else "NO_CURRENT_T0_MATCHES"),
+    })
+    return context
+
+
 def _install_passive_cross_refresh() -> None:
     if getattr(PassiveLearningEngine, "_universe_cross_refresh_version", None) == CONTRACT_VERSION:
         return
@@ -110,33 +139,7 @@ def _install_active_edge_diagnostics() -> None:
 
     def build_active_edge_context(engine, snapshot):
         context = original(engine, snapshot)
-        if not isinstance(context, dict):
-            return context
-        matched = max(0, int(context.get("matched_structured_signal_n") or 0))
-        supporting = max(0, int(context.get("supporting_position_n") or 0))
-        opposing = max(0, int(context.get("opposing_position_n") or 0))
-        directional = min(matched, supporting + opposing)
-        groups = context.get("matched_groups") or []
-        directional_groups = sum(
-            1 for row in groups
-            if isinstance(row, dict) and int(row.get("net_vote") or 0) != 0)
-        nondirectional_groups = sum(
-            1 for row in groups
-            if isinstance(row, dict) and int(row.get("supporting_n") or 0) == 0
-            and int(row.get("opposing_n") or 0) == 0
-        )
-        context.update({
-            "directional_matched_signal_n": directional,
-            "non_directional_matched_signal_n": max(0, matched-directional),
-            "directional_matched_group_n": directional_groups,
-            "non_directional_matched_group_n": nondirectional_groups,
-            "directional_weight_available": directional_groups > 0,
-            "directional_weight_reason": (
-                "DIRECTIONAL_MATCHES_AVAILABLE" if directional_groups > 0
-                else "CURRENT_T0_MATCHES_ARE_NON_DIRECTIONAL" if matched > 0
-                else "NO_CURRENT_T0_MATCHES"),
-        })
-        return context
+        return _annotate_active_context(context) if isinstance(context, dict) else context
 
     # active_edge_policy_weight imports this function dynamically, while the
     # Universe route captured a module-local reference at import time. Patch both.
