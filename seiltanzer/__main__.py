@@ -29,6 +29,7 @@ from .g1_routes import install_g1_dataset_routes
 from .g1_shadow_routes import install_g1_shadow_routes
 from .g1_short_horizon_integration import ensure_g1s_schema_backup
 from .g1_short_horizon_routes import install_g1_short_horizon_routes
+from .g1_short_horizon_status_nonblocking import install_g1_short_horizon_status_nonblocking
 from .lattice_visual_history import install_lattice_visual_history
 from .macro_data_factory_routes import install_macro_data_factory_routes
 from .maintenance.venv_cleanup import remediate_current_environment
@@ -92,6 +93,11 @@ def main() -> None:
                         port=args.port, data_dir=args.data_dir)
     storage = prepare_storage(settings)
     app = create_app(settings)
+
+    # Prewarm the already-materialized G.1S status before uvicorn and the research
+    # worker start. HTTP status polling then reads only a process-local snapshot;
+    # durable SQLite refresh remains on the low-priority worker path.
+    install_g1_short_horizon_status_nonblocking(app.state.engine.short_horizon)
 
     # The full deterministic Position Manager snapshot can take tens of seconds
     # on the 2 GB VPS. Keep the exact math, but calculate it on one serial daemon
