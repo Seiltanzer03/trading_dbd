@@ -1,0 +1,37 @@
+name: diagnose-macro-official
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  live-official-sources:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -e .
+      - name: Fetch and parse current BLS and ISM reports
+        run: |
+          python - <<'PY'
+          import json
+          from seiltanzer.macro_numeric_data import OfficialNumericMacroSource
+          src = OfficialNumericMacroSource(timeout_sec=15)
+          fetched, bls = src.fetch_bls()
+          print('BLS', fetched, json.dumps(bls, ensure_ascii=False, sort_keys=True))
+          assert set(bls) == {'CPI','NFP'}
+          assert bls['CPI']['period']
+          assert bls['NFP']['period']
+          fetched, ism = src.fetch_ism()
+          print('ISM', fetched, json.dumps(ism, ensure_ascii=False, sort_keys=True))
+          assert set(ism) == {'ISM_MANUFACTURING','ISM_SERVICES'}
+          assert ism['ISM_MANUFACTURING']['metrics']['pmi']['current'] > 0
+          assert ism['ISM_SERVICES']['metrics']['pmi']['current'] > 0
+          for payload in [*bls.values(), *ism.values()]:
+              assert payload['consensus_available'] is False
+              assert payload['surprise_computed'] is False
+          print('LIVE OFFICIAL MACRO PARSER PASS')
+          PY
