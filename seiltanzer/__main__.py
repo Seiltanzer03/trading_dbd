@@ -27,6 +27,7 @@ from .g1_short_horizon_integration import ensure_g1s_schema_backup
 from .g1_short_horizon_routes import install_g1_short_horizon_routes
 from .lattice_visual_history import install_lattice_visual_history
 from .maintenance.venv_cleanup import remediate_current_environment
+from .option_feed_resilience import install_option_feed_resilience
 from .option_shadow_state import install_option_shadow_state
 from .production_resource_guard import install_production_resource_guard
 from .research_scalability_bootstrap import install_research_scalability
@@ -66,6 +67,11 @@ def main() -> None:
     cleanup = remediate_current_environment()
     if cleanup.get("candidate_n") or cleanup.get("remaining_n"):
         print("G1E1 venv cleanup -> " + json.dumps(cleanup, ensure_ascii=False, sort_keys=True))
+
+    # Thin experimental option proxies can have a broken/sparse nearest expiry
+    # while the next listed contract is usable. Install the bounded validated
+    # expiry scan before the resource guard wraps MarketData refresh methods.
+    install_option_feed_resilience()
 
     # Production runs on a small shared VPS. Install the concurrency/allocator
     # guard before Engine/MarketData instances are created so startup refreshes,
