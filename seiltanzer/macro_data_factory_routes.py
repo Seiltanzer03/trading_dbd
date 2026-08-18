@@ -6,6 +6,7 @@ import time
 from fastapi import Body, FastAPI
 
 from .macro_data_factory import MacroDataFactory
+from .macro_data_factory_causality_refinement import install_macro_data_factory_causality_refinement
 from .macro_t0_context import install_macro_t0_context
 from .research_llm_cost_guard import cost_guard_status, guarded_macro_extractor
 
@@ -16,6 +17,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     runtime = getattr(app.state.engine, "short_horizon", None)
     if runtime is None:
         raise RuntimeError("G.1S integration must be installed before macro data factory")
+    install_macro_data_factory_causality_refinement()
     factory = MacroDataFactory(runtime)
     app.state.macro_data_factory = factory
     app.state.engine.macro_data_factory = factory
