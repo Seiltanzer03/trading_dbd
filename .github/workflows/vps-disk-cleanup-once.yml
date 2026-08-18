@@ -1,0 +1,102 @@
+name: vps-disk-cleanup-once
+
+on:
+  push:
+    branches: [codex/vps-disk-diagnostic]
+    paths:
+      - '.github/workflows/vps-disk-cleanup-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/vps-disk-diagnostic
+      - name: Install sshpass
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass lsof
+      - name: Safely remove stale scratch data
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 root@94.241.171.182 '
+            set -euo pipefail
+            echo "=== BEFORE ==="; date -u; df -h /
+            service_before=$(systemctl is-active seiltanzer || true)
+            test "$service_before" = active
+
+            removed_files=0
+            removed_dirs=0
+            removed_bytes=0
+            while IFS= read -r -d "" f; do
+              if lsof -- "$f" >/dev/null 2>&1; then
+                echo "KEEP_OPEN=$f"
+                continue
+              fi
+              size=$(stat -c "%s" "$f" 2>/dev/null || echo 0)
+              rm -f -- "$f"
+              removed_files=$((removed_files+1))
+              removed_bytes=$((removed_bytes+size))
+            done < <(find /tmp -maxdepth 1 -type f \
+              \( -name "seiltanzer-ede-source-*.sqlite3" -o -name "seiltanzer-ede-source-*.sqlite3-wal" -o -name "seiltanzer-ede-source-*.sqlite3-shm" \) \
+              -mmin +360 -print0 2>/dev/null)
+
+            while IFS= read -r -d "" d; do
+              if lsof +D "$d" 2>/dev/null | tail -n +2 | grep -q .; then
+                echo "KEEP_OPEN_DIR=$d"
+                continue
+              fi
+              size=$(du -sb "$d" 2>/dev/null | awk "{print \$1}")
+              size=${size:-0}
+              rm -rf -- "$d"
+              removed_dirs=$((removed_dirs+1))
+              removed_bytes=$((removed_bytes+size))
+            done < <(find /tmp -mindepth 1 -maxdepth 1 -type d -name "ede-v*-production-*" -mmin +360 -print0 2>/dev/null)
+
+            backup_root=/opt/seiltanzer/data/backups/local
+            stale_backup_tmp_removed=0
+            while IFS= read -r -d "" f; do
+              case "$f" in "$backup_root"/.*.tmp.sqlite3) ;; *) echo "REFUSE_OUTSIDE_BACKUP_ROOT=$f"; exit 31;; esac
+              if lsof -- "$f" >/dev/null 2>&1; then
+                echo "KEEP_OPEN_BACKUP_TMP=$f"
+                continue
+              fi
+              rm -f -- "$f"
+              stale_backup_tmp_removed=$((stale_backup_tmp_removed+1))
+            done < <(find "$backup_root" -maxdepth 1 -type f -name ".*.tmp.sqlite3" -mmin +30 -print0 2>/dev/null)
+
+            journalctl --vacuum-size=500M >/dev/null
+
+            echo "STALE_EDE_FILES_REMOVED=$removed_files"
+            echo "STALE_EDE_DIRS_REMOVED=$removed_dirs"
+            echo "STALE_EDE_BYTES_REMOVED=$removed_bytes"
+            echo "STALE_BACKUP_TMP_REMOVED=$stale_backup_tmp_removed"
+            echo "=== DB QUICK CHECK ==="
+            /usr/bin/python3 - <<"PY"
+import sqlite3
+con = sqlite3.connect("file:/opt/seiltanzer/data/trades.db?mode=ro", uri=True)
+try:
+    result = con.execute("PRAGMA quick_check").fetchone()[0]
+    print(result)
+    assert result == "ok"
+finally:
+    con.close()
+PY
+            test "$(systemctl is-active seiltanzer)" = active
+            echo "=== AFTER ==="; df -h /
+            du -sh /tmp /opt/seiltanzer/data/backups/local 2>/dev/null || true
+          ' | tee diagnostics/vps_disk_cleanup_once.txt
+      - name: Commit cleanup report on diagnostic branch
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add diagnostics/vps_disk_cleanup_once.txt
+          git commit -m 'Record one-off production disk cleanup result'
+          git push origin HEAD:codex/vps-disk-diagnostic
