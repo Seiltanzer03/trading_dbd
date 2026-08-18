@@ -1,11 +1,16 @@
-"""Resilient selection for thin delayed option-proxy chains.
+"""Resilience for thin experimental option proxies.
 
-Thin ETF proxies (notably FXC for USD/CAD) can have an unusable nearest expiry
-while a later listed expiry is perfectly serviceable.  The base feed validates
-one nearest expiry only.  This refinement keeps all existing option mathematics
-and quality checks, but, after the base attempt fails (or falls back to cache),
-tries a small bounded set of listed expiries and accepts only a candidate that
-passes the same `_compute_chain_metrics` validation.
+The canonical adaptive-chain layer already scans multiple listed expiries and
+keeps the raw quoted-mid quality gate strict.  Thin currency/country ETF options
+can nevertheless publish a usable implied-volatility smile while their bid/ask
+or last-trade mids are too sparse/stale for a Breeden-Litzenberger second
+ derivative.  In that case only, this refinement reconstructs smooth theoretical
+call/put prices from the *reported* IV smile, then runs the exact same existing
+implied-move / BL-density / skew / GEX validators.
+
+This is deliberately a lower-evidence fallback for `proxy_experimental`
+instruments.  It never invents an option chain, never turns missing IV into data,
+and records explicit provenance in the metrics.
 """
 from __future__ import annotations
 
@@ -17,68 +22,165 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from .core import options as opt
+from .data.adaptive_chain import ChainCandidate, MAX_EXPIRIES_TO_SCAN, select_candidate
 from .data.feeds import MarketData, _status_dict
 
-OPTION_FEED_RESILIENCE_VERSION = "option-feed-resilience-v1"
-MAX_CHAIN_EXPIRY_CANDIDATES = 6
+OPTION_FEED_RESILIENCE_VERSION = "option-feed-resilience-v2-iv-smile"
 MAX_SURFACE_EXPIRY_CANDIDATES = 8
 MAX_SURFACE_ROWS = 3
+MIN_IV_POINTS = 7
 _INSTALLED = False
 
+# Importing MarketData has already executed seiltanzer.data.__init__, therefore
+# this base method is the canonical adaptive-chain implementation, not the old
+# nearest-expiry legacy method in feeds.py.
 _BASE_REFRESH_CHAIN = MarketData.refresh_chain
 _BASE_REFRESH_IV_SURFACE = MarketData.refresh_iv_surface
 
 
-def _mid(bid: Any, ask: Any, last: Any) -> np.ndarray:
-    bid = np.asarray(bid, dtype=float)
-    ask = np.asarray(ask, dtype=float)
-    last = np.asarray(last, dtype=float)
-    return np.asarray(np.where((bid > 0) & (ask > 0), (bid + ask) / 2.0, last), dtype=float)
-
-
-def _candidate_metrics(market: MarketData, ticker: Any, proxy: str, expiry: str,
-                       spot: float, term: dict | None) -> dict:
-    """Build one candidate using the exact existing option math/validators."""
+def _expiry_contract(expiry: str) -> tuple[float, float]:
     exp_dt_local = dt.datetime.strptime(expiry, "%Y-%m-%d").replace(
         hour=16, tzinfo=ZoneInfo("America/New_York"))
     exp_ts = exp_dt_local.timestamp()
     t_years = max(exp_ts - time.time(), 3600.0) / (365.0 * 24 * 3600)
+    return exp_ts, t_years
 
-    oc = ticker.option_chain(expiry)
-    calls, puts = oc.calls, oc.puts
-    merged = calls.merge(puts, on="strike", suffixes=("_c", "_p"))
-    if len(merged) < 5:
+
+def _enrich_proxy_contract(market: MarketData, metrics: dict) -> dict:
+    """Make inverse/direct mapping and selected expiry explicit downstream."""
+    metrics["proxy_transform"] = market.instrument.proxy_transform
+    expiry = metrics.get("expiry")
+    if (not market.demo and isinstance(expiry, str)
+            and len(expiry) == 10 and expiry[4:5] == "-" and expiry[7:8] == "-"):
+        try:
+            exp_ts, t_years = _expiry_contract(expiry)
+            metrics["expiry_ts_utc"] = exp_ts
+            metrics["t_years"] = t_years
+            metrics["expiry_date"] = expiry
+            metrics["expiry_timezone"] = "America/New_York"
+            metrics["expiry_time_assumption"] = "assumed_market_close_16:00_ET"
+            metrics["expiry_time_quality"] = "assumed_market_close"
+        except (ValueError, TypeError):
+            pass
+    return metrics
+
+
+def _smooth_reported_iv(strikes: np.ndarray, iv: np.ndarray, spot: float) -> np.ndarray:
+    """Robust quadratic smile fit in log-moneyness using only finite quoted IV."""
+    x = np.log(strikes / spot)
+    valid = (
+        np.isfinite(x) & np.isfinite(iv)
+        & (strikes > 0) & (iv > 0.005) & (iv < 3.0)
+    )
+    if int(valid.sum()) < MIN_IV_POINTS:
+        raise ValueError(f"валидных IV-точек только {int(valid.sum())}")
+
+    xv, yv = x[valid], iv[valid]
+    q1, q3 = np.percentile(yv, [25.0, 75.0])
+    iqr = max(float(q3 - q1), 0.005)
+    robust = (yv >= max(0.005, q1 - 2.5 * iqr)) & (yv <= min(3.0, q3 + 2.5 * iqr))
+    if int(robust.sum()) < MIN_IV_POINTS:
+        robust = np.ones_like(yv, dtype=bool)
+    xv, yv = xv[robust], yv[robust]
+
+    degree = 2 if len(xv) >= 5 else 1
+    # ATM points carry more information for the near-horizon straddle while the
+    # wings remain present to preserve smile curvature.
+    weights = 1.0 / (1.0 + (np.abs(xv) / 0.12) ** 2)
+    coeff = np.polyfit(xv, yv, degree, w=np.sqrt(weights))
+    fitted = np.polyval(coeff, x)
+    lo = max(0.005, float(np.percentile(yv, 5.0)) * 0.65)
+    hi = min(3.0, float(np.percentile(yv, 95.0)) * 1.35)
+    fitted = np.clip(fitted, lo, hi)
+    if not np.all(np.isfinite(fitted)):
+        raise ValueError("IV-smile fit содержит нечисловые значения")
+    return fitted.astype(float)
+
+
+def _iv_smile_candidate(market: MarketData, ticker: Any, proxy: str,
+                        expiry: str, spot: float, ordinal: int) -> ChainCandidate:
+    exp_ts, t_years = _expiry_contract(expiry)
+    chain = ticker.option_chain(expiry)
+    merged = chain.calls.merge(chain.puts, on="strike", suffixes=("_c", "_p"))
+    if len(merged) < MIN_IV_POINTS:
         raise RuntimeError(f"слишком мало общих страйков: {len(merged)}")
 
+    strikes_all = merged["strike"].to_numpy(dtype=float)
+    call_iv_all = merged["impliedVolatility_c"].to_numpy(dtype=float)
+    put_iv_all = merged["impliedVolatility_p"].to_numpy(dtype=float)
+    valid = (
+        np.isfinite(strikes_all) & (strikes_all > 0)
+        & np.isfinite(call_iv_all) & (call_iv_all > 0.005) & (call_iv_all < 3.0)
+        & np.isfinite(put_iv_all) & (put_iv_all > 0.005) & (put_iv_all < 3.0)
+    )
+    if int(valid.sum()) < MIN_IV_POINTS:
+        raise RuntimeError(f"общих call/put IV-точек только {int(valid.sum())}")
+
+    strikes = strikes_all[valid]
+    order = np.argsort(strikes)
+    strikes = strikes[order]
+    call_iv = call_iv_all[valid][order]
+    put_iv = put_iv_all[valid][order]
+    if not (float(strikes[0]) < spot < float(strikes[-1])):
+        raise RuntimeError("IV-smile не охватывает текущий proxy spot")
+
+    call_fit = _smooth_reported_iv(strikes, call_iv, spot)
+    put_fit = _smooth_reported_iv(strikes, put_iv, spot)
+    call_mid = np.asarray([
+        opt.bs_call(spot, float(k), t_years, float(iv))
+        for k, iv in zip(strikes, call_fit)
+    ], dtype=float)
+    put_mid = np.asarray([
+        opt.bs_put(spot, float(k), t_years, float(iv))
+        for k, iv in zip(strikes, put_fit)
+    ], dtype=float)
+
+    call_oi = merged["openInterest_c"].fillna(0).to_numpy(dtype=float)[valid][order]
+    put_oi = merged["openInterest_p"].fillna(0).to_numpy(dtype=float)[valid][order]
     raw = {
-        "strikes": merged["strike"].to_numpy(dtype=float),
-        "call_mid": _mid(
-            merged["bid_c"].fillna(0).to_numpy(),
-            merged["ask_c"].fillna(0).to_numpy(),
-            merged["lastPrice_c"].fillna(np.nan).to_numpy()),
-        "put_mid": _mid(
-            merged["bid_p"].fillna(0).to_numpy(),
-            merged["ask_p"].fillna(0).to_numpy(),
-            merged["lastPrice_p"].fillna(np.nan).to_numpy()),
-        "call_oi": merged["openInterest_c"].fillna(0).to_numpy(dtype=float),
-        "put_oi": merged["openInterest_p"].fillna(0).to_numpy(dtype=float),
-        "call_iv": merged["impliedVolatility_c"].to_numpy(dtype=float),
-        "put_iv": merged["impliedVolatility_p"].to_numpy(dtype=float),
+        "strikes": strikes,
+        "call_mid": call_mid,
+        "put_mid": put_mid,
+        "call_oi": call_oi,
+        "put_oi": put_oi,
+        "call_iv": call_fit,
+        "put_iv": put_fit,
         "t_years": t_years,
         "spot": spot,
         "expiry": expiry,
         "expiry_ts_utc": exp_ts,
     }
-    return market._compute_chain_metrics(
+    metrics = market._compute_chain_metrics(
         raw, spot, proxy, demo=False,
-        experimental=market.instrument.proxy_experimental, term=term)
+        experimental=market.instrument.proxy_experimental, term=None)
+    metrics = _enrich_proxy_contract(market, metrics)
+    density_strikes = np.asarray((metrics.get("density") or {}).get("strikes") or [], dtype=float)
+    if len(density_strikes) < 5:
+        raise RuntimeError("IV-smile fallback не дал валидной density-сетки")
+    support_low = float(np.min(density_strikes)) / spot
+    support_high = float(np.max(density_strikes)) / spot
+    metrics["density_input"] = {
+        "contract_version": OPTION_FEED_RESILIENCE_VERSION,
+        "mode": "reported_iv_smile_bs_reconstruction",
+        "raw_mid_quality": "rejected_by_canonical_adaptive_chain",
+        "reported_iv_points": int(len(strikes)),
+        "quality_tier": "experimental_proxy_iv_rescue",
+        "mathematics": "same_existing_implied_move_bl_skew_gex_after_iv_smile_reconstruction",
+    }
+    return ChainCandidate(
+        expiry=expiry,
+        metrics=metrics,
+        support_low_ratio=support_low,
+        support_high_ratio=support_high,
+        ordinal=ordinal,
+    )
 
 
-def _retry_later_chain_expiries(market: MarketData, base_state: dict) -> None:
+def _rescue_chain_from_reported_iv(market: MarketData, base_state: dict) -> None:
     proxy = market.instrument.options_proxy
-    if market.demo or proxy is None:
+    if market.demo or proxy is None or not market.instrument.proxy_experimental:
         return
-
     try:
         import yfinance as yf
 
@@ -89,70 +191,81 @@ def _retry_later_chain_expiries(market: MarketData, base_state: dict) -> None:
         spot = float(ticker.fast_info.last_price)
         if not math.isfinite(spot) or spot <= 0:
             return
-        term = market._fetch_term(ticker, expiries, spot)
 
+        candidates: list[ChainCandidate] = []
         rejected: list[str] = []
-        for index, expiry in enumerate(expiries[:MAX_CHAIN_EXPIRY_CANDIDATES]):
+        for ordinal, expiry in enumerate(expiries[:MAX_EXPIRIES_TO_SCAN]):
             try:
-                metrics = _candidate_metrics(market, ticker, proxy, expiry, spot, term)
-            except Exception as exc:  # candidate-local failure must not abort the scan
-                rejected.append(f"{expiry}: {type(exc).__name__}: {str(exc)[:100]}")
-                continue
+                candidate = _iv_smile_candidate(market, ticker, proxy, expiry, spot, ordinal)
+                candidates.append(candidate)
+                if candidate.covers():
+                    break
+            except Exception as exc:
+                rejected.append(f"{expiry}: {type(exc).__name__}: {str(exc)[:110]}")
 
-            metrics["expiry_selection"] = {
-                "contract_version": OPTION_FEED_RESILIENCE_VERSION,
-                "method": "first_valid_listed_expiry",
-                "candidate_index": index,
-                "candidate_count_checked": index + 1,
-                "rejected_before_selected": rejected,
-            }
-            if market.proxy_price.get("status") != "live":
-                market.proxy_price = _status_dict(
-                    spot, "delayed", time.time(),
-                    source=f"yfinance REST {proxy} (chain snapshot)")
-            market.chain = {
-                "metrics": metrics,
-                **_status_dict(
-                    True, "delayed", time.time(),
-                    source=f"yfinance {proxy} options {expiry} (validated expiry scan)"),
-            }
-            market.chain["delay_hint_sec"] = 900
-            market.chain["expiry_selection"] = metrics["expiry_selection"]
-            market.cache.add_chain_snapshot(proxy, metrics)
+        if not candidates:
+            if base_state.get("metrics") is not None:
+                market.chain = base_state
+            elif rejected:
+                market.chain = {
+                    "metrics": None,
+                    **_status_dict(
+                        error=("raw-mid и IV-smile кандидаты невалидны: "
+                               + " | ".join(rejected[-3:]))[:500]),
+                    "density_input": {
+                        "contract_version": OPTION_FEED_RESILIENCE_VERSION,
+                        "mode": "unavailable",
+                        "quality_tier": "no_valid_reported_iv_smile",
+                    },
+                }
             return
 
-        # Preserve a usable cached base state when the live scan also fails.
-        if base_state.get("metrics") is not None:
-            market.chain = base_state
-            market.chain["expiry_scan_error"] = (
-                "no valid live expiry; " + " | ".join(rejected[-3:]))[:500]
-        elif rejected:
-            market.chain = {
-                "metrics": None,
-                **_status_dict(
-                    error=("нет валидной опционной экспирации: "
-                           + " | ".join(rejected[-3:]))[:500]),
-                "expiry_selection": {
-                    "contract_version": OPTION_FEED_RESILIENCE_VERSION,
-                    "method": "first_valid_listed_expiry",
-                    "candidate_count_checked": min(len(expiries), MAX_CHAIN_EXPIRY_CANDIDATES),
-                    "selected": None,
-                },
-            }
+        selected = select_candidate(candidates)
+        selected.metrics["term"] = market._fetch_term(ticker, expiries, spot)
+        selection = {
+            "contract_version": OPTION_FEED_RESILIENCE_VERSION,
+            "mode": "adaptive_proxy_support_iv_smile_rescue",
+            "support_moneyness": [
+                round(selected.support_low_ratio, 6),
+                round(selected.support_high_ratio, 6),
+            ],
+            "covered": selected.covers(),
+            "selected_ordinal": selected.ordinal,
+            "scanned": min(len(expiries), MAX_EXPIRIES_TO_SCAN),
+            "valid_candidates": len(candidates),
+            "scan_errors": rejected[:3],
+        }
+        selected.metrics["expiry_selection"] = selection
+        if market.proxy_price.get("status") != "live":
+            market.proxy_price = _status_dict(
+                spot, "delayed", time.time(),
+                source=f"yfinance REST {proxy} (chain snapshot)")
+        market.chain = {
+            "metrics": selected.metrics,
+            **_status_dict(
+                True, "delayed", time.time(),
+                source=f"yfinance {proxy} options {selected.expiry} · IV-smile rescue"),
+            "expiry_selection": selection,
+        }
+        market.chain["delay_hint_sec"] = 900
+        market.cache.add_chain_snapshot(proxy, selected.metrics)
     except Exception:
-        # The base feed already published the authoritative error/cache fallback.
         market.chain = base_state
 
 
 def resilient_refresh_chain(self: MarketData) -> None:
     _BASE_REFRESH_CHAIN(self)
     base_state = dict(self.chain or {})
+    metrics = base_state.get("metrics")
     source = str(base_state.get("source") or "")
+    if isinstance(metrics, dict):
+        _enrich_proxy_contract(self, metrics)
+        self.chain["metrics"] = metrics
     if self.demo or self.instrument.options_proxy is None:
         return
-    if base_state.get("metrics") is not None and source != "кэш цепочки":
+    if isinstance(metrics, dict) and source != "кэш цепочки":
         return
-    _retry_later_chain_expiries(self, base_state)
+    _rescue_chain_from_reported_iv(self, base_state)
 
 
 def _retry_iv_surface(self: MarketData, base_state: dict) -> None:
@@ -183,7 +296,7 @@ def _retry_iv_surface(self: MarketData, base_state: dict) -> None:
                 ivs_raw = calls["impliedVolatility"].to_numpy(dtype=float)
                 ok = (
                     np.isfinite(strikes_raw) & np.isfinite(ivs_raw)
-                    & (strikes_raw > 0) & (ivs_raw > 0) & (ivs_raw < 5.0)
+                    & (strikes_raw > 0) & (ivs_raw > 0.005) & (ivs_raw < 3.0)
                 )
                 strikes = strikes_raw[ok].tolist()
                 ivs = ivs_raw[ok].tolist()
@@ -202,7 +315,7 @@ def _retry_iv_surface(self: MarketData, base_state: dict) -> None:
         if surface:
             self.iv_surface = _status_dict(
                 value=surface, status="delayed", ts=time.time(),
-                source=f"yfinance {proxy} options (validated expiry scan)")
+                source=f"yfinance {proxy} options (validated IV expiry scan)")
             self.iv_surface["delay_hint_sec"] = 900
             self.iv_surface["expiry_selection"] = {
                 "contract_version": OPTION_FEED_RESILIENCE_VERSION,
