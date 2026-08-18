@@ -14,10 +14,10 @@ import time
 from typing import Any
 
 from .g1_historical_analog_analyst import _provider as _analog_provider
-from .macro_data_factory import _openrouter_extract as _macro_provider
+from . import macro_data_factory as _macro_data_factory
 
 
-COST_GUARD_VERSION = "research-llm-cost-guard-v1"
+COST_GUARD_VERSION = "research-llm-cost-guard-v2-dynamic-provider"
 DEFAULT_MACRO_INTERVAL_SEC = 300.0
 DEFAULT_ANALOG_INTERVAL_SEC = 15.0
 
@@ -74,7 +74,10 @@ def reserve_macro_ingest_request() -> float:
 def guarded_macro_extractor(current_text: str, previous_text: str | None,
                             model: str) -> dict[str, Any]:
     _MACRO_PROVIDER_GATE.reserve()
-    return _macro_provider(current_text, previous_text, model)
+    # Resolve at call time so startup refinements can replace the extractor while
+    # preserving the same rate gate. A module-imported function reference would
+    # keep calling the rejected v1 prompt even after PROMPT_VERSION moved to v2.
+    return _macro_data_factory._openrouter_extract(current_text, previous_text, model)
 
 
 def guarded_analog_provider(summary: dict[str, Any], model: str) -> str:
@@ -90,5 +93,6 @@ def cost_guard_status() -> dict[str, Any]:
         "analog_min_provider_interval_sec": _ANALOG_GATE.interval_sec,
         "macro_write_burst_protection": True,
         "cache_checked_before_provider_gate": True,
+        "macro_provider_resolved_at_call_time": True,
         "separate_from_ai_verdict_provider_guard": True,
     }
