@@ -1,6 +1,7 @@
 """Explicit, research-only API for the macro LLM data factory."""
 from __future__ import annotations
 
+import os
 import time
 
 from fastapi import FastAPI
@@ -22,6 +23,9 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     runtime = getattr(app.state.engine, "short_horizon", None)
     if runtime is None:
         raise RuntimeError("G.1S integration must be installed before macro data factory")
+    # Do not silently inherit the possibly more expensive main AI Verdict model.
+    # Operators can still override this dedicated research model explicitly.
+    os.environ.setdefault("DATA_FACTORY_MODEL", "openai/gpt-4o-mini")
     install_macro_data_factory_causality_refinement()
     factory = MacroDataFactory(runtime)
     app.state.macro_data_factory = factory
