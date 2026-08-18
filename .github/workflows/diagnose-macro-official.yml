@@ -19,7 +19,9 @@ jobs:
           python - <<'PY'
           import json
           from seiltanzer.macro_numeric_data import OfficialNumericMacroSource
+          from seiltanzer.macro_ism_parser_refinement import install_ism_roundup_parser_refinement
           from seiltanzer.macro_ism_resilience import fetch_latest_direct_ism
+          install_ism_roundup_parser_refinement()
           src = OfficialNumericMacroSource(timeout_sec=15)
           fetched, bls = src.fetch_bls()
           print('BLS', fetched, json.dumps(bls, ensure_ascii=False, sort_keys=True))
