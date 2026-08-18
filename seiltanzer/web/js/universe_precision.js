@@ -90,7 +90,9 @@ const observer = new MutationObserver(() => {
   observer._timer = window.setTimeout(refreshPrecision, 120);
 });
 const featureRoot = document.getElementById('edge-features');
-if (featureRoot) observer.observe(featureRoot, { childList: true, subtree: true, characterData: true });
+// The primary renderer replaces this root's children. Watching child-list changes
+// is sufficient and avoids a refresh loop when this helper updates text nodes.
+if (featureRoot) observer.observe(featureRoot, { childList: true });
 
 refreshPrecision();
 window.setInterval(refreshPrecision, 12000);
