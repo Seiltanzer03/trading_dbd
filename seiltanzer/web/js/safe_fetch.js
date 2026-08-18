@@ -38,7 +38,9 @@ export async function readResponseSafely(response) {
   return { ok: Boolean(response?.ok), status, contentType, body, text: compactText(text) };
 }
 
-export async function fetchStructured(url, init = {}) {
+let aiVerdictInFlight = null;
+
+async function fetchStructuredOnce(url, init = {}) {
   const response = await fetch(url, init);
   const parsed = await readResponseSafely(response);
   if (!parsed.ok) {
@@ -58,4 +60,25 @@ export async function fetchStructured(url, init = {}) {
     throw error;
   }
   return parsed.body;
+}
+
+export async function fetchStructured(url, init = {}) {
+  // /api/ai/verdict is intentionally serialized on the server. Re-clicking the
+  // AI button while the first request is still running used to replace the
+  // visible modal, send a second POST, and display the server's correct HTTP 429
+  // while the successful first response rendered into a detached DOM node.
+  // Share the same promise instead: every open/re-open of the modal receives the
+  // one authoritative frozen snapshot result and no duplicate provider request
+  // is generated.
+  const method = String(init?.method || 'GET').toUpperCase();
+  if (url === '/api/ai/verdict' && method === 'POST') {
+    if (aiVerdictInFlight) return aiVerdictInFlight;
+    aiVerdictInFlight = fetchStructuredOnce(url, init);
+    try {
+      return await aiVerdictInFlight;
+    } finally {
+      aiVerdictInFlight = null;
+    }
+  }
+  return fetchStructuredOnce(url, init);
 }
