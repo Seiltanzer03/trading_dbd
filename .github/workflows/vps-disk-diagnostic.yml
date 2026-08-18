@@ -1,0 +1,63 @@
+name: vps-disk-diagnostic
+
+on:
+  push:
+    branches: [codex/vps-disk-diagnostic]
+    paths:
+      - '.github/workflows/vps-disk-diagnostic.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/vps-disk-diagnostic
+      - name: Install sshpass
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+      - name: Collect bounded disk metadata
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          sshpass -p "$SSH_PASSWORD" ssh \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=5 \
+            root@94.241.171.182 '
+              set +e
+              echo "=== TIMESTAMP ==="
+              date -u
+              echo "=== FILESYSTEMS ==="
+              df -hT /
+              echo "=== INODES ==="
+              df -ih /
+              echo "=== ROOT TOP LEVEL BYTES ==="
+              du -x -B1 -d1 / 2>/dev/null | sort -n | tail -30
+              echo "=== OPT/VAR/ROOT/HOME DEPTH2 BYTES ==="
+              du -x -B1 -d2 /opt /var /root /home 2>/dev/null | sort -n | tail -100
+              echo "=== PROJECT TOP LEVEL BYTES ==="
+              du -x -B1 -d2 /opt/seiltanzer 2>/dev/null | sort -n | tail -80
+              echo "=== LARGE FILES >=250MB (METADATA ONLY) ==="
+              find /opt /var /root /home -xdev -type f -size +250M -printf "%s %p\n" 2>/dev/null | sort -n | tail -80
+              echo "=== JOURNAL USAGE ==="
+              journalctl --disk-usage 2>/dev/null || true
+              echo "=== KNOWN CACHES ==="
+              du -sh /root/.cache /var/cache/apt /var/lib/apt/lists /tmp 2>/dev/null || true
+              echo "=== PROJECT GIT/VENV/DATA ==="
+              du -sh /opt/seiltanzer/.git /opt/seiltanzer/.venv /opt/seiltanzer/data /opt/seiltanzer/artifacts 2>/dev/null || true
+            ' > diagnostics/vps_disk_report.txt
+          cat diagnostics/vps_disk_report.txt
+      - name: Commit diagnostic report to diagnostic branch only
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add diagnostics/vps_disk_report.txt
+          git commit -m 'Record bounded VPS disk diagnostic'
+          git push origin HEAD:codex/vps-disk-diagnostic
