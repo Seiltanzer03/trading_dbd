@@ -67,11 +67,12 @@ def install_ai_snapshot_runtime_guard(app: Any, materializer: Any,
             return JSONResponse(
                 status_code=400,
                 content={
+                    "ok": False,
                     "error": {
                         "code": "no_active_trade",
                         "message": "Нет активной сделки для ИИ-разбора",
                         "retriable": False,
-                    }
+                    },
                 },
             )
         return await call_next(request)
