@@ -51,7 +51,9 @@ async function fetchStructuredOnce(url, init = {}) {
     const error = new Error(detail);
     error.status = parsed.status;
     error.requestId = parsed.body?.error?.request_id || parsed.body?.request_id || null;
-    error.code = parsed.body?.error?.code || 'http_error';
+    error.code = parsed.body?.error?.code
+      || (typeof parsed.body?.error === 'string' ? parsed.body.error : 'http_error');
+    error.retryAfterSec = Number(parsed.body?.retry_after_sec || 0) || 0;
     throw error;
   }
   if (!parsed.body || typeof parsed.body !== 'object') {
@@ -62,18 +64,41 @@ async function fetchStructuredOnce(url, init = {}) {
   return parsed.body;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchAiVerdictUntilMaterialized(url, init = {}) {
+  // A review-trigger event (+/-0.15R, a strategy/risk boundary, new option
+  // chain or trade edit) can legitimately require the full deterministic
+  // 6,500-path recalculation. The server performs that outside this HTTP call
+  // and returns a fast 503 while it is warming. Poll with separate short HTTP
+  // requests so Caddy never holds one request long enough to emit a 504.
+  const deadline = Date.now() + 120000;
+  while (true) {
+    try {
+      return await fetchStructuredOnce(url, init);
+    } catch (error) {
+      const warming = error?.status === 503 && error?.code === 'ai_snapshot_warming';
+      if (!warming || Date.now() >= deadline) throw error;
+      const delaySec = Math.min(5, Math.max(1, Number(error?.retryAfterSec || 2)));
+      await sleep(delaySec * 1000);
+    }
+  }
+}
+
 export async function fetchStructured(url, init = {}) {
   // /api/ai/verdict is intentionally serialized on the server. Re-clicking the
   // AI button while the first request is still running used to replace the
   // visible modal, send a second POST, and display the server's correct HTTP 429
   // while the successful first response rendered into a detached DOM node.
-  // Share the same promise instead: every open/re-open of the modal receives the
-  // one authoritative frozen snapshot result and no duplicate provider request
-  // is generated.
+  // Share the same promise instead: every open/re-open receives one authoritative
+  // result. Event-driven materializer warmups are retried through separate fast
+  // requests rather than one long gateway-bound request.
   const method = String(init?.method || 'GET').toUpperCase();
   if (url === '/api/ai/verdict' && method === 'POST') {
     if (aiVerdictInFlight) return aiVerdictInFlight;
-    aiVerdictInFlight = fetchStructuredOnce(url, init);
+    aiVerdictInFlight = fetchAiVerdictUntilMaterialized(url, init);
     try {
       return await aiVerdictInFlight;
     } finally {
