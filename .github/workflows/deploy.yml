@@ -1,8 +1,10 @@
 name: deploy
 
-# Production delivery is event-driven by completion of the exact main CI run.
-# This avoids occupying a GitHub runner while waiting for another runner to
-# finish WebKit, which can deadlock/timeout under account concurrency pressure.
+# One exact-SHA production transaction. A green `tests` workflow on main is the
+# only automatic entry point; delivery, readiness, functional smoke and status
+# publication all retain the same EXPECTED_SHA in this workflow. This avoids the
+# subtle workflow_run head_sha drift that can occur across chained workflows when
+# main advances between stages.
 on:
   workflow_run:
     workflows: ["tests"]
@@ -16,7 +18,7 @@ concurrency:
 
 permissions:
   contents: read
-  statuses: read
+  statuses: write
 
 jobs:
   deploy:
@@ -25,7 +27,7 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
     steps:
@@ -36,7 +38,7 @@ jobs:
           test "${{ github.event.workflow_run.conclusion }}" = "success"
           test "${{ github.event.workflow_run.head_branch }}" = "main"
           test -n "$EXPECTED_SHA"
-          echo "Deploying successful main CI head SHA: $EXPECTED_SHA"
+          echo "Atomic production acceptance for successful main CI SHA: $EXPECTED_SHA"
 
       - name: Verify manual dispatch already has green exact-SHA CI
         if: github.event_name == 'workflow_dispatch'
@@ -67,6 +69,7 @@ jobs:
           ref: ${{ env.EXPECTED_SHA }}
 
       - name: Deliver exact SHA over SSH
+        id: delivery
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
@@ -170,3 +173,149 @@ jobs:
               exit 1
             fi
             echo "Delivered exact production SHA: $EXPECTED_SHA"
+
+      - name: Verify exact production readiness
+        id: readiness
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 10m
+          envs: EXPECTED_SHA
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/production_readiness_check.py \
+              --expected-sha "$EXPECTED_SHA"
+
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import time
+            import urllib.request
+            url = "http://127.0.0.1:8790/api/research/g1/q/audit?limit=5000"
+            started = time.monotonic()
+            with urllib.request.urlopen(url, timeout=5.0) as response:
+                response.read()
+                code = int(response.status)
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            print(f"Q_AUDIT_3000MS_GATE http={code} elapsed={elapsed_ms:.0f}ms")
+            assert code == 200, (code, url)
+            assert elapsed_ms < 3000.0, (elapsed_ms, 3000.0)
+            PY
+
+      - name: Exercise exact production routes, AI and official macro data
+        id: smoke
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 8m
+          envs: EXPECTED_SHA
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/production_functional_smoke.py \
+              --expected-sha "$EXPECTED_SHA"
+
+      - name: Verify public terminal from GitHub runner
+        id: public
+        run: |
+          set -euo pipefail
+          url="http://94.241.171.182:8790/api/state"
+          for attempt in 1 2 3; do
+            if curl -fsS \
+              --connect-timeout 3 \
+              --max-time 5 \
+              --output /tmp/public-state.json \
+              "$url"; then
+              bytes=$(wc -c < /tmp/public-state.json)
+              echo "public terminal PASS attempt=${attempt} bytes=${bytes}"
+              exit 0
+            fi
+            echo "public terminal attempt=${attempt}/3 failed"
+            sleep 2
+          done
+          echo "::error::Public terminal is unreachable at ${url}"
+          exit 1
+
+      - name: Diagnose production failure
+        if: failure()
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          script: |
+            set +e
+            echo '=== DEPLOYED SHA ==='
+            git -C /opt/seiltanzer rev-parse HEAD || true
+            echo '=== SERVICE ==='
+            systemctl status seiltanzer --no-pager -l || true
+            echo '=== AI SNAPSHOT STATUS ==='
+            curl -sS --max-time 5 http://127.0.0.1:8790/api/ai/snapshot/status || true
+            echo
+            echo '=== MACRO STATUS ==='
+            curl -sS --max-time 8 http://127.0.0.1:8790/api/research/macro/status || true
+            echo
+            echo '=== RECENT JOURNAL ==='
+            journalctl -u seiltanzer --since '-15 minutes' --no-pager -n 220 || true
+
+      - name: Publish exact-SHA production statuses
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DELIVERY: ${{ steps.delivery.outcome }}
+          READINESS: ${{ steps.readiness.outcome }}
+          SMOKE: ${{ steps.smoke.outcome }}
+          PUBLIC: ${{ steps.public.outcome }}
+        run: |
+          set -u
+          prod_state=failure
+          smoke_state=failure
+          readiness_state=failure
+          if [ "$READINESS" = "success" ]; then readiness_state=success; fi
+          if [ "$SMOKE" = "success" ] && [ "$PUBLIC" = "success" ]; then smoke_state=success; fi
+          if [ "$DELIVERY" = "success" ] && [ "$READINESS" = "success" ] \
+             && [ "$SMOKE" = "success" ] && [ "$PUBLIC" = "success" ]; then
+            prod_state=success
+          fi
+
+          publish() {
+            state="$1"; context="$2"; description="$3"
+            payload="{\"state\":\"$state\",\"context\":\"$context\",\"description\":\"$description\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+            curl --fail-with-body --silent --show-error \
+              --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/statuses/${EXPECTED_SHA}" \
+              -d "$payload"
+          }
+
+          publish "$prod_state" "production/seiltanzer" \
+            "Atomic exact-SHA delivery, readiness and functional acceptance"
+          publish "$readiness_state" "g1e/storage-intelligence" \
+            "Durability and bounded Intelligence readiness"
+          publish "$readiness_state" "g1m/management-edge" \
+            "Terminal Management Edge readiness"
+          publish "$readiness_state" "g1s/short-horizon" \
+            "Fast short-horizon evidence and Q maturity readiness"
+          publish "$readiness_state" "g1m/local-feedback" \
+            "Local management feedback readiness"
+          publish "$smoke_state" "production/functional-smoke" \
+            "Bounded analytics, AI Verdict, official macro and public endpoint smoke"
+
+          echo "EXPECTED_SHA=$EXPECTED_SHA delivery=$DELIVERY readiness=$READINESS smoke=$SMOKE public=$PUBLIC"
+          test "$prod_state" = "success"
