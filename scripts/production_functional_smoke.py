@@ -16,6 +16,12 @@ TRANSIENT_RETRY_DELAY_SEC = 1.0
 AI_VERDICT_MAX_MS = 12_000.0
 AI_VERDICT_TRANSPORT_TIMEOUT_SEC = 14.0
 AI_MATERIALIZER_WAIT_SEC = 150.0
+FOMC_WAIT_SEC = 45.0
+FOMC_PROMPT_VERSION = "fomc-semantic-v2-json-schema"
+FOMC_SEMANTIC_KEYS = {
+    "policy_tone", "policy_shift", "inflation_concern", "growth_concern",
+    "forward_guidance_shift", "uncertainty",
+}
 
 
 def sh(*args: str) -> str:
@@ -134,6 +140,34 @@ def verify_ai_verdict() -> None:
         break
 
 
+def _verify_fomc_semantic() -> None:
+    deadline = time.monotonic() + FOMC_WAIT_SEC
+    row = None
+    while time.monotonic() < deadline:
+        row = assert_route("/api/research/macro/latest?family=FOMC_STATEMENT")
+        if isinstance(row, dict) and row.get("status") == "VALID":
+            break
+        runtime = assert_route("/api/research/macro/status")
+        detail = (runtime or {}).get("fomc_runtime") or {}
+        print(
+            "FOMC v2 waiting "
+            f"running={detail.get('running')} last_error={detail.get('last_error')} "
+            f"last_status={(detail.get('last_result') or {}).get('status')}"
+        )
+        time.sleep(3.0)
+    assert isinstance(row, dict), row
+    assert row.get("status") == "VALID", row
+    assert row.get("family") == "FOMC_STATEMENT", row
+    assert row.get("source") == "Federal Reserve Board", row
+    assert str(row.get("source_url") or "").startswith("https://www.federalreserve.gov/"), row
+    assert row.get("prompt_version") == FOMC_PROMPT_VERSION, row
+    assert float(row.get("available_at") or 0.0) > 0.0, row
+    semantic = row.get("semantic") or {}
+    assert set(semantic) == FOMC_SEMANTIC_KEYS, row
+    assert all(value is not None for value in semantic.values()), row
+    assert row.get("production_authority") is False, row
+
+
 def verify_macro_runtime() -> None:
     status = assert_route("/api/research/macro/status")
     assert isinstance(status, dict), status
@@ -144,6 +178,9 @@ def verify_macro_runtime() -> None:
     assert status.get("production_authority") is False, status
     expected = {"CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES", "FOMC_STATEMENT"}
     assert expected.issubset(set(status.get("official_families") or [])), status
+    transport = status.get("numeric_transport") or {}
+    assert transport.get("official_source_urls_unchanged") is True, transport
+    assert transport.get("payload_or_parser_fallback_added") is False, transport
 
     # Force one deterministic official numeric refresh on the deployed SHA. This
     # is intentionally after the AI review check so it cannot compete with the
@@ -168,6 +205,10 @@ def verify_macro_runtime() -> None:
         payload = row.get("payload") or {}
         assert payload.get("consensus_available") is False, row
         assert payload.get("surprise_computed") is False, row
+
+    # FOMC must also prove the new strict extraction on the production provider;
+    # a green numeric refresh alone must not hide a rejected semantic v1 record.
+    _verify_fomc_semantic()
 
 
 def verify(expected_sha: str) -> None:
