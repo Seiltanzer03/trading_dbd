@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+import time
 import types
 from types import SimpleNamespace
 
@@ -10,7 +11,6 @@ import pandas as pd
 
 from seiltanzer import option_feed_resilience as resilience
 from seiltanzer.config import INSTRUMENTS, Settings
-from seiltanzer.core import options as opt
 from seiltanzer.data.cache import DiskCache
 from seiltanzer.data.feeds import MarketData, _status_dict
 
@@ -19,28 +19,24 @@ def _expiry(days: int) -> str:
     return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=days)).strftime("%Y-%m-%d")
 
 
-def _frames(spot: float, expiry: str, n: int):
-    exp = dt.datetime.strptime(expiry, "%Y-%m-%d").replace(
-        hour=16, tzinfo=dt.timezone.utc)
-    t_years = max((exp - dt.datetime.now(dt.timezone.utc)).total_seconds(), 3600.0) / (
-        365.0 * 24 * 3600)
+def _frames(spot: float, n: int):
     strikes = np.linspace(spot * 0.94, spot * 1.06, n)
     sigma = 0.12
-    call_mid = np.array([opt.bs_call(spot, float(k), t_years, sigma) for k in strikes])
-    put_mid = np.array([opt.bs_put(spot, float(k), t_years, sigma) for k in strikes])
 
-    def frame(mids):
-        mids = np.maximum(mids, 1e-5)
+    def frame():
+        # Reproduce the important FXC failure mode: the option rows and reported
+        # IV exist, but quoted/last mids are unusable. Canonical raw-mid BL must
+        # stay strict; the lower-evidence rescue is allowed to use reported IV.
         return pd.DataFrame({
             "strike": strikes,
-            "bid": mids * 0.99,
-            "ask": mids * 1.01,
-            "lastPrice": mids,
+            "bid": np.zeros(n),
+            "ask": np.zeros(n),
+            "lastPrice": np.zeros(n),
             "openInterest": np.full(n, 25.0),
             "impliedVolatility": np.full(n, sigma),
         })
 
-    return SimpleNamespace(calls=frame(call_mid), puts=frame(put_mid))
+    return SimpleNamespace(calls=frame(), puts=frame())
 
 
 class _FakeTicker:
@@ -50,10 +46,9 @@ class _FakeTicker:
         self._spot = spot
 
     def option_chain(self, expiry: str):
-        # Nearest FXC-style expiry is too sparse to support a density. The next
-        # listed expiry is dense enough and must be selected instead of disabling
-        # the entire USD/CAD option model.
-        return _frames(self._spot, expiry, 2 if expiry == self.options[0] else 21)
+        # The nearest expiry is too sparse even for an IV-smile model; the next
+        # listed expiry has enough reported IV points but still no usable mids.
+        return _frames(self._spot, 2 if expiry == self.options[0] else 21)
 
 
 def _install_fake_yfinance(monkeypatch, ticker):
@@ -76,13 +71,36 @@ def test_usdcad_keeps_explicit_inverse_fxc_mapping():
     assert inst.proxy_experimental is True
 
 
-def test_thin_nearest_expiry_falls_forward_to_first_valid_candidate(monkeypatch, tmp_path):
+def test_existing_adaptive_metrics_get_inverse_mapping_and_real_expiry(monkeypatch, tmp_path):
+    market = _market(tmp_path)
+    expiry = _expiry(30)
+    monkeypatch.setattr(
+        resilience, "_BASE_REFRESH_CHAIN",
+        lambda owner: setattr(owner, "chain", {
+            "metrics": {"expiry": expiry, "t_years": 0.01},
+            **_status_dict(True, "delayed", time.time(), source="adaptive test"),
+        }),
+    )
+
+    resilience.resilient_refresh_chain(market)
+
+    metrics = market.chain["metrics"]
+    assert metrics["proxy_transform"] == "inverse"
+    assert metrics["expiry_date"] == expiry
+    assert metrics["expiry_ts_utc"] > time.time()
+    assert metrics["t_years"] > 0.02
+
+
+def test_invalid_raw_mids_rescue_from_reported_iv_smile(monkeypatch, tmp_path):
     market = _market(tmp_path)
     ticker = _FakeTicker(73.0)
     _install_fake_yfinance(monkeypatch, ticker)
     monkeypatch.setattr(
         resilience, "_BASE_REFRESH_CHAIN",
-        lambda owner: setattr(owner, "chain", {"metrics": None, **_status_dict(error="nearest invalid")}),
+        lambda owner: setattr(owner, "chain", {
+            "metrics": None,
+            **_status_dict(error="canonical raw-mid candidates invalid"),
+        }),
     )
 
     resilience.resilient_refresh_chain(market)
@@ -90,11 +108,13 @@ def test_thin_nearest_expiry_falls_forward_to_first_valid_candidate(monkeypatch,
     metrics = market.chain["metrics"]
     assert metrics is not None
     assert metrics["proxy"] == "FXC"
+    assert metrics["proxy_transform"] == "inverse"
     assert metrics["expiry"] == ticker.options[1]
-    assert metrics["expiry_selection"]["candidate_index"] == 1
-    assert metrics["expiry_selection"]["rejected_before_selected"]
+    assert metrics["density_input"]["mode"] == "reported_iv_smile_bs_reconstruction"
+    assert metrics["density_input"]["quality_tier"] == "experimental_proxy_iv_rescue"
+    assert metrics["expiry_selection"]["selected_ordinal"] == 1
     assert market.chain["status"] == "delayed"
-    assert "validated expiry scan" in market.chain["source"]
+    assert "IV-smile rescue" in market.chain["source"]
 
 
 def test_iv_surface_skips_sparse_expiry_instead_of_aborting(monkeypatch, tmp_path):
