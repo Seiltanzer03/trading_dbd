@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import time
 
-from fastapi import Body, FastAPI
+from fastapi import FastAPI
 
+from .fomc_official_source import refresh_latest_fomc
 from .macro_data_factory import MacroDataFactory
 from .macro_data_factory_causality_refinement import install_macro_data_factory_causality_refinement
 from .macro_t0_context import install_macro_t0_context
@@ -30,7 +31,12 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     install_macro_t0_context(app.state.engine, factory)
 
     def status():
-        return {**factory.status(), "llm_cost_guard": cost_guard_status()}
+        return {
+            **factory.status(),
+            "llm_cost_guard": cost_guard_status(),
+            "public_ingest_mode": "official_federal_reserve_fomc_only",
+            "arbitrary_document_post_enabled": False,
+        }
 
     app.add_api_route(
         "/api/research/macro/status",
@@ -39,9 +45,8 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         name="macro_data_factory_status",
     )
 
-    def extract(document: dict = Body(...)):
-        # Bound arbitrary text persistence before touching SQLite. Provider calls
-        # have a second independent gate after validation/cache inside the factory.
+    def refresh_fomc():
+        # Bound both official network refreshes and DB writes before any work.
         try:
             reserve_macro_ingest_request()
         except RuntimeError as exc:
@@ -52,13 +57,23 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
                 "research_only": True,
                 "production_authority": False,
             }
-        return factory.extract_document(document, extractor=guarded_macro_extractor)
+        try:
+            return refresh_latest_fomc(factory, extractor=guarded_macro_extractor)
+        except (RuntimeError, ValueError) as exc:
+            return {
+                "contract_version": "macro-data-factory-v1",
+                "status": "UNAVAILABLE",
+                "reason": str(exc)[:180],
+                "official_source_verified": False,
+                "research_only": True,
+                "production_authority": False,
+            }
 
     app.add_api_route(
-        "/api/research/macro/extract",
-        extract,
+        "/api/research/macro/fomc/refresh",
+        refresh_fomc,
         methods=["POST"],
-        name="macro_data_factory_extract",
+        name="macro_data_factory_fomc_refresh",
     )
 
     def latest(captured_ts: float | None = None, family: str = "FOMC_STATEMENT"):
