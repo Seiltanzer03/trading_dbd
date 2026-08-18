@@ -7,6 +7,7 @@ from fastapi import Body, FastAPI
 
 from .macro_data_factory import MacroDataFactory
 from .macro_t0_context import install_macro_t0_context
+from .research_llm_cost_guard import cost_guard_status, guarded_macro_extractor
 
 
 def install_macro_data_factory_routes(app: FastAPI) -> None:
@@ -22,17 +23,20 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     # Existing ML feature vectors do not read macro_context_v1.
     install_macro_t0_context(app.state.engine, factory)
 
+    def status():
+        return {**factory.status(), "llm_cost_guard": cost_guard_status()}
+
     app.add_api_route(
         "/api/research/macro/status",
-        factory.status,
+        status,
         methods=["GET"],
         name="macro_data_factory_status",
     )
 
     def extract(document: dict = Body(...)):
-        # This is the only route that may call the extractor. Merely reading
-        # state/status/latest can never spend LLM tokens or wait on a provider.
-        return factory.extract_document(document)
+        # Cache lookup happens inside the factory before this guarded extractor
+        # is called, so repeated documents stay free and do not consume a slot.
+        return factory.extract_document(document, extractor=guarded_macro_extractor)
 
     app.add_api_route(
         "/api/research/macro/extract",
