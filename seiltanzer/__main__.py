@@ -10,6 +10,7 @@ from .ai_provider_guard import install_ai_provider_guard
 from .ai_report_semantics_guard import install_ai_report_semantics_guard
 from .ai_snapshot_budget_guard import install_ai_snapshot_budget_guard
 from .ai_snapshot_materializer import install_ai_snapshot_materializer
+from .ai_snapshot_runtime_guard import install_ai_snapshot_runtime_guard
 from .analytics_runtime import install_analytics_runtime
 from .app import create_app
 from .app_extensions import install_lattice_revaluation
@@ -94,9 +95,12 @@ def main() -> None:
     # The full deterministic Position Manager snapshot can take tens of seconds
     # on the 2 GB VPS. Keep the exact math, but calculate it on one serial daemon
     # worker instead of inside POST /api/ai/verdict. The HTTP path becomes a
-    # bounded cache read + optional OpenRouter explanation. Wrong-trade/stale
-    # snapshots are rejected with fast JSON 503 rather than waiting for Caddy 504.
-    install_ai_snapshot_materializer(app)
+    # bounded cache read + optional OpenRouter explanation. Heavy recomputation
+    # is event-driven by the review geometry (normally +/-0.15R), not a timer.
+    materializer = install_ai_snapshot_materializer(app)
+    # A deterministic calculation failure must not hot-loop every 2 seconds, and
+    # an empty journal must preserve the existing fast no_active_trade response.
+    install_ai_snapshot_runtime_guard(app, materializer)
 
     ensure_g1m_schema_backup(storage)
     ensure_g1s_schema_backup(storage)
