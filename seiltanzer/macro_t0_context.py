@@ -7,6 +7,7 @@ No LLM call can occur here: only MacroDataFactory.latest_admissible() is read.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 from .macro_data_factory import DATA_FACTORY_CONTRACT_VERSION, MacroDataFactory
 from .passive_learning import PassiveLearningEngine
@@ -14,6 +15,19 @@ from .passive_learning import PassiveLearningEngine
 
 MACRO_T0_CONTEXT_VERSION = "macro-t0-context-v1"
 _INSTALLED = False
+
+
+def _official_fed_record(record: dict[str, Any]) -> bool:
+    try:
+        parsed = urlparse(str(record.get("source_url") or ""))
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    return (
+        str(record.get("source") or "") == "Federal Reserve Board"
+        and parsed.scheme == "https"
+        and host in {"www.federalreserve.gov", "federalreserve.gov"}
+    )
 
 
 def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float) -> dict[str, Any]:
@@ -47,6 +61,7 @@ def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float) -> dic
             "research_only": True,
             "production_authority": False,
         }
+    official = _official_fed_record(record)
     return {
         "contract_version": MACRO_T0_CONTEXT_VERSION,
         "available": True,
@@ -54,6 +69,9 @@ def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float) -> dic
         "family": record.get("family"),
         "document_id": record.get("document_id"),
         "document_sha256": record.get("document_sha256"),
+        "source": record.get("source"),
+        "source_url": record.get("source_url"),
+        "official_source_verified": official,
         "published_at": record.get("published_at"),
         "available_at": float(available_at),
         "semantic": record.get("semantic"),
@@ -63,6 +81,7 @@ def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float) -> dic
         "retrospective_publication": bool(record.get("retrospective_only")),
         "prospectively_usable_since": float(available_at),
         "historical_backfill_allowed": False,
+        "eligible_for_future_ml_research": official,
         "causal_rule": "available_at<=captured_ts",
         "research_only": True,
         "production_authority": False,
