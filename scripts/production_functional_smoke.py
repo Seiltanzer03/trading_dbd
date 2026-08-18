@@ -13,6 +13,8 @@ import urllib.request
 BASE = "http://127.0.0.1:8790"
 TRANSIENT_ATTEMPTS = 3
 TRANSIENT_RETRY_DELAY_SEC = 1.0
+AI_VERDICT_MAX_MS = 12_000.0
+AI_VERDICT_TRANSPORT_TIMEOUT_SEC = 14.0
 
 
 def sh(*args: str) -> str:
@@ -79,6 +81,11 @@ def verify_universe_routes() -> None:
     assert weight.get("automatic_execution") is False, edge
     assert isinstance((edge.get("canonical_features") or {}).get("items"), dict), edge
     assert isinstance(edge.get("cross_asset"), dict), edge
+    active = edge.get("active_edge") or {}
+    assert "directional_matched_signal_n" in active, active
+    assert "non_directional_matched_signal_n" in active, active
+    assert "directional_matched_group_n" in active, active
+    assert "directional_weight_reason" in active, active
 
 
 def verify(expected_sha: str) -> None:
@@ -102,8 +109,10 @@ def verify(expected_sha: str) -> None:
 
     verify_universe_routes()
 
-    code, body, elapsed = request("/api/ai/verdict", method="POST", timeout=65.0)
-    print(f"/api/ai/verdict: {code} {elapsed:.0f}ms")
+    code, body, elapsed = request(
+        "/api/ai/verdict", method="POST", timeout=AI_VERDICT_TRANSPORT_TIMEOUT_SEC)
+    print(f"/api/ai/verdict: {code} {elapsed:.0f}ms gate<{AI_VERDICT_MAX_MS:.0f}ms")
+    assert elapsed < AI_VERDICT_MAX_MS, (elapsed, AI_VERDICT_MAX_MS, code, body)
     assert code in {200, 400, 429}, (code, body)
     assert isinstance(body.get("ok"), bool), body
     if body["ok"]:

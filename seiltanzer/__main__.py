@@ -38,6 +38,7 @@ from .storage_routes import install_storage_routes
 from .storage_runtime import install_storage_runtime, prepare_storage
 from .storage_schema_registry_integrity import install_storage_schema_registry_integrity
 from .strategy_terminal_guard import install_strategy_terminal_guard
+from .universe_runtime_refinement import install_universe_runtime_refinement
 from .visual_universe_page import install_visual_universe_page
 from .visual_universe_routes import install_visual_universe_routes
 
@@ -79,6 +80,11 @@ def main() -> None:
     # yfinance/pandas object graphs at the same time. Numerical contracts are
     # unchanged; this is resource scheduling only.
     install_production_resource_guard()
+
+    # Universe correctness: refresh the shared observed correlation graph before
+    # passive price/T0 capture and expose directional vs non-directional matches.
+    # This changes neither policy authority nor any historical immutable row.
+    install_universe_runtime_refinement()
 
     # Strategy terminal levels are deterministic and outrank the AI risk-overlay.
     # If FINAL TAKE is crossed while a real remainder is still open, require a

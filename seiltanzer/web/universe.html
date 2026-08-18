@@ -75,7 +75,9 @@
       <div><span>DIRECTION</span><b id="edge-direction">0.00</b></div>
       <div><span>SUPPORT / OPPOSE</span><b id="edge-votes">0 / 0</b></div>
       <div><span>STRICT SHARE</span><b id="edge-strict">0%</b></div>
-      <div><span>BUCKETS</span><b id="edge-buckets">0</b></div>
+      <div><span>DIR BUCKETS</span><b id="edge-buckets">0</b></div>
+      <div><span>MATCHED GROUPS</span><b id="edge-matched-groups">0</b></div>
+      <div><span>NON-DIR MATCHES</span><b id="edge-nondirectional">0</b></div>
     </div>
     <div class="scene-grid edge-grid">
       <div class="scene-stage">
@@ -98,7 +100,9 @@
       Центр = Position Manager. Базовое облако = доступные canonical T0 features; сектор = feature family, высота = bounded signed value,
       непрозрачность = freshness/availability. При появлении Active Edge поверх него добавляются family×horizon узлы:
       расстояние = horizon, высота = net vote, масса = matched candidates, яркость = STRICT_REFERENCE participation.
-      Фактический Active Edge остаётся только <b>0–30% HIGH_RISK_ONLY / до 40% со STRICT_REFERENCE</b> внутри soft ranking hard-risk-eligible policies;
+      <b>Current-T0 match сам по себе не означает directional vote:</b> volatility/other targets могут совпасть, но не получают право
+      создавать LONG/SHORT soft-weight. В вес входят только directional family×horizon buckets. Фактический Active Edge остаётся только
+      <b>0–30% HIGH_RISK_ONLY / до 40% со STRICT_REFERENCE</b> внутри soft ranking hard-risk-eligible policies;
       CVaR, hard-risk и stop logic не изменяются.
     </div>
   </section>
@@ -110,5 +114,6 @@
 
 <script src="/static/vendor/plotly-gl3d.min.js"></script>
 <script type="module" src="/static/js/universe_scenes.js"></script>
+<script type="module" src="/static/js/universe_precision.js"></script>
 </body>
 </html>
