@@ -165,9 +165,6 @@ def _restore_verified_bytes_for_drill(
         raise FileNotFoundError(str(backup_db))
 
     expected_size = manifest.get("database_size_bytes")
-    if expected_size is not None and int(expected_size) != int(backup_db.stat().st_size):
-        raise ValueError("backup size mismatch")
-
     source_sha, copied_bytes = _copy_source_with_sha256(backup_db, destination)
     if source_sha != expected_sha:
         raise ValueError("backup SHA256 mismatch")
