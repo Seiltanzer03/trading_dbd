@@ -1,0 +1,248 @@
+=== NOW ===
+Tue Aug 18 22:46:33 UTC 2026
+=== DISK ===
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        29G   27G  1.5G  95% /
+=== TMP DEPTH1 ===
+4096	/tmp/.ICE-unix
+4096	/tmp/.X11-unix
+4096	/tmp/.XIM-unix
+4096	/tmp/.font-unix
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-caddy.service-Hn0k3Q
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-fwupd.service-dkCiCz
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-polkit.service-jfOzBs
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-logind.service-6n5fvA
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-resolved.service-3irTz1
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-timesyncd.service-Z0BLEg
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-tor@default.service-vzNZIA
+974856192	/tmp/ede-v13-production-p39rh6yd
+9087877120	/tmp
+=== TMP DEPTH2 LARGEST ===
+4096	/tmp/.ICE-unix
+4096	/tmp/.X11-unix
+4096	/tmp/.XIM-unix
+4096	/tmp/.font-unix
+4096	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-caddy.service-Hn0k3Q/tmp
+4096	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-fwupd.service-dkCiCz/tmp
+4096	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-polkit.service-jfOzBs/tmp
+4096	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-logind.service-6n5fvA/tmp
+4096	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-resolved.service-3irTz1/tmp
+4096	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-timesyncd.service-Z0BLEg/tmp
+4096	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-tor@default.service-vzNZIA/tmp
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-caddy.service-Hn0k3Q
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-fwupd.service-dkCiCz
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-polkit.service-jfOzBs
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-logind.service-6n5fvA
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-resolved.service-3irTz1
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-timesyncd.service-Z0BLEg
+8192	/tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-tor@default.service-vzNZIA
+974856192	/tmp/ede-v13-production-p39rh6yd
+9087877120	/tmp
+=== TMP FILES >=100MB ===
+974848000 2026-08-15T12:28:21.8281258800 /tmp/ede-v13-production-p39rh6yd/immutable-production-copy.sqlite3
+1149652992 2026-08-17T13:13:29.7108439590 /tmp/seiltanzer-ede-source-32033246841.sqlite3
+1229561856 2026-08-17T18:44:59.5014926560 /tmp/seiltanzer-ede-source-32055506664.sqlite3
+1354387456 2026-08-18T08:20:26.9755629320 /tmp/seiltanzer-ede-source-32114542520.sqlite3
+1374810112 2026-08-18T09:34:36.4754847920 /tmp/seiltanzer-ede-source-32121073597.sqlite3
+1435746304 2026-08-18T13:19:51.8860164180 /tmp/seiltanzer-ede-source-32140640918.sqlite3
+1564868608 2026-08-18T19:04:52.6239346660 /tmp/seiltanzer-ede-source-32173876865.sqlite3
+=== TMP TOPLEVEL AGE/TYPE ===
+d 2026-08-15T12:12:06.6950000000 4096 /tmp/.ICE-unix
+d 2026-08-15T12:12:06.6950000000 4096 /tmp/.X11-unix
+d 2026-08-15T12:12:06.6950000000 4096 /tmp/.XIM-unix
+d 2026-08-15T12:12:06.6950000000 4096 /tmp/.font-unix
+d 2026-08-15T12:12:06.7050000000 4096 /tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-resolved.service-3irTz1
+d 2026-08-15T12:12:09.8260000000 4096 /tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-caddy.service-Hn0k3Q
+d 2026-08-15T12:12:10.5160000000 4096 /tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-logind.service-6n5fvA
+d 2026-08-15T12:12:10.9210000000 4096 /tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-tor@default.service-vzNZIA
+d 2026-08-15T12:12:16.4460000000 4096 /tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-systemd-timesyncd.service-Z0BLEg
+d 2026-08-15T12:19:56.2740587880 4096 /tmp/ede-v13-production-p39rh6yd
+d 2026-08-15T13:06:06.0112068100 4096 /tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-polkit.service-jfOzBs
+d 2026-08-15T18:50:45.1045620940 4096 /tmp/systemd-private-d2a7302c6cd04db79e058ea6b20b4544-fwupd.service-dkCiCz
+f 2026-08-15T12:42:43.6512637260 0 /tmp/seiltanzer-ede-source-31885077954.sqlite3-wal
+f 2026-08-15T12:42:43.6512637260 32768 /tmp/seiltanzer-ede-source-31885077954.sqlite3-shm
+f 2026-08-15T13:00:33.4483515070 0 /tmp/seiltanzer-ede-source-31886026816.sqlite3-wal
+f 2026-08-15T13:00:33.4503515510 32768 /tmp/seiltanzer-ede-source-31886026816.sqlite3-shm
+f 2026-08-15T14:33:43.5722852900 0 /tmp/seiltanzer-ede-source-31889985923.sqlite3-wal
+f 2026-08-15T14:33:43.5722852900 32768 /tmp/seiltanzer-ede-source-31889985923.sqlite3-shm
+f 2026-08-15T14:52:42.4364355610 0 /tmp/seiltanzer-ede-source-31890911960.sqlite3-wal
+f 2026-08-15T14:52:42.4374355690 32768 /tmp/seiltanzer-ede-source-31890911960.sqlite3-shm
+f 2026-08-15T15:11:35.5839343810 0 /tmp/seiltanzer-ede-source-31891773123.sqlite3-wal
+f 2026-08-15T15:11:35.5859343640 32768 /tmp/seiltanzer-ede-source-31891773123.sqlite3-shm
+f 2026-08-15T18:48:26.9707578140 0 /tmp/seiltanzer-ede-source-31902109809.sqlite3-wal
+f 2026-08-15T18:48:26.9717578130 32768 /tmp/seiltanzer-ede-source-31902109809.sqlite3-shm
+f 2026-08-15T20:31:56.9883031270 0 /tmp/seiltanzer-ede-source-31906699085.sqlite3-wal
+f 2026-08-15T20:31:56.9883031270 32768 /tmp/seiltanzer-ede-source-31906699085.sqlite3-shm
+f 2026-08-15T21:07:37.6010495190 0 /tmp/seiltanzer-ede-source-31908375297.sqlite3-wal
+f 2026-08-15T21:07:37.6010495190 32768 /tmp/seiltanzer-ede-source-31908375297.sqlite3-shm
+f 2026-08-15T22:09:34.3641628610 0 /tmp/seiltanzer-ede-source-31911155815.sqlite3-wal
+f 2026-08-15T22:09:34.3651628640 32768 /tmp/seiltanzer-ede-source-31911155815.sqlite3-shm
+f 2026-08-15T22:28:51.5054512790 0 /tmp/seiltanzer-ede-source-31912012303.sqlite3-wal
+f 2026-08-15T22:28:51.5054512790 32768 /tmp/seiltanzer-ede-source-31912012303.sqlite3-shm
+f 2026-08-15T22:50:33.6654294840 0 /tmp/seiltanzer-ede-source-31912958836.sqlite3-wal
+f 2026-08-15T22:50:33.6664294890 32768 /tmp/seiltanzer-ede-source-31912958836.sqlite3-shm
+f 2026-08-16T01:58:19.0892476310 0 /tmp/seiltanzer-ede-source-31920751090.sqlite3-wal
+f 2026-08-16T01:58:19.0902476350 32768 /tmp/seiltanzer-ede-source-31920751090.sqlite3-shm
+f 2026-08-16T07:00:51.7504457760 0 /tmp/seiltanzer-ede-source-31932758307.sqlite3-wal
+f 2026-08-16T07:00:51.7524456230 32768 /tmp/seiltanzer-ede-source-31932758307.sqlite3-shm
+f 2026-08-16T13:01:59.8036805320 0 /tmp/seiltanzer-ede-source-31948642568.sqlite3-wal
+f 2026-08-16T13:01:59.8036805320 32768 /tmp/seiltanzer-ede-source-31948642568.sqlite3-shm
+f 2026-08-16T15:47:02.5110314910 0 /tmp/seiltanzer-ede-source-31956429363.sqlite3-wal
+f 2026-08-16T15:47:02.5110314910 32768 /tmp/seiltanzer-ede-source-31956429363.sqlite3-shm
+f 2026-08-16T16:06:40.1603802270 0 /tmp/seiltanzer-ede-source-31957385056.sqlite3-wal
+f 2026-08-16T16:06:40.1613802120 32768 /tmp/seiltanzer-ede-source-31957385056.sqlite3-shm
+f 2026-08-16T16:19:23.2664435740 0 /tmp/seiltanzer-ede-source-31957982550.sqlite3-wal
+f 2026-08-16T16:19:23.2664435740 32768 /tmp/seiltanzer-ede-source-31957982550.sqlite3-shm
+f 2026-08-16T17:16:47.2760556500 0 /tmp/seiltanzer-ede-source-31960872542.sqlite3-wal
+f 2026-08-16T17:16:47.2760556500 32768 /tmp/seiltanzer-ede-source-31960872542.sqlite3-shm
+f 2026-08-16T17:29:03.5287538000 0 /tmp/seiltanzer-ede-source-31961471115.sqlite3-wal
+f 2026-08-16T17:29:03.5287538000 32768 /tmp/seiltanzer-ede-source-31961471115.sqlite3-shm
+f 2026-08-16T17:49:04.5753286080 0 /tmp/seiltanzer-ede-source-31962429445.sqlite3-wal
+f 2026-08-16T17:49:04.5753286080 32768 /tmp/seiltanzer-ede-source-31962429445.sqlite3-shm
+f 2026-08-16T17:53:32.6785157790 0 /tmp/seiltanzer-ede-source-31962861565.sqlite3-wal
+f 2026-08-16T17:53:32.6805157930 32768 /tmp/seiltanzer-ede-source-31962861565.sqlite3-shm
+f 2026-08-16T18:47:53.5500031390 0 /tmp/seiltanzer-ede-source-31965634936.sqlite3-wal
+f 2026-08-16T18:47:53.5530031500 32768 /tmp/seiltanzer-ede-source-31965634936.sqlite3-shm
+f 2026-08-16T19:43:13.9037165840 256038 /tmp/local-state.json
+f 2026-08-16T19:43:15.0577225500 256035 /tmp/public-state.json
+f 2026-08-16T19:44:38.4191469780 0 /tmp/seiltanzer-ede-source-31968220669.sqlite3-wal
+f 2026-08-16T19:44:38.4201469830 32768 /tmp/seiltanzer-ede-source-31968220669.sqlite3-shm
+f 2026-08-16T22:28:54.2958127780 0 /tmp/seiltanzer-ede-source-31975899241.sqlite3-wal
+f 2026-08-16T22:28:54.2958127780 32768 /tmp/seiltanzer-ede-source-31975899241.sqlite3-shm
+f 2026-08-16T23:28:12.9469712190 0 /tmp/seiltanzer-ede-source-31978969868.sqlite3-wal
+f 2026-08-16T23:28:12.9479712240 32768 /tmp/seiltanzer-ede-source-31978969868.sqlite3-shm
+f 2026-08-16T23:50:24.9922781680 0 /tmp/seiltanzer-ede-source-31980012886.sqlite3-wal
+f 2026-08-16T23:50:24.9922781680 32768 /tmp/seiltanzer-ede-source-31980012886.sqlite3-shm
+f 2026-08-17T01:56:28.2099736390 0 /tmp/seiltanzer-ede-source-31986414878.sqlite3-wal
+f 2026-08-17T01:56:28.2099736390 32768 /tmp/seiltanzer-ede-source-31986414878.sqlite3-shm
+f 2026-08-17T06:21:47.4184842610 0 /tmp/seiltanzer-ede-source-32000988729.sqlite3-wal
+f 2026-08-17T06:21:47.4204842650 32768 /tmp/seiltanzer-ede-source-32000988729.sqlite3-shm
+f 2026-08-17T06:36:09.3167168670 0 /tmp/seiltanzer-ede-source-32002010130.sqlite3-wal
+f 2026-08-17T06:36:09.3167168670 32768 /tmp/seiltanzer-ede-source-32002010130.sqlite3-shm
+f 2026-08-17T07:17:04.4510602710 0 /tmp/seiltanzer-ede-source-32005098779.sqlite3-wal
+f 2026-08-17T07:17:04.4520602750 32768 /tmp/seiltanzer-ede-source-32005098779.sqlite3-shm
+f 2026-08-17T09:29:30.9232972320 0 /tmp/seiltanzer-ede-source-32015069316.sqlite3-wal
+f 2026-08-17T09:29:30.9242972360 32768 /tmp/seiltanzer-ede-source-32015069316.sqlite3-shm
+f 2026-08-17T09:54:49.1357244100 0 /tmp/seiltanzer-ede-source-32017161200.sqlite3-wal
+f 2026-08-17T09:54:49.1367244140 32768 /tmp/seiltanzer-ede-source-32017161200.sqlite3-shm
+f 2026-08-17T10:28:31.7227060530 0 /tmp/seiltanzer-ede-source-32019911083.sqlite3-wal
+f 2026-08-17T10:28:31.7237060560 32768 /tmp/seiltanzer-ede-source-32019911083.sqlite3-shm
+f 2026-08-17T13:13:29.7108439590 1149652992 /tmp/seiltanzer-ede-source-32033246841.sqlite3
+f 2026-08-17T13:13:29.7708439190 0 /tmp/seiltanzer-ede-source-32033246841.sqlite3-wal
+f 2026-08-17T13:13:29.7718439190 32768 /tmp/seiltanzer-ede-source-32033246841.sqlite3-shm
+f 2026-08-17T13:47:12.6442778930 168116 /tmp/ai-hotfix-state.json
+f 2026-08-17T14:08:09.5059012850 66170 /tmp/ai-heavy-state.json
+f 2026-08-17T15:08:30.7655931160 223583 /tmp/ai-report-state.json
+f 2026-08-17T16:46:23.7630147450 239731 /tmp/state.after
+f 2026-08-17T16:46:28.1700363700 0 /tmp/proxy.http
+f 2026-08-17T16:49:16.8968315150 40339 /tmp/root.before
+f 2026-08-17T16:49:17.5978346990 313198 /tmp/state.before
+f 2026-08-17T16:49:18.2528376740 313209 /tmp/state.check
+f 2026-08-17T16:49:19.2678422820 40339 /tmp/root.after
+f 2026-08-17T16:49:19.7978446880 313207 /tmp/state.after2
+f 2026-08-17T16:49:19.8638449870 56157 /tmp/proxy.sni
+f 2026-08-17T16:53:35.0759537570 934 /tmp/state.time
+f 2026-08-17T17:46:45.9789889740 43561 /tmp/openapi.json
+f 2026-08-17T18:44:59.5014926560 1229561856 /tmp/seiltanzer-ede-source-32055506664.sqlite3
+f 2026-08-17T18:44:59.7084934870 0 /tmp/seiltanzer-ede-source-32055506664.sqlite3-wal
+f 2026-08-17T18:44:59.7094934920 32768 /tmp/seiltanzer-ede-source-32055506664.sqlite3-shm
+f 2026-08-17T18:58:27.5352163680 0 /tmp/seiltanzer-ede-source-32057709539.sqlite3-wal
+f 2026-08-17T18:58:27.5352163680 32768 /tmp/seiltanzer-ede-source-32057709539.sqlite3-shm
+f 2026-08-17T19:51:54.4172292540 0 /tmp/seiltanzer-ede-source-32062225841.sqlite3-wal
+f 2026-08-17T19:51:54.4172292540 32768 /tmp/seiltanzer-ede-source-32062225841.sqlite3-shm
+f 2026-08-17T20:09:19.3493095840 0 /tmp/seiltanzer-ede-source-32063816073.sqlite3-wal
+f 2026-08-17T20:09:19.3503095860 32768 /tmp/seiltanzer-ede-source-32063816073.sqlite3-shm
+f 2026-08-18T01:51:54.6321161190 0 /tmp/seiltanzer-ede-source-32089706242.sqlite3-wal
+f 2026-08-18T01:51:54.6321161190 32768 /tmp/seiltanzer-ede-source-32089706242.sqlite3-shm
+f 2026-08-18T07:05:11.2773559420 0 /tmp/seiltanzer-ede-source-32109724251.sqlite3-wal
+f 2026-08-18T07:05:11.2773559420 32768 /tmp/seiltanzer-ede-source-32109724251.sqlite3-shm
+f 2026-08-18T08:20:26.9755629320 1354387456 /tmp/seiltanzer-ede-source-32114542520.sqlite3
+f 2026-08-18T08:20:27.3985641060 0 /tmp/seiltanzer-ede-source-32114542520.sqlite3-wal
+f 2026-08-18T08:20:27.3985641060 32768 /tmp/seiltanzer-ede-source-32114542520.sqlite3-shm
+f 2026-08-18T09:34:36.4754847920 1374810112 /tmp/seiltanzer-ede-source-32121073597.sqlite3
+f 2026-08-18T09:34:36.6114853000 0 /tmp/seiltanzer-ede-source-32121073597.sqlite3-wal
+f 2026-08-18T09:34:36.6114853000 32768 /tmp/seiltanzer-ede-source-32121073597.sqlite3-shm
+f 2026-08-18T13:19:51.8860164180 1435746304 /tmp/seiltanzer-ede-source-32140640918.sqlite3
+f 2026-08-18T13:19:52.1550176160 0 /tmp/seiltanzer-ede-source-32140640918.sqlite3-wal
+f 2026-08-18T13:19:52.1550176160 32768 /tmp/seiltanzer-ede-source-32140640918.sqlite3-shm
+f 2026-08-18T16:43:35.4659348190 911 /tmp/check_tokens.py
+f 2026-08-18T16:49:17.5999863080 1478 /tmp/test_sales_full.py
+f 2026-08-18T19:04:52.6239346660 1564868608 /tmp/seiltanzer-ede-source-32173876865.sqlite3
+f 2026-08-18T19:04:52.9649404660 0 /tmp/seiltanzer-ede-source-32173876865.sqlite3-wal
+f 2026-08-18T19:04:52.9649404660 32768 /tmp/seiltanzer-ede-source-32173876865.sqlite3-shm
+f 2026-08-18T22:38:43.3978448510 60063 /tmp/seiltanzer-deploy-state.json
+p 2026-08-15T12:12:14.3120000000 0 /tmp/clr-debug-pipe-793-1336-in
+p 2026-08-15T12:12:14.3120000000 0 /tmp/clr-debug-pipe-793-1336-out
+s 2026-08-15T12:12:14.2940000000 0 /tmp/dotnet-diagnostic-793-1336-socket
+=== TMP OPEN HANDLES ===
+COMMAND   PID          USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+Runner.Li 793 github-runner    9u  unix 0xffff8b1774f5e000      0t0 7661 /tmp/dotnet-diagnostic-793-1336-socket type=STREAM (LISTEN)
+=== LOCAL BACKUPS ===
+0 2026-08-12T09:55:32.5362727370 /opt/seiltanzer/data/backups/local/20260812T080925Z-local-165516.sqlite3-wal
+0 2026-08-13T11:32:02.0569664650 /opt/seiltanzer/data/backups/local/.20260813T113157Z-local-717708.tmp.sqlite3-wal
+0 2026-08-13T12:03:29.6087599670 /opt/seiltanzer/data/backups/local/20260813T115250Z-local-970441.sqlite3-wal
+0 2026-08-13T12:43:34.9159706800 /opt/seiltanzer/data/backups/local/.20260813T124009Z-local-809008.tmp.sqlite3-wal
+0 2026-08-14T00:15:30.7279969900 /opt/seiltanzer/data/backups/local/.20260814T001452Z-local-492167.tmp.sqlite3-wal
+0 2026-08-14T02:25:59.7776284050 /opt/seiltanzer/data/backups/local/.20260814T022411Z-local-251166.tmp.sqlite3-wal
+0 2026-08-14T07:11:04.4269256920 /opt/seiltanzer/data/backups/local/.20260814T071023Z-local-423404.tmp.sqlite3-wal
+0 2026-08-14T17:22:07.2862634320 /opt/seiltanzer/data/backups/local/.20260814T172111Z-local-071383.tmp.sqlite3-wal
+0 2026-08-14T21:47:48.2911859750 /opt/seiltanzer/data/backups/local/.20260814T214638Z-local-998048.tmp.sqlite3-wal
+0 2026-08-15T14:07:09.0693676510 /opt/seiltanzer/data/backups/local/.20260815T140548Z-local-748703.tmp.sqlite3-wal
+0 2026-08-16T08:54:56.5809415750 /opt/seiltanzer/data/backups/local/.20260816T085400Z-local-440289.tmp.sqlite3-wal
+0 2026-08-17T12:37:09.7403920460 /opt/seiltanzer/data/backups/local/.20260817T121943Z-local-183418.tmp.sqlite3-wal
+0 2026-08-17T13:46:21.7198242270 /opt/seiltanzer/data/backups/local/.20260817T134614Z-local-374421.tmp.sqlite3-wal
+0 2026-08-18T08:00:53.8393199950 /opt/seiltanzer/data/backups/local/.20260818T074018Z-local-818774.tmp.sqlite3-wal
+0 2026-08-18T17:48:35.4611466010 /opt/seiltanzer/data/backups/local/.20260818T174825Z-local-305707.tmp.sqlite3-wal
+0 2026-08-18T19:25:21.3261976190 /opt/seiltanzer/data/backups/local/.20260818T192512Z-local-112530.tmp.sqlite3-wal
+0 2026-08-18T20:50:20.2412606270 /opt/seiltanzer/data/backups/local/.20260818T194120Z-local-080103.tmp.sqlite3-wal
+0 2026-08-18T21:19:35.8851617480 /opt/seiltanzer/data/backups/local/.20260818T211924Z-local-964892.tmp.sqlite3-wal
+0 2026-08-18T21:37:25.3553703200 /opt/seiltanzer/data/backups/local/.20260818T213715Z-local-035386.tmp.sqlite3-wal
+0 2026-08-18T22:37:41.6056472050 /opt/seiltanzer/data/backups/local/.20260818T223731Z-local-651838.tmp.sqlite3-wal
+1024 2026-08-12T08:24:31.1180305670 /opt/seiltanzer/data/backups/local/.20260812T082431Z-local-071113.tmp.sqlite3-journal
+1024 2026-08-12T08:25:33.1872257640 /opt/seiltanzer/data/backups/local/.20260812T082533Z-local-133170.tmp.sqlite3-journal
+1024 2026-08-12T08:26:33.2194236280 /opt/seiltanzer/data/backups/local/.20260812T082633Z-local-193209.tmp.sqlite3-journal
+1024 2026-08-12T08:27:33.2576294330 /opt/seiltanzer/data/backups/local/.20260812T082733Z-local-253247.tmp.sqlite3-journal
+1024 2026-08-12T08:28:33.2918422670 /opt/seiltanzer/data/backups/local/.20260812T082833Z-local-313275.tmp.sqlite3-journal
+1024 2026-08-12T08:29:33.3240613560 /opt/seiltanzer/data/backups/local/.20260812T082933Z-local-373307.tmp.sqlite3-journal
+1024 2026-08-14T05:35:27.2229474720 /opt/seiltanzer/data/backups/local/.20260814T053527Z-local-727072.tmp.sqlite3-journal
+1024 2026-08-14T10:01:07.7031306020 /opt/seiltanzer/data/backups/local/.20260814T100107Z-local-667608.tmp.sqlite3-journal
+1024 2026-08-14T11:21:34.9698337050 /opt/seiltanzer/data/backups/local/.20260814T112133Z-local-493871.tmp.sqlite3-journal
+1024 2026-08-14T11:44:04.7222592960 /opt/seiltanzer/data/backups/local/.20260814T114404Z-local-844671.tmp.sqlite3-journal
+1024 2026-08-14T13:22:35.8497913700 /opt/seiltanzer/data/backups/local/.20260814T132235Z-local-755826.tmp.sqlite3-journal
+1024 2026-08-15T04:35:37.8053471040 /opt/seiltanzer/data/backups/local/.20260815T043537Z-local-537783.tmp.sqlite3-journal
+1024 2026-08-15T10:00:28.1821298050 /opt/seiltanzer/data/backups/local/.20260815T100027Z-local-027797.tmp.sqlite3-journal
+1024 2026-08-15T12:11:52.2760456690 /opt/seiltanzer/data/backups/local/.20260815T121134Z-local-894618.tmp.sqlite3-journal
+1024 2026-08-15T12:35:19.6751167090 /opt/seiltanzer/data/backups/local/.20260815T123519Z-local-319654.tmp.sqlite3-journal
+1024 2026-08-15T16:15:16.2731047410 /opt/seiltanzer/data/backups/local/.20260815T161515Z-local-515440.tmp.sqlite3-journal
+1024 2026-08-17T11:57:24.9419639050 /opt/seiltanzer/data/backups/local/.20260817T115724Z-local-844920.tmp.sqlite3-journal
+1024 2026-08-17T14:02:25.3281736310 /opt/seiltanzer/data/backups/local/.20260817T140225Z-local-345288.tmp.sqlite3-journal
+1024 2026-08-17T14:32:41.8485412870 /opt/seiltanzer/data/backups/local/.20260817T143241Z-local-161616.tmp.sqlite3-journal
+1024 2026-08-17T14:48:39.1131477360 /opt/seiltanzer/data/backups/local/.20260817T144839Z-local-119069.tmp.sqlite3-journal
+1024 2026-08-17T15:23:08.9390358420 /opt/seiltanzer/data/backups/local/.20260817T152308Z-local-188901.tmp.sqlite3-journal
+3161 2026-08-18T22:38:25.4367871380 /opt/seiltanzer/data/backups/local/20260818T223752Z-local-672385.manifest.json
+3163 2026-08-18T22:37:31.8336161850 /opt/seiltanzer/data/backups/local/20260818T215238Z-local-958065.manifest.json
+32768 2026-08-13T11:32:02.0569664650 /opt/seiltanzer/data/backups/local/.20260813T113157Z-local-717708.tmp.sqlite3-shm
+32768 2026-08-13T12:03:29.6097599710 /opt/seiltanzer/data/backups/local/20260813T115250Z-local-970441.sqlite3-shm
+32768 2026-08-13T12:43:34.9199706950 /opt/seiltanzer/data/backups/local/.20260813T124009Z-local-809008.tmp.sqlite3-shm
+32768 2026-08-14T00:15:30.7289969930 /opt/seiltanzer/data/backups/local/.20260814T001452Z-local-492167.tmp.sqlite3-shm
+32768 2026-08-14T02:25:59.7856284430 /opt/seiltanzer/data/backups/local/.20260814T022411Z-local-251166.tmp.sqlite3-shm
+32768 2026-08-14T07:11:04.4269256920 /opt/seiltanzer/data/backups/local/.20260814T071023Z-local-423404.tmp.sqlite3-shm
+32768 2026-08-14T17:22:07.2862634320 /opt/seiltanzer/data/backups/local/.20260814T172111Z-local-071383.tmp.sqlite3-shm
+32768 2026-08-14T21:47:48.2911859750 /opt/seiltanzer/data/backups/local/.20260814T214638Z-local-998048.tmp.sqlite3-shm
+32768 2026-08-15T14:07:09.0813676960 /opt/seiltanzer/data/backups/local/.20260815T140548Z-local-748703.tmp.sqlite3-shm
+32768 2026-08-16T08:54:56.7509418150 /opt/seiltanzer/data/backups/local/.20260816T085400Z-local-440289.tmp.sqlite3-shm
+32768 2026-08-17T12:37:09.7403920460 /opt/seiltanzer/data/backups/local/.20260817T121943Z-local-183418.tmp.sqlite3-shm
+32768 2026-08-17T13:46:21.7198242270 /opt/seiltanzer/data/backups/local/.20260817T134614Z-local-374421.tmp.sqlite3-shm
+32768 2026-08-18T08:00:53.8393199950 /opt/seiltanzer/data/backups/local/.20260818T074018Z-local-818774.tmp.sqlite3-shm
+32768 2026-08-18T17:48:35.4611466010 /opt/seiltanzer/data/backups/local/.20260818T174825Z-local-305707.tmp.sqlite3-shm
+32768 2026-08-18T19:25:21.3261976190 /opt/seiltanzer/data/backups/local/.20260818T192512Z-local-112530.tmp.sqlite3-shm
+32768 2026-08-18T20:50:20.2422606360 /opt/seiltanzer/data/backups/local/.20260818T194120Z-local-080103.tmp.sqlite3-shm
+32768 2026-08-18T21:19:35.8861617510 /opt/seiltanzer/data/backups/local/.20260818T211924Z-local-964892.tmp.sqlite3-shm
+32768 2026-08-18T21:37:25.3553703200 /opt/seiltanzer/data/backups/local/.20260818T213715Z-local-035386.tmp.sqlite3-shm
+32768 2026-08-18T22:37:41.6056472050 /opt/seiltanzer/data/backups/local/.20260818T223731Z-local-651838.tmp.sqlite3-shm
+1622515712 2026-08-18T22:36:56.1745035930 /opt/seiltanzer/data/backups/local/20260818T215238Z-local-958065.sqlite3
+1622515712 2026-08-18T22:37:41.3756464750 /opt/seiltanzer/data/backups/local/.20260818T223731Z-local-651838.tmp.sqlite3
+1622515712 2026-08-18T22:38:03.2777162270 /opt/seiltanzer/data/backups/local/20260818T223752Z-local-672385.sqlite3
+=== BACKUP OPEN HANDLES ===
+COMMAND      PID USER   FD   TYPE DEVICE   SIZE/OFF   NODE NAME
+sftp-serv 128628 root    3r   REG    8,1 1622515712 306641 /opt/seiltanzer/data/backups/local/20260818T223752Z-local-672385.sqlite3
