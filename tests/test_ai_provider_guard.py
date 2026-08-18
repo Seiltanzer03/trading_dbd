@@ -12,7 +12,7 @@ def test_provider_timeout_configuration_is_bounded(monkeypatch):
     monkeypatch.setenv("AI_PROVIDER_TIMEOUT_SEC", "0.1")
     assert ai_provider_guard.provider_timeout_sec() == 3.0
     monkeypatch.setenv("AI_PROVIDER_TIMEOUT_SEC", "999")
-    assert ai_provider_guard.provider_timeout_sec() == 15.0
+    assert ai_provider_guard.provider_timeout_sec() == 8.0
     monkeypatch.setenv("AI_PROVIDER_TIMEOUT_SEC", "bad")
     assert ai_provider_guard.provider_timeout_sec() == ai_provider_guard.DEFAULT_PROVIDER_TIMEOUT_SEC
     monkeypatch.delenv("AI_PROVIDER_TIMEOUT_SEC", raising=False)
