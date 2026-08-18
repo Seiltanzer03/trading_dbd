@@ -8,7 +8,11 @@ from fastapi import Body, FastAPI
 from .macro_data_factory import MacroDataFactory
 from .macro_data_factory_causality_refinement import install_macro_data_factory_causality_refinement
 from .macro_t0_context import install_macro_t0_context
-from .research_llm_cost_guard import cost_guard_status, guarded_macro_extractor
+from .research_llm_cost_guard import (
+    cost_guard_status,
+    guarded_macro_extractor,
+    reserve_macro_ingest_request,
+)
 
 
 def install_macro_data_factory_routes(app: FastAPI) -> None:
@@ -36,8 +40,18 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     )
 
     def extract(document: dict = Body(...)):
-        # Cache lookup happens inside the factory before this guarded extractor
-        # is called, so repeated documents stay free and do not consume a slot.
+        # Bound arbitrary text persistence before touching SQLite. Provider calls
+        # have a second independent gate after validation/cache inside the factory.
+        try:
+            reserve_macro_ingest_request()
+        except RuntimeError as exc:
+            return {
+                "contract_version": "macro-data-factory-v1",
+                "status": "RATE_LIMITED",
+                "reason": str(exc)[:160],
+                "research_only": True,
+                "production_authority": False,
+            }
         return factory.extract_document(document, extractor=guarded_macro_extractor)
 
     app.add_api_route(
