@@ -1,9 +1,10 @@
-"""Isolated read-only route for causal G.1S historical analogs."""
+"""Isolated research routes for causal G.1S historical analogs."""
 from __future__ import annotations
 
 from fastapi import FastAPI
 
 from .g1_historical_analog import DEFAULT_FEATURE_SET, DEFAULT_K, historical_analogs
+from .g1_historical_analog_analyst import explain_historical_analogs
 
 
 def install_g1_historical_analog_routes(app: FastAPI) -> None:
@@ -22,5 +23,16 @@ def install_g1_historical_analog_routes(app: FastAPI) -> None:
         analogs,
         methods=["GET"],
         name="g1s_historical_analogs",
+    )
+
+    def explain(observation_id: str, k: int = DEFAULT_K):
+        # Explicit POST only. Merely viewing analogs never spends LLM tokens.
+        return explain_historical_analogs(runtime, observation_id, k=k)
+
+    app.add_api_route(
+        "/api/research/g1s/analogs/explain",
+        explain,
+        methods=["POST"],
+        name="g1s_historical_analog_explanation",
     )
     app.state.g1_historical_analog_routes_installed = True
