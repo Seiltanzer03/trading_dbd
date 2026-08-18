@@ -3,6 +3,7 @@ import sqlite3
 import threading
 
 from seiltanzer.g1_historical_analog import historical_analogs
+from seiltanzer.g1_historical_analog_analyst import explain_historical_analogs
 from seiltanzer.g1_short_horizon_feature_contract_v2 import (
     FEATURE_CONTRACT_V2,
     V2_FEATURE_SETS,
@@ -181,3 +182,47 @@ def test_unknown_or_old_contract_is_unavailable():
 
     assert result["status"] == "UNAVAILABLE"
     assert result["reason"] == "FEATURE_CONTRACT_UNAVAILABLE"
+
+
+def test_analog_llm_is_on_demand_compact_and_cached_by_fixed_analog_set():
+    runtime = FakeRuntime()
+    for index in range(12):
+        add(runtime, f"old-{index}", 1000 + index * 100, resolved=3000 + index,
+            direction="UP" if index < 8 else "DOWN", seed=float(index))
+    add(runtime, "current", 10_000, seed=5.0)
+    calls = []
+
+    def provider(summary, model):
+        calls.append((summary, model))
+        assert len(summary["analogs"]) <= 20
+        assert len(summary["top_feature_differences"]) <= 8
+        assert "warning" in summary
+        return "Исторические аналоги умеренно согласованы; вывод остаётся описательным."
+
+    first = explain_historical_analogs(runtime, "current", k=10, provider=provider)
+    second = explain_historical_analogs(
+        runtime, "current", k=10,
+        provider=lambda *_: (_ for _ in ()).throw(AssertionError("cached explanation must be reused")),
+    )
+
+    assert first["status"] == "OK"
+    assert first["cache_hit"] is False
+    assert second["status"] == "OK"
+    assert second["cache_hit"] is True
+    assert len(calls) == 1
+    assert first["analog_set_sha256"] == second["analog_set_sha256"]
+    assert first["production_authority"] is False
+    assert first["may_change_position_manager"] is False
+
+
+def test_analog_llm_never_runs_when_deterministic_analog_report_is_unavailable():
+    runtime = FakeRuntime()
+    add(runtime, "current", 10_000, seed=5.0)
+
+    result = explain_historical_analogs(
+        runtime, "current", provider=lambda *_: (_ for _ in ()).throw(AssertionError("must not call LLM")),
+    )
+
+    assert result["status"] == "UNAVAILABLE"
+    assert result["reason"] == "ANALOG_REPORT_UNAVAILABLE"
+    assert result["production_authority"] is False
