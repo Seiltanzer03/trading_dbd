@@ -10,6 +10,7 @@ from .fomc_official_source import refresh_latest_fomc
 from .macro_data_factory import MacroDataFactory
 from .macro_data_factory_causality_refinement import install_macro_data_factory_causality_refinement
 from .macro_fomc_runtime import FOMCOfficialRuntime
+from .macro_ism_parser_refinement import install_ism_roundup_parser_refinement
 from .macro_ism_resilience import install_ism_source_resilience
 from .macro_numeric_data import NumericMacroRuntime, NumericMacroStore, research_context
 from .macro_t0_context import install_macro_t0_context
@@ -28,10 +29,12 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         raise RuntimeError("G.1S integration must be installed before macro data factory")
     os.environ.setdefault("DATA_FACTORY_MODEL", "openai/gpt-4o-mini")
     install_macro_data_factory_causality_refinement()
-    # ISM's public landing page can send non-browser clients to SSO. Install the
-    # direct-month official report probe before constructing the runtime source.
-    # Every accepted document is still validated by host, report family, period
-    # and parsed PMI table; no missing report is replaced with a synthetic value.
+    # The current Services roundup uses "increasing 0.1 percentage point to 54.1";
+    # install the narrow official-prose refinement before the source wrapper.
+    install_ism_roundup_parser_refinement()
+    # ISM's newest full report can send non-browser clients to SSO/CAPTCHA.
+    # The resilient source then uses ISM's own validated public roundup plus the
+    # immediately previous official report. Missing components remain missing.
     install_ism_source_resilience()
     factory = MacroDataFactory(runtime)
     numeric_store = NumericMacroStore(runtime)
