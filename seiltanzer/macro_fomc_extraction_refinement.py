@@ -1,9 +1,9 @@
 """Structured-output refinement for the research-only FOMC semantic extractor.
 
 V1 relied on a strict textual instruction and correctly rejected an otherwise
-useful provider response that omitted ``forward_guidance_shift``.  V2 keeps the
+useful provider response that omitted ``forward_guidance_shift``. V2 keeps the
 same six bounded research measurements and the same downstream validator, but
-asks the provider for a strict JSON-schema object.  Changing PROMPT_VERSION also
+asks the provider for a strict JSON-schema object. Changing PROMPT_VERSION also
 creates a fresh immutable cache key; the rejected v1 row remains audit evidence
 and is never mutated or deleted.
 """
@@ -67,6 +67,7 @@ def _extract_v2(current_text: str, previous_text: str | None, model: str) -> dic
         "model": model,
         "temperature": 0.0,
         "max_tokens": 320,
+        "provider": {"require_parameters": True},
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT_V2},
             {"role": "user", "content": user},
