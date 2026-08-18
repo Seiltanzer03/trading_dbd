@@ -1,8 +1,9 @@
-"""Add already-extracted macro semantics to future frozen T0 observations only.
+"""Freeze already-observed official macro context into future T0 rows only.
 
-This is intentionally additive research context. Existing ML feature vectors do
-not read this block, so no current model, policy or production decision changes.
-No LLM call can occur here: only MacroDataFactory.latest_admissible() is read.
+FOMC semantics and deterministic CPI/NFP/ISM numbers are additive research
+context.  They do not enter the current production policy or ML feature vector in
+this pass: the prospective outcome machinery must first measure their actual OOS
+value.  No network or LLM call can occur here.
 """
 from __future__ import annotations
 
@@ -10,10 +11,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .macro_data_factory import DATA_FACTORY_CONTRACT_VERSION, MacroDataFactory
+from .macro_numeric_data import research_context as numeric_research_context
 from .passive_learning import PassiveLearningEngine
 
 
-MACRO_T0_CONTEXT_VERSION = "macro-t0-context-v1"
+MACRO_T0_CONTEXT_VERSION = "macro-t0-context-v2"
 _INSTALLED = False
 
 
@@ -30,12 +32,11 @@ def _official_fed_record(record: dict[str, Any]) -> bool:
     )
 
 
-def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float) -> dict[str, Any]:
+def _fomc_context(factory: MacroDataFactory, captured_ts: float) -> dict[str, Any]:
     try:
         record = factory.latest_admissible(float(captured_ts), family="FOMC_STATEMENT")
-    except Exception as exc:  # fail-soft; collection must never depend on this research context
+    except Exception as exc:
         return {
-            "contract_version": MACRO_T0_CONTEXT_VERSION,
             "available": False,
             "reason": f"FACTORY_READ_ERROR:{type(exc).__name__}",
             "research_only": True,
@@ -43,29 +44,24 @@ def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float) -> dic
         }
     if record.get("status") != "VALID":
         return {
-            "contract_version": MACRO_T0_CONTEXT_VERSION,
             "available": False,
-            "reason": record.get("reason") or "NO_CAUSAL_MACRO_CONTEXT",
+            "reason": record.get("reason") or "NO_CAUSAL_FOMC_CONTEXT",
             "captured_ts": float(captured_ts),
-            "data_factory_contract": DATA_FACTORY_CONTRACT_VERSION,
             "research_only": True,
             "production_authority": False,
         }
     available_at = record.get("available_at")
     if available_at is None or float(available_at) > float(captured_ts) + 1e-6:
         return {
-            "contract_version": MACRO_T0_CONTEXT_VERSION,
             "available": False,
-            "reason": "MACRO_CONTEXT_AFTER_T0",
+            "reason": "FOMC_CONTEXT_AFTER_T0",
             "captured_ts": float(captured_ts),
             "research_only": True,
             "production_authority": False,
         }
     official = _official_fed_record(record)
     return {
-        "contract_version": MACRO_T0_CONTEXT_VERSION,
         "available": True,
-        "captured_ts": float(captured_ts),
         "family": record.get("family"),
         "document_id": record.get("document_id"),
         "document_sha256": record.get("document_sha256"),
@@ -80,13 +76,64 @@ def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float) -> dic
         "model": record.get("model"),
         "retrospective_publication": bool(record.get("retrospective_only")),
         "prospectively_usable_since": float(available_at),
-        "historical_backfill_allowed": False,
         "eligible_for_future_ml_research": official,
         "causal_rule": "available_at<=captured_ts",
         "research_only": True,
         "production_authority": False,
-        "current_ml_feature_vector_reads_macro_context": False,
     }
+
+
+def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float) -> dict[str, Any]:
+    captured_ts = float(captured_ts)
+    fomc = _fomc_context(factory, captured_ts)
+    numeric_store = getattr(factory, "numeric_release_store", None)
+    if numeric_store is None:
+        numeric = {
+            "available_families": [],
+            "candidate_vector": {},
+            "reason": "NUMERIC_STORE_NOT_INSTALLED",
+            "research_only": True,
+            "production_authority": False,
+        }
+    else:
+        try:
+            numeric = numeric_research_context(numeric_store, captured_ts)
+        except Exception as exc:
+            numeric = {
+                "available_families": [],
+                "candidate_vector": {},
+                "reason": f"NUMERIC_STORE_READ_ERROR:{type(exc).__name__}",
+                "research_only": True,
+                "production_authority": False,
+            }
+    available = bool(fomc.get("available") or numeric.get("available_families"))
+    result: dict[str, Any] = {
+        "contract_version": MACRO_T0_CONTEXT_VERSION,
+        "available": available,
+        "captured_ts": captured_ts,
+        "data_factory_contract": DATA_FACTORY_CONTRACT_VERSION,
+        "fomc": fomc,
+        "numeric_macro": numeric,
+        "candidate_vector": dict(numeric.get("candidate_vector") or {}),
+        "historical_backfill_allowed": False,
+        "causal_rule": "each_record.available_at<=captured_ts",
+        "research_only": True,
+        "production_authority": False,
+        "current_ml_feature_vector_reads_macro_context": False,
+        "promotion_rule": "prospective_OOS_evidence_required_before_active_edge_weight",
+    }
+    # Backward-compatible FOMC root fields for existing research readers.
+    if fomc.get("available"):
+        for key in (
+            "family", "document_id", "document_sha256", "source", "source_url",
+            "official_source_verified", "published_at", "available_at", "semantic",
+            "numeric", "prompt_version", "model", "retrospective_publication",
+            "prospectively_usable_since", "eligible_for_future_ml_research",
+        ):
+            result[key] = fomc.get(key)
+    if not available:
+        result["reason"] = "NO_CAUSAL_MACRO_CONTEXT"
+    return result
 
 
 def install_macro_t0_context(engine, factory: MacroDataFactory) -> None:

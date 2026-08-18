@@ -15,6 +15,7 @@ TRANSIENT_ATTEMPTS = 3
 TRANSIENT_RETRY_DELAY_SEC = 1.0
 AI_VERDICT_MAX_MS = 12_000.0
 AI_VERDICT_TRANSPORT_TIMEOUT_SEC = 14.0
+AI_MATERIALIZER_WAIT_SEC = 150.0
 
 
 def sh(*args: str) -> str:
@@ -53,15 +54,12 @@ def assert_route(path: str, *, timeout: float = 5.0) -> dict | list | None:
             time.sleep(TRANSIENT_RETRY_DELAY_SEC)
             continue
         print(f"{path}: {code} {elapsed:.0f}ms attempt={attempt}/{TRANSIENT_ATTEMPTS}")
-        assert code == 200, (path, code)
+        assert code == 200, (path, code, body)
         return body
     raise AssertionError((path, "retry loop exhausted"))
 
 
 def verify_universe_routes() -> None:
-    # These are removable/read-only visualization contracts. A market source may
-    # legitimately be unavailable; the endpoint itself must still be bounded and
-    # must explicitly preserve no-synthetic/no-production-authority semantics.
     rates = assert_route("/api/visual/rates-orbit", timeout=15.0)
     assert isinstance(rates, dict), rates
     assert rates.get("production_authority") is False, rates
@@ -88,6 +86,90 @@ def verify_universe_routes() -> None:
     assert "directional_weight_reason" in active, active
 
 
+def verify_ai_verdict() -> None:
+    status = assert_route("/api/ai/snapshot/status")
+    assert isinstance(status, dict), status
+    assert status.get("periodic_heavy_recompute") is False, status
+    assert status.get("request_path_heavy_build") is False, status
+    assert float(status.get("review_delta_r") or 0.0) == 0.15, status
+    assert float(status.get("failure_backoff_sec") or 0.0) >= 5.0, status
+
+    if status.get("current_trade_id") is not None:
+        deadline = time.monotonic() + AI_MATERIALIZER_WAIT_SEC
+        while not status.get("ready") and time.monotonic() < deadline:
+            print(
+                "/api/ai/snapshot/status: warming "
+                f"building={status.get('building')} reason={status.get('invalidated_reason')} "
+                f"retry={status.get('failure_retry_in_sec')}"
+            )
+            time.sleep(2.0)
+            status = assert_route("/api/ai/snapshot/status")
+        assert status.get("ready") is True, status
+
+    # Every individual POST must remain below the reverse-proxy budget. If the
+    # market crosses a review trigger between the status read and POST, a fast
+    # JSON 503 is correct; wait for the background deterministic rebuild and retry
+    # through a new short request instead of keeping one HTTP request open.
+    deadline = time.monotonic() + AI_MATERIALIZER_WAIT_SEC
+    while True:
+        code, body, elapsed = request(
+            "/api/ai/verdict", method="POST", timeout=AI_VERDICT_TRANSPORT_TIMEOUT_SEC)
+        print(f"/api/ai/verdict: {code} {elapsed:.0f}ms gate<{AI_VERDICT_MAX_MS:.0f}ms")
+        assert elapsed < AI_VERDICT_MAX_MS, (elapsed, AI_VERDICT_MAX_MS, code, body)
+        assert code != 504, body
+        if code == 503 and ((body or {}).get("error") or {}).get("code") == "ai_snapshot_warming":
+            assert time.monotonic() < deadline, body
+            time.sleep(min(3.0, max(1.0, float((body or {}).get("retry_after_sec") or 2.0))))
+            continue
+        assert code in {200, 400, 429}, (code, body)
+        assert isinstance(body, dict), body
+        assert isinstance(body.get("ok"), bool), body
+        if body["ok"]:
+            assert body.get("mode") in {"llm", "deterministic_fallback"}, body
+            assert isinstance(body.get("verdict"), str) and body["verdict"], body
+        else:
+            assert (body.get("error") or {}).get("code") in {
+                "no_active_trade", "ai_rate_limited", "ai_request_in_progress"
+            }, body
+        break
+
+
+def verify_macro_runtime() -> None:
+    status = assert_route("/api/research/macro/status")
+    assert isinstance(status, dict), status
+    assert status.get("official_sources_only") is True, status
+    assert status.get("no_placeholders") is True, status
+    assert status.get("consensus_feed_available") is False, status
+    assert status.get("surprise_computed_without_consensus") is False, status
+    assert status.get("production_authority") is False, status
+    expected = {"CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES", "FOMC_STATEMENT"}
+    assert expected.issubset(set(status.get("official_families") or [])), status
+
+    # Force one deterministic official numeric refresh on the deployed SHA. This
+    # is intentionally after the AI review check so it cannot compete with the
+    # 6,500-path startup calculation on the small production host.
+    code, body, elapsed = request(
+        "/api/research/macro/numeric/refresh", method="POST", timeout=40.0)
+    print(f"/api/research/macro/numeric/refresh: {code} {elapsed:.0f}ms")
+    assert code == 200, (code, body)
+    assert isinstance(body, dict), body
+    assert body.get("status") == "OK", body
+    assert body.get("no_placeholders") is True, body
+    assert body.get("production_authority") is False, body
+    assert not body.get("errors"), body
+
+    for family in ("CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES"):
+        row = assert_route(f"/api/research/macro/latest?family={family}")
+        assert isinstance(row, dict), row
+        assert row.get("status") == "VALID", row
+        assert row.get("family") == family, row
+        assert row.get("official_source_verified") is True, row
+        assert float(row.get("available_at") or 0.0) > 0.0, row
+        payload = row.get("payload") or {}
+        assert payload.get("consensus_available") is False, row
+        assert payload.get("surprise_computed") is False, row
+
+
 def verify(expected_sha: str) -> None:
     actual = sh("git", "-C", "/opt/seiltanzer", "rev-parse", "HEAD")
     assert actual == expected_sha, (actual, expected_sha)
@@ -108,20 +190,8 @@ def verify(expected_sha: str) -> None:
         assert_route(path)
 
     verify_universe_routes()
-
-    code, body, elapsed = request(
-        "/api/ai/verdict", method="POST", timeout=AI_VERDICT_TRANSPORT_TIMEOUT_SEC)
-    print(f"/api/ai/verdict: {code} {elapsed:.0f}ms gate<{AI_VERDICT_MAX_MS:.0f}ms")
-    assert elapsed < AI_VERDICT_MAX_MS, (elapsed, AI_VERDICT_MAX_MS, code, body)
-    assert code in {200, 400, 429}, (code, body)
-    assert isinstance(body.get("ok"), bool), body
-    if body["ok"]:
-        assert body.get("mode") in {"llm", "deterministic_fallback"}, body
-        assert isinstance(body.get("verdict"), str) and body["verdict"], body
-    else:
-        assert (body.get("error") or {}).get("code") in {
-            "no_active_trade", "ai_rate_limited", "ai_request_in_progress"
-        }, body
+    verify_ai_verdict()
+    verify_macro_runtime()
 
 
 def main(argv: list[str] | None = None) -> int:

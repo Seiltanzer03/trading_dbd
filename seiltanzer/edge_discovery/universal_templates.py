@@ -1,8 +1,8 @@
 """Bounded interpretable templates for strategy-agnostic universal outcomes.
 
-Legacy directional EDE keeps its exact frozen template universe.  PASS 5 builds a
+Legacy directional EDE keeps its exact frozen template universe. PASS 5 builds a
 parallel discovery universe that may include newly registered families such as
-RATES without silently changing the legacy exam.
+RATES and future-only MACRO without silently changing the legacy exam.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from itertools import product
 from typing import Iterable
 
 from .filters import CandidateTemplate, ConditionTemplate, candidate_templates
+from .macro_registry import MACRO_FEATURE_DEFINITIONS
 from .rates_registry import RATES_FEATURE_DEFINITIONS
 from .registry import FEATURES, FeatureDefinition
 from .research_policy import interaction_feature_pairs
@@ -25,10 +26,16 @@ def universal_feature_definitions() -> tuple[FeatureDefinition, ...]:
     """Feature definitions admitted to the PASS 5 discovery layer.
 
     RATES remain separate from the live canonical registry until a real T0
-    capture path exists.  They are nevertheless valid historical/off-host
-    discovery features with explicit causality and staleness contracts.
+    capture path exists. MACRO definitions are future-only: they become eligible
+    only when an immutable T0 row physically contains an official release with
+    ``available_at <= T0``. Neither family changes the frozen legacy EDE exam.
     """
-    by_id = {item.feature_id: item for item in tuple(FEATURES) + tuple(RATES_FEATURE_DEFINITIONS)}
+    definitions = (
+        tuple(FEATURES)
+        + tuple(RATES_FEATURE_DEFINITIONS)
+        + tuple(MACRO_FEATURE_DEFINITIONS)
+    )
+    by_id = {item.feature_id: item for item in definitions}
     return tuple(by_id[key] for key in sorted(by_id))
 
 
@@ -47,7 +54,7 @@ def universal_candidate_templates(
 
     Legacy/base templates are retained. Newly declared numeric features receive
     only above/below-train-median singles plus family-policy-bounded pairwise
-    interactions.  There is no unrestricted Cartesian product.
+    interactions. There is no unrestricted Cartesian product.
     """
     definitions = tuple(feature_definitions or universal_feature_definitions())
     eligible = set(str(value) for value in eligible_feature_ids)
