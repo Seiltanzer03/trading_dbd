@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from .g1_historical_analog import DEFAULT_FEATURE_SET, DEFAULT_K, historical_analogs
 from .g1_historical_analog_analyst import explain_historical_analogs
+from .llm_edge_researcher_routes import install_llm_edge_researcher_routes
 from .research_llm_cost_guard import guarded_analog_provider
 
 
@@ -38,4 +39,5 @@ def install_g1_historical_analog_routes(app: FastAPI) -> None:
         methods=["POST"],
         name="g1s_historical_analog_explanation",
     )
+    install_llm_edge_researcher_routes(app)
     app.state.g1_historical_analog_routes_installed = True
