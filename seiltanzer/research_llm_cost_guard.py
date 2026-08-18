@@ -14,12 +14,14 @@ import time
 from typing import Any
 
 from .g1_historical_analog_analyst import _provider as _analog_provider
+from .llm_edge_researcher import _provider as _edge_researcher_provider
 from . import macro_data_factory as _macro_data_factory
 
 
-COST_GUARD_VERSION = "research-llm-cost-guard-v2-dynamic-provider"
+COST_GUARD_VERSION = "research-llm-cost-guard-v3-edge-researcher"
 DEFAULT_MACRO_INTERVAL_SEC = 300.0
 DEFAULT_ANALOG_INTERVAL_SEC = 15.0
+DEFAULT_EDGE_RESEARCHER_INTERVAL_SEC = 30.0
 
 
 def _interval(env_name: str, default: float, minimum: float, maximum: float) -> float:
@@ -65,6 +67,10 @@ _ANALOG_GATE = ProviderRateGate(_interval(
     "ANALOG_LLM_MIN_PROVIDER_INTERVAL_SEC",
     DEFAULT_ANALOG_INTERVAL_SEC, 5.0, 300.0,
 ))
+_EDGE_RESEARCHER_GATE = ProviderRateGate(_interval(
+    "EDGE_RESEARCHER_MIN_PROVIDER_INTERVAL_SEC",
+    DEFAULT_EDGE_RESEARCHER_INTERVAL_SEC, 10.0, 900.0,
+))
 
 
 def reserve_macro_ingest_request() -> float:
@@ -85,13 +91,22 @@ def guarded_analog_provider(summary: dict[str, Any], model: str) -> str:
     return _analog_provider(summary, model)
 
 
+def guarded_edge_researcher_provider(
+    summary: dict[str, Any], model: str, max_hypotheses: int
+) -> dict[str, Any]:
+    _EDGE_RESEARCHER_GATE.reserve()
+    return _edge_researcher_provider(summary, model, max_hypotheses)
+
+
 def cost_guard_status() -> dict[str, Any]:
     return {
         "contract_version": COST_GUARD_VERSION,
         "macro_min_ingest_interval_sec": _MACRO_INGEST_GATE.interval_sec,
         "macro_min_provider_interval_sec": _MACRO_PROVIDER_GATE.interval_sec,
         "analog_min_provider_interval_sec": _ANALOG_GATE.interval_sec,
+        "edge_researcher_min_provider_interval_sec": _EDGE_RESEARCHER_GATE.interval_sec,
         "macro_write_burst_protection": True,
+        "edge_researcher_manual_post_only": True,
         "cache_checked_before_provider_gate": True,
         "macro_provider_resolved_at_call_time": True,
         "separate_from_ai_verdict_provider_guard": True,
