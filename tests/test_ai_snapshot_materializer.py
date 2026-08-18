@@ -67,7 +67,6 @@ def test_materializer_returns_same_review_without_periodic_heavy_rebuild():
     mat = AISnapshotMaterializer(engine, builder, startup_delay_sec=0,
                                  watch_interval_sec=1)
     mat._build_once()
-    # Wall-clock age alone must not force another 6,500-path calculation.
     mat._built_at = time.time() - 3600
     result = mat.cached_build_snapshot(engine)
 
@@ -86,7 +85,7 @@ def test_price_move_0_15r_invalidates_and_requests_refresh():
     mat = AISnapshotMaterializer(engine, lambda _: snapshot(),
                                  watch_interval_sec=1)
     mat._build_once()
-    engine.market.price["value"] = 102.5  # 0.25R vs 0.10R baseline
+    engine.market.price["value"] = 102.5
 
     with pytest.raises(SnapshotNotReady) as exc:
         mat.cached_build_snapshot(engine)
@@ -101,7 +100,7 @@ def test_strategy_boundary_crossing_invalidates_before_0_15r():
     mat = AISnapshotMaterializer(engine, lambda _: snapshot(next_rung=0.18),
                                  watch_interval_sec=1)
     mat._build_once()
-    engine.market.price["value"] = 101.9  # 0.19R: only +0.09R, but crosses 0.18R rung
+    engine.market.price["value"] = 101.9
 
     with pytest.raises(SnapshotNotReady) as exc:
         mat.cached_build_snapshot(engine)
@@ -166,5 +165,6 @@ def test_no_active_trade_is_fast_unavailable_not_a_fake_snapshot():
 
     with pytest.raises(SnapshotNotReady) as exc:
         mat.cached_build_snapshot(engine)
-    assert exc.value.status["reason"] == "NO_ACTIVE_TRADE"
+    assert exc.value.status["reason"] == "SNAPSHOT_WARMING"
     assert exc.value.status["ready"] is False
+    assert mat._snapshot is None
