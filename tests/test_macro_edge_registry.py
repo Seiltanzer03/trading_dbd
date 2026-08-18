@@ -31,6 +31,13 @@ def test_eligible_macro_feature_gets_bounded_interpretable_single_templates():
     templates = universal_candidate_templates(
         eligible_feature_ids={"macro.cpi_core_yoy_pct"},
     )
-    ids = {item.template_id for item in templates}
-    assert any("macro.cpi_core_yoy_pct" in template_id and "ABOVE_MEDIAN" in template_id for template_id in ids)
-    assert any("macro.cpi_core_yoy_pct" in template_id and "BELOW_MEDIAN" in template_id for template_id in ids)
+    macro_conditions = [
+        condition
+        for template in templates
+        for condition in template.conditions
+        if condition.feature_id == "macro.cpi_core_yoy_pct"
+    ]
+    states = {condition.state for condition in macro_conditions}
+    kinds = {condition.kind for condition in macro_conditions}
+    assert {"ABOVE_MEDIAN", "BELOW_MEDIAN"}.issubset(states)
+    assert kinds == {"train_relative"}
