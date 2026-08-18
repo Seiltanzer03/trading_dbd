@@ -9,6 +9,7 @@ import uvicorn
 from .ai_provider_guard import install_ai_provider_guard
 from .ai_report_semantics_guard import install_ai_report_semantics_guard
 from .ai_snapshot_budget_guard import install_ai_snapshot_budget_guard
+from .ai_snapshot_materializer import install_ai_snapshot_materializer
 from .analytics_runtime import install_analytics_runtime
 from .app import create_app
 from .app_extensions import install_lattice_revaluation
@@ -71,73 +72,42 @@ def main() -> None:
     if cleanup.get("candidate_n") or cleanup.get("remaining_n"):
         print("G1E1 venv cleanup -> " + json.dumps(cleanup, ensure_ascii=False, sort_keys=True))
 
-    # Thin experimental option proxies can have a broken/sparse nearest expiry
-    # while the next listed contract is usable. Install the bounded validated
-    # expiry scan before the resource guard wraps MarketData refresh methods.
     install_option_feed_resilience()
-
-    # Production runs on a small shared VPS. Install the concurrency/allocator
-    # guard before Engine/MarketData instances are created so startup refreshes,
-    # passive collection and the live terminal cannot build several large
-    # yfinance/pandas object graphs at the same time. Numerical contracts are
-    # unchanged; this is resource scheduling only.
     install_production_resource_guard()
-
-    # Universe correctness: refresh the shared observed correlation graph before
-    # passive price/T0 capture and expose directional vs non-directional matches.
-    # This changes neither policy authority nor any historical immutable row.
     install_universe_runtime_refinement()
-
-    # Strategy terminal levels are deterministic and outrank the AI risk-overlay.
-    # If FINAL TAKE is crossed while a real remainder is still open, require a
-    # manual STRATEGY EXIT and record it as TAKE_EXIT after confirmation.
     install_strategy_terminal_guard()
-
-    # Report-integrity/provenance copies are explanation-only and must never
-    # turn a valid deterministic management snapshot into HTTP 500 merely by
-    # crossing the AI byte ceiling.
     install_ai_snapshot_budget_guard()
-
-    # Keep stateful active-stop geometry and compact-report semantics internally
-    # consistent. This repairs presentation/snapshot metadata only; policy math,
-    # CVaR, Active Edge and execution authority remain untouched.
     install_ai_report_semantics_guard()
-
-    # OpenRouter is explanation-only. Bound it before FastAPI captures the
-    # request path so a slow provider can never block the deterministic Verdict
-    # indefinitely. On timeout the existing API path returns its deterministic
-    # fallback; policy/CVaR/arbiter math remains unchanged.
     install_ai_provider_guard()
 
     install_analytics_runtime()
     install_storage_refinement()
     install_storage_disk_guard()
     install_g1_management_storage()
-    # storage_refinement is legacy and replaces the registry it sees. Re-union
-    # every currently registered G.1S/G.1-M table before the first manifest.
     install_storage_schema_registry_integrity()
 
     settings = Settings(demo=args.demo, stream=args.stream, host=args.host,
                         port=args.port, data_dir=args.data_dir)
     storage = prepare_storage(settings)
     app = create_app(settings)
+
+    # The full deterministic Position Manager snapshot can take tens of seconds
+    # on the 2 GB VPS. Keep the exact math, but calculate it on one serial daemon
+    # worker instead of inside POST /api/ai/verdict. The HTTP path becomes a
+    # bounded cache read + optional OpenRouter explanation. Wrong-trade/stale
+    # snapshots are rejected with fast JSON 503 rather than waiting for Caddy 504.
+    install_ai_snapshot_materializer(app)
+
     ensure_g1m_schema_backup(storage)
     ensure_g1s_schema_backup(storage)
     install_storage_runtime(app, storage)
     install_storage_routes(app)
     install_database_authority(app)
 
-    # G.1S/G.1-M.1 consume already-frozen source rows on their own low-priority
-    # worker. A slow refit must never delay the market collector or AI Verdict.
     install_research_worker(app)
-
-    # G.1E.2: request-time research APIs become bounded/materialized. This also
-    # fast-gates impossible G.1C fits. The final storage override is installed
-    # afterwards so routine health reads never execute PRAGMA quick_check or Q scans.
     install_research_scalability(app)
     install_storage_fast_status(app)
 
-    # /api/ai/decision/ack is canonical inside create_app.
     install_lattice_revaluation(app)
     install_lattice_visual_history(app)
     install_option_shadow_state(app)
@@ -147,21 +117,12 @@ def main() -> None:
     install_g1_shadow_routes(app)
     install_g1_management_routes(app)
     install_g1_short_horizon_routes(app)
-    # Read-only nearest historical T0 analogs. The route performs no network,
-    # training or LLM work and has no production decision authority.
     install_g1_historical_analog_routes(app)
-    # Macro extraction is explicit and research-only. Status/latest reads never
-    # call an LLM, and semantic records become causal only after available_at.
     install_macro_data_factory_routes(app)
 
-    # Universe Lab is deliberately installed after research runtimes and lives
-    # on its own page. Removing these two calls and the isolated files removes
-    # the experiment without changing any existing terminal visualization.
     install_visual_universe_routes(app)
     install_visual_universe_page(app)
 
-    # Intelligence remains presentation/research only; its background builder is
-    # replaced by the bounded G.1E.2 materializer before lifespan starts.
     install_intelligence_runtime(app)
     install_g1_intelligence_routes(app)
 
