@@ -17,8 +17,15 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
     if runtime is None:
         raise RuntimeError("G.1S integration must be installed before LLM edge researcher")
 
-    # Startup-only additive DDL. GET endpoints below are materialized reads only.
+    # Startup-only additive DDL. GET endpoints below remain materialized reads.
     initialize_journal_storage(runtime)
+
+    # PR C must be visible immediately after app startup instead of waiting for
+    # the low-priority research worker.  The startup upgrader preserves the
+    # previous materialized counts/candidates and adds only versioned scheduler
+    # metadata; it performs no evaluation, feature-history scan or provider call.
+    from .llm_edge_pr_c_startup import initialize_pr_c_materialized_state
+    initialize_pr_c_materialized_state(runtime)
 
     def status():
         return {

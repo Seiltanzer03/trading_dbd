@@ -30,6 +30,16 @@ class Runtime:
                 training_eligible INTEGER NOT NULL DEFAULT 1,
                 created_ts REAL NOT NULL
             )""")
+        self._conn.execute("""
+            CREATE TABLE g1s_resolutions(
+                observation_id TEXT PRIMARY KEY,
+                resolved_ts REAL NOT NULL,
+                terminal_log_return REAL,
+                direction_label TEXT,
+                mfe_log_return REAL,
+                mae_log_return REAL,
+                path_quality_status TEXT
+            )""")
         self._conn.execute(
             "INSERT INTO g1s_observations VALUES(?,?,?,?,?,?,?,?)",
             (observation_id, instrument, captured_ts,
@@ -183,8 +193,8 @@ def test_research_tables_are_immutable():
 def test_status_and_routes_are_research_only():
     runtime = Runtime()
     status = edge_researcher_status(runtime)
-    # PR C status reads materialized worker state only. Before that state exists,
-    # it fails closed as INITIALIZING instead of creating schema/scanning history.
+    # PR C status reads materialized worker state only. Before startup route
+    # materialization exists, it fails closed instead of scanning history.
     assert status["status"] == "INITIALIZING"
     assert status["run_n"] == 0
     assert status["hypothesis_n"] == 0
@@ -200,3 +210,10 @@ def test_status_and_routes_are_research_only():
     paths = {route.path: set(route.methods or ()) for route in app.routes}
     assert paths["/api/research/g1s/edge-researcher/status"] == {"GET"}
     assert paths["/api/research/g1s/edge-researcher/propose"] == {"POST"}
+
+    # Startup route installation upgrades the prebuilt state before the first
+    # GET; no research worker/history reconstruction is required for the contract.
+    after = edge_researcher_status(runtime)
+    assert after["pr_c_contract_version"] == "llm-edge-researcher-v1.3-pr-c"
+    assert after["request_time_history_scan"] is False
+    assert (after["automation"] or {}).get("manual_post_only") is False
