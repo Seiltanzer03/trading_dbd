@@ -18,6 +18,10 @@ on:
       - ".github/workflows/edge-discovery-engine.yml"
   workflow_dispatch:
 
+concurrency:
+  group: g1s-ede-audit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -30,6 +34,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
       - name: Install research runtime
         run: pip install -e ".[dev]"
       - name: Restore reviewed versioned negative registry
