@@ -60,6 +60,21 @@ def _load_latest_audit(path: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _run_llm_edge_lifecycle(engine: Any, current: float) -> dict[str, Any]:
+    """Reuse this existing worker phase; Researcher failure can never break EDE/G1S."""
+    try:
+        from seiltanzer.llm_edge_lifecycle import llm_edge_prospective_tick
+        return llm_edge_prospective_tick(engine, now=current)
+    except Exception as exc:
+        return {
+            "status": "ERROR",
+            "reason": "LLM_EDGE_PROSPECTIVE_TICK_ERROR",
+            "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+            "production_authority": False,
+            "writes_active_edge_registry": False,
+        }
+
+
 def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict[str, Any]:
     """One bounded shadow pass; safe to call from the low-priority worker."""
     current = float(now or time.time())
@@ -72,6 +87,10 @@ def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict
         }
     engine._ede_shadow_runtime_last_ts = current
 
+    # Prospective Researcher work is higher priority than creating new shadow
+    # diagnostics and is deliberately executed before any EDE audit/history read.
+    llm_edge_lifecycle = _run_llm_edge_lifecycle(engine, current)
+
     audit_path = latest_v13_audit_path(engine)
     audit = _load_latest_audit(audit_path)
     if audit is None:
@@ -79,12 +98,14 @@ def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict
             "contract_version": SHADOW_RUNTIME_VERSION,
             "refreshed": False, "reason": "V13_AUDIT_UNAVAILABLE",
             "audit_path": str(audit_path),
+            "llm_edge_lifecycle": llm_edge_lifecycle,
         }
     runtime = getattr(engine, "short_horizon", None)
     if runtime is None:
         return {
             "contract_version": SHADOW_RUNTIME_VERSION,
             "refreshed": False, "reason": "G1S_RUNTIME_UNAVAILABLE",
+            "llm_edge_lifecycle": llm_edge_lifecycle,
         }
 
     adapter = ProspectiveFeatureAdapter(runtime)
@@ -139,6 +160,7 @@ def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict
             "pending_count": summary.get("pending_count", 0),
             "candidate_count": summary.get("candidate_count", 0),
         },
+        "llm_edge_lifecycle": llm_edge_lifecycle,
         "production_authority": False,
         "production_directional_authority": False,
         "auto_promotion": False,

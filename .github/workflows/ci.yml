@@ -2,8 +2,14 @@ name: tests
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -11,12 +17,14 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
       - name: Install
         run: pip install -e ".[dev]"
       - name: Run Python tests
@@ -59,10 +67,38 @@ jobs:
           node tests/web/plotly_camera_guard_mobile_smoke.mjs
           node tests/web/iv_surface_live_smoke.mjs
           node tests/web/render_budget_smoke.mjs
-      - name: Install Playwright WebKit
+      - name: Install Playwright package
+        run: npm install --no-save playwright
+      - name: Cache Playwright WebKit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-webkit-${{ hashFiles('node_modules/playwright-core/browsers.json') }}
+      - name: Install WebKit system dependencies
+        timeout-minutes: 5
         run: |
-          npm install --no-save playwright
-          npx playwright install --with-deps webkit
+          # GitHub hosted runners normally resolve Ubuntu through an Azure
+          # mirrorlist. That mirror has repeatedly stalled while the rest of CI
+          # is green. Replace the mirrorlist source entirely with canonical
+          # Ubuntu archives and bound every apt network attempt.
+          sudo tee /etc/apt/sources.list >/dev/null <<'EOF'
+          deb https://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
+          deb https://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
+          deb https://archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse
+          deb https://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
+          EOF
+          sudo rm -f /etc/apt/sources.list.d/ubuntu.sources
+          sudo tee /etc/apt/apt.conf.d/99-ci-network >/dev/null <<'EOF'
+          Acquire::Retries "3";
+          Acquire::http::Timeout "15";
+          Acquire::https::Timeout "15";
+          Acquire::ForceIPv4 "true";
+          EOF
+          sudo rm -rf /var/lib/apt/lists/*
+          npx playwright install-deps webkit
+      - name: Install Playwright WebKit browser
+        timeout-minutes: 5
+        run: npx playwright install webkit
       - name: Real WebKit iPhone camera test
         run: |
           node tests/web/plotly_camera_webkit_e2e.mjs
@@ -83,9 +119,6 @@ jobs:
             state="failure"
             description="Python, frontend smoke or real WebKit iPhone check failed"
           fi
-          # GitHub Status API can transiently return 5xx even after every test
-          # passed. Retry those transport failures so deploy is not blocked by
-          # an unrelated one-off status-publication outage.
           curl --fail-with-body --silent --show-error \
             --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
             -X POST \
