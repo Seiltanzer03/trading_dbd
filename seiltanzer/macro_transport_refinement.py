@@ -22,6 +22,7 @@ BROWSER_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 )
+BLS_OFFICIAL_HOSTS = frozenset({"api.bls.gov", "bls.gov", "www.bls.gov"})
 BLS_CACHE_FALLBACK_HARD_MAX_AGE_SEC = 24.0 * 60.0 * 60.0
 BLS_CACHE_FALLBACK_ENV = "MACRO_BLS_CACHE_FALLBACK_MAX_AGE_SEC"
 BLS_CACHE_REQUIRED_FAMILIES = ("CPI", "NFP")
@@ -63,27 +64,28 @@ def _verified_cached_bls_rows(
 ) -> list[dict[str, Any]] | None:
     """Build transparent fallback metadata from existing official BLS releases.
 
-    This function never inserts, mutates or synthesizes a macro release.  The store's
-    ``latest_admissible`` query already enforces VALID status and available_at <= T0;
-    the additional checks below enforce complete CPI+NFP coverage, official BLS
-    provenance and a bounded fetch age.
+    This function never inserts, mutates or synthesizes a macro release. The store's
+    ``latest_admissible`` query enforces available_at <= T0 and returns only persisted
+    release facts; the additional checks below enforce complete CPI+NFP coverage,
+    official BLS provenance and a bounded fetch age.
     """
-    from .macro_numeric_data import BLS_OFFICIAL_HOSTS
-
     max_age_sec = bls_cache_fallback_max_age_sec()
     if max_age_sec <= 0.0:
         return None
 
     cached_rows: list[dict[str, Any]] = []
     for family in BLS_CACHE_REQUIRED_FAMILIES:
-        release = runtime.store.latest_admissible(family, now_ts=now_ts)
-        if not release:
+        # Keep this positional to match NumericMacroStore.latest_admissible(family, captured_ts).
+        release = runtime.store.latest_admissible(family, now_ts)
+        if not release or release.get("status") != "VALID":
             return None
         if release.get("official_source_verified") is not True:
             return None
 
-        source_host = (urlparse(str(release.get("source_url") or "")).hostname or "").lower()
-        if source_host not in BLS_OFFICIAL_HOSTS:
+        source_url = str(release.get("source_url") or "")
+        parsed_source = urlparse(source_url)
+        source_host = (parsed_source.hostname or "").lower()
+        if parsed_source.scheme != "https" or source_host not in BLS_OFFICIAL_HOSTS:
             return None
 
         try:
