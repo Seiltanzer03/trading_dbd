@@ -5,6 +5,7 @@ from .engine import Engine
 from .passive_learning import PassiveLearningEngine
 from .g1_management_runtime import ManagementEdgeRuntime
 from .g1_management_active_edge_t0 import install_g1_management_active_edge_t0
+from .g1_management_status_nonblocking import install_g1_management_status_nonblocking
 
 
 _INSTALLED = False
@@ -27,6 +28,9 @@ def install_g1_management_integration() -> None:
     def engine_init(self, *args, **kwargs):
         original_engine_init(self, *args, **kwargs)
         self.management = ManagementEdgeRuntime(self)
+        # Status is prewarmed before server traffic/background contention and its
+        # HTTP facade never touches the shared research SQLite/lock path.
+        install_g1_management_status_nonblocking(self.management)
         # The passive loop is already the durable research scheduler. Reuse it
         # instead of starting another clock/thread with independent cadence.
         self.passive._g1m_runtime = self.management
