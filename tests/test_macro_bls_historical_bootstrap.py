@@ -2,10 +2,12 @@ import math
 import sqlite3
 import threading
 from datetime import datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from seiltanzer.edge_discovery.maturity import data_maturity
 from seiltanzer.macro_bls_historical_bootstrap import (
     BLSHistoricalReleaseStore,
     BLSReleaseSpec,
@@ -13,6 +15,9 @@ from seiltanzer.macro_bls_historical_bootstrap import (
     parse_bls_schedule,
     parse_cpi_archive,
     parse_nfp_archive,
+)
+from seiltanzer.macro_bls_historical_ede_refinement import (
+    _recompute_macro_inventory_maturity,
 )
 
 
@@ -154,3 +159,49 @@ def test_historical_feature_overlay_reuses_release_id_across_repeated_t0():
     assert later_provenance["macro.nfp_payroll_change_k"]["release_id"] == stored["release_id"]
     assert first_provenance["macro.nfp_payroll_change_k"]["old_t0_row_mutated"] is False
     assert first_provenance["macro.nfp_payroll_change_k"]["current_revised_series_backfill"] is False
+
+
+def test_macro_inventory_maturity_counts_one_release_not_repeated_t0_rows():
+    feature_id = "macro.cpi_headline_mom_pct"
+    rows = [
+        {
+            "horizon_minutes": 30,
+            "outcome_available": True,
+            "feature_values": {
+                feature_id: {
+                    "training_eligible": True,
+                    "release_id": "cpi-release-one",
+                }
+            },
+        }
+        for _ in range(150)
+    ]
+
+    class _Adapter:
+        def rows(self, *, resolved_only=False, strict=False):
+            assert resolved_only is False
+            return rows
+
+    report = {
+        "features": [{
+            "feature_id": feature_id,
+            "research_scope": "G1S",
+            "by_horizon": {"30": {}},
+            "status": "DATA_READY_RESEARCH",
+            "data_maturity": "DATA_READY_RESEARCH",
+            "usable_for_ede": True,
+        }],
+        "summary": {"g1s_insufficient_data": 0},
+    }
+    prospective = SimpleNamespace(HORIZONS=(30,), data_maturity=data_maturity)
+
+    _recompute_macro_inventory_maturity(_Adapter(), report, prospective)
+
+    horizon = report["features"][0]["by_horizon"]["30"]
+    assert horizon["raw"] == 150
+    assert horizon["effective"] == 1
+    assert horizon["independent_release_n"] == 1
+    assert horizon["repeated_t0_increases_effective_n"] is False
+    assert report["features"][0]["status"] == "INSUFFICIENT_DATA"
+    assert report["features"][0]["usable_for_ede"] is False
+    assert report["summary"]["g1s_insufficient_data"] == 1
