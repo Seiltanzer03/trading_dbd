@@ -16,6 +16,8 @@ TRANSIENT_RETRY_DELAY_SEC = 1.0
 AI_VERDICT_MAX_MS = 12_000.0
 AI_VERDICT_TRANSPORT_TIMEOUT_SEC = 14.0
 AI_MATERIALIZER_WAIT_SEC = 150.0
+EDGE_RESEARCHER_MAX_MS = 250.0
+EDGE_RESEARCHER_WAIT_SEC = 75.0
 FOMC_WAIT_SEC = 45.0
 FOMC_PROMPT_VERSION = "fomc-semantic-v2-json-schema"
 FOMC_SEMANTIC_KEYS = {
@@ -90,6 +92,51 @@ def verify_universe_routes() -> None:
     assert "non_directional_matched_signal_n" in active, active
     assert "directional_matched_group_n" in active, active
     assert "directional_weight_reason" in active, active
+
+
+def verify_edge_researcher() -> None:
+    deadline = time.monotonic() + EDGE_RESEARCHER_WAIT_SEC
+    lifecycle = None
+    while time.monotonic() < deadline:
+        code, body, elapsed = request(
+            "/api/research/g1s/edge-researcher/lifecycle", timeout=2.0)
+        print(
+            "/api/research/g1s/edge-researcher/lifecycle: "
+            f"{code} {elapsed:.0f}ms gate<{EDGE_RESEARCHER_MAX_MS:.0f}ms"
+        )
+        assert code == 200, (code, body)
+        assert elapsed < EDGE_RESEARCHER_MAX_MS, (elapsed, body)
+        assert isinstance(body, dict), body
+        lifecycle = body
+        if body.get("pr_c_contract_version") == "llm-edge-researcher-v1.3-pr-c":
+            break
+        time.sleep(2.0)
+    assert isinstance(lifecycle, dict), lifecycle
+    assert lifecycle.get("pr_c_contract_version") == "llm-edge-researcher-v1.3-pr-c", lifecycle
+    assert lifecycle.get("request_time_history_scan") is False, lifecycle
+    assert lifecycle.get("production_authority") is False, lifecycle
+    automation = lifecycle.get("automation") or {}
+    assert automation.get("manual_post_only") is False, lifecycle
+    assert int(automation.get("required_new_resolved_t0") or 0) == 100, lifecycle
+    assert int(automation.get("minimum_provider_interval_sec") or 0) == 43_200, lifecycle
+    assert int(automation.get("max_automatic_hypotheses") or 0) == 5, lifecycle
+    assert int(automation.get("heavy_evaluation_concurrency") or 0) == 1, lifecycle
+    quality = lifecycle.get("research_quality") or {}
+    assert "llm_discovery_to_prospective_survival_rate" in quality, lifecycle
+    assert quality.get("production_authority") is False, lifecycle
+
+    code, status, elapsed = request(
+        "/api/research/g1s/edge-researcher/status", timeout=2.0)
+    print(
+        "/api/research/g1s/edge-researcher/status: "
+        f"{code} {elapsed:.0f}ms gate<{EDGE_RESEARCHER_MAX_MS:.0f}ms"
+    )
+    assert code == 200, (code, status)
+    assert elapsed < EDGE_RESEARCHER_MAX_MS, (elapsed, status)
+    assert isinstance(status, dict), status
+    assert status.get("request_time_history_scan") is False, status
+    assert status.get("production_authority") is False, status
+    assert (status.get("automation") or {}).get("manual_post_only") is False, status
 
 
 def verify_ai_verdict() -> None:
@@ -231,6 +278,7 @@ def verify(expected_sha: str) -> None:
         assert_route(path)
 
     verify_universe_routes()
+    verify_edge_researcher()
     verify_ai_verdict()
     verify_macro_runtime()
 
