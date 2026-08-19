@@ -16,8 +16,10 @@ def _release(
     available_at: float | None = None,
     source_url: str = BLS_URL,
     verified: bool = True,
+    status: str = "VALID",
 ) -> dict[str, object]:
     return {
+        "status": status,
         "release_id": f"{family}:2026-07",
         "family": family,
         "period": "2026-07",
@@ -31,10 +33,10 @@ def _release(
 class _Store:
     def __init__(self, rows: dict[str, dict[str, object]]) -> None:
         self.rows = rows
-        self.calls: list[tuple[str, float | None]] = []
+        self.calls: list[tuple[str, float]] = []
 
-    def latest_admissible(self, family: str, now_ts: float | None = None):
-        self.calls.append((family, now_ts))
+    def latest_admissible(self, family: str, captured_ts: float):
+        self.calls.append((family, captured_ts))
         return self.rows.get(family)
 
 
@@ -99,8 +101,23 @@ def test_bls_cache_fallback_rejects_incomplete_cache(monkeypatch) -> None:
     )
 
 
-def test_bls_cache_fallback_rejects_unverified_or_nonofficial_cache(monkeypatch) -> None:
+def test_bls_cache_fallback_rejects_nonvalid_unverified_or_nonofficial_cache(monkeypatch) -> None:
     monkeypatch.delenv(refinement.BLS_CACHE_FALLBACK_ENV, raising=False)
+
+    nonvalid = _runtime(
+        {
+            "CPI": _release("CPI", fetched_at=NOW - 3_600.0, status="UNAVAILABLE"),
+            "NFP": _release("NFP", fetched_at=NOW - 3_600.0),
+        }
+    )
+    assert (
+        refinement._verified_cached_bls_rows(
+            nonvalid,
+            now_ts=NOW,
+            upstream_error=RuntimeError("upstream failed"),
+        )
+        is None
+    )
 
     unverified = _runtime(
         {
