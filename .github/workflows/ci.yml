@@ -2,8 +2,14 @@ name: tests
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -12,11 +18,13 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
       - name: Install
         run: pip install -e ".[dev]"
       - name: Run Python tests
@@ -59,10 +67,16 @@ jobs:
           node tests/web/plotly_camera_guard_mobile_smoke.mjs
           node tests/web/iv_surface_live_smoke.mjs
           node tests/web/render_budget_smoke.mjs
+      - name: Install Playwright package
+        run: npm install --no-save playwright
+      - name: Cache Playwright WebKit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-webkit-${{ hashFiles('node_modules/playwright-core/browsers.json') }}
       - name: Install Playwright WebKit
-        run: |
-          npm install --no-save playwright
-          npx playwright install --with-deps webkit
+        timeout-minutes: 10
+        run: npx playwright install --with-deps webkit
       - name: Real WebKit iPhone camera test
         run: |
           node tests/web/plotly_camera_webkit_e2e.mjs
