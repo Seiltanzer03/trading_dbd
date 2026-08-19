@@ -5,12 +5,17 @@ from . import ai_policy_v16 as _impl
 from .active_edge_policy_weight import (
     install_active_edge_policy_weight as _install_active_edge_policy_weight,
 )
+from .llm_validated_active_edge_bridge import (
+    install_validated_llm_active_edge_bridge as _install_validated_llm_active_edge_bridge,
+)
 
-# Keep the existing v16/v14 policy architecture intact. The installer only wraps
-# the already-existing soft expected-R selector with a bounded active-edge blend;
-# CVaR eligibility, hard-risk floors, simulations and execution remain unchanged.
+# Keep the existing v16/v14 policy architecture intact. Historical Active Edge
+# keeps its bounded soft-ranking blend; the second installer only adds LLM rules
+# after immutable LIVE_PROSPECTIVE_OOS confirmation has reached VALIDATED.
 _install_active_edge_policy_weight(_impl)
+_install_validated_llm_active_edge_bridge()
 del _install_active_edge_policy_weight
+del _install_validated_llm_active_edge_bridge
 
 
 globals().update({
