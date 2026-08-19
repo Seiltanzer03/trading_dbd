@@ -176,9 +176,10 @@ function renderEdgeChart() {
 function renderEdgeSummary() {
   const payload = U.edge || {}; const active = payload.active_edge || {}; const profile = payload.production_weight || {};
   $('edge-weight').textContent = fmtPct(profile.weight_fraction || 0, 1); $('edge-cap').textContent = fmtPct(profile.max_weight_fraction || profile.high_risk_only_cap || .30, 1); $('edge-direction').textContent = fmtSigned(profile.direction_score || 0, 2); $('edge-votes').textContent = `${active.supporting_position_n || 0} / ${active.opposing_position_n || 0}`; $('edge-strict').textContent = fmtPct(profile.strict_directional_share || 0, 0); $('edge-buckets').textContent = String(profile.independent_bucket_n || 0);
-  const matched = Number(active.matched_structured_signal_n || 0); const availableFeatures = Number(payload.canonical_features?.available_n || 0); const tone = matched > 0 ? 'live' : availableFeatures > 0 ? 'delayed' : 'no-data';
-  badge('edge-status', tone, matched > 0 ? `● ${matched} CURRENT-T0 MATCHES` : availableFeatures > 0 ? `◐ ${availableFeatures} T0 FEATURES · NO MATCH` : '○ НЕТ ACTIVE EDGE');
-  const read = $('edge-readout'); if (read) read.textContent = matched > 0 ? `CURRENT-T0 · WEIGHT ${fmtPct(profile.weight_fraction || 0, 1)} · ${profile.independent_bucket_n || 0} FAMILY×HORIZON BUCKETS` : `${availableFeatures} AVAILABLE CANONICAL T0 FEATURES · ACTIVE EDGE MATCH ПОКА НЕТ`;
+  const matched = Number(active.matched_structured_signal_n || 0); const availableFeatures = Number(payload.canonical_features?.available_n || 0); const reason = profile.decision_reason || {}; const activeMatch = reason.code === 'ACTIVE_MATCH'; const tone = activeMatch ? 'live' : availableFeatures > 0 ? 'delayed' : 'no-data';
+  const reasonLabel = reason.label || (matched > 0 ? 'ACTIVE MATCH' : 'NO MATCH');
+  badge('edge-status', tone, activeMatch ? `● ${matched} CURRENT-T0 MATCHES · ${reasonLabel}` : availableFeatures > 0 ? `◐ ${availableFeatures} T0 FEATURES · ${reasonLabel}` : `○ ${reasonLabel}`);
+  const read = $('edge-readout'); if (read) read.textContent = activeMatch ? `CURRENT-T0 · WEIGHT ${fmtPct(profile.weight_fraction || 0, 1)} · ${profile.independent_bucket_n || 0} FAMILY×HORIZON BUCKETS` : `${availableFeatures} AVAILABLE CANONICAL T0 FEATURES · ${reasonLabel}`;
 }
 
 function liveMetricRows() {

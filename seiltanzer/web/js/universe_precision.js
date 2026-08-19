@@ -55,6 +55,19 @@ function patchEdgeSemantics(payload) {
   if (matchedGroupsNode) matchedGroupsNode.textContent = String(matchedGroups);
   if (nonDirectionalNode) nonDirectionalNode.textContent = String(nonDirectional);
 
+  const reason = profile.decision_reason || {};
+  const inferredReason = directional === 0
+    ? 'NON-DIR ONLY'
+    : Number(profile.independent_bucket_n || directionalGroups || 0) <= 0 || Number(profile.weight_fraction || 0) <= 0
+      ? 'ZERO NET'
+      : 'ACTIVE MATCH';
+  const reasonLabel = reason.label || inferredReason;
+  const status = document.getElementById('edge-status');
+  if (status && matched > 0) {
+    status.className = 'status-pill live';
+    status.textContent = `● ${matched} CURRENT-T0 MATCHES · ${reasonLabel}`;
+  }
+
   const readout = document.getElementById('edge-readout');
   if (!readout || matched <= 0) return;
   const weight = finite(profile.weight_fraction)

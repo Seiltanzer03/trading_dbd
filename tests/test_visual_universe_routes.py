@@ -111,7 +111,10 @@ def test_edge_universe_reuses_active_edge_weight_and_exact_feature_ids(monkeypat
              "strict_matched_n": 1, "net_vote": 1, "net_vote_ratio": 1.0},
         ],
     }
-    monkeypatch.setattr(universe, "build_active_edge_context", lambda engine, snapshot: active)
+    monkeypatch.setattr(
+        universe.active_edge_ai, "build_active_edge_context",
+        lambda engine, snapshot: active,
+    )
     monkeypatch.setattr(
         universe, "_latest_frozen_context",
         lambda engine, snapshot: {"observation_t0": snapshot["captured_ts"]})
