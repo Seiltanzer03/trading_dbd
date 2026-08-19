@@ -183,12 +183,15 @@ def test_research_tables_are_immutable():
 def test_status_and_routes_are_research_only():
     runtime = Runtime()
     status = edge_researcher_status(runtime)
-    assert status["status"] == "OK"
+    # PR C status reads materialized worker state only. Before that state exists,
+    # it fails closed as INITIALIZING instead of creating schema/scanning history.
+    assert status["status"] == "INITIALIZING"
     assert status["run_n"] == 0
     assert status["hypothesis_n"] == 0
     assert status["numeric_thresholds_fit_by_llm"] is False
     assert status["future_outcomes_visible_to_llm"] is False
     assert status["writes_active_edge_registry"] is False
+    assert status["request_time_history_scan"] is False
     assert status["production_authority"] is False
 
     app = FastAPI()
