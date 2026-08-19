@@ -51,6 +51,7 @@ jobs:
           node --check seiltanzer/web/js/market_bus.js
           node --check seiltanzer/web/js/universe_scenes.js
           node --check seiltanzer/web/js/universe_precision.js
+          node --check seiltanzer/web/js/llm_edge_researcher_ui.js
           node tests/web/touch_clock_smoke.mjs
           node tests/web/ai_verdict_error_smoke.mjs
           node tests/web/ai_management_decision_smoke.mjs
@@ -67,6 +68,7 @@ jobs:
           node tests/web/plotly_camera_guard_mobile_smoke.mjs
           node tests/web/iv_surface_live_smoke.mjs
           node tests/web/render_budget_smoke.mjs
+          node tests/web/llm_edge_researcher_ui_smoke.mjs
       - name: Install Playwright package
         run: npm install --no-save playwright
       - name: Cache Playwright WebKit
