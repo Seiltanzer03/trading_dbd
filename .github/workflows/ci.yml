@@ -17,8 +17,8 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -74,9 +74,9 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-webkit-${{ hashFiles('node_modules/playwright-core/browsers.json') }}
-      - name: Install Playwright WebKit
-        timeout-minutes: 10
-        run: npx playwright install --with-deps webkit
+      - name: Install Playwright WebKit browser
+        timeout-minutes: 5
+        run: npx playwright install webkit
       - name: Real WebKit iPhone camera test
         run: |
           node tests/web/plotly_camera_webkit_e2e.mjs
@@ -97,9 +97,6 @@ jobs:
             state="failure"
             description="Python, frontend smoke or real WebKit iPhone check failed"
           fi
-          # GitHub Status API can transiently return 5xx even after every test
-          # passed. Retry those transport failures so deploy is not blocked by
-          # an unrelated one-off status-publication outage.
           curl --fail-with-body --silent --show-error \
             --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
             -X POST \
