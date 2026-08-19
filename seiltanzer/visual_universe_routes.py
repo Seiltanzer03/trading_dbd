@@ -16,12 +16,12 @@ from typing import Any, Callable
 
 from fastapi import FastAPI
 
-from .active_edge_ai_integration import build_active_edge_context
+from . import active_edge_ai_integration as active_edge_ai
+from . import active_edge_policy_weight as active_edge_weight
 from .active_edge_policy_weight import (
     CONTRACT_VERSION as EDGE_WEIGHT_CONTRACT,
     HIGH_RISK_ONLY_CAP,
     MAX_EDGE_WEIGHT,
-    edge_weight_profile,
 )
 from .edge_discovery.ai_context import (
     _latest_frozen_context,
@@ -270,6 +270,27 @@ def _compact_horizons(status: dict[str, Any]) -> list[dict[str, Any]]:
     return output
 
 
+def _edge_decision_reason(active: dict[str, Any], profile: dict[str, Any]) -> dict[str, str]:
+    """Explain a zero/non-zero Universe profile without adding a trading vote."""
+    total_active = max(0, int(active.get("total_active_signal_n") or 0))
+    matched = max(0, int(active.get("matched_structured_signal_n") or 0))
+    supporting = max(0, int(active.get("supporting_position_n") or 0))
+    opposing = max(0, int(active.get("opposing_position_n") or 0))
+    directional = supporting + opposing
+    buckets = max(0, int(profile.get("independent_bucket_n") or 0))
+    weight = _finite(profile.get("weight_fraction")) or 0.0
+
+    if total_active == 0:
+        return {"code": "NO_ACTIVE_EDGE", "label": "NO ACTIVE EDGE"}
+    if matched == 0:
+        return {"code": "NO_T0_MATCH", "label": "NO T0 MATCH"}
+    if directional == 0:
+        return {"code": "NON_DIRECTIONAL_ONLY", "label": "NON-DIR ONLY"}
+    if buckets == 0 or weight <= 0.0:
+        return {"code": "ZERO_NET_DIRECTION", "label": "ZERO NET"}
+    return {"code": "ACTIVE_MATCH", "label": "ACTIVE MATCH"}
+
+
 def build_edge_universe_payload(engine: Any, *, now: float | None = None) -> dict[str, Any]:
     """Aggregate current T0 edge, canonical features and prospective feedback.
 
@@ -287,11 +308,16 @@ def build_edge_universe_payload(engine: Any, *, now: float | None = None) -> dic
     }
 
     try:
-        active = build_active_edge_context(engine, snapshot)
+        # Resolve through the module at call time. PR-C installs validated-LLM
+        # wrappers on these canonical module attributes after app imports; a
+        # direct function import here would keep a stale pre-wrapper reference.
+        active = active_edge_ai.build_active_edge_context(engine, snapshot)
     except Exception as exc:
         active = {"available": False, "matched_groups": [],
                   "reason": f"{type(exc).__name__}: {exc}"}
-    profile = edge_weight_profile(active if isinstance(active, dict) else {})
+    active = active if isinstance(active, dict) else {}
+    profile = active_edge_weight.edge_weight_profile(active)
+    decision_reason = _edge_decision_reason(active, profile)
 
     feature_map: dict[str, Any] = {}
     observation_t0 = None
@@ -338,6 +364,7 @@ def build_edge_universe_payload(engine: Any, *, now: float | None = None) -> dic
         "active_edge": active,
         "production_weight": {
             **profile,
+            "decision_reason": decision_reason,
             "weight_contract": EDGE_WEIGHT_CONTRACT,
             "high_risk_only_cap": HIGH_RISK_ONLY_CAP,
             "absolute_cap": MAX_EDGE_WEIGHT,
