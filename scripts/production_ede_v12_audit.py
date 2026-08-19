@@ -19,6 +19,9 @@ from seiltanzer.edge_discovery.evidence_ledger import (
     build_frozen_evidence,
 )
 from seiltanzer.edge_discovery.prospective import ProspectiveFeatureAdapter
+from seiltanzer.macro_bls_historical_ede_refinement import (
+    install_bls_historical_ede_refinement,
+)
 
 
 class ReadOnlyRuntime:
@@ -100,6 +103,10 @@ def _edge_map(discovery: dict[str, Any], inventory: dict[str, Any]) -> list[dict
 
 
 def audit(database: Path) -> dict[str, Any]:
+    # The standalone audit process does not boot FastAPI/macro routes, so install
+    # the same canonical macro IDs, release-level dependency contract and BLS
+    # archive read overlay explicitly before reading the immutable DB snapshot.
+    install_bls_historical_ede_refinement()
     with tempfile.TemporaryDirectory(prefix="ede-v12-production-") as temporary:
         snapshot = Path(temporary)/"immutable-production-copy.sqlite3"
         immutable_snapshot(database, snapshot)
@@ -151,6 +158,8 @@ def audit(database: Path) -> dict[str, Any]:
             frozen_at=materialized_at, prospective_rows=rows),
         "synthetic_data_used": False,
         "retrospective_options_reconstruction": False,
+        "historical_macro_old_t0_rows_mutated": False,
+        "historical_macro_current_revised_series_backfill": False,
         "production_authority": False,
         "auto_promotion": False,
         "ai_authority_changed": False,
