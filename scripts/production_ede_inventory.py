@@ -49,12 +49,11 @@ def inventory(database: Path) -> dict:
         runtime.close()
 
     features = audit.get("features") or []
-    assert len(FEATURES) == 69, len(FEATURES)
-    assert len(features) == len(FEATURES), len(features)
-    assert {row["feature_id"] for row in features} == {
-        definition.feature_id for definition in FEATURES}
+    canonical_ids = {definition.feature_id for definition in FEATURES}
+    assert len(features) == len(canonical_ids), (len(features), len(canonical_ids))
+    assert {row["feature_id"] for row in features} == canonical_ids
     return {
-        "contract_version": "g1s-ede-production-inventory-v1.3.5",
+        "contract_version": "g1s-ede-production-inventory-v1.3.6",
         "database": str(database),
         "database_open_mode": "READ_ONLY",
         "g1s_observations_total": total,
@@ -62,9 +61,11 @@ def inventory(database: Path) -> dict:
         "g1s_resolutions_total": resolved,
         "adapter_observation_count": audit.get("observation_count"),
         "resolved_outcome_count": audit.get("resolved_outcome_count"),
+        "canonical_feature_count": len(canonical_ids),
         "feature_summary": audit.get("summary"),
         "features": features,
         "causal_baseline_price_backfill": True,
+        "macro_release_independence": True,
         "retrospective_options_reconstruction": False,
         "production_authority": False,
         "auto_promotion": False,
@@ -77,8 +78,8 @@ def main(argv: list[str] | None = None) -> int:
                         default=Path("/opt/seiltanzer/data/trades.db"))
     args = parser.parse_args(argv)
     report = inventory(args.database)
-    # Keep every Actions log line bounded. A single 69-feature JSON line can
-    # exceed drone-ssh's scanner buffer and disappear from the audit log.
+    # Keep every Actions log line bounded. Printing per-feature rows avoids a
+    # large single JSON line as the canonical registry grows over time.
     print("EDE_INVENTORY_SUMMARY=" + json.dumps({
         key: value for key, value in report.items() if key != "features"
     }, sort_keys=True))
