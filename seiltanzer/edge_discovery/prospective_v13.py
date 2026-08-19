@@ -8,6 +8,11 @@ GLOBAL_RET5_PERSISTENCE when older immutable T0 rows predate the V3 frozen
 price block.
 
 No option history is reconstructed and no future bar may participate.
+
+The v1.3 production audit imports this adapter directly instead of booting the
+FastAPI macro routes. Install the macro registry/release-independence and
+point-in-time BLS overlay here as well so the actual selective-search process sees
+the same canonical feature universe as the live research runtime.
 """
 from __future__ import annotations
 
@@ -16,6 +21,12 @@ import math
 from typing import Any
 
 from .prospective import ProspectiveFeatureAdapter as _BaseAdapter, _finite
+from ..macro_bls_historical_ede_refinement import install_bls_historical_ede_refinement
+
+
+# This is idempotent. It patches the base adapter and refreshes selective.py's
+# import-time registry caches before the v1.3 subclass is instantiated.
+install_bls_historical_ede_refinement()
 
 
 class ProspectiveFeatureAdapter(_BaseAdapter):
