@@ -198,18 +198,26 @@ def freeze_one(
         "auto_promotion": False,
         "prospective_confirmation": False,
     }
-    admitted = admit_discovery_candidate(discovery)
-    registry.register_evaluation(
-        admitted,
-        dataset_sha256=str(evaluation["dataset_sha256"]),
-        research_run=str(evaluation["run_id"]),
-        measurement_contract=str(evaluation.get("measurement_contract") or MEASUREMENT_CONTRACT),
-        created_ts=float(evaluation.get("created_ts") or frozen_ts),
+    admitted = (
+        current
+        if current is not None and current.get("status") == "HISTORICAL_CANDIDATE"
+        else admit_discovery_candidate(discovery)
     )
 
+    # Fit before the first registry write. A failed final fit cannot leave a
+    # half-admitted candidate that suppresses retries. If a prior process died
+    # after admission, reuse that exact historical candidate and continue.
     frozen = build_structured_frozen_spec(
         admitted, target_rows, spec, source_set_sha256=str(evaluation["dataset_sha256"])
     )
+    if current is None:
+        registry.register_evaluation(
+            admitted,
+            dataset_sha256=str(evaluation["dataset_sha256"]),
+            research_run=str(evaluation["run_id"]),
+            measurement_contract=str(evaluation.get("measurement_contract") or MEASUREMENT_CONTRACT),
+            created_ts=float(evaluation.get("created_ts") or frozen_ts),
+        )
     frozen.update({
         "name": str(hypothesis.get("name") or candidate_id),
         "source": SOURCE,
@@ -270,7 +278,16 @@ def freeze_discovery_signals(engine: Any, *, now: float | None = None, limit: in
     base_ts = float(time.time() if now is None else now)
     for index, evaluation in enumerate(reversed(_discoveries(runtime, limit))):
         candidate_id = _candidate_id(evaluation["evaluation_id"], evaluation["hypothesis_id"])
-        if str(evaluation["evaluation_id"]) in known or registry.current(candidate_id) is not None:
+        current = registry.current(candidate_id)
+        if (
+            str(evaluation["evaluation_id"]) in known
+            or (
+                current is not None
+                and current.get("status") in {
+                    "FROZEN_FOR_VALIDATION", "LIVE_VALIDATING", "VALIDATED", "FAILED_LIVE"
+                }
+            )
+        ):
             continue
         try:
             result = freeze_one(
