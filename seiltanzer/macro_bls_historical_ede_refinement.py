@@ -20,7 +20,7 @@ from .macro_edge_evidence_refinement import (
 )
 
 
-BLS_HISTORICAL_EDE_REFINEMENT_VERSION = "macro-bls-historical-ede-overlay-v2"
+BLS_HISTORICAL_EDE_REFINEMENT_VERSION = "macro-bls-historical-ede-overlay-v3"
 HISTORICAL_BLS_FAMILIES = frozenset({"CPI", "NFP"})
 _MATURITY_RANK = {
     "INSUFFICIENT_DATA": 0,
@@ -135,10 +135,20 @@ def _recompute_macro_inventory_maturity(adapter, report: dict[str, Any], prospec
     report["macro_maturity_dependency_unit"] = "OFFICIAL_MACRO_RELEASE_ID"
 
 
+def _refresh_selective_registry(selective, definitions) -> None:
+    """v1.3 caches registry maps at import; refresh them after macro IDs install."""
+    selective.FEATURES = tuple(definitions)
+    selective._FAMILY = {item.feature_id: item.family for item in definitions}
+    selective._DEPENDENCY = {
+        item.feature_id: item.dependency_family for item in definitions
+    }
+    selective._macro_registry_runtime_refresh = BLS_HISTORICAL_EDE_REFINEMENT_VERSION
+
+
 def install_bls_historical_ede_refinement() -> None:
-    """Add official archive-vintage CPI/NFP features to EDE read paths."""
+    """Add official archive-vintage CPI/NFP features to EDE read/search paths."""
     install_macro_edge_evidence_refinement()
-    from .edge_discovery import ai_context, filters, prospective, registry
+    from .edge_discovery import ai_context, filters, prospective, registry, selective
 
     if getattr(prospective, "_bls_historical_ede_refinement", None) == (
             BLS_HISTORICAL_EDE_REFINEMENT_VERSION):
@@ -149,6 +159,7 @@ def install_bls_historical_ede_refinement() -> None:
     prospective.FEATURES = extended
     filters.FEATURES = extended
     ai_context.FEATURES = extended
+    _refresh_selective_registry(selective, extended)
     prospective.DERIVED_IMPLEMENTED_IDS = set(prospective.DERIVED_IMPLEMENTED_IDS) | {
         feature_id for feature_id, family in MACRO_FEATURE_FAMILY.items()
         if family in HISTORICAL_BLS_FAMILIES
