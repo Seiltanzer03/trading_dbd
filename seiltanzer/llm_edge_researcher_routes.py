@@ -4,6 +4,8 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from .llm_edge_evaluator import edge_evaluator_status, evaluate_edge_research_run
+from .llm_edge_lifecycle import read_materialized_lifecycle
+from .llm_edge_prospective_journal import initialize_journal_storage
 from .llm_edge_researcher import edge_researcher_status, propose_edge_hypotheses
 from .research_llm_cost_guard import guarded_edge_researcher_provider
 
@@ -14,6 +16,9 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
     runtime = getattr(app.state.engine, "short_horizon", None)
     if runtime is None:
         raise RuntimeError("G.1S integration must be installed before LLM edge researcher")
+
+    # Startup-only additive DDL. GET endpoints below are materialized reads only.
+    initialize_journal_storage(runtime)
 
     def status():
         return {
@@ -26,6 +31,16 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
         status,
         methods=["GET"],
         name="g1s_llm_edge_researcher_status",
+    )
+
+    def lifecycle():
+        return read_materialized_lifecycle(runtime)
+
+    app.add_api_route(
+        "/api/research/g1s/edge-researcher/lifecycle",
+        lifecycle,
+        methods=["GET"],
+        name="g1s_llm_edge_researcher_lifecycle",
     )
 
     def propose(observation_id: str | None = None, max_hypotheses: int = 5):
