@@ -227,3 +227,10 @@ del _install_g1_management_active_edge_attribution
 from .trade_delete_lifecycle import install_trade_delete_lifecycle as _install_trade_delete_lifecycle
 _install_trade_delete_lifecycle()
 del _install_trade_delete_lifecycle
+
+# LLM Edge Researcher v1.3 PR C is an additive final refinement over the already
+# merged Phase 1/2 + PR A/B lifecycle. It reuses the existing research worker,
+# materialized state and Active Edge caps; no new service or authority path exists.
+from .llm_edge_pr_c import install_llm_edge_pr_c as _install_llm_edge_pr_c
+_install_llm_edge_pr_c()
+del _install_llm_edge_pr_c

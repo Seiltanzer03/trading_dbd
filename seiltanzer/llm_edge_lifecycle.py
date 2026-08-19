@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from typing import Any
 
@@ -176,10 +177,18 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
 
 
 def read_materialized_lifecycle(runtime: Any) -> dict[str, Any]:
-    with runtime._lock:
-        row = runtime._conn.execute(
-            "SELECT payload_json FROM llm_edge_lifecycle_materialized WHERE singleton_id=1 LIMIT 1"
-        ).fetchone()
+    try:
+        with runtime._lock:
+            row = runtime._conn.execute(
+                "SELECT payload_json FROM llm_edge_lifecycle_materialized WHERE singleton_id=1 LIMIT 1"
+            ).fetchone()
+    except sqlite3.OperationalError as exc:
+        # Request-time readers remain read-only. A minimal test runtime or the
+        # short startup interval before worker initialization is INITIALIZING,
+        # never a reason to create schema or scan history from HTTP.
+        if "no such table" not in str(exc).lower():
+            raise
+        row = None
     if row is not None:
         return json.loads(str(row[0]))
     return {

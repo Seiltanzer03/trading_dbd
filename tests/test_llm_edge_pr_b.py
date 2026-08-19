@@ -259,15 +259,17 @@ def test_repeated_looks_have_stricter_gate_than_overall_fdr_budget():
     assert evaluation.LOOK_ADJUSTED_Q_MAX < evaluation.OVERALL_FDR_BUDGET
 
 
-def test_validated_directional_rule_is_promoted_to_authority_grade_weight():
+def test_validated_directional_rule_stays_high_risk_only_without_strict_reference():
     context = {
         "validated_supporting_position_n": 1,
         "validated_opposing_position_n": 0,
+        "validated_strict_directional_n": 0,
     }
     profile = {
         "available": True,
         "matched_directional_signal_n": 1,
         "strict_directional_signal_n": 0,
+        "strict_directional_share": 0.0,
         "agreement": 1.0,
         "weight_fraction": 0.30,
         "max_weight_fraction": 0.30,
@@ -276,7 +278,11 @@ def test_validated_directional_rule_is_promoted_to_authority_grade_weight():
     upgraded = bridge._upgrade_weight_profile(context, profile, weight_module)
     assert upgraded["prospective_validated_directional_n"] == 1
     assert upgraded["prospective_calibration_pending"] is False
-    assert upgraded["weight_fraction"] == pytest.approx(0.40)
+    # Prospective confirmation grants Active Edge eligibility. The shared
+    # STRICT_REFERENCE gate, not LLM provenance or validation alone, is what
+    # can raise the existing high-risk-only 30% cap toward 40%.
+    assert upgraded["weight_fraction"] == pytest.approx(0.30)
+    assert upgraded["max_weight_fraction"] == pytest.approx(0.30)
 
 
 def test_validated_rule_still_rejects_stale_current_context():
