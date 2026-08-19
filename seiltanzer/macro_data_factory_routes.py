@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from .fomc_official_source import refresh_latest_fomc
 from .macro_data_factory import MacroDataFactory
 from .macro_data_factory_causality_refinement import install_macro_data_factory_causality_refinement
+from .macro_edge_evidence_refinement import install_macro_edge_evidence_refinement
 from .macro_fomc_extraction_refinement import install_fomc_extraction_refinement
 from .macro_fomc_runtime import FOMCOfficialRuntime
 from .macro_ism_parser_refinement import install_ism_roundup_parser_refinement
@@ -48,6 +49,10 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     # The resilient source then uses ISM's own validated public roundup plus the
     # immediately previous official report. Missing components remain missing.
     install_ism_source_resilience()
+    # Macro values already frozen into a T0 become canonical EDE features.  The
+    # dependence unit for a macro-conditioned rule is the official release_id,
+    # never the number of repeated market observations carrying that release.
+    install_macro_edge_evidence_refinement()
     factory = MacroDataFactory(runtime)
     numeric_store = NumericMacroStore(runtime)
     numeric_runtime = NumericMacroRuntime(numeric_store)
@@ -81,6 +86,8 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
             "no_placeholders": True,
             "consensus_feed_available": False,
             "surprise_computed_without_consensus": False,
+            "macro_ede_dependency_unit": "OFFICIAL_RELEASE_ID",
+            "macro_repeated_t0_increases_effective_n": False,
             "arbitrary_document_post_enabled": False,
             "research_only": True,
             "production_authority": False,
