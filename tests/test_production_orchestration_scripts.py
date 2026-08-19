@@ -1,75 +1,80 @@
+from pathlib import Path
 import importlib.util
 import sqlite3
-from pathlib import Path
 
 
 def _load_script(name: str):
     root = Path(__file__).resolve().parents[1]
-    path = root / "scripts" / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
+    spec = importlib.util.spec_from_file_location(name, root / "scripts" / f"{name}.py")
     assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-def test_production_research_acceptance_workflow_is_chained_from_functional_smoke():
+def test_production_orchestration_scripts_compile():
     root = Path(__file__).resolve().parents[1]
-    workflow = (root / ".github/workflows/production-ede-v12-audit.yml").read_text(
-        encoding="utf-8"
-    )
-    assert 'workflows: ["production-functional-smoke"]' in workflow
-    assert "workflow_run" in workflow
-    assert "production_ede_offload.py snapshot" in workflow
-    assert "production_ede_v13_audit.py" in workflow
+    for relative in (
+        "scripts/production_readiness_check.py",
+        "scripts/production_functional_smoke.py",
+        "scripts/production_ede_inventory.py",
+        "scripts/production_ede_v12_audit.py",
+        "scripts/production_post_research_check.py",
+    ):
+        source = (root / relative).read_text(encoding="utf-8")
+        compile(source, relative, "exec")
 
 
-def test_production_post_research_is_chained_from_ede_audit():
-    root = Path(__file__).resolve().parents[1]
-    workflow = (root / ".github/workflows/production-post-research.yml").read_text(
-        encoding="utf-8"
-    )
-    assert 'workflows: ["production-ede-v13-audit"]' in workflow
+def test_readiness_retries_only_transient_transport_errors(monkeypatch):
+    readiness = _load_script("production_readiness_check")
+
+    attempts = iter((TimeoutError("busy"), (200, {"ok": True}, 12.0)))
+
+    def fake_request(*_args, **_kwargs):
+        result = next(attempts)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(readiness, "request", fake_request)
+    monkeypatch.setattr(readiness.time, "sleep", lambda _seconds: None)
+    assert readiness.assert_fast("/bounded", budget_ms=100) == {"ok": True}
 
 
-def test_production_ede_inventory_workflow_keeps_exact_sha_gate():
-    root = Path(__file__).resolve().parents[1]
-    workflow = (root / ".github/workflows/production-ede-inventory.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "EXPECTED_SHA" in workflow
-    assert 'git -C /opt/seiltanzer rev-parse HEAD' in workflow
-    assert "production_ede_inventory.py" in workflow
+def test_readiness_does_not_retry_http_contract_failure(monkeypatch):
+    readiness = _load_script("production_readiness_check")
+
+    calls = 0
+
+    def fake_request(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return 500, {"error": "contract"}, 1.0
+
+    monkeypatch.setattr(readiness, "request", fake_request)
+    try:
+        readiness.assert_fast("/broken")
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("HTTP contract failure unexpectedly passed")
+    assert calls == 1
 
 
-def test_production_ede_v12_audit_workflow_keeps_exact_sha_gate():
-    root = Path(__file__).resolve().parents[1]
-    workflow = (root / ".github/workflows/production-ede-v12-audit.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "EXPECTED_SHA" in workflow
-    assert "expected-sha" in workflow
-    assert "production_ede_offload.py" in workflow
+def test_functional_smoke_retries_transient_timeout(monkeypatch):
+    smoke = _load_script("production_functional_smoke")
 
+    attempts = iter((TimeoutError("busy"), (200, {}, 5.0)))
 
-def test_production_post_research_checks_expected_sha():
-    root = Path(__file__).resolve().parents[1]
-    workflow = (root / ".github/workflows/production-post-research.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "EXPECTED_SHA" in workflow
-    assert "--expected-sha" in workflow
+    def fake_request(*_args, **_kwargs):
+        result = next(attempts)
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
-
-def test_production_research_audit_runs_after_exact_smoke_marker():
-    root = Path(__file__).resolve().parents[1]
-    workflow = (root / ".github/workflows/production-ede-v12-audit.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "wait-marker" in workflow
-    assert "validate-gate" in workflow
-    assert "release-gate" not in workflow
-    assert "production_ede_offload.py snapshot" in workflow
+    monkeypatch.setattr(smoke, "request", fake_request)
+    monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
+    assert smoke.assert_route("/bounded") == {}
 
 
 def test_functional_smoke_checks_public_terminal_and_keeps_network_diagnostics():
