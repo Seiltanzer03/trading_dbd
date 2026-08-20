@@ -9,7 +9,7 @@ import pytest
 from seiltanzer import macro_historical_offhost_bundle as offhost
 from seiltanzer.macro_bls_historical_bootstrap import (
     BLSHistoricalReleaseStore,
-    parse_bls_schedule,
+    parse_bls_ical,
     parse_cpi_archive,
 )
 from seiltanzer.macro_ism_historical_bootstrap import (
@@ -21,12 +21,20 @@ from seiltanzer.macro_ism_historical_bootstrap import (
 NOW = 1_756_000_000.0
 SHA = "c" * 40
 RUN_ID = "32377010025"
-SCHEDULE = """
-<html><body><table>
-<tr><th>Date</th><th>Time</th><th>Release</th></tr>
-<tr><td>Tuesday, August 12, 2025</td><td>08:30 AM</td>
-<td>Consumer Price Index for July 2025</td></tr>
-</table></body></html>
+SCHEDULE_ICAL = """BEGIN:VCALENDAR
+PRODID:-//Department of Labor//Bureau of Labor Statistics//EN
+VERSION:2.0
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+X-WR-CALNAME:BLS Economic News Release Calendar
+BEGIN:VEVENT
+UID:official-cpi-20250812@bls.gov
+DTSTART;TZID=US-Eastern:20250812T083000
+SUMMARY:Consumer Price Index
+LOCATION:Washington, DC
+CATEGORIES:IMPORTANT, BLS
+END:VEVENT
+END:VCALENDAR
 """
 CPI = """
 <html><body><h1>CONSUMER PRICE INDEX - JULY 2025</h1><table>
@@ -64,7 +72,7 @@ def _record(value):
 
 
 def _bundle():
-    spec = parse_bls_schedule(SCHEDULE, year=2025)[0]
+    spec = parse_bls_ical(SCHEDULE_ICAL)[0]
     cpi_payload = parse_cpi_archive(CPI, expected_period="2025-07")
     ism_payload = parse_ism_historical_roundup(
         ISM, family="ISM_MANUFACTURING", period="2025-06", source_url=ISM_URL
@@ -75,11 +83,11 @@ def _bundle():
         "acceptance_run_id": RUN_ID,
         "created_at": NOW - 10.0,
         "window": {"start_ts": NOW - 120 * 86400.0, "end_ts": NOW, "days": 120},
-        "bls_schedules": {"2025": _record({
-            "year": 2025,
-            "source_url": "https://www.bls.gov/schedule/2025/home.htm",
-            "html": SCHEDULE,
-            "source_sha256": offhost._sha256(SCHEDULE),
+        "bls_schedules": {"official_ical": _record({
+            "format": "ICAL",
+            "source_url": "https://www.bls.gov/schedule/news_release/bls.ics",
+            "content": SCHEDULE_ICAL,
+            "source_sha256": offhost._sha256(SCHEDULE_ICAL),
         })},
         "bls_records": [_record({
             "spec": {
@@ -127,7 +135,7 @@ def test_historical_offhost_materializes_real_rows_without_network(monkeypatch):
     monkeypatch.setattr(offhost, "load_verified_bundle", lambda _runtime: bundle)
 
     bls_runtime = Runtime()
-    spec = parse_bls_schedule(SCHEDULE, year=2025)[0]
+    spec = parse_bls_ical(SCHEDULE_ICAL)[0]
     bls_runtime._conn.execute(
         "INSERT INTO g1s_observations VALUES('obs-bls',?,'{}')",
         (spec.published_at + 60.0,),

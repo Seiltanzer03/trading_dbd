@@ -35,6 +35,7 @@ import httpx
 
 BLS_HISTORICAL_BOOTSTRAP_VERSION = "macro-bls-archive-point-in-time-v1"
 BLS_SCHEDULE_TEMPLATE = "https://www.bls.gov/schedule/{year}/home.htm"
+BLS_ICAL_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
 BLS_ARCHIVE_TEMPLATE = "https://www.bls.gov/news.release/archives/{slug}_{date_code}.htm"
 BLS_HOSTS = frozenset({"www.bls.gov", "bls.gov"})
 FAMILIES = ("CPI", "NFP")
@@ -216,6 +217,71 @@ def parse_bls_schedule(html: str, *, year: int) -> list[BLSReleaseSpec]:
             family=family, period=period, published_at=float(published_at),
             source_url=source_url)
         output[(family, period, float(published_at))] = spec
+    return sorted(output.values(), key=lambda item: (item.published_at, item.family))
+
+
+def parse_bls_ical(calendar: str) -> list[BLSReleaseSpec]:
+    """Extract causal CPI/NFP releases from the official machine calendar.
+
+    The BLS iCalendar identifies the release family and exact Eastern release
+    timestamp. CPI and Employment Situation are monthly releases for the prior
+    calendar month; the canonical archive parser independently verifies that
+    derived period against the period printed in the official archived release.
+    """
+    unfolded: list[str] = []
+    for raw in str(calendar or "").replace("\r\n", "\n").split("\n"):
+        if raw.startswith((" ", "\t")) and unfolded:
+            unfolded[-1] += raw[1:]
+        else:
+            unfolded.append(raw.rstrip("\r"))
+    output: dict[tuple[str, str, float], BLSReleaseSpec] = {}
+    for block in "\n".join(unfolded).split("BEGIN:VEVENT")[1:]:
+        event = block.split("END:VEVENT", 1)[0]
+        fields: dict[str, str] = {}
+        for line in event.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            fields[key.strip()] = value.strip()
+        summary = fields.get("SUMMARY", "")
+        family = next(
+            (candidate for candidate, label in RELEASE_LABEL.items()
+             if summary.casefold() == label.casefold()),
+            None,
+        )
+        if family is None:
+            continue
+        calendar_time = next(
+            ((key, value) for key, value in fields.items()
+             if key.startswith("DTSTART")),
+            ("", ""),
+        )
+        if calendar_time[0] not in {
+            "DTSTART;TZID=US-Eastern",
+            "DTSTART;TZID=America/New_York",
+        }:
+            continue
+        raw_dt = calendar_time[1]
+        match = re.fullmatch(r"(\d{8})T(\d{6})", raw_dt)
+        if match is None:
+            continue
+        local = datetime.strptime("".join(match.groups()), "%Y%m%d%H%M%S").replace(
+            tzinfo=ZoneInfo("America/New_York")
+        )
+        if local.month == 1:
+            period = _period(local.year - 1, 12)
+        else:
+            period = _period(local.year, local.month - 1)
+        published_at = float(local.timestamp())
+        source_url = BLS_ARCHIVE_TEMPLATE.format(
+            slug=ARCHIVE_SLUG[family], date_code=local.strftime("%m%d%Y")
+        )
+        output[(family, period, published_at)] = BLSReleaseSpec(
+            family=family,
+            period=period,
+            published_at=published_at,
+            source_url=source_url,
+        )
     return sorted(output.values(), key=lambda item: (item.published_at, item.family))
 
 
