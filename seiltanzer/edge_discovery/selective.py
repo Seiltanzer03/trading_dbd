@@ -22,9 +22,12 @@ from .filters import (
 )
 from .registry import FEATURES
 
-SELECTIVE_CONTRACT_VERSION = "g1s-ede-selective-edge-v1.3"
+SELECTIVE_CONTRACT_VERSION = "g1s-ede-selective-edge-v1.3.1"
 SELECTIVE_HORIZONS = (15, 30, 60)
-MAX_SELECTIVE_TEMPLATES = 320
+# Five deterministic FOMC numeric IDs add exactly ten single-feature median
+# templates. Preserve the existing interaction question set instead of silently
+# evicting old option/cross/regime hypotheses when the canonical registry grows.
+MAX_SELECTIVE_TEMPLATES = 330
 MAX_CONDITIONS = 3
 LOW_PRACTICAL_COVERAGE_PCT = 2.0
 MAX_ASSET_CONCENTRATION = 0.85
