@@ -82,7 +82,6 @@ jobs:
           envs: EXPECTED_SHA
           script: |
             set -euo pipefail
-            git config --global --add safe.directory /opt/seiltanzer || true
             cd /opt/seiltanzer
 
             echo '=== PRE-DEPLOY SERVICE DIAGNOSTICS ==='
@@ -92,9 +91,63 @@ jobs:
             echo '=== RECENT KERNEL OOM / KILL EVENTS ==='
             journalctl -k --since '-45 minutes' --no-pager 2>/dev/null \
               | grep -Ei 'out of memory|oom|killed process|memory cgroup' || true
-            echo '=== HOST CAPACITY ==='
+            echo '=== HOST CAPACITY BEFORE BOUNDED CLEANUP ==='
             free -h || true
             df -h / /opt/seiltanzer || true
+
+            # A full root filesystem prevents even git from creating its lock and
+            # temporary object files. Recover space only from bounded disposable
+            # locations before touching repository state. Never delete data/, DB,
+            # ledgers, evidence, model outputs or arbitrary application files.
+            echo '=== BOUNDED PRE-FETCH DISK CLEANUP ==='
+            rm -f /root/.gitconfig.lock >/dev/null 2>&1 || true
+            if [ -d /root/.cache ]; then
+              find /root/.cache -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
+                >/dev/null 2>&1 || true
+            fi
+            rm -rf /root/.npm/_cacache >/dev/null 2>&1 || true
+            apt-get clean >/dev/null 2>&1 || true
+            journalctl --vacuum-size=128M >/dev/null 2>&1 || true
+            find /tmp -xdev -mindepth 1 -maxdepth 1 \
+              \( -name 'pip-*' -o -name 'pip-build-*' -o -name 'pip-install-*' \) \
+              -mtime +1 -exec rm -rf -- {} + >/dev/null 2>&1 || true
+            find /opt/seiltanzer -xdev \
+              -path /opt/seiltanzer/data -prune -o \
+              -type d \( -name '__pycache__' -o -name '.pytest_cache' \
+                -o -name '.mypy_cache' -o -name '.ruff_cache' \) \
+              -prune -exec rm -rf -- {} + >/dev/null 2>&1 || true
+
+            # Reuse the already-deployed narrow malformed-editable cleanup before
+            # git fetch as well. It is explicitly confined to malformed ~seiltanzer
+            # entries under site-packages and is safe to repeat.
+            if [ -x /opt/seiltanzer/.venv/bin/python ] \
+               && [ -f /opt/seiltanzer/scripts/g1e1_cleanup_venv.py ]; then
+              SITE=$(/opt/seiltanzer/.venv/bin/python - <<'PY'
+            import site
+            print(site.getsitepackages()[0])
+            PY
+              )
+              PYTHONPATH=/opt/seiltanzer /opt/seiltanzer/.venv/bin/python \
+                /opt/seiltanzer/scripts/g1e1_cleanup_venv.py \
+                --site-packages "$SITE" --apply || true
+            fi
+            sync || true
+            echo '=== HOST CAPACITY AFTER BOUNDED CLEANUP ==='
+            df -h / /opt/seiltanzer || true
+
+            free_kb=$(df --output=avail -k / | tail -n 1 | tr -d ' ')
+            required_kb=$((512 * 1024))
+            if [ "${free_kb:-0}" -lt "$required_kb" ]; then
+              echo "::error::Insufficient safe pre-fetch headroom: ${free_kb:-0} KiB < ${required_kb} KiB"
+              echo '=== BOUNDED DISK DIAGNOSTICS ==='
+              du -xhd1 /opt 2>/dev/null | sort -h | tail -n 30 || true
+              du -xhd1 /var 2>/dev/null | sort -h | tail -n 30 || true
+              du -xhd1 /root 2>/dev/null | sort -h | tail -n 30 || true
+              exit 1
+            fi
+
+            rm -f /root/.gitconfig.lock >/dev/null 2>&1 || true
+            git config --global --add safe.directory /opt/seiltanzer || true
 
             while read -r unit _; do
               [ -n "$unit" ] || continue
@@ -123,6 +176,9 @@ jobs:
             PYTHONPATH=/opt/seiltanzer /opt/seiltanzer/.venv/bin/python \
               /opt/seiltanzer/scripts/g1e1_cleanup_venv.py --site-packages "$SITE" --apply || true
             /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
+
+            echo '=== POST-INSTALL DISK ==='
+            df -h / /opt/seiltanzer || true
 
             mkdir -p /etc/systemd/system/seiltanzer.service.d
             cat >/etc/systemd/system/seiltanzer.service.d/20-memory-budget.conf <<'EOF'
