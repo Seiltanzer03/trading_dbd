@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 import httpx
 
 
-TRANSPORT_VERSION = "macro-official-transport-v3"
+TRANSPORT_VERSION = "macro-official-transport-v4"
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
@@ -26,6 +26,8 @@ BLS_OFFICIAL_HOSTS = frozenset({"api.bls.gov", "bls.gov", "www.bls.gov"})
 BLS_CACHE_FALLBACK_HARD_MAX_AGE_SEC = 24.0 * 60.0 * 60.0
 BLS_CACHE_FALLBACK_ENV = "MACRO_BLS_CACHE_FALLBACK_MAX_AGE_SEC"
 BLS_CACHE_REQUIRED_FAMILIES = ("CPI", "NFP")
+BLS_TRANSPORT_ATTEMPTS_PER_ROUTE = 2
+BLS_TRANSPORT_RETRY_BACKOFF_SEC = 1.0
 _INSTALLED = False
 
 
@@ -132,6 +134,13 @@ def macro_transport_status() -> dict[str, Any]:
         ),
         "official_source_urls_unchanged": True,
         "payload_or_parser_fallback_added": False,
+        "bls_transport": {
+            "direct_official_first": True,
+            "configured_proxy_fallback": macro_proxy_url() is not None,
+            "attempts_per_route": BLS_TRANSPORT_ATTEMPTS_PER_ROUTE,
+            "retry_backoff_sec": BLS_TRANSPORT_RETRY_BACKOFF_SEC,
+            "request_timeout_unchanged": True,
+        },
         "bls_cache_fallback": {
             "enabled": max_age_sec > 0.0,
             "max_age_sec": max_age_sec,
@@ -145,6 +154,64 @@ def macro_transport_status() -> dict[str, Any]:
         "research_only": True,
         "production_authority": False,
     }
+
+
+def _fetch_bls_official_with_failover(
+    source: Any,
+    *,
+    now: float | None = None,
+) -> tuple[float, dict[str, dict[str, Any]]]:
+    """Fetch the unchanged official BLS payload over bounded transport routes.
+
+    The shared production proxy can itself exhaust BLS's anonymous request quota.
+    Try the official endpoint directly first, then the configured transport proxy.
+    Every successful response still passes the canonical BLS parser; no cached,
+    synthetic or alternate-source payload can enter through this function.
+    """
+    from .macro_numeric_data import BLS_API_URL, BLS_SERIES, build_bls_releases
+
+    stamp = time.time() if now is None else float(now)
+    year = time.gmtime(stamp).tm_year
+    body = {
+        "seriesid": list(BLS_SERIES.values()),
+        "startyear": str(year - 1),
+        "endyear": str(year),
+    }
+    proxy = macro_proxy_url()
+    routes: list[tuple[str, str | None]] = [("DIRECT_OFFICIAL", None)]
+    if proxy:
+        routes.append(("CONFIGURED_PROXY", proxy))
+
+    errors: list[str] = []
+    for route_name, route_proxy in routes:
+        for attempt in range(1, BLS_TRANSPORT_ATTEMPTS_PER_ROUTE + 1):
+            try:
+                with httpx.Client(
+                    timeout=source.timeout_sec,
+                    follow_redirects=True,
+                    proxy=route_proxy,
+                    trust_env=False,
+                    headers={
+                        "User-Agent": BROWSER_USER_AGENT,
+                        "Accept": "application/json",
+                        "Accept-Language": "en-US,en;q=0.8",
+                        "Cache-Control": "no-cache",
+                    },
+                ) as client:
+                    response = client.post(BLS_API_URL, json=body)
+                    response.raise_for_status()
+                    payload = response.json()
+                releases = build_bls_releases(payload)
+                return time.time(), releases
+            except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
+                errors.append(
+                    f"{route_name}[{attempt}]:{type(exc).__name__}:"
+                    f"{str(exc)[:120]}"
+                )
+                if attempt < BLS_TRANSPORT_ATTEMPTS_PER_ROUTE:
+                    time.sleep(BLS_TRANSPORT_RETRY_BACKOFF_SEC * attempt)
+
+    raise ValueError("BLS_OFFICIAL_TRANSPORT_EXHAUSTED:" + "|".join(errors))
 
 
 def install_macro_transport_refinement() -> None:
@@ -169,6 +236,12 @@ def install_macro_transport_refinement() -> None:
 
     original_ingest_bls = NumericMacroRuntime._ingest_bls
 
+    def fetch_bls_with_failover(
+        self: OfficialNumericMacroSource,
+        now: float | None = None,
+    ) -> tuple[float, dict[str, dict[str, Any]]]:
+        return _fetch_bls_official_with_failover(self, now=now)
+
     def ingest_bls_with_official_cache(self: NumericMacroRuntime) -> list[dict[str, Any]]:
         try:
             return original_ingest_bls(self)
@@ -184,5 +257,6 @@ def install_macro_transport_refinement() -> None:
 
     setattr(ingest_bls_with_official_cache, "_macro_bls_official_cache_v3", True)
     OfficialNumericMacroSource._client = refined_client
+    OfficialNumericMacroSource.fetch_bls = fetch_bls_with_failover
     NumericMacroRuntime._ingest_bls = ingest_bls_with_official_cache
     _INSTALLED = True
