@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 
-EDE_CONTRACT_VERSION = "g1s-edge-discovery-engine-v1.3-macro-registry"
+EDE_CONTRACT_VERSION = "g1s-edge-discovery-engine-v1.3-macro-registry-fomc-deterministic"
 RegistryAvailability = Literal["AVAILABLE", "LIMITED", "UNAVAILABLE"]
 ResearchScope = Literal["G1S", "G1M_ONLY", "QUALITY_ONLY"]
 
@@ -28,6 +28,7 @@ INVENTORY_SOURCES = (
     "seiltanzer/core/gex_field.py",
     "seiltanzer/macro_t0_context.py",
     "seiltanzer/macro_bls_historical_bootstrap.py",
+    "seiltanzer/macro_fomc_deterministic_bootstrap.py",
     "seiltanzer/web/js/regime_phase.js",
     "seiltanzer/web/js/wavelet.js",
     "seiltanzer/web/js/gex.js",
@@ -185,9 +186,9 @@ FEATURES: tuple[FeatureDefinition, ...] = (
        notes="canonical ID currently materializes numeric wavelet phase_stability; not a categorical phase label"),
 
     # Official macro release features are canonical IDs, not a runtime extension.
-    # CPI/NFP historical capability is backed only by original archived BLS
-    # release copies. ISM/FOMC remain future/live only until separate historical
-    # vintage contracts are implemented.
+    # CPI/NFP use archived BLS release copies. Deterministic FOMC history uses
+    # official dated Fed statement pages; the six LLM semantic fields remain
+    # explicitly prospective-only and are never reconstructed after the fact.
     _f("macro.cpi_headline_mom_pct", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
        frequency="official CPI release", asof="official release available_at/published_at <= T0",
        historical="AVAILABLE", dependency="macro_release:CPI",
@@ -237,24 +238,57 @@ FEATURES: tuple[FeatureDefinition, ...] = (
     _f("macro.ism_services_pmi_change_pp", "MACRO_NUMERIC", "macro_t0_context.numeric_macro",
        frequency="official ISM Services release", asof="official release available_at <= T0",
        historical="UNAVAILABLE", dependency="macro_release:ISM_SERVICES"),
+
+    _f("macro.fomc_target_mid_pct", "MACRO_FOMC_DETERMINISTIC",
+       "macro_fomc_deterministic_bootstrap.macro_fomc_deterministic_releases",
+       frequency="official FOMC statement", asof="statement For release at timestamp <= T0",
+       historical="AVAILABLE", dependency="macro_release:FOMC_STATEMENT",
+       notes="mechanical target-range midpoint; no LLM; official dated page reconstruction"),
+    _f("macro.fomc_target_width_bp", "MACRO_FOMC_DETERMINISTIC",
+       "macro_fomc_deterministic_bootstrap.macro_fomc_deterministic_releases",
+       frequency="official FOMC statement", asof="statement For release at timestamp <= T0",
+       historical="AVAILABLE", dependency="macro_release:FOMC_STATEMENT",
+       notes="mechanical target-range width in bp; no LLM"),
+    _f("macro.fomc_target_change_bp", "MACRO_FOMC_DETERMINISTIC",
+       "macro_fomc_deterministic_bootstrap.macro_fomc_deterministic_releases",
+       frequency="official FOMC statement", asof="statement For release at timestamp <= T0",
+       historical="AVAILABLE", dependency="macro_release:FOMC_STATEMENT",
+       notes="midpoint change versus immediately previous official statement only; no future document"),
+    _f("macro.fomc_dissent_share", "MACRO_FOMC_DETERMINISTIC",
+       "macro_fomc_deterministic_bootstrap.macro_fomc_deterministic_releases",
+       frequency="official FOMC statement", asof="statement For release at timestamp <= T0",
+       historical="AVAILABLE", dependency="macro_release:FOMC_STATEMENT",
+       notes="published dissenting votes divided by voting total; no LLM"),
+    _f("macro.fomc_statement_change", "MACRO_FOMC_DETERMINISTIC",
+       "macro_fomc_deterministic_bootstrap.macro_fomc_deterministic_releases",
+       frequency="official FOMC statement", asof="statement For release at timestamp <= T0",
+       historical="AVAILABLE", dependency="macro_release:FOMC_STATEMENT",
+       notes="deterministic text change versus immediately previous official statement; no LLM"),
+
     _f("macro.fomc_policy_tone", "MACRO_FOMC", "macro_t0_context.fomc",
-       frequency="official FOMC statement", asof="official statement available_at <= T0",
-       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+       frequency="official FOMC statement", asof="actual semantic extraction available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT",
+       notes="prospective LLM semantic only; historical reconstruction forbidden"),
     _f("macro.fomc_policy_shift", "MACRO_FOMC", "macro_t0_context.fomc",
-       frequency="official FOMC statement", asof="official statement available_at <= T0",
-       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+       frequency="official FOMC statement", asof="actual semantic extraction available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT",
+       notes="prospective LLM semantic only; historical reconstruction forbidden"),
     _f("macro.fomc_inflation_concern", "MACRO_FOMC", "macro_t0_context.fomc",
-       frequency="official FOMC statement", asof="official statement available_at <= T0",
-       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+       frequency="official FOMC statement", asof="actual semantic extraction available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT",
+       notes="prospective LLM semantic only; historical reconstruction forbidden"),
     _f("macro.fomc_growth_concern", "MACRO_FOMC", "macro_t0_context.fomc",
-       frequency="official FOMC statement", asof="official statement available_at <= T0",
-       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+       frequency="official FOMC statement", asof="actual semantic extraction available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT",
+       notes="prospective LLM semantic only; historical reconstruction forbidden"),
     _f("macro.fomc_forward_guidance_shift", "MACRO_FOMC", "macro_t0_context.fomc",
-       frequency="official FOMC statement", asof="official statement available_at <= T0",
-       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+       frequency="official FOMC statement", asof="actual semantic extraction available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT",
+       notes="prospective LLM semantic only; historical reconstruction forbidden"),
     _f("macro.fomc_uncertainty", "MACRO_FOMC", "macro_t0_context.fomc",
-       frequency="official FOMC statement", asof="official statement available_at <= T0",
-       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+       frequency="official FOMC statement", asof="actual semantic extraction available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT",
+       notes="prospective LLM semantic only; historical reconstruction forbidden"),
 
     _f("quality.availability", "DATA_QUALITY", "edge_discovery.feature_view.FeatureValue",
        datatype="category", eligible=False, dependency="data_quality",
