@@ -124,6 +124,8 @@ def test_production_ede_inventory_is_read_only_and_lists_canonical_features(tmp_
     assert by_id["macro.nfp_payroll_change_k"]["research_scope"] == "G1S"
     assert "macro.fomc_target_change_bp" in by_id
     assert "macro.fomc_statement_change" in by_id
+    assert "macro.ism_manufacturing_pmi" in by_id
+    assert "macro.ism_services_pmi_change_pp" in by_id
     assert by_id["option.barrier_probability"]["status"] == "G1M_ONLY"
     assert by_id["quality.availability"]["status"] == "QUALITY_ONLY"
     assert result["production_authority"] is False
@@ -134,11 +136,12 @@ def test_production_ede_inventory_is_read_only_and_lists_canonical_features(tmp_
     assert definitions["macro.fomc_policy_tone"].historical_availability == "UNAVAILABLE"
 
 
-def test_production_ede_materializes_bls_and_deterministic_fomc_before_snapshot():
+def test_production_ede_materializes_all_point_in_time_macro_before_snapshot():
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github/workflows/production-ede-v12-audit.yml").read_text(
         encoding="utf-8"
     )
     assert "/api/research/macro/historical-bls/refresh" in workflow
+    assert "/api/research/macro/historical-ism/refresh" in workflow
     assert "/api/research/macro/fomc-deterministic/refresh" in workflow
     assert "git -C /opt/seiltanzer rev-parse HEAD" in workflow
