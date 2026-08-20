@@ -1,25 +1,66 @@
 name: production-ede-v13-audit
 
 on:
-  workflow_run:
-    workflows: ["production-functional-smoke"]
-    types: [completed]
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        required: true
+        type: string
+      acceptance_run_id:
+        required: true
+        type: string
   schedule:
     - cron: "17 */6 * * *"
 
 permissions:
+  actions: write
   contents: read
 
 jobs:
+  resolve:
+    runs-on: ubuntu-22.04
+    outputs:
+      expected_sha: ${{ steps.contract.outputs.expected_sha }}
+      acceptance_run_id: ${{ steps.contract.outputs.acceptance_run_id }}
+      exact_chain: ${{ steps.contract.outputs.exact_chain }}
+    steps:
+      - name: Resolve explicit dispatch or scheduled contract
+        id: contract
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SHA: ${{ inputs.expected_sha }}
+          DISPATCH_ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
+          SCHEDULE_SHA: ${{ github.sha }}
+          SCHEDULE_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            test -n "$DISPATCH_SHA"
+            case "$DISPATCH_ACCEPTANCE_RUN_ID" in
+              ''|*[!0-9]*) echo "invalid acceptance_run_id" >&2; exit 1 ;;
+            esac
+            echo "expected_sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
+            echo "acceptance_run_id=$DISPATCH_ACCEPTANCE_RUN_ID" >> "$GITHUB_OUTPUT"
+            echo "exact_chain=true" >> "$GITHUB_OUTPUT"
+          else
+            test "$EVENT_NAME" = "schedule"
+            echo "expected_sha=$SCHEDULE_SHA" >> "$GITHUB_OUTPUT"
+            echo "acceptance_run_id=$SCHEDULE_RUN_ID" >> "$GITHUB_OUTPUT"
+            echo "exact_chain=false" >> "$GITHUB_OUTPUT"
+          fi
+
   snapshot:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.workflow_run.conclusion == 'success' }}
+    needs: resolve
     runs-on: ubuntu-22.04
     timeout-minutes: 50
+    env:
+      EXPECTED_SHA: ${{ needs.resolve.outputs.expected_sha }}
+      ACCEPTANCE_RUN_ID: ${{ needs.resolve.outputs.acceptance_run_id }}
+      EXACT_CHAIN: ${{ needs.resolve.outputs.exact_chain }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve.outputs.expected_sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -72,7 +113,7 @@ jobs:
       - name: Materialize point-in-time macro archives before immutable snapshot
         uses: appleboy/ssh-action@v1
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
         with:
           host: 94.241.171.182
           username: root
@@ -119,21 +160,27 @@ jobs:
               "http://127.0.0.1:8790/api/research/macro/fomc-deterministic/refresh" \
               "OK|PARTIAL"
       - name: Export immutable production DB and release exact-run gate
+        id: snapshot_export
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-          EVENT_NAME: ${{ github.event_name }}
-          INVENTORY_MARKER_ID: ${{ github.event.workflow_run.id || github.run_id }}
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
+          EXACT_CHAIN: ${{ env.EXACT_CHAIN }}
           RUN_ID: ${{ github.run_id }}
           OUTPUT_DB: ${{ runner.temp }}/ede-source.sqlite3
         run: |
-          python scripts/production_ede_offload.py snapshot \
-            --password "$SSH_PASSWORD" \
-            --expected-sha "$EXPECTED_SHA" \
-            --event-name "$EVENT_NAME" \
-            --marker-id "$INVENTORY_MARKER_ID" \
-            --run-id "$RUN_ID" \
+          set -euo pipefail
+          args=(
+            --password "$SSH_PASSWORD"
+            --expected-sha "$EXPECTED_SHA"
+            --acceptance-run-id "$ACCEPTANCE_RUN_ID"
+            --run-id "$RUN_ID"
             --output-db "$OUTPUT_DB"
+          )
+          if [ "$EXACT_CHAIN" = "true" ]; then
+            args+=(--require-acceptance-marker)
+          fi
+          python scripts/production_ede_offload.py snapshot "${args[@]}"
       - name: Guarantee exact remote EDE snapshot cleanup with a fresh SSH session
         if: always()
         uses: appleboy/ssh-action@v1
@@ -160,6 +207,24 @@ jobs:
             test ! -e "${snapshot}-wal"
             test ! -e "${snapshot}-shm"
             echo "EDE_EXACT_REMOTE_SNAPSHOT_CLEAN=1"
+      - name: Release gate if snapshot phase failed before normal release
+        if: always() && needs.resolve.outputs.exact_chain == 'true' && steps.snapshot_export.outcome != 'success'
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
+          script: |
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/production_research_acceptance.py release-gate \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+              --expected-sha "$EXPECTED_SHA" || true
       - uses: actions/upload-artifact@v4
         with:
           name: ede-production-snapshot-${{ github.run_id }}
@@ -167,7 +232,7 @@ jobs:
           retention-days: 1
 
   audit:
-    needs: snapshot
+    needs: [resolve, snapshot]
     runs-on: ubuntu-22.04
     timeout-minutes: 300
     concurrency:
@@ -176,7 +241,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve.outputs.expected_sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -191,7 +256,7 @@ jobs:
       - name: Fetch latest serialized EDE ledgers
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.expected_sha }}
           OUTPUT_DIR: ${{ runner.temp }}/ede-output
         run: |
           python scripts/production_ede_offload.py fetch-ledgers \
@@ -225,13 +290,13 @@ jobs:
           retention-days: 30
 
   publish:
-    needs: audit
+    needs: [resolve, audit]
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve.outputs.expected_sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -243,7 +308,7 @@ jobs:
       - name: Publish compact EDE research outputs without production compute
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.expected_sha }}
           OUTPUT_DIR: ${{ runner.temp }}/ede-output
           RUN_ID: ${{ github.run_id }}
         run: |
@@ -252,3 +317,34 @@ jobs:
             --expected-sha "$EXPECTED_SHA" \
             --output-dir "$OUTPUT_DIR" \
             --run-id "$RUN_ID"
+
+  handoff-active-edge:
+    needs: [resolve, publish]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Continue with active edge reports for the same exact SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.expected_sha }}
+          ACCEPTANCE_RUN_ID: ${{ needs.resolve.outputs.acceptance_run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({
+              "ref": "main",
+              "inputs": {
+                  "expected_sha": os.environ["EXPECTED_SHA"],
+                  "acceptance_run_id": os.environ["ACCEPTANCE_RUN_ID"],
+              },
+          }))
+          PY
+          )
+          curl --fail-with-body --silent --show-error \
+            --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/production-active-edge.yml/dispatches" \
+            -d "$payload"

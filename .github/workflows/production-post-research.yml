@@ -1,35 +1,46 @@
 name: production-post-research
 
 on:
-  workflow_run:
-    # This is the first synchronization boundary after green functional smoke.
-    # It requests a bounded cooperative worker pause, while still allowing the
-    # current service process to complete its required first research cycle.
-    workflows: ["production-functional-smoke"]
-    types: [completed]
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact SHA deployed and accepted by the deploy workflow
+        required: true
+        type: string
+      acceptance_run_id:
+        description: Immutable deploy workflow run owning this acceptance chain
+        required: true
+        type: string
 
 permissions:
+  actions: write
   contents: read
 
 jobs:
   verify:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+
       - name: Verify health after research maintenance completed
+        id: verify
         uses: appleboy/ssh-action@v1
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-          SMOKE_RUN_ID: ${{ github.event.workflow_run.id || github.run_id }}
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
           command_timeout: 22m
-          envs: EXPECTED_SHA,SMOKE_RUN_ID
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
@@ -40,20 +51,14 @@ jobs:
             cleanup_gate_on_failure() {
               if [ "$keep_gate" -ne 1 ]; then
                 "$PY" "$ORCH" release-gate \
-                  --smoke-run-id "$SMOKE_RUN_ID" \
+                  --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
                   --expected-sha "$EXPECTED_SHA" || true
               fi
             }
             trap cleanup_gate_on_failure EXIT
 
-            # Acquire before polling the worker. If this process has not yet
-            # completed its required post-grace cycle, the worker gate permits
-            # that one cycle and pauses only subsequent heavy cycles. Heavy EDE
-            # now leaves production immediately after its immutable snapshot, so
-            # two hours is a conservative crash-safety ceiling for this short
-            # synchronization path rather than a research runtime allowance.
             "$PY" "$ORCH" acquire-gate \
-              --smoke-run-id "$SMOKE_RUN_ID" \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA" \
               --ttl-seconds 7200
 
@@ -61,15 +66,57 @@ jobs:
               --expected-sha "$EXPECTED_SHA"
 
             "$PY" "$ORCH" validate-gate \
-              --smoke-run-id "$SMOKE_RUN_ID" \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA"
             "$PY" "$ORCH" write-marker \
               --stage post-research \
-              --smoke-run-id "$SMOKE_RUN_ID" \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA"
 
-            # Ownership passes to the downstream exact-run chain. G1M/inventory
-            # release on failure; final EDE snapshot releases the owned lease
-            # before any CPU-heavy off-host research begins.
             keep_gate=1
             trap - EXIT
+
+      - name: Continue exact-SHA chain with G1M acceptance
+        id: handoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          payload=$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({
+              "ref": "main",
+              "inputs": {
+                  "expected_sha": os.environ["EXPECTED_SHA"],
+                  "acceptance_run_id": os.environ["ACCEPTANCE_RUN_ID"],
+              },
+          }))
+          PY
+          )
+          curl --fail-with-body --silent --show-error \
+            --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/production-g1m-local-edge.yml/dispatches" \
+            -d "$payload"
+
+      - name: Release gate if downstream dispatch failed
+        if: always() && steps.verify.outcome == 'success' && steps.handoff.outcome != 'success'
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
+          script: |
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/production_research_acceptance.py release-gate \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+              --expected-sha "$EXPECTED_SHA" || true

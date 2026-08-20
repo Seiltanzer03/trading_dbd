@@ -142,7 +142,9 @@ def _probe_api(
             time.sleep(max(0.0, float(retry_delay)))
 
 
-def _release_gate(password: str, *, marker_id: str, expected_sha: str) -> None:
+def _release_gate(
+    password: str, *, acceptance_run_id: str, expected_sha: str
+) -> None:
     """Release the exact-run cooperative pause with a fresh retryable SSH session."""
     client = _connect(password)
     try:
@@ -154,8 +156,8 @@ def _release_gate(password: str, *, marker_id: str, expected_sha: str) -> None:
                     shlex.quote(str(REMOTE_PYTHON)),
                     shlex.quote(str(REMOTE_ORCHESTRATOR)),
                     "release-gate",
-                    "--smoke-run-id",
-                    shlex.quote(marker_id),
+                    "--acceptance-run-id",
+                    shlex.quote(acceptance_run_id),
                     "--expected-sha",
                     shlex.quote(expected_sha),
                 ]
@@ -179,7 +181,11 @@ def snapshot(args: argparse.Namespace) -> int:
     output = pathlib.Path(args.output_db)
     output.parent.mkdir(parents=True, exist_ok=True)
     remote_snapshot = f"/tmp/seiltanzer-ede-source-{args.run_id}.sqlite3"
-    exact_run = args.event_name == "workflow_run"
+    exact_run = bool(args.require_acceptance_marker)
+    if exact_run and not str(args.acceptance_run_id or "").strip():
+        raise ValueError(
+            "--acceptance-run-id is required with --require-acceptance-marker"
+        )
 
     client = _connect(args.password)
     primary_error: BaseException | None = None
@@ -196,8 +202,8 @@ def snapshot(args: argparse.Namespace) -> int:
                         "wait-marker",
                         "--stage",
                         "ede-inventory",
-                        "--smoke-run-id",
-                        shlex.quote(args.marker_id),
+                        "--acceptance-run-id",
+                        shlex.quote(args.acceptance_run_id),
                         "--expected-sha",
                         shlex.quote(args.expected_sha),
                         "--timeout-seconds",
@@ -216,8 +222,8 @@ def snapshot(args: argparse.Namespace) -> int:
                         shlex.quote(str(REMOTE_PYTHON)),
                         shlex.quote(str(REMOTE_ORCHESTRATOR)),
                         "validate-gate",
-                        "--smoke-run-id",
-                        shlex.quote(args.marker_id),
+                        "--acceptance-run-id",
+                        shlex.quote(args.acceptance_run_id),
                         "--expected-sha",
                         shlex.quote(args.expected_sha),
                     ]
@@ -290,7 +296,7 @@ def snapshot(args: argparse.Namespace) -> int:
             # The gate is released before any CPU-heavy research begins.
             _release_gate(
                 args.password,
-                marker_id=args.marker_id,
+                acceptance_run_id=args.acceptance_run_id,
                 expected_sha=args.expected_sha,
             )
             print("EDE_OFFLOAD_GATE_RELEASED=1")
@@ -383,8 +389,8 @@ def parser() -> argparse.ArgumentParser:
     snap = sub.add_parser("snapshot")
     snap.add_argument("--password", required=True)
     snap.add_argument("--expected-sha", required=True)
-    snap.add_argument("--event-name", required=True)
-    snap.add_argument("--marker-id", required=True)
+    snap.add_argument("--acceptance-run-id")
+    snap.add_argument("--require-acceptance-marker", action="store_true")
     snap.add_argument("--run-id", required=True)
     snap.add_argument("--output-db", required=True)
     snap.set_defaults(func=snapshot)

@@ -145,7 +145,7 @@ def _apply_gate_state(state: dict, gate: dict) -> None:
     state["acceptance_gate_active"] = bool(gate["active"])
     state["acceptance_pause_active"] = bool(gate["pause"])
     state["acceptance_gate_reason"] = gate["reason"]
-    state["acceptance_gate_smoke_run_id"] = gate["smoke_run_id"]
+    state["acceptance_gate_run_id"] = gate["acceptance_run_id"]
     state["acceptance_gate_expected_sha"] = gate["expected_sha"]
     state["acceptance_gate_expires_at"] = gate["expires_at"]
 
@@ -196,7 +196,7 @@ def install_research_worker(app) -> None:
         "acceptance_gate_active": False,
         "acceptance_pause_active": False,
         "acceptance_gate_reason": "NO_ACTIVE_ACCEPTANCE_GATE",
-        "acceptance_gate_smoke_run_id": None,
+        "acceptance_gate_run_id": None,
         "acceptance_gate_expected_sha": None,
         "acceptance_gate_expires_at": None,
         "memory_pause_active": False,
