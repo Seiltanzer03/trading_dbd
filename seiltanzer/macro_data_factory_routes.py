@@ -15,12 +15,12 @@ from .macro_bls_historical_ede_refinement import install_bls_historical_ede_refi
 from .macro_data_factory import MacroDataFactory
 from .macro_data_factory_causality_refinement import install_macro_data_factory_causality_refinement
 from .macro_edge_evidence_refinement import install_macro_edge_evidence_refinement
-from .macro_fomc_deterministic_bootstrap import (
-    FOMCDeterministicBootstrapRuntime,
-    FOMCDeterministicReleaseStore,
-)
+from .macro_fomc_deterministic_bootstrap import FOMCDeterministicBootstrapRuntime
 from .macro_fomc_deterministic_ede_refinement import (
     install_fomc_deterministic_ede_refinement,
+)
+from .macro_fomc_deterministic_store_refinement import (
+    StrictFOMCDeterministicReleaseStore,
 )
 from .macro_fomc_extraction_refinement import install_fomc_extraction_refinement
 from .macro_fomc_runtime import FOMCOfficialRuntime
@@ -75,7 +75,10 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     numeric_runtime = NumericMacroRuntime(numeric_store)
     historical_bls_store = BLSHistoricalReleaseStore(runtime)
     historical_bls_runtime = BLSHistoricalBootstrapRuntime(historical_bls_store)
-    fomc_deterministic_store = FOMCDeterministicReleaseStore(runtime)
+    # Production archive ingestion is strict: a non-initial statement cannot be
+    # frozen until its exact predecessor is already materialized, otherwise the
+    # immutable derivative fields could be permanently incomplete.
+    fomc_deterministic_store = StrictFOMCDeterministicReleaseStore(runtime)
     fomc_deterministic_runtime = FOMCDeterministicBootstrapRuntime(
         fomc_deterministic_store)
     fomc_runtime = FOMCOfficialRuntime(factory)
