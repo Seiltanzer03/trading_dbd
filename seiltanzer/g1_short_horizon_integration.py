@@ -10,6 +10,9 @@ from .engine import Engine
 from .g1_short_horizon_runtime import ShortHorizonRuntime
 from .g1_management_local_runtime import ManagementLocalRuntime
 from .g1_management_local_diagnostics import install_g1_management_local_diagnostics
+from .g1_management_status_nonblocking import (
+    install_g1_management_local_status_nonblocking,
+)
 from . import storage_runtime as _storage
 
 
@@ -42,6 +45,7 @@ def install_g1_short_horizon_integration() -> None:
         previous_engine_init(self, *args, **kwargs)
         self.short_horizon = ShortHorizonRuntime(self)
         self.management_local = ManagementLocalRuntime(self)
+        install_g1_management_local_status_nonblocking(self.management_local)
         self.passive._g1s_runtime = self.short_horizon
         self.passive._g1m_local_runtime = self.management_local
 
