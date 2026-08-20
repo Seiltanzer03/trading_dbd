@@ -25,7 +25,7 @@ jobs:
           python-version: "3.11"
       - name: Install snapshot transport
         run: pip install paramiko
-      - name: Materialize point-in-time BLS archive before immutable snapshot
+      - name: Materialize point-in-time macro archives before immutable snapshot
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
@@ -34,27 +34,42 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 8m
+          command_timeout: 12m
           envs: EXPECTED_SHA
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            status=""
-            for attempt in $(seq 1 60); do
-              payload="$(curl -fsS --max-time 240 -X POST \
-                http://127.0.0.1:8790/api/research/macro/historical-bls/refresh)"
-              status="$(printf '%s' "$payload" | python3 -c \
-                'import json,sys; print(str(json.load(sys.stdin).get("status") or ""))')"
-              if [ "$status" != "IN_PROGRESS" ]; then
-                printf 'BLS_HISTORICAL_BOOTSTRAP=%s\n' "$payload"
-                break
-              fi
-              sleep 5
-            done
-            case "$status" in
-              OK|PARTIAL|NO_OBSERVATIONS) ;;
-              *) echo "historical BLS bootstrap did not reach a terminal state: $status" >&2; exit 1 ;;
-            esac
+
+            refresh_endpoint() {
+              label="$1"
+              endpoint="$2"
+              allowed="$3"
+              status=""
+              payload=""
+              for attempt in $(seq 1 60); do
+                payload="$(curl -fsS --max-time 240 -X POST "$endpoint")"
+                status="$(printf '%s' "$payload" | python3 -c \
+                  'import json,sys; print(str(json.load(sys.stdin).get("status") or ""))')"
+                if [ "$status" != "IN_PROGRESS" ]; then
+                  printf '%s=%s\n' "$label" "$payload"
+                  break
+                fi
+                sleep 5
+              done
+              case "|$allowed|" in
+                *"|$status|"*) ;;
+                *) echo "$label did not reach an allowed terminal state: $status" >&2; exit 1 ;;
+              esac
+            }
+
+            refresh_endpoint \
+              "BLS_HISTORICAL_BOOTSTRAP" \
+              "http://127.0.0.1:8790/api/research/macro/historical-bls/refresh" \
+              "OK|PARTIAL|NO_OBSERVATIONS"
+            refresh_endpoint \
+              "FOMC_DETERMINISTIC_BOOTSTRAP" \
+              "http://127.0.0.1:8790/api/research/macro/fomc-deterministic/refresh" \
+              "OK|PARTIAL"
       - name: Export immutable production DB and release exact-run gate
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}

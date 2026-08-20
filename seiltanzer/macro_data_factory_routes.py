@@ -15,6 +15,13 @@ from .macro_bls_historical_ede_refinement import install_bls_historical_ede_refi
 from .macro_data_factory import MacroDataFactory
 from .macro_data_factory_causality_refinement import install_macro_data_factory_causality_refinement
 from .macro_edge_evidence_refinement import install_macro_edge_evidence_refinement
+from .macro_fomc_deterministic_bootstrap import FOMCDeterministicBootstrapRuntime
+from .macro_fomc_deterministic_ede_refinement import (
+    install_fomc_deterministic_ede_refinement,
+)
+from .macro_fomc_deterministic_store_refinement import (
+    StrictFOMCDeterministicReleaseStore,
+)
 from .macro_fomc_extraction_refinement import install_fomc_extraction_refinement
 from .macro_fomc_runtime import FOMCOfficialRuntime
 from .macro_ism_parser_refinement import install_ism_roundup_parser_refinement
@@ -54,38 +61,50 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     # The resilient source then uses ISM's own validated public roundup plus the
     # immediately previous official report. Missing components remain missing.
     install_ism_source_resilience()
-    # Macro values already frozen into a T0 become canonical EDE features.  The
-    # dependence unit for a macro-conditioned rule is the official release_id,
-    # never the number of repeated market observations carrying that release.
+    # Macro values already frozen into a T0 become canonical EDE features. The
+    # dependence unit is the official release_id, never repeated market T0 rows.
     install_macro_edge_evidence_refinement()
-    # For old T0 rows, fill only absent CPI/NFP features from the corresponding
-    # official archived release copy. This is a read-time research overlay; old
-    # observations are never mutated and prospectively frozen values always win.
+    # Old CPI/NFP rows receive a read-only official archive overlay.
     install_bls_historical_ede_refinement()
+    # FOMC history uses deterministic statement measurements only; the six LLM
+    # semantic scores remain prospective-only and are never reconstructed later.
+    install_fomc_deterministic_ede_refinement()
 
     factory = MacroDataFactory(runtime)
     numeric_store = NumericMacroStore(runtime)
     numeric_runtime = NumericMacroRuntime(numeric_store)
     historical_bls_store = BLSHistoricalReleaseStore(runtime)
     historical_bls_runtime = BLSHistoricalBootstrapRuntime(historical_bls_store)
+    # Production archive ingestion is strict: a non-initial statement cannot be
+    # frozen until its exact predecessor is already materialized, otherwise the
+    # immutable derivative fields could be permanently incomplete.
+    fomc_deterministic_store = StrictFOMCDeterministicReleaseStore(runtime)
+    fomc_deterministic_runtime = FOMCDeterministicBootstrapRuntime(
+        fomc_deterministic_store)
     fomc_runtime = FOMCOfficialRuntime(factory)
-    # T0 capture reads these already-materialized live stores only. Historical
-    # archive bootstrap is deliberately not injected into current T0 capture.
+
+    # T0 capture reads materialized stores only. No network/LLM occurs inside a
+    # market observation. Deterministic FOMC rows use public release time as asof;
+    # LLM FOMC semantics keep their actual extraction available_at timestamp.
     factory.numeric_release_store = numeric_store
+    factory.fomc_deterministic_store = fomc_deterministic_store
     app.state.macro_data_factory = factory
     app.state.macro_numeric_store = numeric_store
     app.state.macro_numeric_runtime = numeric_runtime
     app.state.macro_bls_historical_store = historical_bls_store
     app.state.macro_bls_historical_runtime = historical_bls_runtime
+    app.state.macro_fomc_deterministic_store = fomc_deterministic_store
+    app.state.macro_fomc_deterministic_runtime = fomc_deterministic_runtime
     app.state.macro_fomc_runtime = fomc_runtime
     app.state.engine.macro_data_factory = factory
     install_macro_t0_context(app.state.engine, factory)
 
-    # Delayed low-frequency workers: live macro checks hourly; immutable archive
-    # materialization is static and therefore checks only daily.
+    # Low-frequency workers. Deterministic FOMC polling is cheap and hourly so a
+    # newly published statement can enter subsequent prospective T0 captures.
     numeric_runtime.start()
     fomc_runtime.start()
     historical_bls_runtime.start()
+    fomc_deterministic_runtime.start()
 
     def status():
         return {
@@ -93,12 +112,17 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
             "numeric": numeric_runtime.status(),
             "numeric_transport": macro_transport_status(),
             "historical_bls": historical_bls_runtime.status(),
+            "fomc_deterministic": fomc_deterministic_runtime.status(),
             "fomc_runtime": fomc_runtime.status(),
             "llm_cost_guard": cost_guard_status(),
             "official_families": [
                 "CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES", "FOMC_STATEMENT"
             ],
-            "historical_point_in_time_families": ["CPI", "NFP"],
+            "historical_point_in_time_families": [
+                "CPI", "NFP", "FOMC_DETERMINISTIC"
+            ],
+            "historical_fomc_llm_semantics_backfilled": False,
+            "historical_fomc_deterministic_only": True,
             "official_sources_only": True,
             "no_placeholders": True,
             "consensus_feed_available": False,
@@ -113,11 +137,8 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         }
 
     app.add_api_route(
-        "/api/research/macro/status",
-        status,
-        methods=["GET"],
-        name="macro_data_factory_status",
-    )
+        "/api/research/macro/status", status, methods=["GET"],
+        name="macro_data_factory_status")
 
     def refresh_fomc():
         try:
@@ -125,50 +146,44 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         except RuntimeError as exc:
             return {
                 "contract_version": "macro-data-factory-v1",
-                "status": "RATE_LIMITED",
-                "reason": str(exc)[:160],
-                "research_only": True,
-                "production_authority": False,
+                "status": "RATE_LIMITED", "reason": str(exc)[:160],
+                "research_only": True, "production_authority": False,
             }
         try:
             return refresh_latest_fomc(factory, extractor=guarded_macro_extractor)
         except (RuntimeError, ValueError) as exc:
             return {
                 "contract_version": "macro-data-factory-v1",
-                "status": "UNAVAILABLE",
-                "reason": str(exc)[:180],
+                "status": "UNAVAILABLE", "reason": str(exc)[:180],
                 "official_source_verified": False,
-                "research_only": True,
-                "production_authority": False,
+                "research_only": True, "production_authority": False,
             }
 
     app.add_api_route(
-        "/api/research/macro/fomc/refresh",
-        refresh_fomc,
-        methods=["POST"],
-        name="macro_data_factory_fomc_refresh",
-    )
+        "/api/research/macro/fomc/refresh", refresh_fomc, methods=["POST"],
+        name="macro_data_factory_fomc_refresh")
 
     def refresh_numeric():
-        # Deterministic BLS/ISM fetch. No LLM and no synthetic fallback.
         return numeric_runtime.refresh()
 
     app.add_api_route(
-        "/api/research/macro/numeric/refresh",
-        refresh_numeric,
-        methods=["POST"],
-        name="macro_numeric_refresh",
-    )
+        "/api/research/macro/numeric/refresh", refresh_numeric, methods=["POST"],
+        name="macro_numeric_refresh")
 
     def refresh_historical_bls():
         return historical_bls_runtime.refresh()
 
     app.add_api_route(
-        "/api/research/macro/historical-bls/refresh",
-        refresh_historical_bls,
-        methods=["POST"],
-        name="macro_historical_bls_refresh",
-    )
+        "/api/research/macro/historical-bls/refresh", refresh_historical_bls,
+        methods=["POST"], name="macro_historical_bls_refresh")
+
+    def refresh_fomc_deterministic():
+        return fomc_deterministic_runtime.refresh()
+
+    app.add_api_route(
+        "/api/research/macro/fomc-deterministic/refresh",
+        refresh_fomc_deterministic, methods=["POST"],
+        name="macro_fomc_deterministic_refresh")
 
     def latest(captured_ts: float | None = None, family: str = "FOMC_STATEMENT"):
         cutoff = time.time() if captured_ts is None else float(captured_ts)
@@ -178,31 +193,31 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         return factory.latest_admissible(cutoff, family=family_key)
 
     app.add_api_route(
-        "/api/research/macro/latest",
-        latest,
-        methods=["GET"],
-        name="macro_data_factory_latest",
-    )
+        "/api/research/macro/latest", latest, methods=["GET"],
+        name="macro_data_factory_latest")
 
     def latest_historical_bls(captured_ts: float | None = None, family: str = "CPI"):
         cutoff = time.time() if captured_ts is None else float(captured_ts)
         return historical_bls_store.latest_admissible(str(family or "").upper(), cutoff)
 
     app.add_api_route(
-        "/api/research/macro/historical-bls/latest",
-        latest_historical_bls,
-        methods=["GET"],
-        name="macro_historical_bls_latest",
-    )
+        "/api/research/macro/historical-bls/latest", latest_historical_bls,
+        methods=["GET"], name="macro_historical_bls_latest")
+
+    def latest_fomc_deterministic(captured_ts: float | None = None):
+        cutoff = time.time() if captured_ts is None else float(captured_ts)
+        return fomc_deterministic_store.latest_admissible(cutoff)
+
+    app.add_api_route(
+        "/api/research/macro/fomc-deterministic/latest",
+        latest_fomc_deterministic, methods=["GET"],
+        name="macro_fomc_deterministic_latest")
 
     def context(captured_ts: float | None = None):
         cutoff = time.time() if captured_ts is None else float(captured_ts)
         return research_context(numeric_store, cutoff)
 
     app.add_api_route(
-        "/api/research/macro/numeric/context",
-        context,
-        methods=["GET"],
-        name="macro_numeric_context",
-    )
+        "/api/research/macro/numeric/context", context, methods=["GET"],
+        name="macro_numeric_context")
     app.state.macro_data_factory_routes_installed = True
