@@ -75,20 +75,51 @@ jobs:
         with:
           ref: ${{ env.EXPECTED_SHA }}
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Build exact-SHA official macro transport bundle off-host
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --quiet -e '.[research]'
+          python scripts/build_offhost_macro_bundle.py \
+            --expected-sha "$EXPECTED_SHA" \
+            --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+            --output "official-macro-${ACCEPTANCE_RUN_ID}.json"
+
+      - name: Transfer verified official macro bundle over deploy channel
+        uses: appleboy/scp-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          source: official-macro-${{ github.run_id }}.json
+          target: /tmp
+
       - name: Deliver exact SHA over SSH
         id: delivery
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
           command_timeout: 10m
-          envs: EXPECTED_SHA
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
           script: |
             set -euo pipefail
+            case "$ACCEPTANCE_RUN_ID" in
+              ''|*[!0-9]*) echo "Invalid acceptance_run_id"; exit 1 ;;
+            esac
+            bundle_input="/tmp/official-macro-${ACCEPTANCE_RUN_ID}.json"
+            trap 'rm -f -- "$bundle_input"' EXIT
+            test -f "$bundle_input"
             cd /opt/seiltanzer
 
             echo '=== PRE-DEPLOY SERVICE DIAGNOSTICS ==='
@@ -183,6 +214,13 @@ jobs:
             PYTHONPATH=/opt/seiltanzer /opt/seiltanzer/.venv/bin/python \
               /opt/seiltanzer/scripts/g1e1_cleanup_venv.py --site-packages "$SITE" --apply || true
             /opt/seiltanzer/.venv/bin/pip install --quiet -e /opt/seiltanzer
+
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/install_offhost_macro_bundle.py \
+              --input "$bundle_input" \
+              --destination /opt/seiltanzer/data/research/official_macro_offhost_latest.json \
+              --expected-sha "$EXPECTED_SHA" \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID"
 
             echo '=== POST-INSTALL DISK ==='
             df -h / /opt/seiltanzer || true

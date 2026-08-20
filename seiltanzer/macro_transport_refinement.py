@@ -2,10 +2,11 @@
 
 The production VPS can receive transient transport/provider failures from otherwise
 public official endpoints while the same deterministic fetch succeeds elsewhere.
-Keep source URLs, parsers, provenance checks and payloads unchanged.  The primary
-path always attempts the official upstream first.  For BLS only, a failed upstream
-request may reuse a bounded, already-materialized official CPI/NFP snapshot when
-both required families are still causally admissible and recently fetched.
+Keep source URLs, canonical parsers and authority unchanged. The primary path
+always attempts the official upstream first. A failed live request may use an
+exact-SHA, short-lived, hashed official-source bundle fetched by the deploy runner.
+For BLS only, an existing bounded official CPI/NFP snapshot remains the final
+fallback when both required families are causally admissible and recently fetched.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from urllib.parse import urlparse
 import httpx
 
 
-TRANSPORT_VERSION = "macro-official-transport-v5"
+TRANSPORT_VERSION = "macro-official-transport-v6"
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
@@ -28,6 +29,7 @@ BLS_CACHE_FALLBACK_ENV = "MACRO_BLS_CACHE_FALLBACK_MAX_AGE_SEC"
 BLS_CACHE_REQUIRED_FAMILIES = ("CPI", "NFP")
 BLS_TRANSPORT_ATTEMPTS_PER_ROUTE = 2
 BLS_TRANSPORT_RETRY_BACKOFF_SEC = 1.0
+BLS_TRANSPORT_TOTAL_DEADLINE_SEC = 12.0
 _INSTALLED = False
 
 
@@ -141,6 +143,7 @@ def macro_transport_status() -> dict[str, Any]:
             "attempts_per_route": BLS_TRANSPORT_ATTEMPTS_PER_ROUTE,
             "retry_backoff_sec": BLS_TRANSPORT_RETRY_BACKOFF_SEC,
             "request_timeout_unchanged": True,
+            "total_deadline_sec": BLS_TRANSPORT_TOTAL_DEADLINE_SEC,
         },
         "bls_cache_fallback": {
             "enabled": max_age_sec > 0.0,
@@ -151,6 +154,17 @@ def macro_transport_status() -> dict[str, Any]:
             "valid_and_available_only": True,
             "upstream_attempted_first": True,
             "release_materialization": False,
+        },
+        "offhost_official_fallback": {
+            "official_sources_only": True,
+            "canonical_parser_exact_sha": True,
+            "exact_sha_required": True,
+            "acceptance_owner_verified_at_install": True,
+            "bundle_and_release_hashes_required": True,
+            "freshness_configurable_and_bounded": True,
+            "direct_official_attempted_first": True,
+            "synthetic_data_used": False,
+            "placeholder_used": False,
         },
         "research_only": True,
         "production_authority": False,
@@ -183,12 +197,20 @@ def _fetch_bls_official_with_failover(
     if proxy:
         routes.append(("CONFIGURED_PROXY", proxy))
 
+    deadline = time.monotonic() + BLS_TRANSPORT_TOTAL_DEADLINE_SEC
+
+    def remaining_timeout() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            raise TimeoutError("BLS_TRANSPORT_TOTAL_DEADLINE_EXHAUSTED")
+        return max(0.1, min(float(source.timeout_sec), remaining))
+
     errors: list[str] = []
     for route_name, route_proxy in routes:
         for attempt in range(1, BLS_TRANSPORT_ATTEMPTS_PER_ROUTE + 1):
             try:
                 with httpx.Client(
-                    timeout=source.timeout_sec,
+                    timeout=remaining_timeout(),
                     follow_redirects=True,
                     proxy=route_proxy,
                     trust_env=False,
@@ -202,28 +224,36 @@ def _fetch_bls_official_with_failover(
                     response = client.post(BLS_API_URL, json=body)
                     response.raise_for_status()
                     payload = response.json()
+                    if not isinstance(payload, dict):
+                        raise ValueError("BLS_RESPONSE_NOT_OBJECT")
                 releases = build_bls_releases(payload)
                 return time.time(), releases
-            except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
+            except (
+                httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError,
+                TimeoutError,
+            ) as exc:
                 errors.append(
                     f"{route_name}[{attempt}]:{type(exc).__name__}:"
                     f"{str(exc)[:120]}"
                 )
                 if attempt < BLS_TRANSPORT_ATTEMPTS_PER_ROUTE:
-                    time.sleep(BLS_TRANSPORT_RETRY_BACKOFF_SEC * attempt)
+                    delay = BLS_TRANSPORT_RETRY_BACKOFF_SEC * attempt
+                    if deadline - time.monotonic() > delay:
+                        time.sleep(delay)
 
     # Some HTTP proxies accept official GET requests but do not preserve the BLS
     # JSON POST body. BLS v2 exposes the same series through its official per-series
     # GET contract. Assemble only those seven exact official responses, then pass
     # the combined response through the unchanged canonical multi-series parser.
-    if proxy:
+    get_routes = routes
+    for route_name, route_proxy in get_routes:
         for attempt in range(1, BLS_TRANSPORT_ATTEMPTS_PER_ROUTE + 1):
             try:
                 series_payloads: list[dict[str, Any]] = []
                 with httpx.Client(
-                    timeout=source.timeout_sec,
+                    timeout=remaining_timeout(),
                     follow_redirects=True,
-                    proxy=proxy,
+                    proxy=route_proxy,
                     trust_env=False,
                     headers={
                         "User-Agent": BROWSER_USER_AGENT,
@@ -239,9 +269,12 @@ def _fetch_bls_official_with_failover(
                                 "startyear": body["startyear"],
                                 "endyear": body["endyear"],
                             },
+                            timeout=remaining_timeout(),
                         )
                         response.raise_for_status()
                         payload = response.json()
+                        if not isinstance(payload, dict):
+                            raise ValueError("BLS_GET_RESPONSE_NOT_OBJECT")
                         if payload.get("status") != "REQUEST_SUCCEEDED":
                             raise ValueError("BLS_GET_REQUEST_NOT_SUCCEEDED")
                         rows = ((payload.get("Results") or {}).get("series") or [])
@@ -263,13 +296,18 @@ def _fetch_bls_official_with_failover(
                     }
                 )
                 return time.time(), releases
-            except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
+            except (
+                httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError,
+                TimeoutError,
+            ) as exc:
                 errors.append(
-                    f"CONFIGURED_PROXY_GET[{attempt}]:{type(exc).__name__}:"
+                    f"{route_name}_GET[{attempt}]:{type(exc).__name__}:"
                     f"{str(exc)[:120]}"
                 )
                 if attempt < BLS_TRANSPORT_ATTEMPTS_PER_ROUTE:
-                    time.sleep(BLS_TRANSPORT_RETRY_BACKOFF_SEC * attempt)
+                    delay = BLS_TRANSPORT_RETRY_BACKOFF_SEC * attempt
+                    if deadline - time.monotonic() > delay:
+                        time.sleep(delay)
 
     raise ValueError("BLS_OFFICIAL_TRANSPORT_EXHAUSTED:" + "|".join(errors))
 
@@ -295,6 +333,7 @@ def install_macro_transport_refinement() -> None:
         )
 
     original_ingest_bls = NumericMacroRuntime._ingest_bls
+    original_ingest_ism = NumericMacroRuntime._ingest_ism
 
     def fetch_bls_with_failover(
         self: OfficialNumericMacroSource,
@@ -306,17 +345,51 @@ def install_macro_transport_refinement() -> None:
         try:
             return original_ingest_bls(self)
         except Exception as exc:
+            from .macro_offhost_bundle import ingest_offhost_families
+
+            try:
+                return ingest_offhost_families(
+                    self, ("CPI", "NFP"), upstream_error=exc
+                )
+            except Exception as offhost_exc:
+                offhost_error = offhost_exc
             cached_rows = _verified_cached_bls_rows(
                 self,
                 now_ts=time.time(),
                 upstream_error=exc,
             )
             if cached_rows is None:
-                raise
+                raise ValueError(
+                    "BLS_OFFICIAL_AND_OFFHOST_UNAVAILABLE:"
+                    f"{type(exc).__name__}:{str(exc)[:100]}|"
+                    f"{type(offhost_error).__name__}:{str(offhost_error)[:100]}"
+                ) from exc
             return cached_rows
 
+    def ingest_ism_with_offhost(self: NumericMacroRuntime) -> list[dict[str, Any]]:
+        try:
+            return original_ingest_ism(self)
+        except Exception as exc:
+            from .macro_offhost_bundle import ingest_offhost_families
+
+            try:
+                return ingest_offhost_families(
+                    self,
+                    ("ISM_MANUFACTURING", "ISM_SERVICES"),
+                    upstream_error=exc,
+                )
+            except Exception as offhost_exc:
+                raise ValueError(
+                    "ISM_OFFICIAL_AND_OFFHOST_UNAVAILABLE:"
+                    f"{type(exc).__name__}:{str(exc)[:100]}|"
+                    f"{type(offhost_exc).__name__}:{str(offhost_exc)[:100]}"
+                ) from exc
+
     setattr(ingest_bls_with_official_cache, "_macro_bls_official_cache_v3", True)
+    setattr(ingest_bls_with_official_cache, "_macro_offhost_official_v1", True)
+    setattr(ingest_ism_with_offhost, "_macro_offhost_official_v1", True)
     OfficialNumericMacroSource._client = refined_client
     OfficialNumericMacroSource.fetch_bls = fetch_bls_with_failover
     NumericMacroRuntime._ingest_bls = ingest_bls_with_official_cache
+    NumericMacroRuntime._ingest_ism = ingest_ism_with_offhost
     _INSTALLED = True

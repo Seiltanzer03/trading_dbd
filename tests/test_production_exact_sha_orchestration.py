@@ -20,6 +20,19 @@ def test_deploy_starts_one_explicit_acceptance_chain_after_green_smoke():
     assert '[ "$ORCHESTRATION" = "success" ]' in deploy
 
 
+def test_deploy_materializes_exact_sha_offhost_macro_before_unchanged_smoke():
+    deploy = _workflow("deploy.yml")
+    build = "python scripts/build_offhost_macro_bundle.py"
+    install = "/opt/seiltanzer/scripts/install_offhost_macro_bundle.py"
+    smoke = "/opt/seiltanzer/scripts/production_functional_smoke.py"
+    assert build in deploy
+    assert "appleboy/scp-action@v1" in deploy
+    assert install in deploy
+    assert '--expected-sha "$EXPECTED_SHA"' in deploy
+    assert '--acceptance-run-id "$ACCEPTANCE_RUN_ID"' in deploy
+    assert deploy.index(build) < deploy.index(install) < deploy.index(smoke)
+
+
 def test_automatic_downstream_chain_never_uses_workflow_run_head_sha_fallback():
     names = (
         "production-post-research.yml",
