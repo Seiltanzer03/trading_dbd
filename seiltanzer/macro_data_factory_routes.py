@@ -24,6 +24,11 @@ from .macro_fomc_deterministic_store_refinement import (
 )
 from .macro_fomc_extraction_refinement import install_fomc_extraction_refinement
 from .macro_fomc_runtime import FOMCOfficialRuntime
+from .macro_ism_historical_bootstrap import (
+    ISMHistoricalBootstrapRuntime,
+    ISMHistoricalReleaseStore,
+)
+from .macro_ism_historical_ede_refinement import install_ism_historical_ede_refinement
 from .macro_ism_parser_refinement import install_ism_roundup_parser_refinement
 from .macro_ism_resilience import install_ism_source_resilience
 from .macro_numeric_data import NumericMacroRuntime, NumericMacroStore, research_context
@@ -69,23 +74,26 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     # FOMC history uses deterministic statement measurements only; the six LLM
     # semantic scores remain prospective-only and are never reconstructed later.
     install_fomc_deterministic_ede_refinement()
+    # ISM history fills only the already-canonical headline PMI/change IDs from
+    # dated official roundups; no new subindex hypothesis family is introduced.
+    install_ism_historical_ede_refinement()
 
     factory = MacroDataFactory(runtime)
     numeric_store = NumericMacroStore(runtime)
     numeric_runtime = NumericMacroRuntime(numeric_store)
     historical_bls_store = BLSHistoricalReleaseStore(runtime)
     historical_bls_runtime = BLSHistoricalBootstrapRuntime(historical_bls_store)
-    # Production archive ingestion is strict: a non-initial statement cannot be
-    # frozen until its exact predecessor is already materialized, otherwise the
-    # immutable derivative fields could be permanently incomplete.
+    historical_ism_store = ISMHistoricalReleaseStore(runtime)
+    historical_ism_runtime = ISMHistoricalBootstrapRuntime(historical_ism_store)
+    # Production FOMC ingestion is strict: a non-initial statement cannot be
+    # frozen until its exact predecessor is already materialized.
     fomc_deterministic_store = StrictFOMCDeterministicReleaseStore(runtime)
     fomc_deterministic_runtime = FOMCDeterministicBootstrapRuntime(
         fomc_deterministic_store)
     fomc_runtime = FOMCOfficialRuntime(factory)
 
-    # T0 capture reads materialized stores only. No network/LLM occurs inside a
-    # market observation. Deterministic FOMC rows use public release time as asof;
-    # LLM FOMC semantics keep their actual extraction available_at timestamp.
+    # T0 capture reads live materialized stores only. Historical BLS/ISM overlays
+    # are deliberately not injected into a current observation capture.
     factory.numeric_release_store = numeric_store
     factory.fomc_deterministic_store = fomc_deterministic_store
     app.state.macro_data_factory = factory
@@ -93,17 +101,20 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     app.state.macro_numeric_runtime = numeric_runtime
     app.state.macro_bls_historical_store = historical_bls_store
     app.state.macro_bls_historical_runtime = historical_bls_runtime
+    app.state.macro_ism_historical_store = historical_ism_store
+    app.state.macro_ism_historical_runtime = historical_ism_runtime
     app.state.macro_fomc_deterministic_store = fomc_deterministic_store
     app.state.macro_fomc_deterministic_runtime = fomc_deterministic_runtime
     app.state.macro_fomc_runtime = fomc_runtime
     app.state.engine.macro_data_factory = factory
     install_macro_t0_context(app.state.engine, factory)
 
-    # Low-frequency workers. Deterministic FOMC polling is cheap and hourly so a
-    # newly published statement can enter subsequent prospective T0 captures.
+    # Low-frequency workers. Historical dated pages are static and therefore
+    # checked only daily; live numeric/FOMC acquisition retains its own cadence.
     numeric_runtime.start()
     fomc_runtime.start()
     historical_bls_runtime.start()
+    historical_ism_runtime.start()
     fomc_deterministic_runtime.start()
 
     def status():
@@ -112,6 +123,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
             "numeric": numeric_runtime.status(),
             "numeric_transport": macro_transport_status(),
             "historical_bls": historical_bls_runtime.status(),
+            "historical_ism": historical_ism_runtime.status(),
             "fomc_deterministic": fomc_deterministic_runtime.status(),
             "fomc_runtime": fomc_runtime.status(),
             "llm_cost_guard": cost_guard_status(),
@@ -119,10 +131,15 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
                 "CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES", "FOMC_STATEMENT"
             ],
             "historical_point_in_time_families": [
-                "CPI", "NFP", "FOMC_DETERMINISTIC"
+                "CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES",
+                "FOMC_DETERMINISTIC",
             ],
             "historical_fomc_llm_semantics_backfilled": False,
             "historical_fomc_deterministic_only": True,
+            "historical_ism_source_kind": (
+                "OFFICIAL_DATED_ROUNDUP_POST_RELEASE_REPRODUCTION"
+            ),
+            "historical_ism_current_mutable_report_backfill": False,
             "official_sources_only": True,
             "no_placeholders": True,
             "consensus_feed_available": False,
@@ -177,6 +194,13 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         "/api/research/macro/historical-bls/refresh", refresh_historical_bls,
         methods=["POST"], name="macro_historical_bls_refresh")
 
+    def refresh_historical_ism():
+        return historical_ism_runtime.refresh()
+
+    app.add_api_route(
+        "/api/research/macro/historical-ism/refresh", refresh_historical_ism,
+        methods=["POST"], name="macro_historical_ism_refresh")
+
     def refresh_fomc_deterministic():
         return fomc_deterministic_runtime.refresh()
 
@@ -203,6 +227,16 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     app.add_api_route(
         "/api/research/macro/historical-bls/latest", latest_historical_bls,
         methods=["GET"], name="macro_historical_bls_latest")
+
+    def latest_historical_ism(captured_ts: float | None = None,
+                              family: str = "ISM_MANUFACTURING"):
+        cutoff = time.time() if captured_ts is None else float(captured_ts)
+        return historical_ism_store.latest_admissible(
+            str(family or "").upper(), cutoff)
+
+    app.add_api_route(
+        "/api/research/macro/historical-ism/latest", latest_historical_ism,
+        methods=["GET"], name="macro_historical_ism_latest")
 
     def latest_fomc_deterministic(captured_ts: float | None = None):
         cutoff = time.time() if captured_ts is None else float(captured_ts)
