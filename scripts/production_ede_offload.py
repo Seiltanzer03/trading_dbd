@@ -3,7 +3,7 @@
 
 The production server is used only for:
 1. exact-SHA/acceptance-marker validation,
-2. a low-priority immutable SQLite snapshot,
+2. transfer of the deploy-created verified immutable SQLite backup,
 3. small research-ledger/result transfers,
 4. fail-closed API probes.
 
@@ -12,11 +12,12 @@ The CPU-heavy EDE search itself must never run on production.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import pathlib
 import shlex
 import socket
 import sqlite3
-import textwrap
 import time
 from typing import Any
 
@@ -24,12 +25,15 @@ HOST = "94.241.171.182"
 REMOTE_ROOT = pathlib.PurePosixPath("/opt/seiltanzer")
 REMOTE_RESEARCH = REMOTE_ROOT / "data/research"
 REMOTE_DATABASE = REMOTE_ROOT / "data/trades.db"
+REMOTE_LOCAL_BACKUPS = REMOTE_ROOT / "data/backups/local"
 REMOTE_PYTHON = REMOTE_ROOT / ".venv/bin/python"
 REMOTE_ORCHESTRATOR = REMOTE_ROOT / "scripts/production_research_acceptance.py"
 API_PROBE_MAX_TIME_SECONDS = 3
 API_PROBE_ATTEMPTS = 3
 API_PROBE_RETRY_DELAY_SECONDS = 2.0
 SSH_KEEPALIVE_SECONDS = 30
+MAX_EXACT_BACKUP_AGE_SECONDS = 60 * 60
+BACKUP_CONTRACT_VERSION = "seiltanzer-backup-v1"
 
 LEDGER_NAMES = (
     "ede_frozen_evidence.jsonl",
@@ -186,10 +190,173 @@ def _local_quick_check(path: pathlib.Path) -> None:
         conn.close()
 
 
+def _sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_payload_sha256(payload: dict[str, Any]) -> str:
+    canonical = {
+        key: value
+        for key, value in payload.items()
+        if key != "manifest_payload_sha256"
+    }
+    encoded = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _verify_local_exact_backup(
+    database: pathlib.Path,
+    manifest_path: pathlib.Path,
+    *,
+    expected_sha: str,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(f"invalid downloaded backup manifest: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("downloaded backup manifest must be an object")
+    if payload.get("backup_contract_version") != BACKUP_CONTRACT_VERSION:
+        raise RuntimeError("downloaded backup contract mismatch")
+    if payload.get("verified") is not True:
+        raise RuntimeError("downloaded backup is not verified")
+    if payload.get("reason") != "prestart":
+        raise RuntimeError("downloaded backup is not a prestart snapshot")
+    if str(payload.get("git_commit") or "") != expected_sha:
+        raise RuntimeError("downloaded backup does not belong to the expected SHA")
+    if pathlib.PurePosixPath(str(payload.get("source_db") or "")) != REMOTE_DATABASE:
+        raise RuntimeError("downloaded backup source DB mismatch")
+    database_name = str(payload.get("database_file") or "")
+    if not database_name or pathlib.PurePosixPath(database_name).name != database_name:
+        raise RuntimeError("downloaded backup database_file is unsafe")
+    if int(payload.get("database_size_bytes") or -1) != database.stat().st_size:
+        raise RuntimeError("downloaded backup byte count mismatch")
+    expected_database_sha = str(payload.get("database_sha256") or "")
+    if len(expected_database_sha) != 64 or _sha256(database) != expected_database_sha:
+        raise RuntimeError("downloaded backup SHA256 mismatch")
+    expected_manifest_sha = str(payload.get("manifest_payload_sha256") or "")
+    if expected_manifest_sha and _manifest_payload_sha256(payload) != expected_manifest_sha:
+        raise RuntimeError("downloaded backup manifest SHA256 mismatch")
+    _local_quick_check(database)
+    return payload
+
+
+def _select_remote_exact_backup(client, *, expected_sha: str) -> dict[str, Any]:
+    """Select one recent immutable deploy backup without touching the live DB."""
+    selector = r'''
+import hashlib
+import json
+import os
+import pathlib
+import time
+
+root = pathlib.Path(os.environ["BACKUP_ROOT"]).resolve()
+expected_sha = os.environ["EXPECTED_SHA"]
+source_db = pathlib.Path(os.environ["SOURCE_DB"])
+max_age = float(os.environ["MAX_AGE_SECONDS"])
+now = time.time()
+candidates = []
+
+def manifest_hash(payload):
+    canonical = {
+        key: value
+        for key, value in payload.items()
+        if key != "manifest_payload_sha256"
+    }
+    encoded = json.dumps(
+        canonical, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+for manifest_path in root.glob("*.manifest.json"):
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        created_ts = float(payload.get("created_ts") or 0.0)
+        age_sec = now - created_ts
+        database_name = str(payload.get("database_file") or "")
+        if not database_name or pathlib.Path(database_name).name != database_name:
+            continue
+        database_path = (root / database_name).resolve()
+        if database_path.parent != root or not database_path.is_file():
+            continue
+        if payload.get("backup_contract_version") != "seiltanzer-backup-v1":
+            continue
+        if payload.get("verified") is not True or payload.get("reason") != "prestart":
+            continue
+        if str(payload.get("git_commit") or "") != expected_sha:
+            continue
+        if pathlib.Path(str(payload.get("source_db") or "")) != source_db:
+            continue
+        if age_sec < 0 or age_sec > max_age:
+            continue
+        if int(payload.get("database_size_bytes") or -1) != database_path.stat().st_size:
+            continue
+        manifest_sha = str(payload.get("manifest_payload_sha256") or "")
+        if manifest_sha and manifest_hash(payload) != manifest_sha:
+            continue
+        database_sha = str(payload.get("database_sha256") or "")
+        if len(database_sha) != 64:
+            continue
+        candidates.append((created_ts, {
+            "database_path": str(database_path),
+            "manifest_path": str(manifest_path.resolve()),
+            "database_file": database_name,
+            "database_size_bytes": database_path.stat().st_size,
+            "database_sha256": database_sha,
+            "created_ts": created_ts,
+            "age_sec": age_sec,
+            "backup_id": str(payload.get("backup_id") or ""),
+            "reason": "prestart",
+            "git_commit": expected_sha,
+        }))
+    except (OSError, ValueError, TypeError):
+        continue
+
+if not candidates:
+    raise SystemExit("no recent verified exact-SHA prestart backup")
+selected = max(candidates, key=lambda item: item[0])[1]
+print("EDE_VERIFIED_BACKUP_SELECTION=" + json.dumps(selected, sort_keys=True))
+'''
+    command = (
+        "env BACKUP_ROOT="
+        + shlex.quote(str(REMOTE_LOCAL_BACKUPS))
+        + " SOURCE_DB="
+        + shlex.quote(str(REMOTE_DATABASE))
+        + " EXPECTED_SHA="
+        + shlex.quote(expected_sha)
+        + " MAX_AGE_SECONDS="
+        + shlex.quote(str(MAX_EXACT_BACKUP_AGE_SECONDS))
+        + " python3 - <<'REMOTE'\n"
+        + selector
+        + "\nREMOTE"
+    )
+    output = _exec(client, command, timeout=30)
+    prefix = "EDE_VERIFIED_BACKUP_SELECTION="
+    lines = [line for line in output.splitlines() if line.startswith(prefix)]
+    if len(lines) != 1:
+        raise RuntimeError("remote backup selector returned no unique selection")
+    selected = json.loads(lines[0][len(prefix):])
+    if not isinstance(selected, dict):
+        raise RuntimeError("remote backup selection must be an object")
+    return selected
+
+
 def snapshot(args: argparse.Namespace) -> int:
     output = pathlib.Path(args.output_db)
     output.parent.mkdir(parents=True, exist_ok=True)
-    remote_snapshot = f"/tmp/seiltanzer-ede-source-{args.run_id}.sqlite3"
+    manifest_output = output.with_name(output.name + ".manifest.json")
+    selection_output = output.with_name(output.name + ".selection.json")
     exact_run = bool(args.require_acceptance_marker)
     if exact_run and not str(args.acceptance_run_id or "").strip():
         raise ValueError(
@@ -239,85 +406,66 @@ def snapshot(args: argparse.Namespace) -> int:
                 ),
             )
 
-        # Keep the one remaining DB operation gentle: the runner copies pages from
-        # a low-priority online SQLite backup instead of executing EDE on the VPS.
-        snapshot_script = textwrap.dedent(
-            r"""
-            import os
-            import pathlib
-            import sqlite3
+        selected = _select_remote_exact_backup(client, expected_sha=args.expected_sha)
+        output.unlink(missing_ok=True)
+        manifest_output.unlink(missing_ok=True)
+        progress_state = {"bucket": -1}
 
-            source = pathlib.Path("/opt/seiltanzer/data/trades.db")
-            destination = pathlib.Path(os.environ["REMOTE_SNAPSHOT"])
-            destination.unlink(missing_ok=True)
-
-            src = sqlite3.connect(
-                f"file:{source.resolve()}?mode=ro", uri=True, timeout=30.0
+        def transfer_progress(transferred: int, total: int) -> None:
+            percent = (
+                100
+                if total <= 0
+                else int(max(0, min(100, transferred * 100 // total)))
             )
-            src.execute("PRAGMA query_only=ON")
-            src.execute("PRAGMA busy_timeout=30000")
-            dst = sqlite3.connect(destination)
-            progress_state = {"bucket": -1}
-
-            def report_backup_progress(status, remaining, total):
-                percent = 100 if total <= 0 else int(
-                    max(0, min(100, ((total - remaining) * 100) // total))
+            bucket = percent // 10
+            if bucket > progress_state["bucket"]:
+                progress_state["bucket"] = bucket
+                print(
+                    "EDE_VERIFIED_BACKUP_TRANSFER_PROGRESS "
+                    f"percent={percent} transferred_bytes={transferred} "
+                    f"total_bytes={total}",
+                    flush=True,
                 )
-                bucket = percent // 10
-                if bucket > progress_state["bucket"]:
-                    progress_state["bucket"] = bucket
-                    print(
-                        "EDE_REMOTE_SNAPSHOT_PROGRESS "
-                        f"percent={percent} remaining_pages={remaining} "
-                        f"total_pages={total} sqlite_status={status}",
-                        flush=True,
-                    )
-
-            try:
-                src.backup(
-                    dst,
-                    pages=256,
-                    progress=report_backup_progress,
-                    sleep=0.05,
-                )
-                dst.commit()
-            finally:
-                dst.close()
-                src.close()
-
-            check = sqlite3.connect(
-                f"file:{destination.resolve()}?mode=ro", uri=True, timeout=30.0
-            )
-            try:
-                assert check.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-            finally:
-                check.close()
-            """
-        )
-        command = (
-            "env REMOTE_SNAPSHOT="
-            + shlex.quote(remote_snapshot)
-            + " ionice -c2 -n7 nice -n 15 python3 - <<'REMOTE'\n"
-            + snapshot_script
-            + "\nREMOTE"
-        )
-        _exec(client, command, timeout=900)
-        _probe_api(client)
 
         sftp = client.open_sftp()
         try:
-            sftp.get(remote_snapshot, str(output))
+            sftp.get(
+                str(selected["database_path"]),
+                str(output),
+                callback=transfer_progress,
+            )
+            sftp.get(str(selected["manifest_path"]), str(manifest_output))
         finally:
             sftp.close()
-        _local_quick_check(output)
+        manifest = _verify_local_exact_backup(
+            output, manifest_output, expected_sha=args.expected_sha
+        )
+        selection_output.write_text(
+            json.dumps(
+                {
+                    "source": "DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP",
+                    "expected_sha": args.expected_sha,
+                    "backup_id": manifest.get("backup_id"),
+                    "cutoff_ts": float(manifest["created_ts"]),
+                    "selected_age_sec": float(selected["age_sec"]),
+                    "max_age_sec": MAX_EXACT_BACKUP_AGE_SECONDS,
+                    "database_sha256": manifest["database_sha256"],
+                    "production_authority": False,
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        _probe_api(client)
+        print("EDE_OFFLOAD_SNAPSHOT_SOURCE=DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP")
+        print(f"EDE_OFFLOAD_SNAPSHOT_CUTOFF_TS={float(manifest['created_ts']):.6f}")
+        print(f"EDE_OFFLOAD_SNAPSHOT_AGE_SEC={float(selected['age_sec']):.3f}")
         print(f"EDE_OFFLOAD_SNAPSHOT_BYTES={output.stat().st_size}")
     except BaseException as exc:
         primary_error = exc
     finally:
-        try:
-            _exec(client, "rm -f " + shlex.quote(remote_snapshot))
-        except Exception as exc:
-            print(f"snapshot cleanup warning: {exc}")
         client.close()
 
     release_error: BaseException | None = None

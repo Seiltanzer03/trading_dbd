@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
 import pathlib
+import sqlite3
 
 import pytest
 
@@ -96,3 +99,61 @@ def test_ssh_connection_enables_transport_keepalive(monkeypatch):
 
     assert MODULE._connect("secret", attempts=1) is client
     assert client.transport.keepalive == MODULE.SSH_KEEPALIVE_SECONDS == 30
+
+
+def test_downloaded_exact_sha_prestart_backup_is_verified(tmp_path):
+    database = tmp_path / "backup.sqlite3"
+    conn = sqlite3.connect(database)
+    conn.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO evidence(value) VALUES('causal')")
+    conn.commit()
+    conn.close()
+
+    expected_sha = "a" * 40
+    payload = {
+        "backup_contract_version": MODULE.BACKUP_CONTRACT_VERSION,
+        "backup_id": "exact-prestart",
+        "reason": "prestart",
+        "created_ts": 123.0,
+        "source_db": str(MODULE.REMOTE_DATABASE),
+        "database_file": database.name,
+        "database_size_bytes": database.stat().st_size,
+        "database_sha256": hashlib.sha256(database.read_bytes()).hexdigest(),
+        "git_commit": expected_sha,
+        "verified": True,
+    }
+    payload["manifest_payload_sha256"] = MODULE._manifest_payload_sha256(payload)
+    manifest = tmp_path / "backup.manifest.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    verified = MODULE._verify_local_exact_backup(
+        database, manifest, expected_sha=expected_sha
+    )
+    assert verified["backup_id"] == "exact-prestart"
+
+
+def test_downloaded_backup_from_another_sha_is_rejected(tmp_path):
+    database = tmp_path / "backup.sqlite3"
+    conn = sqlite3.connect(database)
+    conn.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    payload = {
+        "backup_contract_version": MODULE.BACKUP_CONTRACT_VERSION,
+        "backup_id": "wrong-sha",
+        "reason": "prestart",
+        "created_ts": 123.0,
+        "source_db": str(MODULE.REMOTE_DATABASE),
+        "database_file": database.name,
+        "database_size_bytes": database.stat().st_size,
+        "database_sha256": hashlib.sha256(database.read_bytes()).hexdigest(),
+        "git_commit": "b" * 40,
+        "verified": True,
+    }
+    manifest = tmp_path / "backup.manifest.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="expected SHA"):
+        MODULE._verify_local_exact_backup(
+            database, manifest, expected_sha="a" * 40
+        )
