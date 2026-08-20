@@ -27,3 +27,8 @@ def install_ism_historical_parser_refinement() -> None:
     historical._title_matches = _title_matches
     historical._historical_title_parser_refinement = (
         ISM_HISTORICAL_PARSER_REFINEMENT_VERSION)
+
+
+# The refinement changes parsing only, never feature IDs or EDE authority. Apply
+# immediately so any direct historical parser consumer sees official ® branding.
+install_ism_historical_parser_refinement()
