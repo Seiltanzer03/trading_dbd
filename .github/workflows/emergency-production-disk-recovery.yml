@@ -27,6 +27,7 @@ jobs:
             set -euo pipefail
             echo "DISK_BEFORE"
             df -h /
+            du -sh /opt/seiltanzer/data/backups/local 2>/dev/null || true
 
             journalctl --vacuum-size=500M
             if [ -d /root/.cache/pip ]; then
@@ -74,15 +75,15 @@ jobs:
             echo "STALE_EDE_FILES_REMOVED=$ede_removed"
             echo "STALE_EDE_DIRS_REMOVED=$ede_dirs_removed"
             echo "STALE_EDE_BYTES_REMOVED=$ede_bytes"
-
             echo "DISK_AFTER_SYSTEM_CLEAN"
             df -h /
-            avail_kb=$(df -Pk / | awk 'NR==2 {print $4}')
-            if [ "$avail_kb" -lt 1048576 ]; then
-              echo "Less than 1 GiB available after safe system cleanup"
-              exit 20
-            fi
 
+            # The previous workflow checked for 1 GiB here and therefore could
+            # never reach its safest large-space recovery on a truly full disk.
+            # Stop the terminal briefly, verify the newest local backup pair by
+            # SHA256, keep eight newest verified pairs, and remove only older
+            # verified pairs plus stale incomplete backup temps. The authoritative
+            # trades.db is outside the backup root and can never be unlinked here.
             systemctl stop seiltanzer
             restart_needed=1
             trap 'if [ "${restart_needed:-0}" = 1 ]; then systemctl start seiltanzer || true; fi' EXIT
@@ -142,26 +143,40 @@ jobs:
             remove = verified[8:]
             keep_paths = {p for row in keep for p in (row[1], row[2])}
             removed_pairs = 0
+            removed_bytes = 0
             for _, manifest, database, _ in remove:
                 if manifest in keep_paths or database in keep_paths:
                     continue
+                try:
+                    removed_bytes += database.stat().st_size
+                except OSError:
+                    pass
+                try:
+                    removed_bytes += manifest.stat().st_size
+                except OSError:
+                    pass
                 database.unlink(missing_ok=True)
                 manifest.unlink(missing_ok=True)
                 removed_pairs += 1
 
             # Incomplete backup files are never research evidence. Be conservative:
             # retain anything newer than 30 minutes in case a separate backup job is
-            # still finalizing it, even though the terminal service is stopped here.
+            # still finalizing it while this recovery started.
             removed_tmp = 0
             cutoff = time.time() - 30 * 60
             for tmp in root.glob(".*.tmp.sqlite3"):
                 if tmp.is_file() and confined(tmp) and tmp.stat().st_mtime < cutoff:
+                    try:
+                        removed_bytes += tmp.stat().st_size
+                    except OSError:
+                        pass
                     tmp.unlink()
                     removed_tmp += 1
             print(f"VERIFIED_PAIRS_TOTAL={len(verified)}")
             print(f"VERIFIED_PAIRS_KEPT={len(keep)}")
             print(f"VERIFIED_PAIRS_REMOVED={removed_pairs}")
             print(f"STALE_TMP_REMOVED={removed_tmp}")
+            print(f"BACKUP_BYTES_REMOVED={removed_bytes}")
             PY
 
             systemctl start seiltanzer
@@ -180,9 +195,21 @@ jobs:
             echo "DB_QUICK_CHECK=$db_check"
             test "$db_check" = ok
 
+            echo "DISK_AFTER_VERIFIED_BACKUP_PRUNE"
+            df -h /
+            du -sh /opt/seiltanzer/data/backups/local 2>/dev/null || true
+            avail_kb=$(df -Pk / | awk 'NR==2 {print $4}')
+            if [ "$avail_kb" -lt 1048576 ]; then
+              echo "Less than 1 GiB available after safe system + verified-backup cleanup"
+              echo "TOP_LEVEL_DISK_DIAGNOSTICS"
+              du -xhd1 /opt 2>/dev/null | sort -h | tail -n 30 || true
+              du -xhd1 /var 2>/dev/null | sort -h | tail -n 30 || true
+              du -xhd1 /root 2>/dev/null | sort -h | tail -n 30 || true
+              exit 20
+            fi
+
             echo "DISK_AFTER"
             df -h /
-            du -sh /opt/seiltanzer/data/backups/local
             systemctl is-active seiltanzer
 
       - name: Publish recovery status
