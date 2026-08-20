@@ -2,9 +2,9 @@
 
 This is an inventory and routing layer, not another implementation of the
 metrics.  ``source`` points at the existing authoritative calculator/capture
-contract.  Historical availability describes the immutable P1B 5m source set
-used by the first EDE audit; prospective availability describes future T0
-captures already supported by the terminal.
+contract.  Historical availability describes the immutable/point-in-time source
+set admitted by research; prospective availability describes future T0 captures
+already supported by the terminal.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 
-EDE_CONTRACT_VERSION = "g1s-edge-discovery-engine-v1.2"
+EDE_CONTRACT_VERSION = "g1s-edge-discovery-engine-v1.3-macro-registry"
 RegistryAvailability = Literal["AVAILABLE", "LIMITED", "UNAVAILABLE"]
 ResearchScope = Literal["G1S", "G1M_ONLY", "QUALITY_ONLY"]
 
@@ -26,6 +26,8 @@ INVENTORY_SOURCES = (
     "seiltanzer/core/macro_regime.py",
     "seiltanzer/core/wavelet.py",
     "seiltanzer/core/gex_field.py",
+    "seiltanzer/macro_t0_context.py",
+    "seiltanzer/macro_bls_historical_bootstrap.py",
     "seiltanzer/web/js/regime_phase.js",
     "seiltanzer/web/js/wavelet.js",
     "seiltanzer/web/js/gex.js",
@@ -73,9 +75,8 @@ def _f(feature_id: str, family: str, source: str, *, datatype: str = "float",
     )
 
 
-# The first audit consumes only the AVAILABLE P1B subset.  LIMITED features may
-# exist in future-only T0 observations, but cannot pass a historical sample gate
-# until their actual immutable coverage is demonstrated.
+# Registry identity is static. Runtime refinements may materialize values, but
+# must not change which canonical IDs exist based on import order.
 FEATURES: tuple[FeatureDefinition, ...] = (
     _f("price.ret_5m", "PRICE", "g1_short_horizon_historical_wf._build_horizon_rows"),
     _f("price.ret_15m", "PRICE", "g1_short_horizon_historical_wf._build_horizon_rows"),
@@ -182,18 +183,89 @@ FEATURES: tuple[FeatureDefinition, ...] = (
     _f("regime.wavelet_phase", "REGIME", "g1_broad_market_evidence_v3._wavelet_block",
        datatype="float", historical="LIMITED", live="AVAILABLE",
        notes="canonical ID currently materializes numeric wavelet phase_stability; not a categorical phase label"),
+
+    # Official macro release features are canonical IDs, not a runtime extension.
+    # CPI/NFP historical capability is backed only by original archived BLS
+    # release copies. ISM/FOMC remain future/live only until separate historical
+    # vintage contracts are implemented.
+    _f("macro.cpi_headline_mom_pct", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official CPI release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:CPI",
+       notes="official release vintage; repeated T0 rows share one release dependence unit"),
+    _f("macro.cpi_core_mom_pct", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official CPI release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:CPI"),
+    _f("macro.cpi_headline_yoy_pct", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official CPI release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:CPI"),
+    _f("macro.cpi_core_yoy_pct", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official CPI release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:CPI"),
+    _f("macro.cpi_headline_mom_change_pp", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official CPI release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:CPI"),
+    _f("macro.cpi_core_mom_change_pp", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official CPI release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:CPI"),
+    _f("macro.nfp_payroll_change_k", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official Employment Situation release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:NFP"),
+    _f("macro.nfp_previous_payroll_change_k", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official Employment Situation release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:NFP"),
+    _f("macro.nfp_unemployment_rate_pct", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official Employment Situation release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:NFP"),
+    _f("macro.nfp_unemployment_change_pp", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official Employment Situation release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:NFP"),
+    _f("macro.nfp_wage_mom_pct", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official Employment Situation release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:NFP"),
+    _f("macro.nfp_wage_yoy_pct", "MACRO_NUMERIC", "macro_t0_context+macro_bls_historical_bootstrap",
+       frequency="official Employment Situation release", asof="official release available_at/published_at <= T0",
+       historical="AVAILABLE", dependency="macro_release:NFP"),
+    _f("macro.ism_manufacturing_pmi", "MACRO_NUMERIC", "macro_t0_context.numeric_macro",
+       frequency="official ISM Manufacturing release", asof="official release available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:ISM_MANUFACTURING"),
+    _f("macro.ism_manufacturing_pmi_change_pp", "MACRO_NUMERIC", "macro_t0_context.numeric_macro",
+       frequency="official ISM Manufacturing release", asof="official release available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:ISM_MANUFACTURING"),
+    _f("macro.ism_services_pmi", "MACRO_NUMERIC", "macro_t0_context.numeric_macro",
+       frequency="official ISM Services release", asof="official release available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:ISM_SERVICES"),
+    _f("macro.ism_services_pmi_change_pp", "MACRO_NUMERIC", "macro_t0_context.numeric_macro",
+       frequency="official ISM Services release", asof="official release available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:ISM_SERVICES"),
+    _f("macro.fomc_policy_tone", "MACRO_FOMC", "macro_t0_context.fomc",
+       frequency="official FOMC statement", asof="official statement available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+    _f("macro.fomc_policy_shift", "MACRO_FOMC", "macro_t0_context.fomc",
+       frequency="official FOMC statement", asof="official statement available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+    _f("macro.fomc_inflation_concern", "MACRO_FOMC", "macro_t0_context.fomc",
+       frequency="official FOMC statement", asof="official statement available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+    _f("macro.fomc_growth_concern", "MACRO_FOMC", "macro_t0_context.fomc",
+       frequency="official FOMC statement", asof="official statement available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+    _f("macro.fomc_forward_guidance_shift", "MACRO_FOMC", "macro_t0_context.fomc",
+       frequency="official FOMC statement", asof="official statement available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+    _f("macro.fomc_uncertainty", "MACRO_FOMC", "macro_t0_context.fomc",
+       frequency="official FOMC statement", asof="official statement available_at <= T0",
+       historical="UNAVAILABLE", dependency="macro_release:FOMC_STATEMENT"),
+
     _f("quality.availability", "DATA_QUALITY", "edge_discovery.feature_view.FeatureValue",
        datatype="category", eligible=False, dependency="data_quality",
-       scope="QUALITY_ONLY",
-       notes="never interpreted as a market predictor"),
+       scope="QUALITY_ONLY", notes="never interpreted as a market predictor"),
     _f("quality.staleness", "DATA_QUALITY", "edge_discovery.feature_view.FeatureValue",
        datatype="boolean", eligible=False, dependency="data_quality",
-       scope="QUALITY_ONLY",
-       notes="provider outage/staleness never interpreted as market state"),
+       scope="QUALITY_ONLY", notes="provider outage/staleness never interpreted as market state"),
 )
 
 
-# Pre-result classification of the 21 v1.1 zero-coverage rows.  This is a
+# Pre-result classification of the original v1.1 zero-coverage rows. This is a
 # measurement contract, not a conclusion inferred after seeing an edge result.
 ZERO_COVERAGE_DIAGNOSIS: dict[str, dict[str, Any]] = {
     **{

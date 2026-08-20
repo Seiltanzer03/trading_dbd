@@ -91,7 +91,7 @@ def test_functional_smoke_checks_public_terminal_and_keeps_network_diagnostics()
     assert "nft list ruleset" in workflow
 
 
-def test_production_ede_inventory_is_read_only_and_lists_all_69(tmp_path):
+def test_production_ede_inventory_is_read_only_and_lists_canonical_features(tmp_path):
     inventory = _load_script("production_ede_inventory").inventory
 
     database = tmp_path / "production.db"
@@ -114,9 +114,12 @@ def test_production_ede_inventory_is_read_only_and_lists_all_69(tmp_path):
     assert database.read_bytes() == before
     assert result["database_open_mode"] == "READ_ONLY"
     assert result["g1s_observations_total"] == 0
-    assert len(result["features"]) == 69
+    assert result["canonical_feature_count"] == 91
+    assert len(result["features"]) == result["canonical_feature_count"]
     assert set(result["features"][0]["by_horizon"]) == {"15", "30", "60", "120", "240"}
     by_id = {row["feature_id"]: row for row in result["features"]}
+    assert by_id["macro.cpi_headline_mom_pct"]["research_scope"] == "G1S"
+    assert by_id["macro.nfp_payroll_change_k"]["research_scope"] == "G1S"
     assert by_id["option.barrier_probability"]["status"] == "G1M_ONLY"
     assert by_id["quality.availability"]["status"] == "QUALITY_ONLY"
     assert result["production_authority"] is False

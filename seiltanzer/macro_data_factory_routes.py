@@ -7,6 +7,11 @@ import time
 from fastapi import FastAPI
 
 from .fomc_official_source import refresh_latest_fomc
+from .macro_bls_historical_bootstrap import (
+    BLSHistoricalBootstrapRuntime,
+    BLSHistoricalReleaseStore,
+)
+from .macro_bls_historical_ede_refinement import install_bls_historical_ede_refinement
 from .macro_data_factory import MacroDataFactory
 from .macro_data_factory_causality_refinement import install_macro_data_factory_causality_refinement
 from .macro_edge_evidence_refinement import install_macro_edge_evidence_refinement
@@ -53,41 +58,55 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     # dependence unit for a macro-conditioned rule is the official release_id,
     # never the number of repeated market observations carrying that release.
     install_macro_edge_evidence_refinement()
+    # For old T0 rows, fill only absent CPI/NFP features from the corresponding
+    # official archived release copy. This is a read-time research overlay; old
+    # observations are never mutated and prospectively frozen values always win.
+    install_bls_historical_ede_refinement()
+
     factory = MacroDataFactory(runtime)
     numeric_store = NumericMacroStore(runtime)
     numeric_runtime = NumericMacroRuntime(numeric_store)
+    historical_bls_store = BLSHistoricalReleaseStore(runtime)
+    historical_bls_runtime = BLSHistoricalBootstrapRuntime(historical_bls_store)
     fomc_runtime = FOMCOfficialRuntime(factory)
-    # T0 capture reads these already-materialized stores only. No network/LLM can
-    # occur inside a market observation capture.
+    # T0 capture reads these already-materialized live stores only. Historical
+    # archive bootstrap is deliberately not injected into current T0 capture.
     factory.numeric_release_store = numeric_store
     app.state.macro_data_factory = factory
     app.state.macro_numeric_store = numeric_store
     app.state.macro_numeric_runtime = numeric_runtime
+    app.state.macro_bls_historical_store = historical_bls_store
+    app.state.macro_bls_historical_runtime = historical_bls_runtime
     app.state.macro_fomc_runtime = fomc_runtime
     app.state.engine.macro_data_factory = factory
     install_macro_t0_context(app.state.engine, factory)
 
-    # Delayed low-frequency workers: AI startup/review math gets priority on the
-    # 2 GB host. Thereafter each official family is checked at most hourly.
+    # Delayed low-frequency workers: live macro checks hourly; immutable archive
+    # materialization is static and therefore checks only daily.
     numeric_runtime.start()
     fomc_runtime.start()
+    historical_bls_runtime.start()
 
     def status():
         return {
             **factory.status(),
             "numeric": numeric_runtime.status(),
             "numeric_transport": macro_transport_status(),
+            "historical_bls": historical_bls_runtime.status(),
             "fomc_runtime": fomc_runtime.status(),
             "llm_cost_guard": cost_guard_status(),
             "official_families": [
                 "CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES", "FOMC_STATEMENT"
             ],
+            "historical_point_in_time_families": ["CPI", "NFP"],
             "official_sources_only": True,
             "no_placeholders": True,
             "consensus_feed_available": False,
             "surprise_computed_without_consensus": False,
             "macro_ede_dependency_unit": "OFFICIAL_RELEASE_ID",
             "macro_repeated_t0_increases_effective_n": False,
+            "historical_macro_old_t0_rows_mutated": False,
+            "historical_macro_current_revised_series_backfill": False,
             "arbitrary_document_post_enabled": False,
             "research_only": True,
             "production_authority": False,
@@ -141,6 +160,16 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         name="macro_numeric_refresh",
     )
 
+    def refresh_historical_bls():
+        return historical_bls_runtime.refresh()
+
+    app.add_api_route(
+        "/api/research/macro/historical-bls/refresh",
+        refresh_historical_bls,
+        methods=["POST"],
+        name="macro_historical_bls_refresh",
+    )
+
     def latest(captured_ts: float | None = None, family: str = "FOMC_STATEMENT"):
         cutoff = time.time() if captured_ts is None else float(captured_ts)
         family_key = str(family or "").upper()
@@ -153,6 +182,17 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         latest,
         methods=["GET"],
         name="macro_data_factory_latest",
+    )
+
+    def latest_historical_bls(captured_ts: float | None = None, family: str = "CPI"):
+        cutoff = time.time() if captured_ts is None else float(captured_ts)
+        return historical_bls_store.latest_admissible(str(family or "").upper(), cutoff)
+
+    app.add_api_route(
+        "/api/research/macro/historical-bls/latest",
+        latest_historical_bls,
+        methods=["GET"],
+        name="macro_historical_bls_latest",
     )
 
     def context(captured_ts: float | None = None):
