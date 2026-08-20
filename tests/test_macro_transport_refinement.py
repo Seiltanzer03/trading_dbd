@@ -132,7 +132,7 @@ def test_bls_transport_exhaustion_never_returns_unvalidated_payload(monkeypatch)
             now=1_787_220_000.0,
         )
 
-    assert calls == [None, None]
+    assert calls == [None, None, None, None]
 
 
 def test_bls_transport_uses_exact_official_get_series_when_proxy_post_is_invalid(
@@ -167,9 +167,9 @@ def test_bls_transport_uses_exact_official_get_series_when_proxy_post_is_invalid
             post_proxies.append(self.proxy)
             return Response({"status": "REQUEST_NOT_SUCCEEDED"})
 
-        def get(self, url, *, params):
+        def get(self, url, *, params, timeout):
             series_id = url.rsplit("/", 1)[-1]
-            get_calls.append((self.proxy, series_id, params))
+            get_calls.append((self.proxy, series_id, params, timeout))
             return Response(
                 {
                     "status": "REQUEST_SUCCEEDED",
@@ -216,6 +216,53 @@ def test_bls_transport_uses_exact_official_get_series_when_proxy_post_is_invalid
         "http://proxy.invalid:8080",
     ]
     assert len(get_calls) == 7
-    assert all(call[0] == "http://proxy.invalid:8080" for call in get_calls)
+    assert all(call[0] is None for call in get_calls)
     assert all(call[2] == {"startyear": "2025", "endyear": "2026"} for call in get_calls)
+    assert all(0.0 < call[3] <= 7.0 for call in get_calls)
     assert sleeps == [1.0, 1.0]
+
+
+def test_bls_transport_retries_non_object_json_instead_of_bypassing_failover(
+    monkeypatch,
+):
+    payloads = [[], {"status": "REQUEST_SUCCEEDED", "Results": {"series": []}}]
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, _url, *, json):
+            assert json["seriesid"]
+            return Response(payloads.pop(0))
+
+    expected = {"CPI": {"period": "2026-07"}, "NFP": {"period": "2026-07"}}
+    monkeypatch.delenv("MACRO_HTTP_PROXY", raising=False)
+    monkeypatch.delenv("OPENROUTER_PROXY", raising=False)
+    monkeypatch.setattr(transport.httpx, "Client", Client)
+    monkeypatch.setattr(transport.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "seiltanzer.macro_numeric_data.build_bls_releases", lambda _payload: expected
+    )
+
+    _fetched_at, releases = transport._fetch_bls_official_with_failover(
+        OfficialNumericMacroSource(timeout_sec=7), now=1_787_220_000.0
+    )
+
+    assert releases == expected
+    assert payloads == []

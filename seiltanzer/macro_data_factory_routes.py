@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -81,6 +82,11 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     factory = MacroDataFactory(runtime)
     numeric_store = NumericMacroStore(runtime)
     numeric_runtime = NumericMacroRuntime(numeric_store)
+    numeric_runtime.offhost_bundle_path = (
+        Path(app.state.engine.settings.data_dir)
+        / "research"
+        / "official_macro_offhost_latest.json"
+    )
     historical_bls_store = BLSHistoricalReleaseStore(runtime)
     historical_bls_runtime = BLSHistoricalBootstrapRuntime(historical_bls_store)
     historical_ism_store = ISMHistoricalReleaseStore(runtime)

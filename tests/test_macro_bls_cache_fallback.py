@@ -208,7 +208,7 @@ def test_macro_transport_status_exposes_bounded_fallback_contract(monkeypatch) -
     monkeypatch.delenv("OPENROUTER_PROXY", raising=False)
     status = refinement.macro_transport_status()
 
-    assert status["contract_version"] == "macro-official-transport-v5"
+    assert status["contract_version"] == "macro-official-transport-v6"
     assert status["payload_or_parser_fallback_added"] is False
     assert status["bls_cache_fallback"] == {
         "enabled": True,
@@ -227,4 +227,16 @@ def test_macro_transport_status_exposes_bounded_fallback_contract(monkeypatch) -
         "attempts_per_route": 2,
         "retry_backoff_sec": 1.0,
         "request_timeout_unchanged": True,
+        "total_deadline_sec": 12.0,
+    }
+    assert status["offhost_official_fallback"] == {
+        "official_sources_only": True,
+        "canonical_parser_exact_sha": True,
+        "exact_sha_required": True,
+        "acceptance_owner_verified_at_install": True,
+        "bundle_and_release_hashes_required": True,
+        "freshness_configurable_and_bounded": True,
+        "direct_official_attempted_first": True,
+        "synthetic_data_used": False,
+        "placeholder_used": False,
     }
