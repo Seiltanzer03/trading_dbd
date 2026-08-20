@@ -254,7 +254,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "ridge": engine.ridge_payload(),
             "journal": engine.journal.list_trades(),
             "edge_track": engine.journal.edge_track(),
-            "validation": engine.journal.validation_report(),
+            # Full validation reconstructs horizon-aligned outcomes and policy
+            # diagnostics from the growing journal. It is research/UI data, not
+            # live decision state, and must not hold the shared Journal lock on
+            # the latency-critical terminal bootstrap route. The frontend loads
+            # the dedicated summary independently after rendering live state.
+            "validation": {
+                "available": True,
+                "summary_endpoint": "/api/validation/summary",
+                "message": "validation summary loads independently",
+                "production_authority": False,
+            },
             "ai_history": (engine.journal.recent_ai_verdicts(active["id"], limit=10)
                            if active else []),
             "setups": _setups_payload(),
@@ -303,6 +313,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         report["counterfactual_replay"] = engine.journal.counterfactual_report()
         report["q_calibration"] = engine.journal.q_calibration_report()
         return report
+
+    @app.get("/api/validation/summary")
+    def api_validation_summary():
+        """Detailed display summary, deliberately isolated from ``/api/state``."""
+        return engine.journal.validation_report()
 
     @app.get("/api/research/passive/status")
     def api_passive_status():

@@ -65,10 +65,22 @@ async function boot() {
     S.aiHistory = st.ai_history || [];
     S.aiHistoryTradeId = st.tick?.trade?.id ?? null;
     renderAll();
+    void refreshValidationSummary();
   } catch (e) {
     console.error('state fetch failed', e);
   }
   connectWS();
+}
+
+async function refreshValidationSummary() {
+  try {
+    const response = await fetch('/api/validation/summary');
+    if (!response.ok) throw new Error(`validation summary HTTP ${response.status}`);
+    S.validation = await response.json();
+    renderEdgeTrack();
+  } catch (e) {
+    console.warn('validation summary fetch failed', e);
+  }
 }
 
 function setWsDot(ok) {
@@ -156,6 +168,7 @@ async function refreshJournalAndSetups() {
   S.edge_track = st.edge_track;
   S.validation = st.validation;
   renderAll();
+  void refreshValidationSummary();
 }
 
 async function maybeRefreshRidge() {

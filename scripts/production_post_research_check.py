@@ -67,7 +67,11 @@ def _cycle_finished(worker: dict, result: object) -> bool:
     # If acceptance was acquired while an optional maintenance phase was already
     # running, wait for that phase to finish. A new phase cannot start once the
     # gate is observed after the bounded core.
-    return worker.get("maintenance_running") is not True
+    return (
+        worker.get("maintenance_running") is False
+        and worker.get("acceptance_pause_active") is True
+        and worker.get("current_phase") == "acceptance_pause"
+    )
 
 
 def verify(expected_sha: str) -> None:
@@ -90,6 +94,8 @@ def verify(expected_sha: str) -> None:
             "maintenance_running": worker.get("maintenance_running"),
             "maintenance_phase": worker.get("maintenance_phase"),
             "last_maintenance_error": worker.get("last_maintenance_error"),
+            "acceptance_pause_active": worker.get("acceptance_pause_active"),
+            "acceptance_gate_run_id": worker.get("acceptance_gate_run_id"),
         })
         if _latest_attempt_finished(worker) and worker.get("last_error") is not None:
             raise AssertionError(f"research worker core failed: {worker.get('last_error')}")

@@ -268,14 +268,33 @@ def test_post_research_waits_if_optional_maintenance_was_already_running():
     check = _load_script("production_post_research_check")
     result = {"g1s": {"batch_limit": 500}, "g1m_local": {"batch_limit": 100}}
     assert check._cycle_finished(
-        {"last_started_ts": 10.0, "last_finished_ts": 12.0, "maintenance_running": False},
+        {"last_started_ts": 10.0, "last_finished_ts": 12.0,
+         "maintenance_running": False, "acceptance_pause_active": True,
+         "current_phase": "acceptance_pause"},
         result,
     ) is True
     assert check._cycle_finished(
-        {"last_started_ts": 10.0, "last_finished_ts": 12.0, "maintenance_running": True},
+        {"last_started_ts": 10.0, "last_finished_ts": 12.0,
+         "maintenance_running": True, "acceptance_pause_active": False,
+         "current_phase": "maintenance:status_refresh"},
         result,
     ) is False
     assert check._cycle_finished(
-        {"last_started_ts": 20.0, "last_finished_ts": 12.0, "maintenance_running": False},
+        {"last_started_ts": 20.0, "last_finished_ts": 12.0,
+         "maintenance_running": False, "acceptance_pause_active": True,
+         "current_phase": "acceptance_pause"},
         result,
     ) is False
+
+
+def test_post_research_requires_observed_acceptance_pause():
+    check = _load_script("production_post_research_check")
+    result = {"g1s": {"batch_limit": 500}, "g1m_local": {"batch_limit": 100}}
+    worker = {
+        "last_started_ts": 10.0,
+        "last_finished_ts": 12.0,
+        "maintenance_running": False,
+        "acceptance_pause_active": False,
+        "current_phase": "idle",
+    }
+    assert check._cycle_finished(worker, result) is False
