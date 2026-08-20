@@ -1,31 +1,44 @@
 name: production-g1m-local-edge
 
 on:
-  workflow_run:
-    workflows: ["production-functional-smoke"]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        required: true
+        type: string
+      acceptance_run_id:
+        required: true
+        type: string
 
 permissions:
+  actions: write
   contents: read
 
 jobs:
   verify:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+
       - name: Verify G1-M.1 local edge on production
+        id: verify
         uses: appleboy/ssh-action@v1
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
-          SMOKE_RUN_ID: ${{ github.event.workflow_run.id }}
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
           command_timeout: 27m
-          envs: EXPECTED_SHA,SMOKE_RUN_ID
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
@@ -36,7 +49,7 @@ jobs:
             cleanup_gate_on_failure() {
               if [ "$keep_gate" -ne 1 ]; then
                 "$PY" "$ORCH" release-gate \
-                  --smoke-run-id "$SMOKE_RUN_ID" \
+                  --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
                   --expected-sha "$EXPECTED_SHA" || true
               fi
             }
@@ -44,16 +57,16 @@ jobs:
 
             # Do not execute the expensive local-edge report while the required
             # worker maintenance cycle is still running. The marker is exact to
-            # this upstream smoke run and its content is the deployed SHA.
+            # this acceptance run and binds both its id and the deployed SHA.
             "$PY" "$ORCH" wait-marker \
               --stage post-research \
-              --smoke-run-id "$SMOKE_RUN_ID" \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA" \
               --timeout-seconds 1500 \
               --poll-seconds 5
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             "$PY" "$ORCH" validate-gate \
-              --smoke-run-id "$SMOKE_RUN_ID" \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA"
 
             "$PY" - <<'PY'
@@ -134,7 +147,52 @@ jobs:
 
             "$PY" "$ORCH" write-marker \
               --stage g1m-local-edge \
-              --smoke-run-id "$SMOKE_RUN_ID" \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA"
             keep_gate=1
             trap - EXIT
+
+      - name: Continue exact-SHA chain with EDE inventory
+        id: handoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          payload=$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({
+              "ref": "main",
+              "inputs": {
+                  "expected_sha": os.environ["EXPECTED_SHA"],
+                  "acceptance_run_id": os.environ["ACCEPTANCE_RUN_ID"],
+              },
+          }))
+          PY
+          )
+          curl --fail-with-body --silent --show-error \
+            --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/production-ede-inventory.yml/dispatches" \
+            -d "$payload"
+
+      - name: Release gate if downstream dispatch failed
+        if: always() && steps.verify.outcome == 'success' && steps.handoff.outcome != 'success'
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
+          script: |
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/production_research_acceptance.py release-gate \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+              --expected-sha "$EXPECTED_SHA" || true

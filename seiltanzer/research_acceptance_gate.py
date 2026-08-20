@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-ACCEPTANCE_GATE_VERSION = "production-research-acceptance-gate-v1"
+ACCEPTANCE_GATE_VERSION = "production-research-acceptance-gate-v2"
 DEFAULT_ACCEPTANCE_GATE_PATH = Path(
     os.environ.get(
         "SEILTANZER_RESEARCH_ACCEPTANCE_GATE",
@@ -33,11 +33,11 @@ DEFAULT_ACCEPTANCE_GATE_PATH = Path(
 MAX_ACCEPTANCE_GATE_TTL_SEC = 2 * 60 * 60
 
 
-def _clean_owner(smoke_run_id: str, expected_sha: str) -> tuple[str, str]:
-    run_id = str(smoke_run_id or "").strip()
+def _clean_owner(acceptance_run_id: str, expected_sha: str) -> tuple[str, str]:
+    run_id = str(acceptance_run_id or "").strip()
     sha = str(expected_sha or "").strip()
     if not run_id:
-        raise ValueError("smoke_run_id is required")
+        raise ValueError("acceptance_run_id is required")
     if not sha:
         raise ValueError("expected_sha is required")
     return run_id, sha
@@ -69,8 +69,8 @@ def read_acceptance_gate(
     try:
         created_at = float(payload["created_at"])
         expires_at = float(payload["expires_at"])
-        smoke_run_id, expected_sha = _clean_owner(
-            str(payload["smoke_run_id"]), str(payload["expected_sha"])
+        acceptance_run_id, expected_sha = _clean_owner(
+            str(payload["acceptance_run_id"]), str(payload["expected_sha"])
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -82,20 +82,20 @@ def read_acceptance_gate(
         **payload,
         "created_at": created_at,
         "expires_at": expires_at,
-        "smoke_run_id": smoke_run_id,
+        "acceptance_run_id": acceptance_run_id,
         "expected_sha": expected_sha,
     }
 
 
 def write_acceptance_gate(
-    smoke_run_id: str,
+    acceptance_run_id: str,
     expected_sha: str,
     *,
     ttl_seconds: float = MAX_ACCEPTANCE_GATE_TTL_SEC,
     path: Path | str = DEFAULT_ACCEPTANCE_GATE_PATH,
     now: float | None = None,
 ) -> dict[str, Any]:
-    run_id, sha = _clean_owner(smoke_run_id, expected_sha)
+    run_id, sha = _clean_owner(acceptance_run_id, expected_sha)
     ttl = float(ttl_seconds)
     if not (0.0 < ttl <= MAX_ACCEPTANCE_GATE_TTL_SEC):
         raise ValueError(
@@ -104,7 +104,7 @@ def write_acceptance_gate(
     created_at = float(time.time() if now is None else now)
     payload = {
         "contract_version": ACCEPTANCE_GATE_VERSION,
-        "smoke_run_id": run_id,
+        "acceptance_run_id": run_id,
         "expected_sha": sha,
         "created_at": created_at,
         "expires_at": created_at + ttl,
@@ -120,7 +120,7 @@ def write_acceptance_gate(
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            # Atomic replace deliberately lets a newer exact-smoke run supersede
+            # Atomic replace deliberately lets a newer exact acceptance run supersede
             # an older lease. The ownership lock makes release-vs-replace atomic,
             # so an older cleanup cannot unlink a newer run's lease.
             os.replace(tmp, gate_path)
@@ -133,13 +133,13 @@ def write_acceptance_gate(
 
 
 def gate_owner_matches(
-    smoke_run_id: str,
+    acceptance_run_id: str,
     expected_sha: str,
     *,
     path: Path | str = DEFAULT_ACCEPTANCE_GATE_PATH,
     now: float | None = None,
 ) -> bool:
-    run_id, sha = _clean_owner(smoke_run_id, expected_sha)
+    run_id, sha = _clean_owner(acceptance_run_id, expected_sha)
     gate_path = Path(path)
     with _exclusive_gate_update(gate_path):
         payload = read_acceptance_gate(gate_path)
@@ -147,25 +147,25 @@ def gate_owner_matches(
             return False
         current = float(time.time() if now is None else now)
         return (
-            payload["smoke_run_id"] == run_id
+            payload["acceptance_run_id"] == run_id
             and payload["expected_sha"] == sha
             and payload["expires_at"] > current
         )
 
 
 def release_acceptance_gate(
-    smoke_run_id: str,
+    acceptance_run_id: str,
     expected_sha: str,
     *,
     path: Path | str = DEFAULT_ACCEPTANCE_GATE_PATH,
 ) -> bool:
-    run_id, sha = _clean_owner(smoke_run_id, expected_sha)
+    run_id, sha = _clean_owner(acceptance_run_id, expected_sha)
     gate_path = Path(path)
     with _exclusive_gate_update(gate_path):
         payload = read_acceptance_gate(gate_path)
         if payload is None:
             return False
-        if payload["smoke_run_id"] != run_id or payload["expected_sha"] != sha:
+        if payload["acceptance_run_id"] != run_id or payload["expected_sha"] != sha:
             return False
         try:
             gate_path.unlink()
@@ -194,7 +194,7 @@ def worker_acceptance_gate_state(
         "active": False,
         "pause": False,
         "reason": "NO_ACTIVE_ACCEPTANCE_GATE",
-        "smoke_run_id": None,
+        "acceptance_run_id": None,
         "expected_sha": None,
         "expires_at": None,
     }
@@ -209,7 +209,7 @@ def worker_acceptance_gate_state(
 
     common = {
         "active": True,
-        "smoke_run_id": payload["smoke_run_id"],
+        "acceptance_run_id": payload["acceptance_run_id"],
         "expected_sha": payload["expected_sha"],
         "expires_at": payload["expires_at"],
     }

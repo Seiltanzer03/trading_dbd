@@ -96,7 +96,7 @@ def test_worker_runs_bounded_core_once_and_skips_all_maintenance_under_gate(monk
                 if last_finished_ts is not None
                 else "REQUIRED_WORKER_CYCLE_PENDING"
             ),
-            "smoke_run_id": "991",
+            "acceptance_run_id": "991",
             "expected_sha": "sha",
             "expires_at": 99999999999.0,
         }
@@ -148,7 +148,7 @@ def test_worker_without_gate_eventually_schedules_optional_maintenance(monkeypat
     calls = []
     no_gate = {
         "active": False, "pause": False, "reason": "NO_ACTIVE_ACCEPTANCE_GATE",
-        "smoke_run_id": None, "expected_sha": None, "expires_at": None,
+        "acceptance_run_id": None, "expected_sha": None, "expires_at": None,
     }
     monkeypatch.setattr(research_worker, "RESEARCH_STARTUP_GRACE_SEC", 0.001)
     monkeypatch.setattr(research_worker, "RESEARCH_INTERVAL_SEC", 0.001)
@@ -228,7 +228,7 @@ def test_trade_link_catchup_is_bounded_and_progresses_to_next_missing_trade():
     assert done["links_created"] == 0
 
 
-def test_exact_run_markers_reject_sha_mismatch(tmp_path):
+def test_exact_run_markers_bind_sha_and_acceptance_run_id(tmp_path):
     orchestration = _load_script("production_research_acceptance")
     marker = orchestration.write_marker(
         "post-research", "991", "sha-good", marker_dir=tmp_path
@@ -243,9 +243,25 @@ def test_exact_run_markers_reject_sha_mismatch(tmp_path):
             poll_seconds=0.1, marker_dir=tmp_path,
         )
     except RuntimeError as exc:
-        assert "POST_RESEARCH_SHA_MISMATCH" in str(exc)
+        assert "POST_RESEARCH_MARKER_MISMATCH" in str(exc)
     else:
         raise AssertionError("wrong-SHA marker unexpectedly passed")
+
+    payload = marker.read_text(encoding="utf-8")
+    assert '"acceptance_run_id":"991"' in payload
+    assert '"expected_sha":"sha-good"' in payload
+
+    assert orchestration.write_marker(
+        "post-research", "991", "sha-good", marker_dir=tmp_path
+    ) == marker
+    try:
+        orchestration.write_marker(
+            "post-research", "991", "sha-other", marker_dir=tmp_path
+        )
+    except RuntimeError as exc:
+        assert "DIFFERENT_OWNER" in str(exc)
+    else:
+        raise AssertionError("immutable marker was overwritten")
 
 
 def test_post_research_waits_if_optional_maintenance_was_already_running():

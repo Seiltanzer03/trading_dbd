@@ -1,10 +1,14 @@
 name: production-active-edge
 
 on:
-  workflow_run:
-    workflows: ["production-functional-smoke"]
-    types: [completed]
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        required: true
+        type: string
+      acceptance_run_id:
+        required: true
+        type: string
   schedule:
     - cron: "37 */6 * * 1-5"
 
@@ -16,8 +20,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  resolve:
+    runs-on: ubuntu-22.04
+    outputs:
+      expected_sha: ${{ steps.contract.outputs.expected_sha }}
+      acceptance_run_id: ${{ steps.contract.outputs.acceptance_run_id }}
+    steps:
+      - name: Resolve explicit dispatch or scheduled contract
+        id: contract
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SHA: ${{ inputs.expected_sha }}
+          DISPATCH_ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
+          SCHEDULE_SHA: ${{ github.sha }}
+          SCHEDULE_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            test -n "$DISPATCH_SHA"
+            case "$DISPATCH_ACCEPTANCE_RUN_ID" in
+              ''|*[!0-9]*) echo "invalid acceptance_run_id" >&2; exit 1 ;;
+            esac
+            echo "expected_sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
+            echo "acceptance_run_id=$DISPATCH_ACCEPTANCE_RUN_ID" >> "$GITHUB_OUTPUT"
+          else
+            test "$EVENT_NAME" = "schedule"
+            echo "expected_sha=$SCHEDULE_SHA" >> "$GITHUB_OUTPUT"
+            echo "acceptance_run_id=$SCHEDULE_RUN_ID" >> "$GITHUB_OUTPUT"
+          fi
+
   structured:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    needs: resolve
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -28,7 +61,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve.outputs.expected_sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -50,7 +83,7 @@ jobs:
       - name: Publish compact report to exact production SHA
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.expected_sha }}
           HORIZON: ${{ matrix.horizon }}
           RUN_ID: ${{ github.run_id }}-${{ matrix.horizon }}
         run: |
@@ -62,18 +95,18 @@ jobs:
             --run-id "$RUN_ID"
       - uses: actions/upload-artifact@v4
         with:
-          name: active-structured-${{ matrix.horizon }}m-${{ github.sha }}
+          name: active-structured-${{ matrix.horizon }}m-${{ needs.resolve.outputs.expected_sha }}
           path: active_structured_${{ matrix.horizon }}m_latest.json
           retention-days: 30
 
   ml:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    needs: resolve
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve.outputs.expected_sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -92,7 +125,7 @@ jobs:
       - name: Publish compact report to exact production SHA
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.expected_sha }}
           RUN_ID: ${{ github.run_id }}-ml
         run: |
           python scripts/publish_active_edge_report.py \
@@ -103,6 +136,6 @@ jobs:
             --run-id "$RUN_ID"
       - uses: actions/upload-artifact@v4
         with:
-          name: active-ml-${{ github.sha }}
+          name: active-ml-${{ needs.resolve.outputs.expected_sha }}
           path: active_ml_latest.json
           retention-days: 30

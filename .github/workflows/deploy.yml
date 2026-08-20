@@ -11,12 +11,18 @@ on:
     branches: [main]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact already-green main SHA to deploy
+        required: true
+        type: string
 
 concurrency:
   group: production-seiltanzer
   cancel-in-progress: true
 
 permissions:
+  actions: write
   contents: read
   statuses: write
 
@@ -29,7 +35,8 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     env:
-      EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+      EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_sha }}
+      ACCEPTANCE_RUN_ID: ${{ github.run_id }}
     steps:
       - name: Verify automatic deploy trigger
         if: github.event_name == 'workflow_run'
@@ -303,6 +310,40 @@ jobs:
           echo "::error::Public terminal is unreachable at ${url}"
           exit 1
 
+      - name: Start exact-SHA post-deploy research acceptance
+        id: orchestration
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$EXPECTED_SHA" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+            *) echo "::error::Invalid expected_sha: $EXPECTED_SHA"; exit 1 ;;
+          esac
+          case "$ACCEPTANCE_RUN_ID" in
+            ''|*[!0-9]*) echo "::error::Invalid acceptance_run_id: $ACCEPTANCE_RUN_ID"; exit 1 ;;
+          esac
+          payload=$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({
+              "ref": "main",
+              "inputs": {
+                  "expected_sha": os.environ["EXPECTED_SHA"],
+                  "acceptance_run_id": os.environ["ACCEPTANCE_RUN_ID"],
+              },
+          }))
+          PY
+          )
+          curl --fail-with-body --silent --show-error \
+            --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/production-post-research.yml/dispatches" \
+            -d "$payload"
+          echo "POST_RESEARCH_DISPATCHED expected_sha=$EXPECTED_SHA acceptance_run_id=$ACCEPTANCE_RUN_ID"
+
       - name: Diagnose production failure
         if: failure()
         uses: appleboy/ssh-action@v1
@@ -335,6 +376,7 @@ jobs:
           READINESS: ${{ steps.readiness.outcome }}
           SMOKE: ${{ steps.smoke.outcome }}
           PUBLIC: ${{ steps.public.outcome }}
+          ORCHESTRATION: ${{ steps.orchestration.outcome }}
         run: |
           set -u
           prod_state=failure
@@ -343,7 +385,8 @@ jobs:
           if [ "$READINESS" = "success" ]; then readiness_state=success; fi
           if [ "$SMOKE" = "success" ] && [ "$PUBLIC" = "success" ]; then smoke_state=success; fi
           if [ "$DELIVERY" = "success" ] && [ "$READINESS" = "success" ] \
-             && [ "$SMOKE" = "success" ] && [ "$PUBLIC" = "success" ]; then
+             && [ "$SMOKE" = "success" ] && [ "$PUBLIC" = "success" ] \
+             && [ "$ORCHESTRATION" = "success" ]; then
             prod_state=success
           fi
 
@@ -373,5 +416,5 @@ jobs:
           publish "$smoke_state" "production/functional-smoke" \
             "Bounded analytics, AI Verdict, official macro and public endpoint smoke"
 
-          echo "EXPECTED_SHA=$EXPECTED_SHA delivery=$DELIVERY readiness=$READINESS smoke=$SMOKE public=$PUBLIC"
+          echo "EXPECTED_SHA=$EXPECTED_SHA acceptance_run_id=$ACCEPTANCE_RUN_ID delivery=$DELIVERY readiness=$READINESS smoke=$SMOKE public=$PUBLIC orchestration=$ORCHESTRATION"
           test "$prod_state" = "success"
