@@ -11,8 +11,8 @@ No option history is reconstructed and no future bar may participate.
 
 The v1.3 production audit imports this adapter directly instead of booting the
 FastAPI macro routes. Install the same release-independent point-in-time macro
-stack here too: archived BLS CPI/NFP plus deterministic FOMC statement features.
-Historical FOMC LLM semantics remain unavailable by design.
+stack here too: archived BLS CPI/NFP, deterministic FOMC, and dated-roundup ISM
+headline PMI history. Historical FOMC LLM semantics remain unavailable by design.
 """
 from __future__ import annotations
 
@@ -21,14 +21,12 @@ import math
 from typing import Any
 
 from .prospective import ProspectiveFeatureAdapter as _BaseAdapter, _finite
-from ..macro_fomc_deterministic_ede_refinement import (
-    install_fomc_deterministic_ede_refinement,
-)
+from ..macro_ism_historical_ede_refinement import install_ism_historical_ede_refinement
 
 
-# Idempotent: installs BLS first, then deterministic FOMC, and refreshes the v1.3
-# selective registry before this subclass is instantiated.
-install_fomc_deterministic_ede_refinement()
+# Idempotent: installs BLS -> deterministic FOMC -> historical ISM, then refreshes
+# the v1.3 selective registry before this subclass is instantiated.
+install_ism_historical_ede_refinement()
 
 
 class ProspectiveFeatureAdapter(_BaseAdapter):
