@@ -1,0 +1,67 @@
+name: diagnose-production-worker-oom
+
+on:
+  push:
+    branches: [diagnose-production-worker-oom]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Read production worker and OOM state
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 7m
+          script: |
+            set -u
+            echo "DIAGNOSTIC_TS=$(date --iso-8601=seconds)"
+            echo "PRODUCTION_SHA=$(git -C /opt/seiltanzer rev-parse HEAD)"
+            systemctl is-active seiltanzer || true
+            systemctl show seiltanzer \
+              -p MainPID -p NRestarts -p ActiveEnterTimestamp \
+              -p MemoryCurrent -p MemoryPeak -p Result -p ExecMainStatus
+
+            pid=$(systemctl show seiltanzer -p MainPID --value)
+            if [ "${pid:-0}" -gt 0 ] && [ -r "/proc/$pid/status" ]; then
+              grep -E '^(Name|State|VmPeak|VmSize|VmHWM|VmRSS|RssAnon|RssFile|VmSwap|Threads):' \
+                "/proc/$pid/status" || true
+              test ! -r "/proc/$pid/smaps_rollup" || \
+                grep -E '^(Rss|Pss|Private_Clean|Private_Dirty|Anonymous|Swap):' \
+                  "/proc/$pid/smaps_rollup" || true
+            fi
+
+            python3 - <<'PY'
+            import json, urllib.request
+            try:
+                with urllib.request.urlopen(
+                    "http://127.0.0.1:8790/api/research/runtime/worker-status",
+                    timeout=3.0,
+                ) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                worker = body.get("worker") or {}
+                keys = (
+                    "running", "current_phase", "last_started_ts", "last_finished_ts",
+                    "last_duration_ms", "last_error", "maintenance_running",
+                    "maintenance_phase", "last_maintenance_started_ts",
+                    "last_maintenance_finished_ts", "last_maintenance_duration_ms",
+                    "last_maintenance_result", "last_maintenance_error",
+                    "maintenance_phase_index", "memory_pressure",
+                    "acceptance_gate_active", "acceptance_pause_active",
+                )
+                print("WORKER=" + json.dumps({key: worker.get(key) for key in keys}, sort_keys=True))
+            except Exception as exc:
+                print(f"WORKER_UNAVAILABLE={type(exc).__name__}: {exc}")
+            PY
+
+            journalctl -u seiltanzer --since '2026-08-20 15:30:00' --no-pager -n 300 || true
+            journalctl -k --since '2026-08-20 15:30:00' --no-pager \
+              | grep -Ei 'out of memory|oom|killed process|memory cgroup' \
+              | tail -n 100 || true
