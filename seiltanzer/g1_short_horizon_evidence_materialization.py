@@ -145,24 +145,31 @@ def materialize_evidence_reports(
     results: dict[str, Any] = {}
     for name, fn in _writers(runtime):
         started = time.time()
-        payload = fn()
-        if not isinstance(payload, dict):
-            raise RuntimeError(f"{name} did not return object")
-        duration_ms = (time.time()-started)*1000.0
-        with runtime._lock, runtime._conn:
-            runtime._conn.execute("""
-                INSERT INTO g1s_evidence_materializations(
-                    report_name,source_signature,payload_json,generated_ts,duration_ms,contract_version)
-                VALUES(?,?,?,?,?,?)
-                ON CONFLICT(report_name) DO UPDATE SET
-                    source_signature=excluded.source_signature,
-                    payload_json=excluded.payload_json,
-                    generated_ts=excluded.generated_ts,
-                    duration_ms=excluded.duration_ms,
-                    contract_version=excluded.contract_version
-            """, (name, signature, _json(payload), time.time(), duration_ms,
-                  EVIDENCE_MATERIALIZATION_VERSION))
-        results[name] = {"duration_ms": duration_ms}
+        try:
+            payload = fn()
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"{name} did not return object")
+            duration_ms = (time.time()-started)*1000.0
+            with runtime._lock, runtime._conn:
+                runtime._conn.execute("""
+                    INSERT INTO g1s_evidence_materializations(
+                        report_name,source_signature,payload_json,generated_ts,duration_ms,contract_version)
+                    VALUES(?,?,?,?,?,?)
+                    ON CONFLICT(report_name) DO UPDATE SET
+                        source_signature=excluded.source_signature,
+                        payload_json=excluded.payload_json,
+                        generated_ts=excluded.generated_ts,
+                        duration_ms=excluded.duration_ms,
+                        contract_version=excluded.contract_version
+                """, (name, signature, _json(payload), time.time(), duration_ms,
+                      EVIDENCE_MATERIALIZATION_VERSION))
+            results[name] = {"duration_ms": duration_ms}
+        finally:
+            # Each report is independent and persisted before the next begins.
+            # Return released SQLite/JSON arenas to the small production host so
+            # six sequential evidence views cannot accumulate one shared peak.
+            from .production_resource_guard import trim_memory_for_pressure
+            trim_memory_for_pressure()
     return {"refreshed": True, "source_signature": signature, "reports": results}
 
 

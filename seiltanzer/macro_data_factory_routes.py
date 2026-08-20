@@ -83,7 +83,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     # dated official roundups; no new subindex hypothesis family is introduced.
     install_ism_historical_ede_refinement()
     # Historical official pages are materialized by the exact-SHA GitHub runner;
-    # the production network is already proven unable to reach BLS/ISM reliably.
+    # production never needs BLS/ISM/Fed archive transport for an EDE snapshot.
     install_historical_offhost_transport()
 
     factory = MacroDataFactory(runtime)
@@ -110,6 +110,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     fomc_deterministic_store = StrictFOMCDeterministicReleaseStore(runtime)
     fomc_deterministic_runtime = FOMCDeterministicBootstrapRuntime(
         fomc_deterministic_store)
+    fomc_deterministic_runtime.offhost_historical_bundle_path = historical_bundle_path
     fomc_runtime = FOMCOfficialRuntime(factory)
 
     # T0 capture reads live materialized stores only. Historical BLS/ISM overlays

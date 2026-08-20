@@ -52,7 +52,11 @@ def _model_eval_rows(runtime: ShortHorizonRuntime) -> dict[str, list[dict[str, A
         rows = runtime._conn.execute("""
             SELECT p.model_id,p.p_up,p.created_ts AS prediction_created_ts,
                    g.observation_id,g.instrument,g.horizon_minutes,g.captured_ts,
-                   g.market_regime,g.frozen_features_json,g.frozen_forecast_json,
+                   g.market_regime,
+                   CASE WHEN json_valid(g.frozen_features_json)
+                        THEN json_extract(g.frozen_features_json,
+                             '$.price_state.g1s_intraday.ret_15m')
+                        ELSE NULL END AS momentum_ret_15m,
                    r.direction_label,m.feature_set,m.model_family
             FROM g1s_shadow_predictions p
             JOIN g1s_observations g USING(observation_id)

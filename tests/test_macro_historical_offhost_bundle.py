@@ -16,6 +16,15 @@ from seiltanzer.macro_ism_historical_bootstrap import (
     ISMHistoricalReleaseStore,
     parse_ism_historical_roundup,
 )
+from seiltanzer.macro_fomc_deterministic_bootstrap import (
+    INDEX_TEMPLATE,
+    deterministic_statement_payload,
+    extract_statement_text,
+    parse_fomc_index,
+)
+from seiltanzer.macro_fomc_deterministic_store_refinement import (
+    StrictFOMCDeterministicReleaseStore,
+)
 
 
 NOW = 1_756_000_000.0
@@ -55,6 +64,30 @@ ISM = """
 in contraction and the official report described current business conditions.</p>
 </body></html>
 """
+FOMC_INDEX = """
+<html><body><h1>2025 FOMC press releases</h1>
+<p>Official Federal Reserve Board archive of dated monetary policy statements.</p>
+<a href="/newsevents/pressreleases/monetary20250618a.htm">June statement</a>
+<a href="/newsevents/pressreleases/monetary20250730a.htm">July statement</a>
+<p>This archive is maintained by the Federal Reserve Board for public research.</p>
+</body></html>
+"""
+FOMC_PREVIOUS = """
+<html><body><div>For release at 2:00 p.m. EDT</div>
+<p>The Federal Open Market Committee decided to maintain the target range for
+the federal funds rate at 4-1/4 to 4-1/2 percent.</p>
+<p>Voting for the monetary policy action were Alice Alpha; Bob Beta; Carol Gamma;
+and Dan Delta. The decision was unanimous.</p>
+<p>For media inquiries, call the Board.</p></body></html>
+"""
+FOMC_CURRENT = """
+<html><body><div>For release at 2:00 p.m. EDT</div>
+<p>The Federal Open Market Committee decided to lower the target range for the
+federal funds rate at 4 to 4-1/4 percent.</p>
+<p>Voting for the monetary policy action were Alice Alpha; Bob Beta; Carol Gamma;
+and Dan Delta. Voting against this action was Eve Epsilon.</p>
+<p>For media inquiries, call the Board.</p></body></html>
+"""
 
 
 class Runtime:
@@ -77,6 +110,14 @@ def _bundle():
     ism_payload = parse_ism_historical_roundup(
         ISM, family="ISM_MANUFACTURING", period="2025-06", source_url=ISM_URL
     )
+    fomc_specs = parse_fomc_index(FOMC_INDEX)
+    previous_body = extract_statement_text(FOMC_PREVIOUS)
+    fomc_html = [FOMC_PREVIOUS, FOMC_CURRENT]
+    fomc_payloads = [
+        deterministic_statement_payload(previous_body),
+        deterministic_statement_payload(
+            extract_statement_text(FOMC_CURRENT), previous_body=previous_body),
+    ]
     bundle = {
         "contract_version": offhost.CONTRACT_VERSION,
         "expected_sha": SHA,
@@ -103,6 +144,34 @@ def _bundle():
             "html": ISM, "source_sha256": offhost._sha256(ISM),
             "payload": ism_payload,
         })],
+        "fomc_window": {
+            "start_ts": NOW - offhost.FOMC_WINDOW_DAYS * 86400.0,
+            "context_start_ts": NOW - offhost.FOMC_WINDOW_DAYS * 86400.0,
+            "end_ts": NOW,
+            "days": offhost.FOMC_WINDOW_DAYS,
+        },
+        "fomc_schedules": {"2025": _record({
+            "format": "HTML", "year": 2025,
+            "source_url": INDEX_TEMPLATE.format(year=2025),
+            "content": FOMC_INDEX,
+            "source_sha256": offhost._sha256(FOMC_INDEX),
+        })},
+        "fomc_records": [
+            _record({
+                "spec": {
+                    "date_code": spec.date_code,
+                    "source_url": spec.source_url,
+                },
+                "previous_source_url": (
+                    fomc_specs[index - 1].source_url if index else None
+                ),
+                "fetched_at": NOW - 10.0,
+                "html": fomc_html[index],
+                "source_sha256": offhost._sha256(fomc_html[index]),
+                "payload": fomc_payloads[index],
+            })
+            for index, spec in enumerate(fomc_specs)
+        ],
         "errors": {}, "official_sources_only": True,
         "canonical_parsers_only": True, "synthetic_data_used": False,
         "no_placeholders": True, "research_only": True,
@@ -129,10 +198,22 @@ def test_historical_bundle_reparses_every_official_page_and_binds_owner(monkeypa
     with pytest.raises(ValueError, match="BLS_PAYLOAD_MISMATCH"):
         offhost.validate_bundle(changed, expected_sha=SHA, now=NOW)
 
+    changed = deepcopy(bundle)
+    changed["fomc_records"][1]["payload"]["target_change_bp"] = 999.0
+    changed["fomc_records"][1]["record_sha256"] = offhost._sha256(
+        offhost._without(changed["fomc_records"][1], "record_sha256")
+    )
+    changed["bundle_sha256"] = offhost._sha256(
+        offhost._without(changed, "bundle_sha256")
+    )
+    with pytest.raises(ValueError, match="FOMC_PAYLOAD_MISMATCH"):
+        offhost.validate_bundle(changed, expected_sha=SHA, now=NOW)
+
 
 def test_historical_offhost_materializes_real_rows_without_network(monkeypatch):
     bundle = _bundle()
     monkeypatch.setattr(offhost, "load_verified_bundle", lambda _runtime: bundle)
+    monkeypatch.setattr(offhost.time, "time", lambda: NOW)
 
     bls_runtime = Runtime()
     spec = parse_bls_ical(SCHEDULE_ICAL)[0]
@@ -158,3 +239,17 @@ def test_historical_offhost_materializes_real_rows_without_network(monkeypatch):
     assert ism["status"] == "OK"
     assert ism_wrapper.store.status()["families"]["ISM_MANUFACTURING"]["row_n"] == 1
     assert all(row.get("status") in {"STORED", "CACHED"} for row in ism["stored"])
+
+    fomc_runtime = Runtime()
+    fomc_runtime._conn.execute(
+        "INSERT INTO g1s_observations VALUES('obs-fomc',?,'{}')",
+        (NOW - 60.0,),
+    )
+    fomc_wrapper = type("Wrapper", (), {})()
+    fomc_wrapper.store = StrictFOMCDeterministicReleaseStore(fomc_runtime)
+    fomc = offhost._fomc_refresh(fomc_wrapper)
+    assert fomc["status"] == "OK"
+    assert fomc_wrapper.store.status()["row_n"] == 2
+    latest = fomc_wrapper.store.latest_admissible(NOW)
+    assert latest["payload"]["target_change_bp"] == -25.0
+    assert latest["payload"]["llm_used"] is False
