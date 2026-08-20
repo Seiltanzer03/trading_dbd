@@ -208,7 +208,7 @@ def test_macro_transport_status_exposes_bounded_fallback_contract(monkeypatch) -
     monkeypatch.delenv("OPENROUTER_PROXY", raising=False)
     status = refinement.macro_transport_status()
 
-    assert status["contract_version"] == "macro-official-transport-v4"
+    assert status["contract_version"] == "macro-official-transport-v5"
     assert status["payload_or_parser_fallback_added"] is False
     assert status["bls_cache_fallback"] == {
         "enabled": True,
@@ -223,6 +223,7 @@ def test_macro_transport_status_exposes_bounded_fallback_contract(monkeypatch) -
     assert status["bls_transport"] == {
         "direct_official_first": True,
         "configured_proxy_fallback": False,
+        "official_get_per_series_proxy_fallback": False,
         "attempts_per_route": 2,
         "retry_backoff_sec": 1.0,
         "request_timeout_unchanged": True,
