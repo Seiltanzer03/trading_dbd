@@ -2,6 +2,8 @@ from pathlib import Path
 import importlib.util
 import sqlite3
 
+from seiltanzer.edge_discovery.registry import FEATURES
+
 
 def _load_script(name: str):
     root = Path(__file__).resolve().parents[1]
@@ -120,9 +122,23 @@ def test_production_ede_inventory_is_read_only_and_lists_canonical_features(tmp_
     by_id = {row["feature_id"]: row for row in result["features"]}
     assert by_id["macro.cpi_headline_mom_pct"]["research_scope"] == "G1S"
     assert by_id["macro.nfp_payroll_change_k"]["research_scope"] == "G1S"
-    assert by_id["macro.fomc_target_change_bp"]["historical_availability"] == "AVAILABLE"
-    assert by_id["macro.fomc_statement_change"]["historical_availability"] == "AVAILABLE"
-    assert by_id["macro.fomc_policy_tone"]["historical_availability"] == "UNAVAILABLE"
+    assert "macro.fomc_target_change_bp" in by_id
+    assert "macro.fomc_statement_change" in by_id
     assert by_id["option.barrier_probability"]["status"] == "G1M_ONLY"
     assert by_id["quality.availability"]["status"] == "QUALITY_ONLY"
     assert result["production_authority"] is False
+
+    definitions = {item.feature_id: item for item in FEATURES}
+    assert definitions["macro.fomc_target_change_bp"].historical_availability == "AVAILABLE"
+    assert definitions["macro.fomc_statement_change"].historical_availability == "AVAILABLE"
+    assert definitions["macro.fomc_policy_tone"].historical_availability == "UNAVAILABLE"
+
+
+def test_production_ede_materializes_bls_and_deterministic_fomc_before_snapshot():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/production-ede-v12-audit.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "/api/research/macro/historical-bls/refresh" in workflow
+    assert "/api/research/macro/fomc-deterministic/refresh" in workflow
+    assert "git -C /opt/seiltanzer rev-parse HEAD" in workflow
