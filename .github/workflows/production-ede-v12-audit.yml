@@ -25,6 +25,50 @@ jobs:
           python-version: "3.11"
       - name: Install snapshot transport
         run: pip install paramiko
+      - name: Remove only stale closed EDE snapshot leftovers
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 3m
+          script: |
+            set -euo pipefail
+            command -v lsof >/dev/null 2>&1 || {
+              echo "lsof is required for fail-closed stale EDE snapshot cleanup" >&2
+              exit 1
+            }
+
+            removed=0
+            removed_bytes=0
+            while IFS= read -r -d '' candidate; do
+              case "$candidate" in
+                /tmp/seiltanzer-ede-source-*.sqlite3|\
+                /tmp/seiltanzer-ede-source-*.sqlite3-wal|\
+                /tmp/seiltanzer-ede-source-*.sqlite3-shm) ;;
+                *)
+                  echo "Refusing unexpected EDE cleanup path: $candidate" >&2
+                  exit 1
+                  ;;
+              esac
+              if lsof -- "$candidate" >/dev/null 2>&1; then
+                echo "KEEP_OPEN_EDE_SNAPSHOT=$candidate"
+                continue
+              fi
+              size=$(stat -c '%s' "$candidate" 2>/dev/null || echo 0)
+              rm -f -- "$candidate"
+              removed=$((removed + 1))
+              removed_bytes=$((removed_bytes + size))
+            done < <(find /tmp -maxdepth 1 -type f \
+              \( -name 'seiltanzer-ede-source-*.sqlite3' \
+                 -o -name 'seiltanzer-ede-source-*.sqlite3-wal' \
+                 -o -name 'seiltanzer-ede-source-*.sqlite3-shm' \) \
+              -mmin +360 -print0 2>/dev/null)
+
+            echo "EDE_STALE_REMOTE_SNAPSHOTS_REMOVED=$removed"
+            echo "EDE_STALE_REMOTE_SNAPSHOT_BYTES_REMOVED=$removed_bytes"
+            df -h /
       - name: Materialize point-in-time macro archives before immutable snapshot
         uses: appleboy/ssh-action@v1
         env:
@@ -90,6 +134,32 @@ jobs:
             --marker-id "$INVENTORY_MARKER_ID" \
             --run-id "$RUN_ID" \
             --output-db "$OUTPUT_DB"
+      - name: Guarantee exact remote EDE snapshot cleanup with a fresh SSH session
+        if: always()
+        uses: appleboy/ssh-action@v1
+        env:
+          RUN_ID: ${{ github.run_id }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 3m
+          envs: RUN_ID
+          script: |
+            set -euo pipefail
+            case "$RUN_ID" in
+              ''|*[!0-9]*)
+                echo "Refusing non-numeric GitHub run id: $RUN_ID" >&2
+                exit 1
+                ;;
+            esac
+            snapshot="/tmp/seiltanzer-ede-source-${RUN_ID}.sqlite3"
+            rm -f -- "$snapshot" "${snapshot}-wal" "${snapshot}-shm"
+            test ! -e "$snapshot"
+            test ! -e "${snapshot}-wal"
+            test ! -e "${snapshot}-shm"
+            echo "EDE_EXACT_REMOTE_SNAPSHOT_CLEAN=1"
       - uses: actions/upload-artifact@v4
         with:
           name: ede-production-snapshot-${{ github.run_id }}
