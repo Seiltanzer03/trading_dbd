@@ -14,9 +14,12 @@ from .macro_fomc_deterministic_ede_refinement import (
     install_fomc_deterministic_ede_refinement,
 )
 from .macro_ism_historical_bootstrap import FEATURE_IDS, feature_records_from_runtime
+from .macro_ism_historical_parser_refinement import (
+    install_ism_historical_parser_refinement,
+)
 
 
-ISM_HISTORICAL_EDE_REFINEMENT_VERSION = "ism-historical-ede-overlay-v2"
+ISM_HISTORICAL_EDE_REFINEMENT_VERSION = "ism-historical-ede-overlay-v3"
 ISM_FEATURE_IDS = frozenset(
     feature_id for mapping in FEATURE_IDS.values() for feature_id in mapping.values()
 )
@@ -42,6 +45,7 @@ def _historical_ism_registry(definitions):
 
 def install_ism_historical_ede_refinement() -> None:
     """Add dated-roundup ISM history without mutating old T0 observations."""
+    install_ism_historical_parser_refinement()
     install_fomc_deterministic_ede_refinement()
     from .edge_discovery import ai_context, filters, prospective, registry, selective
     from .macro_bls_historical_ede_refinement import _refresh_selective_registry
