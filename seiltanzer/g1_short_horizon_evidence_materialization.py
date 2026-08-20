@@ -145,6 +145,7 @@ def materialize_evidence_reports(
     results: dict[str, Any] = {}
     for name, fn in _writers(runtime):
         started = time.time()
+        payload: dict[str, Any] | None = None
         try:
             payload = fn()
             if not isinstance(payload, dict):
@@ -165,9 +166,10 @@ def materialize_evidence_reports(
                       EVIDENCE_MATERIALIZATION_VERSION))
             results[name] = {"duration_ms": duration_ms}
         finally:
-            # Each report is independent and persisted before the next begins.
-            # Return released SQLite/JSON arenas to the small production host so
-            # six sequential evidence views cannot accumulate one shared peak.
+            # The allocator cannot reclaim a just-persisted full-history report
+            # while this frame still owns it. Drop that strong reference before
+            # trimming, then build the next independent report from a lower peak.
+            payload = None
             from .production_resource_guard import trim_memory_for_pressure
             trim_memory_for_pressure()
     return {"refreshed": True, "source_signature": signature, "reports": results}
