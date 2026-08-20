@@ -65,7 +65,50 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install snapshot transport
-        run: pip install paramiko
+        run: pip install paramiko -e '.[research]'
+      - name: Build exact-SHA historical BLS/ISM bundle off-host
+        run: |
+          set -euo pipefail
+          python scripts/build_offhost_historical_macro_bundle.py \
+            --expected-sha "$EXPECTED_SHA" \
+            --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+            --output "historical-macro-${{ github.run_id }}.json"
+      - name: Transfer historical official-source bundle
+        uses: appleboy/scp-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          source: historical-macro-${{ github.run_id }}.json
+          target: /tmp
+      - name: Verify and install historical official-source bundle
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
+          RUN_ID: ${{ github.run_id }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 3m
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID,RUN_ID
+          script: |
+            set -euo pipefail
+            case "$RUN_ID" in
+              ''|*[!0-9]*) echo "invalid run id" >&2; exit 1 ;;
+            esac
+            input="/tmp/historical-macro-${RUN_ID}.json"
+            trap 'rm -f -- "$input"' EXIT
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/install_offhost_historical_macro_bundle.py \
+              --input "$input" \
+              --destination /opt/seiltanzer/data/research/official_macro_historical_offhost_latest.json \
+              --expected-sha "$EXPECTED_SHA" \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID"
       - name: Remove only stale closed EDE snapshot leftovers
         uses: appleboy/ssh-action@v1
         with:

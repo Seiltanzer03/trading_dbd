@@ -32,6 +32,10 @@ from .macro_ism_historical_bootstrap import (
 from .macro_ism_historical_ede_refinement import install_ism_historical_ede_refinement
 from .macro_ism_parser_refinement import install_ism_roundup_parser_refinement
 from .macro_ism_resilience import install_ism_source_resilience
+from .macro_historical_offhost_bundle import (
+    install_historical_offhost_transport,
+    transport_status as historical_offhost_transport_status,
+)
 from .macro_numeric_data import NumericMacroRuntime, NumericMacroStore, research_context
 from .macro_t0_context import install_macro_t0_context
 from .macro_transport_refinement import (
@@ -78,6 +82,9 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     # ISM history fills only the already-canonical headline PMI/change IDs from
     # dated official roundups; no new subindex hypothesis family is introduced.
     install_ism_historical_ede_refinement()
+    # Historical official pages are materialized by the exact-SHA GitHub runner;
+    # the production network is already proven unable to reach BLS/ISM reliably.
+    install_historical_offhost_transport()
 
     factory = MacroDataFactory(runtime)
     numeric_store = NumericMacroStore(runtime)
@@ -91,6 +98,13 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     historical_bls_runtime = BLSHistoricalBootstrapRuntime(historical_bls_store)
     historical_ism_store = ISMHistoricalReleaseStore(runtime)
     historical_ism_runtime = ISMHistoricalBootstrapRuntime(historical_ism_store)
+    historical_bundle_path = (
+        Path(app.state.engine.settings.data_dir)
+        / "research"
+        / "official_macro_historical_offhost_latest.json"
+    )
+    historical_bls_runtime.offhost_historical_bundle_path = historical_bundle_path
+    historical_ism_runtime.offhost_historical_bundle_path = historical_bundle_path
     # Production FOMC ingestion is strict: a non-initial statement cannot be
     # frozen until its exact predecessor is already materialized.
     fomc_deterministic_store = StrictFOMCDeterministicReleaseStore(runtime)
@@ -130,6 +144,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
             "numeric_transport": macro_transport_status(),
             "historical_bls": historical_bls_runtime.status(),
             "historical_ism": historical_ism_runtime.status(),
+            "historical_offhost_transport": historical_offhost_transport_status(),
             "fomc_deterministic": fomc_deterministic_runtime.status(),
             "fomc_runtime": fomc_runtime.status(),
             "llm_cost_guard": cost_guard_status(),
