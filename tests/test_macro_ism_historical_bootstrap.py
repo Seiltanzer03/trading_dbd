@@ -103,11 +103,24 @@ def test_manufacturing_roundup_uses_official_release_day_at_10_et():
     assert parsed["llm_used"] is False
 
 
-def test_services_roundup_rejects_wrong_period_or_family():
-    with pytest.raises(ValueError, match="TITLE_PERIOD_FAMILY_MISMATCH"):
+def test_services_roundup_rejects_url_period_mismatch_before_content_parse():
+    with pytest.raises(ValueError, match="ISM_HISTORICAL_URL_PERIOD_MISMATCH"):
         _parse(
             JULY_SERVICES_HTML, family="ISM_SERVICES", period="2025-06",
             url=JULY_SERVICES_URL)
+
+
+def test_services_roundup_rejects_title_period_mismatch_after_url_matches():
+    # The URL/period pair is internally consistent for June, but the page body is
+    # deliberately July. This exercises the independent content/title gate rather
+    # than expecting it to run before the stronger URL-period gate.
+    with pytest.raises(ValueError, match="ISM_HISTORICAL_TITLE_PERIOD_FAMILY_MISMATCH"):
+        _parse(
+            JULY_SERVICES_HTML, family="ISM_SERVICES", period="2025-06",
+            url=JUNE_SERVICES_URL)
+
+
+def test_services_roundup_rejects_wrong_family():
     with pytest.raises(ValueError):
         _parse(
             JULY_SERVICES_HTML, family="ISM_MANUFACTURING", period="2025-07",
