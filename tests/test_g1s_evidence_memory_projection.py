@@ -76,23 +76,36 @@ class _Runtime:
         self._conn = _Connection()
 
 
-def test_evidence_materializer_trims_after_each_persisted_report(monkeypatch) -> None:
+class _TrackedPayload(dict):
+    def __init__(self, label: str, events: list[str]):
+        super().__init__(report=label)
+        self._label = label
+        self._events = events
+
+    def __del__(self):
+        self._events.append(f"released:{self._label}")
+
+
+def test_evidence_materializer_releases_payload_before_each_trim(monkeypatch) -> None:
     runtime = _Runtime()
-    trims: list[str] = []
+    events: list[str] = []
     monkeypatch.setattr(materialization, "_ensure_table", lambda _runtime: None)
     monkeypatch.setattr(materialization, "_source_signature", lambda _runtime: "source")
     monkeypatch.setattr(materialization, "_writers", lambda _runtime: (
-        ("probability_oos", lambda: {"report": "probability"}),
-        ("final_report", lambda: {"report": "final"}),
+        ("probability_oos", lambda: _TrackedPayload("probability", events)),
+        ("final_report", lambda: _TrackedPayload("final", events)),
     ))
     monkeypatch.setattr(
         production_resource_guard,
         "trim_memory_for_pressure",
-        lambda: trims.append("trim"),
+        lambda: events.append("trim"),
     )
 
     result = materialization.materialize_evidence_reports(runtime, force=True)
 
     assert result["refreshed"] is True
     assert set(result["reports"]) == {"probability_oos", "final_report"}
-    assert trims == ["trim", "trim"]
+    assert events == [
+        "released:probability", "trim",
+        "released:final", "trim",
+    ]
