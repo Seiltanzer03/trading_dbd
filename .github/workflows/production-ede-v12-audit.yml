@@ -34,7 +34,7 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 12m
+          command_timeout: 15m
           envs: EXPECTED_SHA
           script: |
             set -euo pipefail
@@ -65,6 +65,10 @@ jobs:
             refresh_endpoint \
               "BLS_HISTORICAL_BOOTSTRAP" \
               "http://127.0.0.1:8790/api/research/macro/historical-bls/refresh" \
+              "OK|PARTIAL|NO_OBSERVATIONS"
+            refresh_endpoint \
+              "ISM_HISTORICAL_BOOTSTRAP" \
+              "http://127.0.0.1:8790/api/research/macro/historical-ism/refresh" \
               "OK|PARTIAL|NO_OBSERVATIONS"
             refresh_endpoint \
               "FOMC_DETERMINISTIC_BOOTSTRAP" \
