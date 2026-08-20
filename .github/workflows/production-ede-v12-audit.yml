@@ -228,7 +228,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ede-production-snapshot-${{ github.run_id }}
-          path: ${{ runner.temp }}/ede-source.sqlite3
+          path: ${{ runner.temp }}/ede-source.sqlite3*
           retention-days: 1
 
   audit:

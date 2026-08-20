@@ -33,15 +33,19 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
         "Run EDE v1.3 research off production VPS"
     )
 
-    # The only DB work left on production is a gentle online immutable snapshot,
-    # guarded by the same fail-closed 3-second API health budget.
-    assert "progress=report_backup_progress" in offload
-    assert "EDE_REMOTE_SNAPSHOT_PROGRESS" in offload
+    # Snapshot export reuses the deploy-created, immutable, verified exact-SHA
+    # prestart backup. It must never start a second whole live-DB copy.
+    assert "MAX_EXACT_BACKUP_AGE_SECONDS = 60 * 60" in offload
+    assert "EDE_VERIFIED_BACKUP_SELECTION" in offload
+    assert "DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP" in offload
+    assert "database_sha256" in offload
+    assert "src.backup(" not in offload
+    assert "EDE_VERIFIED_BACKUP_TRANSFER_PROGRESS" in offload
     assert "transport.set_keepalive(SSH_KEEPALIVE_SECONDS)" in offload
-    assert "ionice -c2 -n7 nice -n 15" in offload
     assert "API_PROBE_MAX_TIME_SECONDS = 3" in offload
     assert 'f"--max-time {API_PROBE_MAX_TIME_SECONDS} "' in offload
     assert "PRAGMA quick_check" in offload
+    assert "path: ${{ runner.temp }}/ede-source.sqlite3*" in ede
 
     # Heavy jobs are serialized off-host; compact outputs are returned atomically
     # so existing production research paths remain compatible.
