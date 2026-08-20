@@ -56,6 +56,21 @@ def test_serialized_handoffs_keep_exact_sha_and_acceptance_run_id():
         assert '"acceptance_run_id": os.environ["ACCEPTANCE_RUN_ID"]' in workflow
 
 
+def test_post_research_uses_only_lightweight_worker_acceptance_probe():
+    workflow = _workflow("production-post-research.yml")
+    script = (ROOT / "scripts" / "production_post_research_check.py").read_text(
+        encoding="utf-8"
+    )
+    assert '--acceptance-run-id "$ACCEPTANCE_RUN_ID"' in workflow
+    assert 'assert_route("/api/research/runtime/worker-status")' in script
+    for duplicated_acceptance_probe in (
+        'assert_route("/api/state")',
+        'assert_route("/api/analytics/',
+        'request("/api/ai/verdict"',
+    ):
+        assert duplicated_acceptance_probe not in script
+
+
 def test_gate_is_released_on_every_handoff_or_snapshot_failure():
     for name in (
         "production-post-research.yml",

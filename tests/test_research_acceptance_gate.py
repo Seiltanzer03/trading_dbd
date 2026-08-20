@@ -298,3 +298,21 @@ def test_post_research_requires_observed_acceptance_pause():
         "current_phase": "idle",
     }
     assert check._cycle_finished(worker, result) is False
+
+
+def test_post_research_requires_exact_acceptance_owner():
+    check = _load_script("production_post_research_check")
+    worker = {
+        "acceptance_gate_active": True,
+        "acceptance_gate_run_id": "run-91",
+        "acceptance_gate_expected_sha": "sha-exact",
+    }
+    assert check._acceptance_owner_matches(
+        worker, expected_sha="sha-exact", acceptance_run_id="run-91"
+    ) is True
+    assert check._acceptance_owner_matches(
+        worker, expected_sha="sha-wrong", acceptance_run_id="run-91"
+    ) is False
+    assert check._acceptance_owner_matches(
+        worker, expected_sha="sha-exact", acceptance_run_id="run-wrong"
+    ) is False

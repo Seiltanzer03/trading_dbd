@@ -18,11 +18,10 @@ def sh(*args: str) -> str:
     return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT).strip()
 
 
-def request(path: str, *, method: str = "GET", timeout: float = 5.0):
+def request(path: str, *, timeout: float = 5.0):
     started = time.monotonic()
-    req = urllib.request.Request(BASE+path, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        with urllib.request.urlopen(BASE + path, timeout=timeout) as response:
             raw = response.read(); code = int(response.status)
     except urllib.error.HTTPError as exc:
         raw = exc.read(); code = int(exc.code)
@@ -74,7 +73,17 @@ def _cycle_finished(worker: dict, result: object) -> bool:
     )
 
 
-def verify(expected_sha: str) -> None:
+def _acceptance_owner_matches(
+    worker: dict, *, expected_sha: str, acceptance_run_id: str
+) -> bool:
+    return (
+        worker.get("acceptance_gate_active") is True
+        and worker.get("acceptance_gate_run_id") == acceptance_run_id
+        and worker.get("acceptance_gate_expected_sha") == expected_sha
+    )
+
+
+def verify(expected_sha: str, acceptance_run_id: str) -> None:
     assert sh("git", "-C", "/opt/seiltanzer", "rev-parse", "HEAD") == expected_sha
     assert sh("systemctl", "is-active", "seiltanzer") == "active"
     worker = None
@@ -99,7 +108,14 @@ def verify(expected_sha: str) -> None:
         })
         if _latest_attempt_finished(worker) and worker.get("last_error") is not None:
             raise AssertionError(f"research worker core failed: {worker.get('last_error')}")
-        if _cycle_finished(worker, result):
+        if (
+            _cycle_finished(worker, result)
+            and _acceptance_owner_matches(
+                worker,
+                expected_sha=expected_sha,
+                acceptance_run_id=acceptance_run_id,
+            )
+        ):
             break
         time.sleep(10)
     else:
@@ -107,28 +123,22 @@ def verify(expected_sha: str) -> None:
     assert worker is not None
     assert worker.get("running") is True, worker
     assert worker.get("last_error") is None, worker
+    assert _acceptance_owner_matches(
+        worker,
+        expected_sha=expected_sha,
+        acceptance_run_id=acceptance_run_id,
+    ), worker
     assert float(worker["last_started_ts"]) >= float(worker["first_cycle_not_before_ts"])-1.0
     result = result or {}
     assert isinstance(result.get("g1s"), dict) and isinstance(result.get("g1m_local"), dict), result
     assert int((result["g1s"] or {}).get("batch_limit") or 0) > 0, result
 
-    assert_route("/api/research/runtime/status")
-    assert_route("/api/state")
-    assert_route("/api/analytics/gex-migration")
-    assert_route("/api/analytics/regime-phase")
-    assert_route("/api/analytics/wavelet")
-    assert_route("/api/analytics/correlation-graph")
-    code, body, elapsed = request("/api/ai/verdict", method="POST", timeout=65.0)
-    print(f"/api/ai/verdict: {code} {elapsed:.0f}ms")
-    assert code in {200, 400, 429}, (code, body)
-    assert isinstance((body or {}).get("ok"), bool), body
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--expected-sha", required=True)
+    parser.add_argument("--acceptance-run-id", required=True)
     args = parser.parse_args(argv)
-    verify(args.expected_sha)
+    verify(args.expected_sha, args.acceptance_run_id)
     print("POST-RESEARCH PRODUCTION CHECK PASS")
     return 0
 

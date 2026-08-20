@@ -63,7 +63,8 @@ jobs:
               --ttl-seconds 7200
 
             "$PY" /opt/seiltanzer/scripts/production_post_research_check.py \
-              --expected-sha "$EXPECTED_SHA"
+              --expected-sha "$EXPECTED_SHA" \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID"
 
             "$PY" "$ORCH" validate-gate \
               --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
