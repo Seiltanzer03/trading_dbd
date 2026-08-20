@@ -19,6 +19,8 @@ AI_MATERIALIZER_WAIT_SEC = 150.0
 EDGE_RESEARCHER_MAX_MS = 250.0
 EDGE_RESEARCHER_WAIT_SEC = 75.0
 FOMC_WAIT_SEC = 45.0
+MACRO_NUMERIC_REFRESH_WAIT_SEC = 30.0
+MACRO_NUMERIC_REFRESH_POLL_SEC = 1.0
 FOMC_PROMPT_VERSION = "fomc-semantic-v2-json-schema"
 FOMC_SEMANTIC_KEYS = {
     "policy_tone", "policy_shift", "inflation_concern", "growth_concern",
@@ -215,6 +217,53 @@ def _verify_fomc_semantic() -> None:
     assert row.get("production_authority") is False, row
 
 
+def _assert_macro_numeric_refresh_result(body: object) -> dict:
+    assert isinstance(body, dict), body
+    assert body.get("status") == "OK", body
+    assert body.get("no_placeholders") is True, body
+    assert body.get("production_authority") is False, body
+    assert not body.get("errors"), body
+    return body
+
+
+def _wait_for_macro_numeric_refresh(
+    initial_body: object,
+    *,
+    wait_sec: float = MACRO_NUMERIC_REFRESH_WAIT_SEC,
+    poll_sec: float = MACRO_NUMERIC_REFRESH_POLL_SEC,
+) -> dict:
+    """Accept only a completed successful official numeric refresh.
+
+    The POST can legitimately return IN_PROGRESS when the startup worker already
+    owns the refresh. Do not turn that transient state into success: poll the
+    existing runtime for a short bounded window and validate its completed result.
+    """
+    assert isinstance(initial_body, dict), initial_body
+    if initial_body.get("status") == "OK":
+        return _assert_macro_numeric_refresh_result(initial_body)
+    assert initial_body.get("status") == "IN_PROGRESS", initial_body
+
+    deadline = time.monotonic() + max(0.0, wait_sec)
+    last_numeric: object = initial_body
+    while time.monotonic() < deadline:
+        runtime = assert_route("/api/research/macro/status", timeout=5.0)
+        assert isinstance(runtime, dict), runtime
+        numeric = runtime.get("numeric") or {}
+        assert isinstance(numeric, dict), numeric
+        last_numeric = numeric
+        print(
+            "macro numeric refresh waiting "
+            f"running={numeric.get('running')} last_error={numeric.get('last_error')} "
+            f"last_status={(numeric.get('last_result') or {}).get('status')}"
+        )
+        if numeric.get("running") is False:
+            assert not numeric.get("last_error"), numeric
+            return _assert_macro_numeric_refresh_result(numeric.get("last_result") or {})
+        time.sleep(max(0.0, poll_sec))
+
+    raise AssertionError(("macro_numeric_refresh_timeout", last_numeric))
+
+
 def verify_macro_runtime() -> None:
     status = assert_route("/api/research/macro/status")
     assert isinstance(status, dict), status
@@ -229,18 +278,14 @@ def verify_macro_runtime() -> None:
     assert transport.get("official_source_urls_unchanged") is True, transport
     assert transport.get("payload_or_parser_fallback_added") is False, transport
 
-    # Force one deterministic official numeric refresh on the deployed SHA. This
-    # is intentionally after the AI review check so it cannot compete with the
-    # 6,500-path startup calculation on the small production host.
+    # Force one deterministic official numeric refresh on the deployed SHA. If
+    # the startup worker already owns that refresh, wait only for that existing
+    # bounded operation to finish and then require its real successful result.
     code, body, elapsed = request(
         "/api/research/macro/numeric/refresh", method="POST", timeout=40.0)
     print(f"/api/research/macro/numeric/refresh: {code} {elapsed:.0f}ms")
     assert code == 200, (code, body)
-    assert isinstance(body, dict), body
-    assert body.get("status") == "OK", body
-    assert body.get("no_placeholders") is True, body
-    assert body.get("production_authority") is False, body
-    assert not body.get("errors"), body
+    body = _wait_for_macro_numeric_refresh(body)
 
     for family in ("CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES"):
         row = assert_route(f"/api/research/macro/latest?family={family}")
