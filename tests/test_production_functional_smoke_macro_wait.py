@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 
-from scripts import production_functional_smoke as smoke
+
+_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "production_functional_smoke.py"
+_SPEC = importlib.util.spec_from_file_location("production_functional_smoke_under_test", _SCRIPT)
+assert _SPEC is not None and _SPEC.loader is not None
+smoke = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(smoke)
 
 
 def _ok_result() -> dict:
