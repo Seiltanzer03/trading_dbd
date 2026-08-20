@@ -18,6 +18,18 @@ MOMENTUM_DOWN_P = 0.45
 
 
 def _momentum_probability(row: dict) -> float:
+    if "momentum_ret_15m" in row:
+        try:
+            ret = float(row.get("momentum_ret_15m"))
+        except (TypeError, ValueError):
+            return 0.5
+        if not math.isfinite(ret):
+            return 0.5
+        if ret > 0:
+            return MOMENTUM_UP_P
+        if ret < 0:
+            return MOMENTUM_DOWN_P
+        return 0.5
     features=_loads(row.get("frozen_features_json"),{})
     state=((features.get("price_state") or {}).get("g1s_intraday") or {})
     try:

@@ -51,6 +51,8 @@ def _loads(value: Any) -> dict[str, Any]:
 
 
 def _ret15(row: dict[str, Any]) -> float | None:
+    if "frozen_ret_15m" in row:
+        return _finite(row.get("frozen_ret_15m"))
     features = _loads(row.get("frozen_features_json"))
     intraday = features.get("g1s_intraday")
     if isinstance(intraday, dict):
@@ -194,7 +196,12 @@ def _safe_eval_rows(runtime: ShortHorizonRuntime) -> dict[str, list[dict[str, An
         rows = runtime._conn.execute("""
             SELECT p.model_id,p.p_up,p.created_ts AS prediction_created_ts,
                    g.observation_id,g.instrument,g.horizon_minutes,g.captured_ts,
-                   g.target_ts,g.market_regime,g.frozen_features_json,
+                   g.target_ts,g.market_regime,
+                   CASE WHEN json_valid(g.frozen_features_json) THEN COALESCE(
+                        json_extract(g.frozen_features_json,'$.g1s_intraday.ret_15m'),
+                        json_extract(g.frozen_features_json,'$.ret_15m'),
+                        json_extract(g.frozen_features_json,'$.return_15m'))
+                        ELSE NULL END AS frozen_ret_15m,
                    r.direction_label,r.resolved_ts,
                    m.feature_set,m.model_family,m.created_ts AS model_created_ts,
                    m.training_cutoff_ts

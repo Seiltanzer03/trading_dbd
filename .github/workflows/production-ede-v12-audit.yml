@@ -66,7 +66,7 @@ jobs:
           python-version: "3.11"
       - name: Install snapshot transport
         run: pip install paramiko -e '.[research]'
-      - name: Build exact-SHA historical BLS/ISM bundle off-host
+      - name: Build exact-SHA historical BLS/ISM/FOMC bundle off-host
         run: |
           set -euo pipefail
           python scripts/build_offhost_historical_macro_bundle.py \

@@ -321,7 +321,11 @@ def _effectiveness(runtime: ShortHorizonRuntime) -> dict:
         rows = runtime._conn.execute("""
             SELECT p.model_id,p.p_up,p.created_ts AS prediction_created_ts,
                    g.observation_id,g.instrument,g.horizon_minutes,g.captured_ts,g.market_regime,
-                   g.frozen_features_json,r.direction_label,m.model_family,m.feature_set,
+                   CASE WHEN json_valid(g.frozen_features_json)
+                        THEN json_extract(g.frozen_features_json,
+                             '$.price_state.g1s_intraday.ret_15m')
+                        ELSE NULL END AS momentum_ret_15m,
+                   r.direction_label,m.model_family,m.feature_set,
                    m.raw_n AS train_raw_n,m.effective_n AS train_effective_n,
                    m.artifact_sha256,m.created_ts AS model_created_ts
             FROM g1s_shadow_predictions p

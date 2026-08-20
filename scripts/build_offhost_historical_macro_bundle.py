@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch canonical historical BLS/ISM pages outside the production network."""
+"""Fetch canonical historical BLS/ISM/FOMC pages off production."""
 from __future__ import annotations
 
 import argparse
@@ -28,6 +28,7 @@ def main() -> None:
         "HISTORICAL_OFFHOST_BUNDLE_BUILT "
         f"sha={args.expected_sha} acceptance_run_id={args.acceptance_run_id} "
         f"bls_n={len(bundle['bls_records'])} ism_n={len(bundle['ism_records'])} "
+        f"fomc_n={len(bundle['fomc_records'])} "
         f"error_n={len(bundle['errors'])} bundle_sha256={bundle['bundle_sha256']}"
     )
 

@@ -1,4 +1,4 @@
-"""Exact-SHA off-host transport for official historical BLS/ISM pages."""
+"""Exact-SHA off-host transport for official historical macro pages."""
 from __future__ import annotations
 
 import json
@@ -6,8 +6,10 @@ import os
 import re
 import time
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .macro_offhost_bundle import (
     _canonical_json,
@@ -18,9 +20,10 @@ from .macro_offhost_bundle import (
 )
 
 
-CONTRACT_VERSION = "official-macro-historical-offhost-v2-ical"
+CONTRACT_VERSION = "official-macro-historical-offhost-v3-fomc"
 DEFAULT_WINDOW_DAYS = 120
 MAX_WINDOW_DAYS = 180
+FOMC_WINDOW_DAYS = 365
 DEFAULT_MAX_AGE_SEC = 45.0 * 60.0
 HARD_MAX_AGE_SEC = 60.0 * 60.0
 PATH_ENV = "SEILTANZER_OFFHOST_HISTORICAL_MACRO_BUNDLE"
@@ -73,6 +76,13 @@ def build_bundle(
         FAMILIES as ISM_FAMILIES,
         OfficialISMHistoricalSource,
         _periods_for_window,
+    )
+    from .macro_fomc_deterministic_bootstrap import (
+        INDEX_TEMPLATE,
+        OfficialFOMCArchiveSource,
+        deterministic_statement_payload,
+        extract_statement_text,
+        parse_fomc_index,
     )
 
     stamp = time.time() if now is None else float(now)
@@ -132,6 +142,85 @@ def build_bundle(
                     f"{type(exc).__name__}:{str(exc)[:180]}"
                 )
 
+    # Deterministic FOMC features need the immediately previous official
+    # statement.  Fetch a bounded one-year window plus exactly one predecessor;
+    # production re-runs the same canonical parser/store before the snapshot.
+    fomc_start_ts = stamp - FOMC_WINDOW_DAYS * 86400.0
+    fomc_start_year = datetime.fromtimestamp(
+        fomc_start_ts, tz=ZoneInfo("UTC")).year
+    fomc_end_year = datetime.fromtimestamp(stamp, tz=ZoneInfo("UTC")).year
+    fomc_source = OfficialFOMCArchiveSource()
+    fomc_schedules: dict[str, dict[str, Any]] = {}
+    fomc_specs = []
+    with fomc_source._client() as client:
+        for year in range(fomc_start_year - 1, fomc_end_year + 1):
+            url = INDEX_TEMPLATE.format(year=year)
+            try:
+                html = fomc_source._validated(client.get(url))
+                fomc_schedules[str(year)] = _record({
+                    "format": "HTML",
+                    "year": year,
+                    "source_url": url,
+                    "content": html,
+                    "source_sha256": _sha256(html),
+                })
+                fomc_specs.extend(parse_fomc_index(html))
+            except Exception as exc:
+                errors[f"FOMC:schedule:{year}"] = (
+                    f"{type(exc).__name__}:{str(exc)[:180]}"
+                )
+
+    fomc_dedup = {spec.source_url: spec for spec in fomc_specs}
+    in_window = sorted(
+        (
+            spec for spec in fomc_dedup.values()
+            if fomc_start_ts <= spec.approximate_published_at <= stamp + 86400.0
+        ),
+        key=lambda item: item.date_code,
+    )
+    predecessors = [
+        spec for spec in fomc_dedup.values()
+        if spec.approximate_published_at < fomc_start_ts
+    ]
+    selected_fomc = list(in_window)
+    if predecessors:
+        selected_fomc.insert(
+            0, max(predecessors, key=lambda item: item.approximate_published_at)
+        )
+    selected_fomc = list({spec.source_url: spec for spec in selected_fomc}.values())
+    selected_fomc.sort(key=lambda item: item.date_code)
+
+    fomc_records: list[dict[str, Any]] = []
+    previous_spec = None
+    previous_body = None
+    for spec in selected_fomc:
+        previous_url = previous_spec.source_url if previous_spec else None
+        try:
+            fetched_at, html = fomc_source.archive(spec)
+            body = extract_statement_text(html)
+            payload = deterministic_statement_payload(
+                body, previous_body=previous_body)
+            fomc_records.append(_record({
+                "spec": asdict(spec),
+                "previous_source_url": previous_url,
+                "fetched_at": fetched_at,
+                "html": html,
+                "source_sha256": _sha256(html),
+                "payload": payload,
+            }))
+            previous_body = body
+        except Exception as exc:
+            errors[f"FOMC:{spec.date_code}"] = (
+                f"{type(exc).__name__}:{str(exc)[:180]}"
+            )
+            previous_body = None
+        previous_spec = spec
+
+    fomc_context_start_ts = min(
+        (spec.approximate_published_at for spec in selected_fomc),
+        default=fomc_start_ts,
+    )
+
     bundle = {
         "contract_version": CONTRACT_VERSION,
         "expected_sha": expected_sha,
@@ -141,6 +230,14 @@ def build_bundle(
         "bls_schedules": schedules,
         "bls_records": bls_records,
         "ism_records": ism_records,
+        "fomc_window": {
+            "start_ts": fomc_start_ts,
+            "context_start_ts": fomc_context_start_ts,
+            "end_ts": stamp,
+            "days": FOMC_WINDOW_DAYS,
+        },
+        "fomc_schedules": fomc_schedules,
+        "fomc_records": fomc_records,
         "errors": errors,
         "official_sources_only": True,
         "canonical_parsers_only": True,
@@ -169,6 +266,15 @@ def validate_bundle(
         FAMILIES as ISM_FAMILIES,
         _official_ism_url,
         parse_ism_historical_roundup,
+    )
+    from .macro_fomc_deterministic_bootstrap import (
+        FOMCStatementSpec,
+        INDEX_TEMPLATE,
+        _official_fed_url,
+        deterministic_statement_payload,
+        extract_statement_text,
+        parse_fomc_index,
+        parse_release_timestamp,
     )
 
     if not isinstance(bundle, dict) or bundle.get("contract_version") != CONTRACT_VERSION:
@@ -278,6 +384,73 @@ def validate_bundle(
             raise ValueError("HISTORICAL_OFFHOST_ISM_WINDOW_MISMATCH")
         if fetched_at + 300.0 < published_at:
             raise ValueError("HISTORICAL_OFFHOST_FETCH_TIME_INVALID")
+
+    fomc_window = bundle.get("fomc_window") or {}
+    fomc_start_ts = float(fomc_window.get("start_ts") or 0.0)
+    fomc_context_start_ts = float(fomc_window.get("context_start_ts") or 0.0)
+    fomc_end_ts = float(fomc_window.get("end_ts") or 0.0)
+    if not (
+        0 < fomc_context_start_ts <= fomc_start_ts <= fomc_end_ts <= stamp + 120.0
+    ):
+        raise ValueError("HISTORICAL_OFFHOST_FOMC_WINDOW_INVALID")
+    if fomc_end_ts - fomc_start_ts > FOMC_WINDOW_DAYS * 86400.0 + 1.0:
+        raise ValueError("HISTORICAL_OFFHOST_FOMC_WINDOW_TOO_WIDE")
+
+    fomc_schedule_specs: dict[str, FOMCStatementSpec] = {}
+    fomc_schedules = bundle.get("fomc_schedules")
+    if not isinstance(fomc_schedules, dict) or not fomc_schedules:
+        raise ValueError("HISTORICAL_OFFHOST_FOMC_SCHEDULES_MISSING")
+    for raw_year, value in fomc_schedules.items():
+        if value.get("record_sha256") != _sha256(_without(value, "record_sha256")):
+            raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
+        year = int(raw_year)
+        if value.get("format") != "HTML" or int(value.get("year") or 0) != year:
+            raise ValueError("HISTORICAL_OFFHOST_FOMC_CALENDAR_FORMAT_INVALID")
+        expected_url = INDEX_TEMPLATE.format(year=year)
+        if str(value.get("source_url") or "") != expected_url:
+            raise ValueError("HISTORICAL_OFFHOST_FOMC_SOURCE_INVALID")
+        content = str(value.get("content") or "")
+        if len(content) < 200 or len(content.encode("utf-8")) > 1_500_000:
+            raise ValueError("HISTORICAL_OFFHOST_SOURCE_SIZE_INVALID")
+        if value.get("source_sha256") != _sha256(content):
+            raise ValueError("HISTORICAL_OFFHOST_SOURCE_HASH_MISMATCH")
+        for spec in parse_fomc_index(content):
+            fomc_schedule_specs[spec.source_url] = spec
+
+    fomc_records = bundle.get("fomc_records")
+    if not isinstance(fomc_records, list) or len(fomc_records) > 40:
+        raise ValueError("HISTORICAL_OFFHOST_FOMC_RECORDS_INVALID")
+    previous_html_by_url: dict[str, str] = {}
+    for record in sorted(
+        fomc_records, key=lambda row: str((row.get("spec") or {}).get("date_code") or "")
+    ):
+        if record.get("record_sha256") != _sha256(_without(record, "record_sha256")):
+            raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
+        spec = FOMCStatementSpec(**(record.get("spec") or {}))
+        scheduled = fomc_schedule_specs.get(spec.source_url)
+        if scheduled != spec or not _official_fed_url(spec.source_url):
+            raise ValueError("HISTORICAL_OFFHOST_FOMC_CALENDAR_MISMATCH")
+        html = str(record.get("html") or "")
+        if len(html) < 200 or len(html.encode("utf-8")) > 1_500_000:
+            raise ValueError("HISTORICAL_OFFHOST_SOURCE_SIZE_INVALID")
+        if record.get("source_sha256") != _sha256(html):
+            raise ValueError("HISTORICAL_OFFHOST_SOURCE_HASH_MISMATCH")
+        published_at = parse_release_timestamp(html, date_code=spec.date_code)
+        if published_at < fomc_context_start_ts - 86400.0 or published_at > fomc_end_ts + 86400.0:
+            raise ValueError("HISTORICAL_OFFHOST_FOMC_WINDOW_MISMATCH")
+        fetched_at = float(record.get("fetched_at") or 0.0)
+        if fetched_at + 300.0 < published_at or fetched_at > stamp + 120.0:
+            raise ValueError("HISTORICAL_OFFHOST_FETCH_TIME_INVALID")
+        previous_url = record.get("previous_source_url")
+        if previous_url is not None and str(previous_url) not in fomc_schedule_specs:
+            raise ValueError("HISTORICAL_OFFHOST_FOMC_PREVIOUS_INVALID")
+        body = extract_statement_text(html)
+        previous_html = previous_html_by_url.get(str(previous_url))
+        previous_body = extract_statement_text(previous_html) if previous_html else None
+        parsed = deterministic_statement_payload(body, previous_body=previous_body)
+        if _canonical_json(parsed) != _canonical_json(record.get("payload")):
+            raise ValueError("HISTORICAL_OFFHOST_FOMC_PAYLOAD_MISMATCH")
+        previous_html_by_url[spec.source_url] = html
     return bundle
 
 
@@ -383,11 +556,82 @@ def _ism_refresh(runtime: Any) -> dict[str, Any]:
     }
 
 
+def _fomc_refresh(runtime: Any) -> dict[str, Any]:
+    from .macro_fomc_deterministic_bootstrap import (
+        FOMCStatementSpec,
+        HISTORICAL_LOOKBACK_BUFFER_SEC,
+        _observation_span,
+    )
+
+    bundle = load_verified_bundle(runtime)
+    span = _observation_span(runtime.store.runtime)
+    now_ts = time.time()
+    required_start_ts = (
+        max(0.0, span[0] - HISTORICAL_LOOKBACK_BUFFER_SEC)
+        if span is not None else now_ts - HISTORICAL_LOOKBACK_BUFFER_SEC
+    )
+    errors = {
+        key: value for key, value in (bundle.get("errors") or {}).items()
+        if key.startswith("FOMC:")
+    }
+    fomc_window = bundle["fomc_window"]
+    if float(fomc_window["start_ts"]) > required_start_ts:
+        errors["bundle_window"] = "FOMC_REQUIRED_OBSERVATION_WINDOW_NOT_COVERED"
+    if span is not None and float(fomc_window["end_ts"]) + 120.0 < span[1]:
+        errors["bundle_window"] = "FOMC_LATEST_OBSERVATION_NOT_COVERED"
+
+    stored = []
+    skipped = 0
+    records = sorted(
+        bundle["fomc_records"], key=lambda row: row["spec"]["date_code"])
+    for record in records:
+        spec = FOMCStatementSpec(**record["spec"])
+        if spec.approximate_published_at > now_ts + 86400.0:
+            continue
+        if runtime.store.has_source_url(spec.source_url):
+            skipped += 1
+            continue
+        try:
+            stored.append(runtime.store.ingest(
+                spec,
+                html=record["html"],
+                previous_source_url=record.get("previous_source_url"),
+                fetched_at=record["fetched_at"],
+            ))
+        except Exception as exc:
+            errors[f"INGEST:FOMC:{spec.date_code}"] = (
+                f"{type(exc).__name__}:{str(exc)[:180]}"
+            )
+    return {
+        "status": "PARTIAL" if errors else "OK",
+        "observation_span": (
+            {"first_t0": span[0], "latest_t0": span[1]} if span else None
+        ),
+        "bootstrap_window": {
+            "start_ts": required_start_ts,
+            "end_ts": now_ts,
+        },
+        "candidate_release_n": len(records),
+        "stored": stored,
+        "skipped": skipped,
+        "errors": errors,
+        "transport": "OFF_HOST_OFFICIAL_SOURCE",
+        "bundle_sha256": bundle["bundle_sha256"],
+        "llm_used": False,
+        "source_kind": "OFFICIAL_FED_DATED_STATEMENT_PAGE",
+        "source_vintage_guarantee": "OFFICIAL_DATED_PAGE_NOT_VERSIONED",
+        "old_t0_rows_mutated": False,
+        "research_only": True,
+        "production_authority": False,
+    }
+
+
 def install_historical_offhost_transport() -> None:
     global _INSTALLED
     if _INSTALLED:
         return
     from .macro_bls_historical_bootstrap import BLSHistoricalBootstrapRuntime
+    from .macro_fomc_deterministic_bootstrap import FOMCDeterministicBootstrapRuntime
     from .macro_ism_historical_bootstrap import ISMHistoricalBootstrapRuntime
 
     def run(self: Any, callback: Any) -> dict[str, Any]:
@@ -424,15 +668,23 @@ def install_historical_offhost_transport() -> None:
         del now
         return run(self, _ism_refresh)
 
+    def fomc_refresh(self: Any, *, now: float | None = None) -> dict[str, Any]:
+        del now
+        return run(self, _fomc_refresh)
+
     BLSHistoricalBootstrapRuntime.refresh = bls_refresh
     ISMHistoricalBootstrapRuntime.refresh = ism_refresh
+    FOMCDeterministicBootstrapRuntime.refresh = fomc_refresh
     _INSTALLED = True
 
 
 def transport_status() -> dict[str, Any]:
     return {
         "contract_version": CONTRACT_VERSION,
-        "families": ["CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES"],
+        "families": [
+            "CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES",
+            "FOMC_STATEMENT_DETERMINISTIC",
+        ],
         "official_sources_only": True,
         "canonical_parser_exact_sha": True,
         "bundle_and_record_hashes_required": True,
