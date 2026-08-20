@@ -35,7 +35,9 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
 
     # The only DB work left on production is a gentle online immutable snapshot,
     # guarded by the same fail-closed 3-second API health budget.
-    assert "src.backup(dst, pages=256, sleep=0.05)" in offload
+    assert "progress=report_backup_progress" in offload
+    assert "EDE_REMOTE_SNAPSHOT_PROGRESS" in offload
+    assert "transport.set_keepalive(SSH_KEEPALIVE_SECONDS)" in offload
     assert "ionice -c2 -n7 nice -n 15" in offload
     assert "API_PROBE_MAX_TIME_SECONDS = 3" in offload
     assert 'f"--max-time {API_PROBE_MAX_TIME_SECONDS} "' in offload

@@ -29,6 +29,7 @@ REMOTE_ORCHESTRATOR = REMOTE_ROOT / "scripts/production_research_acceptance.py"
 API_PROBE_MAX_TIME_SECONDS = 3
 API_PROBE_ATTEMPTS = 3
 API_PROBE_RETRY_DELAY_SECONDS = 2.0
+SSH_KEEPALIVE_SECONDS = 30
 
 LEDGER_NAMES = (
     "ede_frozen_evidence.jsonl",
@@ -64,6 +65,14 @@ def _connect(password: str, *, attempts: int = 4):
                 look_for_keys=False,
                 allow_agent=False,
             )
+            transport = client.get_transport()
+            if transport is None:
+                raise RuntimeError("SSH transport unavailable after connect")
+            # The low-priority online copy of the multi-GiB production DB can
+            # legitimately run for several minutes. Keep the authenticated
+            # transport alive while the remote command is otherwise quiet;
+            # this does not extend the command timeout or retry failed work.
+            transport.set_keepalive(SSH_KEEPALIVE_SECONDS)
             return client
         except (paramiko.SSHException, socket.timeout, OSError) as exc:
             client.close()
@@ -248,8 +257,29 @@ def snapshot(args: argparse.Namespace) -> int:
             src.execute("PRAGMA query_only=ON")
             src.execute("PRAGMA busy_timeout=30000")
             dst = sqlite3.connect(destination)
+            progress_state = {"bucket": -1}
+
+            def report_backup_progress(status, remaining, total):
+                percent = 100 if total <= 0 else int(
+                    max(0, min(100, ((total - remaining) * 100) // total))
+                )
+                bucket = percent // 10
+                if bucket > progress_state["bucket"]:
+                    progress_state["bucket"] = bucket
+                    print(
+                        "EDE_REMOTE_SNAPSHOT_PROGRESS "
+                        f"percent={percent} remaining_pages={remaining} "
+                        f"total_pages={total} sqlite_status={status}",
+                        flush=True,
+                    )
+
             try:
-                src.backup(dst, pages=256, sleep=0.05)
+                src.backup(
+                    dst,
+                    pages=256,
+                    progress=report_backup_progress,
+                    sleep=0.05,
+                )
                 dst.commit()
             finally:
                 dst.close()

@@ -54,3 +54,45 @@ def test_probe_still_fails_closed_after_bounded_retries(monkeypatch):
 def test_probe_rejects_zero_attempts():
     with pytest.raises(ValueError, match="attempts must be >= 1"):
         MODULE._probe_api(object(), attempts=0)
+
+
+def test_ssh_connection_enables_transport_keepalive(monkeypatch):
+    class Transport:
+        keepalive = None
+
+        def set_keepalive(self, seconds):
+            self.keepalive = seconds
+
+    class Client:
+        def __init__(self):
+            self.transport = Transport()
+
+        def set_missing_host_key_policy(self, _policy):
+            pass
+
+        def connect(self, *_args, **_kwargs):
+            pass
+
+        def get_transport(self):
+            return self.transport
+
+        def close(self):
+            pass
+
+    client = Client()
+
+    class Paramiko:
+        SSHException = RuntimeError
+
+        @staticmethod
+        def SSHClient():
+            return client
+
+        @staticmethod
+        def AutoAddPolicy():
+            return object()
+
+    monkeypatch.setattr(MODULE, "_paramiko", lambda: Paramiko)
+
+    assert MODULE._connect("secret", attempts=1) is client
+    assert client.transport.keepalive == MODULE.SSH_KEEPALIVE_SECONDS == 30
