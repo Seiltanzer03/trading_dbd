@@ -114,12 +114,15 @@ def test_production_ede_inventory_is_read_only_and_lists_canonical_features(tmp_
     assert database.read_bytes() == before
     assert result["database_open_mode"] == "READ_ONLY"
     assert result["g1s_observations_total"] == 0
-    assert result["canonical_feature_count"] == 91
-    assert len(result["features"]) == result["canonical_feature_count"]
+    assert result["canonical_feature_count"] == len(result["features"])
+    assert result["canonical_feature_count"] >= 96
     assert set(result["features"][0]["by_horizon"]) == {"15", "30", "60", "120", "240"}
     by_id = {row["feature_id"]: row for row in result["features"]}
     assert by_id["macro.cpi_headline_mom_pct"]["research_scope"] == "G1S"
     assert by_id["macro.nfp_payroll_change_k"]["research_scope"] == "G1S"
+    assert by_id["macro.fomc_target_change_bp"]["historical_availability"] == "AVAILABLE"
+    assert by_id["macro.fomc_statement_change"]["historical_availability"] == "AVAILABLE"
+    assert by_id["macro.fomc_policy_tone"]["historical_availability"] == "UNAVAILABLE"
     assert by_id["option.barrier_probability"]["status"] == "G1M_ONLY"
     assert by_id["quality.availability"]["status"] == "QUALITY_ONLY"
     assert result["production_authority"] is False
