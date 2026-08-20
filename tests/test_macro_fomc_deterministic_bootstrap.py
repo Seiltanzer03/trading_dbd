@@ -7,12 +7,14 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from seiltanzer.macro_fomc_deterministic_bootstrap import (
-    FOMCDeterministicReleaseStore,
     FOMCStatementSpec,
     deterministic_statement_payload,
     feature_records_from_runtime,
     parse_fomc_index,
     parse_release_timestamp,
+)
+from seiltanzer.macro_fomc_deterministic_store_refinement import (
+    StrictFOMCDeterministicReleaseStore,
 )
 from seiltanzer.macro_t0_context import build_macro_t0_context
 
@@ -105,7 +107,7 @@ def test_deterministic_payload_uses_only_current_and_previous_statement():
 
 def test_current_release_is_not_immutably_stored_without_known_previous():
     runtime = _Runtime()
-    store = FOMCDeterministicReleaseStore(runtime)
+    store = StrictFOMCDeterministicReleaseStore(runtime)
 
     with pytest.raises(ValueError, match="FOMC_PREVIOUS_RELEASE_MISSING"):
         store.ingest(
@@ -127,7 +129,7 @@ def test_store_is_causal_immutable_and_derivatives_use_exact_previous_release():
         "frozen_features_json TEXT)")
     runtime._conn.execute(
         "INSERT INTO g1s_observations VALUES('obs-1',200.0,'{\"original\":true}')")
-    store = FOMCDeterministicReleaseStore(runtime)
+    store = StrictFOMCDeterministicReleaseStore(runtime)
 
     first = store.ingest(
         _spec("20260318"), html=PREVIOUS_HTML, fetched_at=2_000_000_000.0)
@@ -158,7 +160,7 @@ def test_store_is_causal_immutable_and_derivatives_use_exact_previous_release():
 
 def test_repeated_t0_rows_reuse_same_fomc_release_id():
     runtime = _Runtime()
-    store = FOMCDeterministicReleaseStore(runtime)
+    store = StrictFOMCDeterministicReleaseStore(runtime)
     first = store.ingest(
         _spec("20260318"), html=PREVIOUS_HTML, fetched_at=2_000_000_000.0)
     second = store.ingest(
