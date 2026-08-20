@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from scripts import production_ede_inventory as inventory
+import importlib.util
+from pathlib import Path
+
+
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "production_ede_inventory.py"
+_SPEC = importlib.util.spec_from_file_location("production_ede_inventory", _SCRIPT_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+inventory = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(inventory)
 
 
 def _row(feature_id: str, *, real: int = 0, usable: bool = False,
