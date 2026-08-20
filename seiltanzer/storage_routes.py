@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Request
 
+from .storage_readiness import bounded_storage_integrity
 from .storage_restore_drill import (
     RESTORE_DRILL_CONTRACT_VERSION,
     last_restore_drill,
@@ -33,7 +34,9 @@ def install_storage_routes(app: FastAPI) -> None:
         return app.state.storage.backups(limit=limit)
 
     def integrity(full: bool = False):
-        return app.state.storage.integrity(full=full)
+        if full:
+            return app.state.storage.integrity(full=True)
+        return bounded_storage_integrity(app.state.storage)
 
     def restore_drill(request: Request):
         # This operation verifies a protected snapshot by restoring only into a
