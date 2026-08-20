@@ -6,10 +6,8 @@ import os
 import re
 import time
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from .macro_offhost_bundle import (
     _canonical_json,
@@ -20,7 +18,7 @@ from .macro_offhost_bundle import (
 )
 
 
-CONTRACT_VERSION = "official-macro-historical-offhost-v1"
+CONTRACT_VERSION = "official-macro-historical-offhost-v2-ical"
 DEFAULT_WINDOW_DAYS = 120
 MAX_WINDOW_DAYS = 180
 DEFAULT_MAX_AGE_SEC = 45.0 * 60.0
@@ -67,9 +65,9 @@ def build_bundle(
         raise ValueError("HISTORICAL_OFFHOST_WINDOW_INVALID")
 
     from .macro_bls_historical_bootstrap import (
-        BLS_SCHEDULE_TEMPLATE,
+        BLS_ICAL_URL,
         OfficialBLSArchiveSource,
-        parse_bls_schedule,
+        parse_bls_ical,
     )
     from .macro_ism_historical_bootstrap import (
         FAMILIES as ISM_FAMILIES,
@@ -80,21 +78,17 @@ def build_bundle(
     stamp = time.time() if now is None else float(now)
     start_ts = stamp - days * 86400.0
     bls_source = OfficialBLSArchiveSource()
-    schedules: dict[str, dict[str, Any]] = {}
-    specs = []
-    start_year = datetime.fromtimestamp(start_ts, ZoneInfo("UTC")).year
-    end_year = datetime.fromtimestamp(stamp, ZoneInfo("UTC")).year
-    for year in range(start_year, end_year + 1):
-        url = BLS_SCHEDULE_TEMPLATE.format(year=year)
-        with bls_source._client() as client:
-            html = bls_source._validated_response(client.get(url))
-        schedules[str(year)] = _record({
-            "year": year,
-            "source_url": url,
-            "html": html,
-            "source_sha256": _sha256(html),
+    with bls_source._client() as client:
+        calendar = bls_source._validated_response(client.get(BLS_ICAL_URL))
+    schedules: dict[str, dict[str, Any]] = {
+        "official_ical": _record({
+            "format": "ICAL",
+            "source_url": BLS_ICAL_URL,
+            "content": calendar,
+            "source_sha256": _sha256(calendar),
         })
-        specs.extend(parse_bls_schedule(html, year=year))
+    }
+    specs = parse_bls_ical(calendar)
 
     bls_records: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
@@ -167,7 +161,7 @@ def validate_bundle(
         BLSReleaseSpec,
         FAMILIES as BLS_FAMILIES,
         _official_bls_url,
-        parse_bls_schedule,
+        parse_bls_ical,
         parse_cpi_archive,
         parse_nfp_archive,
     )
@@ -216,13 +210,14 @@ def validate_bundle(
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
         if not _official_bls_url(str(value.get("source_url") or "")):
             raise ValueError("HISTORICAL_OFFHOST_BLS_SOURCE_INVALID")
-        html = str(value.get("html") or "")
-        if len(html) < 200 or len(html.encode("utf-8")) > 2_000_000:
+        if value.get("format") != "ICAL":
+            raise ValueError("HISTORICAL_OFFHOST_BLS_CALENDAR_FORMAT_INVALID")
+        content = str(value.get("content") or "")
+        if len(content) < 200 or len(content.encode("utf-8")) > 2_000_000:
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_SIZE_INVALID")
-        if value.get("source_sha256") != _sha256(html):
+        if value.get("source_sha256") != _sha256(content):
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_HASH_MISMATCH")
-        year = int(value["year"])
-        for spec in parse_bls_schedule(html, year=year):
+        for spec in parse_bls_ical(content):
             schedule_specs.add((spec.family, spec.period, spec.published_at, spec.source_url))
 
     bls_records = bundle.get("bls_records")

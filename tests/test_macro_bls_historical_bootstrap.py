@@ -12,6 +12,7 @@ from seiltanzer.macro_bls_historical_bootstrap import (
     BLSHistoricalReleaseStore,
     BLSReleaseSpec,
     historical_feature_records_from_runtime,
+    parse_bls_ical,
     parse_bls_schedule,
     parse_cpi_archive,
     parse_nfp_archive,
@@ -34,6 +35,19 @@ SCHEDULE_HTML = """
 <tr><td>Wednesday, August 12, 2026</td><td>08:30 AM</td><td>Consumer Price Index for July 2026</td></tr>
 <tr><td>Thursday, August 13, 2026</td><td>08:30 AM</td><td>Producer Price Index for July 2026</td></tr>
 </table>
+"""
+
+SCHEDULE_ICAL = """BEGIN:VCALENDAR
+PRODID:-//Department of Labor//Bureau of Labor Statistics//EN
+BEGIN:VEVENT
+DTSTART;TZID=US-Eastern:20260807T083000
+SUMMARY:Employment Situation
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;TZID=US-Eastern:20260812T083000
+SUMMARY:Consumer Price Index
+END:VEVENT
+END:VCALENDAR
 """
 
 CPI_HTML = """
@@ -77,6 +91,20 @@ def test_schedule_uses_exact_official_release_time_and_archive_date():
     assert cpi.published_at == expected_cpi
     assert nfp.source_url.endswith("/empsit_08072026.htm")
     assert cpi.source_url.endswith("/cpi_08122026.htm")
+
+
+def test_official_ical_uses_exact_release_time_and_archive_period_guard():
+    specs = parse_bls_ical(SCHEDULE_ICAL)
+    assert [(item.family, item.period) for item in specs] == [
+        ("NFP", "2026-07"), ("CPI", "2026-07")]
+    assert specs[0].published_at == datetime(
+        2026, 8, 7, 8, 30, tzinfo=ZoneInfo("America/New_York")
+    ).timestamp()
+    assert specs[1].published_at == datetime(
+        2026, 8, 12, 8, 30, tzinfo=ZoneInfo("America/New_York")
+    ).timestamp()
+    assert specs[0].source_url.endswith("/empsit_08072026.htm")
+    assert specs[1].source_url.endswith("/cpi_08122026.htm")
 
 
 def test_cpi_archive_uses_values_printed_in_release_table():
