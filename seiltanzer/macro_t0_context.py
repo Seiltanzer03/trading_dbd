@@ -1,9 +1,9 @@
 """Freeze already-observed official macro context into future T0 rows only.
 
-FOMC semantics and deterministic CPI/NFP/ISM numbers are additive research
-context.  They do not enter the current production policy or ML feature vector in
-this pass: the prospective outcome machinery must first measure their actual OOS
-value.  No network or LLM call can occur here.
+FOMC prospective LLM semantics, deterministic FOMC statement measurements, and
+deterministic CPI/NFP/ISM numbers are additive research context. They do not
+enter the current production policy or ML feature vector unless promoted through
+the existing evidence gates. No network or LLM call can occur here.
 """
 from __future__ import annotations
 
@@ -11,11 +11,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .macro_data_factory import DATA_FACTORY_CONTRACT_VERSION, MacroDataFactory
+from .macro_fomc_deterministic_bootstrap import FOMC_DETERMINISTIC_FEATURES
 from .macro_numeric_data import research_context as numeric_research_context
 from .passive_learning import PassiveLearningEngine
 
 
-MACRO_T0_CONTEXT_VERSION = "macro-t0-context-v2"
+MACRO_T0_CONTEXT_VERSION = "macro-t0-context-v3"
 _INSTALLED = False
 
 
@@ -83,9 +84,69 @@ def _fomc_context(factory: MacroDataFactory, captured_ts: float) -> dict[str, An
     }
 
 
+def _fomc_deterministic_context(factory: MacroDataFactory,
+                                captured_ts: float) -> dict[str, Any]:
+    store = getattr(factory, "fomc_deterministic_store", None)
+    if store is None:
+        return {
+            "available": False,
+            "reason": "FOMC_DETERMINISTIC_STORE_NOT_INSTALLED",
+            "research_only": True,
+            "production_authority": False,
+        }
+    try:
+        record = store.latest_admissible(float(captured_ts))
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": f"FOMC_DETERMINISTIC_READ_ERROR:{type(exc).__name__}",
+            "research_only": True,
+            "production_authority": False,
+        }
+    if record.get("status") != "VALID":
+        return {
+            "available": False,
+            "reason": record.get("reason") or "NO_CAUSAL_FOMC_DETERMINISTIC_CONTEXT",
+            "captured_ts": float(captured_ts),
+            "research_only": True,
+            "production_authority": False,
+        }
+    available_at = record.get("available_at")
+    if available_at is None or float(available_at) > float(captured_ts)+1e-6:
+        return {
+            "available": False,
+            "reason": "FOMC_DETERMINISTIC_CONTEXT_AFTER_T0",
+            "captured_ts": float(captured_ts),
+            "research_only": True,
+            "production_authority": False,
+        }
+    return {
+        "available": True,
+        "family": "FOMC_STATEMENT",
+        "release_id": record.get("release_id"),
+        "date_code": record.get("date_code"),
+        "source": record.get("source"),
+        "source_url": record.get("source_url"),
+        "official_source_verified": bool(record.get("official_source_verified")),
+        "published_at": record.get("published_at"),
+        "available_at": float(available_at),
+        "body_sha256": record.get("body_sha256"),
+        "previous_release_id": record.get("previous_release_id"),
+        "payload": record.get("payload") or {},
+        "historical_reconstruction": bool(record.get("historical_reconstruction")),
+        "source_vintage_guarantee": record.get("source_vintage_guarantee"),
+        "llm_used": False,
+        "eligible_for_future_ml_research": bool(record.get("official_source_verified")),
+        "causal_rule": "published_at<=captured_ts",
+        "research_only": True,
+        "production_authority": False,
+    }
+
+
 def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float) -> dict[str, Any]:
     captured_ts = float(captured_ts)
     fomc = _fomc_context(factory, captured_ts)
+    fomc_deterministic = _fomc_deterministic_context(factory, captured_ts)
     numeric_store = getattr(factory, "numeric_release_store", None)
     if numeric_store is None:
         numeric = {
@@ -106,15 +167,31 @@ def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float) -> dic
                 "research_only": True,
                 "production_authority": False,
             }
-    available = bool(fomc.get("available") or numeric.get("available_families"))
+
+    deterministic_vector: dict[str, Any] = {}
+    if fomc_deterministic.get("available"):
+        payload = fomc_deterministic.get("payload") or {}
+        for source_name, feature_id in FOMC_DETERMINISTIC_FEATURES.items():
+            value = payload.get(source_name)
+            if value is not None:
+                deterministic_vector[feature_id] = value
+    candidate_vector = dict(numeric.get("candidate_vector") or {})
+    candidate_vector.update(deterministic_vector)
+
+    available = bool(
+        fomc.get("available")
+        or fomc_deterministic.get("available")
+        or numeric.get("available_families")
+    )
     result: dict[str, Any] = {
         "contract_version": MACRO_T0_CONTEXT_VERSION,
         "available": available,
         "captured_ts": captured_ts,
         "data_factory_contract": DATA_FACTORY_CONTRACT_VERSION,
         "fomc": fomc,
+        "fomc_deterministic": fomc_deterministic,
         "numeric_macro": numeric,
-        "candidate_vector": dict(numeric.get("candidate_vector") or {}),
+        "candidate_vector": candidate_vector,
         "historical_backfill_allowed": False,
         "causal_rule": "each_record.available_at<=captured_ts",
         "research_only": True,
