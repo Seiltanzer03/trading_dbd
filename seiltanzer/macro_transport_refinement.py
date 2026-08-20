@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 import httpx
 
 
-TRANSPORT_VERSION = "macro-official-transport-v4"
+TRANSPORT_VERSION = "macro-official-transport-v5"
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
@@ -137,6 +137,7 @@ def macro_transport_status() -> dict[str, Any]:
         "bls_transport": {
             "direct_official_first": True,
             "configured_proxy_fallback": macro_proxy_url() is not None,
+            "official_get_per_series_proxy_fallback": macro_proxy_url() is not None,
             "attempts_per_route": BLS_TRANSPORT_ATTEMPTS_PER_ROUTE,
             "retry_backoff_sec": BLS_TRANSPORT_RETRY_BACKOFF_SEC,
             "request_timeout_unchanged": True,
@@ -206,6 +207,65 @@ def _fetch_bls_official_with_failover(
             except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
                 errors.append(
                     f"{route_name}[{attempt}]:{type(exc).__name__}:"
+                    f"{str(exc)[:120]}"
+                )
+                if attempt < BLS_TRANSPORT_ATTEMPTS_PER_ROUTE:
+                    time.sleep(BLS_TRANSPORT_RETRY_BACKOFF_SEC * attempt)
+
+    # Some HTTP proxies accept official GET requests but do not preserve the BLS
+    # JSON POST body. BLS v2 exposes the same series through its official per-series
+    # GET contract. Assemble only those seven exact official responses, then pass
+    # the combined response through the unchanged canonical multi-series parser.
+    if proxy:
+        for attempt in range(1, BLS_TRANSPORT_ATTEMPTS_PER_ROUTE + 1):
+            try:
+                series_payloads: list[dict[str, Any]] = []
+                with httpx.Client(
+                    timeout=source.timeout_sec,
+                    follow_redirects=True,
+                    proxy=proxy,
+                    trust_env=False,
+                    headers={
+                        "User-Agent": BROWSER_USER_AGENT,
+                        "Accept": "application/json",
+                        "Accept-Language": "en-US,en;q=0.8",
+                        "Cache-Control": "no-cache",
+                    },
+                ) as client:
+                    for series_id in body["seriesid"]:
+                        response = client.get(
+                            BLS_API_URL + series_id,
+                            params={
+                                "startyear": body["startyear"],
+                                "endyear": body["endyear"],
+                            },
+                        )
+                        response.raise_for_status()
+                        payload = response.json()
+                        if payload.get("status") != "REQUEST_SUCCEEDED":
+                            raise ValueError("BLS_GET_REQUEST_NOT_SUCCEEDED")
+                        rows = ((payload.get("Results") or {}).get("series") or [])
+                        matching = [
+                            row
+                            for row in rows
+                            if isinstance(row, dict)
+                            and str(row.get("seriesID") or "") == series_id
+                        ]
+                        if len(matching) != 1:
+                            raise ValueError(
+                                "BLS_GET_SERIES_MISMATCH:" + series_id
+                            )
+                        series_payloads.append(matching[0])
+                releases = build_bls_releases(
+                    {
+                        "status": "REQUEST_SUCCEEDED",
+                        "Results": {"series": series_payloads},
+                    }
+                )
+                return time.time(), releases
+            except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
+                errors.append(
+                    f"CONFIGURED_PROXY_GET[{attempt}]:{type(exc).__name__}:"
                     f"{str(exc)[:120]}"
                 )
                 if attempt < BLS_TRANSPORT_ATTEMPTS_PER_ROUTE:

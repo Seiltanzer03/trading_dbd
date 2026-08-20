@@ -133,3 +133,89 @@ def test_bls_transport_exhaustion_never_returns_unvalidated_payload(monkeypatch)
         )
 
     assert calls == [None, None]
+
+
+def test_bls_transport_uses_exact_official_get_series_when_proxy_post_is_invalid(
+    monkeypatch,
+):
+    post_proxies = []
+    get_calls = []
+    sleeps = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.proxy = kwargs["proxy"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, _url, *, json):
+            assert len(json["seriesid"]) == 7
+            post_proxies.append(self.proxy)
+            return Response({"status": "REQUEST_NOT_SUCCEEDED"})
+
+        def get(self, url, *, params):
+            series_id = url.rsplit("/", 1)[-1]
+            get_calls.append((self.proxy, series_id, params))
+            return Response(
+                {
+                    "status": "REQUEST_SUCCEEDED",
+                    "Results": {
+                        "series": [
+                            {
+                                "seriesID": series_id,
+                                "data": [
+                                    {"year": "2026", "period": "M07", "value": "1"}
+                                ],
+                            }
+                        ]
+                    },
+                }
+            )
+
+    expected = {"CPI": {"period": "2026-07"}, "NFP": {"period": "2026-07"}}
+
+    def validate_combined(payload):
+        rows = payload["Results"]["series"]
+        assert payload["status"] == "REQUEST_SUCCEEDED"
+        assert len(rows) == 7
+        assert len({row["seriesID"] for row in rows}) == 7
+        return expected
+
+    monkeypatch.setenv("MACRO_HTTP_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setattr(transport.httpx, "Client", Client)
+    monkeypatch.setattr(transport.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        "seiltanzer.macro_numeric_data.build_bls_releases",
+        validate_combined,
+    )
+
+    _fetched_at, releases = transport._fetch_bls_official_with_failover(
+        OfficialNumericMacroSource(timeout_sec=7),
+        now=1_787_220_000.0,
+    )
+
+    assert releases == expected
+    assert post_proxies == [
+        None,
+        None,
+        "http://proxy.invalid:8080",
+        "http://proxy.invalid:8080",
+    ]
+    assert len(get_calls) == 7
+    assert all(call[0] == "http://proxy.invalid:8080" for call in get_calls)
+    assert all(call[2] == {"startyear": "2025", "endyear": "2026"} for call in get_calls)
+    assert sleeps == [1.0, 1.0]
