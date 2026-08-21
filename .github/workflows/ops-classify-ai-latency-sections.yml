@@ -1,0 +1,121 @@
+name: ops-classify-ai-latency-sections
+
+on:
+  push:
+    branches:
+      - ops/diagnose-ai-provider-live-20260821
+    paths:
+      - .github/workflows/ops-classify-ai-latency-sections.yml
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  classify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Verify saved diagnostic exists
+        id: data
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: test -s /tmp/candidate_llm_diag.json
+
+      - name: Under 8 seconds
+        id: t8
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: python3 -c "import json; assert float(json.load(open('/tmp/candidate_llm_diag.json'))['elapsed_ms']) < 8000"
+      - name: Under 9 seconds
+        id: t9
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: python3 -c "import json; assert float(json.load(open('/tmp/candidate_llm_diag.json'))['elapsed_ms']) < 9000"
+      - name: Under 10 seconds
+        id: t10
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: python3 -c "import json; assert float(json.load(open('/tmp/candidate_llm_diag.json'))['elapsed_ms']) < 10000"
+      - name: Under 11 seconds
+        id: t11
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: python3 -c "import json; assert float(json.load(open('/tmp/candidate_llm_diag.json'))['elapsed_ms']) < 11000"
+
+      - name: No vague-style warnings
+        id: vague
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: |
+            python3 - <<'PY'
+            import json
+            v=json.load(open('/tmp/candidate_llm_diag.json'))['violations']
+            assert not [x for x in v if x.startswith('размытая формулировка')], v
+            PY
+
+      - name: Publish latency classifications
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DATA: ${{ steps.data.outcome }}
+          T8: ${{ steps.t8.outcome }}
+          T9: ${{ steps.t9.outcome }}
+          T10: ${{ steps.t10.outcome }}
+          T11: ${{ steps.t11.outcome }}
+          VAGUE: ${{ steps.vague.outcome }}
+        run: |
+          set -euo pipefail
+          publish() {
+            outcome="$1" context="$2" ok="$3" bad="$4"
+            if [ "$outcome" = success ]; then state=success; desc="$ok"; else state=failure; desc="$bad"; fi
+            payload=$(python3 - "$state" "$context" "$desc" <<'PY'
+          import json,sys
+          print(json.dumps({'state':sys.argv[1],'context':sys.argv[2],'description':sys.argv[3]}))
+          PY
+            )
+            curl -fsS -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" -d "$payload" >/dev/null
+          }
+          publish "$DATA" diagnostic/latency-data "Saved real-prompt diagnostic available" "Saved real-prompt diagnostic missing"
+          publish "$T8" diagnostic/under-8s "Real prompt completes under 8s" "Real prompt takes at least 8s"
+          publish "$T9" diagnostic/under-9s "Real prompt completes under 9s" "Real prompt takes at least 9s"
+          publish "$T10" diagnostic/under-10s "Real prompt completes under 10s" "Real prompt takes at least 10s"
+          publish "$T11" diagnostic/under-11s "Real prompt completes under 11s" "Real prompt takes at least 11s"
+          publish "$VAGUE" diagnostic/no-vague-warning "No vague-style validator warning" "Provider answer also has vague-style warning"
