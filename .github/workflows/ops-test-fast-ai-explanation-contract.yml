@@ -1,0 +1,163 @@
+name: ops-test-fast-ai-explanation-contract
+
+on:
+  push:
+    branches:
+      - ops/diagnose-ai-provider-live-20260821
+    paths:
+      - .github/workflows/ops-test-fast-ai-explanation-contract.yml
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 6
+    steps:
+      - name: Benchmark fast explanation against live snapshot
+        id: call
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          script: |
+            set -euo pipefail
+            curl -fsSL --max-time 20 \
+              https://raw.githubusercontent.com/Seiltanzer03/trading_dbd/f9017e51e9754c6b1233a70293e93d7b37ed6b65/seiltanzer/ai_provider_guard.py \
+              -o /tmp/ai_provider_guard_candidate.py
+            PID=$(systemctl show -p MainPID --value seiltanzer)
+            /opt/seiltanzer/.venv/bin/python - "$PID" <<'PY'
+            import importlib.util, json, os, sqlite3, sys, time
+            from pathlib import Path
+            import httpx
+            raw=open(f'/proc/{sys.argv[1]}/environ','rb').read().split(b'\0')
+            env={k.decode():v.decode() for k,v in (item.split(b'=',1) for item in raw if b'=' in item)}
+            key=env.get('OPENROUTER_API_KEY','').strip(); assert key
+            model=env.get('OPENROUTER_MODEL','openai/gpt-4o-mini')
+            proxy=env.get('OPENROUTER_PROXY','').strip() or None
+            spec=importlib.util.spec_from_file_location('candidate_guard','/tmp/ai_provider_guard_candidate.py')
+            guard=importlib.util.module_from_spec(spec); spec.loader.exec_module(guard)
+            snapshot=None
+            for path in sorted(Path('/opt/seiltanzer/data').rglob('*.sqlite3')):
+                try:
+                    con=sqlite3.connect(f'file:{path}?mode=ro',uri=True,timeout=0.2)
+                    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_verdicts'").fetchone():
+                        row=con.execute('SELECT snapshot_json FROM ai_verdicts ORDER BY ts DESC LIMIT 1').fetchone()
+                        if row and row[0]: snapshot=json.loads(row[0]); con.close(); break
+                    con.close()
+                except Exception:
+                    continue
+            assert isinstance(snapshot,dict)
+            projected=guard.compact_provider_snapshot(snapshot)
+            from seiltanzer import ai_verdict
+            manager=projected.get('policy_manager') or {}
+            rec=manager.get('recommendation') or {}
+            facts={'action_ru':rec.get('action_ru'),'selected_policy':rec.get('policy'),'policies':{
+                name:{k:row.get(k) for k in ('expected_final_r','cvar10_r')}
+                for name,row in (manager.get('policies') or {}).items()}}
+            fast_suffix='''\n\nПРОИЗВОДСТВЕННЫЙ EXPLANATION_ONLY РЕЖИМ. Это требование заменяет старое требование 320–520 слов и 11 обязательных разделов. Ответь по-русски 170–240 слов. Не меняй и не предлагай новое действие. Первая строка должна дословно содержать action_ru. Затем кратко: (1) одной компактной строкой все HOLD/CLOSE_10/CLOSE_25/CLOSE_50/EXIT с Expected R и CVaR10 ровно как во входе; (2) почему выбран текущий policy; (3) 2–4 главных подтверждения/ограничения данных; (4) следующий пересчёт. Не придумывай отсутствующие значения. EDE/research context без production authority не называй самостоятельной причиной CLOSE/EXIT. Формат заголовков вторичен; точность action и чисел обязательна.'''
+            body={'model':model,'temperature':0.0,'max_tokens':650,'messages':[
+                {'role':'system','content':ai_verdict.SYSTEM_PROMPT+fast_suffix},
+                {'role':'user','content':'EXPLANATION_ONLY snapshot:\n'+json.dumps(projected,ensure_ascii=False,separators=(',',':'))+'\n\nКонтрольные authoritative факты:\n'+json.dumps(facts,ensure_ascii=False,separators=(',',':'))},
+            ]}
+            started=time.monotonic()
+            with httpx.Client(proxy=proxy,timeout=30,trust_env=False) as client:
+                resp=client.post('https://openrouter.ai/api/v1/chat/completions',json=body,
+                    headers={'Authorization':f'Bearer {key}','Content-Type':'application/json','Accept':'application/json','User-Agent':'Seiltanzer-Diagnostic/1.0'})
+            elapsed=(time.monotonic()-started)*1000
+            resp.raise_for_status(); result=resp.json()
+            content=((result.get('choices') or [{}])[0].get('message') or {}).get('content'); assert content
+            violations=ai_verdict._validate_model_report(content,projected)
+            out={'elapsed_ms':elapsed,'violations':violations,'chars':len(content)}
+            open('/tmp/fast_candidate_llm_diag.json','w').write(json.dumps(out,ensure_ascii=False))
+            print(json.dumps({'elapsed_ms':round(elapsed,1),'chars':len(content),'violations':len(violations)},sort_keys=True))
+            PY
+
+      - name: Under 6 seconds
+        id: t6
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: python3 -c "import json; assert float(json.load(open('/tmp/fast_candidate_llm_diag.json'))['elapsed_ms']) < 6000"
+      - name: Under 8 seconds
+        id: t8
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: python3 -c "import json; assert float(json.load(open('/tmp/fast_candidate_llm_diag.json'))['elapsed_ms']) < 8000"
+      - name: Hard action invariant
+        id: action
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: |
+            python3 - <<'PY'
+            import json
+            v=json.load(open('/tmp/fast_candidate_llm_diag.json'))['violations']
+            assert 'изменено рассчитанное действие' not in v, v
+            PY
+      - name: Hard policy number invariants
+        id: numbers
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: |
+            python3 - <<'PY'
+            import json
+            v=json.load(open('/tmp/fast_candidate_llm_diag.json'))['violations']
+            assert not [x for x in v if 'изменено или пропущено' in x or x.startswith('нет политики')], v
+            PY
+
+      - name: Publish benchmark classifications
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CALL: ${{ steps.call.outcome }}
+          T6: ${{ steps.t6.outcome }}
+          T8: ${{ steps.t8.outcome }}
+          ACTION: ${{ steps.action.outcome }}
+          NUMBERS: ${{ steps.numbers.outcome }}
+        run: |
+          set -euo pipefail
+          publish() {
+            outcome="$1" context="$2" ok="$3" bad="$4"
+            if [ "$outcome" = success ]; then state=success; desc="$ok"; else state=failure; desc="$bad"; fi
+            payload=$(python3 - "$state" "$context" "$desc" <<'PY'
+          import json,sys
+          print(json.dumps({'state':sys.argv[1],'context':sys.argv[2],'description':sys.argv[3]}))
+          PY
+            )
+            curl -fsS -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" -d "$payload" >/dev/null
+          }
+          publish "$CALL" diagnostic/fast-call "Fast explanation prompt returns provider content" "Fast explanation prompt fails"
+          publish "$T6" diagnostic/fast-under-6s "Fast explanation completes under 6s" "Fast explanation exceeds 6s"
+          publish "$T8" diagnostic/fast-under-8s "Fast explanation completes under 8s" "Fast explanation exceeds 8s"
+          publish "$ACTION" diagnostic/fast-action "Fast explanation preserves action" "Fast explanation fails action invariant"
+          publish "$NUMBERS" diagnostic/fast-numbers "Fast explanation preserves policy numbers" "Fast explanation fails policy number invariant"
