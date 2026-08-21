@@ -2,13 +2,15 @@
 
 The deterministic policy snapshot/report is authoritative. OpenRouter is only an
 explanation layer, so a slow provider must never hold the public HTTP request long
-enough for an upstream gateway to return HTML 504. A timeout opens a short circuit:
-while the still-running HTTP call drains inside the single provider worker, new AI
-reviews immediately use the established deterministic fallback instead of queueing
-behind stale provider work.
+enough for an upstream gateway to return HTML 504. The provider receives a small
+explanation projection rather than longitudinal/debug replicas that do not own the
+management action. A timeout still falls back to the established deterministic
+report.
 """
 from __future__ import annotations
 
+from copy import deepcopy
+import json
 import os
 import threading
 import time
@@ -16,16 +18,11 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Any, Callable
 
 
-# The public route has a materially tighter SLA than the provider's own HTTP
-# timeout. Keep enough time for a fast explanation, but fail over well before a
-# gateway can terminate the browser request. The full deterministic policy report
-# is already available and remains authoritative on every timeout. The hard cap
-# also prevents a stale server environment override from restoring the old 25s
-# behavior after deployment.
 DEFAULT_PROVIDER_TIMEOUT_SEC = 6.0
 MIN_PROVIDER_TIMEOUT_SEC = 3.0
 MAX_PROVIDER_TIMEOUT_SEC = 8.0
 DEFAULT_PROVIDER_CIRCUIT_SEC = 50.0
+PROVIDER_SNAPSHOT_LIMIT_BYTES = 18_000
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="seiltanzer-ai-provider")
 _CIRCUIT_LOCK = threading.Lock()
@@ -49,6 +46,166 @@ def provider_circuit_sec() -> float:
     except (TypeError, ValueError):
         value = DEFAULT_PROVIDER_CIRCUIT_SEC
     return min(120.0, max(15.0, value))
+
+
+def _json_bytes(value: Any) -> int:
+    return len(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=str,
+    ).encode("utf-8"))
+
+
+def _pick(source: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    source = source if isinstance(source, dict) else {}
+    return {key: deepcopy(source[key]) for key in keys if key in source}
+
+
+def _bounded(value: Any, *, depth: int = 0) -> Any:
+    """Bound explanation-only detail without inventing values."""
+    if depth >= 4:
+        return "[bounded]"
+    if isinstance(value, str):
+        return value if len(value) <= 192 else value[:189] + "..."
+    if isinstance(value, (list, tuple)):
+        return [_bounded(item, depth=depth + 1) for item in value[:8]]
+    if isinstance(value, dict):
+        return {
+            key: _bounded(value[key], depth=depth + 1)
+            for key in sorted(value)[:20]
+        }
+    return value
+
+
+def _compact_policies(source: Any) -> dict[str, Any]:
+    source = source if isinstance(source, dict) else {}
+    fields = (
+        "name", "close_fraction", "expected_final_r", "median_final_r", "cvar10_r",
+        "p_final_profit", "p_final_loss", "p_giveback_0_25_from_now",
+        "p_giveback_0_50_from_now", "p_next_rung_before_stop",
+        "p_stop_before_next_rung", "next_rung_r", "expected_event_minutes",
+        "no_event_probability", "gross_expected_final_r", "execution_cost_r",
+        "expected_future_r_on_remaining", "expected_total_trade_r", "eligible", "reason",
+    )
+    return {name: _pick(row, fields) for name, row in source.items() if isinstance(row, dict)}
+
+
+def _compact_evidence(source: Any) -> dict[str, Any]:
+    source = source if isinstance(source, dict) else {}
+    # These are the decision/explanation surfaces used by the public report. Full
+    # raw grids, option-chain replicas and research workspaces stay canonical in
+    # the stored AI snapshot and are intentionally not uploaded to the provider.
+    keys = (
+        "live_price", "atr_regime", "iv_surface", "correlation", "strike_oi_gex",
+        "option_barrier", "option_derivative_state", "cone_rnd", "levels",
+        "data_quality", "adverse_confirmations", "supportive_contradictions",
+        "context_observations", "uncertainty_flags", "decision_roles",
+        "confirmation_independence", "adverse_confirmation_families",
+        "supportive_confirmation_families", "mixed_confirmation_families",
+        "adverse_confirmation_count",
+    )
+    return {key: _bounded(source[key]) for key in keys if key in source}
+
+
+def _compact_input_audit(source: Any) -> dict[str, Any]:
+    source = source if isinstance(source, dict) else {}
+    out = _pick(source, (
+        "all_required_available", "missing_required", "degraded_inputs",
+        "required_count", "available_count",
+    ))
+    rows = source.get("rows")
+    if isinstance(rows, dict):
+        row_fields = ("available", "status", "source", "role", "age_sec", "symbol")
+        out["rows"] = {
+            name: _pick(row, row_fields)
+            for name, row in list(rows.items())[:20]
+            if isinstance(row, dict)
+        }
+    return out
+
+
+def _compact_ede(source: Any) -> dict[str, Any]:
+    source = source if isinstance(source, dict) else {}
+    keys = (
+        "contract_version", "instrument", "snapshot_ts", "observation_t0",
+        "data_maturity", "edge_maturity", "confidence_context",
+        "candidate", "candidate_id", "candidate_applies", "application_reason",
+        "position_relation", "family_evidence", "current_features", "families",
+    )
+    selected = {key: source[key] for key in keys if key in source}
+    # Schema versions have changed over time; if named fields are absent, keep a
+    # small bounded view rather than silently dropping all causal context.
+    return _bounded(selected if selected else source)
+
+
+def compact_provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Return an explanation-only projection while preserving action semantics."""
+    original_bytes = _json_bytes(snapshot)
+    manager = snapshot.get("policy_manager") or {}
+    manager = manager if isinstance(manager, dict) else {}
+
+    manager_fields = (
+        "version", "management_decision", "recommendation", "selection_rule",
+        "inputs", "risk_constraint", "management_arbiter", "stability",
+        "state_change_attribution", "counterfactual_attribution", "metric_changes",
+        "cancellation_boundary", "recalculation_triggers", "first_touch_clock",
+        "derived_scenario_ensemble", "execution_cost_sensitivity",
+        "calibration_contract", "derivative_switch_thresholds", "shadow_policy_contract",
+        "phase_e_authority_contract", "decision_inputs", "decision_influence",
+        "influence_report", "option_derivative_state",
+    )
+    compact_manager = _pick(manager, manager_fields)
+    compact_manager["policies"] = _compact_policies(manager.get("policies"))
+    compact_manager["evidence"] = _compact_evidence(manager.get("evidence"))
+    compact_manager["input_audit"] = _compact_input_audit(manager.get("input_audit"))
+    compact_manager["gate"] = _bounded(manager.get("gate") or {})
+
+    payload = _pick(snapshot, (
+        "captured_ts", "trade_id", "strategy", "position_state", "trade_geometry",
+        "time_context", "observation", "metric_coverage", "validation",
+        "position_management_risk_long", "active_edge_provisional_weight",
+        "active_edge", "active_edge_context", "short_horizon_policy", "ai_review_mode",
+    ))
+    payload["policy_manager"] = compact_manager
+    payload["ede_causal_context"] = _compact_ede(snapshot.get("ede_causal_context"))
+    previous_reviews = snapshot.get("previous_reviews")
+    payload["provider_history_summary"] = {
+        "metric_history_present": bool(snapshot.get("metric_history")),
+        "previous_review_count": len(previous_reviews) if isinstance(previous_reviews, list) else 0,
+    }
+
+    # The canonical snapshot can carry large explanatory replicas inside these
+    # top-level objects too. Keep only bounded summaries for the LLM projection.
+    for key in (
+        "time_context", "observation", "metric_coverage", "validation",
+        "active_edge_context", "short_horizon_policy",
+    ):
+        if key in payload:
+            payload[key] = _bounded(payload[key])
+
+    payload["provider_projection"] = {
+        "contract_version": "ai-llm-explanation-projection-v1",
+        "authority": "EXPLANATION_ONLY",
+        "canonical_snapshot_unchanged": True,
+        "original_snapshot_bytes": original_bytes,
+        "final_bytes": 0,
+    }
+
+    if _json_bytes(payload) > PROVIDER_SNAPSHOT_LIMIT_BYTES:
+        # Preserve the actual action, compared policy arithmetic, trade geometry,
+        # hard risk inputs and production-authority fields. Shrink explanation
+        # surfaces only.
+        compact_manager["evidence"] = _bounded(compact_manager.get("evidence") or {}, depth=2)
+        compact_manager["input_audit"] = _bounded(compact_manager.get("input_audit") or {}, depth=2)
+        compact_manager["gate"] = _bounded(compact_manager.get("gate") or {}, depth=2)
+        compact_manager["option_derivative_state"] = _bounded(
+            compact_manager.get("option_derivative_state") or {}, depth=2)
+        payload["ede_causal_context"] = _bounded(payload.get("ede_causal_context") or {}, depth=2)
+
+    for _ in range(2):
+        payload["provider_projection"]["final_bytes"] = _json_bytes(payload)
+    if _json_bytes(payload) > PROVIDER_SNAPSHOT_LIMIT_BYTES:
+        raise RuntimeError("LLM explanation snapshot byte budget exceeded")
+    return payload
 
 
 def _circuit_remaining(now: float | None = None) -> float:
@@ -77,15 +234,7 @@ def bounded_provider_call(
     timeout_sec: float | None = None,
     executor: ThreadPoolExecutor | None = None,
 ) -> dict[str, Any]:
-    """Call one provider with a hard wall-clock budget and stale-work circuit.
-
-    The shared production executor is deliberately single-threaded. A timed-out
-    running HTTP call cannot be killed safely by ``Future.cancel()``; therefore we
-    open a circuit for longer than the normal drain interval. During that window
-    callers receive RuntimeError immediately and FastAPI renders the deterministic
-    policy report. Supplying a private executor (unit tests) bypasses the global
-    circuit so tests remain isolated.
-    """
+    """Call one provider with a hard wall-clock budget and stale-work circuit."""
     timeout = provider_timeout_sec() if timeout_sec is None else float(timeout_sec)
     production_pool = executor is None
     if production_pool:
@@ -117,11 +266,12 @@ def install_ai_provider_guard() -> None:
     original = app_module.request_verdict
 
     def guarded_request_verdict(snapshot: dict[str, Any]) -> dict[str, Any]:
-        return bounded_provider_call(original, snapshot)
+        provider_snapshot = compact_provider_snapshot(snapshot)
+        return bounded_provider_call(original, provider_snapshot)
 
     guarded_request_verdict.__name__ = getattr(original, "__name__", "request_verdict")
     guarded_request_verdict.__doc__ = (
-        "Gateway-safe OpenRouter explanation call; deterministic fallback remains authoritative."
+        "Gateway-safe OpenRouter explanation call; deterministic policy remains authoritative."
     )
     app_module.request_verdict = guarded_request_verdict
     _INSTALLED = True
