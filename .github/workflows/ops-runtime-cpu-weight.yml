@@ -16,12 +16,12 @@ permissions:
   contents: read
 
 jobs:
-  apply:
+  verify:
     if: github.event_name == 'push' || github.head_ref == 'ops/runtime-cpu-weight-50'
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
-      - name: Apply runtime-only CPU weight without restart
+      - name: Verify live runtime CPU relief without restart
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -35,27 +35,15 @@ jobs:
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             test "$(systemctl is-active seiltanzer)" = "active"
 
-            before=$(systemctl show seiltanzer -p CPUWeight --value || true)
-            echo "CPUWeight before=${before:-unset}"
+            weight=$(systemctl show seiltanzer -p CPUWeight --value)
+            active=$(systemctl show seiltanzer -p ActiveState --value)
+            sub=$(systemctl show seiltanzer -p SubState --value)
+            pid=$(systemctl show seiltanzer -p MainPID --value)
+            echo "CPUWeight=$weight ActiveState=$active SubState=$sub MainPID=$pid"
 
-            # Runtime-only scheduling preference: no service restart, no code/data change.
-            # The terminal may still use idle CPU, but yields CPU more readily under contention.
-            systemctl set-property --runtime seiltanzer.service CPUWeight=50
+            test "$weight" = "50"
+            test "$active" = "active"
+            test "$sub" = "running"
+            test "${pid:-0}" -gt 0
 
-            after=$(systemctl show seiltanzer -p CPUWeight --value)
-            echo "CPUWeight after=$after"
-            test "$after" = "50"
-            test "$(systemctl is-active seiltanzer)" = "active"
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-
-            result=$(curl -sS -o /tmp/seiltanzer-cpu-weight-state.json \
-              --connect-timeout 2 --max-time 8 \
-              -w '%{http_code} %{time_total}' \
-              http://127.0.0.1:8790/api/state)
-            code=${result%% *}
-            elapsed=${result#* }
-            echo "api_state http=$code seconds=$elapsed"
-            test "$code" = "200"
-
-            systemctl show seiltanzer \
-              -p CPUWeight -p ActiveState -p SubState -p MainPID -p MemoryCurrent
+            ps -o pid,pcpu,pmem,etime,cmd -p "$pid" || true
