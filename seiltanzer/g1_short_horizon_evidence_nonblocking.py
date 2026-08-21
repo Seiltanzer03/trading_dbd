@@ -1,17 +1,20 @@
 """Process-local nonblocking facade for materialized G.1S research reports.
 
 Durable SQLite rows remain the source of truth and are still produced only by
-existing research materializers.  This facade moves presentation reads off the
+existing research materializers. This facade moves presentation reads off the
 shared passive/G1S SQLite lock: evidence snapshots and historical walk-forward
 status are prewarmed before uvicorn/research-worker startup, then refreshed only
 from the worker path after durable writes.
 
 HTTP reads never touch SQLite and never trigger full-history/network work.
 Missing or corrupt process-local cache fails closed instead of falling back to a
-request-time database scan.
+request-time database scan. Large evidence payloads are also pre-encoded on the
+worker/startup path so latency-sensitive HTTP routes do not recursively JSON-
+encode the same immutable report on every request.
 """
 from __future__ import annotations
 
+import json
 import time
 import types
 from typing import Any, Callable
@@ -19,7 +22,9 @@ from typing import Any, Callable
 from .g1_short_horizon_evidence_materialization import REPORT_NAMES
 
 
-NONBLOCKING_EVIDENCE_VERSION = "g1s-evidence-nonblocking-v2-historical"
+NONBLOCKING_EVIDENCE_VERSION = "g1s-evidence-nonblocking-v3-preencoded"
+_AGE_PLACEHOLDER = "__G1S_MATERIALIZATION_AGE_SEC__"
+_AGE_MARKER = json.dumps(_AGE_PLACEHOLDER).encode("utf-8")
 
 
 def _building(name: str) -> dict[str, Any]:
@@ -67,6 +72,32 @@ def _historical_building() -> dict[str, Any]:
     }
 
 
+def _encode_report_template(snapshot: dict[str, Any]) -> tuple[bytes, float | None]:
+    """Pre-encode immutable evidence while keeping age_sec request-current.
+
+    The durable/materialized report itself is unchanged. Only the presentation
+    representation is cached. A unique JSON string token stands in for the one
+    dynamic field and is replaced with a finite JSON number at request time.
+    """
+    payload = dict(snapshot)
+    generated_ts: float | None = None
+    materialization = payload.get("materialization")
+    if isinstance(materialization, dict):
+        materialization = dict(materialization)
+        generated = materialization.get("generated_ts")
+        try:
+            generated_ts = float(generated)
+        except (TypeError, ValueError):
+            generated_ts = None
+        if generated_ts is not None:
+            materialization["age_sec"] = _AGE_PLACEHOLDER
+        payload["materialization"] = materialization
+    encoded = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return encoded, generated_ts
+
+
 def _cache_report(runtime: Any, name: str, body: dict[str, Any]) -> None:
     cache = getattr(runtime, "_g1s_evidence_report_cache", None)
     if not isinstance(cache, dict):
@@ -85,6 +116,19 @@ def _cache_report(runtime: Any, name: str, body: dict[str, Any]) -> None:
     snapshot["request_time_sqlite_access"] = False
     snapshot["materialized_snapshot_cached"] = True
     cache[str(name)] = snapshot
+
+    json_cache = getattr(runtime, "_g1s_evidence_json_cache", None)
+    if not isinstance(json_cache, dict):
+        json_cache = {}
+        runtime._g1s_evidence_json_cache = json_cache
+    try:
+        json_cache[str(name)] = _encode_report_template(snapshot)
+    except (TypeError, ValueError):
+        # Fail closed at presentation time rather than falling back to SQLite or
+        # expensive request-time recursive encoding of an invalid snapshot.
+        fallback = _building(name)
+        fallback["materialized_snapshot_cached"] = False
+        json_cache[str(name)] = _encode_report_template(fallback)
 
 
 def _cache_status(runtime: Any, body: dict[str, Any]) -> None:
@@ -138,6 +182,23 @@ def _present_report(runtime: Any, name: str) -> dict[str, Any]:
     body["request_time_sqlite_access"] = False
     body["materialized_snapshot_cached"] = True
     return body
+
+
+def _present_report_json(runtime: Any, name: str) -> bytes:
+    """Return already encoded JSON without SQLite or recursive request encoding."""
+    cache = getattr(runtime, "_g1s_evidence_json_cache", None)
+    entry = cache.get(str(name)) if isinstance(cache, dict) else None
+    if not (isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[0], bytes)):
+        body = _building(name)
+        body["materialized_snapshot_cached"] = False
+        return json.dumps(
+            body, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    template, generated_ts = entry
+    if generated_ts is None or _AGE_MARKER not in template:
+        return template
+    age = max(0.0, time.time()-float(generated_ts))
+    return template.replace(_AGE_MARKER, repr(float(age)).encode("ascii"), 1)
 
 
 def _present_status(runtime: Any) -> dict[str, Any]:
@@ -218,6 +279,11 @@ def install_g1_short_horizon_evidence_nonblocking(runtime: Any) -> None:
             raise ValueError(f"unknown G1S materialized report: {name}")
         return _present_report(self, str(name))
 
+    def report_json(self, name: str) -> bytes:
+        if str(name) not in REPORT_NAMES:
+            raise ValueError(f"unknown G1S materialized report: {name}")
+        return _present_report_json(self, str(name))
+
     def status(self) -> dict[str, Any]:
         return _present_status(self)
 
@@ -241,6 +307,7 @@ def install_g1_short_horizon_evidence_nonblocking(runtime: Any) -> None:
         return result
 
     runtime.materialized_evidence_report = types.MethodType(report, runtime)
+    runtime.materialized_evidence_json = types.MethodType(report_json, runtime)
     runtime.evidence_materialization_status = types.MethodType(status, runtime)
     runtime.materialize_evidence_reports = types.MethodType(refresh, runtime)
     if callable(original_historical_status):
