@@ -14,7 +14,7 @@ permissions:
 jobs:
   diagnose:
     runs-on: ubuntu-22.04
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - name: Verify provider key is present in service
         id: key
@@ -57,7 +57,7 @@ jobs:
             set -euo pipefail
             PID=$(systemctl show -p MainPID --value seiltanzer)
             /opt/seiltanzer/.venv/bin/python - "$PID" <<'PY'
-            import json, sys, time, httpx
+            import sys, time, httpx
             raw = open(f'/proc/{sys.argv[1]}/environ','rb').read().split(b'\0')
             env = {k.decode(): v.decode() for k,v in (item.split(b'=',1) for item in raw if b'=' in item)}
             key = env.get('OPENROUTER_API_KEY','').strip()
@@ -78,6 +78,89 @@ jobs:
             content=((result.get('choices') or [{}])[0].get('message') or {}).get('content')
             assert content, 'empty provider content'
             print('DIRECT_PROVIDER_OK=true')
+            PY
+
+      - name: Verify latest canonical snapshot can be projected
+        id: projection
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          script: |
+            set -euo pipefail
+            cd /opt/seiltanzer
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import json, sqlite3
+            from pathlib import Path
+            from seiltanzer.ai_provider_guard import compact_provider_snapshot, _json_bytes, PROVIDER_SNAPSHOT_LIMIT_BYTES
+
+            snapshot = None
+            source = None
+            for path in sorted(Path('/opt/seiltanzer/data').rglob('*.sqlite3')):
+                try:
+                    con = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=0.2)
+                    row = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_verdicts'").fetchone()
+                    if row:
+                        latest = con.execute('SELECT snapshot_json FROM ai_verdicts ORDER BY ts DESC LIMIT 1').fetchone()
+                        if latest and latest[0]:
+                            snapshot = json.loads(latest[0]); source = path
+                            con.close(); break
+                    con.close()
+                except Exception:
+                    continue
+            assert isinstance(snapshot, dict), 'latest canonical AI snapshot not found'
+            projected = compact_provider_snapshot(snapshot)
+            size = _json_bytes(projected)
+            print(f'PROJECTION_OK=true canonical_bytes={_json_bytes(snapshot)} projected_bytes={size} source={source.name}')
+            assert size <= PROVIDER_SNAPSHOT_LIMIT_BYTES
+            assert projected.get('policy_manager', {}).get('recommendation')
+            PY
+
+      - name: Run unguarded real provider on projected management snapshot
+        id: base
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          script: |
+            set -euo pipefail
+            cd /opt/seiltanzer
+            PID=$(systemctl show -p MainPID --value seiltanzer)
+            /opt/seiltanzer/.venv/bin/python - "$PID" <<'PY'
+            import json, os, sqlite3, sys, time
+            from pathlib import Path
+            raw = open(f'/proc/{sys.argv[1]}/environ','rb').read().split(b'\0')
+            service_env = {k.decode(): v.decode() for k,v in (item.split(b'=',1) for item in raw if b'=' in item)}
+            for key in ('OPENROUTER_API_KEY','OPENROUTER_MODEL','OPENROUTER_PROXY'):
+                if service_env.get(key): os.environ[key]=service_env[key]
+            from seiltanzer.ai_provider_guard import compact_provider_snapshot
+            from seiltanzer import ai_verdict
+            snapshot=None
+            for path in sorted(Path('/opt/seiltanzer/data').rglob('*.sqlite3')):
+                try:
+                    con=sqlite3.connect(f'file:{path}?mode=ro',uri=True,timeout=0.2)
+                    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_verdicts'").fetchone():
+                        row=con.execute('SELECT snapshot_json FROM ai_verdicts ORDER BY ts DESC LIMIT 1').fetchone()
+                        if row and row[0]: snapshot=json.loads(row[0]); con.close(); break
+                    con.close()
+                except Exception:
+                    continue
+            assert isinstance(snapshot,dict), 'snapshot not found'
+            projected=compact_provider_snapshot(snapshot)
+            started=time.monotonic()
+            result=ai_verdict.request_verdict(projected)
+            elapsed=(time.monotonic()-started)*1000
+            model=str(result.get('model') or '')
+            print(f'UNGUARDED_MODEL={model} elapsed_ms={elapsed:.1f}')
+            assert model and model != 'deterministic-policy-fallback', 'provider answered but report normalization fell back'
             PY
 
       - name: Verify real AI management route uses LLM
@@ -123,6 +206,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           KEY_OUTCOME: ${{ steps.key.outcome }}
           DIRECT_OUTCOME: ${{ steps.direct.outcome }}
+          PROJECTION_OUTCOME: ${{ steps.projection.outcome }}
+          BASE_OUTCOME: ${{ steps.base.outcome }}
           ROUTE_OUTCOME: ${{ steps.route.outcome }}
         run: |
           set -euo pipefail
@@ -143,4 +228,6 @@ jobs:
           }
           publish "$KEY_OUTCOME" diagnostic/llm-key "OpenRouter key present" "OpenRouter key missing from service"
           publish "$DIRECT_OUTCOME" diagnostic/llm-direct "Direct OpenRouter call succeeds" "Direct OpenRouter call fails"
+          publish "$PROJECTION_OUTCOME" diagnostic/llm-projection "Canonical snapshot projects under budget" "Provider projection fails before OpenRouter"
+          publish "$BASE_OUTCOME" diagnostic/llm-unguarded "Projected report passes provider validation" "Projected provider result normalizes to fallback"
           publish "$ROUTE_OUTCOME" diagnostic/llm-route "AI management route returns LLM" "AI management route still deterministic"
