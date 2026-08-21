@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 
 from seiltanzer.ai_provider_guard import (
+    DEFAULT_PROVIDER_TIMEOUT_SEC,
     MAX_PROVIDER_TIMEOUT_SEC,
     PROVIDER_SNAPSHOT_LIMIT_BYTES,
     compact_provider_snapshot,
@@ -111,9 +112,10 @@ def test_provider_projection_is_bounded_non_mutating_and_keeps_action_inputs():
     )
 
 
-def test_provider_timeout_defaults_to_existing_public_hard_cap(monkeypatch):
+def test_provider_timeout_contract_is_unchanged(monkeypatch):
     monkeypatch.delenv("AI_PROVIDER_TIMEOUT_SEC", raising=False)
-    assert provider_timeout_sec() == MAX_PROVIDER_TIMEOUT_SEC == 8.0
+    assert provider_timeout_sec() == DEFAULT_PROVIDER_TIMEOUT_SEC == 6.0
+    assert MAX_PROVIDER_TIMEOUT_SEC == 8.0
 
     monkeypatch.setenv("AI_PROVIDER_TIMEOUT_SEC", "99")
     assert provider_timeout_sec() == MAX_PROVIDER_TIMEOUT_SEC
