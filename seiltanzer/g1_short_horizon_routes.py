@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 
 from .g1_short_horizon_final_report import install_g1_short_horizon_final_report
 from .g1_short_horizon_historical_wf_integrity import install_g1_short_horizon_historical_wf_integrity
@@ -37,6 +37,18 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
 
     def cached(name: str):
         return runtime.materialized_evidence_report(name)
+
+    async def probability_oos():
+        # The probability report can contain many frozen model/cohort/reliability
+        # rows. It is already materialized and process-local, so do not spend the
+        # readiness request recursively converting/encoding that immutable tree.
+        # The nonblocking facade pre-encodes it at startup/worker refresh and only
+        # substitutes the current age_sec here. No SQLite, refit or methodology
+        # work moves onto the HTTP path.
+        renderer = getattr(runtime, "materialized_evidence_json", None)
+        if not callable(renderer):
+            return cached("probability_oos")
+        return Response(content=renderer("probability_oos"), media_type="application/json")
 
     def final_report():
         body = cached("final_report")
@@ -97,7 +109,7 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
 
     # Full-history metrics are worker-materialized. A request can never trigger
     # an OOS scan, refit or economic replay merely because the UI opened.
-    app.add_api_route("/api/research/g1s/oos", lambda: cached("probability_oos"),
+    app.add_api_route("/api/research/g1s/oos", probability_oos,
                       methods=["GET"], name="g1s_oos")
     app.add_api_route("/api/research/g1s/continuous-oos", lambda: cached("continuous_oos"),
                       methods=["GET"], name="g1s_continuous_oos")
