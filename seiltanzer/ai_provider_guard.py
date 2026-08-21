@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Any, Callable
 
 
-DEFAULT_PROVIDER_TIMEOUT_SEC = 8.0
+DEFAULT_PROVIDER_TIMEOUT_SEC = 6.0
 MIN_PROVIDER_TIMEOUT_SEC = 3.0
 MAX_PROVIDER_TIMEOUT_SEC = 8.0
 DEFAULT_PROVIDER_CIRCUIT_SEC = 50.0
@@ -68,6 +68,22 @@ def _bounded_context(value: Any, *, depth: int = 0) -> Any:
         return {
             key: _bounded_context(value[key], depth=depth + 1)
             for key in sorted(value)[:32]
+        }
+    return value
+
+
+def _minimal_context(value: Any, *, depth: int = 0) -> Any:
+    """Last-resort projection for explanatory evidence only."""
+    if depth >= 4:
+        return "[bounded]"
+    if isinstance(value, str):
+        return value if len(value) <= 160 else value[:157] + "..."
+    if isinstance(value, (list, tuple)):
+        return [_minimal_context(item, depth=depth + 1) for item in value[:6]]
+    if isinstance(value, dict):
+        return {
+            key: _minimal_context(value[key], depth=depth + 1)
+            for key in sorted(value)[:16]
         }
     return value
 
@@ -142,23 +158,28 @@ def compact_provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         payload = {key: payload.get(key) for key in keep_top if key in payload}
 
     if _json_bytes(payload) > PROVIDER_SNAPSHOT_LIMIT_BYTES:
-        payload["ede_causal_context"] = _bounded_context(
-            payload.get("ede_causal_context") or {}, depth=2
-        )
         manager = payload.get("policy_manager") or {}
         for key in ("evidence", "input_audit", "gate", "option_derivative_state"):
             if key in manager:
-                manager[key] = _bounded_context(manager[key], depth=2)
+                manager[key] = _minimal_context(manager[key])
         payload["policy_manager"] = manager
+        for key in (
+            "ede_causal_context", "time_context", "observation",
+            "metric_coverage", "active_edge_context", "short_horizon_policy",
+        ):
+            if key in payload:
+                payload[key] = _minimal_context(payload[key])
 
     payload["provider_projection"] = {
         "contract_version": "ai-llm-explanation-projection-v1",
         "authority": "EXPLANATION_ONLY",
         "original_snapshot_bytes": original_bytes,
+        "final_bytes": 0,
     }
-    payload["provider_projection"]["final_bytes"] = _json_bytes(payload)
+    for _ in range(2):
+        payload["provider_projection"]["final_bytes"] = _json_bytes(payload)
 
-    if payload["provider_projection"]["final_bytes"] > PROVIDER_SNAPSHOT_LIMIT_BYTES:
+    if _json_bytes(payload) > PROVIDER_SNAPSHOT_LIMIT_BYTES:
         raise RuntimeError("LLM explanation snapshot byte budget exceeded")
     return payload
 
