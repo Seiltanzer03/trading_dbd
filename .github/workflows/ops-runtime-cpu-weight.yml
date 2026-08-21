@@ -6,44 +6,38 @@ on:
       - ops/runtime-cpu-weight-50
     paths:
       - .github/workflows/ops-runtime-cpu-weight.yml
-  pull_request:
-    branches:
-      - main
-    paths:
-      - .github/workflows/ops-runtime-cpu-weight.yml
 
 permissions:
   contents: read
 
 jobs:
-  verify:
-    if: github.event_name == 'push' || github.head_ref == 'ops/runtime-cpu-weight-50'
+  inspect:
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
-      - name: Verify live runtime CPU relief without restart
+      - name: Inspect live AI provider and macro state
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 2m
+          command_timeout: 3m
           script: |
             set -euo pipefail
-            EXPECTED_SHA=8dcac9e64d7d2605939a7346c534c39ae7c29d93
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            test "$(systemctl is-active seiltanzer)" = "active"
-
-            weight=$(systemctl show seiltanzer -p CPUWeight --value)
-            active=$(systemctl show seiltanzer -p ActiveState --value)
-            sub=$(systemctl show seiltanzer -p SubState --value)
-            pid=$(systemctl show seiltanzer -p MainPID --value)
-            echo "CPUWeight=$weight ActiveState=$active SubState=$sub MainPID=$pid"
-
-            test "$weight" = "50"
-            test "$active" = "active"
-            test "$sub" = "running"
-            test "${pid:-0}" -gt 0
-
-            ps -o pid,pcpu,pmem,etime,cmd -p "$pid" || true
+            echo "SHA=$(git -C /opt/seiltanzer rev-parse HEAD)"
+            echo "CPUWeight=$(systemctl show seiltanzer -p CPUWeight --value)"
+            echo '=== TARGET AI REQUEST ==='
+            journalctl -u seiltanzer --since '-12 hours' --no-pager \
+              | grep -F 'ai-e733c0c6bbe9478b8308' | tail -n 12 || true
+            echo '=== RECENT AI PROVIDER EVENTS ==='
+            journalctl -u seiltanzer --since '-2 hours' --no-pager \
+              | grep -F 'ai_verdict_event' | tail -n 20 || true
+            echo '=== MACRO STATUS ==='
+            curl -fsS --max-time 15 http://127.0.0.1:8790/api/research/macro/status \
+              | /opt/seiltanzer/.venv/bin/python -m json.tool
+            for family in CPI NFP ISM_MANUFACTURING ISM_SERVICES FOMC_STATEMENT; do
+              echo "=== MACRO LATEST ${family} ==="
+              curl -fsS --max-time 15 "http://127.0.0.1:8790/api/research/macro/latest?family=${family}" \
+                | /opt/seiltanzer/.venv/bin/python -m json.tool || true
+            done
