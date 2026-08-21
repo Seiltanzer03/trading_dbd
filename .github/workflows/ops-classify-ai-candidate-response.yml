@@ -1,0 +1,195 @@
+name: ops-classify-ai-candidate-response
+
+on:
+  push:
+    branches:
+      - ops/diagnose-ai-provider-live-20260821
+    paths:
+      - .github/workflows/ops-classify-ai-candidate-response.yml
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  classify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 6
+    steps:
+      - name: Call OpenRouter with the real projected management prompt
+        id: raw
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          script: |
+            set -euo pipefail
+            curl -fsSL --max-time 20 \
+              https://raw.githubusercontent.com/Seiltanzer03/trading_dbd/f9017e51e9754c6b1233a70293e93d7b37ed6b65/seiltanzer/ai_provider_guard.py \
+              -o /tmp/ai_provider_guard_candidate.py
+            PID=$(systemctl show -p MainPID --value seiltanzer)
+            /opt/seiltanzer/.venv/bin/python - "$PID" <<'PY'
+            import importlib.util, json, os, sqlite3, sys, time
+            from pathlib import Path
+            import httpx
+            raw=open(f'/proc/{sys.argv[1]}/environ','rb').read().split(b'\0')
+            env={k.decode():v.decode() for k,v in (item.split(b'=',1) for item in raw if b'=' in item)}
+            key=env.get('OPENROUTER_API_KEY','').strip(); assert key
+            model=env.get('OPENROUTER_MODEL','openai/gpt-4o-mini')
+            proxy=env.get('OPENROUTER_PROXY','').strip() or None
+            spec=importlib.util.spec_from_file_location('candidate_guard','/tmp/ai_provider_guard_candidate.py')
+            guard=importlib.util.module_from_spec(spec); spec.loader.exec_module(guard)
+            snapshot=None
+            for path in sorted(Path('/opt/seiltanzer/data').rglob('*.sqlite3')):
+                try:
+                    con=sqlite3.connect(f'file:{path}?mode=ro',uri=True,timeout=0.2)
+                    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_verdicts'").fetchone():
+                        row=con.execute('SELECT snapshot_json FROM ai_verdicts ORDER BY ts DESC LIMIT 1').fetchone()
+                        if row and row[0]: snapshot=json.loads(row[0]); con.close(); break
+                    con.close()
+                except Exception:
+                    continue
+            assert isinstance(snapshot,dict)
+            projected=guard.compact_provider_snapshot(snapshot)
+            from seiltanzer import ai_verdict
+            deterministic=ai_verdict.render_policy_report(projected)
+            body={
+                'model':model,'temperature':0.0,'max_tokens':1100,
+                'messages':[
+                    {'role':'system','content':ai_verdict.SYSTEM_PROMPT},
+                    {'role':'user','content':'Количественный снимок сделки:\n'+json.dumps(projected,ensure_ascii=False,separators=(',',':'))+'\n\nАвторитетный черновик, числа и действие не менять:\n'+deterministic},
+                ],
+            }
+            started=time.monotonic()
+            with httpx.Client(proxy=proxy,timeout=45,trust_env=False) as client:
+                resp=client.post('https://openrouter.ai/api/v1/chat/completions',json=body,
+                    headers={'Authorization':f'Bearer {key}','Content-Type':'application/json','Accept':'application/json','User-Agent':'Seiltanzer-Diagnostic/1.0'})
+            elapsed=(time.monotonic()-started)*1000
+            resp.raise_for_status(); result=resp.json()
+            content=((result.get('choices') or [{}])[0].get('message') or {}).get('content')
+            assert content, 'empty content'
+            violations=ai_verdict._validate_model_report(content,projected)
+            out={'elapsed_ms':elapsed,'provider_model':result.get('model',model),'violations':violations,
+                 'content_chars':len(content),'projected_bytes':guard._json_bytes(projected)}
+            open('/tmp/candidate_llm_diag.json','w',encoding='utf-8').write(json.dumps(out,ensure_ascii=False))
+            print(json.dumps({'elapsed_ms':round(elapsed,1),'violation_count':len(violations),'content_chars':len(content),'projected_bytes':out['projected_bytes']},sort_keys=True))
+            PY
+
+      - name: Check real prompt fits 6 second guard
+        id: latency
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: |
+            python3 - <<'PY'
+            import json
+            d=json.load(open('/tmp/candidate_llm_diag.json'))
+            assert float(d['elapsed_ms']) < 6000.0, d['elapsed_ms']
+            PY
+
+      - name: Check required sections validation
+        id: sections
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: |
+            python3 - <<'PY'
+            import json
+            v=json.load(open('/tmp/candidate_llm_diag.json'))['violations']
+            assert not [x for x in v if x.startswith('нет раздела')], v
+            PY
+
+      - name: Check authoritative action validation
+        id: action
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: |
+            python3 - <<'PY'
+            import json
+            v=json.load(open('/tmp/candidate_llm_diag.json'))['violations']
+            assert 'изменено рассчитанное действие' not in v, v
+            PY
+
+      - name: Check exact policy number validation
+        id: numbers
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: |
+            python3 - <<'PY'
+            import json
+            v=json.load(open('/tmp/candidate_llm_diag.json'))['violations']
+            assert not [x for x in v if 'изменено или пропущено' in x or x.startswith('нет политики')], v
+            PY
+
+      - name: Check full post-validation contract
+        id: validation
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          script: |
+            python3 - <<'PY'
+            import json
+            v=json.load(open('/tmp/candidate_llm_diag.json'))['violations']
+            assert not v, v
+            PY
+
+      - name: Publish response classifications
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RAW: ${{ steps.raw.outcome }}
+          LATENCY: ${{ steps.latency.outcome }}
+          SECTIONS: ${{ steps.sections.outcome }}
+          ACTION: ${{ steps.action.outcome }}
+          NUMBERS: ${{ steps.numbers.outcome }}
+          VALIDATION: ${{ steps.validation.outcome }}
+        run: |
+          set -euo pipefail
+          publish() {
+            outcome="$1" context="$2" ok="$3" bad="$4"
+            if [ "$outcome" = success ]; then state=success; desc="$ok"; else state=failure; desc="$bad"; fi
+            payload=$(python3 - "$state" "$context" "$desc" <<'PY'
+          import json,sys
+          print(json.dumps({'state':sys.argv[1],'context':sys.argv[2],'description':sys.argv[3]}))
+          PY
+            )
+            curl -fsS -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" -d "$payload" >/dev/null
+          }
+          publish "$RAW" diagnostic/candidate-real-prompt "OpenRouter answers real projected prompt" "Real projected prompt fails provider call"
+          publish "$LATENCY" diagnostic/candidate-under-6s "Real prompt completes under 6 seconds" "Real prompt exceeds current 6 second guard"
+          publish "$SECTIONS" diagnostic/candidate-sections "LLM includes every required report section" "LLM omits required report sections"
+          publish "$ACTION" diagnostic/candidate-action "LLM preserves authoritative action" "LLM fails authoritative action validation"
+          publish "$NUMBERS" diagnostic/candidate-numbers "LLM preserves required policy numbers" "LLM omits or changes required policy numbers"
+          publish "$VALIDATION" diagnostic/candidate-validation "LLM passes full report validator" "LLM answer is rejected by post-validator"
