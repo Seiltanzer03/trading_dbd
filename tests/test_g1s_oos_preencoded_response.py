@@ -33,7 +33,7 @@ class _Runtime:
                         ],
                     }
                     for i in range(250)
-                ] if name == "probability_oos" else [],
+                ] if name in {"probability_oos", "continuous_oos"} else [],
                 "production_authority": False,
                 "edge_claim_allowed": False,
                 "materialization": {
@@ -79,6 +79,26 @@ def test_probability_oos_preencoded_json_preserves_contract_and_dynamic_age():
     assert runtime.report_reads == before_reads
 
 
+def test_all_materialized_evidence_reports_are_preencoded_without_new_reads():
+    runtime = _Runtime()
+    install_g1_short_horizon_evidence_nonblocking(runtime)
+    before_reads = runtime.report_reads
+
+    bodies = {
+        name: json.loads(runtime.materialized_evidence_json(name))
+        for name in REPORT_NAMES
+    }
+
+    assert set(bodies) == set(REPORT_NAMES)
+    assert runtime.report_reads == before_reads
+    for name, body in bodies.items():
+        assert body["report_name"] == name
+        assert body["production_authority"] is False
+        assert body["edge_claim_allowed"] is False
+        assert body["request_time_sqlite_access"] is False
+        assert body["materialization"]["request_time_sqlite_access"] is False
+
+
 def test_probability_oos_preencoded_read_does_not_wait_for_runtime_lock():
     runtime = _Runtime()
     install_g1_short_horizon_evidence_nonblocking(runtime)
@@ -96,6 +116,33 @@ def test_probability_oos_preencoded_read_does_not_wait_for_runtime_lock():
     try:
         started = time.monotonic()
         body = json.loads(runtime.materialized_evidence_json("probability_oos"))
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        thread.join(timeout=1.0)
+
+    assert elapsed < 0.10
+    assert body["revision"] == 1
+    assert body["request_time_sqlite_access"] is False
+
+
+def test_continuous_oos_preencoded_read_does_not_wait_for_runtime_lock():
+    runtime = _Runtime()
+    install_g1_short_horizon_evidence_nonblocking(runtime)
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        with runtime._lock:
+            acquired.set()
+            release.wait(timeout=2.0)
+
+    thread = threading.Thread(target=holder, daemon=True)
+    thread.start()
+    assert acquired.wait(timeout=1.0)
+    try:
+        started = time.monotonic()
+        body = json.loads(runtime.materialized_evidence_json("continuous_oos"))
         elapsed = time.monotonic() - started
     finally:
         release.set()
