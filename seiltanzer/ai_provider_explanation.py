@@ -31,19 +31,26 @@ may be described only as context, never as an independent reason to close or exi
 No markdown table. No preamble about being an AI.
 """.strip()
 
+# Reject only clear new imperative/recommendation language. Merely discussing why
+# an alternative CLOSE/EXIT was rejected is valid explanation and must not be
+# mistaken for a new trading command.
 _FORBIDDEN_INSTRUCTION_PHRASES = (
-    "закрыть позицию",
-    "закрыть 10%",
-    "закрыть 25%",
-    "закрыть 50%",
-    "закрыть 100%",
-    "сократить позицию",
-    "увеличить позицию",
-    "добавить позицию",
-    "перенести стоп",
-    "расширить стоп",
-    "открыть позицию",
-    "войти в позицию",
+    "нужно закрыть",
+    "следует закрыть",
+    "рекомендую закрыть",
+    "необходимо закрыть",
+    "закройте позицию",
+    "нужно сократить",
+    "следует сократить",
+    "рекомендую сократить",
+    "необходимо сократить",
+    "сократите позицию",
+    "увеличьте позицию",
+    "добавьте позицию",
+    "перенесите стоп",
+    "расширьте стоп",
+    "откройте позицию",
+    "войдите в позицию",
 )
 
 
@@ -96,8 +103,17 @@ def _sanitize_explanation(content: str) -> str:
     return text
 
 
-def request_explanation(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Return authoritative deterministic report plus real LLM commentary."""
+def request_explanation(
+    snapshot: dict[str, Any],
+    *,
+    authoritative_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return authoritative deterministic report plus real LLM commentary.
+
+    ``snapshot`` is the bounded provider projection. ``authoritative_snapshot``
+    stays process-local and is never uploaded; when supplied, it owns deterministic
+    rendering and integrity validation.
+    """
     from . import ai_verdict
 
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -105,8 +121,9 @@ def request_explanation(snapshot: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("OPENROUTER_API_KEY не настроен на сервере")
     model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
     proxy = os.environ.get("OPENROUTER_PROXY", "").strip() or None
+    authority = authoritative_snapshot if isinstance(authoritative_snapshot, dict) else snapshot
 
-    deterministic = ai_verdict.render_policy_report(snapshot)
+    deterministic = ai_verdict.render_policy_report(authority)
     facts = _explanation_facts(snapshot)
     body = {
         "model": model,
@@ -155,7 +172,7 @@ def request_explanation(snapshot: dict[str, Any]) -> dict[str, Any]:
     )
     # The model never owns the deterministic portion, but validate the composed
     # response anyway: all action/policy arithmetic must still be present exactly.
-    violations = ai_verdict._validate_model_report(combined, snapshot)
+    violations = ai_verdict._validate_model_report(combined, authority)
     hard_violations = [
         violation for violation in violations
         if violation == "изменено рассчитанное действие"
@@ -168,9 +185,34 @@ def request_explanation(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "verdict": combined,
         "model": result.get("model", model),
-        "captured_ts": snapshot.get("captured_ts"),
+        "captured_ts": authority.get("captured_ts"),
         "provider_mode": "llm_explanation_over_deterministic_policy",
         "validation_warnings": [
             violation for violation in violations if violation not in hard_violations
         ],
     }
+
+
+def install_ai_provider_explanation() -> None:
+    """Replace the legacy full-report provider call with the fast explanation layer.
+
+    This is installed immediately after ``install_ai_provider_guard``. It reuses
+    that guard's projection, timeout, executor and circuit; only the provider work
+    performed inside the existing bounded call changes.
+    """
+    from . import app as app_module
+    from .ai_provider_guard import bounded_provider_call, compact_provider_snapshot
+
+    def guarded_explanation(snapshot: dict[str, Any]) -> dict[str, Any]:
+        provider_snapshot = compact_provider_snapshot(snapshot)
+        return bounded_provider_call(
+            lambda projected: request_explanation(
+                projected, authoritative_snapshot=snapshot),
+            provider_snapshot,
+        )
+
+    guarded_explanation.__name__ = "request_verdict"
+    guarded_explanation.__doc__ = (
+        "Gateway-safe OpenRouter explanation over authoritative deterministic policy."
+    )
+    app_module.request_verdict = guarded_explanation
