@@ -38,17 +38,18 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
     def cached(name: str):
         return runtime.materialized_evidence_report(name)
 
-    async def probability_oos():
-        # The probability report can contain many frozen model/cohort/reliability
-        # rows. It is already materialized and process-local, so do not spend the
-        # readiness request recursively converting/encoding that immutable tree.
-        # The nonblocking facade pre-encodes it at startup/worker refresh and only
-        # substitutes the current age_sec here. No SQLite, refit or methodology
-        # work moves onto the HTTP path.
-        renderer = getattr(runtime, "materialized_evidence_json", None)
-        if not callable(renderer):
-            return cached("probability_oos")
-        return Response(content=renderer("probability_oos"), media_type="application/json")
+    def preencoded(name: str):
+        async def endpoint():
+            # Evidence reports can contain many frozen model/cohort/reliability
+            # rows. They are already worker-materialized and process-local, so
+            # request-time recursive JSON encoding only adds latency. Reuse the
+            # startup/worker-refresh encoding without moving SQLite, refits or
+            # methodology work onto HTTP.
+            renderer = getattr(runtime, "materialized_evidence_json", None)
+            if not callable(renderer):
+                return cached(name)
+            return Response(content=renderer(name), media_type="application/json")
+        return endpoint
 
     def final_report():
         body = cached("final_report")
@@ -108,16 +109,18 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         methods=["GET"], name="g1s_path_metrics")
 
     # Full-history metrics are worker-materialized. A request can never trigger
-    # an OOS scan, refit or economic replay merely because the UI opened.
-    app.add_api_route("/api/research/g1s/oos", probability_oos,
+    # an OOS scan, refit or economic replay merely because the UI opened. All
+    # immutable evidence payloads use the same proven pre-encoded transport so
+    # readiness latency does not depend on which report happens to be largest.
+    app.add_api_route("/api/research/g1s/oos", preencoded("probability_oos"),
                       methods=["GET"], name="g1s_oos")
-    app.add_api_route("/api/research/g1s/continuous-oos", lambda: cached("continuous_oos"),
+    app.add_api_route("/api/research/g1s/continuous-oos", preencoded("continuous_oos"),
                       methods=["GET"], name="g1s_continuous_oos")
-    app.add_api_route("/api/research/g1s/calibration-oos", lambda: cached("calibration_oos"),
+    app.add_api_route("/api/research/g1s/calibration-oos", preencoded("calibration_oos"),
                       methods=["GET"], name="g1s_calibration_oos")
-    app.add_api_route("/api/research/g1s/ablation", lambda: cached("ablation"),
+    app.add_api_route("/api/research/g1s/ablation", preencoded("ablation"),
                       methods=["GET"], name="g1s_ablation")
-    app.add_api_route("/api/research/g1s/trade-relevance", lambda: cached("trade_relevance"),
+    app.add_api_route("/api/research/g1s/trade-relevance", preencoded("trade_relevance"),
                       methods=["GET"], name="g1s_trade_relevance")
     app.add_api_route("/api/research/g1s/evidence-materialization",
                       runtime.evidence_materialization_status,
