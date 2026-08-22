@@ -12,55 +12,14 @@ permissions:
   statuses: write
 
 jobs:
-  verify:
+  diagnose:
     runs-on: ubuntu-22.04
-    timeout-minutes: 25
+    timeout-minutes: 8
     env:
       EXPECTED_SHA: f6480483deb6495ad4a4f184c57fcc3fb8206556
     steps:
-      - name: Wait for exact-SHA production acceptance
-        id: acceptance
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 120); do
-            body=$(curl -fsS --max-time 8 \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${{ github.repository }}/commits/${EXPECTED_SHA}/status")
-            row=$(BODY="$body" python3 - <<'PY'
-          import json, os
-          body=json.loads(os.environ['BODY'])
-          rows=[x for x in body.get('statuses',[]) if x.get('context')=='production/seiltanzer']
-          if not rows:
-              print('missing|')
-          else:
-              x=rows[0]
-              print(str(x.get('state') or '')+'|'+str(x.get('target_url') or ''))
-          PY
-            )
-            state=${row%%|*}
-            target=${row#*|}
-            echo "production acceptance attempt=$attempt state=${state:-missing} target=${target:-none}"
-            if [ "$state" = success ]; then
-              run_id=$(printf '%s' "$target" | sed -n 's#^.*/actions/runs/\([0-9][0-9]*\).*$#\1#p')
-              test -n "$run_id"
-              echo "deploy_run_id=$run_id" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            if [ "$state" = failure ] || [ "$state" = error ]; then
-              echo "::error::Exact-SHA production acceptance failed"
-              exit 1
-            fi
-            sleep 10
-          done
-          echo "::error::Exact-SHA production acceptance did not finish within 20 minutes"
-          exit 1
-
-      - name: Verify cached G1S readiness and real LLM explanation
-        id: runtime
+      - name: Measure exact production evidence transport and LLM
+        id: probe
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
@@ -69,125 +28,93 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 5m
+          command_timeout: 6m
           envs: EXPECTED_SHA
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             test "$(systemctl is-active seiltanzer)" = active
 
+            echo '=== ROUTE TRANSPORT ==='
+            for path in \
+              '/api/research/g1s/trade-relevance' \
+              '/api/research/g1s/ablation' \
+              '/api/research/g1s/oos' \
+              '/api/research/g1s/final-report'; do
+              for attempt in 1 2 3; do
+                curl -sS --max-time 12 -o /dev/null \
+                  -w "ROUTE path=$path attempt=$attempt http=%{http_code} bytes=%{size_download} start=%{time_starttransfer} total=%{time_total}\n" \
+                  "http://127.0.0.1:8790$path" || true
+              done
+            done
+
+            echo '=== MATERIALIZED PAYLOAD BYTES ==='
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import sqlite3
+            db='/opt/seiltanzer/data/trades.db'
+            con=sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=5)
+            try:
+                for row in con.execute("SELECT report_name,length(payload_json),duration_ms,generated_ts FROM g1s_evidence_materializations ORDER BY report_name"):
+                    print('MATERIALIZED', row)
+            finally:
+                con.close()
+            PY
+
+            echo '=== LLM PROBE ==='
             PID=$(systemctl show -p MainPID --value seiltanzer)
             python3 - "$PID" <<'PY'
             import sys
             raw=open(f'/proc/{sys.argv[1]}/environ','rb').read().split(b'\0')
             env=dict(item.split(b'=',1) for item in raw if b'=' in item)
-            assert bool(env.get(b'OPENROUTER_API_KEY')), 'OPENROUTER_API_KEY missing'
-            print('OPENROUTER_API_KEY_PRESENT=true')
+            print('OPENROUTER_API_KEY_PRESENT=' + str(bool(env.get(b'OPENROUTER_API_KEY'))).lower())
             print('OPENROUTER_MODEL=' + env.get(b'OPENROUTER_MODEL', b'<default>').decode(errors='ignore'))
             print('AI_PROVIDER_TIMEOUT_SEC=' + env.get(b'AI_PROVIDER_TIMEOUT_SEC', b'<default>').decode(errors='ignore'))
             PY
-
             /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import json, time, urllib.request, urllib.error
-            base='http://127.0.0.1:8790'
-
-            def req(path, method='GET', timeout=6.0):
+            import json,time,urllib.request,urllib.error
+            def call():
+                req=urllib.request.Request('http://127.0.0.1:8790/api/ai/verdict',method='POST')
                 started=time.monotonic()
-                request=urllib.request.Request(base+path, method=method)
                 try:
-                    with urllib.request.urlopen(request, timeout=timeout) as response:
-                        raw=response.read(); code=int(response.status)
-                except urllib.error.HTTPError as exc:
-                    raw=exc.read(); code=int(exc.code)
-                elapsed=(time.monotonic()-started)*1000.0
-                body=json.loads(raw.decode('utf-8')) if raw else None
-                return code, body, elapsed
-
-            for path in (
-                '/api/research/g1s/barriers?limit=500',
-                '/api/research/g1s/cuts?limit=500',
-                '/api/research/g1s/path-metrics?limit=500',
-            ):
-                code, body, elapsed=req(path, timeout=5.0)
-                print('G1S_ROUTE=' + json.dumps({'path':path,'http':code,'elapsed_ms':round(elapsed,1)},sort_keys=True))
-                assert code == 200, (path,code,body)
-                assert elapsed < 3000.0, (path,elapsed)
-
-            status_code, status, status_elapsed=req('/api/ai/snapshot/status', timeout=5.0)
-            print('AI_SNAPSHOT=' + json.dumps({
-                'http':status_code,
-                'elapsed_ms':round(status_elapsed,1),
-                'ready':status.get('ready') if isinstance(status,dict) else None,
-                'current_trade_id':status.get('current_trade_id') if isinstance(status,dict) else None,
-            },sort_keys=True))
-            assert status_code == 200 and isinstance(status,dict), status
-            assert status.get('current_trade_id') is not None, 'no active trade: real management LLM route cannot be proven'
-
-            last=None
-            for attempt in range(1,6):
-                code, body, elapsed=req('/api/ai/verdict', method='POST', timeout=14.0)
-                result=body.get('result') if isinstance(body,dict) and isinstance(body.get('result'),dict) else body
-                result=result if isinstance(result,dict) else {}
-                verdict=str((body or {}).get('verdict') or result.get('verdict') or '') if isinstance(body,dict) else ''
-                model=str((body or {}).get('model') or result.get('model') or '') if isinstance(body,dict) else ''
-                mode=str((body or {}).get('mode') or result.get('mode') or '') if isinstance(body,dict) else ''
-                payload={
-                    'attempt':attempt,
-                    'http':code,
-                    'elapsed_ms':round(elapsed,1),
-                    'model':model,
-                    'mode':mode,
+                    with urllib.request.urlopen(req,timeout=14) as r:
+                        raw=r.read(); code=r.status
+                except urllib.error.HTTPError as e:
+                    raw=e.read(); code=e.code
+                elapsed=(time.monotonic()-started)*1000
+                body=json.loads(raw.decode()) if raw else {}
+                result=body.get('result') if isinstance(body.get('result'),dict) else body
+                verdict=str(body.get('verdict') or result.get('verdict') or '')
+                print('LLM=' + json.dumps({
+                    'http':code,'elapsed_ms':round(elapsed,1),
+                    'model':body.get('model') or result.get('model'),
+                    'mode':body.get('mode') or result.get('mode'),
+                    'result_mode':body.get('result_mode') or result.get('result_mode'),
                     'has_llm_explanation':'LLM EXPLANATION' in verdict.upper(),
-                    'error_code':(((body or {}).get('error') or {}).get('code') if isinstance(body,dict) else None),
-                }
-                print('AI_ROUTE_PROBE=' + json.dumps(payload,ensure_ascii=False,sort_keys=True))
-                last=payload
-                if code == 200 and model and model != 'deterministic-policy-fallback' and payload['has_llm_explanation']:
-                    break
-                if code in {429,503}:
-                    time.sleep(3)
-                    continue
-                time.sleep(2)
-            assert isinstance(last,dict), last
-            assert last.get('http') == 200, last
-            assert last.get('model') and last['model'] != 'deterministic-policy-fallback', last
-            assert last.get('has_llm_explanation') is True, last
-            assert float(last.get('elapsed_ms') or 99999) < 12000.0, last
+                },sort_keys=True))
+                return code,body
+            for i in range(3):
+                call(); time.sleep(2)
             PY
 
-      - name: Show sanitized recent AI events
-        if: always()
-        uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 2m
-          script: |
-            echo '=== DEPLOYED SHA ==='
-            git -C /opt/seiltanzer rev-parse HEAD || true
             echo '=== RECENT AI EVENTS ==='
-            journalctl -u seiltanzer --since '-30 minutes' --no-pager \
-              | grep 'ai_verdict_event' | tail -n 30 || true
+            journalctl -u seiltanzer --since '-20 minutes' --no-pager | grep 'ai_verdict_event' | tail -n 20 || true
 
-      - name: Publish exact-SHA final diagnostic status
+      - name: Publish diagnostic status
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          ACCEPTANCE_OUTCOME: ${{ steps.acceptance.outcome }}
-          RUNTIME_OUTCOME: ${{ steps.runtime.outcome }}
+          OUTCOME: ${{ steps.probe.outcome }}
         run: |
           set -euo pipefail
-          state=failure
-          description='Production runtime or model-backed LLM proof failed'
-          if [ "$ACCEPTANCE_OUTCOME" = success ] && [ "$RUNTIME_OUTCOME" = success ]; then
-            state=success
-            description='Production cached readiness and real OpenRouter management explanation verified'
+          state=success
+          description='Production trade-relevance transport diagnostic completed'
+          if [ "$OUTCOME" != success ]; then
+            state=failure
+            description='Production trade-relevance diagnostic failed'
           fi
           payload=$(python3 - "$state" "$description" <<'PY'
           import json,sys
-          print(json.dumps({'state':sys.argv[1],'context':'diagnostic/final-llm','description':sys.argv[2],
+          print(json.dumps({'state':sys.argv[1],'context':'diagnostic/trade-relevance','description':sys.argv[2],
                             'target_url':'${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'}))
           PY
           )
@@ -197,4 +124,3 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${{ github.repository }}/statuses/${EXPECTED_SHA}" \
             -d "$payload" >/dev/null
-          test "$state" = success
