@@ -6,6 +6,7 @@ import json
 
 import uvicorn
 
+from .ai_provider_explanation import install_ai_provider_explanation
 from .ai_provider_guard import install_ai_provider_guard
 from .ai_report_semantics_guard import install_ai_report_semantics_guard
 from .ai_snapshot_budget_guard import install_ai_snapshot_budget_guard
@@ -83,6 +84,10 @@ def main() -> None:
     install_ai_snapshot_budget_guard()
     install_ai_report_semantics_guard()
     install_ai_provider_guard()
+    # Keep deterministic policy authoritative, but replace the legacy request for
+    # a second full report with a short provider explanation inside the same
+    # timeout/circuit. The provider never owns action or policy arithmetic.
+    install_ai_provider_explanation()
 
     install_analytics_runtime()
     install_storage_refinement()

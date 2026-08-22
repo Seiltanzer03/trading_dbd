@@ -80,20 +80,21 @@ def _compact_policies(source: Any) -> dict[str, Any]:
     source = source if isinstance(source, dict) else {}
     fields = (
         "name", "close_fraction", "expected_final_r", "median_final_r", "cvar10_r",
-        "p_final_profit", "p_final_loss", "p_giveback_0_25_from_now",
-        "p_giveback_0_50_from_now", "p_next_rung_before_stop",
-        "p_stop_before_next_rung", "next_rung_r", "expected_event_minutes",
-        "no_event_probability", "gross_expected_final_r", "execution_cost_r",
-        "expected_future_r_on_remaining", "expected_total_trade_r", "eligible", "reason",
+        "expected_final_r_net", "cvar10_r_net", "p_final_profit", "p_final_loss",
+        "p_giveback_0_25_from_now", "p_giveback_0_50_from_now",
+        "p_next_rung_before_stop", "p_stop_before_next_rung", "next_rung_r",
+        "expected_event_minutes", "no_event_probability", "gross_expected_final_r",
+        "execution_cost_r", "expected_future_r_on_remaining", "expected_total_trade_r",
+        "eligible", "reason",
     )
-    return {name: _pick(row, fields) for name, row in source.items() if isinstance(row, dict)}
+    return {
+        name: _bounded(_pick(row, fields))
+        for name, row in source.items() if isinstance(row, dict)
+    }
 
 
 def _compact_evidence(source: Any) -> dict[str, Any]:
     source = source if isinstance(source, dict) else {}
-    # These are the decision/explanation surfaces used by the public report. Full
-    # raw grids, option-chain replicas and research workspaces stay canonical in
-    # the stored AI snapshot and are intentionally not uploaded to the provider.
     keys = (
         "live_price", "atr_regime", "iv_surface", "correlation", "strike_oi_gex",
         "option_barrier", "option_derivative_state", "cone_rnd", "levels",
@@ -106,21 +107,24 @@ def _compact_evidence(source: Any) -> dict[str, Any]:
     return {key: _bounded(source[key]) for key in keys if key in source}
 
 
-def _compact_input_audit(source: Any) -> dict[str, Any]:
+def _compact_input_audit(source: Any, *, row_limit: int = 20) -> dict[str, Any]:
     source = source if isinstance(source, dict) else {}
     out = _pick(source, (
         "all_required_available", "missing_required", "degraded_inputs",
-        "required_count", "available_count",
+        "required_count", "available_count", "total_count",
     ))
     rows = source.get("rows")
     if isinstance(rows, dict):
-        row_fields = ("available", "status", "source", "role", "age_sec", "symbol")
+        row_fields = (
+            "available", "status", "source", "role", "age_sec", "symbol",
+            "reason", "quality", "proxy_quality", "is_proxy", "fallback_tier",
+        )
         out["rows"] = {
-            name: _pick(row, row_fields)
-            for name, row in list(rows.items())[:20]
+            name: _bounded(_pick(row, row_fields))
+            for name, row in list(rows.items())[:row_limit]
             if isinstance(row, dict)
         }
-    return out
+    return _bounded(out)
 
 
 def _compact_ede(source: Any) -> dict[str, Any]:
@@ -130,11 +134,207 @@ def _compact_ede(source: Any) -> dict[str, Any]:
         "data_maturity", "edge_maturity", "confidence_context",
         "candidate", "candidate_id", "candidate_applies", "application_reason",
         "position_relation", "family_evidence", "current_features", "families",
+        "production_authority", "production_directional_authority", "auto_promotion",
+        "may_trigger_exit_or_close",
     )
     selected = {key: source[key] for key in keys if key in source}
-    # Schema versions have changed over time; if named fields are absent, keep a
-    # small bounded view rather than silently dropping all causal context.
     return _bounded(selected if selected else source)
+
+
+def _compact_recommendation(source: Any) -> dict[str, Any]:
+    return _bounded(_pick(source, (
+        "policy", "action_ru", "raw_optimizer_policy", "selected_policy",
+        "close_fraction", "remaining_fraction", "remaining_management",
+        "next_rung_r", "automatic_execution_allowed", "reason",
+    )))
+
+
+def _compact_management_decision(source: Any) -> dict[str, Any]:
+    return _bounded(_pick(source, (
+        "decision_id", "policy", "execution_status", "instruction_ru", "continuity",
+        "close_fraction", "remaining_fraction", "next_rung_r", "last_ack_status",
+        "automatic_execution_allowed", "arbiter_reason",
+    )))
+
+
+def _compact_scalar_contract(source: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    return _bounded(_pick(source, keys))
+
+
+def _minimal_provider_projection(snapshot: dict[str, Any], original_bytes: int) -> dict[str, Any]:
+    """Hard-bounded projection retaining every field that can own/report the action.
+
+    A large canonical snapshot is valid input, not provider unavailability. This
+    projection deliberately drops only duplicated research/debug workspaces. It is
+    also used as a deterministic second tier when the richer explanation projection
+    exceeds the transport budget.
+    """
+    manager = snapshot.get("policy_manager") or {}
+    manager = manager if isinstance(manager, dict) else {}
+    observation = snapshot.get("observation") or {}
+    observation = observation if isinstance(observation, dict) else {}
+
+    compact_manager = {
+        "recommendation": _compact_recommendation(manager.get("recommendation")),
+        "management_decision": _compact_management_decision(manager.get("management_decision")),
+        "policies": _compact_policies(manager.get("policies")),
+        "selection_rule": _compact_scalar_contract(manager.get("selection_rule"), (
+            "cvar_floor_r", "minimum_net_advantage_r", "min_net_advantage_r",
+            "eligible", "winner", "raw_policy", "selected_policy",
+        )),
+        "inputs": _compact_scalar_contract(manager.get("inputs"), (
+            "r0", "sigma_R", "drift_R", "skew_R", "term_slope", "horizon_minutes",
+            "chain_age_sec", "chain_status", "proxy_quality", "stop_r", "be_r",
+            "active_stop_r", "current_r", "remaining_fraction",
+        )),
+        "risk_constraint": _bounded(manager.get("risk_constraint") or {}),
+        "gate": _compact_scalar_contract(manager.get("gate"), (
+            "status", "raw_policy", "provisional_policy", "selected_policy",
+            "automatic_execution_allowed", "reason", "reasons",
+            "independent_confirmation_count", "required_confirmation_count",
+        )),
+        "stability": _compact_scalar_contract(manager.get("stability"), (
+            "status", "stable", "winner", "selected_share", "required_share",
+            "decision_uncertain", "checks",
+        )),
+        "raw_optimizer_stability": _compact_scalar_contract(
+            manager.get("raw_optimizer_stability"),
+            ("status", "stable", "winner", "selected_share", "required_share",
+             "decision_uncertain", "checks")),
+        "risk_tradeoff": _compact_scalar_contract(manager.get("risk_tradeoff"), (
+            "expected_delta_vs_hold_r", "cvar_improvement_vs_hold_r",
+            "expected_r_sacrifice", "cvar_gain_r", "status", "reason",
+        )),
+        "scenario_geometry": _compact_scalar_contract(manager.get("scenario_geometry"), (
+            "scenario_count", "next_rung_r", "p_next_rung_before_stop",
+            "rung_first_count", "p_stop_before_next_rung", "stop_first_count",
+            "p_unresolved_full_horizon", "unresolved_count", "resolved_count",
+            "full_horizon_minutes", "mean_event_minutes_given_resolved",
+            "take_first_probability", "stop_or_be_first_probability",
+        )),
+        "evidence": _compact_evidence(manager.get("evidence")),
+        "input_audit": _compact_input_audit(manager.get("input_audit"), row_limit=12),
+        "management_arbiter": _bounded(manager.get("management_arbiter") or {}),
+        "cancellation_boundary": _bounded(manager.get("cancellation_boundary") or {}),
+        "counterfactual_attribution": _bounded(manager.get("counterfactual_attribution") or {}),
+    }
+
+    exact_levels = observation.get("exact_levels") or {}
+    payload: dict[str, Any] = {
+        "captured_ts": snapshot.get("captured_ts"),
+        "trade_id": snapshot.get("trade_id"),
+        "strategy": _compact_scalar_contract(snapshot.get("strategy"), (
+            "symbol", "instrument", "direction", "setup", "setup_id", "timeframe",
+        )),
+        "position_state": _bounded(snapshot.get("position_state") or {}),
+        "trade_geometry": _bounded(snapshot.get("trade_geometry") or {}),
+        "observation": {
+            "exact_levels": _bounded(exact_levels),
+            **_compact_scalar_contract(observation, ("symbol", "price", "captured_ts")),
+        },
+        "metric_coverage": _bounded(snapshot.get("metric_coverage") or {}),
+        "position_management_risk_long": _bounded(
+            snapshot.get("position_management_risk_long") or {}),
+        "active_edge_provisional_weight": _bounded(
+            snapshot.get("active_edge_provisional_weight") or {}),
+        "active_edge": _bounded(snapshot.get("active_edge") or {}),
+        "policy_manager": compact_manager,
+        "ede_causal_context": _compact_ede(snapshot.get("ede_causal_context")),
+        "provider_history_summary": {
+            "metric_history_present": bool(snapshot.get("metric_history")),
+            "previous_review_count": len(snapshot.get("previous_reviews") or [])
+            if isinstance(snapshot.get("previous_reviews"), list) else 0,
+        },
+        "provider_projection": {
+            "contract_version": "ai-llm-explanation-projection-v2",
+            "authority": "EXPLANATION_ONLY",
+            "canonical_snapshot_unchanged": True,
+            "compaction_tier": "minimal",
+            "truncated_debug_workspaces": True,
+            "original_snapshot_bytes": original_bytes,
+            "final_bytes": 0,
+        },
+    }
+
+    # Optional context is removed in a stable priority order until the immutable
+    # transport budget is met. Action/policies/geometry/risk inputs are never in
+    # this prune list.
+    prune_order = (
+        "active_edge", "ede_causal_context", "position_management_risk_long",
+        "metric_coverage", "trade_geometry",
+    )
+    for key in prune_order:
+        if _json_bytes(payload) <= PROVIDER_SNAPSHOT_LIMIT_BYTES:
+            break
+        payload.pop(key, None)
+
+    for key in (
+        "counterfactual_attribution", "cancellation_boundary", "management_arbiter",
+        "evidence", "input_audit", "raw_optimizer_stability", "risk_tradeoff",
+    ):
+        if _json_bytes(payload) <= PROVIDER_SNAPSHOT_LIMIT_BYTES:
+            break
+        compact_manager.pop(key, None)
+
+    # Final emergency projection still keeps the exact selected action and all
+    # policy Expected/CVaR values needed by post-provider integrity validation.
+    if _json_bytes(payload) > PROVIDER_SNAPSHOT_LIMIT_BYTES:
+        compact_manager.clear()
+        compact_manager.update({
+            "recommendation": _compact_recommendation(manager.get("recommendation")),
+            "management_decision": _compact_management_decision(manager.get("management_decision")),
+            "policies": _compact_policies(manager.get("policies")),
+            "selection_rule": _compact_scalar_contract(manager.get("selection_rule"), (
+                "cvar_floor_r", "minimum_net_advantage_r", "eligible", "winner",
+            )),
+            "inputs": _compact_scalar_contract(manager.get("inputs"), (
+                "r0", "sigma_R", "drift_R", "skew_R", "term_slope", "horizon_minutes",
+                "chain_age_sec", "chain_status", "proxy_quality",
+            )),
+            "gate": _compact_scalar_contract(manager.get("gate"), (
+                "status", "automatic_execution_allowed", "reason", "reasons",
+            )),
+            "scenario_geometry": _compact_scalar_contract(manager.get("scenario_geometry"), (
+                "scenario_count", "next_rung_r", "p_next_rung_before_stop",
+                "p_stop_before_next_rung", "p_unresolved_full_horizon",
+                "full_horizon_minutes", "mean_event_minutes_given_resolved",
+            )),
+        })
+        for key in list(payload):
+            if key not in {
+                "captured_ts", "trade_id", "strategy", "position_state", "observation",
+                "policy_manager", "provider_history_summary", "provider_projection",
+            }:
+                payload.pop(key, None)
+        payload["position_state"] = _bounded(payload.get("position_state") or {}, depth=2)
+        payload["observation"] = _bounded(payload.get("observation") or {}, depth=2)
+
+    # With bounded strings/lists and the small immutable action surface above this
+    # should be unreachable for real snapshots. Do not mislabel a valid trade as
+    # provider-unavailable if it ever is reached: retain only absolute essentials.
+    if _json_bytes(payload) > PROVIDER_SNAPSHOT_LIMIT_BYTES:
+        payload = {
+            "captured_ts": snapshot.get("captured_ts"),
+            "trade_id": snapshot.get("trade_id"),
+            "policy_manager": {
+                "recommendation": _compact_recommendation(manager.get("recommendation")),
+                "management_decision": _compact_management_decision(manager.get("management_decision")),
+                "policies": _compact_policies(manager.get("policies")),
+            },
+            "provider_projection": {
+                "contract_version": "ai-llm-explanation-projection-v2",
+                "authority": "EXPLANATION_ONLY",
+                "canonical_snapshot_unchanged": True,
+                "compaction_tier": "essential",
+                "truncated_debug_workspaces": True,
+                "original_snapshot_bytes": original_bytes,
+                "final_bytes": 0,
+            },
+        }
+
+    for _ in range(2):
+        payload["provider_projection"]["final_bytes"] = _json_bytes(payload)
+    return payload
 
 
 def compact_provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -173,8 +373,6 @@ def compact_provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         "previous_review_count": len(previous_reviews) if isinstance(previous_reviews, list) else 0,
     }
 
-    # The canonical snapshot can carry large explanatory replicas inside these
-    # top-level objects too. Keep only bounded summaries for the LLM projection.
     for key in (
         "time_context", "observation", "metric_coverage", "validation",
         "active_edge_context", "short_horizon_policy",
@@ -183,28 +381,22 @@ def compact_provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             payload[key] = _bounded(payload[key])
 
     payload["provider_projection"] = {
-        "contract_version": "ai-llm-explanation-projection-v1",
+        "contract_version": "ai-llm-explanation-projection-v2",
         "authority": "EXPLANATION_ONLY",
         "canonical_snapshot_unchanged": True,
+        "compaction_tier": "rich",
+        "truncated_debug_workspaces": False,
         "original_snapshot_bytes": original_bytes,
         "final_bytes": 0,
     }
 
     if _json_bytes(payload) > PROVIDER_SNAPSHOT_LIMIT_BYTES:
-        # Preserve the actual action, compared policy arithmetic, trade geometry,
-        # hard risk inputs and production-authority fields. Shrink explanation
-        # surfaces only.
-        compact_manager["evidence"] = _bounded(compact_manager.get("evidence") or {}, depth=2)
-        compact_manager["input_audit"] = _bounded(compact_manager.get("input_audit") or {}, depth=2)
-        compact_manager["gate"] = _bounded(compact_manager.get("gate") or {}, depth=2)
-        compact_manager["option_derivative_state"] = _bounded(
-            compact_manager.get("option_derivative_state") or {}, depth=2)
-        payload["ede_causal_context"] = _bounded(payload.get("ede_causal_context") or {}, depth=2)
+        return _minimal_provider_projection(snapshot, original_bytes)
 
     for _ in range(2):
         payload["provider_projection"]["final_bytes"] = _json_bytes(payload)
     if _json_bytes(payload) > PROVIDER_SNAPSHOT_LIMIT_BYTES:
-        raise RuntimeError("LLM explanation snapshot byte budget exceeded")
+        return _minimal_provider_projection(snapshot, original_bytes)
     return payload
 
 

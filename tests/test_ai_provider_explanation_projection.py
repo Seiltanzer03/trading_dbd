@@ -104,7 +104,9 @@ def test_provider_projection_is_bounded_non_mutating_and_keeps_action_inputs():
     assert projected["provider_history_summary"]["previous_review_count"] == 300
     assert "metric_history" not in projected
     assert "previous_reviews" not in projected
-    assert "raw_optimizer_stability" not in projected["policy_manager"]
+    # A tiny decision-stability summary may be retained, but the original
+    # high-volume stability workspace must never reach the provider.
+    assert "rows" not in projected["policy_manager"].get("raw_optimizer_stability", {})
     assert projected["provider_projection"]["authority"] == "EXPLANATION_ONLY"
     assert projected["provider_projection"]["final_bytes"] <= PROVIDER_SNAPSHOT_LIMIT_BYTES
     assert len(json.dumps(projected, ensure_ascii=False).encode("utf-8")) < len(
