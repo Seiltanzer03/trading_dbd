@@ -8,35 +8,107 @@ on:
       - .github/workflows/ops-verify-final-f648-20260822.yml
 
 permissions:
-  contents: write
+  contents: read
+  statuses: write
 
 jobs:
-  patch-readiness:
+  diagnose-llm:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 8
+    env:
+      EXPECTED_SHA: f6480483deb6495ad4a4f184c57fcc3fb8206556
     steps:
-      - uses: actions/checkout@v4
+      - name: Diagnose exact production AI verdict latency
+        id: probe
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
         with:
-          fetch-depth: 0
-      - name: Patch bounded latency retry on fix branch
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 6m
+          envs: EXPECTED_SHA
+          script: |
+            set -u
+            echo "DEPLOYED_SHA=$(git -C /opt/seiltanzer rev-parse HEAD 2>/dev/null || true)"
+            echo "SERVICE=$(systemctl is-active seiltanzer 2>/dev/null || true)"
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            PID=$(systemctl show -p MainPID --value seiltanzer)
+            python3 - "$PID" <<'PY'
+            import sys
+            raw=open(f'/proc/{sys.argv[1]}/environ','rb').read().split(b'\0')
+            env=dict(item.split(b'=',1) for item in raw if b'=' in item)
+            print('OPENROUTER_API_KEY_PRESENT=' + str(bool(env.get(b'OPENROUTER_API_KEY'))).lower())
+            print('OPENROUTER_MODEL=' + env.get(b'OPENROUTER_MODEL', b'<default>').decode(errors='ignore'))
+            print('AI_PROVIDER_TIMEOUT_SEC=' + env.get(b'AI_PROVIDER_TIMEOUT_SEC', b'<default>').decode(errors='ignore'))
+            PY
+
+            echo '=== BEFORE ==='
+            curl -sS --max-time 8 -o /tmp/ai-status-before.json -w 'STATE_BEFORE http=%{http_code} start=%{time_starttransfer} total=%{time_total}\n' http://127.0.0.1:8790/api/state || true
+            curl -sS --max-time 8 -o /tmp/snapshot-status-before.json -w 'SNAPSHOT_BEFORE http=%{http_code} start=%{time_starttransfer} total=%{time_total}\n' http://127.0.0.1:8790/api/ai/snapshot/status || true
+            python3 - <<'PY'
+            import json
+            try:
+                b=json.load(open('/tmp/snapshot-status-before.json'))
+            except Exception as e:
+                print('SNAPSHOT_PARSE_ERROR='+type(e).__name__)
+            else:
+                keep={k:b.get(k) for k in ('ready','building','current_trade_id','snapshot_trade_id','age_sec','build_duration_ms','last_error')}
+                print('SNAPSHOT_STATUS='+json.dumps(keep,sort_keys=True))
+            PY
+
+            echo '=== VERDICT ==='
+            started=$(date +%s)
+            curl -sS --max-time 40 -X POST -o /tmp/ai-verdict.json \
+              -w 'AI_VERDICT http=%{http_code} bytes=%{size_download} start=%{time_starttransfer} total=%{time_total}\n' \
+              http://127.0.0.1:8790/api/ai/verdict || echo "AI_VERDICT_CURL_EXIT=$?"
+            ended=$(date +%s)
+            echo "AI_VERDICT_WALL_SEC=$((ended-started))"
+            python3 - <<'PY'
+            import json, os
+            path='/tmp/ai-verdict.json'
+            if not os.path.exists(path):
+                print('AI_BODY=missing')
+            else:
+                try: b=json.load(open(path))
+                except Exception as e: print('AI_BODY_PARSE_ERROR='+type(e).__name__)
+                else:
+                    verdict=str(b.get('verdict') or '')
+                    print('AI_BODY='+json.dumps({
+                        'ok':b.get('ok'),'model':b.get('model'),'mode':b.get('mode'),
+                        'request_id':b.get('request_id'),'degraded':b.get('degraded'),
+                        'provider_error':b.get('provider_error'),
+                        'has_llm_explanation':'LLM EXPLANATION' in verdict.upper(),
+                    },sort_keys=True))
+            PY
+
+            sleep 3
+            echo '=== AFTER ==='
+            curl -sS --max-time 8 -o /dev/null -w 'STATE_AFTER http=%{http_code} start=%{time_starttransfer} total=%{time_total}\n' http://127.0.0.1:8790/api/state || true
+            curl -sS --max-time 8 -o /tmp/snapshot-status-after.json -w 'SNAPSHOT_AFTER http=%{http_code} start=%{time_starttransfer} total=%{time_total}\n' http://127.0.0.1:8790/api/ai/snapshot/status || true
+
+            echo '=== AI EVENTS ==='
+            journalctl -u seiltanzer --since '-15 minutes' --no-pager | grep 'ai_verdict_event' | tail -n 40 || true
+            echo '=== RESOURCE ==='
+            ps -p "$PID" -o pid,etimes,%cpu,%mem,rss,vsz,nlwp,stat --no-headers || true
+
+      - name: Publish diagnostic completion
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          git fetch origin fix/readiness-transient-latency-retry
-          git switch fix/readiness-transient-latency-retry
-          python3 - <<'PY'
-          from pathlib import Path
-          path=Path('scripts/production_readiness_check.py')
-          text=path.read_text()
-          old='''def assert_fast(path: str, *, budget_ms: float | None = None,\n                attempts: int = TRANSIENT_ATTEMPTS):\n    """Verify one bounded route, retrying transport contention only.\n\n    A research materializer can briefly hold the shared SQLite/runtime lock.\n    Retrying a socket timeout does not relax the response-time assertion: the\n    successful attempt must still satisfy the original per-route budget.\n    HTTP errors, malformed bodies and assertion failures remain immediate.\n    """\n    for attempt in range(1, max(1, int(attempts)) + 1):\n        try:\n            code, body, elapsed = request(path, timeout=FAST_TIMEOUT)\n        except Exception as exc:\n            if not _is_transient_transport_error(exc) or attempt >= attempts:\n                raise\n            print(f"{path}: transient {type(exc).__name__} "\n                  f"attempt={attempt}/{attempts}; retrying")\n            time.sleep(TRANSIENT_RETRY_DELAY_SEC)\n            continue\n        print(f"{path}: {code} {elapsed:.0f}ms attempt={attempt}/{attempts}")\n        assert code == 200, (path, code, body)\n        if budget_ms is not None:\n            assert elapsed < budget_ms, (path, elapsed, budget_ms)\n        return body\n    raise AssertionError((path, "retry loop exhausted"))\n'''
-          new='''def assert_fast(path: str, *, budget_ms: float | None = None,\n                attempts: int = TRANSIENT_ATTEMPTS):\n    """Verify one bounded route with a bounded transient-contention retry.\n\n    Transport timeouts and isolated 200 responses that miss the existing latency\n    budget may both be caused by short scheduler/runtime contention. Retrying does\n    not relax the SLA: one attempt must still complete below the original budget.\n    HTTP errors and malformed bodies remain immediate failures, and repeated slow\n    responses fail on the final attempt.\n    """\n    max_attempts = max(1, int(attempts))\n    for attempt in range(1, max_attempts + 1):\n        try:\n            code, body, elapsed = request(path, timeout=FAST_TIMEOUT)\n        except Exception as exc:\n            if not _is_transient_transport_error(exc) or attempt >= max_attempts:\n                raise\n            print(f"{path}: transient {type(exc).__name__} "\n                  f"attempt={attempt}/{max_attempts}; retrying")\n            time.sleep(TRANSIENT_RETRY_DELAY_SEC)\n            continue\n        print(f"{path}: {code} {elapsed:.0f}ms attempt={attempt}/{max_attempts}")\n        assert code == 200, (path, code, body)\n        if budget_ms is not None and elapsed >= budget_ms:\n            if attempt >= max_attempts:\n                raise AssertionError((path, elapsed, budget_ms))\n            print(f"{path}: transient latency budget overrun "\n                  f"{elapsed:.0f}ms>={budget_ms:.0f}ms "\n                  f"attempt={attempt}/{max_attempts}; retrying")\n            time.sleep(TRANSIENT_RETRY_DELAY_SEC)\n            continue\n        return body\n    raise AssertionError((path, "retry loop exhausted"))\n'''
-          if old not in text:
-              raise SystemExit('target assert_fast block not found')
-          path.write_text(text.replace(old,new,1))
+          payload=$(python3 - <<'PY'
+          import json
+          print(json.dumps({'state':'success','context':'diagnostic/llm-latency','description':'Exact production AI latency diagnostic completed',
+                            'target_url':'${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'}))
           PY
-          git diff --check
-          git diff -- scripts/production_readiness_check.py
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add scripts/production_readiness_check.py
-          git commit -m 'fix: retry transient readiness latency spikes'
-          git push origin HEAD:fix/readiness-transient-latency-retry
+          )
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${EXPECTED_SHA}" \
+            -d "$payload" >/dev/null
