@@ -1,0 +1,108 @@
+name: ops-final-verify-d175-20260822
+
+on:
+  push:
+    branches: [ops/final-verify-d175-20260822]
+    paths: [.github/workflows/ops-final-verify-d175-20260822.yml]
+
+permissions:
+  contents: read
+  actions: read
+  statuses: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      EXPECTED_SHA: d175d119c02201e36f8199363cf9ca43b0b8082a
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Wait exact main CI
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 120); do
+            body=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs?head_sha=$EXPECTED_SHA&event=push&per_page=20")
+            row=$(BODY="$body" python3 - <<'PY'
+          import json,os
+          runs=json.loads(os.environ['BODY']).get('workflow_runs',[])
+          runs=[r for r in runs if r.get('name')=='tests' and r.get('head_sha')==os.environ['EXPECTED_SHA']]
+          if not runs: print('missing|||')
+          else:
+              r=sorted(runs,key=lambda x:x.get('created_at',''),reverse=True)[0]
+              print('|'.join(str(r.get(k) or '') for k in ('id','status','conclusion','html_url')))
+          PY
+            )
+            IFS='|' read -r run_id status conclusion url <<< "$row"
+            echo "CI attempt=$attempt run=${run_id:-missing} status=${status:-missing} conclusion=${conclusion:-none}"
+            if [ "$status" = completed ]; then
+              test "$conclusion" = success
+              echo "MAIN_CI_RUN=$run_id"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo '::error::main CI did not complete'; exit 1
+
+      - name: Wait exact production acceptance
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 120); do
+            body=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/$EXPECTED_SHA/status")
+            row=$(BODY="$body" python3 - <<'PY'
+          import json,os
+          rows=[r for r in json.loads(os.environ['BODY']).get('statuses',[]) if r.get('context')=='production/seiltanzer']
+          if not rows: print('missing|')
+          else: print(str(rows[0].get('state') or '')+'|'+str(rows[0].get('target_url') or ''))
+          PY
+            )
+            state=${row%%|*}; target=${row#*|}
+            echo "PROD attempt=$attempt state=${state:-missing} target=${target:-none}"
+            if [ "$state" = success ]; then exit 0; fi
+            if [ "$state" = failure ] || [ "$state" = error ]; then echo '::error::production acceptance failed'; exit 1; fi
+            sleep 10
+          done
+          echo '::error::production acceptance did not complete'; exit 1
+
+      - name: Verify exact production and real LLM
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 5m
+          envs: EXPECTED_SHA
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            test "$(systemctl is-active seiltanzer)" = active
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import json,time,urllib.request,urllib.error
+            base='http://127.0.0.1:8790'
+            def request(path,method='GET',timeout=10):
+                req=urllib.request.Request(base+path,method=method); t=time.monotonic()
+                try:
+                    with urllib.request.urlopen(req,timeout=timeout) as r: raw=r.read(); code=r.status
+                except urllib.error.HTTPError as e: raw=e.read(); code=e.code
+                return code,(json.loads(raw.decode()) if raw else {}),(time.monotonic()-t)*1000
+            for path,budget in [('/api/state',3000),('/api/research/g1s/cuts?limit=500',3000),('/api/research/g1s/barriers?limit=500',3000),('/api/research/g1s/trade-relevance',3000)]:
+                ok=False
+                for attempt in range(1,4):
+                    code,body,ms=request(path,timeout=8)
+                    print('ROUTE',path,'attempt',attempt,'http',code,'ms',round(ms,1))
+                    if code==200 and ms<budget: ok=True; break
+                    time.sleep(1)
+                assert ok,path
+            code,body,ms=request('/api/ai/verdict',method='POST',timeout=20)
+            verdict=str(body.get('verdict') or '')
+            print('LLM',json.dumps({'http':code,'ms':round(ms,1),'model':body.get('model'),'mode':body.get('mode'),'degraded':body.get('degraded'),'has_llm_explanation':'LLM EXPLANATION' in verdict.upper()},sort_keys=True))
+            assert code==200
+            assert body.get('model') and body.get('model')!='deterministic-policy-fallback'
+            assert body.get('mode')=='llm' and body.get('degraded') is False
+            assert 'LLM EXPLANATION' in verdict.upper()
+            PY
