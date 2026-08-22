@@ -1,4 +1,4 @@
-name: ops-final-verify-d175-20260822
+name: ops-q-audit-diagnostic-d175-20260822
 
 on:
   push:
@@ -7,66 +7,17 @@ on:
 
 permissions:
   contents: read
-  actions: read
-  statuses: read
+  statuses: write
 
 jobs:
-  watch:
+  diagnose:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 10
     env:
       EXPECTED_SHA: d175d119c02201e36f8199363cf9ca43b0b8082a
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Wait exact main CI
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 120); do
-            body=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs?head_sha=$EXPECTED_SHA&event=push&per_page=20")
-            row=$(BODY="$body" python3 - <<'PY'
-          import json,os
-          runs=json.loads(os.environ['BODY']).get('workflow_runs',[])
-          runs=[r for r in runs if r.get('name')=='tests' and r.get('head_sha')==os.environ['EXPECTED_SHA']]
-          if not runs: print('missing|||')
-          else:
-              r=sorted(runs,key=lambda x:x.get('created_at',''),reverse=True)[0]
-              print('|'.join(str(r.get(k) or '') for k in ('id','status','conclusion','html_url')))
-          PY
-            )
-            IFS='|' read -r run_id status conclusion url <<< "$row"
-            echo "CI attempt=$attempt run=${run_id:-missing} status=${status:-missing} conclusion=${conclusion:-none}"
-            if [ "$status" = completed ]; then
-              test "$conclusion" = success
-              echo "MAIN_CI_RUN=$run_id"
-              exit 0
-            fi
-            sleep 10
-          done
-          echo '::error::main CI did not complete'; exit 1
-
-      - name: Wait exact production acceptance
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 120); do
-            body=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${{ github.repository }}/commits/$EXPECTED_SHA/status")
-            row=$(BODY="$body" python3 - <<'PY'
-          import json,os
-          rows=[r for r in json.loads(os.environ['BODY']).get('statuses',[]) if r.get('context')=='production/seiltanzer']
-          if not rows: print('missing|')
-          else: print(str(rows[0].get('state') or '')+'|'+str(rows[0].get('target_url') or ''))
-          PY
-            )
-            state=${row%%|*}; target=${row#*|}
-            echo "PROD attempt=$attempt state=${state:-missing} target=${target:-none}"
-            if [ "$state" = success ]; then exit 0; fi
-            if [ "$state" = failure ] || [ "$state" = error ]; then echo '::error::production acceptance failed'; exit 1; fi
-            sleep 10
-          done
-          echo '::error::production acceptance did not complete'; exit 1
-
-      - name: Verify exact production and real LLM
+      - name: Measure exact production Q audit phases
+        id: probe
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
@@ -81,28 +32,69 @@ jobs:
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             test "$(systemctl is-active seiltanzer)" = active
+            echo '=== ROUTE ==='
+            for attempt in 1 2 3; do
+              curl -sS --max-time 10 -o /dev/null -w "Q_ROUTE attempt=$attempt http=%{http_code} bytes=%{size_download} start=%{time_starttransfer} total=%{time_total}\n" \
+                'http://127.0.0.1:8790/api/research/g1/q/audit?limit=5000' || true
+            done
+            echo '=== SQLITE PHASES ==='
             /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import json,time,urllib.request,urllib.error
-            base='http://127.0.0.1:8790'
-            def request(path,method='GET',timeout=10):
-                req=urllib.request.Request(base+path,method=method); t=time.monotonic()
-                try:
-                    with urllib.request.urlopen(req,timeout=timeout) as r: raw=r.read(); code=r.status
-                except urllib.error.HTTPError as e: raw=e.read(); code=e.code
-                return code,(json.loads(raw.decode()) if raw else {}),(time.monotonic()-t)*1000
-            for path,budget in [('/api/state',3000),('/api/research/g1s/cuts?limit=500',3000),('/api/research/g1s/barriers?limit=500',3000),('/api/research/g1s/trade-relevance',3000)]:
-                ok=False
-                for attempt in range(1,4):
-                    code,body,ms=request(path,timeout=8)
-                    print('ROUTE',path,'attempt',attempt,'http',code,'ms',round(ms,1))
-                    if code==200 and ms<budget: ok=True; break
-                    time.sleep(1)
-                assert ok,path
-            code,body,ms=request('/api/ai/verdict',method='POST',timeout=20)
-            verdict=str(body.get('verdict') or '')
-            print('LLM',json.dumps({'http':code,'ms':round(ms,1),'model':body.get('model'),'mode':body.get('mode'),'degraded':body.get('degraded'),'has_llm_explanation':'LLM EXPLANATION' in verdict.upper()},sort_keys=True))
-            assert code==200
-            assert body.get('model') and body.get('model')!='deterministic-policy-fallback'
-            assert body.get('mode')=='llm' and body.get('degraded') is False
-            assert 'LLM EXPLANATION' in verdict.upper()
+            import sqlite3,time
+            db='/opt/seiltanzer/data/trades.db'
+            con=sqlite3.connect(f'file:{db}?mode=ro',uri=True,timeout=10)
+            con.row_factory=sqlite3.Row
+            now=time.time()
+            def timed(label, sql, args=()):
+                t=time.monotonic(); rows=con.execute(sql,args).fetchall(); ms=(time.monotonic()-t)*1000
+                print(f'{label} rows={len(rows)} ms={ms:.1f}')
+                return rows
+            rows=timed('Q_ROWS', '''
+              SELECT q.attempt_id,q.attempt_ts,q.target_instrument,q.observation_created,
+                     q.created_observation_id,q.blocker_code,p.target_ts,p.resolution_status,
+                     p.instrument
+              FROM g1_q_capture_attempts q
+              LEFT JOIN passive_market_observations p ON p.observation_id=q.created_observation_id
+              ORDER BY q.attempt_ts DESC LIMIT ?''',(5000,))
+            path=timed('PATH_GLOBAL_MAX','SELECT instrument,MAX(ts) mx FROM passive_market_path GROUP BY instrument')
+            bars=timed('BARS_GLOBAL_MAX','SELECT instrument,MAX(bar_end_ts) mx FROM passive_market_bars GROUP BY instrument')
+            needs=[]
+            for r in rows:
+                target=r['target_ts']
+                if int(r['observation_created'] or 0)==1 and r['created_observation_id'] and r['resolution_status']!='resolved' and target is not None and float(target)<=now:
+                    needs.append(str(r['instrument'] or r['target_instrument'] or ''))
+            instruments=sorted(set(x for x in needs if x))
+            print('DUE_UNRESOLVED_ROWS',len(needs),'INSTRUMENTS',instruments)
+            fast_path={}; fast_bar={}
+            t=time.monotonic()
+            for instrument in instruments:
+                r=con.execute('SELECT ts FROM passive_market_path WHERE instrument=? ORDER BY ts DESC LIMIT 1',(instrument,)).fetchone()
+                fast_path[instrument]=float(r[0]) if r else 0.0
+                r=con.execute('SELECT bar_end_ts FROM passive_market_bars WHERE instrument=? ORDER BY bar_start_ts DESC LIMIT 1',(instrument,)).fetchone()
+                fast_bar[instrument]=float(r[0]) if r else 0.0
+            print(f'INDEXED_LATEST instruments={len(instruments)} ms={(time.monotonic()-t)*1000:.1f}')
+            global_path={str(r['instrument']):float(r['mx'] or 0) for r in path}
+            global_bar={str(r['instrument']):float(r['mx'] or 0) for r in bars}
+            print('PATH_MATCH',all(abs(fast_path.get(i,0)-global_path.get(i,0))<1e-6 for i in instruments))
+            print('BAR_MATCH',all(abs(fast_bar.get(i,0)-global_bar.get(i,0))<1e-6 for i in instruments))
+            con.close()
             PY
+
+      - name: Publish diagnostic status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ steps.probe.outcome }}
+        run: |
+          set -euo pipefail
+          state=success
+          desc='Production Q audit SQL diagnostic completed'
+          if [ "$OUTCOME" != success ]; then state=failure; desc='Production Q audit SQL diagnostic failed'; fi
+          payload=$(python3 - "$state" "$desc" <<'PY'
+          import json,sys
+          print(json.dumps({'state':sys.argv[1],'context':'diagnostic/q-audit-sql','description':sys.argv[2],
+            'target_url':'${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'}))
+          PY
+          )
+          curl -fsS -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${EXPECTED_SHA}" -d "$payload" >/dev/null
