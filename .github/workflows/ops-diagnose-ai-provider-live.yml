@@ -14,156 +14,9 @@ permissions:
 jobs:
   diagnose:
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
-      - name: Verify provider key is present in service
-        id: key
-        continue-on-error: true
-        uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 2m
-          script: |
-            set -euo pipefail
-            EXPECTED_SHA=3edd97c48fc9f1b63c80f2dcf4349d9b1ad9d636
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            test "$(systemctl is-active seiltanzer)" = active
-            PID=$(systemctl show -p MainPID --value seiltanzer)
-            python3 - "$PID" <<'PY'
-            import sys
-            raw = open(f'/proc/{sys.argv[1]}/environ','rb').read().split(b'\0')
-            env = dict(item.split(b'=',1) for item in raw if b'=' in item)
-            assert bool(env.get(b'OPENROUTER_API_KEY')), 'OPENROUTER_API_KEY missing'
-            print('KEY_PRESENT=true')
-            print('MODEL=' + env.get(b'OPENROUTER_MODEL', b'<default>').decode(errors='ignore'))
-            print('TIMEOUT=' + env.get(b'AI_PROVIDER_TIMEOUT_SEC', b'<default>').decode(errors='ignore'))
-            print('CIRCUIT=' + env.get(b'AI_PROVIDER_CIRCUIT_SEC', b'<default>').decode(errors='ignore'))
-            PY
-
-      - name: Verify OpenRouter directly with tiny prompt
-        id: direct
-        continue-on-error: true
-        uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 2m
-          script: |
-            set -euo pipefail
-            PID=$(systemctl show -p MainPID --value seiltanzer)
-            /opt/seiltanzer/.venv/bin/python - "$PID" <<'PY'
-            import sys, time, httpx
-            raw = open(f'/proc/{sys.argv[1]}/environ','rb').read().split(b'\0')
-            env = {k.decode(): v.decode() for k,v in (item.split(b'=',1) for item in raw if b'=' in item)}
-            key = env.get('OPENROUTER_API_KEY','').strip()
-            assert key, 'provider key missing'
-            model = env.get('OPENROUTER_MODEL','openai/gpt-4o-mini')
-            proxy = env.get('OPENROUTER_PROXY','').strip() or None
-            body = {'model': model, 'temperature': 0.0, 'max_tokens': 12,
-                    'messages': [{'role':'user','content':'Reply exactly: OK'}]}
-            started=time.monotonic()
-            with httpx.Client(proxy=proxy, timeout=12.0, trust_env=False) as client:
-                r=client.post('https://openrouter.ai/api/v1/chat/completions', json=body,
-                    headers={'Authorization':f'Bearer {key}','Content-Type':'application/json',
-                             'Accept':'application/json','User-Agent':'Seiltanzer-Diagnostic/1.0'})
-            elapsed=(time.monotonic()-started)*1000
-            print(f'DIRECT_HTTP={r.status_code} elapsed_ms={elapsed:.1f}')
-            r.raise_for_status()
-            result=r.json()
-            content=((result.get('choices') or [{}])[0].get('message') or {}).get('content')
-            assert content, 'empty provider content'
-            print('DIRECT_PROVIDER_OK=true')
-            PY
-
-      - name: Verify latest canonical snapshot can be projected
-        id: projection
-        continue-on-error: true
-        uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 2m
-          script: |
-            set -euo pipefail
-            cd /opt/seiltanzer
-            /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import json, sqlite3
-            from pathlib import Path
-            from seiltanzer.ai_provider_guard import compact_provider_snapshot, _json_bytes, PROVIDER_SNAPSHOT_LIMIT_BYTES
-
-            snapshot = None
-            source = None
-            for path in sorted(Path('/opt/seiltanzer/data').rglob('*.sqlite3')):
-                try:
-                    con = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=0.2)
-                    row = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_verdicts'").fetchone()
-                    if row:
-                        latest = con.execute('SELECT snapshot_json FROM ai_verdicts ORDER BY ts DESC LIMIT 1').fetchone()
-                        if latest and latest[0]:
-                            snapshot = json.loads(latest[0]); source = path
-                            con.close(); break
-                    con.close()
-                except Exception:
-                    continue
-            assert isinstance(snapshot, dict), 'latest canonical AI snapshot not found'
-            projected = compact_provider_snapshot(snapshot)
-            size = _json_bytes(projected)
-            print(f'PROJECTION_OK=true canonical_bytes={_json_bytes(snapshot)} projected_bytes={size} source={source.name}')
-            assert size <= PROVIDER_SNAPSHOT_LIMIT_BYTES
-            assert projected.get('policy_manager', {}).get('recommendation')
-            PY
-
-      - name: Run unguarded real provider on projected management snapshot
-        id: base
-        continue-on-error: true
-        uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 2m
-          script: |
-            set -euo pipefail
-            cd /opt/seiltanzer
-            PID=$(systemctl show -p MainPID --value seiltanzer)
-            /opt/seiltanzer/.venv/bin/python - "$PID" <<'PY'
-            import json, os, sqlite3, sys, time
-            from pathlib import Path
-            raw = open(f'/proc/{sys.argv[1]}/environ','rb').read().split(b'\0')
-            service_env = {k.decode(): v.decode() for k,v in (item.split(b'=',1) for item in raw if b'=' in item)}
-            for key in ('OPENROUTER_API_KEY','OPENROUTER_MODEL','OPENROUTER_PROXY'):
-                if service_env.get(key): os.environ[key]=service_env[key]
-            from seiltanzer.ai_provider_guard import compact_provider_snapshot
-            from seiltanzer import ai_verdict
-            snapshot=None
-            for path in sorted(Path('/opt/seiltanzer/data').rglob('*.sqlite3')):
-                try:
-                    con=sqlite3.connect(f'file:{path}?mode=ro',uri=True,timeout=0.2)
-                    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_verdicts'").fetchone():
-                        row=con.execute('SELECT snapshot_json FROM ai_verdicts ORDER BY ts DESC LIMIT 1').fetchone()
-                        if row and row[0]: snapshot=json.loads(row[0]); con.close(); break
-                    con.close()
-                except Exception:
-                    continue
-            assert isinstance(snapshot,dict), 'snapshot not found'
-            projected=compact_provider_snapshot(snapshot)
-            started=time.monotonic()
-            result=ai_verdict.request_verdict(projected)
-            elapsed=(time.monotonic()-started)*1000
-            model=str(result.get('model') or '')
-            print(f'UNGUARDED_MODEL={model} elapsed_ms={elapsed:.1f}')
-            assert model and model != 'deterministic-policy-fallback', 'provider answered but report normalization fell back'
-            PY
-
-      - name: Verify real AI management route uses LLM
+      - name: Wait for merged exact SHA and verify real AI route
         id: route
         continue-on-error: true
         uses: appleboy/ssh-action@v1
@@ -172,22 +25,71 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 2m
+          command_timeout: 10m
           script: |
             set -euo pipefail
-            /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import json, time, urllib.request
-            started=time.monotonic()
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/verdict', timeout=15.0) as r:
-                body=json.loads(r.read().decode('utf-8'))
-            elapsed=(time.monotonic()-started)*1000
-            result=body.get('result') if isinstance(body.get('result'),dict) else body
-            model=str(result.get('model') or '')
-            print(f'ROUTE_MODEL={model} elapsed_ms={elapsed:.1f}')
-            assert model and model != 'deterministic-policy-fallback', body
+            EXPECTED_SHA=38a07b10abfbb0443d15004d33e661fc5c05f37b
+            matched=0
+            for attempt in $(seq 1 90); do
+              actual=$(git -C /opt/seiltanzer rev-parse HEAD 2>/dev/null || true)
+              active=$(systemctl is-active seiltanzer 2>/dev/null || true)
+              echo "production wait attempt=$attempt expected=$EXPECTED_SHA actual=${actual:-missing} active=${active:-unknown}"
+              if [ "$actual" = "$EXPECTED_SHA" ] && [ "$active" = active ]; then
+                matched=1
+                break
+              fi
+              sleep 5
+            done
+            test "$matched" = 1
+
+            PID=$(systemctl show -p MainPID --value seiltanzer)
+            python3 - "$PID" <<'PY'
+            import sys
+            raw=open(f'/proc/{sys.argv[1]}/environ','rb').read().split(b'\0')
+            env=dict(item.split(b'=',1) for item in raw if b'=' in item)
+            assert bool(env.get(b'OPENROUTER_API_KEY')), 'OPENROUTER_API_KEY missing'
+            print('OPENROUTER_API_KEY_PRESENT=true')
+            print('OPENROUTER_MODEL=' + env.get(b'OPENROUTER_MODEL', b'<default>').decode(errors='ignore'))
+            print('AI_PROVIDER_TIMEOUT_SEC=' + env.get(b'AI_PROVIDER_TIMEOUT_SEC', b'<default>').decode(errors='ignore'))
             PY
 
-      - name: Show sanitized recent AI events
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import json, time, urllib.request
+            url='http://127.0.0.1:8790/api/ai/verdict'
+            last=None
+            for attempt in range(1,4):
+                started=time.monotonic()
+                try:
+                    with urllib.request.urlopen(url, timeout=15.0) as r:
+                        body=json.loads(r.read().decode('utf-8'))
+                    elapsed=(time.monotonic()-started)*1000.0
+                    result=body.get('result') if isinstance(body.get('result'),dict) else body
+                    model=str(result.get('model') or '')
+                    verdict=str(result.get('verdict') or '')
+                    provider_mode=str(result.get('provider_mode') or '')
+                    payload={
+                        'http':200,
+                        'elapsed_ms':round(elapsed,1),
+                        'model':model,
+                        'provider_mode':provider_mode,
+                        'result_mode':body.get('result_mode') or result.get('result_mode'),
+                        'has_llm_explanation':'LLM EXPLANATION' in verdict.upper(),
+                    }
+                    print('AI_ROUTE_PROBE=' + json.dumps(payload,ensure_ascii=False,sort_keys=True))
+                    last=payload
+                    if model and model != 'deterministic-policy-fallback' and payload['has_llm_explanation']:
+                        break
+                except Exception as exc:
+                    last={'error':type(exc).__name__}
+                    print(f'AI_ROUTE_ATTEMPT_{attempt}_ERROR={type(exc).__name__}')
+                time.sleep(2)
+            assert isinstance(last,dict), last
+            assert last.get('model') and last['model'] != 'deterministic-policy-fallback', last
+            assert last.get('has_llm_explanation') is True, last
+            assert float(last.get('elapsed_ms') or 99999) < 12000.0, last
+            PY
+
+      - name: Show sanitized AI events
         if: always()
         uses: appleboy/ssh-action@v1
         with:
@@ -197,37 +99,34 @@ jobs:
           port: 22
           command_timeout: 2m
           script: |
-            journalctl -u seiltanzer --since '-90 minutes' --no-pager \
-              | grep 'ai_verdict_event' | tail -n 30 || true
+            echo '=== DEPLOYED SHA ==='
+            git -C /opt/seiltanzer rev-parse HEAD || true
+            echo '=== RECENT AI EVENTS ==='
+            journalctl -u seiltanzer --since '-20 minutes' --no-pager \
+              | grep 'ai_verdict_event' | tail -n 20 || true
 
-      - name: Publish diagnostic classifications
+      - name: Publish post-merge diagnostic status
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          KEY_OUTCOME: ${{ steps.key.outcome }}
-          DIRECT_OUTCOME: ${{ steps.direct.outcome }}
-          PROJECTION_OUTCOME: ${{ steps.projection.outcome }}
-          BASE_OUTCOME: ${{ steps.base.outcome }}
           ROUTE_OUTCOME: ${{ steps.route.outcome }}
         run: |
           set -euo pipefail
-          publish() {
-            outcome="$1"; context="$2"; ok="$3"; bad="$4"
-            if [ "$outcome" = success ]; then state=success; desc="$ok"; else state=failure; desc="$bad"; fi
-            payload=$(python3 - "$state" "$context" "$desc" <<'PY'
-          import json, sys
-          print(json.dumps({'state':sys.argv[1], 'context':sys.argv[2], 'description':sys.argv[3]}))
+          if [ "$ROUTE_OUTCOME" = success ]; then
+            state=success
+            description='Merged exact-SHA production AI route returns real OpenRouter explanation'
+          else
+            state=failure
+            description='Merged exact-SHA production AI route not yet model-backed'
+          fi
+          payload=$(python3 - "$state" "$description" <<'PY'
+          import json,sys
+          print(json.dumps({'state':sys.argv[1],'context':'diagnostic/postmerge-llm','description':sys.argv[2]}))
           PY
-            )
-            curl -fsS -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
-              -d "$payload" >/dev/null
-          }
-          publish "$KEY_OUTCOME" diagnostic/llm-key "OpenRouter key present" "OpenRouter key missing from service"
-          publish "$DIRECT_OUTCOME" diagnostic/llm-direct "Direct OpenRouter call succeeds" "Direct OpenRouter call fails"
-          publish "$PROJECTION_OUTCOME" diagnostic/llm-projection "Canonical snapshot projects under budget" "Provider projection fails before OpenRouter"
-          publish "$BASE_OUTCOME" diagnostic/llm-unguarded "Projected report passes provider validation" "Projected provider result normalizes to fallback"
-          publish "$ROUTE_OUTCOME" diagnostic/llm-route "AI management route returns LLM" "AI management route still deterministic"
+          )
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+            -d "$payload" >/dev/null
