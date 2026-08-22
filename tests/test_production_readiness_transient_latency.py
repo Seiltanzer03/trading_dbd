@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 
-from scripts import production_readiness_check as readiness
+
+_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "production_readiness_check.py"
+_SPEC = importlib.util.spec_from_file_location("production_readiness_check", _MODULE_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+readiness = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(readiness)
 
 
 def test_assert_fast_retries_one_transient_budget_overrun(monkeypatch):
