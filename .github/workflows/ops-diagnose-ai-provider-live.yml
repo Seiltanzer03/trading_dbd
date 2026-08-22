@@ -14,119 +14,48 @@ permissions:
 jobs:
   diagnose:
     runs-on: ubuntu-22.04
-    timeout-minutes: 12
+    timeout-minutes: 6
     steps:
-      - name: Wait for merged exact SHA and verify real AI route
-        id: route
-        continue-on-error: true
+      - name: Measure read-only G1S operational snapshot queries
+        id: measure
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 10m
+          command_timeout: 4m
           script: |
             set -euo pipefail
-            EXPECTED_SHA=38a07b10abfbb0443d15004d33e661fc5c05f37b
-            matched=0
-            for attempt in $(seq 1 90); do
-              actual=$(git -C /opt/seiltanzer rev-parse HEAD 2>/dev/null || true)
-              active=$(systemctl is-active seiltanzer 2>/dev/null || true)
-              echo "production wait attempt=$attempt expected=$EXPECTED_SHA actual=${actual:-missing} active=${active:-unknown}"
-              if [ "$actual" = "$EXPECTED_SHA" ] && [ "$active" = active ]; then
-                matched=1
-                break
-              fi
-              sleep 5
-            done
-            test "$matched" = 1
-
-            PID=$(systemctl show -p MainPID --value seiltanzer)
-            python3 - "$PID" <<'PY'
-            import sys
-            raw=open(f'/proc/{sys.argv[1]}/environ','rb').read().split(b'\0')
-            env=dict(item.split(b'=',1) for item in raw if b'=' in item)
-            assert bool(env.get(b'OPENROUTER_API_KEY')), 'OPENROUTER_API_KEY missing'
-            print('OPENROUTER_API_KEY_PRESENT=true')
-            print('OPENROUTER_MODEL=' + env.get(b'OPENROUTER_MODEL', b'<default>').decode(errors='ignore'))
-            print('AI_PROVIDER_TIMEOUT_SEC=' + env.get(b'AI_PROVIDER_TIMEOUT_SEC', b'<default>').decode(errors='ignore'))
-            PY
-
+            test "$(systemctl is-active seiltanzer)" = active
             /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import json, time, urllib.request
-            url='http://127.0.0.1:8790/api/ai/verdict'
-            last=None
-            for attempt in range(1,4):
-                started=time.monotonic()
-                try:
-                    with urllib.request.urlopen(url, timeout=15.0) as r:
-                        body=json.loads(r.read().decode('utf-8'))
-                    elapsed=(time.monotonic()-started)*1000.0
-                    result=body.get('result') if isinstance(body.get('result'),dict) else body
-                    model=str(result.get('model') or '')
-                    verdict=str(result.get('verdict') or '')
-                    provider_mode=str(result.get('provider_mode') or '')
-                    payload={
-                        'http':200,
-                        'elapsed_ms':round(elapsed,1),
-                        'model':model,
-                        'provider_mode':provider_mode,
-                        'result_mode':body.get('result_mode') or result.get('result_mode'),
-                        'has_llm_explanation':'LLM EXPLANATION' in verdict.upper(),
-                    }
-                    print('AI_ROUTE_PROBE=' + json.dumps(payload,ensure_ascii=False,sort_keys=True))
-                    last=payload
-                    if model and model != 'deterministic-policy-fallback' and payload['has_llm_explanation']:
-                        break
-                except Exception as exc:
-                    last={'error':type(exc).__name__}
-                    print(f'AI_ROUTE_ATTEMPT_{attempt}_ERROR={type(exc).__name__}')
-                time.sleep(2)
-            assert isinstance(last,dict), last
-            assert last.get('model') and last['model'] != 'deterministic-policy-fallback', last
-            assert last.get('has_llm_explanation') is True, last
-            assert float(last.get('elapsed_ms') or 99999) < 12000.0, last
+            import json, sqlite3, time
+            db='file:/opt/seiltanzer/data/trades.db?mode=ro'
+            conn=sqlite3.connect(db, uri=True, timeout=2.0)
+            conn.row_factory=sqlite3.Row
+            conn.execute('PRAGMA query_only=ON')
+            queries={
+              'cuts500': ('''SELECT c.*,l.model_id FROM g1s_training_cuts c LEFT JOIN g1s_model_cut_links l USING(cut_id) ORDER BY c.created_ts DESC LIMIT ?''',500),
+              'barriers5000': ('''SELECT b.*,g.instrument,g.horizon_minutes,g.captured_ts,g.origin FROM g1s_barrier_outcomes b JOIN g1s_observations g USING(observation_id) ORDER BY g.captured_ts DESC,b.barrier_atr_multiple LIMIT ?''',5000),
+              'path_metrics5000': ('''SELECT m.*,g.instrument,g.captured_ts,g.target_ts,g.origin FROM g1s_path_metrics m JOIN g1s_observations g USING(observation_id) ORDER BY g.captured_ts DESC LIMIT ?''',5000),
+            }
+            for name,(sql,limit) in queries.items():
+                started=time.monotonic(); rows=conn.execute(sql,(limit,)).fetchall(); elapsed=(time.monotonic()-started)*1000
+                encoded=len(json.dumps([dict(r) for r in rows],ensure_ascii=False,default=str).encode())
+                print(f'{name}: rows={len(rows)} query_ms={elapsed:.1f} json_bytes={encoded}')
+                assert elapsed < 5000, (name,elapsed)
+            conn.close()
             PY
-
-      - name: Show sanitized AI events
-        if: always()
-        uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 2m
-          script: |
-            echo '=== DEPLOYED SHA ==='
-            git -C /opt/seiltanzer rev-parse HEAD || true
-            echo '=== RECENT AI EVENTS ==='
-            journalctl -u seiltanzer --since '-20 minutes' --no-pager \
-              | grep 'ai_verdict_event' | tail -n 20 || true
-
-      - name: Publish post-merge diagnostic status
+      - name: Publish measurement status
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          ROUTE_OUTCOME: ${{ steps.route.outcome }}
+          OUTCOME: ${{ steps.measure.outcome }}
         run: |
-          set -euo pipefail
-          if [ "$ROUTE_OUTCOME" = success ]; then
-            state=success
-            description='Merged exact-SHA production AI route returns real OpenRouter explanation'
-          else
-            state=failure
-            description='Merged exact-SHA production AI route not yet model-backed'
-          fi
-          payload=$(python3 - "$state" "$description" <<'PY'
+          if [ "$OUTCOME" = success ]; then state=success; desc='G1S operational max-limit prewarm queries are bounded'; else state=failure; desc='G1S operational prewarm query measurement failed'; fi
+          payload=$(python3 - "$state" "$desc" <<'PY'
           import json,sys
-          print(json.dumps({'state':sys.argv[1],'context':'diagnostic/postmerge-llm','description':sys.argv[2]}))
+          print(json.dumps({'state':sys.argv[1],'context':'diagnostic/g1s-prewarm','description':sys.argv[2]}))
           PY
           )
-          curl -fsS -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
-            -d "$payload" >/dev/null
+          curl -fsS -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" -d "$payload" >/dev/null
