@@ -7,6 +7,7 @@ import pytest
 
 
 _MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "production_readiness_check.py"
+_DEPLOY_PATH = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy.yml"
 _SPEC = importlib.util.spec_from_file_location("production_readiness_check", _MODULE_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 readiness = importlib.util.module_from_spec(_SPEC)
@@ -60,3 +61,11 @@ def test_assert_fast_http_error_still_fails_without_retry(monkeypatch):
         readiness.assert_fast("/api/test", budget_ms=3000, attempts=3)
 
     assert calls == 1
+
+
+def test_q_audit_latency_gate_is_centralized_in_retrying_readiness():
+    readiness_source = _MODULE_PATH.read_text(encoding="utf-8")
+    deploy_source = _DEPLOY_PATH.read_text(encoding="utf-8")
+
+    assert '("/api/research/g1/q/audit?limit=5000", 3000)' in readiness_source
+    assert "Q_AUDIT_3000MS_GATE" not in deploy_source

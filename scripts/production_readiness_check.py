@@ -211,7 +211,7 @@ def verify(expected_sha: str) -> None:
         ("/api/research/g1s/ablation", 3000), ("/api/research/g1s/trade-relevance", 3000),
         ("/api/research/g1s/evidence-materialization", 3000),
         ("/api/research/g1s/final-report", 3000),
-        ("/api/research/g1/q/audit?limit=5000", None),
+        ("/api/research/g1/q/audit?limit=5000", 3000),
         ("/api/research/g1/intelligence/status", None),
         ("/api/research/g1/management/status", 3000),
         ("/api/research/g1/management/local-status", 3000),
