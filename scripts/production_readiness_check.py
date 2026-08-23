@@ -14,6 +14,8 @@ BASE = "http://127.0.0.1:8790"
 FAST_TIMEOUT = 5.0
 TRANSIENT_ATTEMPTS = 3
 TRANSIENT_RETRY_DELAY_SEC = 1.0
+POST_RESTORE_STABLE_SAMPLES = 3
+POST_RESTORE_STABLE_ATTEMPTS = 10
 SCHEMA_BACKUP_MAX_AGE_SEC = 15 * 60.0
 EVIDENCE_REPORTS = {
     "probability_oos", "continuous_oos", "calibration_oos",
@@ -106,6 +108,46 @@ def assert_fast(path: str, *, budget_ms: float | None = None,
             continue
         return body
     raise AssertionError((path, "retry loop exhausted"))
+
+
+def wait_route_stable(path: str, *, budget_ms: float,
+                      consecutive: int = POST_RESTORE_STABLE_SAMPLES,
+                      attempts: int = POST_RESTORE_STABLE_ATTEMPTS) -> None:
+    """Require consecutive healthy live-route samples after destructive IO drills.
+
+    A restore drill is intentionally heavy and may leave the tiny production host
+    under transient IO/memory pressure after the drill itself reports success.
+    Readiness must not hand off to functional smoke until the live route has
+    recovered repeatedly under the unchanged latency SLA.
+    """
+    needed = max(1, int(consecutive))
+    max_attempts = max(needed, int(attempts))
+    streak = 0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            code, body, elapsed = request(path, timeout=FAST_TIMEOUT)
+        except Exception as exc:
+            if not _is_transient_transport_error(exc):
+                raise
+            streak = 0
+            print(f"post-restore {path}: transient {type(exc).__name__} "
+                  f"attempt={attempt}/{max_attempts} streak=0/{needed}")
+        else:
+            print(f"post-restore {path}: {code} {elapsed:.0f}ms "
+                  f"attempt={attempt}/{max_attempts}")
+            assert code == 200, (path, code, body)
+            if elapsed >= budget_ms:
+                streak = 0
+                print(f"post-restore {path}: latency budget overrun "
+                      f"{elapsed:.0f}ms>={budget_ms:.0f}ms streak=0/{needed}")
+            else:
+                streak += 1
+                print(f"post-restore {path}: stable streak={streak}/{needed}")
+                if streak >= needed:
+                    return
+        if attempt < max_attempts:
+            time.sleep(TRANSIENT_RETRY_DELAY_SEC)
+    raise AssertionError((path, "post-restore stability not reached", streak, needed))
 
 
 def assert_authority_off(authority: dict, label: str) -> None:
@@ -316,6 +358,12 @@ def verify(expected_sha: str) -> None:
     assert drill.get("schema_complete_current_contract") is True, drill
     assert drill.get("live_database_replaced") is False, drill
     assert not (drill.get("critical_table_mismatches") or {}), drill
+
+    # The restore drill is intentionally heavy. A successful drill proves the
+    # backup, but it does not by itself prove that latency-critical live routes
+    # have recovered from the resulting IO/memory pressure. Require repeated
+    # healthy samples before readiness hands the host to functional smoke.
+    wait_route_stable("/api/state", budget_ms=3000.0)
 
     by = {int(row["horizon_minutes"]): row for row in g1s.get("horizons", [])}
     print("G1S", json.dumps({h: {"raw": by[h].get("raw_resolved"),
