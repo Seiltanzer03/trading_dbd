@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 
-from scripts import production_readiness_check as readiness
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "production_readiness_check.py"
+SPEC = importlib.util.spec_from_file_location("production_readiness_check", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+readiness = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(readiness)
 
 
 def test_post_restore_stability_requires_consecutive_healthy_samples(monkeypatch):
