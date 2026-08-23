@@ -120,6 +120,25 @@ class ExperimentResult(BaseModel):
     result: dict = Field(default_factory=dict)
 
 
+def _validation_report_from_score(score: dict, policy_shadow: dict) -> dict:
+    """Project the canonical Q score into the legacy validation response shape."""
+    take = score.get("take") or {}
+    return {
+        "version": score.get("version"),
+        "n": score.get("n", 0),
+        "brier": take.get("q_model_brier"),
+        "log_loss": take.get("q_model_log_loss"),
+        "calibration": take.get("reliability_curve") or [],
+        "censored_n": score.get("censored_n", 0),
+        "outcome_counts": score.get("outcome_counts") or {},
+        "oos_scorecard": score.get("oos_scorecard") or {},
+        "message": ("horizon-aligned forecast outcomes; manual-close paths "
+                    "without coverage to H are censored"),
+        "policy_shadow": policy_shadow,
+        "promotion_allowed": False,
+    }
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or settings_from_env()
     engine = Engine(settings)
@@ -309,9 +328,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/validation")
     def api_validation():
-        report = engine.journal.validation_report()
+        # The full Q score is the expensive part. Build it exactly once and
+        # project that same immutable result into both compatibility views.
+        score = engine.journal.q_calibration_report()
+        report = _validation_report_from_score(
+            score, engine.journal.policy_shadow_report())
         report["counterfactual_replay"] = engine.journal.counterfactual_report()
-        report["q_calibration"] = engine.journal.q_calibration_report()
+        report["q_calibration"] = score
         return report
 
     @app.get("/api/validation/summary")
