@@ -16,8 +16,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: production-active-edge
-  cancel-in-progress: true
+  group: production-active-edge-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'schedule' }}
 
 jobs:
   resolve:
