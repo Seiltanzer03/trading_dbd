@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 import time
 
@@ -8,6 +9,19 @@ from fastapi.testclient import TestClient
 from seiltanzer.app import create_app
 from seiltanzer.config import Settings
 from seiltanzer.g1_short_horizon_routes import install_g1_short_horizon_routes
+
+
+def _direct_state_payload(app):
+    route = next(
+        route for route in app.routes
+        if getattr(route, "path", None) == "/api/state"
+    )
+    response = route.endpoint()
+    if asyncio.iscoroutine(response):
+        response = asyncio.run(response)
+    if hasattr(response, "body"):
+        return json.loads(response.body)
+    return response
 
 
 def test_slow_passive_collector_does_not_block_live_http_or_websocket(tmp_path):
@@ -111,7 +125,9 @@ def test_slow_tick_materialization_does_not_block_event_loop(tmp_path, monkeypat
             assert state.status_code == 200
             assert "ts" in state.json()["tick"]
             assert state_elapsed < 0.25
-            assert app.state.live_tick_snapshot["build_n"] >= 1
+            current = app.state.live_state_snapshot["current"]
+            assert current is not None
+            assert current["build_n"] >= 1
             release.set()
     finally:
         release.set()
@@ -119,8 +135,9 @@ def test_slow_tick_materialization_does_not_block_event_loop(tmp_path, monkeypat
 
 def test_live_state_and_initial_websocket_do_not_recompute_tick(tmp_path, monkeypatch):
     app = create_app(Settings(demo=True, data_dir=str(tmp_path)))
-    cached = app.state.live_tick_snapshot["payload"]
-    assert cached is not None
+    current = app.state.live_state_snapshot["current"]
+    assert current is not None
+    cached = current["payload"]["tick"]
 
     calls = []
 
@@ -130,11 +147,7 @@ def test_live_state_and_initial_websocket_do_not_recompute_tick(tmp_path, monkey
 
     monkeypatch.setattr(app.state.engine, "tick_payload", forbidden_recompute)
 
-    state_route = next(
-        route for route in app.routes
-        if getattr(route, "path", None) == "/api/state"
-    )
-    assert state_route.endpoint()["tick"] == cached
+    assert _direct_state_payload(app)["tick"] == cached
 
     sent = []
 
@@ -157,4 +170,47 @@ def test_live_state_and_initial_websocket_do_not_recompute_tick(tmp_path, monkey
     asyncio.run(websocket_route.endpoint(Socket()))
     assert sent == [cached]
 
+    assert calls == []
+
+
+def test_live_state_does_not_recompute_any_request_time_dependency(
+    tmp_path, monkeypatch,
+):
+    app = create_app(Settings(demo=True, data_dir=str(tmp_path)))
+    state_route = next(
+        route for route in app.routes
+        if getattr(route, "path", None) == "/api/state"
+    )
+    assert asyncio.iscoroutinefunction(state_route.endpoint)
+    current = app.state.live_state_snapshot["current"]
+    assert current is not None
+    assert json.loads(current["encoded"]) == current["payload"]
+    expected = _direct_state_payload(app)
+    calls = []
+
+    def forbidden(name):
+        def fail(*_args, **_kwargs):
+            calls.append(name)
+            raise AssertionError(f"request-time state recomputation: {name}")
+        return fail
+
+    engine = app.state.engine
+    monkeypatch.setattr(engine, "tick_payload", forbidden("tick_payload"))
+    monkeypatch.setattr(engine, "ridge_payload", forbidden("ridge_payload"))
+    for name in (
+        "active_trade",
+        "list_trades",
+        "edge_track",
+        "recent_ai_verdicts",
+        "setup_stats",
+        "journal_counts",
+    ):
+        monkeypatch.setattr(engine.journal, name, forbidden(name))
+
+    started = time.perf_counter()
+    actual = _direct_state_payload(app)
+    elapsed = time.perf_counter() - started
+
+    assert actual == expected
+    assert elapsed < 0.1
     assert calls == []

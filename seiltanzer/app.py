@@ -194,6 +194,72 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return payload
 
+    instruments_payload = {
+        code: {
+            "yahoo": instrument.yahoo,
+            "quote_pair": instrument.swissquote_pair,
+            "broker_symbol": instrument.tradingview_symbol,
+            "options_proxy": instrument.options_proxy,
+        }
+        for code, instrument in INSTRUMENTS.items()
+    }
+
+    def build_live_state(tick: dict) -> tuple[dict, bytes]:
+        """Build and encode the complete bootstrap state away from HTTP."""
+        active = engine.journal.active_trade()
+        payload = {
+            "tick": tick,
+            "ridge": engine.ridge_payload(),
+            "journal": engine.journal.list_trades(),
+            "edge_track": engine.journal.edge_track(),
+            # Full validation reconstructs horizon-aligned outcomes and policy
+            # diagnostics from the growing journal. It is research/UI data, not
+            # live decision state, and loads independently after bootstrap.
+            "validation": {
+                "available": True,
+                "summary_endpoint": "/api/validation/summary",
+                "message": "validation summary loads independently",
+                "production_authority": False,
+            },
+            "ai_history": (
+                engine.journal.recent_ai_verdicts(active["id"], limit=10)
+                if active else []
+            ),
+            "setups": _setups_payload(),
+            "instruments": instruments_payload,
+        }
+        return payload, JSONResponse(content=payload).body
+
+    # One background owner now materializes the complete ``/api/state``
+    # contract, including its JSON bytes. HTTP and WebSocket readers consume
+    # one atomically-published process-local generation; no request-time
+    # journal/ridge/setup work or serialization remains on the bootstrap path.
+    live_state_snapshot = {"current": None}
+
+    def publish_live_state(
+        payload: dict, encoded: bytes, *, build_ms: float,
+    ) -> None:
+        previous = live_state_snapshot["current"]
+        build_n = int(previous["build_n"] if previous else 0) + 1
+        live_state_snapshot["current"] = {
+            "payload": payload,
+            "encoded": encoded,
+            "refreshed_at": time.time(),
+            "build_ms": float(build_ms),
+            "build_n": build_n,
+        }
+
+    def materialized_live_state() -> dict:
+        current = live_state_snapshot["current"]
+        if current is None:
+            raise HTTPException(
+                status_code=503,
+                detail="live state snapshot is warming",
+            )
+        return current
+
+    app.state.live_state_snapshot = live_state_snapshot
+
     @app.middleware("http")
     async def auth_and_no_cache(request, call_next):
         # Basic Auth check
@@ -267,15 +333,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         last[name] = now
                         running[name] = asyncio.create_task(asyncio.to_thread(fn))
 
-                # The canonical tick payload can run option/scenario math and
-                # persist a market point for an active trade.  Keep that work
-                # off the uvicorn event loop just like every feed refresh above;
-                # otherwise a cold/event-driven payload can delay even a
-                # lock-free readiness route beyond its latency contract.
+                # Keep both canonical tick work and the remaining immutable
+                # bootstrap materialization off the uvicorn event loop.
                 build_started = time.monotonic()
                 payload = await asyncio.to_thread(engine.tick_payload)
                 publish_live_tick(
                     payload,
+                    build_ms=(time.monotonic() - build_started) * 1000.0,
+                )
+                state_payload, encoded = await asyncio.to_thread(
+                    build_live_state, payload,
+                )
+                publish_live_state(
+                    state_payload,
+                    encoded,
                     build_ms=(time.monotonic() - build_started) * 1000.0,
                 )
                 dead = []
@@ -320,33 +391,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ------------------------------------------------------------------- api
 
     @app.get("/api/state")
-    def api_state():
-        active = engine.journal.active_trade()
-        return {
-            "tick": materialized_live_tick(),
-            "ridge": engine.ridge_payload(),
-            "journal": engine.journal.list_trades(),
-            "edge_track": engine.journal.edge_track(),
-            # Full validation reconstructs horizon-aligned outcomes and policy
-            # diagnostics from the growing journal. It is research/UI data, not
-            # live decision state, and must not hold the shared Journal lock on
-            # the latency-critical terminal bootstrap route. The frontend loads
-            # the dedicated summary independently after rendering live state.
-            "validation": {
-                "available": True,
-                "summary_endpoint": "/api/validation/summary",
-                "message": "validation summary loads independently",
-                "production_authority": False,
-            },
-            "ai_history": (engine.journal.recent_ai_verdicts(active["id"], limit=10)
-                           if active else []),
-            "setups": _setups_payload(),
-            "instruments": {c: {"yahoo": i.yahoo,
-                                "quote_pair": i.swissquote_pair,
-                                "broker_symbol": i.tradingview_symbol,
-                                "options_proxy": i.options_proxy}
-                            for c, i in INSTRUMENTS.items()},
-        }
+    async def api_state():
+        current = materialized_live_state()
+        return Response(content=current["encoded"], media_type="application/json")
 
     @app.get("/api/ai/history")
     def api_ai_history():
@@ -371,6 +418,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "efficiency": stats.efficiency,
             })
         return out
+
+    # Demo/unit-test applications have no active production trade and their
+    # initial payload is cheap. Prewarming keeps direct route calls
+    # deterministic; production is warmed only by the background owner.
+    if getattr(settings, "demo", False):
+        started = time.monotonic()
+        payload, encoded = build_live_state(materialized_live_tick())
+        publish_live_state(
+            payload,
+            encoded,
+            build_ms=(time.monotonic() - started) * 1000.0,
+        )
 
     @app.get("/api/setups")
     def api_setups():
