@@ -20,7 +20,7 @@ from .macro_offhost_bundle import (
 )
 
 
-CONTRACT_VERSION = "official-macro-historical-offhost-v3-fomc"
+CONTRACT_VERSION = "official-macro-historical-offhost-v4-bls-atom"
 DEFAULT_WINDOW_DAYS = 120
 MAX_WINDOW_DAYS = 180
 FOMC_WINDOW_DAYS = 365
@@ -68,9 +68,9 @@ def build_bundle(
         raise ValueError("HISTORICAL_OFFHOST_WINDOW_INVALID")
 
     from .macro_bls_historical_bootstrap import (
-        BLS_ICAL_URL,
+        BLS_ATOM_FEEDS,
         OfficialBLSArchiveSource,
-        parse_bls_ical,
+        _bls_archive_identity,
     )
     from .macro_ism_historical_bootstrap import (
         FAMILIES as ISM_FAMILIES,
@@ -88,38 +88,58 @@ def build_bundle(
     stamp = time.time() if now is None else float(now)
     start_ts = stamp - days * 86400.0
     bls_source = OfficialBLSArchiveSource()
-    with bls_source._client() as client:
-        calendar = bls_source._validated_response(client.get(BLS_ICAL_URL))
-    schedules: dict[str, dict[str, Any]] = {
-        "official_ical": _record({
-            "format": "ICAL",
-            "source_url": BLS_ICAL_URL,
-            "content": calendar,
-            "source_sha256": _sha256(calendar),
-        })
-    }
-    specs = parse_bls_ical(calendar)
-
     bls_records: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
-    dedup = {
-        (item.family, item.period, item.published_at): item for item in specs
-        if start_ts <= item.published_at <= stamp + 1e-6
-    }
-    for spec in sorted(dedup.values(), key=lambda item: item.published_at):
+    schedules: dict[str, dict[str, Any]] = {}
+    manifest_links: list[tuple[str, str]] = []
+    for family, source_url in BLS_ATOM_FEEDS.items():
         try:
-            fetched_at, html, payload = bls_source.archive(spec)
-            bls_records.append(_record({
-                "spec": asdict(spec),
-                "fetched_at": fetched_at,
-                "html": html,
-                "source_sha256": _sha256(html),
-                "payload": payload,
-            }))
+            feed, links = bls_source.atom_manifest(family)
+            schedules[family] = _record({
+                "format": "ATOM",
+                "family": family,
+                "source_url": source_url,
+                "content": feed,
+                "source_sha256": _sha256(feed),
+            })
+            manifest_links.extend((family, link) for link in links)
         except Exception as exc:
-            errors[f"BLS:{spec.family}:{spec.period}"] = (
+            errors[f"BLS:manifest:{family}"] = (
                 f"{type(exc).__name__}:{str(exc)[:180]}"
             )
+
+    dedup: dict[tuple[str, str, float], dict[str, Any]] = {}
+    for family, source_url in manifest_links:
+        identity = _bls_archive_identity(source_url)
+        if identity is None:
+            errors[f"BLS:archive:{family}:invalid-url"] = (
+                "ValueError:BLS_ATOM_ARCHIVE_LINK_INVALID"
+            )
+            continue
+        archive_day = datetime.strptime(identity[1], "%m%d%Y").replace(
+            tzinfo=ZoneInfo("America/New_York")
+        ).timestamp()
+        # The URL date is used only to avoid fetching feed history outside the
+        # bounded bundle.  The archive's embargo header remains the sole causal
+        # published_at authority and is verified after download.
+        if archive_day < start_ts - 86400.0 or archive_day > stamp + 86400.0:
+            continue
+        try:
+            spec, fetched_at, html, payload = bls_source.archive_from_manifest(
+                family=family, source_url=source_url)
+            if start_ts <= spec.published_at <= stamp + 1e-6:
+                dedup[(spec.family, spec.period, spec.published_at)] = _record({
+                    "spec": asdict(spec),
+                    "fetched_at": fetched_at,
+                    "html": html,
+                    "source_sha256": _sha256(html),
+                    "payload": payload,
+                })
+        except Exception as exc:
+            errors[f"BLS:archive:{family}:{source_url.rsplit('/', 1)[-1]}"] = (
+                f"{type(exc).__name__}:{str(exc)[:180]}"
+            )
+    bls_records = [dedup[key] for key in sorted(dedup, key=lambda item: item[2])]
 
     ism_source = OfficialISMHistoricalSource()
     ism_records: list[dict[str, Any]] = []
@@ -255,10 +275,12 @@ def validate_bundle(
     acceptance_run_id: str | None = None, now: float | None = None,
 ) -> dict[str, Any]:
     from .macro_bls_historical_bootstrap import (
+        BLS_ATOM_FEEDS,
         BLSReleaseSpec,
         FAMILIES as BLS_FAMILIES,
         _official_bls_url,
-        parse_bls_ical,
+        parse_bls_archive_spec,
+        parse_bls_atom_archive_urls,
         parse_cpi_archive,
         parse_nfp_archive,
     )
@@ -307,24 +329,30 @@ def validate_bundle(
     if end_ts - start_ts > MAX_WINDOW_DAYS * 86400.0 + 1.0:
         raise ValueError("HISTORICAL_OFFHOST_WINDOW_TOO_WIDE")
 
-    schedule_specs: set[tuple[str, str, float, str]] = set()
+    manifest_links: set[tuple[str, str]] = set()
     schedules = bundle.get("bls_schedules")
-    if not isinstance(schedules, dict) or not schedules:
+    if not isinstance(schedules, dict) or set(schedules) != set(BLS_FAMILIES):
         raise ValueError("HISTORICAL_OFFHOST_BLS_SCHEDULES_MISSING")
-    for value in schedules.values():
+    for family, value in schedules.items():
         if value.get("record_sha256") != _sha256(_without(value, "record_sha256")):
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
-        if not _official_bls_url(str(value.get("source_url") or "")):
+        if (
+            value.get("family") != family
+            or value.get("source_url") != BLS_ATOM_FEEDS[family]
+            or not _official_bls_url(str(value.get("source_url") or ""))
+        ):
             raise ValueError("HISTORICAL_OFFHOST_BLS_SOURCE_INVALID")
-        if value.get("format") != "ICAL":
+        if value.get("format") != "ATOM":
             raise ValueError("HISTORICAL_OFFHOST_BLS_CALENDAR_FORMAT_INVALID")
         content = str(value.get("content") or "")
         if len(content) < 200 or len(content.encode("utf-8")) > 2_000_000:
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_SIZE_INVALID")
         if value.get("source_sha256") != _sha256(content):
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_HASH_MISMATCH")
-        for spec in parse_bls_ical(content):
-            schedule_specs.add((spec.family, spec.period, spec.published_at, spec.source_url))
+        manifest_links.update(
+            (family, source_url)
+            for source_url in parse_bls_atom_archive_urls(content, family=family)
+        )
 
     bls_records = bundle.get("bls_records")
     if not isinstance(bls_records, list) or len(bls_records) > 50:
@@ -334,9 +362,10 @@ def validate_bundle(
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
         raw_spec = record.get("spec") or {}
         spec = BLSReleaseSpec(**raw_spec)
-        if spec.family not in BLS_FAMILIES or (
-            spec.family, spec.period, spec.published_at, spec.source_url
-        ) not in schedule_specs:
+        if (
+            spec.family not in BLS_FAMILIES
+            or (spec.family, spec.source_url) not in manifest_links
+        ):
             raise ValueError("HISTORICAL_OFFHOST_BLS_CALENDAR_MISMATCH")
         fetched_at = float(record.get("fetched_at") or 0.0)
         if fetched_at + 300.0 < spec.published_at or fetched_at > stamp + 120.0:
@@ -348,6 +377,10 @@ def validate_bundle(
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_SIZE_INVALID")
         if record.get("source_sha256") != _sha256(html):
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_HASH_MISMATCH")
+        archive_spec = parse_bls_archive_spec(
+            html, family=spec.family, source_url=spec.source_url)
+        if archive_spec != spec:
+            raise ValueError("HISTORICAL_OFFHOST_BLS_ARCHIVE_SPEC_MISMATCH")
         parsed = (
             parse_cpi_archive(html, expected_period=spec.period)
             if spec.family == "CPI"

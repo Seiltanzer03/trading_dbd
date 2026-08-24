@@ -2,13 +2,13 @@
 
 The live numeric macro runtime intentionally uses first-seen timestamps and never
 backfills old T0 captures.  This module is a separate *historical research*
-source: it downloads the BLS release calendar plus the archived release copy that
-was publicly available at that release time, parses only values printed in that
-archive, and exposes them to old EDE T0 rows without mutating those rows.
+source: it downloads an official BLS release manifest plus the archived release
+copy that was publicly available at that release time, parses only values printed
+in that archive, and exposes them to old EDE T0 rows without mutating those rows.
 
 Important safety properties:
 - official ``bls.gov`` HTTPS only;
-- release ``published_at`` comes from the official BLS release calendar;
+- release ``published_at`` comes from the archive's official embargo header;
 - no current BLS time-series values are projected backwards;
 - no consensus/surprise is invented;
 - archive payloads are immutable and SHA256-addressed;
@@ -23,6 +23,7 @@ import math
 import re
 import threading
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from html.parser import HTMLParser
@@ -36,6 +37,10 @@ import httpx
 BLS_HISTORICAL_BOOTSTRAP_VERSION = "macro-bls-archive-point-in-time-v1"
 BLS_SCHEDULE_TEMPLATE = "https://www.bls.gov/schedule/{year}/home.htm"
 BLS_ICAL_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
+BLS_ATOM_FEEDS = {
+    "CPI": "https://www.bls.gov/feed/cpi.rss",
+    "NFP": "https://www.bls.gov/feed/empsit.rss",
+}
 BLS_ARCHIVE_TEMPLATE = "https://www.bls.gov/news.release/archives/{slug}_{date_code}.htm"
 BLS_HOSTS = frozenset({"www.bls.gov", "bls.gov"})
 FAMILIES = ("CPI", "NFP")
@@ -108,6 +113,24 @@ def _official_bls_url(url: str) -> bool:
     except ValueError:
         return False
     return parsed.scheme == "https" and (parsed.hostname or "").lower() in BLS_HOSTS
+
+
+def _bls_archive_identity(url: str) -> tuple[str, str] | None:
+    """Return the canonical family/date encoded by an official archive URL."""
+    if not _official_bls_url(url):
+        return None
+    parsed = urlparse(str(url))
+    if parsed.query or parsed.fragment:
+        return None
+    match = re.fullmatch(
+        r"/news\.release/archives/(cpi|empsit)_(\d{8})\.htm",
+        parsed.path,
+        flags=re.I,
+    )
+    if match is None:
+        return None
+    family = "CPI" if match.group(1).lower() == "cpi" else "NFP"
+    return family, match.group(2)
 
 
 class _TableTextParser(HTMLParser):
@@ -285,6 +308,98 @@ def parse_bls_ical(calendar: str) -> list[BLSReleaseSpec]:
     return sorted(output.values(), key=lambda item: (item.published_at, item.family))
 
 
+def parse_bls_atom_archive_urls(feed: str, *, family: str) -> list[str]:
+    """Extract canonical official archive links from one family Atom feed.
+
+    Atom entry timestamps are intentionally ignored: BLS can publish the feed
+    item before the release embargo expires.  The exact causal timestamp is
+    parsed later from the linked official archive itself.
+    """
+    if family not in FAMILIES:
+        raise ValueError("BLS_ATOM_FAMILY_INVALID")
+    try:
+        root = ET.fromstring(str(feed or ""))
+    except ET.ParseError as exc:
+        raise ValueError("BLS_ATOM_XML_INVALID") from exc
+    namespace = "{http://www.w3.org/2005/Atom}"
+    if root.tag != f"{namespace}feed":
+        raise ValueError("BLS_ATOM_ROOT_INVALID")
+    output: set[str] = set()
+    for entry in root.findall(f"{namespace}entry"):
+        links = [
+            str(link.attrib.get("href") or "").strip()
+            for link in entry.findall(f"{namespace}link")
+            if str(link.attrib.get("rel") or "alternate").lower() == "alternate"
+        ]
+        links = [link for link in links if link]
+        if len(links) != 1:
+            raise ValueError("BLS_ATOM_ARCHIVE_LINK_INVALID")
+        identity = _bls_archive_identity(links[0])
+        if identity is None or identity[0] != family:
+            raise ValueError("BLS_ATOM_ARCHIVE_LINK_INVALID")
+        output.add(links[0])
+    if not output:
+        raise ValueError("BLS_ATOM_ARCHIVE_LINKS_MISSING")
+    return sorted(output)
+
+
+def _archive_period_from_text(text: str, *, family: str) -> str:
+    prefix = (
+        r"CONSUMER\s+PRICE\s+INDEX"
+        if family == "CPI"
+        else r"THE\s+EMPLOYMENT\s+SITUATION"
+    )
+    match = re.search(
+        prefix
+        + r"\s*-{1,2}\s*(January|February|March|April|May|June|July|August|"
+          r"September|October|November|December)\s+(20\d{2})",
+        text,
+        flags=re.I,
+    )
+    if match is None:
+        raise ValueError(f"{family}_ARCHIVE_PERIOD_NOT_FOUND")
+    return _period(int(match.group(2)), MONTHS[match.group(1).lower()])
+
+
+def parse_bls_archive_spec(
+    html: str, *, family: str, source_url: str,
+) -> BLSReleaseSpec:
+    """Bind family, period and exact embargo time to one official archive."""
+    identity = _bls_archive_identity(source_url)
+    if family not in FAMILIES or identity is None or identity[0] != family:
+        raise ValueError("BLS_ARCHIVE_SOURCE_INVALID")
+    parser = _TableTextParser()
+    parser.feed(html or "")
+    full_text = " ".join(parser.text_parts)
+    match = re.search(
+        r"(?:news\s+)?release\s+is\s+embargoed\s+until\s+"
+        r"(?:USDL-\d{2}-\d{4}\s+)?"
+        r"(\d{1,2}:\d{2})\s*([ap])\.?\s*m\.?\s*"
+        r"\((?:ET|EST|EDT)\)\s*"
+        r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*,?\s*"
+        r"(January|February|March|April|May|June|July|August|September|"
+        r"October|November|December)\s+(\d{1,2}),\s*(20\d{2})",
+        full_text,
+        flags=re.I,
+    )
+    if match is None:
+        raise ValueError("BLS_ARCHIVE_EMBARGO_TIME_NOT_FOUND")
+    clock = f"{match.group(1)} {match.group(2).upper()}M"
+    date_text = f"{match.group(3)} {match.group(4)}, {match.group(5)}"
+    published_at = _parse_calendar_datetime(date_text, clock)
+    if published_at is None:
+        raise ValueError("BLS_ARCHIVE_EMBARGO_TIME_INVALID")
+    local = datetime.fromtimestamp(published_at, tz=ZoneInfo("America/New_York"))
+    if local.strftime("%m%d%Y") != identity[1]:
+        raise ValueError("BLS_ARCHIVE_DATE_MISMATCH")
+    return BLSReleaseSpec(
+        family=family,
+        period=_archive_period_from_text(full_text, family=family),
+        published_at=float(published_at),
+        source_url=source_url,
+    )
+
+
 def _cell_number(value: str) -> float | None:
     match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", str(value).replace("$", ""))
     return _finite(match.group(0).replace(",", "")) if match else None
@@ -324,7 +439,7 @@ def parse_cpi_archive(html: str, *, expected_period: str) -> dict[str, Any]:
     parser = _TableTextParser(); parser.feed(html or "")
     full_text = " ".join(parser.text_parts)
     title = re.search(
-        r"CONSUMER\s+PRICE\s+INDEX\s*-\s*(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})",
+        r"CONSUMER\s+PRICE\s+INDEX\s*-{1,2}\s*(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})",
         full_text, flags=re.I)
     if not title:
         raise ValueError("CPI_ARCHIVE_PERIOD_NOT_FOUND")
@@ -353,7 +468,7 @@ def parse_nfp_archive(html: str, *, expected_period: str) -> dict[str, Any]:
     parser = _TableTextParser(); parser.feed(html or "")
     full_text = " ".join(parser.text_parts)
     title = re.search(
-        r"THE\s+EMPLOYMENT\s+SITUATION\s*-\s*(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})",
+        r"THE\s+EMPLOYMENT\s+SITUATION\s*-{1,2}\s*(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})",
         full_text, flags=re.I)
     if not title:
         raise ValueError("NFP_ARCHIVE_PERIOD_NOT_FOUND")
@@ -626,6 +741,30 @@ class OfficialBLSArchiveSource:
             html = self._validated_response(response)
         return parse_bls_schedule(html, year=int(year))
 
+    def atom_manifest(self, family: str) -> tuple[str, list[str]]:
+        if family not in FAMILIES:
+            raise ValueError("BLS_ATOM_FAMILY_INVALID")
+        url = BLS_ATOM_FEEDS[family]
+        with self._client() as client:
+            feed = self._validated_response(client.get(url))
+        return feed, parse_bls_atom_archive_urls(feed, family=family)
+
+    def archive_from_manifest(
+        self, *, family: str, source_url: str,
+    ) -> tuple[BLSReleaseSpec, float, str, dict[str, Any]]:
+        if family not in FAMILIES or _bls_archive_identity(source_url) is None:
+            raise ValueError("BLS_HISTORICAL_UNOFFICIAL_ARCHIVE_URL")
+        with self._client() as client:
+            html = self._validated_response(client.get(source_url))
+        spec = parse_bls_archive_spec(
+            html, family=family, source_url=source_url)
+        payload = (
+            parse_cpi_archive(html, expected_period=spec.period)
+            if family == "CPI"
+            else parse_nfp_archive(html, expected_period=spec.period)
+        )
+        return spec, time.time(), html, payload
+
     def archive(self, spec: BLSReleaseSpec) -> tuple[float, str, dict[str, Any]]:
         if not _official_bls_url(spec.source_url):
             raise ValueError("BLS_HISTORICAL_UNOFFICIAL_ARCHIVE_URL")
@@ -769,7 +908,7 @@ class BLSHistoricalBootstrapRuntime:
                 {"first_t0": span[0], "latest_t0": span[1]} if span else None),
             "store": self.store.status(),
             "official_source_only": True,
-            "release_timestamp_source": "BLS_RELEASE_CALENDAR",
+            "release_timestamp_source": "BLS_OFFICIAL_CALENDAR_OR_ARCHIVE_EMBARGO",
             "value_source": "BLS_ARCHIVED_NEWS_RELEASE",
             "current_revised_series_backfill": False,
             "old_t0_rows_mutated": False,

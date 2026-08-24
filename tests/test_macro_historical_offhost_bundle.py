@@ -9,7 +9,7 @@ import pytest
 from seiltanzer import macro_historical_offhost_bundle as offhost
 from seiltanzer.macro_bls_historical_bootstrap import (
     BLSHistoricalReleaseStore,
-    parse_bls_ical,
+    parse_bls_archive_spec,
     parse_cpi_archive,
 )
 from seiltanzer.macro_ism_historical_bootstrap import (
@@ -30,23 +30,30 @@ from seiltanzer.macro_fomc_deterministic_store_refinement import (
 NOW = 1_756_000_000.0
 SHA = "c" * 40
 RUN_ID = "32377010025"
-SCHEDULE_ICAL = """BEGIN:VCALENDAR
-PRODID:-//Department of Labor//Bureau of Labor Statistics//EN
-VERSION:2.0
-CALSCALE:GREGORIAN
-METHOD:PUBLISH
-X-WR-CALNAME:BLS Economic News Release Calendar
-BEGIN:VEVENT
-UID:official-cpi-20250812@bls.gov
-DTSTART;TZID=US-Eastern:20250812T083000
-SUMMARY:Consumer Price Index
-LOCATION:Washington, DC
-CATEGORIES:IMPORTANT, BLS
-END:VEVENT
-END:VCALENDAR
+ATOM_CPI = """<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Consumer Price Index</title><id>https://www.bls.gov/feed/cpi.rss</id>
+<updated>2025-08-12T07:51:00-04:00</updated>
+<entry><title>Consumer Price Index - July 2025</title>
+<id>https://www.bls.gov/news.release/archives/cpi_08122025.htm</id>
+<published>2025-08-12T07:51:00-04:00</published>
+<link rel="alternate" href="https://www.bls.gov/news.release/archives/cpi_08122025.htm" />
+</entry></feed>
+"""
+ATOM_NFP = """<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Employment Situation</title><id>https://www.bls.gov/feed/empsit.rss</id>
+<updated>2025-08-01T07:50:00-04:00</updated>
+<entry><title>Employment Situation - July 2025</title>
+<id>https://www.bls.gov/news.release/archives/empsit_08012025.htm</id>
+<published>2025-08-01T07:50:00-04:00</published>
+<link rel="alternate" href="https://www.bls.gov/news.release/archives/empsit_08012025.htm" />
+</entry></feed>
 """
 CPI = """
-<html><body><h1>CONSUMER PRICE INDEX - JULY 2025</h1><table>
+<html><body><p>Transmission of material in this release is embargoed until
+8:30 a.m. (ET) Tuesday, August 12, 2025</p>
+<h1>CONSUMER PRICE INDEX - JULY 2025</h1><table>
 <tr><th>Item</th><th>May</th><th>Jun</th><th>Jul</th><th>12 mos.</th></tr>
 <tr><td>All items</td><td>0.1</td><td>0.3</td><td>0.2</td><td>2.7</td></tr>
 <tr><td>All items less food and energy</td><td>0.1</td><td>0.2</td><td>0.3</td><td>3.1</td></tr>
@@ -105,7 +112,10 @@ def _record(value):
 
 
 def _bundle():
-    spec = parse_bls_ical(SCHEDULE_ICAL)[0]
+    spec = parse_bls_archive_spec(
+        CPI, family="CPI",
+        source_url="https://www.bls.gov/news.release/archives/cpi_08122025.htm",
+    )
     cpi_payload = parse_cpi_archive(CPI, expected_period="2025-07")
     ism_payload = parse_ism_historical_roundup(
         ISM, family="ISM_MANUFACTURING", period="2025-06", source_url=ISM_URL
@@ -124,12 +134,20 @@ def _bundle():
         "acceptance_run_id": RUN_ID,
         "created_at": NOW - 10.0,
         "window": {"start_ts": NOW - 120 * 86400.0, "end_ts": NOW, "days": 120},
-        "bls_schedules": {"official_ical": _record({
-            "format": "ICAL",
-            "source_url": "https://www.bls.gov/schedule/news_release/bls.ics",
-            "content": SCHEDULE_ICAL,
-            "source_sha256": offhost._sha256(SCHEDULE_ICAL),
-        })},
+        "bls_schedules": {
+            "CPI": _record({
+                "format": "ATOM", "family": "CPI",
+                "source_url": "https://www.bls.gov/feed/cpi.rss",
+                "content": ATOM_CPI,
+                "source_sha256": offhost._sha256(ATOM_CPI),
+            }),
+            "NFP": _record({
+                "format": "ATOM", "family": "NFP",
+                "source_url": "https://www.bls.gov/feed/empsit.rss",
+                "content": ATOM_NFP,
+                "source_sha256": offhost._sha256(ATOM_NFP),
+            }),
+        },
         "bls_records": [_record({
             "spec": {
                 "family": spec.family, "period": spec.period,
@@ -216,7 +234,10 @@ def test_historical_offhost_materializes_real_rows_without_network(monkeypatch):
     monkeypatch.setattr(offhost.time, "time", lambda: NOW)
 
     bls_runtime = Runtime()
-    spec = parse_bls_ical(SCHEDULE_ICAL)[0]
+    spec = parse_bls_archive_spec(
+        CPI, family="CPI",
+        source_url="https://www.bls.gov/news.release/archives/cpi_08122025.htm",
+    )
     bls_runtime._conn.execute(
         "INSERT INTO g1s_observations VALUES('obs-bls',?,'{}')",
         (spec.published_at + 60.0,),
