@@ -10,6 +10,7 @@ from seiltanzer.production_resource_guard import (
     MEMORY_SOFT_MIB,
     RESOURCE_GUARD_VERSION,
     _wrap_heavy_refresh,
+    cooperative_heavy_operation,
     install_production_resource_guard,
     memory_pressure_state,
     resource_guard_status,
@@ -46,6 +47,31 @@ def test_heavy_refreshes_are_serialized() -> None:
         assert not thread.is_alive()
 
     assert peak == 1
+
+
+def test_cooperative_heavy_operation_shares_refresh_gate() -> None:
+    attempting = threading.Event()
+    finished = threading.Event()
+
+    def source() -> None:
+        finished.set()
+
+    guarded = _wrap_heavy_refresh(source)
+
+    def run() -> None:
+        attempting.set()
+        guarded()
+
+    with cooperative_heavy_operation():
+        thread = threading.Thread(target=run)
+        thread.start()
+        assert attempting.wait(timeout=1)
+        time.sleep(0.03)
+        assert finished.is_set() is False
+
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert finished.is_set() is True
 
 
 def test_install_is_idempotent_and_passive_feed_cache_is_bounded_to_one() -> None:
