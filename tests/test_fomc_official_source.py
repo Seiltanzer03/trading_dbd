@@ -56,6 +56,21 @@ def test_statement_parser_extracts_policy_body_without_scripts_or_media_footer()
     assert "Implementation Note" not in text
 
 
+def test_statement_parser_keeps_conditions_paragraph_before_policy_decision():
+    page = """
+    <html><body><h1>Federal Reserve issues FOMC statement</h1>
+    <p>For release at 2:00 p.m. EDT</p>
+    <p>Recent indicators suggest that economic activity moderated.</p>
+    <p>In support of its goals, the Committee decided to maintain the target
+    range for the federal funds rate at 4-1/4 to 4-1/2 percent.</p>
+    <p>For media inquiries, call the Board.</p></body></html>
+    """
+    text = extract_statement_text(page)
+    assert text.startswith("Recent indicators suggest")
+    assert "Committee decided to maintain" in text
+    assert "Federal Reserve issues" not in text
+
+
 def test_refresh_seeds_previous_text_without_second_llm_call_and_extracts_latest_once():
     runtime = FakeRuntime()
     factory = MacroDataFactory(runtime)

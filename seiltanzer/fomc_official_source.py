@@ -28,6 +28,10 @@ FED_BASE = "https://www.federalreserve.gov"
 ALLOWED_HOSTS = {"www.federalreserve.gov", "federalreserve.gov"}
 INDEX_PATH = "/newsevents/pressreleases/{year}-press-fomc.htm"
 STATEMENT_RE = re.compile(r"/newsevents/pressreleases/monetary(\d{8})a\.htm", re.I)
+RELEASE_BOUNDARY_RE = re.compile(
+    r"\bFor release at\s+\d{1,2}:\d{2}\s+(?:a|p)\.?m\.?\s+E(?:S|D)T\b",
+    re.I,
+)
 FETCH_TIMEOUT_SEC = 8.0
 MAX_HTML_BYTES = 1_500_000
 
@@ -75,15 +79,25 @@ def extract_statement_text(page_html: str) -> str:
     text = " ".join(parser.parts)
     text = re.sub(r"\s+", " ", text).strip()
 
-    starts = [
-        "The Federal Open Market Committee approved the following statement",
-        "The Federal Open Market Committee decided",
-        "The Committee decided",
-    ]
-    start_positions = [text.find(marker) for marker in starts if text.find(marker) >= 0]
-    if not start_positions:
-        raise ValueError("FOMC_STATEMENT_BODY_NOT_FOUND")
-    start = min(start_positions)
+    # Current official pages begin the statement with an economic-conditions
+    # paragraph, before the first "Committee decided" sentence.  The page's
+    # own release-time line is therefore the canonical body boundary.  Keep the
+    # older markers only for archived layouts without that line.
+    release_boundary = RELEASE_BOUNDARY_RE.search(text)
+    if release_boundary:
+        start = release_boundary.end()
+    else:
+        starts = [
+            "The Federal Open Market Committee approved the following statement",
+            "The Federal Open Market Committee decided",
+            "The Committee decided",
+        ]
+        start_positions = [
+            text.find(marker) for marker in starts if text.find(marker) >= 0
+        ]
+        if not start_positions:
+            raise ValueError("FOMC_STATEMENT_BODY_NOT_FOUND")
+        start = min(start_positions)
     end_candidates = [
         text.find("For media inquiries", start),
         text.find("Implementation Note", start),

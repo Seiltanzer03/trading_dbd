@@ -254,7 +254,16 @@ def _bundle():
             })
             for index, spec in enumerate(fomc_specs)
         ],
-        "errors": {}, "official_sources_only": True,
+        "errors": {},
+        "historical_availability": {
+            "CPI": "VERIFIED_REAL_HISTORY",
+            "NFP": "VERIFIED_REAL_HISTORY",
+            "ISM_MANUFACTURING": "VERIFIED_REAL_HISTORY",
+            "ISM_SERVICES": "VERIFIED_REAL_HISTORY",
+            "FOMC_STATEMENT_DETERMINISTIC": "VERIFIED_REAL_HISTORY",
+        },
+        "missing_is_zero": False,
+        "official_sources_only": True,
         "canonical_parsers_only": True, "synthetic_data_used": False,
         "no_placeholders": True, "research_only": True,
         "production_authority": False,
@@ -338,3 +347,87 @@ def test_historical_offhost_materializes_real_rows_without_network(monkeypatch):
     latest = fomc_wrapper.store.latest_admissible(NOW)
     assert latest["payload"]["target_change_bp"] == -25.0
     assert latest["payload"]["llm_used"] is False
+
+
+def test_verified_partial_bundle_materializes_fomc_and_marks_blocked_sources(monkeypatch):
+    bundle = _bundle()
+    bundle["bls_schedules"] = {}
+    bundle["bls_records"] = []
+    bundle["ism_records"] = []
+    bundle["errors"] = {
+        "BLS:manifest:CPI": "HTTPStatusError:403 Forbidden",
+        "BLS:manifest:NFP": "HTTPStatusError:403 Forbidden",
+        "ISM:ISM_MANUFACTURING:2025-06": "RuntimeError:redirect rejected",
+        "ISM:ISM_SERVICES:2025-07": "RuntimeError:redirect rejected",
+    }
+    bundle["historical_availability"] = {
+        "CPI": "OFFICIAL_SOURCE_UNAVAILABLE_PROSPECTIVE_REQUIRED",
+        "NFP": "OFFICIAL_SOURCE_UNAVAILABLE_PROSPECTIVE_REQUIRED",
+        "ISM_MANUFACTURING": "OFFICIAL_SOURCE_UNAVAILABLE_PROSPECTIVE_REQUIRED",
+        "ISM_SERVICES": "OFFICIAL_SOURCE_UNAVAILABLE_PROSPECTIVE_REQUIRED",
+        "FOMC_STATEMENT_DETERMINISTIC": "VERIFIED_REAL_HISTORY",
+    }
+    bundle["bundle_sha256"] = offhost._sha256(
+        offhost._without(bundle, "bundle_sha256")
+    )
+    assert offhost.validate_bundle(bundle, expected_sha=SHA, now=NOW) is bundle
+
+    monkeypatch.setattr(offhost, "load_verified_bundle", lambda _runtime: bundle)
+    monkeypatch.setattr(offhost.time, "time", lambda: NOW)
+    bls_runtime = Runtime()
+    bls_runtime._conn.execute(
+        "INSERT INTO g1s_observations VALUES('obs-bls-partial',?,'{}')",
+        (NOW - 60.0,),
+    )
+    bls_wrapper = type("Wrapper", (), {})()
+    bls_wrapper.store = BLSHistoricalReleaseStore(bls_runtime)
+    bls_result = offhost._bls_refresh(bls_wrapper)
+    assert bls_result["status"] == "PARTIAL"
+    assert bls_result["stored"] == []
+    assert all(
+        value == "OFFICIAL_SOURCE_UNAVAILABLE_PROSPECTIVE_REQUIRED"
+        for value in bls_result["historical_availability"].values()
+    )
+
+    ism_runtime = Runtime()
+    ism_runtime._conn.execute(
+        "INSERT INTO g1s_observations VALUES('obs-ism-partial',?,'{}')",
+        (NOW - 60.0,),
+    )
+    ism_wrapper = type("Wrapper", (), {})()
+    ism_wrapper.store = ISMHistoricalReleaseStore(ism_runtime)
+    ism_result = offhost._ism_refresh(ism_wrapper)
+    assert ism_result["status"] == "PARTIAL"
+    assert ism_result["stored"] == []
+    assert all(
+        value == "OFFICIAL_SOURCE_UNAVAILABLE_PROSPECTIVE_REQUIRED"
+        for value in ism_result["historical_availability"].values()
+    )
+
+    fomc_runtime = Runtime()
+    fomc_runtime._conn.execute(
+        "INSERT INTO g1s_observations VALUES('obs-fomc-partial',?,'{}')",
+        (NOW - 60.0,),
+    )
+    wrapper = type("Wrapper", (), {})()
+    wrapper.store = StrictFOMCDeterministicReleaseStore(fomc_runtime)
+    result = offhost._fomc_refresh(wrapper)
+    assert result["status"] == "OK"
+    assert wrapper.store.status()["row_n"] == 2
+
+
+def test_partial_bundle_rejects_silent_missing_family():
+    bundle = _bundle()
+    bundle["bls_schedules"].pop("CPI")
+    bundle["bls_records"] = [
+        row for row in bundle["bls_records"]
+        if row["spec"]["family"] != "CPI"
+    ]
+    bundle["historical_availability"]["CPI"] = (
+        "OFFICIAL_SOURCE_UNAVAILABLE_PROSPECTIVE_REQUIRED"
+    )
+    bundle["bundle_sha256"] = offhost._sha256(
+        offhost._without(bundle, "bundle_sha256")
+    )
+    with pytest.raises(ValueError, match="BLS_SCHEDULES_MISSING"):
+        offhost.validate_bundle(bundle, expected_sha=SHA, now=NOW)
