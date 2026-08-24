@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import math
 import os
+import threading
 import time
 import base64
 import secrets
@@ -194,6 +195,161 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return payload
 
+    instruments_payload = {
+        code: {
+            "yahoo": instrument.yahoo,
+            "quote_pair": instrument.swissquote_pair,
+            "broker_symbol": instrument.tradingview_symbol,
+            "options_proxy": instrument.options_proxy,
+        }
+        for code, instrument in INSTRUMENTS.items()
+    }
+
+    def build_live_state(tick: dict) -> tuple[dict, bytes]:
+        """Build and encode the complete bootstrap state away from HTTP."""
+        active = engine.journal.active_trade()
+        payload = {
+            "tick": tick,
+            "ridge": engine.ridge_payload(),
+            "journal": engine.journal.list_trades(),
+            "edge_track": engine.journal.edge_track(),
+            # Full validation reconstructs horizon-aligned outcomes and policy
+            # diagnostics from the growing journal. It is research/UI data, not
+            # live decision state, and loads independently after bootstrap.
+            "validation": {
+                "available": True,
+                "summary_endpoint": "/api/validation/summary",
+                "message": "validation summary loads independently",
+                "production_authority": False,
+            },
+            "ai_history": (
+                engine.journal.recent_ai_verdicts(active["id"], limit=10)
+                if active else []
+            ),
+            "setups": _setups_payload(),
+            "instruments": instruments_payload,
+        }
+        return payload, JSONResponse(content=payload).body
+
+    # One background owner now materializes the complete ``/api/state``
+    # contract, including its JSON bytes. HTTP and WebSocket readers consume
+    # one atomically-published process-local generation; no request-time
+    # journal/ridge/setup work or serialization remains on the bootstrap path.
+    live_state_snapshot = {
+        "current": None,
+        "error": None,
+        "revision": 0,
+        "build_n": 0,
+    }
+    live_state_build_lock = asyncio.Lock()
+    live_state_meta_lock = threading.Lock()
+
+    def publish_live_state(
+        payload: dict, encoded: bytes, *, build_ms: float,
+        expected_revision: int | None = None,
+    ) -> dict | None:
+        with live_state_meta_lock:
+            if (
+                expected_revision is not None
+                and expected_revision != live_state_snapshot["revision"]
+            ):
+                return None
+            live_state_snapshot["build_n"] = int(
+                live_state_snapshot["build_n"]
+            ) + 1
+            current = {
+                "payload": payload,
+                "encoded": encoded,
+                "refreshed_at": time.time(),
+                "build_ms": float(build_ms),
+                "build_n": live_state_snapshot["build_n"],
+                "revision": live_state_snapshot["revision"],
+            }
+            live_state_snapshot["current"] = current
+            live_state_snapshot["error"] = None
+            return current
+
+    def invalidate_live_state() -> None:
+        with live_state_meta_lock:
+            live_state_snapshot["revision"] = int(
+                live_state_snapshot["revision"]
+            ) + 1
+            live_state_snapshot["current"] = None
+            live_state_snapshot["error"] = None
+
+    def live_state_revision() -> int:
+        with live_state_meta_lock:
+            return int(live_state_snapshot["revision"])
+
+    def record_live_state_error(
+        exc: Exception, *, expected_revision: int,
+    ) -> None:
+        with live_state_meta_lock:
+            if expected_revision == live_state_snapshot["revision"]:
+                live_state_snapshot["error"] = type(exc).__name__
+
+    async def refresh_live_state(
+        tick: dict | None = None, *, expected_revision: int,
+    ) -> dict | None:
+        """Serialize one complete generation without blocking the event loop."""
+        async with live_state_build_lock:
+            if tick is None:
+                tick = materialized_live_tick()
+            started = time.monotonic()
+            worker = asyncio.create_task(asyncio.to_thread(
+                build_live_state, tick,
+            ))
+            try:
+                payload, encoded = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # ``to_thread`` cannot be cancelled once running. Keep the
+                # single-flight lock until its SQLite reader has really exited
+                # so shutdown and a second refresh cannot race the orphan.
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not worker.cancelled():
+                    error = worker.exception()
+                    if error is not None:
+                        record_live_state_error(
+                            error, expected_revision=expected_revision,
+                        )
+                raise
+            except Exception as exc:
+                record_live_state_error(
+                    exc, expected_revision=expected_revision,
+                )
+                raise
+            return publish_live_state(
+                payload,
+                encoded,
+                build_ms=(time.monotonic() - started) * 1000.0,
+                expected_revision=expected_revision,
+            )
+
+    def materialized_live_state() -> dict:
+        with live_state_meta_lock:
+            error = live_state_snapshot["error"]
+            current = live_state_snapshot["current"]
+        if error is not None:
+            raise HTTPException(
+                status_code=503,
+                detail="live state snapshot refresh failed",
+            )
+        if current is None:
+            raise HTTPException(
+                status_code=503,
+                detail="live state snapshot is warming",
+            )
+        return current
+
+    app.state.live_state_snapshot = live_state_snapshot
+    app.state.live_state_build_lock = live_state_build_lock
+
     @app.middleware("http")
     async def auth_and_no_cache(request, call_next):
         # Basic Auth check
@@ -229,6 +385,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         last = {"price": 0.0, "proxy_price": 0.0, "intraday": 0.0, "vols": 0.0,
                 "daily": 0.0, "chain": 0.0, "iv_surface": 0.0, "correlation": 0.0}
         running: dict[str, asyncio.Task] = {}
+        state_task: asyncio.Task | None = None
         # при живом стриме цену «опрашиваем» часто (берём свежий тик из памяти)
         price_period = 1.0 if (settings.demo or settings.stream) else settings.price_poll_sec
         periods = {
@@ -262,16 +419,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         with contextlib.suppress(Exception):
                             task.result()
                         del running[name]
+                if state_task is not None and state_task.done():
+                    with contextlib.suppress(Exception):
+                        state_task.result()
+                    state_task = None
                 for name, fn in jobs.items():
                     if name not in running and now - last[name] >= periods[name]:
                         last[name] = now
                         running[name] = asyncio.create_task(asyncio.to_thread(fn))
 
-                # The canonical tick payload can run option/scenario math and
-                # persist a market point for an active trade.  Keep that work
-                # off the uvicorn event loop just like every feed refresh above;
-                # otherwise a cold/event-driven payload can delay even a
-                # lock-free readiness route beyond its latency contract.
+                # Keep canonical tick work off the uvicorn event loop.
                 build_started = time.monotonic()
                 payload = await asyncio.to_thread(engine.tick_payload)
                 publish_live_tick(
@@ -286,12 +443,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         dead.append(ws)
                 for ws in dead:
                     clients.discard(ws)
+                # Full journal/ridge/setup materialization may wait on SQLite.
+                # Run at most one generation in parallel so it can never delay
+                # live WebSocket ticks or kill the poll loop on failure.
+                if state_task is None:
+                    state_task = asyncio.create_task(refresh_live_state(
+                        payload,
+                        expected_revision=live_state_revision(),
+                    ))
                 await asyncio.sleep(
                     1.0 if (settings.demo or settings.stream) else 2.0)
         finally:
             # Не закрываем sqlite, пока уже запущенный фид ещё может писать кэш.
-            if running:
-                await asyncio.gather(*running.values(), return_exceptions=True)
+            pending = list(running.values())
+            if state_task is not None:
+                pending.append(state_task)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
     async def passive_loop():
         while True:
@@ -320,33 +488,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ------------------------------------------------------------------- api
 
     @app.get("/api/state")
-    def api_state():
-        active = engine.journal.active_trade()
-        return {
-            "tick": materialized_live_tick(),
-            "ridge": engine.ridge_payload(),
-            "journal": engine.journal.list_trades(),
-            "edge_track": engine.journal.edge_track(),
-            # Full validation reconstructs horizon-aligned outcomes and policy
-            # diagnostics from the growing journal. It is research/UI data, not
-            # live decision state, and must not hold the shared Journal lock on
-            # the latency-critical terminal bootstrap route. The frontend loads
-            # the dedicated summary independently after rendering live state.
-            "validation": {
-                "available": True,
-                "summary_endpoint": "/api/validation/summary",
-                "message": "validation summary loads independently",
-                "production_authority": False,
-            },
-            "ai_history": (engine.journal.recent_ai_verdicts(active["id"], limit=10)
-                           if active else []),
-            "setups": _setups_payload(),
-            "instruments": {c: {"yahoo": i.yahoo,
-                                "quote_pair": i.swissquote_pair,
-                                "broker_symbol": i.tradingview_symbol,
-                                "options_proxy": i.options_proxy}
-                            for c, i in INSTRUMENTS.items()},
-        }
+    async def api_state(fresh: bool = False):
+        if fresh:
+            try:
+                revision = live_state_revision()
+                current = await refresh_live_state(
+                    expected_revision=revision,
+                )
+                if current is None:
+                    raise RuntimeError("live state refresh superseded")
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="live state refresh failed",
+                ) from exc
+        else:
+            current = materialized_live_state()
+        return Response(content=current["encoded"], media_type="application/json")
 
     @app.get("/api/ai/history")
     def api_ai_history():
@@ -371,6 +529,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "efficiency": stats.efficiency,
             })
         return out
+
+    # Demo/unit-test applications have no active production trade and their
+    # initial payload is cheap. Prewarming keeps direct route calls
+    # deterministic; production is warmed only by the background owner.
+    if getattr(settings, "demo", False):
+        started = time.monotonic()
+        payload, encoded = build_live_state(materialized_live_tick())
+        publish_live_state(
+            payload,
+            encoded,
+            build_ms=(time.monotonic() - started) * 1000.0,
+        )
 
     @app.get("/api/setups")
     def api_setups():
@@ -488,6 +658,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                           req.notes, req.opened_at)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        invalidate_live_state()
         return t
 
     @app.get("/api/journal.csv", response_class=PlainTextResponse)
@@ -527,6 +698,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, str(e)) from e
         engine.position.open_trade(trade)
         engine.on_trade_opened(trade)
+        invalidate_live_state()
         return {**trade, "position_state": engine.position.state(trade)}
 
     @app.post("/api/trade/close")
@@ -538,6 +710,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 live_trade, event_type="MANUAL_EXIT",
                 execution_price=engine._current_instrument_price(live_trade),
                 execution_r=req.result_r)
+            invalidate_live_state()
             return {**closed, "position_state": engine.position.state(live_trade)}
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
@@ -545,9 +718,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/trade/zones")
     def api_trade_zones(req: ZonesUpdate):
         try:
-            return engine.journal.update_zones(req.trade_id, req.zones)
+            updated = engine.journal.update_zones(req.trade_id, req.zones)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        invalidate_live_state()
+        return updated
 
     @app.post("/api/trade/edit")
     def api_trade_edit(req: TradeEdit):
@@ -566,8 +741,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             engine.position.supersede_trade(req.trade_id, "trade_geometry_changed")
         if trade["status"] == "open":
             engine.on_trade_edited(trade)
-            return {**trade, "position_state": engine.position.state(trade)}
-        return trade
+            response = {**trade, "position_state": engine.position.state(trade)}
+        else:
+            response = trade
+        invalidate_live_state()
+        return response
 
     @app.post("/api/trade/delete")
     def api_trade_delete(req: TradeDelete):
@@ -575,14 +753,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             engine.journal.delete_trade(req.trade_id)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        invalidate_live_state()
         return {"ok": True}
 
     @app.post("/api/account")
     def api_account(req: AccountUpdate):
         try:
-            return engine.journal.update_account(**req.model_dump())
+            account = engine.journal.update_account(**req.model_dump())
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        invalidate_live_state()
+        return account
 
     @app.post("/api/ai/verdict")
     async def api_ai_verdict():
@@ -726,6 +907,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "journal_error", "Разбор рассчитан, но не удалось сохранить снимок",
                         req_id, retriable=False),
                 )
+            invalidate_live_state()
             body = ai_success_body(
                 result, req_id, degraded=degraded,
                 provider_failure=provider_failure,
@@ -745,7 +927,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if trade is None or int(trade["id"]) != int(req.trade_id):
                 raise StaleDecisionError("active trade changed")
             tick = engine.tick_payload()
-            return engine.position.acknowledge(
+            acknowledged = engine.position.acknowledge(
                 decision_id=req.decision_id, trade=trade, executed=req.executed,
                 execution_price=((tick.get("feeds") or {}).get("price") or {}).get("value"),
                 execution_r=((tick.get("prob") or {}).get("r")))
@@ -753,6 +935,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        invalidate_live_state()
+        return acknowledged
 
     @app.get("/api/position")
     def api_position_state():

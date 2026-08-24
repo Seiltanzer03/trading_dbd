@@ -160,11 +160,16 @@ function renderAll() {
 }
 
 async function refreshJournalAndSetups() {
-  const st = await (await fetch('/api/state')).json();
+  // Mutations need a generation built after the write. Normal bootstrap and
+  // production probes stay on the pointer-only cached route.
+  const response = await fetch('/api/state?fresh=true');
+  if (!response.ok) throw new Error(`state refresh HTTP ${response.status}`);
+  const st = await response.json();
   S.journal = st.journal;
   S.setups = st.setups;
   S.ridge = st.ridge;
-  S.tick = st.tick;
+  // WebSocket is the canonical tick owner. This state build may have started
+  // before a newer WS tick and must never roll live price/position data back.
   S.edge_track = st.edge_track;
   S.validation = st.validation;
   renderAll();
