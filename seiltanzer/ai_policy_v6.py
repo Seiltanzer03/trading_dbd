@@ -217,7 +217,11 @@ def _status_summary(values: dict) -> dict:
         for key, value in rows.items() if isinstance(value, dict)
     }
     return {
-        "available": any(status not in {None, "no_data"} for status in statuses.values()),
+        "available": any(
+            status not in {None, "no_data"}
+            and _num((rows.get(key) or {}).get("value")) is not None
+            for key, status in statuses.items()
+        ),
         "statuses": statuses,
     }
 
@@ -239,25 +243,47 @@ def _input_audit(tick: dict, ridge: dict) -> dict:
     price = feeds.get("price") or {}
     proxy = feeds.get("proxy_price") or {}
     chain = feeds.get("chain") or {}
+    correlation = tick.get("correlation") or {}
+    price_available = (
+        _num(price.get("value")) is not None
+        and price.get("status") not in {None, "no_data"}
+    )
+    proxy_available = (
+        _num(proxy.get("value")) is not None
+        and proxy.get("status") not in {None, "no_data"}
+    )
+    chain_available = bool(
+        chain.get("status") not in {None, "no_data"}
+        and (chain.get("value") is not None or chain.get("metrics"))
+    )
+    correlation_available = bool(
+        isinstance(correlation, dict)
+        and correlation.get("status") not in {None, "no_data"}
+        and isinstance(correlation.get("value"), dict)
+        and correlation.get("value")
+    )
     rows = {
         "instrument_price": {
-            "available": _num(price.get("value")) is not None,
+            "available": price_available,
             "status": price.get("status"),
             "source": price.get("source"),
             "value": _num(price.get("value")),
+            "reason": price.get("error") if not price_available else None,
             "role": "optimizer_and_geometry",
         },
         "option_proxy_price": {
-            "available": _num(proxy.get("value")) is not None,
+            "available": proxy_available,
             "status": proxy.get("status"),
             "source": proxy.get("source"),
             "value": _num(proxy.get("value")),
+            "reason": proxy.get("error") if not proxy_available else None,
             "role": "option_moneyness_mapping",
         },
         "option_chain": {
-            "available": chain.get("status") not in {None, "no_data"},
+            "available": chain_available,
             "status": chain.get("status"),
             "source": chain.get("source"),
+            "reason": chain.get("error") if not chain_available else None,
             "role": "option_anchor_optimizer_and_evidence",
         },
         "volatility_indices": {
@@ -273,9 +299,13 @@ def _input_audit(tick: dict, ridge: dict) -> dict:
             "role": "evidence_gate",
         },
         "cross_asset_correlation": {
-            "available": bool(tick.get("correlation")),
-            "status": (tick.get("correlation") or {}).get("status")
-                      if isinstance(tick.get("correlation"), dict) else None,
+            "available": correlation_available,
+            "status": correlation.get("status")
+                      if isinstance(correlation, dict) else None,
+            "source": correlation.get("source")
+                      if isinstance(correlation, dict) else None,
+            "reason": correlation.get("error")
+                      if isinstance(correlation, dict) and not correlation_available else None,
             "role": "uncertainty_and_regime_gate",
         },
         "oi_gex_strike_landscape": {

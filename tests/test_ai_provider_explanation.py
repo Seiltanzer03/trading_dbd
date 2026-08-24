@@ -46,6 +46,7 @@ def _snapshot() -> dict:
     return {
         "captured_ts": 1234.0,
         "trade_id": 7,
+        "trade_geometry": {"current": 10740.0},
         "provider_projection": {"authority": "EXPLANATION_ONLY"},
         "policy_manager": {
             "recommendation": {
@@ -69,7 +70,16 @@ def _snapshot() -> dict:
             },
             "gate": {"status": "confirmed_hold"},
             "stability": {"stable": True},
-            "input_audit": {"available_count": 8, "total_count": 12},
+            "input_audit": {
+                "available_count": 8,
+                "total_count": 12,
+                "rows": {
+                    "instrument_price": {
+                        "available": True,
+                        "status": "live",
+                    },
+                },
+            },
             "scenario_geometry": {"scenario_count": 6500},
         },
     }
@@ -150,3 +160,20 @@ def test_explanation_rejects_new_imperative_but_allows_describing_rejected_alter
         "CLOSE_50 был отклонён gate, поэтому эта альтернатива остаётся только сравнением."
     )
     assert "CLOSE_50" in text
+
+
+def test_explanation_is_not_requested_without_authoritative_current_price(monkeypatch):
+    snapshot = _snapshot()
+    snapshot["trade_geometry"]["current"] = None
+    snapshot["policy_manager"]["input_audit"]["rows"]["instrument_price"].update({
+        "available": False,
+        "status": "no_data",
+    })
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret-test-key")
+
+    def unexpected_client(**_kwargs):
+        raise AssertionError("provider must not be called without live geometry")
+
+    monkeypatch.setattr(explanation.httpx, "Client", unexpected_client)
+    with pytest.raises(RuntimeError, match="blocked_missing_authoritative_price"):
+        explanation.request_explanation(snapshot, authoritative_snapshot=snapshot)

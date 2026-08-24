@@ -192,7 +192,7 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
     app.add_api_route("/api/research/runtime/materializers", runtime.materializer_status,
                       methods=["GET"], name="research_materializers")
 
-    def worker_status():
+    def _worker_status_body():
         """Lock-free worker lifecycle view.
 
         Lifecycle polling needs only in-memory state, so keep this path
@@ -240,6 +240,10 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
             "production_authority": False,
         }
 
+    async def worker_status():
+        """Event-loop-native status; never queue behind sync worker threads."""
+        return _worker_status_body()
+
     app.add_api_route("/api/research/runtime/worker-status", worker_status,
                       methods=["GET"], name="research_worker_status")
 
@@ -252,7 +256,7 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         reports again here only created lock contention and false production
         failures while the research worker was legitimately maintaining data.
         """
-        worker = worker_status()["worker"]
+        worker = _worker_status_body()["worker"]
         return {
             "contract_version": "research-runtime-status-v2",
             "worker": worker,

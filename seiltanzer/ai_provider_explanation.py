@@ -123,6 +123,13 @@ def request_explanation(
     proxy = os.environ.get("OPENROUTER_PROXY", "").strip() or None
     authority = authoritative_snapshot if isinstance(authoritative_snapshot, dict) else snapshot
 
+    # Exact policy/scenario numbers are conditional on a current trade geometry.
+    # When that quote is absent the deterministic renderer explains the fail-safe
+    # strategy fallback; an LLM must not turn neutral-r0 diagnostics into support.
+    from .ai_report_semantics_guard import authoritative_current_price_available
+    if not authoritative_current_price_available(authority):
+        raise RuntimeError("provider_explanation_blocked_missing_authoritative_price")
+
     deterministic = ai_verdict.render_policy_report(authority)
     facts = _explanation_facts(snapshot)
     body = {
