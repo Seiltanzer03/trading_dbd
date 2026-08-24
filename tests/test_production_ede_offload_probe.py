@@ -59,6 +59,26 @@ def test_probe_rejects_zero_attempts():
         MODULE._probe_api(object(), attempts=0)
 
 
+def test_post_transfer_recovery_is_bounded_and_does_not_change_probe_sla(
+    monkeypatch, capsys,
+):
+    sleeps: list[float] = []
+    monkeypatch.setattr(MODULE.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    MODULE._wait_for_post_transfer_recovery()
+
+    assert MODULE.POST_TRANSFER_RECOVERY_SECONDS == 30.0
+    assert MODULE.API_PROBE_MAX_TIME_SECONDS == 3
+    assert sleeps == [30.0]
+    assert "EDE_POST_TRANSFER_RECOVERY_SECONDS=30" in capsys.readouterr().out
+
+
+def test_post_transfer_recovery_rejects_negative_delay(monkeypatch):
+    monkeypatch.setattr(MODULE.time, "sleep", lambda _seconds: None)
+    with pytest.raises(ValueError, match="delay must be >= 0"):
+        MODULE._wait_for_post_transfer_recovery(-1)
+
+
 def test_ssh_connection_enables_transport_keepalive(monkeypatch):
     class Transport:
         keepalive = None
