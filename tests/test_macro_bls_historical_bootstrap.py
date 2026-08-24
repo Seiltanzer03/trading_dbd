@@ -12,6 +12,8 @@ from seiltanzer.macro_bls_historical_bootstrap import (
     BLSHistoricalReleaseStore,
     BLSReleaseSpec,
     historical_feature_records_from_runtime,
+    parse_bls_archive_spec,
+    parse_bls_atom_archive_urls,
     parse_bls_ical,
     parse_bls_schedule,
     parse_cpi_archive,
@@ -52,6 +54,8 @@ END:VCALENDAR
 
 CPI_HTML = """
 <html><body>
+<p>Transmission of material in this release is embargoed until
+8:30 a.m. (ET) Tuesday, August 12, 2025</p>
 <h1>CONSUMER PRICE INDEX - JULY 2025</h1>
 <table>
 <tr><th>Item</th><th>May</th><th>Jun</th><th>Jul</th><th>12 mos.</th></tr>
@@ -62,9 +66,21 @@ CPI_HTML = """
 </body></html>
 """
 
+ATOM_CPI = """<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Consumer Price Index</title><id>https://www.bls.gov/feed/cpi.rss</id>
+<updated>2025-08-12T07:51:00-04:00</updated>
+<entry><title>Consumer Price Index - July 2025</title>
+<published>2025-08-12T07:51:00-04:00</published>
+<link rel="alternate" href="https://www.bls.gov/news.release/archives/cpi_08122025.htm" />
+</entry></feed>
+"""
+
 NFP_HTML = """
 <html><body>
-<h1>THE EMPLOYMENT SITUATION - JUNE 2026</h1>
+<p>Transmission of material in this news release is embargoed until
+USDL-26-1125 8:30 a.m. (ET) Thursday, July 2, 2026</p>
+<h1>THE EMPLOYMENT SITUATION -- JUNE 2026</h1>
 <table>
 <tr><th>Category</th><th>Jun 2025</th><th>Apr 2026</th><th>May 2026</th><th>Jun 2026</th><th>Change</th></tr>
 <tr><td>Unemployment rate</td><td>4.1</td><td>4.3</td><td>4.3</td><td>4.2</td><td>-0.1</td></tr>
@@ -107,6 +123,37 @@ def test_official_ical_uses_exact_release_time_and_archive_period_guard():
     assert specs[1].source_url.endswith("/cpi_08122026.htm")
 
 
+def test_official_atom_discovers_archive_but_archive_sets_causal_time():
+    links = parse_bls_atom_archive_urls(ATOM_CPI, family="CPI")
+    assert links == [
+        "https://www.bls.gov/news.release/archives/cpi_08122025.htm"
+    ]
+    spec = parse_bls_archive_spec(
+        CPI_HTML, family="CPI", source_url=links[0])
+    assert spec.period == "2025-07"
+    assert spec.published_at == datetime(
+        2025, 8, 12, 8, 30, tzinfo=ZoneInfo("America/New_York")
+    ).timestamp()
+    # The Atom entry was visible at 07:51, but it cannot move availability
+    # ahead of the archive's explicit 08:30 embargo.
+    assert spec.published_at > datetime(
+        2025, 8, 12, 7, 51, tzinfo=ZoneInfo("America/New_York")
+    ).timestamp()
+
+
+def test_atom_and_archive_provenance_fail_closed():
+    with pytest.raises(ValueError, match="ARCHIVE_LINK_INVALID"):
+        parse_bls_atom_archive_urls(
+            ATOM_CPI.replace("https://www.bls.gov/news.release", "https://example.com"),
+            family="CPI",
+        )
+    with pytest.raises(ValueError, match="DATE_MISMATCH"):
+        parse_bls_archive_spec(
+            CPI_HTML, family="CPI",
+            source_url="https://www.bls.gov/news.release/archives/cpi_08132025.htm",
+        )
+
+
 def test_cpi_archive_uses_values_printed_in_release_table():
     payload = parse_cpi_archive(CPI_HTML, expected_period="2025-07")
     assert payload["headline_mom_pct"] == 0.2
@@ -120,6 +167,11 @@ def test_cpi_archive_uses_values_printed_in_release_table():
 
 
 def test_nfp_archive_uses_summary_release_vintage_not_current_series():
+    spec = parse_bls_archive_spec(
+        NFP_HTML, family="NFP",
+        source_url="https://www.bls.gov/news.release/archives/empsit_07022026.htm",
+    )
+    assert spec.period == "2026-06"
     payload = parse_nfp_archive(NFP_HTML, expected_period="2026-06")
     assert payload["payroll_change_k"] == 57.0
     assert payload["previous_payroll_change_k"] == 129.0
