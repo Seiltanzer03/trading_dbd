@@ -7,13 +7,14 @@ explicit; preserving terminal availability outranks optional background refreshe
 """
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import gc
 import os
 import threading
 import time
 from functools import wraps
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 RESOURCE_GUARD_VERSION = "production-resource-guard-v2-memory-pressure"
@@ -114,6 +115,23 @@ def _trim_allocator(*, min_interval_sec: float = 15.0) -> None:
 
 def trim_memory_for_pressure() -> None:
     _trim_allocator(min_interval_sec=0.0)
+
+
+@contextlib.contextmanager
+def cooperative_heavy_operation() -> Iterator[None]:
+    """Serialize one large operational task with existing heavy feed refreshes.
+
+    This is deliberately the same lock already used by production market-data
+    refreshes.  Storage/readiness work can therefore cooperate with the existing
+    resource guard instead of overlapping another memory/I/O-heavy refresh on the
+    small shared host.  The caller owns the operation semantics; this context only
+    controls resource concurrency and trims released allocator arenas afterwards.
+    """
+    with _HEAVY_LOCK:
+        try:
+            yield
+        finally:
+            _trim_allocator(min_interval_sec=0.0)
 
 
 def _mark_pressure_degraded(owner: Any, method_name: str, pressure: dict[str, Any]) -> None:
