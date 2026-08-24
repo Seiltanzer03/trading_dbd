@@ -146,9 +146,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ai_last_call = 0.0
     ai_lock = asyncio.Lock()
 
+    # ``tick_payload()`` is the canonical live-state calculation and may run
+    # option/scenario math for an active trade.  One background materializer
+    # owns that calculation; HTTP and WebSocket readers consume the latest
+    # atomically-published process-local snapshot instead of recomputing the
+    # same payload on their request threads.  Dict reference replacement is
+    # atomic under CPython and the published payload is never mutated here.
+    live_tick_snapshot = {
+        "payload": None,
+        "refreshed_at": None,
+        "build_ms": None,
+        "build_n": 0,
+    }
+
+    # Demo/unit-test applications have no active production trade and their
+    # initial payload is cheap.  Prewarming it keeps the standalone create_app
+    # contract deterministic; production is warmed only by the background
+    # owner after the server starts.
+    if getattr(settings, "demo", False):
+        started = time.monotonic()
+        live_tick_snapshot["payload"] = engine.tick_payload()
+        live_tick_snapshot["refreshed_at"] = time.time()
+        live_tick_snapshot["build_ms"] = (
+            time.monotonic() - started
+        ) * 1000.0
+        live_tick_snapshot["build_n"] = 1
+
     app = FastAPI(title="Seiltanzer Terminal", version="0.1.0")
     app.state.engine = engine
     app.state.settings = settings
+    app.state.live_tick_snapshot = live_tick_snapshot
+
+    def publish_live_tick(payload: dict, *, build_ms: float) -> None:
+        live_tick_snapshot["payload"] = payload
+        live_tick_snapshot["refreshed_at"] = time.time()
+        live_tick_snapshot["build_ms"] = float(build_ms)
+        live_tick_snapshot["build_n"] = int(
+            live_tick_snapshot["build_n"] or 0
+        ) + 1
+
+    def materialized_live_tick() -> dict:
+        payload = live_tick_snapshot["payload"]
+        if payload is None:
+            raise HTTPException(
+                status_code=503,
+                detail="live tick snapshot is warming",
+            )
+        return payload
 
     @app.middleware("http")
     async def auth_and_no_cache(request, call_next):
@@ -228,7 +272,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # off the uvicorn event loop just like every feed refresh above;
                 # otherwise a cold/event-driven payload can delay even a
                 # lock-free readiness route beyond its latency contract.
+                build_started = time.monotonic()
                 payload = await asyncio.to_thread(engine.tick_payload)
+                publish_live_tick(
+                    payload,
+                    build_ms=(time.monotonic() - build_started) * 1000.0,
+                )
                 dead = []
                 for ws in clients:
                     try:
@@ -274,7 +323,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_state():
         active = engine.journal.active_trade()
         return {
-            "tick": engine.tick_payload(),
+            "tick": materialized_live_tick(),
             "ridge": engine.ridge_payload(),
             "journal": engine.journal.list_trades(),
             "edge_track": engine.journal.edge_track(),
@@ -741,7 +790,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         clients.add(ws)
         try:
-            await ws.send_json(engine.tick_payload())
+            # The background owner may still be producing the first production
+            # snapshot.  Wait boundedly without running canonical scenario math
+            # on the event loop or on a second request thread.
+            deadline = time.monotonic() + 30.0
+            while live_tick_snapshot["payload"] is None:
+                if time.monotonic() >= deadline:
+                    await ws.close(code=1013)
+                    return
+                await asyncio.sleep(0.05)
+            await ws.send_json(live_tick_snapshot["payload"])
             while True:
                 await ws.receive_text()  # клиент ничего не шлёт; держим сокет
         except WebSocketDisconnect:
