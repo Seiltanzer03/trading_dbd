@@ -90,6 +90,114 @@ def _compacted(snapshot: dict[str, Any]) -> bool:
     )
 
 
+def authoritative_current_price_available(snapshot: dict[str, Any]) -> bool:
+    """Whether the report has a current, explicitly available instrument quote."""
+    manager = snapshot.get("policy_manager") or {}
+    row = (((manager.get("input_audit") or {}).get("rows") or {})
+           .get("instrument_price") or {})
+    status = str(row.get("status") or "").lower()
+    current = _number((snapshot.get("trade_geometry") or {}).get("current"))
+    return bool(row.get("available") is True and status != "no_data" and current is not None)
+
+
+def _current_price_explicitly_unavailable(snapshot: dict[str, Any]) -> bool:
+    manager = snapshot.get("policy_manager") or {}
+    rows = (manager.get("input_audit") or {}).get("rows") or {}
+    if "instrument_price" not in rows:
+        return False
+    row = rows.get("instrument_price") or {}
+    status = str(row.get("status") or "").lower()
+    current = _number((snapshot.get("trade_geometry") or {}).get("current"))
+    return bool(row.get("available") is False or status == "no_data" or current is None)
+
+
+def _missing_price_detail(snapshot: dict[str, Any]) -> str:
+    manager = snapshot.get("policy_manager") or {}
+    row = (((manager.get("input_audit") or {}).get("rows") or {})
+           .get("instrument_price") or {})
+    availability = ((snapshot.get("metric_availability_contract") or {})
+                    .get("inputs") or {}).get("instrument_price") or {}
+    status = row.get("status") or availability.get("status") or "no_data"
+    reason = row.get("reason") or availability.get("reason")
+    source = row.get("source") or availability.get("source")
+    pieces = [f"status={status}"]
+    if source:
+        pieces.append(f"source={source}")
+    if reason:
+        pieces.append(f"reason={reason}")
+    return "; ".join(pieces)
+
+
+def _repair_missing_current_price(lines: list[str], snapshot: dict[str, Any]) -> list[str]:
+    """Suppress neutral-r0 simulations when no current quote exists.
+
+    The quantitative engine retains its deterministic fallback workspace for
+    diagnostics, but those paths are not a current trade-management estimate and
+    must not be presented as evidence confirming HOLD.
+    """
+    if not _current_price_explicitly_unavailable(snapshot):
+        return lines
+
+    action = _section_bounds(lines, "**ДЕЙСТВИЕ СЕЙЧАС**")
+    if action is not None:
+        start, end = action
+        lines[start:end] = [
+            (
+                "**ДЕЙСТВИЕ СЕЙЧАС** — НОВЫХ ВНЕПЛАНОВЫХ ДЕЙСТВИЙ НЕТ: "
+                "LIVE-ЦЕНА ИНСТРУМЕНТА НЕДОСТУПНА."
+            ),
+            (
+                "Сохранить только уже действующий стратегический стоп/БУ и "
+                "предусмотренную стратегией лестницу. Это fail-safe возврат к "
+                "стратегическому плану, а не подтверждённый данными прогноз HOLD."
+            ),
+            f"Причина недоступности текущей геометрии: {_missing_price_detail(snapshot)}.",
+            "AI risk-overlay и новые CLOSE/EXIT по этому снимку не авторизуются.",
+            "",
+        ]
+
+    replacements = {
+        "**ОБЩАЯ ГЕОМЕТРИЯ СЦЕНАРИЕВ**": [
+            "UNAVAILABLE для текущего состояния сделки: нет authoritative live-цены.",
+            (
+                "Сохранённые пути с нейтральным fallback r0=0 являются только "
+                "внутренней диагностикой и здесь не публикуются как текущие вероятности."
+            ),
+        ],
+        "**РАСЧЁТ ПОЛИТИК**": [
+            "Current-policy Expected/CVaR: UNAVAILABLE без authoritative live-цены.",
+            "Нулевой CURRENT R не подставляется; production остаётся у стратегии.",
+        ],
+        "**ЭКОНОМИЧЕСКАЯ БЛИЗОСТЬ ПОЛИТИК**": [
+            "UNAVAILABLE: сравнение политик не считается текущим без live-геометрии сделки.",
+        ],
+        "**ПОЧЕМУ ВЫБРАНО**": [
+            (
+                "Это не evidence-confirmed HOLD. Новое вмешательство отклонено "
+                "fail-safe из-за отсутствия authoritative live-цены."
+            ),
+            "Действует только уже существующий STRATEGY-план; AI trading authority не расширена.",
+        ],
+        "**СЛЕДУЮЩИЙ ПЕРЕСЧЁТ**": [
+            "После восстановления authoritative live-цены и построения новой текущей геометрии.",
+            "До этого ценовые триггеры ±R из нейтрального fallback не публикуются.",
+        ],
+    }
+    for title, body in replacements.items():
+        _replace_section_body(lines, title, body)
+
+    ede = _section_bounds(lines, "**EDE CAUSAL MARKET CONTEXT**")
+    if ede is not None:
+        start, _ = ede
+        clarification = (
+            "DATA_MATURITY ниже относится к историческому research coverage и не "
+            "означает готовность текущих live decision inputs."
+        )
+        if clarification not in lines:
+            lines.insert(start + 1, clarification)
+    return lines
+
+
 def _section_bounds(lines: list[str], title: str) -> tuple[int, int] | None:
     start = next((i for i, line in enumerate(lines) if line.startswith(title)), None)
     if start is None:
@@ -190,6 +298,7 @@ def repair_report_semantics(text: str, snapshot: dict[str, Any]) -> str:
     lines = cleaned
 
     lines = _repair_source_stability(lines, snapshot)
+    lines = _repair_missing_current_price(lines, snapshot)
 
     authority = (snapshot.get("ede_causal_context") or {}).get("authority") or {}
     if authority.get("production_directional_authority") is False:

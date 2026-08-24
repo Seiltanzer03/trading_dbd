@@ -266,6 +266,8 @@ def _audit_lines(manager: dict) -> list[str]:
             details.append(f"источник {row.get('source')}")
         if _num(row.get("age_sec")) is not None:
             details.append(f"возраст {_num(row.get('age_sec')):.1f} сек")
+        if row.get("reason"):
+            details.append(f"причина {row.get('reason')}")
         result.append(f"{label}: " + "; ".join(details) + f"; роль {row.get('role', '—')}.")
         if key == "volatility_indices":
             for item in row.get("items") or []:

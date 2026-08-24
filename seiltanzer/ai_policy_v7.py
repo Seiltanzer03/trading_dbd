@@ -372,10 +372,16 @@ def _enrich_input_audit(result: dict, tick: dict, ridge: dict) -> None:
         ("option_chain", chain, None),
     ):
         row = rows.get(key) or {}
-        row.update(_audit_time(source, now, fallback))
+        row.update(_audit_time(
+            source,
+            now,
+            fallback if row.get("available") else None,
+        ))
         if _num(source.get("value")) is not None:
             row["value"] = _num(source.get("value"))
         row["symbol"] = source.get("symbol") or source.get("ticker")
+        if not row.get("available") and source.get("error"):
+            row["reason"] = source.get("error")
         rows[key] = row
 
     vol_items = []
@@ -394,14 +400,23 @@ def _enrich_input_audit(result: dict, tick: dict, ridge: dict) -> None:
 
     correlation = tick.get("correlation") or {}
     if isinstance(correlation, dict) and "cross_asset_correlation" in rows:
-        rows["cross_asset_correlation"].update(
-            _audit_time(correlation, now, tick_ts)
-        )
+        correlation_row = rows["cross_asset_correlation"]
+        correlation_row.update(_audit_time(
+            correlation,
+            now,
+            tick_ts if correlation_row.get("available") else None,
+        ))
+        if not correlation_row.get("available") and correlation.get("error"):
+            correlation_row["reason"] = correlation.get("error")
 
     rows.setdefault("oi_gex_strike_landscape", {})["snapshot_count"] = len(
         ridge.get("snapshots") or ridge.get("history") or []
     ) if isinstance(ridge, dict) else 0
     audit["rows"] = rows
+    audit["available_count"] = sum(
+        1 for row in rows.values() if isinstance(row, dict) and row.get("available")
+    )
+    audit["total_count"] = len(rows)
     audit["snapshot_ts"] = now
     audit["snapshot_utc"] = _fmt_time(now, "UTC")
     result["input_audit"] = audit

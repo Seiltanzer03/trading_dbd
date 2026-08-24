@@ -71,7 +71,8 @@ def _compact_snapshot_payload(snapshot: dict) -> None:
         compact_rows = {}
         for name, row in audit["rows"].items():
             compact = _small_row(row, (
-                "available", "status", "source", "role", "age_sec", "symbol"))
+                "available", "status", "source", "role", "age_sec", "symbol",
+                "reason"))
             if isinstance(row, dict) and isinstance(row.get("items"), list):
                 compact["items"] = [
                     _small_row(item, ("symbol", "available", "status", "source", "age_sec"))

@@ -144,6 +144,35 @@ def test_ridge_no_data_dict_is_not_counted_as_available():
     assert policy_v6._ridge_available({"gex": {"top": []}}) is True
 
 
+def test_input_audit_does_not_count_no_data_containers_as_available():
+    audit = policy_v6._input_audit({
+        "feeds": {
+            "price": {
+                "value": None,
+                "status": "no_data",
+                "error": "TradingView timeout",
+            },
+            "proxy_price": {"value": None, "status": "no_data"},
+            "chain": {"value": None, "status": "no_data"},
+            "vols": {
+                "vix": {"value": None, "status": "no_data"},
+            },
+        },
+        "correlation": {
+            "value": None,
+            "status": "no_data",
+            "error": "Yahoo unavailable",
+        },
+    }, {})
+
+    rows = audit["rows"]
+    assert rows["instrument_price"]["available"] is False
+    assert rows["instrument_price"]["reason"] == "TradingView timeout"
+    assert rows["volatility_indices"]["available"] is False
+    assert rows["cross_asset_correlation"]["available"] is False
+    assert rows["cross_asset_correlation"]["reason"] == "Yahoo unavailable"
+
+
 def _metric(expected, cvar):
     return {
         "expected_final_r": expected,

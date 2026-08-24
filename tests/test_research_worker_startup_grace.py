@@ -71,7 +71,9 @@ def test_worker_status_route_is_lock_free_and_bounded(monkeypatch):
         lambda: None)
     install_g1_short_horizon_routes(app)
 
-    body = app.routes["/api/research/runtime/worker-status"]()
+    endpoint = app.routes["/api/research/runtime/worker-status"]
+    assert asyncio.iscoroutinefunction(endpoint)
+    body = asyncio.run(endpoint())
     assert body["sqlite_access"] is False
     assert body["production_authority"] is False
     assert body["last_result"] == {

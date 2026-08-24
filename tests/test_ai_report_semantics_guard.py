@@ -188,3 +188,61 @@ p_take: current=0.5 probability.
     repaired = repair_report_semantics(report, snapshot)
     assert "Base production policy distribution (common execution-MC paths):" in repaired
     assert "Один набор из 6500 путей." in repaired
+
+
+def test_missing_current_price_is_strategy_fallback_not_confirmed_hold():
+    snapshot = {
+        "trade_geometry": {
+            "current": None,
+            "entry": 10735.0,
+            "original_stop": 10685.0,
+        },
+        "policy_manager": {
+            "management_decision": {"authority": "STRATEGY", "policy": "HOLD"},
+            "input_audit": {
+                "rows": {
+                    "instrument_price": {
+                        "available": False,
+                        "status": "no_data",
+                        "reason": "TradingView timeout",
+                    },
+                },
+            },
+            "scenario_geometry": {"scenario_count": 6500},
+        },
+        "ede_causal_context": {
+            "authority": {"production_directional_authority": False},
+        },
+    }
+    report = """**ДЕЙСТВИЕ СЕЙЧАС** — HOLD ПОДТВЕРЖДЁН.
+Единственный действующий план — стандартный менеджмент.
+
+**ОБЩАЯ ГЕОМЕТРИЯ СЦЕНАРИЕВ** —
+Один набор из 6500 путей. Ближайшая ступень: 31.8%.
+
+**РАСЧЁТ ПОЛИТИК** —
+Base production policy distribution (common execution-MC paths):
+HOLD: Expected net -0.015R.
+
+**ЭКОНОМИЧЕСКАЯ БЛИЗОСТЬ ПОЛИТИК** —
+Ближайшая политика CLOSE_10.
+
+**ПОЧЕМУ ВЫБРАНО** —
+Итог gate: confirmed_hold.
+
+**СЛЕДУЮЩИЙ ПЕРЕСЧЁТ** —
+Движение вниз на 0.15R.
+
+**EDE CAUSAL MARKET CONTEXT** —
+DATA_MATURITY=DATA_READY_ROBUST.
+"""
+    repaired = repair_report_semantics(report, snapshot)
+
+    assert "HOLD ПОДТВЕРЖДЁН" not in repaired
+    assert "LIVE-ЦЕНА ИНСТРУМЕНТА НЕДОСТУПНА" in repaired
+    assert "не подтверждённый данными прогноз HOLD" in repaired
+    assert "TradingView timeout" in repaired
+    assert "31.8%" not in repaired
+    assert "Expected net -0.015R" not in repaired
+    assert "нейтральным fallback r0=0" in repaired
+    assert "не означает готовность текущих live decision inputs" in repaired
