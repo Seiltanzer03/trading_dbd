@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Request
 
+from .production_resource_guard import cooperative_heavy_operation
 from .storage_readiness import bounded_storage_integrity
 from .storage_restore_drill import (
     RESTORE_DRILL_CONTRACT_VERSION,
@@ -41,10 +42,14 @@ def install_storage_routes(app: FastAPI) -> None:
     def restore_drill(request: Request):
         # This operation verifies a protected snapshot by restoring only into a
         # disposable tempfile. Keep it reachable only from the local production
-        # host/CI runner, not through the public terminal surface.
+        # host/CI runner, not through the public terminal surface. The multi-GB
+        # sequential restore shares the existing production heavy-operation gate
+        # so it cannot overlap memory/I/O-heavy market refresh work on the small
+        # host; the durability proof itself remains unchanged.
         _require_loopback(request)
         try:
-            return run_restore_drill(app.state.storage)
+            with cooperative_heavy_operation():
+                return run_restore_drill(app.state.storage)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"restore drill failed: {exc}") from exc
 
