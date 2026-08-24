@@ -13,10 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from .ai_verdict_budget_bridge import enforce_public_snapshot_budget
+from .runtime_git_identity import runtime_git_sha
 
 
 CONTRACT_VERSION = "ai-active-high-risk-edge-context-v1"
 POLICY_VERSION = "g1s-manual-trader-high-risk-edge-policy-v1"
+PUBLICATION_CONTRACT_VERSION = "active-edge-exact-sha-publication-v1"
 MAX_REPORT_AGE_SEC = 8 * 60 * 60
 MAX_SIGNALS = 8
 MAX_MATCHED_GROUPS = 64
@@ -50,7 +52,15 @@ def _research_dir(engine: Any) -> Path:
     return data_dir / "research"
 
 
-def _load_report(path: Path, snapshot_ts: float) -> dict[str, Any] | None:
+def _load_report(
+    path: Path,
+    snapshot_ts: float,
+    expected_sha: str | None,
+) -> dict[str, Any] | None:
+    """Load only a fresh report published for this exact code generation."""
+    expected = str(expected_sha or "").strip().lower()
+    if len(expected) != 40:
+        return None
     try:
         stat = path.stat()
         if stat.st_size <= 0 or stat.st_size > 8_000_000:
@@ -66,6 +76,11 @@ def _load_report(path: Path, snapshot_ts: float) -> dict[str, Any] | None:
         if payload.get("edge_policy") != POLICY_VERSION:
             return None
         if payload.get("production_authority") is not False:
+            return None
+        if payload.get("publication_contract_version") != PUBLICATION_CONTRACT_VERSION:
+            return None
+        published_for = str(payload.get("published_for_sha") or "").strip().lower()
+        if published_for != expected:
             return None
         return payload
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -251,11 +266,14 @@ def _matched_groups(matched_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
     snapshot_ts = _finite(snapshot.get("captured_ts")) or 0.0
     root = _research_dir(engine)
+    expected_sha = runtime_git_sha()
     structured_reports = [report for horizon in (15, 30, 60, 120, 240)
                           if (report := _load_report(
                               root / f"active_structured_{horizon}m_latest.json",
-                              snapshot_ts))]
-    ml_report = _load_report(root / "active_ml_latest.json", snapshot_ts)
+                              snapshot_ts,
+                              expected_sha))]
+    ml_report = _load_report(
+        root / "active_ml_latest.json", snapshot_ts, expected_sha)
     values = _current_values(engine, snapshot)
     direction = str((snapshot.get("strategy") or {}).get("direction") or "")
     rows: list[dict[str, Any]] = []
@@ -330,6 +348,8 @@ def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str
         "risk_acceptance": "HIGH_FALSE_DISCOVERY_TOLERANCE",
         "strict_reference_is_blocking": False,
         "aggregate_scope": "ALL_ACTIVE_CANDIDATES_WITH_ALL_MATCHED_STRUCTURED_VOTES",
+        "exact_sha_reports_only": True,
+        "runtime_sha": expected_sha,
         "total_active_signal_n": len(all_rows),
         "structured_signal_n": structured_n,
         "ml_signal_n": ml_n,
@@ -393,6 +413,7 @@ def install_active_edge_ai_integration() -> None:
                 evidence["active_high_risk_edge"] = {
                     key: context[key] for key in (
                         "edge_policy", "available", "risk_acceptance", "aggregate_scope",
+                        "exact_sha_reports_only", "runtime_sha",
                         "total_active_signal_n", "structured_signal_n", "ml_signal_n",
                         "strict_reference_signal_n", "matched_strict_reference_signal_n",
                         "matched_structured_signal_n", "supporting_position_n",
