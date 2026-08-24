@@ -14,7 +14,15 @@ from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.registry import FEATURES
 
 
-INVENTORY_CONTRACT_VERSION = "g1s-ede-production-inventory-v1.4.0"
+INVENTORY_CONTRACT_VERSION = "g1s-ede-production-inventory-v1.5.0"
+HORIZONS = (15, 30, 60, 120, 240)
+KNOWN_DATA_MATURITY = frozenset({
+    "INSUFFICIENT_DATA",
+    "DATA_READY_EARLY",
+    "DATA_READY_RESEARCH",
+    "DATA_READY_PROVISIONAL",
+    "DATA_READY_ROBUST",
+})
 
 
 class _ReadOnlyRuntime:
@@ -42,6 +50,22 @@ def _history_strategy(definition: Any) -> str:
     return "PROSPECTIVE_ONLY"
 
 
+def _normalized_data_maturity(value: Any) -> str:
+    maturity = str(value or "INSUFFICIENT_DATA")
+    return maturity if maturity in KNOWN_DATA_MATURITY else "INSUFFICIENT_DATA"
+
+
+def _missing_coverage_state(definition: Any, row: dict[str, Any]) -> str:
+    diagnosis = row.get("zero_coverage_diagnosis") or {}
+    if bool(diagnosis.get("causal_backfill")):
+        return "CAUSAL_BACKFILL_NO_COVERAGE"
+    if str(definition.live_availability) == "UNAVAILABLE":
+        return "SOURCE_MISSING"
+    if str(definition.historical_availability) == "UNAVAILABLE":
+        return "HISTORICAL_DATA_MISSING"
+    return "NO_REAL_OBSERVATIONS"
+
+
 def _coverage_state(definition: Any, row: dict[str, Any]) -> str:
     scope = str(definition.research_scope)
     if scope == "G1M_ONLY":
@@ -51,18 +75,42 @@ def _coverage_state(definition: Any, row: dict[str, Any]) -> str:
 
     real_n = int(row.get("real_observations") or 0)
     if real_n <= 0:
-        diagnosis = row.get("zero_coverage_diagnosis") or {}
-        if bool(diagnosis.get("causal_backfill")):
-            return "CAUSAL_BACKFILL_NO_COVERAGE"
-        if str(definition.live_availability) == "UNAVAILABLE":
-            return "SOURCE_MISSING"
-        if str(definition.historical_availability) == "UNAVAILABLE":
-            return "HISTORICAL_DATA_MISSING"
-        return "NO_REAL_OBSERVATIONS"
+        return _missing_coverage_state(definition, row)
 
-    if bool(row.get("usable_for_ede")):
+    # Fail closed: an upstream boolean alone is not sufficient evidence.  The
+    # canonical adapter must also emit a recognized non-insufficient maturity.
+    maturity = _normalized_data_maturity(row.get("data_maturity"))
+    if bool(row.get("usable_for_ede")) and maturity != "INSUFFICIENT_DATA":
         return "DATA_READY"
     return "INSUFFICIENT_INDEPENDENT_EVIDENCE"
+
+
+def _horizon_bucket(row: dict[str, Any], horizon: int) -> dict[str, Any]:
+    buckets = row.get("by_horizon") or {}
+    if not isinstance(buckets, dict):
+        return {}
+    bucket = buckets.get(str(int(horizon))) or {}
+    return bucket if isinstance(bucket, dict) else {}
+
+
+def _horizon_coverage_state(
+    definition: Any, row: dict[str, Any], horizon: int
+) -> str:
+    scope = str(definition.research_scope)
+    if scope == "G1M_ONLY":
+        return "G1M_ONLY"
+    if scope == "QUALITY_ONLY":
+        return "QUALITY_ONLY"
+
+    bucket = _horizon_bucket(row, horizon)
+    raw_n = int(bucket.get("raw") or 0)
+    if raw_n <= 0:
+        return _missing_coverage_state(definition, row)
+
+    maturity = _normalized_data_maturity(bucket.get("data_maturity"))
+    if maturity == "INSUFFICIENT_DATA":
+        return "INSUFFICIENT_INDEPENDENT_EVIDENCE"
+    return "DATA_READY"
 
 
 def _enrich_features(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -72,6 +120,10 @@ def _enrich_features(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
         feature_id = str(row["feature_id"])
         definition = definitions[feature_id]
         diagnosis = row.get("zero_coverage_diagnosis") or {}
+        coverage_state_by_horizon = {
+            str(horizon): _horizon_coverage_state(definition, row, horizon)
+            for horizon in HORIZONS
+        }
         enriched = {
             **row,
             "family": definition.family,
@@ -86,9 +138,56 @@ def _enrich_features(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "reconstructable_from_existing_causal_store": bool(
                 diagnosis.get("causal_backfill")),
             "coverage_state": _coverage_state(definition, row),
+            "coverage_state_by_horizon": coverage_state_by_horizon,
         }
         output.append(enriched)
     return output
+
+
+def _family_horizon_summary(
+    rows: list[dict[str, Any]], horizon: int
+) -> dict[str, Any]:
+    buckets = [_horizon_bucket(row, horizon) for row in rows]
+    states = Counter(
+        str((row.get("coverage_state_by_horizon") or {}).get(
+            str(horizon), "INSUFFICIENT_INDEPENDENT_EVIDENCE"))
+        for row in rows
+    )
+    maturity = Counter(
+        _normalized_data_maturity(bucket.get("data_maturity"))
+        for bucket in buckets
+    )
+    temporal_blocks = Counter(int(bucket.get("temporal_blocks") or 0)
+                              for bucket in buckets)
+    coverage = [float(bucket.get("coverage_pct") or 0.0) for bucket in buckets]
+
+    return {
+        "feature_count": len(rows),
+        "with_training_eligible_observations": sum(
+            int(bucket.get("raw") or 0) > 0 for bucket in buckets),
+        "with_resolved_observations": sum(
+            int(bucket.get("resolved") or 0) > 0 for bucket in buckets),
+        "data_ready_features": int(states.get("DATA_READY", 0)),
+        "zero_coverage_features": sum(
+            int(bucket.get("raw") or 0) == 0 for bucket in buckets),
+        # These are feature-observation totals, not independent market T0 rows.
+        "raw_feature_observations": sum(
+            int(bucket.get("raw") or 0) for bucket in buckets),
+        "effective_feature_observations": sum(
+            int(bucket.get("effective") or 0) for bucket in buckets),
+        "resolved_feature_observations": sum(
+            int(bucket.get("resolved") or 0) for bucket in buckets),
+        "temporal_block_counts": {
+            str(key): value for key, value in sorted(temporal_blocks.items())
+        },
+        "coverage_pct_min": min(coverage) if coverage else 0.0,
+        "coverage_pct_mean": (
+            sum(coverage) / len(coverage) if coverage else 0.0),
+        "coverage_pct_max": max(coverage) if coverage else 0.0,
+        "data_maturity_counts": dict(sorted(maturity.items())),
+        "coverage_state_counts": dict(sorted(states.items())),
+        "production_authority": False,
+    }
 
 
 def _family_summary(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -105,10 +204,14 @@ def _family_summary(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "feature_count": len(rows),
             "with_real_observations": sum(
                 int(row.get("real_observations") or 0) > 0 for row in rows),
-            "usable_for_ede": sum(bool(row.get("usable_for_ede")) for row in rows),
+            "usable_for_ede": int(states.get("DATA_READY", 0)),
             "zero_coverage": sum(
                 int(row.get("real_observations") or 0) == 0 for row in rows),
             "coverage_state_counts": dict(sorted(states.items())),
+            "by_horizon": {
+                str(horizon): _family_horizon_summary(rows, horizon)
+                for horizon in HORIZONS
+            },
             "production_authority": False,
         })
     return output
@@ -161,6 +264,8 @@ def inventory(database: Path) -> dict:
         "families": families,
         "features": enriched_features,
         "classification_is_data_coverage_not_edge_result": True,
+        "family_horizon_classification": True,
+        "unknown_data_maturity_fails_closed": True,
         "missing_is_not_zero": True,
         "causal_baseline_price_backfill": True,
         "macro_release_independence": True,
