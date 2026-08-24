@@ -160,6 +160,18 @@ def _family_horizon_summary(
     temporal_blocks = Counter(int(bucket.get("temporal_blocks") or 0)
                               for bucket in buckets)
     coverage = [float(bucket.get("coverage_pct") or 0.0) for bucket in buckets]
+    dependency_units = Counter(
+        str(bucket.get("dependency_unit"))
+        for bucket in buckets if bucket.get("dependency_unit")
+    )
+    independent_release_counts = [
+        int(bucket.get("independent_release_n") or 0)
+        for bucket in buckets if "independent_release_n" in bucket
+    ]
+    repeated_release_flags = [
+        bool(bucket.get("repeated_t0_increases_effective_n"))
+        for bucket in buckets if "repeated_t0_increases_effective_n" in bucket
+    ]
 
     return {
         "feature_count": len(rows),
@@ -170,13 +182,24 @@ def _family_horizon_summary(
         "data_ready_features": int(states.get("DATA_READY", 0)),
         "zero_coverage_features": sum(
             int(bucket.get("raw") or 0) == 0 for bucket in buckets),
-        # These are feature-observation totals, not independent market T0 rows.
+        # These are additive feature-observation totals for inventory sizing;
+        # they are never an independent market sample size.  Release-driven
+        # macro features expose their dependence unit separately below.
         "raw_feature_observations": sum(
             int(bucket.get("raw") or 0) for bucket in buckets),
         "effective_feature_observations": sum(
             int(bucket.get("effective") or 0) for bucket in buckets),
         "resolved_feature_observations": sum(
             int(bucket.get("resolved") or 0) for bucket in buckets),
+        "aggregate_counts_are_feature_observation_totals": True,
+        "dependency_unit_counts": dict(sorted(dependency_units.items())),
+        "release_dependency_feature_count": len(independent_release_counts),
+        "independent_release_n_min": (
+            min(independent_release_counts) if independent_release_counts else None),
+        "independent_release_n_max": (
+            max(independent_release_counts) if independent_release_counts else None),
+        "repeated_t0_increases_effective_n": (
+            any(repeated_release_flags) if repeated_release_flags else None),
         "temporal_block_counts": {
             str(key): value for key, value in sorted(temporal_blocks.items())
         },
