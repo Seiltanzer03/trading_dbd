@@ -31,6 +31,7 @@ REMOTE_ORCHESTRATOR = REMOTE_ROOT / "scripts/production_research_acceptance.py"
 API_PROBE_MAX_TIME_SECONDS = 3
 API_PROBE_ATTEMPTS = 3
 API_PROBE_RETRY_DELAY_SECONDS = 2.0
+POST_TRANSFER_RECOVERY_SECONDS = 30.0
 SSH_KEEPALIVE_SECONDS = 30
 MAX_EXACT_BACKUP_AGE_SECONDS = 60 * 60
 BACKUP_CONTRACT_VERSION = "seiltanzer-backup-v1"
@@ -153,6 +154,21 @@ def _probe_api(
                 f"{exc}; retrying in {retry_delay:g}s"
             )
             time.sleep(max(0.0, float(retry_delay)))
+
+
+def _wait_for_post_transfer_recovery(
+    delay: float = POST_TRANSFER_RECOVERY_SECONDS,
+) -> None:
+    """Let production leave the bounded multi-GiB copy pressure window.
+
+    This wait is outside the HTTP probe.  Every subsequent request retains the
+    exact three-second SLA and must still return HTTP 200 to pass.
+    """
+    seconds = float(delay)
+    if seconds < 0.0:
+        raise ValueError("post-transfer recovery delay must be >= 0")
+    print(f"EDE_POST_TRANSFER_RECOVERY_SECONDS={seconds:g}", flush=True)
+    time.sleep(seconds)
 
 
 def _release_gate(
@@ -458,6 +474,7 @@ def snapshot(args: argparse.Namespace) -> int:
             + "\n",
             encoding="utf-8",
         )
+        _wait_for_post_transfer_recovery()
         _probe_api(client)
         print("EDE_OFFLOAD_SNAPSHOT_SOURCE=DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP")
         print(f"EDE_OFFLOAD_SNAPSHOT_CUTOFF_TS={float(manifest['created_ts']):.6f}")

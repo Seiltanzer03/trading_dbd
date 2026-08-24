@@ -44,6 +44,10 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     assert "transport.set_keepalive(SSH_KEEPALIVE_SECONDS)" in offload
     assert "API_PROBE_MAX_TIME_SECONDS = 3" in offload
     assert 'f"--max-time {API_PROBE_MAX_TIME_SECONDS} "' in offload
+    assert "POST_TRANSFER_RECOVERY_SECONDS = 30.0" in offload
+    assert offload.index("_wait_for_post_transfer_recovery()") < offload.index(
+        "_probe_api(client)", offload.index("def snapshot")
+    )
     assert "PRAGMA quick_check" in offload
     assert "path: ${{ runner.temp }}/ede-source.sqlite3*" in ede
 
