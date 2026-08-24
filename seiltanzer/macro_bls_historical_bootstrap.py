@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -40,6 +40,10 @@ BLS_ICAL_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
 BLS_ATOM_FEEDS = {
     "CPI": "https://www.bls.gov/feed/cpi.rss",
     "NFP": "https://www.bls.gov/feed/empsit.rss",
+}
+BLS_ARCHIVE_INDEXES = {
+    "CPI": "https://www.bls.gov/bls/news-release/cpi.htm",
+    "NFP": "https://www.bls.gov/bls/news-release/empsit.htm",
 }
 BLS_ARCHIVE_TEMPLATE = "https://www.bls.gov/news.release/archives/{slug}_{date_code}.htm"
 BLS_HOSTS = frozenset({"www.bls.gov", "bls.gov"})
@@ -180,6 +184,19 @@ class _TableTextParser(HTMLParser):
         self.text_parts.append(clean)
         if self._cell is not None:
             self._cell.append(clean)
+
+
+class _ArchiveLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() != "a":
+            return
+        for name, value in attrs:
+            if str(name).lower() == "href" and value:
+                self.hrefs.append(str(value).strip())
 
 
 @dataclass(frozen=True)
@@ -340,6 +357,34 @@ def parse_bls_atom_archive_urls(feed: str, *, family: str) -> list[str]:
         output.add(links[0])
     if not output:
         raise ValueError("BLS_ATOM_ARCHIVE_LINKS_MISSING")
+    return sorted(output)
+
+
+def parse_bls_archive_index_urls(
+    html: str, *, family: str, source_url: str,
+) -> list[str]:
+    """Extract canonical release-vintage links from an official BLS index.
+
+    The archive index is itself an official, durable manifest and explicitly
+    warns that later releases may revise the values printed in earlier copies.
+    Only immutable-looking HTML archive URLs for the requested family are
+    admitted; current mutable releases, PDFs, queries and foreign redirects are
+    excluded.  The archive page still supplies the exact embargo timestamp.
+    """
+    if family not in FAMILIES or source_url != BLS_ARCHIVE_INDEXES[family]:
+        raise ValueError("BLS_ARCHIVE_INDEX_SOURCE_INVALID")
+    if not _official_bls_url(source_url):
+        raise ValueError("BLS_ARCHIVE_INDEX_SOURCE_INVALID")
+    parser = _ArchiveLinkParser()
+    parser.feed(html or "")
+    output: set[str] = set()
+    for href in parser.hrefs:
+        candidate = urljoin(source_url, href)
+        identity = _bls_archive_identity(candidate)
+        if identity is not None and identity[0] == family:
+            output.add(candidate)
+    if not output:
+        raise ValueError("BLS_ARCHIVE_INDEX_LINKS_MISSING")
     return sorted(output)
 
 
@@ -748,6 +793,15 @@ class OfficialBLSArchiveSource:
         with self._client() as client:
             feed = self._validated_response(client.get(url))
         return feed, parse_bls_atom_archive_urls(feed, family=family)
+
+    def archive_index_manifest(self, family: str) -> tuple[str, list[str]]:
+        if family not in FAMILIES:
+            raise ValueError("BLS_ARCHIVE_INDEX_FAMILY_INVALID")
+        url = BLS_ARCHIVE_INDEXES[family]
+        with self._client() as client:
+            html = self._validated_response(client.get(url))
+        return html, parse_bls_archive_index_urls(
+            html, family=family, source_url=url)
 
     def archive_from_manifest(
         self, *, family: str, source_url: str,

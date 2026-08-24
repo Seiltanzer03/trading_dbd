@@ -147,6 +147,9 @@ def _roundup_current_values(text: str, family: str) -> dict[str, float]:
     else:
         patterns = {
             "pmi": [
+                r"composite\s+PMI[^.]{0,100}?(?:increasing|increased)\s+"
+                r"\d+(?:\.\d+)?\s+percentage\s+points?\s+to\s+"
+                r"(\d+(?:\.\d+)?)\s*percent",
                 r"composite\s+PMI[^.]{0,100}?(?:increasing|increased|decreasing|decreased|registered)[^.]{0,40}?to\s+(\d+(?:\.\d+)?)\s*percent",
                 r"Services\s+PMI[^.]{0,100}?(?:registered|at)\s+(\d+(?:\.\d+)?)\s*percent",
             ],

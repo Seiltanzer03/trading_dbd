@@ -20,7 +20,7 @@ from .macro_offhost_bundle import (
 )
 
 
-CONTRACT_VERSION = "official-macro-historical-offhost-v4-bls-atom"
+CONTRACT_VERSION = "official-macro-historical-offhost-v5-bls-archive-index"
 DEFAULT_WINDOW_DAYS = 120
 MAX_WINDOW_DAYS = 180
 FOMC_WINDOW_DAYS = 365
@@ -68,7 +68,7 @@ def build_bundle(
         raise ValueError("HISTORICAL_OFFHOST_WINDOW_INVALID")
 
     from .macro_bls_historical_bootstrap import (
-        BLS_ATOM_FEEDS,
+        BLS_ARCHIVE_INDEXES,
         OfficialBLSArchiveSource,
         _bls_archive_identity,
     )
@@ -92,15 +92,15 @@ def build_bundle(
     errors: dict[str, str] = {}
     schedules: dict[str, dict[str, Any]] = {}
     manifest_links: list[tuple[str, str]] = []
-    for family, source_url in BLS_ATOM_FEEDS.items():
+    for family, source_url in BLS_ARCHIVE_INDEXES.items():
         try:
-            feed, links = bls_source.atom_manifest(family)
+            index_html, links = bls_source.archive_index_manifest(family)
             schedules[family] = _record({
-                "format": "ATOM",
+                "format": "HTML_ARCHIVE_INDEX",
                 "family": family,
                 "source_url": source_url,
-                "content": feed,
-                "source_sha256": _sha256(feed),
+                "content": index_html,
+                "source_sha256": _sha256(index_html),
             })
             manifest_links.extend((family, link) for link in links)
         except Exception as exc:
@@ -275,12 +275,12 @@ def validate_bundle(
     acceptance_run_id: str | None = None, now: float | None = None,
 ) -> dict[str, Any]:
     from .macro_bls_historical_bootstrap import (
-        BLS_ATOM_FEEDS,
+        BLS_ARCHIVE_INDEXES,
         BLSReleaseSpec,
         FAMILIES as BLS_FAMILIES,
         _official_bls_url,
         parse_bls_archive_spec,
-        parse_bls_atom_archive_urls,
+        parse_bls_archive_index_urls,
         parse_cpi_archive,
         parse_nfp_archive,
     )
@@ -338,11 +338,11 @@ def validate_bundle(
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
         if (
             value.get("family") != family
-            or value.get("source_url") != BLS_ATOM_FEEDS[family]
+            or value.get("source_url") != BLS_ARCHIVE_INDEXES[family]
             or not _official_bls_url(str(value.get("source_url") or ""))
         ):
             raise ValueError("HISTORICAL_OFFHOST_BLS_SOURCE_INVALID")
-        if value.get("format") != "ATOM":
+        if value.get("format") != "HTML_ARCHIVE_INDEX":
             raise ValueError("HISTORICAL_OFFHOST_BLS_CALENDAR_FORMAT_INVALID")
         content = str(value.get("content") or "")
         if len(content) < 200 or len(content.encode("utf-8")) > 2_000_000:
@@ -351,12 +351,25 @@ def validate_bundle(
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_HASH_MISMATCH")
         manifest_links.update(
             (family, source_url)
-            for source_url in parse_bls_atom_archive_urls(content, family=family)
+            for source_url in parse_bls_archive_index_urls(
+                content,
+                family=family,
+                source_url=BLS_ARCHIVE_INDEXES[family],
+            )
         )
 
     bls_records = bundle.get("bls_records")
     if not isinstance(bls_records, list) or len(bls_records) > 50:
         raise ValueError("HISTORICAL_OFFHOST_BLS_RECORDS_INVALID")
+    bls_counts = {
+        family: sum(
+            1 for record in bls_records
+            if (record.get("spec") or {}).get("family") == family
+        )
+        for family in BLS_FAMILIES
+    }
+    if any(count < 1 for count in bls_counts.values()):
+        raise ValueError("HISTORICAL_OFFHOST_BLS_RECORDS_MISSING")
     for record in bls_records:
         if record.get("record_sha256") != _sha256(_without(record, "record_sha256")):
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
@@ -392,6 +405,12 @@ def validate_bundle(
     ism_records = bundle.get("ism_records")
     if not isinstance(ism_records, list) or len(ism_records) > 30:
         raise ValueError("HISTORICAL_OFFHOST_ISM_RECORDS_INVALID")
+    ism_counts = {
+        family: sum(1 for record in ism_records if record.get("family") == family)
+        for family in ISM_FAMILIES
+    }
+    if any(count < 1 for count in ism_counts.values()):
+        raise ValueError("HISTORICAL_OFFHOST_ISM_RECORDS_MISSING")
     for record in ism_records:
         if record.get("record_sha256") != _sha256(_without(record, "record_sha256")):
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")

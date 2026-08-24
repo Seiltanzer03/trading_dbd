@@ -199,8 +199,8 @@ def _title_matches(text: str, family: str, period: str) -> bool:
     month_name = _month_name(month)
     label = FAMILY_LABEL[family]
     patterns = (
-        rf"ISM\s*PMI\s*Reports\s+Roundup:\s*{month_name}\s+{label}",
-        rf"Report\s+On\s+Business\s+Roundup:\s*{month_name}\s+{label}\s+PMI",
+        rf"ISM(?:®)?\s*PMI(?:®)?\s*Reports\s+Roundup:\s*{month_name}\s+{label}",
+        rf"Report\s+On\s+Business(?:®)?\s+Roundup:\s*{month_name}\s+{label}\s+PMI(?:®)?",
     )
     return any(re.search(pattern, text, flags=re.I) for pattern in patterns)
 

@@ -31,6 +31,13 @@ def main() -> None:
         f"fomc_n={len(bundle['fomc_records'])} "
         f"error_n={len(bundle['errors'])} bundle_sha256={bundle['bundle_sha256']}"
     )
+    if bundle["errors"]:
+        print(
+            "HISTORICAL_OFFHOST_BUNDLE_ERRORS "
+            + " | ".join(
+                f"{key}={value}" for key, value in sorted(bundle["errors"].items())
+            )
+        )
 
 
 if __name__ == "__main__":
