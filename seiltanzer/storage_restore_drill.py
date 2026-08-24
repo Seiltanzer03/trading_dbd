@@ -13,6 +13,13 @@ required table is present.  Re-running full ``PRAGMA integrity_check`` on both
 source and destination would scan the same large database multiple additional
 times and made production acceptance exceed 90 seconds on the small VPS without
 adding independent evidence.
+
+The production database is several times larger than host RAM.  Sequentially
+restoring and re-reading a multi-GB snapshot must therefore also avoid turning
+Linux page cache into an implicit second copy of the database.  The drill keeps
+dirty writeback bounded and drops completed sequential ranges from page cache
+where POSIX fadvise is available.  This changes resource behaviour only; the
+byte-identical restore and independent destination hash remain mandatory.
 """
 from __future__ import annotations
 
@@ -32,13 +39,13 @@ from .storage_runtime import (
     StorageManager,
     _atomic_json,
     _read_json,
-    _sha256,
 )
 
 
 RESTORE_DRILL_CONTRACT_VERSION = "seiltanzer-restore-drill-v3-byte-identical"
 RESTORE_DRILL_STATE_FILENAME = ".restore_drill_state.json"
 COPY_CHUNK_BYTES = 4 * 1024 * 1024
+WRITEBACK_WINDOW_BYTES = 64 * 1024 * 1024
 
 
 def _cleanup_sqlite(path: Path) -> None:
@@ -76,20 +83,94 @@ def _schema_identity(database_path: Path) -> tuple[int, str, set[str]]:
         conn.close()
 
 
+def _advise_sequential(fh: Any) -> bool:
+    fadvise = getattr(os, "posix_fadvise", None)
+    advice = getattr(os, "POSIX_FADV_SEQUENTIAL", None)
+    if fadvise is None or advice is None:
+        return False
+    try:
+        fadvise(fh.fileno(), 0, 0, advice)
+        return True
+    except OSError:
+        return False
+
+
+def _drop_file_cache(fh: Any, offset: int, length: int) -> bool:
+    """Release an already-consumed clean range from the kernel page cache."""
+    if length <= 0:
+        return False
+    fadvise = getattr(os, "posix_fadvise", None)
+    advice = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if fadvise is None or advice is None:
+        return False
+    try:
+        fadvise(fh.fileno(), max(0, int(offset)), int(length), advice)
+        return True
+    except OSError:
+        return False
+
+
+def _sync_data(fh: Any) -> None:
+    fdatasync = getattr(os, "fdatasync", None)
+    if fdatasync is not None:
+        fdatasync(fh.fileno())
+    else:
+        os.fsync(fh.fileno())
+
+
+def _sha256_streaming_no_cache(path: Path) -> str:
+    """Hash the restored bytes without retaining the whole file in page cache."""
+    digest = hashlib.sha256()
+    offset = 0
+    with path.open("rb") as fh:
+        _advise_sequential(fh)
+        while True:
+            chunk = fh.read(COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+            _drop_file_cache(fh, offset, len(chunk))
+            offset += len(chunk)
+    return digest.hexdigest()
+
+
 def _copy_source_with_sha256(source: Path, destination: Path) -> tuple[str, int]:
-    """Perform the actual restore copy while hashing exactly the bytes read."""
+    """Perform the actual restore copy while hashing exactly the bytes read.
+
+    Dirty destination pages are synced in a bounded window instead of allowing a
+    multi-GB disposable restore to accumulate in page cache until one final
+    fsync.  Completed source/destination ranges are marked DONTNEED when Linux
+    supports POSIX fadvise so the live service keeps its own hot working set.
+    """
     digest = hashlib.sha256()
     copied = 0
+    writeback_start = 0
+    pending_writeback = 0
     with source.open("rb") as src, destination.open("xb") as dst:
+        _advise_sequential(src)
+        _advise_sequential(dst)
         while True:
             chunk = src.read(COPY_CHUNK_BYTES)
             if not chunk:
                 break
+            source_offset = copied
             digest.update(chunk)
             dst.write(chunk)
             copied += len(chunk)
+            pending_writeback += len(chunk)
+            _drop_file_cache(src, source_offset, len(chunk))
+
+            if pending_writeback >= WRITEBACK_WINDOW_BYTES:
+                dst.flush()
+                _sync_data(dst)
+                _drop_file_cache(dst, writeback_start, pending_writeback)
+                writeback_start = copied
+                pending_writeback = 0
+
         dst.flush()
         os.fsync(dst.fileno())
+        if pending_writeback:
+            _drop_file_cache(dst, writeback_start, pending_writeback)
     return digest.hexdigest(), copied
 
 
@@ -173,8 +254,9 @@ def _restore_verified_bytes_for_drill(
 
     # A separate read of the restored file proves the filesystem destination is
     # byte-identical to the manifest-approved source, not merely that the source
-    # stream had the expected digest.
-    restored_sha = _sha256(destination)
+    # stream had the expected digest.  The scan drops consumed cache ranges so a
+    # disposable multi-GB file cannot displace the live service working set.
+    restored_sha = _sha256_streaming_no_cache(destination)
     if restored_sha != expected_sha:
         raise RuntimeError("restored database SHA256 mismatch")
 
@@ -206,11 +288,18 @@ def _restore_verified_bytes_for_drill(
         "copied_bytes": copied_bytes,
         "verification_method": (
             "MANIFEST_FULL_INTEGRITY_PROVENANCE+SOURCE_SHA256+"
-            "BYTE_IDENTICAL_RESTORE_SHA256+SCHEMA_IDENTITY+TABLE_PRESENCE"
+            "BYTE_IDENTICAL_RESTORE_SHA256+SCHEMA_IDENTITY+TABLE_PRESENCE+"
+            "BOUNDED_WRITEBACK"
         ),
         "source_full_integrity_verified_at_backup_creation": True,
         "repeat_full_integrity_scan_during_drill": False,
         "critical_table_counts_inherited_by_byte_identity": True,
+        "page_cache_pressure_bounded": True,
+        "writeback_window_bytes": WRITEBACK_WINDOW_BYTES,
+        "posix_fadvise_available": bool(
+            getattr(os, "posix_fadvise", None)
+            and getattr(os, "POSIX_FADV_DONTNEED", None) is not None
+        ),
     }
 
 
@@ -272,6 +361,9 @@ def run_restore_drill(manager: StorageManager) -> dict[str, Any]:
             "request_waits_for_backup_manager_lock": False,
             "restored_sha256": result.get("restored_sha256"),
             "copied_bytes": result.get("copied_bytes"),
+            "page_cache_pressure_bounded": result.get("page_cache_pressure_bounded"),
+            "writeback_window_bytes": result.get("writeback_window_bytes"),
+            "posix_fadvise_available": result.get("posix_fadvise_available"),
             "live_database_replaced": False,
             "drill_destination_kind": "disposable_tempfile",
             "completed_ts": time.time(),
