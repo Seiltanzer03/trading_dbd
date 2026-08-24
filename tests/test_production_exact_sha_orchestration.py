@@ -20,6 +20,21 @@ def test_deploy_starts_one_explicit_acceptance_chain_after_green_smoke():
     assert '[ "$ORCHESTRATION" = "success" ]' in deploy
 
 
+def test_deploy_acquires_existing_gate_before_readiness_and_keeps_owner_downstream():
+    deploy = _workflow("deploy.yml")
+    post_research = _workflow("production-post-research.yml")
+    acquire = '"$PY" "$ORCH" acquire-gate'
+    wait_for_pause = "/opt/seiltanzer/scripts/production_post_research_check.py"
+    readiness = "/opt/seiltanzer/scripts/production_readiness_check.py"
+
+    assert deploy.index(acquire) < deploy.index(wait_for_pause) < deploy.index(readiness)
+    assert "PRE_ACCEPTANCE_RESEARCH_PAUSED" in deploy
+    assert "Release pre-acceptance gate if deploy chain failed" in deploy
+    assert "steps.orchestration.outcome != 'success'" in deploy
+    assert acquire not in post_research
+    assert '"$PY" "$ORCH" validate-gate' in post_research
+
+
 def test_deploy_materializes_exact_sha_offhost_macro_before_unchanged_smoke():
     deploy = _workflow("deploy.yml")
     build = "python scripts/build_offhost_macro_bundle.py"

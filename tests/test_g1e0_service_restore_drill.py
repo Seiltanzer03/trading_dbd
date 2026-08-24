@@ -69,6 +69,28 @@ def test_service_restore_drill_restores_disposable_copy_without_touching_live_db
     assert last_restore_drill(manager) == report
 
 
+def test_service_restore_drill_reports_failed_cache_eviction(tmp_path, monkeypatch):
+    manager, _ = _manager_with_backup(tmp_path)
+    monkeypatch.setattr(
+        "seiltanzer.storage_restore_drill._drop_file_cache",
+        lambda *_args: False,
+    )
+
+    report = run_restore_drill(manager)
+
+    assert report["ok"] is True
+    assert report["page_cache_pressure_bounded"] is False
+
+
+def test_production_readiness_requires_verified_cache_eviction():
+    readiness = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "production_readiness_check.py"
+    ).read_text(encoding="utf-8")
+    assert 'drill.get("page_cache_pressure_bounded") is True' in readiness
+
+
 def test_service_restore_drill_fails_closed_without_verified_backup(tmp_path):
     settings = Settings(demo=True, data_dir=str(tmp_path))
     live_db = Path(settings.trades_db)

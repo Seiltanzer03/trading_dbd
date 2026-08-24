@@ -118,10 +118,11 @@ def _sync_data(fh: Any) -> None:
         os.fsync(fh.fileno())
 
 
-def _sha256_streaming_no_cache(path: Path) -> str:
-    """Hash the restored bytes without retaining the whole file in page cache."""
+def _sha256_streaming_no_cache(path: Path) -> tuple[str, bool]:
+    """Hash restored bytes and report whether every cache eviction succeeded."""
     digest = hashlib.sha256()
     offset = 0
+    cache_eviction_verified = True
     with path.open("rb") as fh:
         _advise_sequential(fh)
         while True:
@@ -129,12 +130,17 @@ def _sha256_streaming_no_cache(path: Path) -> str:
             if not chunk:
                 break
             digest.update(chunk)
-            _drop_file_cache(fh, offset, len(chunk))
+            cache_eviction_verified = (
+                _drop_file_cache(fh, offset, len(chunk))
+                and cache_eviction_verified
+            )
             offset += len(chunk)
-    return digest.hexdigest()
+    return digest.hexdigest(), cache_eviction_verified
 
 
-def _copy_source_with_sha256(source: Path, destination: Path) -> tuple[str, int]:
+def _copy_source_with_sha256(
+    source: Path, destination: Path,
+) -> tuple[str, int, bool]:
     """Perform the actual restore copy while hashing exactly the bytes read.
 
     Dirty destination pages are synced in a bounded window instead of allowing a
@@ -146,6 +152,7 @@ def _copy_source_with_sha256(source: Path, destination: Path) -> tuple[str, int]
     copied = 0
     writeback_start = 0
     pending_writeback = 0
+    cache_eviction_verified = True
     with source.open("rb") as src, destination.open("xb") as dst:
         _advise_sequential(src)
         _advise_sequential(dst)
@@ -158,20 +165,29 @@ def _copy_source_with_sha256(source: Path, destination: Path) -> tuple[str, int]
             dst.write(chunk)
             copied += len(chunk)
             pending_writeback += len(chunk)
-            _drop_file_cache(src, source_offset, len(chunk))
+            cache_eviction_verified = (
+                _drop_file_cache(src, source_offset, len(chunk))
+                and cache_eviction_verified
+            )
 
             if pending_writeback >= WRITEBACK_WINDOW_BYTES:
                 dst.flush()
                 _sync_data(dst)
-                _drop_file_cache(dst, writeback_start, pending_writeback)
+                cache_eviction_verified = (
+                    _drop_file_cache(dst, writeback_start, pending_writeback)
+                    and cache_eviction_verified
+                )
                 writeback_start = copied
                 pending_writeback = 0
 
         dst.flush()
         os.fsync(dst.fileno())
         if pending_writeback:
-            _drop_file_cache(dst, writeback_start, pending_writeback)
-    return digest.hexdigest(), copied
+            cache_eviction_verified = (
+                _drop_file_cache(dst, writeback_start, pending_writeback)
+                and cache_eviction_verified
+            )
+    return digest.hexdigest(), copied, cache_eviction_verified
 
 
 def _live_required_tables(manager: StorageManager) -> tuple[str, ...]:
@@ -246,7 +262,9 @@ def _restore_verified_bytes_for_drill(
         raise FileNotFoundError(str(backup_db))
 
     expected_size = manifest.get("database_size_bytes")
-    source_sha, copied_bytes = _copy_source_with_sha256(backup_db, destination)
+    source_sha, copied_bytes, copy_cache_eviction_verified = (
+        _copy_source_with_sha256(backup_db, destination)
+    )
     if source_sha != expected_sha:
         raise ValueError("backup SHA256 mismatch")
     if expected_size is not None and copied_bytes != int(expected_size):
@@ -256,7 +274,9 @@ def _restore_verified_bytes_for_drill(
     # byte-identical to the manifest-approved source, not merely that the source
     # stream had the expected digest.  The scan drops consumed cache ranges so a
     # disposable multi-GB file cannot displace the live service working set.
-    restored_sha = _sha256_streaming_no_cache(destination)
+    restored_sha, hash_cache_eviction_verified = _sha256_streaming_no_cache(
+        destination
+    )
     if restored_sha != expected_sha:
         raise RuntimeError("restored database SHA256 mismatch")
 
@@ -294,7 +314,9 @@ def _restore_verified_bytes_for_drill(
         "source_full_integrity_verified_at_backup_creation": True,
         "repeat_full_integrity_scan_during_drill": False,
         "critical_table_counts_inherited_by_byte_identity": True,
-        "page_cache_pressure_bounded": True,
+        "page_cache_pressure_bounded": (
+            copy_cache_eviction_verified and hash_cache_eviction_verified
+        ),
         "writeback_window_bytes": WRITEBACK_WINDOW_BYTES,
         "posix_fadvise_available": bool(
             getattr(os, "posix_fadvise", None)

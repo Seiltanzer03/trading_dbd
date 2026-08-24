@@ -28,7 +28,7 @@ jobs:
         with:
           ref: ${{ inputs.expected_sha }}
 
-      - name: Verify health after research maintenance completed
+      - name: Verify exact-SHA research pause is retained
         id: verify
         uses: appleboy/ssh-action@v1
         env:
@@ -57,10 +57,11 @@ jobs:
             }
             trap cleanup_gate_on_failure EXIT
 
-            "$PY" "$ORCH" acquire-gate \
+            # The deploy transaction already acquired this exact owner before
+            # readiness. Validate the continuous lease instead of replacing it.
+            "$PY" "$ORCH" validate-gate \
               --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
-              --expected-sha "$EXPECTED_SHA" \
-              --ttl-seconds 7200
+              --expected-sha "$EXPECTED_SHA"
 
             "$PY" /opt/seiltanzer/scripts/production_post_research_check.py \
               --expected-sha "$EXPECTED_SHA" \
