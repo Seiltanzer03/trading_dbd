@@ -1,3 +1,4 @@
+import threading
 import time
 
 from fastapi.testclient import TestClient
@@ -68,3 +69,39 @@ def test_expensive_validation_is_not_on_live_state_path(tmp_path, monkeypatch):
         assert summary.status_code == 200
         assert summary.json()["n"] == 7
         assert calls == ["validation"]
+
+
+def test_slow_tick_materialization_does_not_block_event_loop(tmp_path, monkeypatch):
+    app = create_app(Settings(demo=True, data_dir=str(tmp_path)))
+    install_g1_short_horizon_routes(app)
+    engine = app.state.engine
+    started = threading.Event()
+    release = threading.Event()
+
+    for name in (
+        "refresh_price", "refresh_proxy_price", "refresh_intraday",
+        "refresh_vols", "refresh_daily", "refresh_chain",
+        "refresh_iv_surface", "refresh_correlation",
+    ):
+        monkeypatch.setattr(engine.market, name, lambda: None)
+    monkeypatch.setattr(engine.passive, "step", lambda: None)
+
+    def slow_tick_payload():
+        started.set()
+        assert release.wait(2.0)
+        return {"ts": time.time()}
+
+    monkeypatch.setattr(engine, "tick_payload", slow_tick_payload)
+
+    try:
+        with TestClient(app) as client:
+            assert started.wait(1.0)
+            requested = time.perf_counter()
+            response = client.get("/api/research/runtime/worker-status")
+            elapsed = time.perf_counter() - requested
+            assert response.status_code == 200
+            assert response.json()["sqlite_access"] is False
+            assert elapsed < 0.25
+            release.set()
+    finally:
+        release.set()

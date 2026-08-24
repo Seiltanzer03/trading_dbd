@@ -223,7 +223,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         last[name] = now
                         running[name] = asyncio.create_task(asyncio.to_thread(fn))
 
-                payload = engine.tick_payload()
+                # The canonical tick payload can run option/scenario math and
+                # persist a market point for an active trade.  Keep that work
+                # off the uvicorn event loop just like every feed refresh above;
+                # otherwise a cold/event-driven payload can delay even a
+                # lock-free readiness route beyond its latency contract.
+                payload = await asyncio.to_thread(engine.tick_payload)
                 dead = []
                 for ws in clients:
                     try:
