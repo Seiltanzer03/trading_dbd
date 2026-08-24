@@ -20,7 +20,7 @@ from .macro_offhost_bundle import (
 )
 
 
-CONTRACT_VERSION = "official-macro-historical-offhost-v5-bls-archive-index"
+CONTRACT_VERSION = "official-macro-historical-offhost-v6-verified-partial"
 DEFAULT_WINDOW_DAYS = 120
 MAX_WINDOW_DAYS = 180
 FOMC_WINDOW_DAYS = 365
@@ -53,6 +53,43 @@ def _record(value: dict[str, Any]) -> dict[str, Any]:
     output = dict(value)
     output["record_sha256"] = _sha256(output)
     return output
+
+
+def _historical_availability(
+    *, bls_records: list[dict[str, Any]], ism_records: list[dict[str, Any]],
+    fomc_records: list[dict[str, Any]], errors: dict[str, str],
+) -> dict[str, str]:
+    def status(count: int, prefixes: tuple[str, ...]) -> str:
+        has_error = any(
+            any(key.startswith(prefix) for prefix in prefixes) for key in errors
+        )
+        if count > 0:
+            return (
+                "VERIFIED_PARTIAL_REAL_HISTORY" if has_error
+                else "VERIFIED_REAL_HISTORY"
+            )
+        return "OFFICIAL_SOURCE_UNAVAILABLE_PROSPECTIVE_REQUIRED"
+
+    return {
+        family: status(
+            sum(
+                1 for record in bls_records
+                if (record.get("spec") or {}).get("family") == family
+            ),
+            (f"BLS:manifest:{family}", f"BLS:archive:{family}:"),
+        )
+        for family in ("CPI", "NFP")
+    } | {
+        family: status(
+            sum(1 for record in ism_records if record.get("family") == family),
+            (f"ISM:{family}:",),
+        )
+        for family in ("ISM_MANUFACTURING", "ISM_SERVICES")
+    } | {
+        "FOMC_STATEMENT_DETERMINISTIC": status(
+            len(fomc_records), ("FOMC:",)
+        )
+    }
 
 
 def build_bundle(
@@ -259,6 +296,13 @@ def build_bundle(
         "fomc_schedules": fomc_schedules,
         "fomc_records": fomc_records,
         "errors": errors,
+        "historical_availability": _historical_availability(
+            bls_records=bls_records,
+            ism_records=ism_records,
+            fomc_records=fomc_records,
+            errors=errors,
+        ),
+        "missing_is_zero": False,
         "official_sources_only": True,
         "canonical_parsers_only": True,
         "synthetic_data_used": False,
@@ -312,6 +356,7 @@ def validate_bundle(
         bundle.get("canonical_parsers_only") is True,
         bundle.get("synthetic_data_used") is False,
         bundle.get("no_placeholders") is True,
+        bundle.get("missing_is_zero") is False,
         bundle.get("research_only") is True,
         bundle.get("production_authority") is False,
     )):
@@ -329,10 +374,30 @@ def validate_bundle(
     if end_ts - start_ts > MAX_WINDOW_DAYS * 86400.0 + 1.0:
         raise ValueError("HISTORICAL_OFFHOST_WINDOW_TOO_WIDE")
 
+    errors = bundle.get("errors")
+    if (
+        not isinstance(errors, dict) or len(errors) > 200
+        or any(
+            not isinstance(key, str)
+            or not key.startswith(("BLS:", "ISM:", "FOMC:"))
+            or not isinstance(value, str)
+            or not value
+            or len(value) > 240
+            for key, value in errors.items()
+        )
+    ):
+        raise ValueError("HISTORICAL_OFFHOST_ERRORS_INVALID")
+
     manifest_links: set[tuple[str, str]] = set()
     schedules = bundle.get("bls_schedules")
-    if not isinstance(schedules, dict) or set(schedules) != set(BLS_FAMILIES):
+    if (
+        not isinstance(schedules, dict)
+        or not set(schedules).issubset(set(BLS_FAMILIES))
+    ):
         raise ValueError("HISTORICAL_OFFHOST_BLS_SCHEDULES_MISSING")
+    for family in BLS_FAMILIES:
+        if family not in schedules and f"BLS:manifest:{family}" not in errors:
+            raise ValueError("HISTORICAL_OFFHOST_BLS_SCHEDULES_MISSING")
     for family, value in schedules.items():
         if value.get("record_sha256") != _sha256(_without(value, "record_sha256")):
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
@@ -368,8 +433,14 @@ def validate_bundle(
         )
         for family in BLS_FAMILIES
     }
-    if any(count < 1 for count in bls_counts.values()):
-        raise ValueError("HISTORICAL_OFFHOST_BLS_RECORDS_MISSING")
+    for family, count in bls_counts.items():
+        has_transport_error = any(
+            key == f"BLS:manifest:{family}"
+            or key.startswith(f"BLS:archive:{family}:")
+            for key in errors
+        )
+        if count < 1 and not has_transport_error:
+            raise ValueError("HISTORICAL_OFFHOST_BLS_RECORDS_MISSING")
     for record in bls_records:
         if record.get("record_sha256") != _sha256(_without(record, "record_sha256")):
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
@@ -409,8 +480,11 @@ def validate_bundle(
         family: sum(1 for record in ism_records if record.get("family") == family)
         for family in ISM_FAMILIES
     }
-    if any(count < 1 for count in ism_counts.values()):
-        raise ValueError("HISTORICAL_OFFHOST_ISM_RECORDS_MISSING")
+    for family, count in ism_counts.items():
+        if count < 1 and not any(
+            key.startswith(f"ISM:{family}:") for key in errors
+        ):
+            raise ValueError("HISTORICAL_OFFHOST_ISM_RECORDS_MISSING")
     for record in ism_records:
         if record.get("record_sha256") != _sha256(_without(record, "record_sha256")):
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
@@ -472,6 +546,8 @@ def validate_bundle(
     fomc_records = bundle.get("fomc_records")
     if not isinstance(fomc_records, list) or len(fomc_records) > 40:
         raise ValueError("HISTORICAL_OFFHOST_FOMC_RECORDS_INVALID")
+    if not fomc_records and not any(key.startswith("FOMC:") for key in errors):
+        raise ValueError("HISTORICAL_OFFHOST_FOMC_RECORDS_MISSING")
     previous_html_by_url: dict[str, str] = {}
     for record in sorted(
         fomc_records, key=lambda row: str((row.get("spec") or {}).get("date_code") or "")
@@ -503,6 +579,14 @@ def validate_bundle(
         if _canonical_json(parsed) != _canonical_json(record.get("payload")):
             raise ValueError("HISTORICAL_OFFHOST_FOMC_PAYLOAD_MISMATCH")
         previous_html_by_url[spec.source_url] = html
+    expected_availability = _historical_availability(
+        bls_records=bls_records,
+        ism_records=ism_records,
+        fomc_records=fomc_records,
+        errors=errors,
+    )
+    if bundle.get("historical_availability") != expected_availability:
+        raise ValueError("HISTORICAL_OFFHOST_AVAILABILITY_MISMATCH")
     return bundle
 
 
@@ -533,7 +617,10 @@ def _bls_refresh(runtime: Any) -> dict[str, Any]:
         return {"status": "NO_OBSERVATIONS", "stored": [], "skipped": 0,
                 "errors": {}, "research_only": True, "production_authority": False}
     stored = []
-    errors = dict(bundle.get("errors") or {})
+    errors = {
+        key: value for key, value in (bundle.get("errors") or {}).items()
+        if key.startswith("BLS:")
+    }
     window = bundle["window"]
     if float(window["start_ts"]) > max(0.0, span[0] - HISTORICAL_LOOKBACK_BUFFER_SEC):
         errors["bundle_window"] = "BLS_REQUIRED_OBSERVATION_WINDOW_NOT_COVERED"
@@ -557,6 +644,10 @@ def _bls_refresh(runtime: Any) -> dict[str, Any]:
         "stored": stored, "skipped": 0, "errors": errors,
         "transport": "OFF_HOST_OFFICIAL_SOURCE",
         "bundle_sha256": bundle["bundle_sha256"],
+        "historical_availability": {
+            family: bundle["historical_availability"][family]
+            for family in ("CPI", "NFP")
+        },
         "research_only": True, "production_authority": False,
     }
 
@@ -604,6 +695,10 @@ def _ism_refresh(runtime: Any) -> dict[str, Any]:
         "stored": stored, "skipped": skipped, "errors": errors,
         "transport": "OFF_HOST_OFFICIAL_SOURCE",
         "bundle_sha256": bundle["bundle_sha256"],
+        "historical_availability": {
+            family: bundle["historical_availability"][family]
+            for family in FAMILIES
+        },
         "research_only": True, "production_authority": False,
     }
 
@@ -669,6 +764,11 @@ def _fomc_refresh(runtime: Any) -> dict[str, Any]:
         "errors": errors,
         "transport": "OFF_HOST_OFFICIAL_SOURCE",
         "bundle_sha256": bundle["bundle_sha256"],
+        "historical_availability": {
+            "FOMC_STATEMENT_DETERMINISTIC": bundle[
+                "historical_availability"
+            ]["FOMC_STATEMENT_DETERMINISTIC"]
+        },
         "llm_used": False,
         "source_kind": "OFFICIAL_FED_DATED_STATEMENT_PAGE",
         "source_vintage_guarantee": "OFFICIAL_DATED_PAGE_NOT_VERSIONED",
