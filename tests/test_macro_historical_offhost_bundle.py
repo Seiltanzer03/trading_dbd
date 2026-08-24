@@ -11,6 +11,7 @@ from seiltanzer.macro_bls_historical_bootstrap import (
     BLSHistoricalReleaseStore,
     parse_bls_archive_spec,
     parse_cpi_archive,
+    parse_nfp_archive,
 )
 from seiltanzer.macro_ism_historical_bootstrap import (
     ISMHistoricalReleaseStore,
@@ -50,6 +51,18 @@ ATOM_NFP = """<?xml version="1.0" encoding="utf-8"?>
 <link rel="alternate" href="https://www.bls.gov/news.release/archives/empsit_08012025.htm" />
 </entry></feed>
 """
+ARCHIVE_INDEX_CPI = """
+<html><body><h1>Consumer Price Index Archived News Releases</h1>
+<p>Data in archived news releases may have been revised in subsequent releases.</p>
+<a href="/news.release/archives/cpi_08122025.htm">July 2025 CPI</a>
+</body></html>
+"""
+ARCHIVE_INDEX_NFP = """
+<html><body><h1>Employment Situation Archived News Releases</h1>
+<p>Links to archive copies of The Employment Situation news releases.</p>
+<a href="/news.release/archives/empsit_08012025.htm">July 2025 Employment Situation</a>
+</body></html>
+"""
 CPI = """
 <html><body><p>Transmission of material in this release is embargoed until
 8:30 a.m. (ET) Tuesday, August 12, 2025</p>
@@ -57,6 +70,15 @@ CPI = """
 <tr><th>Item</th><th>May</th><th>Jun</th><th>Jul</th><th>12 mos.</th></tr>
 <tr><td>All items</td><td>0.1</td><td>0.3</td><td>0.2</td><td>2.7</td></tr>
 <tr><td>All items less food and energy</td><td>0.1</td><td>0.2</td><td>0.3</td><td>3.1</td></tr>
+</table></body></html>
+"""
+NFP = """
+<html><body><p>Transmission of material in this release is embargoed until
+8:30 a.m. (ET) Friday, August 1, 2025</p>
+<h1>THE EMPLOYMENT SITUATION -- JULY 2025</h1><table>
+<tr><td>Total nonfarm</td><td>100</td><td>110</td><td>115</td><td>120</td></tr>
+<tr><td>Unemployment rate</td><td>4.1</td><td>4.0</td><td>4.1</td><td>4.2</td><td>0.1</td></tr>
+<tr><td>Average hourly earnings</td><td>30</td><td>31</td><td>32</td><td>33</td></tr>
 </table></body></html>
 """
 ISM_URL = (
@@ -69,6 +91,19 @@ ISM = """
 <div>July 01, 2025</div>
 <p>The Manufacturing PMI for June registered 49 percent as the sector remained
 in contraction and the official report described current business conditions.</p>
+</body></html>
+"""
+ISM_SERVICES_URL = (
+    "https://www.ismworld.org/supply-management-news-and-reports/"
+    "news-publications/inside-supply-management-magazine/blog/2025/2025-08/"
+    "report-on-business-roundup-july-2025-services-pmi/"
+)
+ISM_SERVICES = """
+<html><body><h1>Report On Business® Roundup: July Services PMI®</h1>
+<div>August 05, 2025</div>
+<p>The Services PMI® registered 50.1 percent in July, indicating expansion.
+The official report described resilient business activity and continuing demand
+across service industries while employment conditions remained mixed.</p>
 </body></html>
 """
 FOMC_INDEX = """
@@ -117,8 +152,17 @@ def _bundle():
         source_url="https://www.bls.gov/news.release/archives/cpi_08122025.htm",
     )
     cpi_payload = parse_cpi_archive(CPI, expected_period="2025-07")
+    nfp_spec = parse_bls_archive_spec(
+        NFP, family="NFP",
+        source_url="https://www.bls.gov/news.release/archives/empsit_08012025.htm",
+    )
+    nfp_payload = parse_nfp_archive(NFP, expected_period="2025-07")
     ism_payload = parse_ism_historical_roundup(
         ISM, family="ISM_MANUFACTURING", period="2025-06", source_url=ISM_URL
+    )
+    ism_services_payload = parse_ism_historical_roundup(
+        ISM_SERVICES, family="ISM_SERVICES", period="2025-07",
+        source_url=ISM_SERVICES_URL,
     )
     fomc_specs = parse_fomc_index(FOMC_INDEX)
     previous_body = extract_statement_text(FOMC_PREVIOUS)
@@ -136,32 +180,52 @@ def _bundle():
         "window": {"start_ts": NOW - 120 * 86400.0, "end_ts": NOW, "days": 120},
         "bls_schedules": {
             "CPI": _record({
-                "format": "ATOM", "family": "CPI",
-                "source_url": "https://www.bls.gov/feed/cpi.rss",
-                "content": ATOM_CPI,
-                "source_sha256": offhost._sha256(ATOM_CPI),
+                "format": "HTML_ARCHIVE_INDEX", "family": "CPI",
+                "source_url": "https://www.bls.gov/bls/news-release/cpi.htm",
+                "content": ARCHIVE_INDEX_CPI,
+                "source_sha256": offhost._sha256(ARCHIVE_INDEX_CPI),
             }),
             "NFP": _record({
-                "format": "ATOM", "family": "NFP",
-                "source_url": "https://www.bls.gov/feed/empsit.rss",
-                "content": ATOM_NFP,
-                "source_sha256": offhost._sha256(ATOM_NFP),
+                "format": "HTML_ARCHIVE_INDEX", "family": "NFP",
+                "source_url": "https://www.bls.gov/bls/news-release/empsit.htm",
+                "content": ARCHIVE_INDEX_NFP,
+                "source_sha256": offhost._sha256(ARCHIVE_INDEX_NFP),
             }),
         },
-        "bls_records": [_record({
-            "spec": {
-                "family": spec.family, "period": spec.period,
-                "published_at": spec.published_at, "source_url": spec.source_url,
-            },
-            "fetched_at": NOW - 10.0, "html": CPI,
-            "source_sha256": offhost._sha256(CPI), "payload": cpi_payload,
-        })],
-        "ism_records": [_record({
-            "family": "ISM_MANUFACTURING", "period": "2025-06",
-            "source_url": ISM_URL, "fetched_at": NOW - 10.0,
-            "html": ISM, "source_sha256": offhost._sha256(ISM),
-            "payload": ism_payload,
-        })],
+        "bls_records": [
+            _record({
+                "spec": {
+                    "family": spec.family, "period": spec.period,
+                    "published_at": spec.published_at, "source_url": spec.source_url,
+                },
+                "fetched_at": NOW - 10.0, "html": CPI,
+                "source_sha256": offhost._sha256(CPI), "payload": cpi_payload,
+            }),
+            _record({
+                "spec": {
+                    "family": nfp_spec.family, "period": nfp_spec.period,
+                    "published_at": nfp_spec.published_at,
+                    "source_url": nfp_spec.source_url,
+                },
+                "fetched_at": NOW - 10.0, "html": NFP,
+                "source_sha256": offhost._sha256(NFP), "payload": nfp_payload,
+            }),
+        ],
+        "ism_records": [
+            _record({
+                "family": "ISM_MANUFACTURING", "period": "2025-06",
+                "source_url": ISM_URL, "fetched_at": NOW - 10.0,
+                "html": ISM, "source_sha256": offhost._sha256(ISM),
+                "payload": ism_payload,
+            }),
+            _record({
+                "family": "ISM_SERVICES", "period": "2025-07",
+                "source_url": ISM_SERVICES_URL, "fetched_at": NOW - 10.0,
+                "html": ISM_SERVICES,
+                "source_sha256": offhost._sha256(ISM_SERVICES),
+                "payload": ism_services_payload,
+            }),
+        ],
         "fomc_window": {
             "start_ts": NOW - offhost.FOMC_WINDOW_DAYS * 86400.0,
             "context_start_ts": NOW - offhost.FOMC_WINDOW_DAYS * 86400.0,

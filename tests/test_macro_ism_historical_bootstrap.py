@@ -103,6 +103,40 @@ def test_manufacturing_roundup_uses_official_release_day_at_10_et():
     assert parsed["llm_used"] is False
 
 
+def test_rebranded_official_titles_preserve_registered_marks():
+    manufacturing = """
+    <html><body><h1>ISM® PMI® Reports Roundup: July Manufacturing</h1>
+    <div>August 03, 2026</div>
+    <p>In the same month the composite PMI® registered 55.6 percent, its
+    strongest reading in several years according to the official report.</p>
+    </body></html>
+    """
+    services = """
+    <html><body><h1>ISM® PMI® Reports Roundup: July Services</h1>
+    <div>August 05, 2026</div>
+    <p>The composite PMI® reading was steady, increasing 0.1 percentage point
+    to 54.1 percent despite mixed employment conditions.</p>
+    </body></html>
+    """
+    mfg_url = (
+        "https://www.ismworld.org/supply-management-news-and-reports/"
+        "news-publications/inside-supply-management-magazine/blog/2026/2026-08/"
+        "ism-pmi-reports-roundup-july-2026-manufacturing/"
+    )
+    services_url = (
+        "https://www.ismworld.org/supply-management-news-and-reports/"
+        "news-publications/inside-supply-management-magazine/blog/2026/2026-08/"
+        "ism-pmi-reports-roundup-july-2026-services/"
+    )
+    assert _parse(
+        manufacturing, family="ISM_MANUFACTURING", period="2026-07",
+        url=mfg_url,
+    )["pmi"] == 55.6
+    assert _parse(
+        services, family="ISM_SERVICES", period="2026-07", url=services_url,
+    )["pmi"] == 54.1
+
+
 def test_services_roundup_rejects_url_period_mismatch_before_content_parse():
     with pytest.raises(ValueError, match="ISM_HISTORICAL_URL_PERIOD_MISMATCH"):
         _parse(

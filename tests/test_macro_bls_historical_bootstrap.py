@@ -13,6 +13,7 @@ from seiltanzer.macro_bls_historical_bootstrap import (
     BLSReleaseSpec,
     historical_feature_records_from_runtime,
     parse_bls_archive_spec,
+    parse_bls_archive_index_urls,
     parse_bls_atom_archive_urls,
     parse_bls_ical,
     parse_bls_schedule,
@@ -74,6 +75,16 @@ ATOM_CPI = """<?xml version="1.0" encoding="utf-8"?>
 <published>2025-08-12T07:51:00-04:00</published>
 <link rel="alternate" href="https://www.bls.gov/news.release/archives/cpi_08122025.htm" />
 </entry></feed>
+"""
+
+ARCHIVE_INDEX_CPI = """
+<html><body><h1>Consumer Price Index Archived News Releases</h1>
+<p>Links to archive copies of Consumer Price Index news releases.</p>
+<a href="/news.release/archives/cpi_08122025.htm">July 2025 CPI</a>
+<a href="https://www.bls.gov/news.release/archives/cpi_07152025.htm">June 2025 CPI</a>
+<a href="/news.release/cpi.nr0.htm">Current mutable CPI</a>
+<a href="https://example.com/news.release/archives/cpi_06112025.htm">Foreign copy</a>
+</body></html>
 """
 
 NFP_HTML = """
@@ -139,6 +150,24 @@ def test_official_atom_discovers_archive_but_archive_sets_causal_time():
     assert spec.published_at > datetime(
         2025, 8, 12, 7, 51, tzinfo=ZoneInfo("America/New_York")
     ).timestamp()
+
+
+def test_official_archive_index_is_family_bound_and_excludes_mutable_links():
+    links = parse_bls_archive_index_urls(
+        ARCHIVE_INDEX_CPI,
+        family="CPI",
+        source_url="https://www.bls.gov/bls/news-release/cpi.htm",
+    )
+    assert links == [
+        "https://www.bls.gov/news.release/archives/cpi_07152025.htm",
+        "https://www.bls.gov/news.release/archives/cpi_08122025.htm",
+    ]
+    with pytest.raises(ValueError, match="SOURCE_INVALID"):
+        parse_bls_archive_index_urls(
+            ARCHIVE_INDEX_CPI,
+            family="NFP",
+            source_url="https://www.bls.gov/bls/news-release/cpi.htm",
+        )
 
 
 def test_atom_and_archive_provenance_fail_closed():
