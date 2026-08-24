@@ -1,6 +1,8 @@
+import asyncio
 import threading
 import time
 
+from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 from seiltanzer.app import create_app
@@ -102,6 +104,57 @@ def test_slow_tick_materialization_does_not_block_event_loop(tmp_path, monkeypat
             assert response.status_code == 200
             assert response.json()["sqlite_access"] is False
             assert elapsed < 0.25
+
+            requested = time.perf_counter()
+            state = client.get("/api/state")
+            state_elapsed = time.perf_counter() - requested
+            assert state.status_code == 200
+            assert "ts" in state.json()["tick"]
+            assert state_elapsed < 0.25
+            assert app.state.live_tick_snapshot["build_n"] >= 1
             release.set()
     finally:
         release.set()
+
+
+def test_live_state_and_initial_websocket_do_not_recompute_tick(tmp_path, monkeypatch):
+    app = create_app(Settings(demo=True, data_dir=str(tmp_path)))
+    cached = app.state.live_tick_snapshot["payload"]
+    assert cached is not None
+
+    calls = []
+
+    def forbidden_recompute():
+        calls.append("tick_payload")
+        raise AssertionError("request-time tick recomputation is forbidden")
+
+    monkeypatch.setattr(app.state.engine, "tick_payload", forbidden_recompute)
+
+    state_route = next(
+        route for route in app.routes
+        if getattr(route, "path", None) == "/api/state"
+    )
+    assert state_route.endpoint()["tick"] == cached
+
+    sent = []
+
+    class Socket:
+        headers = {}
+
+        async def accept(self):
+            return None
+
+        async def send_json(self, payload):
+            sent.append(payload)
+
+        async def receive_text(self):
+            raise WebSocketDisconnect()
+
+    websocket_route = next(
+        route for route in app.routes
+        if getattr(route, "path", None) == "/ws"
+    )
+    asyncio.run(websocket_route.endpoint(Socket()))
+    assert sent == [cached]
+
+    assert calls == []
