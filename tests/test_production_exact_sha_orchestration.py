@@ -136,3 +136,9 @@ def test_schedule_source_is_separate_from_explicit_acceptance_inputs():
         assert "DISPATCH_SHA: ${{ inputs.expected_sha }}" in workflow
         assert "SCHEDULE_SHA: ${{ github.sha }}" in workflow
         assert "ref: ${{ needs.resolve.outputs.expected_sha }}" in workflow
+
+
+def test_active_edge_schedule_cannot_cancel_exact_dispatch():
+    workflow = _workflow("production-active-edge.yml")
+    assert "group: production-active-edge-${{ github.event_name }}" in workflow
+    assert "cancel-in-progress: ${{ github.event_name == 'schedule' }}" in workflow
