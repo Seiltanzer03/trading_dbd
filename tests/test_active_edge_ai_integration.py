@@ -8,14 +8,31 @@ from types import SimpleNamespace
 from seiltanzer import active_edge_ai_integration as active
 
 
+TEST_SHA = "a" * 40
+OTHER_SHA = "b" * 40
+
+
 def _engine(tmp_path):
     return SimpleNamespace(settings=SimpleNamespace(data_dir=str(tmp_path)))
+
+
+def _published(report: dict, *, sha: str = TEST_SHA) -> dict:
+    return {
+        **report,
+        "publication_contract_version": active.PUBLICATION_CONTRACT_VERSION,
+        "published_for_sha": sha,
+        "publication_run_id": "123-test",
+    }
+
+
+def _exact_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(active, "runtime_git_sha", lambda: TEST_SHA)
 
 
 def test_structured_active_edge_is_related_to_current_long(monkeypatch, tmp_path):
     research = tmp_path / "research"
     research.mkdir()
-    report = {
+    report = _published({
         "edge_policy": active.POLICY_VERSION,
         "production_authority": False,
         "horizons": [{
@@ -38,11 +55,12 @@ def test_structured_active_edge_is_related_to_current_long(monkeypatch, tmp_path
                 }]
             }]
         }],
-    }
+    })
     path = research / "active_structured_30m_latest.json"
     path.write_text(json.dumps(report), encoding="utf-8")
     now = time.time()
     os.utime(path, (now, now))
+    _exact_runtime(monkeypatch)
     monkeypatch.setattr(active, "_current_values", lambda *_: {})
     monkeypatch.setattr(active, "_conditions_match", lambda *_: True)
 
@@ -51,6 +69,8 @@ def test_structured_active_edge_is_related_to_current_long(monkeypatch, tmp_path
         {"captured_ts": now + 1.0, "strategy": {"direction": "long", "instrument": "NAS100"}},
     )
     assert context["available"] is True
+    assert context["exact_sha_reports_only"] is True
+    assert context["runtime_sha"] == TEST_SHA
     assert context["matched_structured_signal_n"] == 1
     assert context["supporting_position_n"] == 0
     assert context["opposing_position_n"] == 1
@@ -100,11 +120,11 @@ def test_legacy_structured_ids_match_live_canonical_values():
     assert active._conditions_match(values, candidate) is True
 
 
-def test_stale_active_edge_report_is_not_used(tmp_path):
+def test_stale_active_edge_report_is_not_used(monkeypatch, tmp_path):
     research = tmp_path / "research"
     research.mkdir()
     path = research / "active_ml_latest.json"
-    path.write_text(json.dumps({
+    path.write_text(json.dumps(_published({
         "edge_policy": active.POLICY_VERSION,
         "production_authority": False,
         "candidates": [{
@@ -116,9 +136,10 @@ def test_stale_active_edge_report_is_not_used(tmp_path):
             "q_value": 0.9,
             "fold_positive": 2,
         }],
-    }), encoding="utf-8")
+    })), encoding="utf-8")
     old = time.time() - active.MAX_REPORT_AGE_SEC - 10
     os.utime(path, (old, old))
+    _exact_runtime(monkeypatch)
     context = active.build_active_edge_context(
         _engine(tmp_path),
         {"captured_ts": time.time(), "strategy": {"direction": "long", "instrument": "NAS100"}},
@@ -126,6 +147,87 @@ def test_stale_active_edge_report_is_not_used(tmp_path):
     assert context["available"] is False
     assert context["signals"] == []
     assert context["matched_groups"] == []
+
+
+def test_fresh_active_edge_report_from_previous_sha_is_not_used(monkeypatch, tmp_path):
+    research = tmp_path / "research"
+    research.mkdir()
+    path = research / "active_ml_latest.json"
+    path.write_text(json.dumps(_published({
+        "edge_policy": active.POLICY_VERSION,
+        "production_authority": False,
+        "candidates": [{
+            "candidate_id": "ml-old-sha",
+            "status": "ML_DISCOVERY_SIGNAL",
+            "target_id": "DIRECTION",
+            "horizon_minutes": 15,
+            "primary_improvement": 0.02,
+        }],
+    }, sha=OTHER_SHA)), encoding="utf-8")
+    now = time.time()
+    os.utime(path, (now, now))
+    _exact_runtime(monkeypatch)
+
+    context = active.build_active_edge_context(
+        _engine(tmp_path),
+        {"captured_ts": now + 1.0, "strategy": {"direction": "long", "instrument": "NAS100"}},
+    )
+    assert context["available"] is False
+    assert context["total_active_signal_n"] == 0
+
+
+def test_unstamped_active_edge_report_fails_closed(monkeypatch, tmp_path):
+    research = tmp_path / "research"
+    research.mkdir()
+    path = research / "active_ml_latest.json"
+    path.write_text(json.dumps({
+        "edge_policy": active.POLICY_VERSION,
+        "production_authority": False,
+        "candidates": [{
+            "candidate_id": "ml-legacy",
+            "status": "ML_DISCOVERY_SIGNAL",
+            "target_id": "DIRECTION",
+            "horizon_minutes": 15,
+            "primary_improvement": 0.02,
+        }],
+    }), encoding="utf-8")
+    now = time.time()
+    os.utime(path, (now, now))
+    _exact_runtime(monkeypatch)
+
+    context = active.build_active_edge_context(
+        _engine(tmp_path),
+        {"captured_ts": now + 1.0, "strategy": {"direction": "long", "instrument": "NAS100"}},
+    )
+    assert context["available"] is False
+    assert context["total_active_signal_n"] == 0
+
+
+def test_unknown_runtime_sha_fails_closed(monkeypatch, tmp_path):
+    research = tmp_path / "research"
+    research.mkdir()
+    path = research / "active_ml_latest.json"
+    path.write_text(json.dumps(_published({
+        "edge_policy": active.POLICY_VERSION,
+        "production_authority": False,
+        "candidates": [{
+            "candidate_id": "ml-1",
+            "status": "ML_DISCOVERY_SIGNAL",
+            "target_id": "DIRECTION",
+            "horizon_minutes": 15,
+            "primary_improvement": 0.02,
+        }],
+    })), encoding="utf-8")
+    now = time.time()
+    os.utime(path, (now, now))
+    monkeypatch.setattr(active, "runtime_git_sha", lambda: None)
+
+    context = active.build_active_edge_context(
+        _engine(tmp_path),
+        {"captured_ts": now + 1.0, "strategy": {"direction": "long", "instrument": "NAS100"}},
+    )
+    assert context["available"] is False
+    assert context["runtime_sha"] is None
 
 
 def test_all_matching_candidates_are_aggregated_beyond_top_eight(monkeypatch, tmp_path):
@@ -149,15 +251,16 @@ def test_all_matching_candidates_are_aggregated_beyond_top_eight(monkeypatch, tm
                 "interpretation": "MORE_DOWNSIDE_RETURN",
             },
         })
-    report = {
+    report = _published({
         "edge_policy": active.POLICY_VERSION,
         "production_authority": False,
         "horizons": [{"targets": [{"candidates": candidates}]}],
-    }
+    })
     path = research / "active_structured_60m_latest.json"
     path.write_text(json.dumps(report), encoding="utf-8")
     now = time.time()
     os.utime(path, (now, now))
+    _exact_runtime(monkeypatch)
     monkeypatch.setattr(active, "_current_values", lambda *_: {})
     monkeypatch.setattr(active, "_conditions_match", lambda *_: True)
 
