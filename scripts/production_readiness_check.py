@@ -358,6 +358,7 @@ def verify(expected_sha: str) -> None:
     assert drill.get("schema_complete_current_contract") is True, drill
     assert drill.get("live_database_replaced") is False, drill
     assert not (drill.get("critical_table_mismatches") or {}), drill
+    assert drill.get("page_cache_pressure_bounded") is True, drill
 
     # The restore drill is intentionally heavy. A successful drill proves the
     # backup, but it does not by itself prove that latency-critical live routes

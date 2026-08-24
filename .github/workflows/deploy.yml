@@ -286,6 +286,55 @@ jobs:
             fi
             echo "Delivered exact production SHA: $EXPECTED_SHA"
 
+      - name: Pause research for exact-SHA production acceptance
+        id: preacceptance
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 12m
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            PY=/opt/seiltanzer/.venv/bin/python
+            ORCH=/opt/seiltanzer/scripts/production_research_acceptance.py
+            gate_owned=0
+
+            cleanup_gate_on_failure() {
+              if [ "$gate_owned" -eq 1 ]; then
+                "$PY" "$ORCH" release-gate \
+                  --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+                  --expected-sha "$EXPECTED_SHA" || true
+              fi
+            }
+            trap cleanup_gate_on_failure EXIT
+
+            # Acquire the existing cooperative lease immediately after the new
+            # service first becomes HTTP-ready. The worker may complete its one
+            # required core cycle, but cannot start optional maintenance before
+            # the restore drill/readiness transaction begins.
+            "$PY" "$ORCH" acquire-gate \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+              --expected-sha "$EXPECTED_SHA" \
+              --ttl-seconds 7200
+            gate_owned=1
+
+            "$PY" /opt/seiltanzer/scripts/production_post_research_check.py \
+              --expected-sha "$EXPECTED_SHA" \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID"
+            "$PY" "$ORCH" validate-gate \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+              --expected-sha "$EXPECTED_SHA"
+
+            trap - EXIT
+            echo "PRE_ACCEPTANCE_RESEARCH_PAUSED expected_sha=$EXPECTED_SHA acceptance_run_id=$ACCEPTANCE_RUN_ID"
+
       - name: Verify exact production readiness
         id: readiness
         uses: appleboy/ssh-action@v1
@@ -379,6 +428,25 @@ jobs:
             -d "$payload"
           echo "POST_RESEARCH_DISPATCHED expected_sha=$EXPECTED_SHA acceptance_run_id=$ACCEPTANCE_RUN_ID"
 
+      - name: Release pre-acceptance gate if deploy chain failed
+        if: always() && steps.preacceptance.outcome == 'success' && steps.orchestration.outcome != 'success'
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
+          script: |
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/production_research_acceptance.py release-gate \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+              --expected-sha "$EXPECTED_SHA" || true
+
       - name: Diagnose production failure
         if: failure()
         uses: appleboy/ssh-action@v1
@@ -408,6 +476,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DELIVERY: ${{ steps.delivery.outcome }}
+          PREACCEPTANCE: ${{ steps.preacceptance.outcome }}
           READINESS: ${{ steps.readiness.outcome }}
           SMOKE: ${{ steps.smoke.outcome }}
           PUBLIC: ${{ steps.public.outcome }}
@@ -419,7 +488,8 @@ jobs:
           readiness_state=failure
           if [ "$READINESS" = "success" ]; then readiness_state=success; fi
           if [ "$SMOKE" = "success" ] && [ "$PUBLIC" = "success" ]; then smoke_state=success; fi
-          if [ "$DELIVERY" = "success" ] && [ "$READINESS" = "success" ] \
+          if [ "$DELIVERY" = "success" ] && [ "$PREACCEPTANCE" = "success" ] \
+             && [ "$READINESS" = "success" ] \
              && [ "$SMOKE" = "success" ] && [ "$PUBLIC" = "success" ] \
              && [ "$ORCHESTRATION" = "success" ]; then
             prod_state=success

@@ -31,9 +31,12 @@ def test_acceptance_gate_max_ttl_matches_short_production_path(tmp_path):
         )
 
 
-def test_post_research_workflow_requests_supported_gate_ttl():
+def test_deploy_workflow_requests_supported_gate_ttl_before_readiness():
     root = Path(__file__).resolve().parents[1]
-    workflow = (root / ".github/workflows/production-post-research.yml").read_text(
+    workflow = (root / ".github/workflows/deploy.yml").read_text(
         encoding="utf-8"
     )
     assert "--ttl-seconds 7200" in workflow
+    assert workflow.index("--ttl-seconds 7200") < workflow.index(
+        "/opt/seiltanzer/scripts/production_readiness_check.py"
+    )

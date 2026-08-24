@@ -54,9 +54,12 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     assert "actions/download-artifact@v4" in ede
     assert "sftp.posix_rename" in offload
 
-    # With heavy EDE off production, the lease only covers the short serialized
-    # acceptance path and is released immediately after the snapshot.
-    assert "--ttl-seconds 7200" in post
+    # With heavy EDE off production, deploy acquires the existing bounded lease
+    # before readiness and downstream validates the same continuous owner until
+    # the immutable snapshot releases it.
+    assert "--ttl-seconds 7200" in deploy
+    assert '"$PY" "$ORCH" acquire-gate' not in post
+    assert '"$PY" "$ORCH" validate-gate' in post
 
     # The first offload deployment must evict any legacy pre-v1.3.13 research
     # process that was already running on the VPS before the workflow changed.
