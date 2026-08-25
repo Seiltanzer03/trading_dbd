@@ -19,6 +19,17 @@ def test_deploy_has_bounded_progress_visible_prestart_window():
     assert "prestart_backup_bytes=${prestart_backup_bytes:-0}" in workflow
     assert "measured about 188 seconds" in workflow
 
+    # A slow stop may SIGKILL the old process while it owns a young hidden backup
+    # temp. The next start must not inherit that multi-GiB orphan and attempt a
+    # second full SQLite backup on top of it.
+    stop = workflow.index("systemctl stop seiltanzer")
+    cleanup = workflow.index("DEPLOY_ORPHAN_PRESTART_TEMPS_REMOVED")
+    start = workflow.index("systemctl start seiltanzer")
+    assert stop < cleanup < start
+    assert "/opt/seiltanzer/data/backups/local" in workflow
+    assert "DEPLOY_ORPHAN_PRESTART_TEMP_BYTES_REMOVED" in workflow
+    assert "systemctl restart seiltanzer" not in workflow
+
     # Cold-start durability allowance must not weaken live acceptance limits.
     assert "--connect-timeout 1 --max-time 3" in workflow
     assert "production_readiness_check.py" in workflow
