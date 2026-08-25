@@ -6,12 +6,12 @@ or execution. Missing source data stays missing: no synthetic fallback is used.
 """
 from __future__ import annotations
 
+import json
 import math
 import threading
 import time
 import urllib.parse
 import urllib.request
-import json
 from typing import Any, Callable
 
 from fastapi import FastAPI
@@ -33,8 +33,6 @@ CONTRACT_VERSION = "visual-universe-scenes-v1"
 RATES_CACHE_TTL_SEC = 300.0
 RATES_FAILURE_TTL_SEC = 60.0
 
-# Free Yahoo yield indices. Values are quoted in percentage points, therefore a
-# 0.01 move is one basis point. ^IRX is a 13-week T-bill proxy, not a 2Y yield.
 RATE_SERIES = (
     {"id": "UST_13W", "ticker": "^IRX", "label": "13W", "maturity_years": 0.25},
     {"id": "UST_5Y", "ticker": "^FVX", "label": "5Y", "maturity_years": 5.0},
@@ -86,9 +84,6 @@ def parse_yahoo_chart(payload: dict[str, Any], ticker: str) -> dict[str, Any]:
 
     previous = None
     if len(pairs) >= 2:
-        # If the latest daily close equals the regular-market observation, this
-        # is the correct previous daily close. If not, chartPreviousClose below
-        # is still a valid fallback.
         previous = pairs[-2][1]
     if previous is None:
         previous = _finite(meta.get("chartPreviousClose"))
@@ -189,7 +184,7 @@ def build_rates_orbit_payload(
                 "exchange": raw.get("exchange"),
                 "status": "delayed",
             })
-        except Exception as exc:  # source failure stays visible, never synthesized
+        except Exception as exc:
             row["reason"] = f"{type(exc).__name__}: {exc}"
         rows.append(row)
 
@@ -270,8 +265,51 @@ def _compact_horizons(status: dict[str, Any]) -> list[dict[str, Any]]:
     return output
 
 
+def _edge_measurement_available(active: dict[str, Any]) -> bool:
+    explicit = active.get("measurement_available")
+    if explicit is not None:
+        return bool(explicit)
+    return not bool(active.get("reason"))
+
+
+def _visual_profile(
+    active: dict[str, Any], profile: dict[str, Any]
+) -> dict[str, Any]:
+    """Project policy-weight diagnostics for display without fabricating zeros."""
+    measurement_available = _edge_measurement_available(active)
+    output = dict(profile)
+    output["measurement_available"] = measurement_available
+    output["report_state"] = active.get("report_state")
+    output["source_report_n"] = active.get("source_report_n")
+    output["expected_report_n"] = active.get("expected_report_n")
+    if measurement_available:
+        return output
+    for key in (
+        "weight_fraction",
+        "max_weight_fraction",
+        "direction_score",
+        "agreement",
+        "preferred_close_fraction",
+        "strict_directional_share",
+        "independent_bucket_n",
+        "matched_directional_signal_n",
+        "strict_directional_signal_n",
+    ):
+        output[key] = None
+    output["available"] = False
+    return output
+
+
 def _edge_decision_reason(active: dict[str, Any], profile: dict[str, Any]) -> dict[str, str]:
-    """Explain a zero/non-zero Universe profile without adding a trading vote."""
+    """Explain unavailable/zero/non-zero Universe states without adding a vote."""
+    if not _edge_measurement_available(active):
+        state = str(active.get("report_state") or "")
+        if state == "CURRENT_SHA_REPORTS_PARTIAL":
+            return {"code": "EDGE_REPORTS_PARTIAL", "label": "EDGE REPORTS PARTIAL"}
+        if state == "CURRENT_SHA_REPORTS_MISSING":
+            return {"code": "EDGE_REPORTS_MISSING", "label": "EDGE REPORTS MISSING"}
+        return {"code": "EDGE_CONTEXT_UNAVAILABLE", "label": "EDGE N/A"}
+
     total_active = max(0, int(active.get("total_active_signal_n") or 0))
     matched = max(0, int(active.get("matched_structured_signal_n") or 0))
     supporting = max(0, int(active.get("supporting_position_n") or 0))
@@ -292,12 +330,7 @@ def _edge_decision_reason(active: dict[str, Any], profile: dict[str, Any]) -> di
 
 
 def build_edge_universe_payload(engine: Any, *, now: float | None = None) -> dict[str, Any]:
-    """Aggregate current T0 edge, canonical features and prospective feedback.
-
-    The endpoint is visualization-only. It reuses the same active-edge matcher and
-    exact canonical feature IDs as production, but never invokes policy analysis
-    or changes a decision.
-    """
+    """Aggregate current T0 edge, canonical features and prospective feedback."""
     now = float(now or time.time())
     trade = engine.journal.active_trade()
     instrument = str((trade or {}).get("instrument") or engine.market.instrument_code or "")
@@ -308,16 +341,19 @@ def build_edge_universe_payload(engine: Any, *, now: float | None = None) -> dic
     }
 
     try:
-        # Resolve through the module at call time. PR-C installs validated-LLM
-        # wrappers on these canonical module attributes after app imports; a
-        # direct function import here would keep a stale pre-wrapper reference.
         active = active_edge_ai.build_active_edge_context(engine, snapshot)
     except Exception as exc:
-        active = {"available": False, "matched_groups": [],
-                  "reason": f"{type(exc).__name__}: {exc}"}
+        active = {
+            "available": False,
+            "measurement_available": False,
+            "report_state": "EDGE_CONTEXT_EXCEPTION",
+            "matched_groups": [],
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
     active = active if isinstance(active, dict) else {}
-    profile = active_edge_weight.edge_weight_profile(active)
-    decision_reason = _edge_decision_reason(active, profile)
+    raw_profile = active_edge_weight.edge_weight_profile(active)
+    decision_reason = _edge_decision_reason(active, raw_profile)
+    profile = _visual_profile(active, raw_profile)
 
     feature_map: dict[str, Any] = {}
     observation_t0 = None
@@ -345,11 +381,6 @@ def build_edge_universe_payload(engine: Any, *, now: float | None = None) -> dic
     management_edge = _safe_call(management, "edge") if management is not None else {
         "available": False, "reason": "management_local runtime unavailable"}
 
-    # Cross-asset topology is an already-existing observed analytics family.  It
-    # is computed only on an explicit Universe request (no new background job)
-    # and reduced to its descriptive summary so the experimental page gets the
-    # same systemic-coupling/tension/fragmentation metrics without duplicating
-    # the full correlation visualization or turning them into an extra vote.
     cross_asset_payload = _safe_call(engine, "cross_asset_payload")
     cross_asset_summary = cross_asset_payload.get("summary") or {}
     if not isinstance(cross_asset_summary, dict):
@@ -403,6 +434,7 @@ def build_edge_universe_payload(engine: Any, *, now: float | None = None) -> dic
             "radial_distance": "signal horizon minutes",
             "node_mass": "matched candidate count",
             "strictness": "strict-reference participation",
+            "missing_active_edge_is_not_zero": True,
             "random_motion": False,
         },
         "production_authority": False,
