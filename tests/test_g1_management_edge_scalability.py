@@ -80,12 +80,36 @@ class _Conn:
         raise AssertionError(normalized)
 
 
+class _SnapshotConn(_Conn):
+    def execute(self, sql):
+        normalized = " ".join(sql.split())
+        if normalized == "BEGIN":
+            self.sql.append(normalized)
+            return _Cursor([])
+        return super().execute(sql)
+
+    def rollback(self):
+        self.sql.append("ROLLBACK")
+
+    def close(self):
+        self.sql.append("CLOSE")
+
+
+class _FailLock:
+    def __enter__(self):
+        raise AssertionError("presentation read waited on runtime lock")
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 def _runtime():
     return SimpleNamespace(_conn=_Conn(), _lock=threading.RLock())
 
 
-def test_scalability_installer_replaces_only_report_helpers():
+def test_scalability_installer_replaces_read_only_report_helpers():
     assert local_edge._pairwise_rows is scalability._pairwise_rows_bounded_io
+    assert local_edge._dataset_summary is scalability._dataset_summary_bounded_io
     assert local_edge._context_labels is scalability._context_labels_cached
     assert attribution._window_records is scalability._window_records_bounded_io
 
@@ -133,3 +157,19 @@ def test_attribution_reads_active_context_once_per_window_not_once_per_policy():
     context_queries = [sql for sql in runtime._conn.sql if "active_edge_context_json" in sql]
     assert len(context_queries) == 1
     assert "g1m_local_policy_outcomes" not in context_queries[0]
+
+
+def test_file_backed_snapshot_does_not_acquire_runtime_lock(monkeypatch):
+    snapshot = _SnapshotConn()
+    runtime = SimpleNamespace(
+        _conn=object(),
+        _lock=_FailLock(),
+        _g1m_edge_db_path="/var/lib/seiltanzer/research.sqlite3",
+    )
+    monkeypatch.setattr(scalability, "_open_read_snapshot", lambda _runtime: snapshot)
+
+    rows = scalability._pairwise_rows_bounded_io(runtime)
+
+    assert len(rows) == 1
+    assert snapshot.sql[0] == "BEGIN"
+    assert snapshot.sql[-2:] == ["ROLLBACK", "CLOSE"]
