@@ -1,15 +1,18 @@
-"""Bound G1-M local-edge read amplification without changing report semantics.
+"""Bound G1-M local-edge read/CPU amplification without changing semantics.
 
-The production G1-M endpoint used to join large frozen context JSON blobs directly
-against policy-outcome rows.  That duplicated each context payload once per policy
-(5x in the base report, 4x in active-edge attribution) and also asked SQLite to
-sort the expanded rowset.  As the immutable research database grows, the read
-amplification can dominate the strict production latency gate.
+The production G1-M endpoint originally joined large frozen context JSON blobs
+against policy-outcome rows. That duplicated each context payload once per policy
+(5x in the base report, 4x in active-edge attribution) and asked SQLite to sort
+the expanded rowset. After that I/O amplification was removed, the descriptive
+WHERE_IT_HELPS/HURTS pass still decoded the same immutable context once for every
+pairwise comparison. With five comparisons that was another 5x JSON CPU
+amplification on the strict request path.
 
-This installer changes only the report read path: read each resolved window/context
-once, read the compact policy rows separately, pivot in memory, and preserve the
-same chronological window order.  No evidence eligibility, statistics, maturity,
-authority, promotion or execution contract is changed.
+This installer changes only report materialization: read each resolved context
+once, read compact policy rows separately, decode the base frozen context once per
+window, then reuse its derived labels across pairwise records. No evidence
+eligibility, statistics, maturity, authority, promotion or execution contract is
+changed.
 """
 from __future__ import annotations
 
@@ -20,8 +23,18 @@ from . import g1_management_local_edge_v2 as _local_edge
 from . import g1_management_active_edge_attribution as _attribution
 
 
-SCALABILITY_VERSION = "g1m-local-edge-read-scalability-v1"
+SCALABILITY_VERSION = "g1m-local-edge-read-scalability-v2"
 _INSTALLED = False
+_ORIGINAL_CONTEXT_LABELS = _local_edge._context_labels
+_CONTEXT_LABELS_CACHE_KEY = "_g1m_context_labels_cached"
+
+
+def _context_labels_cached(row: dict[str, Any]) -> dict[str, str]:
+    """Reuse labels already derived from the same immutable frozen window."""
+    cached = row.get(_CONTEXT_LABELS_CACHE_KEY)
+    if isinstance(cached, dict):
+        return cached
+    return _ORIGINAL_CONTEXT_LABELS(row)
 
 
 def _pairwise_rows_bounded_io(runtime: ManagementLocalRuntime) -> list[dict[str, Any]]:
@@ -74,10 +87,16 @@ def _pairwise_rows_bounded_io(runtime: ManagementLocalRuntime) -> list[dict[str,
             "regret_r": float(row["regret_r"]),
         }
 
-    # The former SQL ORDER BY was part of the descriptive context contract because
-    # the last CONTEXT_SCAN_LIMIT rows are selected.  Preserve it in memory after
-    # removing the much larger joined-row SQLite sort.
+    # Every pairwise comparison shallow-copies the same window dictionary. Put the
+    # derived labels on the source row once so all five copies share the immutable
+    # result instead of reparsing the large context_json five times.
     rows = [row for row in pivot.values() if row["policies"]]
+    for row in rows:
+        row[_CONTEXT_LABELS_CACHE_KEY] = _ORIGINAL_CONTEXT_LABELS(row)
+
+    # The former SQL ORDER BY was part of the descriptive context contract because
+    # the last CONTEXT_SCAN_LIMIT rows are selected. Preserve it in memory after
+    # removing the much larger joined-row SQLite sort.
     rows.sort(key=lambda row: (float(row["captured_ts"]), str(row["window_id"])))
     return rows
 
@@ -151,9 +170,10 @@ def install_g1_management_edge_scalability() -> None:
     ) == SCALABILITY_VERSION:
         return
 
-    # Patch the module-level readers used by the already-installed report methods.
+    # Patch only module-level helpers used by the already-installed report methods.
     # This deliberately avoids another ManagementLocalRuntime.edge wrapper.
     _local_edge._pairwise_rows = _pairwise_rows_bounded_io
+    _local_edge._context_labels = _context_labels_cached
     _attribution._window_records = _window_records_bounded_io
     ManagementLocalRuntime._edge_scalability_version = SCALABILITY_VERSION
     _INSTALLED = True

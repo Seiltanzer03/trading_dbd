@@ -84,8 +84,9 @@ def _runtime():
     return SimpleNamespace(_conn=_Conn(), _lock=threading.RLock())
 
 
-def test_scalability_installer_replaces_only_report_readers():
+def test_scalability_installer_replaces_only_report_helpers():
     assert local_edge._pairwise_rows is scalability._pairwise_rows_bounded_io
+    assert local_edge._context_labels is scalability._context_labels_cached
     assert attribution._window_records is scalability._window_records_bounded_io
 
 
@@ -99,6 +100,27 @@ def test_base_edge_reads_context_once_per_window_not_once_per_policy():
     context_queries = [sql for sql in runtime._conn.sql if "context_json" in sql]
     assert len(context_queries) == 1
     assert "g1m_local_policy_outcomes" not in context_queries[0]
+
+
+def test_base_edge_decodes_context_labels_once_per_window(monkeypatch):
+    runtime = _runtime()
+    original = scalability._ORIGINAL_CONTEXT_LABELS
+    calls = []
+
+    def counted(row):
+        calls.append(str(row["window_id"]))
+        return original(row)
+
+    monkeypatch.setattr(scalability, "_ORIGINAL_CONTEXT_LABELS", counted)
+    rows = scalability._pairwise_rows_bounded_io(runtime)
+    assert calls == ["w1"]
+
+    # Pairwise records are shallow copies. They retain the one immutable cached
+    # label dictionary and must not decode the same context again.
+    for _ in range(5):
+        copied = {**rows[0]}
+        assert local_edge._context_labels(copied)["instrument"] == "NAS100"
+    assert calls == ["w1"]
 
 
 def test_attribution_reads_active_context_once_per_window_not_once_per_policy():
