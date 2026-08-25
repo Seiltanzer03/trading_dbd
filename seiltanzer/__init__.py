@@ -222,6 +222,12 @@ from .g1_management_active_edge_attribution import install_g1_management_active_
 _install_g1_management_active_edge_attribution()
 del _install_g1_management_active_edge_attribution
 
+# Keep the same G1-M report contracts while avoiding repeated large context JSON
+# reads across every policy row on the strict production HTTP latency path.
+from .g1_management_edge_scalability import install_g1_management_edge_scalability as _install_g1_management_edge_scalability
+_install_g1_management_edge_scalability()
+del _install_g1_management_edge_scalability
+
 # Operational deletion is the final Journal lifecycle boundary: hide a trade
 # from user/live management while preserving frozen prospective evidence.
 from .trade_delete_lifecycle import install_trade_delete_lifecycle as _install_trade_delete_lifecycle
