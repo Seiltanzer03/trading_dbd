@@ -241,14 +241,12 @@ jobs:
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
 
-            # The source-of-truth SQLite DB is currently >2 GiB. Before any
-            # migration, service startup deliberately creates and fully verifies
-            # an online prestart snapshot; the measured production copy takes
-            # about 90 seconds. Give that durability operation a separate,
-            # bounded cold-start window without relaxing any live route-latency
-            # gate below. Report the growing tempfile so a stalled backup is
-            # distinguishable from normal progress in Actions logs.
-            cold_start_attempts=90
+            # The source-of-truth SQLite DB is now roughly 3.7 GiB. Startup still
+            # has to finish the durability snapshot and initialization before the
+            # real HTTP gate may pass. Production measured about 188 seconds on
+            # 2026-08-25, so keep a bounded ~210-second allowance with margin.
+            # This does not relax the live route latency/readiness gates below.
+            cold_start_attempts=105
             ready=0
             for attempt in $(seq 1 "$cold_start_attempts"); do
               active=$(systemctl is-active seiltanzer 2>/dev/null || true)
