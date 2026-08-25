@@ -155,7 +155,7 @@ async function refreshPrecision() {
 
 const observer = new MutationObserver(() => {
   window.clearTimeout(observer._timer);
-  observer._timer = window.setTimeout(refreshPrecision, 120);
+  observer._timer = window.setTimeout(refreshPrecision, 0);
 });
 const featureRoot = document.getElementById('edge-features');
 if (featureRoot) observer.observe(featureRoot, { childList: true });
