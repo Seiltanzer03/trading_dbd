@@ -25,6 +25,15 @@ def test_precision_layer_distinguishes_missing_reports_from_measured_zero() -> N
     assert "setText('edge-votes', '— / —')" in source
 
 
+def test_precision_layer_clears_stale_values_on_transport_failure() -> None:
+    source = (ROOT / "js" / "universe_precision.js").read_text(encoding="utf-8")
+    assert "patchEdgeUnavailableTransport" in source
+    assert "EDGE API HTTP ${response.status}" in source
+    assert "patchEdgeUnavailableTransport('EDGE API ERROR')" in source
+    assert "ACTIVE EDGE N/A · ${label}" in source
+    assert "window.Plotly.purge(chart)" in source
+
+
 def test_precision_numeric_formatters_do_not_coerce_missing_to_zero() -> None:
     source = (ROOT / "js" / "universe_precision.js").read_text(encoding="utf-8")
     assert "const pct = (value, digits = 1) => finite(value)" in source
