@@ -13,13 +13,17 @@ from pathlib import Path
 from typing import Any
 
 from .ai_verdict_budget_bridge import enforce_public_snapshot_budget
+from .runtime_git_identity import runtime_git_sha
 
 
 CONTRACT_VERSION = "ai-active-high-risk-edge-context-v1"
 POLICY_VERSION = "g1s-manual-trader-high-risk-edge-policy-v1"
+PUBLICATION_CONTRACT_VERSION = "active-edge-exact-sha-publication-v1"
 MAX_REPORT_AGE_SEC = 8 * 60 * 60
 MAX_SIGNALS = 8
 MAX_MATCHED_GROUPS = 64
+EXPECTED_STRUCTURED_HORIZONS = (15, 30, 60, 120, 240)
+EXPECTED_REPORT_COUNT = len(EXPECTED_STRUCTURED_HORIZONS) + 1
 _INSTALLED = False
 
 LEGACY_TO_CANONICAL_FEATURE_ID = {
@@ -50,7 +54,15 @@ def _research_dir(engine: Any) -> Path:
     return data_dir / "research"
 
 
-def _load_report(path: Path, snapshot_ts: float) -> dict[str, Any] | None:
+def _load_report(
+    path: Path,
+    snapshot_ts: float,
+    expected_sha: str | None,
+) -> dict[str, Any] | None:
+    """Load only a fresh report published for this exact code generation."""
+    expected = str(expected_sha or "").strip().lower()
+    if len(expected) != 40:
+        return None
     try:
         stat = path.stat()
         if stat.st_size <= 0 or stat.st_size > 8_000_000:
@@ -67,9 +79,29 @@ def _load_report(path: Path, snapshot_ts: float) -> dict[str, Any] | None:
             return None
         if payload.get("production_authority") is not False:
             return None
+        if payload.get("publication_contract_version") != PUBLICATION_CONTRACT_VERSION:
+            return None
+        published_for = str(payload.get("published_for_sha") or "").strip().lower()
+        if published_for != expected:
+            return None
         return payload
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None
+
+
+def _report_state(
+    expected_sha: str | None,
+    structured_report_n: int,
+    ml_report_loaded: bool,
+) -> str:
+    if not expected_sha:
+        return "RUNTIME_SHA_UNAVAILABLE"
+    source_report_n = max(0, int(structured_report_n)) + int(bool(ml_report_loaded))
+    if source_report_n <= 0:
+        return "CURRENT_SHA_REPORTS_MISSING"
+    if source_report_n < EXPECTED_REPORT_COUNT:
+        return "CURRENT_SHA_REPORTS_PARTIAL"
+    return "CURRENT_SHA_REPORTS_COMPLETE"
 
 
 def _structured_candidates(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -251,52 +283,66 @@ def _matched_groups(matched_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
     snapshot_ts = _finite(snapshot.get("captured_ts")) or 0.0
     root = _research_dir(engine)
-    structured_reports = [report for horizon in (15, 30, 60, 120, 240)
-                          if (report := _load_report(
-                              root / f"active_structured_{horizon}m_latest.json",
-                              snapshot_ts))]
-    ml_report = _load_report(root / "active_ml_latest.json", snapshot_ts)
-    values = _current_values(engine, snapshot)
+    expected_sha = runtime_git_sha()
+    structured_reports = [
+        report for horizon in EXPECTED_STRUCTURED_HORIZONS
+        if (report := _load_report(
+            root / f"active_structured_{horizon}m_latest.json",
+            snapshot_ts,
+            expected_sha,
+        ))
+    ]
+    ml_report = _load_report(
+        root / "active_ml_latest.json", snapshot_ts, expected_sha)
+    source_report_n = len(structured_reports) + int(ml_report is not None)
+    report_state = _report_state(
+        expected_sha, len(structured_reports), ml_report is not None)
+    report_set_complete = report_state == "CURRENT_SHA_REPORTS_COMPLETE"
+
+    values = _current_values(engine, snapshot) if report_set_complete else {}
     direction = str((snapshot.get("strategy") or {}).get("direction") or "")
     rows: list[dict[str, Any]] = []
 
-    for report in structured_reports:
-        for candidate in _structured_candidates(report):
-            matched = _conditions_match(values, candidate)
-            bias = _bias(candidate)
-            rows.append({
-                "candidate_id": candidate.get("candidate_id"),
-                "source": "STRUCTURED",
-                "target_id": candidate.get("target_id"),
-                "horizon_minutes": candidate.get("horizon_minutes"),
-                "primary_improvement": candidate.get("primary_improvement"),
-                "q_value_diagnostic": candidate.get("q_value"),
-                "fold_positive": candidate.get("fold_positive"),
-                "strict_reference_qualified": bool(candidate.get("strict_reference_qualified")),
-                "conditions_match_current_t0": matched,
-                "prediction_shift": candidate.get("prediction_shift"),
-                "market_bias": bias,
-                "position_relation": _relation(direction, bias) if matched else "NOT_APPLICABLE",
-            })
-    if ml_report:
-        for candidate in _ml_candidates(ml_report):
-            rows.append({
-                "candidate_id": candidate.get("candidate_id"),
-                "source": "ML",
-                "target_id": candidate.get("target_id"),
-                "horizon_minutes": candidate.get("horizon_minutes"),
-                "primary_improvement": candidate.get("primary_improvement"),
-                "q_value_diagnostic": candidate.get("q_value"),
-                "fold_positive": candidate.get("fold_positive"),
-                "strict_reference_qualified": bool(candidate.get("strict_reference_qualified")),
-                "conditions_match_current_t0": None,
-                "market_bias": "NON_DIRECTIONAL_MODEL_CONFIRMATION",
-                "position_relation": "CONTEXT_ONLY",
-            })
+    # Fail closed on a missing/partial generation. A partially published matrix
+    # must never bias AI/policy votes; it remains visible through report_state.
+    if report_set_complete:
+        for report in structured_reports:
+            for candidate in _structured_candidates(report):
+                matched = _conditions_match(values, candidate)
+                bias = _bias(candidate)
+                rows.append({
+                    "candidate_id": candidate.get("candidate_id"),
+                    "source": "STRUCTURED",
+                    "target_id": candidate.get("target_id"),
+                    "horizon_minutes": candidate.get("horizon_minutes"),
+                    "primary_improvement": candidate.get("primary_improvement"),
+                    "q_value_diagnostic": candidate.get("q_value"),
+                    "fold_positive": candidate.get("fold_positive"),
+                    "strict_reference_qualified": bool(
+                        candidate.get("strict_reference_qualified")),
+                    "conditions_match_current_t0": matched,
+                    "prediction_shift": candidate.get("prediction_shift"),
+                    "market_bias": bias,
+                    "position_relation": (
+                        _relation(direction, bias) if matched else "NOT_APPLICABLE"),
+                })
+        if ml_report:
+            for candidate in _ml_candidates(ml_report):
+                rows.append({
+                    "candidate_id": candidate.get("candidate_id"),
+                    "source": "ML",
+                    "target_id": candidate.get("target_id"),
+                    "horizon_minutes": candidate.get("horizon_minutes"),
+                    "primary_improvement": candidate.get("primary_improvement"),
+                    "q_value_diagnostic": candidate.get("q_value"),
+                    "fold_positive": candidate.get("fold_positive"),
+                    "strict_reference_qualified": bool(
+                        candidate.get("strict_reference_qualified")),
+                    "conditions_match_current_t0": None,
+                    "market_bias": "NON_DIRECTIONAL_MODEL_CONFIRMATION",
+                    "position_relation": "CONTEXT_ONLY",
+                })
 
-    # Every active candidate participates in aggregate context. Only the most
-    # relevant eight rows are serialized for explanation so the fixed snapshot
-    # budget never turns into an accidental information-selection gate.
     all_rows = list(rows)
     matched_rows = [item for item in all_rows
                     if item.get("conditions_match_current_t0") is True]
@@ -308,7 +354,8 @@ def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str
     structured_n = sum(item.get("source") == "STRUCTURED" for item in all_rows)
     ml_n = sum(item.get("source") == "ML" for item in all_rows)
     strict_n = sum(bool(item.get("strict_reference_qualified")) for item in all_rows)
-    strict_rows = [item for item in matched_rows if item.get("strict_reference_qualified")]
+    strict_rows = [
+        item for item in matched_rows if item.get("strict_reference_qualified")]
     matched_strict_n = len(strict_rows)
     strict_supporting = sum(item.get("position_relation") == "SUPPORTS_POSITION"
                             for item in strict_rows)
@@ -326,10 +373,18 @@ def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str
     return {
         "contract_version": CONTRACT_VERSION,
         "edge_policy": POLICY_VERSION,
-        "available": bool(all_rows),
+        "available": report_set_complete and bool(all_rows),
+        "measurement_available": report_set_complete,
+        "report_state": report_state,
+        "source_report_n": source_report_n,
+        "expected_report_n": EXPECTED_REPORT_COUNT,
+        "structured_report_n": len(structured_reports),
+        "ml_report_loaded": ml_report is not None,
         "risk_acceptance": "HIGH_FALSE_DISCOVERY_TOLERANCE",
         "strict_reference_is_blocking": False,
         "aggregate_scope": "ALL_ACTIVE_CANDIDATES_WITH_ALL_MATCHED_STRUCTURED_VOTES",
+        "exact_sha_reports_only": True,
+        "runtime_sha": expected_sha,
         "total_active_signal_n": len(all_rows),
         "structured_signal_n": structured_n,
         "ml_signal_n": ml_n,
@@ -343,7 +398,8 @@ def build_active_edge_context(engine: Any, snapshot: dict[str, Any]) -> dict[str
         "strict_supporting_position_n": strict_supporting,
         "strict_opposing_position_n": strict_opposing,
         "strict_net_position_vote": strict_supporting - strict_opposing,
-        "strict_net_position_vote_ratio": _vote_ratio(strict_supporting, strict_opposing),
+        "strict_net_position_vote_ratio": _vote_ratio(
+            strict_supporting, strict_opposing),
         "matched_groups": groups,
         "matched_group_n": len(groups),
         "serialized_signal_n": len(rows),
@@ -374,7 +430,11 @@ def install_active_edge_ai_integration() -> None:
         ede["active_high_risk"] = context
         lines = ede.get("context_lines_ru")
         if isinstance(lines, list):
-            if context["matched_structured_signal_n"]:
+            if not context["measurement_available"]:
+                lines.append(
+                    "Active Edge: полный набор отчётов для текущей версии "
+                    f"ещё недоступен ({context['report_state']}).")
+            elif context["matched_structured_signal_n"]:
                 lines.append(
                     "Активный рискованный edge: совпало "
                     f"{context['matched_structured_signal_n']} ранних OOS-сигналов; "
@@ -392,14 +452,22 @@ def install_active_edge_ai_integration() -> None:
             if isinstance(evidence, dict):
                 evidence["active_high_risk_edge"] = {
                     key: context[key] for key in (
-                        "edge_policy", "available", "risk_acceptance", "aggregate_scope",
+                        "edge_policy", "available", "measurement_available",
+                        "report_state", "source_report_n", "expected_report_n",
+                        "risk_acceptance", "aggregate_scope",
+                        "exact_sha_reports_only", "runtime_sha",
                         "total_active_signal_n", "structured_signal_n", "ml_signal_n",
-                        "strict_reference_signal_n", "matched_strict_reference_signal_n",
+                        "strict_reference_signal_n",
+                        "matched_strict_reference_signal_n",
                         "matched_structured_signal_n", "supporting_position_n",
-                        "opposing_position_n", "net_position_vote", "net_position_vote_ratio",
-                        "strict_supporting_position_n", "strict_opposing_position_n",
-                        "strict_net_position_vote", "strict_net_position_vote_ratio",
-                        "matched_group_n", "serialized_signal_n", "details_truncated",
+                        "opposing_position_n", "net_position_vote",
+                        "net_position_vote_ratio",
+                        "strict_supporting_position_n",
+                        "strict_opposing_position_n",
+                        "strict_net_position_vote",
+                        "strict_net_position_vote_ratio",
+                        "matched_group_n", "serialized_signal_n",
+                        "details_truncated",
                     )
                 }
         enforce_public_snapshot_budget(snapshot)

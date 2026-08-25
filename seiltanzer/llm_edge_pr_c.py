@@ -498,6 +498,11 @@ def _augment_context_with_strict_and_researcher(
     engine: Any, snapshot: dict[str, Any], context: dict[str, Any], integration: Any
 ) -> dict[str, Any]:
     result = dict(_BASE_AUGMENT_CONTEXT(engine, snapshot, context, integration))
+    if result.get("measurement_available") is False:
+        result["validated_strict_directional_n"] = 0
+        result["edge_researcher"] = _researcher_context(engine)
+        return result
+
     validated = _validated_rows_with_strict(engine, snapshot, integration)
     strict_rows = [
         row for row in validated
@@ -744,7 +749,7 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
     return payload
 
 
-def _materialized_status(runtime: Any) -> dict[str, Any]:
+def _materialized_status(runtime: Any) -> dict[str,Any]:
     payload = _lifecycle.read_materialized_lifecycle(runtime)
     summary = payload.get("researcher") or {}
     return {
