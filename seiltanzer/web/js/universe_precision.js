@@ -47,6 +47,34 @@ function setText(id, value) {
   if (node) node.textContent = value;
 }
 
+function patchEdgeUnavailableTransport(label = 'EDGE API ERROR') {
+  for (const id of [
+    'edge-weight', 'edge-cap', 'edge-direction', 'edge-strict',
+    'edge-buckets', 'edge-matched-groups', 'edge-nondirectional',
+  ]) setText(id, '—');
+  setText('edge-votes', '— / —');
+
+  const status = document.getElementById('edge-status');
+  if (status) {
+    status.className = 'status-pill no-data';
+    status.textContent = `○ ${label}`;
+  }
+  const readout = document.getElementById('edge-readout');
+  if (readout) {
+    readout.textContent = `ACTIVE EDGE N/A · ${label}`;
+    readout.title = 'Active Edge endpoint недоступен; ранее показанные значения не считаются текущим измерением.';
+  }
+  const empty = document.getElementById('edge-empty');
+  if (empty) {
+    empty.style.display = 'flex';
+    empty.textContent = `○ ${label}`;
+  }
+  const chart = document.getElementById('edge-universe-chart');
+  if (chart && window.Plotly && typeof window.Plotly.purge === 'function') {
+    window.Plotly.purge(chart);
+  }
+}
+
 function patchEdgeSemantics(payload) {
   const active = payload?.active_edge || {};
   const profile = payload?.production_weight || {};
@@ -142,12 +170,15 @@ async function refreshPrecision() {
   busy = true;
   try {
     const response = await fetch('/api/visual/edge-universe', { cache: 'no-store' });
-    if (!response.ok) return;
+    if (!response.ok) {
+      patchEdgeUnavailableTransport(`EDGE API HTTP ${response.status}`);
+      return;
+    }
     const payload = await response.json();
     patchFeatures(payload);
     patchEdgeSemantics(payload);
   } catch (_) {
-    // Primary Universe renderer owns transport/error UX. This helper is fail-soft.
+    patchEdgeUnavailableTransport('EDGE API ERROR');
   } finally {
     busy = false;
   }
