@@ -208,11 +208,17 @@ def _validated_rows(
 def _augment_context(
     engine: Any, snapshot: dict[str, Any], context: dict[str, Any], integration: Any
 ) -> dict[str, Any]:
-    validated = _validated_rows(engine, snapshot, integration)
     context = dict(context)
-    context["validated_llm_signal_n"] = len(validated)
     context["validated_promotion_bridge"] = True
     context["validated_promotion_contract"] = CONTRACT_VERSION
+    if context.get("measurement_available") is False:
+        context["validated_llm_signal_n"] = 0
+        context["validated_bridge_blocked_by_measurement"] = True
+        return context
+
+    validated = _validated_rows(engine, snapshot, integration)
+    context["validated_llm_signal_n"] = len(validated)
+    context["validated_bridge_blocked_by_measurement"] = False
     if not validated:
         return context
 
