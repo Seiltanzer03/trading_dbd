@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
+import time
 
 import uvicorn
 
@@ -52,6 +54,22 @@ from .visual_universe_page import install_visual_universe_page
 from .visual_universe_routes import install_visual_universe_routes
 
 
+_STARTUP_TRACEBACK_AFTER_SEC = 195
+
+
+def _arm_startup_diagnostics() -> float:
+    """Expose the exact owner if bounded production startup is exceeded."""
+    started = time.monotonic()
+    faulthandler.dump_traceback_later(_STARTUP_TRACEBACK_AFTER_SEC, repeat=False)
+    _startup_marker(started, "begin")
+    return started
+
+
+def _startup_marker(started: float, phase: str) -> None:
+    elapsed = max(0.0, time.monotonic() - started)
+    print(f"STARTUP_PHASE phase={phase} elapsed_sec={elapsed:.3f}", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         prog="seiltanzer",
@@ -74,6 +92,7 @@ def main() -> None:
         run_check()
         return
 
+    startup_started = _arm_startup_diagnostics()
     cleanup = remediate_current_environment()
     if cleanup.get("candidate_n") or cleanup.get("remaining_n"):
         print("G1E1 venv cleanup -> " + json.dumps(cleanup, ensure_ascii=False, sort_keys=True))
@@ -98,8 +117,11 @@ def main() -> None:
 
     settings = Settings(demo=args.demo, stream=args.stream, host=args.host,
                         port=args.port, data_dir=args.data_dir)
+    _startup_marker(startup_started, "storage.prepare.begin")
     storage = prepare_storage(settings)
+    _startup_marker(startup_started, "storage.prepare.complete")
     app = create_app(settings)
+    _startup_marker(startup_started, "app.create.complete")
 
     # Install fail-closed process-local G.1S presentation caches before uvicorn.
     # Their durable reads start on one daemon at the HTTP startup boundary, so
@@ -127,9 +149,13 @@ def main() -> None:
     # an empty journal must preserve the existing fast no_active_trade response.
     install_ai_snapshot_runtime_guard(app, materializer)
 
+    _startup_marker(startup_started, "schema.backup.begin")
     ensure_g1m_schema_backup(storage)
     ensure_g1s_schema_backup(storage)
+    _startup_marker(startup_started, "schema.backup.complete")
+    _startup_marker(startup_started, "storage.runtime.begin")
     install_storage_runtime(app, storage)
+    _startup_marker(startup_started, "storage.runtime.complete")
     install_storage_routes(app)
     install_database_authority(app)
 
@@ -154,6 +180,7 @@ def main() -> None:
 
     install_intelligence_runtime(app)
     install_g1_intelligence_routes(app)
+    _startup_marker(startup_started, "routes.complete")
 
     print(f"Seiltanzer Terminal -> http://{args.host}:{args.port}"
           f"{' [DEMO]' if args.demo else ''}{' [STREAM]' if args.stream else ''}")
@@ -161,6 +188,8 @@ def main() -> None:
     print(f"Intelligence Lab -> http://{args.host}:{args.port}/intelligence")
     print(f"Management Edge -> http://{args.host}:{args.port}/management-edge")
     print(f"Fast Market Learning -> /api/research/g1s/status")
+    _startup_marker(startup_started, "uvicorn.run")
+    faulthandler.cancel_dump_traceback_later()
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
