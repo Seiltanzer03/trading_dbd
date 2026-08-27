@@ -5,7 +5,10 @@ import sqlite3
 import time
 from pathlib import Path
 
+import pytest
+
 from seiltanzer.config import Settings
+from seiltanzer import storage_disk_guard
 from seiltanzer.storage_disk_guard import install_storage_disk_guard
 from seiltanzer.storage_refinement import install_storage_refinement
 from seiltanzer.storage_runtime import StorageManager
@@ -75,3 +78,81 @@ def test_stale_partial_backup_is_removed_before_next_snapshot(tmp_path, monkeypa
     assert not stale.exists()
     assert Path(result.database_path).exists()
     assert Path(result.manifest_path).exists()
+
+
+def test_low_space_preflight_temporarily_keeps_one_verified_backup(
+    tmp_path, monkeypatch
+):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _db(Path(settings.trades_db))
+    manager = StorageManager(settings)
+    manager.create_backup(kind="local", reason="seed-1")
+    time.sleep(0.002)
+    manager.create_backup(kind="local", reason="seed-2")
+    manifests = manager.backups()["local"]
+    assert len(manifests) == 2
+
+    real_apply = storage_disk_guard._apply_local_byte_budget
+    observed: list[tuple[int, int]] = []
+
+    def record_apply(self, *, minimum_verified=2):
+        result = real_apply(self, minimum_verified=minimum_verified)
+        kept = len(self._verified_manifests(self.local_dir))
+        observed.append((minimum_verified, kept))
+        return result
+
+    monkeypatch.setattr(storage_disk_guard, "_apply_local_byte_budget", record_apply)
+    monkeypatch.setattr(
+        storage_disk_guard,
+        "_preflight_minimum_verified",
+        lambda self, directory: 1,
+    )
+
+    manager.create_backup(kind="local", reason="low-space-replacement")
+
+    assert observed[0] == (1, 1)
+    assert observed[-1] == (2, 2)
+    assert len(manager.backups()["local"]) == 2
+
+
+def test_preflight_reduces_floor_only_when_replacement_lacks_headroom(
+    tmp_path, monkeypatch
+):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _db(Path(settings.trades_db))
+    manager = StorageManager(settings)
+    live_bytes = Path(settings.trades_db).stat().st_size
+
+    class Stat:
+        f_frsize = 1
+        f_bavail = live_bytes + storage_disk_guard.MIN_BACKUP_HEADROOM_BYTES - 1
+
+    monkeypatch.setattr(storage_disk_guard.os, "statvfs", lambda directory: Stat())
+    assert storage_disk_guard._preflight_minimum_verified(manager, manager.local_dir) == 1
+
+    Stat.f_bavail += 1
+    assert storage_disk_guard._preflight_minimum_verified(manager, manager.local_dir) == 2
+
+
+def test_failed_low_space_replacement_preserves_newest_verified_backup(
+    tmp_path, monkeypatch
+):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _db(Path(settings.trades_db))
+    manager = StorageManager(settings)
+    manager.create_backup(kind="local", reason="seed-1")
+    time.sleep(0.002)
+    manager.create_backup(kind="local", reason="seed-2")
+    monkeypatch.setattr(
+        storage_disk_guard,
+        "_preflight_minimum_verified",
+        lambda self, directory: 1,
+    )
+    manager.db_path = tmp_path / "missing.sqlite3"
+
+    with pytest.raises(FileNotFoundError):
+        manager.create_backup(kind="local", reason="expected-failure")
+
+    manifests = manager.backups()["local"]
+    assert len(manifests) == 1
+    assert (manager.local_dir / manifests[0]["database_file"]).exists()
