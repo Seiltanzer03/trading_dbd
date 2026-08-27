@@ -175,6 +175,42 @@ jobs:
 
             free_kb=$(df --output=avail -k / | tail -n 1 | tr -d ' ')
             required_kb=$((512 * 1024))
+            if [ "${free_kb:-0}" -lt "$required_kb" ] \
+               && find /opt/seiltanzer/data/backups/local \
+                 -maxdepth 1 -type f -name '.*.tmp.sqlite3' -print -quit \
+                 2>/dev/null | grep -q .; then
+              # A failed/restarting prestart may own the only disposable multi-GiB
+              # file. Stop the writer first, then remove only its exact hidden temp
+              # path so git can fetch the fixed revision. Verified backups and the
+              # authoritative DB remain outside this contract.
+              systemctl stop seiltanzer
+              if systemctl is-active --quiet seiltanzer; then
+                echo "::error::seiltanzer still active during pre-fetch recovery"
+                exit 1
+              fi
+              prefetch_orphan_n=0
+              prefetch_orphan_bytes=0
+              while IFS= read -r -d '' orphan; do
+                case "$orphan" in
+                  /opt/seiltanzer/data/backups/local/.*.tmp.sqlite3) ;;
+                  *)
+                    echo "::error::Refusing unexpected pre-fetch cleanup path: $orphan"
+                    exit 1
+                    ;;
+                esac
+                size=$(stat -c '%s' "$orphan" 2>/dev/null || echo 0)
+                rm -f -- "$orphan"
+                prefetch_orphan_n=$((prefetch_orphan_n + 1))
+                prefetch_orphan_bytes=$((prefetch_orphan_bytes + size))
+              done < <(
+                find /opt/seiltanzer/data/backups/local \
+                  -maxdepth 1 -type f -name '.*.tmp.sqlite3' -print0 2>/dev/null
+              )
+              sync || true
+              echo "DEPLOY_PREFETCH_ORPHAN_PRESTART_TEMPS_REMOVED=$prefetch_orphan_n"
+              echo "DEPLOY_PREFETCH_ORPHAN_PRESTART_TEMP_BYTES_REMOVED=$prefetch_orphan_bytes"
+              free_kb=$(df --output=avail -k / | tail -n 1 | tr -d ' ')
+            fi
             if [ "${free_kb:-0}" -lt "$required_kb" ]; then
               echo "::error::Insufficient safe pre-fetch headroom: ${free_kb:-0} KiB < ${required_kb} KiB"
               echo '=== BOUNDED DISK DIAGNOSTICS ==='

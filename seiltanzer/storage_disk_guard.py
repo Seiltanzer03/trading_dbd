@@ -17,10 +17,11 @@ from typing import Any
 from . import storage_runtime as _s
 
 
-DISK_GUARD_VERSION = "seiltanzer-storage-disk-guard-v1"
+DISK_GUARD_VERSION = "seiltanzer-storage-disk-guard-v2"
 DEFAULT_LOCAL_BACKUP_MAX_BYTES = 4 * 1024 * 1024 * 1024
 DEFAULT_DENSE_BUDGET_FRACTION = 0.75
 MIN_VERIFIED_LOCAL_BACKUPS = 2
+MIN_BACKUP_HEADROOM_BYTES = 512 * 1024 * 1024
 DEFAULT_TMP_MAX_AGE_SEC = 5 * 60
 
 
@@ -110,21 +111,44 @@ def _retention_priority(manifests: list[dict[str, Any]], *, dense_ids: set[str])
     return sparse
 
 
-def _apply_local_byte_budget(self) -> dict[str, Any]:
+def _preflight_minimum_verified(self, directory: Path) -> int:
+    """Preserve one recovery point when two would prevent a replacement copy."""
+    try:
+        live_bytes = max(1, int(self.db_path.stat().st_size))
+        stat = os.statvfs(directory)
+        free_bytes = max(0, int(stat.f_bavail) * int(stat.f_frsize))
+    except OSError:
+        # Unknown capacity must not reduce the normal two-backup durability floor.
+        return MIN_VERIFIED_LOCAL_BACKUPS
+    required_bytes = live_bytes + MIN_BACKUP_HEADROOM_BYTES
+    return 1 if free_bytes < required_bytes else MIN_VERIFIED_LOCAL_BACKUPS
+
+
+def _apply_local_byte_budget(
+    self, *, minimum_verified: int = MIN_VERIFIED_LOCAL_BACKUPS
+) -> dict[str, Any]:
     directory = self._backup_dir("local")
     manifests = self._verified_manifests(directory)
     if not manifests:
         return {"kept": 0, "removed": 0, "budget_bytes": 0, "used_bytes": 0}
 
+    minimum_verified = max(
+        1, min(int(minimum_verified), MIN_VERIFIED_LOCAL_BACKUPS)
+    )
+
     configured_budget = _positive_int_env(
         "SEILTANZER_LOCAL_BACKUP_MAX_BYTES", DEFAULT_LOCAL_BACKUP_MAX_BYTES)
     newest_size = _manifest_size(directory, manifests[0])
-    # Never trade away the two newest verified restore points just because the DB
-    # grew beyond an old static budget.  The effective budget expands only enough
-    # to preserve that minimum recovery floor.
-    budget = max(configured_budget, newest_size * MIN_VERIFIED_LOCAL_BACKUPS)
+    # Normal retention keeps two restore points. During a low-space preflight the
+    # caller may temporarily keep only the newest verified point so a replacement
+    # snapshot can be created; successful post-backup retention restores two.
+    budget = (
+        newest_size
+        if minimum_verified == 1
+        else max(configured_budget, newest_size * minimum_verified)
+    )
     dense_budget = max(
-        newest_size * MIN_VERIFIED_LOCAL_BACKUPS,
+        newest_size * minimum_verified,
         int(budget * DEFAULT_DENSE_BUDGET_FRACTION),
     )
 
@@ -145,9 +169,9 @@ def _apply_local_byte_budget(self) -> dict[str, Any]:
 
     # Minimum safety floor first, then as much dense recent history as the dense
     # share permits.
-    for manifest in manifests[:MIN_VERIFIED_LOCAL_BACKUPS]:
+    for manifest in manifests[:minimum_verified]:
         add(manifest, ceiling=budget, force=True)
-    for manifest in manifests[MIN_VERIFIED_LOCAL_BACKUPS:]:
+    for manifest in manifests[minimum_verified:]:
         add(manifest, ceiling=dense_budget)
 
     # Spend the remaining quarter preferentially on sparse older recovery anchors.
@@ -200,7 +224,10 @@ def install_storage_disk_guard() -> None:
             # Preflight pruning ensures a normal scheduled backup does not wait until
             # after another full copy has already consumed the last free bytes.
             if kind == "local":
-                _apply_local_byte_budget(self)
+                _apply_local_byte_budget(
+                    self,
+                    minimum_verified=_preflight_minimum_verified(self, directory),
+                )
             _cleanup_stale_temp(directory)
             before = {p.name for p in directory.iterdir()}
             try:

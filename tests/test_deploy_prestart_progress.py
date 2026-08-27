@@ -30,6 +30,19 @@ def test_deploy_has_bounded_progress_visible_prestart_window():
     assert "DEPLOY_ORPHAN_PRESTART_TEMP_BYTES_REMOVED" in workflow
     assert "systemctl restart seiltanzer" not in workflow
 
+    # If a restart loop fills the disk before git fetch, recovery must first stop
+    # the writer, remove only exact hidden prestart temps, and re-check the same
+    # unchanged 512 MiB fetch headroom gate.
+    prefetch_cleanup = workflow.index(
+        "DEPLOY_PREFETCH_ORPHAN_PRESTART_TEMPS_REMOVED"
+    )
+    fetch = workflow.index("git fetch origin main")
+    headroom_error = workflow.index("Insufficient safe pre-fetch headroom")
+    assert workflow.rfind("systemctl stop seiltanzer", 0, prefetch_cleanup) >= 0
+    assert prefetch_cleanup < headroom_error < fetch
+    assert "DEPLOY_PREFETCH_ORPHAN_PRESTART_TEMP_BYTES_REMOVED" in workflow
+    assert "required_kb=$((512 * 1024))" in workflow
+
     # Cold-start durability allowance must not weaken live acceptance limits.
     assert "--connect-timeout 1 --max-time 3" in workflow
     assert "production_readiness_check.py" in workflow
