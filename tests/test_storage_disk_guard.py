@@ -134,6 +134,40 @@ def test_preflight_reduces_floor_only_when_replacement_lacks_headroom(
     assert storage_disk_guard._preflight_minimum_verified(manager, manager.local_dir) == 2
 
 
+def test_restore_drill_headroom_prunes_only_older_verified_backup(
+    tmp_path, monkeypatch
+):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _db(Path(settings.trades_db))
+    manager = StorageManager(settings)
+    manager.create_backup(kind="local", reason="seed-1")
+    time.sleep(0.002)
+    manager.create_backup(kind="local", reason="seed-2")
+    newest = manager.backups()["local"][0]
+    required = int(newest["database_size_bytes"])
+    reserved = (required * 2) + storage_disk_guard.MIN_BACKUP_HEADROOM_BYTES
+    free_values = iter((reserved - 1, reserved))
+
+    class Stat:
+        f_frsize = 1
+
+        @property
+        def f_bavail(self):
+            return next(free_values)
+
+    monkeypatch.setattr(storage_disk_guard.os, "statvfs", lambda _directory: Stat())
+    report = storage_disk_guard.reserve_restore_drill_headroom(
+        manager,
+        required_bytes=required,
+        protected_backup_id=str(newest["backup_id"]),
+    )
+
+    remaining = manager.backups()["local"]
+    assert report["pruned"] is True
+    assert report["retention"]["removed"] == 1
+    assert [item["backup_id"] for item in remaining] == [newest["backup_id"]]
+
+
 def test_failed_low_space_replacement_preserves_newest_verified_backup(
     tmp_path, monkeypatch
 ):
