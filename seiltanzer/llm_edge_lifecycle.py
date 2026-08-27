@@ -21,6 +21,51 @@ from .llm_edge_prospective_journal import (
 )
 
 LIFECYCLE_CONTRACT_VERSION = "llm-edge-lifecycle-v1.3-pr-b"
+_MATERIALIZED_CACHE_ATTR = "_llm_edge_lifecycle_payload_json"
+
+
+def _initializing_materialized_lifecycle() -> dict[str, Any]:
+    return {
+        "contract_version": LIFECYCLE_CONTRACT_VERSION,
+        "status": "INITIALIZING",
+        "researcher": {
+            "proposal_runs": 0, "hypotheses": 0, "discovery_signals": 0,
+            "frozen_prospective": 0, "collecting": 0, "underpowered": 0,
+            "prospective_pass": 0, "prospective_fail": 0, "active_edge": 0,
+            "strict_reference": 0, "rejected": 0,
+        },
+        "candidates": [],
+        "writes_active_edge_registry": True,
+        "production_authority": False,
+        "prospective_confirmation_enabled": True,
+        "active_edge_bridge_enabled": True,
+        "request_time_history_scan": False,
+    }
+
+
+def publish_materialized_lifecycle_cache(runtime: Any, payload_json: str) -> None:
+    """Atomically expose one committed serialized singleton to HTTP readers."""
+    setattr(runtime, _MATERIALIZED_CACHE_ATTR, str(payload_json))
+
+
+def read_cached_materialized_lifecycle_json(runtime: Any) -> str:
+    payload_json = getattr(runtime, _MATERIALIZED_CACHE_ATTR, None)
+    if isinstance(payload_json, str):
+        try:
+            payload = json.loads(payload_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            return payload_json
+    return json.dumps(
+        _initializing_materialized_lifecycle(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def read_cached_materialized_lifecycle(runtime: Any) -> dict[str, Any]:
+    return json.loads(read_cached_materialized_lifecycle_json(runtime))
 
 
 def researcher_enabled() -> bool:
@@ -165,14 +210,17 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
         "request_time_history_scan": False,
         "updated_ts": float(time.time() if now is None else now),
     }
-    with runtime._lock, runtime._conn:
-        runtime._conn.execute("""INSERT INTO llm_edge_lifecycle_materialized(
-              singleton_id,payload_json,updated_ts) VALUES(1,?,?)
-            ON CONFLICT(singleton_id) DO UPDATE SET
-              payload_json=excluded.payload_json,updated_ts=excluded.updated_ts""", (
-                json.dumps(payload, sort_keys=True, separators=(",", ":")),
-                payload["updated_ts"],
-            ))
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    with runtime._lock:
+        with runtime._conn:
+            runtime._conn.execute("""INSERT INTO llm_edge_lifecycle_materialized(
+                  singleton_id,payload_json,updated_ts) VALUES(1,?,?)
+                ON CONFLICT(singleton_id) DO UPDATE SET
+                  payload_json=excluded.payload_json,updated_ts=excluded.updated_ts""", (
+                    payload_json,
+                    payload["updated_ts"],
+                ))
+        publish_materialized_lifecycle_cache(runtime, payload_json)
     return payload
 
 
@@ -191,22 +239,7 @@ def read_materialized_lifecycle(runtime: Any) -> dict[str, Any]:
         row = None
     if row is not None:
         return json.loads(str(row[0]))
-    return {
-        "contract_version": LIFECYCLE_CONTRACT_VERSION,
-        "status": "INITIALIZING",
-        "researcher": {
-            "proposal_runs": 0, "hypotheses": 0, "discovery_signals": 0,
-            "frozen_prospective": 0, "collecting": 0, "underpowered": 0,
-            "prospective_pass": 0, "prospective_fail": 0, "active_edge": 0,
-            "strict_reference": 0, "rejected": 0,
-        },
-        "candidates": [],
-        "writes_active_edge_registry": True,
-        "production_authority": False,
-        "prospective_confirmation_enabled": True,
-        "active_edge_bridge_enabled": True,
-        "request_time_history_scan": False,
-    }
+    return _initializing_materialized_lifecycle()
 
 
 def llm_edge_prospective_tick(engine: Any, *, now: float | None = None) -> dict[str, Any]:
