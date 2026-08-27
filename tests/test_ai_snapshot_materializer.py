@@ -1,10 +1,16 @@
+import asyncio
+import threading
 import time
 
 import pytest
+from fastapi import FastAPI
+
+from seiltanzer import app as app_module
 
 from seiltanzer.ai_snapshot_materializer import (
     AISnapshotMaterializer,
     SnapshotNotReady,
+    install_ai_snapshot_materializer,
 )
 
 
@@ -168,3 +174,26 @@ def test_no_active_trade_is_fast_unavailable_not_a_fake_snapshot():
     assert exc.value.status["reason"] == "SNAPSHOT_WARMING"
     assert exc.value.status["ready"] is False
     assert mat._snapshot is None
+
+
+def test_install_defers_worker_until_real_fastapi_lifespan(monkeypatch):
+    app = FastAPI()
+    engine = FakeEngine()
+
+    @app.post("/api/ai/verdict")
+    def verdict():
+        return engine
+
+    started = threading.Event()
+    monkeypatch.setattr(app_module, "build_snapshot", lambda runtime: snapshot())
+    monkeypatch.setattr(AISnapshotMaterializer, "start", lambda self: started.set())
+
+    install_ai_snapshot_materializer(app)
+
+    assert not started.is_set()
+
+    async def exercise_lifespan():
+        async with app.router.lifespan_context(app):
+            assert started.is_set()
+
+    asyncio.run(exercise_lifespan())
