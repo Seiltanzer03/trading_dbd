@@ -125,24 +125,42 @@ def _table_counts(path: Path) -> dict[str, int | None]:
 
 def _verify_backup_snapshot(
     path: Path,
-) -> tuple[bool, str, str, dict[str, int | None]]:
+    *,
+    startup_source: Path | None = None,
+) -> tuple[
+    bool,
+    str,
+    str,
+    dict[str, int | None],
+    tuple[bool, str] | None,
+]:
     """Run independent immutable-snapshot checks in one bounded read window.
 
     Once SQLite has closed the destination connection, integrity, byte identity
     and critical-table counts are independent read-only validations.  Running
     them together preserves every fail-closed assertion while avoiding three
-    sequential whole-snapshot scans during production cold start.
+    sequential whole-snapshot scans during production cold start.  The existing
+    live ``quick_check`` may join the same window before Engine construction;
+    it is never omitted or moved onto a request path.
     """
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=3, thread_name_prefix="backup-verify",
+        max_workers=4 if startup_source is not None else 3,
+        thread_name_prefix="backup-verify",
     ) as executor:
         integrity = executor.submit(_sqlite_integrity, path, full=True)
         digest = executor.submit(_sha256, path)
         counts = executor.submit(_table_counts, path)
+        source_integrity = (
+            executor.submit(_sqlite_integrity, startup_source, full=False)
+            if startup_source is not None else None
+        )
         ok, detail = integrity.result()
         sha = digest.result()
         table_counts = counts.result()
-    return ok, detail, sha, table_counts
+        source_check = (
+            source_integrity.result() if source_integrity is not None else None
+        )
+    return ok, detail, sha, table_counts, source_check
 
 
 @dataclass(frozen=True)
@@ -180,6 +198,7 @@ class StorageManager:
         self._lock = threading.RLock()
         self._previous_marker = _read_json(self.marker_path) or {}
         self._startup_integrity: dict[str, Any] | None = None
+        self._prestart_integrity_ready = False
         self._recovery_actions: list[dict[str, Any]] = []
         self._last_error: str | None = None
         self._background_running = False
@@ -211,11 +230,15 @@ class StorageManager:
             conn.execute("PRAGMA synchronous=FULL")
 
     def mark_startup(self) -> None:
-        ok, detail = _sqlite_integrity(self.db_path, full=False)
-        self._startup_integrity = {
-            "checked_ts": _now(), "ok": ok, "detail": detail,
-            "contract_version": STORAGE_CONTRACT_VERSION,
-        }
+        if not self._prestart_integrity_ready:
+            ok, detail = _sqlite_integrity(self.db_path, full=False)
+            self._startup_integrity = {
+                "checked_ts": _now(), "ok": ok, "detail": detail,
+                "check_kind": "quick_check",
+                "verification_scope": "post_engine_source",
+                "contract_version": STORAGE_CONTRACT_VERSION,
+            }
+        self._prestart_integrity_ready = False
         _atomic_json(self.marker_path, {
             "storage_contract_version": STORAGE_CONTRACT_VERSION,
             "started_ts": _now(),
@@ -286,11 +309,31 @@ class StorageManager:
                 dst.close()
                 src.close()
 
-            ok, integrity_detail, sha, counts = _verify_backup_snapshot(temp_db)
+            startup_source = self.db_path if reason == "prestart" else None
+            ok, integrity_detail, sha, counts, source_check = _verify_backup_snapshot(
+                temp_db,
+                startup_source=startup_source,
+            )
             if not ok:
                 with contextlib.suppress(FileNotFoundError):
                     temp_db.unlink()
                 raise RuntimeError(f"backup integrity failed: {integrity_detail}")
+            if source_check is not None and not source_check[0]:
+                with contextlib.suppress(FileNotFoundError):
+                    temp_db.unlink()
+                raise RuntimeError(
+                    f"source startup integrity failed: {source_check[1]}"
+                )
+            if source_check is not None:
+                self._startup_integrity = {
+                    "checked_ts": _now(),
+                    "ok": source_check[0],
+                    "detail": source_check[1],
+                    "check_kind": "quick_check",
+                    "verification_scope": "pre_engine_source",
+                    "contract_version": STORAGE_CONTRACT_VERSION,
+                }
+                self._prestart_integrity_ready = True
             size = temp_db.stat().st_size
             os.replace(temp_db, final_db)
             manifest = {
