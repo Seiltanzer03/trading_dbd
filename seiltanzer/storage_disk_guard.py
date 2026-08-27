@@ -9,6 +9,7 @@ artifacts left by interrupted/ENOSPC backup attempts.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import time
 from pathlib import Path
@@ -122,6 +123,62 @@ def _preflight_minimum_verified(self, directory: Path) -> int:
         return MIN_VERIFIED_LOCAL_BACKUPS
     required_bytes = live_bytes + MIN_BACKUP_HEADROOM_BYTES
     return 1 if free_bytes < required_bytes else MIN_VERIFIED_LOCAL_BACKUPS
+
+
+def reserve_restore_drill_headroom(
+    self, *, required_bytes: int, protected_backup_id: str,
+) -> dict[str, Any]:
+    """Reserve disposable-copy space without dropping the newest recovery point.
+
+    This reuses the same one-backup low-space floor as snapshot replacement.  It
+    never waits behind an active backup: readiness either reserves space now or
+    fails visibly, while the live database and newest verified backup remain.
+    """
+    directory = self._backup_dir("local")
+    # The drill intentionally never holds the manager lock while copying.  Keep
+    # room for its disposable restore and one concurrent replacement snapshot;
+    # production had 8.1 GiB free yet ENOSPC when these two windows overlapped.
+    required = (max(1, int(required_bytes)) * 2) + MIN_BACKUP_HEADROOM_BYTES
+
+    def free_bytes() -> int:
+        stat = os.statvfs(directory)
+        return max(0, int(stat.f_bavail) * int(stat.f_frsize))
+
+    before = free_bytes()
+    if before >= required:
+        return {
+            "disk_guard_version": DISK_GUARD_VERSION,
+            "pruned": False,
+            "required_bytes": required,
+            "free_before_bytes": before,
+            "free_after_bytes": before,
+        }
+
+    if not self._lock.acquire(blocking=False):
+        raise RuntimeError("restore drill headroom unavailable while backup is active")
+    try:
+        manifests = self._verified_manifests(directory)
+        newest_id = str(manifests[0].get("backup_id") or "") if manifests else ""
+        if not newest_id or newest_id != str(protected_backup_id):
+            raise RuntimeError("restore drill cannot prune its protected newest backup")
+        retention = _apply_local_byte_budget(self, minimum_verified=1)
+    finally:
+        self._lock.release()
+
+    after = free_bytes()
+    if after < required:
+        raise OSError(
+            errno.ENOSPC,
+            "insufficient headroom after preserving newest verified backup",
+        )
+    return {
+        "disk_guard_version": DISK_GUARD_VERSION,
+        "pruned": True,
+        "required_bytes": required,
+        "free_before_bytes": before,
+        "free_after_bytes": after,
+        "retention": retention,
+    }
 
 
 def _apply_local_byte_budget(
