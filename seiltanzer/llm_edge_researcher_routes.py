@@ -1,10 +1,10 @@
 """Research-only routes for the LLM Edge Researcher."""
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 
 from .llm_edge_evaluator import edge_evaluator_status, evaluate_edge_research_run
-from .llm_edge_lifecycle import read_materialized_lifecycle
+from .llm_edge_lifecycle import read_cached_materialized_lifecycle_json
 from .llm_edge_prospective_journal import initialize_journal_storage
 from .llm_edge_researcher import edge_researcher_status, propose_edge_hypotheses
 from .research_llm_cost_guard import guarded_edge_researcher_provider
@@ -41,7 +41,10 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
     )
 
     def lifecycle():
-        return read_materialized_lifecycle(runtime)
+        return Response(
+            content=read_cached_materialized_lifecycle_json(runtime),
+            media_type="application/json",
+        )
 
     app.add_api_route(
         "/api/research/g1s/edge-researcher/lifecycle",

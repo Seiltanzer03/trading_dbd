@@ -460,7 +460,7 @@ def _researcher_context(engine: Any) -> dict[str, Any]:
             "production_authority": False,
         }
     try:
-        payload = _lifecycle.read_materialized_lifecycle(runtime)
+        payload = _lifecycle.read_cached_materialized_lifecycle(runtime)
     except Exception:
         payload = {}
     summary = payload.get("researcher") or {}
@@ -734,23 +734,26 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
         payload["researcher"]["strict_reference"] = strict_active
     payload["pr_c_contract_version"] = PR_C_CONTRACT_VERSION
     payload["request_time_history_scan"] = False
-    with runtime._lock, runtime._conn:
-        runtime._conn.execute(
-            """INSERT INTO llm_edge_lifecycle_materialized(
-                 singleton_id,payload_json,updated_ts
-               ) VALUES(1,?,?)
-               ON CONFLICT(singleton_id) DO UPDATE SET
-                 payload_json=excluded.payload_json,updated_ts=excluded.updated_ts""",
-            (
-                _canonical(payload),
-                float(payload.get("updated_ts") or current),
-            ),
-        )
+    payload_json = _canonical(payload)
+    with runtime._lock:
+        with runtime._conn:
+            runtime._conn.execute(
+                """INSERT INTO llm_edge_lifecycle_materialized(
+                     singleton_id,payload_json,updated_ts
+                   ) VALUES(1,?,?)
+                   ON CONFLICT(singleton_id) DO UPDATE SET
+                     payload_json=excluded.payload_json,updated_ts=excluded.updated_ts""",
+                (
+                    payload_json,
+                    float(payload.get("updated_ts") or current),
+                ),
+            )
+        _lifecycle.publish_materialized_lifecycle_cache(runtime, payload_json)
     return payload
 
 
 def _materialized_status(runtime: Any) -> dict[str,Any]:
-    payload = _lifecycle.read_materialized_lifecycle(runtime)
+    payload = _lifecycle.read_cached_materialized_lifecycle(runtime)
     summary = payload.get("researcher") or {}
     return {
         "contract_version": _researcher.CONTRACT_VERSION,
@@ -775,7 +778,7 @@ def _materialized_status(runtime: Any) -> dict[str,Any]:
 
 
 def _materialized_evaluator_status(runtime: Any) -> dict[str, Any]:
-    payload = _lifecycle.read_materialized_lifecycle(runtime)
+    payload = _lifecycle.read_cached_materialized_lifecycle(runtime)
     quality = payload.get("research_quality") or {}
     return {
         "contract_version": _evaluator.CONTRACT_VERSION,
