@@ -255,7 +255,25 @@ def _present_historical(runtime: Any) -> dict[str, Any]:
     return body
 
 
-def install_g1_short_horizon_evidence_nonblocking(runtime: Any) -> None:
+def prewarm_g1_short_horizon_evidence(runtime: Any) -> None:
+    """Fill materialized evidence caches away from HTTP request threads."""
+    original_report = getattr(runtime, "_g1s_evidence_original_report", None)
+    original_status = getattr(runtime, "_g1s_evidence_original_status", None)
+    original_historical_status = getattr(
+        runtime, "_g1s_evidence_original_historical_status", None,
+    )
+    if not callable(original_report) or not callable(original_status):
+        raise RuntimeError("G1S_EVIDENCE_PREWARM_NOT_INSTALLED")
+    for name in REPORT_NAMES:
+        _cache_report(runtime, name, original_report(name))
+    _cache_status(runtime, original_status())
+    if callable(original_historical_status):
+        _cache_historical(runtime, original_historical_status())
+
+
+def install_g1_short_horizon_evidence_nonblocking(
+    runtime: Any, *, prewarm: bool = True,
+) -> None:
     """Prewarm durable research views and replace HTTP readers with memory reads."""
     if getattr(runtime, "_g1s_evidence_nonblocking_version", None) == NONBLOCKING_EVIDENCE_VERSION:
         return
@@ -265,14 +283,9 @@ def install_g1_short_horizon_evidence_nonblocking(runtime: Any) -> None:
     original_refresh = runtime.materialize_evidence_reports
     original_historical_status = getattr(runtime, "historical_walkforward_status", None)
     original_historical_refresh = getattr(runtime, "materialize_historical_walkforward", None)
-
-    # Prewarm before uvicorn/research-worker startup. SQLite access is acceptable
-    # here because no latency-sensitive HTTP request exists yet.
-    for name in REPORT_NAMES:
-        _cache_report(runtime, name, original_report(name))
-    _cache_status(runtime, original_status())
-    if callable(original_historical_status):
-        _cache_historical(runtime, original_historical_status())
+    runtime._g1s_evidence_original_report = original_report
+    runtime._g1s_evidence_original_status = original_status
+    runtime._g1s_evidence_original_historical_status = original_historical_status
 
     def report(self, name: str) -> dict[str, Any]:
         if str(name) not in REPORT_NAMES:
@@ -315,3 +328,5 @@ def install_g1_short_horizon_evidence_nonblocking(runtime: Any) -> None:
     if callable(original_historical_refresh):
         runtime.materialize_historical_walkforward = types.MethodType(historical_refresh, runtime)
     runtime._g1s_evidence_nonblocking_version = NONBLOCKING_EVIDENCE_VERSION
+    if prewarm:
+        prewarm_g1_short_horizon_evidence(runtime)
