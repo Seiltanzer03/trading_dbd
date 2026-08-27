@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 
 import seiltanzer.llm_edge_lifecycle as lifecycle
 import seiltanzer.llm_edge_pr_c as prc
@@ -138,3 +139,54 @@ def test_startup_upgrade_is_idempotent_and_never_downgrades_counts():
     assert second["candidates"] == [{"candidate_id": "persist-me"}]
     assert second["pr_c_contract_version"] == prc.PR_C_CONTRACT_VERSION
     assert second["updated_ts"] == 120.0
+    assert lifecycle.read_cached_materialized_lifecycle(runtime) == second
+
+
+def test_cached_materialized_read_never_waits_for_worker_lock():
+    runtime = Runtime()
+    initialize_journal_storage(runtime)
+    upgraded = initialize_pr_c_materialized_state(runtime, now=200.0)
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_worker_lock():
+        with runtime._lock:
+            acquired.set()
+            release.wait(timeout=1.0)
+
+    thread = threading.Thread(target=hold_worker_lock, daemon=True)
+    thread.start()
+    assert acquired.wait(timeout=1.0)
+    try:
+        started = time.monotonic()
+        reread = lifecycle.read_cached_materialized_lifecycle(runtime)
+        assert time.monotonic() - started < 0.25
+        assert reread == upgraded
+    finally:
+        release.set()
+        thread.join(timeout=1.0)
+
+
+def test_missing_cached_lifecycle_fails_closed_without_worker_lock():
+    runtime = Runtime()
+    setattr(runtime, lifecycle._MATERIALIZED_CACHE_ATTR, "{broken")
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_worker_lock():
+        with runtime._lock:
+            acquired.set()
+            release.wait(timeout=1.0)
+
+    thread = threading.Thread(target=hold_worker_lock, daemon=True)
+    thread.start()
+    assert acquired.wait(timeout=1.0)
+    try:
+        started = time.monotonic()
+        payload = lifecycle.read_cached_materialized_lifecycle(runtime)
+        assert time.monotonic() - started < 0.25
+        assert payload["status"] == "INITIALIZING"
+        assert payload["production_authority"] is False
+    finally:
+        release.set()
+        thread.join(timeout=1.0)
