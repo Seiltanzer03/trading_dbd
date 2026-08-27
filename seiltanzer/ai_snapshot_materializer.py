@@ -13,6 +13,7 @@ fast retryable 503 rather than sitting behind the reverse proxy until HTTP 504.
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import gc
 import math
@@ -484,6 +485,19 @@ def _warming_response(status: dict[str, Any]) -> JSONResponse:
     )
 
 
+def _defer_materializer_start(app: Any, materializer: AISnapshotMaterializer) -> None:
+    """Start heavy snapshot work only at the bounded HTTP startup boundary."""
+    original_lifespan = app.router.lifespan_context
+
+    @contextlib.asynccontextmanager
+    async def materializer_lifespan(inner_app):
+        async with original_lifespan(inner_app):
+            materializer.start()
+            yield
+
+    app.router.lifespan_context = materializer_lifespan
+
+
 def install_ai_snapshot_materializer(app: Any) -> AISnapshotMaterializer:
     """Install one production materializer without changing deterministic math."""
     existing = getattr(app.state, "ai_snapshot_materializer", None)
@@ -521,5 +535,5 @@ def install_ai_snapshot_materializer(app: Any) -> AISnapshotMaterializer:
     def ai_snapshot_status():
         return materializer.status()
 
-    materializer.start()
+    _defer_materializer_start(app, materializer)
     return materializer
