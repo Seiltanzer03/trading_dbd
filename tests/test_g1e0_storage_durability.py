@@ -4,6 +4,9 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from seiltanzer import storage_runtime
 from seiltanzer.config import Settings
 from seiltanzer.engine import Engine
 from seiltanzer.storage_refinement import install_storage_refinement
@@ -49,6 +52,67 @@ def test_prepare_storage_creates_verified_prestart_backup(tmp_path):
     assert len(latest["manifest_payload_sha256"]) == 64
     backup_path = manager.local_dir / latest["database_file"]
     assert backup_path.exists()
+
+
+def test_prestart_quick_check_is_reused_by_startup_marker(tmp_path, monkeypatch):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _minimal_db(Path(settings.trades_db))
+    real_integrity = storage_runtime._sqlite_integrity
+    quick_checks: list[Path] = []
+
+    def tracked_integrity(path: Path, *, full: bool = True):
+        if not full:
+            quick_checks.append(path)
+        return real_integrity(path, full=full)
+
+    monkeypatch.setattr(storage_runtime, "_sqlite_integrity", tracked_integrity)
+    manager = prepare_storage(settings)
+
+    assert quick_checks == [Path(settings.trades_db).resolve()]
+    assert manager._startup_integrity == {
+        "checked_ts": manager._startup_integrity["checked_ts"],
+        "ok": True,
+        "detail": "ok",
+        "check_kind": "quick_check",
+        "verification_scope": "pre_engine_source",
+        "contract_version": storage_runtime.STORAGE_CONTRACT_VERSION,
+    }
+
+    monkeypatch.setattr(
+        storage_runtime,
+        "_sqlite_integrity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup must reuse the completed prestart quick_check")
+        ),
+    )
+    manager.mark_startup()
+    assert manager.marker_path.exists()
+
+    monkeypatch.setattr(storage_runtime, "_sqlite_integrity", tracked_integrity)
+    manager.mark_startup()
+    assert quick_checks == [
+        Path(settings.trades_db).resolve(),
+        Path(settings.trades_db).resolve(),
+    ]
+
+
+def test_prestart_source_quick_check_failure_is_fail_closed(tmp_path, monkeypatch):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _minimal_db(Path(settings.trades_db))
+    manager = StorageManager(settings)
+    real_integrity = storage_runtime._sqlite_integrity
+
+    def source_failure(path: Path, *, full: bool = True):
+        if path == manager.db_path and not full:
+            return False, "source-corrupt"
+        return real_integrity(path, full=full)
+
+    monkeypatch.setattr(storage_runtime, "_sqlite_integrity", source_failure)
+    with pytest.raises(RuntimeError, match="source startup integrity failed"):
+        manager.create_backup(kind="local", reason="prestart")
+
+    assert manager.backups()["local"] == []
+    assert list(manager.local_dir.glob("*.sqlite3")) == []
 
 
 def test_verified_backups_form_previous_snapshot_chain(tmp_path):
