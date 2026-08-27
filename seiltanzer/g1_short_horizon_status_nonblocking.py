@@ -2,8 +2,9 @@
 
 The durable G.1S tables remain the source of truth. This layer separates their
 SQLite reads from latency-sensitive HTTP requests: status plus the bounded
-``cuts``, ``barriers`` and ``path_metrics`` lists are prewarmed before uvicorn
-starts and refreshed by the existing low-priority status materializer.
+``cuts``, ``barriers`` and ``path_metrics`` lists are process-local. Production
+fills them after the HTTP startup boundary; the existing low-priority status
+materializer owns later refreshes.
 Request-time readers never acquire the shared passive/G1S SQLite lock.
 
 If new observations/resolutions/models arrive before the next materialized
@@ -121,7 +122,18 @@ def _cached_operational(runtime: Any, name: str, limit: int) -> dict[str, Any]:
     return root
 
 
-def install_g1_short_horizon_status_nonblocking(runtime: Any) -> None:
+def prewarm_g1_short_horizon_status(runtime: Any) -> None:
+    """Fill process-local presentation caches away from HTTP request threads."""
+    original_status = getattr(runtime, "_g1s_status_original", None)
+    if not callable(original_status):
+        raise RuntimeError("G1S_STATUS_PREWARM_NOT_INSTALLED")
+    _cache_snapshot(runtime, original_status())
+    _refresh_operational(runtime)
+
+
+def install_g1_short_horizon_status_nonblocking(
+    runtime: Any, *, prewarm: bool = True,
+) -> None:
     """Install instance-local caches after all G.1S class refinements exist."""
     if getattr(runtime, "_g1s_nonblocking_status_version", None) == NONBLOCKING_STATUS_VERSION:
         return
@@ -137,16 +149,10 @@ def install_g1_short_horizon_status_nonblocking(runtime: Any) -> None:
         "barriers": runtime.barriers,
         "path_metrics": runtime.path_metrics,
     }
+    runtime._g1s_status_original = original_status
     runtime._g1s_operational_originals = original_operational
     runtime._g1s_operational_cache = {}
     runtime._g1s_operational_cache_errors = {}
-
-    # Prewarm from durable truth before uvicorn starts and before the research
-    # worker can contend for the shared passive/G1S SQLite lock.
-    _cache_snapshot(runtime, original_status())
-    for name, max_limit in _OPERATIONAL_LIMITS.items():
-        _cache_operational(runtime, name,
-                           original_operational[name](limit=max_limit), max_limit)
 
     def status(self) -> dict[str, Any]:
         raw = getattr(self, "_g1s_status_snapshot_json", "")
@@ -231,3 +237,5 @@ def install_g1_short_horizon_status_nonblocking(runtime: Any) -> None:
     runtime.barriers = types.MethodType(barriers, runtime)
     runtime.path_metrics = types.MethodType(path_metrics, runtime)
     runtime._g1s_nonblocking_status_version = NONBLOCKING_STATUS_VERSION
+    if prewarm:
+        prewarm_g1_short_horizon_status(runtime)
