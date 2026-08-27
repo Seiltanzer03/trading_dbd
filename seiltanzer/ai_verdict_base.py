@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .ai_policy import analyze_policies, metric_coverage
+from .canonical_market_context import canonical_instrument_code
 from .source_asof import rows_as_of
 from .strategy_playbooks import PLAYBOOKS as SETUP_PLAYBOOKS
 
@@ -223,12 +224,24 @@ def _observation(tick: dict, policy: dict, trade: dict) -> dict:
 
 
 def build_snapshot(engine) -> dict:
-    tick = engine.tick_payload()
+    canonical_tick = getattr(engine, "canonical_tick_payload", None)
+    tick = canonical_tick() if callable(canonical_tick) else engine.tick_payload()
     captured_ts = time.time()
     trade = tick.get("trade")
     if not trade:
         return {"captured_ts": captured_ts, "trade_id": None,
                 "message": "нет активной сделки"}
+    active_trade = engine.journal.active_trade()
+    tick_instrument = canonical_instrument_code(tick.get("instrument"))
+    trade_instrument = canonical_instrument_code(trade.get("instrument"))
+    active_instrument = canonical_instrument_code(
+        (active_trade or {}).get("instrument"))
+    if (
+        not tick_instrument
+        or tick_instrument != trade_instrument
+        or (active_instrument and tick_instrument != active_instrument)
+    ):
+        raise RuntimeError("CANONICAL_LIVE_TICK_INSTRUMENT_MISMATCH")
     trade_id = int(trade["id"])
     ridge = engine.ridge_payload()
     previous_full = _previous_full_snapshot(engine, trade_id)

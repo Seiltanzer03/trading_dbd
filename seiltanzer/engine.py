@@ -12,6 +12,7 @@ import datetime as dt
 import math
 import time
 from copy import deepcopy
+from typing import Callable
 
 from .config import (
     BREAKEVEN_AFTER,
@@ -21,6 +22,7 @@ from .config import (
     SETUPS,
     Settings,
 )
+from .canonical_market_context import canonical_instrument_code
 from .core import prob as pb
 from .core import risk as rk
 from .data.cache import DiskCache
@@ -80,11 +82,48 @@ class Engine:
         self._execution_mc_cache = None
         self._live_clock_mc_cache_key: tuple | None = None
         self._live_clock_mc_cache = None
+        self._canonical_tick_provider: Callable[[], dict] | None = None
         trade = self.journal.active_trade()
         if trade:
             self.market.set_instrument(trade["instrument"])
 
     # ------------------------------------------------------------ lifecycle
+
+    def bind_canonical_tick_provider(self, provider: Callable[[], dict]) -> None:
+        """Bind the immutable tick generation already published to UI readers."""
+        self._canonical_tick_provider = provider
+
+    def canonical_tick_payload(self, *, copy_payload: bool = True) -> dict:
+        """Return the UI-owned tick; use direct calculation only before binding."""
+        payload = (
+            self._canonical_tick_provider()
+            if self._canonical_tick_provider is not None
+            else self.tick_payload()
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError("CANONICAL_LIVE_TICK_UNAVAILABLE")
+        active = self.journal.active_trade()
+        payload_trade = payload.get("trade") if isinstance(payload.get("trade"), dict) else None
+        context_matches = (
+            (active is None and payload_trade is None)
+            or (
+                active is not None
+                and payload_trade is not None
+                and str(active.get("id")) == str(payload_trade.get("id"))
+                and canonical_instrument_code(active.get("instrument"))
+                == canonical_instrument_code(payload.get("instrument"))
+                == canonical_instrument_code(payload_trade.get("instrument"))
+            )
+        )
+        if not context_matches:
+            # Standalone demo/tests do not install the production AI materializer;
+            # let them calculate the new generation synchronously. Production
+            # fails closed until the background owner publishes it.
+            if self.settings.demo:
+                payload = self.tick_payload()
+            else:
+                raise RuntimeError("CANONICAL_LIVE_TICK_TRADE_MISMATCH")
+        return deepcopy(payload) if copy_payload else payload
 
     def _reset_scenario_caches(self) -> None:
         self._mc_cache_key = None

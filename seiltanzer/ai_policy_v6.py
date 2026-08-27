@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from . import ai_policy_v5 as _impl
+from .canonical_market_context import price_quote_available, price_quote_reason
 
 
 globals().update({
@@ -244,10 +245,7 @@ def _input_audit(tick: dict, ridge: dict) -> dict:
     proxy = feeds.get("proxy_price") or {}
     chain = feeds.get("chain") or {}
     correlation = tick.get("correlation") or {}
-    price_available = (
-        _num(price.get("value")) is not None
-        and price.get("status") not in {None, "no_data"}
-    )
+    price_available = price_quote_available(price)
     proxy_available = (
         _num(proxy.get("value")) is not None
         and proxy.get("status") not in {None, "no_data"}
@@ -268,7 +266,7 @@ def _input_audit(tick: dict, ridge: dict) -> dict:
             "status": price.get("status"),
             "source": price.get("source"),
             "value": _num(price.get("value")),
-            "reason": price.get("error") if not price_available else None,
+            "reason": price_quote_reason(price) if not price_available else None,
             "role": "optimizer_and_geometry",
         },
         "option_proxy_price": {
