@@ -329,10 +329,10 @@ def _restore_verified_bytes_for_drill(
 def run_restore_drill(manager: StorageManager) -> dict[str, Any]:
     """Restore newest schema-complete verified snapshot to a disposable DB.
 
-    The manager-wide backup lock is deliberately not held.  Published backup and
-    manifest files are immutable; if retention races this read the drill fails
-    visibly instead of waiting behind a potentially long off-host backup.  This
-    keeps a localhost readiness request independent of scheduled backup I/O.
+    With normal headroom the manager-wide backup lock is not held.  Under low
+    headroom it is acquired non-blocking and held only across the disposable
+    copy, preventing a concurrent replacement backup from consuming the reserved
+    space.  Readiness therefore never waits behind scheduled backup I/O.
     """
     started = time.time()
     state_path = Path(manager.data_dir)/RESTORE_DRILL_STATE_FILENAME
@@ -351,26 +351,25 @@ def run_restore_drill(manager: StorageManager) -> dict[str, Any]:
         backup_bytes = int(
             latest.get("database_size_bytes") or backup_db.stat().st_size
         )
-        headroom = reserve_restore_drill_headroom(
+        with reserve_restore_drill_headroom(
             manager,
             required_bytes=backup_bytes,
             protected_backup_id=str(latest.get("backup_id") or ""),
-        )
+        ) as headroom:
+            fd, temp_name = tempfile.mkstemp(
+                prefix="seiltanzer-service-restore-drill-", suffix=".sqlite3")
+            os.close(fd)
+            Path(temp_name).unlink(missing_ok=True)
+            destination = Path(temp_name)
 
-        fd, temp_name = tempfile.mkstemp(
-            prefix="seiltanzer-service-restore-drill-", suffix=".sqlite3")
-        os.close(fd)
-        Path(temp_name).unlink(missing_ok=True)
-        destination = Path(temp_name)
-
-        result = _restore_verified_bytes_for_drill(
-            backup_db=backup_db,
-            manifest_path=manifest_path,
-            destination=destination,
-            required_tables=required,
-        )
-        if result.get("ok") is not True:
-            raise RuntimeError("restore drill contract did not return ok=true")
+            result = _restore_verified_bytes_for_drill(
+                backup_db=backup_db,
+                manifest_path=manifest_path,
+                destination=destination,
+                required_tables=required,
+            )
+            if result.get("ok") is not True:
+                raise RuntimeError("restore drill contract did not return ok=true")
 
         report = {
             "ok": True,
