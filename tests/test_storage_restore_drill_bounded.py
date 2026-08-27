@@ -60,6 +60,7 @@ def test_restore_drill_does_not_wait_for_long_storage_manager_lock(tmp_path):
     assert report["writeback_window_bytes"] == WRITEBACK_WINDOW_BYTES
     assert isinstance(report["posix_fadvise_available"], bool)
     assert report["headroom_reservation"]["pruned"] is False
+    assert report["headroom_reservation"]["exclusive_backup_window"] is False
     assert report["live_database_replaced"] is False
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -146,7 +147,8 @@ def test_restore_drill_headroom_prunes_only_older_verified_backup(
     newest = manager.backups()["local"][0]
     required = int(newest["database_size_bytes"])
     reserved = (required * 2) + storage_disk_guard.MIN_BACKUP_HEADROOM_BYTES
-    free_values = iter((reserved - 1, reserved))
+    locked = required + storage_disk_guard.MIN_BACKUP_HEADROOM_BYTES
+    free_values = iter((reserved - 1, locked))
 
     class Stat:
         f_frsize = 1
@@ -156,16 +158,55 @@ def test_restore_drill_headroom_prunes_only_older_verified_backup(
             return next(free_values)
 
     monkeypatch.setattr(storage_disk_guard.os, "statvfs", lambda _directory: Stat())
-    report = storage_disk_guard.reserve_restore_drill_headroom(
+    with storage_disk_guard.reserve_restore_drill_headroom(
         manager,
         required_bytes=required,
         protected_backup_id=str(newest["backup_id"]),
-    )
+    ) as report:
+        remaining = manager.backups()["local"]
+        assert report["exclusive_backup_window"] is True
+        assert [item["backup_id"] for item in remaining] == [newest["backup_id"]]
 
-    remaining = manager.backups()["local"]
     assert report["pruned"] is True
     assert report["retention"]["removed"] == 1
-    assert [item["backup_id"] for item in remaining] == [newest["backup_id"]]
+
+
+def test_low_headroom_restore_drill_never_waits_for_active_backup(
+    tmp_path, monkeypatch
+):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _db(Path(settings.trades_db))
+    manager = StorageManager(settings)
+    backup = manager.create_backup(kind="local", reason="seed")
+    acquired = threading.Event()
+    release = threading.Event()
+
+    class Stat:
+        f_frsize = 1
+        f_bavail = 0
+
+    def hold_backup_lock():
+        with manager._lock:
+            acquired.set()
+            release.wait(timeout=2.0)
+
+    thread = threading.Thread(target=hold_backup_lock, daemon=True)
+    thread.start()
+    assert acquired.wait(timeout=1.0)
+    monkeypatch.setattr(storage_disk_guard.os, "statvfs", lambda _directory: Stat())
+    try:
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="while backup is active"):
+            with storage_disk_guard.reserve_restore_drill_headroom(
+                manager,
+                required_bytes=Path(backup.database_path).stat().st_size,
+                protected_backup_id=backup.backup_id,
+            ):
+                raise AssertionError("unreachable")
+        assert time.monotonic() - started < 0.5
+    finally:
+        release.set()
+        thread.join(timeout=1.0)
 
 
 def test_failed_low_space_replacement_preserves_newest_verified_backup(
