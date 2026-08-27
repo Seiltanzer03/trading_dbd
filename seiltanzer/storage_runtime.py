@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -120,6 +121,28 @@ def _table_counts(path: Path) -> dict[str, int | None]:
     finally:
         conn.close()
     return out
+
+
+def _verify_backup_snapshot(
+    path: Path,
+) -> tuple[bool, str, str, dict[str, int | None]]:
+    """Run independent immutable-snapshot checks in one bounded read window.
+
+    Once SQLite has closed the destination connection, integrity, byte identity
+    and critical-table counts are independent read-only validations.  Running
+    them together preserves every fail-closed assertion while avoiding three
+    sequential whole-snapshot scans during production cold start.
+    """
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=3, thread_name_prefix="backup-verify",
+    ) as executor:
+        integrity = executor.submit(_sqlite_integrity, path, full=True)
+        digest = executor.submit(_sha256, path)
+        counts = executor.submit(_table_counts, path)
+        ok, detail = integrity.result()
+        sha = digest.result()
+        table_counts = counts.result()
+    return ok, detail, sha, table_counts
 
 
 @dataclass(frozen=True)
@@ -263,13 +286,11 @@ class StorageManager:
                 dst.close()
                 src.close()
 
-            ok, integrity_detail = _sqlite_integrity(temp_db, full=True)
+            ok, integrity_detail, sha, counts = _verify_backup_snapshot(temp_db)
             if not ok:
                 with contextlib.suppress(FileNotFoundError):
                     temp_db.unlink()
                 raise RuntimeError(f"backup integrity failed: {integrity_detail}")
-            sha = _sha256(temp_db)
-            counts = _table_counts(temp_db)
             size = temp_db.stat().st_size
             os.replace(temp_db, final_db)
             manifest = {
