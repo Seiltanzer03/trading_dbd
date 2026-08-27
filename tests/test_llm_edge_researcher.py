@@ -3,7 +3,7 @@ import sqlite3
 import threading
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 
 from seiltanzer.llm_edge_researcher import (
     CONTRACT_VERSION,
@@ -209,7 +209,16 @@ def test_status_and_routes_are_research_only():
     install_llm_edge_researcher_routes(app)
     paths = {route.path: set(route.methods or ()) for route in app.routes}
     assert paths["/api/research/g1s/edge-researcher/status"] == {"GET"}
+    assert paths["/api/research/g1s/edge-researcher/lifecycle"] == {"GET"}
     assert paths["/api/research/g1s/edge-researcher/propose"] == {"POST"}
+    lifecycle_route = next(
+        route for route in app.routes
+        if route.path == "/api/research/g1s/edge-researcher/lifecycle"
+    )
+    lifecycle_response = lifecycle_route.endpoint()
+    assert isinstance(lifecycle_response, Response)
+    lifecycle_payload = json.loads(lifecycle_response.body)
+    assert lifecycle_payload["production_authority"] is False
 
     # Startup route installation upgrades the prebuilt state before the first
     # GET; no research worker/history reconstruction is required for the contract.
