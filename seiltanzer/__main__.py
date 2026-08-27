@@ -101,9 +101,9 @@ def main() -> None:
     storage = prepare_storage(settings)
     app = create_app(settings)
 
-    # Prewarm already-materialized G.1S presentation snapshots before uvicorn and
-    # before the research worker starts. HTTP status/evidence reads then stay off
-    # the shared passive/G1S SQLite lock while worker-owned durable truth is kept.
+    # Install fail-closed process-local G.1S presentation caches before uvicorn.
+    # Their durable reads start on one daemon at the HTTP startup boundary, so
+    # cold SQLite prewarm cannot delay binding and request paths never touch it.
     install_g1_short_horizon_status_nonblocking(
         app.state.engine.short_horizon, prewarm=False,
     )

@@ -2,8 +2,9 @@
 
 The durable G.1S tables remain the source of truth. This layer separates their
 SQLite reads from latency-sensitive HTTP requests: status plus the bounded
-``cuts``, ``barriers`` and ``path_metrics`` lists are prewarmed before uvicorn
-starts and refreshed by the existing low-priority status materializer.
+``cuts``, ``barriers`` and ``path_metrics`` lists are process-local. Production
+fills them after the HTTP startup boundary; the existing low-priority status
+materializer owns later refreshes.
 Request-time readers never acquire the shared passive/G1S SQLite lock.
 
 If new observations/resolutions/models arrive before the next materialized

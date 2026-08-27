@@ -2,9 +2,9 @@
 
 Durable SQLite rows remain the source of truth and are still produced only by
 existing research materializers. This facade moves presentation reads off the
-shared passive/G1S SQLite lock: evidence snapshots and historical walk-forward
-status are prewarmed before uvicorn/research-worker startup, then refreshed only
-from the worker path after durable writes.
+shared passive/G1S SQLite lock. Production installs fail-closed caches before
+uvicorn, fills them after the HTTP startup boundary, then refreshes only from
+the worker path after durable writes.
 
 HTTP reads never touch SQLite and never trigger full-history/network work.
 Missing or corrupt process-local cache fails closed instead of falling back to a
