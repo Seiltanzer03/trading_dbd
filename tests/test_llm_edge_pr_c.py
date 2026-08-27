@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import seiltanzer.llm_edge_lifecycle as lifecycle
 import seiltanzer.llm_edge_pr_c as prc
 import seiltanzer.llm_edge_researcher as researcher
 
@@ -324,6 +325,12 @@ def test_true_strict_reference_keeps_existing_40pct_cap():
 def test_materialized_status_has_no_request_time_history_scan():
     runtime = Runtime()
     prc._ensure_storage(runtime)
+    payload_json = json.dumps({
+        "status": "OK",
+        "researcher": {"proposal_runs": 2, "hypotheses": 4},
+        "automation": {"manual_post_only": False},
+        "research_quality": {"evaluations_total": 3},
+    })
     with runtime._conn:
         runtime._conn.execute("""CREATE TABLE llm_edge_lifecycle_materialized(
             singleton_id INTEGER PRIMARY KEY,
@@ -332,13 +339,9 @@ def test_materialized_status_has_no_request_time_history_scan():
         )""")
         runtime._conn.execute(
             "INSERT INTO llm_edge_lifecycle_materialized VALUES(1,?,?)",
-            (json.dumps({
-                "status": "OK",
-                "researcher": {"proposal_runs": 2, "hypotheses": 4},
-                "automation": {"manual_post_only": False},
-                "research_quality": {"evaluations_total": 3},
-            }), 100.0),
+            (payload_json, 100.0),
         )
+    lifecycle.publish_materialized_lifecycle_cache(runtime, payload_json)
 
     status = prc._materialized_status(runtime)
     evaluator_status = prc._materialized_evaluator_status(runtime)
