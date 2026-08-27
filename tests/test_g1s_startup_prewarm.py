@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
-from types import SimpleNamespace
+
+from fastapi import FastAPI
 
 from seiltanzer.g1_short_horizon_evidence_nonblocking import (
     install_g1_short_horizon_evidence_nonblocking,
@@ -13,15 +15,6 @@ from seiltanzer.g1_short_horizon_startup_prewarm import (
 from seiltanzer.g1_short_horizon_status_nonblocking import (
     install_g1_short_horizon_status_nonblocking,
 )
-
-
-class _App:
-    def __init__(self):
-        self.state = SimpleNamespace()
-        self.handlers = {}
-
-    def add_event_handler(self, event, handler):
-        self.handlers.setdefault(event, []).append(handler)
 
 
 class _Runtime:
@@ -80,9 +73,9 @@ class _Runtime:
         return {"refreshed": False}
 
 
-def test_production_prewarm_returns_startup_without_request_time_sqlite():
+def test_production_prewarm_uses_real_fastapi_lifespan_without_blocking():
     runtime = _Runtime()
-    app = _App()
+    app = FastAPI()
     install_g1_short_horizon_status_nonblocking(runtime, prewarm=False)
     install_g1_short_horizon_evidence_nonblocking(runtime, prewarm=False)
 
@@ -92,22 +85,25 @@ def test_production_prewarm_returns_startup_without_request_time_sqlite():
     assert runtime.materialized_evidence_report("calibration_oos")["status"] == "BUILDING"
 
     install_g1_short_horizon_startup_prewarm(app, runtime)
-    started = time.monotonic()
-    app.handlers["startup"][0]()
-    elapsed = time.monotonic() - started
 
-    assert elapsed < 0.10
-    assert runtime.started.wait(1.0)
-    assert app.state.g1s_startup_prewarm["state"] == "BUILDING"
-    assert runtime.status()["status"] == "UNAVAILABLE"
+    async def exercise_lifespan():
+        started = time.monotonic()
+        async with app.router.lifespan_context(app):
+            elapsed = time.monotonic() - started
+            assert elapsed < 0.10
+            assert runtime.started.wait(1.0)
+            assert app.state.g1s_startup_prewarm["state"] == "BUILDING"
+            assert runtime.status()["status"] == "UNAVAILABLE"
 
-    runtime.release.set()
-    thread = app.state.g1s_startup_prewarm["thread"]
-    thread.join(2.0)
-    assert not thread.is_alive()
-    assert app.state.g1s_startup_prewarm["state"] == "READY"
-    assert app.state.g1s_startup_prewarm["errors"] == {}
-    assert runtime.status()["status"] == "READY"
-    assert runtime.materialized_evidence_report(
-        "calibration_oos",
-    )["production_authority"] is False
+            runtime.release.set()
+            thread = app.state.g1s_startup_prewarm["thread"]
+            thread.join(2.0)
+            assert not thread.is_alive()
+            assert app.state.g1s_startup_prewarm["state"] == "READY"
+            assert app.state.g1s_startup_prewarm["errors"] == {}
+            assert runtime.status()["status"] == "READY"
+            assert runtime.materialized_evidence_report(
+                "calibration_oos",
+            )["production_authority"] is False
+
+    asyncio.run(exercise_lifespan())

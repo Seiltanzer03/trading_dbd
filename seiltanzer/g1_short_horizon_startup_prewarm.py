@@ -1,6 +1,7 @@
 """Defer G.1S presentation prewarm until the HTTP server startup boundary."""
 from __future__ import annotations
 
+import contextlib
 import threading
 from typing import Any
 
@@ -54,4 +55,12 @@ def install_g1_short_horizon_startup_prewarm(app: Any, runtime: Any) -> None:
         state["thread"] = thread
         thread.start()
 
-    app.add_event_handler("startup", start)
+    original_lifespan = app.router.lifespan_context
+
+    @contextlib.asynccontextmanager
+    async def startup_prewarm_lifespan(inner_app):
+        async with original_lifespan(inner_app):
+            start()
+            yield
+
+    app.router.lifespan_context = startup_prewarm_lifespan
