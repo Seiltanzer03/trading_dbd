@@ -13,7 +13,7 @@ import errno
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from . import storage_runtime as _s
 
@@ -125,9 +125,10 @@ def _preflight_minimum_verified(self, directory: Path) -> int:
     return 1 if free_bytes < required_bytes else MIN_VERIFIED_LOCAL_BACKUPS
 
 
+@contextlib.contextmanager
 def reserve_restore_drill_headroom(
     self, *, required_bytes: int, protected_backup_id: str,
-) -> dict[str, Any]:
+) -> Iterator[dict[str, Any]]:
     """Reserve disposable-copy space without dropping the newest recovery point.
 
     This reuses the same one-backup low-space floor as snapshot replacement.  It
@@ -135,24 +136,25 @@ def reserve_restore_drill_headroom(
     fails visibly, while the live database and newest verified backup remain.
     """
     directory = self._backup_dir("local")
-    # The drill intentionally never holds the manager lock while copying.  Keep
-    # room for its disposable restore and one concurrent replacement snapshot;
-    # production had 8.1 GiB free yet ENOSPC when these two windows overlapped.
-    required = (max(1, int(required_bytes)) * 2) + MIN_BACKUP_HEADROOM_BYTES
+    copy_bytes = max(1, int(required_bytes))
+    locked_required = copy_bytes + MIN_BACKUP_HEADROOM_BYTES
+    unlocked_required = (copy_bytes * 2) + MIN_BACKUP_HEADROOM_BYTES
 
     def free_bytes() -> int:
         stat = os.statvfs(directory)
         return max(0, int(stat.f_bavail) * int(stat.f_frsize))
 
     before = free_bytes()
-    if before >= required:
-        return {
+    if before >= unlocked_required:
+        yield {
             "disk_guard_version": DISK_GUARD_VERSION,
             "pruned": False,
-            "required_bytes": required,
+            "required_bytes": unlocked_required,
             "free_before_bytes": before,
             "free_after_bytes": before,
+            "exclusive_backup_window": False,
         }
+        return
 
     if not self._lock.acquire(blocking=False):
         raise RuntimeError("restore drill headroom unavailable while backup is active")
@@ -162,23 +164,23 @@ def reserve_restore_drill_headroom(
         if not newest_id or newest_id != str(protected_backup_id):
             raise RuntimeError("restore drill cannot prune its protected newest backup")
         retention = _apply_local_byte_budget(self, minimum_verified=1)
+        after = free_bytes()
+        if after < locked_required:
+            raise OSError(
+                errno.ENOSPC,
+                "insufficient headroom after preserving newest verified backup",
+            )
+        yield {
+            "disk_guard_version": DISK_GUARD_VERSION,
+            "pruned": True,
+            "required_bytes": locked_required,
+            "free_before_bytes": before,
+            "free_after_bytes": after,
+            "exclusive_backup_window": True,
+            "retention": retention,
+        }
     finally:
         self._lock.release()
-
-    after = free_bytes()
-    if after < required:
-        raise OSError(
-            errno.ENOSPC,
-            "insufficient headroom after preserving newest verified backup",
-        )
-    return {
-        "disk_guard_version": DISK_GUARD_VERSION,
-        "pruned": True,
-        "required_bytes": required,
-        "free_before_bytes": before,
-        "free_after_bytes": after,
-        "retention": retention,
-    }
 
 
 def _apply_local_byte_budget(
