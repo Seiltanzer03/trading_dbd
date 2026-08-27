@@ -120,20 +120,23 @@ def initialize_pr_c_materialized_state(
     payload["production_authority"] = False
     payload["updated_ts"] = current
 
-    with runtime._lock, runtime._conn:
-        runtime._conn.execute(
-            """INSERT INTO llm_edge_lifecycle_materialized(
-                 singleton_id,payload_json,updated_ts
-               ) VALUES(1,?,?)
-               ON CONFLICT(singleton_id) DO UPDATE SET
-                 payload_json=excluded.payload_json,
-                 updated_ts=excluded.updated_ts""",
-            (
-                json.dumps(
-                    payload, ensure_ascii=False, sort_keys=True,
-                    separators=(",", ":"), allow_nan=False,
+    payload_json = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    )
+    with runtime._lock:
+        with runtime._conn:
+            runtime._conn.execute(
+                """INSERT INTO llm_edge_lifecycle_materialized(
+                     singleton_id,payload_json,updated_ts
+                   ) VALUES(1,?,?)
+                   ON CONFLICT(singleton_id) DO UPDATE SET
+                     payload_json=excluded.payload_json,
+                     updated_ts=excluded.updated_ts""",
+                (
+                    payload_json,
+                    current,
                 ),
-                current,
-            ),
-        )
+            )
+        _lifecycle.publish_materialized_lifecycle_cache(runtime, payload_json)
     return payload
