@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from . import storage_runtime as _storage
+from .storage_disk_guard import reserve_restore_drill_headroom
 from .storage_runtime import (
     BACKUP_CONTRACT_VERSION,
     StorageManager,
@@ -42,7 +43,7 @@ from .storage_runtime import (
 )
 
 
-RESTORE_DRILL_CONTRACT_VERSION = "seiltanzer-restore-drill-v3-byte-identical"
+RESTORE_DRILL_CONTRACT_VERSION = "seiltanzer-restore-drill-v4-byte-identical-headroom"
 RESTORE_DRILL_STATE_FILENAME = ".restore_drill_state.json"
 COPY_CHUNK_BYTES = 4 * 1024 * 1024
 WRITEBACK_WINDOW_BYTES = 64 * 1024 * 1024
@@ -347,6 +348,14 @@ def run_restore_drill(manager: StorageManager) -> dict[str, Any]:
         if not str(manifest_path) or not database_file:
             raise RuntimeError("verified backup metadata is incomplete")
         backup_db = manifest_path.parent/database_file
+        backup_bytes = int(
+            latest.get("database_size_bytes") or backup_db.stat().st_size
+        )
+        headroom = reserve_restore_drill_headroom(
+            manager,
+            required_bytes=backup_bytes,
+            protected_backup_id=str(latest.get("backup_id") or ""),
+        )
 
         fd, temp_name = tempfile.mkstemp(
             prefix="seiltanzer-service-restore-drill-", suffix=".sqlite3")
@@ -386,6 +395,7 @@ def run_restore_drill(manager: StorageManager) -> dict[str, Any]:
             "page_cache_pressure_bounded": result.get("page_cache_pressure_bounded"),
             "writeback_window_bytes": result.get("writeback_window_bytes"),
             "posix_fadvise_available": result.get("posix_fadvise_available"),
+            "headroom_reservation": headroom,
             "live_database_replaced": False,
             "drill_destination_kind": "disposable_tempfile",
             "completed_ts": time.time(),
