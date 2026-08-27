@@ -195,6 +195,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return payload
 
+    # AI/Position Manager must consume this exact immutable generation instead
+    # of running a second market calculation which can observe a different feed
+    # state during a transient refresh failure.
+    bind_canonical_tick = getattr(engine, "bind_canonical_tick_provider", None)
+    if callable(bind_canonical_tick):
+        bind_canonical_tick(materialized_live_tick)
+
     instruments_payload = {
         code: {
             "yahoo": instrument.yahoo,

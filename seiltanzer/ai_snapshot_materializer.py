@@ -22,6 +22,11 @@ from typing import Any, Callable
 
 from fastapi.responses import JSONResponse
 
+from .canonical_market_context import (
+    canonical_instrument_code,
+    price_quote_available,
+)
+
 
 MATERIALIZER_VERSION = "ai-snapshot-materializer-v2-event-driven"
 REVIEW_DELTA_R = 0.15
@@ -114,6 +119,8 @@ class AISnapshotMaterializer:
         self._chain_marker: str | None = None
         self._baseline_r: float | None = None
         self._boundaries_r: tuple[float, ...] = ()
+        self._baseline_quote_available: bool | None = None
+        self._baseline_instrument: str | None = None
 
     def current_trade(self) -> dict[str, Any] | None:
         try:
@@ -125,9 +132,26 @@ class AISnapshotMaterializer:
     def current_trade_id(self) -> str | None:
         return _trade_id(self.current_trade())
 
+    def _current_quote(self) -> tuple[str | None, bool | None, float | None]:
+        canonical_tick = getattr(self.engine, "canonical_tick_payload", None)
+        if not callable(canonical_tick):
+            return None, None, None
+        try:
+            tick = canonical_tick(copy_payload=False)
+        except Exception:  # canonical owner may still be warming during startup
+            return None, None, None
+        instrument = canonical_instrument_code(tick.get("instrument")) or None
+        row = ((tick.get("feeds") or {}).get("price") or {})
+        available = price_quote_available(row)
+        return instrument, available, _finite(row.get("value")) if available else None
+
     def _current_price(self, trade: dict[str, Any] | None) -> float | None:
         if not trade:
             return None
+        instrument, available, value = self._current_quote()
+        if available is not None:
+            trade_instrument = canonical_instrument_code(trade.get("instrument"))
+            return value if instrument == trade_instrument and available else None
         try:
             value = self.engine._current_instrument_price(trade)
             value = _finite(value)
@@ -216,6 +240,8 @@ class AISnapshotMaterializer:
             baseline_r = self._baseline_r
             boundaries = self._boundaries_r
             chain_marker = self._chain_marker
+            baseline_quote_available = self._baseline_quote_available
+            baseline_instrument = self._baseline_instrument
             invalidated = self._invalidated_reason
         if invalidated:
             return invalidated
@@ -225,6 +251,19 @@ class AISnapshotMaterializer:
             return "INITIAL_BUILD"
         if snapshot_trade != current_trade:
             return "TRADE_CHANGED"
+        live_instrument, live_quote_available, _ = self._current_quote()
+        if (
+            baseline_instrument is not None
+            and live_instrument is not None
+            and live_instrument != baseline_instrument
+        ):
+            return "CANONICAL_MARKET_CONTEXT_CHANGED"
+        if (
+            baseline_quote_available is not None
+            and live_quote_available is not None
+            and live_quote_available != baseline_quote_available
+        ):
+            return "PRICE_AVAILABILITY_CHANGED"
         live_r = self._current_r(trade)
         if baseline_r is not None and live_r is not None:
             if abs(live_r - baseline_r) >= self.review_delta_r - 1e-9:
@@ -271,6 +310,8 @@ class AISnapshotMaterializer:
                     self._baseline_r = None
                     self._boundaries_r = ()
                     self._chain_marker = None
+                    self._baseline_quote_available = None
+                    self._baseline_instrument = None
                     self._invalidated_reason = None
             self._wake.wait(self.watch_interval_sec)
             self._wake.clear()
@@ -285,6 +326,11 @@ class AISnapshotMaterializer:
                 self._built_at = time.time()
                 self._build_ms = 0.0
                 self._last_error = None
+                self._baseline_r = None
+                self._boundaries_r = ()
+                self._chain_marker = None
+                self._baseline_quote_available = None
+                self._baseline_instrument = None
                 self._invalidated_reason = None
             return
         started_wall = time.time()
@@ -326,6 +372,13 @@ class AISnapshotMaterializer:
             boundaries = self._snapshot_boundaries(snapshot, final_trade)
             baseline_r = _finite(trigger.get("baseline_r"))
             chain_marker = self._current_chain_marker()
+            audit_price = (((snapshot.get("policy_manager") or {})
+                            .get("input_audit") or {}).get("rows") or {}).get(
+                                "instrument_price") or {}
+            baseline_quote_available = bool(audit_price.get("available") is True)
+            baseline_instrument = canonical_instrument_code(
+                ((snapshot.get("strategy") or {}).get("instrument")
+                 or (final_trade or {}).get("instrument"))) or None
             with self._lock:
                 self._snapshot = annotated
                 self._snapshot_trade_id = snapshot_trade
@@ -336,6 +389,8 @@ class AISnapshotMaterializer:
                 self._baseline_r = baseline_r
                 self._boundaries_r = boundaries
                 self._chain_marker = chain_marker
+                self._baseline_quote_available = baseline_quote_available
+                self._baseline_instrument = baseline_instrument
                 self._invalidated_reason = None
         except Exception as exc:
             with self._lock:
@@ -371,6 +426,7 @@ class AISnapshotMaterializer:
                 "review_delta_r": self.review_delta_r,
                 "baseline_r": round(self._baseline_r, 6) if self._baseline_r is not None else None,
                 "live_r": round(live_r, 6) if live_r is not None else None,
+                "canonical_quote_available": self._baseline_quote_available,
                 "boundary_r": [round(x, 6) for x in self._boundaries_r],
                 "invalidated_reason": self._invalidated_reason,
                 "build_ms": round(self._build_ms, 1) if self._build_ms is not None else None,
