@@ -30,6 +30,16 @@ def test_deploy_has_bounded_progress_visible_prestart_window():
     assert "DEPLOY_ORPHAN_PRESTART_TEMP_BYTES_REMOVED" in workflow
     assert "systemctl restart seiltanzer" not in workflow
 
+    # A SIGKILL during the byte-identical readiness drill can likewise leave its
+    # disposable full-size copy. Remove only its exact /tmp prefix after stop,
+    # and fail rather than unlink any file still open by another process.
+    restore_cleanup = workflow.index("DEPLOY_ORPHAN_RESTORE_TEMPS_REMOVED")
+    assert stop < restore_cleanup < start
+    assert "/tmp/seiltanzer-service-restore-drill-*.sqlite3" in workflow
+    assert 'lsof -- "$orphan"' in workflow
+    assert "Refusing open restore temp after service stop" in workflow
+    assert "DEPLOY_ORPHAN_RESTORE_TEMP_BYTES_REMOVED" in workflow
+
     # If a restart loop fills the disk before git fetch, recovery must first stop
     # the writer, remove only exact hidden prestart temps, and re-check the same
     # unchanged 512 MiB fetch headroom gate.
