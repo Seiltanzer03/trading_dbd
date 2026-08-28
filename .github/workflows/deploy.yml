@@ -275,11 +275,11 @@ jobs:
             systemctl reset-failed seiltanzer >/dev/null 2>&1 || true
 
             # A slow shutdown can be SIGKILLed by systemd while the old process
-            # owns a young hidden SQLite backup temp. `systemctl stop` returning
-            # gives us the safe boundary: no live seiltanzer writer remains, so
-            # only those hidden local-backup temps are orphaned and may be removed.
-            # Verified recovery points, manifests and the authoritative DB are
-            # deliberately outside this exact path/name contract.
+            # owns a young hidden SQLite backup temp or a disposable restore-drill
+            # copy. `systemctl stop` returning gives us the safe boundary: no live
+            # seiltanzer writer remains, so only those exact temp names are orphaned
+            # and may be removed. Verified recovery points, manifests and the
+            # authoritative DB are deliberately outside these path/name contracts.
             systemctl stop seiltanzer
             if systemctl is-active --quiet seiltanzer; then
               echo "::error::seiltanzer still active after explicit stop"
@@ -305,6 +305,38 @@ jobs:
             )
             echo "DEPLOY_ORPHAN_PRESTART_TEMPS_REMOVED=$orphan_tmp_n"
             echo "DEPLOY_ORPHAN_PRESTART_TEMP_BYTES_REMOVED=$orphan_tmp_bytes"
+
+            command -v lsof >/dev/null 2>&1 || {
+              echo "::error::lsof is required for bounded restore-temp cleanup"
+              exit 1
+            }
+            restore_tmp_n=0
+            restore_tmp_bytes=0
+            while IFS= read -r -d '' orphan; do
+              case "$orphan" in
+                /tmp/seiltanzer-service-restore-drill-*.sqlite3) ;;
+                *)
+                  echo "::error::Refusing unexpected restore temp cleanup path: $orphan"
+                  exit 1
+                  ;;
+              esac
+              if lsof -- "$orphan" >/dev/null 2>&1; then
+                echo "::error::Refusing open restore temp after service stop: $orphan"
+                exit 1
+              fi
+              size=$(stat -c '%s' "$orphan" 2>/dev/null || echo 0)
+              rm -f -- "$orphan"
+              restore_tmp_n=$((restore_tmp_n + 1))
+              restore_tmp_bytes=$((restore_tmp_bytes + size))
+            done < <(
+              find /tmp -xdev -maxdepth 1 -type f \
+                -name 'seiltanzer-service-restore-drill-*.sqlite3' \
+                -print0 2>/dev/null
+            )
+            sync || true
+            echo "DEPLOY_ORPHAN_RESTORE_TEMPS_REMOVED=$restore_tmp_n"
+            echo "DEPLOY_ORPHAN_RESTORE_TEMP_BYTES_REMOVED=$restore_tmp_bytes"
+            df -h / || true
             systemctl start seiltanzer
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
