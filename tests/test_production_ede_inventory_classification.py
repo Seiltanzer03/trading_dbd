@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "production_ede_inventory.py"
 _SPEC = importlib.util.spec_from_file_location("production_ede_inventory", _SCRIPT_PATH)
@@ -39,6 +41,27 @@ def _row(feature_id: str, *, real: int = 0, usable: bool = False,
             str(horizon): _bucket() for horizon in inventory.HORIZONS
         },
     }
+
+
+def test_feature_horizon_contract_accepts_complete_buckets() -> None:
+    inventory._validate_feature_horizons([_row("price.ret_5m")])
+
+
+def test_feature_horizon_contract_rejects_missing_or_malformed_buckets() -> None:
+    missing_horizon = _row("price.ret_5m")
+    missing_horizon["by_horizon"].pop("240")
+    with pytest.raises(AssertionError, match="price.ret_5m horizons mismatch"):
+        inventory._validate_feature_horizons([missing_horizon])
+
+    non_mapping = _row("price.ret_5m")
+    non_mapping["by_horizon"]["60"] = []
+    with pytest.raises(AssertionError, match="horizon 60 must be a mapping"):
+        inventory._validate_feature_horizons([non_mapping])
+
+    missing_field = _row("price.ret_5m")
+    missing_field["by_horizon"]["120"].pop("data_maturity")
+    with pytest.raises(AssertionError, match="horizon 120 missing fields"):
+        inventory._validate_feature_horizons([missing_field])
 
 
 def test_coverage_state_separates_missing_history_from_real_insufficient_n() -> None:
