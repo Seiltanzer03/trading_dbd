@@ -94,7 +94,7 @@ jobs:
             --remote-name "active_structured_${HORIZON}m_latest.json" \
             --run-id "$RUN_ID"
       - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}
         with:
           name: active-structured-${{ matrix.horizon }}m-${{ needs.resolve.outputs.expected_sha }}
           path: active_structured_${{ matrix.horizon }}m_latest.json
@@ -137,7 +137,7 @@ jobs:
             --remote-name active_ml_latest.json \
             --run-id "$RUN_ID"
       - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}
         with:
           name: active-ml-${{ needs.resolve.outputs.expected_sha }}
           path: active_ml_latest.json

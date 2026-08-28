@@ -149,7 +149,7 @@ def test_active_edge_preserves_completed_reports_when_publication_fails():
     workflow = _workflow("production-active-edge.yml")
     resilient_upload = re.compile(
         r"- uses: actions/upload-artifact@v4\n"
-        r"\s+if: \$\{\{ always\(\) \}\}\n"
+        r"\s+if: \$\{\{ !cancelled\(\) \}\}\n"
         r"\s+with:"
     )
     assert len(resilient_upload.findall(workflow)) == 2
