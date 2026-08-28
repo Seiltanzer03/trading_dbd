@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -142,3 +143,14 @@ def test_active_edge_schedule_cannot_cancel_exact_dispatch():
     workflow = _workflow("production-active-edge.yml")
     assert "group: production-active-edge-${{ github.event_name }}" in workflow
     assert "cancel-in-progress: ${{ github.event_name == 'schedule' }}" in workflow
+
+
+def test_active_edge_preserves_completed_reports_when_publication_fails():
+    workflow = _workflow("production-active-edge.yml")
+    resilient_upload = re.compile(
+        r"- uses: actions/upload-artifact@v4\n"
+        r"\s+if: \$\{\{ always\(\) \}\}\n"
+        r"\s+with:"
+    )
+    assert len(resilient_upload.findall(workflow)) == 2
+    assert workflow.count("if-no-files-found: ignore") == 2
