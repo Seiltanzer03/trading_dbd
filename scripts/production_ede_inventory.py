@@ -11,6 +11,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from seiltanzer.edge_discovery.maturity import data_maturity as canonical_data_maturity
 from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.registry import FEATURES
 
@@ -32,13 +33,6 @@ KNOWN_DATA_MATURITY = frozenset({
     "DATA_READY_RESEARCH",
     "DATA_READY_PROVISIONAL",
     "DATA_READY_ROBUST",
-})
-KNOWN_EDGE_MATURITY = frozenset({
-    "INSUFFICIENT_DATA",
-    "EARLY_CONTEXT",
-    "RESEARCH_SIGNAL",
-    "PROVISIONAL_EDGE",
-    "ROBUST_EDGE",
 })
 
 
@@ -162,14 +156,22 @@ def _validate_feature_horizons(features: list[dict[str, Any]]) -> None:
                 raise AssertionError(
                     f"feature {feature_id} horizon {horizon} "
                     "coverage_pct must be finite and within [0,100]")
-            if bucket["data_maturity"] not in KNOWN_DATA_MATURITY:
+            expected_maturity = canonical_data_maturity(
+                raw_n=counts["resolved"],
+                effective_n=counts["effective"],
+                temporal_blocks=counts["temporal_blocks"],
+            )
+            if (
+                bucket["data_maturity"] not in KNOWN_DATA_MATURITY
+                or bucket["data_maturity"] != expected_maturity
+            ):
                 raise AssertionError(
                     f"feature {feature_id} horizon {horizon} "
-                    "data_maturity is invalid")
-            if bucket["edge_maturity"] not in KNOWN_EDGE_MATURITY:
+                    "data_maturity does not match canonical counts")
+            if bucket["edge_maturity"] != "INSUFFICIENT_DATA":
                 raise AssertionError(
                     f"feature {feature_id} horizon {horizon} "
-                    "edge_maturity is invalid")
+                    "edge_maturity must remain INSUFFICIENT_DATA")
 
 
 def _horizon_bucket(row: dict[str, Any], horizon: int) -> dict[str, Any]:

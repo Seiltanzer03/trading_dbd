@@ -73,7 +73,7 @@ def test_feature_horizon_contract_rejects_missing_or_malformed_buckets() -> None
     ("coverage_pct", float("nan")),
     ("coverage_pct", 100.1),
     ("data_maturity", "UNKNOWN_DATA_TIER"),
-    ("edge_maturity", "UNKNOWN_EDGE_TIER"),
+    ("edge_maturity", "ROBUST_EDGE"),
 ))
 def test_feature_horizon_contract_rejects_invalid_values(
     field: str, value: object,
@@ -105,6 +105,30 @@ def test_feature_horizon_contract_rejects_inconsistent_counts(
     row["by_horizon"]["30"].update(counts)
     with pytest.raises(AssertionError, match="count relationships invalid"):
         inventory._validate_feature_horizons([row])
+
+
+def test_feature_horizon_contract_binds_maturity_to_counts() -> None:
+    valid = _row("price.ret_5m")
+    valid["by_horizon"]["60"].update({
+        "raw": 100,
+        "effective": 50,
+        "resolved": 100,
+        "temporal_blocks": 2,
+        "coverage_pct": 50.0,
+        "data_maturity": "DATA_READY_EARLY",
+    })
+    inventory._validate_feature_horizons([valid])
+
+    overclaim = _row("price.ret_5m")
+    overclaim["by_horizon"]["60"].update({
+        "raw": 1,
+        "effective": 1,
+        "resolved": 1,
+        "temporal_blocks": 1,
+        "data_maturity": "DATA_READY_ROBUST",
+    })
+    with pytest.raises(AssertionError, match="does not match canonical counts"):
+        inventory._validate_feature_horizons([overclaim])
 
 
 def test_coverage_state_separates_missing_history_from_real_insufficient_n() -> None:
