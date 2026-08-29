@@ -64,6 +64,49 @@ def test_feature_horizon_contract_rejects_missing_or_malformed_buckets() -> None
         inventory._validate_feature_horizons([missing_field])
 
 
+@pytest.mark.parametrize(("field", "value"), (
+    ("raw", None),
+    ("raw", True),
+    ("effective", -1),
+    ("resolved", 1.5),
+    ("temporal_blocks", -1),
+    ("coverage_pct", float("nan")),
+    ("coverage_pct", 100.1),
+    ("data_maturity", "UNKNOWN_DATA_TIER"),
+    ("edge_maturity", "UNKNOWN_EDGE_TIER"),
+))
+def test_feature_horizon_contract_rejects_invalid_values(
+    field: str, value: object,
+) -> None:
+    row = _row("price.ret_5m")
+    row["by_horizon"]["15"].update({
+        "raw": 3,
+        "effective": 2,
+        "resolved": 2,
+        "temporal_blocks": 1,
+        "coverage_pct": 50.0,
+        "data_maturity": "DATA_READY_EARLY",
+        "edge_maturity": "INSUFFICIENT_DATA",
+        field: value,
+    })
+    with pytest.raises(AssertionError, match="horizon 15"):
+        inventory._validate_feature_horizons([row])
+
+
+@pytest.mark.parametrize("counts", (
+    {"raw": 1, "resolved": 2, "effective": 1, "temporal_blocks": 1},
+    {"raw": 2, "resolved": 1, "effective": 2, "temporal_blocks": 1},
+    {"raw": 2, "resolved": 1, "effective": 1, "temporal_blocks": 2},
+))
+def test_feature_horizon_contract_rejects_inconsistent_counts(
+    counts: dict[str, int],
+) -> None:
+    row = _row("price.ret_5m")
+    row["by_horizon"]["30"].update(counts)
+    with pytest.raises(AssertionError, match="count relationships invalid"):
+        inventory._validate_feature_horizons([row])
+
+
 def test_coverage_state_separates_missing_history_from_real_insufficient_n() -> None:
     definitions = {item.feature_id: item for item in inventory.FEATURES}
 

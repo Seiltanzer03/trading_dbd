@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import threading
 from collections import Counter, defaultdict
@@ -31,6 +32,13 @@ KNOWN_DATA_MATURITY = frozenset({
     "DATA_READY_RESEARCH",
     "DATA_READY_PROVISIONAL",
     "DATA_READY_ROBUST",
+})
+KNOWN_EDGE_MATURITY = frozenset({
+    "INSUFFICIENT_DATA",
+    "EARLY_CONTEXT",
+    "RESEARCH_SIGNAL",
+    "PROVISIONAL_EDGE",
+    "ROBUST_EDGE",
 })
 
 
@@ -123,6 +131,45 @@ def _validate_feature_horizons(features: list[dict[str, Any]]) -> None:
                 raise AssertionError(
                     f"feature {feature_id} horizon {horizon} missing fields: "
                     f"{missing_fields}")
+
+            counts: dict[str, int] = {}
+            for field in ("raw", "effective", "resolved", "temporal_blocks"):
+                value = bucket[field]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                ):
+                    raise AssertionError(
+                        f"feature {feature_id} horizon {horizon} "
+                        f"{field} must be a non-negative integer")
+                counts[field] = value
+            if not (
+                counts["effective"] <= counts["resolved"] <= counts["raw"]
+                and counts["temporal_blocks"] <= counts["resolved"]
+            ):
+                raise AssertionError(
+                    f"feature {feature_id} horizon {horizon} "
+                    f"count relationships invalid: {counts}")
+
+            coverage = bucket["coverage_pct"]
+            if (
+                isinstance(coverage, bool)
+                or not isinstance(coverage, (int, float))
+                or not math.isfinite(float(coverage))
+                or not 0.0 <= float(coverage) <= 100.0
+            ):
+                raise AssertionError(
+                    f"feature {feature_id} horizon {horizon} "
+                    "coverage_pct must be finite and within [0,100]")
+            if bucket["data_maturity"] not in KNOWN_DATA_MATURITY:
+                raise AssertionError(
+                    f"feature {feature_id} horizon {horizon} "
+                    "data_maturity is invalid")
+            if bucket["edge_maturity"] not in KNOWN_EDGE_MATURITY:
+                raise AssertionError(
+                    f"feature {feature_id} horizon {horizon} "
+                    "edge_maturity is invalid")
 
 
 def _horizon_bucket(row: dict[str, Any], horizon: int) -> dict[str, Any]:
