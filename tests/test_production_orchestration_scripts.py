@@ -118,7 +118,11 @@ def test_production_ede_inventory_is_read_only_and_lists_canonical_features(tmp_
     assert result["g1s_observations_total"] == 0
     assert result["canonical_feature_count"] == len(result["features"])
     assert result["canonical_feature_count"] >= 96
-    assert set(result["features"][0]["by_horizon"]) == {"15", "30", "60", "120", "240"}
+    expected_horizons = {"15", "30", "60", "120", "240"}
+    assert all(
+        set(feature["by_horizon"]) == expected_horizons
+        for feature in result["features"]
+    )
     by_id = {row["feature_id"]: row for row in result["features"]}
     assert by_id["macro.cpi_headline_mom_pct"]["research_scope"] == "G1S"
     assert by_id["macro.nfp_payroll_change_k"]["research_scope"] == "G1S"

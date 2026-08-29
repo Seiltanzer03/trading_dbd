@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "production_ede_inventory.py"
 _SPEC = importlib.util.spec_from_file_location("production_ede_inventory", _SCRIPT_PATH)
@@ -39,6 +41,94 @@ def _row(feature_id: str, *, real: int = 0, usable: bool = False,
             str(horizon): _bucket() for horizon in inventory.HORIZONS
         },
     }
+
+
+def test_feature_horizon_contract_accepts_complete_buckets() -> None:
+    inventory._validate_feature_horizons([_row("price.ret_5m")])
+
+
+def test_feature_horizon_contract_rejects_missing_or_malformed_buckets() -> None:
+    missing_horizon = _row("price.ret_5m")
+    missing_horizon["by_horizon"].pop("240")
+    with pytest.raises(AssertionError, match="price.ret_5m horizons mismatch"):
+        inventory._validate_feature_horizons([missing_horizon])
+
+    non_mapping = _row("price.ret_5m")
+    non_mapping["by_horizon"]["60"] = []
+    with pytest.raises(AssertionError, match="horizon 60 must be a mapping"):
+        inventory._validate_feature_horizons([non_mapping])
+
+    missing_field = _row("price.ret_5m")
+    missing_field["by_horizon"]["120"].pop("data_maturity")
+    with pytest.raises(AssertionError, match="horizon 120 missing fields"):
+        inventory._validate_feature_horizons([missing_field])
+
+
+@pytest.mark.parametrize(("field", "value"), (
+    ("raw", None),
+    ("raw", True),
+    ("effective", -1),
+    ("resolved", 1.5),
+    ("temporal_blocks", -1),
+    ("coverage_pct", float("nan")),
+    ("coverage_pct", 100.1),
+    ("data_maturity", "UNKNOWN_DATA_TIER"),
+    ("edge_maturity", "ROBUST_EDGE"),
+))
+def test_feature_horizon_contract_rejects_invalid_values(
+    field: str, value: object,
+) -> None:
+    row = _row("price.ret_5m")
+    row["by_horizon"]["15"].update({
+        "raw": 3,
+        "effective": 2,
+        "resolved": 2,
+        "temporal_blocks": 1,
+        "coverage_pct": 50.0,
+        "data_maturity": "DATA_READY_EARLY",
+        "edge_maturity": "INSUFFICIENT_DATA",
+        field: value,
+    })
+    with pytest.raises(AssertionError, match="horizon 15"):
+        inventory._validate_feature_horizons([row])
+
+
+@pytest.mark.parametrize("counts", (
+    {"raw": 1, "resolved": 2, "effective": 1, "temporal_blocks": 1},
+    {"raw": 2, "resolved": 1, "effective": 2, "temporal_blocks": 1},
+    {"raw": 2, "resolved": 1, "effective": 1, "temporal_blocks": 2},
+))
+def test_feature_horizon_contract_rejects_inconsistent_counts(
+    counts: dict[str, int],
+) -> None:
+    row = _row("price.ret_5m")
+    row["by_horizon"]["30"].update(counts)
+    with pytest.raises(AssertionError, match="count relationships invalid"):
+        inventory._validate_feature_horizons([row])
+
+
+def test_feature_horizon_contract_binds_maturity_to_counts() -> None:
+    valid = _row("price.ret_5m")
+    valid["by_horizon"]["60"].update({
+        "raw": 100,
+        "effective": 50,
+        "resolved": 100,
+        "temporal_blocks": 2,
+        "coverage_pct": 50.0,
+        "data_maturity": "DATA_READY_EARLY",
+    })
+    inventory._validate_feature_horizons([valid])
+
+    overclaim = _row("price.ret_5m")
+    overclaim["by_horizon"]["60"].update({
+        "raw": 1,
+        "effective": 1,
+        "resolved": 1,
+        "temporal_blocks": 1,
+        "data_maturity": "DATA_READY_ROBUST",
+    })
+    with pytest.raises(AssertionError, match="does not match canonical counts"):
+        inventory._validate_feature_horizons([overclaim])
 
 
 def test_coverage_state_separates_missing_history_from_real_insufficient_n() -> None:

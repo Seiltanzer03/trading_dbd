@@ -4,18 +4,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import threading
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from seiltanzer.edge_discovery.maturity import data_maturity as canonical_data_maturity
 from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.registry import FEATURES
 
 
 INVENTORY_CONTRACT_VERSION = "g1s-ede-production-inventory-v1.5.0"
 HORIZONS = (15, 30, 60, 120, 240)
+REQUIRED_HORIZON_BUCKET_FIELDS = frozenset({
+    "raw",
+    "effective",
+    "resolved",
+    "temporal_blocks",
+    "coverage_pct",
+    "data_maturity",
+    "edge_maturity",
+})
 KNOWN_DATA_MATURITY = frozenset({
     "INSUFFICIENT_DATA",
     "DATA_READY_EARLY",
@@ -83,6 +94,84 @@ def _coverage_state(definition: Any, row: dict[str, Any]) -> str:
     if bool(row.get("usable_for_ede")) and maturity != "INSUFFICIENT_DATA":
         return "DATA_READY"
     return "INSUFFICIENT_INDEPENDENT_EVIDENCE"
+
+
+def _validate_feature_horizons(features: list[dict[str, Any]]) -> None:
+    required = tuple(str(horizon) for horizon in HORIZONS)
+    expected = set(required)
+    for row in features:
+        feature_id = str(row.get("feature_id") or "<missing>")
+        buckets = row.get("by_horizon")
+        if not isinstance(buckets, dict):
+            raise AssertionError(
+                f"feature {feature_id} by_horizon must be a mapping")
+
+        actual = set(buckets)
+        if actual != expected:
+            missing = sorted(expected - actual, key=str)
+            unexpected = sorted(actual - expected, key=str)
+            raise AssertionError(
+                f"feature {feature_id} horizons mismatch: "
+                f"missing={missing}, unexpected={unexpected}")
+
+        for horizon in required:
+            bucket = buckets[horizon]
+            if not isinstance(bucket, dict):
+                raise AssertionError(
+                    f"feature {feature_id} horizon {horizon} must be a mapping")
+            missing_fields = sorted(
+                REQUIRED_HORIZON_BUCKET_FIELDS - set(bucket), key=str)
+            if missing_fields:
+                raise AssertionError(
+                    f"feature {feature_id} horizon {horizon} missing fields: "
+                    f"{missing_fields}")
+
+            counts: dict[str, int] = {}
+            for field in ("raw", "effective", "resolved", "temporal_blocks"):
+                value = bucket[field]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                ):
+                    raise AssertionError(
+                        f"feature {feature_id} horizon {horizon} "
+                        f"{field} must be a non-negative integer")
+                counts[field] = value
+            if not (
+                counts["effective"] <= counts["resolved"] <= counts["raw"]
+                and counts["temporal_blocks"] <= counts["resolved"]
+            ):
+                raise AssertionError(
+                    f"feature {feature_id} horizon {horizon} "
+                    f"count relationships invalid: {counts}")
+
+            coverage = bucket["coverage_pct"]
+            if (
+                isinstance(coverage, bool)
+                or not isinstance(coverage, (int, float))
+                or not math.isfinite(float(coverage))
+                or not 0.0 <= float(coverage) <= 100.0
+            ):
+                raise AssertionError(
+                    f"feature {feature_id} horizon {horizon} "
+                    "coverage_pct must be finite and within [0,100]")
+            expected_maturity = canonical_data_maturity(
+                raw_n=counts["resolved"],
+                effective_n=counts["effective"],
+                temporal_blocks=counts["temporal_blocks"],
+            )
+            if (
+                bucket["data_maturity"] not in KNOWN_DATA_MATURITY
+                or bucket["data_maturity"] != expected_maturity
+            ):
+                raise AssertionError(
+                    f"feature {feature_id} horizon {horizon} "
+                    "data_maturity does not match canonical counts")
+            if bucket["edge_maturity"] != "INSUFFICIENT_DATA":
+                raise AssertionError(
+                    f"feature {feature_id} horizon {horizon} "
+                    "edge_maturity must remain INSUFFICIENT_DATA")
 
 
 def _horizon_bucket(row: dict[str, Any], horizon: int) -> dict[str, Any]:
@@ -267,6 +356,7 @@ def inventory(database: Path) -> dict:
     canonical_ids = {definition.feature_id for definition in FEATURES}
     assert len(features) == len(canonical_ids), (len(features), len(canonical_ids))
     assert {row["feature_id"] for row in features} == canonical_ids
+    _validate_feature_horizons(features)
     enriched_features = _enrich_features(features)
     families = _family_summary(enriched_features)
     coverage_states = Counter(
