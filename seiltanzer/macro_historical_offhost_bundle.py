@@ -20,7 +20,7 @@ from .macro_offhost_bundle import (
 )
 
 
-CONTRACT_VERSION = "official-macro-historical-offhost-v7-bls-atom-fallback"
+CONTRACT_VERSION = "official-macro-historical-offhost-v8-ism-calendar-direct-fallback"
 DEFAULT_WINDOW_DAYS = 120
 MAX_WINDOW_DAYS = 180
 FOMC_WINDOW_DAYS = 365
@@ -219,11 +219,21 @@ def build_bundle(
 
     ism_source = OfficialISMHistoricalSource()
     ism_records: list[dict[str, Any]] = []
+    ism_schedules: dict[str, dict[str, Any]] = {}
     periods = _periods_for_window(start_ts, stamp)
     for family in ISM_FAMILIES:
         for period in periods:
             try:
-                fetched_at, html, parsed = ism_source.fetch(family, period)
+                fetched_at, html, parsed, supporting = (
+                    ism_source.fetch_with_evidence(family, period)
+                )
+                for source in supporting:
+                    year = str(int(source["year"]))
+                    content = str(source["content"])
+                    ism_schedules[year] = _record({
+                        **source,
+                        "source_sha256": _sha256(content),
+                    })
                 ism_records.append(_record({
                     "family": family,
                     "period": period,
@@ -325,6 +335,7 @@ def build_bundle(
         "window": {"start_ts": start_ts, "end_ts": stamp, "days": days},
         "bls_schedules": schedules,
         "bls_records": bls_records,
+        "ism_schedules": ism_schedules,
         "ism_records": ism_records,
         "fomc_window": {
             "start_ts": fomc_start_ts,
@@ -371,8 +382,13 @@ def validate_bundle(
     )
     from .macro_ism_historical_bootstrap import (
         FAMILIES as ISM_FAMILIES,
+        ISM_RELEASE_CALENDAR_URL,
         _official_ism_url,
+        _period_parts,
+        _shift_month,
+        parse_ism_historical_direct_report,
         parse_ism_historical_roundup,
+        parse_ism_release_calendar,
     )
     from .macro_fomc_deterministic_bootstrap import (
         FOMCStatementSpec,
@@ -515,6 +531,36 @@ def validate_bundle(
         if _canonical_json(parsed) != _canonical_json(record.get("payload")):
             raise ValueError("HISTORICAL_OFFHOST_BLS_PAYLOAD_MISMATCH")
 
+    ism_schedules = bundle.get("ism_schedules")
+    if (
+        not isinstance(ism_schedules, dict)
+        or len(ism_schedules) > 3
+        or any(not re.fullmatch(r"20\d{2}", str(year)) for year in ism_schedules)
+    ):
+        raise ValueError("HISTORICAL_OFFHOST_ISM_SCHEDULES_INVALID")
+    parsed_ism_schedules: dict[int, tuple[str, dict[tuple[str, str], float]]] = {}
+    for raw_year, value in ism_schedules.items():
+        if value.get("record_sha256") != _sha256(_without(value, "record_sha256")):
+            raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
+        year = int(raw_year)
+        if (
+            value.get("format") != "HTML_ISM_RELEASE_CALENDAR"
+            or int(value.get("year") or 0) != year
+            or str(value.get("source_url") or "") != ISM_RELEASE_CALENDAR_URL
+        ):
+            raise ValueError("HISTORICAL_OFFHOST_ISM_CALENDAR_FORMAT_INVALID")
+        content = str(value.get("content") or "")
+        if len(content) < 200 or len(content.encode("utf-8")) > 2_000_000:
+            raise ValueError("HISTORICAL_OFFHOST_SOURCE_SIZE_INVALID")
+        if value.get("source_sha256") != _sha256(content):
+            raise ValueError("HISTORICAL_OFFHOST_SOURCE_HASH_MISMATCH")
+        parsed_ism_schedules[year] = (
+            content,
+            parse_ism_release_calendar(
+                content, year=year, source_url=ISM_RELEASE_CALENDAR_URL,
+            ),
+        )
+
     ism_records = bundle.get("ism_records")
     if not isinstance(ism_records, list) or len(ism_records) > 30:
         raise ValueError("HISTORICAL_OFFHOST_ISM_RECORDS_INVALID")
@@ -542,9 +588,27 @@ def validate_bundle(
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_SIZE_INVALID")
         if record.get("source_sha256") != _sha256(html):
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_HASH_MISMATCH")
-        parsed = parse_ism_historical_roundup(
-            html, family=family, period=period, source_url=source_url
-        )
+        payload = record.get("payload") or {}
+        if payload.get("source_kind") == (
+            "OFFICIAL_MONTHLY_REPORT_WITH_OFFICIAL_RELEASE_CALENDAR"
+        ):
+            year, month = _period_parts(period)
+            release_year, _ = _shift_month(year, month, 1)
+            schedule = parsed_ism_schedules.get(release_year)
+            if schedule is None or (family, period) not in schedule[1]:
+                raise ValueError("HISTORICAL_OFFHOST_ISM_CALENDAR_MISMATCH")
+            parsed = parse_ism_historical_direct_report(
+                html,
+                family=family,
+                period=period,
+                source_url=source_url,
+                calendar_html=schedule[0],
+                calendar_source_url=ISM_RELEASE_CALENDAR_URL,
+            )
+        else:
+            parsed = parse_ism_historical_roundup(
+                html, family=family, period=period, source_url=source_url
+            )
         if _canonical_json(parsed) != _canonical_json(record.get("payload")):
             raise ValueError("HISTORICAL_OFFHOST_ISM_PAYLOAD_MISMATCH")
         published_at = float(parsed.get("published_at") or 0.0)

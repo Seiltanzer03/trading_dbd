@@ -14,7 +14,9 @@ from seiltanzer.macro_bls_historical_bootstrap import (
     parse_nfp_archive,
 )
 from seiltanzer.macro_ism_historical_bootstrap import (
+    ISM_RELEASE_CALENDAR_URL,
     ISMHistoricalReleaseStore,
+    parse_ism_historical_direct_report,
     parse_ism_historical_roundup,
 )
 from seiltanzer.macro_fomc_deterministic_bootstrap import (
@@ -105,6 +107,28 @@ ISM_SERVICES = """
 The official report described resilient business activity and continuing demand
 across service industries while employment conditions remained mixed.</p>
 </body></html>
+"""
+ISM_CALENDAR_2025 = """
+<html><body><h1>Release Dates for the ISM Manufacturing and Services PMI Reports</h1>
+<h2>2025 ISM PMI Reports Release Dates</h2><table>
+<tr><th>Month</th><th>Manufacturing PMI</th><th>Services PMI</th></tr>
+<tr><td>July 2025</td><td>1</td><td>3</td></tr>
+<tr><td>August 2025</td><td>1</td><td>5</td></tr>
+</table><p>Reports are issued by the official ISM business survey panels.</p>
+</body></html>
+"""
+ISM_DIRECT_URL = (
+    "https://www.ismworld.org/supply-management-news-and-reports/"
+    "reports/ism-pmi-reports/pmi/june/"
+)
+ISM_DIRECT = """
+<html><body><h1>June 2025 ISM Manufacturing PMI Report</h1>
+<p>The report was issued today by the Institute for Supply Management.</p><table>
+<tr><th>Index</th><th>Jun</th><th>May</th><th>Change</th></tr>
+<tr><td>Manufacturing PMI</td><td>49.0</td><td>48.5</td><td>0.5</td></tr>
+<tr><td>New Orders</td><td>50.0</td><td>49.0</td><td>1.0</td></tr>
+<tr><td>Production</td><td>51.0</td><td>50.0</td><td>1.0</td></tr>
+</table></body></html>
 """
 FOMC_INDEX = """
 <html><body><h1>2025 FOMC press releases</h1>
@@ -211,6 +235,7 @@ def _bundle():
                 "source_sha256": offhost._sha256(NFP), "payload": nfp_payload,
             }),
         ],
+        "ism_schedules": {},
         "ism_records": [
             _record({
                 "family": "ISM_MANUFACTURING", "period": "2025-06",
@@ -298,6 +323,52 @@ def test_historical_bundle_reparses_every_official_page_and_binds_owner(monkeypa
         offhost._without(changed, "bundle_sha256")
     )
     with pytest.raises(ValueError, match="FOMC_PAYLOAD_MISMATCH"):
+        offhost.validate_bundle(changed, expected_sha=SHA, now=NOW)
+
+
+def test_historical_bundle_accepts_direct_ism_only_with_hashed_official_calendar():
+    bundle = _bundle()
+    payload = parse_ism_historical_direct_report(
+        ISM_DIRECT,
+        family="ISM_MANUFACTURING",
+        period="2025-06",
+        source_url=ISM_DIRECT_URL,
+        calendar_html=ISM_CALENDAR_2025,
+    )
+    bundle["ism_schedules"] = {"2025": _record({
+        "format": "HTML_ISM_RELEASE_CALENDAR",
+        "year": 2025,
+        "source_url": ISM_RELEASE_CALENDAR_URL,
+        "content": ISM_CALENDAR_2025,
+        "source_sha256": offhost._sha256(ISM_CALENDAR_2025),
+    })}
+    bundle["ism_records"][0] = _record({
+        "family": "ISM_MANUFACTURING",
+        "period": "2025-06",
+        "source_url": ISM_DIRECT_URL,
+        "fetched_at": NOW - 10.0,
+        "html": ISM_DIRECT,
+        "source_sha256": offhost._sha256(ISM_DIRECT),
+        "payload": payload,
+    })
+    bundle["bundle_sha256"] = offhost._sha256(
+        offhost._without(bundle, "bundle_sha256")
+    )
+    assert offhost.validate_bundle(bundle, expected_sha=SHA, now=NOW) is bundle
+
+    changed = deepcopy(bundle)
+    calendar = changed["ism_schedules"]["2025"]
+    calendar["content"] = calendar["content"].replace(
+        "<td>1</td><td>3</td>", "<td>2</td><td>3</td>"
+    )
+    calendar["source_sha256"] = offhost._sha256(calendar["content"])
+    calendar["record_sha256"] = offhost._sha256(
+        offhost._without(calendar, "record_sha256")
+    )
+    changed["bundle_sha256"] = offhost._sha256(
+        offhost._without(changed, "bundle_sha256")
+    )
+    with pytest.raises(ValueError, match="ISM_PAYLOAD_MISMATCH"):
         offhost.validate_bundle(changed, expected_sha=SHA, now=NOW)
 
 

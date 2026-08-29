@@ -3,13 +3,18 @@ import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 
 from seiltanzer.macro_ism_historical_bootstrap import (
+    ISM_RELEASE_CALENDAR_URL,
     ISMHistoricalReleaseStore,
+    OfficialISMHistoricalSource,
     _candidate_roundup_urls,
     feature_records_from_runtime,
+    parse_ism_historical_direct_report,
     parse_ism_historical_roundup,
+    parse_ism_release_calendar,
 )
 from seiltanzer.macro_ism_historical_ede_refinement import (
     install_ism_historical_ede_refinement,
@@ -75,6 +80,31 @@ JULY_SERVICES_HTML = """
 </body></html>
 """
 
+RELEASE_CALENDAR_2026 = """
+<html><body>
+<h1>Release Dates for the ISM Manufacturing and Services PMI Reports</h1>
+<h2>2026 ISM PMI Reports Release Dates</h2>
+<table><tr><th>Month</th><th>Manufacturing PMI</th><th>Services PMI</th></tr>
+<tr><td>July 2026</td><td>1</td><td>6**</td></tr>
+<tr><td>August 2026</td><td>3</td><td>5</td></tr>
+</table><p>Reports are issued by the official ISM business survey panels.</p>
+</body></html>
+"""
+JUNE_2026_DIRECT_URL = (
+    "https://www.ismworld.org/supply-management-news-and-reports/"
+    "reports/ism-pmi-reports/pmi/june/"
+)
+JUNE_2026_DIRECT = """
+<html><body><h1>June 2026 ISM Manufacturing PMI Report</h1>
+<p>The report was issued today by the Institute for Supply Management.</p>
+<table>
+<tr><th>Index</th><th>Jun</th><th>May</th><th>Change</th></tr>
+<tr><td>Manufacturing PMI</td><td>53.3</td><td>54.0</td><td>-0.7</td></tr>
+<tr><td>New Orders</td><td>56.0</td><td>56.8</td><td>-0.8</td></tr>
+<tr><td>Production</td><td>52.2</td><td>54.3</td><td>-2.1</td></tr>
+</table></body></html>
+"""
+
 
 def _parse(html, *, family, period, url):
     return parse_ism_historical_roundup(
@@ -86,6 +116,108 @@ def test_candidate_urls_cover_pre_and_post_rebrand_official_slugs():
     assert any("ism-pmi-reports-roundup-july-2025-manufacturing" in url for url in urls)
     assert any("report-on-business-roundup-july-2025-manufacturing-pmi" in url for url in urls)
     assert all("/2025/2025-08/" in url for url in urls)
+
+
+def test_official_calendar_binds_direct_report_to_exact_release_day():
+    calendar = parse_ism_release_calendar(
+        RELEASE_CALENDAR_2026, year=2026,
+        source_url=ISM_RELEASE_CALENDAR_URL,
+    )
+    expected = datetime(
+        2026, 7, 1, 10, 0, tzinfo=ZoneInfo("America/New_York")
+    ).timestamp()
+    assert calendar[("ISM_MANUFACTURING", "2026-06")] == expected
+
+    parsed = parse_ism_historical_direct_report(
+        JUNE_2026_DIRECT,
+        family="ISM_MANUFACTURING",
+        period="2026-06",
+        source_url=JUNE_2026_DIRECT_URL,
+        calendar_html=RELEASE_CALENDAR_2026,
+    )
+    assert parsed["pmi"] == 53.3
+    assert parsed["published_at"] == expected
+    assert parsed["publication_date"] == "2026-07-01"
+    assert parsed["source_kind"] == (
+        "OFFICIAL_MONTHLY_REPORT_WITH_OFFICIAL_RELEASE_CALENDAR"
+    )
+    assert parsed["llm_used"] is False
+
+
+def test_official_calendar_binds_families_by_verified_headers():
+    reordered = RELEASE_CALENDAR_2026.replace(
+        "<th>Month</th><th>Manufacturing PMI</th><th>Services PMI</th>",
+        "<th>Services PMI</th><th>Manufacturing PMI</th><th>Month</th>",
+    ).replace(
+        "<td>July 2026</td><td>1</td><td>6**</td>",
+        "<td>6**</td><td>1</td><td>July 2026</td>",
+    ).replace(
+        "<td>August 2026</td><td>3</td><td>5</td>",
+        "<td>5</td><td>3</td><td>August 2026</td>",
+    )
+    calendar = parse_ism_release_calendar(reordered, year=2026)
+    assert calendar[("ISM_MANUFACTURING", "2026-06")] == datetime(
+        2026, 7, 1, 10, 0, tzinfo=ZoneInfo("America/New_York")
+    ).timestamp()
+    assert calendar[("ISM_SERVICES", "2026-06")] == datetime(
+        2026, 7, 6, 10, 0, tzinfo=ZoneInfo("America/New_York")
+    ).timestamp()
+
+    duplicated = RELEASE_CALENDAR_2026.replace(
+        "<th>Services PMI</th>", "<th>Manufacturing PMI</th>"
+    )
+    with pytest.raises(ValueError, match="HEADERS_DUPLICATED"):
+        parse_ism_release_calendar(duplicated, year=2026)
+
+
+def test_direct_report_rejects_calendar_or_content_period_mismatch():
+    with pytest.raises(ValueError, match="DIRECT_CONTENT_PERIOD_MISMATCH"):
+        parse_ism_historical_direct_report(
+            JUNE_2026_DIRECT.replace("June 2026", "May 2026"),
+            family="ISM_MANUFACTURING",
+            period="2026-06",
+            source_url=JUNE_2026_DIRECT_URL,
+            calendar_html=RELEASE_CALENDAR_2026,
+        )
+    with pytest.raises(ValueError, match="CALENDAR_TITLE_YEAR_MISMATCH"):
+        parse_ism_historical_direct_report(
+            JUNE_2026_DIRECT,
+            family="ISM_MANUFACTURING",
+            period="2026-06",
+            source_url=JUNE_2026_DIRECT_URL,
+            calendar_html=RELEASE_CALENDAR_2026.replace("2026 ISM", "2025 ISM"),
+        )
+
+
+def test_source_falls_back_from_blocked_roundups_to_direct_report_and_calendar(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url == JUNE_2026_DIRECT_URL:
+            return httpx.Response(200, text=JUNE_2026_DIRECT, request=request)
+        if url == ISM_RELEASE_CALENDAR_URL:
+            return httpx.Response(200, text=RELEASE_CALENDAR_2026, request=request)
+        return httpx.Response(403, text="blocked", request=request)
+
+    source = OfficialISMHistoricalSource()
+    monkeypatch.setattr(
+        source,
+        "_client",
+        lambda: httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=True,
+        ),
+    )
+    _, html, parsed, supporting = source.fetch_with_evidence(
+        "ISM_MANUFACTURING", "2026-06"
+    )
+    assert html == JUNE_2026_DIRECT
+    assert parsed["pmi"] == 53.3
+    assert parsed["source_kind"].startswith("OFFICIAL_MONTHLY_REPORT")
+    assert supporting == ({
+        "format": "HTML_ISM_RELEASE_CALENDAR",
+        "year": 2026,
+        "source_url": ISM_RELEASE_CALENDAR_URL,
+        "content": RELEASE_CALENDAR_2026,
+    },)
 
 
 def test_manufacturing_roundup_uses_official_release_day_at_10_et():
@@ -244,6 +376,35 @@ def test_repeated_market_t0s_reuse_one_ism_release_id_and_never_backfill_current
     assert first_prov[feature_id]["current_mutable_report_backfill"] is False
     assert first_prov[feature_id]["future_points_used"] is False
     assert first_prov[feature_id]["llm_used"] is False
+
+
+def test_direct_report_provenance_preserves_release_calendar_evidence():
+    runtime = _Runtime()
+    parsed = parse_ism_historical_direct_report(
+        JUNE_2026_DIRECT,
+        family="ISM_MANUFACTURING",
+        period="2026-06",
+        source_url=JUNE_2026_DIRECT_URL,
+        calendar_html=RELEASE_CALENDAR_2026,
+    )
+    ISMHistoricalReleaseStore(runtime).ingest(
+        parsed, html=JUNE_2026_DIRECT, fetched_at=2_000_000_000.0,
+        require_previous=False,
+    )
+    _, provenance = feature_records_from_runtime(
+        runtime,
+        instrument="NAS100",
+        t0=parsed["published_at"] + 1.0,
+        horizon=30,
+    )
+    item = provenance["macro.ism_manufacturing_pmi"]
+    assert item["provenance"] == (
+        "OFFICIAL_ISM_DIRECT_REPORT_WITH_RELEASE_CALENDAR_POINT_IN_TIME"
+    )
+    assert item["release_calendar_source_url"] == ISM_RELEASE_CALENDAR_URL
+    assert item["release_calendar_source_sha256"] == parsed[
+        "release_calendar_source_sha256"
+    ]
 
 
 def test_ism_registry_ids_become_historically_available_without_changing_id_universe():

@@ -1,4 +1,4 @@
-"""Historical ISM PMI reconstruction from dated official ISM roundup pages.
+"""Historical ISM PMI reconstruction from official point-in-time pages.
 
 Scope is deliberately narrow: this module fills only the four already-canonical
 EDE IDs for Manufacturing/Services headline PMI and month-over-month PMI change.
@@ -8,18 +8,19 @@ headline family has demonstrated useful prospective evidence.
 Source/causality contract
 -------------------------
 ISM publishes the underlying Manufacturing and Services PMI reports at 10:00 ET.
-Its dated same-day official roundup pages reproduce the released PMI values and
-remain accessible with year/month URLs.  Historical values here therefore use:
+Its dated same-day roundup and exact-period report pages reproduce released PMI
+values. Historical values here therefore use:
 
-* value source: dated official ``ismworld.org`` roundup page;
-* as-of: 10:00 America/New_York on that page's official publication date;
-* delta: current PMI minus the immediately previous official roundup PMI;
+* primary value source: dated official ``ismworld.org`` roundup page;
+* bounded fallback: exact-period monthly report plus official release calendar;
+* as-of: 10:00 America/New_York on the verified official publication date;
+* delta: current PMI minus the immediately previous official release PMI;
 * one family/month release ID = one EDE dependence unit;
 * no consensus, market data, LLM, synthetic value, or current mutable report page.
 
-The roundup is an official post-release reproduction, not a byte-versioned copy
-of the first report HTML.  Provenance says that explicitly.  Old T0 observation
-bytes are never mutated; the store is an immutable research overlay.
+These pages are official post-release reproductions, not byte-versioned copies
+of first-release HTML. Provenance says that explicitly. Old T0 observation bytes
+are never mutated; the store is an immutable research overlay.
 """
 from __future__ import annotations
 
@@ -39,13 +40,22 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .macro_ism_resilience import _roundup_current_values
+from .macro_numeric_data import _LinkAndTableParser, parse_ism_report
 
 
-ISM_HISTORICAL_BOOTSTRAP_VERSION = "ism-dated-roundup-point-in-time-v1"
+ISM_HISTORICAL_BOOTSTRAP_VERSION = "ism-official-point-in-time-v2-calendar-direct-fallback"
 ISM_HOSTS = frozenset({"www.ismworld.org", "ismworld.org"})
 ISM_MAGAZINE_BASE = (
     "https://www.ismworld.org/supply-management-news-and-reports/"
     "news-publications/inside-supply-management-magazine/blog"
+)
+ISM_DIRECT_REPORT_BASE = (
+    "https://www.ismworld.org/supply-management-news-and-reports/"
+    "reports/ism-pmi-reports"
+)
+ISM_RELEASE_CALENDAR_URL = (
+    "https://www.ismworld.org/supply-management-news-and-reports/"
+    "reports/rob-report-calendar/"
 )
 FAMILIES = ("ISM_MANUFACTURING", "ISM_SERVICES")
 FAMILY_SLUG = {
@@ -177,9 +187,101 @@ def _candidate_roundup_urls(family: str, period: str) -> tuple[str, ...]:
     return tuple(f"{directory}/{slug}/" for slug in slugs)
 
 
+def _direct_report_url(family: str, period: str) -> str:
+    _, month = _period_parts(period)
+    section = "pmi" if family == "ISM_MANUFACTURING" else "services"
+    return f"{ISM_DIRECT_REPORT_BASE}/{section}/{_month_slug(month)}/"
+
+
 def _visible_text(html: str) -> str:
     parser = _VisibleTextParser(); parser.feed(html or "")
     return re.sub(r"\s+", " ", " ".join(parser.parts)).strip()
+
+
+def parse_ism_release_calendar(
+    html: str, *, year: int, source_url: str = ISM_RELEASE_CALENDAR_URL,
+) -> dict[tuple[str, str], float]:
+    """Parse exact official release days into report-period 10:00 ET timestamps."""
+    if source_url != ISM_RELEASE_CALENDAR_URL or not _official_ism_url(source_url):
+        raise ValueError("ISM_RELEASE_CALENDAR_UNOFFICIAL_SOURCE")
+    target_year = int(year)
+    parser = _LinkAndTableParser()
+    parser.feed(html or "")
+    text = re.sub(r"\s+", " ", " ".join(parser.text_parts)).strip()
+    if (
+        "Release Dates for the ISM" not in text
+        or f"{target_year} ISM" not in text
+    ):
+        raise ValueError("ISM_RELEASE_CALENDAR_TITLE_YEAR_MISMATCH")
+
+    month_column: int | None = None
+    family_columns: dict[str, int] = {}
+    for row in parser.rows:
+        tokens_by_column = [
+            set(re.findall(r"[a-z]+", str(value).lower())) for value in row
+        ]
+        month_columns = [
+            index for index, tokens in enumerate(tokens_by_column)
+            if "month" in tokens
+        ]
+        if not month_columns:
+            continue
+        columns: dict[str, list[int]] = {family: [] for family in FAMILIES}
+        for index, tokens in enumerate(tokens_by_column):
+            if {"manufacturing", "pmi"} <= tokens:
+                columns["ISM_MANUFACTURING"].append(index)
+            if {"services", "pmi"} <= tokens:
+                columns["ISM_SERVICES"].append(index)
+        if (
+            len(month_columns) != 1
+            or any(len(columns[family]) > 1 for family in FAMILIES)
+        ):
+            raise ValueError("ISM_RELEASE_CALENDAR_HEADERS_DUPLICATED")
+        if all(len(columns[family]) == 1 for family in FAMILIES):
+            indexes = {month_columns[0], *(columns[family][0] for family in FAMILIES)}
+            if len(indexes) != 3:
+                raise ValueError("ISM_RELEASE_CALENDAR_HEADERS_AMBIGUOUS")
+            month_column = month_columns[0]
+            family_columns = {
+                family: columns[family][0] for family in FAMILIES
+            }
+            break
+    if month_column is None or set(family_columns) != set(FAMILIES):
+        raise ValueError("ISM_RELEASE_CALENDAR_HEADERS_MISSING")
+
+    output: dict[tuple[str, str], float] = {}
+    month_pattern = "|".join(name.title() for name in _MONTHS)
+    for row in parser.rows:
+        if len(row) <= max(month_column, *family_columns.values()):
+            continue
+        label = re.sub(r"\s+", " ", str(row[month_column])).strip()
+        match = re.fullmatch(
+            rf"({month_pattern})\s+(20\d{{2}})", label, flags=re.I
+        )
+        if not match or int(match.group(2)) != target_year:
+            continue
+        release_month = _MONTHS[match.group(1).lower()]
+        report_year, report_month = _shift_month(target_year, release_month, -1)
+        period = _period(report_year, report_month)
+        for family, index in family_columns.items():
+            day_match = re.search(r"\d{1,2}", str(row[index]))
+            if not day_match:
+                raise ValueError("ISM_RELEASE_CALENDAR_DAY_MISSING")
+            day = int(day_match.group(0))
+            try:
+                released = datetime(
+                    target_year, release_month, day, 10, 0, 0,
+                    tzinfo=ZoneInfo("America/New_York"),
+                )
+            except ValueError as exc:
+                raise ValueError("ISM_RELEASE_CALENDAR_DAY_INVALID") from exc
+            key = (family, period)
+            if key in output:
+                raise ValueError("ISM_RELEASE_CALENDAR_PERIOD_DUPLICATED")
+            output[key] = float(released.timestamp())
+    if not output:
+        raise ValueError("ISM_RELEASE_CALENDAR_ROWS_MISSING")
+    return output
 
 
 def _publication_date(text: str) -> tuple[int, int, int] | None:
@@ -248,6 +350,56 @@ def parse_ism_historical_roundup(html: str, *, family: str, period: str,
         "release_time_rule": "10:00_America/New_York",
         "source_kind": "OFFICIAL_DATED_ROUNDUP_POST_RELEASE_REPRODUCTION",
         "source_vintage_guarantee": "OFFICIAL_DATED_PAGE_NOT_FIRST_REPORT_HTML",
+        "consensus_available": False,
+        "surprise_computed": False,
+        "llm_used": False,
+    }
+
+
+def parse_ism_historical_direct_report(
+    html: str, *, family: str, period: str, source_url: str,
+    calendar_html: str, calendar_source_url: str = ISM_RELEASE_CALENDAR_URL,
+) -> dict[str, Any]:
+    """Parse a still-public official monthly report with its official calendar."""
+    if family not in FAMILIES:
+        raise ValueError("ISM_HISTORICAL_FAMILY_INVALID")
+    if not _official_ism_url(source_url):
+        raise ValueError("ISM_HISTORICAL_UNOFFICIAL_SOURCE")
+    expected_url = _direct_report_url(family, period)
+    actual = urlparse(source_url)
+    expected = urlparse(expected_url)
+    if actual.path.rstrip("/") != expected.path.rstrip("/"):
+        raise ValueError("ISM_HISTORICAL_DIRECT_URL_PERIOD_FAMILY_MISMATCH")
+
+    parsed = parse_ism_report(html, family, source_url)
+    if parsed.get("period") != period:
+        raise ValueError("ISM_HISTORICAL_DIRECT_CONTENT_PERIOD_MISMATCH")
+    year, month = _period_parts(period)
+    release_year, _ = _shift_month(year, month, 1)
+    calendar = parse_ism_release_calendar(
+        calendar_html, year=release_year, source_url=calendar_source_url,
+    )
+    published_at = calendar.get((family, period))
+    if published_at is None:
+        raise ValueError("ISM_HISTORICAL_DIRECT_RELEASE_DATE_MISSING")
+    pmi = _finite(((parsed.get("metrics") or {}).get("pmi") or {}).get("current"))
+    if pmi is None or not (0.0 <= pmi <= 100.0):
+        raise ValueError("ISM_HISTORICAL_PMI_MISSING")
+    published = datetime.fromtimestamp(
+        published_at, tz=ZoneInfo("America/New_York")
+    )
+    return {
+        "family": family,
+        "period": period,
+        "pmi": pmi,
+        "published_at": float(published_at),
+        "publication_date": published.strftime("%Y-%m-%d"),
+        "source_url": source_url,
+        "release_time_rule": "10:00_America/New_York",
+        "source_kind": "OFFICIAL_MONTHLY_REPORT_WITH_OFFICIAL_RELEASE_CALENDAR",
+        "source_vintage_guarantee": "OFFICIAL_MONTH_URL_EXACT_PERIOD_NOT_FIRST_BYTE_VERSION",
+        "release_calendar_source_url": calendar_source_url,
+        "release_calendar_source_sha256": _sha(calendar_html),
         "consensus_available": False,
         "surprise_computed": False,
         "llm_used": False,
@@ -396,9 +548,9 @@ class ISMHistoricalReleaseStore:
                 for feature_id in mapping.values()
             ],
             "causal_rule": "published_at<=T0",
-            "release_time_rule": "10:00_America/New_York_on_official_roundup_date",
-            "source_kind": "OFFICIAL_DATED_ROUNDUP_POST_RELEASE_REPRODUCTION",
-            "source_vintage_guarantee": "OFFICIAL_DATED_PAGE_NOT_FIRST_REPORT_HTML",
+            "release_time_rule": "10:00_America/New_York_on_official_release_date",
+            "source_kind": "OFFICIAL_ISM_POINT_IN_TIME_SOURCE",
+            "source_vintage_guarantee": "OFFICIAL_SOURCE_EXACT_PERIOD_NOT_FIRST_BYTE_VERSION",
             "current_mutable_report_backfill": False,
             "old_t0_rows_mutated": False,
             "research_only": True, "production_authority": False,
@@ -434,6 +586,7 @@ def _latest_release(runtime: Any, family: str, captured_ts: float) -> dict[str, 
     if row is None:
         return {"status": "UNAVAILABLE", "family": family,
                 "reason": "NO_ISM_ROUNDUP_BEFORE_T0"}
+    payload = json.loads(str(row[9]))
     return {
         "status": "VALID", "family": family,
         "release_id": str(row[0]), "period": str(row[1]),
@@ -443,11 +596,15 @@ def _latest_release(runtime: Any, family: str, captured_ts: float) -> dict[str, 
         "pmi": float(row[5]),
         "change_pp": float(row[6]) if row[6] is not None else None,
         "previous_release_id": row[7], "source_sha256": str(row[8]),
-        "payload": json.loads(str(row[9])), "contract_version": str(row[10]),
+        "payload": payload, "contract_version": str(row[10]),
         "official_source_verified": True,
         "historical_reconstruction": True,
-        "source_kind": "OFFICIAL_DATED_ROUNDUP_POST_RELEASE_REPRODUCTION",
-        "source_vintage_guarantee": "OFFICIAL_DATED_PAGE_NOT_FIRST_REPORT_HTML",
+        "source_kind": payload.get(
+            "source_kind", "OFFICIAL_DATED_ROUNDUP_POST_RELEASE_REPRODUCTION"
+        ),
+        "source_vintage_guarantee": payload.get(
+            "source_vintage_guarantee", "OFFICIAL_DATED_PAGE_NOT_FIRST_REPORT_HTML"
+        ),
         "causal_rule": "published_at<=T0",
         "research_only": True, "production_authority": False,
     }
@@ -480,8 +637,14 @@ def feature_records_from_runtime(runtime: Any, *, instrument: str,
             if not record.training_eligible:
                 continue
             values[feature_id] = record
-            provenance[feature_id] = {
-                "provenance": "OFFICIAL_ISM_DATED_ROUNDUP_POINT_IN_TIME",
+            source_kind = str(release["source_kind"])
+            point_in_time_kind = (
+                "OFFICIAL_ISM_DATED_ROUNDUP_POINT_IN_TIME"
+                if source_kind == "OFFICIAL_DATED_ROUNDUP_POST_RELEASE_REPRODUCTION"
+                else "OFFICIAL_ISM_DIRECT_REPORT_WITH_RELEASE_CALENDAR_POINT_IN_TIME"
+            )
+            feature_provenance = {
+                "provenance": point_in_time_kind,
                 "release_id": release["release_id"],
                 "release_family": family,
                 "release_period": release["period"],
@@ -492,19 +655,29 @@ def feature_records_from_runtime(runtime: Any, *, instrument: str,
                 "previous_release_id": release.get("previous_release_id"),
                 "official_source_verified": True,
                 "historical_reconstruction": True,
-                "source_kind": "OFFICIAL_DATED_ROUNDUP_POST_RELEASE_REPRODUCTION",
-                "source_vintage_guarantee": "OFFICIAL_DATED_PAGE_NOT_FIRST_REPORT_HTML",
+                "source_kind": source_kind,
+                "source_vintage_guarantee": release["source_vintage_guarantee"],
                 "current_mutable_report_backfill": False,
                 "old_t0_row_mutated": False,
                 "future_points_used": False,
                 "llm_used": False,
             }
+            payload = release.get("payload") or {}
+            if payload.get("release_calendar_source_url"):
+                feature_provenance["release_calendar_source_url"] = str(
+                    payload["release_calendar_source_url"]
+                )
+                feature_provenance["release_calendar_source_sha256"] = str(
+                    payload["release_calendar_source_sha256"]
+                )
+            provenance[feature_id] = feature_provenance
     return values, provenance
 
 
 class OfficialISMHistoricalSource:
     def __init__(self, *, timeout_sec: float = 12.0) -> None:
         self.timeout_sec = max(4.0, min(30.0, float(timeout_sec)))
+        self._calendar_cache: dict[int, tuple[str, str]] = {}
 
     def _client(self) -> httpx.Client:
         from .macro_transport_refinement import BROWSER_USER_AGENT, macro_proxy_url
@@ -529,7 +702,25 @@ class OfficialISMHistoricalSource:
             raise ValueError("ISM_HISTORICAL_RESPONSE_TOO_LARGE")
         return response.text
 
-    def fetch(self, family: str, period: str) -> tuple[float, str, dict[str, Any]]:
+    def _release_calendar(
+        self, client: httpx.Client, *, year: int,
+    ) -> tuple[str, str]:
+        cached = self._calendar_cache.get(int(year))
+        if cached is not None:
+            return cached
+        response = client.get(ISM_RELEASE_CALENDAR_URL)
+        html = self._validated(response)
+        final_url = str(response.url)
+        if final_url != ISM_RELEASE_CALENDAR_URL:
+            raise ValueError("ISM_RELEASE_CALENDAR_REDIRECT_REJECTED")
+        parse_ism_release_calendar(html, year=int(year), source_url=final_url)
+        cached = (html, final_url)
+        self._calendar_cache[int(year)] = cached
+        return cached
+
+    def fetch_with_evidence(
+        self, family: str, period: str,
+    ) -> tuple[float, str, dict[str, Any], tuple[dict[str, Any], ...]]:
         failures: list[str] = []
         with self._client() as client:
             for url in _candidate_roundup_urls(family, period):
@@ -539,10 +730,45 @@ class OfficialISMHistoricalSource:
                     parsed = parse_ism_historical_roundup(
                         html, family=family, period=period,
                         source_url=str(response.url))
-                    return time.time(), html, parsed
+                    return time.time(), html, parsed, ()
                 except (httpx.HTTPError, ValueError, TypeError) as exc:
                     failures.append(f"{type(exc).__name__}:{str(exc)[:120]}")
-        raise RuntimeError("ISM_HISTORICAL_ROUNDUP_UNAVAILABLE:" + "|".join(failures[-3:]))
+
+            direct_url = _direct_report_url(family, period)
+            try:
+                response = client.get(direct_url)
+                html = self._validated(response)
+                year, month = _period_parts(period)
+                release_year, _ = _shift_month(year, month, 1)
+                calendar_html, calendar_url = self._release_calendar(
+                    client, year=release_year,
+                )
+                parsed = parse_ism_historical_direct_report(
+                    html,
+                    family=family,
+                    period=period,
+                    source_url=str(response.url),
+                    calendar_html=calendar_html,
+                    calendar_source_url=calendar_url,
+                )
+                return time.time(), html, parsed, ({
+                    "format": "HTML_ISM_RELEASE_CALENDAR",
+                    "year": release_year,
+                    "source_url": calendar_url,
+                    "content": calendar_html,
+                },)
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                failures.append(
+                    f"DIRECT:{type(exc).__name__}:{str(exc)[:120]}"
+                )
+        raise RuntimeError(
+            "ISM_HISTORICAL_OFFICIAL_SOURCE_UNAVAILABLE:"
+            + "|".join(failures[-4:])
+        )
+
+    def fetch(self, family: str, period: str) -> tuple[float, str, dict[str, Any]]:
+        fetched_at, html, parsed, _ = self.fetch_with_evidence(family, period)
+        return fetched_at, html, parsed
 
 
 def _observation_span(runtime: Any) -> tuple[float, float] | None:
@@ -641,8 +867,8 @@ class ISMHistoricalBootstrapRuntime:
                 "bootstrap_window": {"start_ts": start_ts, "end_ts": end_ts},
                 "periods": periods, "stored": stored, "skipped": skipped,
                 "errors": errors,
-                "source_kind": "OFFICIAL_DATED_ROUNDUP_POST_RELEASE_REPRODUCTION",
-                "release_time_rule": "10:00_America/New_York_on_official_roundup_date",
+                "source_kind": "OFFICIAL_ISM_POINT_IN_TIME_SOURCE",
+                "release_time_rule": "10:00_America/New_York_on_official_release_date",
                 "current_mutable_report_backfill": False,
                 "old_t0_rows_mutated": False,
                 "research_only": True, "production_authority": False,
@@ -675,8 +901,8 @@ class ISMHistoricalBootstrapRuntime:
                 {"first_t0": span[0], "latest_t0": span[1]} if span else None),
             "store": self.store.status(),
             "official_source_only": True,
-            "source_kind": "OFFICIAL_DATED_ROUNDUP_POST_RELEASE_REPRODUCTION",
-            "release_time_rule": "10:00_America/New_York_on_official_roundup_date",
+            "source_kind": "OFFICIAL_ISM_POINT_IN_TIME_SOURCE",
+            "release_time_rule": "10:00_America/New_York_on_official_release_date",
             "current_mutable_report_backfill": False,
             "old_t0_rows_mutated": False,
             "research_only": True, "production_authority": False,

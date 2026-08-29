@@ -1,9 +1,9 @@
 """Read-only historical ISM PMI overlay for EDE v1.3.
 
 The four headline ISM IDs already exist for prospective T0 capture. This module
-only makes the exact same IDs historically available from dated official roundup
-reproductions. The canonical ID universe never changes; only historical-source
-metadata is upgraded when this refinement is installed.
+only makes the exact same IDs historically available from validated official
+point-in-time sources. The canonical ID universe never changes; only historical
+source metadata is upgraded when this refinement is installed.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from .macro_ism_historical_parser_refinement import (
 )
 
 
-ISM_HISTORICAL_EDE_REFINEMENT_VERSION = "ism-historical-ede-overlay-v3"
+ISM_HISTORICAL_EDE_REFINEMENT_VERSION = "ism-historical-ede-overlay-v4"
 ISM_FEATURE_IDS = frozenset(
     feature_id for mapping in FEATURE_IDS.values() for feature_id in mapping.values()
 )
@@ -34,8 +34,9 @@ def _historical_ism_registry(definitions):
                 source="macro_ism_historical_bootstrap.macro_ism_historical_releases",
                 historical_availability="AVAILABLE",
                 notes=(
-                    "official dated ISM roundup post-release reproduction; "
-                    "10:00 ET release-day asof; release_id is dependence unit"
+                    "official dated ISM roundup or exact-period report with "
+                    "official release calendar; 10:00 ET release-day asof; "
+                    "release_id is dependence unit"
                 ),
             ))
         else:
@@ -44,7 +45,7 @@ def _historical_ism_registry(definitions):
 
 
 def install_ism_historical_ede_refinement() -> None:
-    """Add dated-roundup ISM history without mutating old T0 observations."""
+    """Add official point-in-time ISM history without mutating old T0 rows."""
     install_ism_historical_parser_refinement()
     install_fomc_deterministic_ede_refinement()
     from .edge_discovery import ai_context, filters, prospective, registry, selective
