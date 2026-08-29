@@ -20,7 +20,7 @@ from .macro_offhost_bundle import (
 )
 
 
-CONTRACT_VERSION = "official-macro-historical-offhost-v6-verified-partial"
+CONTRACT_VERSION = "official-macro-historical-offhost-v7-bls-atom-fallback"
 DEFAULT_WINDOW_DAYS = 120
 MAX_WINDOW_DAYS = 180
 FOMC_WINDOW_DAYS = 365
@@ -53,6 +53,37 @@ def _record(value: dict[str, Any]) -> dict[str, Any]:
     output = dict(value)
     output["record_sha256"] = _sha256(output)
     return output
+
+
+def _fetch_bls_manifest(
+    source: Any, *, family: str, archive_index_url: str, atom_url: str,
+) -> tuple[dict[str, Any] | None, list[str], str | None]:
+    """Fetch one official BLS manifest, falling back to its official Atom feed."""
+    try:
+        content, links = source.archive_index_manifest(family)
+        return _record({
+            "format": "HTML_ARCHIVE_INDEX",
+            "family": family,
+            "source_url": archive_index_url,
+            "content": content,
+            "source_sha256": _sha256(content),
+        }), links, None
+    except Exception as index_exc:
+        try:
+            content, links = source.atom_manifest(family)
+            return _record({
+                "format": "ATOM_ARCHIVE_MANIFEST",
+                "family": family,
+                "source_url": atom_url,
+                "content": content,
+                "source_sha256": _sha256(content),
+            }), links, None
+        except Exception as atom_exc:
+            error = (
+                f"archive_index={type(index_exc).__name__}:{index_exc}|"
+                f"atom={type(atom_exc).__name__}:{atom_exc}"
+            )
+            return None, [], error[:240]
 
 
 def _historical_availability(
@@ -106,6 +137,7 @@ def build_bundle(
 
     from .macro_bls_historical_bootstrap import (
         BLS_ARCHIVE_INDEXES,
+        BLS_ATOM_FEEDS,
         OfficialBLSArchiveSource,
         _bls_archive_identity,
     )
@@ -130,20 +162,17 @@ def build_bundle(
     schedules: dict[str, dict[str, Any]] = {}
     manifest_links: list[tuple[str, str]] = []
     for family, source_url in BLS_ARCHIVE_INDEXES.items():
-        try:
-            index_html, links = bls_source.archive_index_manifest(family)
-            schedules[family] = _record({
-                "format": "HTML_ARCHIVE_INDEX",
-                "family": family,
-                "source_url": source_url,
-                "content": index_html,
-                "source_sha256": _sha256(index_html),
-            })
+        manifest, links, error = _fetch_bls_manifest(
+            bls_source,
+            family=family,
+            archive_index_url=source_url,
+            atom_url=BLS_ATOM_FEEDS[family],
+        )
+        if manifest is not None:
+            schedules[family] = manifest
             manifest_links.extend((family, link) for link in links)
-        except Exception as exc:
-            errors[f"BLS:manifest:{family}"] = (
-                f"{type(exc).__name__}:{str(exc)[:180]}"
-            )
+        else:
+            errors[f"BLS:manifest:{family}"] = str(error)
 
     dedup: dict[tuple[str, str, float], dict[str, Any]] = {}
     for family, source_url in manifest_links:
@@ -177,6 +206,16 @@ def build_bundle(
                 f"{type(exc).__name__}:{str(exc)[:180]}"
             )
     bls_records = [dedup[key] for key in sorted(dedup, key=lambda item: item[2])]
+    for family in schedules:
+        if not any(
+            (record.get("spec") or {}).get("family") == family
+            for record in bls_records
+        ) and not any(
+            key.startswith(f"BLS:archive:{family}:") for key in errors
+        ):
+            errors[f"BLS:archive:{family}:window"] = (
+                "ValueError:BLS_HISTORICAL_WINDOW_RECORDS_MISSING"
+            )
 
     ism_source = OfficialISMHistoricalSource()
     ism_records: list[dict[str, Any]] = []
@@ -320,11 +359,13 @@ def validate_bundle(
 ) -> dict[str, Any]:
     from .macro_bls_historical_bootstrap import (
         BLS_ARCHIVE_INDEXES,
+        BLS_ATOM_FEEDS,
         BLSReleaseSpec,
         FAMILIES as BLS_FAMILIES,
         _official_bls_url,
         parse_bls_archive_spec,
         parse_bls_archive_index_urls,
+        parse_bls_atom_archive_urls,
         parse_cpi_archive,
         parse_nfp_archive,
     )
@@ -401,26 +442,27 @@ def validate_bundle(
     for family, value in schedules.items():
         if value.get("record_sha256") != _sha256(_without(value, "record_sha256")):
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
-        if (
-            value.get("family") != family
-            or value.get("source_url") != BLS_ARCHIVE_INDEXES[family]
-            or not _official_bls_url(str(value.get("source_url") or ""))
-        ):
+        source_url = str(value.get("source_url") or "")
+        if value.get("family") != family or not _official_bls_url(source_url):
             raise ValueError("HISTORICAL_OFFHOST_BLS_SOURCE_INVALID")
-        if value.get("format") != "HTML_ARCHIVE_INDEX":
-            raise ValueError("HISTORICAL_OFFHOST_BLS_CALENDAR_FORMAT_INVALID")
         content = str(value.get("content") or "")
         if len(content) < 200 or len(content.encode("utf-8")) > 2_000_000:
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_SIZE_INVALID")
         if value.get("source_sha256") != _sha256(content):
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_HASH_MISMATCH")
+        if value.get("format") == "HTML_ARCHIVE_INDEX":
+            if source_url != BLS_ARCHIVE_INDEXES[family]:
+                raise ValueError("HISTORICAL_OFFHOST_BLS_SOURCE_INVALID")
+            links = parse_bls_archive_index_urls(
+                content, family=family, source_url=source_url)
+        elif value.get("format") == "ATOM_ARCHIVE_MANIFEST":
+            if source_url != BLS_ATOM_FEEDS[family]:
+                raise ValueError("HISTORICAL_OFFHOST_BLS_SOURCE_INVALID")
+            links = parse_bls_atom_archive_urls(content, family=family)
+        else:
+            raise ValueError("HISTORICAL_OFFHOST_BLS_CALENDAR_FORMAT_INVALID")
         manifest_links.update(
-            (family, source_url)
-            for source_url in parse_bls_archive_index_urls(
-                content,
-                family=family,
-                source_url=BLS_ARCHIVE_INDEXES[family],
-            )
+            (family, archive_url) for archive_url in links
         )
 
     bls_records = bundle.get("bls_records")

@@ -301,6 +301,80 @@ def test_historical_bundle_reparses_every_official_page_and_binds_owner(monkeypa
         offhost.validate_bundle(changed, expected_sha=SHA, now=NOW)
 
 
+def test_bls_manifest_falls_back_to_official_atom_and_validates():
+    class Source:
+        @staticmethod
+        def archive_index_manifest(_family):
+            raise PermissionError("403 Forbidden")
+
+        @staticmethod
+        def atom_manifest(family):
+            assert family == "CPI"
+            return ATOM_CPI, [
+                "https://www.bls.gov/news.release/archives/cpi_08122025.htm"
+            ]
+
+    manifest, links, error = offhost._fetch_bls_manifest(
+        Source(),
+        family="CPI",
+        archive_index_url="https://www.bls.gov/bls/news-release/cpi.htm",
+        atom_url="https://www.bls.gov/feed/cpi.rss",
+    )
+    assert error is None
+    assert links == [
+        "https://www.bls.gov/news.release/archives/cpi_08122025.htm"
+    ]
+    assert manifest["format"] == "ATOM_ARCHIVE_MANIFEST"
+
+    bundle = _bundle()
+    bundle["bls_schedules"]["CPI"] = manifest
+    bundle["bundle_sha256"] = offhost._sha256(
+        offhost._without(bundle, "bundle_sha256")
+    )
+    assert offhost.validate_bundle(bundle, expected_sha=SHA, now=NOW) is bundle
+
+
+def test_bls_atom_manifest_rejects_foreign_archive_link():
+    bundle = _bundle()
+    foreign = ATOM_CPI.replace(
+        "https://www.bls.gov/news.release/archives/cpi_08122025.htm",
+        "https://example.com/news.release/archives/cpi_08122025.htm",
+    )
+    bundle["bls_schedules"]["CPI"] = _record({
+        "format": "ATOM_ARCHIVE_MANIFEST", "family": "CPI",
+        "source_url": "https://www.bls.gov/feed/cpi.rss",
+        "content": foreign,
+        "source_sha256": offhost._sha256(foreign),
+    })
+    bundle["bundle_sha256"] = offhost._sha256(
+        offhost._without(bundle, "bundle_sha256")
+    )
+    with pytest.raises(ValueError, match="BLS_ATOM_ARCHIVE_LINK_INVALID"):
+        offhost.validate_bundle(bundle, expected_sha=SHA, now=NOW)
+
+
+def test_bls_manifest_dual_failure_remains_explicit_partial():
+    class Source:
+        @staticmethod
+        def archive_index_manifest(_family):
+            raise PermissionError("403 Forbidden")
+
+        @staticmethod
+        def atom_manifest(_family):
+            raise ConnectionError("feed unavailable")
+
+    manifest, links, error = offhost._fetch_bls_manifest(
+        Source(),
+        family="NFP",
+        archive_index_url="https://www.bls.gov/bls/news-release/empsit.htm",
+        atom_url="https://www.bls.gov/feed/empsit.rss",
+    )
+    assert manifest is None
+    assert links == []
+    assert "archive_index=PermissionError:403 Forbidden" in error
+    assert "atom=ConnectionError:feed unavailable" in error
+
+
 def test_historical_offhost_materializes_real_rows_without_network(monkeypatch):
     bundle = _bundle()
     monkeypatch.setattr(offhost, "load_verified_bundle", lambda _runtime: bundle)
