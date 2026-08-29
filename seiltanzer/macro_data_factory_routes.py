@@ -68,8 +68,8 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     # install the narrow official-prose refinement before the source wrapper.
     install_ism_roundup_parser_refinement()
     # ISM's newest full report can send non-browser clients to SSO/CAPTCHA.
-    # The resilient source then uses ISM's own validated public roundup plus the
-    # immediately previous official report. Missing components remain missing.
+    # The resilient source uses validated official report/roundup pages.
+    # Missing components and unverifiable release dates remain missing.
     install_ism_source_resilience()
     # Macro values already frozen into a T0 become canonical EDE features. The
     # dependence unit is the official release_id, never repeated market T0 rows.
@@ -161,6 +161,10 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
             "historical_ism_source_kind": (
                 "OFFICIAL_DATED_ROUNDUP_POST_RELEASE_REPRODUCTION"
             ),
+            "historical_ism_source_kinds": [
+                "OFFICIAL_DATED_ROUNDUP_POST_RELEASE_REPRODUCTION",
+                "OFFICIAL_MONTHLY_REPORT_WITH_OFFICIAL_RELEASE_CALENDAR",
+            ],
             "historical_ism_current_mutable_report_backfill": False,
             "official_sources_only": True,
             "no_placeholders": True,
