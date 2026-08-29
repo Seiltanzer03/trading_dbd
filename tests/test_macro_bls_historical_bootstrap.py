@@ -287,9 +287,11 @@ def test_macro_inventory_maturity_counts_one_release_not_repeated_t0_rows():
     ]
 
     class _Adapter:
-        def rows(self, *, resolved_only=False, strict=False):
+        def rows(self, *, resolved_only=False, strict=False,
+                 horizon_minutes=None):
             assert resolved_only is False
-            return rows
+            return [row for row in rows
+                    if int(row["horizon_minutes"]) == int(horizon_minutes)]
 
     report = {
         "features": [{

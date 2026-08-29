@@ -58,20 +58,18 @@ def _release_id(row: dict[str, Any], feature_id: str) -> str | None:
 
 def _recompute_macro_inventory_maturity(adapter, report: dict[str, Any], prospective) -> None:
     """Make inventory eligibility obey the same release independence as candidates."""
-    rows = adapter.rows(resolved_only=False, strict=False)
     feature_rows = {
         str(item.get("feature_id")): item
         for item in report.get("features") or []
     }
-    for feature_id in MACRO_FEATURE_FAMILY:
-        item = feature_rows.get(feature_id)
-        if item is None:
-            continue
-        by_horizon = item.get("by_horizon") or {}
-        for horizon in prospective.HORIZONS:
-            horizon_rows = [
-                row for row in rows if int(row["horizon_minutes"]) == int(horizon)
-            ]
+    for horizon in prospective.HORIZONS:
+        horizon_rows = adapter.rows(
+            resolved_only=False, strict=False, horizon_minutes=int(horizon))
+        for feature_id in MACRO_FEATURE_FAMILY:
+            item = feature_rows.get(feature_id)
+            if item is None:
+                continue
+            by_horizon = item.get("by_horizon") or {}
             eligible_rows = [
                 row for row in horizon_rows
                 if ((row.get("feature_values") or {}).get(feature_id) or {}).get(
@@ -105,7 +103,13 @@ def _recompute_macro_inventory_maturity(adapter, report: dict[str, Any], prospec
                 "dependency_unit": "OFFICIAL_MACRO_RELEASE_ID",
                 "repeated_t0_increases_effective_n": False,
             })
+        del eligible_rows, resolved_rows, horizon_rows
 
+    for feature_id in MACRO_FEATURE_FAMILY:
+        item = feature_rows.get(feature_id)
+        if item is None:
+            continue
+        by_horizon = item.get("by_horizon") or {}
         best = max(
             (row.get("data_maturity", "INSUFFICIENT_DATA")
              for row in by_horizon.values()),

@@ -22,7 +22,7 @@ from seiltanzer.edge_discovery.filters import (
 )
 from seiltanzer.edge_discovery.registry import feature_registry
 from seiltanzer.edge_discovery.historical import aligned_cross_asset_context
-from seiltanzer.edge_discovery.prospective import ProspectiveFeatureAdapter
+from seiltanzer.edge_discovery.prospective import HORIZONS, ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.maturity import (
     TERMINAL_USE_BY_MATURITY,
     data_maturity,
@@ -402,6 +402,68 @@ def test_prospective_outcome_hidden_until_target_and_missing_options_stay_missin
     assert rows[0]["feature_values"]["option.iv"]["availability"] == "UNAVAILABLE"
     assert rows[0]["feature_values"]["option.iv"]["value"] is None
     assert adapter.rows(resolved_only=True) == []
+
+
+def test_feature_capture_audit_reads_one_horizon_batch_at_a_time(monkeypatch):
+    runtime = _ProspectiveRuntime()
+    for horizon in HORIZONS:
+        runtime._conn.execute(
+            "INSERT INTO g1s_observations VALUES(?,?,?,?,?,?)",
+            (f"o-{horizon}", 100.0, 200.0, "NAS100", horizon,
+             _prospective_features(100.0)))
+    runtime._conn.commit()
+    adapter = ProspectiveFeatureAdapter(runtime, available_asof=150.0)
+    original = adapter._source_rows
+    requested: list[int | None] = []
+
+    def tracked_source_rows(*, horizon_minutes=None):
+        requested.append(horizon_minutes)
+        return original(horizon_minutes=horizon_minutes)
+
+    monkeypatch.setattr(adapter, "_source_rows", tracked_source_rows)
+    audit = adapter.feature_capture_audit()
+
+    # Base coverage plus the official-macro release-independence overlay each
+    # make one bounded pass; neither may materialize all horizons together.
+    assert requested
+    assert len(requested) % len(HORIZONS) == 0
+    assert all(
+        requested[index:index + len(HORIZONS)] == list(HORIZONS)
+        for index in range(0, len(requested), len(HORIZONS)))
+    assert None not in requested
+    assert audit["observation_count"] == len(HORIZONS)
+    assert audit["resolved_outcome_count"] == 0
+    price = next(row for row in audit["features"]
+                 if row["feature_id"] == "price.ret_5m")
+    assert {key: bucket["raw"] for key, bucket in price["by_horizon"].items()} == {
+        str(horizon): 1 for horizon in HORIZONS}
+
+
+def test_complete_frozen_price_context_never_loads_passive_bar_history():
+    runtime = _ProspectiveRuntime()
+    frozen = json.loads(_prospective_features(100.0))
+    frozen["g1s_evidence_v3"]["price_volatility"].update({
+        "ret_60m": 0.03,
+        "trend_efficiency_60": 0.4,
+        "range_60m": 0.05,
+        "drawdown_60m": -0.01,
+        "drawup_60m": 0.02,
+        "trend_regime": "TREND_UP",
+        "volatility_regime": "NORMAL",
+    })
+    runtime._conn.execute(
+        "INSERT INTO g1s_observations VALUES(?,?,?,?,?,?)",
+        ("complete", 100.0, 200.0, "NAS100", 15,
+         json.dumps(frozen, sort_keys=True)))
+    runtime._conn.commit()
+
+    class _NoPassiveBarLoad(ProspectiveFeatureAdapter):
+        def _load_causal_bars(self):
+            raise AssertionError("complete frozen captures must not load passive bars")
+
+    adapter = _NoPassiveBarLoad(runtime, available_asof=150.0)
+    assert len(adapter.rows(resolved_only=False)) == 1
+    assert adapter._causal_bars is None
 
 
 def test_nearest_causal_cross_join_accepts_past_and_rejects_future_and_stale():

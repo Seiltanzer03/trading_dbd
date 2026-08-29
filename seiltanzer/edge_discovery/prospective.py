@@ -181,6 +181,12 @@ CAUSAL_OPTION_SERIES = {
     "gex": "option.gex_net_balance", "vanna": "option.vanna",
     "charm": "option.charm", "zero_gamma": "option.zero_gamma_distance",
 }
+CAUSAL_RECOMPUTABLE_IDS = {
+    "price.ret_5m", "price.ret_15m", "price.ret_60m",
+    "price.trend_efficiency_60", "price.range_60",
+    "price.drawdown_60", "price.drawup_60",
+    "vol.rv_15m", "vol.rv_60m", "regime.trend", "regime.volatility",
+}
 DERIVED_IMPLEMENTED_IDS = {
     "vol.rv15_over_rv60", "cross.confirmation", "cross.family_breadth",
     "cross.market_breadth", "cross.correlation", "cross.correlation_change",
@@ -203,7 +209,10 @@ class ProspectiveFeatureAdapter:
         with runtime._lock:
             self.tables = {str(row[0]) for row in runtime._conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        self._causal_bars = self._load_causal_bars()
+        # Most recent T0 captures already contain the complete frozen price
+        # block.  Loading every retained passive bar eagerly made a read-only
+        # inventory consume memory proportional to the full production DB.
+        self._causal_bars: dict[str, list[dict[str, Any]]] | None = None
         self._causal_bar_cache: dict[tuple[str, float, float], dict[str, Any]] = {}
 
     def _load_causal_bars(self) -> dict[str, list[dict[str, Any]]]:
@@ -232,6 +241,8 @@ class ProspectiveFeatureAdapter:
         cached = self._causal_bar_cache.get(key)
         if cached is not None:
             return cached
+        if self._causal_bars is None:
+            self._causal_bars = self._load_causal_bars()
         all_bars = self._causal_bars.get(instrument, [])
         eligible = [bar for bar in all_bars
                     if float(bar["bar_end_ts"]) <= t0+1e-6
@@ -302,9 +313,11 @@ class ProspectiveFeatureAdapter:
         self._causal_bar_cache[key] = block
         return block
 
-    def _source_rows(self) -> list[dict[str, Any]]:
+    def _source_rows(self, *, horizon_minutes: int | None = None) -> list[dict[str, Any]]:
         if "g1s_observations" not in self.tables:
             return []
+        if horizon_minutes is not None and horizon_minutes not in HORIZONS:
+            raise ValueError(f"unsupported horizon_minutes={horizon_minutes}")
         has_resolutions = "g1s_resolutions" in self.tables
         resolution_columns = (
             "r.resolved_ts,r.terminal_log_return,r.direction_label,"
@@ -313,11 +326,17 @@ class ProspectiveFeatureAdapter:
             "NULL resolved_ts,NULL terminal_log_return,NULL direction_label,"
             "NULL mfe_log_return,NULL mae_log_return,NULL path_quality_status")
         join = "LEFT JOIN g1s_resolutions r USING(observation_id)" if has_resolutions else ""
+        where = "g.horizon_minutes IN (15,30,60,120,240)"
+        parameters: tuple[int, ...] = ()
+        if horizon_minutes is not None:
+            where = "g.horizon_minutes = ?"
+            parameters = (horizon_minutes,)
         with self.runtime._lock:
             rows = self.runtime._conn.execute(
                 f"SELECT g.*,{resolution_columns} FROM g1s_observations g {join} "
-                "WHERE g.horizon_minutes IN (15,30,60,120,240) "
-                "ORDER BY g.captured_ts,g.instrument,g.horizon_minutes").fetchall()
+                f"WHERE {where} "
+                "ORDER BY g.captured_ts,g.instrument,g.horizon_minutes",
+                parameters).fetchall()
         return [dict(row) for row in rows]
 
     def _feature_values(self, row: dict[str, Any], *, strict: bool) -> tuple[
@@ -328,14 +347,17 @@ class ProspectiveFeatureAdapter:
         rejected: list[str] = []
         provenance_by_feature: dict[str, dict[str, Any]] = {}
         definitions = {item.feature_id: item for item in FEATURES}
-        recomputed = self._recomputed_price_context(row)
+        recomputed: dict[str, Any] | None = None
         for feature_id, extractor in EXTRACTORS.items():
             value, block = extractor(frozen)
             provenance = "FROZEN_T0"
-            if value is None and feature_id in recomputed:
-                value = recomputed.get(feature_id)
-                block = recomputed.get("_meta") or {}
-                provenance = "CAUSAL_RECOMPUTED"
+            if value is None and feature_id in CAUSAL_RECOMPUTABLE_IDS:
+                if recomputed is None:
+                    recomputed = self._recomputed_price_context(row)
+                if feature_id in recomputed:
+                    value = recomputed.get(feature_id)
+                    block = recomputed.get("_meta") or {}
+                    provenance = "CAUSAL_RECOMPUTED"
             asof, quality, stale_after = _block_meta(block, t0)
             definition = definitions[feature_id]
             try:
@@ -353,16 +375,18 @@ class ProspectiveFeatureAdapter:
                     "future_points_used": False,
                 }
                 if provenance == "CAUSAL_RECOMPUTED":
-                    provenance_by_feature[feature_id].update(recomputed.get("_meta") or {})
+                    provenance_by_feature[feature_id].update(
+                        (recomputed or {}).get("_meta") or {})
             except ValueError as exc:
                 rejected.append(feature_id)
                 if strict:
                     raise ValueError(f"{feature_id} rejected: {exc}") from exc
         return values, rejected, provenance_by_feature
 
-    def rows(self, *, resolved_only: bool = True, strict: bool = True) -> list[dict[str, Any]]:
+    def rows(self, *, resolved_only: bool = True, strict: bool = True,
+             horizon_minutes: int | None = None) -> list[dict[str, Any]]:
         output: list[dict[str, Any]] = []
-        for source in self._source_rows():
+        for source in self._source_rows(horizon_minutes=horizon_minutes):
             t0, target = float(source["captured_ts"]), float(source["target_ts"])
             if target <= t0:
                 raise ValueError("target_ts must be after T0")
@@ -553,32 +577,43 @@ class ProspectiveFeatureAdapter:
                             row["feature_values"][feature_id] = record
 
     def feature_capture_audit(self) -> dict[str, Any]:
-        rows = self.rows(resolved_only=False, strict=False)
-        totals = len(rows)
-        records: list[dict[str, Any]] = []
         maturity_rank = {
             "INSUFFICIENT_DATA": 0, "DATA_READY_EARLY": 1,
             "DATA_READY_RESEARCH": 2, "DATA_READY_PROVISIONAL": 3,
             "DATA_READY_ROBUST": 4,
         }
-        for definition in FEATURES:
-            values = [row["feature_values"].get(definition.feature_id) for row in rows]
-            present = [value for value in values if value and value["availability"] == "AVAILABLE"]
-            stale = [value for value in present if value["stale"]]
-            eligible = [value for value in present if value["training_eligible"]]
-            t0s = [float(row["captured_ts"]) for row, value in zip(rows, values)
-                   if value and value["availability"] == "AVAILABLE"]
-            implemented = (definition.feature_id in EXTRACTORS
-                           or definition.feature_id in DERIVED_IMPLEMENTED_IDS)
-            by_horizon: dict[str, dict[str, Any]] = {}
-            for horizon in HORIZONS:
-                horizon_rows = [row for row in rows
-                                if int(row["horizon_minutes"]) == horizon]
+        aggregate: dict[str, dict[str, Any]] = {
+            definition.feature_id: {
+                "present": 0, "stale": 0, "eligible": 0,
+                "first_t0": None, "latest_t0": None, "recomputed": 0,
+                "by_horizon": {},
+            }
+            for definition in FEATURES
+        }
+        totals = 0
+        resolved_outcome_count = 0
+
+        # Derived option and cross-asset features are horizon-local.  Process
+        # one horizon at a time so peak memory is bounded to roughly one fifth
+        # of the full audit while preserving the exact aggregate contract.
+        for horizon in HORIZONS:
+            rows = self.rows(
+                resolved_only=False, strict=False, horizon_minutes=horizon)
+            horizon_total = len(rows)
+            totals += horizon_total
+            resolved_outcome_count += sum(
+                bool(row["outcome_available"]) for row in rows)
+            for definition in FEATURES:
+                feature_id = definition.feature_id
+                values = [row["feature_values"].get(feature_id) for row in rows]
+                present_pairs = [
+                    (row, value) for row, value in zip(rows, values)
+                    if value and value["availability"] == "AVAILABLE"]
                 eligible_rows = [
-                    row for row in horizon_rows
-                    if (row["feature_values"].get(definition.feature_id) or {}).get(
-                        "training_eligible")]
-                resolved_rows = [row for row in eligible_rows if row["outcome_available"]]
+                    row for row, value in zip(rows, values)
+                    if value and value.get("training_eligible")]
+                resolved_rows = [
+                    row for row in eligible_rows if row["outcome_available"]]
                 _unused_weights, effective = _weights(resolved_rows) if resolved_rows else ([], 0)
                 temporal_blocks = len({
                     time.strftime("%Y-%m-%d", time.gmtime(float(row["captured_ts"])))
@@ -586,15 +621,41 @@ class ProspectiveFeatureAdapter:
                 maturity = data_maturity(
                     raw_n=len(resolved_rows), effective_n=int(effective),
                     temporal_blocks=temporal_blocks)
-                by_horizon[str(horizon)] = {
+                stats = aggregate[feature_id]
+                stats["by_horizon"][str(horizon)] = {
                     "raw": len(eligible_rows),
                     "effective": int(effective),
                     "resolved": len(resolved_rows),
                     "temporal_blocks": temporal_blocks,
-                    "coverage_pct": 100.0*len(eligible_rows)/max(1, len(horizon_rows)),
+                    "coverage_pct": 100.0*len(eligible_rows)/max(1, horizon_total),
                     "data_maturity": maturity,
                     "edge_maturity": "INSUFFICIENT_DATA",
                 }
+                stats["present"] += len(present_pairs)
+                stats["stale"] += sum(bool(value["stale"])
+                                      for _, value in present_pairs)
+                stats["eligible"] += sum(bool(value["training_eligible"])
+                                         for _, value in present_pairs)
+                stats["recomputed"] += sum(
+                    bool(value and value.get("provenance") == "CAUSAL_RECOMPUTED")
+                    for value in values)
+                t0s = [float(row["captured_ts"]) for row, _ in present_pairs]
+                if t0s:
+                    first_t0, latest_t0 = min(t0s), max(t0s)
+                    stats["first_t0"] = (
+                        first_t0 if stats["first_t0"] is None
+                        else min(float(stats["first_t0"]), first_t0))
+                    stats["latest_t0"] = (
+                        latest_t0 if stats["latest_t0"] is None
+                        else max(float(stats["latest_t0"]), latest_t0))
+            # Do not retain the expanded feature dictionaries while loading
+            # the next horizon batch.
+            del values, present_pairs, eligible_rows, resolved_rows, t0s, rows
+
+        records: list[dict[str, Any]] = []
+        for definition in FEATURES:
+            stats = aggregate[definition.feature_id]
+            by_horizon = stats["by_horizon"]
             best_maturity = max(
                 (item["data_maturity"] for item in by_horizon.values()),
                 key=lambda item: maturity_rank[item], default="INSUFFICIENT_DATA")
@@ -604,21 +665,20 @@ class ProspectiveFeatureAdapter:
                 status = "QUALITY_ONLY"
             else:
                 status = best_maturity
-            recomputed_n = sum(
-                bool(value and value.get("provenance") == "CAUSAL_RECOMPUTED")
-                for value in values)
+            implemented = (definition.feature_id in EXTRACTORS
+                           or definition.feature_id in DERIVED_IMPLEMENTED_IDS)
             records.append({
                 "feature_id": definition.feature_id,
                 "research_scope": definition.research_scope,
                 "live_capture_implemented": bool(implemented),
-                "real_observations": len(present),
-                "first_t0": min(t0s) if t0s else None,
-                "latest_t0": max(t0s) if t0s else None,
-                "coverage_pct": 100.0*len(present)/max(1, totals),
-                "available_pct": 100.0*len(present)/max(1, totals),
-                "stale_pct": 100.0*len(stale)/max(1, len(present)),
-                "training_eligible_observations": len(eligible),
-                "causal_recomputed_observations": recomputed_n,
+                "real_observations": stats["present"],
+                "first_t0": stats["first_t0"],
+                "latest_t0": stats["latest_t0"],
+                "coverage_pct": 100.0*stats["present"]/max(1, totals),
+                "available_pct": 100.0*stats["present"]/max(1, totals),
+                "stale_pct": 100.0*stats["stale"]/max(1, stats["present"]),
+                "training_eligible_observations": stats["eligible"],
+                "causal_recomputed_observations": stats["recomputed"],
                 "usable_for_ede": bool(
                     definition.research_scope == "G1S"
                     and best_maturity != "INSUFFICIENT_DATA"),
@@ -639,7 +699,7 @@ class ProspectiveFeatureAdapter:
         return {
             "contract_version": PROSPECTIVE_ADAPTER_VERSION,
             "observation_count": totals,
-            "resolved_outcome_count": sum(bool(row["outcome_available"]) for row in rows),
+            "resolved_outcome_count": resolved_outcome_count,
             "features": records,
             "summary": {
                 "feature_definitions": len(FEATURES),
