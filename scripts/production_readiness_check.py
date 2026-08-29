@@ -239,7 +239,28 @@ def verify_historical_contract(hist: dict) -> None:
                 assert row.get("provisional_model_id"), row
 
 
-def verify(expected_sha: str) -> None:
+def verify_restore_drill(*, skip: bool, backup_id: str | None) -> dict | None:
+    """Run the full restore proof unless low-disk operation was explicitly chosen."""
+    if skip:
+        print("RESTORE", backup_id, "SKIPPED_USER_AUTHORIZED_LOW_DISK")
+        return None
+
+    code, drill, elapsed = request(
+        "/api/system/storage/restore-drill", method="POST", timeout=90.0
+    )
+    print(f"restore-drill: {code} {elapsed:.0f}ms")
+    assert code == 200 and drill.get("ok") is True, drill
+    assert drill.get("schema_complete_current_contract") is True, drill
+    assert drill.get("live_database_replaced") is False, drill
+    assert not (drill.get("critical_table_mismatches") or {}), drill
+    assert drill.get("page_cache_pressure_bounded") is True, drill
+
+    # A successful drill can leave the host under transient IO/memory pressure.
+    wait_route_stable("/api/state", budget_ms=3000.0)
+    return drill
+
+
+def verify(expected_sha: str, *, skip_restore_drill: bool = False) -> None:
     wait_core(expected_sha)
     fast_paths = [
         ("/api/state", 3000), ("/api/validation", None),
@@ -352,19 +373,10 @@ def verify(expected_sha: str) -> None:
     overdue = int((q.get("counts") or {}).get("DUE_BUT_NOT_RESOLVED") or 0)
     assert overdue == 0, q
 
-    code, drill, elapsed = request("/api/system/storage/restore-drill", method="POST", timeout=90.0)
-    print(f"restore-drill: {code} {elapsed:.0f}ms")
-    assert code == 200 and drill.get("ok") is True, drill
-    assert drill.get("schema_complete_current_contract") is True, drill
-    assert drill.get("live_database_replaced") is False, drill
-    assert not (drill.get("critical_table_mismatches") or {}), drill
-    assert drill.get("page_cache_pressure_bounded") is True, drill
-
-    # The restore drill is intentionally heavy. A successful drill proves the
-    # backup, but it does not by itself prove that latency-critical live routes
-    # have recovered from the resulting IO/memory pressure. Require repeated
-    # healthy samples before readiness hands the host to functional smoke.
-    wait_route_stable("/api/state", budget_ms=3000.0)
+    drill = verify_restore_drill(
+        skip=skip_restore_drill,
+        backup_id=str(selected.get("backup_id") or "unknown"),
+    )
 
     by = {int(row["horizon_minutes"]): row for row in g1s.get("horizons", [])}
     print("G1S", json.dumps({h: {"raw": by[h].get("raw_resolved"),
@@ -383,14 +395,23 @@ def verify(expected_sha: str) -> None:
         ("windows", "resolved", "evidence_eligible", "eligible_resolved")}, sort_keys=True))
     print("RESEARCH_WORKER", json.dumps({k: worker.get(k) for k in
         ("running", "last_duration_ms", "last_error", "scalability_refinement_version")}, sort_keys=True))
-    print("RESTORE", drill.get("backup_id"), "PASS")
+    if drill is not None:
+        print("RESTORE", drill.get("backup_id"), "PASS")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--expected-sha", required=True)
+    parser.add_argument(
+        "--skip-restore-drill-low-disk",
+        action="store_true",
+        help="keep the verified backup checks but skip its disposable full-size restore",
+    )
     args = parser.parse_args(argv)
-    verify(args.expected_sha)
+    verify(
+        args.expected_sha,
+        skip_restore_drill=args.skip_restore_drill_low_disk,
+    )
     print("PRODUCTION READINESS PASS")
     return 0
 

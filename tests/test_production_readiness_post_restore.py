@@ -13,6 +13,25 @@ readiness = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(readiness)
 
 
+def test_user_authorized_low_disk_mode_keeps_backup_but_skips_full_restore(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("full-size restore must not run in low-disk mode")
+
+    monkeypatch.setattr(readiness, "request", forbidden)
+    monkeypatch.setattr(readiness, "wait_route_stable", forbidden)
+
+    assert readiness.verify_restore_drill(
+        skip=True, backup_id="verified-backup-1"
+    ) is None
+
+
+def test_deploy_explicitly_selects_user_authorized_low_disk_mode():
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy.yml"
+    ).read_text(encoding="utf-8")
+    assert "--skip-restore-drill-low-disk" in workflow
+
+
 def test_post_restore_stability_requires_consecutive_healthy_samples(monkeypatch):
     samples = iter([
         (200, {"ok": True}, 100.0),

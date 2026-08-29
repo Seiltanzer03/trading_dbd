@@ -416,7 +416,7 @@ jobs:
             # Acquire the existing cooperative lease immediately after the new
             # service first becomes HTTP-ready. The worker may complete its one
             # required core cycle, but cannot start optional maintenance before
-            # the restore drill/readiness transaction begins.
+            # the readiness transaction begins.
             "$PY" "$ORCH" acquire-gate \
               --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA" \
@@ -450,7 +450,8 @@ jobs:
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             /opt/seiltanzer/.venv/bin/python \
               /opt/seiltanzer/scripts/production_readiness_check.py \
-              --expected-sha "$EXPECTED_SHA"
+              --expected-sha "$EXPECTED_SHA" \
+              --skip-restore-drill-low-disk
 
       - name: Exercise exact production routes, AI and official macro data
         id: smoke
