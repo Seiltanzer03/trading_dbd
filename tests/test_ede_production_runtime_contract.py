@@ -33,11 +33,15 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
         "Run EDE v1.3 research off production VPS"
     )
 
-    # Snapshot export reuses the deploy-created, immutable, verified exact-SHA
-    # prestart backup. It must never start a second whole live-DB copy.
+    # Snapshot export reuses an immutable, verified exact-SHA local backup,
+    # preferring deploy prestart and falling back to a scheduled recovery point
+    # if low-disk retention rotated the 5.3-GiB prestart pair. It must never
+    # start a second whole live-DB copy.
     assert "MAX_EXACT_BACKUP_AGE_SECONDS = 60 * 60" in offload
     assert "EDE_VERIFIED_BACKUP_SELECTION" in offload
     assert "DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP" in offload
+    assert "SCHEDULED_VERIFIED_LOCAL_BACKUP" in offload
+    assert 'EXACT_BACKUP_REASONS = frozenset(("prestart", "scheduled"))' in offload
     assert "database_sha256" in offload
     assert "src.backup(" not in offload
     assert "EDE_VERIFIED_BACKUP_TRANSFER_PROGRESS" in offload
