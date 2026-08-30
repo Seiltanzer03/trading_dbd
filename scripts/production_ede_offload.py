@@ -42,6 +42,7 @@ SSH_KEEPALIVE_SECONDS = 30
 SSH_OPERATION_ATTEMPTS = 4
 MAX_EXACT_BACKUP_AGE_SECONDS = 60 * 60
 BACKUP_CONTRACT_VERSION = "seiltanzer-backup-v1"
+EXACT_BACKUP_REASONS = frozenset(("prestart", "scheduled"))
 
 LEDGER_NAMES = (
     "ede_frozen_evidence.jsonl",
@@ -278,8 +279,9 @@ def _verify_local_exact_backup(
         raise RuntimeError("downloaded backup contract mismatch")
     if payload.get("verified") is not True:
         raise RuntimeError("downloaded backup is not verified")
-    if payload.get("reason") != "prestart":
-        raise RuntimeError("downloaded backup is not a prestart snapshot")
+    reason = str(payload.get("reason") or "")
+    if reason not in EXACT_BACKUP_REASONS:
+        raise RuntimeError("downloaded backup reason is not accepted for EDE")
     if str(payload.get("git_commit") or "") != expected_sha:
         raise RuntimeError("downloaded backup does not belong to the expected SHA")
     if pathlib.PurePosixPath(str(payload.get("source_db") or "")) != REMOTE_DATABASE:
@@ -300,7 +302,14 @@ def _verify_local_exact_backup(
 
 
 def _select_remote_exact_backup(client, *, expected_sha: str) -> dict[str, Any]:
-    """Select one recent immutable deploy backup without touching the live DB."""
+    """Select one recent immutable exact-SHA backup without touching the live DB.
+
+    Prefer the deploy-created prestart recovery point.  On the small production
+    disk, two later 15-minute scheduled snapshots can legitimately rotate that
+    5.3-GiB file before the EDE handoff reaches this step; a scheduled snapshot
+    has the same immutable manifest, hash and SQLite verification contract and
+    is therefore the fail-closed fallback.
+    """
     selector = r'''
 import hashlib
 import json
@@ -340,7 +349,8 @@ for manifest_path in root.glob("*.manifest.json"):
             continue
         if payload.get("backup_contract_version") != "seiltanzer-backup-v1":
             continue
-        if payload.get("verified") is not True or payload.get("reason") != "prestart":
+        reason = str(payload.get("reason") or "")
+        if payload.get("verified") is not True or reason not in ("prestart", "scheduled"):
             continue
         if str(payload.get("git_commit") or "") != expected_sha:
             continue
@@ -356,7 +366,8 @@ for manifest_path in root.glob("*.manifest.json"):
         database_sha = str(payload.get("database_sha256") or "")
         if len(database_sha) != 64:
             continue
-        candidates.append((created_ts, {
+        reason_priority = 1 if reason == "prestart" else 0
+        candidates.append(((reason_priority, created_ts), {
             "database_path": str(database_path),
             "manifest_path": str(manifest_path.resolve()),
             "database_file": database_name,
@@ -365,14 +376,14 @@ for manifest_path in root.glob("*.manifest.json"):
             "created_ts": created_ts,
             "age_sec": age_sec,
             "backup_id": str(payload.get("backup_id") or ""),
-            "reason": "prestart",
+            "reason": reason,
             "git_commit": expected_sha,
         }))
     except (OSError, ValueError, TypeError):
         continue
 
 if not candidates:
-    raise SystemExit("no recent verified exact-SHA prestart backup")
+    raise SystemExit("no recent verified exact-SHA local backup")
 selected = max(candidates, key=lambda item: item[0])[1]
 print("EDE_VERIFIED_BACKUP_SELECTION=" + json.dumps(selected, sort_keys=True))
 '''
@@ -551,12 +562,19 @@ def snapshot(args: argparse.Namespace) -> int:
         manifest = _verify_local_exact_backup(
             output, manifest_output, expected_sha=args.expected_sha
         )
+        backup_reason = str(manifest["reason"])
+        snapshot_source = (
+            "DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP"
+            if backup_reason == "prestart"
+            else "SCHEDULED_VERIFIED_LOCAL_BACKUP"
+        )
         selection_output.write_text(
             json.dumps(
                 {
-                    "source": "DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP",
+                    "source": snapshot_source,
                     "expected_sha": args.expected_sha,
                     "backup_id": manifest.get("backup_id"),
+                    "backup_reason": backup_reason,
                     "cutoff_ts": float(manifest["created_ts"]),
                     "selected_age_sec": float(selected["age_sec"]),
                     "max_age_sec": MAX_EXACT_BACKUP_AGE_SECONDS,
@@ -571,7 +589,7 @@ def snapshot(args: argparse.Namespace) -> int:
         )
         _wait_for_post_transfer_recovery()
         _probe_api(client)
-        print("EDE_OFFLOAD_SNAPSHOT_SOURCE=DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP")
+        print(f"EDE_OFFLOAD_SNAPSHOT_SOURCE={snapshot_source}")
         print(f"EDE_OFFLOAD_SNAPSHOT_CUTOFF_TS={float(manifest['created_ts']):.6f}")
         print(f"EDE_OFFLOAD_SNAPSHOT_AGE_SEC={float(selected['age_sec']):.3f}")
         print(f"EDE_OFFLOAD_SNAPSHOT_BYTES={output.stat().st_size}")
