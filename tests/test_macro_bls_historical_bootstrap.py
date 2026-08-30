@@ -11,6 +11,7 @@ from seiltanzer.edge_discovery.maturity import data_maturity
 from seiltanzer.macro_bls_historical_bootstrap import (
     BLSHistoricalReleaseStore,
     BLSReleaseSpec,
+    OfficialBLSArchiveSource,
     historical_feature_records_from_runtime,
     parse_bls_archive_spec,
     parse_bls_archive_index_urls,
@@ -150,6 +151,110 @@ def test_official_atom_discovers_archive_but_archive_sets_causal_time():
     assert spec.published_at > datetime(
         2025, 8, 12, 7, 51, tzinfo=ZoneInfo("America/New_York")
     ).timestamp()
+
+
+def test_historical_bls_transport_tries_direct_before_configured_proxy(monkeypatch):
+    calls = []
+
+    class Response:
+        url = "https://www.bls.gov/bls/news-release/cpi.htm"
+        text = ARCHIVE_INDEX_CPI
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.proxy = kwargs["proxy"]
+            calls.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, _url):
+            if self.proxy is None:
+                raise ValueError("direct route unavailable")
+            return Response()
+
+    monkeypatch.setenv("MACRO_HTTP_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setattr(
+        "seiltanzer.macro_bls_historical_bootstrap.httpx.Client", Client)
+
+    _content, links = OfficialBLSArchiveSource().archive_index_manifest("CPI")
+
+    assert links
+    assert [row["proxy"] for row in calls] == [
+        None, "http://proxy.invalid:8080"]
+    assert all(row["trust_env"] is False for row in calls)
+
+
+def test_historical_bls_transport_does_not_touch_proxy_after_direct_success(
+    monkeypatch,
+):
+    calls = []
+
+    class Response:
+        url = "https://www.bls.gov/bls/news-release/cpi.htm"
+        text = ARCHIVE_INDEX_CPI
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    class Client:
+        def __init__(self, **kwargs):
+            calls.append(kwargs["proxy"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def get(_url):
+            return Response()
+
+    monkeypatch.setenv("MACRO_HTTP_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setattr(
+        "seiltanzer.macro_bls_historical_bootstrap.httpx.Client", Client)
+
+    _content, links = OfficialBLSArchiveSource().archive_index_manifest("CPI")
+
+    assert links
+    assert calls == [None]
+
+
+def test_historical_bls_transport_failure_does_not_leak_proxy(monkeypatch):
+    class Client:
+        def __init__(self, **kwargs):
+            self.proxy = kwargs["proxy"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, _url):
+            raise ValueError(f"blocked via {self.proxy}")
+
+    secret_proxy = "http://user:secret@proxy.invalid:8080"
+    monkeypatch.setenv("MACRO_HTTP_PROXY", secret_proxy)
+    monkeypatch.setattr(
+        "seiltanzer.macro_bls_historical_bootstrap.httpx.Client", Client)
+
+    with pytest.raises(ValueError) as failure:
+        OfficialBLSArchiveSource().archive_index_manifest("CPI")
+
+    message = str(failure.value)
+    assert "DIRECT_OFFICIAL:ValueError" in message
+    assert "CONFIGURED_PROXY:ValueError" in message
+    assert secret_proxy not in message
 
 
 def test_official_archive_index_is_family_bound_and_excludes_mutable_links():
