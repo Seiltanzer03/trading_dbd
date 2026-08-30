@@ -28,11 +28,18 @@ REMOTE_DATABASE = REMOTE_ROOT / "data/trades.db"
 REMOTE_LOCAL_BACKUPS = REMOTE_ROOT / "data/backups/local"
 REMOTE_PYTHON = REMOTE_ROOT / ".venv/bin/python"
 REMOTE_ORCHESTRATOR = REMOTE_ROOT / "scripts/production_research_acceptance.py"
+REMOTE_HISTORICAL_INSTALLER = (
+    REMOTE_ROOT / "scripts/install_offhost_historical_macro_bundle.py"
+)
+REMOTE_HISTORICAL_BUNDLE = (
+    REMOTE_RESEARCH / "official_macro_historical_offhost_latest.json"
+)
 API_PROBE_MAX_TIME_SECONDS = 3
 API_PROBE_ATTEMPTS = 3
 API_PROBE_RETRY_DELAY_SECONDS = 2.0
 POST_TRANSFER_RECOVERY_SECONDS = 30.0
 SSH_KEEPALIVE_SECONDS = 30
+SSH_OPERATION_ATTEMPTS = 4
 MAX_EXACT_BACKUP_AGE_SECONDS = 60 * 60
 BACKUP_CONTRACT_VERSION = "seiltanzer-backup-v1"
 
@@ -91,6 +98,31 @@ def _connect(password: str, *, attempts: int = 4):
             )
             time.sleep(delay)
     raise RuntimeError(f"SSH connection unavailable: {last_error}")
+
+
+def _retry_ssh_operation(password: str, operation, *, attempts: int = SSH_OPERATION_ATTEMPTS):
+    """Retry a whole idempotent transfer after connect or channel resets."""
+    if attempts < 1:
+        raise ValueError("SSH operation attempts must be >= 1")
+    paramiko = _paramiko()
+    transient = (paramiko.SSHException, socket.timeout, TimeoutError, EOFError, OSError)
+    for attempt in range(1, attempts + 1):
+        client = _connect(password)
+        try:
+            return operation(client)
+        except transient as exc:
+            if attempt == attempts:
+                raise
+            delay = 5 * attempt
+            print(
+                f"transient SSH operation failure attempt={attempt}/{attempts}: "
+                f"{type(exc).__name__}; retrying in {delay}s",
+                flush=True,
+            )
+            time.sleep(delay)
+        finally:
+            client.close()
+    raise RuntimeError("SSH operation retries exhausted")
 
 
 def _exec(client, command: str, *, timeout: float | None = None) -> str:
@@ -368,6 +400,66 @@ print("EDE_VERIFIED_BACKUP_SELECTION=" + json.dumps(selected, sort_keys=True))
     return selected
 
 
+def install_historical_bundle(args: argparse.Namespace) -> int:
+    """Upload and install one exact-run official bundle with channel retries."""
+    if not str(args.run_id).isdigit() or not str(args.acceptance_run_id).isdigit():
+        raise ValueError("run IDs must be numeric")
+    source = pathlib.Path(args.input)
+    if not source.is_file():
+        raise FileNotFoundError(str(source))
+    remote = pathlib.PurePosixPath(f"/tmp/historical-macro-{args.run_id}.json")
+    temporary = pathlib.PurePosixPath(str(remote) + ".upload")
+
+    def operation(client) -> None:
+        _verify_sha(client, args.expected_sha)
+        sftp = client.open_sftp()
+        try:
+            sftp.put(str(source), str(temporary))
+        finally:
+            sftp.close()
+        _exec(client, f"mv -f -- {shlex.quote(str(temporary))} {shlex.quote(str(remote))}")
+        command = " ".join([
+            shlex.quote(str(REMOTE_PYTHON)),
+            shlex.quote(str(REMOTE_HISTORICAL_INSTALLER)),
+            "--input", shlex.quote(str(remote)),
+            "--destination", shlex.quote(str(REMOTE_HISTORICAL_BUNDLE)),
+            "--expected-sha", shlex.quote(args.expected_sha),
+            "--acceptance-run-id", shlex.quote(args.acceptance_run_id),
+        ])
+        try:
+            _exec(client, command, timeout=180)
+        finally:
+            _exec(
+                client,
+                f"rm -f -- {shlex.quote(str(remote))} {shlex.quote(str(temporary))}",
+            )
+
+    _retry_ssh_operation(args.password, operation)
+    print("EDE_HISTORICAL_BUNDLE_INSTALLED=1")
+    return 0
+
+
+def cleanup_snapshot(args: argparse.Namespace) -> int:
+    """Remove only the exact run-scoped remote snapshot, retrying SSH resets."""
+    if not str(args.run_id).isdigit():
+        raise ValueError("run id must be numeric")
+    snapshot = pathlib.PurePosixPath(
+        f"/tmp/seiltanzer-ede-source-{args.run_id}.sqlite3"
+    )
+    paths = [str(snapshot), f"{snapshot}-wal", f"{snapshot}-shm"]
+
+    def operation(client) -> None:
+        quoted = " ".join(shlex.quote(path) for path in paths)
+        checks = " && ".join(
+            f"test ! -e {shlex.quote(path)}" for path in paths
+        )
+        _exec(client, f"rm -f -- {quoted} && {checks}")
+
+    _retry_ssh_operation(args.password, operation)
+    print("EDE_EXACT_REMOTE_SNAPSHOT_CLEAN=1")
+    return 0
+
+
 def snapshot(args: argparse.Namespace) -> int:
     output = pathlib.Path(args.output_db)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -589,6 +681,19 @@ def parser() -> argparse.ArgumentParser:
     snap.add_argument("--run-id", required=True)
     snap.add_argument("--output-db", required=True)
     snap.set_defaults(func=snapshot)
+
+    install = sub.add_parser("install-historical-bundle")
+    install.add_argument("--password", required=True)
+    install.add_argument("--expected-sha", required=True)
+    install.add_argument("--acceptance-run-id", required=True)
+    install.add_argument("--run-id", required=True)
+    install.add_argument("--input", required=True)
+    install.set_defaults(func=install_historical_bundle)
+
+    cleanup = sub.add_parser("cleanup-snapshot")
+    cleanup.add_argument("--password", required=True)
+    cleanup.add_argument("--run-id", required=True)
+    cleanup.set_defaults(func=cleanup_snapshot)
 
     ledgers = sub.add_parser("fetch-ledgers")
     ledgers.add_argument("--password", required=True)
