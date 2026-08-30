@@ -288,8 +288,13 @@ def parse_vintage_evidence(
 
 
 class OfficialALFREDBLSVintageSource:
-    def __init__(self, *, timeout_sec: float = 20.0) -> None:
+    def __init__(
+        self, *, timeout_sec: float = 20.0, fetch_attempts: int = 3,
+        retry_delay_sec: float = 2.0,
+    ) -> None:
         self.timeout_sec = max(5.0, min(45.0, float(timeout_sec)))
+        self.fetch_attempts = max(1, min(4, int(fetch_attempts)))
+        self.retry_delay_sec = max(0.0, min(10.0, float(retry_delay_sec)))
 
     def _client(self, *, proxy: str | None) -> httpx.Client:
         from .macro_transport_refinement import BROWSER_USER_AGENT
@@ -317,11 +322,21 @@ class OfficialALFREDBLSVintageSource:
             routes.append(("CONFIGURED_PROXY", proxy))
         errors = []
         for route_name, route_proxy in routes:
-            try:
-                with self._client(proxy=route_proxy) as client:
-                    return self._validated(client.get(url))
-            except (httpx.HTTPError, ValueError, TypeError) as exc:
-                errors.append(f"{route_name}:{type(exc).__name__}")
+            for attempt in range(1, self.fetch_attempts + 1):
+                try:
+                    with self._client(proxy=route_proxy) as client:
+                        return self._validated(client.get(url))
+                except httpx.TransportError as exc:
+                    if attempt < self.fetch_attempts:
+                        time.sleep(self.retry_delay_sec * attempt)
+                        continue
+                    errors.append(f"{route_name}:{type(exc).__name__}")
+                    break
+                except (httpx.HTTPStatusError, ValueError, TypeError) as exc:
+                    # A rejected source, malformed response or deterministic
+                    # HTTP status is a contract failure, not retryable evidence.
+                    errors.append(f"{route_name}:{type(exc).__name__}")
+                    break
         raise ValueError(
             "ALFRED_BLS_OFFICIAL_TRANSPORT_EXHAUSTED:" + "|".join(errors)
         )
