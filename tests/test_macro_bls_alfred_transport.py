@@ -39,6 +39,12 @@ def test_alfred_retries_bounded_transient_read_timeout(monkeypatch):
     assert sleeps == [0.25, 0.5]
 
 
+def test_alfred_default_timeout_covers_slow_official_runner_response():
+    source = alfred.OfficialALFREDBLSVintageSource()
+    assert source.timeout_sec == alfred.DEFAULT_TIMEOUT_SECONDS == 45.0
+    assert source.fetch_attempts == 3
+
+
 def test_alfred_does_not_retry_deterministic_validation_failure(monkeypatch):
     calls = []
 

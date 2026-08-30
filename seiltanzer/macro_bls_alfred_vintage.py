@@ -33,6 +33,7 @@ SERIES = {
     "CPI": ("CPIAUCSL", "CPILFESL", "CPIAUCNS", "CPILFENS"),
     "NFP": ("PAYEMS", "UNRATE", "CES0500000003"),
 }
+DEFAULT_TIMEOUT_SECONDS = 45.0
 
 
 def _canonical(value: Any) -> str:
@@ -289,7 +290,7 @@ def parse_vintage_evidence(
 
 class OfficialALFREDBLSVintageSource:
     def __init__(
-        self, *, timeout_sec: float = 20.0, fetch_attempts: int = 3,
+        self, *, timeout_sec: float = DEFAULT_TIMEOUT_SECONDS, fetch_attempts: int = 3,
         retry_delay_sec: float = 2.0,
     ) -> None:
         self.timeout_sec = max(5.0, min(45.0, float(timeout_sec)))
