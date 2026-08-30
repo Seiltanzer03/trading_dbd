@@ -7,8 +7,9 @@ copy that was publicly available at that release time, parses only values printe
 in that archive, and exposes them to old EDE T0 rows without mutating those rows.
 
 Important safety properties:
-- official ``bls.gov`` HTTPS only;
-- release ``published_at`` comes from the archive's official embargo header;
+- official ``bls.gov`` or Federal Reserve FRED/ALFRED HTTPS only;
+- archive ``published_at`` comes from the official embargo header;
+- day-granular ALFRED vintages become visible only on the following day;
 - no current BLS time-series values are projected backwards;
 - no consensus/surprise is invented;
 - archive payloads are immutable and SHA256-addressed;
@@ -117,6 +118,13 @@ def _official_bls_url(url: str) -> bool:
     except ValueError:
         return False
     return parsed.scheme == "https" and (parsed.hostname or "").lower() in BLS_HOSTS
+
+
+def _official_historical_bls_url(url: str) -> bool:
+    if _official_bls_url(url):
+        return True
+    from .macro_bls_alfred_vintage import _official_fed_history_url
+    return _official_fed_history_url(url)
 
 
 def _bls_archive_identity(url: str) -> tuple[str, str] | None:
@@ -603,7 +611,7 @@ class BLSHistoricalReleaseStore:
             raise ValueError("BLS_HISTORICAL_FAMILY_MISMATCH")
         if payload.get("period") != spec.period:
             raise ValueError("BLS_HISTORICAL_PERIOD_MISMATCH")
-        if not _official_bls_url(spec.source_url):
+        if not _official_historical_bls_url(spec.source_url):
             raise ValueError("BLS_HISTORICAL_UNOFFICIAL_SOURCE")
         published_at = float(spec.published_at)
         fetched = float(time.time() if fetched_at is None else fetched_at)
@@ -701,7 +709,10 @@ def _latest_historical_release(runtime: Any, family: str,
         "contract_version": str(row[7]),
         "official_source_verified": True,
         "historical_reconstruction": True,
-        "provenance": "OFFICIAL_BLS_ARCHIVE_POINT_IN_TIME",
+        "provenance": str(
+            (json.loads(str(row[5])) or {}).get("source_kind")
+            or "OFFICIAL_BLS_ARCHIVE_POINT_IN_TIME"
+        ),
         "causal_rule": "published_at<=T0",
         "research_only": True,
         "production_authority": False,
@@ -721,6 +732,9 @@ def historical_feature_records_from_runtime(
         if release.get("status") != "VALID":
             continue
         payload = release.get("payload") or {}
+        source_kind = str(
+            payload.get("source_kind") or "OFFICIAL_BLS_ARCHIVE_POINT_IN_TIME"
+        )
         asof = float(release["published_at"])
         for source_name, feature_id in mapping.items():
             value = _finite(payload.get(source_name))
@@ -736,7 +750,7 @@ def historical_feature_records_from_runtime(
                 continue
             values[feature_id] = record
             provenance[feature_id] = {
-                "provenance": "OFFICIAL_BLS_ARCHIVE_POINT_IN_TIME",
+                "provenance": source_kind,
                 "release_id": release["release_id"],
                 "release_family": family,
                 "release_period": release["period"],
@@ -757,16 +771,44 @@ class OfficialBLSArchiveSource:
     def __init__(self, *, timeout_sec: float = 12.0) -> None:
         self.timeout_sec = max(4.0, min(30.0, float(timeout_sec)))
 
-    def _client(self) -> httpx.Client:
-        from .macro_transport_refinement import BROWSER_USER_AGENT, macro_proxy_url
+    def _client(self, *, proxy: str | None) -> httpx.Client:
+        from .macro_transport_refinement import BROWSER_USER_AGENT
         return httpx.Client(
             timeout=self.timeout_sec, follow_redirects=True,
-            proxy=macro_proxy_url(), trust_env=False,
+            proxy=proxy, trust_env=False,
             headers={
                 "User-Agent": BROWSER_USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.8",
             },
+        )
+
+    def _fetch_official_text(self, url: str) -> str:
+        """Fetch one official page directly before using the configured proxy.
+
+        The shared proxy can be denied by BLS even when the same immutable
+        official page is reachable from the GitHub runner itself.  Route
+        selection is transport-only: both paths request the identical BLS URL
+        and every response still passes the canonical official-host guard.
+        """
+        from .macro_transport_refinement import macro_proxy_url
+
+        proxy = macro_proxy_url()
+        routes: list[tuple[str, str | None]] = [("DIRECT_OFFICIAL", None)]
+        if proxy:
+            routes.append(("CONFIGURED_PROXY", proxy))
+        errors: list[str] = []
+        for route_name, route_proxy in routes:
+            try:
+                with self._client(proxy=route_proxy) as client:
+                    return self._validated_response(client.get(url))
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                # Route labels are enough for diagnostics.  Exception strings
+                # from proxy connection failures can contain credentials.
+                errors.append(f"{route_name}:{type(exc).__name__}")
+        raise ValueError(
+            "BLS_HISTORICAL_OFFICIAL_TRANSPORT_EXHAUSTED:"
+            + "|".join(errors)
         )
 
     @staticmethod
@@ -781,25 +823,21 @@ class OfficialBLSArchiveSource:
 
     def schedule(self, year: int) -> list[BLSReleaseSpec]:
         url = BLS_SCHEDULE_TEMPLATE.format(year=int(year))
-        with self._client() as client:
-            response = client.get(url)
-            html = self._validated_response(response)
+        html = self._fetch_official_text(url)
         return parse_bls_schedule(html, year=int(year))
 
     def atom_manifest(self, family: str) -> tuple[str, list[str]]:
         if family not in FAMILIES:
             raise ValueError("BLS_ATOM_FAMILY_INVALID")
         url = BLS_ATOM_FEEDS[family]
-        with self._client() as client:
-            feed = self._validated_response(client.get(url))
+        feed = self._fetch_official_text(url)
         return feed, parse_bls_atom_archive_urls(feed, family=family)
 
     def archive_index_manifest(self, family: str) -> tuple[str, list[str]]:
         if family not in FAMILIES:
             raise ValueError("BLS_ARCHIVE_INDEX_FAMILY_INVALID")
         url = BLS_ARCHIVE_INDEXES[family]
-        with self._client() as client:
-            html = self._validated_response(client.get(url))
+        html = self._fetch_official_text(url)
         return html, parse_bls_archive_index_urls(
             html, family=family, source_url=url)
 
@@ -808,8 +846,7 @@ class OfficialBLSArchiveSource:
     ) -> tuple[BLSReleaseSpec, float, str, dict[str, Any]]:
         if family not in FAMILIES or _bls_archive_identity(source_url) is None:
             raise ValueError("BLS_HISTORICAL_UNOFFICIAL_ARCHIVE_URL")
-        with self._client() as client:
-            html = self._validated_response(client.get(source_url))
+        html = self._fetch_official_text(source_url)
         spec = parse_bls_archive_spec(
             html, family=family, source_url=source_url)
         payload = (
@@ -822,9 +859,7 @@ class OfficialBLSArchiveSource:
     def archive(self, spec: BLSReleaseSpec) -> tuple[float, str, dict[str, Any]]:
         if not _official_bls_url(spec.source_url):
             raise ValueError("BLS_HISTORICAL_UNOFFICIAL_ARCHIVE_URL")
-        with self._client() as client:
-            response = client.get(spec.source_url)
-            html = self._validated_response(response)
+        html = self._fetch_official_text(spec.source_url)
         payload = (
             parse_cpi_archive(html, expected_period=spec.period)
             if spec.family == "CPI"
