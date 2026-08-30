@@ -110,7 +110,7 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 10m
+          command_timeout: 15m
           envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
           script: |
             set -euo pipefail
@@ -341,12 +341,14 @@ jobs:
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
 
-            # The source-of-truth SQLite DB is now roughly 3.7 GiB. Startup still
+            # The source-of-truth SQLite DB is now above 5 GiB. Startup still
             # has to finish the durability snapshot and initialization before the
-            # real HTTP gate may pass. Production measured about 188 seconds on
-            # 2026-08-25, so keep a bounded ~210-second allowance with margin.
+            # real HTTP gate may pass. Production exceeded 210 seconds on
+            # 2026-08-30 while verifying the 5.3 GiB prestart snapshot, then
+            # became HTTP-ready without intervention. Keep a bounded seven-minute
+            # allowance; this changes orchestration only, not the live gates.
             # This does not relax the live route latency/readiness gates below.
-            cold_start_attempts=105
+            cold_start_attempts=210
             ready=0
             for attempt in $(seq 1 "$cold_start_attempts"); do
               active=$(systemctl is-active seiltanzer 2>/dev/null || true)
