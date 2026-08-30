@@ -20,7 +20,7 @@ from .macro_offhost_bundle import (
 )
 
 
-CONTRACT_VERSION = "official-macro-historical-offhost-v8-ism-calendar-direct-fallback"
+CONTRACT_VERSION = "official-macro-historical-offhost-v9-alfred-vintage-fallback"
 DEFAULT_WINDOW_DAYS = 120
 MAX_WINDOW_DAYS = 180
 FOMC_WINDOW_DAYS = 365
@@ -141,6 +141,10 @@ def build_bundle(
         OfficialBLSArchiveSource,
         _bls_archive_identity,
     )
+    from .macro_bls_alfred_vintage import (
+        SOURCE_KIND as ALFRED_SOURCE_KIND,
+        OfficialALFREDBLSVintageSource,
+    )
     from .macro_ism_historical_bootstrap import (
         FAMILIES as ISM_FAMILIES,
         OfficialISMHistoricalSource,
@@ -216,6 +220,55 @@ def build_bundle(
             errors[f"BLS:archive:{family}:window"] = (
                 "ValueError:BLS_HISTORICAL_WINDOW_RECORDS_MISSING"
             )
+
+    # GitHub runner addresses can be denied by BLS archive pages.  When a
+    # family has no canonical archive row, use only official Fed release dates
+    # and the matching day-granular ALFRED vintage.  Visibility is delayed to
+    # the following day by the fallback parser, so this cannot create look-ahead.
+    alfred_source = OfficialALFREDBLSVintageSource()
+    for family in ("CPI", "NFP"):
+        if any(
+            (record.get("spec") or {}).get("family") == family
+            for record in bls_records
+        ):
+            continue
+        try:
+            calendar, calendar_url, release_dates = alfred_source.calendar(
+                family=family, start_ts=start_ts - 86400.0, end_ts=stamp,
+            )
+            fallback_rows = []
+            for release_date in release_dates:
+                spec, fetched_at, raw, payload = alfred_source.vintage_record(
+                    family=family, release_date=release_date,
+                    calendar_url=calendar_url,
+                )
+                if start_ts <= spec.published_at <= stamp + 1e-6:
+                    fallback_rows.append(_record({
+                        "source_kind": ALFRED_SOURCE_KIND,
+                        "spec": asdict(spec), "fetched_at": fetched_at,
+                        "html": raw, "source_sha256": _sha256(raw),
+                        "payload": payload,
+                    }))
+            if not fallback_rows:
+                raise ValueError("ALFRED_BLS_WINDOW_RECORDS_MISSING")
+            errors = {
+                key: value for key, value in errors.items()
+                if key != f"BLS:manifest:{family}"
+                and not key.startswith(f"BLS:archive:{family}:")
+            }
+            schedules[family] = _record({
+                "format": "FRED_RELEASE_CALENDAR_JSON", "family": family,
+                "source_url": calendar_url, "content": calendar,
+                "source_sha256": _sha256(calendar),
+            })
+            bls_records.extend(fallback_rows)
+        except Exception as exc:
+            errors[f"BLS:fallback:{family}"] = (
+                f"{type(exc).__name__}:{str(exc)[:180]}"
+            )
+    bls_records.sort(
+        key=lambda row: float((row.get("spec") or {}).get("published_at") or 0.0)
+    )
 
     ism_source = OfficialISMHistoricalSource()
     ism_records: list[dict[str, Any]] = []
@@ -380,6 +433,12 @@ def validate_bundle(
         parse_cpi_archive,
         parse_nfp_archive,
     )
+    from .macro_bls_alfred_vintage import (
+        SOURCE_KIND as ALFRED_SOURCE_KIND,
+        _official_fed_history_url,
+        parse_fred_release_calendar,
+        parse_vintage_evidence,
+    )
     from .macro_ism_historical_bootstrap import (
         FAMILIES as ISM_FAMILIES,
         ISM_RELEASE_CALENDAR_URL,
@@ -446,6 +505,7 @@ def validate_bundle(
         raise ValueError("HISTORICAL_OFFHOST_ERRORS_INVALID")
 
     manifest_links: set[tuple[str, str]] = set()
+    alfred_calendars: dict[str, tuple[str, set[str]]] = {}
     schedules = bundle.get("bls_schedules")
     if (
         not isinstance(schedules, dict)
@@ -459,10 +519,16 @@ def validate_bundle(
         if value.get("record_sha256") != _sha256(_without(value, "record_sha256")):
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
         source_url = str(value.get("source_url") or "")
-        if value.get("family") != family or not _official_bls_url(source_url):
+        if value.get("family") != family or not (
+            _official_bls_url(source_url)
+            or _official_fed_history_url(source_url)
+        ):
             raise ValueError("HISTORICAL_OFFHOST_BLS_SOURCE_INVALID")
         content = str(value.get("content") or "")
-        if len(content) < 200 or len(content.encode("utf-8")) > 2_000_000:
+        minimum_size = (
+            20 if value.get("format") == "FRED_RELEASE_CALENDAR_JSON" else 200
+        )
+        if len(content) < minimum_size or len(content.encode("utf-8")) > 2_000_000:
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_SIZE_INVALID")
         if value.get("source_sha256") != _sha256(content):
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_HASH_MISMATCH")
@@ -475,6 +541,11 @@ def validate_bundle(
             if source_url != BLS_ATOM_FEEDS[family]:
                 raise ValueError("HISTORICAL_OFFHOST_BLS_SOURCE_INVALID")
             links = parse_bls_atom_archive_urls(content, family=family)
+        elif value.get("format") == "FRED_RELEASE_CALENDAR_JSON":
+            dates = parse_fred_release_calendar(
+                content, family=family, source_url=source_url)
+            alfred_calendars[family] = (source_url, set(dates))
+            links = []
         else:
             raise ValueError("HISTORICAL_OFFHOST_BLS_CALENDAR_FORMAT_INVALID")
         manifest_links.update(
@@ -504,10 +575,14 @@ def validate_bundle(
             raise ValueError("HISTORICAL_OFFHOST_RECORD_HASH_MISMATCH")
         raw_spec = record.get("spec") or {}
         spec = BLSReleaseSpec(**raw_spec)
-        if (
-            spec.family not in BLS_FAMILIES
-            or (spec.family, spec.source_url) not in manifest_links
-        ):
+        source_kind = record.get("source_kind")
+        if spec.family not in BLS_FAMILIES:
+            raise ValueError("HISTORICAL_OFFHOST_BLS_CALENDAR_MISMATCH")
+        if source_kind == ALFRED_SOURCE_KIND:
+            calendar = alfred_calendars.get(spec.family)
+            if calendar is None or spec.source_url != calendar[0]:
+                raise ValueError("HISTORICAL_OFFHOST_BLS_CALENDAR_MISMATCH")
+        elif (spec.family, spec.source_url) not in manifest_links:
             raise ValueError("HISTORICAL_OFFHOST_BLS_CALENDAR_MISMATCH")
         fetched_at = float(record.get("fetched_at") or 0.0)
         if fetched_at + 300.0 < spec.published_at or fetched_at > stamp + 120.0:
@@ -519,15 +594,21 @@ def validate_bundle(
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_SIZE_INVALID")
         if record.get("source_sha256") != _sha256(html):
             raise ValueError("HISTORICAL_OFFHOST_SOURCE_HASH_MISMATCH")
-        archive_spec = parse_bls_archive_spec(
-            html, family=spec.family, source_url=spec.source_url)
-        if archive_spec != spec:
-            raise ValueError("HISTORICAL_OFFHOST_BLS_ARCHIVE_SPEC_MISMATCH")
-        parsed = (
-            parse_cpi_archive(html, expected_period=spec.period)
-            if spec.family == "CPI"
-            else parse_nfp_archive(html, expected_period=spec.period)
-        )
+        if source_kind == ALFRED_SOURCE_KIND:
+            parsed = parse_vintage_evidence(
+                html, spec=spec,
+                calendar_dates=alfred_calendars[spec.family][1],
+            )
+        else:
+            archive_spec = parse_bls_archive_spec(
+                html, family=spec.family, source_url=spec.source_url)
+            if archive_spec != spec:
+                raise ValueError("HISTORICAL_OFFHOST_BLS_ARCHIVE_SPEC_MISMATCH")
+            parsed = (
+                parse_cpi_archive(html, expected_period=spec.period)
+                if spec.family == "CPI"
+                else parse_nfp_archive(html, expected_period=spec.period)
+            )
         if _canonical_json(parsed) != _canonical_json(record.get("payload")):
             raise ValueError("HISTORICAL_OFFHOST_BLS_PAYLOAD_MISMATCH")
 
