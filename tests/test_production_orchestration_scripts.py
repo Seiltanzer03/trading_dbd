@@ -150,9 +150,11 @@ def test_production_ede_materializes_all_point_in_time_macro_before_snapshot():
     assert "/api/research/macro/fomc-deterministic/refresh" in workflow
     assert "git -C /opt/seiltanzer rev-parse HEAD" in workflow
     build = "python scripts/build_offhost_historical_macro_bundle.py"
-    install = "/opt/seiltanzer/scripts/install_offhost_historical_macro_bundle.py"
+    install = "install_offhost_historical_macro_bundle.py"
+    transport = "production_ede_offload.py install-historical-bundle"
     materialize = "Materialize point-in-time macro archives before immutable snapshot"
     assert build in workflow
-    assert "appleboy/scp-action@v1" in workflow
-    assert install in workflow
-    assert workflow.index(build) < workflow.index(install) < workflow.index(materialize)
+    assert transport in workflow
+    offload = (root / "scripts/production_ede_offload.py").read_text(encoding="utf-8")
+    assert install in offload
+    assert workflow.index(build) < workflow.index(transport) < workflow.index(materialize)

@@ -73,42 +73,19 @@ jobs:
             --expected-sha "$EXPECTED_SHA" \
             --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
             --output "historical-macro-${{ github.run_id }}.json"
-      - name: Transfer historical official-source bundle
-        uses: appleboy/scp-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          source: historical-macro-${{ github.run_id }}.json
-          target: /tmp
-      - name: Verify and install historical official-source bundle
-        uses: appleboy/ssh-action@v1
+      - name: Transfer and install historical bundle with bounded SSH retries
         env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
           EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
           ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
           RUN_ID: ${{ github.run_id }}
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 3m
-          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID,RUN_ID
-          script: |
-            set -euo pipefail
-            case "$RUN_ID" in
-              ''|*[!0-9]*) echo "invalid run id" >&2; exit 1 ;;
-            esac
-            input="/tmp/historical-macro-${RUN_ID}.json"
-            trap 'rm -f -- "$input"' EXIT
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            /opt/seiltanzer/.venv/bin/python \
-              /opt/seiltanzer/scripts/install_offhost_historical_macro_bundle.py \
-              --input "$input" \
-              --destination /opt/seiltanzer/data/research/official_macro_historical_offhost_latest.json \
-              --expected-sha "$EXPECTED_SHA" \
-              --acceptance-run-id "$ACCEPTANCE_RUN_ID"
+        run: |
+          python scripts/production_ede_offload.py install-historical-bundle \
+            --password "$SSH_PASSWORD" \
+            --expected-sha "$EXPECTED_SHA" \
+            --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+            --run-id "$RUN_ID" \
+            --input "historical-macro-${RUN_ID}.json"
       - name: Remove only stale closed EDE snapshot leftovers
         uses: appleboy/ssh-action@v1
         with:
@@ -226,30 +203,13 @@ jobs:
           python scripts/production_ede_offload.py snapshot "${args[@]}"
       - name: Guarantee exact remote EDE snapshot cleanup with a fresh SSH session
         if: always()
-        uses: appleboy/ssh-action@v1
         env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
           RUN_ID: ${{ github.run_id }}
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 3m
-          envs: RUN_ID
-          script: |
-            set -euo pipefail
-            case "$RUN_ID" in
-              ''|*[!0-9]*)
-                echo "Refusing non-numeric GitHub run id: $RUN_ID" >&2
-                exit 1
-                ;;
-            esac
-            snapshot="/tmp/seiltanzer-ede-source-${RUN_ID}.sqlite3"
-            rm -f -- "$snapshot" "${snapshot}-wal" "${snapshot}-shm"
-            test ! -e "$snapshot"
-            test ! -e "${snapshot}-wal"
-            test ! -e "${snapshot}-shm"
-            echo "EDE_EXACT_REMOTE_SNAPSHOT_CLEAN=1"
+        run: |
+          python scripts/production_ede_offload.py cleanup-snapshot \
+            --password "$SSH_PASSWORD" \
+            --run-id "$RUN_ID"
       - name: Release gate if snapshot phase failed before normal release
         if: always() && needs.resolve.outputs.exact_chain == 'true' && steps.snapshot_export.outcome != 'success'
         uses: appleboy/ssh-action@v1

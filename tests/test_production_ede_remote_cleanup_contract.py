@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/production-ede-v12-audit.yml"
+OFFLOAD = ROOT / "scripts/production_ede_offload.py"
 
 
 def _workflow_text() -> str:
@@ -40,14 +41,14 @@ def test_exact_snapshot_cleanup_uses_fresh_always_session_and_numeric_run_id() -
 
     assert export_pos < cleanup_pos < upload_pos
     assert "if: always()" in block
-    assert "uses: appleboy/ssh-action@v1" in block
+    assert "production_ede_offload.py cleanup-snapshot" in block
+    assert "SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}" in block
     assert "RUN_ID: ${{ github.run_id }}" in block
-    assert "''|*[!0-9]*" in block
-    assert 'snapshot="/tmp/seiltanzer-ede-source-${RUN_ID}.sqlite3"' in block
-    assert 'rm -f -- "$snapshot" "${snapshot}-wal" "${snapshot}-shm"' in block
-    assert 'test ! -e "$snapshot"' in block
-    assert 'test ! -e "${snapshot}-wal"' in block
-    assert 'test ! -e "${snapshot}-shm"' in block
+    script = OFFLOAD.read_text(encoding="utf-8")
+    assert "if not str(args.run_id).isdigit()" in script
+    assert 'f"/tmp/seiltanzer-ede-source-{args.run_id}.sqlite3"' in script
+    assert "_retry_ssh_operation(args.password, operation)" in script
+    assert 'f"rm -f -- {quoted} && {checks}"' in script
     assert "/opt/seiltanzer/data" not in block
 
 
