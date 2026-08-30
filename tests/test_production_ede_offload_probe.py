@@ -121,6 +121,60 @@ def test_ssh_connection_enables_transport_keepalive(monkeypatch):
     assert client.transport.keepalive == MODULE.SSH_KEEPALIVE_SECONDS == 30
 
 
+def test_whole_ssh_operation_retries_channel_reset(monkeypatch):
+    class TransientSSHError(Exception):
+        pass
+
+    class Paramiko:
+        SSHException = TransientSSHError
+
+    class Client:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    clients = [Client(), Client(), Client()]
+    attempts = []
+    sleeps = []
+    monkeypatch.setattr(MODULE, "_paramiko", lambda: Paramiko)
+    monkeypatch.setattr(MODULE, "_connect", lambda _password: clients[len(attempts)])
+    monkeypatch.setattr(MODULE.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    def operation(_client):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise TransientSSHError("connection reset")
+        return "ok"
+
+    assert MODULE._retry_ssh_operation("secret", operation, attempts=3) == "ok"
+    assert len(attempts) == 3
+    assert sleeps == [5, 10]
+    assert all(client.closed for client in clients)
+
+
+def test_whole_ssh_operation_does_not_retry_remote_contract_failure(monkeypatch):
+    class Paramiko:
+        SSHException = OSError
+
+    class Client:
+        def close(self):
+            pass
+
+    calls = []
+    monkeypatch.setattr(MODULE, "_paramiko", lambda: Paramiko)
+    monkeypatch.setattr(MODULE, "_connect", lambda _password: Client())
+
+    def operation(_client):
+        calls.append(1)
+        raise RuntimeError("exact SHA mismatch")
+
+    with pytest.raises(RuntimeError, match="exact SHA mismatch"):
+        MODULE._retry_ssh_operation("secret", operation, attempts=4)
+    assert calls == [1]
+
+
 def test_downloaded_exact_sha_prestart_backup_is_verified(tmp_path):
     database = tmp_path / "backup.sqlite3"
     conn = sqlite3.connect(database)
