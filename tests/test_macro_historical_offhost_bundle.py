@@ -9,9 +9,23 @@ import pytest
 from seiltanzer import macro_historical_offhost_bundle as offhost
 from seiltanzer.macro_bls_historical_bootstrap import (
     BLSHistoricalReleaseStore,
+    BLSReleaseSpec,
     parse_bls_archive_spec,
     parse_cpi_archive,
     parse_nfp_archive,
+)
+from seiltanzer.macro_bls_alfred_vintage import (
+    SERIES as ALFRED_SERIES,
+    SOURCE_KIND as ALFRED_SOURCE_KIND,
+    _canonical as alfred_canonical,
+    _sha as alfred_sha,
+    alfred_series_url,
+    build_vintage_payload,
+    conservative_available_at,
+    fred_calendar_url,
+    parse_alfred_csv,
+    parse_fred_release_calendar,
+    parse_vintage_evidence,
 )
 from seiltanzer.macro_ism_historical_bootstrap import (
     ISM_RELEASE_CALENDAR_URL,
@@ -576,3 +590,103 @@ def test_partial_bundle_rejects_silent_missing_family():
     )
     with pytest.raises(ValueError, match="BLS_SCHEDULES_MISSING"):
         offhost.validate_bundle(bundle, expected_sha=SHA, now=NOW)
+
+
+def _alfred_csv(series_id, release_date, rows):
+    return "\n".join([
+        f"observation_date,{series_id}_{release_date.replace('-', '')}",
+        *(f"{period}-01,{value}" for period, value in rows.items()),
+        "",
+    ])
+
+
+def test_historical_bundle_accepts_hashed_official_alfred_vintage():
+    family, release_date, period = "CPI", "2025-08-12", "2025-07"
+    calendar_url = fred_calendar_url(
+        family, start_date="2025-04-01", end_date="2025-08-24")
+    calendar = '{"events":[{"title":"1 release","start":"2025-08-12"}]}'
+    assert parse_fred_release_calendar(
+        calendar, family=family, source_url=calendar_url) == [release_date]
+    raw_values = {
+        "CPIAUCSL": {"2025-05": 100.0, "2025-06": 101.0, "2025-07": 102.0},
+        "CPILFESL": {"2025-05": 200.0, "2025-06": 202.0, "2025-07": 204.0},
+        "CPIAUCNS": {"2024-07": 100.0, "2025-07": 103.0},
+        "CPILFENS": {"2024-07": 200.0, "2025-07": 206.0},
+    }
+    series = []
+    parsed_values = {}
+    for series_id in ALFRED_SERIES[family]:
+        content = _alfred_csv(series_id, release_date, raw_values[series_id])
+        parsed_values[series_id] = parse_alfred_csv(
+            content, series_id=series_id, vintage_date=release_date)
+        series.append({
+            "series_id": series_id,
+            "source_url": alfred_series_url(
+                series_id, period=period, vintage_date=release_date),
+            "content": content, "source_sha256": alfred_sha(content),
+        })
+    raw = alfred_canonical({
+        "source_kind": ALFRED_SOURCE_KIND, "family": family,
+        "release_date": release_date, "series": series,
+    })
+    spec = BLSReleaseSpec(
+        family=family, period=period,
+        published_at=conservative_available_at(release_date),
+        source_url=calendar_url,
+    )
+    payload = build_vintage_payload(
+        family=family, period=period, release_date=release_date,
+        values=parsed_values,
+    )
+    assert parse_vintage_evidence(
+        raw, spec=spec, calendar_dates={release_date}) == payload
+
+    bundle = _bundle()
+    bundle["bls_schedules"][family] = _record({
+        "format": "FRED_RELEASE_CALENDAR_JSON", "family": family,
+        "source_url": calendar_url, "content": calendar,
+        "source_sha256": offhost._sha256(calendar),
+    })
+    bundle["bls_records"][0] = _record({
+        "source_kind": ALFRED_SOURCE_KIND,
+        "spec": {
+            "family": spec.family, "period": spec.period,
+            "published_at": spec.published_at, "source_url": spec.source_url,
+        },
+        "fetched_at": NOW - 10.0, "html": raw,
+        "source_sha256": offhost._sha256(raw), "payload": payload,
+    })
+    bundle["bundle_sha256"] = offhost._sha256(
+        offhost._without(bundle, "bundle_sha256"))
+    assert offhost.validate_bundle(bundle, expected_sha=SHA, now=NOW) is bundle
+
+
+def test_alfred_vintage_rejects_foreign_calendar():
+    calendar = '{"events":[{"title":"1 release","start":"2025-08-12"}]}'
+    with pytest.raises(ValueError, match="CALENDAR_SOURCE_INVALID"):
+        parse_fred_release_calendar(
+            calendar, family="CPI",
+            source_url="https://example.com/releases/calendar?rdc=1&rid=10"
+        )
+
+
+def test_alfred_nfp_payload_uses_one_historical_vintage():
+    payload = build_vintage_payload(
+        family="NFP", period="2026-07", release_date="2026-08-07",
+        values={
+            "PAYEMS": {
+                "2026-05": 158_800.0, "2026-06": 158_860.0,
+                "2026-07": 158_875.0,
+            },
+            "UNRATE": {"2026-06": 4.2, "2026-07": 4.1},
+            "CES0500000003": {
+                "2025-07": 36.50, "2026-06": 37.50, "2026-07": 37.60,
+            },
+        },
+    )
+    assert payload["payroll_change_k"] == 15.0
+    assert payload["previous_payroll_change_k"] == 60.0
+    assert payload["unemployment_rate_pct"] == 4.1
+    assert payload["unemployment_change_pp"] == pytest.approx(-0.1)
+    assert payload["historical_alfred_vintage"] is True
+    assert payload["source_kind"] == ALFRED_SOURCE_KIND
