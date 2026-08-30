@@ -537,12 +537,15 @@ def snapshot(args: argparse.Namespace) -> int:
 
         sftp = client.open_sftp()
         try:
+            # Pin the tiny verified manifest locally before the multi-GiB copy.
+            # Backup retention may remove the remote pair while an already-open
+            # SFTP database handle is still transferring for many minutes.
+            sftp.get(str(selected["manifest_path"]), str(manifest_output))
             sftp.get(
                 str(selected["database_path"]),
                 str(output),
                 callback=transfer_progress,
             )
-            sftp.get(str(selected["manifest_path"]), str(manifest_output))
         finally:
             sftp.close()
         manifest = _verify_local_exact_backup(

@@ -41,6 +41,12 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     assert "database_sha256" in offload
     assert "src.backup(" not in offload
     assert "EDE_VERIFIED_BACKUP_TRANSFER_PROGRESS" in offload
+    snapshot = offload[
+        offload.index("def snapshot"):offload.index("def fetch_ledgers")
+    ]
+    assert snapshot.index('sftp.get(str(selected["manifest_path"]') < snapshot.index(
+        'str(selected["database_path"])'
+    )
     assert "transport.set_keepalive(SSH_KEEPALIVE_SECONDS)" in offload
     assert "API_PROBE_MAX_TIME_SECONDS = 3" in offload
     assert 'f"--max-time {API_PROBE_MAX_TIME_SECONDS} "' in offload
