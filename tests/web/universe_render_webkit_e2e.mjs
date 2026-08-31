@@ -117,8 +117,21 @@ assert.equal(state.nonDirectional,'8','non-directional match count must be expli
 assert.equal(state.momentum,'4.000e-7','tiny observed values must not be rounded to visual zero');
 assert(state.featureIds.includes('vol.rv15_over_rv60'),'exact canonical feature IDs must be present in 3D trace data');
 assert(state.featureIds.includes('option_dynamics.gex_velocity'),'option dynamics must be present in 3D trace data');
-assert(state.traceText.includes('N/A · 2'),'unavailable features must be one identified aggregate, not anonymous balls');
+assert(!state.traceText.some((text)=>String(text).startsWith('N/A ·')),'unavailable features must not be rendered as a misleading 3D node');
+assert((await page.locator('#edge-feature-count').textContent()).includes('2 N/A (NOT ZERO)'),'unavailable coverage must remain explicit outside the geometry');
 assert.equal(edgeRequestCount,1,'precision layer must reuse the scene payload instead of duplicating the heavy request');
+
+const userCamera={eye:{x:-1.35,y:.72,z:1.18},center:{x:.04,y:-.03,z:.02},up:{x:0,y:0,z:1}};
+await page.evaluate(async(camera)=>{
+  const chart=document.querySelector('#edge-universe-chart');
+  await window.Plotly.relayout(chart,{'scene.camera':camera});
+  window.dispatchEvent(new Event('resize'));
+  document.dispatchEvent(new Event('visibilitychange'));
+},userCamera);
+await page.waitForTimeout(150);
+const retainedCamera=await page.evaluate(()=>document.querySelector('#edge-universe-chart')?._fullLayout?.scene?.camera);
+assert(Math.abs(retainedCamera.eye.x-userCamera.eye.x)<1e-6,'user camera must survive refresh/resize');
+assert(Math.abs(retainedCamera.eye.y-userCamera.eye.y)<1e-6,'user camera azimuth must not reset');
 
 const html=await readFile(path.join(ROOT,'seiltanzer/web/universe.html'),'utf8');
 assert(html.includes('/static/vendor/plotly-gl3d.min.js'),'Universe must use repository-local Plotly');

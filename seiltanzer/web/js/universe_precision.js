@@ -15,7 +15,7 @@ function formatObserved(featureId, value) {
   if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
   if (!finite(value)) return 'N/A';
   const number = Number(value);
-  if (Object.is(number, -0) || number === 0) return '0';
+  if (Object.is(number, -0) || number === 0) return '0 · OBSERVED';
   const magnitude = Math.abs(number);
   if (magnitude >= 100) return number.toFixed(2);
   if (magnitude >= 1) return number.toFixed(4);
@@ -45,6 +45,11 @@ function patchFeatures(payload) {
 function setText(id, value) {
   const node = document.getElementById(id);
   if (node) node.textContent = value;
+}
+
+function setTitle(id, value) {
+  const node = document.getElementById(id);
+  if (node) node.title = value;
 }
 
 function patchEdgeUnavailableTransport(label = 'EDGE API ERROR') {
@@ -125,15 +130,19 @@ function patchEdgeSemantics(payload) {
     ? Number(active.directional_matched_group_n)
     : finite(profile.independent_bucket_n) ? Number(profile.independent_bucket_n) : null;
 
-  setText('edge-weight', pct(profile.weight_fraction, 1));
-  setText('edge-cap', pct(profile.max_weight_fraction, 1));
-  setText('edge-direction', signed(profile.direction_score, 2));
+  const noDirectionalVote = matched != null && matched > 0 && directional === 0;
+  setText('edge-weight', noDirectionalVote ? 'NEUTRAL' : pct(profile.weight_fraction, 1));
+  setText('edge-cap', noDirectionalVote ? 'NO DIR' : pct(profile.max_weight_fraction, 1));
+  setText('edge-direction', noDirectionalVote ? 'NO VOTE' : signed(profile.direction_score, 2));
   setText('edge-votes', supporting != null && opposing != null
     ? `${supporting} / ${opposing}` : '— / —');
-  setText('edge-strict', pct(profile.strict_directional_share, 0));
+  setText('edge-strict', noDirectionalVote ? 'N/A' : pct(profile.strict_directional_share, 0));
   setText('edge-buckets', count(directionalGroups));
   setText('edge-matched-groups', count(matchedGroups));
   setText('edge-nondirectional', count(nonDirectional));
+  setTitle('edge-weight', `raw measured weight ${pct(profile.weight_fraction, 1)}`);
+  setTitle('edge-cap', `raw directional cap ${pct(profile.max_weight_fraction, 1)}`);
+  setTitle('edge-direction', `raw measured direction ${signed(profile.direction_score, 2)}`);
 
   const reasonLabel = reason.label
     || (matched != null && matched > 0 ? 'ACTIVE MATCH' : 'NO ACTIVE EDGE');

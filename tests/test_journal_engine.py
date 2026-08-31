@@ -3,6 +3,7 @@ import json
 import pytest
 
 from seiltanzer.config import INSTRUMENTS, Settings
+from seiltanzer.data.feeds import CORRELATION_SERIES
 from seiltanzer.engine import Engine
 from seiltanzer.journal import Journal
 
@@ -589,4 +590,5 @@ class TestLiveVisualPayloads:
         assert value["matrix_short"]
         assert value["matrix_baseline"]
         assert value["matrix_delta"]
-        assert len(value["observations_short"]) == len(value["assets"]) == 8
+        assert len(value["observations_short"]) == len(value["assets"]) == len(CORRELATION_SERIES)
+        assert {"EURUSD", "USDCAD", "XAGUSD"} <= set(value["assets"])

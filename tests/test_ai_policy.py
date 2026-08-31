@@ -93,6 +93,20 @@ def test_full_correlation_matrix_is_not_reduced_to_selected_pairs():
     assert summary["instrument_relevant"]
 
 
+def test_full_correlation_relevance_covers_every_traded_instrument():
+    assets = ["NAS", "SP500", "US30", "GER40", "UK100", "JPY100",
+              "GOLD", "XAGUSD", "EURUSD", "USDCAD", "VIX"]
+    matrix = [[1.0 if i == j else 0.2 for j in range(len(assets))]
+              for i in range(len(assets))]
+    payload = {"status": "ok", "value": {
+        "assets": assets, "matrix_short": matrix,
+    }}
+    for instrument in ("NAS100", "SP500", "US30", "GER40", "UK100",
+                       "JPY100", "XAU", "XAG", "EURUSD", "USDCAD"):
+        summary = full_correlation_summary(payload, instrument)
+        assert summary["instrument_relevant"], instrument
+
+
 def test_every_metric_family_has_an_explicit_decision_role():
     evidence = {
         "option_barrier": {"p_take": .2}, "cone_rnd": {"median_r": 0},

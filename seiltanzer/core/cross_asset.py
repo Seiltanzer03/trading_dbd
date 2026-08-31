@@ -21,11 +21,11 @@ def _group(asset: str) -> str:
         return "equity"
     if a in {"VIX", "VXN", "GVZ", "OVX", "DV1X", "EVZ"}:
         return "volatility"
-    if a in {"GOLD", "XAU", "SILVER", "XAG"}:
+    if a in {"GOLD", "XAU", "XAUUSD", "SILVER", "XAG", "XAGUSD"}:
         return "metals"
     if a in {"OIL", "BRENT", "WTI", "OIL_BRENT"}:
         return "energy"
-    if a in {"DXY", "JPY", "EURUSD", "GBPUSD"}:
+    if a in {"DXY", "JPY", "EURUSD", "GBPUSD", "USDCAD", "CADUSD"}:
         return "fx"
     if a in {"BTC", "BTCUSD", "ETH", "ETHUSD"}:
         return "crypto"
@@ -128,6 +128,7 @@ def compute_correlation_graph(
 
     n = min(len(assets), len(short))
     assets = [str(a) for a in assets[:n]]
+    core_assets = [str(a) for a in (p.get("core_assets") or assets) if str(a) in assets]
     now_ts = float(p.get("asof")) if _finite(p.get("asof")) else 0.0
     history = list(history or [])
     history_asof = sorted(
@@ -247,11 +248,27 @@ def compute_correlation_graph(
         abs(l.get("delta_15m") or 0),
         abs(l.get("delta_1h") or 0)), reverse=True)
 
-    mean_coupling = sum(abs(float(l["correlation"])) for l in links) / max(1, len(links))
-    mean_tension = sum(float(l.get("tension") or 0.0) for l in links) / max(1, len(links))
-    components = _components(assets, links)
-    fragmentation = (components - 1) / max(1, len(assets) - 1)
+    core_set = set(core_assets)
+    core_links = [link for link in links
+                  if link["source"] in core_set and link["target"] in core_set]
+    canonical_links = core_links or links
+    canonical_assets = core_assets if core_links else assets
+    mean_coupling = sum(abs(float(l["correlation"])) for l in canonical_links) / max(1, len(canonical_links))
+    mean_tension = sum(float(l.get("tension") or 0.0) for l in canonical_links) / max(1, len(canonical_links))
+    components = _components(canonical_assets, canonical_links)
+    fragmentation = (components - 1) / max(1, len(canonical_assets) - 1)
+    full_mean_coupling = sum(abs(float(l["correlation"])) for l in links) / max(1, len(links))
+    full_mean_tension = sum(float(l.get("tension") or 0.0) for l in links) / max(1, len(links))
+    full_components = _components(assets, links)
+    full_fragmentation = (full_components - 1) / max(1, len(assets) - 1)
     top_node = max(nodes, key=lambda n: float(n.get("stress_pressure") or 0.0)) if nodes else None
+    paired_assets = sorted(asset for asset, edges in incident.items() if edges)
+    unpaired_assets = sorted(set(assets) - set(paired_assets))
+    observations = p.get("observations_short") or []
+    for idx, node in enumerate(nodes):
+        node["observed_pair_count"] = len(incident.get(node["id"], []))
+        node["observations_short"] = int(observations[idx]) if idx < len(observations) and _finite(observations[idx]) else None
+        node["data_available"] = node["observed_pair_count"] > 0
     possible_pairs = n * (n - 1) // 2
     material_pairs = sum(
         abs(float(link.get("correlation") or 0.0)) >= 0.22
@@ -271,13 +288,28 @@ def compute_correlation_graph(
         state = str(link.get("relationship_state") or "TRANSITION")
         relationship_states[state] = relationship_states.get(state, 0) + 1
 
+    positive = [link for link in links if float(link["correlation"]) > 0]
+    negative = [link for link in links if float(link["correlation"]) < 0]
+    top_positive = max(positive, key=lambda link: float(link["correlation"]), default=None)
+    top_negative = min(negative, key=lambda link: float(link["correlation"]), default=None)
+    top_dislocation = max(
+        (link for link in links if link.get("delta_baseline") is not None),
+        key=lambda link: abs(float(link["delta_baseline"])), default=None)
+    top_velocity = max(
+        links, key=lambda link: float(link.get("velocity_magnitude") or 0.0),
+        default=None)
+    core_alerts = [link for link in alerts
+                   if link["source"] in core_set and link["target"] in core_set]
+
     return {
         "version": "cross-asset-v4-full-stress-topology",
         "available": True,
         "nodes": nodes, "links": links, "break_alerts": alerts[:8],
         "summary": {
-            "regime": "CORRELATION BREAKDOWN" if alerts else "NORMAL CORRELATION",
-            "active_breaks_count": len(alerts),
+            "regime": "CORRELATION BREAKDOWN" if core_alerts else "NORMAL CORRELATION",
+            "active_breaks_count": len(core_alerts),
+            "full_regime": "CORRELATION BREAKDOWN" if alerts else "NORMAL CORRELATION",
+            "full_active_breaks_count": len(alerts),
             "observed_pairs": observed_pairs,
             "possible_pairs": possible_pairs,
             "complete_topology": observed_pairs == possible_pairs,
@@ -292,8 +324,21 @@ def compute_correlation_graph(
             "network_tension": round(mean_tension, 3),
             "strong_components": components,
             "fragmentation": round(fragmentation, 3),
+            "full_systemic_coupling": round(full_mean_coupling, 3),
+            "full_network_tension": round(full_mean_tension, 3),
+            "full_strong_components": full_components,
+            "full_fragmentation": round(full_fragmentation, 3),
             "dominant_stress_node": top_node["id"] if top_node else None,
             "dominant_stress_pressure": top_node.get("stress_pressure") if top_node else None,
+            "assets_total": len(assets),
+            "assets_with_pairs": paired_assets,
+            "assets_without_pairs": unpaired_assets,
+            "core_assets": core_assets,
+            "inverse_aliases": {"CADUSD": "USDCAD"} if "USDCAD" in assets else {},
+            "top_positive_pair": top_positive,
+            "top_negative_pair": top_negative,
+            "top_dislocation_pair": top_dislocation,
+            "top_velocity_pair": top_velocity,
             "source": source_meta,
             "authority": "correlation_family", "independent_vote": False,
         },

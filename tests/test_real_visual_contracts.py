@@ -27,7 +27,18 @@ def test_cross_asset_full_mode_and_honest_counts_are_present():
     assert "return links.slice()" in corr
     assert "SHOWN LINKS ${activeLinks.length} / OBSERVED ${links.length}" in corr
     assert "const packets = [.5 + .5 * phase, .5 - .5 * phase]" in corr
-    assert "no causal direction" in corr
+    assert "causal source/target direction that has not been estimated" in corr
+    assert "raw==null" in corr
+    assert "5M DATA N/A" in corr
+
+
+def test_universe_camera_and_measured_motion_contracts_are_present():
+    source = _read("seiltanzer/web/js/universe_scenes.js")
+    assert "createPlotlyCameraGuard" in source
+    assert "renderKey !== U.edgeRenderKey" in source
+    assert "Plotly.animate(chart, { data: traces }" in source
+    assert "motionSegments" in source
+    assert "N/A AGGREGATE" not in source
 
 
 def test_unified_3d_toolbar_is_guard_owned_and_never_auto_rotates():

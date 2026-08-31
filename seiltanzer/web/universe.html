@@ -85,7 +85,7 @@
         <div class="scene-chart" id="edge-universe-chart"></div>
         <div class="scene-empty" id="edge-empty">○ ОЖИДАНИЕ CURRENT-T0 FEATURE STATE</div>
         <div class="stage-legend">
-          <span class="fresh">● OBSERVED</span><span class="stale">● STALE</span><span>● N/A AGGREGATE</span>
+          <span class="fresh">● OBSERVED</span><span class="stale">● STALE</span><span>N/A = NOT OBSERVED, NOT ZERO</span>
           <span>━ FAMILY</span><span class="support">━ SUPPORT</span><span class="oppose">━ OPPOSE</span>
         </div>
       </div>
@@ -106,9 +106,9 @@
     </div>
     <div class="scene-foot">
       Центр = Position Manager. Цветные подписанные узлы = наблюдаемые canonical T0 features; размер = нормализованная сила шока,
-      сектор = feature family, высота = bounded signed value. N/A свёрнуты в один честный агрегат и не считаются нулём. Серые линии показывают
+      сектор = feature family, высота = bounded signed value. N/A вынесены в счётчик покрытия и не рисуются как фиктивный узел. Серые линии показывают
       структуру family, толстые зелёные/красные — фактический support/oppose Active Edge. Движение возникает только при новом реальном T0:
-      больший наблюдаемый сдвиг проходит быстрее, случайной/декоративной анимации нет. При появлении Active Edge добавляются family×horizon узлы:
+      наблюдаемый ΔT0 анимируется 1–2 секунды и оставляет bounded trail/halo (это мера изменения, не физическая или причинная траектория); случайной/декоративной анимации нет. Камера остаётся там, куда её повернул пользователь. При появлении Active Edge добавляются family×horizon узлы:
       расстояние = horizon, высота = net vote, масса = matched candidates, яркость = STRICT_REFERENCE participation.
       <b>Current-T0 match сам по себе не означает directional vote:</b> volatility/other targets могут совпасть, но не получают право
       создавать LONG/SHORT soft-weight. В вес входят только directional family×horizon buckets. Фактический Active Edge остаётся только
