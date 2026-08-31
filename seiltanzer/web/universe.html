@@ -84,6 +84,10 @@
         <div class="stage-readout" id="edge-readout">ACTIVE EDGE ОЖИДАЕТ CURRENT-SHA REPORTS</div>
         <div class="scene-chart" id="edge-universe-chart"></div>
         <div class="scene-empty" id="edge-empty">○ ОЖИДАНИЕ CURRENT-T0 FEATURE STATE</div>
+        <div class="stage-legend">
+          <span class="fresh">● OBSERVED</span><span class="stale">● STALE</span><span>● N/A AGGREGATE</span>
+          <span>━ FAMILY</span><span class="support">━ SUPPORT</span><span class="oppose">━ OPPOSE</span>
+        </div>
       </div>
       <aside class="scene-hud edge-hud">
         <div class="hud-title">LIVE DECISION STATE</div>
@@ -101,8 +105,10 @@
       </aside>
     </div>
     <div class="scene-foot">
-      Центр = Position Manager. Базовое облако = доступные canonical T0 features; сектор = feature family, высота = bounded signed value,
-      непрозрачность = freshness/availability. При появлении Active Edge поверх него добавляются family×horizon узлы:
+      Центр = Position Manager. Цветные подписанные узлы = наблюдаемые canonical T0 features; размер = нормализованная сила шока,
+      сектор = feature family, высота = bounded signed value. N/A свёрнуты в один честный агрегат и не считаются нулём. Серые линии показывают
+      структуру family, толстые зелёные/красные — фактический support/oppose Active Edge. Движение возникает только при новом реальном T0:
+      больший наблюдаемый сдвиг проходит быстрее, случайной/декоративной анимации нет. При появлении Active Edge добавляются family×horizon узлы:
       расстояние = horizon, высота = net vote, масса = matched candidates, яркость = STRICT_REFERENCE participation.
       <b>Current-T0 match сам по себе не означает directional vote:</b> volatility/other targets могут совпасть, но не получают право
       создавать LONG/SHORT soft-weight. В вес входят только directional family×horizon buckets. Фактический Active Edge остаётся только

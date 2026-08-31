@@ -75,6 +75,16 @@ button, a { font: inherit; }
   background-size: auto, auto, 42px 42px, 42px 42px;
 }
 .scene-chart { position: absolute; inset: 34px 0 0; }
+.scene-chart.transport-stale { opacity: .34; filter: saturate(.35); }
+.scene-chart.payload-stale { opacity: .76; }
+.stage-legend {
+  position: absolute; left: 15px; bottom: 12px; z-index: 4; display: flex; flex-wrap: wrap; gap: 8px 13px;
+  color: #768493; font-size: 8px; letter-spacing: .05em; pointer-events: none;
+}
+.stage-legend .fresh { color: var(--cyan); }
+.stage-legend .stale { color: var(--amber); }
+.stage-legend .support { color: var(--green); }
+.stage-legend .oppose { color: var(--red); }
 .stage-readout {
   position: absolute; left: 15px; top: 12px; z-index: 4; color: #96a5b5; font-size: 10px;
   letter-spacing: .08em; pointer-events: none;
@@ -118,6 +128,8 @@ button, a { font: inherit; }
 .feature-row .id { color: #8795a5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .feature-row .fv { text-align: right; color: #d0d9e2; }
 .feature-row.stale { opacity: .45; }
+.feature-row.stale .fv { color: var(--amber); }
+.feature-row.unavailable { opacity: .38; }
 
 .scene-foot { padding: 10px 17px 12px; border-top: 1px solid var(--line); color: #667381; font-size: 9px; line-height: 1.65; }
 .scene-foot b { color: #8fa0b2; font-weight: 500; }

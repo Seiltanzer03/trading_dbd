@@ -27,11 +27,30 @@ def test_precision_layer_distinguishes_missing_reports_from_measured_zero() -> N
 
 def test_precision_layer_clears_stale_values_on_transport_failure() -> None:
     source = (ROOT / "js" / "universe_precision.js").read_text(encoding="utf-8")
+    scene_source = (ROOT / "js" / "universe_scenes.js").read_text(encoding="utf-8")
     assert "patchEdgeUnavailableTransport" in source
-    assert "EDGE API HTTP ${response.status}" in source
-    assert "patchEdgeUnavailableTransport('EDGE API ERROR')" in source
+    assert "EDGE API HTTP ${response.status}" in scene_source
+    assert "markEdgeUniverseTransportUnavailable" in scene_source
     assert "ACTIVE EDGE N/A · ${label}" in source
-    assert "window.Plotly.purge(chart)" in source
+    assert "chart?.classList.add('transport-stale')" in source
+    assert "window.Plotly.purge(chart)" not in source
+
+
+def test_precision_layer_does_not_duplicate_heavy_edge_requests() -> None:
+    source = (ROOT / "js" / "universe_precision.js").read_text(encoding="utf-8")
+    assert "fetch('/api/visual/edge-universe'" not in source
+    assert "MutationObserver" not in source
+    assert "setInterval(refreshPrecision" not in source
+    assert "window.applyEdgeUniversePrecision" in source
+
+
+def test_universe_graph_identifies_missing_features_and_uses_real_t0_motion() -> None:
+    source = (ROOT / "js" / "universe_scenes.js").read_text(encoding="utf-8")
+    assert "N/A AGGREGATE" in source
+    assert "featureGeo.unavailableN" in source
+    assert "realT0Changed" in source
+    assert "window.Plotly.animate" in source
+    assert "setInterval" not in source
 
 
 def test_precision_numeric_formatters_do_not_coerce_missing_to_zero() -> None:
