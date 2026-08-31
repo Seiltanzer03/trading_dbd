@@ -34,6 +34,21 @@ logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 DELAYED_GRACE = 5.0  # во сколько раз можно превысить период опроса до no_data
 
+# The first eight rows preserve the historical/canonical correlation family.
+# Additional rows expose every instrument traded by the terminal to the visual
+# topology without silently changing the meaning of the trained core aggregate.
+CORRELATION_SERIES = (
+    ("NAS", "NQ=F"), ("VXN", "^VXN"),
+    ("SP500", "ES=F"), ("VIX", "^VIX"),
+    ("GOLD", "GC=F"), ("GVZ", "^GVZ"),
+    ("OIL", "CL=F"), ("OVX", "^OVX"),
+    ("US30", "YM=F"), ("GER40", "^GDAXI"),
+    ("UK100", "^FTSE"), ("JPY100", "^N225"),
+    ("XAGUSD", "SI=F"), ("EURUSD", "EURUSD=X"),
+    ("USDCAD", "CAD=X"),
+)
+CORRELATION_CORE_ASSETS = tuple(name for name, _ in CORRELATION_SERIES[:8])
+
 
 def _status_dict(value=None, status="no_data", ts=None, error=None, source=None):
     return {"value": value, "status": status, "ts": ts, "error": error, "source": source}
@@ -758,8 +773,8 @@ class MarketData:
 
     def refresh_correlation(self) -> None:
         """Rolling cross-asset regime: 5m correlation versus 3-month baseline."""
-        tickers = ["NQ=F", "^VXN", "ES=F", "^VIX", "GC=F", "^GVZ", "CL=F", "^OVX"]
-        names = ["NAS", "VXN", "SP500", "VIX", "GOLD", "GVZ", "OIL", "OVX"]
+        names = [name for name, _ in CORRELATION_SERIES]
+        tickers = [ticker for _, ticker in CORRELATION_SERIES]
         now_ts = time.time()
 
         if self.demo:
@@ -781,6 +796,7 @@ class MarketData:
                        "matrix_short": short.tolist(),
                        "matrix_baseline": baseline.tolist(),
                        "matrix_delta": delta.tolist(),
+                       "core_assets": list(CORRELATION_CORE_ASSETS),
                        "observations_short": [96] * n,
                        "short_window": "5m × 96", "baseline_window": "3mo × 1d",
                        "asof": now_ts},
@@ -818,7 +834,7 @@ class MarketData:
                     return mat, counts
                 counts = [int(returns[t].notna().sum()) if t in returns else 0 for t in tickers]
                 for i, t1 in enumerate(tickers):
-                    mat[i][i] = 1.0
+                    mat[i][i] = 1.0 if counts[i] >= min_obs else None
                     for j in range(i + 1, n):
                         pair = returns[[t1, tickers[j]]].dropna()
                         val = (
@@ -857,7 +873,8 @@ class MarketData:
                         row.append(sv)
                         drow.append(sv - bv)
                     else:
-                        row.append(bv if bv is not None else (1.0 if i == j else 0.0))
+                        row.append(bv if bv is not None else (
+                            1.0 if i == j and observations[i] >= 12 else None))
                         drow.append(None)
                 matrix.append(row)
                 delta.append(drow)
@@ -869,6 +886,7 @@ class MarketData:
                        "matrix_short": short,
                        "matrix_baseline": baseline,
                        "matrix_delta": delta,
+                       "core_assets": list(CORRELATION_CORE_ASSETS),
                        "observations_short": observations,
                        "short_window": "5m × 96",
                        "baseline_window": "3mo × 1d",

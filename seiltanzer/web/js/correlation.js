@@ -202,6 +202,7 @@ function aliasForInstrument(instrument) {
   if (a.includes('NAS')) return 'NAS';
   if (a.includes('SP500') || a.includes('SPX')) return 'SP500';
   if (a.includes('XAU') || a.includes('GOLD')) return 'GOLD';
+  if (a.includes('XAG') || a.includes('SILVER')) return 'XAGUSD';
   if (a.includes('OIL') || a.includes('WTI') || a.includes('BRENT')) return 'OIL';
   if (a.includes('US30')) return 'US30';
   if (a.includes('GER')) return 'GER40';
@@ -301,7 +302,7 @@ function renderForceGraph(force = false) {
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  const activeInstrument = aliasForInstrument(liveTick?.trade?.instrument);
+  const activeInstrument = aliasForInstrument(liveTick?.instrument || liveTick?.trade?.instrument);
   const shownLinks = linksForNetworkMode(links, currentLinkMode);
   const linkDynamics = shownLinks.some((l) => Math.abs(correlationMotionRate(l)) > .01);
   let lastDraw = 0;
@@ -390,7 +391,7 @@ function renderForceGraph(force = false) {
       const coupling = clamp(n.coupling || 0, 0, 1);
       const incident = links.filter((l) => l.source === n.id || l.target === n.id);
       const visibleIncident = shownLinks.filter((l) => l.source === n.id || l.target === n.id);
-      const noDynamics = incident.every((l) => Math.abs(Number(l.correlation || 0)) < .015 && Number(l.tension || 0) < .015);
+      const noDynamics = n.data_available === false || incident.length === 0;
       const filteredOut = currentLinkMode !== 'FULL' && visibleIncident.length === 0;
       const isLive = activeInstrument && (n.id === activeInstrument || (activeInstrument === 'XAU' && n.id === 'GOLD'));
       const selected = n.id === selectedNodeId;
@@ -423,7 +424,7 @@ function renderForceGraph(force = false) {
       ctx.fillStyle = '#fff'; ctx.font = `bold ${mobile ? 8 : 9}px IBM Plex Mono,monospace`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(n.id, n.x, n.y);
       if (!mobile) {
         ctx.fillStyle = 'rgba(201,216,226,.66)'; ctx.font = '8px IBM Plex Mono,monospace';
-        ctx.fillText(noDynamics ? 'NO PAIR DYN' : `σ ${Number(n.stress_pressure || 0).toFixed(2)}`, n.x, n.y + r + 15);
+        ctx.fillText(noDynamics ? '5M DATA N/A' : `σ ${Number(n.stress_pressure || 0).toFixed(2)}`, n.x, n.y + r + 15);
       }
       ctx.globalAlpha = 1;
     });
@@ -447,6 +448,8 @@ function drawNetworkBackground(ctx, width, height, mobile) {
 
 function drawHud(ctx, width, height, systemic, frag, allPairs, activePairs, mobile) {
   const s = graphData.summary || {};
+  systemic = Number(s.full_systemic_coupling ?? systemic);
+  frag = Number(s.full_fragmentation ?? frag);
   const boxW=mobile?190:245,boxH=mobile?46:55;
   ctx.fillStyle = 'rgba(4,11,18,.72)'; ctx.fillRect(8, 8, boxW, boxH);
   ctx.strokeStyle='rgba(184,207,222,.14)';ctx.strokeRect(8,8,boxW,boxH);
@@ -473,9 +476,9 @@ function bindNetworkPointer(cv, nodes, byId, width, height, mobile) {
 }
 
 function updateNetworkText(links, activeLinks) {
-  const s=graphData.summary||{};if(statusEl)statusEl.textContent=`${s.active_breaks_count?'⚠':'●'} ${currentLinkMode} · SHOWN LINKS ${activeLinks.length} / OBSERVED ${links.length} · TENSION ${Number(s.network_tension||0).toFixed(2)}`;
-  const headline=$('#corr-human-line');if(headline){const velocity=Number(s.max_break_velocity||0);headline.textContent=s.active_breaks_count?`NETWORK BREAKS ${s.active_breaks_count} · ${s.dominant_stress_node||'SYSTEM'} STRESS DOMINANT`:velocity>.02?`CROSS-ASSET RELATIONSHIPS CHANGING · Δρ VELOCITY ${velocity.toFixed(2)}`:`CROSS-ASSET COUPLING STABLE · Δρ VELOCITY ≈ 0`;}
-  const interpret=$('#corr-interpretation');if(interpret){const top=(graphData.break_alerts||[])[0];const detail=top?`<b>TOP STRESS:</b> ${top.source}↔${top.target} · ρ ${Number(top.correlation).toFixed(2)} · Δbaseline ${top.delta_baseline==null?'—':Number(top.delta_baseline).toFixed(2)} · Δ15m ${top.delta_15m==null?'—':Number(top.delta_15m).toFixed(2)}. `:'';interpret.innerHTML=`${detail}<b>${currentLinkMode}:</b> SHOWN LINKS ${activeLinks.length} / OBSERVED ${links.length}. Width = |ρ| · green/red = sign · glow = tension · mirrored packet speed = measured |dρ/dt| (no causal direction) · node radius = coupling · halo = stress.`;interpret.style.display='block';}
+  const s=graphData.summary||{};const breaks=Number(s.full_active_breaks_count??s.active_breaks_count??0);const tension=Number(s.full_network_tension??s.network_tension??0);if(statusEl)statusEl.textContent=`${breaks?'⚠':'●'} ${currentLinkMode} · SHOWN LINKS ${activeLinks.length} / OBSERVED ${links.length} · ASSETS ${s.assets_with_pairs?.length||0}/${s.assets_total||graphData.nodes?.length||0} · TENSION ${tension.toFixed(2)}`;
+  const velocity=Number(s.max_break_velocity||0);const headline=$('#corr-human-line');if(headline)headline.textContent=breaks?`CORRELATION BREAKS ${breaks} · CHECK HEDGE AND DUPLICATE EXPOSURE`:velocity>.02?`RELATIONSHIPS CHANGING · Δρ VELOCITY ${velocity.toFixed(2)} · CONFIRMATION WEAKENING`:`RELATIONSHIPS STABLE · USE STRONG PAIRS AS CROSS-MARKET CONFIRMATION`;
+  const interpret=$('#corr-interpretation');if(interpret){const top=(graphData.break_alerts||[])[0];const positive=s.top_positive_pair;const negative=s.top_negative_pair;const missing=(s.assets_without_pairs||[]);const pair=(item)=>item?`${item.source}↔${item.target} ρ ${Number(item.correlation).toFixed(2)}`:'—';const detail=top?`<b>ГЛАВНОЕ ИЗМЕНЕНИЕ:</b> ${top.source}↔${top.target} · ρ ${Number(top.correlation).toFixed(2)} · Δ к базе ${top.delta_baseline==null?'—':Number(top.delta_baseline).toFixed(2)} · Δ15m ${top.delta_15m==null?'—':Number(top.delta_15m).toFixed(2)}. `:'';const action=breaks?'Не считайте прежний hedge стабильным и проверьте суммарную экспозицию по связанным активам.':Number(s.full_fragmentation??s.fragmentation??0)>.45?'Сеть фрагментирована: сигнал одного рынка требует подтверждения отдельным кластером.':'Сильная однонаправленная пара подтверждает общий фактор, сильная обратная — только наблюдаемый hedge, не причинность.';const inverse=s.inverse_aliases?.CADUSD?' USDCAD показан один раз; CADUSD — его обратная ориентация, поэтому дубликат не добавлен.':'';interpret.innerHTML=`${detail}<b>СИЛЬНАЯ +:</b> ${pair(positive)} · <b>СИЛЬНАЯ −:</b> ${pair(negative)}. <b>ВЫВОД:</b> ${action}${missing.length?` <b>5M N/A:</b> ${missing.join(', ')} — не нули.`:''}${inverse}`;interpret.style.display='block';}
 }
 
 function ensureNetworkAnimation(){
@@ -489,7 +492,7 @@ function renderMatrixChart(force=false) {
   const mobile=isAnalyticsMobile();
   if (!chart) chart=window.echarts.init(holder,null,{renderer:'canvas',devicePixelRatio:analyticsMobileDpr()});
   const matrix=payload.matrix_short||payload.matrix,assets=payload.assets||payload.pairs||[],delta=payload.matrix_delta||[],points=[];
-  for(let i=0;i<matrix.length;i++)for(let j=0;j<matrix[i].length;j++){const v=Number(matrix[i][j]);if(Number.isFinite(v))points.push([j,i,v,Number(delta?.[i]?.[j])]);}
+  for(let i=0;i<matrix.length;i++)for(let j=0;j<matrix[i].length;j++){const raw=matrix[i][j];if(raw==null||raw==='')continue;const v=Number(raw);if(Number.isFinite(v)){const rawDelta=delta?.[i]?.[j];points.push([j,i,v,rawDelta==null?null:Number(rawDelta)]);}}
   chart.setOption({animationDuration:mobile?120:280,backgroundColor:'#08131f',tooltip:{show:!mobile,backgroundColor:'rgba(4,12,20,.96)',borderColor:'#2b485e',textStyle:{color:'#d6e4eb',fontFamily:'IBM Plex Mono',fontSize:10},formatter:p=>{const[j,i,rho,d]=p.data;return`<b>${assets[i]} ↔ ${assets[j]}</b><br>rolling ρ: ${rho.toFixed(2)}<br>Δ vs baseline: ${Number.isFinite(d)?d.toFixed(2):'—'}`;}},grid:mobile?{left:45,right:8,top:20,bottom:44}:{left:70,right:30,top:28,bottom:48},xAxis:{type:'category',data:assets,axisLabel:{rotate:mobile?-45:-25,fontSize:mobile?7:9,color:'#a9bdc9',interval:0},axisLine:{lineStyle:{color:'#345064'}},splitLine:{show:true,lineStyle:{color:'rgba(164,190,207,.07)'}}},yAxis:{type:'category',data:assets,inverse:true,axisLabel:{fontSize:mobile?7:9,color:'#a9bdc9'},axisLine:{lineStyle:{color:'#345064'}},splitLine:{show:true,lineStyle:{color:'rgba(164,190,207,.07)'}}},visualMap:{min:-1,max:1,show:false,inRange:{color:['#d84861','#172839','#36c898']}},series:[{type:'heatmap',data:points,label:{show:true,formatter:p=>Number(p.data[2]).toFixed(mobile?1:2),fontSize:mobile?7:9,color:'#dce7ed'},itemStyle:{borderColor:'rgba(210,225,234,.12)',borderWidth:1}}]}, {notMerge:true,lazyUpdate:true});
   if(statusEl)statusEl.textContent=`● MATRIX · ${assets.length} ASSETS`;
 }

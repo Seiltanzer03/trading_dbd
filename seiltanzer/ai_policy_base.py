@@ -871,15 +871,23 @@ def full_correlation_summary(payload: dict, instrument: str | None = None) -> di
         for j in range(i + 1, len(assets)):
             def cell(matrix):
                 return _rnd(matrix[i][j], 4) if i < len(matrix) and j < len(matrix[i]) else None
-            pairs.append({"pair": f"{assets[i]}-{assets[j]}",
-                          "rolling": cell(short), "baseline": cell(baseline),
-                          "delta": cell(delta)})
+            pair = {"pair": f"{assets[i]}-{assets[j]}",
+                    "rolling": cell(short), "baseline": cell(baseline),
+                    "delta": cell(delta)}
+            if any(pair[key] is not None for key in ("rolling", "baseline", "delta")):
+                pairs.append(pair)
     pairs.sort(key=lambda x: abs(x["delta"] or 0.0), reverse=True)
     aliases = {
         "NAS100": ("NAS", "VXN", "SP500", "VIX"),
         "SP500": ("SP500", "VIX", "NAS", "VXN"),
+        "US30": ("US30", "SP500", "NAS", "VIX"),
         "XAU": ("GOLD", "GVZ", "DXY", "VIX"),
-        "GER40": ("DAX", "V1X", "SP500", "VIX"),
+        "XAG": ("XAGUSD", "GOLD", "GVZ", "EURUSD"),
+        "EURUSD": ("EURUSD", "USDCAD", "VIX", "GOLD"),
+        "USDCAD": ("USDCAD", "EURUSD", "OIL", "GOLD"),
+        "GER40": ("GER40", "SP500", "VIX", "EURUSD"),
+        "UK100": ("UK100", "SP500", "VIX", "EURUSD"),
+        "JPY100": ("JPY100", "NAS", "SP500", "VIX"),
     }
     relevant_keys = aliases.get(instrument or "", (instrument or "",))
     relevant = [x for x in pairs if any(k and k in x["pair"] for k in relevant_keys)]

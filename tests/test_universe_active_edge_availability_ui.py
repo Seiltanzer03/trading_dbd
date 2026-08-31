@@ -46,9 +46,12 @@ def test_precision_layer_does_not_duplicate_heavy_edge_requests() -> None:
 
 def test_universe_graph_identifies_missing_features_and_uses_real_t0_motion() -> None:
     source = (ROOT / "js" / "universe_scenes.js").read_text(encoding="utf-8")
-    assert "N/A AGGREGATE" in source
+    html = (ROOT / "universe.html").read_text(encoding="utf-8")
+    assert "N/A AGGREGATE" not in source
     assert "featureGeo.unavailableN" in source
+    assert "N/A = NOT OBSERVED, NOT ZERO" in html
     assert "realT0Changed" in source
+    assert "motionSegments" in source
     assert "window.Plotly.animate" in source
     assert "setInterval" not in source
 

@@ -1,4 +1,6 @@
 from seiltanzer.core.cross_asset import compute_correlation_graph, relationship_state
+from seiltanzer.config import INSTRUMENTS
+from seiltanzer.data.feeds import CORRELATION_CORE_ASSETS, CORRELATION_SERIES
 
 
 def test_cross_asset_empty_is_honest_no_data():
@@ -8,6 +10,37 @@ def test_cross_asset_empty_is_honest_no_data():
     assert res["links"] == []
     assert res["summary"]["authority"] == "correlation_family"
     assert res["summary"]["independent_vote"] is False
+
+
+def test_correlation_universe_covers_every_traded_instrument_once():
+    names = {name for name, _ in CORRELATION_SERIES}
+    aliases = {"NAS100": "NAS", "XAU": "GOLD", "XAG": "XAGUSD"}
+    assert {aliases.get(code, code) for code in INSTRUMENTS} <= names
+    assert "USDCAD" in names
+    assert "CADUSD" not in names  # inverse duplicate would manufacture a -1 pair
+    assert CORRELATION_CORE_ASSETS == (
+        "NAS", "VXN", "SP500", "VIX", "GOLD", "GVZ", "OIL", "OVX")
+
+
+def test_extended_topology_preserves_core_aggregate_and_marks_missing_assets():
+    corr = {
+        "assets": ["NAS", "VXN", "EURUSD", "USDCAD"],
+        "core_assets": ["NAS", "VXN"],
+        "observations_short": [96, 96, 96, 0],
+        "matrix_short": [
+            [1.0, -0.50, 0.90, None],
+            [-0.50, 1.0, -0.10, None],
+            [0.90, -0.10, 1.0, None],
+            [None, None, None, None],
+        ],
+    }
+    res = compute_correlation_graph(corr)
+    nodes = {node["id"]: node for node in res["nodes"]}
+    assert res["summary"]["systemic_coupling"] == 0.5
+    assert nodes["USDCAD"]["data_available"] is False
+    assert nodes["USDCAD"]["observed_pair_count"] == 0
+    assert res["summary"]["assets_without_pairs"] == ["USDCAD"]
+    assert res["summary"]["inverse_aliases"] == {"CADUSD": "USDCAD"}
 
 
 def test_cross_asset_uses_actual_assets_and_break_alert():
