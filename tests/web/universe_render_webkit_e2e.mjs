@@ -49,11 +49,12 @@ const edge = {
   cross_asset:{summary:{systemic_coupling:.327,network_tension:.139,fragmentation:.714}},
 };
 
+let edgeRequestCount=0;
 const server = http.createServer(async (req,res)=>{
   try {
     const u=new URL(req.url,'http://127.0.0.1');
     if(u.pathname==='/api/visual/rates-orbit'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(rates));return;}
-    if(u.pathname==='/api/visual/edge-universe'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(edge));return;}
+    if(u.pathname==='/api/visual/edge-universe'){edgeRequestCount+=1;res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(edge));return;}
     let rel;
     if(u.pathname==='/universe') rel='seiltanzer/web/universe.html';
     else if(u.pathname.startsWith('/static/')) rel='seiltanzer/web/'+u.pathname.slice('/static/'.length);
@@ -101,6 +102,7 @@ const state=await page.evaluate(()=>({
   nonDirectional:document.querySelector('#edge-nondirectional')?.textContent||'',
   momentum:[...document.querySelectorAll('#edge-features .feature-row')].find((row)=>row.querySelector('.id')?.textContent==='price.momentum')?.querySelector('.fv')?.textContent||'',
   featureIds:(document.querySelector('#edge-universe-chart')?.data||[]).flatMap((t)=>Array.isArray(t.customdata)?t.customdata.map((v)=>Array.isArray(v)?v[0]:null):[]).filter(Boolean),
+  traceText:(document.querySelector('#edge-universe-chart')?.data||[]).flatMap((t)=>Array.isArray(t.text)?t.text:[]).filter(Boolean),
 }));
 assert.equal(state.ratesButton,'ON','rates must start ON on every page load');
 assert.equal(state.edgeButton,'ON','edge must start ON on every page load');
@@ -115,6 +117,8 @@ assert.equal(state.nonDirectional,'8','non-directional match count must be expli
 assert.equal(state.momentum,'4.000e-7','tiny observed values must not be rounded to visual zero');
 assert(state.featureIds.includes('vol.rv15_over_rv60'),'exact canonical feature IDs must be present in 3D trace data');
 assert(state.featureIds.includes('option_dynamics.gex_velocity'),'option dynamics must be present in 3D trace data');
+assert(state.traceText.includes('N/A · 2'),'unavailable features must be one identified aggregate, not anonymous balls');
+assert.equal(edgeRequestCount,1,'precision layer must reuse the scene payload instead of duplicating the heavy request');
 
 const html=await readFile(path.join(ROOT,'seiltanzer/web/universe.html'),'utf8');
 assert(html.includes('/static/vendor/plotly-gl3d.min.js'),'Universe must use repository-local Plotly');

@@ -20,6 +20,7 @@ const FEATURE_COLORS = {
 const U = {
   tick: null, rates: null, edge: null,
   ratesBusy: false, edgeBusy: false, ratesNext: 0, edgeNext: 0, lastInstrument: null,
+  edgeFrameKey: null, edgeCoords: {},
   // Session-local toggles only. Every page load starts visible by design.
   ratesEnabled: true, edgeEnabled: true,
 };
@@ -118,21 +119,25 @@ function buildFeatureGeometry(items) {
   for (const family of families) {
     const subset = rows.filter((row) => featureFamily(row.feature_id) === family).sort((a, b) => String(a.feature_id).localeCompare(String(b.feature_id)));
     const numeric = subset.filter((row) => row.available && !row.stale && finite(row.value));
+    const visible = subset.filter((row) => row.available || row.stale);
     const magnitude = Math.max(1e-8, median(numeric.map((row) => Math.abs(Number(row.value))).filter((v) => v > 0)) || 1);
     const angle0 = (familyIndex[family] / Math.max(1, families.length)) * Math.PI * 2 - Math.PI / 2;
     const familyZ = numeric.length ? numeric.reduce((sum, row) => sum + Math.tanh(Number(row.value) / (magnitude * 3)), 0) / numeric.length : 0;
     const anchor = [.52 * Math.cos(angle0), .52 * Math.sin(angle0), familyZ * .55];
     anchors.push({ family, coord: anchor, n: subset.length, color: FEATURE_COLORS[family] || FEATURE_COLORS.other });
-    subset.forEach((row, idx) => {
-      const slot = subset.length <= 1 ? 0 : (idx / (subset.length - 1) - .5); const angle = angle0 + slot * .56;
+    visible.forEach((row, idx) => {
+      const slot = visible.length <= 1 ? 0 : (idx / (visible.length - 1) - .5); const angle = angle0 + slot * .56;
       const radius = .82 + (idx % 4) * .12 + Math.floor(idx / 4) * .035;
-      const numericValue = row.available && !row.stale && finite(row.value) ? Number(row.value) : null;
+      const numericValue = row.available && finite(row.value) ? Number(row.value) : null;
       const z = numericValue == null ? 0 : Math.tanh(numericValue / (magnitude * 3)) * 1.15;
       const coord = [radius * Math.cos(angle), radius * Math.sin(angle), z];
-      nodes.push({ row, family, coord, color: FEATURE_COLORS[family] || FEATURE_COLORS.other }); links.push([anchor, coord]);
+      const shock = numericValue == null ? 0 : Math.abs(numericValue) / magnitude;
+      nodes.push({ row, family, coord, shock, color: FEATURE_COLORS[family] || FEATURE_COLORS.other }); links.push([anchor, coord]);
     });
   }
-  return { anchors, nodes, links };
+  for (const node of nodes) node.label = String(node.row.feature_id).split('.').pop();
+  const unavailableN = rows.filter((row) => !row.available && !row.stale).length;
+  return { anchors, nodes, links, unavailableN };
 }
 function edgeColor(ratio) { return Number(ratio) > .02 ? '#49d79a' : Number(ratio) < -.02 ? '#ff6b72' : '#8995a3'; }
 function renderEdgeChart() {
@@ -141,12 +146,12 @@ function renderEdgeChart() {
   if (!plotAvailable()) { if (empty) { empty.style.display = 'flex'; empty.textContent = '○ LOCAL PLOTLY НЕ ЗАГРУЖЕН'; } return; }
   const featureGeo = buildFeatureGeometry(payload.canonical_features?.items || {});
   const activeGroups = (payload.active_edge?.matched_groups || []).filter((row) => finite(row.net_vote_ratio));
-  if (!featureGeo.nodes.length && !activeGroups.length) { if (empty) { empty.style.display = 'flex'; empty.textContent = '○ НЕТ CURRENT-T0 FEATURE STATE'; } purge('edge'); return; }
+  if (!featureGeo.nodes.length && !activeGroups.length && !featureGeo.unavailableN) { if (empty) { empty.style.display = 'flex'; empty.textContent = '○ НЕТ CURRENT-T0 FEATURE STATE'; } purge('edge'); return; }
   if (empty) empty.style.display = 'none';
   const traces = [ringTrace(.52, 0, 'rgba(246,184,95,.10)'), ringTrace(1.05, 0, 'rgba(115,216,255,.08)')];
   const center = [0, 0, clamp(Number(payload.production_weight?.direction_score || 0), -1, 1) * .45];
-  traces.push(segmentTrace(featureGeo.anchors.map((a) => [center, a.coord]), '#556274', 2, .32));
-  traces.push(segmentTrace(featureGeo.links, '#495666', 1, .20));
+  traces.push(segmentTrace(featureGeo.anchors.map((a) => [center, a.coord]), '#657489', 4, .48));
+  traces.push(segmentTrace(featureGeo.links, '#5d6b7d', 2.5, .36));
   if (featureGeo.anchors.length) traces.push({
     type: 'scatter3d', mode: 'markers+text', x: featureGeo.anchors.map((v) => v.coord[0]), y: featureGeo.anchors.map((v) => v.coord[1]), z: featureGeo.anchors.map((v) => v.coord[2]),
     text: featureGeo.anchors.map((v) => v.family.toUpperCase()), textposition: 'top center', textfont: { family: 'IBM Plex Mono, monospace', size: 9, color: '#aebcca' },
@@ -154,24 +159,54 @@ function renderEdgeChart() {
     customdata: featureGeo.anchors.map((v) => [v.family, v.n]), hovertemplate: '<b>%{customdata[0]}</b><br>%{customdata[1]} canonical features<extra></extra>',
   });
   if (featureGeo.nodes.length) traces.push({
-    type: 'scatter3d', mode: 'markers', x: featureGeo.nodes.map((v) => v.coord[0]), y: featureGeo.nodes.map((v) => v.coord[1]), z: featureGeo.nodes.map((v) => v.coord[2]),
-    marker: { size: featureGeo.nodes.map((v) => v.row.available && !v.row.stale ? 5 : 3.5), color: featureGeo.nodes.map((v) => v.row.available && !v.row.stale ? v.color : '#58616c'), opacity: featureGeo.nodes.map((v) => v.row.available && !v.row.stale ? .88 : .34), line: { color: 'rgba(255,255,255,.18)', width: .5 } },
+    type: 'scatter3d', mode: 'markers+text', x: featureGeo.nodes.map((v) => v.coord[0]), y: featureGeo.nodes.map((v) => v.coord[1]), z: featureGeo.nodes.map((v) => v.coord[2]),
+    text: featureGeo.nodes.map((v) => v.label), textposition: 'top center', textfont: { family: 'IBM Plex Mono, monospace', size: 8, color: '#9eacbb' },
+    marker: { size: featureGeo.nodes.map((v) => v.row.available && !v.row.stale ? 5 + Math.min(7, Math.log1p(v.shock) * 2.2) : 4.5), color: featureGeo.nodes.map((v) => v.row.stale ? '#f6b85f' : v.color), opacity: featureGeo.nodes.map((v) => v.row.available && !v.row.stale ? .94 : .55), line: { color: 'rgba(255,255,255,.42)', width: 1 } },
     customdata: featureGeo.nodes.map((v) => [v.row.feature_id, displayValue(v.row.value, 5), v.row.available ? 'available' : 'N/A', v.row.stale ? 'stale' : 'fresh']),
     hovertemplate: '<b>%{customdata[0]}</b><br>value %{customdata[1]}<br>%{customdata[2]} · %{customdata[3]}<extra></extra>',
+  });
+  if (featureGeo.unavailableN > 0) traces.push({
+    type: 'scatter3d', mode: 'markers+text', x: [-1.28], y: [-1.18], z: [-.82],
+    text: [`N/A · ${featureGeo.unavailableN}`], textposition: 'top center', textfont: { family: 'IBM Plex Mono, monospace', size: 10, color: '#76818d' },
+    marker: { size: 7 + Math.min(8, Math.sqrt(featureGeo.unavailableN)), color: '#3f4853', opacity: .62, line: { color: '#76818d', width: 1.5 } },
+    customdata: [[`${featureGeo.unavailableN} canonical features`, 'not observed at current T0']],
+    hovertemplate: '<b>N/A AGGREGATE</b><br>%{customdata[0]}<br>%{customdata[1]} · not zero<extra></extra>',
   });
   if (activeGroups.length) {
     const targetFamilies = [...new Set(activeGroups.map((row) => row.target_family || 'OTHER'))].sort();
     const targetIndex = Object.fromEntries(targetFamilies.map((name, i) => [name, i]));
     const edgeNodes = activeGroups.map((row) => { const family = row.target_family || 'OTHER'; const baseAngle = (targetIndex[family] / Math.max(1, targetFamilies.length)) * Math.PI * 2 - Math.PI / 2; const horizon = Math.max(0, Number(row.signal_horizon_minutes || 0)); const radius = 1.48 + clamp(horizon / 240, 0, 1.5) * .72; const ratio = clamp(Number(row.net_vote_ratio || 0), -1, 1); return { row, ratio, coord: [radius * Math.cos(baseAngle), radius * Math.sin(baseAngle), ratio * 1.5] }; });
     traces.push(ringTrace(1.72, 0, 'rgba(73,215,154,.07)'));
-    traces.push(segmentTrace(edgeNodes.filter((v) => v.ratio > .02).map((v) => [center, v.coord]), '#49d79a', 3, .48));
-    traces.push(segmentTrace(edgeNodes.filter((v) => v.ratio < -.02).map((v) => [center, v.coord]), '#ff6b72', 3, .48));
-    traces.push(segmentTrace(edgeNodes.filter((v) => Math.abs(v.ratio) <= .02).map((v) => [center, v.coord]), '#8995a3', 2, .25));
-    traces.push({ type: 'scatter3d', mode: 'markers', x: edgeNodes.map((v) => v.coord[0]), y: edgeNodes.map((v) => v.coord[1]), z: edgeNodes.map((v) => v.coord[2]), marker: { size: edgeNodes.map((v) => 6 + Math.min(8, Math.log2(1 + Number(v.row.matched_n || 0)) * 1.8)), color: edgeNodes.map((v) => edgeColor(v.ratio)), opacity: .95, line: { color: edgeNodes.map((v) => Number(v.row.strict_matched_n || 0) > 0 ? '#ffffff' : '#66717d'), width: 1.2 } }, customdata: edgeNodes.map((v) => [v.row.target_family || 'OTHER', v.row.signal_horizon_minutes || 0, v.row.target_id || '—', v.row.matched_n || 0, v.row.supporting_n || 0, v.row.opposing_n || 0, v.row.net_vote_ratio || 0, v.row.strict_matched_n || 0]), hovertemplate: '<b>%{customdata[0]} · %{customdata[1]}m</b><br>target %{customdata[2]}<br>matched %{customdata[3]}<br>support %{customdata[4]} / oppose %{customdata[5]}<br>net %{customdata[6]:+.3f}<br>strict %{customdata[7]}<extra></extra>' });
+    for (const edgeNode of edgeNodes) {
+      const matchedMass = Math.log2(1 + Math.max(0, Number(edgeNode.row.matched_n || 0)));
+      const relationshipStrength = Math.abs(edgeNode.ratio) * 4 + matchedMass;
+      traces.push(segmentTrace(
+        [[center, edgeNode.coord]], edgeColor(edgeNode.ratio),
+        3 + Math.min(6, relationshipStrength), Math.abs(edgeNode.ratio) > .02 ? .72 : .42,
+      ));
+    }
+    traces.push({ type: 'scatter3d', mode: 'markers+text', x: edgeNodes.map((v) => v.coord[0]), y: edgeNodes.map((v) => v.coord[1]), z: edgeNodes.map((v) => v.coord[2]), text: edgeNodes.map((v) => `${v.row.target_family || 'OTHER'} · ${v.row.signal_horizon_minutes || 0}m`), textposition: 'top center', textfont: { family: 'IBM Plex Mono, monospace', size: 9, color: '#c5d0dc' }, marker: { size: edgeNodes.map((v) => 6 + Math.min(8, Math.log2(1 + Number(v.row.matched_n || 0)) * 1.8)), color: edgeNodes.map((v) => edgeColor(v.ratio)), opacity: .95, line: { color: edgeNodes.map((v) => Number(v.row.strict_matched_n || 0) > 0 ? '#ffffff' : '#66717d'), width: 1.2 } }, customdata: edgeNodes.map((v) => [v.row.target_family || 'OTHER', v.row.signal_horizon_minutes || 0, v.row.target_id || '—', v.row.matched_n || 0, v.row.supporting_n || 0, v.row.opposing_n || 0, v.row.net_vote_ratio || 0, v.row.strict_matched_n || 0]), hovertemplate: '<b>%{customdata[0]} · %{customdata[1]}m</b><br>target %{customdata[2]}<br>matched %{customdata[3]}<br>support %{customdata[4]} / oppose %{customdata[5]}<br>net %{customdata[6]:+.3f}<br>strict %{customdata[7]}<extra></extra>' });
   }
   const instrument = payload.instrument || U.tick?.instrument || 'POSITION';
-  traces.push({ type: 'scatter3d', mode: 'markers+text', x: [center[0]], y: [center[1]], z: [center[2]], text: [`PM · ${instrument}`], textposition: 'top center', textfont: { family: 'IBM Plex Mono, monospace', size: 10, color: '#ffe0a5' }, marker: { size: 10, color: '#f6b85f', line: { color: '#ffe0a5', width: 2 } }, hovertemplate: `<b>Position Manager · ${esc(instrument)}</b><br>soft weight ${fmtPct(payload.production_weight?.weight_fraction || 0, 1)}<extra></extra>` });
-  window.Plotly.react($('edge-universe-chart'), traces, sceneLayout({ eye: { x: 1.55, y: 1.35, z: 1.05 } }), plotConfig());
+  traces.push({ type: 'scatter3d', mode: 'markers+text', x: [center[0]], y: [center[1]], z: [center[2]], text: [`PM · ${instrument}`], textposition: 'top center', textfont: { family: 'IBM Plex Mono, monospace', size: 10, color: '#ffe0a5' }, marker: { size: 10, color: '#f6b85f', line: { color: '#ffe0a5', width: 2 } }, hovertemplate: `<b>Position Manager · ${esc(instrument)}</b><br>soft weight ${fmtPct(payload.production_weight?.weight_fraction, 1)}<extra></extra>` });
+  const chart = $('edge-universe-chart');
+  const frameKey = String(payload.canonical_features?.observation_t0 ?? payload.captured_ts ?? '');
+  const nextCoords = Object.fromEntries(featureGeo.nodes.map((node) => [node.row.feature_id, node.coord]));
+  let maxMove = 0;
+  for (const [id, coord] of Object.entries(nextCoords)) {
+    const prior = U.edgeCoords[id];
+    if (prior) maxMove = Math.max(maxMove, Math.hypot(coord[0] - prior[0], coord[1] - prior[1], coord[2] - prior[2]));
+  }
+  const realT0Changed = U.edgeFrameKey != null && frameKey && frameKey !== U.edgeFrameKey;
+  U.edgeFrameKey = frameKey; U.edgeCoords = nextCoords;
+  const layout = sceneLayout({ eye: { x: 1.55, y: 1.35, z: 1.05 } });
+  if (realT0Changed && chart?.data?.length === traces.length && typeof window.Plotly.animate === 'function') {
+    const duration = Math.round(clamp(850 - maxMove * 300, 350, 850));
+    window.Plotly.animate(chart, { data: traces, layout }, { transition: { duration, easing: 'cubic-in-out' }, frame: { duration, redraw: true }, mode: 'immediate' })
+      .catch(() => window.Plotly.react(chart, traces, layout, plotConfig()));
+  } else {
+    window.Plotly.react(chart, traces, layout, plotConfig());
+  }
 }
 function renderEdgeSummary() {
   const payload = U.edge || {}; const active = payload.active_edge || {}; const profile = payload.production_weight || {};
@@ -203,7 +238,7 @@ function renderFeatures() {
   const root = $('edge-features'); const count = $('edge-feature-count'); if (!root) return; const block = U.edge?.canonical_features || {}; const items = block.items || {};
   const rows = Object.values(items).filter((row) => row && typeof row === 'object').sort((a, b) => { const aa = a.available && !a.stale ? 0 : a.stale ? 1 : 2; const bb = b.available && !b.stale ? 0 : b.stale ? 1 : 2; return aa - bb || String(a.feature_id).localeCompare(String(b.feature_id)); });
   if (count) count.textContent = `${block.available_n || 0}/${block.total_n || rows.length}`;
-  root.innerHTML = rows.map((row) => { const cls = row.stale ? ' stale' : ''; const value = row.available ? displayValue(row.value, 4) : row.stale ? 'STALE' : 'N/A'; return `<div class="feature-row${cls}" title="${esc(row.feature_id)}"><span class="id">${esc(row.feature_id)}</span><span class="fv">${esc(value)}</span></div>`; }).join('') || '<div class="feature-row"><span class="id">canonical T0</span><span class="fv">N/A</span></div>';
+  root.innerHTML = rows.map((row) => { const state = row.stale ? 'stale' : row.available ? 'fresh' : 'unavailable'; const value = row.available ? displayValue(row.value, 4) : row.stale ? 'STALE' : 'N/A'; return `<div class="feature-row ${state}" title="${esc(row.feature_id)}"><span class="id">${esc(row.feature_id)}</span><span class="fv">${esc(value)}</span></div>`; }).join('') || '<div class="feature-row unavailable"><span class="id">canonical T0</span><span class="fv">N/A</span></div>';
 }
 
 async function refreshRates(force = false) {
@@ -214,13 +249,27 @@ async function refreshRates(force = false) {
 }
 async function refreshEdge(force = false) {
   if (!U.edgeEnabled || U.edgeBusy) return; const now = Date.now(); if (!force && now < U.edgeNext) return; U.edgeBusy = true;
-  try { const response = await fetch('/api/visual/edge-universe', { cache: 'no-store' }); if (!response.ok) throw new Error(`HTTP ${response.status}`); U.edge = await response.json(); U.edgeNext = now + 30000; renderEdgeSummary(); renderAttribution(); renderFeatures(); renderEdgeChart(); renderLiveMetrics(); }
-  catch (error) { U.edgeNext = now + 30000; badge('edge-status', 'no-data', '○ EDGE API ERROR'); console.warn('[universe] edge refresh failed', error); }
+  try {
+    const response = await fetch('/api/visual/edge-universe', { cache: 'no-store' });
+    if (!response.ok) { const error = new Error(`HTTP ${response.status}`); error.edgeLabel = `EDGE API HTTP ${response.status}`; throw error; }
+    U.edge = await response.json(); window.__edgeUniversePayload = U.edge;
+    U.edgeNext = now + (U.edge?.transport?.cache_state === 'FRESH' ? 30000 : 2000);
+    renderEdgeSummary(); renderAttribution(); renderFeatures(); renderEdgeChart(); renderLiveMetrics();
+    window.applyEdgeUniversePrecision?.(U.edge);
+  }
+  catch (error) {
+    U.edgeNext = now + 15000;
+    const label = error?.edgeLabel || 'EDGE API ERROR';
+    window.markEdgeUniverseTransportUnavailable?.(label);
+    if (!window.markEdgeUniverseTransportUnavailable) badge('edge-status', 'no-data', `○ ${label}`);
+    console.warn('[universe] edge refresh failed', error);
+  }
   finally { U.edgeBusy = false; }
 }
 function onTick(tick) {
   U.tick = tick; renderLiveMetrics(); const instrument = tick?.instrument || null;
-  if (instrument !== U.lastInstrument) { U.lastInstrument = instrument; if (U.rates) renderRatesChart(); U.edgeNext = 0; refreshEdge(true); }
+  if (U.lastInstrument == null) U.lastInstrument = instrument;
+  else if (instrument !== U.lastInstrument) { U.lastInstrument = instrument; if (U.rates) renderRatesChart(); U.edgeNext = 0; refreshEdge(true); }
   refreshRates(false); refreshEdge(false);
 }
 function connectWS() {

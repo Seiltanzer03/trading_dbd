@@ -32,6 +32,8 @@ from .edge_discovery.ai_context import (
 CONTRACT_VERSION = "visual-universe-scenes-v1"
 RATES_CACHE_TTL_SEC = 300.0
 RATES_FAILURE_TTL_SEC = 60.0
+EDGE_CACHE_TTL_SEC = 30.0
+EDGE_INITIAL_WAIT_SEC = 0.75
 
 RATE_SERIES = (
     {"id": "UST_13W", "ticker": "^IRX", "label": "13W", "maturity_years": 0.25},
@@ -442,16 +444,159 @@ def build_edge_universe_payload(engine: Any, *, now: float | None = None) -> dic
     }
 
 
+def _edge_warming_payload(
+    engine: Any, *, now: float, error: str | None, building: bool,
+) -> dict[str, Any]:
+    """Return an honest, cheap response while the first heavy snapshot is built."""
+    trade = engine.journal.active_trade()
+    instrument = str((trade or {}).get("instrument") or engine.market.instrument_code or "")
+    reason = error or "initial snapshot is building"
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "captured_ts": now,
+        "instrument": instrument,
+        "direction": str((trade or {}).get("direction") or ""),
+        "trade_id": (trade or {}).get("id"),
+        "active_edge": {
+            "available": False,
+            "measurement_available": False,
+            "report_state": "EDGE_PAYLOAD_WARMING",
+            "matched_groups": [],
+            "reason": reason,
+        },
+        "production_weight": {
+            "measurement_available": False,
+            "decision_reason": {"code": "EDGE_PAYLOAD_WARMING", "label": "EDGE WARMING"},
+            "automatic_execution": False,
+        },
+        "canonical_features": {
+            "observation_t0": None, "total_n": 0, "available_n": 0,
+            "stale_n": 0, "items": {},
+        },
+        "g1s": {"horizons": [], "status": "WARMING"},
+        "management_attribution": {"status": {}, "edge": {}},
+        "cross_asset": {"available": False, "summary": {}, "production_authority": False},
+        "semantics": {"missing_active_edge_is_not_zero": True, "random_motion": False},
+        "production_authority": False,
+        "visualization_only": True,
+        "transport": {
+            "cache_state": "WARMING", "payload_age_sec": None,
+            "refresh_in_progress": building, "last_refresh_error": error,
+        },
+    }
+
+
+class EdgeUniversePayloadCache:
+    """Single-flight stale-while-refresh cache for the expensive Universe snapshot."""
+
+    def __init__(
+        self,
+        engine: Any,
+        *,
+        builder: Callable[..., dict[str, Any]] | None = None,
+        ttl_sec: float = EDGE_CACHE_TTL_SEC,
+        initial_wait_sec: float = EDGE_INITIAL_WAIT_SEC,
+    ) -> None:
+        self.engine = engine
+        self.builder = builder or build_edge_universe_payload
+        self.ttl_sec = max(0.0, float(ttl_sec))
+        self.initial_wait_sec = max(0.0, float(initial_wait_sec))
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        self._payload: dict[str, Any] | None = None
+        self._payload_ts = 0.0
+        self._building = False
+        self._last_error: str | None = None
+
+    def _start_refresh_locked(self) -> None:
+        if self._building:
+            return
+        self._building = True
+        self._ready.clear()
+
+        def build() -> None:
+            payload: dict[str, Any] | None = None
+            error: str | None = None
+            try:
+                payload = self.builder(self.engine)
+                if not isinstance(payload, dict):
+                    raise TypeError("edge universe builder returned a non-object payload")
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+            with self._lock:
+                if payload is not None:
+                    self._payload = payload
+                    self._payload_ts = time.time()
+                    self._last_error = None
+                else:
+                    self._last_error = error
+                self._building = False
+                self._ready.set()
+
+        threading.Thread(
+            target=build, name="edge-universe-refresh", daemon=True,
+        ).start()
+
+    def start_refresh(self) -> None:
+        with self._lock:
+            self._start_refresh_locked()
+
+    def get(self) -> dict[str, Any]:
+        now = time.time()
+        trade = self.engine.journal.active_trade()
+        current_instrument = str(
+            (trade or {}).get("instrument") or self.engine.market.instrument_code or "")
+        current_trade_id = (trade or {}).get("id")
+        with self._lock:
+            payload = self._payload
+            age = max(0.0, now - self._payload_ts) if payload is not None else None
+            identity_changed = bool(payload is not None and (
+                str(payload.get("instrument") or "") != current_instrument
+                or payload.get("trade_id") != current_trade_id
+            ))
+            stale = payload is None or age is None or age >= self.ttl_sec or identity_changed
+            if stale:
+                self._start_refresh_locked()
+            building = self._building
+
+        if payload is None and building and self.initial_wait_sec > 0:
+            self._ready.wait(self.initial_wait_sec)
+            now = time.time()
+            with self._lock:
+                payload = self._payload
+                age = max(0.0, now - self._payload_ts) if payload is not None else None
+                building = self._building
+
+        with self._lock:
+            error = self._last_error
+        if payload is None:
+            return _edge_warming_payload(
+                self.engine, now=now, error=error, building=building)
+
+        result = dict(payload)
+        result["transport"] = {
+            "cache_state": "STALE_REFRESHING" if building else "FRESH",
+            "payload_age_sec": round(float(age or 0.0), 3),
+            "refresh_in_progress": building,
+            "last_refresh_error": error,
+            "identity_changed": identity_changed,
+        }
+        return result
+
+
 def install_visual_universe_routes(app: FastAPI) -> None:
     """Install the two removable read-only visualization endpoints."""
     if getattr(app.state, "visual_universe_routes_installed", False):
         return
 
+    edge_cache = EdgeUniversePayloadCache(app.state.engine)
+    edge_cache.start_refresh()
+
     def rates_orbit():
         return build_rates_orbit_payload()
 
     def edge_universe():
-        return build_edge_universe_payload(app.state.engine)
+        return edge_cache.get()
 
     app.add_api_route(
         "/api/visual/rates-orbit", rates_orbit,
@@ -459,4 +604,5 @@ def install_visual_universe_routes(app: FastAPI) -> None:
     app.add_api_route(
         "/api/visual/edge-universe", edge_universe,
         methods=["GET"], name="visual_edge_universe")
+    app.state.edge_universe_payload_cache = edge_cache
     app.state.visual_universe_routes_installed = True

@@ -64,15 +64,14 @@ function patchEdgeUnavailableTransport(label = 'EDGE API ERROR') {
     readout.textContent = `ACTIVE EDGE N/A · ${label}`;
     readout.title = 'Active Edge endpoint недоступен; ранее показанные значения не считаются текущим измерением.';
   }
+  const chart = document.getElementById('edge-universe-chart');
+  const hasLastGoodChart = !!(chart && Array.isArray(chart.data) && chart.data.length);
   const empty = document.getElementById('edge-empty');
-  if (empty) {
+  if (empty && !hasLastGoodChart) {
     empty.style.display = 'flex';
     empty.textContent = `○ ${label}`;
   }
-  const chart = document.getElementById('edge-universe-chart');
-  if (chart && window.Plotly && typeof window.Plotly.purge === 'function') {
-    window.Plotly.purge(chart);
-  }
+  chart?.classList.add('transport-stale');
 }
 
 function patchEdgeSemantics(payload) {
@@ -164,32 +163,23 @@ function patchEdgeSemantics(payload) {
   }
 }
 
-let busy = false;
-async function refreshPrecision() {
-  if (busy || document.visibilityState === 'hidden') return;
-  busy = true;
-  try {
-    const response = await fetch('/api/visual/edge-universe', { cache: 'no-store' });
-    if (!response.ok) {
-      patchEdgeUnavailableTransport(`EDGE API HTTP ${response.status}`);
-      return;
-    }
-    const payload = await response.json();
-    patchFeatures(payload);
-    patchEdgeSemantics(payload);
-  } catch (_) {
-    patchEdgeUnavailableTransport('EDGE API ERROR');
-  } finally {
-    busy = false;
+function applyEdgeUniversePrecision(payload) {
+  patchFeatures(payload);
+  patchEdgeSemantics(payload);
+  const chart = document.getElementById('edge-universe-chart');
+  const cacheStale = payload?.transport?.cache_state === 'STALE_REFRESHING';
+  chart?.classList.remove('transport-stale');
+  chart?.classList.toggle('payload-stale', cacheStale);
+  if (cacheStale) {
+    const age = finite(payload?.transport?.payload_age_sec)
+      ? Math.round(Number(payload.transport.payload_age_sec)) : null;
+    const status = document.getElementById('edge-status');
+    if (status) status.textContent += ` · CACHE${age == null ? '' : ` ${age}s`}`;
   }
 }
 
-const observer = new MutationObserver(() => {
-  window.clearTimeout(observer._timer);
-  observer._timer = window.setTimeout(refreshPrecision, 0);
-});
-const featureRoot = document.getElementById('edge-features');
-if (featureRoot) observer.observe(featureRoot, { childList: true });
-
-refreshPrecision();
-window.setInterval(refreshPrecision, 12000);
+// universe_scenes.js is the sole network owner. This layer refines that same
+// payload, avoiding duplicate heavy requests and observer-triggered request loops.
+window.applyEdgeUniversePrecision = applyEdgeUniversePrecision;
+window.markEdgeUniverseTransportUnavailable = patchEdgeUnavailableTransport;
+if (window.__edgeUniversePayload) applyEdgeUniversePrecision(window.__edgeUniversePayload);

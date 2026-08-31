@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from threading import Event
 
 from fastapi import FastAPI
 
@@ -170,6 +171,32 @@ def test_edge_universe_reuses_active_edge_weight_and_exact_feature_ids(monkeypat
     assert payload["cross_asset"]["independent_vote"] is False
     assert payload["visualization_only"] is True
     assert payload["production_authority"] is False
+
+
+def test_edge_universe_cache_shares_one_heavy_build_between_requests():
+    release = Event()
+    calls = []
+
+    def builder(engine):
+        calls.append(engine)
+        release.wait(1.0)
+        return {"captured_ts": 123.0, "instrument": "NAS100", "trade_id": 7}
+
+    engine = SimpleNamespace(
+        journal=_Journal(), market=SimpleNamespace(instrument_code="NAS100"))
+    cache = universe.EdgeUniversePayloadCache(
+        engine, builder=builder, ttl_sec=60.0, initial_wait_sec=1.0)
+
+    cache.start_refresh()
+    cache.start_refresh()
+    release.set()
+    payload = cache.get()
+    cached = cache.get()
+
+    assert len(calls) == 1
+    assert payload["instrument"] == "NAS100"
+    assert payload["transport"]["cache_state"] == "FRESH"
+    assert cached["transport"]["cache_state"] == "FRESH"
 
 
 def test_universe_page_is_standalone_route():
