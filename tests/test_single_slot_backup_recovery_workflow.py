@@ -5,15 +5,20 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "production-single-slot-backup-recovery.yml"
 
 
-def test_recovery_is_manual_exact_sha_and_serialized_with_production():
+def test_recovery_is_pr_triggered_exact_sha_and_serialized_with_production():
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
+    assert "push:" in workflow
+    assert "branches: [main]" in workflow
+    assert "paths: [.github/workflows/production-single-slot-backup-recovery.yml]" in workflow
     assert "workflow_dispatch:" in workflow
     assert "expected_sha:" in workflow
     assert "group: production-seiltanzer" in workflow
     assert "cancel-in-progress: false" in workflow
     assert 'test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"' in workflow
     assert 'statuses.get("ci/full-webkit", "missing")' in workflow
+    assert 'item.get("name") == "deploy"' in workflow
+    assert "needs_recovery=true" in workflow
 
 
 def test_recovery_can_remove_only_backup_pairs_and_hidden_backup_temps():
@@ -41,3 +46,12 @@ def test_recovery_requires_headroom_then_a_new_verified_exact_sha_backup():
     assert "no new exact-SHA verified prestart backup" in workflow
     assert "POST_RECOVERY_DB_QUICK_CHECK" in workflow
     assert "ops/single-slot-backup-recovery" in workflow
+
+
+def test_successful_recovery_dispatches_existing_deploy_workflow():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "actions: write" in workflow
+    assert "needs.recover.result == 'success'" in workflow
+    assert "/actions/workflows/deploy.yml/dispatches" in workflow
+    assert r'\"expected_sha\":\"$EXPECTED_SHA\"' in workflow

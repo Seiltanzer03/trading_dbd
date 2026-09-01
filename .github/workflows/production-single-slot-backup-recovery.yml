@@ -1,6 +1,9 @@
 name: production-single-slot-backup-recovery
 
 on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/production-single-slot-backup-recovery.yml]
   workflow_dispatch:
     inputs:
       expected_sha:
@@ -8,33 +11,37 @@ on:
         required: true
         type: string
 
-concurrency:
-  group: production-seiltanzer
-  cancel-in-progress: false
-
 permissions:
+  actions: write
   contents: read
   statuses: write
 
+env:
+  EXPECTED_SHA: ${{ github.event_name == 'push' && github.sha || inputs.expected_sha }}
+
 jobs:
-  recover:
+  gate:
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
-    env:
-      EXPECTED_SHA: ${{ inputs.expected_sha }}
+    timeout-minutes: 35
+    outputs:
+      needs_recovery: ${{ steps.wait.outputs.needs_recovery }}
     steps:
-      - name: Verify exact SHA is green on main
+      - name: Wait for green exact-SHA CI and the automatic deploy result
+        id: wait
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$(git ls-remote https://github.com/${{ github.repository }} refs/heads/main | cut -f1)" = "$EXPECTED_SHA"
-          body=$(curl -fsS --max-time 8 \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ github.repository }}/commits/${EXPECTED_SHA}/status")
-          verdict=$(BODY="$body" python3 - <<'PY'
+
+          ci=missing
+          for attempt in $(seq 1 100); do
+            body=$(curl -fsS --max-time 8 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/${EXPECTED_SHA}/status")
+            ci=$(BODY="$body" python3 - <<'PY'
           import json, os
           statuses = {
               str(item.get("context")): str(item.get("state"))
@@ -42,9 +49,60 @@ jobs:
           }
           print(statuses.get("ci/full-webkit", "missing"))
           PY
-          )
-          test "$verdict" = success
+            )
+            echo "exact-SHA CI attempt=$attempt/100 state=$ci"
+            [ "$ci" = success ] && break
+            [ "$ci" = failure ] && exit 1
+            sleep 10
+          done
+          test "$ci" = success
 
+          deploy=missing
+          for attempt in $(seq 1 100); do
+            body=$(curl -fsS --max-time 8 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs?head_sha=${EXPECTED_SHA}&per_page=100")
+            deploy=$(BODY="$body" python3 - <<'PY'
+          import json, os
+          runs = [
+              item for item in json.loads(os.environ["BODY"]).get("workflow_runs", [])
+              if item.get("name") == "deploy" and item.get("event") == "workflow_run"
+          ]
+          runs.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+          if not runs:
+              print("missing")
+          else:
+              run = runs[0]
+              print(str(run.get("conclusion") or run.get("status") or "missing"))
+          PY
+            )
+            echo "automatic deploy attempt=$attempt/100 state=$deploy"
+            case "$deploy" in
+              success)
+                echo "needs_recovery=false" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              failure|cancelled|timed_out)
+                echo "needs_recovery=true" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Automatic deploy did not reach a terminal state"
+          exit 1
+
+  recover:
+    needs: gate
+    if: needs.gate.outputs.needs_recovery == 'true'
+    concurrency:
+      group: production-seiltanzer
+      cancel-in-progress: false
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
       - name: Rotate duplicate local backups and rebuild one verified slot
         id: recovery
         uses: appleboy/ssh-action@v1
@@ -61,7 +119,6 @@ jobs:
             live=/opt/seiltanzer/data/trades.db
             test "$root" = /opt/seiltanzer/data/backups/local
             test "$live" = /opt/seiltanzer/data/trades.db
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             test -f "$live"
             mkdir -p "$root"
 
@@ -70,6 +127,10 @@ jobs:
               echo "::error::Refusing backup rotation while seiltanzer is active"
               exit 1
             fi
+            git -C /opt/seiltanzer fetch origin main
+            git -C /opt/seiltanzer cat-file -e "${EXPECTED_SHA}^{commit}"
+            git -C /opt/seiltanzer reset --hard "$EXPECTED_SHA"
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             if lsof -- "$live" >/dev/null 2>&1; then
               echo "::error::Refusing backup rotation while trades.db is open"
               exit 1
@@ -295,3 +356,22 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${{ github.repository }}/statuses/${EXPECTED_SHA}" \
             -d "{\"state\":\"$state\",\"context\":\"ops/single-slot-backup-recovery\",\"description\":\"$description\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+
+  redeploy:
+    needs: recover
+    if: needs.recover.result == 'success'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Trigger existing exact-SHA deploy after recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/deploy.yml/dispatches" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"expected_sha\":\"$EXPECTED_SHA\"}}"
