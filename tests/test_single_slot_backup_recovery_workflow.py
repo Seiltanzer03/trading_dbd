@@ -41,6 +41,11 @@ def test_recovery_can_remove_only_backup_pairs_hidden_temps_and_classified_legac
     assert "trades.db).unlink" not in workflow
     assert "AUTHORITATIVE_DB_QUICK_CHECK" in workflow
     assert "NEWEST_BACKUP_SHA_MATCH" in workflow
+    assert "CLOSED_EDE_SNAPSHOTS_REMOVED" in workflow
+    assert "/tmp/seiltanzer-ede-source-*.sqlite3" in workflow
+    assert "lsof -- \"$candidate\"" in workflow
+    assert "seiltanzer-ede-*.service" in workflow
+    assert "pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_offload.py'" in workflow
 
 
 def test_recovery_can_resume_after_the_verified_slot_was_safely_removed():

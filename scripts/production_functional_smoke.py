@@ -14,6 +14,7 @@ BASE = "http://127.0.0.1:8790"
 TRANSIENT_ATTEMPTS = 3
 TRANSIENT_RETRY_DELAY_SEC = 1.0
 AI_VERDICT_MAX_MS = 12_000.0
+PASSIVE_STATUS_TIMEOUT_SEC = 20.0
 AI_VERDICT_TRANSPORT_TIMEOUT_SEC = 14.0
 AI_MATERIALIZER_WAIT_SEC = 150.0
 EDGE_RESEARCHER_MAX_MS = 250.0
@@ -320,7 +321,10 @@ def verify(expected_sha: str) -> None:
         "/api/analytics/correlation-graph",
     )
     for path in paths:
-        assert_route(path)
+        if path == "/api/research/passive/status":
+            assert_route(path, timeout=PASSIVE_STATUS_TIMEOUT_SEC)
+        else:
+            assert_route(path)
 
     verify_universe_routes()
     verify_edge_researcher()

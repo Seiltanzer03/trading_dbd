@@ -142,6 +142,56 @@ jobs:
               exit 1
             fi
 
+            # Any in-flight EDE transport copy is disposable only after its
+            # owning research process is stopped. These exact /tmp filenames are
+            # immutable SQLite copies, not market/research evidence or live state.
+            while read -r unit _; do
+              [ -n "$unit" ] || continue
+              case "$unit" in
+                seiltanzer-ede-*.service)
+                  timeout 8s systemctl stop "$unit" >/dev/null 2>&1 || true
+                  systemctl kill --kill-who=all --signal=KILL "$unit" >/dev/null 2>&1 || true
+                  systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+                  ;;
+              esac
+            done < <(systemctl list-units --all --type=service --no-legend 'seiltanzer-ede-*' || true)
+            pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_v13_audit.py' >/dev/null 2>&1 || true
+            pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_transition_audit.py' >/dev/null 2>&1 || true
+            pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_offload.py' >/dev/null 2>&1 || true
+            command -v lsof >/dev/null 2>&1 || {
+              echo "STOP: lsof is required for closed EDE snapshot cleanup" >&2
+              exit 1
+            }
+            ede_removed=0
+            ede_bytes=0
+            while IFS= read -r -d '' candidate; do
+              case "$candidate" in
+                /tmp/seiltanzer-ede-source-*.sqlite3|\\
+                /tmp/seiltanzer-ede-source-*.sqlite3-wal|\\
+                /tmp/seiltanzer-ede-source-*.sqlite3-shm) ;;
+                *)
+                  echo "STOP: refusing unexpected EDE cleanup path: $candidate" >&2
+                  exit 1
+                  ;;
+              esac
+              if lsof -- "$candidate" >/dev/null 2>&1; then
+                echo "KEEP_OPEN_EDE_SNAPSHOT=$candidate"
+                continue
+              fi
+              size=$(stat -c '%s' "$candidate" 2>/dev/null || echo 0)
+              rm -f -- "$candidate"
+              ede_removed=$((ede_removed + 1))
+              ede_bytes=$((ede_bytes + size))
+            done < <(
+              find /tmp -maxdepth 1 -type f \\
+                \( -name 'seiltanzer-ede-source-*.sqlite3' \\
+                   -o -name 'seiltanzer-ede-source-*.sqlite3-wal' \\
+                   -o -name 'seiltanzer-ede-source-*.sqlite3-shm' \) \\
+                -print0 2>/dev/null
+            )
+            echo "CLOSED_EDE_SNAPSHOTS_REMOVED=$ede_removed"
+            echo "CLOSED_EDE_SNAPSHOT_BYTES_REMOVED=$ede_bytes"
+
             export RECOVERY_STARTED_TS=$(date +%s)
             /usr/bin/python3 - <<'PY'
             import hashlib
