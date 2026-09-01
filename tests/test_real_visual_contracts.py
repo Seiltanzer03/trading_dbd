@@ -55,6 +55,8 @@ def test_unified_3d_toolbar_is_guard_owned_and_never_auto_rotates():
     assert "requestAnimationFrame" not in toolbar
     assert "function panCamera" in guard
     assert "function turntableCamera" in guard
+    assert "function canonicalCamera" in guard
+    assert "projection: Object.freeze({ type: 'perspective' })" in guard
     assert "next.scene.dragmode = dragMode" in guard
     for module in ("regime_phase.js", "wavelet.js", "gex.js"):
         source = _read(f"seiltanzer/web/js/{module}")

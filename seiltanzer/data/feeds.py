@@ -26,7 +26,7 @@ import numpy as np
 from ..config import (INSTRUMENTS, SIGMA_INDEX_FOR, VOL_INDEX_TICKERS,
                       Instrument, Settings)
 from ..core import options as opt
-from .cache import DiskCache
+from .cache import DiskCache, production_chain_snapshot
 
 # yfinance шумит в stderr про делистинги (например ^V1X/VDAX недоступен) —
 # это ожидаемо и обрабатывается статусом no_data, поэтому глушим его логгер.
@@ -983,13 +983,28 @@ class MarketData:
             self.cache.add_chain_snapshot(proxy, metrics)
         except Exception as e:  # noqa: BLE001
             # протухший кэш допустим для контекста, но статус честный
-            snaps = self.cache.chain_snapshots(proxy, limit=1)
+            snaps = [
+                snap for snap in self.cache.chain_snapshots(proxy, limit=60)
+                if production_chain_snapshot(snap)
+            ]
             if snaps and time.time() - snaps[-1]["ts"] < 24 * 3600:
                 self.chain = {"metrics": snaps[-1],
                               **_status_dict(True, "delayed", snaps[-1]["ts"],
-                                             error=str(e)[:200], source="кэш цепочки")}
+                                             error=str(e)[:200], source="кэш цепочки"),
+                              "cache_fallback": {
+                                  "used": True,
+                                  "snapshot_provenance": "explicit_real_demo_false",
+                              }}
             else:
-                self.chain = {"metrics": None, **_status_dict(error=str(e)[:200])}
+                self.chain = {
+                    "metrics": None,
+                    **_status_dict(error=str(e)[:200]),
+                    "cache_fallback": {
+                        "used": False,
+                        "reason": "no_explicitly_real_snapshot",
+                        "demo_or_unverified_rejected": True,
+                    },
+                }
 
     def _compute_chain_metrics(self, raw: dict, spot: float, proxy: str,
                                demo: bool, experimental: bool = False,

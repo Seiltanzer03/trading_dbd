@@ -19,6 +19,7 @@ from .analytics_runtime import install_analytics_runtime
 from .app import create_app
 from .app_extensions import install_lattice_revaluation
 from .config import Settings
+from .crypto_global_routes import install_crypto_global_routes
 from .database_authority import install_database_authority
 from .g1_baseline_routes import install_g1_baseline_routes
 from .g1_historical_analog_routes import install_g1_historical_analog_routes
@@ -177,6 +178,7 @@ def main() -> None:
 
     install_visual_universe_routes(app)
     install_visual_universe_page(app)
+    install_crypto_global_routes(app)
 
     install_intelligence_runtime(app)
     install_g1_intelligence_routes(app)
@@ -185,6 +187,7 @@ def main() -> None:
     print(f"Seiltanzer Terminal -> http://{args.host}:{args.port}"
           f"{' [DEMO]' if args.demo else ''}{' [STREAM]' if args.stream else ''}")
     print(f"Universe Lab -> http://{args.host}:{args.port}/universe")
+    print(f"Global Crypto -> http://{args.host}:{args.port}/crypto")
     print(f"Intelligence Lab -> http://{args.host}:{args.port}/intelligence")
     print(f"Management Edge -> http://{args.host}:{args.port}/management-edge")
     print(f"Fast Market Learning -> /api/research/g1s/status")

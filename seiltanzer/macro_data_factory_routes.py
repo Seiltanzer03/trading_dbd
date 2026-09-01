@@ -47,6 +47,11 @@ from .research_llm_cost_guard import (
     guarded_macro_extractor,
     reserve_macro_ingest_request,
 )
+from .treasury_t0_context import (
+    TreasuryLiveRuntime,
+    install_treasury_ai_context,
+    install_treasury_t0_context,
+)
 
 
 def install_macro_data_factory_routes(app: FastAPI) -> None:
@@ -112,6 +117,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         fomc_deterministic_store)
     fomc_deterministic_runtime.offhost_historical_bundle_path = historical_bundle_path
     fomc_runtime = FOMCOfficialRuntime(factory)
+    treasury_runtime = TreasuryLiveRuntime()
 
     # T0 capture reads live materialized stores only. Historical BLS/ISM overlays
     # are deliberately not injected into a current observation capture.
@@ -127,8 +133,11 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     app.state.macro_fomc_deterministic_store = fomc_deterministic_store
     app.state.macro_fomc_deterministic_runtime = fomc_deterministic_runtime
     app.state.macro_fomc_runtime = fomc_runtime
+    app.state.treasury_live_runtime = treasury_runtime
     app.state.engine.macro_data_factory = factory
     install_macro_t0_context(app.state.engine, factory)
+    install_treasury_t0_context(app.state.engine, treasury_runtime)
+    install_treasury_ai_context()
 
     # Low-frequency workers. Historical dated pages are static and therefore
     # checked only daily; live numeric/FOMC acquisition retains its own cadence.
@@ -137,6 +146,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     historical_bls_runtime.start()
     historical_ism_runtime.start()
     fomc_deterministic_runtime.start()
+    treasury_runtime.start()
 
     def status():
         return {
@@ -148,6 +158,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
             "historical_offhost_transport": historical_offhost_transport_status(),
             "fomc_deterministic": fomc_deterministic_runtime.status(),
             "fomc_runtime": fomc_runtime.status(),
+            "treasury_live_t0": treasury_runtime.status(),
             "llm_cost_guard": cost_guard_status(),
             "official_families": [
                 "CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES", "FOMC_STATEMENT"

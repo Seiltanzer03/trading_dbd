@@ -29,6 +29,12 @@ const server = http.createServer(async (req, res) => {
   const el = document.getElementById('plot');
   const holder = document.getElementById('holder');
   const guard = createPlotlyCameraGuard(el, INIT);
+  const guardedRelayout = Plotly.relayout.bind(Plotly);
+  const relayoutLog = [];
+  Plotly.relayout = (node, update) => {
+    relayoutLog.push(structuredClone(update || {}));
+    return guardedRelayout(node, update);
+  };
   const z = Array.from({length:12}, (_,r) => Array.from({length:12}, (_,c) =>
     Math.exp(-((c-5.5)*(c-5.5)+(r-5.5)*(r-5.5))/20)));
   const traces = [{type:'surface', z, showscale:false}];
@@ -37,7 +43,7 @@ const server = http.createServer(async (req, res) => {
   await Plotly.newPlot(el, traces, layout, {responsive:true,scrollZoom:true,displayModeBar:false});
   guard.arm();
   const toolbar = attachTerminal3DToolbar({plot:el,container:holder,guard,homeCamera:INIT,key:'e2e'});
-  window.__fixture = {el,holder,guard,toolbar,INIT,traces,layout,attachTerminal3DToolbar};
+  window.__fixture = {el,holder,guard,toolbar,INIT,traces,layout,relayoutLog,attachTerminal3DToolbar};
 </script>`);
       return;
     }
@@ -71,6 +77,38 @@ page.on('console', (msg) => {
 });
 await page.goto(`http://127.0.0.1:${port}/fixture`, { waitUntil: 'networkidle' });
 await page.waitForFunction(() => window.__fixture?.el?._fullLayout?.scene?.camera);
+
+// A mode selection is state, not an animation. Plotly expands the omitted
+// projection default in `_fullLayout`; that difference must not make the guard
+// restore the same camera forever while the user is not touching the plot.
+await page.getByRole('button', { name: 'Turntable drag mode' }).click();
+await page.waitForTimeout(500);
+const turntableIdleA = await page.evaluate(() => ({
+  camera: structuredClone(window.__fixture.el._fullLayout.scene.camera),
+  saved: window.__fixture.guard.getSavedCamera(),
+  mode: window.__fixture.guard.getDragMode(),
+  writes: window.__fixture.relayoutLog.length,
+  cameraWrites: window.__fixture.relayoutLog.filter((update) => update['scene.camera']).length,
+}));
+await page.waitForTimeout(650);
+const turntableIdleB = await page.evaluate(() => ({
+  camera: structuredClone(window.__fixture.el._fullLayout.scene.camera),
+  saved: window.__fixture.guard.getSavedCamera(),
+  mode: window.__fixture.guard.getDragMode(),
+  writes: window.__fixture.relayoutLog.length,
+  cameraWrites: window.__fixture.relayoutLog.filter((update) => update['scene.camera']).length,
+}));
+assert.deepEqual(turntableIdleB.camera, turntableIdleA.camera,
+  'turntable selection without input must not move the camera');
+assert.deepEqual(turntableIdleB.saved, turntableIdleA.saved,
+  'turntable selection without input must not change the saved camera');
+assert.equal(turntableIdleB.writes, turntableIdleA.writes,
+  'turntable selection must not cause background relayout calls');
+assert.equal(turntableIdleB.cameraWrites, turntableIdleA.cameraWrites,
+  'turntable selection must not cause background camera restores');
+assert.equal(turntableIdleB.mode, 'turntable');
+await page.getByRole('button', { name: 'Orbit drag mode' }).click();
+await page.waitForTimeout(350);
 
 async function dispatchTouch(type, points, changed = points) {
   await page.evaluate(({ type, points, changed }) => {
@@ -235,6 +273,8 @@ assert.equal(await page.evaluate(() => window.__fixture.guard.getDragMode()), 't
 
 console.log(JSON.stringify({
   realWebKit: true,
+  canonicalCameraQuiescent: true,
+  turntableSelectionDoesNotAnimate: true,
   customIOSTouch: await page.evaluate(() => window.__fixture.guard.usesCustomIOSTouch()),
   orbit: true,
   panMovesCenter: true,

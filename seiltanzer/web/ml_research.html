@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SEILTANZER · ML RESEARCH LIVE</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/vendor/fonts/ibm-plex-mono.css">
+<link rel="stylesheet" href="/static/css/ml_research.css">
+</head>
+<body>
+<main class="shell">
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">READ-ONLY · REAL MATERIALIZED RESEARCH</div>
+      <h1>ML RESEARCH LIVE</h1>
+      <p>Что система действительно проверяет сейчас — без имитации мыслей, активности или уверенности.</p>
+    </div>
+    <nav><a href="/universe">UNIVERSE</a><a href="/">ТЕРМИНАЛ</a></nav>
+  </header>
+
+  <div class="truth-banner" id="freshness-banner">ЗАГРУЗКА МАТЕРИАЛИЗОВАННОГО СОСТОЯНИЯ…</div>
+
+  <section class="panel">
+    <div class="section-head"><div><span>PIPELINE</span><h2>Что происходит с данными</h2></div><div id="worker-state" class="worker-state">—</div></div>
+    <div class="pipeline" id="pipeline"></div>
+  </section>
+
+  <section class="grid two">
+    <article class="panel">
+      <div class="section-head"><div><span>G1S · SHADOW ML</span><h2>Обучение по горизонтам</h2></div><b id="training-total">—</b></div>
+      <p class="explain" id="training-explanation"></p>
+      <div id="training-horizons" class="horizon-list"></div>
+    </article>
+    <article class="panel">
+      <div class="section-head"><div><span>LLM → DETERMINISTIC EDE</span><h2>Сводка гипотез</h2></div><b id="researcher-total">—</b></div>
+      <div id="researcher-summary" class="summary-grid"></div>
+      <div class="honesty-note">LLM предлагает только структуру гипотезы. Числовые пороги подбираются train-only кодом; будущие исходы LLM не видит.</div>
+    </article>
+  </section>
+
+  <section class="panel">
+    <div class="section-head"><div><span>REAL CANDIDATES</span><h2>Какие гипотезы проверяются</h2></div><b id="hypothesis-count">—</b></div>
+    <div id="hypotheses" class="hypothesis-grid"></div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head"><div><span>OBSERVED RUNS</span><h2>Последние реальные циклы</h2></div><b>UTC</b></div>
+    <div id="recent-runs" class="run-list"></div>
+  </section>
+
+  <footer>READ-ONLY · NO REQUEST-TIME TRAINING · NO POLICY/CVaR AUTHORITY</footer>
+</main>
+<script type="module" src="/static/js/ml_research_broadcast.js"></script>
+</body>
+</html>

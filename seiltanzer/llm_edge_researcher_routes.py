@@ -8,6 +8,7 @@ from .llm_edge_lifecycle import read_cached_materialized_lifecycle_json
 from .llm_edge_prospective_journal import initialize_journal_storage
 from .llm_edge_researcher import edge_researcher_status, propose_edge_hypotheses
 from .research_llm_cost_guard import guarded_edge_researcher_provider
+from .ml_research_broadcast import install_ml_research_broadcast
 
 
 def install_llm_edge_researcher_routes(app: FastAPI) -> None:
@@ -78,4 +79,5 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
         methods=["POST"],
         name="g1s_llm_edge_researcher_evaluate",
     )
+    install_ml_research_broadcast(app)
     app.state.llm_edge_researcher_routes_installed = True

@@ -8,6 +8,30 @@ import threading
 import time
 
 
+def production_chain_snapshot(snapshot: object) -> bool:
+    """Return whether a cached option snapshot is eligible for live use.
+
+    Cache files can outlive a demo process.  Production therefore requires an
+    explicit ``demo=False`` marker written by the real option-chain parser; an
+    unlabelled, demo, or explicitly synthetic snapshot fails closed.
+    """
+    if not isinstance(snapshot, dict) or snapshot.get("demo") is not False:
+        return False
+    if snapshot.get("synthetic_data_used") not in (None, False):
+        return False
+    provenance = snapshot.get("provenance")
+    if isinstance(provenance, dict):
+        if provenance.get("synthetic_data_used") not in (None, False):
+            return False
+        if provenance.get("demo") is True:
+            return False
+    density_input = snapshot.get("density_input")
+    mode = str(
+        density_input.get("mode") if isinstance(density_input, dict) else ""
+    ).lower()
+    return "demo" not in mode and "synthetic" not in mode
+
+
 class DiskCache:
     """Потокобезопасный kv-кэш + история снапшотов опционных цепочек."""
 

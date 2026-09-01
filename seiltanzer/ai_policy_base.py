@@ -1175,14 +1175,24 @@ def _center_path(cone: dict) -> list[dict]:
 
 def _volume_profile_delta(vp: dict, trade: dict) -> dict:
     bins = vp.get("bins") or []
+    if vp.get("is_tpo") or not vp.get("flow_available", True):
+        return {
+            "directional_delta_ratio": None,
+            "kind": "TPO_occupancy_only",
+            "bins": len(bins),
+            "available": False,
+            "reason": "no_observed_volume_for_directional_flow",
+            "authority": "none",
+        }
     total_delta = sum(_num(x.get("delta")) or 0.0 for x in bins)
     total_volume = sum(_num(x.get("volume")) or 0.0 for x in bins)
     signed = total_delta / total_volume if total_volume else None
     if signed is not None and trade.get("direction") == "short":
         signed = -signed
     return {"directional_delta_ratio": _rnd(signed, 4),
-            "kind": "TPO_approx" if vp.get("is_tpo") else "volume",
-            "bins": len(bins)}
+            "kind": "observed_volume_tick_rule",
+            "bins": len(bins), "available": signed is not None,
+            "authority": "context_only"}
 
 
 def metric_coverage(evidence: dict, history: dict | None = None) -> dict:

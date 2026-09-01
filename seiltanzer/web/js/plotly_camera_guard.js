@@ -8,6 +8,12 @@
 const REGISTRY = new WeakMap();
 const ALL_GUARDS = new Set();
 const VALID_DRAG_MODES = new Set(['orbit', 'turntable', 'pan', 'zoom']);
+const CAMERA_DEFAULTS = Object.freeze({
+  eye: Object.freeze({ x: 1.25, y: 1.25, z: 1.25 }),
+  center: Object.freeze({ x: 0, y: 0, z: 0 }),
+  up: Object.freeze({ x: 0, y: 0, z: 1 }),
+  projection: Object.freeze({ type: 'perspective' }),
+});
 let PATCHED_PLOTLY = null;
 let ORIGINAL = null;
 let GLOBAL_INTERACTIONS = 0;
@@ -15,6 +21,32 @@ let GLOBAL_INTERACTIONS = 0;
 function cloneValue(value) {
   if (value == null) return value;
   try { return JSON.parse(JSON.stringify(value)); } catch { return null; }
+}
+
+function cameraPoint(value, fallback) {
+  const source = value && typeof value === 'object' ? value : {};
+  return Object.fromEntries(['x', 'y', 'z'].map((key) => {
+    const number = Number(source[key]);
+    return [key, Number.isFinite(number) ? number : fallback[key]];
+  }));
+}
+
+// Plotly keeps omitted defaults only in `_fullLayout`, while the public input
+// layout retains the shorter object supplied by the caller. Comparing those
+// objects directly makes a valid camera look different forever and creates an
+// afterplot -> relayout -> afterplot feedback loop. Keep one complete camera
+// shape at every guard boundary so equality is semantic, not object-shape based.
+function canonicalCamera(camera) {
+  const source = camera && typeof camera === 'object' ? camera : {};
+  const projection = String(source?.projection?.type || CAMERA_DEFAULTS.projection.type);
+  return {
+    eye: cameraPoint(source.eye, CAMERA_DEFAULTS.eye),
+    center: cameraPoint(source.center, CAMERA_DEFAULTS.center),
+    up: cameraPoint(source.up, CAMERA_DEFAULTS.up),
+    projection: {
+      type: projection === 'orthographic' ? 'orthographic' : 'perspective',
+    },
+  };
 }
 
 function setNested(target, path, value) {
@@ -31,10 +63,12 @@ function setNested(target, path, value) {
 
 export function cameraFromRelayout(baseCamera, update) {
   if (!update || typeof update !== 'object') return null;
-  let next = cloneValue(baseCamera) || {};
+  let next = canonicalCamera(baseCamera);
   let touched = false;
   if (update['scene.camera'] && typeof update['scene.camera'] === 'object') {
-    next = cloneValue(update['scene.camera']) || next;
+    // A whole-camera update has replacement semantics. Missing fields use
+    // Plotly defaults; dotted updates below retain the existing camera.
+    next = canonicalCamera(update['scene.camera']);
     touched = true;
   }
   for (const [key, value] of Object.entries(update)) {
@@ -42,7 +76,7 @@ export function cameraFromRelayout(baseCamera, update) {
     setNested(next, key.slice('scene.camera.'.length), value);
     touched = true;
   }
-  return touched ? next : null;
+  return touched ? canonicalCamera(next) : null;
 }
 
 function normalizeDragMode(mode) {
@@ -268,7 +302,7 @@ function touchDistance(touches) {
 }
 
 export function createPlotlyCameraGuard(el, initialCamera) {
-  const homeCamera = cloneValue(initialCamera) || {};
+  const homeCamera = canonicalCamera(initialCamera);
   let savedCamera = cloneValue(homeCamera);
   let dragMode = normalizeDragMode(el?.layout?.scene?.dragmode || 'orbit');
   let state = 'idle';
@@ -376,19 +410,20 @@ export function createPlotlyCameraGuard(el, initialCamera) {
   }
 
   function currentCamera() {
-    return cloneValue(el?._fullLayout?.scene?.camera);
+    const camera = el?._fullLayout?.scene?.camera;
+    return camera ? canonicalCamera(camera) : null;
   }
 
   function rememberExternalCamera(camera) {
     if (!camera) return;
-    savedCamera = cloneValue(camera);
+    savedCamera = canonicalCamera(camera);
   }
 
   function rememberGestureCamera(camera) {
     if (!camera) return;
     if (isProtected() && equalValue(camera, homeCamera)
         && !equalValue(savedCamera, homeCamera)) return;
-    savedCamera = cloneValue(camera);
+    savedCamera = canonicalCamera(camera);
   }
 
   function notifyDragMode() {
@@ -445,7 +480,7 @@ export function createPlotlyCameraGuard(el, initialCamera) {
 
   function writeCamera(camera) {
     if (destroyed || !window.Plotly || !el?._fullLayout?.scene) return resolved(el);
-    savedCamera = cloneValue(camera);
+    savedCamera = canonicalCamera(camera);
     internalDepth += 1;
     pinLayoutState();
     let result;
@@ -461,8 +496,8 @@ export function createPlotlyCameraGuard(el, initialCamera) {
   }
 
   function queueCamera(camera) {
-    pendingCamera = cloneValue(camera);
-    savedCamera = cloneValue(camera);
+    pendingCamera = canonicalCamera(camera);
+    savedCamera = canonicalCamera(camera);
     if (cameraWriteQueued) return;
     cameraWriteQueued = true;
     const run = () => {

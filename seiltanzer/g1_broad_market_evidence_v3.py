@@ -14,6 +14,7 @@ from .core.cross_asset import compute_correlation_graph
 from .core.gex_field import analytic_gex_field
 from .core.macro_regime import compute_macro_regime
 from .core.wavelet import compute_wavelet_analysis
+from .data.cache import production_chain_snapshot
 from .g1_short_horizon_runtime import ShortHorizonRuntime, _finite
 from .option_shadow_state import robust_derivative
 from .passive_learning import PassiveLearningEngine
@@ -226,9 +227,11 @@ def _option_history(engine: PassiveLearningEngine, features: dict,
         rows = engine.cache.chain_snapshots(proxy, limit=120)
     except Exception:  # noqa: BLE001
         return proxy, []
+    production = getattr(getattr(engine, "settings", None), "demo", None) is False
     valid = [dict(row) for row in rows
              if _finite(row.get("ts")) is not None
-             and float(row["ts"]) <= captured_ts+1e-6]
+             and float(row["ts"]) <= captured_ts+1e-6
+             and (not production or production_chain_snapshot(row))]
     valid.sort(key=lambda row: float(row["ts"]))
     return proxy, valid
 

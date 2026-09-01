@@ -47,6 +47,12 @@ const INIT_CAM = {
   up: { x: 0, y: 0, z: 1 },
 };
 const clone = (value) => value == null ? value : JSON.parse(JSON.stringify(value));
+const canonicalCamera = (value) => ({
+  eye: clone(value.eye),
+  center: clone(value.center),
+  up: clone(value.up),
+  projection: clone(value.projection || { type: 'perspective' }),
+});
 const writes = [];
 
 function emitAfterPlot(el) {
@@ -198,8 +204,8 @@ await new Promise((resolve) => setTimeout(resolve, 360));
 runFrames(12);
 await Promise.resolve();
 assert.deepEqual(
-  graph._fullLayout.scene.camera,
-  draggedCamera,
+  canonicalCamera(graph._fullLayout.scene.camera),
+  canonicalCamera(draggedCamera),
   'rotation and zoom must survive the deferred structural refresh',
 );
 
@@ -208,8 +214,8 @@ runFrames(4);
 await new Promise((resolve) => setTimeout(resolve, 220));
 await Promise.resolve();
 assert.deepEqual(
-  graph._fullLayout.scene.camera,
-  draggedCamera,
+  canonicalCamera(graph._fullLayout.scene.camera),
+  canonicalCamera(draggedCamera),
   'rotation and zoom must survive a mobile responsive resize',
 );
 
@@ -232,8 +238,8 @@ await new Promise((resolve) => setTimeout(resolve, 360));
 runFrames(10);
 await Promise.resolve();
 assert.deepEqual(
-  graph._fullLayout.scene.camera,
-  zoomedCamera,
+  canonicalCamera(graph._fullLayout.scene.camera),
+  canonicalCamera(zoomedCamera),
   'a pinch/scroll zoom must remain fixed after the next model rebuild',
 );
 assert.equal(graph.layout.scene.uirevision, 'probability-cone-camera-v3');

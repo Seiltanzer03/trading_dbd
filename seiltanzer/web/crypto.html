@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SEILTANZER · GLOBAL CRYPTO</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/vendor/fonts/ibm-plex-mono.css">
+<link rel="stylesheet" href="/static/css/crypto_global.css">
+</head>
+<body>
+<main class="crypto-shell">
+  <header class="crypto-header">
+    <div>
+      <div class="eyebrow">SEILTANZER · 24/7 DIGITAL ASSET OBSERVATORY</div>
+      <h1>GLOBAL CRYPTO</h1>
+      <p>Отдельная карта крипторынка. Только полученные рыночные наблюдения; N/A не превращается в ноль, а геометрия не создаёт торговый сигнал.</p>
+    </div>
+    <div class="header-actions">
+      <span class="status-pill no-data" id="crypto-status">○ ЗАГРУЗКА</span>
+      <a href="/" class="terminal-link">← ОСНОВНОЙ ТЕРМИНАЛ</a>
+    </div>
+  </header>
+
+  <section class="global-strip" aria-label="Глобальный рынок">
+    <div><span>TOTAL MARKET CAP</span><b id="global-cap">N/A</b></div>
+    <div><span>24H VOLUME</span><b id="global-volume">N/A</b></div>
+    <div><span>BTC DOMINANCE</span><b id="btc-dominance">N/A</b></div>
+    <div><span>ETH DOMINANCE</span><b id="eth-dominance">N/A</b></div>
+    <div><span>GLOBAL 24H</span><b id="global-change">N/A</b></div>
+    <div><span>OBSERVED BREADTH</span><b id="market-breadth">N/A</b></div>
+  </section>
+
+  <section class="card wide-card">
+    <div class="card-head">
+      <div><div class="kicker">CAPITAL · MOMENTUM · RISK</div><h2>CRYPTO MARKET FIELD</h2></div>
+      <span class="stamp" id="field-stamp">N/A</span>
+    </div>
+    <div class="stage-grid">
+      <div class="plot-stage"><div id="crypto-field" class="plot"></div><div class="empty" id="field-empty">НЕДОСТАТОЧНО НАБЛЮДАЕМЫХ КООРДИНАТ</div></div>
+      <aside class="analysis-panel">
+        <h3>ЧТО НАБЛЮДАЕТСЯ</h3>
+        <div id="crypto-observations" class="observation-list"><p>Загрузка…</p></div>
+        <h3>КАК ЧИТАТЬ</h3>
+        <p>X = наблюдаемая корреляция часовых доходностей с BTC за 7 дней. Y = изменение за 7 дней. Z = реализованная 24h волатильность, приведённая к году. Размер = капитализация.</p>
+        <p class="disclaimer">Связь описательная. Корреляция не является причинностью; блок не управляет Position Manager.</p>
+      </aside>
+    </div>
+  </section>
+
+  <div class="two-column">
+    <section class="card">
+      <div class="card-head"><div><div class="kicker">BTC LEADERSHIP · ALT BREADTH</div><h2>ROTATION TRAJECTORY</h2></div><span class="stamp">OBSERVED 24H WINDOWS</span></div>
+      <div class="small-stage"><div id="rotation-path" class="plot"></div><div class="empty" id="rotation-empty">N/A · НЕТ СОВМЕСТНОЙ ЧАСОВОЙ ИСТОРИИ</div></div>
+      <div class="card-foot">Каждая точка — реально завершившееся часовое наблюдение: BTC 24h, медиана альткоинов 24h и доля растущих альткоинов. Между точками нет интерполяции.</div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><div><div class="kicker">HOURLY LOG RETURNS · 7D</div><h2>CRYPTO CORRELATION</h2></div><span class="stamp" id="corr-coverage">N/A</span></div>
+      <div class="small-stage"><div id="crypto-correlation" class="plot"></div><div class="empty" id="correlation-empty">N/A · НЕТ ДОСТАТОЧНЫХ ПАР</div></div>
+      <div class="card-foot">Ячейка существует только при ≥36 совместных часовых доходностях. Отсутствие пары остаётся пустым, а не становится нулевой корреляцией.</div>
+    </section>
+  </div>
+
+  <section class="card">
+    <div class="card-head"><div><div class="kicker">OBSERVED UNIVERSE</div><h2>MARKET SNAPSHOT</h2></div><span class="stamp" id="asset-coverage">0 / 9</span></div>
+    <div class="table-wrap"><table><thead><tr><th>ASSET</th><th>PRICE</th><th>MARKET CAP</th><th>1H</th><th>24H</th><th>7D</th><th>RV 24H ANN.</th><th>CORR BTC</th><th>AGE</th></tr></thead><tbody id="asset-table"></tbody></table></div>
+  </section>
+
+  <section class="source-bar">
+    <div><b>PROVENANCE</b><span id="source-coingecko">CoinGecko: N/A</span><span id="source-yahoo">Yahoo: N/A</span></div>
+    <div id="transport-state">CACHE N/A</div>
+  </section>
+</main>
+<script src="/static/vendor/plotly-gl3d.min.js"></script>
+<script type="module" src="/static/js/crypto_global.js"></script>
+</body>
+</html>

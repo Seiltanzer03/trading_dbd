@@ -46,14 +46,24 @@ const ZOOM_CAM = {
   eye: { x: -0.34, y: 0.21, z: 0.29 },
   center: { x: 0.13, y: -0.08, z: 0.04 },
   up: { x: 0, y: 0, z: 1 },
+  projection: { type: 'perspective' },
 };
+
+function plotlyCamera(camera) {
+  return {
+    eye: { x: 1.25, y: 1.25, z: 1.25, ...(camera?.eye || {}) },
+    center: { x: 0, y: 0, z: 0, ...(camera?.center || {}) },
+    up: { x: 0, y: 0, z: 1, ...(camera?.up || {}) },
+    projection: { type: 'perspective', ...(camera?.projection || {}) },
+  };
+}
 
 const graph = new FakeTarget();
 const fakeWindow = new FakeTarget();
 fakeWindow.PointerEvent = class PointerEvent {};
 fakeWindow.visualViewport = new FakeTarget();
 graph.layout = { scene: { camera: clone(INIT_CAM) } };
-graph._fullLayout = { scene: { camera: clone(INIT_CAM) } };
+graph._fullLayout = { scene: { camera: plotlyCamera(INIT_CAM), dragmode: 'orbit' } };
 
 globalThis.window = fakeWindow;
 globalThis.requestAnimationFrame = (fn) => setTimeout(() => fn(performance.now()), 0);
@@ -64,14 +74,18 @@ fakeWindow.Plotly = {
   newPlot(el, traces, layout) {
     el.data = clone(traces || []);
     el.layout = clone(layout || { scene: { camera: INIT_CAM } });
-    el._fullLayout = { scene: { camera: clone(el.layout.scene?.camera || INIT_CAM) } };
+    el._fullLayout = { scene: {
+      camera: plotlyCamera(el.layout.scene?.camera || INIT_CAM),
+      dragmode: el.layout.scene?.dragmode || 'orbit',
+    } };
     emitAfter(el);
     return Promise.resolve(el);
   },
   react(el, traces, layout) {
     el.data = clone(traces || []);
     el.layout = clone(layout || el.layout);
-    el._fullLayout.scene.camera = clone(el.layout.scene?.camera || INIT_CAM);
+    el._fullLayout.scene.camera = plotlyCamera(el.layout.scene?.camera || INIT_CAM);
+    el._fullLayout.scene.dragmode = el.layout.scene?.dragmode || el._fullLayout.scene.dragmode;
     emitAfter(el);
     return Promise.resolve(el);
   },
@@ -81,8 +95,12 @@ fakeWindow.Plotly = {
   relayout(el, update) {
     writes.push(clone(update));
     if (update['scene.camera']) {
-      el._fullLayout.scene.camera = clone(update['scene.camera']);
+      el._fullLayout.scene.camera = plotlyCamera(update['scene.camera']);
       el.layout.scene.camera = clone(update['scene.camera']);
+    }
+    if (update['scene.dragmode']) {
+      el._fullLayout.scene.dragmode = update['scene.dragmode'];
+      el.layout.scene.dragmode = update['scene.dragmode'];
     }
     el.emit('plotly_relayout', clone(update));
     emitAfter(el);
@@ -99,9 +117,30 @@ fakeWindow.Plotly = {
 
 const guard = createPlotlyCameraGuard(graph, INIT_CAM);
 guard.arm();
-await sleep(30);
+graph.emit('plotly_afterplot');
+await sleep(180);
 assert.equal(graph.style.touchAction, 'none', 'browser gestures must not own the WebGL surface');
 assert.equal(graph.style.overscrollBehavior, 'contain');
+assert.equal(writes.length, 0,
+  'Plotly-expanded center/projection defaults must not create an idle relayout loop');
+assert.deepEqual(guard.getSavedCamera(), plotlyCamera(INIT_CAM),
+  'the guard must own a complete canonical initial camera');
+
+await guard.setDragMode('turntable');
+await sleep(350);
+const writesAfterTurntable = writes.length;
+const cameraWritesAfterTurntable = writes.filter((update) => update['scene.camera']).length;
+await sleep(260);
+assert.equal(writes.length, writesAfterTurntable,
+  'selecting turntable without input must become completely quiescent');
+assert.equal(
+  writes.filter((update) => update['scene.camera']).length,
+  cameraWritesAfterTurntable,
+  'turntable selection must not start background camera restores',
+);
+assert.equal(guard.getDragMode(), 'turntable');
+await guard.setDragMode('orbit');
+await sleep(350);
 
 // Real phone ordering missed by the previous test: pointerup runs in the
 // window capture phase first, while Plotly publishes its final camera later.
@@ -120,8 +159,8 @@ graph.emit('plotly_relayout', { 'scene.camera': clone(INIT_CAM) });
 graph.emit('plotly_afterplot');
 await sleep(950);
 assert.deepEqual(
-  graph._fullLayout.scene.camera,
-  USER_CAM,
+  plotlyCamera(graph._fullLayout.scene.camera),
+  plotlyCamera(USER_CAM),
   'post-pointer final camera must survive a racing responsive INIT reset',
 );
 assert.equal(guard.getState(), 'idle');
@@ -139,8 +178,8 @@ fakeWindow.dispatch('resize');
 fakeWindow.visualViewport.dispatch('resize');
 await sleep(1100);
 assert.deepEqual(
-  graph._fullLayout.scene.camera,
-  ZOOM_CAM,
+  plotlyCamera(graph._fullLayout.scene.camera),
+  plotlyCamera(ZOOM_CAM),
   'pinch/wheel zoom must survive redraw and viewport resize',
 );
 
@@ -153,7 +192,7 @@ fakeWindow.dispatch('touchend', { touches: [{}] });
 assert.equal(guard.getState(), 'interacting', 'first finger release must not end a pinch');
 fakeWindow.dispatch('touchend', { touches: [] });
 await sleep(950);
-assert.deepEqual(graph._fullLayout.scene.camera, USER_CAM);
+assert.deepEqual(plotlyCamera(graph._fullLayout.scene.camera), plotlyCamera(USER_CAM));
 
 const coneSource = await readFile(
   new URL('../../seiltanzer/web/js/cone.js', import.meta.url), 'utf8');
@@ -164,6 +203,9 @@ assert.match(ivSource, /createPlotlyCameraGuard/, 'IV surface must use the share
 assert(writes.length >= 2, 'guard must restore the camera after real resets');
 
 console.log(JSON.stringify({
+  canonicalPlotlyDefaults: true,
+  idleRelayoutLoopAbsent: true,
+  turntableSelectionQuiescent: true,
   postPointerFinalRelayoutRetained: true,
   staleInitRejectedDuringSettling: true,
   zoomRetainedDuringWheelSettling: true,

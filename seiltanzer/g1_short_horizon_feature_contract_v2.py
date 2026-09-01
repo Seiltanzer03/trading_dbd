@@ -23,6 +23,7 @@ import numpy as np
 
 from . import g1_short_horizon_runtime as _runtime_module
 from .core.wavelet import compute_wavelet_analysis
+from .data.cache import production_chain_snapshot
 from .data.feeds import MarketData
 from .g1_short_horizon_runtime import (
     MODEL_REFIT_INTERVAL_SEC,
@@ -249,8 +250,11 @@ def _latest_option_snapshot(engine: PassiveLearningEngine, features: dict[str, A
         snapshots = engine.cache.chain_snapshots(proxy, limit=60)
     except Exception as exc:  # noqa: BLE001
         return {"available": False, "reason": f"cache_error:{type(exc).__name__}"}
+    production = getattr(getattr(engine, "settings", None), "demo", None) is False
     valid = [snap for snap in snapshots
-             if _finite(snap.get("ts")) is not None and float(snap["ts"]) <= captured_ts+1e-6]
+             if _finite(snap.get("ts")) is not None
+             and float(snap["ts"]) <= captured_ts+1e-6
+             and (not production or production_chain_snapshot(snap))]
     if not valid:
         return {"available": False, "reason": "no_chain_snapshot_at_or_before_t0",
                 "proxy": proxy}
