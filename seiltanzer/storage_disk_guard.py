@@ -24,6 +24,7 @@ DEFAULT_DENSE_BUDGET_FRACTION = 0.75
 MIN_VERIFIED_LOCAL_BACKUPS = 2
 MIN_BACKUP_HEADROOM_BYTES = 512 * 1024 * 1024
 DEFAULT_TMP_MAX_AGE_SEC = 5 * 60
+LOW_DISK_REUSE_REASON = "LOW_DISK_CURRENT_SHA_VERIFIED_BACKUP_REUSE"
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -123,6 +124,80 @@ def _preflight_minimum_verified(self, directory: Path) -> int:
         return MIN_VERIFIED_LOCAL_BACKUPS
     required_bytes = live_bytes + MIN_BACKUP_HEADROOM_BYTES
     return 1 if free_bytes < required_bytes else MIN_VERIFIED_LOCAL_BACKUPS
+
+
+def _available_bytes(directory: Path) -> int:
+    stat = os.statvfs(directory)
+    return max(0, int(stat.f_bavail) * int(stat.f_frsize))
+
+
+def _reuse_current_prestart_backup(self, directory: Path):
+    """Reuse only a recent verified backup produced by this exact code SHA.
+
+    A small production disk may have room for one full SQLite recovery point,
+    but not for the old and replacement copies at the same time.  A repeated
+    restart of the *same* release must not fill the filesystem rebuilding the
+    recovery point it created minutes earlier.  This path performs a fresh
+    quick-check of the authoritative DB and preserves the original manifest
+    timestamp/provenance; it never relabels an old backup as new.
+    """
+    manifests = self._verified_manifests(directory)
+    if not manifests:
+        return None
+    newest = manifests[0]
+    created_ts = float(newest.get("created_ts") or 0.0)
+    max_age = max(1, int(getattr(self, "local_interval", 0) or _s.LOCAL_BACKUP_INTERVAL_SEC))
+    if created_ts <= 0 or time.time() - created_ts > max_age:
+        return None
+    if str(newest.get("git_commit") or "") != str(self.git_commit):
+        return None
+    database_file = Path(str(newest.get("database_file") or ""))
+    if database_file.is_absolute():
+        backup_db = database_file.resolve()
+    else:
+        backup_db = (directory / database_file).resolve()
+    if backup_db.parent != directory.resolve() or not backup_db.is_file():
+        return None
+    try:
+        declared_size = int(newest.get("database_size_bytes") or 0)
+    except (TypeError, ValueError):
+        return None
+    if declared_size <= 0 or backup_db.stat().st_size != declared_size:
+        return None
+    source_ok, source_detail = _s._sqlite_integrity(self.db_path, full=False)
+    if not source_ok:
+        return None
+
+    checked_ts = time.time()
+    backup_id = str(newest.get("backup_id") or "")
+    self._startup_integrity = {
+        "checked_ts": checked_ts,
+        "ok": True,
+        "detail": source_detail,
+        "check_kind": "quick_check",
+        "verification_scope": "pre_engine_source",
+        "backup_reused": True,
+        "backup_id": backup_id,
+        "reason": LOW_DISK_REUSE_REASON,
+        "original_backup_created_ts": created_ts,
+    }
+    self._prestart_integrity_ready = True
+    self._recovery_actions.append({
+        "ts": checked_ts,
+        "action": "reuse_recent_exact_sha_prestart_backup",
+        "backup_id": backup_id,
+        "reason": LOW_DISK_REUSE_REASON,
+    })
+    manifest_path = Path(str(newest.get("manifest_path") or ""))
+    return _s.BackupResult(
+        backup_id=backup_id,
+        kind=str(newest.get("kind") or "local"),
+        database_path=str(backup_db),
+        manifest_path=str(manifest_path),
+        verified=True,
+        created_ts=created_ts,
+        sha256=str(newest.get("database_sha256") or ""),
+    )
 
 
 @contextlib.contextmanager
@@ -288,6 +363,21 @@ def install_storage_disk_guard() -> None:
                     minimum_verified=_preflight_minimum_verified(self, directory),
                 )
             _cleanup_stale_temp(directory)
+            if kind == "local":
+                required = max(1, int(self.db_path.stat().st_size)) + MIN_BACKUP_HEADROOM_BYTES
+                available = _available_bytes(directory)
+                if available < required:
+                    reused = (
+                        _reuse_current_prestart_backup(self, directory)
+                        if reason == "prestart" else None
+                    )
+                    if reused is not None:
+                        return reused
+                    raise OSError(
+                        errno.ENOSPC,
+                        "insufficient single-slot backup headroom while preserving "
+                        f"verified recovery point: available={available} required={required}",
+                    )
             before = {p.name for p in directory.iterdir()}
             try:
                 result = original_create(self, kind=kind, reason=reason)
