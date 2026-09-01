@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import sqlite3
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -200,6 +201,20 @@ def test_v3_collects_rich_pre_t0_state_without_enabling_training():
     assert "energy_transfer" in wavelet
 
     _assert_no_future_timestamps(block, captured)
+
+
+def test_production_option_history_rejects_demo_cache_rows():
+    from seiltanzer.g1_broad_market_evidence_v3 import _option_history
+
+    engine = _Engine([
+        {"ts": 80.0, "demo": False, "proxy": "QQQ"},
+        {"ts": 90.0, "demo": True, "proxy": "QQQ"},
+    ])
+    engine.settings = SimpleNamespace(demo=False)
+    proxy, history = _option_history(
+        engine, {"option_distribution": {"proxy": "QQQ"}}, 100.0)
+    assert proxy == "QQQ"
+    assert [row["ts"] for row in history] == [80.0]
 
 
 def test_v3_rejects_future_cross_asset_source_without_freezing_future_timestamp():

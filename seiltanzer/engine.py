@@ -25,7 +25,7 @@ from .config import (
 from .canonical_market_context import canonical_instrument_code
 from .core import prob as pb
 from .core import risk as rk
-from .data.cache import DiskCache
+from .data.cache import DiskCache, production_chain_snapshot
 from .data.feeds import MarketData
 from .journal import Journal
 from .position_state import PositionLedger
@@ -1305,14 +1305,12 @@ class Engine:
         prev_p = None
         for _ts, raw_p, vol in intraday:
             p = raw_p + quote_offset
-            # Если нет реального объема, используем 1 как TPO (Time Price Opportunity)
+            # No-volume feeds may still form a TPO occupancy profile, but TPO
+            # cannot be relabelled as bid/ask flow or CVD for the AI policy.
             v = vol if has_real_volume else 1.0
-            
-            # Эмуляция CVD (Cumulative Volume Delta) по тику:
-            # Если цена выросла — агрессивная покупка (ask), упала — агрессивная продажа (bid)
             bid_vol = 0.0
             ask_vol = 0.0
-            if prev_p is not None:
+            if has_real_volume and prev_p is not None:
                 if p > prev_p:
                     ask_vol = v
                 elif p < prev_p:
@@ -1320,7 +1318,7 @@ class Engine:
                 else:
                     bid_vol = v * 0.5
                     ask_vol = v * 0.5
-            else:
+            elif has_real_volume:
                 bid_vol = v * 0.5
                 ask_vol = v * 0.5
             prev_p = p
@@ -1345,9 +1343,10 @@ class Engine:
             {
                 "price": k, 
                 "volume": v["volume"],
-                "bid_vol": v["bid_vol"],
-                "ask_vol": v["ask_vol"],
-                "delta": v["ask_vol"] - v["bid_vol"]
+                "bid_vol": (v["bid_vol"] if has_real_volume else None),
+                "ask_vol": (v["ask_vol"] if has_real_volume else None),
+                "delta": (v["ask_vol"] - v["bid_vol"]
+                          if has_real_volume else None),
             } 
             for k, v in profile.items()
         ]
@@ -1367,6 +1366,12 @@ class Engine:
             "bins": bins_list,
             "total": total_vol,
             "is_tpo": not has_real_volume,
+            "flow_available": has_real_volume,
+            "flow_provenance": (
+                "tick_rule_on_observed_volume"
+                if has_real_volume else "unavailable_no_observed_volume"
+            ),
+            "flow_authority": "context_only" if has_real_volume else "none",
             "bin_size": bin_size,
             "value_area_low": min(selected) if selected else None,
             "value_area_high": max(selected) if selected else None,
@@ -1432,7 +1437,10 @@ class Engine:
             return {"available": False,
                     "reason": f"опционные данные недоступны для {inst.code}",
                     "snapshots": []}
-        snaps = self.cache.chain_snapshots(inst.options_proxy, limit=10)
+        snaps = self.cache.chain_snapshots(inst.options_proxy, limit=60)
+        if not self.settings.demo:
+            snaps = [snap for snap in snaps if production_chain_snapshot(snap)]
+        snaps = snaps[-10:]
         if not snaps:
             return {"available": False,
                     "reason": "ещё нет ни одного снапшота цепочки",
@@ -1516,53 +1524,22 @@ class Engine:
         return clean_nans(res)
 
     def macro_regime_payload(self) -> dict:
-        """Полноразмерный payload 3D Phase Space (Macro Regime Attractor)."""
-        import time
-        from .core.macro_regime import compute_macro_regime
+        """Real observed-history macro payload (no prototype trajectory)."""
+        from .analytics_runtime import _macro_regime_payload
 
-        vols = self.market.vols
-        corr = getattr(self.market, "correlation", {})
-        raw_price = self.market.price.get("value")
-        prices = []
-        if raw_price and math.isfinite(raw_price):
-            now = time.time()
-            for i in range(50):
-                prices.append({"ts": now - i * 300, "price": raw_price * (1.0 - i * 0.0002)})
-
-        prev_regime = getattr(self, "_last_macro_regime", None)
-        res = compute_macro_regime(prices, vols, corr, prev_regime)
-        if res.get("available") and res.get("summary"):
-            self._last_macro_regime = res["summary"]["regime"]
-            self._macro_regime_summary_cache = res.get("summary")
-        return clean_nans(res)
+        return _macro_regime_payload(self)
 
     def wavelet_payload(self) -> dict:
-        """Полноразмерный payload CWT Morlet вейвлет-анализа циклов (Wavelet Cycle Map)."""
-        import time
-        from .core.wavelet import compute_wavelet_analysis
+        """Real observed-history wavelet payload (no generated sine path)."""
+        from .analytics_runtime import _wavelet_payload
 
-        raw_price = self.market.price.get("value")
-        prices = []
-        if raw_price and math.isfinite(raw_price):
-            now = time.time()
-            for i in range(60):
-                prices.append({"ts": now - (60 - i) * 300, "price": raw_price * (1.0 + 0.003 * math.sin(i / 4.0))})
-
-        res = compute_wavelet_analysis(prices)
-        if res.get("available") and res.get("summary"):
-            self._wavelet_summary_cache = res.get("summary")
-        return clean_nans(res)
+        return _wavelet_payload(self)
 
     def cross_asset_payload(self) -> dict:
-        """Полноразмерный payload Cross-Asset Force Graph & Correlation Break Velocity."""
-        from .core.cross_asset import compute_correlation_graph
+        """Observed correlation payload through the canonical runtime adapter."""
+        from .analytics_runtime import _cross_asset_payload
 
-        corr = getattr(self.market, "correlation", {})
-        price_feeds = self.market.price
-        res = compute_correlation_graph(corr, price_feeds)
-        if res.get("available") and res.get("summary"):
-            self._cross_asset_summary_cache = res.get("summary")
-        return clean_nans(res)
+        return _cross_asset_payload(self)
 
     def _analytics_summary(self, price, trade) -> dict:
         gex_mig = self.gex_migration_payload()

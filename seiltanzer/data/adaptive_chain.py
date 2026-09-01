@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 
 from ..core import options as opt
+from .cache import production_chain_snapshot
 
 
 REQUIRED_MONEYNESS = (0.78, 1.22)
@@ -121,7 +122,10 @@ def _support_ratios(metrics: dict, spot: float) -> tuple[float, float]:
 
 
 def _cache_fallback(self, proxy: str, error: Exception, status_dict) -> None:
-    snapshots = self.cache.chain_snapshots(proxy, limit=1)
+    snapshots = [
+        snapshot for snapshot in self.cache.chain_snapshots(proxy, limit=60)
+        if production_chain_snapshot(snapshot)
+    ]
     if snapshots and time.time() - snapshots[-1]["ts"] < 24 * 3600:
         self.chain = {
             "metrics": snapshots[-1],
@@ -132,11 +136,20 @@ def _cache_fallback(self, proxy: str, error: Exception, status_dict) -> None:
                 error=str(error)[:200],
                 source="кэш цепочки",
             ),
+            "cache_fallback": {
+                "used": True,
+                "snapshot_provenance": "explicit_real_demo_false",
+            },
         }
     else:
         self.chain = {
             "metrics": None,
             **status_dict(error=str(error)[:200]),
+            "cache_fallback": {
+                "used": False,
+                "reason": "no_explicitly_real_snapshot",
+                "demo_or_unverified_rejected": True,
+            },
         }
 
 

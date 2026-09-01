@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -75,6 +76,21 @@ def test_option_snapshot_selects_latest_strictly_pre_t0():
     assert chosen["available"] is True
     assert chosen["source_ts"] == pytest.approx(90.0)
     assert chosen["metrics"]["implied_move"]["sigma_annual"] == pytest.approx(0.2)
+
+
+def test_production_option_snapshot_rejects_demo_cache_row():
+    engine = _Engine([
+        {"ts": 90.0, "demo": False, "proxy": "QQQ",
+         "implied_move": {"sigma_annual": 0.2}},
+        {"ts": 95.0, "demo": True, "proxy": "QQQ",
+         "implied_move": {"sigma_annual": 0.9}},
+    ])
+    engine.settings = SimpleNamespace(demo=False)
+    chosen = v2._latest_option_snapshot(
+        engine, {"option_distribution": {"proxy": "QQQ"}}, 100.0)
+    assert chosen["available"] is True
+    assert chosen["source_ts"] == pytest.approx(90.0)
+    assert chosen["metrics"]["demo"] is False
 
 
 def test_future_cross_asset_is_rejected_without_admitted_future_source_timestamp():
