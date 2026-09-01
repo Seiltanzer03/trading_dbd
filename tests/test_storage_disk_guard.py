@@ -135,6 +135,80 @@ def test_preflight_reduces_floor_only_when_replacement_lacks_headroom(
     assert storage_disk_guard._preflight_minimum_verified(manager, manager.local_dir) == 2
 
 
+def test_low_disk_scheduled_backup_fails_before_allocating_temp(
+    tmp_path, monkeypatch
+):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _db(Path(settings.trades_db))
+    manager = StorageManager(settings, git_commit="single-slot-sha")
+    seed = manager.create_backup(kind="local", reason="prestart")
+    before = {path.name for path in manager.local_dir.iterdir()}
+
+    class Stat:
+        f_frsize = 1
+        f_bavail = 0
+
+    monkeypatch.setattr(storage_disk_guard.os, "statvfs", lambda _directory: Stat())
+
+    with pytest.raises(OSError, match="single-slot backup headroom") as error:
+        manager.create_backup(kind="local", reason="scheduled")
+
+    assert error.value.errno == storage_disk_guard.errno.ENOSPC
+    assert {path.name for path in manager.local_dir.iterdir()} == before
+    assert Path(seed.database_path).is_file()
+    assert not list(manager.local_dir.glob(".*.tmp.sqlite3"))
+
+
+def test_low_disk_prestart_reuses_only_recent_exact_sha_verified_backup(
+    tmp_path, monkeypatch
+):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _db(Path(settings.trades_db))
+    manager = StorageManager(settings, git_commit="single-slot-sha")
+    seed = manager.create_backup(kind="local", reason="prestart")
+    before = {path.name for path in manager.local_dir.iterdir()}
+
+    class Stat:
+        f_frsize = 1
+        f_bavail = 0
+
+    monkeypatch.setattr(storage_disk_guard.os, "statvfs", lambda _directory: Stat())
+
+    reused = manager.create_backup(kind="local", reason="prestart")
+
+    assert reused.backup_id == seed.backup_id
+    assert {path.name for path in manager.local_dir.iterdir()} == before
+    assert manager._prestart_integrity_ready is True
+    assert manager._startup_integrity["backup_reused"] is True
+    assert manager._startup_integrity["reason"] == storage_disk_guard.LOW_DISK_REUSE_REASON
+    assert manager._startup_integrity["original_backup_created_ts"] == reused.created_ts
+
+
+def test_low_disk_prestart_never_reuses_backup_from_another_sha(
+    tmp_path, monkeypatch
+):
+    settings = Settings(demo=True, data_dir=str(tmp_path))
+    _db(Path(settings.trades_db))
+    manager = StorageManager(settings, git_commit="old-sha")
+    seed = manager.create_backup(kind="local", reason="prestart")
+    manager.git_commit = "new-sha"
+    manager._prestart_integrity_ready = False
+    manager._startup_integrity = None
+
+    class Stat:
+        f_frsize = 1
+        f_bavail = 0
+
+    monkeypatch.setattr(storage_disk_guard.os, "statvfs", lambda _directory: Stat())
+
+    with pytest.raises(OSError, match="single-slot backup headroom"):
+        manager.create_backup(kind="local", reason="prestart")
+
+    assert Path(seed.database_path).is_file()
+    assert manager._prestart_integrity_ready is False
+    assert manager._startup_integrity is None
+
+
 def test_restore_drill_headroom_prunes_only_older_verified_backup(
     tmp_path, monkeypatch
 ):

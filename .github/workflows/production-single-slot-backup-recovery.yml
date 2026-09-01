@@ -1,0 +1,297 @@
+name: production-single-slot-backup-recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact already-green main SHA already delivered to the VPS
+        required: true
+        type: string
+
+concurrency:
+  group: production-seiltanzer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  recover:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - name: Verify exact SHA is green on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote https://github.com/${{ github.repository }} refs/heads/main | cut -f1)" = "$EXPECTED_SHA"
+          body=$(curl -fsS --max-time 8 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${EXPECTED_SHA}/status")
+          verdict=$(BODY="$body" python3 - <<'PY'
+          import json, os
+          statuses = {
+              str(item.get("context")): str(item.get("state"))
+              for item in json.loads(os.environ["BODY"]).get("statuses", [])
+          }
+          print(statuses.get("ci/full-webkit", "missing"))
+          PY
+          )
+          test "$verdict" = success
+
+      - name: Rotate duplicate local backups and rebuild one verified slot
+        id: recovery
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 18m
+          envs: EXPECTED_SHA
+          script: |
+            set -euo pipefail
+            root=/opt/seiltanzer/data/backups/local
+            live=/opt/seiltanzer/data/trades.db
+            test "$root" = /opt/seiltanzer/data/backups/local
+            test "$live" = /opt/seiltanzer/data/trades.db
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            test -f "$live"
+            mkdir -p "$root"
+
+            systemctl stop seiltanzer
+            if systemctl is-active --quiet seiltanzer; then
+              echo "::error::Refusing backup rotation while seiltanzer is active"
+              exit 1
+            fi
+            if lsof -- "$live" >/dev/null 2>&1; then
+              echo "::error::Refusing backup rotation while trades.db is open"
+              exit 1
+            fi
+
+            export RECOVERY_STARTED_TS=$(date +%s)
+            /usr/bin/python3 - <<'PY'
+            import hashlib
+            import json
+            import os
+            import sqlite3
+            from pathlib import Path
+
+            root = Path("/opt/seiltanzer/data/backups/local").resolve()
+            live = Path("/opt/seiltanzer/data/trades.db").resolve()
+            assert live.parent == Path("/opt/seiltanzer/data").resolve()
+
+            def confined(path: Path) -> bool:
+                try:
+                    path.resolve().relative_to(root)
+                    return True
+                except ValueError:
+                    return False
+
+            def digest(path: Path) -> str:
+                value = hashlib.sha256()
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                        value.update(chunk)
+                return value.hexdigest()
+
+            # The authoritative market database is read-only in this workflow.
+            uri = f"file:{live}?mode=ro"
+            connection = sqlite3.connect(uri, uri=True, timeout=30)
+            try:
+                quick_check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+            finally:
+                connection.close()
+            print(f"AUTHORITATIVE_DB_QUICK_CHECK={quick_check}")
+            if quick_check != "ok":
+                raise SystemExit("STOP: authoritative trades.db quick_check failed")
+
+            # With the writer stopped, hidden SQLite backup temps are incomplete
+            # duplicate copies. They never carry a verified manifest and are the
+            # only non-manifest files this recovery may remove automatically.
+            temp_removed = 0
+            temp_bytes = 0
+            for temp in root.glob(".*.tmp.sqlite3"):
+                temp = temp.resolve()
+                if not confined(temp) or temp.parent != root:
+                    raise SystemExit(f"STOP: unexpected temp path {temp}")
+                temp_bytes += temp.stat().st_size
+                temp.unlink()
+                temp_removed += 1
+
+            verified = []
+            for manifest_path in root.glob("*.manifest.json"):
+                manifest_path = manifest_path.resolve()
+                if not confined(manifest_path) or manifest_path.parent != root:
+                    continue
+                try:
+                    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if payload.get("verified") is not True:
+                    continue
+                raw_db = Path(str(payload.get("database_file") or ""))
+                backup_db = (raw_db if raw_db.is_absolute() else root / raw_db).resolve()
+                if not confined(backup_db) or backup_db.parent != root or not backup_db.is_file():
+                    continue
+                verified.append((
+                    float(payload.get("created_ts") or 0.0),
+                    manifest_path,
+                    backup_db,
+                    payload,
+                ))
+            verified.sort(key=lambda row: row[0], reverse=True)
+            if not verified:
+                raise SystemExit("STOP: no verified local backup pair available")
+
+            newest = verified[0]
+            expected = str(newest[3].get("database_sha256") or "").lower()
+            if len(expected) != 64:
+                raise SystemExit("STOP: newest verified backup has no SHA256")
+            actual = digest(newest[2])
+            print(f"NEWEST_BACKUP={newest[2].name}")
+            print(f"NEWEST_BACKUP_SHA_MATCH={actual == expected}")
+            if actual != expected:
+                raise SystemExit("STOP: newest verified backup SHA256 mismatch")
+
+            required = live.stat().st_size + 1024 * 1024 * 1024
+
+            def free_bytes() -> int:
+                stat = os.statvfs(root)
+                return int(stat.f_bavail) * int(stat.f_frsize)
+
+            removed_pairs = 0
+            removed_bytes = 0
+            # Sacrifice only duplicate backup pairs, oldest first. Preserve the
+            # newest verified pair whenever that still leaves enough room for a
+            # fresh full snapshot plus 1 GiB operating headroom.
+            for _, manifest_path, backup_db, _payload in reversed(verified[1:]):
+                if free_bytes() >= required:
+                    break
+                removed_bytes += backup_db.stat().st_size + manifest_path.stat().st_size
+                backup_db.unlink()
+                manifest_path.unlink()
+                removed_pairs += 1
+
+            deleted_last_verified = False
+            if free_bytes() < required:
+                # The user explicitly authorized sacrificing backup copies, never
+                # market data. The newest pair was SHA-verified above and the live
+                # DB passed quick_check. Remove the old slot so startup can create
+                # its exact-SHA replacement immediately.
+                _, manifest_path, backup_db, _payload = newest
+                removed_bytes += backup_db.stat().st_size + manifest_path.stat().st_size
+                backup_db.unlink()
+                manifest_path.unlink()
+                removed_pairs += 1
+                deleted_last_verified = True
+
+            available = free_bytes()
+            print(f"INCOMPLETE_BACKUP_TEMPS_REMOVED={temp_removed}")
+            print(f"INCOMPLETE_BACKUP_TEMP_BYTES_REMOVED={temp_bytes}")
+            print(f"VERIFIED_BACKUP_PAIRS_REMOVED={removed_pairs}")
+            print(f"VERIFIED_BACKUP_BYTES_REMOVED={removed_bytes}")
+            print(f"DELETED_LAST_VERIFIED_SLOT={str(deleted_last_verified).lower()}")
+            print(f"BACKUP_REBUILD_REQUIRED_BYTES={required}")
+            print(f"BACKUP_REBUILD_AVAILABLE_BYTES={available}")
+            if available < required:
+                raise SystemExit("STOP: insufficient headroom after backup-only rotation")
+            PY
+
+            # Headroom now exists for the application to create and fully verify
+            # a replacement prestart snapshot before Engine construction.
+            systemctl reset-failed seiltanzer >/dev/null 2>&1 || true
+            systemctl start seiltanzer
+            ready=0
+            for attempt in $(seq 1 240); do
+              active=$(systemctl is-active seiltanzer 2>/dev/null || true)
+              code=$(curl -sS -o /tmp/single-slot-recovery-state.json \
+                --connect-timeout 1 --max-time 3 -w '%{http_code}' \
+                http://127.0.0.1:8790/api/state 2>/dev/null || true)
+              echo "single-slot recovery attempt=$attempt/240 active=${active:-unknown} http=${code:-000}"
+              if [ "$active" = active ] && [ "$code" = 200 ]; then
+                ready=1
+                break
+              fi
+              sleep 2
+            done
+            if [ "$ready" != 1 ]; then
+              echo "::error::Terminal did not become ready after backup-only rotation"
+              systemctl status seiltanzer --no-pager -l || true
+              journalctl -u seiltanzer --since '-20 minutes' --no-pager -n 220 || true
+              exit 1
+            fi
+
+            /usr/bin/python3 - <<'PY'
+            import json
+            import os
+            import sqlite3
+            from pathlib import Path
+
+            root = Path("/opt/seiltanzer/data/backups/local").resolve()
+            expected_sha = os.environ["EXPECTED_SHA"]
+            started = float(os.environ["RECOVERY_STARTED_TS"])
+            verified = []
+            for manifest_path in root.glob("*.manifest.json"):
+                try:
+                    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                db = (root / str(payload.get("database_file") or "")).resolve()
+                if (
+                    payload.get("verified") is True
+                    and payload.get("reason") == "prestart"
+                    and str(payload.get("git_commit") or "") == expected_sha
+                    and float(payload.get("created_ts") or 0.0) >= started
+                    and db.parent == root
+                    and db.is_file()
+                ):
+                    verified.append((float(payload["created_ts"]), payload, db))
+            if not verified:
+                raise SystemExit("STOP: no new exact-SHA verified prestart backup")
+            verified.sort(key=lambda row: row[0], reverse=True)
+            print(f"NEW_EXACT_SHA_BACKUP={verified[0][2].name}")
+            print(f"NEW_EXACT_SHA_BACKUP_BYTES={verified[0][2].stat().st_size}")
+
+            live = Path("/opt/seiltanzer/data/trades.db")
+            connection = sqlite3.connect(f"file:{live}?mode=ro", uri=True, timeout=30)
+            try:
+                result = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+            finally:
+                connection.close()
+            print(f"POST_RECOVERY_DB_QUICK_CHECK={result}")
+            if result != "ok":
+                raise SystemExit("STOP: post-recovery trades.db quick_check failed")
+            PY
+
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            test "$(systemctl is-active seiltanzer)" = active
+            df -h /
+
+      - name: Publish exact-SHA recovery status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ steps.recovery.outcome }}
+        run: |
+          if [ "$OUTCOME" = success ]; then
+            state=success
+            description="Backup-only rotation rebuilt one verified exact-SHA recovery slot"
+          else
+            state=failure
+            description="Backup-only rotation stopped safely before acceptance"
+          fi
+          curl --fail-with-body --silent --show-error \
+            --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${EXPECTED_SHA}" \
+            -d "{\"state\":\"$state\",\"context\":\"ops/single-slot-backup-recovery\",\"description\":\"$description\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
