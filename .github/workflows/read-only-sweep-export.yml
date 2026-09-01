@@ -1,0 +1,144 @@
+name: One-shot read-only sweep breakout export
+
+on:
+  push:
+    branches:
+      - codex/read-only-sweep-export-20260901
+    paths:
+      - .github/workflows/read-only-sweep-export.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: one-shot-read-only-sweep-export-20260901
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install isolated export dependencies
+        run: pip install --disable-pip-version-check "paramiko==3.5.1" "pyarrow==21.0.0"
+
+      - name: Download newest verified immutable production backup
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          OUTPUT_DB: ${{ runner.temp }}/sweep-source.sqlite3
+          OUTPUT_MANIFEST: ${{ runner.temp }}/sweep-source.manifest.json
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import socket
+          import textwrap
+          import time
+
+          import paramiko
+
+          client = None
+          last_error = None
+          for attempt in range(1, 4):
+              candidate = paramiko.SSHClient()
+              candidate.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+              try:
+                  candidate.connect(
+                      "94.241.171.182", username="root",
+                      password=os.environ["SSH_PASSWORD"], timeout=15,
+                      banner_timeout=30, auth_timeout=30,
+                      look_for_keys=False, allow_agent=False,
+                  )
+                  client = candidate
+                  break
+              except (paramiko.SSHException, socket.timeout, OSError) as exc:
+                  candidate.close()
+                  last_error = exc
+                  if attempt == 3:
+                      raise
+                  time.sleep(5 * attempt)
+          if client is None:
+              raise RuntimeError(f"SSH unavailable: {last_error}")
+
+          remote_python = textwrap.dedent(r'''
+              import json
+              import pathlib
+              root = pathlib.Path('/opt/seiltanzer/data/backups/local')
+              valid = []
+              for manifest_path in root.glob('*.manifest.json'):
+                  try:
+                      item = json.loads(manifest_path.read_text())
+                      db_path = pathlib.Path(str(item.get('database_file') or ''))
+                      if not db_path.is_absolute():
+                          db_path = root / db_path
+                      if item.get('verified') is True and db_path.is_file():
+                          valid.append((float(item.get('created_ts') or manifest_path.stat().st_mtime), db_path, manifest_path, item))
+                  except Exception:
+                      pass
+              if not valid:
+                  raise SystemExit('no verified backup')
+              _ts, db_path, manifest_path, item = max(valid, key=lambda row: row[0])
+              print(json.dumps({'database': str(db_path), 'manifest': str(manifest_path), 'payload': item}, separators=(',', ':')))
+          ''')
+          command = "python3 - <<'REMOTE'\n" + remote_python + "REMOTE\n"
+          _stdin, stdout, stderr = client.exec_command(command)
+          result = stdout.read().decode().strip()
+          error = stderr.read().decode().strip()
+          if not result or error:
+              raise RuntimeError(error or "verified backup selection failed")
+          selected = json.loads(result)
+          sftp = client.open_sftp()
+          sftp.get(selected["database"], os.environ["OUTPUT_DB"])
+          sftp.get(selected["manifest"], os.environ["OUTPUT_MANIFEST"])
+          sftp.close()
+          client.close()
+
+          manifest = json.loads(pathlib.Path(os.environ["OUTPUT_MANIFEST"]).read_text())
+          if manifest.get("verified") is not True:
+              raise RuntimeError("backup manifest is not verified")
+          db = pathlib.Path(os.environ["OUTPUT_DB"])
+          hasher = hashlib.sha256()
+          with db.open("rb") as handle:
+              for block in iter(lambda: handle.read(1024 * 1024), b""):
+                  hasher.update(block)
+          digest = hasher.hexdigest()
+          expected = str(manifest.get("database_sha256") or manifest.get("sha256") or "")
+          if expected and digest != expected:
+              raise RuntimeError("downloaded backup SHA256 mismatch")
+          expected_bytes = (manifest.get("database_size_bytes") or
+                            manifest.get("database_bytes") or manifest.get("size_bytes"))
+          if expected_bytes is not None and db.stat().st_size != int(expected_bytes):
+              raise RuntimeError("downloaded backup byte count mismatch")
+          print(json.dumps({"verified": True, "backup_id": manifest.get("backup_id"), "bytes": db.stat().st_size}))
+          PY
+
+      - name: Export immutable T0 events and bars
+        env:
+          SOURCE_DB: ${{ runner.temp }}/sweep-source.sqlite3
+          SOURCE_MANIFEST: ${{ runner.temp }}/sweep-source.manifest.json
+          OUTPUT_DIR: ${{ runner.temp }}/sweep-export
+        run: |
+          python scripts/read_only_sweep_export.py \
+            --database "$SOURCE_DB" \
+            --source-manifest "$SOURCE_MANIFEST" \
+            --source-run-id "${{ github.run_id }}" \
+            --output-dir "$OUTPUT_DIR"
+
+      - name: Upload minimal research dataset
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-breakout-read-only-export-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/sweep-export/events.parquet
+            ${{ runner.temp }}/sweep-export/bars.parquet
+            ${{ runner.temp }}/sweep-export/schema.json
+          retention-days: 3
+          if-no-files-found: error
