@@ -117,8 +117,10 @@ jobs:
             set -euo pipefail
             root=/opt/seiltanzer/data/backups/local
             live=/opt/seiltanzer/data/trades.db
+            legacy=/opt/seiltanzer/trades.db
             test "$root" = /opt/seiltanzer/data/backups/local
             test "$live" = /opt/seiltanzer/data/trades.db
+            test "$legacy" = /opt/seiltanzer/trades.db
             test -f "$live"
             mkdir -p "$root"
 
@@ -135,6 +137,10 @@ jobs:
               echo "::error::Refusing backup rotation while trades.db is open"
               exit 1
             fi
+            if [ -e "$legacy" ] && lsof -- "$legacy" >/dev/null 2>&1; then
+              echo "::error::Refusing backup rotation while legacy backup copy is open"
+              exit 1
+            fi
 
             export RECOVERY_STARTED_TS=$(date +%s)
             /usr/bin/python3 - <<'PY'
@@ -146,6 +152,8 @@ jobs:
 
             root = Path("/opt/seiltanzer/data/backups/local").resolve()
             live = Path("/opt/seiltanzer/data/trades.db").resolve()
+            legacy_raw = Path("/opt/seiltanzer/trades.db")
+            authority_path = Path("/opt/seiltanzer/data/database_authority.json")
             assert live.parent == Path("/opt/seiltanzer/data").resolve()
 
             def confined(path: Path) -> bool:
@@ -208,18 +216,23 @@ jobs:
                     payload,
                 ))
             verified.sort(key=lambda row: row[0], reverse=True)
-            if not verified:
-                raise SystemExit("STOP: no verified local backup pair available")
-
-            newest = verified[0]
-            expected = str(newest[3].get("database_sha256") or "").lower()
-            if len(expected) != 64:
-                raise SystemExit("STOP: newest verified backup has no SHA256")
-            actual = digest(newest[2])
-            print(f"NEWEST_BACKUP={newest[2].name}")
-            print(f"NEWEST_BACKUP_SHA_MATCH={actual == expected}")
-            if actual != expected:
-                raise SystemExit("STOP: newest verified backup SHA256 mismatch")
+            newest = verified[0] if verified else None
+            if newest is None:
+                # A previous fail-closed recovery attempt may already have removed
+                # the verified slot before discovering another legacy copy was
+                # needed for headroom. The authoritative DB still has to pass the
+                # independent read-only quick_check above; no missing backup is
+                # silently represented as verified.
+                print("NO_VERIFIED_LOCAL_BACKUP=true")
+            else:
+                expected = str(newest[3].get("database_sha256") or "").lower()
+                if len(expected) != 64:
+                    raise SystemExit("STOP: newest verified backup has no SHA256")
+                actual = digest(newest[2])
+                print(f"NEWEST_BACKUP={newest[2].name}")
+                print(f"NEWEST_BACKUP_SHA_MATCH={actual == expected}")
+                if actual != expected:
+                    raise SystemExit("STOP: newest verified backup SHA256 mismatch")
 
             required = live.stat().st_size + 1024 * 1024 * 1024
 
@@ -241,7 +254,7 @@ jobs:
                 removed_pairs += 1
 
             deleted_last_verified = False
-            if free_bytes() < required:
+            if free_bytes() < required and newest is not None:
                 # The user explicitly authorized sacrificing backup copies, never
                 # market data. The newest pair was SHA-verified above and the live
                 # DB passed quick_check. Remove the old slot so startup can create
@@ -253,12 +266,90 @@ jobs:
                 removed_pairs += 1
                 deleted_last_verified = True
 
+            legacy_removed = False
+            legacy_bytes = 0
+            if free_bytes() < required and legacy_raw.exists():
+                # `/opt/seiltanzer/trades.db` is removable only when the runtime's
+                # durable authority record explicitly classifies that exact path as
+                # NON_AUTHORITATIVE_LEGACY. This is a backup copy, never the market
+                # source of truth at `/opt/seiltanzer/data/trades.db`.
+                if legacy_raw.is_symlink():
+                    raise SystemExit("STOP: legacy backup copy must not be a symlink")
+                legacy = legacy_raw.resolve()
+                if legacy != Path("/opt/seiltanzer/trades.db") or legacy.parent != Path("/opt/seiltanzer"):
+                    raise SystemExit("STOP: unexpected legacy backup path")
+                if os.path.samefile(legacy, live):
+                    raise SystemExit("STOP: legacy path aliases authoritative trades.db")
+                try:
+                    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    raise SystemExit(f"STOP: database authority record unavailable: {exc}")
+                authoritative = Path(str(authority.get("authoritative_database_path") or "")).resolve()
+                if authoritative != live:
+                    raise SystemExit("STOP: database authority does not name live trades.db")
+                classified = any(
+                    Path(str(item.get("path") or "")).resolve() == legacy
+                    and item.get("classification") == "NON_AUTHORITATIVE_LEGACY"
+                    for item in authority.get("legacy_databases") or []
+                    if isinstance(item, dict)
+                )
+                if not classified:
+                    raise SystemExit("STOP: legacy database lacks NON_AUTHORITATIVE_LEGACY classification")
+
+                def sqlite_snapshot(path: Path) -> tuple[str, dict[str, int], str | None]:
+                    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+                    try:
+                        check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+                        tables = {
+                            str(row[0]) for row in connection.execute(
+                                "SELECT name FROM sqlite_master WHERE type='table'"
+                            ).fetchall()
+                        }
+                        critical = (
+                            "trades", "account", "ai_verdicts", "decision_snapshots",
+                            "decision_replays", "human_decisions", "position_management_events",
+                            "management_decisions", "passive_observations", "q_capture_attempts",
+                            "g1_dataset_membership", "g1_dataset_cuts", "g1_dataset_cut_members",
+                            "g1c_fit_runs", "g1c_shadow_models", "g1c_shadow_predictions",
+                        )
+                        counts = {
+                            name: int(connection.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0])
+                            for name in critical if name in tables
+                        }
+                        database_uuid = None
+                        if "database_authority" in tables:
+                            row = connection.execute(
+                                "SELECT database_uuid FROM database_authority WHERE id=1"
+                            ).fetchone()
+                            database_uuid = None if row is None else str(row[0])
+                        return check, counts, database_uuid
+                    finally:
+                        connection.close()
+
+                legacy_check, legacy_counts, legacy_uuid = sqlite_snapshot(legacy)
+                live_check, live_counts, live_uuid = sqlite_snapshot(live)
+                print(f"LEGACY_BACKUP_QUICK_CHECK={legacy_check}")
+                if legacy_check != "ok" or live_check != "ok":
+                    raise SystemExit("STOP: legacy/live SQLite quick_check failed")
+                if legacy_uuid is not None and live_uuid is not None and legacy_uuid != live_uuid:
+                    raise SystemExit("STOP: legacy backup belongs to a different database lineage")
+                for table, count in legacy_counts.items():
+                    if table not in live_counts or live_counts[table] < count:
+                        raise SystemExit(f"STOP: legacy backup has unmatched critical rows in {table}")
+
+                legacy_bytes = legacy.stat().st_size
+                legacy.unlink()
+                legacy_removed = True
+                print("LEGACY_BACKUP_CLASSIFICATION=NON_AUTHORITATIVE_LEGACY")
+
             available = free_bytes()
             print(f"INCOMPLETE_BACKUP_TEMPS_REMOVED={temp_removed}")
             print(f"INCOMPLETE_BACKUP_TEMP_BYTES_REMOVED={temp_bytes}")
             print(f"VERIFIED_BACKUP_PAIRS_REMOVED={removed_pairs}")
             print(f"VERIFIED_BACKUP_BYTES_REMOVED={removed_bytes}")
             print(f"DELETED_LAST_VERIFIED_SLOT={str(deleted_last_verified).lower()}")
+            print(f"LEGACY_BACKUP_COPY_REMOVED={str(legacy_removed).lower()}")
+            print(f"LEGACY_BACKUP_COPY_BYTES_REMOVED={legacy_bytes}")
             print(f"BACKUP_REBUILD_REQUIRED_BYTES={required}")
             print(f"BACKUP_REBUILD_AVAILABLE_BYTES={available}")
             if available < required:

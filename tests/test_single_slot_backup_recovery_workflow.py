@@ -21,7 +21,7 @@ def test_recovery_is_pr_triggered_exact_sha_and_serialized_with_production():
     assert "needs_recovery=true" in workflow
 
 
-def test_recovery_can_remove_only_backup_pairs_and_hidden_backup_temps():
+def test_recovery_can_remove_only_backup_pairs_hidden_temps_and_classified_legacy_copy():
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     assert 'root = Path("/opt/seiltanzer/data/backups/local").resolve()' in workflow
@@ -30,10 +30,27 @@ def test_recovery_can_remove_only_backup_pairs_and_hidden_backup_temps():
     assert 'root.glob("*.manifest.json")' in workflow
     assert "backup_db.unlink()" in workflow
     assert "manifest_path.unlink()" in workflow
+    assert 'legacy_raw = Path("/opt/seiltanzer/trades.db")' in workflow
+    assert 'authority_path = Path("/opt/seiltanzer/data/database_authority.json")' in workflow
+    assert 'item.get("classification") == "NON_AUTHORITATIVE_LEGACY"' in workflow
+    assert "legacy_raw.is_symlink()" in workflow
+    assert "os.path.samefile(legacy, live)" in workflow
+    assert "legacy.unlink()" in workflow
+    assert "legacy backup has unmatched critical rows" in workflow
     assert "live.unlink" not in workflow
     assert "trades.db).unlink" not in workflow
     assert "AUTHORITATIVE_DB_QUICK_CHECK" in workflow
     assert "NEWEST_BACKUP_SHA_MATCH" in workflow
+
+
+def test_recovery_can_resume_after_the_verified_slot_was_safely_removed():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "NO_VERIFIED_LOCAL_BACKUP=true" in workflow
+    assert "newest = verified[0] if verified else None" in workflow
+    assert "if free_bytes() < required and newest is not None:" in workflow
+    assert "LEGACY_BACKUP_QUICK_CHECK" in workflow
+    assert "LEGACY_BACKUP_COPY_REMOVED" in workflow
 
 
 def test_recovery_requires_headroom_then_a_new_verified_exact_sha_backup():
