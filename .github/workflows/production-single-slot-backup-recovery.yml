@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
     paths: [.github/workflows/production-single-slot-backup-recovery.yml]
+  workflow_run:
+    workflows: ["deploy"]
+    branches: [main]
+    types: [completed]
   workflow_dispatch:
     inputs:
       expected_sha:
@@ -17,7 +21,7 @@ permissions:
   statuses: write
 
 env:
-  EXPECTED_SHA: ${{ github.event_name == 'push' && github.sha || inputs.expected_sha }}
+  EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.event_name == 'push' && github.sha || inputs.expected_sha }}
 
 jobs:
   gate:
