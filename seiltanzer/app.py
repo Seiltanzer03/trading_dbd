@@ -32,6 +32,13 @@ from .ai_api import (
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 
+# The live tick remains frequent, but the complete /api/state payload is a
+# cached journal/ridge/setup snapshot. A short production refresh interval and
+# a post-build idle gap prevent SQLite/JSON work from retrying in a tight loop
+# while the research worker is active.
+LIVE_STATE_REFRESH_PERIOD_PRODUCTION_SEC = 10.0
+LIVE_STATE_REFRESH_PERIOD_FAST_SEC = 2.0
+
 
 class TradeOpen(BaseModel):
     setup: int
@@ -393,6 +400,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "daily": 0.0, "chain": 0.0, "iv_surface": 0.0, "correlation": 0.0}
         running: dict[str, asyncio.Task] = {}
         state_task: asyncio.Task | None = None
+        state_last_finished = 0.0
+        state_refresh_period = (
+            LIVE_STATE_REFRESH_PERIOD_FAST_SEC
+            if (settings.demo or settings.stream)
+            else LIVE_STATE_REFRESH_PERIOD_PRODUCTION_SEC
+        )
         # при живом стриме цену «опрашиваем» часто (берём свежий тик из памяти)
         price_period = 1.0 if (settings.demo or settings.stream) else settings.price_poll_sec
         periods = {
@@ -430,6 +443,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     with contextlib.suppress(Exception):
                         state_task.result()
                     state_task = None
+                    # Count the cooldown from completion, not submission. If a
+                    # SQLite reader is slow or fails, the next attempt cannot
+                    # form a retry storm and starve the live request path.
+                    state_last_finished = time.monotonic()
                 for name, fn in jobs.items():
                     if name not in running and now - last[name] >= periods[name]:
                         last[name] = now
@@ -451,9 +468,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for ws in dead:
                     clients.discard(ws)
                 # Full journal/ridge/setup materialization may wait on SQLite.
-                # Run at most one generation in parallel so it can never delay
-                # live WebSocket ticks or kill the poll loop on failure.
-                if state_task is None:
+                # The HTTP route serves the last encoded generation directly, so
+                # production does not need a new build for every 2s live tick.
+                # Keep one generation in flight and an idle gap after completion
+                # to avoid retry pressure while research is using the same DB.
+                if (
+                    state_task is None
+                    and (
+                        state_last_finished <= 0.0
+                        or time.monotonic() - state_last_finished
+                        >= state_refresh_period
+                    )
+                ):
                     state_task = asyncio.create_task(refresh_live_state(
                         payload,
                         expected_revision=live_state_revision(),
