@@ -11,6 +11,9 @@ def test_recovery_is_pr_triggered_exact_sha_and_serialized_with_production():
     assert "push:" in workflow
     assert "branches: [main]" in workflow
     assert "paths: [.github/workflows/production-single-slot-backup-recovery.yml]" in workflow
+    assert "workflow_run:" in workflow
+    assert 'workflows: ["deploy"]' in workflow
+    assert "types: [completed]" in workflow
     assert "workflow_dispatch:" in workflow
     assert "expected_sha:" in workflow
     assert "group: production-seiltanzer" in workflow
