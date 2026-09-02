@@ -30,61 +30,100 @@ jobs:
           import os, pathlib, socket, textwrap, time
           import paramiko
 
-          client = None
+          deadline = time.monotonic() + 20 * 60
+          output = pathlib.Path(os.environ["OUTPUT_DB"])
           last_error = None
-          for attempt in range(1, 4):
-              candidate = paramiko.SSHClient()
-              candidate.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-              try:
-                  candidate.connect(
-                      "94.241.171.182",
-                      username="root",
-                      password=os.environ["SSH_PASSWORD"],
-                      timeout=15,
-                      banner_timeout=30,
-                      auth_timeout=30,
-                      look_for_keys=False,
-                      allow_agent=False,
-                  )
-                  client = candidate
-                  break
-              except (paramiko.SSHException, socket.timeout, OSError) as exc:
-                  candidate.close()
-                  last_error = exc
-                  if attempt == 3:
-                      raise
-                  delay = 5 * attempt
-                  print(f"transient SSH connect failure attempt={attempt}: {exc}; retrying in {delay}s")
-                  time.sleep(delay)
-          if client is None:
-              raise RuntimeError(f"SSH connection unavailable: {last_error}")
 
-          remote_python = textwrap.dedent(r'''
-              import json, pathlib
-              root=pathlib.Path('/opt/seiltanzer/data/backups/local')
-              valid=[]
-              for path in root.glob('*.manifest.json'):
-                  try:
-                      item=json.loads(path.read_text())
-                      db=pathlib.Path(str(item.get('database_file') or ''))
-                      if not db.is_absolute(): db=root/db
-                      if item.get('verified') is True and db.is_file():
-                          valid.append((float(item.get('created_ts') or path.stat().st_mtime),str(db)))
-                  except Exception:
-                      pass
-              if not valid: raise SystemExit('no verified backup')
-              print(max(valid)[1])
-          ''')
-          command = "python3 - <<'REMOTE'\n" + remote_python + "REMOTE\n"
-          _stdin, stdout, stderr = client.exec_command(command)
-          remote = stdout.read().decode().strip()
-          error = stderr.read().decode().strip()
-          if not remote or error:
-              raise RuntimeError(error or "verified backup path unavailable")
-          sftp = client.open_sftp()
-          sftp.get(remote, os.environ["OUTPUT_DB"])
-          sftp.close(); client.close()
-          print("downloaded verified immutable backup", pathlib.Path(os.environ["OUTPUT_DB"]).stat().st_size)
+          # A push-triggered research run can overlap the exact-SHA deploy. Wait
+          # for the immutable verified backup instead of failing during that
+          # bounded hand-off; no production writes or DB mutations happen here.
+          while True:
+              client = None
+              try:
+                  connect_error = None
+                  for attempt in range(1, 4):
+                      candidate = paramiko.SSHClient()
+                      candidate.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                      try:
+                          candidate.connect(
+                              "94.241.171.182",
+                              username="root",
+                              password=os.environ["SSH_PASSWORD"],
+                              timeout=15,
+                              banner_timeout=30,
+                              auth_timeout=30,
+                              look_for_keys=False,
+                              allow_agent=False,
+                          )
+                          client = candidate
+                          break
+                      except (paramiko.SSHException, socket.timeout, OSError) as exc:
+                          candidate.close()
+                          connect_error = exc
+                          if attempt == 3:
+                              break
+                          delay = 5 * attempt
+                          print(
+                              f"transient SSH connect failure attempt={attempt}: "
+                              f"{exc}; retrying in {delay}s",
+                              flush=True,
+                          )
+                          time.sleep(delay)
+                  if client is None:
+                      raise RuntimeError(
+                          f"SSH connection unavailable: {connect_error}"
+                      )
+
+                  remote_python = textwrap.dedent(r'''
+                      import json, pathlib
+                      root=pathlib.Path('/opt/seiltanzer/data/backups/local')
+                      valid=[]
+                      for path in root.glob('*.manifest.json'):
+                          try:
+                              item=json.loads(path.read_text())
+                              db=pathlib.Path(str(item.get('database_file') or ''))
+                              if not db.is_absolute(): db=root/db
+                              if item.get('verified') is True and db.is_file():
+                                  valid.append((float(item.get('created_ts') or path.stat().st_mtime),str(db)))
+                          except Exception:
+                              pass
+                      if not valid:
+                          print('__NO_VERIFIED_BACKUP__')
+                      else:
+                          print(max(valid)[1])
+                  ''')
+                  command = "python3 - <<'REMOTE'\n" + remote_python + "REMOTE\n"
+                  _stdin, stdout, stderr = client.exec_command(command)
+                  remote = stdout.read().decode().strip()
+                  error = stderr.read().decode().strip()
+                  if error:
+                      raise RuntimeError(error)
+                  if remote == "__NO_VERIFIED_BACKUP__":
+                      raise RuntimeError("no verified backup")
+                  if not remote:
+                      raise RuntimeError("verified backup path unavailable")
+                  sftp = client.open_sftp()
+                  sftp.get(remote, os.environ["OUTPUT_DB"])
+                  sftp.close()
+                  print(
+                      "downloaded verified immutable backup",
+                      output.stat().st_size,
+                  )
+                  break
+              except (paramiko.SSHException, socket.timeout, OSError, RuntimeError) as exc:
+                  last_error = exc
+                  if time.monotonic() >= deadline:
+                      raise RuntimeError(
+                          f"verified backup unavailable after bounded wait: {exc}"
+                      ) from exc
+                  print(
+                      f"verified backup not ready: {exc}; retrying in 30s",
+                      flush=True,
+                  )
+                  time.sleep(30)
+              finally:
+                  if client is not None:
+                      client.close()
           PY
       - name: Verify source DB and run one frozen outer cycle
         env:

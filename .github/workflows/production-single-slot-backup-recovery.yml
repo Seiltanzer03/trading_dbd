@@ -115,6 +115,19 @@ jobs:
           envs: EXPECTED_SHA
           script: |
             set -euo pipefail
+            # Recovery deliberately stops the writer while validating and rotating
+            # disposable backup copies. Restore the terminal on every exit path,
+            # including fail-closed disk/integrity errors, so a failed rotation
+            # cannot leave production unavailable.
+            restart_needed=1
+            restore_service_on_exit() {
+              if [ "${restart_needed:-1}" = 1 ]; then
+                systemctl reset-failed seiltanzer >/dev/null 2>&1 || true
+                systemctl start seiltanzer >/dev/null 2>&1 || true
+                echo "RECOVERY_SERVICE_RESTORE_ATTEMPTED=1"
+              fi
+            }
+            trap restore_service_on_exit EXIT
             root=/opt/seiltanzer/data/backups/local
             live=/opt/seiltanzer/data/trades.db
             legacy=/opt/seiltanzer/trades.db
@@ -474,6 +487,7 @@ jobs:
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             test "$(systemctl is-active seiltanzer)" = active
+            restart_needed=0
             df -h /
 
       - name: Publish exact-SHA recovery status
