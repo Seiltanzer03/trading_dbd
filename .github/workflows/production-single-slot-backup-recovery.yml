@@ -1,9 +1,6 @@
 name: production-single-slot-backup-recovery
 
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/production-single-slot-backup-recovery.yml]
   workflow_run:
     workflows: ["deploy"]
     branches: [main]
@@ -21,7 +18,7 @@ permissions:
   statuses: write
 
 env:
-  EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.event_name == 'push' && github.sha || inputs.expected_sha }}
+  EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_sha }}
 
 jobs:
   gate:
@@ -146,8 +143,13 @@ jobs:
               echo "::error::Refusing backup rotation while seiltanzer is active"
               exit 1
             fi
-            git -C /opt/seiltanzer fetch origin main
-            git -C /opt/seiltanzer cat-file -e "${EXPECTED_SHA}^{commit}"
+            # The failed deploy has already delivered the exact SHA locally.
+            # Do not perform a second network fetch from the VPS: recovery must
+            # remain deterministic even when the server has no Git credentials.
+            if ! git -C /opt/seiltanzer cat-file -e "${EXPECTED_SHA}^{commit}"; then
+              echo "::error::Expected SHA is not present locally after deploy delivery"
+              exit 1
+            fi
             git -C /opt/seiltanzer reset --hard "$EXPECTED_SHA"
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
             if lsof -- "$live" >/dev/null 2>&1; then
