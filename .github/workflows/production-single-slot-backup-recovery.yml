@@ -400,6 +400,110 @@ jobs:
                 legacy_removed = True
                 print("LEGACY_BACKUP_CLASSIFICATION=NON_AUTHORITATIVE_LEGACY")
 
+            # If the dedicated local slot is already gone, inspect only
+            # immediate service backup locations for additional SQLite copies.
+            # A candidate is removable only when it is a valid SQLite snapshot
+            # of this same database lineage and its critical counts do not exceed
+            # the authoritative DB. Market files, evidence and arbitrary files
+            # therefore remain outside this cleanup contract.
+            def sqlite_identity(path: Path) -> tuple[str, str | None, dict[str, int]]:
+                connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+                try:
+                    check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+                    tables = {
+                        str(row[0]) for row in connection.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        ).fetchall()
+                    }
+                    database_uuid = None
+                    if "database_authority" in tables:
+                        row = connection.execute(
+                            "SELECT database_uuid FROM database_authority WHERE id=1"
+                        ).fetchone()
+                        database_uuid = None if row is None else str(row[0])
+                    critical = (
+                        "trades", "account", "ai_verdicts", "decision_snapshots",
+                        "decision_replays", "human_decisions",
+                        "position_management_events", "management_decisions",
+                        "passive_observations", "q_capture_attempts",
+                        "g1_dataset_membership", "g1_dataset_cuts",
+                        "g1_dataset_cut_members", "g1c_fit_runs",
+                        "g1c_shadow_models", "g1c_shadow_predictions",
+                    )
+                    counts = {
+                        name: int(connection.execute(
+                            f'SELECT COUNT(*) FROM "{name}"'
+                        ).fetchone()[0])
+                        for name in critical if name in tables
+                    }
+                    return check, database_uuid, counts
+                finally:
+                    connection.close()
+
+            live_identity_check, live_identity_uuid, live_identity_counts = sqlite_identity(live)
+            extra_roots = (
+                Path("/var/backups"),
+                Path("/root"),
+                Path("/opt/seiltanzer"),
+            )
+            protected_paths = {
+                live,
+                root,
+                Path("/opt/seiltanzer/data").resolve(),
+            }
+            extra_candidates: list[Path] = []
+            for directory in extra_roots:
+                try:
+                    entries = tuple(directory.iterdir())
+                except OSError:
+                    continue
+                for candidate in entries:
+                    try:
+                        if candidate.is_symlink() or not candidate.is_file():
+                            continue
+                        resolved = candidate.resolve()
+                    except OSError:
+                        continue
+                    if resolved in protected_paths or resolved.parent == root:
+                        continue
+                    name = resolved.name.lower()
+                    if not (
+                        "backup" in name
+                        or name.startswith("trades")
+                        or name.endswith((".sqlite3", ".sqlite", ".db", ".bak"))
+                    ):
+                        continue
+                    extra_candidates.append(resolved)
+
+            extra_verified: list[tuple[int, Path]] = []
+            if live_identity_check == "ok" and live_identity_uuid:
+                for candidate in extra_candidates:
+                    try:
+                        check, database_uuid, counts = sqlite_identity(candidate)
+                    except (OSError, sqlite3.Error) as exc:
+                        print(f"EXTRA_BACKUP_SKIPPED path={candidate} reason={type(exc).__name__}")
+                        continue
+                    if check != "ok" or database_uuid != live_identity_uuid:
+                        print(f"EXTRA_BACKUP_SKIPPED path={candidate} reason=LINEAGE_MISMATCH")
+                        continue
+                    if any(
+                        table not in live_identity_counts
+                        or live_identity_counts[table] < count
+                        for table, count in counts.items()
+                    ):
+                        print(f"EXTRA_BACKUP_SKIPPED path={candidate} reason=CRITICAL_COUNTS")
+                        continue
+                    extra_verified.append((candidate.stat().st_size, candidate))
+
+            extra_verified.sort(key=lambda item: item[0], reverse=True)
+            print(f"EXTRA_BACKUP_CANDIDATES={len(extra_candidates)}")
+            print(f"EXTRA_BACKUP_VERIFIED={len(extra_verified)}")
+            for size, candidate in extra_verified:
+                if free_bytes() >= required:
+                    break
+                candidate.unlink()
+                print(f"EXTRA_BACKUP_COPY_REMOVED path={candidate} bytes={size}")
+
             available = free_bytes()
             print(f"INCOMPLETE_BACKUP_TEMPS_REMOVED={temp_removed}")
             print(f"INCOMPLETE_BACKUP_TEMP_BYTES_REMOVED={temp_bytes}")
