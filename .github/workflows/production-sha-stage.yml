@@ -1,0 +1,117 @@
+name: production-sha-stage
+
+on:
+  workflow_run:
+    workflows: ["tests"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact already-green main SHA to stage on the VPS
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-sha-stage
+  cancel-in-progress: true
+
+env:
+  EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_sha }}
+  STAGE_RUN_ID: ${{ github.run_id }}
+
+jobs:
+  stage:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Verify automatic stage trigger
+        if: github.event_name == 'workflow_run'
+        run: |
+          set -euo pipefail
+          test "${{ github.event.workflow_run.conclusion }}" = success
+          test "${{ github.event.workflow_run.head_branch }}" = main
+          test -n "$EXPECTED_SHA"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+          fetch-depth: 0
+
+      - name: Build exact-SHA Git bundle off-host
+        run: |
+          set -euo pipefail
+          bundle="deploy-${STAGE_RUN_ID}.bundle"
+          cleanup_ref() { git update-ref -d refs/deploy/exact >/dev/null 2>&1 || true; }
+          trap cleanup_ref EXIT
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git update-ref refs/deploy/exact "$EXPECTED_SHA"
+          git bundle create "$bundle" refs/deploy/exact
+          git bundle verify "$bundle"
+          bundled_sha=$(git bundle list-heads "$bundle" refs/deploy/exact | awk 'NR==1 {print $1}')
+          test "$bundled_sha" = "$EXPECTED_SHA"
+
+      - name: Transfer exact-SHA bundle over deploy channel
+        uses: appleboy/scp-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          source: deploy-${{ github.run_id }}.bundle
+          target: /tmp
+
+      - name: Import exact SHA without changing production HEAD
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          STAGE_RUN_ID: ${{ env.STAGE_RUN_ID }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 3m
+          envs: EXPECTED_SHA,STAGE_RUN_ID
+          script: |
+            set -euo pipefail
+            case "$STAGE_RUN_ID" in
+              ''|*[!0-9]*) echo "Invalid stage run id"; exit 1 ;;
+            esac
+            bundle="/tmp/deploy-${STAGE_RUN_ID}.bundle"
+            trap 'rm -f -- "$bundle"' EXIT
+            test -f "$bundle"
+            cd /opt/seiltanzer
+            git config --global --add safe.directory /opt/seiltanzer || true
+            git bundle verify "$bundle"
+            bundled_sha=$(git bundle list-heads "$bundle" refs/deploy/exact | awk 'NR==1 {print $1}')
+            test "$bundled_sha" = "$EXPECTED_SHA"
+            git fetch --no-tags "$bundle" "+refs/deploy/exact:refs/deploy/staged"
+            git cat-file -e "${EXPECTED_SHA}^{commit}"
+            test "$(git rev-parse refs/deploy/staged)" = "$EXPECTED_SHA"
+            echo "STAGED_EXACT_SHA=$EXPECTED_SHA"
+
+      - name: Confirm staging never mutated production working tree
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          envs: EXPECTED_SHA
+          script: |
+            set -euo pipefail
+            cd /opt/seiltanzer
+            git cat-file -e "${EXPECTED_SHA}^{commit}"
+            test "$(git rev-parse refs/deploy/staged)" = "$EXPECTED_SHA"
+            echo "PRODUCTION_HEAD_UNCHANGED=$(git rev-parse HEAD)"
