@@ -5,16 +5,18 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "production-single-slot-backup-recovery.yml"
 
 
-def test_recovery_is_pr_triggered_exact_sha_and_serialized_with_production():
+def test_recovery_is_deploy_failure_triggered_exact_sha_and_serialized_with_production():
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    assert "push:" in workflow
+    assert "push:" not in workflow
     assert "branches: [main]" in workflow
-    assert "paths: [.github/workflows/production-single-slot-backup-recovery.yml]" in workflow
+    assert "workflow_run:" in workflow
     assert "workflow_run:" in workflow
     assert 'workflows: ["deploy"]' in workflow
     assert "types: [completed]" in workflow
     assert "workflow_dispatch:" in workflow
+    assert "Expected SHA is not present locally after deploy delivery" in workflow
+    assert "git -C /opt/seiltanzer fetch origin main" not in workflow
     assert "expected_sha:" in workflow
     assert "group: production-seiltanzer" in workflow
     assert "cancel-in-progress: false" in workflow
