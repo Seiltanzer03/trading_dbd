@@ -15,6 +15,7 @@ TRANSIENT_ATTEMPTS = 3
 TRANSIENT_RETRY_DELAY_SEC = 1.0
 AI_VERDICT_MAX_MS = 12_000.0
 PASSIVE_STATUS_TIMEOUT_SEC = 20.0
+PASSIVE_CALIBRATION_TIMEOUT_SEC = 20.0
 AI_VERDICT_TRANSPORT_TIMEOUT_SEC = 14.0
 AI_MATERIALIZER_WAIT_SEC = 150.0
 EDGE_RESEARCHER_MAX_MS = 250.0
@@ -53,18 +54,23 @@ def _is_transient_transport_error(exc: BaseException) -> bool:
         exc.reason, (TimeoutError, socket.timeout, ConnectionError))
 
 
-def assert_route(path: str, *, timeout: float = 5.0) -> dict | list | None:
-    for attempt in range(1, TRANSIENT_ATTEMPTS + 1):
+def assert_route(
+    path: str,
+    *,
+    timeout: float = 5.0,
+    attempts: int = TRANSIENT_ATTEMPTS,
+) -> dict | list | None:
+    for attempt in range(1, attempts + 1):
         try:
             code, body, elapsed = request(path, timeout=timeout)
         except Exception as exc:
-            if not _is_transient_transport_error(exc) or attempt >= TRANSIENT_ATTEMPTS:
+            if not _is_transient_transport_error(exc) or attempt >= attempts:
                 raise
             print(f"{path}: transient {type(exc).__name__} "
-                  f"attempt={attempt}/{TRANSIENT_ATTEMPTS}; retrying")
+                  f"attempt={attempt}/{attempts}; retrying")
             time.sleep(TRANSIENT_RETRY_DELAY_SEC)
             continue
-        print(f"{path}: {code} {elapsed:.0f}ms attempt={attempt}/{TRANSIENT_ATTEMPTS}")
+        print(f"{path}: {code} {elapsed:.0f}ms attempt={attempt}/{attempts}")
         assert code == 200, (path, code, body)
         return body
     raise AssertionError((path, "retry loop exhausted"))
@@ -323,6 +329,12 @@ def verify(expected_sha: str) -> None:
     for path in paths:
         if path == "/api/research/passive/status":
             assert_route(path, timeout=PASSIVE_STATUS_TIMEOUT_SEC)
+        elif path == "/api/research/passive/calibration":
+            assert_route(
+                path,
+                timeout=PASSIVE_CALIBRATION_TIMEOUT_SEC,
+                attempts=1,
+            )
         else:
             assert_route(path)
 
