@@ -21,7 +21,10 @@ RESEARCH_WORKER_VERSION = "g1-research-worker-v1"
 # an operational guard around the same bounded-v5 research semantics, not a new
 # research/scalability algorithm.
 RESEARCH_WORKER_SCALABILITY_VERSION = "g1-research-worker-bounded-v5"
-RESEARCH_INTERVAL_SEC = 10.0
+# Research is intentionally lower priority than the live terminal. Keep a
+# bounded idle window after each core/maintenance cycle so CPU and SQLite
+# contention cannot repeatedly starve the API on the small production VPS.
+RESEARCH_INTERVAL_SEC = 30.0
 RESEARCH_STARTUP_GRACE_SEC = 5 * 60.0
 G1S_BATCH = 500
 G1M_LOCAL_BATCH = 100
