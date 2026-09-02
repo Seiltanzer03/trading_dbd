@@ -401,7 +401,7 @@ jobs:
                 print("LEGACY_BACKUP_CLASSIFICATION=NON_AUTHORITATIVE_LEGACY")
 
             # If the dedicated local slot is already gone, inspect only
-            # immediate service backup locations for additional SQLite copies.
+            # explicitly discoverable backup locations for additional SQLite copies.
             # A candidate is removable only when it is a valid SQLite snapshot
             # of this same database lineage and its critical counts do not exceed
             # the authoritative DB. Market files, evidence and arbitrary files
@@ -441,43 +441,96 @@ jobs:
                     connection.close()
 
             live_identity_check, live_identity_uuid, live_identity_counts = sqlite_identity(live)
+            protected_paths = {
+                live,
+                root,
+                Path("/opt/seiltanzer/data/database_authority.json").resolve(),
+            }
+
+            def under(path: Path, parent: Path) -> bool:
+                try:
+                    path.relative_to(parent)
+                    return True
+                except ValueError:
+                    return False
+
+            # Search only bounded, service-adjacent backup trees. The data tree is
+            # traversed separately at data/backups; the live database and local
+            # verified slot remain protected by exact-path and ancestry checks.
             extra_roots = (
                 Path("/var/backups"),
                 Path("/root"),
                 Path("/opt/seiltanzer"),
+                Path("/opt/seiltanzer/data/backups"),
             )
-            protected_paths = {
-                live,
-                root,
-                Path("/opt/seiltanzer/data").resolve(),
+            skip_dir_names = {
+                ".cache", ".cargo", ".git", ".local", ".npm", ".rustup",
+                "__pycache__", "evidence", "logs", "market", "node_modules",
+                "research", "venv", ".venv",
             }
-            extra_candidates: list[Path] = []
-            for directory in extra_roots:
+            extra_candidates: set[Path] = set()
+            for raw_directory in extra_roots:
                 try:
-                    entries = tuple(directory.iterdir())
+                    directory = raw_directory.resolve()
+                    if not directory.is_dir():
+                        continue
                 except OSError:
                     continue
-                for candidate in entries:
+                for current, dirnames, filenames in os.walk(
+                    directory, topdown=True, followlinks=False
+                ):
                     try:
-                        if candidate.is_symlink() or not candidate.is_file():
+                        current_path = Path(current).resolve()
+                        depth = len(current_path.relative_to(directory).parts)
+                    except (OSError, ValueError):
+                        dirnames[:] = []
+                        continue
+                    if depth >= 5:
+                        dirnames[:] = []
+                    else:
+                        kept_dirs = []
+                        for dirname in dirnames:
+                            if dirname.lower() in skip_dir_names:
+                                continue
+                            child = current_path / dirname
+                            try:
+                                if child.is_symlink():
+                                    continue
+                                child_resolved = child.resolve()
+                                if any(
+                                    child_resolved == parent
+                                    or under(child_resolved, parent)
+                                    for parent in (root,)
+                                ):
+                                    continue
+                            except OSError:
+                                continue
+                            kept_dirs.append(dirname)
+                        dirnames[:] = kept_dirs
+                    for filename in filenames:
+                        candidate = current_path / filename
+                        try:
+                            if candidate.is_symlink() or not candidate.is_file():
+                                continue
+                            resolved = candidate.resolve()
+                            if resolved in protected_paths or confined(resolved):
+                                continue
+                            if os.path.samefile(resolved, live):
+                                continue
+                        except OSError:
                             continue
-                        resolved = candidate.resolve()
-                    except OSError:
-                        continue
-                    if resolved in protected_paths or resolved.parent == root:
-                        continue
-                    name = resolved.name.lower()
-                    if not (
-                        "backup" in name
-                        or name.startswith("trades")
-                        or name.endswith((".sqlite3", ".sqlite", ".db", ".bak"))
-                    ):
-                        continue
-                    extra_candidates.append(resolved)
+                        name = resolved.name.lower()
+                        if not (
+                            "backup" in name
+                            or name.startswith("trades")
+                            or name.endswith((".sqlite3", ".sqlite", ".db", ".bak"))
+                        ):
+                            continue
+                        extra_candidates.add(resolved)
 
             extra_verified: list[tuple[int, Path]] = []
             if live_identity_check == "ok" and live_identity_uuid:
-                for candidate in extra_candidates:
+                for candidate in sorted(extra_candidates, key=str):
                     try:
                         check, database_uuid, counts = sqlite_identity(candidate)
                     except (OSError, sqlite3.Error) as exc:
@@ -501,7 +554,15 @@ jobs:
             for size, candidate in extra_verified:
                 if free_bytes() >= required:
                     break
-                candidate.unlink()
+                try:
+                    if candidate.is_symlink() or not candidate.is_file():
+                        continue
+                    if os.path.samefile(candidate, live) or confined(candidate):
+                        continue
+                    candidate.unlink()
+                except OSError as exc:
+                    print(f"EXTRA_BACKUP_COPY_SKIP_REMOVE path={candidate} reason={type(exc).__name__}")
+                    continue
                 print(f"EXTRA_BACKUP_COPY_REMOVED path={candidate} bytes={size}")
 
             available = free_bytes()
@@ -618,14 +679,3 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Trigger existing exact-SHA deploy after recovery
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          curl --fail-with-body --silent --show-error \
-            --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/deploy.yml/dispatches" \
-            -d "{\"ref\":\"main\",\"inputs\":{\"expected_sha\":\"$EXPECTED_SHA\"}}"
