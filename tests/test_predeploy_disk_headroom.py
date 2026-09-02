@@ -7,9 +7,16 @@ def test_deploy_recovers_bounded_disk_headroom_before_git_fetch():
 
     cleanup = workflow.index("=== BOUNDED PRE-FETCH DISK CLEANUP ===")
     gate = workflow.index("required_kb=$((512 * 1024))")
-    fetch = workflow.index("git fetch origin main")
+    local_exact_sha = workflow.index(
+        'if git cat-file -e "${EXPECTED_SHA}^{commit}" 2>/dev/null; then'
+    )
+    fetch = workflow.index(
+        "git fetch --no-tags https://github.com/Seiltanzer03/trading_dbd.git main"
+    )
 
-    assert cleanup < gate < fetch
+    assert cleanup < gate < local_exact_sha < fetch
+    assert "git fetch origin main" not in workflow
+    assert "DEPLOY_EXACT_SHA_ALREADY_LOCAL=$EXPECTED_SHA" in workflow
     assert "-path /opt/seiltanzer/data -prune" in workflow
     assert "journalctl --vacuum-size=128M" in workflow
     assert "/root/.cache" in workflow
@@ -29,6 +36,7 @@ def test_deploy_keeps_exact_sha_and_readiness_after_cleanup():
 
     assert 'git cat-file -e "${EXPECTED_SHA}^{commit}"' in workflow
     assert 'git reset --hard "$EXPECTED_SHA"' in workflow
+    assert 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in workflow
     assert 'test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"' in workflow
     assert "production_readiness_check.py" in workflow
     assert "production_functional_smoke.py" in workflow

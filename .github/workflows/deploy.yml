@@ -238,9 +238,18 @@ jobs:
             pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_v13_audit.py' >/dev/null 2>&1 || true
             pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_transition_audit.py' >/dev/null 2>&1 || true
 
-            git fetch origin main
-            git cat-file -e "${EXPECTED_SHA}^{commit}"
+            # Recovery and retry deploys may already have the exact commit locally.
+            # Avoid the VPS's credential-dependent `origin` in that case. For a
+            # newly merged SHA, fetch through the public repository URL instead so
+            # production delivery remains independent of server-side Git auth.
+            if git cat-file -e "${EXPECTED_SHA}^{commit}" 2>/dev/null; then
+              echo "DEPLOY_EXACT_SHA_ALREADY_LOCAL=$EXPECTED_SHA"
+            else
+              git fetch --no-tags https://github.com/Seiltanzer03/trading_dbd.git main
+              git cat-file -e "${EXPECTED_SHA}^{commit}"
+            fi
             git reset --hard "$EXPECTED_SHA"
+            test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
             SITE=$(/opt/seiltanzer/.venv/bin/python - <<'PY'
             import site
