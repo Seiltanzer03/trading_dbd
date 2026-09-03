@@ -89,59 +89,74 @@ def _cadence_due(runtime, attr: str, interval_sec: float, now: float) -> bool:
 def _run_maintenance_phase(runtime, engine, phase: str) -> dict:
     """Run exactly one optional phase; heavy phases never belong to core health."""
     now = time.time()
-    if phase == "status_refresh":
-        return {
-            "phase": phase,
-            "result": runtime.refresh_materialized_status(limit=STATUS_REFRESH_BATCH),
-            "batch_limit": STATUS_REFRESH_BATCH,
-        }
-    if phase == "trade_links":
-        from .g1_trade_link_catchup import materialize_trade_links_bounded
-        return {
-            "phase": phase,
-            "result": materialize_trade_links_bounded(runtime, limit=TRADE_LINK_BATCH),
-        }
-    if phase == "barriers":
-        from .g1_short_horizon_refinement import _materialize_barriers
-        return {
-            "phase": phase,
-            "rows_created": _materialize_barriers(runtime, limit=AUX_BATCH),
-            "batch_limit": AUX_BATCH,
-        }
-    if phase == "path_metrics":
-        from .g1_short_horizon_metrics_refinement import _materialize_path_metrics
-        return {
-            "phase": phase,
-            "rows_created": _materialize_path_metrics(runtime, limit=AUX_BATCH),
-            "batch_limit": AUX_BATCH,
-        }
-    if phase == "ede_shadow":
-        return {"phase": phase, "result": _run_ede_shadow_bounded(engine)}
-    if phase == "evidence_reports":
-        if not _cadence_due(runtime, "_g1s_worker_last_evidence_ts", EVIDENCE_INTERVAL_SEC, now):
-            return {"phase": phase, "skipped": True, "reason": "CADENCE_NOT_DUE"}
-        fn = getattr(runtime, "materialize_evidence_reports", None)
-        return {
-            "phase": phase,
-            "result": fn() if callable(fn) else {
-                "refreshed": False, "reason": "MATERIALIZER_UNAVAILABLE"
-            },
-        }
-    if phase == "historical_walk_forward":
-        if not _cadence_due(runtime, "_g1s_worker_last_historical_wf_ts", HISTORICAL_WF_INTERVAL_SEC, now):
-            return {"phase": phase, "skipped": True, "reason": "CADENCE_NOT_DUE"}
-        fn = getattr(runtime, "materialize_historical_walkforward", None)
-        return {
-            "phase": phase,
-            "result": fn() if callable(fn) else {
-                "refreshed": False, "reason": "HISTORICAL_WF_UNAVAILABLE"
-            },
-        }
-    if phase == "fit_models":
-        if not _cadence_due(runtime, "_g1s_worker_last_fit_gate_ts", FIT_GATE_INTERVAL_SEC, now):
-            return {"phase": phase, "skipped": True, "reason": "CADENCE_NOT_DUE"}
-        return {"phase": phase, "models_created": runtime.fit_if_ready()}
-    raise ValueError(f"unknown research maintenance phase: {phase}")
+    if phase in {"ede_shadow", "evidence_reports", "historical_walk_forward", "fit_models"}:
+        pressure = memory_pressure_state()
+        if pressure.get("pause_background"):
+            trim_memory_for_pressure()
+            return {
+                "phase": phase,
+                "skipped": True,
+                "reason": "MEMORY_PRESSURE_YIELD",
+                "rss_mib": pressure.get("rss_mib"),
+            }
+
+    try:
+        if phase == "status_refresh":
+            return {
+                "phase": phase,
+                "result": runtime.refresh_materialized_status(limit=STATUS_REFRESH_BATCH),
+                "batch_limit": STATUS_REFRESH_BATCH,
+            }
+        if phase == "trade_links":
+            from .g1_trade_link_catchup import materialize_trade_links_bounded
+            return {
+                "phase": phase,
+                "result": materialize_trade_links_bounded(runtime, limit=TRADE_LINK_BATCH),
+            }
+        if phase == "barriers":
+            from .g1_short_horizon_refinement import _materialize_barriers
+            return {
+                "phase": phase,
+                "rows_created": _materialize_barriers(runtime, limit=AUX_BATCH),
+                "batch_limit": AUX_BATCH,
+            }
+        if phase == "path_metrics":
+            from .g1_short_horizon_metrics_refinement import _materialize_path_metrics
+            return {
+                "phase": phase,
+                "rows_created": _materialize_path_metrics(runtime, limit=AUX_BATCH),
+                "batch_limit": AUX_BATCH,
+            }
+        if phase == "ede_shadow":
+            return {"phase": phase, "result": _run_ede_shadow_bounded(engine)}
+        if phase == "evidence_reports":
+            if not _cadence_due(runtime, "_g1s_worker_last_evidence_ts", EVIDENCE_INTERVAL_SEC, now):
+                return {"phase": phase, "skipped": True, "reason": "CADENCE_NOT_DUE"}
+            fn = getattr(runtime, "materialize_evidence_reports", None)
+            return {
+                "phase": phase,
+                "result": fn() if callable(fn) else {
+                    "refreshed": False, "reason": "MATERIALIZER_UNAVAILABLE"
+                },
+            }
+        if phase == "historical_walk_forward":
+            if not _cadence_due(runtime, "_g1s_worker_last_historical_wf_ts", HISTORICAL_WF_INTERVAL_SEC, now):
+                return {"phase": phase, "skipped": True, "reason": "CADENCE_NOT_DUE"}
+            fn = getattr(runtime, "materialize_historical_walkforward", None)
+            return {
+                "phase": phase,
+                "result": fn() if callable(fn) else {
+                    "refreshed": False, "reason": "HISTORICAL_WF_UNAVAILABLE"
+                },
+            }
+        if phase == "fit_models":
+            if not _cadence_due(runtime, "_g1s_worker_last_fit_gate_ts", FIT_GATE_INTERVAL_SEC, now):
+                return {"phase": phase, "skipped": True, "reason": "CADENCE_NOT_DUE"}
+            return {"phase": phase, "models_created": runtime.fit_if_ready()}
+        raise ValueError(f"unknown research maintenance phase: {phase}")
+    finally:
+        trim_memory_for_pressure()
+
 
 
 def _apply_gate_state(state: dict, gate: dict) -> None:
@@ -294,6 +309,8 @@ def install_research_worker(app) -> None:
                     state["maintenance_running"] = False
                     state["maintenance_phase"] = None
                     state["current_phase"] = "idle"
+                    trim_memory_for_pressure()
+
 
                 await asyncio.sleep(RESEARCH_INTERVAL_SEC)
         finally:

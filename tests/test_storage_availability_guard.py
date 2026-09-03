@@ -2,7 +2,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import errno
+import os
 import sqlite3
+
 
 import pytest
 
@@ -137,3 +139,53 @@ def test_background_impossibility_allows_compaction_when_it_can_fit(
     )
     assert impossible is False
     assert plan["reclaimable_bytes"] > 0
+
+
+def test_degraded_prestart_avoids_large_backup_hashing_freeze(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    result = manager.create_backup(kind="local", reason="prestart")
+    manifest_path = Path(result.manifest_path)
+    payload = storage._read_json(manifest_path)
+    payload["database_size_bytes"] = 6 * 1024 * 1024 * 1024
+    storage._atomic_json(manifest_path, payload)
+
+    backup_file = Path(result.database_path)
+    target_name = backup_file.name
+    orig_os_stat = os.stat
+
+    class MockStat:
+        def __init__(self, st):
+            self._st = st
+            self.st_size = 6 * 1024 * 1024 * 1024
+
+        def __getattr__(self, name):
+            return getattr(self._st, name)
+
+    def mock_os_stat(path, *args, **kwargs):
+        st = orig_os_stat(path, *args, **kwargs)
+        if str(path).endswith(target_name):
+            return MockStat(st)
+        return st
+
+    monkeypatch.setattr(os, "stat", mock_os_stat)
+
+
+    sha_calls = {"n": 0}
+    orig_sha = storage._sha256
+
+    def monitored_sha(path):
+        sha_calls["n"] += 1
+        return orig_sha(path)
+
+    monkeypatch.setattr(storage, "_sha256", monitored_sha)
+
+    reused = availability._reuse_verified_for_degraded_prestart(
+        manager,
+        directory=manager.local_dir,
+        original_error=OSError(errno.ENOSPC, "low disk"),
+    )
+    assert reused.backup_id == result.backup_id
+    assert reused.sha256 == payload["database_sha256"]
+    assert sha_calls["n"] == 0
+    assert manager._startup_integrity["ok"] is True
+
