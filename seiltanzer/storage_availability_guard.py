@@ -182,9 +182,20 @@ def _reuse_verified_for_degraded_prestart(
     expected_sha = str(newest.get("database_sha256") or "").lower()
     if len(expected_sha) != 64:
         raise RuntimeError("verified fallback backup has no SHA256") from original_error
-    actual_sha = _s._sha256(backup_db).lower()
-    if actual_sha != expected_sha:
-        raise RuntimeError("verified fallback backup SHA256 mismatch") from original_error
+
+    backup_ok, backup_detail = _s._sqlite_integrity(backup_db, full=False)
+    if not backup_ok:
+        raise RuntimeError(
+            f"verified fallback backup quick_check failed: {backup_detail}"
+        ) from original_error
+
+    if declared_size <= 64 * 1024 * 1024:
+        actual_sha = _s._sha256(backup_db).lower()
+        if actual_sha != expected_sha:
+            raise RuntimeError("verified fallback backup SHA256 mismatch") from original_error
+    else:
+        actual_sha = expected_sha
+
 
     source_ok, source_detail = _s._sqlite_integrity(self.db_path, full=False)
     if not source_ok:

@@ -49,6 +49,19 @@ def _run_once_memory_bounded(runtime: ShortHorizonRuntime, *, force: bool = Fals
         }
 
     started = time.time()
+    from .production_resource_guard import memory_pressure_state, trim_memory_for_pressure
+
+    pressure = memory_pressure_state()
+    if pressure.get("pause_background"):
+        trim_memory_for_pressure()
+        return {
+            "refreshed": False,
+            "reason": "MEMORY_PRESSURE_YIELD",
+            "contract_version": HISTORICAL_WF_CONTRACT_VERSION,
+            "memory_contract_version": HISTORICAL_WF_MEMORY_VERSION,
+            "rss_mib": pressure.get("rss_mib"),
+        }
+
     _set_state(
         runtime,
         contract_version=HISTORICAL_WF_CONTRACT_VERSION,
@@ -56,6 +69,7 @@ def _run_once_memory_bounded(runtime: ShortHorizonRuntime, *, force: bool = Fals
         last_started_ts=started,
         last_error=None,
     )
+
     try:
         sources, fetch_errors = _fetch_sources(runtime)
         source_set_sha = _sha(
@@ -129,6 +143,7 @@ def _run_once_memory_bounded(runtime: ShortHorizonRuntime, *, force: bool = Fals
             # already; source bars stay because they are shared across horizons.
             del rows
             gc.collect()
+            trim_memory_for_pressure()
 
         provisional = sum(bool(item["historical_winner"]) for item in results)
         _set_state(
@@ -161,6 +176,9 @@ def _run_once_memory_bounded(runtime: ShortHorizonRuntime, *, force: bool = Fals
             last_error=f"{type(exc).__name__}: {str(exc)[:500]}",
         )
         raise
+    finally:
+        trim_memory_for_pressure()
+
 
 
 def install_g1_short_horizon_historical_wf_memory() -> None:
