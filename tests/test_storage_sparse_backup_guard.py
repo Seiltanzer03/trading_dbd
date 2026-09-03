@@ -120,3 +120,112 @@ def test_allocated_bytes_is_never_greater_than_logical_for_sparse_probe(tmp_path
         handle.write(b"\0")
     assert probe.stat().st_size == 32 * 1024 * 1024
     assert sparse._allocated_bytes(probe) <= probe.stat().st_size
+
+
+def test_sparse_file_clone_preserves_bytes_and_holes(tmp_path):
+    source = tmp_path / "source.bin"
+    destination = tmp_path / "destination.bin"
+    logical = 32 * 1024 * 1024
+    with source.open("wb") as handle:
+        handle.write(b"HEAD")
+        handle.seek(logical - 4)
+        handle.write(b"TAIL")
+
+    before_sha = storage._sha256(source)
+    result = sparse._copy_sparse_file(
+        source,
+        destination,
+        directory=tmp_path,
+        abort_floor=1,
+    )
+
+    assert destination.stat().st_size == logical
+    assert storage._sha256(destination) == before_sha
+    assert result["logical_size_bytes"] == logical
+    assert result["filesystem_allocated_bytes"] == sparse._allocated_bytes(destination)
+    assert sparse._allocated_bytes(destination) < logical
+    if result["copy_method"] == "seek_hole":
+        assert sparse._allocated_bytes(destination) <= (
+            sparse._allocated_bytes(source) + 1024 * 1024
+        )
+
+
+def test_quiescent_sparse_clone_replays_wal_only_into_backup(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    writer = sqlite3.connect(manager.db_path)
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("INSERT INTO trades(payload) VALUES ('committed-in-wal')")
+        writer.commit()
+
+        source_sha = storage._sha256(manager.db_path)
+        source_signature = sparse._file_signature(manager.db_path)
+        wal = Path(str(manager.db_path) + "-wal")
+        wal_signature = sparse._file_signature(wal)
+        assert wal_signature is not None
+        plenty = sparse._guard.MIN_BACKUP_HEADROOM_BYTES + 4 * 1024 * 1024 * 1024
+        monkeypatch.setattr(sparse, "_available_bytes", lambda _directory: plenty)
+
+        result = sparse._create_quiescent_sparse_clone_backup(
+            manager,
+            kind="local",
+            reason="prestart",
+        )
+
+        backup = Path(result.database_path)
+        manifest = storage._read_json(Path(result.manifest_path))
+        clone = sqlite3.connect(backup)
+        try:
+            rows = [
+                row[0]
+                for row in clone.execute(
+                    "SELECT payload FROM trades ORDER BY id"
+                ).fetchall()
+            ]
+            assert rows == ["authoritative", "committed-in-wal"]
+            assert clone.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        finally:
+            clone.close()
+
+        assert storage._sha256(manager.db_path) == source_sha
+        assert sparse._file_signature(manager.db_path) == source_signature
+        assert sparse._file_signature(wal) == wal_signature
+        assert not Path(str(backup) + "-wal").exists()
+        assert manifest is not None
+        assert manifest["verified"] is True
+        assert manifest["snapshot_mode"] == "quiescent_sparse_clone_checkpointed"
+        assert manifest["source_wal_present"] is True
+        assert manifest["database_sha256"] == storage._sha256(backup)
+        assert manager._prestart_integrity_ready is True
+    finally:
+        writer.close()
+
+
+def test_quiescent_clone_aborts_if_source_signature_changes(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    plenty = sparse._guard.MIN_BACKUP_HEADROOM_BYTES + 4 * 1024 * 1024 * 1024
+    monkeypatch.setattr(sparse, "_available_bytes", lambda _directory: plenty)
+    original = sparse._verify_source_quiescent
+    calls = {"n": 0}
+
+    def changed(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError(
+                "authoritative database changed during quiescent sparse clone"
+            )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sparse, "_verify_source_quiescent", changed)
+
+    with pytest.raises(RuntimeError, match="changed during quiescent sparse clone"):
+        sparse._create_quiescent_sparse_clone_backup(
+            manager,
+            kind="local",
+            reason="prestart",
+        )
+
+    assert manager._verified_manifests(manager.local_dir) == []
+    assert list(manager.local_dir.glob(".*.tmp.sqlite3")) == []
+    assert storage._sqlite_integrity(manager.db_path, full=False) == (True, "ok")
