@@ -1,8 +1,8 @@
 """Fail-closed replacement of the only verified local SQLite backup.
 
 The production disk is intentionally allowed to keep a single full recovery point
-when two database-sized copies do not fit.  ``storage_disk_guard`` preserves that
-point and raises ENOSPC before allocating a second copy.  This refinement handles
+when two database-sized copies do not fit. ``storage_disk_guard`` preserves that
+point and raises ENOSPC before allocating a second copy. This refinement handles
 only that exact ENOSPC: it freshly verifies the existing slot by SHA256, runs a
 read-only quick_check of the authoritative database, proves that reclaiming the
 old slot creates enough room for a replacement plus the existing 1 GiB operating
@@ -10,10 +10,11 @@ headroom, removes only the verified backup pair, and immediately retries the
 canonical backup implementation.
 
 This is the in-process equivalent of the existing production single-slot recovery
-workflow.  It never deletes or rewrites the authoritative trades.db.
+workflow. It never deletes or rewrites the authoritative trades.db.
 """
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import time
@@ -75,7 +76,7 @@ def _validated_single_slot(
         raise RuntimeError("single-slot verified backup size mismatch")
 
     # Do not sacrifice the current recovery point unless its space is sufficient
-    # to make the canonical replacement possible.  This keeps an impossible
+    # to make the canonical replacement possible. This keeps an impossible
     # rotation fail-closed with the old backup still present.
     if available_bytes + actual_size < required_bytes:
         return None
@@ -90,7 +91,8 @@ def _validated_single_slot(
     source_ok, source_detail = _s._sqlite_integrity(self.db_path, full=False)
     if not source_ok:
         raise RuntimeError(
-            f"authoritative trades.db quick_check failed before single-slot rotation: {source_detail}"
+            "authoritative trades.db quick_check failed before single-slot rotation: "
+            f"{source_detail}"
         )
 
     return {
@@ -130,12 +132,12 @@ def install_storage_single_slot_rotation() -> None:
             # The disk guard released the same RLock when it raised. Reacquire it
             # so no other in-process backup can race validation/deletion/retry.
             with self._lock:
+                directory = self._backup_dir("local")
                 required = max(1, int(self.db_path.stat().st_size)) + MIN_BACKUP_HEADROOM_BYTES
-                available = _available_bytes(self._backup_dir("local"))
+                available = _available_bytes(directory)
                 if available >= required:
                     return guarded_create(self, kind=kind, reason=reason)
 
-                directory = self._backup_dir("local")
                 slot = _validated_single_slot(
                     self,
                     directory,
@@ -151,16 +153,16 @@ def install_storage_single_slot_rotation() -> None:
                 reclaimed = int(slot["backup_bytes"])
 
                 # Same ordering as the existing recovery workflow: remove the
-                # duplicate database copy first, then its manifest.  A crash in
+                # duplicate database copy first, then its manifest. A crash in
                 # between cannot turn a missing file into a usable verified slot.
                 backup_db.unlink()
                 manifest_path.unlink()
-                with suppress_os_sync_errors():
+                with contextlib.suppress(OSError, AttributeError):
                     os.sync()
                 after = _available_bytes(directory)
                 if after < required:
                     # This can only happen if an external reader still holds the
-                    # unlinked inode.  Surface it immediately; never touch trades.db.
+                    # unlinked inode. Surface it immediately; never touch trades.db.
                     raise OSError(
                         errno.ENOSPC,
                         "single-slot verified backup was validated and unlinked but "
@@ -168,7 +170,7 @@ def install_storage_single_slot_rotation() -> None:
                         f"required={required}",
                     )
 
-                action = {
+                self._recovery_actions.append({
                     "ts": time.time(),
                     "action": "replace_verified_single_slot_backup",
                     "reason": SINGLE_SLOT_ROTATION_REASON,
@@ -179,8 +181,7 @@ def install_storage_single_slot_rotation() -> None:
                     "required_bytes": required,
                     "source_integrity": slot["source_integrity"],
                     "authoritative_db_deleted": False,
-                }
-                self._recovery_actions.append(action)
+                })
 
                 try:
                     result = guarded_create(self, kind=kind, reason=reason)
@@ -207,13 +208,3 @@ def install_storage_single_slot_rotation() -> None:
 
     manager_cls.create_backup = create_backup
     manager_cls._storage_single_slot_rotation_version = SINGLE_SLOT_ROTATION_VERSION
-
-
-class suppress_os_sync_errors:
-    """Tiny local context manager; sync failure must not hide actual free-space check."""
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return exc_type is not None and issubclass(exc_type, OSError)
