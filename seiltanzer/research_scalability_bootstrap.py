@@ -5,6 +5,7 @@ from . import passive_learning as _pl
 from . import research_scalability as _runtime
 from .g1_operational_status_passthrough import install_operational_status_passthrough
 from .passive_calibration_nonblocking import install_passive_calibration_nonblocking
+from .validation_nonblocking import install_validation_nonblocking
 
 # research_scalability deliberately avoids another heavyweight import cycle; bind
 # the already-installed passive contract before any bounded endpoint is called.
@@ -17,6 +18,10 @@ def install_research_scalability(app):
     # the passive SQLite/writer lock. Materialize that exact bounded report away
     # from HTTP so functional smoke/readers cannot queue behind research work.
     install_passive_calibration_nonblocking(app)
+    # Full journal Q validation can take long enough that a client timeout leaves
+    # its synchronous worker running. Materialize one genuine report before the
+    # background workers start, persist it, and keep all HTTP readers off SQLite.
+    install_validation_nonblocking(app)
     # G.1E.2 intentionally replaces PassiveLearningEngine.status with a bounded
     # presentation view. Re-attach only the persisted/bounded P0 health telemetry
     # afterwards; never call the legacy full-history status on request paths.
