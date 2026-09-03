@@ -28,7 +28,6 @@ RECOVERY_CONTRACT_VERSION = "seiltanzer-recovery-v1"
 RETENTION_CONTRACT_VERSION = "seiltanzer-backup-retention-v1"
 LOCAL_BACKUP_INTERVAL_SEC = 15 * 60
 OFFHOST_BACKUP_INTERVAL_SEC = 60 * 60
-BACKUP_FREE_SPACE_RESERVE_BYTES = 512 * 1024 * 1024
 
 # These tables contain the economically/research relevant state that must survive
 # process restarts. Missing tables are allowed for old/test databases and are
@@ -291,16 +290,6 @@ class StorageManager:
                 raise FileNotFoundError(str(self.db_path))
             directory = self._backup_dir(kind)
             directory.mkdir(parents=True, exist_ok=True)
-            if reason != "prestart":
-                source_size = self.db_path.stat().st_size
-                free_bytes = shutil.disk_usage(directory).free
-                required_bytes = source_size + BACKUP_FREE_SPACE_RESERVE_BYTES
-                if free_bytes < required_bytes:
-                    raise RuntimeError(
-                        "insufficient disk headroom for "
-                        f"{reason} {kind} backup: free={free_bytes} "
-                        f"required={required_bytes} source={source_size}"
-                    )
             created = _now()
             stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(created))
             backup_id = f"{stamp}-{kind}-{int(created * 1000) % 1000000:06d}"
@@ -316,24 +305,15 @@ class StorageManager:
                 src.execute("PRAGMA busy_timeout=30000")
                 src.backup(dst, pages=256, sleep=0.01)
                 dst.commit()
-            except Exception:
-                with contextlib.suppress(FileNotFoundError):
-                    temp_db.unlink()
-                raise
             finally:
                 dst.close()
                 src.close()
 
             startup_source = self.db_path if reason == "prestart" else None
-            try:
-                ok, integrity_detail, sha, counts, source_check = _verify_backup_snapshot(
-                    temp_db,
-                    startup_source=startup_source,
-                )
-            except Exception:
-                with contextlib.suppress(FileNotFoundError):
-                    temp_db.unlink()
-                raise
+            ok, integrity_detail, sha, counts, source_check = _verify_backup_snapshot(
+                temp_db,
+                startup_source=startup_source,
+            )
             if not ok:
                 with contextlib.suppress(FileNotFoundError):
                     temp_db.unlink()
@@ -354,13 +334,8 @@ class StorageManager:
                     "contract_version": STORAGE_CONTRACT_VERSION,
                 }
                 self._prestart_integrity_ready = True
-            try:
-                size = temp_db.stat().st_size
-                os.replace(temp_db, final_db)
-            except Exception:
-                with contextlib.suppress(FileNotFoundError):
-                    temp_db.unlink()
-                raise
+            size = temp_db.stat().st_size
+            os.replace(temp_db, final_db)
             manifest = {
                 "backup_contract_version": BACKUP_CONTRACT_VERSION,
                 "retention_contract_version": RETENTION_CONTRACT_VERSION,
