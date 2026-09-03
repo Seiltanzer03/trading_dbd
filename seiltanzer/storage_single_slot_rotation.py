@@ -1,13 +1,13 @@
 """Fail-closed replacement of the only verified local SQLite backup.
 
-The production disk is intentionally allowed to keep a single full recovery point
-when two database-sized copies do not fit. ``storage_disk_guard`` preserves that
-point and raises ENOSPC before allocating a second copy. This refinement handles
-only that exact ENOSPC: it freshly verifies the existing slot by SHA256, runs a
-read-only quick_check of the authoritative database, proves that reclaiming the
-old slot creates enough room for a replacement plus the existing 1 GiB operating
-headroom, removes only the verified backup pair, and immediately retries the
-canonical backup implementation.
+The production disk is intentionally allowed to keep a single recovery point when
+two snapshots do not fit. ``storage_disk_guard`` preserves that point and raises
+ENOSPC before allocating a second copy. This refinement handles only that exact
+ENOSPC: it freshly verifies the existing slot by SHA256, runs a read-only
+quick_check of the authoritative database, proves that reclaiming the old slot
+creates enough room for the next raw or compact replacement plus the existing
+1 GiB operating headroom, removes only the verified backup pair, and immediately
+retries the guarded backup implementation.
 
 This is the in-process equivalent of the existing production single-slot recovery
 workflow. It never deletes or rewrites the authoritative trades.db.
@@ -22,12 +22,18 @@ from pathlib import Path
 from typing import Any
 
 from . import storage_runtime as _s
-from .storage_disk_guard import MIN_BACKUP_HEADROOM_BYTES
+from .storage_disk_guard import MIN_BACKUP_HEADROOM_BYTES, _compact_snapshot_plan
 
 
-SINGLE_SLOT_ROTATION_VERSION = "storage-single-slot-rotation-v1"
+SINGLE_SLOT_ROTATION_VERSION = "storage-single-slot-rotation-v2-compact"
 SINGLE_SLOT_ROTATION_REASON = "LOW_DISK_VERIFIED_SINGLE_SLOT_REPLACEMENT"
-_ELIGIBLE_REASONS = {"prestart", "scheduled", "clean_shutdown"}
+_ELIGIBLE_REASONS = {
+    "prestart",
+    "scheduled",
+    "clean_shutdown",
+    "g1m-schema-identity",
+    "g1s-schema-identity",
+}
 _GUARD_ENOSPC_FRAGMENT = "insufficient single-slot backup headroom"
 
 
@@ -45,6 +51,16 @@ def _confined_file(directory: Path, raw: str) -> Path | None:
     if resolved.parent != root:
         return None
     return resolved
+
+
+def _replacement_requirement(self: Any) -> tuple[int, str, dict[str, int] | None]:
+    """Return the smallest fully guarded replacement footprint for current source."""
+    raw_required = max(1, int(self.db_path.stat().st_size)) + MIN_BACKUP_HEADROOM_BYTES
+    plan = _compact_snapshot_plan(self.db_path)
+    compact_required = int(plan["estimated_snapshot_bytes"]) + MIN_BACKUP_HEADROOM_BYTES
+    if int(plan["reclaimable_bytes"]) > 0 and compact_required < raw_required:
+        return compact_required, "compact", plan
+    return raw_required, "raw", None
 
 
 def _validated_single_slot(
@@ -76,7 +92,7 @@ def _validated_single_slot(
         raise RuntimeError("single-slot verified backup size mismatch")
 
     # Do not sacrifice the current recovery point unless its space is sufficient
-    # to make the canonical replacement possible. This keeps an impossible
+    # to make the measured replacement possible. This keeps an impossible
     # rotation fail-closed with the old backup still present.
     if available_bytes + actual_size < required_bytes:
         return None
@@ -133,15 +149,24 @@ def install_storage_single_slot_rotation() -> None:
             # so no other in-process backup can race validation/deletion/retry.
             with self._lock:
                 directory = self._backup_dir("local")
-                required = max(1, int(self.db_path.stat().st_size)) + MIN_BACKUP_HEADROOM_BYTES
+                raw_required = (
+                    max(1, int(self.db_path.stat().st_size))
+                    + MIN_BACKUP_HEADROOM_BYTES
+                )
                 available = _available_bytes(directory)
-                if available >= required:
+                if available >= raw_required:
+                    return guarded_create(self, kind=kind, reason=reason)
+
+                replacement_required, replacement_mode, compact_plan = (
+                    _replacement_requirement(self)
+                )
+                if available >= replacement_required:
                     return guarded_create(self, kind=kind, reason=reason)
 
                 slot = _validated_single_slot(
                     self,
                     directory,
-                    required_bytes=required,
+                    required_bytes=replacement_required,
                     available_bytes=available,
                 )
                 if slot is None:
@@ -160,14 +185,15 @@ def install_storage_single_slot_rotation() -> None:
                 with contextlib.suppress(OSError, AttributeError):
                     os.sync()
                 after = _available_bytes(directory)
-                if after < required:
+                if after < replacement_required:
                     # This can only happen if an external reader still holds the
                     # unlinked inode. Surface it immediately; never touch trades.db.
                     raise OSError(
                         errno.ENOSPC,
                         "single-slot verified backup was validated and unlinked but "
-                        f"filesystem did not release required headroom: available={after} "
-                        f"required={required}",
+                        "filesystem did not release required headroom: "
+                        f"available={after} required={replacement_required} "
+                        f"replacement_mode={replacement_mode}",
                     )
 
                 self._recovery_actions.append({
@@ -178,7 +204,14 @@ def install_storage_single_slot_rotation() -> None:
                     "reclaimed_bytes": reclaimed,
                     "free_before_bytes": available,
                     "free_after_bytes": after,
-                    "required_bytes": required,
+                    "raw_required_bytes": raw_required,
+                    "replacement_required_bytes": replacement_required,
+                    "replacement_mode": replacement_mode,
+                    "compact_reclaimable_source_bytes": (
+                        int(compact_plan.get("reclaimable_bytes") or 0)
+                        if compact_plan is not None
+                        else 0
+                    ),
                     "source_integrity": slot["source_integrity"],
                     "authoritative_db_deleted": False,
                 })
@@ -191,6 +224,7 @@ def install_storage_single_slot_rotation() -> None:
                         "action": "replace_verified_single_slot_backup_failed",
                         "reason": SINGLE_SLOT_ROTATION_REASON,
                         "replaced_backup_id": backup_id,
+                        "replacement_mode": replacement_mode,
                         "error": f"{type(exc).__name__}: {exc}",
                         "authoritative_db_deleted": False,
                     })
@@ -202,6 +236,7 @@ def install_storage_single_slot_rotation() -> None:
                     "reason": SINGLE_SLOT_ROTATION_REASON,
                     "replaced_backup_id": backup_id,
                     "new_backup_id": result.backup_id,
+                    "replacement_mode": replacement_mode,
                     "authoritative_db_deleted": False,
                 })
                 return result
