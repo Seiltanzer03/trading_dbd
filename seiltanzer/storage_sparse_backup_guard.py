@@ -361,6 +361,15 @@ def _create_quiescent_sparse_clone_backup(
     if source_signature is None:
         raise FileNotFoundError(str(source))
     wal_signature = _file_signature(source_wal)
+    source_allocated = _allocated_bytes(source)
+    wal_allocated = 0 if wal_signature is None else _allocated_bytes(source_wal)
+    print(
+        "SPARSE_CLONE_SOURCE "
+        f"logical={source_signature[2]} allocated={source_allocated} "
+        f"wal_logical={0 if wal_signature is None else wal_signature[2]} "
+        f"wal_allocated={wal_allocated} free={before_free}",
+        flush=True,
+    )
 
     created, backup_id, final_db, manifest_path, temp_db = _new_backup_paths(
         self, kind
@@ -452,7 +461,7 @@ def _create_quiescent_sparse_clone_backup(
             snapshot_mode="quiescent_sparse_clone_checkpointed",
             extra_manifest={
                 "source_logical_size_bytes": int(source_signature[2]),
-                "source_filesystem_allocated_bytes": _allocated_bytes(source),
+                "source_filesystem_allocated_bytes": source_allocated,
                 "source_wal_present": wal_signature is not None,
                 "source_wal_size_bytes": 0 if wal_signature is None else int(wal_signature[2]),
                 "main_copy": dict(main_copy or {}),
@@ -477,7 +486,7 @@ def _create_quiescent_sparse_clone_backup(
             "reason": QUIESCENT_CLONE_REASON,
             "backup_id": backup_id,
             "source_logical_size_bytes": int(source_signature[2]),
-            "source_filesystem_allocated_bytes": _allocated_bytes(source),
+            "source_filesystem_allocated_bytes": source_allocated,
             "backup_logical_size_bytes": int(Path(result.database_path).stat().st_size),
             "backup_filesystem_allocated_bytes": _allocated_bytes(
                 Path(result.database_path)
