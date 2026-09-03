@@ -1,0 +1,104 @@
+name: production-health-recovery
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: production-health-recovery
+  cancel-in-progress: false
+
+jobs:
+  health:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    steps:
+      - name: Resolve current green main SHA
+        id: authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected_sha=$(git ls-remote https://github.com/${{ github.repository }} refs/heads/main | cut -f1)
+          test -n "$expected_sha"
+          ci=$(curl -fsS --max-time 8 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${expected_sha}/status" \
+            | python3 -c 'import json,sys; body=json.load(sys.stdin); states={str(x.get("context")):str(x.get("state")) for x in body.get("statuses",[])}; print(states.get("ci/full-webkit","missing"))')
+          echo "HEALTH_EXPECTED_SHA=$expected_sha ci=$ci"
+          test "$ci" = success
+          echo "expected_sha=$expected_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Probe public terminal repeatedly
+        id: public
+        run: |
+          set -euo pipefail
+          healthy=0
+          for attempt in 1 2 3; do
+            result=$(curl -sS -o /tmp/production-health.json \
+              --connect-timeout 2 --max-time 5 -w '%{http_code}' \
+              http://94.241.171.182:8790/api/state 2>/dev/null || true)
+            echo "production health attempt=$attempt/3 http=${result:-000}"
+            if [ "$result" = 200 ]; then
+              healthy=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$healthy" = 1 ]; then
+            echo "unhealthy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "unhealthy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Capture server diagnostics before recovery
+        if: steps.public.outputs.unhealthy == 'true'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          script: |
+            set +e
+            echo '=== HEALTH WATCH LOCAL API ==='
+            curl -sS -o /tmp/health-watch-state.json --connect-timeout 1 --max-time 5 \
+              -w 'local_http=%{http_code} seconds=%{time_total}\n' \
+              http://127.0.0.1:8790/api/state || true
+            echo '=== SERVICE ==='
+            systemctl status seiltanzer --no-pager -l || true
+            systemctl show seiltanzer -p Result -p ExecMainStatus -p NRestarts \
+              -p MemoryCurrent -p MemoryPeak -p ActiveState -p SubState || true
+            echo '=== CAPACITY ==='
+            free -h || true
+            df -h / /opt/seiltanzer || true
+            echo '=== RECENT SERVICE JOURNAL ==='
+            journalctl -u seiltanzer --since '-12 hours' --no-pager -n 500 || true
+            echo '=== RECENT KERNEL OOM / KILL ==='
+            journalctl -k --since '-12 hours' --no-pager 2>/dev/null \
+              | grep -Ei 'out of memory|oom|killed process|memory cgroup' || true
+
+      - name: Dispatch fail-closed single-slot recovery
+        if: steps.public.outputs.unhealthy == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ steps.authority.outputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          echo "Dispatching single-slot recovery for exact green main SHA $EXPECTED_SHA"
+          curl --fail-with-body --silent --show-error \
+            --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/production-single-slot-backup-recovery.yml/dispatches" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"expected_sha\":\"$EXPECTED_SHA\"}}"

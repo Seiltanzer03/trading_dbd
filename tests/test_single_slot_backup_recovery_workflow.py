@@ -11,7 +11,6 @@ def test_recovery_is_deploy_failure_triggered_exact_sha_and_serialized_with_prod
     assert "push:" not in workflow
     assert "branches: [main]" in workflow
     assert "workflow_run:" in workflow
-    assert "workflow_run:" in workflow
     assert 'workflows: ["deploy"]' in workflow
     assert "types: [completed]" in workflow
     assert "workflow_dispatch:" in workflow
@@ -22,7 +21,8 @@ def test_recovery_is_deploy_failure_triggered_exact_sha_and_serialized_with_prod
     assert "cancel-in-progress: false" in workflow
     assert 'test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"' in workflow
     assert 'statuses.get("ci/full-webkit", "missing")' in workflow
-    assert 'item.get("name") == "deploy"' in workflow
+    assert 'DEPLOY_CONCLUSION: ${{ github.event.workflow_run.conclusion }}' in workflow
+    assert 'actions/runs?head_sha=' not in workflow
     assert "needs_recovery=true" in workflow
 
 
