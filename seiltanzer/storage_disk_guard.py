@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -18,13 +19,15 @@ from typing import Any, Iterator
 from . import storage_runtime as _s
 
 
-DISK_GUARD_VERSION = "seiltanzer-storage-disk-guard-v3"
+DISK_GUARD_VERSION = "seiltanzer-storage-disk-guard-v4-compact-backup"
 DEFAULT_LOCAL_BACKUP_MAX_BYTES = 4 * 1024 * 1024 * 1024
 DEFAULT_DENSE_BUDGET_FRACTION = 0.75
 MIN_VERIFIED_LOCAL_BACKUPS = 2
 MIN_BACKUP_HEADROOM_BYTES = 1024 * 1024 * 1024
 DEFAULT_TMP_MAX_AGE_SEC = 5 * 60
+COMPACT_BACKUP_MARGIN_BYTES = 16 * 1024 * 1024
 LOW_DISK_REUSE_REASON = "LOW_DISK_CURRENT_SHA_VERIFIED_BACKUP_REUSE"
+LOW_DISK_COMPACT_REASON = "LOW_DISK_COMPACT_SQLITE_SNAPSHOT"
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -129,6 +132,163 @@ def _preflight_minimum_verified(self, directory: Path) -> int:
 def _available_bytes(directory: Path) -> int:
     stat = os.statvfs(directory)
     return max(0, int(stat.f_bavail) * int(stat.f_frsize))
+
+
+def _compact_snapshot_plan(source: Path) -> dict[str, int]:
+    """Measure whether a read-only VACUUM INTO snapshot can fit safely.
+
+    The normal online backup is intentionally preferred because it is a direct
+    page-for-page recovery point.  This planner is used only when that copy cannot
+    fit.  ``freelist_count`` measures pages SQLite can omit while rebuilding the
+    same logical database.  A source quick_check is mandatory before the fallback
+    is allowed.
+    """
+    source = source.resolve()
+    conn = sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=30)
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+        quick_rows = [str(row[0]) for row in conn.execute("PRAGMA quick_check").fetchall()]
+        if quick_rows != ["ok"]:
+            raise RuntimeError(
+                "source quick_check failed before compact backup: "
+                + "; ".join(quick_rows[:20])
+            )
+        page_size = max(1, int(conn.execute("PRAGMA page_size").fetchone()[0]))
+        page_count = max(1, int(conn.execute("PRAGMA page_count").fetchone()[0]))
+        freelist_count = max(0, int(conn.execute("PRAGMA freelist_count").fetchone()[0]))
+    finally:
+        conn.close()
+    freelist_count = min(freelist_count, page_count)
+    logical_bytes = page_count * page_size
+    logical_used_bytes = max(page_size, (page_count - freelist_count) * page_size)
+    reclaimable_bytes = freelist_count * page_size
+    # VACUUM rebuilds using the same page size and normally cannot require more
+    # than the currently allocated non-freelist pages.  Keep an extra filesystem
+    # cushion anyway; post-copy headroom is checked again before promotion.
+    estimated_snapshot_bytes = logical_used_bytes + COMPACT_BACKUP_MARGIN_BYTES
+    return {
+        "page_size": page_size,
+        "page_count": page_count,
+        "freelist_count": freelist_count,
+        "logical_database_bytes": logical_bytes,
+        "logical_used_bytes": logical_used_bytes,
+        "reclaimable_bytes": reclaimable_bytes,
+        "estimated_snapshot_bytes": estimated_snapshot_bytes,
+    }
+
+
+def _create_compact_backup(
+    self,
+    *,
+    kind: str,
+    reason: str,
+    plan: dict[str, int],
+):
+    """Create and fully verify a compact SQLite recovery point without source writes."""
+    directory = self._backup_dir(kind)
+    directory.mkdir(parents=True, exist_ok=True)
+    created = time.time()
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(created))
+    backup_id = f"{stamp}-{kind}-{int(created * 1000) % 1000000:06d}"
+    final_db = directory / f"{backup_id}.sqlite3"
+    manifest_path = directory / f"{backup_id}.manifest.json"
+    temp_db = directory / f".{backup_id}.tmp.sqlite3"
+    with contextlib.suppress(FileNotFoundError):
+        temp_db.unlink()
+
+    # mode=ro makes the source-side safety property explicit.  VACUUM INTO writes
+    # only the new destination database and obtains a transactionally consistent
+    # snapshot of committed source state, including committed WAL contents.
+    src = sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
+    try:
+        src.execute("PRAGMA busy_timeout=30000")
+        src.execute("VACUUM INTO ?", (str(temp_db),))
+    finally:
+        src.close()
+
+    if not temp_db.is_file():
+        raise RuntimeError("compact SQLite backup did not create its destination")
+    size = int(temp_db.stat().st_size)
+    remaining = _available_bytes(directory)
+    if remaining < MIN_BACKUP_HEADROOM_BYTES:
+        with contextlib.suppress(FileNotFoundError):
+            temp_db.unlink()
+        raise OSError(
+            errno.ENOSPC,
+            "compact backup would consume protected headroom: "
+            f"remaining={remaining} required={MIN_BACKUP_HEADROOM_BYTES}",
+        )
+
+    startup_source = self.db_path if reason == "prestart" else None
+    ok, integrity_detail, sha, counts, source_check = _s._verify_backup_snapshot(
+        temp_db,
+        startup_source=startup_source,
+    )
+    if not ok:
+        with contextlib.suppress(FileNotFoundError):
+            temp_db.unlink()
+        raise RuntimeError(f"compact backup integrity failed: {integrity_detail}")
+    if source_check is not None and not source_check[0]:
+        with contextlib.suppress(FileNotFoundError):
+            temp_db.unlink()
+        raise RuntimeError(f"source startup integrity failed: {source_check[1]}")
+    if source_check is not None:
+        self._startup_integrity = {
+            "checked_ts": time.time(),
+            "ok": source_check[0],
+            "detail": source_check[1],
+            "check_kind": "quick_check",
+            "verification_scope": "pre_engine_source",
+            "contract_version": _s.STORAGE_CONTRACT_VERSION,
+            "backup_compacted": True,
+            "reason": LOW_DISK_COMPACT_REASON,
+        }
+        self._prestart_integrity_ready = True
+
+    os.replace(temp_db, final_db)
+    manifest = {
+        "backup_contract_version": _s.BACKUP_CONTRACT_VERSION,
+        "retention_contract_version": _s.RETENTION_CONTRACT_VERSION,
+        "backup_id": backup_id,
+        "kind": kind,
+        "reason": reason,
+        "created_ts": created,
+        "source_db": str(self.db_path),
+        "database_file": final_db.name,
+        "database_sha256": sha,
+        "database_size_bytes": size,
+        "sqlite_integrity": integrity_detail,
+        "critical_table_counts": counts,
+        "git_commit": self.git_commit,
+        "verified": True,
+        "encryption_status": (
+            "external_target_managed" if kind == "offhost" else "filesystem_permissions"
+        ),
+        "snapshot_mode": "vacuum_into_compact",
+        "disk_guard_version": DISK_GUARD_VERSION,
+        "compact_plan": dict(plan),
+        "free_after_snapshot_bytes": remaining,
+    }
+    _s._atomic_json(manifest_path, manifest)
+    self._recovery_actions.append({
+        "ts": time.time(),
+        "action": "create_compact_verified_backup",
+        "backup_id": backup_id,
+        "reason": LOW_DISK_COMPACT_REASON,
+        "database_size_bytes": size,
+        "reclaimable_source_bytes": int(plan.get("reclaimable_bytes") or 0),
+        "free_after_snapshot_bytes": remaining,
+    })
+    self._apply_retention(kind)
+    return _s.BackupResult(
+        backup_id=backup_id,
+        kind=kind,
+        database_path=str(final_db),
+        manifest_path=str(manifest_path),
+        verified=True,
+        created_ts=created,
+        sha256=sha,
+    )
 
 
 def _reuse_current_prestart_backup(self, directory: Path):
@@ -363,6 +523,7 @@ def install_storage_disk_guard() -> None:
                     minimum_verified=_preflight_minimum_verified(self, directory),
                 )
             _cleanup_stale_temp(directory)
+            compact_plan: dict[str, int] | None = None
             if kind == "local":
                 required = max(1, int(self.db_path.stat().st_size)) + MIN_BACKUP_HEADROOM_BYTES
                 available = _available_bytes(directory)
@@ -373,21 +534,45 @@ def install_storage_disk_guard() -> None:
                     )
                     if reused is not None:
                         return reused
-                    raise OSError(
-                        errno.ENOSPC,
-                        "insufficient single-slot backup headroom while preserving "
-                        f"verified recovery point: available={available} required={required}",
+                    compact_plan = _compact_snapshot_plan(self.db_path)
+                    compact_required = (
+                        int(compact_plan["estimated_snapshot_bytes"])
+                        + MIN_BACKUP_HEADROOM_BYTES
                     )
+                    if (
+                        int(compact_plan["reclaimable_bytes"]) <= 0
+                        or available < compact_required
+                    ):
+                        raise OSError(
+                            errno.ENOSPC,
+                            "insufficient single-slot backup headroom while preserving "
+                            "verified recovery point: "
+                            f"available={available} raw_required={required} "
+                            f"compact_required={compact_required} "
+                            f"reclaimable={compact_plan['reclaimable_bytes']}",
+                        )
             before = {p.name for p in directory.iterdir()}
             try:
-                result = original_create(self, kind=kind, reason=reason)
+                if compact_plan is not None:
+                    result = _create_compact_backup(
+                        self,
+                        kind=kind,
+                        reason=reason,
+                        plan=compact_plan,
+                    )
+                else:
+                    result = original_create(self, kind=kind, reason=reason)
             except Exception:
                 # Remove only artifacts created by this failed attempt. Existing
                 # verified snapshots and the authoritative live DB are untouched.
                 for path in directory.iterdir():
                     if path.name in before:
                         continue
-                    if path.name.endswith(".tmp.sqlite3") or path.name.endswith(".manifest.json") or path.name.endswith(".sqlite3"):
+                    if (
+                        path.name.endswith(".tmp.sqlite3")
+                        or path.name.endswith(".manifest.json")
+                        or path.name.endswith(".sqlite3")
+                    ):
                         with contextlib.suppress(FileNotFoundError, OSError):
                             path.unlink()
                 _cleanup_stale_temp(directory, max_age_sec=0)
