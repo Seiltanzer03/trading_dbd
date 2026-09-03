@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import sqlite3
 
 from seiltanzer import storage_disk_guard as guard
+from seiltanzer import storage_refinement as refinement
 from seiltanzer import storage_runtime as storage
 
 
@@ -79,3 +80,6 @@ def test_compact_backup_is_verified_and_does_not_modify_source(tmp_path):
     assert manifest["database_sha256"] == storage._sha256(backup)
     assert manifest["database_size_bytes"] == backup.stat().st_size
     assert manifest["compact_plan"]["reclaimable_bytes"] > 0
+    assert manifest["storage_refinement_version"] == refinement.REFINEMENT_VERSION
+    assert manifest["schema_sha256"] == refinement._schema_identity(backup)[1]
+    assert manifest["manifest_payload_sha256"] == refinement._manifest_hash(manifest)
