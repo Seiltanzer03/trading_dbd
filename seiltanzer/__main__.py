@@ -43,6 +43,7 @@ from .option_feed_resilience import install_option_feed_resilience
 from .option_shadow_state import install_option_shadow_state
 from .production_resource_guard import install_production_resource_guard
 from .research_scalability_bootstrap import install_research_scalability
+from .storage_availability_guard import install_storage_availability_guard
 from .storage_disk_guard import install_storage_disk_guard
 from .storage_fast_status_refinement import install_storage_fast_status
 from .storage_refinement import install_storage_refinement
@@ -117,10 +118,15 @@ def main() -> None:
     install_storage_disk_guard()
     # Try a low-disk SQLite online backup while guarding actual free filesystem
     # blocks before the legacy single-slot path can consider removing a recovery
-    # point.  Sparse snapshots are therefore handled without predicting reclaim
+    # point. Sparse snapshots are therefore handled without predicting reclaim
     # from their logical st_size.
     install_storage_sparse_backup_guard()
     install_storage_single_slot_rotation()
+    # Outermost availability refinement: impossible background snapshots are
+    # deferred before scanning/copying multi-GiB SQLite files, while prestart may
+    # serve only after re-verifying an existing backup and the authoritative DB.
+    # The old backup timestamp is never refreshed, so missed RPO stays visible.
+    install_storage_availability_guard()
     install_g1_management_storage()
     install_storage_schema_registry_integrity()
 
