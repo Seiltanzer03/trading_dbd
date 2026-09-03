@@ -50,6 +50,7 @@ from .storage_routes import install_storage_routes
 from .storage_runtime import install_storage_runtime, prepare_storage
 from .storage_schema_registry_integrity import install_storage_schema_registry_integrity
 from .storage_single_slot_rotation import install_storage_single_slot_rotation
+from .storage_sparse_backup_guard import install_storage_sparse_backup_guard
 from .strategy_terminal_guard import install_strategy_terminal_guard
 from .universe_runtime_refinement import install_universe_runtime_refinement
 from .visual_universe_page import install_visual_universe_page
@@ -114,6 +115,11 @@ def main() -> None:
     install_analytics_runtime()
     install_storage_refinement()
     install_storage_disk_guard()
+    # Try a low-disk SQLite online backup while guarding actual free filesystem
+    # blocks before the legacy single-slot path can consider removing a recovery
+    # point.  Sparse snapshots are therefore handled without predicting reclaim
+    # from their logical st_size.
+    install_storage_sparse_backup_guard()
     install_storage_single_slot_rotation()
     install_g1_management_storage()
     install_storage_schema_registry_integrity()
