@@ -293,14 +293,18 @@ jobs:
             if free_bytes() < required and newest is not None:
                 # The user explicitly authorized sacrificing backup copies, never
                 # market data. The newest pair was SHA-verified above and the live
-                # DB passed quick_check. Remove the old slot so startup can create
-                # its exact-SHA replacement immediately.
-                _, manifest_path, backup_db, _payload = newest
-                removed_bytes += backup_db.stat().st_size + manifest_path.stat().st_size
-                backup_db.unlink()
-                manifest_path.unlink()
-                removed_pairs += 1
-                deleted_last_verified = True
+                # DB passed quick_check. Remove the old slot only when its actual
+                # filesystem blocks guarantee sufficient rebuild headroom.
+                allocated_reclaim = int(newest[2].stat().st_blocks) * 512
+                if free_bytes() + allocated_reclaim >= required:
+                    _, manifest_path, backup_db, _payload = newest
+                    removed_bytes += backup_db.stat().st_size + manifest_path.stat().st_size
+                    backup_db.unlink()
+                    manifest_path.unlink()
+                    removed_pairs += 1
+                    deleted_last_verified = True
+                else:
+                    print("RETAIN_NEWEST_BACKUP: deleting last verified slot would not yield sufficient headroom")
 
             legacy_removed = False
             legacy_bytes = 0
