@@ -13,7 +13,7 @@ def test_gate_does_not_pass_actions_payload_through_environment():
 
 def test_manual_health_dispatch_still_requires_exact_green_main():
     source = WORKFLOW.read_text(encoding='utf-8')
-    exact = source.index('test "$current_main" = "$EXPECTED_SHA"')
+    exact = source.index('refs/heads/main | cut -f1)" = "$EXPECTED_SHA"')
     green = source.index('test "$ci" = success')
     manual = source.index('if [ "$EVENT_NAME" = workflow_dispatch ]')
     assert exact < manual
@@ -30,10 +30,10 @@ def test_automatic_gate_uses_completed_deploy_event_directly():
 
 def test_recovery_never_deletes_authoritative_database():
     source = WORKFLOW.read_text(encoding='utf-8')
-    assert "live = Path('/opt/seiltanzer/data/trades.db').resolve()" in source
-    assert "quick_check(live)" in source
-    assert "live.unlink()" not in source
-    assert "rm -f -- \"$live\"" not in source
-    assert "backup.unlink()" in source
-    assert "manifest_path.unlink()" in source
-    assert "1024 * 1024 * 1024" in source
+    assert 'live = Path("/opt/seiltanzer/data/trades.db").resolve()' in source
+    assert 'AUTHORITATIVE_DB_QUICK_CHECK' in source
+    assert 'live.unlink()' not in source
+    assert 'rm -f -- "$live"' not in source
+    assert 'backup_db.unlink()' in source
+    assert 'manifest_path.unlink()' in source
+    assert '1024 * 1024 * 1024' in source
