@@ -13,7 +13,7 @@ def test_gate_does_not_pass_actions_payload_through_environment():
 
 def test_manual_health_dispatch_still_requires_exact_green_main():
     source = WORKFLOW.read_text(encoding='utf-8')
-    exact = source.index('refs/heads/main | cut -f1)" = "$EXPECTED_SHA"')
+    exact = source.index('refs/heads/main | cut -f1)\" = \"$EXPECTED_SHA\"')
     green = source.index('test "$ci" = success')
     manual = source.index('if [ "$EVENT_NAME" = workflow_dispatch ]')
     assert exact < manual
