@@ -34,14 +34,18 @@ from .storage_disk_guard import (
 
 AVAILABILITY_GUARD_VERSION = "storage-availability-guard-v1-low-disk-defer"
 DEGRADED_REUSE_REASON = "LOW_DISK_STALE_VERIFIED_BACKUP_AVAILABILITY_REUSE"
+DEGRADED_ZERO_BACKUP_REASON = "LOW_DISK_ZERO_BACKUP_AVAILABILITY_SERVE"
 BACKGROUND_DEFER_REASON = "LOW_DISK_BACKGROUND_BACKUP_DEFERRED"
 _BACKGROUND_REASONS = {"scheduled", "clean_shutdown"}
 _LOW_DISK_RETRY_MIN_SEC = 5 * 60
 
 
 def _available_bytes(directory: Path) -> int:
-    stat = os.statvfs(directory)
-    return max(0, int(stat.f_bavail) * int(stat.f_frsize))
+    if callable(getattr(os, "statvfs", None)):
+        stat = os.statvfs(directory)
+        return max(0, int(stat.f_bavail) * int(stat.f_frsize))
+    import shutil
+    return max(0, int(shutil.disk_usage(directory).free))
 
 
 def _lightweight_compact_plan(source: Path) -> dict[str, int]:
@@ -113,7 +117,56 @@ def _reuse_verified_for_degraded_prestart(
     """Keep serving with an unchanged verified point while exposing stale RPO."""
     manifests = self._verified_manifests(directory)
     if not manifests:
-        raise original_error
+        source_ok, source_detail = _s._sqlite_integrity(self.db_path, full=False)
+        if not source_ok:
+            raise RuntimeError(
+                "authoritative trades.db quick_check failed during degraded startup: "
+                f"{source_detail}"
+            ) from original_error
+        checked_ts = time.time()
+        self._startup_integrity = {
+            "checked_ts": checked_ts,
+            "ok": True,
+            "detail": source_detail,
+            "check_kind": "quick_check",
+            "verification_scope": "pre_engine_source",
+            "backup_reused": False,
+            "durability_degraded": True,
+            "backup_id": None,
+            "backup_age_sec": None,
+            "reason": DEGRADED_ZERO_BACKUP_REASON,
+            "original_backup_created_ts": None,
+            "original_backup_git_commit": None,
+            "availability_guard_version": AVAILABILITY_GUARD_VERSION,
+        }
+        self._prestart_integrity_ready = True
+        message = (
+            "serving without local backup after deterministic low-disk ENOSPC; "
+            f"authoritative_quick_check={source_detail} error={original_error}"
+        )
+        self._last_error = message
+        self._recovery_actions.append(
+            {
+                "ts": checked_ts,
+                "action": "serve_without_backup_under_low_disk",
+                "reason": DEGRADED_ZERO_BACKUP_REASON,
+                "backup_id": None,
+                "backup_age_sec": None,
+                "source_quick_check": source_detail,
+                "durability_degraded": True,
+                "authoritative_db_deleted": False,
+                "authoritative_db_modified": False,
+            }
+        )
+        return _s.BackupResult(
+            backup_id="degraded-zero-backup",
+            kind="local",
+            database_path=str(self.db_path),
+            manifest_path="",
+            verified=False,
+            created_ts=checked_ts,
+            sha256="",
+        )
     newest = manifests[0]
     backup_db = _confined_backup(directory, newest)
     if backup_db is None:

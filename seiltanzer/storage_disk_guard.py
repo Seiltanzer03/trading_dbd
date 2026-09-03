@@ -117,22 +117,24 @@ def _retention_priority(manifests: list[dict[str, Any]], *, dense_ids: set[str])
     return sparse
 
 
+def _available_bytes(directory: Path) -> int:
+    if callable(getattr(os, "statvfs", None)):
+        stat = os.statvfs(directory)
+        return max(0, int(stat.f_bavail) * int(stat.f_frsize))
+    import shutil
+    return max(0, int(shutil.disk_usage(directory).free))
+
+
 def _preflight_minimum_verified(self, directory: Path) -> int:
     """Preserve one recovery point when two would prevent a replacement copy."""
     try:
         live_bytes = max(1, int(self.db_path.stat().st_size))
-        stat = os.statvfs(directory)
-        free_bytes = max(0, int(stat.f_bavail) * int(stat.f_frsize))
-    except OSError:
+        free_bytes = _available_bytes(directory)
+    except (OSError, AttributeError):
         # Unknown capacity must not reduce the normal two-backup durability floor.
         return MIN_VERIFIED_LOCAL_BACKUPS
     required_bytes = live_bytes + MIN_BACKUP_HEADROOM_BYTES
     return 1 if free_bytes < required_bytes else MIN_VERIFIED_LOCAL_BACKUPS
-
-
-def _available_bytes(directory: Path) -> int:
-    stat = os.statvfs(directory)
-    return max(0, int(stat.f_bavail) * int(stat.f_frsize))
 
 
 def _compact_snapshot_plan(source: Path) -> dict[str, int]:

@@ -23,6 +23,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+if not hasattr(os, "statvfs"):
+    os.statvfs = None  # type: ignore[attr-defined]
+
 from . import storage_runtime as _s
 from .storage_disk_guard import MIN_BACKUP_HEADROOM_BYTES, _compact_snapshot_plan
 

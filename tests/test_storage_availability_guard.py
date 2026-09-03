@@ -57,16 +57,36 @@ def test_degraded_prestart_reuses_verified_backup_without_touching_source(tmp_pa
     assert action["backup_sha256_reverified"] is True
 
 
-def test_degraded_prestart_refuses_missing_recovery_point(tmp_path):
+def test_degraded_prestart_serves_without_backup_when_no_recovery_point_exists(tmp_path):
     manager = _manager(tmp_path)
     original = OSError(errno.ENOSPC, "no room")
-    with pytest.raises(OSError) as exc:
+    result = availability._reuse_verified_for_degraded_prestart(
+        manager,
+        directory=manager.local_dir,
+        original_error=original,
+    )
+    assert result.backup_id == "degraded-zero-backup"
+    assert manager._prestart_integrity_ready is True
+    assert manager._startup_integrity["ok"] is True
+    assert manager._startup_integrity["durability_degraded"] is True
+    assert manager._startup_integrity["reason"] == availability.DEGRADED_ZERO_BACKUP_REASON
+    action = manager._recovery_actions[-1]
+    assert action["authoritative_db_deleted"] is False
+    assert action["authoritative_db_modified"] is False
+    assert action["source_quick_check"] == "ok"
+
+
+def test_degraded_prestart_refuses_corrupt_authoritative_database(tmp_path):
+    manager = _manager(tmp_path)
+    with open(manager.db_path, "wb") as f:
+        f.write(b"corrupt header and garbage data")
+    original = OSError(errno.ENOSPC, "no room")
+    with pytest.raises(RuntimeError, match="authoritative trades.db quick_check failed"):
         availability._reuse_verified_for_degraded_prestart(
             manager,
             directory=manager.local_dir,
             original_error=original,
         )
-    assert exc.value is original
 
 
 def test_background_impossibility_is_proved_without_full_database_scan(

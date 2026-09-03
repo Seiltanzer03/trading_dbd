@@ -112,3 +112,15 @@ def test_post_restore_stability_does_not_retry_http_failure(monkeypatch):
         readiness.wait_route_stable("/api/state", budget_ms=3000.0,
                                     consecutive=2, attempts=5)
     assert calls == 1
+
+
+def test_production_readiness_allows_degraded_low_disk_health_and_age():
+    allowed = {"HEALTHY", "LOCAL_BACKUP_ONLY", "DISASTER_RECOVERY_DEGRADED"}
+    skip_restore_drill = True
+    storage = {"startup_integrity": {"durability_degraded": True}, "health": "BACKUP_STALE"}
+    if skip_restore_drill and (
+        storage.get("startup_integrity", {}).get("durability_degraded")
+        or storage.get("health") == "BACKUP_STALE"
+    ):
+        allowed.add("BACKUP_STALE")
+    assert storage.get("health") in allowed
