@@ -9,7 +9,9 @@ creates enough room for the next raw or compact replacement plus the existing
 1 GiB operating headroom, removes only the verified backup pair, and immediately
 retries the guarded backup implementation.
 
-This is the in-process equivalent of the existing production single-slot recovery
+A SQLite backup may be a sparse file. Therefore replacement safety is based on
+filesystem-allocated blocks (``st_blocks``), never logical ``st_size``. This is
+the in-process equivalent of the existing production single-slot recovery
 workflow. It never deletes or rewrites the authoritative trades.db.
 """
 from __future__ import annotations
@@ -25,7 +27,7 @@ from . import storage_runtime as _s
 from .storage_disk_guard import MIN_BACKUP_HEADROOM_BYTES, _compact_snapshot_plan
 
 
-SINGLE_SLOT_ROTATION_VERSION = "storage-single-slot-rotation-v2-compact"
+SINGLE_SLOT_ROTATION_VERSION = "storage-single-slot-rotation-v3-allocated-blocks"
 SINGLE_SLOT_ROTATION_REASON = "LOW_DISK_VERIFIED_SINGLE_SLOT_REPLACEMENT"
 _ELIGIBLE_REASONS = {
     "prestart",
@@ -40,6 +42,15 @@ _GUARD_ENOSPC_FRAGMENT = "insufficient single-slot backup headroom"
 def _available_bytes(directory: Path) -> int:
     stat = os.statvfs(directory)
     return max(0, int(stat.f_bavail) * int(stat.f_frsize))
+
+
+def _allocated_bytes(path: Path) -> int:
+    """Return blocks actually reclaimable on unlink, not sparse logical size."""
+    stat = path.stat()
+    blocks = getattr(stat, "st_blocks", None)
+    if blocks is None:
+        return max(1, int(stat.st_size))
+    return max(0, int(blocks) * 512)
 
 
 def _confined_file(directory: Path, raw: str) -> Path | None:
@@ -87,14 +98,16 @@ def _validated_single_slot(
         declared_size = int(manifest.get("database_size_bytes") or 0)
     except (TypeError, ValueError):
         return None
-    actual_size = int(backup_db.stat().st_size)
-    if declared_size <= 0 or actual_size != declared_size:
+    stat = backup_db.stat()
+    logical_size = int(stat.st_size)
+    allocated_size = _allocated_bytes(backup_db)
+    if declared_size <= 0 or logical_size != declared_size:
         raise RuntimeError("single-slot verified backup size mismatch")
 
-    # Do not sacrifice the current recovery point unless its space is sufficient
-    # to make the measured replacement possible. This keeps an impossible
-    # rotation fail-closed with the old backup still present.
-    if available_bytes + actual_size < required_bytes:
+    # st_size is a logical SQLite length and may describe sparse holes. Only
+    # st_blocks predicts what unlink can actually return to statvfs. Production
+    # previously lost its last verified slot because these two were conflated.
+    if available_bytes + allocated_size < required_bytes:
         return None
 
     expected_sha = str(manifest.get("database_sha256") or "").lower()
@@ -115,14 +128,16 @@ def _validated_single_slot(
         "backup_id": backup_id,
         "backup_db": backup_db,
         "manifest_path": manifest_path,
-        "backup_bytes": actual_size,
+        "backup_bytes": allocated_size,
+        "backup_logical_bytes": logical_size,
+        "backup_allocated_bytes": allocated_size,
         "source_integrity": source_detail,
         "database_sha256": actual_sha,
     }
 
 
 def install_storage_single_slot_rotation() -> None:
-    """Install after ``install_storage_disk_guard`` and before ``prepare_storage``."""
+    """Install after low-disk sparse guard and before ``prepare_storage``."""
     manager_cls = _s.StorageManager
     if (
         getattr(manager_cls, "_storage_single_slot_rotation_version", None)
@@ -175,23 +190,21 @@ def install_storage_single_slot_rotation() -> None:
                 backup_db = slot["backup_db"]
                 manifest_path = slot["manifest_path"]
                 backup_id = str(slot["backup_id"])
-                reclaimed = int(slot["backup_bytes"])
+                reclaimed = int(slot["backup_allocated_bytes"])
 
-                # Same ordering as the existing recovery workflow: remove the
-                # duplicate database copy first, then its manifest. A crash in
-                # between cannot turn a missing file into a usable verified slot.
+                # This destructive fallback is reachable only when actual allocated
+                # blocks prove the filesystem can satisfy the replacement after
+                # unlink. Sparse logical size is never accepted as that proof.
                 backup_db.unlink()
                 manifest_path.unlink()
                 with contextlib.suppress(OSError, AttributeError):
                     os.sync()
                 after = _available_bytes(directory)
                 if after < replacement_required:
-                    # This can only happen if an external reader still holds the
-                    # unlinked inode. Surface it immediately; never touch trades.db.
                     raise OSError(
                         errno.ENOSPC,
-                        "single-slot verified backup was validated and unlinked but "
-                        "filesystem did not release required headroom: "
+                        "single-slot verified backup was validated by allocated blocks "
+                        "but filesystem did not release required headroom: "
                         f"available={after} required={replacement_required} "
                         f"replacement_mode={replacement_mode}",
                     )
@@ -202,6 +215,8 @@ def install_storage_single_slot_rotation() -> None:
                     "reason": SINGLE_SLOT_ROTATION_REASON,
                     "backup_id": backup_id,
                     "reclaimed_bytes": reclaimed,
+                    "backup_logical_bytes": int(slot["backup_logical_bytes"]),
+                    "backup_allocated_bytes": reclaimed,
                     "free_before_bytes": available,
                     "free_after_bytes": after,
                     "raw_required_bytes": raw_required,
