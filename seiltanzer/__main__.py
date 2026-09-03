@@ -49,6 +49,7 @@ from .storage_refinement import install_storage_refinement
 from .storage_routes import install_storage_routes
 from .storage_runtime import install_storage_runtime, prepare_storage
 from .storage_schema_registry_integrity import install_storage_schema_registry_integrity
+from .storage_single_slot_rotation import install_storage_single_slot_rotation
 from .strategy_terminal_guard import install_strategy_terminal_guard
 from .universe_runtime_refinement import install_universe_runtime_refinement
 from .visual_universe_page import install_visual_universe_page
@@ -113,6 +114,7 @@ def main() -> None:
     install_analytics_runtime()
     install_storage_refinement()
     install_storage_disk_guard()
+    install_storage_single_slot_rotation()
     install_g1_management_storage()
     install_storage_schema_registry_integrity()
 

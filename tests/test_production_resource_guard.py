@@ -80,10 +80,11 @@ def test_memory_pressure_thresholds_are_monotonic_and_explicit() -> None:
     assert normal["pause_background"] is False
     assert soft["level"] == "soft"
     assert soft["pause_background"] is True
-    assert soft["shed_optional_feeds"] is False
+    assert soft["shed_optional_feeds"] is True
+    assert soft["shed_all_heavy_feeds"] is False
     assert hard["level"] == "hard"
     assert hard["shed_optional_feeds"] is True
-    assert hard["shed_all_heavy_feeds"] is False
+    assert hard["shed_all_heavy_feeds"] is True
     assert critical["level"] == "critical"
     assert critical["shed_all_heavy_feeds"] is True
 

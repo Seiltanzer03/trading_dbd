@@ -16,7 +16,7 @@ from functools import wraps
 from typing import Any, Callable
 
 
-RESOURCE_GUARD_VERSION = "production-resource-guard-v2-memory-pressure"
+RESOURCE_GUARD_VERSION = "production-resource-guard-v3-host-headroom"
 _HEAVY_FEED_METHODS = (
     "refresh_intraday",
     "refresh_vols",
@@ -25,7 +25,7 @@ _HEAVY_FEED_METHODS = (
     "refresh_iv_surface",
     "refresh_correlation",
 )
-_OPTIONAL_AT_HARD_PRESSURE = {
+_OPTIONAL_AT_SOFT_PRESSURE = {
     "refresh_daily",
     "refresh_chain",
     "refresh_iv_surface",
@@ -36,17 +36,71 @@ _LAST_TRIM_TS = 0.0
 _TRIM_LOCK = threading.Lock()
 
 
-def _env_mib(name: str, default: int) -> int:
+def _host_total_mib() -> int | None:
+    """Return physical RAM from procfs without allocating a probe buffer."""
     try:
-        value = int(os.environ.get(name, str(default)))
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    return max(1, int(line.split()[1]) // 1024)
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _default_memory_limits(total_mib: int | None) -> tuple[int, int, int]:
+    """Keep large-host defaults but reserve real spike headroom on a 2 GiB VPS.
+
+    Production was OOM-killed at roughly 1.51 GiB RSS on a 1.9 GiB host.  The
+    previous 1450 MiB critical threshold was therefore too close to the kernel
+    kill point to be useful.  On small hosts we start yielding background work
+    near one third of RAM and stop starting any heavy feed near 43%, leaving
+    hundreds of MiB for a single in-flight phase and the OS page cache.
+    """
+    legacy = (850, 1200, 1450)
+    if total_mib is None or total_mib >= 4096:
+        return legacy
+    total = max(1024, int(total_mib))
+    soft = min(legacy[0], max(512, int(total * 0.33)))
+    hard = min(legacy[1], max(soft + 128, int(total * 0.43)))
+    critical = min(legacy[2], max(hard + 128, int(total * 0.53)))
+    return soft, hard, critical
+
+
+def _env_mib(primary: str, legacy: str, default: int) -> int:
+    raw = os.environ.get(primary)
+    if raw is None:
+        raw = os.environ.get(legacy)
+    try:
+        value = int(raw) if raw is not None else int(default)
     except (TypeError, ValueError):
-        value = default
+        value = int(default)
     return max(128, value)
 
 
-MEMORY_SOFT_MIB = _env_mib("SEILTZANZER_MEMORY_SOFT_MIB", 850)
-MEMORY_HARD_MIB = max(MEMORY_SOFT_MIB + 128, _env_mib("SEILTZANZER_MEMORY_HARD_MIB", 1200))
-MEMORY_CRITICAL_MIB = max(MEMORY_HARD_MIB + 128, _env_mib("SEILTZANZER_MEMORY_CRITICAL_MIB", 1450))
+_HOST_TOTAL_MIB = _host_total_mib()
+_DEFAULT_SOFT_MIB, _DEFAULT_HARD_MIB, _DEFAULT_CRITICAL_MIB = _default_memory_limits(
+    _HOST_TOTAL_MIB
+)
+# Accept the correctly-spelled variables going forward while retaining the old
+# misspelled names as compatibility aliases for any existing service override.
+MEMORY_SOFT_MIB = _env_mib(
+    "SEILTANZER_MEMORY_SOFT_MIB", "SEILTZANZER_MEMORY_SOFT_MIB", _DEFAULT_SOFT_MIB
+)
+MEMORY_HARD_MIB = max(
+    MEMORY_SOFT_MIB + 128,
+    _env_mib(
+        "SEILTANZER_MEMORY_HARD_MIB", "SEILTZANZER_MEMORY_HARD_MIB", _DEFAULT_HARD_MIB
+    ),
+)
+MEMORY_CRITICAL_MIB = max(
+    MEMORY_HARD_MIB + 128,
+    _env_mib(
+        "SEILTANZER_MEMORY_CRITICAL_MIB",
+        "SEILTZANZER_MEMORY_CRITICAL_MIB",
+        _DEFAULT_CRITICAL_MIB,
+    ),
+)
 
 
 def _rss_bytes() -> int | None:
@@ -77,12 +131,13 @@ def memory_pressure_state(rss_bytes: int | None = None) -> dict[str, Any]:
         "level": level,
         "rss_bytes": rss,
         "rss_mib": round(rss_mib, 2) if rss_mib is not None else None,
+        "host_total_mib": _HOST_TOTAL_MIB,
         "soft_mib": MEMORY_SOFT_MIB,
         "hard_mib": MEMORY_HARD_MIB,
         "critical_mib": MEMORY_CRITICAL_MIB,
         "pause_background": level in {"soft", "hard", "critical"},
-        "shed_optional_feeds": level in {"hard", "critical"},
-        "shed_all_heavy_feeds": level == "critical",
+        "shed_optional_feeds": level in {"soft", "hard", "critical"},
+        "shed_all_heavy_feeds": level in {"hard", "critical"},
     }
 
 
@@ -158,7 +213,8 @@ def _wrap_heavy_refresh(method: Callable[..., Any]) -> Callable[..., Any]:
             pressure = memory_pressure_state()
             should_shed = _production_shedding_enabled(owner) and (
                 pressure["shed_all_heavy_feeds"] or (
-                    pressure["shed_optional_feeds"] and method_name in _OPTIONAL_AT_HARD_PRESSURE
+                    pressure["shed_optional_feeds"]
+                    and method_name in _OPTIONAL_AT_SOFT_PRESSURE
                 )
             )
             if should_shed:
@@ -168,7 +224,10 @@ def _wrap_heavy_refresh(method: Callable[..., Any]) -> Callable[..., Any]:
             try:
                 return method(*args, **kwargs)
             finally:
-                _trim_allocator()
+                # Every heavy refresh is an explicit memory boundary on the 2 GiB
+                # production host.  Waiting 15 seconds can retain a full temporary
+                # numpy/pandas arena into the next refresh and reproduce the OOM.
+                _trim_allocator(min_interval_sec=0.0)
 
     guarded._production_resource_guard_version = RESOURCE_GUARD_VERSION  # type: ignore[attr-defined]
     return guarded
@@ -209,6 +268,7 @@ def resource_guard_status() -> dict[str, Any]:
         "heavy_feed_parallelism": 1,
         "passive_feed_cache_max": 1,
         "allocator_trim_supported": True,
+        "host_memory_adaptive_limits": True,
         "memory_pressure": pressure,
         "rss_bytes": pressure["rss_bytes"],
         "rss_mib": pressure["rss_mib"],
