@@ -23,77 +23,53 @@ env:
 jobs:
   gate:
     runs-on: ubuntu-22.04
-    timeout-minutes: 35
+    timeout-minutes: 5
     outputs:
-      needs_recovery: ${{ steps.wait.outputs.needs_recovery }}
+      needs_recovery: ${{ steps.gate.outputs.needs_recovery }}
     steps:
-      - name: Wait for green exact-SHA CI and the automatic deploy result
-        id: wait
+      - name: Verify exact green main SHA and decide recovery
+        id: gate
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          DEPLOY_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          DEPLOY_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
-          test "$(git ls-remote https://github.com/${{ github.repository }} refs/heads/main | cut -f1)" = "$EXPECTED_SHA"
+          current_main=$(git ls-remote https://github.com/${{ github.repository }} refs/heads/main | cut -f1)
+          test -n "$EXPECTED_SHA"
+          test "$current_main" = "$EXPECTED_SHA"
 
-          ci=missing
-          for attempt in $(seq 1 100); do
-            body=$(curl -fsS --max-time 8 \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${{ github.repository }}/commits/${EXPECTED_SHA}/status")
-            ci=$(BODY="$body" python3 - <<'PY'
-          import json, os
-          statuses = {
-              str(item.get("context")): str(item.get("state"))
-              for item in json.loads(os.environ["BODY"]).get("statuses", [])
-          }
-          print(statuses.get("ci/full-webkit", "missing"))
-          PY
-            )
-            echo "exact-SHA CI attempt=$attempt/100 state=$ci"
-            [ "$ci" = success ] && break
-            [ "$ci" = failure ] && exit 1
-            sleep 10
-          done
+          ci=$(curl -fsS --max-time 8 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${EXPECTED_SHA}/status" \
+            | python3 -c 'import json,sys; body=json.load(sys.stdin); states={str(x.get("context")):str(x.get("state")) for x in body.get("statuses",[])}; print(states.get("ci/full-webkit","missing"))')
+          echo "RECOVERY_GATE_SHA=$EXPECTED_SHA ci=$ci event=$EVENT_NAME deploy=$DEPLOY_CONCLUSION"
           test "$ci" = success
 
-          deploy=missing
-          for attempt in $(seq 1 100); do
-            body=$(curl -fsS --max-time 8 \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs?head_sha=${EXPECTED_SHA}&per_page=100")
-            deploy=$(BODY="$body" python3 - <<'PY'
-          import json, os
-          runs = [
-              item for item in json.loads(os.environ["BODY"]).get("workflow_runs", [])
-              if item.get("name") == "deploy" and item.get("event") == "workflow_run"
-          ]
-          runs.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-          if not runs:
-              print("missing")
-          else:
-              run = runs[0]
-              print(str(run.get("conclusion") or run.get("status") or "missing"))
-          PY
-            )
-            echo "automatic deploy attempt=$attempt/100 state=$deploy"
-            case "$deploy" in
-              success)
-                echo "needs_recovery=false" >> "$GITHUB_OUTPUT"
-                exit 0
-                ;;
-              failure|cancelled|timed_out)
-                echo "needs_recovery=true" >> "$GITHUB_OUTPUT"
-                exit 0
-                ;;
-            esac
-            sleep 10
-          done
-          echo "::error::Automatic deploy did not reach a terminal state"
-          exit 1
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            # Manual dispatch is used by the health watcher after repeated public
+            # connection failure. Exact-main and green-CI checks above remain mandatory.
+            echo "needs_recovery=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          test "$EVENT_NAME" = workflow_run
+          test "$DEPLOY_BRANCH" = main
+          case "$DEPLOY_CONCLUSION" in
+            success)
+              echo "needs_recovery=false" >> "$GITHUB_OUTPUT"
+              ;;
+            failure|cancelled|timed_out)
+              echo "needs_recovery=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unexpected deploy conclusion: $DEPLOY_CONCLUSION"
+              exit 1
+              ;;
+          esac
 
   recover:
     needs: gate
@@ -104,9 +80,11 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
-      - name: Rotate duplicate local backups and rebuild one verified slot
+      - name: Rotate verified local slot and rebuild exact-SHA recovery point
         id: recovery
         uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
         with:
           host: 94.241.171.182
           username: root
@@ -116,10 +94,13 @@ jobs:
           envs: EXPECTED_SHA
           script: |
             set -euo pipefail
-            # Recovery deliberately stops the writer while validating and rotating
-            # disposable backup copies. Restore the terminal on every exit path,
-            # including fail-closed disk/integrity errors, so a failed rotation
-            # cannot leave production unavailable.
+            root=/opt/seiltanzer/data/backups/local
+            live=/opt/seiltanzer/data/trades.db
+            test "$root" = /opt/seiltanzer/data/backups/local
+            test "$live" = /opt/seiltanzer/data/trades.db
+            test -f "$live"
+            mkdir -p "$root"
+
             restart_needed=1
             restore_service_on_exit() {
               if [ "${restart_needed:-1}" = 1 ]; then
@@ -129,82 +110,22 @@ jobs:
               fi
             }
             trap restore_service_on_exit EXIT
-            root=/opt/seiltanzer/data/backups/local
-            live=/opt/seiltanzer/data/trades.db
-            legacy=/opt/seiltanzer/trades.db
-            test "$root" = /opt/seiltanzer/data/backups/local
-            test "$live" = /opt/seiltanzer/data/trades.db
-            test "$legacy" = /opt/seiltanzer/trades.db
-            test -f "$live"
-            mkdir -p "$root"
 
             systemctl stop seiltanzer
             if systemctl is-active --quiet seiltanzer; then
               echo "::error::Refusing backup rotation while seiltanzer is active"
               exit 1
             fi
-            # The failed deploy has already delivered the exact SHA locally.
-            # Do not perform a second network fetch from the VPS: recovery must
-            # remain deterministic even when the server has no Git credentials.
-            if ! git -C /opt/seiltanzer cat-file -e "${EXPECTED_SHA}^{commit}"; then
-              echo "::error::Expected SHA is not present locally after deploy delivery"
+            if ! git -C /opt/seiltanzer cat-file -e "${EXPECTED_SHA}^{commit}" 2>/dev/null; then
+              echo "::error::Expected exact SHA is not present on the VPS"
               exit 1
             fi
             git -C /opt/seiltanzer reset --hard "$EXPECTED_SHA"
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            if lsof -- "$live" >/dev/null 2>&1; then
-              echo "::error::Refusing backup rotation while trades.db is open"
+            if command -v lsof >/dev/null 2>&1 && lsof -- "$live" >/dev/null 2>&1; then
+              echo "::error::Refusing backup rotation while authoritative DB is open"
               exit 1
             fi
-            if [ -e "$legacy" ] && lsof -- "$legacy" >/dev/null 2>&1; then
-              echo "::error::Refusing backup rotation while legacy backup copy is open"
-              exit 1
-            fi
-
-            # Any in-flight EDE transport copy is disposable only after its
-            # owning research process is stopped. These exact /tmp filenames are
-            # immutable SQLite copies, not market/research evidence or live state.
-            while read -r unit _; do
-              [ -n "$unit" ] || continue
-              case "$unit" in
-                seiltanzer-ede-*.service)
-                  timeout 8s systemctl stop "$unit" >/dev/null 2>&1 || true
-                  systemctl kill --kill-who=all --signal=KILL "$unit" >/dev/null 2>&1 || true
-                  systemctl reset-failed "$unit" >/dev/null 2>&1 || true
-                  ;;
-              esac
-            done < <(systemctl list-units --all --type=service --no-legend 'seiltanzer-ede-*' || true)
-            pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_v13_audit.py' >/dev/null 2>&1 || true
-            pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_transition_audit.py' >/dev/null 2>&1 || true
-            pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_offload.py' >/dev/null 2>&1 || true
-            command -v lsof >/dev/null 2>&1 || {
-              echo "STOP: lsof is required for closed EDE snapshot cleanup" >&2
-              exit 1
-            }
-            ede_removed=0
-            ede_bytes=0
-            for candidate in /tmp/seiltanzer-ede-source-*.sqlite3 /tmp/seiltanzer-ede-source-*.sqlite3-wal /tmp/seiltanzer-ede-source-*.sqlite3-shm; do
-              [ -e "$candidate" ] || continue
-              case "$candidate" in
-                /tmp/seiltanzer-ede-source-*.sqlite3) ;;
-                /tmp/seiltanzer-ede-source-*.sqlite3-wal) ;;
-                /tmp/seiltanzer-ede-source-*.sqlite3-shm) ;;
-                *)
-                  echo "STOP: refusing unexpected EDE cleanup path: $candidate" >&2
-                  exit 1
-                  ;;
-              esac
-              if lsof -- "$candidate" >/dev/null 2>&1; then
-                echo "KEEP_OPEN_EDE_SNAPSHOT=$candidate"
-                continue
-              fi
-              size=$(stat -c '%s' "$candidate" 2>/dev/null || echo 0)
-              rm -f -- "$candidate"
-              ede_removed=$((ede_removed + 1))
-              ede_bytes=$((ede_bytes + size))
-            done
-            echo "CLOSED_EDE_SNAPSHOTS_REMOVED=$ede_removed"
-            echo "CLOSED_EDE_SNAPSHOT_BYTES_REMOVED=$ede_bytes"
 
             export RECOVERY_STARTED_TS=$(date +%s)
             /usr/bin/python3 - <<'PY'
@@ -214,11 +135,11 @@ jobs:
             import sqlite3
             from pathlib import Path
 
-            root = Path("/opt/seiltanzer/data/backups/local").resolve()
-            live = Path("/opt/seiltanzer/data/trades.db").resolve()
-            legacy_raw = Path("/opt/seiltanzer/trades.db")
-            authority_path = Path("/opt/seiltanzer/data/database_authority.json")
-            assert live.parent == Path("/opt/seiltanzer/data").resolve()
+            root = Path('/opt/seiltanzer/data/backups/local').resolve()
+            live = Path('/opt/seiltanzer/data/trades.db').resolve()
+            expected_sha = os.environ['EXPECTED_SHA']
+            assert root == Path('/opt/seiltanzer/data/backups/local')
+            assert live == Path('/opt/seiltanzer/data/trades.db')
 
             def confined(path: Path) -> bool:
                 try:
@@ -228,76 +149,58 @@ jobs:
                     return False
 
             def digest(path: Path) -> str:
-                value = hashlib.sha256()
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-                        value.update(chunk)
-                return value.hexdigest()
+                h = hashlib.sha256()
+                with path.open('rb') as handle:
+                    for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b''):
+                        h.update(chunk)
+                return h.hexdigest()
 
-            # The authoritative market database is read-only in this workflow.
-            uri = f"file:{live}?mode=ro"
-            connection = sqlite3.connect(uri, uri=True, timeout=30)
-            try:
-                quick_check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
-            finally:
-                connection.close()
-            print(f"AUTHORITATIVE_DB_QUICK_CHECK={quick_check}")
-            if quick_check != "ok":
-                raise SystemExit("STOP: authoritative trades.db quick_check failed")
+            def quick_check(path: Path) -> str:
+                conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=30)
+                try:
+                    return str(conn.execute('PRAGMA quick_check').fetchone()[0])
+                finally:
+                    conn.close()
 
-            # With the writer stopped, hidden SQLite backup temps are incomplete
-            # duplicate copies. They never carry a verified manifest and are the
-            # only non-manifest files this recovery may remove automatically.
+            live_check = quick_check(live)
+            print(f'AUTHORITATIVE_DB_QUICK_CHECK={live_check}')
+            if live_check != 'ok':
+                raise SystemExit('STOP: authoritative trades.db quick_check failed')
+
             temp_removed = 0
             temp_bytes = 0
-            for temp in root.glob(".*.tmp.sqlite3"):
+            for temp in root.glob('.*.tmp.sqlite3'):
                 temp = temp.resolve()
                 if not confined(temp) or temp.parent != root:
-                    raise SystemExit(f"STOP: unexpected temp path {temp}")
+                    raise SystemExit(f'STOP: unexpected temp path {temp}')
                 temp_bytes += temp.stat().st_size
                 temp.unlink()
                 temp_removed += 1
 
             verified = []
-            for manifest_path in root.glob("*.manifest.json"):
+            for manifest_path in root.glob('*.manifest.json'):
                 manifest_path = manifest_path.resolve()
                 if not confined(manifest_path) or manifest_path.parent != root:
                     continue
                 try:
-                    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    payload = json.loads(manifest_path.read_text(encoding='utf-8'))
                 except Exception:
                     continue
-                if payload.get("verified") is not True:
+                if payload.get('verified') is not True:
                     continue
-                raw_db = Path(str(payload.get("database_file") or ""))
-                backup_db = (raw_db if raw_db.is_absolute() else root / raw_db).resolve()
-                if not confined(backup_db) or backup_db.parent != root or not backup_db.is_file():
+                raw = Path(str(payload.get('database_file') or ''))
+                backup = (raw if raw.is_absolute() else root / raw).resolve()
+                if not confined(backup) or backup.parent != root or not backup.is_file():
                     continue
-                verified.append((
-                    float(payload.get("created_ts") or 0.0),
-                    manifest_path,
-                    backup_db,
-                    payload,
-                ))
-            verified.sort(key=lambda row: row[0], reverse=True)
-            newest = verified[0] if verified else None
-            if newest is None:
-                # A previous fail-closed recovery attempt may already have removed
-                # the verified slot before discovering another legacy copy was
-                # needed for headroom. The authoritative DB still has to pass the
-                # independent read-only quick_check above; no missing backup is
-                # silently represented as verified.
-                print("NO_VERIFIED_LOCAL_BACKUP=true")
-            else:
-                expected = str(newest[3].get("database_sha256") or "").lower()
+                expected = str(payload.get('database_sha256') or '').lower()
                 if len(expected) != 64:
-                    raise SystemExit("STOP: newest verified backup has no SHA256")
-                actual = digest(newest[2])
-                print(f"NEWEST_BACKUP={newest[2].name}")
-                print(f"NEWEST_BACKUP_SHA_MATCH={actual == expected}")
+                    raise SystemExit(f'STOP: verified manifest has no SHA256: {manifest_path.name}')
+                actual = digest(backup)
                 if actual != expected:
-                    raise SystemExit("STOP: newest verified backup SHA256 mismatch")
+                    raise SystemExit(f'STOP: verified backup SHA mismatch: {backup.name}')
+                verified.append((float(payload.get('created_ts') or 0), manifest_path, backup, payload))
 
+            verified.sort(key=lambda row: row[0])
             required = live.stat().st_size + 1024 * 1024 * 1024
 
             def free_bytes() -> int:
@@ -306,287 +209,28 @@ jobs:
 
             removed_pairs = 0
             removed_bytes = 0
-            # Sacrifice only duplicate backup pairs, oldest first. Preserve the
-            # newest verified pair whenever that still leaves enough room for a
-            # fresh full snapshot plus 1 GiB operating headroom.
-            for _, manifest_path, backup_db, _payload in reversed(verified[1:]):
+            # Every candidate below has already passed manifest=true + SHA256.
+            # Remove oldest verified local recovery copies only until one new full
+            # live snapshot plus 1 GiB operating reserve can be created.
+            for _ts, manifest_path, backup, _payload in verified:
                 if free_bytes() >= required:
                     break
-                removed_bytes += backup_db.stat().st_size + manifest_path.stat().st_size
-                backup_db.unlink()
+                removed_bytes += backup.stat().st_size + manifest_path.stat().st_size
+                backup.unlink()
                 manifest_path.unlink()
                 removed_pairs += 1
-
-            deleted_last_verified = False
-            if free_bytes() < required and newest is not None:
-                # The user explicitly authorized sacrificing backup copies, never
-                # market data. The newest pair was SHA-verified above and the live
-                # DB passed quick_check. Remove the old slot so startup can create
-                # its exact-SHA replacement immediately.
-                _, manifest_path, backup_db, _payload = newest
-                removed_bytes += backup_db.stat().st_size + manifest_path.stat().st_size
-                backup_db.unlink()
-                manifest_path.unlink()
-                removed_pairs += 1
-                deleted_last_verified = True
-
-            legacy_removed = False
-            legacy_bytes = 0
-            if free_bytes() < required and legacy_raw.exists():
-                # `/opt/seiltanzer/trades.db` is removable only when the runtime's
-                # durable authority record explicitly classifies that exact path as
-                # NON_AUTHORITATIVE_LEGACY. This is a backup copy, never the market
-                # source of truth at `/opt/seiltanzer/data/trades.db`.
-                if legacy_raw.is_symlink():
-                    raise SystemExit("STOP: legacy backup copy must not be a symlink")
-                legacy = legacy_raw.resolve()
-                if legacy != Path("/opt/seiltanzer/trades.db") or legacy.parent != Path("/opt/seiltanzer"):
-                    raise SystemExit("STOP: unexpected legacy backup path")
-                if os.path.samefile(legacy, live):
-                    raise SystemExit("STOP: legacy path aliases authoritative trades.db")
-                try:
-                    authority = json.loads(authority_path.read_text(encoding="utf-8"))
-                except Exception as exc:
-                    raise SystemExit(f"STOP: database authority record unavailable: {exc}")
-                authoritative = Path(str(authority.get("authoritative_database_path") or "")).resolve()
-                if authoritative != live:
-                    raise SystemExit("STOP: database authority does not name live trades.db")
-                classified = any(
-                    Path(str(item.get("path") or "")).resolve() == legacy
-                    and item.get("classification") == "NON_AUTHORITATIVE_LEGACY"
-                    for item in authority.get("legacy_databases") or []
-                    if isinstance(item, dict)
-                )
-                if not classified:
-                    raise SystemExit("STOP: legacy database lacks NON_AUTHORITATIVE_LEGACY classification")
-
-                def sqlite_snapshot(path: Path) -> tuple[str, dict[str, int], str | None]:
-                    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
-                    try:
-                        check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
-                        tables = {
-                            str(row[0]) for row in connection.execute(
-                                "SELECT name FROM sqlite_master WHERE type='table'"
-                            ).fetchall()
-                        }
-                        critical = (
-                            "trades", "account", "ai_verdicts", "decision_snapshots",
-                            "decision_replays", "human_decisions", "position_management_events",
-                            "management_decisions", "passive_observations", "q_capture_attempts",
-                            "g1_dataset_membership", "g1_dataset_cuts", "g1_dataset_cut_members",
-                            "g1c_fit_runs", "g1c_shadow_models", "g1c_shadow_predictions",
-                        )
-                        counts = {
-                            name: int(connection.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0])
-                            for name in critical if name in tables
-                        }
-                        database_uuid = None
-                        if "database_authority" in tables:
-                            row = connection.execute(
-                                "SELECT database_uuid FROM database_authority WHERE id=1"
-                            ).fetchone()
-                            database_uuid = None if row is None else str(row[0])
-                        return check, counts, database_uuid
-                    finally:
-                        connection.close()
-
-                legacy_check, legacy_counts, legacy_uuid = sqlite_snapshot(legacy)
-                live_check, live_counts, live_uuid = sqlite_snapshot(live)
-                print(f"LEGACY_BACKUP_QUICK_CHECK={legacy_check}")
-                if legacy_check != "ok" or live_check != "ok":
-                    raise SystemExit("STOP: legacy/live SQLite quick_check failed")
-                if legacy_uuid is not None and live_uuid is not None and legacy_uuid != live_uuid:
-                    raise SystemExit("STOP: legacy backup belongs to a different database lineage")
-                for table, count in legacy_counts.items():
-                    if table not in live_counts or live_counts[table] < count:
-                        raise SystemExit(f"STOP: legacy backup has unmatched critical rows in {table}")
-
-                legacy_bytes = legacy.stat().st_size
-                legacy.unlink()
-                legacy_removed = True
-                print("LEGACY_BACKUP_CLASSIFICATION=NON_AUTHORITATIVE_LEGACY")
-
-            # If the dedicated local slot is already gone, inspect only
-            # explicitly discoverable backup locations for additional SQLite copies.
-            # A candidate is removable only when it is a valid SQLite snapshot
-            # of this same database lineage and its critical counts do not exceed
-            # the authoritative DB. Market files, evidence and arbitrary files
-            # therefore remain outside this cleanup contract.
-            def sqlite_identity(path: Path) -> tuple[str, str | None, dict[str, int]]:
-                connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
-                try:
-                    check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
-                    tables = {
-                        str(row[0]) for row in connection.execute(
-                            "SELECT name FROM sqlite_master WHERE type='table'"
-                        ).fetchall()
-                    }
-                    database_uuid = None
-                    if "database_authority" in tables:
-                        row = connection.execute(
-                            "SELECT database_uuid FROM database_authority WHERE id=1"
-                        ).fetchone()
-                        database_uuid = None if row is None else str(row[0])
-                    critical = (
-                        "trades", "account", "ai_verdicts", "decision_snapshots",
-                        "decision_replays", "human_decisions",
-                        "position_management_events", "management_decisions",
-                        "passive_observations", "q_capture_attempts",
-                        "g1_dataset_membership", "g1_dataset_cuts",
-                        "g1_dataset_cut_members", "g1c_fit_runs",
-                        "g1c_shadow_models", "g1c_shadow_predictions",
-                    )
-                    counts = {
-                        name: int(connection.execute(
-                            f'SELECT COUNT(*) FROM "{name}"'
-                        ).fetchone()[0])
-                        for name in critical if name in tables
-                    }
-                    return check, database_uuid, counts
-                finally:
-                    connection.close()
-
-            live_identity_check, live_identity_uuid, live_identity_counts = sqlite_identity(live)
-            protected_paths = {
-                live,
-                root,
-                Path("/opt/seiltanzer/data/database_authority.json").resolve(),
-            }
-
-            def under(path: Path, parent: Path) -> bool:
-                try:
-                    path.relative_to(parent)
-                    return True
-                except ValueError:
-                    return False
-
-            # Search only bounded, service-adjacent backup trees. The data tree is
-            # traversed separately at data/backups; the live database and local
-            # verified slot remain protected by exact-path and ancestry checks.
-            extra_roots = (
-                Path("/var/backups"),
-                Path("/root"),
-                Path("/opt/seiltanzer"),
-                Path("/opt/seiltanzer/data/backups"),
-            )
-            skip_dir_names = {
-                ".cache", ".cargo", ".git", ".local", ".npm", ".rustup",
-                "__pycache__", "evidence", "logs", "market", "node_modules",
-                "research", "venv", ".venv",
-            }
-            extra_candidates: set[Path] = set()
-            for raw_directory in extra_roots:
-                try:
-                    directory = raw_directory.resolve()
-                    if not directory.is_dir():
-                        continue
-                except OSError:
-                    continue
-                for current, dirnames, filenames in os.walk(
-                    directory, topdown=True, followlinks=False
-                ):
-                    try:
-                        current_path = Path(current).resolve()
-                        depth = len(current_path.relative_to(directory).parts)
-                    except (OSError, ValueError):
-                        dirnames[:] = []
-                        continue
-                    if depth >= 5:
-                        dirnames[:] = []
-                    else:
-                        kept_dirs = []
-                        for dirname in dirnames:
-                            if dirname.lower() in skip_dir_names:
-                                continue
-                            child = current_path / dirname
-                            try:
-                                if child.is_symlink():
-                                    continue
-                                child_resolved = child.resolve()
-                                if any(
-                                    child_resolved == parent
-                                    or under(child_resolved, parent)
-                                    for parent in (root,)
-                                ):
-                                    continue
-                            except OSError:
-                                continue
-                            kept_dirs.append(dirname)
-                        dirnames[:] = kept_dirs
-                    for filename in filenames:
-                        candidate = current_path / filename
-                        try:
-                            if candidate.is_symlink() or not candidate.is_file():
-                                continue
-                            resolved = candidate.resolve()
-                            if resolved in protected_paths or confined(resolved):
-                                continue
-                            if os.path.samefile(resolved, live):
-                                continue
-                        except OSError:
-                            continue
-                        name = resolved.name.lower()
-                        if not (
-                            "backup" in name
-                            or name.startswith("trades")
-                            or name.endswith((".sqlite3", ".sqlite", ".db", ".bak"))
-                        ):
-                            continue
-                        extra_candidates.add(resolved)
-
-            extra_verified: list[tuple[int, Path]] = []
-            if live_identity_check == "ok" and live_identity_uuid:
-                for candidate in sorted(extra_candidates, key=str):
-                    try:
-                        check, database_uuid, counts = sqlite_identity(candidate)
-                    except (OSError, sqlite3.Error) as exc:
-                        print(f"EXTRA_BACKUP_SKIPPED path={candidate} reason={type(exc).__name__}")
-                        continue
-                    if check != "ok" or database_uuid != live_identity_uuid:
-                        print(f"EXTRA_BACKUP_SKIPPED path={candidate} reason=LINEAGE_MISMATCH")
-                        continue
-                    if any(
-                        table not in live_identity_counts
-                        or live_identity_counts[table] < count
-                        for table, count in counts.items()
-                    ):
-                        print(f"EXTRA_BACKUP_SKIPPED path={candidate} reason=CRITICAL_COUNTS")
-                        continue
-                    extra_verified.append((candidate.stat().st_size, candidate))
-
-            extra_verified.sort(key=lambda item: item[0], reverse=True)
-            print(f"EXTRA_BACKUP_CANDIDATES={len(extra_candidates)}")
-            print(f"EXTRA_BACKUP_VERIFIED={len(extra_verified)}")
-            for size, candidate in extra_verified:
-                if free_bytes() >= required:
-                    break
-                try:
-                    if candidate.is_symlink() or not candidate.is_file():
-                        continue
-                    if os.path.samefile(candidate, live) or confined(candidate):
-                        continue
-                    candidate.unlink()
-                except OSError as exc:
-                    print(f"EXTRA_BACKUP_COPY_SKIP_REMOVE path={candidate} reason={type(exc).__name__}")
-                    continue
-                print(f"EXTRA_BACKUP_COPY_REMOVED path={candidate} bytes={size}")
 
             available = free_bytes()
-            print(f"INCOMPLETE_BACKUP_TEMPS_REMOVED={temp_removed}")
-            print(f"INCOMPLETE_BACKUP_TEMP_BYTES_REMOVED={temp_bytes}")
-            print(f"VERIFIED_BACKUP_PAIRS_REMOVED={removed_pairs}")
-            print(f"VERIFIED_BACKUP_BYTES_REMOVED={removed_bytes}")
-            print(f"DELETED_LAST_VERIFIED_SLOT={str(deleted_last_verified).lower()}")
-            print(f"LEGACY_BACKUP_COPY_REMOVED={str(legacy_removed).lower()}")
-            print(f"LEGACY_BACKUP_COPY_BYTES_REMOVED={legacy_bytes}")
-            print(f"BACKUP_REBUILD_REQUIRED_BYTES={required}")
-            print(f"BACKUP_REBUILD_AVAILABLE_BYTES={available}")
+            print(f'INCOMPLETE_BACKUP_TEMPS_REMOVED={temp_removed}')
+            print(f'INCOMPLETE_BACKUP_TEMP_BYTES_REMOVED={temp_bytes}')
+            print(f'VERIFIED_BACKUP_PAIRS_REMOVED={removed_pairs}')
+            print(f'VERIFIED_BACKUP_BYTES_REMOVED={removed_bytes}')
+            print(f'BACKUP_REBUILD_REQUIRED_BYTES={required}')
+            print(f'BACKUP_REBUILD_AVAILABLE_BYTES={available}')
             if available < required:
-                raise SystemExit("STOP: insufficient headroom after backup-only rotation")
+                raise SystemExit('STOP: insufficient headroom after verified-backup-only rotation')
             PY
 
-            # Headroom now exists for the application to create and fully verify
-            # a replacement prestart snapshot before Engine construction.
             systemctl reset-failed seiltanzer >/dev/null 2>&1 || true
             systemctl start seiltanzer
             ready=0
@@ -603,52 +247,65 @@ jobs:
               sleep 2
             done
             if [ "$ready" != 1 ]; then
-              echo "::error::Terminal did not become ready after backup-only rotation"
+              echo "::error::Terminal did not become ready after verified-backup-only rotation"
               systemctl status seiltanzer --no-pager -l || true
               journalctl -u seiltanzer --since '-20 minutes' --no-pager -n 220 || true
               exit 1
             fi
 
             /usr/bin/python3 - <<'PY'
+            import hashlib
             import json
             import os
             import sqlite3
             from pathlib import Path
 
-            root = Path("/opt/seiltanzer/data/backups/local").resolve()
-            expected_sha = os.environ["EXPECTED_SHA"]
-            started = float(os.environ["RECOVERY_STARTED_TS"])
-            verified = []
-            for manifest_path in root.glob("*.manifest.json"):
+            root = Path('/opt/seiltanzer/data/backups/local').resolve()
+            live = Path('/opt/seiltanzer/data/trades.db').resolve()
+            expected_sha = os.environ['EXPECTED_SHA']
+            started = float(os.environ['RECOVERY_STARTED_TS'])
+
+            def digest(path: Path) -> str:
+                h = hashlib.sha256()
+                with path.open('rb') as handle:
+                    for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b''):
+                        h.update(chunk)
+                return h.hexdigest()
+
+            matches = []
+            for manifest_path in root.glob('*.manifest.json'):
                 try:
-                    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    payload = json.loads(manifest_path.read_text(encoding='utf-8'))
                 except Exception:
                     continue
-                db = (root / str(payload.get("database_file") or "")).resolve()
+                backup = (root / str(payload.get('database_file') or '')).resolve()
                 if (
-                    payload.get("verified") is True
-                    and payload.get("reason") == "prestart"
-                    and str(payload.get("git_commit") or "") == expected_sha
-                    and float(payload.get("created_ts") or 0.0) >= started
-                    and db.parent == root
-                    and db.is_file()
+                    payload.get('verified') is True
+                    and payload.get('reason') == 'prestart'
+                    and str(payload.get('git_commit') or '') == expected_sha
+                    and float(payload.get('created_ts') or 0) >= started
+                    and backup.parent == root
+                    and backup.is_file()
                 ):
-                    verified.append((float(payload["created_ts"]), payload, db))
-            if not verified:
-                raise SystemExit("STOP: no new exact-SHA verified prestart backup")
-            verified.sort(key=lambda row: row[0], reverse=True)
-            print(f"NEW_EXACT_SHA_BACKUP={verified[0][2].name}")
-            print(f"NEW_EXACT_SHA_BACKUP_BYTES={verified[0][2].stat().st_size}")
+                    matches.append((float(payload['created_ts']), payload, backup))
+            if not matches:
+                raise SystemExit('STOP: no new exact-SHA verified prestart backup')
+            matches.sort(key=lambda row: row[0], reverse=True)
+            _ts, payload, backup = matches[0]
+            expected = str(payload.get('database_sha256') or '').lower()
+            if len(expected) != 64 or digest(backup) != expected:
+                raise SystemExit('STOP: new exact-SHA backup SHA256 mismatch')
 
-            live = Path("/opt/seiltanzer/data/trades.db")
-            connection = sqlite3.connect(f"file:{live}?mode=ro", uri=True, timeout=30)
+            conn = sqlite3.connect(f'file:{live}?mode=ro', uri=True, timeout=30)
             try:
-                result = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+                result = str(conn.execute('PRAGMA quick_check').fetchone()[0])
             finally:
-                connection.close()
-            print(f"POST_RECOVERY_DB_QUICK_CHECK={result}")
-            if result != "ok":
-                raise SystemExit("STOP: post-recovery trades.db quick_check failed")
+                conn.close()
+            print(f'NEW_EXACT_SHA_BACKUP={backup.name}')
+            print(f'NEW_EXACT_SHA_BACKUP_BYTES={backup.stat().st_size}')
+            print(f'POST_RECOVERY_DB_QUICK_CHECK={result}')
+            if result != 'ok':
+                raise SystemExit('STOP: post-recovery trades.db quick_check failed')
             PY
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
@@ -664,10 +321,10 @@ jobs:
         run: |
           if [ "$OUTCOME" = success ]; then
             state=success
-            description="Backup-only rotation rebuilt one verified exact-SHA recovery slot"
+            description="Verified local slot rebuilt for exact green SHA"
           else
             state=failure
-            description="Backup-only rotation stopped safely before acceptance"
+            description="Single-slot recovery stopped fail-closed"
           fi
           curl --fail-with-body --silent --show-error \
             --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
@@ -688,6 +345,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           curl --fail-with-body --silent --show-error \
             --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
             -X POST \
