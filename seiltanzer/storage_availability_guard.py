@@ -308,7 +308,20 @@ def install_storage_availability_guard() -> None:
                 )
                 raise OSError(errno.ENOSPC, self._last_error)
 
+        if kind == "local" and reason == "prestart":
+            impossible, plan = _background_copy_is_impossible(self, directory)
+            if impossible and self._verified_manifests(directory):
+                return _reuse_verified_for_degraded_prestart(
+                    self,
+                    directory=directory,
+                    original_error=OSError(
+                        errno.ENOSPC,
+                        f"prestart backup skipped to preserve availability: {BACKGROUND_DEFER_REASON}",
+                    ),
+                )
+
         try:
+
             return guarded_create(self, kind=kind, reason=reason)
         except OSError as exc:
             if not (
