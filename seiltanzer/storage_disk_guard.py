@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
+from . import storage_refinement as _refinement
 from . import storage_runtime as _s
 
 
@@ -138,9 +139,9 @@ def _compact_snapshot_plan(source: Path) -> dict[str, int]:
     """Measure whether a read-only VACUUM INTO snapshot can fit safely.
 
     The normal online backup is intentionally preferred because it is a direct
-    page-for-page recovery point.  This planner is used only when that copy cannot
-    fit.  ``freelist_count`` measures pages SQLite can omit while rebuilding the
-    same logical database.  A source quick_check is mandatory before the fallback
+    page-for-page recovery point. This planner is used only when that copy cannot
+    fit. ``freelist_count`` measures pages SQLite can omit while rebuilding the
+    same logical database. A source quick_check is mandatory before the fallback
     is allowed.
     """
     source = source.resolve()
@@ -163,7 +164,7 @@ def _compact_snapshot_plan(source: Path) -> dict[str, int]:
     logical_used_bytes = max(page_size, (page_count - freelist_count) * page_size)
     reclaimable_bytes = freelist_count * page_size
     # VACUUM rebuilds using the same page size and normally cannot require more
-    # than the currently allocated non-freelist pages.  Keep an extra filesystem
+    # than the currently allocated non-freelist pages. Keep an extra filesystem
     # cushion anyway; post-copy headroom is checked again before promotion.
     estimated_snapshot_bytes = logical_used_bytes + COMPACT_BACKUP_MARGIN_BYTES
     return {
@@ -175,6 +176,37 @@ def _compact_snapshot_plan(source: Path) -> dict[str, int]:
         "reclaimable_bytes": reclaimable_bytes,
         "estimated_snapshot_bytes": estimated_snapshot_bytes,
     }
+
+
+def _refine_compact_manifest(self, result: _s.BackupResult, *, kind: str) -> None:
+    """Apply the same refinement identity as the canonical backup wrapper."""
+    manifest_path = Path(result.manifest_path)
+    database_path = Path(result.database_path)
+    manifest = _s._read_json(manifest_path) or {}
+    previous = [
+        item
+        for item in self._verified_manifests(self._backup_dir(kind))
+        if str(item.get("backup_id")) != result.backup_id
+    ]
+    user_version, schema_sha = _refinement._schema_identity(database_path)
+    manifest["previous_backup_id"] = previous[0].get("backup_id") if previous else None
+    manifest["sqlite_user_version"] = user_version
+    manifest["schema_sha256"] = schema_sha
+    if kind == "offhost":
+        encrypted = _refinement._truthy_env("SEILTANZER_OFFHOST_ENCRYPTION_VERIFIED")
+        target_verified = _refinement._truthy_env("SEILTANZER_OFFHOST_TARGET_VERIFIED")
+        manifest["encryption_status"] = (
+            "verified_external_target" if encrypted else "external_target_not_verified"
+        )
+        manifest["encryption_verified"] = encrypted
+        manifest["offhost_target_verified"] = target_verified
+    else:
+        manifest["encryption_status"] = "local_filesystem_permissions_only"
+        manifest["encryption_verified"] = False
+        manifest["offhost_target_verified"] = False
+    manifest["storage_refinement_version"] = _refinement.REFINEMENT_VERSION
+    manifest["manifest_payload_sha256"] = _refinement._manifest_hash(manifest)
+    _s._atomic_json(manifest_path, manifest)
 
 
 def _create_compact_backup(
@@ -196,7 +228,7 @@ def _create_compact_backup(
     with contextlib.suppress(FileNotFoundError):
         temp_db.unlink()
 
-    # mode=ro makes the source-side safety property explicit.  VACUUM INTO writes
+    # mode=ro makes the source-side safety property explicit. VACUUM INTO writes
     # only the new destination database and obtains a transactionally consistent
     # snapshot of committed source state, including committed WAL contents.
     src = sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
@@ -270,6 +302,16 @@ def _create_compact_backup(
         "free_after_snapshot_bytes": remaining,
     }
     _s._atomic_json(manifest_path, manifest)
+    result = _s.BackupResult(
+        backup_id=backup_id,
+        kind=kind,
+        database_path=str(final_db),
+        manifest_path=str(manifest_path),
+        verified=True,
+        created_ts=created,
+        sha256=sha,
+    )
+    _refine_compact_manifest(self, result, kind=kind)
     self._recovery_actions.append({
         "ts": time.time(),
         "action": "create_compact_verified_backup",
@@ -280,24 +322,16 @@ def _create_compact_backup(
         "free_after_snapshot_bytes": remaining,
     })
     self._apply_retention(kind)
-    return _s.BackupResult(
-        backup_id=backup_id,
-        kind=kind,
-        database_path=str(final_db),
-        manifest_path=str(manifest_path),
-        verified=True,
-        created_ts=created,
-        sha256=sha,
-    )
+    return result
 
 
 def _reuse_current_prestart_backup(self, directory: Path):
     """Reuse only a recent verified backup produced by this exact code SHA.
 
     A small production disk may have room for one full SQLite recovery point,
-    but not for the old and replacement copies at the same time.  A repeated
+    but not for the old and replacement copies at the same time. A repeated
     restart of the *same* release must not fill the filesystem rebuilding the
-    recovery point it created minutes earlier.  This path performs a fresh
+    recovery point it created minutes earlier. This path performs a fresh
     quick-check of the authoritative DB and preserves the original manifest
     timestamp/provenance; it never relabels an old backup as new.
     """
@@ -366,7 +400,7 @@ def reserve_restore_drill_headroom(
 ) -> Iterator[dict[str, Any]]:
     """Reserve disposable-copy space without dropping the newest recovery point.
 
-    This reuses the same one-backup low-space floor as snapshot replacement.  It
+    This reuses the same one-backup low-space floor as snapshot replacement. It
     never waits behind an active backup: readiness either reserves space now or
     fails visibly, while the live database and newest verified backup remain.
     """
