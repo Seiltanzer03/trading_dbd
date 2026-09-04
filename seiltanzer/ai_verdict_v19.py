@@ -219,6 +219,17 @@ def _scenario_geometry_lines(snapshot: dict) -> list[str]:
     return lines
 
 
+def _degraded_evidence_summary(gate: dict) -> tuple[dict, float | None, float | None, float | None]:
+    overlay = gate.get("degraded_authority_overlay") or {}
+    evidence = overlay.get("evidence") or {}
+    return (
+        evidence,
+        _number(evidence.get("total_adverse_count")),
+        _number(evidence.get("live_adverse_count")),
+        _number(evidence.get("observed_adverse_item_count")),
+    )
+
+
 def _risk_lines(snapshot: dict) -> list[str]:
     manager = snapshot.get("policy_manager") or {}
     risk = manager.get("risk_constraint") or {}
@@ -245,6 +256,18 @@ def _risk_lines(snapshot: dict) -> list[str]:
         state = "ELIGIBLE" if arithmetic_ok and eligible_membership else "INELIGIBLE"
         lines.append(f"{raw} CVaR10 net: {_r(chosen_cvar)} {symbol} {_r(net)} → {state}.")
     lines.append(f"Источник gross floor: {_text(risk.get('source'))}. Правило: {_text(risk.get('rule'))}.")
+
+    indifference = _number(rule.get("indifference_band_r"))
+    best_expected = _number(rule.get("best_expected_r"))
+    raw_expected = _number((policies.get(raw) or {}).get("expected_final_r"))
+    if indifference is not None and best_expected is not None and raw_expected is not None:
+        gap = max(0.0, best_expected - raw_expected)
+        lines.append(
+            f"Зона безразличия Expected: {_r(indifference)}. Лучший Expected {_r(best_expected)}; "
+            f"{raw} отстаёт на {_r(gap)}. При разрыве не больше зоны выбирается "
+            "наименее вмешивающаяся допустимая политика."
+        )
+
     tradeoff = manager.get("risk_tradeoff") or {}; delta = _number(tradeoff.get("expected_delta_vs_hold_r"))
     if delta is not None:
         label = tradeoff.get("expected_delta_label") or "расчётное преимущество над HOLD"
@@ -273,8 +296,47 @@ def _risk_lines(snapshot: dict) -> list[str]:
             f"Устойчивость к источнику данных для {selected}: "
             f"{int(source_count)}/{int(source_checks)} ({_pct(gate.get('source_stability_share'))})."
         )
+
+    evidence_summary, total_families, live_families, observed_items = _degraded_evidence_summary(gate)
+    if gate.get("status") == "confirmed_degraded_manual":
+        families = evidence_summary.get("adverse_families") or []
+        family_text = ", ".join(str(item) for item in families) if families else "детали не опубликованы"
+        if total_families is not None or live_families is not None:
+            total_text = "—" if total_families is None else str(int(total_families))
+            live_text = "—" if live_families is None else str(int(live_families))
+            item_text = "—" if observed_items is None else str(int(observed_items))
+            lines.append(
+                f"Degraded-manual подтверждение: независимых adverse families {total_text}; "
+                f"live families {live_text}; наблюдаемых adverse metric rows {item_text}; "
+                f"семьи: {family_text}."
+            )
+        else:
+            lines.append(
+                "Degraded-manual подтверждение сохранено gate, но детальный evidence summary "
+                "не опубликован в snapshot; отсутствие деталей после compaction не трактуется как 0."
+            )
+
+    decision = manager.get("management_decision") or {}
     auto = gate.get("automatic_execution_allowed") if "automatic_execution_allowed" in gate else None
-    if auto is True:
+    manual_pending = bool(
+        decision.get("execution_status") == "pending_execution"
+        and decision.get("manual_execution_required") is True
+        and decision.get("policy") not in (None, "", "HOLD")
+    )
+    if manual_pending:
+        instruction = (
+            decision.get("instruction_ru")
+            or rec.get("execution_action_ru")
+            or f"{decision.get('policy')} вручную"
+        )
+        work_action = f"{instruction} (только вручную; автоматическое исполнение запрещено)"
+    elif (
+        gate.get("status") == "confirmed_degraded_manual"
+        and gate.get("working_action_confirmed")
+        and selected != "HOLD"
+    ):
+        work_action = f"{selected} вручную; автоматическое исполнение запрещено"
+    elif auto is True:
         work_action = selected
     elif auto is False:
         work_action = "не менять позицию по этому отчёту"
@@ -374,11 +436,38 @@ def _ede_context_lines(snapshot: dict) -> list[str]:
     return lines
 
 
+def _repair_degraded_manual_summary(lines: list[str], snapshot: dict) -> list[str]:
+    manager = snapshot.get("policy_manager") or {}
+    gate = manager.get("gate") or {}
+    if gate.get("status") != "confirmed_degraded_manual":
+        return lines
+    evidence, total_families, live_families, observed_items = _degraded_evidence_summary(gate)
+    if total_families is None and live_families is None and observed_items is None:
+        return lines
+    families = evidence.get("adverse_families") or []
+    family_text = ", ".join(str(item) for item in families) if families else "детали не опубликованы"
+    repaired = []
+    for line in lines:
+        if "Независимые семьи подтверждений:" in line:
+            total_text = "—" if total_families is None else str(int(total_families))
+            live_text = "—" if live_families is None else str(int(live_families))
+            line = (
+                f"Независимые семьи подтверждений: {total_text}; live: {live_text}; "
+                f"семьи: {family_text}."
+            )
+        elif "Отдельных строк метрик:" in line:
+            item_text = "—" if observed_items is None else str(int(observed_items))
+            line = f"Отдельных adverse строк метрик: {item_text}."
+        repaired.append(line)
+    return repaired
+
+
 def normalize_structured_report(text: str, snapshot: dict) -> str:
     if not _structured_contract(snapshot): return text
     lines = text.splitlines()
     _replace_section(lines, "**ЕДИНЫЙ ПЛАН МЕНЕДЖМЕНТА**", _plan_lines(snapshot)); _replace_section(lines, "**ГЕОМЕТРИЯ СДЕЛКИ**", _trade_geometry_lines(snapshot)); _replace_take_stop_body(lines, _take_stop_lines(snapshot)); _replace_section(lines, "**ОБЩАЯ ГЕОМЕТРИЯ СЦЕНАРИЕВ**", _scenario_geometry_lines(snapshot)); _replace_section(lines, "**ПОЧЕМУ ВЫБРАНО**", _risk_lines(snapshot)); _replace_section(lines, "**КАЧЕСТВО ДАННЫХ**", _quality_lines(snapshot))
     manager = snapshot.get("policy_manager") or {}; _replace_section(lines, "**ЧТО УЛУЧШИЛОСЬ**", _material_change_lines(manager, "what_improved")); _replace_section(lines, "**ЧТО УХУДШИЛОСЬ**", _material_change_lines(manager, "what_deteriorated"))
+    lines = _repair_degraded_manual_summary(lines, snapshot)
     lines = [line.replace("Shadow metrics:", "Derived shadow scenario distribution:") for line in lines]
     bounds = _section(lines, "**РАСЧЁТ ПОЛИТИК**")
     if bounds is not None:
