@@ -43,6 +43,13 @@ def install_g1_short_horizon_integration() -> None:
 
     def engine_init(self, *args, **kwargs):
         previous_engine_init(self, *args, **kwargs)
+        # Champion overlays are installed after this integration module at package
+        # import time. Resolve the bounded progress patch here, immediately before
+        # runtime construction, so startup never materializes the full OOS ledger.
+        from .g1_champion_progress_scalability import (
+            install_g1_champion_progress_scalability,
+        )
+        install_g1_champion_progress_scalability()
         self.short_horizon = ShortHorizonRuntime(self)
         self.management_local = ManagementLocalRuntime(self)
         install_g1_management_local_status_nonblocking(self.management_local)
