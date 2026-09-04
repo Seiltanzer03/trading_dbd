@@ -11,6 +11,7 @@ import uvicorn
 from .ai_provider_explanation import install_ai_provider_explanation
 from .ai_provider_guard import install_ai_provider_guard
 from .ai_report_semantics_guard import install_ai_report_semantics_guard
+from .ai_runtime_report_v20 import install_ai_runtime_report_v20
 from .ai_snapshot_budget_guard import install_ai_snapshot_budget_guard
 from .ai_snapshot_causality_refinement import install_ai_snapshot_causality_refinement
 from .ai_snapshot_materializer import install_ai_snapshot_materializer
@@ -112,6 +113,10 @@ def main() -> None:
     # a second full report with a short provider explanation inside the same
     # timeout/circuit. The provider never owns action or policy arithmetic.
     install_ai_provider_explanation()
+    # V20 keeps that one bounded provider call, adds the independent LLM shadow
+    # to the same response, and makes family coverage vs numerical availability
+    # explicit. It changes no management/execution authority.
+    install_ai_runtime_report_v20()
 
     install_analytics_runtime()
     install_storage_refinement()
