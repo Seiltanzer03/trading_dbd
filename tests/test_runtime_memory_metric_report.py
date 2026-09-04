@@ -46,7 +46,7 @@ def _progress_runtime() -> _Runtime:
     base = 1_700_000_000.0
     rows = [
         ("o1", base, base + 900, 15, "XAU", "LOW", 1, "UP", 0.01, base + 901),
-        ("o2", base + 100, base + 1000, 15, "XAU", "LOW", 1, "DOWN", -0.01, base + 1001),
+        ("o2", base + 50, base + 1000, 15, "XAU", "LOW", 1, "DOWN", -0.01, base + 1001),
         ("o3", base + 1000, base + 1900, 15, "XAU", "HIGH", 1, "UP", 0.02, base + 1901),
         # Linked but excluded from the direction evidence because it resolved FLAT.
         ("o4", base + 2000, base + 2900, 15, "XAG", "HIGH", 1, "FLAT", 0.0, base + 2901),
@@ -187,6 +187,14 @@ def test_combined_provider_uses_one_call_and_returns_non_authoritative_shadow(mo
     snapshot = _report_snapshot()
     snapshot["captured_ts"] = 123.0
     snapshot["trade_id"] = 7
+    snapshot["policy_manager"]["input_audit"] = {
+        "rows": {
+            "instrument_price": {
+                "available": True,
+                "status": "live",
+            }
+        }
+    }
     calls = {"n": 0}
 
     provider_content = json.dumps({
