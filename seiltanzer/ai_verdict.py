@@ -432,3 +432,39 @@ def build_snapshot(engine) -> dict:
         snapshot["ede_prospective_shadow"] = shadow
     _impl._enforce_snapshot_budget(snapshot)
     return snapshot
+
+
+# LLM Decision Shadow v1 is deliberately additive.  The established v18/v19
+# verdict remains authoritative; the second provider call can only append a
+# research comparison and a machine-readable shadow object.
+from .llm_decision_shadow import (
+    append_shadow_section as _append_llm_shadow_section,
+    request_shadow_decision as _request_llm_shadow_decision,
+    unavailable_shadow as _unavailable_llm_shadow,
+)
+
+_BASE_REQUEST_VERDICT_WITHOUT_SHADOW = _impl.request_verdict
+
+
+def request_verdict(snapshot: dict) -> dict:
+    result = _BASE_REQUEST_VERDICT_WITHOUT_SHADOW(snapshot)
+    if not isinstance(result, dict):
+        return result
+    result = dict(result)
+    if result.get("model") == "deterministic-policy-fallback":
+        shadow = _unavailable_llm_shadow(snapshot, "PRIMARY_LLM_REPORT_FALLBACK")
+    else:
+        try:
+            shadow = _request_llm_shadow_decision(snapshot)
+        except RuntimeError as exc:
+            # Shadow failures never downgrade or replace the established verdict.
+            code = str(exc).strip() or "SHADOW_PROVIDER_FAILURE"
+            shadow = _unavailable_llm_shadow(snapshot, code)
+    result["llm_shadow_decision"] = shadow
+    verdict = result.get("verdict")
+    if isinstance(verdict, str):
+        result["verdict"] = _append_llm_shadow_section(verdict, shadow)
+    return result
+
+
+globals()["request_verdict"] = request_verdict
