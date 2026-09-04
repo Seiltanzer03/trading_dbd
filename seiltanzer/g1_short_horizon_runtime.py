@@ -144,8 +144,19 @@ class ShortHorizonRuntime:
         self._last_step_finished: float | None = None
         self._last_step_duration_ms: float | None = None
         self._last_error: str | None = None
+        self._cached_materializer_items: list[dict[str, Any]] = []
         self._ensure_tables()
+        self._refresh_materializer_cache_under_lock()
         self.activation_ts = self._activation_ts()
+
+    def _refresh_materializer_cache_under_lock(self) -> None:
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM g1s_materialization_state ORDER BY materializer"
+            ).fetchall()
+            self._cached_materializer_items = [dict(r) for r in rows]
+        except Exception:
+            pass
 
     # ---------------------------------------------------------------- schema
     def _ensure_tables(self) -> None:
@@ -435,6 +446,7 @@ class ShortHorizonRuntime:
                 "last_success_ts=excluded.last_success_ts,last_duration_ms=excluded.last_duration_ms,"
                 "processed_n=g1s_materialization_state.processed_n+excluded.processed_n,last_error=NULL",
                 (G1S_MATERIALIZER_VERSION, last_rowid, started, time.time(), duration, processed))
+            self._refresh_materializer_cache_under_lock()
         return processed
 
     # ------------------------------------------------------------- resolution
@@ -972,11 +984,13 @@ class ShortHorizonRuntime:
                 "items": items, "slow_q_semantics_unchanged": True}
 
     def materializer_status(self) -> dict:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM g1s_materialization_state ORDER BY materializer").fetchall()
+        items = getattr(self, "_cached_materializer_items", None)
+        if items is None:
+            with self._lock:
+                self._refresh_materializer_cache_under_lock()
+                items = self._cached_materializer_items
         return {"contract_version": G1S_MATERIALIZER_VERSION,
-                "items": [dict(r) for r in rows],
+                "items": list(items or []),
                 "worker": {"last_started": self._last_step_started,
                            "last_finished": self._last_step_finished,
                            "duration_ms": self._last_step_duration_ms,
