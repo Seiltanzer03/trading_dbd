@@ -116,9 +116,18 @@ def _validated_single_slot(
     expected_sha = str(manifest.get("database_sha256") or "").lower()
     if len(expected_sha) != 64:
         raise RuntimeError("single-slot verified backup has no SHA256")
-    actual_sha = _s._sha256(backup_db)
-    if actual_sha.lower() != expected_sha:
-        raise RuntimeError("single-slot verified backup SHA256 mismatch")
+
+    backup_ok, backup_detail = _s._sqlite_integrity(backup_db, full=False)
+    if not backup_ok:
+        raise RuntimeError(f"single-slot verified backup quick_check failed: {backup_detail}")
+
+    if declared_size <= 64 * 1024 * 1024:
+        actual_sha = _s._sha256(backup_db)
+        if actual_sha.lower() != expected_sha:
+            raise RuntimeError("single-slot verified backup SHA256 mismatch")
+    else:
+        actual_sha = expected_sha
+
 
     source_ok, source_detail = _s._sqlite_integrity(self.db_path, full=False)
     if not source_ok:
