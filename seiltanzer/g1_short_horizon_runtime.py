@@ -219,6 +219,9 @@ class ShortHorizonRuntime:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_g1s_obs_instrument_horizon "
                 "ON g1s_observations(instrument,horizon_minutes,captured_ts)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_g1s_obs_captured_ts "
+                "ON g1s_observations(captured_ts)")
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS g1s_resolutions(
                     observation_id TEXT PRIMARY KEY,

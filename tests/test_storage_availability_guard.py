@@ -189,3 +189,32 @@ def test_degraded_prestart_avoids_large_backup_hashing_freeze(tmp_path, monkeypa
     assert sha_calls["n"] == 0
     assert manager._startup_integrity["ok"] is True
 
+
+def test_impossible_prestart_serves_without_backup_when_no_recovery_point_exists(
+    tmp_path, monkeypatch
+):
+    orig_create = storage.StorageManager.create_backup
+    try:
+        availability.install_storage_availability_guard()
+        manager = _manager(tmp_path)
+        monkeypatch.setattr(availability, "_available_bytes", lambda _directory: 100)
+        monkeypatch.setattr(
+            availability,
+            "_lightweight_compact_plan",
+            lambda _source: {
+                "page_size": 4096,
+                "page_count": 1000,
+                "freelist_count": 0,
+                "reclaimable_bytes": 0,
+                "compact_required_bytes": 100_000,
+            },
+        )
+        result = manager.create_backup(kind="local", reason="prestart")
+        assert result.backup_id == "degraded-zero-backup"
+        assert manager._startup_integrity["ok"] is True
+        assert manager._startup_integrity["durability_degraded"] is True
+        assert manager._startup_integrity["reason"] == availability.DEGRADED_ZERO_BACKUP_REASON
+    finally:
+        storage.StorageManager.create_backup = orig_create
+
+

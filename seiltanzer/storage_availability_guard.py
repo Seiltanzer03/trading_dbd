@@ -310,7 +310,7 @@ def install_storage_availability_guard() -> None:
 
         if kind == "local" and reason == "prestart":
             impossible, plan = _background_copy_is_impossible(self, directory)
-            if impossible and self._verified_manifests(directory):
+            if impossible:
                 return _reuse_verified_for_degraded_prestart(
                     self,
                     directory=directory,
@@ -323,11 +323,16 @@ def install_storage_availability_guard() -> None:
         try:
 
             return guarded_create(self, kind=kind, reason=reason)
-        except OSError as exc:
+        except (OSError, sqlite3.OperationalError) as exc:
             if not (
                 kind == "local"
                 and reason == "prestart"
-                and exc.errno == errno.ENOSPC
+                and (
+                    not isinstance(exc, OSError)
+                    or exc.errno in (errno.ENOSPC, errno.EDQUOT)
+                    or "disk is full" in str(exc).lower()
+                    or "disk i/o error" in str(exc).lower()
+                )
             ):
                 raise
             return _reuse_verified_for_degraded_prestart(

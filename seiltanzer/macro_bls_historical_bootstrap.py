@@ -673,15 +673,33 @@ class BLSHistoricalReleaseStore:
         }
 
 
+_TABLE_EXISTS_CACHE: dict[tuple[int, str], bool] = {}
+
+
 def _table_exists(runtime: Any, table: str) -> bool:
+    key = (id(runtime), table)
+    if _TABLE_EXISTS_CACHE.get(key) is True:
+        return True
+    lock = getattr(runtime, "_lock", None)
+    acquired = False
+    if lock is not None:
+        try:
+            acquired = lock.acquire(timeout=0.25)
+        except Exception:
+            acquired = False
     try:
-        with runtime._lock:
-            row = runtime._conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-            ).fetchone()
-        return row is not None
+        row = runtime._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        exists = row is not None
+        if exists:
+            _TABLE_EXISTS_CACHE[key] = True
+        return exists
     except Exception:
         return False
+    finally:
+        if acquired and lock is not None:
+            lock.release()
 
 
 def _latest_historical_release(runtime: Any, family: str,
@@ -868,17 +886,45 @@ class OfficialBLSArchiveSource:
         return time.time(), html, payload
 
 
+_OBSERVATION_SPAN_CACHE: dict[int, tuple[float, tuple[float, float] | None]] = {}
+
+
 def observation_span(runtime: Any) -> tuple[float, float] | None:
+    runtime_id = id(runtime)
+    now = time.monotonic()
+    cached = _OBSERVATION_SPAN_CACHE.get(runtime_id)
+    if cached is not None and (now - cached[0]) < 60.0:
+        return cached[1]
     if not _table_exists(runtime, "g1s_observations"):
         return None
-    with runtime._lock:
+
+    lock = getattr(runtime, "_lock", None)
+    acquired = False
+    if lock is not None:
+        try:
+            acquired = lock.acquire(timeout=0.25)
+        except Exception:
+            acquired = False
+    if not acquired and cached is not None:
+        return cached[1]
+
+    try:
         row = runtime._conn.execute(
             "SELECT MIN(captured_ts),MAX(captured_ts) FROM g1s_observations"
         ).fetchone()
+    except Exception:
+        return cached[1] if cached is not None else None
+    finally:
+        if acquired and lock is not None:
+            lock.release()
+
     if row is None or row[0] is None or row[1] is None:
-        return None
-    start, end = float(row[0]), float(row[1])
-    return (start, end) if math.isfinite(start) and math.isfinite(end) else None
+        span: tuple[float, float] | None = None
+    else:
+        start, end = float(row[0]), float(row[1])
+        span = (start, end) if math.isfinite(start) and math.isfinite(end) else None
+    _OBSERVATION_SPAN_CACHE[runtime_id] = (now, span)
+    return span
 
 
 class BLSHistoricalBootstrapRuntime:
