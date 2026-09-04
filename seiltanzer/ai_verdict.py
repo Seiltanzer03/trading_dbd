@@ -432,3 +432,62 @@ def build_snapshot(engine) -> dict:
         snapshot["ede_prospective_shadow"] = shadow
     _impl._enforce_snapshot_budget(snapshot)
     return snapshot
+
+
+# LLM Decision Shadow v1 is deliberately additive. The established v18/v19
+# verdict remains authoritative; the second provider call can only append a
+# research comparison and a machine-readable shadow object.
+from .llm_decision_shadow import (
+    append_shadow_section as _append_llm_shadow_section,
+    request_shadow_decision as _request_llm_shadow_decision,
+    unavailable_shadow as _unavailable_llm_shadow,
+)
+
+_BASE_REQUEST_VERDICT_WITHOUT_SHADOW = _impl.request_verdict
+_SHADOW_POLICIES = {"HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
+
+
+def _shadow_contract_active(snapshot: dict) -> bool:
+    """Activate only for a complete live position-management snapshot.
+
+    Legacy/provider contract calls and reduced unit-test snapshots must remain
+    byte-for-byte compatible with the established public v18 facade.
+    """
+    if snapshot.get("trade_id") is None:
+        return False
+    manager = snapshot.get("policy_manager") or {}
+    decision = manager.get("management_decision") or {}
+    policies = manager.get("policies") or {}
+    return bool(
+        isinstance(decision, dict)
+        and decision.get("policy") in _SHADOW_POLICIES
+        and isinstance(policies, dict)
+        and policies
+        and isinstance(manager.get("selection_rule"), dict)
+    )
+
+
+def request_verdict(snapshot: dict) -> dict:
+    result = _BASE_REQUEST_VERDICT_WITHOUT_SHADOW(snapshot)
+    if not isinstance(result, dict) or not _shadow_contract_active(snapshot):
+        return result
+    result = dict(result)
+    if result.get("model") == "deterministic-policy-fallback":
+        shadow = _unavailable_llm_shadow(snapshot, "PRIMARY_LLM_REPORT_FALLBACK")
+    else:
+        try:
+            shadow = _request_llm_shadow_decision(snapshot)
+        except RuntimeError as exc:
+            # Shadow failures never downgrade or replace the established verdict.
+            code = str(exc).strip() or "SHADOW_PROVIDER_FAILURE"
+            shadow = _unavailable_llm_shadow(snapshot, code)
+    result["llm_shadow_decision"] = shadow
+    verdict = result.get("verdict")
+    if isinstance(verdict, str):
+        result["verdict"] = _append_llm_shadow_section(verdict, shadow)
+    return result
+
+
+# Preserve the established public facade identity expected by runtime contracts.
+request_verdict.__module__ = _impl.__name__
+globals()["request_verdict"] = request_verdict

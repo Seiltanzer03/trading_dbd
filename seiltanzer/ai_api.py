@@ -60,6 +60,10 @@ def success_body(result: dict, req_id: str, *, degraded: bool = False,
     decision = result.get("management_decision")
     if isinstance(decision, dict):
         body["management_decision"] = decision
+    shadow = result.get("llm_shadow_decision")
+    if isinstance(shadow, dict):
+        # Research-only comparison. It never replaces management_decision.
+        body["llm_shadow_decision"] = shadow
     if provider_failure:
         body["provider_error"] = provider_failure
     if result.get("captured_ts") is not None:
