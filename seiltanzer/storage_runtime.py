@@ -305,6 +305,10 @@ class StorageManager:
                 src.execute("PRAGMA busy_timeout=30000")
                 src.backup(dst, pages=256, sleep=0.01)
                 dst.commit()
+            except Exception:
+                with contextlib.suppress(FileNotFoundError):
+                    temp_db.unlink()
+                raise
             finally:
                 dst.close()
                 src.close()

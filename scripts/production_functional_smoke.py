@@ -266,7 +266,7 @@ def _wait_for_macro_numeric_refresh(
 
 
 def verify_macro_runtime() -> None:
-    status = assert_route("/api/research/macro/status")
+    status = assert_route("/api/research/macro/status", timeout=15.0)
     assert isinstance(status, dict), status
     assert status.get("official_sources_only") is True, status
     assert status.get("no_placeholders") is True, status
