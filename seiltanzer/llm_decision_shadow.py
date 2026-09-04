@@ -1,7 +1,7 @@
 """Independent LLM trade-management opinion with zero production authority.
 
 The deterministic policy manager remains the only source of production execution
-state.  This module asks the configured LLM for a separate, machine-readable
+state. This module asks the configured LLM for a separate, machine-readable
 opinion so disagreements can be observed before any future authority change.
 """
 from __future__ import annotations
@@ -19,6 +19,8 @@ VALID_POLICIES = ("HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT")
 _MAX_REASON_CHARS = 1200
 _MAX_EVIDENCE_ITEMS = 6
 _MAX_EVIDENCE_CHARS = 320
+_DEFAULT_SHADOW_TIMEOUT_SEC = 10.0
+_MAX_SHADOW_TIMEOUT_SEC = 15.0
 
 SHADOW_SYSTEM_PROMPT = """Ты — независимый риск-менеджер уже ОТКРЫТОЙ сделки.
 Это SHADOW-анализ: твой ответ НЕ исполняется и НЕ меняет production policy.
@@ -115,9 +117,7 @@ def _shadow_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
         "ede_prospective_shadow",
         "active_edge_context",
     )
-    projection = {
-        key: snapshot[key] for key in root_keys if key in snapshot
-    }
+    projection = {key: snapshot[key] for key in root_keys if key in snapshot}
     projection["policy_manager"] = {
         key: manager[key] for key in manager_keys if key in manager
     }
@@ -141,7 +141,7 @@ def _extract_json_object(content: str) -> dict[str, Any]:
             text = text[:-3].strip()
     try:
         payload = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError) as exc:
         raise RuntimeError("shadow_invalid_json") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("shadow_invalid_payload")
@@ -188,7 +188,7 @@ def _validate_model_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _hard_guard(snapshot: dict[str, Any], policy: str) -> tuple[bool, list[str]]:
-    """Check the same published hard-risk facts without changing production state."""
+    """Fail closed against the published hard-risk/CVaR contract."""
     manager = snapshot.get("policy_manager") or {}
     rule = manager.get("selection_rule") or {}
     policies = manager.get("policies") or {}
@@ -197,12 +197,20 @@ def _hard_guard(snapshot: dict[str, Any], policy: str) -> tuple[bool, list[str]]
 
     reasons: list[str] = []
     eligible = rule.get("eligible")
-    if isinstance(eligible, list) and eligible and policy not in eligible:
-        reasons.append("POLICY_OUTSIDE_PUBLISHED_CVAR_FEASIBLE_SET")
-
     row = policies.get(policy) if isinstance(policies, dict) else None
     floor = _number(rule.get("cvar_floor_r"))
     cvar = _number((row or {}).get("cvar10_r")) if isinstance(row, dict) else None
+
+    if isinstance(eligible, list):
+        # An explicitly published empty feasible set means no shadow policy is
+        # admissible. Do not silently turn [] into "guard unavailable" or PASS.
+        if policy not in eligible:
+            reasons.append("POLICY_OUTSIDE_PUBLISHED_CVAR_FEASIBLE_SET")
+    elif floor is None or cvar is None:
+        # The report may still display the LLM opinion, but it must never call
+        # the risk check PASS when the hard constraint cannot be evaluated.
+        reasons.append("HARD_CVAR_GUARD_UNAVAILABLE")
+
     if floor is not None and cvar is not None and cvar < floor - 1e-12:
         reasons.append("POLICY_CVAR10_BELOW_HARD_FLOOR")
 
@@ -234,8 +242,14 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
         os.environ.get("OPENROUTER_SHADOW_MODEL", "").strip()
         or os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
     )
-    timeout = _number(os.environ.get("OPENROUTER_SHADOW_TIMEOUT_SEC")) or 22.0
-    timeout = max(5.0, min(timeout, 30.0))
+    timeout = (
+        _number(os.environ.get("OPENROUTER_SHADOW_TIMEOUT_SEC"))
+        or _DEFAULT_SHADOW_TIMEOUT_SEC
+    )
+    # The primary verdict is already a provider call. Keep shadow latency
+    # tightly bounded so this additive research layer cannot create a gateway
+    # timeout on an otherwise successful verdict request.
+    timeout = max(5.0, min(timeout, _MAX_SHADOW_TIMEOUT_SEC))
     body = {
         "model": model,
         "temperature": 0.0,
@@ -324,8 +338,15 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
     confidence = _number(shadow.get("confidence"))
     confidence_text = "—" if confidence is None else f"{confidence * 100:.1f}%"
     agreement = shadow.get("agreement")
-    agreement_text = "совпадает" if agreement is True else ("расходится" if agreement is False else "не сопоставлено")
-    guard = "BLOCKED hard-risk guard" if shadow.get("blocked_by_hard_guard") else "PASS hard-risk guard"
+    agreement_text = (
+        "совпадает" if agreement is True
+        else ("расходится" if agreement is False else "не сопоставлено")
+    )
+    guard = (
+        "BLOCKED/UNVERIFIED hard-risk guard"
+        if shadow.get("blocked_by_hard_guard")
+        else "PASS hard-risk guard"
+    )
     lines.append(
         f"Quant: {quant_policy}. Независимый LLM: {policy}; confidence {confidence_text}; "
         f"с quant {agreement_text}; {guard}."
