@@ -79,6 +79,42 @@ def test_functional_smoke_retries_transient_timeout(monkeypatch):
     assert smoke.assert_route("/bounded") == {}
 
 
+def test_functional_smoke_accepts_configured_required_new_resolved_t0(monkeypatch):
+    smoke = _load_script("production_functional_smoke")
+
+    for req_t0 in (1, 100):
+        fake_lifecycle = {
+            "pr_c_contract_version": "llm-edge-researcher-v1.3-pr-c",
+            "request_time_history_scan": False,
+            "production_authority": False,
+            "automation": {
+                "manual_post_only": False,
+                "required_new_resolved_t0": req_t0,
+                "minimum_provider_interval_sec": 43_200,
+                "max_automatic_hypotheses": 5,
+                "heavy_evaluation_concurrency": 1,
+            },
+            "research_quality": {
+                "llm_discovery_to_prospective_survival_rate": 0.0,
+                "production_authority": False,
+            },
+        }
+
+        def fake_request(path: str, *, method: str = "GET", timeout: float = 5.0):
+            if path == "/api/research/g1s/edge-researcher/lifecycle":
+                return 200, fake_lifecycle, 5.0
+            if path == "/api/research/g1s/edge-researcher/status":
+                return 200, {
+                    "request_time_history_scan": False,
+                    "production_authority": False,
+                    "automation": {"manual_post_only": False},
+                }, 5.0
+            raise AssertionError(f"Unexpected path: {path}")
+
+        monkeypatch.setattr(smoke, "request", fake_request)
+        smoke.verify_edge_researcher()
+
+
 def test_functional_smoke_checks_public_terminal_and_keeps_network_diagnostics():
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github/workflows/production-functional-smoke.yml").read_text(
