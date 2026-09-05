@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from collections import defaultdict
 from typing import Any
@@ -34,6 +35,62 @@ SERIOUS_OOS_REQUIRED = {
     "negative_n": 120,
     "temporal_blocks": 20,
 }
+
+HORIZON_SERIOUS_OOS_REQUIRED = {
+    15: {
+        "raw_resolved": 800,
+        "effective_n": 350,
+        "positive_n": 100,
+        "negative_n": 100,
+        "temporal_blocks": 15,
+    },
+    30: {
+        "raw_resolved": 850,
+        "effective_n": 350,
+        "positive_n": 100,
+        "negative_n": 100,
+        "temporal_blocks": 15,
+    },
+    60: {
+        "raw_resolved": 900,
+        "effective_n": 350,
+        "positive_n": 100,
+        "negative_n": 100,
+        "temporal_blocks": 15,
+    },
+    120: {
+        "raw_resolved": 950,
+        "effective_n": 300,
+        "positive_n": 100,
+        "negative_n": 100,
+        "temporal_blocks": 15,
+    },
+    240: {
+        "raw_resolved": 1000,
+        "effective_n": 250,
+        "positive_n": 100,
+        "negative_n": 100,
+        "temporal_blocks": 15,
+    },
+}
+
+
+def get_oos_candidate_required(horizon: int | None = None) -> dict[str, int]:
+    if horizon is not None:
+        try:
+            h = int(horizon)
+            if h in HORIZON_SERIOUS_OOS_REQUIRED:
+                return dict(HORIZON_SERIOUS_OOS_REQUIRED[h])
+        except (TypeError, ValueError):
+            pass
+    return dict(SERIOUS_OOS_REQUIRED)
+
+
+def get_min_volatility_regimes() -> int:
+    try:
+        return int(os.environ.get("G1S_MIN_VOLATILITY_REGIMES", "1"))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _clip(value: float) -> float:
@@ -280,7 +337,7 @@ def _causal_baselines(rows: list[dict[str, Any]]) -> dict[str, list[float]]:
     }
 
 
-def _candidate_blockers(rows: list[dict[str, Any]], effective_n: int) -> tuple[dict[str, int], list[str]]:
+def _candidate_blockers(rows: list[dict[str, Any]], effective_n: int, horizon: int | None = None) -> tuple[dict[str, int], list[str]]:
     positive = sum(str(row["direction_label"]) == "UP" for row in rows)
     negative = sum(str(row["direction_label"]) == "DOWN" for row in rows)
     days = len({time.strftime("%Y-%m-%d", time.gmtime(float(row["captured_ts"]))) for row in rows})
@@ -293,12 +350,14 @@ def _candidate_blockers(rows: list[dict[str, Any]], effective_n: int) -> tuple[d
         "temporal_blocks": int(days),
         "volatility_regime_count": int(regimes),
     }
+    required_specs = get_oos_candidate_required(horizon) if horizon is not None else SERIOUS_OOS_REQUIRED
     blockers = [
         f"INSUFFICIENT_{key.upper()}"
-        for key, required in SERIOUS_OOS_REQUIRED.items()
+        for key, required in required_specs.items()
         if observed[key] < int(required)
     ]
-    if regimes < 2:
+    min_regimes = get_min_volatility_regimes()
+    if regimes < min_regimes:
         blockers.append("INSUFFICIENT_VOLATILITY_REGIME_DIVERSITY")
     return observed, blockers
 

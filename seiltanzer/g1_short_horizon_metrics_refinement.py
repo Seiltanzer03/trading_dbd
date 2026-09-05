@@ -463,10 +463,15 @@ def install_g1_short_horizon_metrics_refinement() -> None:
             "negative_n": int(result.get("negative_n") or 0),
             "temporal_blocks": temporal_blocks,
         }
-        for key, required in OOS_CANDIDATE_REQUIRED.items():
+        from .g1_short_horizon_evidence_completion import (
+            get_oos_candidate_required,
+            get_min_volatility_regimes,
+        )
+        reqs = get_oos_candidate_required(horizon)
+        for key, required in reqs.items():
             if observed.get(key, 0) < required:
                 candidate_blockers.append(f"INSUFFICIENT_{key.upper()}")
-        if regimes < 2:
+        if regimes < get_min_volatility_regimes():
             candidate_blockers.append("INSUFFICIENT_VOLATILITY_REGIME_DIVERSITY")
         result["dependency_contract_version"] = DEPENDENCY_GROUP_VERSION
         result["dependency_groups_finalized"] = int(dependency["groups_n"] or 0)

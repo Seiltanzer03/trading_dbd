@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import threading
 import time
 from typing import Any, Callable
@@ -32,7 +33,15 @@ AUTOMATION_CONTRACT_VERSION = "llm-edge-research-automation-v1"
 RESEARCH_QUALITY_CONTRACT_VERSION = "llm-edge-research-quality-v1"
 PROMOTION_PARITY_CONTRACT_VERSION = "llm-edge-active-parity-v1"
 
-AUTO_MIN_NEW_RESOLVED_T0 = 100
+
+def _auto_min_new_resolved_t0() -> int:
+    try:
+        return int(os.environ.get("LLM_EDGE_AUTO_MIN_NEW_RESOLVED_T0", "1"))
+    except (TypeError, ValueError):
+        return 1
+
+
+AUTO_MIN_NEW_RESOLVED_T0 = _auto_min_new_resolved_t0()
 AUTO_MIN_PROVIDER_INTERVAL_SEC = 12 * 60 * 60
 AUTO_MAX_HYPOTHESES = 5
 

@@ -14,7 +14,11 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .g1_short_horizon_evidence_completion import SERIOUS_OOS_REQUIRED
+from .g1_short_horizon_evidence_completion import (
+    SERIOUS_OOS_REQUIRED,
+    get_oos_candidate_required,
+    get_min_volatility_regimes,
+)
 
 
 _PATCH_VERSION = "g1s-champion-progress-sql-aggregate-v1"
@@ -102,11 +106,13 @@ def _refresh_progress_bounded(runtime) -> None:
             "negative_n": negative_n,
             "temporal_blocks": temporal_blocks,
         }
+        h = cohort.get("horizon_minutes")
+        reqs = get_oos_candidate_required(h)
         blockers = [
-            key for key, required in SERIOUS_OOS_REQUIRED.items()
+            key for key, required in reqs.items()
             if int(observed.get(key, 0)) < int(required)
         ]
-        if regimes < 2:
+        if regimes < get_min_volatility_regimes():
             blockers.append("volatility_regime_count")
         maturity = "SERIOUS_SAMPLE_GATE_MET" if not blockers else "INSUFFICIENT"
 

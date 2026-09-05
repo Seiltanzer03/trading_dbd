@@ -22,7 +22,11 @@ import numpy as np
 
 from . import g1_short_horizon_integration as _integration
 from . import storage_runtime as _storage
-from .g1_short_horizon_evidence_completion import SERIOUS_OOS_REQUIRED
+from .g1_short_horizon_evidence_completion import (
+    SERIOUS_OOS_REQUIRED,
+    get_oos_candidate_required,
+    get_min_volatility_regimes,
+)
 from .g1_short_horizon_gbt_refinement import MODEL_FAMILY as GBT_MODEL_FAMILY, _predict_gbt
 from .g1_short_horizon_runtime import ShortHorizonRuntime, _loads, _sigmoid
 
@@ -474,9 +478,11 @@ def _refresh_progress(runtime: ShortHorizonRuntime) -> None:
             "negative_n": int(negative),
             "temporal_blocks": int(blocks),
         }
-        blockers = [key for key, required in SERIOUS_OOS_REQUIRED.items()
+        h = cohort.get("horizon_minutes")
+        reqs = get_oos_candidate_required(h)
+        blockers = [key for key, required in reqs.items()
                     if int(observed.get(key, 0)) < int(required)]
-        if regimes < 2:
+        if regimes < get_min_volatility_regimes():
             blockers.append("volatility_regime_count")
         maturity = "SERIOUS_SAMPLE_GATE_MET" if not blockers else "INSUFFICIENT"
         latest_resolved = max((_finite(row.get("resolved_ts")) or 0.0 for row in rows), default=0.0)

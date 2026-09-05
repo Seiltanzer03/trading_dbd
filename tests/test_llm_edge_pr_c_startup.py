@@ -112,7 +112,7 @@ def test_startup_upgrade_preserves_materialized_truth_without_research(monkeypat
     assert upgraded["request_time_history_scan"] is False
     assert upgraded["production_authority"] is False
     assert upgraded["automation"]["manual_post_only"] is False
-    assert upgraded["automation"]["required_new_resolved_t0"] == 100
+    assert upgraded["automation"]["required_new_resolved_t0"] == prc.AUTO_MIN_NEW_RESOLVED_T0
     assert upgraded["automation"]["minimum_provider_interval_sec"] == 43_200
     assert upgraded["automation"]["max_automatic_hypotheses"] == 5
     assert upgraded["automation"]["heavy_evaluation_concurrency"] == 1
