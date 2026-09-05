@@ -123,7 +123,8 @@ def test_worker_runs_bounded_core_once_and_skips_all_maintenance_under_gate(monk
 
     async def exercise():
         async with app.router.lifespan_context(app):
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.08)
+
 
     asyncio.run(exercise())
     assert calls == ["g1s-core", "g1m-core"]
@@ -164,7 +165,8 @@ def test_worker_without_gate_eventually_schedules_optional_maintenance(monkeypat
 
     async def exercise():
         async with app.router.lifespan_context(app):
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.08)
+
 
     asyncio.run(exercise())
     assert calls

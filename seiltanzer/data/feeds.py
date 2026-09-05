@@ -23,10 +23,12 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from ..config import (INSTRUMENTS, SIGMA_INDEX_FOR, VOL_INDEX_TICKERS,
+from ..config import (ALL_INSTRUMENTS, CRYPTO_INSTRUMENTS, CRYPTO_VOL_INDEX,
+                      INSTRUMENTS, SIGMA_INDEX_FOR, VOL_INDEX_TICKERS,
                       Instrument, Settings)
 from ..core import options as opt
 from .cache import DiskCache, production_chain_snapshot
+from .deribit import DeribitFetcher
 
 # yfinance шумит в stderr про делистинги (например ^V1X/VDAX недоступен) —
 # это ожидаемо и обрабатывается статусом no_data, поэтому глушим его логгер.
@@ -185,8 +187,9 @@ class DemoMarket:
 
     def __init__(self, seed: int | None = None):
         self.rng = random.Random(seed)
-        self.prices = {c: i.demo_price for c, i in INSTRUMENTS.items()}
-        self.vols = {"vix": 17.5, "gvz": 16.0, "dv1x": 16.5, "evz": 8.0, "vxn": 22.0}
+        self.prices = {c: i.demo_price for c, i in ALL_INSTRUMENTS.items()}
+        self.vols = {"vix": 17.5, "gvz": 16.0, "dv1x": 16.5, "evz": 8.0, "vxn": 22.0,
+                     "btc_dvol": 52.0, "eth_dvol": 62.0, "sol_dvol": 78.0}
         self._last = time.time()
 
     def step(self) -> None:
@@ -194,7 +197,7 @@ class DemoMarket:
         dt_sec = max(now - self._last, 1e-3)
         self._last = now
         dt_y = dt_sec / (365.0 * 24 * 3600)
-        for code, inst in INSTRUMENTS.items():
+        for code, inst in ALL_INSTRUMENTS.items():
             sigma = inst.demo_vol
             z = self.rng.gauss(0, 1)
             self.prices[code] *= math.exp(-0.5 * sigma * sigma * dt_y
@@ -202,17 +205,18 @@ class DemoMarket:
             # *8: демо-время ускорено, чтобы движение было видно на панелях
         for k, anchor, floor in (("vix", 17.5, 9.0), ("gvz", 16.0, 9.0),
                                  ("dv1x", 16.5, 9.0), ("evz", 8.0, 4.0),
-                                 ("vxn", 22.0, 12.0)):
-            v = self.vols[k]
+                                 ("vxn", 22.0, 12.0), ("btc_dvol", 52.0, 20.0),
+                                 ("eth_dvol", 62.0, 25.0), ("sol_dvol", 78.0, 30.0)):
+            v = self.vols.get(k, anchor)
             self.vols[k] = max(floor, v + 0.05 * (anchor - v) + self.rng.gauss(0, 0.15))
 
     def daily_bars(self, code: str, days: int = 60) -> dict:
-        inst = INSTRUMENTS[code]
+        inst = ALL_INSTRUMENTS[code]
         rng = random.Random(hash(code) & 0xFFFF)
         closes, highs, lows = [], [], []
         p = self.prices[code] * 0.97
         for _ in range(days):
-            drift = rng.gauss(0, inst.demo_vol / math.sqrt(252))
+            drift = rng.gauss(0, inst.demo_vol / math.sqrt(inst.annual_days))
             o = p
             p = p * math.exp(drift)
             hi = max(o, p) * (1 + abs(rng.gauss(0, 0.004)))
@@ -225,14 +229,16 @@ class DemoMarket:
                 "closes": [c * scale for c in closes]}
 
     def chain(self, code: str) -> dict | None:
-        inst = INSTRUMENTS[code]
-        if inst.options_proxy is None:
+        inst = ALL_INSTRUMENTS[code]
+        if inst.options_proxy is None and inst.asset_class != "crypto":
             return None
         spot = self.prices[code]
-        iv = 0.16 + 0.04 * math.sin(time.time() / 300.0)
+        base_iv = inst.demo_vol
+        iv = base_iv + 0.04 * math.sin(time.time() / 300.0)
         iv_skew = 0.7 * math.sin(time.time() / 240.0)   # меандрирует бычий/медвежий
         return opt.synth_chain(spot, iv, t_years=2.0 / 365.0, n_strikes=41,
-                               width=0.06, oi_skew=0.5, iv_skew=iv_skew,
+                               width=0.10 if inst.asset_class == "crypto" else 0.06,
+                               oi_skew=0.5, iv_skew=iv_skew,
                                seed=int(time.time()) // 30)
 
 
@@ -279,7 +285,7 @@ class MarketData:
 
     @property
     def instrument(self) -> Instrument:
-        return INSTRUMENTS[self.instrument_code]
+        return ALL_INSTRUMENTS[self.instrument_code]
 
     def _has_direct_price_scale(self) -> bool:
         """Цена сейчас действительно в шкале spot/broker, а не Yahoo fallback."""
@@ -289,7 +295,7 @@ class MarketData:
                         and source.startswith("TradingView snapshot")))
 
     def set_instrument(self, code: str) -> None:
-        if code not in INSTRUMENTS:
+        if code not in ALL_INSTRUMENTS:
             raise ValueError(f"неизвестный инструмент: {code}")
         if code != self.instrument_code:
             self.instrument_code = code
@@ -436,6 +442,11 @@ class MarketData:
         остаётся снимком, а её положение относительно текущей цены оживает
         между снимками без выдумывания новых опционных котировок.
         """
+        if self.instrument.asset_class == "crypto":
+            p = self.price.get("value")
+            st = self.price.get("status") or "live"
+            self.proxy_price = _status_dict(p, st, time.time(), source="direct scale (crypto native)")
+            return
         proxy = self.instrument.options_proxy
         if proxy is None:
             self.proxy_price = _status_dict(error="у инструмента нет опционного прокси")
@@ -491,6 +502,58 @@ class MarketData:
             cutoff = now - 8 * 3600
             self.intraday = [x for x in self.intraday if x[0] > cutoff]
             return
+        if self.instrument.asset_class == "crypto":
+            now = time.time()
+            binance_sym = self.instrument.binance_symbol or "BTCUSDT"
+            # 1. Проверяем тиковый Binance WebSocket стрим
+            if self.stream is not None:
+                sp = self.stream.fresh(binance_sym, max_age=8.0)
+                if sp is not None:
+                    self.price = _status_dict(
+                        sp, "live", now, source=f"Binance WS {binance_sym}")
+                    self.price.update({
+                        "derived": False,
+                        "instrument_type": "crypto_spot",
+                    })
+                    self._annotate_freshness()
+                    self.refresh_proxy_price()
+                    self.intraday.append((now, sp, 0.0))
+                    self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
+                    return
+
+            # 2. REST fallback: Deribit Index или Binance REST
+            if now - self._last_price_rest_attempt < self.settings.price_poll_sec:
+                return
+            self._last_price_rest_attempt = now
+            try:
+                curr = self.instrument.deribit_currency or "BTC"
+                fetcher = getattr(self, "_deribit_fetcher", None)
+                if fetcher is None:
+                    fetcher = DeribitFetcher()
+                    self._deribit_fetcher = fetcher
+                p = fetcher.fetch_index_price(curr)
+                if p is None or p <= 0:
+                    import httpx
+                    client = httpx.Client(timeout=4.0)
+                    r = client.get(f"https://api.binance.com/api/v3/ticker/price?symbol={binance_sym}")
+                    if r.status_code == 200:
+                        p = float(r.json().get("price", 0.0))
+                if p is None or p <= 0:
+                    raise RuntimeError("не удалось получить крипто-котировку с Deribit/Binance")
+                self.price = _status_dict(
+                    p, "live", now, source=f"Binance/Deribit REST {binance_sym}")
+                self.price.update({
+                    "derived": False,
+                    "instrument_type": "crypto_spot",
+                })
+                self._annotate_freshness()
+                self.refresh_proxy_price()
+                self.intraday.append((now, p, 0.0))
+                self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
+                return
+            except Exception as e:
+                self._mark_fail(self.price, self.settings.price_poll_sec, str(e))
+                return
         broker_error = None
         broker_symbol = self.instrument.tradingview_symbol
         if broker_symbol:
@@ -594,6 +657,28 @@ class MarketData:
         """1m-бары дня для VWAP (объём нужен; у кэш-индексов его нет — честно None)."""
         if self.demo:
             return
+        if self.instrument.asset_class == "crypto":
+            try:
+                import httpx
+                binance_sym = self.instrument.binance_symbol or "BTCUSDT"
+                client = httpx.Client(timeout=6.0)
+                resp = client.get(
+                    f"https://api.binance.com/api/v3/klines?symbol={binance_sym}&interval=1m&limit=120"
+                )
+                if resp.status_code == 200:
+                    raw_bars = resp.json()
+                    self.intraday_is_offset = False
+                    self.intraday_ohlcv = [
+                        (float(b[0]) / 1000.0, float(b[1]), float(b[2]), float(b[3]), float(b[4]), float(b[5]))
+                        for b in raw_bars
+                    ]
+                    self.intraday = [
+                        (float(b[0]) / 1000.0, float(b[4]), float(b[5]))
+                        for b in raw_bars
+                    ]
+            except Exception:
+                pass
+            return
         try:
             import yfinance as yf
             hist = yf.Ticker(self.instrument.yahoo).history(period="1d", interval="1m")
@@ -639,6 +724,41 @@ class MarketData:
             self.daily = {"bars": self.demo_market.daily_bars(self.instrument_code),
                           **_status_dict(True, "demo", time.time(), source="demo GBM")}
             return
+        if self.instrument.asset_class == "crypto":
+            try:
+                import httpx
+                binance_sym = self.instrument.binance_symbol or "BTCUSDT"
+                client = httpx.Client(timeout=8.0)
+                resp = client.get(
+                    f"https://api.binance.com/api/v3/klines?symbol={binance_sym}&interval=1d&limit=120"
+                )
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Binance klines status: {resp.status_code}")
+                raw_bars = resp.json()
+                if len(raw_bars) < 25:
+                    raise RuntimeError(f"мало дневных баров Binance: {len(raw_bars)}")
+                bars = {
+                    "highs": [float(b[2]) for b in raw_bars],
+                    "lows": [float(b[3]) for b in raw_bars],
+                    "closes": [float(b[4]) for b in raw_bars],
+                }
+                self.daily = {
+                    "bars": bars,
+                    **_status_dict(True, "live", time.time(),
+                                   source=f"Binance REST {binance_sym} 1d klines")
+                }
+                self.cache.put(f"daily:{self.instrument_code}", bars)
+                return
+            except Exception as e:
+                cached = self.cache.get(f"daily:{self.instrument_code}", max_age=3 * 24 * 3600)
+                if cached:
+                    bars, ts = cached
+                    self.daily = {"bars": bars, **_status_dict(True, "delayed", ts,
+                                                               error=str(e)[:200],
+                                                               source="кэш дневок")}
+                else:
+                    self.daily = {"bars": None, **_status_dict(error=str(e)[:200])}
+                return
         try:
             import yfinance as yf
             hist = yf.Ticker(self.instrument.yahoo).history(period="4mo", interval="1d")
@@ -680,6 +800,26 @@ class MarketData:
             return
         import yfinance as yf
         for key, ticker in VOL_INDEX_TICKERS.items():
+            if ticker is None:
+                # Крипто DVOL индекс с Deribit (btc_dvol, eth_dvol, sol_dvol)
+                curr = key.split("_")[0].upper()
+                try:
+                    fetcher = getattr(self, "_deribit_fetcher", None)
+                    if fetcher is None:
+                        fetcher = DeribitFetcher()
+                        self._deribit_fetcher = fetcher
+                    dvol_val = fetcher.fetch_dvol(curr)
+                    if dvol_val is not None and dvol_val > 0:
+                        self.vols[key] = _status_dict(round(float(dvol_val), 2), "live",
+                                                      time.time(),
+                                                      source=f"Deribit {curr} DVOL")
+                        self.vols[key]["timeframe"] = "1m"
+                        self.vols[key]["delay_hint_sec"] = 60
+                    else:
+                        raise RuntimeError(f"нет данных DVOL для {curr}")
+                except Exception as e:
+                    self._mark_fail(self.vols[key], self.settings.vol_poll_sec, str(e))
+                continue
             try:
                 # 15m — бесплатный динамический контекст. Это не тиковый опцион и
                 # не точная 4H-последовательность стратегии; источник/таймфрейм
@@ -699,6 +839,61 @@ class MarketData:
 
     def refresh_iv_surface(self) -> None:
         """Сетка IV для нескольких экспираций -> поверхность (3D)."""
+        if self.instrument.asset_class == "crypto":
+            curr = self.instrument.deribit_currency or "BTC"
+            if self.demo:
+                days_arr = [0.05, 0.1, 0.25, 0.5, 1.0]
+                surface = []
+                now_ts = time.time()
+                for i, d in enumerate(days_arr):
+                    iv_base = self.instrument.demo_vol + 0.06 * math.sin(now_ts / 60.0) + (i * 0.005)
+                    iv_skew = 0.8 * math.sin(now_ts / 45.0)
+                    spot = self.demo_market.prices[self.instrument_code]
+                    chain = opt.synth_chain(spot, iv_base, max(0.001, d / 365.0), n_strikes=41, width=0.10, r=0.05, iv_skew=iv_skew, seed=int(now_ts)//10 + i)
+                    surface.append({
+                        "days": d, "expiry": f"{d*24:.1f}h",
+                        "strikes": chain["strikes"].tolist(), "ivs": chain["call_iv"].tolist(),
+                        "spot_at_snapshot": spot,
+                    })
+                self.iv_surface = _status_dict(value=surface, status="demo", ts=now_ts, source="synthetic crypto micro-3D")
+                return
+
+            try:
+                fetcher = getattr(self, "_deribit_fetcher", None)
+                if fetcher is None:
+                    fetcher = DeribitFetcher()
+                    self._deribit_fetcher = fetcher
+                matrix = fetcher.fetch_full_options_matrix(curr)
+                spot = matrix.get("spot") or 0.0
+                now_ts = matrix.get("ts", time.time())
+                surface = []
+                for exp_name, opts in sorted(matrix.get("expiries", {}).items(), key=lambda x: len(x[1]), reverse=True)[:5]:
+                    calls = [o for o in opts if o.get("type") == "C" and (o.get("iv") or 0) > 0]
+                    if len(calls) < 3:
+                        continue
+                    calls.sort(key=lambda o: o["strike"])
+                    try:
+                        exp_dt = dt.datetime.strptime(exp_name, "%d%b%y").replace(
+                            hour=8, minute=0, second=0, tzinfo=dt.timezone.utc
+                        )
+                        days = max(0.1, (exp_dt.timestamp() - now_ts) / 86400.0)
+                    except Exception:
+                        days = 1.0
+                    surface.append({
+                        "days": round(days, 2),
+                        "expiry": exp_name,
+                        "strikes": [c["strike"] for c in calls],
+                        "ivs": [c["iv"] / 100.0 for c in calls],
+                        "spot_at_snapshot": spot,
+                    })
+                surface.sort(key=lambda s: s["days"])
+                self.iv_surface = _status_dict(
+                    value=surface, status="live", ts=now_ts,
+                    source=f"Deribit {curr} 3D surface")
+            except Exception as e:
+                self.iv_surface = _status_dict(status="no_data", error=str(e)[:200])
+            return
+
         proxy = self.instrument.options_proxy
         if proxy is None:
             self.iv_surface = _status_dict(status="no_data", error="нет опционов")
@@ -904,6 +1099,68 @@ class MarketData:
 
         Снапшот уходит в кэш — история снапшотов питает Strike Landscape.
         """
+        if self.instrument.asset_class == "crypto":
+            curr = self.instrument.deribit_currency or "BTC"
+            if self.demo:
+                raw = self.demo_market.chain(self.instrument_code)
+                spot = self.demo_market.prices[self.instrument_code]
+                term = self._demo_term()
+                try:
+                    metrics = self._compute_chain_metrics(
+                        raw, spot, curr, demo=True,
+                        experimental=False, term=term)
+                    self.chain = {"metrics": metrics,
+                                  **_status_dict(True, "demo", time.time(),
+                                                 source="synthetic BS chain")}
+                    self.cache.add_chain_snapshot(curr, metrics)
+                except ValueError as e:
+                    self.chain = {"metrics": None, **_status_dict(error=str(e))}
+                return
+
+            try:
+                fetcher = getattr(self, "_deribit_fetcher", None)
+                if fetcher is None:
+                    fetcher = DeribitFetcher()
+                    self._deribit_fetcher = fetcher
+
+                raw = fetcher.fetch_chain(curr)
+                if raw is None:
+                    raise RuntimeError(f"Deribit API не вернул цепочку для {curr}")
+                spot = raw["spot"]
+                term_points = fetcher.fetch_term_structure(curr, spot)
+                term = opt.term_structure(term_points) if len(term_points) >= 2 else None
+                metrics = self._compute_chain_metrics(
+                    raw, spot, curr, demo=False,
+                    experimental=False, term=term)
+                self.chain = {"metrics": metrics,
+                              **_status_dict(True, "live", time.time(),
+                                             source=f"Deribit {curr} options {raw.get('expiry')}")}
+                self.chain["delay_hint_sec"] = 60
+                self.cache.add_chain_snapshot(curr, metrics)
+            except Exception as e:
+                snaps = [
+                    snap for snap in self.cache.chain_snapshots(curr, limit=60)
+                    if production_chain_snapshot(snap)
+                ]
+                if snaps and time.time() - snaps[-1]["ts"] < 24 * 3600:
+                    self.chain = {"metrics": snaps[-1],
+                                  **_status_dict(True, "delayed", snaps[-1]["ts"],
+                                                 error=str(e)[:200], source="кэш цепочки"),
+                                  "cache_fallback": {
+                                      "used": True,
+                                      "snapshot_provenance": "explicit_real_demo_false",
+                                  }}
+                else:
+                    self.chain = {
+                        "metrics": None,
+                        **_status_dict(error=str(e)[:200]),
+                        "cache_fallback": {
+                            "used": False,
+                            "reason": "no_explicitly_real_snapshot",
+                            "demo_or_unverified_rejected": True,
+                        },
+                    }
+            return
         proxy = self.instrument.options_proxy
         if proxy is None:
             self.chain = {"metrics": None,

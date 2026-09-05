@@ -1,0 +1,384 @@
+/* Seiltanzer Crypto Trading & Derivatives Terminal Styles */
+
+.mode-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: rgba(13, 20, 28, 0.85);
+  border: 1px solid rgba(80, 140, 180, 0.25);
+  border-radius: 4px;
+  padding: 8px 14px;
+  margin-bottom: 16px;
+}
+
+.mode-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.tab-btn {
+  background: rgba(22, 33, 44, 0.6);
+  border: 1px solid rgba(110, 160, 200, 0.2);
+  color: #8da4b4;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 6px 14px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.tab-btn:hover {
+  background: rgba(30, 45, 60, 0.8);
+  color: #e0edf5;
+  border-color: rgba(110, 190, 240, 0.4);
+}
+
+.tab-btn.active {
+  background: rgba(14, 45, 68, 0.9);
+  color: #4bd8e8;
+  border-color: #4bd8e8;
+  box-shadow: 0 0 10px rgba(75, 216, 232, 0.25);
+}
+
+.asset-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.asset-pill-btn {
+  background: rgba(18, 26, 36, 0.7);
+  border: 1px solid rgba(90, 130, 160, 0.25);
+  color: #9cb5c5;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.asset-pill-btn:hover {
+  background: rgba(26, 38, 52, 0.9);
+  color: #ffffff;
+}
+
+.asset-pill-btn.active {
+  background: #153245;
+  color: #55f0b5;
+  border-color: #55f0b5;
+  box-shadow: 0 0 8px rgba(85, 240, 181, 0.3);
+}
+
+/* KPI Bar */
+.crypto-kpi-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.kpi-card {
+  background: rgba(13, 20, 28, 0.75);
+  border: 1px solid rgba(80, 130, 170, 0.18);
+  border-radius: 4px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.kpi-title {
+  font-size: 9px;
+  font-weight: 600;
+  color: #6b8495;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+
+.kpi-val {
+  font-size: 15px;
+  font-weight: 700;
+  color: #dceaf2;
+  font-family: 'IBM Plex Mono', monospace;
+  transition: color 0.3s ease;
+}
+
+.kpi-sub {
+  font-size: 9px;
+  color: #7994a5;
+  margin-top: 2px;
+}
+
+.kpi-val.pos { color: #50d99a; }
+.kpi-val.neg { color: #ff6371; }
+.kpi-val.warn { color: #f2c050; }
+
+.flash-up {
+  color: #50d99a !important;
+  text-shadow: 0 0 10px rgba(80, 217, 154, 0.6);
+}
+
+.flash-down {
+  color: #ff6371 !important;
+  text-shadow: 0 0 10px rgba(255, 99, 113, 0.6);
+}
+
+/* Derivatives Main Layout */
+.derivatives-layout {
+  display: grid;
+  grid-template-columns: 1fr 390px;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+@media (max-width: 1200px) {
+  .derivatives-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Expiry Selector Strip */
+.expiry-strip-wrap {
+  background: rgba(13, 20, 28, 0.75);
+  border: 1px solid rgba(80, 130, 170, 0.2);
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  overflow-x: auto;
+}
+
+.expiry-strip-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: #728d9f;
+  white-space: nowrap;
+  letter-spacing: 0.06em;
+}
+
+.expiry-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.chip-btn {
+  background: rgba(22, 33, 44, 0.6);
+  border: 1px solid rgba(90, 130, 160, 0.2);
+  color: #8da4b4;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.chip-btn:hover {
+  background: rgba(30, 46, 62, 0.8);
+  color: #e0edf5;
+}
+
+.chip-btn.active {
+  background: #113448;
+  color: #4bd8e8;
+  border-color: #4bd8e8;
+  font-weight: 600;
+}
+
+.chip-dte {
+  font-size: 9px;
+  opacity: 0.75;
+  margin-left: 3px;
+}
+
+/* Options Chain Table */
+.chain-container {
+  background: rgba(11, 17, 24, 0.85);
+  border: 1px solid rgba(80, 130, 170, 0.22);
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.chain-header-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: rgba(16, 25, 35, 0.9);
+  border-bottom: 1px solid rgba(80, 130, 170, 0.2);
+}
+
+.chain-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #9cb5c5;
+}
+
+.chain-stats {
+  font-size: 10px;
+  color: #6d8899;
+}
+
+.options-table-wrap {
+  overflow-x: auto;
+  max-height: 560px;
+  overflow-y: auto;
+}
+
+.options-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  text-align: right;
+}
+
+.options-table th {
+  position: sticky;
+  top: 0;
+  background: #0e1722;
+  color: #7892a3;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(80, 130, 170, 0.25);
+  z-index: 2;
+}
+
+.options-table th.col-call {
+  background: #0d1e29;
+  color: #55c8da;
+}
+
+.options-table th.col-strike {
+  background: #14212e;
+  color: #f2c050;
+  text-align: center;
+}
+
+.options-table th.col-put {
+  background: #251b1f;
+  color: #e87b87;
+}
+
+.options-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(50, 80, 100, 0.12);
+  white-space: nowrap;
+}
+
+.options-table tr:hover {
+  background: rgba(26, 42, 58, 0.4);
+}
+
+.options-table td.strike-cell {
+  text-align: center;
+  font-weight: 700;
+  background: rgba(20, 33, 46, 0.4);
+  color: #e0ecf2;
+}
+
+.options-table tr.atm-row {
+  background: rgba(242, 192, 80, 0.12) !important;
+}
+
+.options-table tr.atm-row td.strike-cell {
+  background: rgba(242, 192, 80, 0.28);
+  color: #ffd978;
+  font-weight: 800;
+  box-shadow: inset 0 0 8px rgba(242, 192, 80, 0.3);
+}
+
+.call-val { color: #86dbe7; }
+.put-val { color: #f29da6; }
+.dim-val { color: #516574; }
+.oi-val { color: #9bb1c0; }
+
+/* Quant Analytics Sidebar */
+.quant-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.quant-card {
+  background: rgba(11, 17, 24, 0.85);
+  border: 1px solid rgba(80, 130, 170, 0.2);
+  border-radius: 4px;
+  overflow: hidden;
+  padding: 12px;
+}
+
+.quant-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  border-bottom: 1px solid rgba(80, 130, 170, 0.15);
+  padding-bottom: 6px;
+}
+
+.quant-card-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #9cb5c5;
+}
+
+.quant-card-badge {
+  font-size: 9px;
+  background: rgba(18, 30, 42, 0.7);
+  padding: 2px 6px;
+  border-radius: 2px;
+  color: #4bd8e8;
+  border: 1px solid rgba(75, 216, 232, 0.25);
+}
+
+.quant-chart-box {
+  height: 200px;
+  position: relative;
+}
+
+.quant-metrics-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  padding: 4px 0;
+  border-bottom: 1px dashed rgba(80, 130, 170, 0.12);
+}
+
+.metric-key {
+  color: #728d9f;
+}
+
+.metric-val {
+  font-weight: 600;
+  color: #dceaf2;
+}
+
+.gex-top-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  padding: 2px 0;
+}

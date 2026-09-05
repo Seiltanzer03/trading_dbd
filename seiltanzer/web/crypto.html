@@ -3,76 +3,223 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SEILTANZER · GLOBAL CRYPTO</title>
+<title>SEILTANZER · GLOBAL CRYPTO & TRADING TERMINAL</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/static/vendor/fonts/ibm-plex-mono.css">
 <link rel="stylesheet" href="/static/css/crypto_global.css">
+<link rel="stylesheet" href="/static/css/crypto_terminal.css">
 </head>
 <body>
 <main class="crypto-shell">
   <header class="crypto-header">
     <div>
-      <div class="eyebrow">SEILTANZER · 24/7 DIGITAL ASSET OBSERVATORY</div>
-      <h1>GLOBAL CRYPTO</h1>
-      <p>Отдельная карта крипторынка. Только полученные рыночные наблюдения; N/A не превращается в ноль, а геометрия не создаёт торговый сигнал.</p>
+      <div class="eyebrow">SEILTANZER · GLOBAL CRYPTO & DERIVATIVES TERMINAL</div>
+      <h1>CRYPTO TRADING TERMINAL</h1>
+
+      <p>Опционный стакан Deribit, сабсекундный тиковый стрим Binance WebSocket, индекс волатильности DVOL, 25Δ Skew, GEX-профиль и 24/7 сессионная динамика.</p>
     </div>
     <div class="header-actions">
       <span class="status-pill no-data" id="crypto-status">○ ЗАГРУЗКА</span>
+      <span class="status-pill fresh" id="ws-status-badge">○ WS ПОДКЛЮЧЕНИЕ</span>
       <a href="/" class="terminal-link">← ОСНОВНОЙ ТЕРМИНАЛ</a>
     </div>
   </header>
 
-  <section class="global-strip" aria-label="Глобальный рынок">
-    <div><span>TOTAL MARKET CAP</span><b id="global-cap">N/A</b></div>
-    <div><span>24H VOLUME</span><b id="global-volume">N/A</b></div>
-    <div><span>BTC DOMINANCE</span><b id="btc-dominance">N/A</b></div>
-    <div><span>ETH DOMINANCE</span><b id="eth-dominance">N/A</b></div>
-    <div><span>GLOBAL 24H</span><b id="global-change">N/A</b></div>
-    <div><span>OBSERVED BREADTH</span><b id="market-breadth">N/A</b></div>
-  </section>
-
-  <section class="card wide-card">
-    <div class="card-head">
-      <div><div class="kicker">CAPITAL · MOMENTUM · RISK</div><h2>CRYPTO MARKET FIELD</h2></div>
-      <span class="stamp" id="field-stamp">N/A</span>
+  <!-- Navigation / Mode Switcher -->
+  <nav class="mode-nav">
+    <div class="mode-tabs">
+      <button class="tab-btn active" id="tab-derivatives">⚡ ОПЦИОННЫЙ ТЕРМИНАЛ</button>
+      <button class="tab-btn" id="tab-global">🌐 ОБЗОР РЫНКА (GLOBAL)</button>
     </div>
-    <div class="stage-grid">
-      <div class="plot-stage"><div id="crypto-field" class="plot"></div><div class="empty" id="field-empty">НЕДОСТАТОЧНО НАБЛЮДАЕМЫХ КООРДИНАТ</div></div>
-      <aside class="analysis-panel">
-        <h3>ЧТО НАБЛЮДАЕТСЯ</h3>
-        <div id="crypto-observations" class="observation-list"><p>Загрузка…</p></div>
-        <h3>КАК ЧИТАТЬ</h3>
-        <p>X = наблюдаемая корреляция часовых доходностей с BTC за 7 дней. Y = изменение за 7 дней. Z = реализованная 24h волатильность, приведённая к году. Размер = капитализация.</p>
-        <p class="disclaimer">Связь описательная. Корреляция не является причинностью; блок не управляет Position Manager.</p>
+    <div class="asset-nav" id="derivatives-asset-nav">
+      <span style="font-size:10px;color:#6b8596;font-weight:600;">АКТИВ:</span>
+      <button class="asset-pill-btn active" data-asset="BTC">BTC / USD</button>
+      <button class="asset-pill-btn" data-asset="ETH">ETH / USD</button>
+      <button class="asset-pill-btn" data-asset="SOL">SOL / USD</button>
+    </div>
+  </nav>
+
+  <!-- ==================== DERIVATIVES MODE ==================== -->
+  <div id="derivatives-mode-view">
+    <!-- KPI Bar -->
+    <section class="crypto-kpi-bar" aria-label="Метрики опционного рынка">
+      <div class="kpi-card">
+        <span class="kpi-title">LIVE SPOT PRICE</span>
+        <span class="kpi-val" id="kpi-spot">—</span>
+        <span class="kpi-sub">Binance / Deribit</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-title">DVOL VOLATILITY INDEX</span>
+        <span class="kpi-val" id="kpi-dvol">—</span>
+        <span class="kpi-sub">Annualized Implied Vol</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-title">25Δ RISK REVERSAL</span>
+        <span class="kpi-val" id="kpi-skew">—</span>
+        <span class="kpi-sub" id="kpi-skew-sub">Call - Put IV OTM</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-title">NET DEALER GEX</span>
+        <span class="kpi-val" id="kpi-gex">—</span>
+        <span class="kpi-sub" id="kpi-gex-sub">Gamma Exposure</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-title">NEXT EXPIRY</span>
+        <span class="kpi-val" id="kpi-next-exp">—</span>
+        <span class="kpi-sub" id="kpi-next-exp-sub">08:00 UTC Settlement</span>
+      </div>
+    </section>
+
+    <!-- Expiry Strip -->
+    <div class="expiry-strip-wrap">
+      <span class="expiry-strip-label">ДАТЫ ЭКСПИРАЦИИ:</span>
+      <div class="expiry-chips" id="expiry-chips">
+        <!-- populated by JS -->
+      </div>
+    </div>
+
+    <!-- Main Layout: Table + Sidebar -->
+    <div class="derivatives-layout">
+      <!-- Options Chain Matrix -->
+      <section class="chain-container">
+        <div class="chain-header-bar">
+          <span class="chain-title">OPTIONS CHAIN MATRIX · DERIBIT BOARD</span>
+          <span class="chain-stats" id="chain-stats">Загрузка опционной доски…</span>
+        </div>
+        <div class="options-table-wrap">
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th colspan="5" class="col-call">CALLS</th>
+                <th class="col-strike">STRIKE</th>
+                <th colspan="5" class="col-put">PUTS</th>
+              </tr>
+              <tr>
+                <th class="col-call">DELTA</th>
+                <th class="col-call">IV %</th>
+                <th class="col-call">OI</th>
+                <th class="col-call">BID ($)</th>
+                <th class="col-call">ASK ($)</th>
+                <th class="col-strike">STRIKE</th>
+                <th class="col-put">BID ($)</th>
+                <th class="col-put">ASK ($)</th>
+                <th class="col-put">OI</th>
+                <th class="col-put">IV %</th>
+                <th class="col-put">DELTA</th>
+              </tr>
+            </thead>
+            <tbody id="options-table-body">
+              <tr>
+                <td colspan="11" style="text-align:center;padding:32px;color:#70899a;">ЗАГРУЗКА ДАННЫХ ИЗ DERIBIT…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Quant Analytics Sidebar -->
+      <aside class="quant-sidebar">
+        <!-- IV Smile -->
+        <div class="quant-card">
+          <div class="quant-card-head">
+            <span class="quant-card-title">УЛЫБКА ВОЛАТИЛЬНОСТИ (IV SMILE)</span>
+            <span class="quant-card-badge">STRIKE vs IV</span>
+          </div>
+          <div id="iv-smile-plot" class="quant-chart-box"></div>
+        </div>
+
+        <!-- Term Structure -->
+        <div class="quant-card">
+          <div class="quant-card-head">
+            <span class="quant-card-title">СТРУКТУРА СРОКОВ (TERM STRUCTURE)</span>
+            <span class="quant-card-badge">DTE vs ATM IV</span>
+          </div>
+          <div id="term-structure-plot" class="quant-chart-box"></div>
+        </div>
+
+        <!-- Gamma Exposure (GEX) Details -->
+        <div class="quant-card">
+          <div class="quant-card-head">
+            <span class="quant-card-title">ГАММА-ПРОФИЛЬ ДИЛЕРОВ (GEX)</span>
+            <span class="quant-card-badge">WALLS</span>
+          </div>
+          <div class="quant-metrics-list" id="gex-top-list">
+            <div style="color:#6d8899;font-size:10px;">Загрузка уровней…</div>
+          </div>
+        </div>
+
+        <!-- Specifications & Rules -->
+        <div class="quant-card">
+          <div class="quant-card-head">
+            <span class="quant-card-title">РЕГЛАМЕНТ 24/7 КРИПТОРЫНКА</span>
+            <span class="quant-card-badge">RULES</span>
+          </div>
+          <div class="quant-metrics-list">
+            <div class="metric-row"><span class="metric-key">Экспирация:</span><span class="metric-val">Ежедневно 08:00 UTC</span></div>
+            <div class="metric-row"><span class="metric-key">Годовой множитель волатильности:</span><span class="metric-val">365 дней</span></div>
+            <div class="metric-row"><span class="metric-key">Тип маржирования:</span><span class="metric-val">BTC/ETH (Coin), SOL (USDC)</span></div>
+            <div class="metric-row"><span class="metric-key">Источник цен:</span><span class="metric-val">Binance WS + Deribit Index</span></div>
+          </div>
+        </div>
       </aside>
     </div>
-  </section>
-
-  <div class="two-column">
-    <section class="card">
-      <div class="card-head"><div><div class="kicker">BTC LEADERSHIP · ALT BREADTH</div><h2>ROTATION TRAJECTORY</h2></div><span class="stamp">OBSERVED 24H WINDOWS</span></div>
-      <div class="small-stage"><div id="rotation-path" class="plot"></div><div class="empty" id="rotation-empty">N/A · НЕТ СОВМЕСТНОЙ ЧАСОВОЙ ИСТОРИИ</div></div>
-      <div class="card-foot">Каждая точка — реально завершившееся часовое наблюдение: BTC 24h, медиана альткоинов 24h и доля растущих альткоинов. Между точками нет интерполяции.</div>
-    </section>
-
-    <section class="card">
-      <div class="card-head"><div><div class="kicker">HOURLY LOG RETURNS · 7D</div><h2>CRYPTO CORRELATION</h2></div><span class="stamp" id="corr-coverage">N/A</span></div>
-      <div class="small-stage"><div id="crypto-correlation" class="plot"></div><div class="empty" id="correlation-empty">N/A · НЕТ ДОСТАТОЧНЫХ ПАР</div></div>
-      <div class="card-foot">Ячейка существует только при ≥36 совместных часовых доходностях. Отсутствие пары остаётся пустым, а не становится нулевой корреляцией.</div>
-    </section>
   </div>
 
-  <section class="card">
-    <div class="card-head"><div><div class="kicker">OBSERVED UNIVERSE</div><h2>MARKET SNAPSHOT</h2></div><span class="stamp" id="asset-coverage">0 / 9</span></div>
-    <div class="table-wrap"><table><thead><tr><th>ASSET</th><th>PRICE</th><th>MARKET CAP</th><th>1H</th><th>24H</th><th>7D</th><th>RV 24H ANN.</th><th>CORR BTC</th><th>AGE</th></tr></thead><tbody id="asset-table"></tbody></table></div>
-  </section>
+  <!-- ==================== GLOBAL OBSERVATORY MODE ==================== -->
+  <div id="global-mode-view" style="display:none;">
+    <section class="global-strip" aria-label="Глобальный рынок">
+      <div><span>TOTAL MARKET CAP</span><b id="global-cap">N/A</b></div>
+      <div><span>24H VOLUME</span><b id="global-volume">N/A</b></div>
+      <div><span>BTC DOMINANCE</span><b id="btc-dominance">N/A</b></div>
+      <div><span>ETH DOMINANCE</span><b id="eth-dominance">N/A</b></div>
+      <div><span>GLOBAL 24H</span><b id="global-change">N/A</b></div>
+      <div><span>OBSERVED BREADTH</span><b id="market-breadth">N/A</b></div>
+    </section>
 
-  <section class="source-bar">
-    <div><b>PROVENANCE</b><span id="source-coingecko">CoinGecko: N/A</span><span id="source-yahoo">Yahoo: N/A</span></div>
-    <div id="transport-state">CACHE N/A</div>
-  </section>
+    <section class="card wide-card">
+      <div class="card-head">
+        <div><div class="kicker">CAPITAL · MOMENTUM · RISK</div><h2>CRYPTO MARKET FIELD</h2></div>
+        <span class="stamp" id="field-stamp">N/A</span>
+      </div>
+      <div class="stage-grid">
+        <div class="plot-stage"><div id="crypto-field" class="plot"></div><div class="empty" id="field-empty">НЕДОСТАТОЧНО НАБЛЮДАЕМЫХ КООРДИНАТ</div></div>
+        <aside class="analysis-panel">
+          <h3>ЧТО НАБЛЮДАЕТСЯ</h3>
+          <div id="crypto-observations" class="observation-list"><p>Загрузка…</p></div>
+          <h3>КАК ЧИТАТЬ</h3>
+          <p>X = наблюдаемая корреляция часовых доходностей с BTC за 7 дней. Y = изменение за 7 дней. Z = реализованная 24h волатильность, приведённая к году. Размер = капитализация.</p>
+          <p class="disclaimer">Связь описательная. Корреляция не является причинностью; блок не управляет Position Manager.</p>
+        </aside>
+      </div>
+    </section>
+
+    <div class="two-column">
+      <section class="card">
+        <div class="card-head"><div><div class="kicker">BTC LEADERSHIP · ALT BREADTH</div><h2>ROTATION TRAJECTORY</h2></div><span class="stamp">OBSERVED 24H WINDOWS</span></div>
+        <div class="small-stage"><div id="rotation-path" class="plot"></div><div class="empty" id="rotation-empty">N/A · НЕТ СОВМЕСТНОЙ ЧАСОВОЙ ИСТОРИИ</div></div>
+        <div class="card-foot">Каждая точка — реально завершившееся часовое наблюдение: BTC 24h, медиана альткоинов 24h и доля растущих альткоинов. Между точками нет интерполяции.</div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><div class="kicker">HOURLY LOG RETURNS · 7D</div><h2>CRYPTO CORRELATION</h2></div><span class="stamp" id="corr-coverage">N/A</span></div>
+        <div class="small-stage"><div id="crypto-correlation" class="plot"></div><div class="empty" id="correlation-empty">N/A · НЕТ ДОСТАТОЧНЫХ ПАР</div></div>
+        <div class="card-foot">Ячейка существует только при ≥36 совместных часовых доходностях. Отсутствие пары остаётся пустым, а не становится нулевой корреляцией.</div>
+      </section>
+    </div>
+
+    <section class="card">
+      <div class="card-head"><div><div class="kicker">OBSERVED UNIVERSE</div><h2>MARKET SNAPSHOT</h2></div><span class="stamp" id="asset-coverage">0 / 9</span></div>
+      <div class="table-wrap"><table><thead><tr><th>ASSET</th><th>PRICE</th><th>MARKET CAP</th><th>1H</th><th>24H</th><th>7D</th><th>RV 24H ANN.</th><th>CORR BTC</th><th>AGE</th></tr></thead><tbody id="asset-table"></tbody></table></div>
+    </section>
+
+    <section class="source-bar">
+      <div><b>PROVENANCE</b><span id="source-coingecko">CoinGecko: N/A</span><span id="source-yahoo">Yahoo: N/A</span></div>
+      <div id="transport-state">CACHE N/A</div>
+    </section>
+  </div>
 </main>
 <script src="/static/vendor/plotly-gl3d.min.js"></script>
+<script src="/static/js/crypto_terminal.js"></script>
 <script type="module" src="/static/js/crypto_global.js"></script>
 </body>
 </html>

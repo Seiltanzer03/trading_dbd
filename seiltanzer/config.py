@@ -78,6 +78,11 @@ class Instrument:
     # Точный broker CFD symbol в бесплатном TradingView scanner snapshot.
     # Yahoo остаётся резервом и источником истории, но не основной ценой.
     tradingview_symbol: str | None = None
+    # Crypto additions:
+    asset_class: str = "equity"           # "equity" | "crypto"
+    deribit_currency: str | None = None   # "BTC" | "ETH" | "SOL"
+    binance_symbol: str | None = None     # "BTCUSDT" | "ETHUSDT" | "SOLUSDT"
+    annual_days: float = 252.0            # 252 for equities, 365 for crypto
 
 
 INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
@@ -120,7 +125,33 @@ INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
                swissquote_pair="USD/CAD"),
 ]}
 
-# индексы волатильности (Yahoo). Первые три — ворота фильтров стратегии;
+# Криптовалютные инструменты (Binance Spot/WS + Deribit Options/Greeks/DVOL)
+CRYPTO_INSTRUMENTS: dict[str, Instrument] = {i.code: i for i in [
+    Instrument("BTCUSD", "BTC-USD", None, 67000.0, 0.55,
+               price_label="Binance BTC/USDT Spot",
+               tradingview_symbol="BINANCE:BTCUSDT",
+               asset_class="crypto", deribit_currency="BTC",
+               binance_symbol="BTCUSDT", annual_days=365.0),
+    Instrument("ETHUSD", "ETH-USD", None, 3500.0, 0.65,
+               price_label="Binance ETH/USDT Spot",
+               tradingview_symbol="BINANCE:ETHUSDT",
+               asset_class="crypto", deribit_currency="ETH",
+               binance_symbol="ETHUSDT", annual_days=365.0),
+    Instrument("SOLUSD", "SOL-USD", None, 180.0, 0.85,
+               price_label="Binance SOL/USDT Spot",
+               tradingview_symbol="BINANCE:SOLUSDT",
+               asset_class="crypto", deribit_currency="SOL",
+               binance_symbol="SOLUSDT", annual_days=365.0),
+]}
+
+ALL_INSTRUMENTS: dict[str, Instrument] = {**INSTRUMENTS, **CRYPTO_INSTRUMENTS}
+
+
+def get_instrument(code: str) -> Instrument | None:
+    return ALL_INSTRUMENTS.get(code)
+
+
+# индексы волатильности (Yahoo + Deribit DVOL). Первые три — ворота фильтров стратегии;
 # evz/vxn — источник implied-волы для σ-поправки там, где полной цепочки нет.
 # ^V1X (VDAX-NEW) в Yahoo обычно недоступен — фид честно вернёт "no_data",
 # UI покажет «проверь вручную» (ТЗ, п.7 ядра).
@@ -128,13 +159,28 @@ VOL_INDEX_TICKERS = {
     "vix": "^VIX", "gvz": "^GVZ", "dv1x": "^V1X",
     "evz": "^EVZ",   # CBOE EuroCurrency Volatility Index — implied-вола EUR/USD
     "vxn": "^VXN",   # CBOE NASDAQ-100 Volatility Index
+    "btc_dvol": None,  # Deribit DVOL Index (BTC)
+    "eth_dvol": None,  # Deribit DVOL Index (ETH)
+    "sol_dvol": None,  # Deribit DVOL / ATM IV (SOL)
+}
+
+# Маппинг крипто-инструментов на соответствующие DVOL-индексы:
+CRYPTO_VOL_INDEX = {
+    "BTCUSD": "btc_dvol",
+    "ETHUSD": "eth_dvol",
+    "SOLUSD": "sol_dvol",
 }
 
 # Инструмент -> ключ индекса волы как ИСТОЧНИК sigma_implied, когда полной
 # опционной цепочки нет. Значение индекса — годовая implied-вола в % (÷100).
 # Даёт σ-поправку без цепочки (но без Strike Landscape / GEX). Честный список:
 # только там, где есть бесплатный профильный индекс волы.
-SIGMA_INDEX_FOR = {"EURUSD": "evz"}
+SIGMA_INDEX_FOR = {
+    "EURUSD": "evz",
+    "BTCUSD": "btc_dvol",
+    "ETHUSD": "eth_dvol",
+    "SOLUSD": "sol_dvol",
+}
 
 
 # ----------------------------------------------------- лестница фиксации

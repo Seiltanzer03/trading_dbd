@@ -21,6 +21,8 @@ from typing import Callable
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
+import numpy as np
+
 
 
 CRYPTO_PAGE = Path(__file__).resolve().parent / "web" / "crypto.html"
@@ -514,6 +516,86 @@ class CryptoGlobalCache:
         return result
 
 
+def build_crypto_options_matrix_payload(currency: str = "BTC") -> dict:
+    from .data.deribit import get_deribit_fetcher
+    curr = currency.upper()
+    if curr not in {"BTC", "ETH", "SOL"}:
+        curr = "BTC"
+    fetcher = get_deribit_fetcher()
+    matrix = fetcher.fetch_full_options_matrix(curr)
+    chain = fetcher.fetch_chain(curr)
+    gex_summary = None
+    skew_summary = None
+    if chain:
+        from .core.options import gex_profile, risk_reversal_skew
+        try:
+            gp = gex_profile(
+                chain["strikes"], chain["call_oi"], chain["put_oi"],
+                chain["call_iv"], chain["put_iv"], chain["spot"], chain["t_years"]
+            )
+            gex_summary = {
+                "total_gex": float(np.sum(gp.net_gex)),
+                "zero_flip": float(gp.zero_flip) if gp.zero_flip is not None else None,
+                "top_levels": [
+                    {"strike": float(t["strike"]), "gex": float(t["gex"])}
+                    for t in gp.top_levels
+                ],
+            }
+        except Exception:
+            pass
+        try:
+            sk = risk_reversal_skew(
+                chain["strikes"], chain["call_iv"], chain["put_iv"], chain["spot"]
+            )
+            if sk:
+                skew_summary = {
+                    "rr": float(sk.get("rr", 0.0)),
+                    "tilt": str(sk.get("tilt", "нейтральный")),
+                    "call_iv_otm": float(sk.get("call_iv_otm", 0.0)),
+                    "put_iv_otm": float(sk.get("put_iv_otm", 0.0)),
+                    "atm_iv": float(sk.get("atm_iv", 0.0)),
+                }
+        except Exception:
+            pass
+    matrix["gex_summary"] = gex_summary
+    matrix["skew_summary"] = skew_summary
+    return matrix
+
+
+def build_crypto_market_summary_payload() -> dict:
+    from .data.deribit import get_deribit_fetcher
+    fetcher = get_deribit_fetcher()
+    summary = {}
+    for c in ["BTC", "ETH", "SOL"]:
+        spot = fetcher.fetch_index_price(c)
+        dvol = fetcher.fetch_dvol(c)
+        chain = fetcher.fetch_chain(c)
+        skew_rr = None
+        tilt = None
+        if chain:
+            from .core.options import risk_reversal_skew
+            try:
+                sk = risk_reversal_skew(
+                    chain["strikes"], chain["call_iv"], chain["put_iv"], chain["spot"]
+                )
+                if sk:
+                    skew_rr = float(sk.get("rr", 0.0))
+                    tilt = str(sk.get("tilt", "нейтральный"))
+            except Exception:
+                pass
+        summary[c] = {
+            "currency": c,
+            "spot": spot,
+            "dvol": dvol,
+            "skew_rr": skew_rr,
+            "skew_tilt": tilt,
+        }
+    return {
+        "ts": time.time(),
+        "assets": summary,
+    }
+
+
 def install_crypto_global_routes(app: FastAPI, *, cache: CryptoGlobalCache | None = None) -> None:
     if getattr(app.state, "crypto_global_routes_installed", False):
         return
@@ -526,7 +608,24 @@ def install_crypto_global_routes(app: FastAPI, *, cache: CryptoGlobalCache | Non
     def crypto_snapshot():
         return cache.get()
 
+    def crypto_options_matrix(currency: str = "BTC"):
+        return build_crypto_options_matrix_payload(currency)
+
+    def crypto_market_summary():
+        return build_crypto_market_summary_payload()
+
+    def crypto_term_structure(currency: str = "BTC"):
+        from .data.deribit import get_deribit_fetcher
+        curr = currency.upper()
+        if curr not in {"BTC", "ETH", "SOL"}:
+            curr = "BTC"
+        return {"currency": curr, "points": get_deribit_fetcher().fetch_term_structure(curr), "ts": time.time()}
+
     app.add_api_route("/crypto", crypto_page, methods=["GET"], name="crypto_global")
     app.add_api_route("/api/crypto/global", crypto_snapshot, methods=["GET"], name="crypto_global_snapshot")
+    app.add_api_route("/api/crypto/options-matrix", crypto_options_matrix, methods=["GET"], name="crypto_options_matrix")
+    app.add_api_route("/api/crypto/market-summary", crypto_market_summary, methods=["GET"], name="crypto_market_summary")
+    app.add_api_route("/api/crypto/term-structure", crypto_term_structure, methods=["GET"], name="crypto_term_structure")
     app.state.crypto_global_cache = cache
     app.state.crypto_global_routes_installed = True
+
