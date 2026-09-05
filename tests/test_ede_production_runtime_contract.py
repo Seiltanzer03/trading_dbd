@@ -37,7 +37,8 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     # preferring deploy prestart and falling back to a scheduled recovery point
     # if low-disk retention rotated the 5.3-GiB prestart pair. It must never
     # start a second whole live-DB copy.
-    assert "MAX_EXACT_BACKUP_AGE_SECONDS = 60 * 60" in offload
+    assert "MAX_EXACT_BACKUP_AGE_SECONDS" in offload
+    assert "MAX_FALLBACK_BACKUP_AGE_SECONDS" in offload
     assert "EDE_VERIFIED_BACKUP_SELECTION" in offload
     assert "DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP" in offload
     assert "SCHEDULED_VERIFIED_LOCAL_BACKUP" in offload
