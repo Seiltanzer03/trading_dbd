@@ -89,15 +89,15 @@ FAMILY_INTERACTION_POLICIES: tuple[FamilyInteractionPolicy, ...] = (
     FamilyInteractionPolicy("RATES", "OPTIONS", 16, activation="CURRENT_SELECTIVE"),
     FamilyInteractionPolicy("RATES", "CROSS_ASSET", 16, activation="CURRENT_SELECTIVE"),
     FamilyInteractionPolicy("RATES", "REGIME", 12, activation="CURRENT_SELECTIVE"),
-    FamilyInteractionPolicy("OPTIONS", "VOLATILITY", 16, activation="UNIVERSAL_OUTCOMES"),
+    FamilyInteractionPolicy("OPTIONS", "VOLATILITY", 16, activation="CURRENT_SELECTIVE"),
     FamilyInteractionPolicy("OPTION_DYNAMICS", "VOLATILITY", 16,
-                            activation="UNIVERSAL_OUTCOMES"),
-    FamilyInteractionPolicy("PRICE", "VOLATILITY", 16, activation="UNIVERSAL_OUTCOMES"),
-    FamilyInteractionPolicy("PRICE", "CROSS_ASSET", 16, activation="UNIVERSAL_OUTCOMES"),
-    FamilyInteractionPolicy("REGIME", "OPTIONS", 12, activation="UNIVERSAL_OUTCOMES"),
+                            activation="CURRENT_SELECTIVE"),
+    FamilyInteractionPolicy("PRICE", "VOLATILITY", 16, activation="CURRENT_SELECTIVE"),
+    FamilyInteractionPolicy("PRICE", "CROSS_ASSET", 16, activation="CURRENT_SELECTIVE"),
+    FamilyInteractionPolicy("REGIME", "OPTIONS", 12, activation="CURRENT_SELECTIVE"),
     FamilyInteractionPolicy("REGIME", "OPTION_DYNAMICS", 12,
-                            activation="UNIVERSAL_OUTCOMES"),
-    FamilyInteractionPolicy("REGIME", "CROSS_ASSET", 12, activation="UNIVERSAL_OUTCOMES"),
+                            activation="CURRENT_SELECTIVE"),
+    FamilyInteractionPolicy("REGIME", "CROSS_ASSET", 12, activation="CURRENT_SELECTIVE"),
 )
 
 

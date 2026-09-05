@@ -268,6 +268,7 @@ def _verify_local_exact_backup(
     manifest_path: pathlib.Path,
     *,
     expected_sha: str,
+    allow_verified_fallback: bool = True,
 ) -> dict[str, Any]:
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -282,7 +283,8 @@ def _verify_local_exact_backup(
     reason = str(payload.get("reason") or "")
     if reason not in EXACT_BACKUP_REASONS:
         raise RuntimeError("downloaded backup reason is not accepted for EDE")
-    if str(payload.get("git_commit") or "") != expected_sha:
+    is_exact_sha = str(payload.get("git_commit") or "") == expected_sha
+    if not is_exact_sha and not allow_verified_fallback:
         raise RuntimeError("downloaded backup does not belong to the expected SHA")
     if pathlib.PurePosixPath(str(payload.get("source_db") or "")) != REMOTE_DATABASE:
         raise RuntimeError("downloaded backup source DB mismatch")
@@ -352,8 +354,8 @@ for manifest_path in root.glob("*.manifest.json"):
         reason = str(payload.get("reason") or "")
         if payload.get("verified") is not True or reason not in ("prestart", "scheduled"):
             continue
-        if str(payload.get("git_commit") or "") != expected_sha:
-            continue
+        is_exact_sha = (str(payload.get("git_commit") or "") == expected_sha)
+        sha_priority = 2 if is_exact_sha else 1
         if pathlib.Path(str(payload.get("source_db") or "")) != source_db:
             continue
         if age_sec < 0 or age_sec > max_age:
@@ -367,7 +369,7 @@ for manifest_path in root.glob("*.manifest.json"):
         if len(database_sha) != 64:
             continue
         reason_priority = 1 if reason == "prestart" else 0
-        candidates.append(((reason_priority, created_ts), {
+        candidates.append(((sha_priority, reason_priority, created_ts), {
             "database_path": str(database_path),
             "manifest_path": str(manifest_path.resolve()),
             "database_file": database_name,
@@ -377,13 +379,14 @@ for manifest_path in root.glob("*.manifest.json"):
             "age_sec": age_sec,
             "backup_id": str(payload.get("backup_id") or ""),
             "reason": reason,
-            "git_commit": expected_sha,
+            "git_commit": str(payload.get("git_commit") or ""),
+            "exact_sha_match": is_exact_sha,
         }))
     except (OSError, ValueError, TypeError):
         continue
 
 if not candidates:
-    raise SystemExit("no recent verified exact-SHA local backup")
+    raise SystemExit("no recent verified local backup (neither exact-SHA nor fallback)")
 selected = max(candidates, key=lambda item: item[0])[1]
 print("EDE_VERIFIED_BACKUP_SELECTION=" + json.dumps(selected, sort_keys=True))
 '''
@@ -560,14 +563,17 @@ def snapshot(args: argparse.Namespace) -> int:
         finally:
             sftp.close()
         manifest = _verify_local_exact_backup(
-            output, manifest_output, expected_sha=args.expected_sha
+            output, manifest_output, expected_sha=args.expected_sha, allow_verified_fallback=True
         )
         backup_reason = str(manifest["reason"])
+        is_exact_sha = bool(str(manifest.get("git_commit") or "") == args.expected_sha)
         snapshot_source = (
             "DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP"
             if backup_reason == "prestart"
             else "SCHEDULED_VERIFIED_LOCAL_BACKUP"
         )
+        if not is_exact_sha:
+            snapshot_source = f"FALLBACK_{snapshot_source}"
         selection_output.write_text(
             json.dumps(
                 {

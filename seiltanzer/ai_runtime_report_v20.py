@@ -37,7 +37,7 @@ Return ONLY one valid JSON object, no markdown:
 {
   "explanation_ru": "120-180 Russian words explaining why the existing production policy is reasonable, its strongest evidence/limitations, data quality, and next recalculation trigger; do not issue a new trading instruction here",
   "shadow_decision": {
-    "policy": "HOLD|CLOSE_10|CLOSE_25|CLOSE_50|EXIT",
+    "policy": "HOLD|CLOSE_10|CLOSE_25|CLOSE_50|EXIT|MOVE_TO_BE|TRAIL_GAMMA_FLIP|TIGHTEN_STOP|EXTEND_TAKE|REDUCE_TAKE|SCALE_OUT_ON_SPIKE|TIME_STOP",
     "confidence": 0.0,
     "reason_ru": "brief independent numerical rationale",
     "key_evidence": ["3-6 strongest facts"],
@@ -52,7 +52,7 @@ cross-asset/regime, metric changes, freshness/source quality, Active Edge/EDE on
 within their published authority. Missing/UNAVAILABLE/COMPACTED is never zero.
 Delayed/proxy data reduces confidence and is not automatically directional.
 Correlated metrics from one family are not independent votes. Hard-CVaR eligibility
-is mandatory. Never widen stops, add to loss, change TAKE/STOP or invent a policy.
+is mandatory. Never widen stops, average down, or add to a losing position.
 First form the independent shadow opinion; quant_management_decision is only for
 comparison. Shadow has zero production and zero automatic-execution authority.
 """.strip()
@@ -203,14 +203,22 @@ def _metric_audit_lines(snapshot: dict) -> list[str]:
         if name in normalized_bounds and abs(value) >= 1.0 - 1e-12:
             boundary.add(str(name))
 
+    displayed_names: set[str] = set()
+    for line in base[1:]:
+        if ":" in line:
+            displayed_names.add(line.split(":", 1)[0].strip())
+
+    effective_boundary = boundary & displayed_names if displayed_names else boundary
+    effective_low_confidence = low_confidence & displayed_names if displayed_names else low_confidence
+
     if len(base) > 1:
         base.insert(
             1,
-            f"Audit summary: rows={max(0, len(base)-1)}; boundary_values={len(boundary)}; "
-            f"confidence<25%={len(low_confidence)}. Boundary value не означает 100% уверенности модели.",
+            f"Audit summary: rows={len(displayed_names)}; boundary_values={len(effective_boundary)}; "
+            f"confidence<25%={len(effective_low_confidence)}. Boundary value не означает 100% уверенности модели.",
         )
     for index, line in enumerate(base):
-        name = line.split(":", 1)[0] if ":" in line else ""
+        name = line.split(":", 1)[0].strip() if ":" in line else ""
         notes = []
         if name in boundary:
             notes.append("BOUNDARY_VALUE: возможное насыщение/клиппинг; интерпретировать вместе с confidence/source quality")
