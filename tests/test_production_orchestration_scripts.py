@@ -147,6 +147,49 @@ def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
     assert recorded_timeouts["/api/state"] == 5.0
 
 
+def test_functional_smoke_macro_latest_uses_dedicated_timeout(monkeypatch):
+    smoke = _load_script("production_functional_smoke")
+
+    assert smoke.MACRO_LATEST_TIMEOUT_SEC >= 15.0
+
+    recorded_timeouts = {}
+
+    def fake_assert_route(path: str, *, timeout: float = 5.0):
+        recorded_timeouts[path] = timeout
+        if path == "/api/research/macro/status":
+            return {
+                "official_sources_only": True,
+                "no_placeholders": True,
+                "consensus_feed_available": False,
+                "surprise_computed_without_consensus": False,
+                "production_authority": False,
+                "official_families": ["CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES", "FOMC_STATEMENT"],
+                "numeric_transport": {
+                    "official_source_urls_unchanged": True,
+                    "payload_or_parser_fallback_added": False,
+                },
+            }
+        return {
+            "status": "VALID",
+            "family": path.split("=")[-1],
+            "official_source_verified": True,
+            "available_at": 100.0,
+            "payload": {
+                "consensus_available": False,
+                "surprise_computed": False,
+            },
+        }
+
+    monkeypatch.setattr(smoke, "assert_route", fake_assert_route)
+    monkeypatch.setattr(smoke, "request", lambda *args, **kwargs: (200, {"status": "OK", "no_placeholders": True, "production_authority": False, "errors": {}}, 10.0))
+    monkeypatch.setattr(smoke, "_verify_fomc_semantic", lambda: None)
+
+    smoke.verify_macro_runtime()
+    for family in ("CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES"):
+        assert recorded_timeouts[f"/api/research/macro/latest?family={family}"] == smoke.MACRO_LATEST_TIMEOUT_SEC
+
+
+
 
 def test_functional_smoke_checks_public_terminal_and_keeps_network_diagnostics():
     root = Path(__file__).resolve().parents[1]
