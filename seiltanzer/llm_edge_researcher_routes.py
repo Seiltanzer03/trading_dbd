@@ -166,15 +166,15 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
 
     def evaluate_status():
         cached = read_cached_materialized_lifecycle(runtime)
-        summary = cached.get("summary") or {}
+        researcher = cached.get("researcher") or cached.get("summary") or {}
         return {
             "status": "OK",
             "job": dict(eval_state),
             "pending_summary": {
-                "total_hypotheses": summary.get("hypotheses_total", 0),
-                "pending_hypotheses": summary.get("pending_hypotheses", 0),
-                "discovery_signals": summary.get("discovery_signals", 0),
-                "rejected": summary.get("rejected", 0),
+                "total_hypotheses": int(researcher.get("hypotheses", researcher.get("hypotheses_total", 0)) or 0),
+                "pending_hypotheses": int(researcher.get("pending_hypotheses", 0) or 0),
+                "discovery_signals": int(researcher.get("discovery_signals", 0) or 0),
+                "rejected": int(researcher.get("rejected", 0) or 0),
             },
         }
 

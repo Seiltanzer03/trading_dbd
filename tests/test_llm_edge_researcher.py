@@ -284,4 +284,23 @@ def test_edge_researcher_evaluate_routes_and_background_execution(monkeypatch):
     assert async_res["status"] == "ACCEPTED"
     assert async_res["message"] == "Background evaluation job started"
 
+    # Test reading pending_summary from published cache
+    from seiltanzer.llm_edge_lifecycle import publish_materialized_lifecycle_cache
+    fake_lifecycle = {
+        "status": "OK",
+        "researcher": {
+            "hypotheses": 42,
+            "pending_hypotheses": 15,
+            "discovery_signals": 3,
+            "rejected": 24,
+        },
+    }
+    publish_materialized_lifecycle_cache(runtime, json.dumps(fake_lifecycle))
+    st_cached = status_route.endpoint()
+    assert st_cached["pending_summary"]["total_hypotheses"] == 42
+    assert st_cached["pending_summary"]["pending_hypotheses"] == 15
+    assert st_cached["pending_summary"]["discovery_signals"] == 3
+    assert st_cached["pending_summary"]["rejected"] == 24
+
+
 
