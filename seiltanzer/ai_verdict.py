@@ -438,13 +438,14 @@ def build_snapshot(engine) -> dict:
 # verdict remains authoritative; the second provider call can only append a
 # research comparison and a machine-readable shadow object.
 from .llm_decision_shadow import (
+    VALID_POLICIES,
     append_shadow_section as _append_llm_shadow_section,
     request_shadow_decision as _request_llm_shadow_decision,
     unavailable_shadow as _unavailable_llm_shadow,
 )
 
 _BASE_REQUEST_VERDICT_WITHOUT_SHADOW = _impl.request_verdict
-_SHADOW_POLICIES = {"HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
+_SHADOW_POLICIES = set(VALID_POLICIES)
 
 
 def _shadow_contract_active(snapshot: dict) -> bool:

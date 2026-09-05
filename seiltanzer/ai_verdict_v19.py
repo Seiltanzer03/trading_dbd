@@ -129,7 +129,7 @@ def _plan_lines(snapshot: dict) -> list[str]:
     authority = decision.get("authority") or arbiter.get("winner") or "—"
     production = decision.get("policy") or rec.get("policy") or "—"
     model_policy = decision.get("model_policy") or shadow.get("new_candidate_policy") or rec.get("raw_optimizer_policy") or production
-    continuity = decision.get("continuity") or "—"
+    continuity = decision.get("continuity") or "none (первый разбор)"
     return [
         f"Авторитет плана: {authority}; production policy: {production}; shadow/model candidate: {model_policy}.",
         f"Статус исполнения: {_text(decision.get('execution_status'))}; continuity={continuity}.",

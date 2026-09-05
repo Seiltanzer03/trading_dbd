@@ -15,7 +15,17 @@ import httpx
 
 
 SHADOW_VERSION = "llm-decision-shadow-v1"
-VALID_POLICIES = ("HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT")
+BASE_POLICIES = ("HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT")
+EXTENDED_DYNAMIC_POLICIES = (
+    "MOVE_TO_BE",
+    "TRAIL_GAMMA_FLIP",
+    "TIGHTEN_STOP",
+    "EXTEND_TAKE",
+    "REDUCE_TAKE",
+    "SCALE_OUT_ON_SPIKE",
+    "TIME_STOP",
+)
+VALID_POLICIES = BASE_POLICIES + EXTENDED_DYNAMIC_POLICIES
 _MAX_REASON_CHARS = 1200
 _MAX_EVIDENCE_ITEMS = 6
 _MAX_EVIDENCE_CHARS = 320
@@ -25,14 +35,26 @@ _MAX_SHADOW_TIMEOUT_SEC = 15.0
 SHADOW_SYSTEM_PROMPT = """Ты — независимый риск-менеджер уже ОТКРЫТОЙ сделки.
 Это SHADOW-анализ: твой ответ НЕ исполняется и НЕ меняет production policy.
 
-Самостоятельно выбери ровно одну политику:
-HOLD, CLOSE_10, CLOSE_25, CLOSE_50 или EXIT.
+Самостоятельно выбери ровно одну профессиональную политику:
+1. Базовые:
+   - HOLD: удержание позиции по текущей стратегии без изменения ордеров;
+   - CLOSE_10 / CLOSE_25 / CLOSE_50: частичное закрытие 10%, 25% или 50% объема по рынку;
+   - EXIT: немедленное полное закрытие позиции по рынку.
+2. Динамический стоп (Stop Management):
+   - MOVE_TO_BE: перенос стоп-ордера на цену входа в безубыток;
+   - TRAIL_GAMMA_FLIP: перемещение стоп-ордера на расчетный уровень Zero-Gamma дилеров;
+   - TIGHTEN_STOP: подтягивание стоп-ордера ближе текущей цены (под ближайшую структуру/ступень).
+3. Управление тейком (Take-Profit Management):
+   - EXTEND_TAKE: перенос лимитного тейк-профита дальше первоначальной цели;
+   - REDUCE_TAKE: подтягивание лимитного тейк-профита ближе к текущей цене.
+4. Кондициональные и временные (Conditional / Time-based):
+   - SCALE_OUT_ON_SPIKE: частичный сброс объема лимитным ордером в ликвидность на импульсе;
+   - TIME_STOP: принудительный выход из позиции по истечении допустимого времени удержания.
 
-Цель: максимизировать ожидаемый итог сделки с учётом хвостового риска и качества
-данных. Не копируй mechanically quant decision: можешь согласиться или не согласиться.
+Цель: самостоятельно максимизировать ожидаемый итог сделки с учётом хвостового риска и качества данных.
+Не копируй mechanically quant decision: оценивай ситуацию автономно.
 При этом hard CVaR feasible set является обязательным ограничением. Нельзя расширять
-стоп, усреднять убыточную позицию, добавлять позицию, менять TAKE/STOP или придумывать
-шестую политику.
+стоп, усреднять убыточную позицию или добавлять позицию.
 
 Анализируй СОВОКУПНОСТЬ доступных фактов: текущую геометрию и R; Expected/median/CVaR
 всех политик; execution-MC и scenario geometry; option-distribution и её производные
@@ -48,7 +70,7 @@ quant_management_decision дан только для сравнения. Сна�
 
 Ответ ТОЛЬКО валидным JSON-объектом без markdown и без текста снаружи:
 {
-  "policy": "HOLD|CLOSE_10|CLOSE_25|CLOSE_50|EXIT",
+  "policy": "HOLD|CLOSE_10|CLOSE_25|CLOSE_50|EXIT|MOVE_TO_BE|TRAIL_GAMMA_FLIP|TIGHTEN_STOP|EXTEND_TAKE|REDUCE_TAKE|SCALE_OUT_ON_SPIKE|TIME_STOP",
   "confidence": 0.0,
   "reason_ru": "краткое числовое объяснение решения",
   "key_evidence": ["3-6 самых важных аргументов с числами, если они доступны"],
@@ -187,6 +209,22 @@ def _validate_model_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _disagreement_category(shadow_policy: str, quant_policy: str | None) -> str | None:
+    if quant_policy is None or shadow_policy == quant_policy:
+        return None
+    if shadow_policy in ("MOVE_TO_BE", "TRAIL_GAMMA_FLIP", "TIGHTEN_STOP"):
+        return "DYNAMIC_STOP_MANAGEMENT"
+    if shadow_policy in ("EXTEND_TAKE", "REDUCE_TAKE"):
+        return "TAKE_PROFIT_MANAGEMENT"
+    if shadow_policy in ("SCALE_OUT_ON_SPIKE", "TIME_STOP"):
+        return "CONDITIONAL_TIME_MANAGEMENT"
+    if quant_policy == "HOLD" and shadow_policy in ("CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"):
+        return "EARLY_DERISK"
+    if quant_policy in ("CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT") and shadow_policy == "HOLD":
+        return "HIGHER_CONVICTION_HOLD"
+    return "POLICY_DIVERGENCE"
+
+
 def _hard_guard(snapshot: dict[str, Any], policy: str) -> tuple[bool, list[str]]:
     """Fail closed against the published hard-risk/CVaR contract."""
     manager = snapshot.get("policy_manager") or {}
@@ -197,22 +235,39 @@ def _hard_guard(snapshot: dict[str, Any], policy: str) -> tuple[bool, list[str]]
 
     reasons: list[str] = []
     eligible = rule.get("eligible")
-    row = policies.get(policy) if isinstance(policies, dict) else None
     floor = _number(rule.get("cvar_floor_r"))
-    cvar = _number((row or {}).get("cvar10_r")) if isinstance(row, dict) else None
 
-    if isinstance(eligible, list):
-        # An explicitly published empty feasible set means no shadow policy is
-        # admissible. Do not silently turn [] into "guard unavailable" or PASS.
-        if policy not in eligible:
-            reasons.append("POLICY_OUTSIDE_PUBLISHED_CVAR_FEASIBLE_SET")
-    elif floor is None or cvar is None:
-        # The report may still display the LLM opinion, but it must never call
-        # the risk check PASS when the hard constraint cannot be evaluated.
-        reasons.append("HARD_CVAR_GUARD_UNAVAILABLE")
+    if policy in EXTENDED_DYNAMIC_POLICIES:
+        # Dynamic stop, take-profit and time-based policies do not widen the strategy stop;
+        # their tail downside risk is bounded by HOLD.
+        effective_base = "HOLD"
+        row = policies.get(effective_base) if isinstance(policies, dict) else None
+        cvar = _number((row or {}).get("cvar10_r")) if isinstance(row, dict) else None
 
-    if floor is not None and cvar is not None and cvar < floor - 1e-12:
-        reasons.append("POLICY_CVAR10_BELOW_HARD_FLOOR")
+        if isinstance(eligible, list):
+            if effective_base not in eligible:
+                reasons.append("POLICY_OUTSIDE_PUBLISHED_CVAR_FEASIBLE_SET")
+        elif floor is None or cvar is None:
+            reasons.append("HARD_CVAR_GUARD_UNAVAILABLE")
+
+        if floor is not None and cvar is not None and cvar < floor - 1e-12:
+            reasons.append("POLICY_CVAR10_BELOW_HARD_FLOOR")
+    else:
+        row = policies.get(policy) if isinstance(policies, dict) else None
+        cvar = _number((row or {}).get("cvar10_r")) if isinstance(row, dict) else None
+
+        if isinstance(eligible, list):
+            # An explicitly published empty feasible set means no shadow policy is
+            # admissible. Do not silently turn [] into "guard unavailable" or PASS.
+            if policy not in eligible:
+                reasons.append("POLICY_OUTSIDE_PUBLISHED_CVAR_FEASIBLE_SET")
+        elif floor is None or cvar is None:
+            # The report may still display the LLM opinion, but it must never call
+            # the risk check PASS when the hard constraint cannot be evaluated.
+            reasons.append("HARD_CVAR_GUARD_UNAVAILABLE")
+
+        if floor is not None and cvar is not None and cvar < floor - 1e-12:
+            reasons.append("POLICY_CVAR10_BELOW_HARD_FLOOR")
 
     return (not reasons), reasons
 
@@ -227,6 +282,7 @@ def unavailable_shadow(snapshot: dict[str, Any], reason: str) -> dict[str, Any]:
         "policy": None,
         "confidence": None,
         "agreement": None,
+        "disagreement_category": None,
         "blocked_by_hard_guard": False,
         "hard_guard_reasons": [],
         "reason_code": _bounded_text(reason, max_chars=96) or "SHADOW_UNAVAILABLE",
@@ -303,6 +359,10 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
     parsed = _validate_model_payload(_extract_json_object(content))
     quant_policy = _quant_policy(snapshot)
     guard_ok, guard_reasons = _hard_guard(snapshot, parsed["policy"])
+    agreement = (
+        parsed["policy"] == quant_policy if quant_policy is not None else None
+    )
+    disagreement_cat = _disagreement_category(parsed["policy"], quant_policy)
     return {
         "version": SHADOW_VERSION,
         "status": "ok" if guard_ok else "blocked",
@@ -312,8 +372,8 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
         "quant_policy": quant_policy,
         "policy": parsed["policy"],
         "confidence": parsed["confidence"],
-        "agreement": (
-            parsed["policy"] == quant_policy if quant_policy is not None else None),
+        "agreement": agreement,
+        "disagreement_category": disagreement_cat,
         "blocked_by_hard_guard": not guard_ok,
         "hard_guard_reasons": guard_reasons,
         "reason_ru": parsed["reason_ru"],
@@ -338,10 +398,13 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
     confidence = _number(shadow.get("confidence"))
     confidence_text = "—" if confidence is None else f"{confidence * 100:.1f}%"
     agreement = shadow.get("agreement")
+    disagreement_cat = shadow.get("disagreement_category")
     agreement_text = (
         "совпадает" if agreement is True
         else ("расходится" if agreement is False else "не сопоставлено")
     )
+    if disagreement_cat:
+        agreement_text += f" [{disagreement_cat}]"
     guard = (
         "BLOCKED/UNVERIFIED hard-risk guard"
         if shadow.get("blocked_by_hard_guard")
