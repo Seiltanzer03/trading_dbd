@@ -21,6 +21,10 @@ from .g1_short_horizon_runtime import (
     G1S_STAGE,
     ShortHorizonRuntime,
 )
+from .g1_short_horizon_evidence_completion import (
+    get_oos_candidate_required,
+    get_min_volatility_regimes,
+)
 
 
 MATERIALIZATION_VERSION = "g1s-status-materialization-v1"
@@ -237,10 +241,11 @@ def _horizon_summary(runtime: ShortHorizonRuntime, horizon: int) -> dict[str, An
         "raw_resolved": raw, "effective_n": eff, "positive_n": pos,
         "negative_n": neg, "temporal_blocks": days,
     }
+    reqs = get_oos_candidate_required(horizon)
     candidate_blockers = [f"INSUFFICIENT_{key.upper()}"
-                          for key, required in OOS_CANDIDATE_REQUIRED.items()
+                          for key, required in reqs.items()
                           if candidate_observed.get(key, 0) < int(required)]
-    if regimes < 2:
+    if regimes < get_min_volatility_regimes():
         candidate_blockers.append("INSUFFICIENT_VOLATILITY_REGIME_DIVERSITY")
     state = "OOS_CANDIDATE" if not candidate_blockers else (
         "SHADOW_FIT_ALLOWED" if not blockers else ("EARLY" if raw > 0 else "COLLECTING"))

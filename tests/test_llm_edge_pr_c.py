@@ -58,6 +58,7 @@ def _resolved(runtime: Runtime, count: int, *, start: int = 1) -> None:
 
 
 def test_automatic_research_requires_both_100_new_resolved_and_12h(monkeypatch):
+    monkeypatch.setattr(prc, "AUTO_MIN_NEW_RESOLVED_T0", 100)
     runtime = Runtime()
     prc._ensure_storage(runtime)
     _resolved(runtime, 99)

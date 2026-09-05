@@ -5,10 +5,13 @@ import time
 import pytest
 
 from seiltanzer.g1_short_horizon_evidence_completion import (
+    HORIZON_SERIOUS_OOS_REQUIRED,
     SERIOUS_OOS_REQUIRED,
     _candidate_blockers,
     _causal_baselines,
     _evaluate_model,
+    get_min_volatility_regimes,
+    get_oos_candidate_required,
 )
 from seiltanzer.g1_short_horizon_runtime import OOS_CANDIDATE_REQUIRED
 
@@ -98,3 +101,35 @@ def test_dependency_weighted_model_report_makes_adjusted_metrics_primary():
     assert report["roc_auc_secondary"] is not None
     assert report["pr_auc_secondary"] is not None
     assert report["chronological_baselines_use_only_pre_t0_resolutions"] is True
+
+
+def test_horizon_scaled_oos_candidate_requirements():
+    assert get_oos_candidate_required(15)["raw_resolved"] == 800
+    assert get_oos_candidate_required(30)["raw_resolved"] == 850
+    assert get_oos_candidate_required(60)["raw_resolved"] == 900
+    assert get_oos_candidate_required(120)["raw_resolved"] == 950
+    assert get_oos_candidate_required(240)["raw_resolved"] == 1000
+    assert get_oos_candidate_required(240)["effective_n"] == 250
+    assert get_oos_candidate_required(None) == SERIOUS_OOS_REQUIRED
+    assert get_min_volatility_regimes() == 1
+
+
+def test_candidate_gate_with_horizon_scaled_allows_850_on_15m():
+    base = 1_780_000_000.0
+    rows = []
+    for index in range(850):
+        rows.append(_row(
+            index,
+            captured=base + index * 24 * 60 * 60,
+            resolved=base + index * 24 * 60 * 60 + 900,
+            label="UP" if index % 2 == 0 else "DOWN",
+            regime="normal",
+        ))
+    # Horizon 15m allows raw_resolved >= 800 and 1 regime
+    observed, blockers = _candidate_blockers(rows, effective_n=400, horizon=15)
+    assert observed["raw_resolved"] == 850
+    assert blockers == []
+
+    # Default horizon (None) still requires 1000 raw
+    observed_default, blockers_default = _candidate_blockers(rows, effective_n=400, horizon=None)
+    assert "INSUFFICIENT_RAW_RESOLVED" in blockers_default

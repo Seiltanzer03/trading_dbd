@@ -20,7 +20,11 @@ import numpy as np
 from . import g1_short_horizon_integration as _integration
 from . import g1_short_horizon_runtime as _runtime_module
 from . import storage_runtime as _storage
-from .g1_short_horizon_evidence_completion import SERIOUS_OOS_REQUIRED
+from .g1_short_horizon_evidence_completion import (
+    SERIOUS_OOS_REQUIRED,
+    get_oos_candidate_required,
+    get_min_volatility_regimes,
+)
 from .g1_short_horizon_runtime import (
     HORIZONS,
     MODEL_REFIT_INTERVAL_SEC,
@@ -444,7 +448,7 @@ def _causal_return_baselines(rows: list[dict[str, Any]]) -> dict[str, list[float
     }
 
 
-def _continuous_candidate(rows: list[dict[str, Any]], effective_n: int) -> tuple[dict[str, int], list[str]]:
+def _continuous_candidate(rows: list[dict[str, Any]], effective_n: int, horizon: int | None = None) -> tuple[dict[str, int], list[str]]:
     positive = sum(float(row["terminal_log_return"]) > 0 for row in rows)
     negative = sum(float(row["terminal_log_return"]) < 0 for row in rows)
     days = len({time.strftime("%Y-%m-%d", time.gmtime(float(row["captured_ts"]))) for row in rows})
@@ -454,9 +458,10 @@ def _continuous_candidate(rows: list[dict[str, Any]], effective_n: int) -> tuple
         "positive_n": int(positive), "negative_n": int(negative),
         "temporal_blocks": int(days), "volatility_regime_count": int(regimes),
     }
-    blockers = [f"INSUFFICIENT_{key.upper()}" for key, required in SERIOUS_OOS_REQUIRED.items()
+    reqs = get_oos_candidate_required(horizon) if horizon is not None else SERIOUS_OOS_REQUIRED
+    blockers = [f"INSUFFICIENT_{key.upper()}" for key, required in reqs.items()
                 if observed[key] < int(required)]
-    if regimes < 2:
+    if regimes < get_min_volatility_regimes():
         blockers.append("INSUFFICIENT_VOLATILITY_REGIME_DIVERSITY")
     return observed, blockers
 
