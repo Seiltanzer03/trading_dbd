@@ -23,6 +23,7 @@ EDGE_RESEARCHER_WAIT_SEC = 75.0
 FOMC_WAIT_SEC = 45.0
 MACRO_NUMERIC_REFRESH_WAIT_SEC = 30.0
 MACRO_NUMERIC_REFRESH_POLL_SEC = 1.0
+MACRO_LATEST_TIMEOUT_SEC = 20.0
 FOMC_PROMPT_VERSION = "fomc-semantic-v2-json-schema"
 FOMC_SEMANTIC_KEYS = {
     "policy_tone", "policy_shift", "inflation_concern", "growth_concern",
@@ -195,7 +196,10 @@ def _verify_fomc_semantic() -> None:
     deadline = time.monotonic() + FOMC_WAIT_SEC
     row = None
     while time.monotonic() < deadline:
-        row = assert_route("/api/research/macro/latest?family=FOMC_STATEMENT")
+        row = assert_route(
+            "/api/research/macro/latest?family=FOMC_STATEMENT",
+            timeout=MACRO_LATEST_TIMEOUT_SEC,
+        )
         if isinstance(row, dict) and row.get("status") == "VALID":
             break
         runtime = assert_route("/api/research/macro/status")
@@ -290,7 +294,10 @@ def verify_macro_runtime() -> None:
     body = _wait_for_macro_numeric_refresh(body)
 
     for family in ("CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES"):
-        row = assert_route(f"/api/research/macro/latest?family={family}")
+        row = assert_route(
+            f"/api/research/macro/latest?family={family}",
+            timeout=MACRO_LATEST_TIMEOUT_SEC,
+        )
         assert isinstance(row, dict), row
         assert row.get("status") == "VALID", row
         assert row.get("family") == family, row
