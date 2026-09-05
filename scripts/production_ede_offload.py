@@ -40,7 +40,8 @@ API_PROBE_RETRY_DELAY_SECONDS = 2.0
 POST_TRANSFER_RECOVERY_SECONDS = 30.0
 SSH_KEEPALIVE_SECONDS = 30
 SSH_OPERATION_ATTEMPTS = 4
-MAX_EXACT_BACKUP_AGE_SECONDS = 60 * 60
+MAX_EXACT_BACKUP_AGE_SECONDS = 24 * 3600
+MAX_FALLBACK_BACKUP_AGE_SECONDS = 7 * 86400
 BACKUP_CONTRACT_VERSION = "seiltanzer-backup-v1"
 EXACT_BACKUP_REASONS = frozenset(("prestart", "scheduled"))
 
@@ -322,7 +323,9 @@ import time
 root = pathlib.Path(os.environ["BACKUP_ROOT"]).resolve()
 expected_sha = os.environ["EXPECTED_SHA"]
 source_db = pathlib.Path(os.environ["SOURCE_DB"])
-max_age = float(os.environ["MAX_AGE_SECONDS"])
+legacy_max_age = os.environ.get("MAX_AGE_SECONDS")
+max_exact_age = float(os.environ.get("MAX_EXACT_AGE_SECONDS") or legacy_max_age or (24 * 3600))
+max_fallback_age = float(os.environ.get("MAX_FALLBACK_AGE_SECONDS") or legacy_max_age or (7 * 86400))
 now = time.time()
 candidates = []
 
@@ -358,6 +361,7 @@ for manifest_path in root.glob("*.manifest.json"):
         sha_priority = 2 if is_exact_sha else 1
         if pathlib.Path(str(payload.get("source_db") or "")) != source_db:
             continue
+        max_age = max_exact_age if is_exact_sha else max_fallback_age
         if age_sec < 0 or age_sec > max_age:
             continue
         if int(payload.get("database_size_bytes") or -1) != database_path.stat().st_size:
@@ -397,6 +401,10 @@ print("EDE_VERIFIED_BACKUP_SELECTION=" + json.dumps(selected, sort_keys=True))
         + shlex.quote(str(REMOTE_DATABASE))
         + " EXPECTED_SHA="
         + shlex.quote(expected_sha)
+        + " MAX_EXACT_AGE_SECONDS="
+        + shlex.quote(str(MAX_EXACT_BACKUP_AGE_SECONDS))
+        + " MAX_FALLBACK_AGE_SECONDS="
+        + shlex.quote(str(MAX_FALLBACK_BACKUP_AGE_SECONDS))
         + " MAX_AGE_SECONDS="
         + shlex.quote(str(MAX_EXACT_BACKUP_AGE_SECONDS))
         + " python3 - <<'REMOTE'\n"
@@ -583,7 +591,11 @@ def snapshot(args: argparse.Namespace) -> int:
                     "backup_reason": backup_reason,
                     "cutoff_ts": float(manifest["created_ts"]),
                     "selected_age_sec": float(selected["age_sec"]),
-                    "max_age_sec": MAX_EXACT_BACKUP_AGE_SECONDS,
+                    "max_age_sec": (
+                        MAX_EXACT_BACKUP_AGE_SECONDS
+                        if selected.get("exact_sha_match")
+                        else MAX_FALLBACK_BACKUP_AGE_SECONDS
+                    ),
                     "database_sha256": manifest["database_sha256"],
                     "production_authority": False,
                 },

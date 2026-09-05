@@ -33,15 +33,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  resolve-matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      horizons: ${{ steps.set.outputs.horizons }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo 'horizons=[15, 60]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'horizons=[15, 30, 60, 120, 240]' >> "$GITHUB_OUTPUT"
+          fi
+
   universal-structured-discovery:
+    needs: resolve-matrix
     name: universal-structured-${{ matrix.horizon }}m
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
-        horizon: [15, 30, 60, 120, 240]
+        horizon: ${{ fromJSON(needs.resolve-matrix.outputs.horizons) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

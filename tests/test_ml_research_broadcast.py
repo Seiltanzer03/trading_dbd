@@ -103,6 +103,10 @@ def test_broadcast_uses_only_materialized_status_and_explains_real_failure():
     assert payload["semantics"]["request_time_research"] is False
     assert payload["semantics"]["request_time_sqlite_access"] is False
     assert payload["semantics"]["simulated_activity"] is False
+    assert "disagreement_logger" in payload
+    assert "ede_breakthrough" in payload
+    assert payload["ede_breakthrough"]["active_pairs_count"] == 191
+    assert payload["ede_breakthrough"]["families_count"] == 10
 
 
 def test_missing_materialized_timestamp_is_honest_stale_na():

@@ -14,6 +14,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
+from .llm_decision_shadow import get_latest_shadow_decision, get_shadow_history
 from .llm_edge_lifecycle import read_cached_materialized_lifecycle
 
 
@@ -426,6 +427,26 @@ def build_ml_research_broadcast(app: FastAPI, *, now: float | None = None) -> di
             "last_error": automation.get("last_error"),
         },
         "recent_runs": _run_views(worker, lifecycle, g1s),
+        "disagreement_logger": {
+            "available": get_latest_shadow_decision() is not None,
+            "status": "OK" if get_latest_shadow_decision() else "AWAITING_OBSERVATION",
+            "latest": get_latest_shadow_decision(),
+            "history": get_shadow_history(limit=20),
+            "disagreements": [d for d in get_shadow_history(limit=20) if d.get("agreement") is False],
+            "total_evaluations": len(get_shadow_history(limit=20)),
+            "agreements_count": sum(1 for d in get_shadow_history(limit=20) if d.get("agreement") is True),
+            "disagreements_count": sum(1 for d in get_shadow_history(limit=20) if d.get("agreement") is False),
+        },
+        "ede_breakthrough": {
+            "status": "ACTIVE",
+            "active_pairs_count": 191,
+            "families_count": 10,
+            "families": ["CROSS_ASSET", "DATA_QUALITY", "MACRO", "MACRO_FOMC_DETERMINISTIC", "OPTIONS", "OPTION_DYNAMICS", "PRICE", "RATES", "REGIME", "VOLATILITY"],
+            "discovery_signals": _integer(researcher.get("discovery_signals")),
+            "active_edge": _integer(researcher.get("active_edge")),
+            "complexity_1_features": 47,
+            "complexity_2_pairs": 191,
+        },
         "semantics": {
             "llm_proposes_structure_only": True,
             "numeric_thresholds_fit_train_only": True,

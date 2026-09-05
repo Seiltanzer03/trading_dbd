@@ -27,7 +27,7 @@ CONTRACT_VERSION = "llm-edge-researcher-v1"
 PROMPT_VERSION = "llm-edge-hypothesis-proposal-v1"
 DEFAULT_MODEL = "openai/gpt-4o-mini"
 DEFAULT_TIMEOUT_SEC = 10.0
-MAX_OUTPUT_TOKENS = 900
+MAX_OUTPUT_TOKENS = 2048
 MAX_HYPOTHESES = 8
 MAX_CONDITIONS = 2
 
@@ -129,17 +129,56 @@ def _provider(summary: dict[str, Any], model: str, max_hypotheses: int) -> dict[
     content = result.get("choices", [{}])[0].get("message", {}).get("content")
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError("PROVIDER_EMPTY_RESPONSE")
-    text = content.strip()
+    return _extract_provider_json(content)
+
+
+def _resilient_extract_json(text: str) -> dict[str, Any]:
+    raw = text.strip()
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+
     try:
-        payload = json.loads(text)
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
     except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start < 0 or end <= start:
-            raise RuntimeError("PROVIDER_INVALID_JSON")
+        pass
+
+    start, end = raw.find("{"), raw.rfind("}")
+    if start >= 0 and end > start:
         try:
-            payload = json.loads(text[start:end + 1])
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("PROVIDER_INVALID_JSON") from exc
+            data = json.loads(raw[start:end + 1])
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    if start >= 0:
+        sub = raw[start:]
+        last_brace = sub.rfind("}")
+        while last_brace > 0:
+            candidate = sub[:last_brace + 1].strip()
+            if candidate.endswith(","):
+                candidate = candidate[:-1].strip()
+            for suffix in ("", "]}", "}"):
+                try:
+                    data = json.loads(candidate + suffix)
+                    if isinstance(data, dict) and "hypotheses" in data:
+                        return data
+                except json.JSONDecodeError:
+                    continue
+            last_brace = sub.rfind("}", 0, last_brace)
+
+    raise RuntimeError("PROVIDER_INVALID_JSON")
+
+
+def _extract_provider_json(content: str) -> dict[str, Any]:
+    payload = _resilient_extract_json(content)
     if not isinstance(payload, dict):
         raise RuntimeError("PROVIDER_INVALID_JSON_OBJECT")
     return payload
