@@ -19,9 +19,10 @@ from collections import defaultdict
 from typing import Any
 
 from .edge_discovery.filters import CandidateTemplate, ConditionTemplate
-from .edge_discovery.prospective import ProspectiveFeatureAdapter
+from .edge_discovery.prospective import HORIZONS, ProspectiveFeatureAdapter
 from .edge_discovery.scoring import benjamini_hochberg
 from .edge_discovery.universal_outcome_adapter import ProspectiveUniversalOutcomeAdapter
+from .production_resource_guard import memory_pressure_state, trim_memory_for_pressure
 from .edge_discovery.universal_structured_discovery import (
     MAX_Q_VALUE,
     MIN_OUTER_TEST_RAW,
@@ -128,7 +129,9 @@ def _load_hypotheses(runtime, hypothesis_ids: list[str]) -> list[dict[str, Any]]
     return output
 
 
-def _resolved_rows_at_cutoff(runtime, cutoff_ts: float) -> list[dict[str, Any]]:
+def _resolved_rows_at_cutoff(
+    runtime, cutoff_ts: float, target_horizons: set[int] | None = None
+) -> list[dict[str, Any]]:
     """Return only prospective T0 rows whose outcomes existed by ``cutoff_ts``.
 
     ``ProspectiveFeatureAdapter.available_asof`` gates target time, while the
@@ -136,17 +139,32 @@ def _resolved_rows_at_cutoff(runtime, cutoff_ts: float) -> list[dict[str, Any]]:
     time.  This prevents a later resolution from leaking into an older proposal.
     """
     adapter = ProspectiveFeatureAdapter(runtime, available_asof=float(cutoff_ts))
-    rows = adapter.rows(resolved_only=False, strict=False)
-    admissible = []
-    for row in rows:
-        resolved_ts = row.get("resolved_ts")
-        if not bool(row.get("outcome_available")) or resolved_ts is None:
-            continue
-        if float(row["target_ts"]) > float(cutoff_ts) + 1e-6:
-            continue
-        if float(resolved_ts) > float(cutoff_ts) + 1e-6:
-            continue
-        admissible.append(row)
+    valid_horizons = set(HORIZONS)
+    if target_horizons and set(target_horizons).issubset(valid_horizons) and len(target_horizons) < len(valid_horizons):
+        admissible = []
+        for h in sorted(target_horizons):
+            h_rows = adapter.rows(resolved_only=False, strict=False, horizon_minutes=h)
+            for row in h_rows:
+                resolved_ts = row.get("resolved_ts")
+                if not bool(row.get("outcome_available")) or resolved_ts is None:
+                    continue
+                if float(row["target_ts"]) > float(cutoff_ts) + 1e-6:
+                    continue
+                if float(resolved_ts) > float(cutoff_ts) + 1e-6:
+                    continue
+                admissible.append(row)
+    else:
+        rows = adapter.rows(resolved_only=False, strict=False)
+        admissible = []
+        for row in rows:
+            resolved_ts = row.get("resolved_ts")
+            if not bool(row.get("outcome_available")) or resolved_ts is None:
+                continue
+            if float(row["target_ts"]) > float(cutoff_ts) + 1e-6:
+                continue
+            if float(resolved_ts) > float(cutoff_ts) + 1e-6:
+                continue
+            admissible.append(row)
     return ProspectiveUniversalOutcomeAdapter(runtime).attach(admissible)
 
 
@@ -399,8 +417,45 @@ def evaluate_edge_research_run(runtime, run_id: str | None = None) -> dict[str, 
             "eligible_for_policy": False,
         }
     cutoff_ts = float(run["created_ts"])
+    pressure = memory_pressure_state()
+    if pressure.get("pause_background"):
+        return {
+            "contract_version": CONTRACT_VERSION,
+            "status": "PAUSED_MEMORY_PRESSURE",
+            "reason": f"MEMORY_PRESSURE_PAUSED:{pressure.get('level')}:{pressure.get('rss_mib')}MiB",
+            "run_id": str(run["run_id"]),
+            "evaluation_cutoff_ts": cutoff_ts,
+            "hypothesis_n": len(hypotheses),
+            "evaluated_n": 0,
+            "insufficient_data_n": 0,
+            "discovery_signal_n": 0,
+            "new_artifact_n": 0,
+            "results": [],
+            "cutoff_frozen_at_proposal_time": True,
+            "future_resolutions_excluded": True,
+            "numeric_thresholds_fit_train_only": True,
+            "walk_forward_chronological": True,
+            "llm_scores_or_selects_results": False,
+            "prospective_confirmation": False,
+            "writes_active_edge_registry": False,
+            "research_only": True,
+            "production_authority": False,
+            "eligible_for_policy": False,
+            "auto_promotion": False,
+            "may_change_position_manager": False,
+            "may_change_cvar_stop_or_size": False,
+            "next_step": "YIELD_TO_PRODUCTION_MEMORY_BUDGET",
+        }
+
+    target_horizons = {
+        int(h["horizon_minutes"]) for h in hypotheses if "horizon_minutes" in h
+    }
+    rows = None
     try:
-        rows = _resolved_rows_at_cutoff(runtime, cutoff_ts)
+        try:
+            rows = _resolved_rows_at_cutoff(runtime, cutoff_ts, target_horizons=target_horizons)
+        except TypeError:
+            rows = _resolved_rows_at_cutoff(runtime, cutoff_ts)
         specs = _specs(rows)
         results = [
             _evaluate_one(rows, hypothesis, cutoff_ts=cutoff_ts, specs=specs)
@@ -418,6 +473,9 @@ def evaluate_edge_research_run(runtime, run_id: str | None = None) -> dict[str, 
             "production_authority": False,
             "eligible_for_policy": False,
         }
+    finally:
+        rows = None
+        trim_memory_for_pressure()
 
     inserted = _persist(runtime, str(run["run_id"]), cutoff_ts, results)
     discovery_n = sum(item.get("status") == "DISCOVERY_SIGNAL" for item in results)
@@ -535,28 +593,39 @@ def pending_edge_research_summary(runtime) -> dict[str, Any]:
 
 
 def evaluate_pending_edge_research_runs(
-    runtime, *, max_runs: int = 10
+    runtime, *, max_runs: int = 2
 ) -> dict[str, Any]:
     summary = pending_edge_research_summary(runtime)
     pending_runs = summary.get("pending_runs", [])[:max_runs]
     results = []
     total_evaluated = 0
     total_discoveries = 0
+    paused = False
     for item in pending_runs:
+        pressure = memory_pressure_state()
+        if pressure.get("pause_background"):
+            paused = True
+            break
         run_id = item["run_id"]
         res = evaluate_edge_research_run(runtime, run_id)
         results.append(res)
+        if res.get("status") == "PAUSED_MEMORY_PRESSURE":
+            paused = True
+            break
         total_evaluated += int(res.get("evaluated_n") or 0)
         total_discoveries += int(res.get("discovery_signal_n") or 0)
+        trim_memory_for_pressure()
 
     remaining = max(0, summary.get("pending_runs_count", 0) - len(results))
+    status = "PAUSED_MEMORY_PRESSURE" if (paused and not results) else ("OK" if results else "NO_PENDING_RUNS")
     return {
         "contract_version": CONTRACT_VERSION,
-        "status": "OK" if results else "NO_PENDING_RUNS",
+        "status": status,
         "pending_runs_processed": len(results),
         "hypotheses_evaluated": total_evaluated,
         "discovery_signals_found": total_discoveries,
         "remaining_pending_runs": remaining,
+        "paused_due_to_pressure": paused,
         "results": results,
     }
 

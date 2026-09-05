@@ -12,9 +12,13 @@ from .llm_edge_evaluator import (
     evaluate_pending_edge_research_runs,
     pending_edge_research_summary,
 )
-from .llm_edge_lifecycle import read_cached_materialized_lifecycle_json
+from .llm_edge_lifecycle import (
+    read_cached_materialized_lifecycle,
+    read_cached_materialized_lifecycle_json,
+)
 from .llm_edge_prospective_journal import initialize_journal_storage
 from .llm_edge_researcher import edge_researcher_status, propose_edge_hypotheses
+from .production_resource_guard import trim_memory_for_pressure
 from .research_llm_cost_guard import guarded_edge_researcher_provider
 from .ml_research_broadcast import install_ml_research_broadcast
 
@@ -119,9 +123,14 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
             finally:
                 eval_state["finished_ts"] = time.time()
                 eval_state["running"] = False
+                try:
+                    trim_memory_for_pressure()
+                except Exception:
+                    pass
 
-    def evaluate(run_id: str | None = None, background: bool = True, max_runs: int = 20):
+    def evaluate(run_id: str | None = None, background: bool = True, max_runs: int = 2):
         # Deterministic only: no provider call and no Active Edge write.
+        max_runs = max(1, min(int(max_runs), 5))
         if not background:
             if run_id and run_id not in {"pending", "all"}:
                 return evaluate_edge_research_run(runtime, run_id)
@@ -156,11 +165,17 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
     )
 
     def evaluate_status():
-        summary = pending_edge_research_summary(runtime)
+        cached = read_cached_materialized_lifecycle(runtime)
+        summary = cached.get("summary") or {}
         return {
             "status": "OK",
             "job": dict(eval_state),
-            "pending_summary": summary,
+            "pending_summary": {
+                "total_hypotheses": summary.get("hypotheses_total", 0),
+                "pending_hypotheses": summary.get("pending_hypotheses", 0),
+                "discovery_signals": summary.get("discovery_signals", 0),
+                "rejected": summary.get("rejected", 0),
+            },
         }
 
     app.add_api_route(
