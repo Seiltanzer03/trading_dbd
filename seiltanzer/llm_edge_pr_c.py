@@ -789,11 +789,13 @@ def _materialized_status(runtime: Any) -> dict[str,Any]:
 def _materialized_evaluator_status(runtime: Any) -> dict[str, Any]:
     payload = _lifecycle.read_cached_materialized_lifecycle(runtime)
     quality = payload.get("research_quality") or {}
+    researcher = payload.get("researcher") or {}
     return {
         "contract_version": _evaluator.CONTRACT_VERSION,
         "measurement_contract": _evaluator.MEASUREMENT_CONTRACT,
         "status": payload.get("status", "INITIALIZING"),
         "evaluation_n": int(quality.get("evaluations_total") or 0),
+        "pending_hypotheses": int(researcher.get("pending_hypotheses") or 0),
         "cutoff_frozen_at_proposal_time": True,
         "future_resolutions_excluded": True,
         "numeric_thresholds_fit_train_only": True,
@@ -821,6 +823,16 @@ def llm_edge_research_tick(engine: Any, *, now: float | None = None) -> dict[str
             materialize_lifecycle(engine, now=current)
         except Exception:
             pass
+    elif automatic.get("status") == "NOT_DUE":
+        runtime = getattr(engine, "short_horizon", None)
+        if runtime is not None:
+            try:
+                eval_res = _evaluator.evaluate_pending_edge_research_runs(runtime, max_runs=1)
+                if eval_res.get("pending_runs_processed", 0) > 0:
+                    _lifecycle.freeze_discovery_signals(engine, now=current)
+                    materialize_lifecycle(engine, now=current)
+            except Exception:
+                pass
     return {
         **base,
         "automation": automatic,

@@ -251,3 +251,37 @@ def test_resilient_extract_json_handles_fences_and_truncation():
     with pytest.raises(RuntimeError, match="PROVIDER_INVALID_JSON"):
         _resilient_extract_json("not valid json at all")
 
+
+def test_edge_researcher_evaluate_routes_and_background_execution(monkeypatch):
+    runtime = Runtime()
+    app = FastAPI()
+    app.state.engine = type("Engine", (), {"short_horizon": runtime})()
+    install_llm_edge_researcher_routes(app)
+
+    paths = {route.path: set(route.methods or ()) for route in app.routes}
+    assert paths["/api/research/g1s/edge-researcher/evaluate"] == {"POST"}
+    assert paths["/api/research/g1s/edge-researcher/evaluate/status"] == {"GET"}
+
+    eval_route = next(r for r in app.routes if r.path == "/api/research/g1s/edge-researcher/evaluate")
+    status_route = next(r for r in app.routes if r.path == "/api/research/g1s/edge-researcher/evaluate/status")
+
+    # Status check
+    st = status_route.endpoint()
+    assert st["status"] == "OK"
+    assert "pending_summary" in st
+    assert st["job"]["running"] is False
+
+    # Synchronous evaluate call
+    monkeypatch.setattr(
+        "seiltanzer.llm_edge_researcher_routes.evaluate_pending_edge_research_runs",
+        lambda rt, max_runs: {"status": "OK", "pending_runs_processed": 0},
+    )
+    sync_res = eval_route.endpoint(background=False)
+    assert sync_res["status"] == "OK"
+
+    # Async background evaluate call
+    async_res = eval_route.endpoint(background=True)
+    assert async_res["status"] == "ACCEPTED"
+    assert async_res["message"] == "Background evaluation job started"
+
+

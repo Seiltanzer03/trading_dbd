@@ -29,12 +29,13 @@ def _initializing_materialized_lifecycle() -> dict[str, Any]:
         "contract_version": LIFECYCLE_CONTRACT_VERSION,
         "status": "INITIALIZING",
         "researcher": {
-            "proposal_runs": 0, "hypotheses": 0, "discovery_signals": 0,
-            "frozen_prospective": 0, "collecting": 0, "underpowered": 0,
-            "prospective_pass": 0, "prospective_fail": 0, "active_edge": 0,
-            "strict_reference": 0, "rejected": 0,
+            "proposal_runs": 0, "hypotheses": 0, "pending_hypotheses": 0,
+            "discovery_signals": 0, "frozen_prospective": 0, "collecting": 0,
+            "underpowered": 0, "prospective_pass": 0, "prospective_fail": 0,
+            "active_edge": 0, "strict_reference": 0, "rejected": 0,
         },
         "candidates": [],
+        "research_hypotheses": [],
         "writes_active_edge_registry": True,
         "production_authority": False,
         "prospective_confirmation_enabled": True,
@@ -157,6 +158,20 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
             FROM llm_edge_candidate_opportunities""").fetchone()
         outcome_n = int(runtime._conn.execute(
             "SELECT COUNT(*) FROM llm_edge_candidate_outcomes").fetchone()[0])
+        recent_rows = []
+        try:
+            recent_rows = runtime._conn.execute("""
+                SELECT h.hypothesis_id, h.name, h.target_id, h.target_family,
+                       h.horizon_minutes, h.conditions_json, h.status,
+                       h.evaluation_state, h.created_ts,
+                       e.result_json
+                FROM llm_edge_hypotheses h
+                LEFT JOIN llm_edge_evaluations e ON h.hypothesis_id = e.hypothesis_id
+                ORDER BY h.created_ts DESC
+                LIMIT 30
+            """).fetchall()
+        except Exception:
+            recent_rows = []
 
     discovery = rejected = 0
     for raw in evaluations:
@@ -167,18 +182,68 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
         discovery += int(result.get("status") == "DISCOVERY_SIGNAL")
         rejected += int(result.get("status") in {"RESEARCH_DIAGNOSTIC", "INSUFFICIENT_DATA"})
 
+    research_hypotheses = []
+    for r in recent_rows:
+        row = dict(r) if not isinstance(r, dict) else r
+        try:
+            conds = json.loads(str(row.get("conditions_json") or "[]"))
+        except Exception:
+            conds = []
+        eval_result = None
+        if row.get("result_json"):
+            try:
+                eval_result = json.loads(str(row["result_json"]))
+            except Exception:
+                pass
+
+        if eval_result is None:
+            stage_code = "PENDING_DETERMINISTIC_EVALUATION"
+            stage_label = "В ОЧЕРЕДИ НА ОЦЕНКУ"
+            p_val = q_val = effect = reason = folds = None
+        else:
+            status_code = str(eval_result.get("status") or "")
+            if status_code == "DISCOVERY_SIGNAL":
+                stage_code = "DISCOVERY_SIGNAL"
+                stage_label = "СТАТИСТИЧЕСКИЙ ПЕРЕВЕС"
+            else:
+                stage_code = "RESEARCH_REJECTED"
+                stage_label = "ОТКЛОНЕНО (ШУМ)"
+            p_val = eval_result.get("p_value")
+            q_val = eval_result.get("q_value")
+            effect = eval_result.get("relative_improvement") or eval_result.get("primary_improvement")
+            reason = eval_result.get("reason")
+            folds = eval_result.get("folds_stable")
+
+        research_hypotheses.append({
+            "hypothesis_id": str(row.get("hypothesis_id") or ""),
+            "name": str(row.get("name") or ""),
+            "target": str(row.get("target_id") or ""),
+            "target_family": str(row.get("target_family") or ""),
+            "horizon_minutes": int(row.get("horizon_minutes") or 0),
+            "conditions": conds,
+            "created_ts": float(row.get("created_ts") or 0.0),
+            "stage": {"code": stage_code, "label_ru": stage_label},
+            "p_value": p_val,
+            "q_value": q_val,
+            "effect": effect,
+            "folds_stable": folds,
+            "rejection_reason": reason,
+        })
+
     statuses = [str(item.get("state") or "") for item in details]
     strict_reference = sum(
         1 for item in details
         if (item.get("prospective") or {}).get("q") is not None
         and float((item.get("prospective") or {})["q"]) <= 0.10
     )
+    pending_hypotheses = max(0, hypotheses - len(evaluations))
     payload = {
         "contract_version": LIFECYCLE_CONTRACT_VERSION,
         "status": "OK" if researcher_enabled() else "DISABLED",
         "researcher": {
             "proposal_runs": proposal_runs,
             "hypotheses": hypotheses,
+            "pending_hypotheses": pending_hypotheses,
             "discovery_signals": discovery,
             "frozen_prospective": len(details),
             "collecting": sum(state in {"FROZEN_FOR_VALIDATION", "LIVE_VALIDATING"}
@@ -202,6 +267,7 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
             "resolved_outcomes": outcome_n,
         },
         "candidates": details,
+        "research_hypotheses": research_hypotheses,
         "writes_active_edge_registry": True,
         "production_authority": False,
         "prospective_confirmation_enabled": True,

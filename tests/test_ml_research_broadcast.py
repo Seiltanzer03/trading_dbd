@@ -107,6 +107,9 @@ def test_broadcast_uses_only_materialized_status_and_explains_real_failure():
     assert "ede_breakthrough" in payload
     assert payload["ede_breakthrough"]["active_pairs_count"] == 191
     assert payload["ede_breakthrough"]["families_count"] == 10
+    assert "research_hypotheses" in payload
+    assert isinstance(payload["research_hypotheses"], list)
+
 
 
 def test_missing_materialized_timestamp_is_honest_stale_na():
