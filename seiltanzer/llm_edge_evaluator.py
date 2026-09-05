@@ -485,3 +485,78 @@ def edge_evaluator_status(runtime) -> dict[str, Any]:
         "eligible_for_policy": False,
         "auto_promotion": False,
     }
+
+
+def pending_edge_research_summary(runtime) -> dict[str, Any]:
+    _ensure_tables(runtime)
+    with runtime._lock:
+        total_runs = int(runtime._conn.execute(
+            "SELECT COUNT(*) FROM llm_edge_research_runs"
+        ).fetchone()[0])
+        total_hypotheses = int(runtime._conn.execute(
+            "SELECT COUNT(*) FROM llm_edge_hypotheses"
+        ).fetchone()[0])
+        evaluated_hypotheses = int(runtime._conn.execute(
+            "SELECT COUNT(DISTINCT hypothesis_id) FROM llm_edge_evaluations"
+        ).fetchone()[0])
+        evaluated_ids = {
+            str(row[0]) for row in runtime._conn.execute(
+                "SELECT DISTINCT hypothesis_id FROM llm_edge_evaluations"
+            ).fetchall()
+        }
+        runs = runtime._conn.execute(
+            "SELECT run_id, hypothesis_ids_json, created_ts FROM llm_edge_research_runs ORDER BY created_ts ASC"
+        ).fetchall()
+        pending_runs = []
+        for row in runs:
+            run_id = str(row["run_id"])
+            try:
+                hyp_ids = json.loads(str(row["hypothesis_ids_json"] or "[]"))
+            except Exception:
+                hyp_ids = []
+            unevaluated = [hid for hid in hyp_ids if str(hid) not in evaluated_ids]
+            if unevaluated:
+                pending_runs.append({
+                    "run_id": run_id,
+                    "created_ts": float(row["created_ts"]),
+                    "unevaluated_count": len(unevaluated),
+                    "total_hypotheses": len(hyp_ids),
+                })
+        pending_hypotheses = max(0, total_hypotheses - evaluated_hypotheses)
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "total_runs": total_runs,
+        "total_hypotheses": total_hypotheses,
+        "evaluated_hypotheses": evaluated_hypotheses,
+        "pending_hypotheses": pending_hypotheses,
+        "pending_runs_count": len(pending_runs),
+        "pending_runs": pending_runs,
+    }
+
+
+def evaluate_pending_edge_research_runs(
+    runtime, *, max_runs: int = 10
+) -> dict[str, Any]:
+    summary = pending_edge_research_summary(runtime)
+    pending_runs = summary.get("pending_runs", [])[:max_runs]
+    results = []
+    total_evaluated = 0
+    total_discoveries = 0
+    for item in pending_runs:
+        run_id = item["run_id"]
+        res = evaluate_edge_research_run(runtime, run_id)
+        results.append(res)
+        total_evaluated += int(res.get("evaluated_n") or 0)
+        total_discoveries += int(res.get("discovery_signal_n") or 0)
+
+    remaining = max(0, summary.get("pending_runs_count", 0) - len(results))
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "status": "OK" if results else "NO_PENDING_RUNS",
+        "pending_runs_processed": len(results),
+        "hypotheses_evaluated": total_evaluated,
+        "discovery_signals_found": total_discoveries,
+        "remaining_pending_runs": remaining,
+        "results": results,
+    }
+

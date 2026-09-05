@@ -413,9 +413,11 @@ def build_ml_research_broadcast(app: FastAPI, *, now: float | None = None) -> di
             ),
         },
         "hypotheses": candidates,
+        "research_hypotheses": lifecycle.get("research_hypotheses") or [],
         "researcher_summary": {
             "proposal_runs": _integer(researcher.get("proposal_runs")),
             "hypotheses": _integer(researcher.get("hypotheses")),
+            "pending_hypotheses": _integer(researcher.get("pending_hypotheses")),
             "discovery_signals": _integer(researcher.get("discovery_signals")),
             "collecting": _integer(researcher.get("collecting")),
             "validated": _integer(researcher.get("prospective_pass")),

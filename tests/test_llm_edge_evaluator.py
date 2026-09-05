@@ -195,3 +195,50 @@ def test_missing_research_run_fails_closed():
     assert report["reason"] == "RESEARCH_RUN_NOT_FOUND"
     assert report["production_authority"] is False
     assert report["eligible_for_policy"] is False
+
+
+def test_pending_edge_research_summary_and_batch_evaluation(monkeypatch):
+    runtime = Runtime()
+    monkeypatch.setattr(evaluator, "_resolved_rows_at_cutoff", lambda runtime, cutoff: [])
+    monkeypatch.setattr(evaluator, "_specs", lambda rows: {})
+    monkeypatch.setattr(evaluator, "_evaluate_one", lambda rows, hypothesis, cutoff_ts, specs: {
+        "hypothesis_id": hypothesis["hypothesis_id"],
+        "target_id": hypothesis["target_id"],
+        "target_family": hypothesis["target_family"],
+        "horizon_minutes": hypothesis["horizon_minutes"],
+        "dataset_sha256": "dataset-" + hypothesis["hypothesis_id"],
+        "evaluation_state": "DETERMINISTIC_EVALUATED",
+        "status": "RESEARCH_DIAGNOSTIC",
+        "reason": "TEST",
+        "raw_rows": 10,
+        "target_rows": 10,
+        "fold_count": 3,
+        "p_value": 0.4,
+        "q_value": 0.5,
+        "production_authority": False,
+        "eligible_for_policy": False,
+        "auto_promotion": False,
+        "prospective_confirmation": False,
+    })
+
+    summary = evaluator.pending_edge_research_summary(runtime)
+    assert summary["total_runs"] == 1
+    assert summary["total_hypotheses"] == 2
+    assert summary["evaluated_hypotheses"] == 0
+    assert summary["pending_hypotheses"] == 2
+    assert summary["pending_runs_count"] == 1
+
+    batch_res = evaluator.evaluate_pending_edge_research_runs(runtime, max_runs=5)
+    assert batch_res["status"] == "OK"
+    assert batch_res["pending_runs_processed"] == 1
+    assert batch_res["hypotheses_evaluated"] == 2
+
+    summary_after = evaluator.pending_edge_research_summary(runtime)
+    assert summary_after["evaluated_hypotheses"] == 2
+    assert summary_after["pending_hypotheses"] == 0
+    assert summary_after["pending_runs_count"] == 0
+
+    second_batch = evaluator.evaluate_pending_edge_research_runs(runtime)
+    assert second_batch["status"] == "NO_PENDING_RUNS"
+    assert second_batch["pending_runs_processed"] == 0
+

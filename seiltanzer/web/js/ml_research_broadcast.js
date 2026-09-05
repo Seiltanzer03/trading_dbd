@@ -53,18 +53,70 @@ function renderSummary(payload) {
 }
 
 function renderHypotheses(payload) {
-  const items = payload.hypotheses || [];
-  $('hypothesis-count').textContent = `${items.length} MATERIALIZED`;
-  $('hypotheses').innerHTML = items.map((item) => {
-    const evidence = item.evidence || {};
-    const conditions = (item.conditions || []).map((row) => `<span class="condition" title="${esc(row.kind)}">${esc(row.label_ru)}</span>`).join('');
-    const rejected = item.rejection ? `<div class="rejection">ОТКЛОНЕНО: ${esc(item.rejection.label_ru)} · q ${value(item.rejection.q_value)} / ${value(item.rejection.q_value_max)}</div>` : '';
-    return `<article class="hypothesis"><div class="hypothesis-head"><div><h3>${esc(item.name)}</h3>
-      <div class="meta">${esc(item.target)} · ${value(item.horizon_minutes, 'm')} · ${esc(item.candidate_id || 'N/A')}</div></div>${status(item.stage)}</div>
-      <div class="conditions">${conditions || '<span class="condition">CONDITIONS N/A</span>'}</div>
-      <div class="evidence"><div><span>MATCHED</span><b>${value(evidence.matched_n)}</b></div><div><span>NEXT CHECKPOINT</span><b>${value(evidence.next_checkpoint)}</b></div>
-      <div><span>EFFECT</span><b>${pct(evidence.effect)}</b></div><div><span>Q VALUE</span><b>${value(evidence.q_value)}</b></div></div>${rejected}</article>`;
-  }).join('') || '<div class="empty">НЕТ МАТЕРИАЛИЗОВАННЫХ КАНДИДАТОВ. ЭТО НЕ ОЗНАЧАЕТ, ЧТО ИДЁТ СКРЫТЫЙ ПЕРЕБОР.</div>';
+  const candidates = payload.hypotheses || [];
+  const research = payload.research_hypotheses || [];
+  $('hypothesis-count').textContent = `${candidates.length} OOS · ${research.length} В ИССЛЕДОВАНИИ`;
+
+  let html = '';
+  if (candidates.length > 0) {
+    html += '<div style="grid-column:1/-1;margin:8px 0 4px;font-size:11px;color:var(--cyan);letter-spacing:0.08em;font-weight:bold;">● ПРОСПЕКТИВНЫЕ OOS КАНДИДАТЫ (CONFIRMATION)</div>';
+    html += candidates.map((item) => {
+      const evidence = item.evidence || {};
+      const conditions = (item.conditions || []).map((row) => `<span class="condition" title="${esc(row.kind)}">${esc(row.label_ru)}</span>`).join('');
+      const rejected = item.rejection ? `<div class="rejection">ОТКЛОНЕНО: ${esc(item.rejection.label_ru)} · q ${value(item.rejection.q_value)} / ${value(item.rejection.q_value_max)}</div>` : '';
+      return `<article class="hypothesis"><div class="hypothesis-head"><div><h3>${esc(item.name)}</h3>
+        <div class="meta">${esc(item.target)} · ${value(item.horizon_minutes, 'm')} · ${esc(item.candidate_id || 'N/A')}</div></div>${status(item.stage)}</div>
+        <div class="conditions">${conditions || '<span class="condition">CONDITIONS N/A</span>'}</div>
+        <div class="evidence"><div><span>MATCHED</span><b>${value(evidence.matched_n)}</b></div><div><span>NEXT CHECKPOINT</span><b>${value(evidence.next_checkpoint)}</b></div>
+        <div><span>EFFECT</span><b>${pct(evidence.effect)}</b></div><div><span>Q VALUE</span><b>${value(evidence.q_value)}</b></div></div>${rejected}</article>`;
+    }).join('');
+  }
+
+  if (research.length > 0) {
+    html += '<div style="grid-column:1/-1;margin:12px 0 4px;font-size:11px;color:var(--amber);letter-spacing:0.08em;font-weight:bold;">● ИССЛЕДУЕМЫЕ ГИПОТЕЗЫ (DETERMINISTIC WALK-FORWARD CV)</div>';
+    html += research.map((item) => {
+      const conditions = (item.conditions || []).map((row) => {
+        const feat = row.feature_id || 'N/A';
+        const st = row.state || row.operator || '';
+        return `<span class="condition" title="${esc(row.kind || '')}">${esc(feat)} ${esc(st)}</span>`;
+      }).join('');
+      const isPending = item.stage?.code === 'PENDING_DETERMINISTIC_EVALUATION';
+      const isDiscovery = item.stage?.code === 'DISCOVERY_SIGNAL';
+      const stageBadge = isDiscovery
+        ? '<span class="status good">СТАТИСТИЧЕСКИЙ ПЕРЕВЕС</span>'
+        : isPending
+        ? '<span class="status working">В ОЧЕРЕДИ НА ОЦЕНКУ</span>'
+        : '<span class="status bad">ОТКЛОНЕНО (ШУМ)</span>';
+
+      const metrics = isPending
+        ? '<div class="honesty-note" style="margin-top:6px;font-size:10px;padding:6px;">Сформулировано LLM. Ожидает расчёта Purged Walk-Forward CV.</div>'
+        : `<div class="evidence">
+            <div><span>P-VALUE</span><b>${value(item.p_value)}</b></div>
+            <div><span>Q-VALUE (FDR)</span><b>${value(item.q_value)}</b></div>
+            <div><span>EFFECT</span><b>${pct(item.effect)}</b></div>
+            <div><span>СТАБИЛЬНЫХ ФОЛДОВ</span><b>${value(item.folds_stable)}</b></div>
+          </div>`;
+
+      const rejected = (item.rejection_reason && !isDiscovery && !isPending)
+        ? `<div class="rejection">ПРИЧИНА ОТСЕВА: ${esc(item.rejection_reason)}</div>`
+        : '';
+
+      return `<article class="hypothesis">
+        <div class="hypothesis-head">
+          <div>
+            <h3>${esc(item.name)}</h3>
+            <div class="meta">${esc(item.target)} · ${value(item.horizon_minutes, 'm')} · ${esc(item.hypothesis_id)}</div>
+          </div>
+          ${stageBadge}
+        </div>
+        <div class="conditions">${conditions || '<span class="condition">CONDITIONS N/A</span>'}</div>
+        ${metrics}
+        ${rejected}
+      </article>`;
+    }).join('');
+  }
+
+  $('hypotheses').innerHTML = html || '<div class="empty">НЕТ МАТЕРИАЛИЗОВАННЫХ КАНДИДАТОВ. НАЖМИТЕ «ЗАПУСК ПЕРЕБОРА», ЧТОБЫ НАЧАТЬ ПОИСК.</div>';
 }
 
 function renderRuns(payload) {
@@ -152,17 +204,27 @@ const triggerBtn = $('trigger-hypothesis-btn');
 if (triggerBtn) {
   triggerBtn.addEventListener('click', async () => {
     triggerBtn.disabled = true;
-    triggerBtn.textContent = 'ОТПРАВКА...';
+    triggerBtn.textContent = 'ГЕНЕРАЦИЯ...';
     try {
-      const res = await fetch('/api/research/g1s/edge-researcher/propose', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok) {
-        triggerBtn.textContent = 'ЗАПУЩЕНО!';
-        setTimeout(() => { triggerBtn.textContent = 'ЗАПУСК ПЕРЕБОРА'; triggerBtn.disabled = false; refresh(); }, 2000);
-      } else {
-        triggerBtn.textContent = data.reason || 'ОШИБКА';
-        setTimeout(() => { triggerBtn.textContent = 'ЗАПУСК ПЕРЕБОРА'; triggerBtn.disabled = false; }, 3000);
-      }
+      // 1. Propose new hypotheses with LLM
+      const resPropose = await fetch('/api/research/g1s/edge-researcher/propose', { method: 'POST' });
+      const dataPropose = await resPropose.json();
+
+      // 2. Trigger asynchronous background evaluation of pending hypotheses
+      triggerBtn.textContent = 'ОЦЕНКА WALK-FORWARD...';
+      const resEval = await fetch('/api/research/g1s/edge-researcher/evaluate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ background: true, max_runs: 20 })
+      });
+      const dataEval = await resEval.json();
+
+      triggerBtn.textContent = 'ПЕРЕБОР В ФОНЕ!';
+      setTimeout(() => {
+        triggerBtn.textContent = 'ЗАПУСК ПЕРЕБОРА';
+        triggerBtn.disabled = false;
+        refresh();
+      }, 2500);
     } catch (e) {
       triggerBtn.textContent = 'СБОЙ СЕТИ';
       setTimeout(() => { triggerBtn.textContent = 'ЗАПУСК ПЕРЕБОРА'; triggerBtn.disabled = false; }, 3000);
