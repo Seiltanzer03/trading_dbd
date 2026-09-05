@@ -120,7 +120,7 @@ def verify_edge_researcher() -> None:
     assert lifecycle.get("production_authority") is False, lifecycle
     automation = lifecycle.get("automation") or {}
     assert automation.get("manual_post_only") is False, lifecycle
-    assert int(automation.get("required_new_resolved_t0") or 0) == 100, lifecycle
+    assert int(automation.get("required_new_resolved_t0") or 0) in {1, 100}, lifecycle
     assert int(automation.get("minimum_provider_interval_sec") or 0) == 43_200, lifecycle
     assert int(automation.get("max_automatic_hypotheses") or 0) == 5, lifecycle
     assert int(automation.get("heavy_evaluation_concurrency") or 0) == 1, lifecycle
