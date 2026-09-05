@@ -268,7 +268,7 @@ def _verify_local_exact_backup(
     manifest_path: pathlib.Path,
     *,
     expected_sha: str,
-    allow_verified_fallback: bool = True,
+    allow_verified_fallback: bool = False,
 ) -> dict[str, Any]:
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
