@@ -115,6 +115,39 @@ def test_functional_smoke_accepts_configured_required_new_resolved_t0(monkeypatc
         smoke.verify_edge_researcher()
 
 
+def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
+    smoke = _load_script("production_functional_smoke")
+
+    assert smoke.PASSIVE_STATUS_TIMEOUT_SEC >= 20.0
+    assert smoke.PASSIVE_EDGE_TIMEOUT_SEC >= 20.0
+
+    recorded_timeouts = {}
+
+    def fake_assert_route(path: str, *, timeout: float = 5.0):
+        recorded_timeouts[path] = timeout
+        return {}
+
+    monkeypatch.setattr(smoke, "assert_route", fake_assert_route)
+    def fake_sh(*args):
+        if args == ("git", "-C", "/opt/seiltanzer", "rev-parse", "HEAD"):
+            return "fake"
+        if args == ("systemctl", "is-active", "seiltanzer"):
+            return "active"
+        return ""
+
+    monkeypatch.setattr(smoke, "sh", fake_sh)
+    monkeypatch.setattr(smoke, "verify_universe_routes", lambda: None)
+    monkeypatch.setattr(smoke, "verify_edge_researcher", lambda: None)
+    monkeypatch.setattr(smoke, "verify_ai_verdict", lambda: None)
+    monkeypatch.setattr(smoke, "verify_macro_runtime", lambda: None)
+
+    smoke.verify("fake")
+    assert recorded_timeouts["/api/research/passive/status"] == smoke.PASSIVE_STATUS_TIMEOUT_SEC
+    assert recorded_timeouts["/api/research/passive/edge"] == smoke.PASSIVE_EDGE_TIMEOUT_SEC
+    assert recorded_timeouts["/api/state"] == 5.0
+
+
+
 def test_functional_smoke_checks_public_terminal_and_keeps_network_diagnostics():
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github/workflows/production-functional-smoke.yml").read_text(
