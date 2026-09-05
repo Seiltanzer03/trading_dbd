@@ -16,11 +16,13 @@ from . import ai_verdict
 from . import ai_verdict_v19 as _v19
 from . import ai_provider_explanation as _provider
 from .llm_decision_shadow import (
+    _disagreement_category,
     _extract_json_object,
     _hard_guard,
     _quant_policy,
     _validate_model_payload,
     append_shadow_section,
+    record_shadow_decision,
 )
 
 
@@ -302,6 +304,7 @@ def request_explanation_with_shadow(
     explanation, parsed_shadow = _provider_payload(content)
     quant_policy = _quant_policy(authority)
     guard_ok, guard_reasons = _hard_guard(authority, parsed_shadow["policy"])
+    disagreement_cat = _disagreement_category(parsed_shadow["policy"], quant_policy)
     shadow = {
         "version": "llm-decision-shadow-v1",
         "status": "ok" if guard_ok else "blocked",
@@ -312,12 +315,14 @@ def request_explanation_with_shadow(
         "policy": parsed_shadow["policy"],
         "confidence": parsed_shadow["confidence"],
         "agreement": parsed_shadow["policy"] == quant_policy if quant_policy else None,
+        "disagreement_category": disagreement_cat,
         "blocked_by_hard_guard": not guard_ok,
         "hard_guard_reasons": guard_reasons,
         "reason_ru": parsed_shadow["reason_ru"],
         "key_evidence": parsed_shadow["key_evidence"],
         "counter_evidence": parsed_shadow["counter_evidence"],
     }
+    record_shadow_decision(shadow)
     combined = (
         deterministic.rstrip()
         + "\n\n**LLM EXPLANATION · OPENROUTER** —\n"

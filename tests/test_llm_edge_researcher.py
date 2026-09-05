@@ -226,3 +226,28 @@ def test_status_and_routes_are_research_only():
     assert after["pr_c_contract_version"] == "llm-edge-researcher-v1.3-pr-c"
     assert after["request_time_history_scan"] is False
     assert (after["automation"] or {}).get("manual_post_only") is False
+
+
+def test_resilient_extract_json_handles_fences_and_truncation():
+    from seiltanzer.llm_edge_researcher import _resilient_extract_json
+
+    # 1. Markdown code fence
+    fence_input = '```json\n{"hypotheses": [{"name": "H1"}]}\n```'
+    assert _resilient_extract_json(fence_input) == {"hypotheses": [{"name": "H1"}]}
+
+    # 2. Truncated mid-stream: recovery of complete hypotheses
+    truncated = '{"hypotheses": [{"name": "H1", "target": "DIR"}, {"name": "H2", "target":'
+    recovered = _resilient_extract_json(truncated)
+    assert len(recovered["hypotheses"]) == 1
+    assert recovered["hypotheses"][0]["name"] == "H1"
+
+    # 3. Trailing comma before truncation
+    trailing_comma = '{"hypotheses": [{"name": "H1", "target": "DIR"}, '
+    recovered_comma = _resilient_extract_json(trailing_comma)
+    assert len(recovered_comma["hypotheses"]) == 1
+    assert recovered_comma["hypotheses"][0]["name"] == "H1"
+
+    # 4. Invalid without any hypotheses raises RuntimeError
+    with pytest.raises(RuntimeError, match="PROVIDER_INVALID_JSON"):
+        _resilient_extract_json("not valid json at all")
+

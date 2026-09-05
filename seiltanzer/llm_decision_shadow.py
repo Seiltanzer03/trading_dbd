@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
+import time
 from typing import Any
 
 import httpx
@@ -363,7 +365,7 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
         parsed["policy"] == quant_policy if quant_policy is not None else None
     )
     disagreement_cat = _disagreement_category(parsed["policy"], quant_policy)
-    return {
+    result = {
         "version": SHADOW_VERSION,
         "status": "ok" if guard_ok else "blocked",
         "production_authority": False,
@@ -380,6 +382,38 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
         "key_evidence": parsed["key_evidence"],
         "counter_evidence": parsed["counter_evidence"],
     }
+    record_shadow_decision(result)
+    return result
+
+
+_SHADOW_HISTORY_LOCK = threading.Lock()
+_LATEST_SHADOW_DECISION: dict[str, Any] | None = None
+_SHADOW_HISTORY: list[dict[str, Any]] = []
+
+
+def record_shadow_decision(decision: dict[str, Any]) -> None:
+    global _LATEST_SHADOW_DECISION
+    if not isinstance(decision, dict):
+        return
+    with _SHADOW_HISTORY_LOCK:
+        _LATEST_SHADOW_DECISION = dict(decision)
+        entry = {
+            **decision,
+            "recorded_ts": time.time(),
+        }
+        _SHADOW_HISTORY.append(entry)
+        if len(_SHADOW_HISTORY) > 50:
+            _SHADOW_HISTORY.pop(0)
+
+
+def get_latest_shadow_decision() -> dict[str, Any] | None:
+    with _SHADOW_HISTORY_LOCK:
+        return dict(_LATEST_SHADOW_DECISION) if _LATEST_SHADOW_DECISION else None
+
+
+def get_shadow_history(limit: int = 20) -> list[dict[str, Any]]:
+    with _SHADOW_HISTORY_LOCK:
+        return [dict(x) for x in _SHADOW_HISTORY[-limit:]]
 
 
 def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:

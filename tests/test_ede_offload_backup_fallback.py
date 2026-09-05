@@ -124,3 +124,63 @@ def test_remote_selector_script_prefers_exact_sha_and_falls_back(tmp_path: pathl
     selection2 = json.loads(proc2.stdout.split("EDE_VERIFIED_BACKUP_SELECTION=")[1].strip())
     assert selection2["backup_id"] == "b-new"
     assert selection2["exact_sha_match"] is True
+
+
+def test_remote_selector_respects_fallback_max_age_window(tmp_path: pathlib.Path):
+    backup_root = tmp_path / "backups_window"
+    backup_root.mkdir()
+
+    import time
+    now = time.time()
+
+    # Fallback backup created 2 hours ago (7200 seconds ago)
+    db_fallback = backup_root / "db_fallback.sqlite3"
+    db_fallback.write_bytes(b"fallback_data")
+    m_fallback = {
+        "backup_contract_version": BACKUP_CONTRACT_VERSION,
+        "backup_id": "b-fallback-2h",
+        "created_ts": now - 7200,
+        "database_file": "db_fallback.sqlite3",
+        "database_sha256": hashlib.sha256(b"fallback_data").hexdigest(),
+        "database_size_bytes": len(b"fallback_data"),
+        "git_commit": "different_sha",
+        "reason": "scheduled",
+        "source_db": "/opt/seiltanzer/data/trades.db",
+        "verified": True,
+    }
+    m_fallback["manifest_payload_sha256"] = _manifest_payload_sha256(m_fallback)
+    (backup_root / "db_fallback.sqlite3.manifest.json").write_text(json.dumps(m_fallback), encoding="utf-8")
+
+    offload_py = (ROOT / "scripts/production_ede_offload.py").read_text(encoding="utf-8")
+    selector_start = offload_py.index("selector = r'''") + len("selector = r'''")
+    selector_end = offload_py.index("'''\n    command = (")
+    selector_code = offload_py[selector_start:selector_end]
+
+    # With MAX_EXACT_AGE_SECONDS=3600 (1h) and MAX_FALLBACK_AGE_SECONDS=86400 (24h),
+    # the 2-hour-old fallback backup MUST be accepted.
+    env_ok = {
+        "BACKUP_ROOT": str(backup_root),
+        "SOURCE_DB": "/opt/seiltanzer/data/trades.db",
+        "EXPECTED_SHA": "current_repo_sha",
+        "MAX_EXACT_AGE_SECONDS": "3600",
+        "MAX_FALLBACK_AGE_SECONDS": "86400",
+    }
+    proc_ok = subprocess.run([sys.executable, "-c", selector_code], env=env_ok, capture_output=True, text=True)
+    assert proc_ok.returncode == 0, proc_ok.stderr
+    assert "EDE_VERIFIED_BACKUP_SELECTION=" in proc_ok.stdout
+    selection = json.loads(proc_ok.stdout.split("EDE_VERIFIED_BACKUP_SELECTION=")[1].strip())
+    assert selection["backup_id"] == "b-fallback-2h"
+    assert selection["exact_sha_match"] is False
+
+    # If MAX_FALLBACK_AGE_SECONDS=3600, it would fail closed
+    env_strict = {
+        "BACKUP_ROOT": str(backup_root),
+        "SOURCE_DB": "/opt/seiltanzer/data/trades.db",
+        "EXPECTED_SHA": "current_repo_sha",
+        "MAX_EXACT_AGE_SECONDS": "3600",
+        "MAX_FALLBACK_AGE_SECONDS": "3600",
+    }
+    proc_strict = subprocess.run([sys.executable, "-c", selector_code], env=env_strict, capture_output=True, text=True)
+    assert proc_strict.returncode != 0
+    assert "no recent verified local backup" in proc_strict.stderr
+
