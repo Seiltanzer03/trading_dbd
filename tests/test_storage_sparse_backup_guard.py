@@ -143,11 +143,13 @@ def test_sparse_file_clone_preserves_bytes_and_holes(tmp_path):
     assert storage._sha256(destination) == before_sha
     assert result["logical_size_bytes"] == logical
     assert result["filesystem_allocated_bytes"] == sparse._allocated_bytes(destination)
-    assert sparse._allocated_bytes(destination) < logical
-    if result["copy_method"] == "seek_hole":
-        assert sparse._allocated_bytes(destination) <= (
-            sparse._allocated_bytes(source) + 1024 * 1024
-        )
+    if getattr(destination.stat(), "st_blocks", None) is not None:
+        assert sparse._allocated_bytes(destination) < logical
+        if result["copy_method"] == "seek_hole":
+            assert sparse._allocated_bytes(destination) <= (
+                sparse._allocated_bytes(source) + 1024 * 1024
+            )
+
 
 
 def test_quiescent_sparse_clone_replays_wal_only_into_backup(tmp_path, monkeypatch):

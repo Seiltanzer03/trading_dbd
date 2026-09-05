@@ -24,6 +24,7 @@ import time
 log = logging.getLogger("seiltanzer.stream")
 
 WS_URL = "wss://streamer.finance.yahoo.com/"
+BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
 
 
 def _read_varint(buf: bytes, i: int) -> tuple[int, int]:
@@ -71,21 +72,27 @@ def parse_yaticker(buf: bytes) -> dict:
 
 
 class StreamHub:
-    """Держит открытый WS к Yahoo и свежие цены по тикерам.
+    """Держит открытые WS к Yahoo (фондовые) и Binance (крипта) и свежие цены по тикерам.
 
     latest[ticker] = (price, ts). Метод fresh(ticker, max_age) возвращает цену,
     если она не старше max_age секунд.
     """
 
-    def __init__(self, tickers: list[str]):
+    def __init__(self, tickers: list[str], binance_symbols: list[str] | None = None):
         self.tickers = tickers
+        self.binance_symbols = binance_symbols or []
         self.latest: dict[str, tuple[float, float]] = {}
         self._task: asyncio.Task | None = None
         self._stop = False
         self.connected = False
+        self.binance_connected = False
 
     def fresh(self, ticker: str, max_age: float = 8.0) -> float | None:
         v = self.latest.get(ticker)
+        if not v:
+            v = self.latest.get(ticker.upper())
+        if not v:
+            v = self.latest.get(ticker.replace("-", "").replace("/", ""))
         if v and time.time() - v[1] <= max_age:
             return v[0]
         return None
@@ -99,6 +106,51 @@ class StreamHub:
             self._task.cancel()
 
     async def _run(self) -> None:
+        tasks = []
+        if self.tickers:
+            tasks.append(self._run_yahoo())
+        if self.binance_symbols:
+            tasks.append(self._run_binance())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _run_binance(self) -> None:
+        try:
+            import websockets  # noqa: PLC0415
+        except ImportError:
+            log.warning("пакет websockets не установлен — Binance стрим отключён")
+            return
+        import json  # noqa: PLC0415
+        streams = "/".join(f"{s.lower()}@trade" for s in self.binance_symbols)
+        url = f"{BINANCE_WS_URL}/{streams}"
+        backoff = 2.0
+        while not self._stop:
+            try:
+                async with websockets.connect(url, ping_interval=20, open_timeout=15) as ws:
+                    self.binance_connected = True
+                    backoff = 2.0
+                    log.info("Binance WS стрим подключён: %s", ",".join(self.binance_symbols))
+                    async for raw in ws:
+                        try:
+                            data = json.loads(raw)
+                            sym = data.get("s", "").upper()
+                            price_str = data.get("p")
+                            if sym and price_str:
+                                p = float(price_str)
+                                if p > 0:
+                                    self.latest[sym] = (p, time.time())
+                        except Exception:
+                            pass
+            except asyncio.CancelledError:
+                break
+            except Exception as e:  # noqa: BLE001
+                self.binance_connected = False
+                log.warning("Binance WS стрим отвалился (%s), переподключение через %.0fс",
+                            str(e)[:80], backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
+
+    async def _run_yahoo(self) -> None:
         try:
             import websockets  # noqa: PLC0415
         except ImportError:
@@ -110,7 +162,7 @@ class StreamHub:
             try:
                 async with websockets.connect(WS_URL, ping_interval=20,
                                               open_timeout=15) as ws:
-                    import json
+                    import json  # noqa: PLC0415
                     await ws.send(json.dumps({"subscribe": self.tickers}))
                     self.connected = True
                     backoff = 2.0

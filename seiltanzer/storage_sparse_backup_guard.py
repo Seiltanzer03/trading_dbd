@@ -37,8 +37,16 @@ _GUARD_ENOSPC_FRAGMENT = "insufficient single-slot backup headroom"
 
 
 def _available_bytes(directory: Path) -> int:
-    stat = os.statvfs(directory)
-    return max(0, int(stat.f_bavail) * int(stat.f_frsize))
+    stat_fn = getattr(os, "statvfs", None)
+    if callable(stat_fn):
+        try:
+            stat = stat_fn(directory)
+            return max(0, int(stat.f_bavail) * int(stat.f_frsize))
+        except Exception:
+            pass
+    import shutil
+    return max(0, int(shutil.disk_usage(directory).free))
+
 
 
 def _allocated_bytes(path: Path) -> int:
@@ -65,14 +73,30 @@ def _file_signature(path: Path) -> tuple[int, int, int, int, int] | None:
     )
 
 
+def _read_all_at(fd: int, size: int, offset: int) -> bytes:
+    if hasattr(os, "pread"):
+        return os.pread(fd, size, offset)
+    os.lseek(fd, offset, os.SEEK_SET)
+    return os.read(fd, size)
+
+
 def _write_all_at(fd: int, data: bytes, offset: int) -> None:
     view = memoryview(data)
     written = 0
-    while written < len(view):
-        amount = os.pwrite(fd, view[written:], offset + written)
-        if amount <= 0:
-            raise OSError(errno.EIO, "short pwrite while creating sparse backup")
-        written += amount
+    if hasattr(os, "pwrite"):
+        while written < len(view):
+            amount = os.pwrite(fd, view[written:], offset + written)
+            if amount <= 0:
+                raise OSError(errno.EIO, "short pwrite while creating sparse backup")
+            written += amount
+    else:
+        os.lseek(fd, offset, os.SEEK_SET)
+        while written < len(view):
+            amount = os.write(fd, view[written:])
+            if amount <= 0:
+                raise OSError(errno.EIO, "short write while creating sparse backup")
+            written += amount
+
 
 
 def _guard_copy_headroom(directory: Path, abort_floor: int) -> int:
@@ -150,7 +174,7 @@ def _copy_sparse_file(
 
                 cursor = int(position)
                 while cursor < hole:
-                    chunk = os.pread(
+                    chunk = _read_all_at(
                         source_fd,
                         min(COPY_CHUNK_BYTES, hole - cursor),
                         cursor,
@@ -180,7 +204,7 @@ def _copy_sparse_file(
             method = "zero_scan"
             cursor = 0
             while cursor < logical_size:
-                chunk = os.pread(
+                chunk = _read_all_at(
                     source_fd,
                     min(COPY_CHUNK_BYTES, logical_size - cursor),
                     cursor,

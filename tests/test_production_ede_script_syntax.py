@@ -21,14 +21,19 @@ def test_production_ede_script_compiles(relative_path: str) -> None:
 
 @pytest.mark.parametrize("relative_path", PRODUCTION_EDE_SCRIPTS)
 def test_production_ede_entrypoint_imports(relative_path: str) -> None:
+    import os
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path.cwd()) + (os.pathsep + env["PYTHONPATH"] if "PYTHONPATH" in env else "")
     result = subprocess.run(
         [sys.executable, relative_path, "--help"],
         cwd=Path.cwd(),
+        env=env,
         capture_output=True,
         text=True,
         timeout=30,
         check=False,
     )
+
     assert result.returncode == 0, (
         relative_path,
         result.stdout,

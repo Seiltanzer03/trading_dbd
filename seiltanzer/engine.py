@@ -42,11 +42,13 @@ def clean_nans(obj):
     return obj
 
 US_CLOSE_UTC_HOUR = 21  # аппроксимация конца сессии для полосы implied move
+DERIBIT_SETTLE_UTC_HOUR = 8  # расчетный час Deribit в 08:00 UTC
 
 
-def _seconds_to_session_end(now: float | None = None) -> float:
+def _seconds_to_session_end(now: float | None = None, is_crypto: bool = False) -> float:
     t = dt.datetime.fromtimestamp(now or time.time(), dt.timezone.utc)
-    close = t.replace(hour=US_CLOSE_UTC_HOUR, minute=0, second=0, microsecond=0)
+    target_hour = DERIBIT_SETTLE_UTC_HOUR if is_crypto else US_CLOSE_UTC_HOUR
+    close = t.replace(hour=target_hour, minute=0, second=0, microsecond=0)
     if t >= close:
         close += dt.timedelta(days=1)
     return (close - t).total_seconds()
@@ -66,13 +68,17 @@ class Engine:
             from .data.stream import StreamHub
             # Тики торгуемого ряда двигают сделку, тики ETF-прокси двигают
             # moneyness последнего опционного снимка между обновлениями цепочки.
+            from .config import CRYPTO_INSTRUMENTS
             tickers = sorted(
                 {i.yahoo for i in INSTRUMENTS.values()}
                 | {i.options_proxy for i in INSTRUMENTS.values()
                    if i.options_proxy is not None}
                 | {driver for i in INSTRUMENTS.values()
                    for driver in i.live_price_drivers})
-            self.stream_hub = StreamHub(tickers)
+            binance_symbols = sorted(
+                {i.binance_symbol for i in CRYPTO_INSTRUMENTS.values()
+                 if i.binance_symbol is not None})
+            self.stream_hub = StreamHub(tickers, binance_symbols=binance_symbols)
             self.market.stream = self.stream_hub
         self._mc_cache_key: tuple | None = None
         self._mc_cache: dict | None = None
@@ -573,11 +579,26 @@ class Engine:
                               "не является полным подтверждением сетапа")
             return chip
 
-        chips = [
-            vol_chip("vix", "VIX > 20", "vix_gt_20", lambda v: v > 20.0),
-            vol_chip("gvz", "GVZ < 18", "gvz_lt_18", lambda v: v < 18.0),
-            vol_chip("dv1x", "DV1X < 19", "dv1x_lt_19", lambda v: v < 19.0),
-        ]
+        is_crypto = getattr(self.market.instrument, "asset_class", "equity") == "crypto"
+        if is_crypto:
+            vol_key = getattr(self.market.instrument, "vol_ticker", "btc_dvol")
+            chips = [{
+                "key": "dvol",
+                "label": f"DVOL ({getattr(self.market.instrument, 'deribit_currency', None) or 'BTC'})",
+                "required": False,
+                "value": self.market.vols.get(vol_key, {}).get("value"),
+                "status_feed": self.market.vols.get(vol_key, {}).get("status"),
+                "state": "pass" if self.market.vols.get(vol_key, {}).get("value") else "na",
+                "detail": "Deribit Implied Volatility Index (DVOL)",
+                "decision_weight": False,
+            }]
+        else:
+            chips = [
+                vol_chip("vix", "VIX > 20", "vix_gt_20", lambda v: v > 20.0),
+                vol_chip("gvz", "GVZ < 18", "gvz_lt_18", lambda v: v < 18.0),
+                vol_chip("dv1x", "DV1X < 19", "dv1x_lt_19", lambda v: v < 19.0),
+            ]
+
 
         atr = self._atr_payload()
         chips.append({
@@ -1182,9 +1203,12 @@ class Engine:
         proxy_current = self._current_proxy_spot(m)
         if price is None or proxy_current is None:
             return None
-        sess_rem_y = _seconds_to_session_end() / (365.0 * 24 * 3600)
+        is_crypto = getattr(self.market.instrument, "asset_class", "equity") == "crypto"
+        annual_days = getattr(self.market.instrument, "annual_days", 365.0 if is_crypto else 252.0)
+        sess_rem_y = _seconds_to_session_end(is_crypto=is_crypto) / (annual_days * 24 * 3600)
         sigma_ann = m["implied_move"]["sigma_annual"]
         band = (price * sigma_ann * (sess_rem_y ** 0.5)) if price else None
+
 
         # Для inverse-прокси инструментальные calls/puts меняются местами:
         # дорогие calls FXC означают защиту/ставку на падение USD/CAD.

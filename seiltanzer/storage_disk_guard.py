@@ -412,8 +412,8 @@ def reserve_restore_drill_headroom(
     unlocked_required = (copy_bytes * 2) + MIN_BACKUP_HEADROOM_BYTES
 
     def free_bytes() -> int:
-        stat = os.statvfs(directory)
-        return max(0, int(stat.f_bavail) * int(stat.f_frsize))
+        return _available_bytes(directory)
+
 
     before = free_bytes()
     if before >= unlocked_required:
