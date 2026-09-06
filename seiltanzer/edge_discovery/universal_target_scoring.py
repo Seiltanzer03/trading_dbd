@@ -81,12 +81,17 @@ def _finite(value: Any) -> float | None:
 
 def target_value(row: dict[str, Any], spec: UniversalTargetSpec) -> float | str | None:
     outcome = row.get("universal_outcome") or {}
+    if spec.target_id == "DIRECTION":
+        if bool(outcome.get("available")) and bool(outcome.get("path_complete")):
+            value = str(outcome.get("direction_label") or "")
+            if value in {"UP", "DOWN"}:
+                return value
+        dir_label = str(row.get("direction_label") or outcome.get("direction_label") or "")
+        return dir_label if dir_label in {"UP", "DOWN"} else None
+
     if not bool(outcome.get("available")) or not bool(outcome.get("path_complete")):
         return None
     sigma = _finite(outcome.get("t0_local_sigma_h"))
-    if spec.target_id == "DIRECTION":
-        value = str(outcome.get("direction_label") or "")
-        return value if value in {"UP", "DOWN"} else None
     if sigma is None or sigma <= 0.0:
         return None
     if spec.target_id == "RETURN_SIGMA":

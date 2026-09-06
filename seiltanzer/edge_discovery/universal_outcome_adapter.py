@@ -27,12 +27,18 @@ def resolve_historical_universal_outcome(
         if float(bar["bar_end_ts"]) > t0 + 1e-9
         and float(bar["bar_end_ts"]) <= target + 1e-6
     ]
+    t0_features = row.get("features") or {}
+    rv60 = t0_features.get("realized_vol_60m")
+    if rv60 is None:
+        rv15 = t0_features.get("realized_vol_15m")
+        if rv15 is not None and float(rv15) > 0:
+            rv60 = float(rv15) * 2.0
     result = resolve_universal_market_outcome(
         start_price=_historical_t0_close(source, t0),
         captured_ts=t0,
         target_ts=target,
         horizon_minutes=int(row["horizon_minutes"]),
-        t0_realized_vol_60m=(row.get("features") or {}).get("realized_vol_60m"),
+        t0_realized_vol_60m=rv60,
         bars=bars,
         path_complete=bool(bars and float(bars[-1]["bar_end_ts"]) >= target - 1e-6),
     )
@@ -119,7 +125,12 @@ class ProspectiveUniversalOutcomeAdapter:
                 output.append(row)
                 continue
             context = self._resolution_context(str(row["observation_id"]))
-            rv60 = (row.get("ede_features") or {}).get("vol.rv_60m")
+            ede_feats = row.get("ede_features") or {}
+            rv60 = ede_feats.get("vol.rv_60m")
+            if rv60 is None:
+                rv15 = ede_feats.get("vol.rv_15m")
+                if rv15 is not None and float(rv15) > 0:
+                    rv60 = float(rv15) * 2.0
             bars = self._bars_for(row, context.get("resolved_ts"))
             path_quality = str(context.get("path_quality_status") or "").lower()
             reaches_target = bool(

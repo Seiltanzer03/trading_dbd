@@ -188,3 +188,35 @@ def test_paired_significance_refuses_many_intraday_duplicates_on_too_few_days() 
         rows, np.asarray(model), np.asarray(baseline), spec)
     assert [len(values) for values in cohorts] == [1, 1]
     assert paired_target_pvalue(rows, np.asarray(model), np.asarray(baseline), spec) == 1.0
+
+
+def test_direction_target_fallback_to_causal_resolution() -> None:
+    spec = UniversalTargetSpec("DIRECTION", "DIRECTION", "BINARY", ("DOWN", "UP"),
+                               ("brier", "logloss"))
+
+    # 1. Fallback when universal_outcome is unavailable
+    row_with_row_label = {
+        "direction_label": "UP",
+        "universal_outcome": {"available": False, "reason": "T0_VOLATILITY_SCALE_UNAVAILABLE"},
+    }
+    assert target_value(row_with_row_label, spec) == "UP"
+
+    # 2. Fallback when universal_outcome is None
+    row_no_outcome = {"direction_label": "DOWN"}
+    assert target_value(row_no_outcome, spec) == "DOWN"
+
+    # 3. Non-directional / FLAT returns None
+    row_flat = {"direction_label": "FLAT"}
+    assert target_value(row_flat, spec) is None
+
+    # 4. Universal outcome present and complete takes precedence
+    row_complete = {
+        "direction_label": "DOWN",
+        "universal_outcome": {
+            "available": True,
+            "path_complete": True,
+            "direction_label": "UP",
+        },
+    }
+    assert target_value(row_complete, spec) == "UP"
+
