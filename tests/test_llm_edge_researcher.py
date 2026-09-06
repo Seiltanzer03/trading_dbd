@@ -303,4 +303,71 @@ def test_edge_researcher_evaluate_routes_and_background_execution(monkeypatch):
     assert st_cached["pending_summary"]["rejected"] == 24
 
 
+def test_three_condition_hypothesis_accepted_and_four_rejected():
+    t0 = 1_800_000_000.0
+    runtime = Runtime(frozen={
+        "g1s_evidence_v3": {
+            "price_volatility": {
+                "realized_vol_15m": 0.01,
+                "realized_vol_60m": 0.02,
+                "quality": {"source_ts": t0, "source_quality": 1.0},
+            },
+            "option_static": {
+                "iv": 0.22,
+                "quality": {"source_ts": t0, "source_quality": 1.0},
+            }
+        }
+    }, captured_ts=t0)
+
+    def provider_3(summary, model, max_hypotheses):
+        return {"hypotheses": [{
+            "name": "Triple condition hypothesis",
+            "target_id": "DIRECTION",
+            "conditions": [
+                {"feature_id": "regime.asset", "kind": "categorical", "state": "NAS100"},
+                {"feature_id": "vol.rv15_over_rv60", "kind": "train_relative", "state": "ABOVE_MEDIAN"},
+                {"feature_id": "option.iv", "kind": "train_relative", "state": "BELOW_MEDIAN"},
+            ],
+            "rationale": "Test 3-condition multi-family interaction.",
+        }]}
+
+    report = propose_edge_hypotheses(runtime, "obs-1", provider=provider_3)
+    assert report["status"] == "OK"
+    assert len(report["hypotheses"]) == 1
+    assert len(report["hypotheses"][0]["conditions"]) == 3
+
+    # Test that 4 conditions are rejected as exceeding MAX_CONDITIONS
+    runtime_4 = Runtime(frozen={
+        "g1s_evidence_v3": {
+            "price_volatility": {
+                "realized_vol_15m": 0.01,
+                "realized_vol_60m": 0.02,
+                "quality": {"source_ts": t0, "source_quality": 1.0},
+            },
+            "option_static": {
+                "iv": 0.22,
+                "quality": {"source_ts": t0, "source_quality": 1.0},
+            }
+        }
+    }, captured_ts=t0, observation_id="obs-2")
+
+    def provider_4(summary, model, max_hypotheses):
+        return {"hypotheses": [{
+            "name": "Quad condition hypothesis exceeding limit",
+            "target_id": "DIRECTION",
+            "conditions": [
+                {"feature_id": "regime.asset", "kind": "categorical", "state": "NAS100"},
+                {"feature_id": "vol.rv15_over_rv60", "kind": "train_relative", "state": "ABOVE_MEDIAN"},
+                {"feature_id": "option.iv", "kind": "train_relative", "state": "BELOW_MEDIAN"},
+                {"feature_id": "regime.asset_family", "kind": "categorical", "state": "EQUITY_INDEX"},
+            ],
+            "rationale": "Test 4-condition limit rejection.",
+        }]}
+
+    report_4 = propose_edge_hypotheses(runtime_4, "obs-2", provider=provider_4)
+    assert report_4["status"] == "NO_VALID_HYPOTHESES"
+    assert "0:INVALID_CONDITION_COUNT" in report_4["rejections"]
+
+
+
 

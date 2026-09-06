@@ -29,7 +29,7 @@ DEFAULT_MODEL = "openai/gpt-4o-mini"
 DEFAULT_TIMEOUT_SEC = 10.0
 MAX_OUTPUT_TOKENS = 2048
 MAX_HYPOTHESES = 8
-MAX_CONDITIONS = 2
+MAX_CONDITIONS = 3
 
 TARGET_FAMILY_BY_ID = {
     "DIRECTION": "DIRECTION",
@@ -45,14 +45,14 @@ TARGET_FAMILY_BY_ID = {
 ALLOWED_TARGET_IDS = tuple(TARGET_FAMILY_BY_ID)
 
 SYSTEM_PROMPT = """Ты research-only генератор проверяемых гипотез для Edge Discovery Engine.
-Тебе передан только причинный T0 snapshot без будущих исходов. Предлагай 1-2 условия,
+Тебе передан только причинный T0 snapshot без будущих исходов. Предлагай 1-3 взаимодополняющих условия (комбинация драйвера, режима рынка и контекста подтверждения),
 используя ТОЛЬКО allowed feature IDs, condition kinds/states и allowed feature pairs.
 Числовые пороги не придумывай: numeric condition всегда train_relative +
 ABOVE_MEDIAN/BELOW_MEDIAN, а порог позже фитится детерминированно только на train-cut.
 Категориальное значение бери только из allowed_states переданного feature.
 Не давай BUY/SELL/HOLD/CLOSE, не меняй Position Manager, CVaR, stop, size или risk.
 Не утверждай, что edge доказан. Не добавляй production authority/eligibility/status.
-Верни только JSON-объект {\"hypotheses\":[...]}.
+Верни только JSON-объект {"hypotheses":[...]}.
 Каждая hypothesis содержит ровно: name, target_id, conditions, rationale.
 Каждое condition содержит ровно: feature_id, kind, state.
 Не более requested_max_hypotheses гипотез."""
@@ -408,9 +408,19 @@ def _validate_hypothesis(raw: Any, snapshot: dict[str, Any], *, index: int
         normalized.append({"feature_id": feature_id, "kind": kind, "state": state})
 
     normalized.sort(key=lambda item: (item["feature_id"], item["kind"], item["state"]))
+    allowed_pairs = {tuple(item) for item in snapshot["allowed_feature_pairs"]}
     if len(normalized) == 2:
         pair = tuple(sorted(item["feature_id"] for item in normalized))
-        if pair not in {tuple(item) for item in snapshot["allowed_feature_pairs"]}:
+        if pair not in allowed_pairs:
+            return None, f"{index}:INTERACTION_POLICY_REJECTED"
+    elif len(normalized) == 3:
+        f_ids = [item["feature_id"] for item in normalized]
+        pairs = [
+            tuple(sorted((f_ids[0], f_ids[1]))),
+            tuple(sorted((f_ids[0], f_ids[2]))),
+            tuple(sorted((f_ids[1], f_ids[2]))),
+        ]
+        if not any(p in allowed_pairs for p in pairs):
             return None, f"{index}:INTERACTION_POLICY_REJECTED"
     identity = {"target_id": target_id, "horizon_minutes": horizon,
                 "conditions": normalized}

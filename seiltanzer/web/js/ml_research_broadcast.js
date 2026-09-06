@@ -82,14 +82,19 @@ function renderHypotheses(payload) {
       }).join('');
       const isPending = item.stage?.code === 'PENDING_DETERMINISTIC_EVALUATION';
       const isDiscovery = item.stage?.code === 'DISCOVERY_SIGNAL';
+      const isInsufficient = item.stage?.code === 'INSUFFICIENT_DATA';
       const stageBadge = isDiscovery
         ? '<span class="status good">СТАТИСТИЧЕСКИЙ ПЕРЕВЕС</span>'
         : isPending
         ? '<span class="status working">В ОЧЕРЕДИ НА ОЦЕНКУ</span>'
+        : isInsufficient
+        ? '<span class="status working">НЕДОСТАТОЧНО ДАННЫХ</span>'
         : '<span class="status bad">ОТКЛОНЕНО (ШУМ)</span>';
 
       const metrics = isPending
         ? '<div class="honesty-note" style="margin-top:6px;font-size:10px;padding:6px;">Сформулировано LLM. Ожидает расчёта Purged Walk-Forward CV.</div>'
+        : isInsufficient
+        ? `<div class="honesty-note" style="margin-top:6px;font-size:10px;padding:6px;border-left-color:var(--amber);">Недостаточно строк таргета для проверки (${esc(item.rejection_reason || 'NO_ELIGIBLE_TARGET_ROWS')}).</div>`
         : `<div class="evidence">
             <div><span>P-VALUE</span><b>${value(item.p_value)}</b></div>
             <div><span>Q-VALUE (FDR)</span><b>${value(item.q_value)}</b></div>
@@ -97,7 +102,7 @@ function renderHypotheses(payload) {
             <div><span>СТАБИЛЬНЫХ ФОЛДОВ</span><b>${value(item.folds_stable)}</b></div>
           </div>`;
 
-      const rejected = (item.rejection_reason && !isDiscovery && !isPending)
+      const rejected = (item.rejection_reason && !isDiscovery && !isPending && !isInsufficient)
         ? `<div class="rejection">ПРИЧИНА ОТСЕВА: ${esc(item.rejection_reason)}</div>`
         : '';
 

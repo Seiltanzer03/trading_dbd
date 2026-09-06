@@ -205,6 +205,9 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
             if status_code == "DISCOVERY_SIGNAL":
                 stage_code = "DISCOVERY_SIGNAL"
                 stage_label = "СТАТИСТИЧЕСКИЙ ПЕРЕВЕС"
+            elif status_code == "INSUFFICIENT_DATA":
+                stage_code = "INSUFFICIENT_DATA"
+                stage_label = "НЕДОСТАТОЧНО ДАННЫХ"
             else:
                 stage_code = "RESEARCH_REJECTED"
                 stage_label = "ОТКЛОНЕНО (ШУМ)"
