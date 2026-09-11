@@ -60,8 +60,6 @@ def replicate_live(client, *, password: str, expected_sha: str,
         raise ValueError('run_id must be numeric')
     if output.exists() or any(Path(str(output) + suffix).exists() for suffix in ('-wal', '-shm')):
         raise ValueError('Replica destination must be new')
-    if shutil.which('sshpass') is None:
-        raise RuntimeError('Worker must install sshpass')
     output.parent.mkdir(parents=True, exist_ok=True)
     _verify_sha(client, expected_sha)
     _probe_api(client)
@@ -73,7 +71,7 @@ def replicate_live(client, *, password: str, expected_sha: str,
     )
     stats = json.loads(_exec(client, stat_command, timeout=10).strip())
     # The audit currently makes a second immutable worker copy. Account for it.
-    if shutil.disk_usage(output.parent).free < 2 * stats['size'] + 2 * MIN_FREE_BYTES:
+    if shutil.disk_usage(output.parent).free < stats['size'] + 2 * MIN_FREE_BYTES:
         raise RuntimeError('Worker lacks space for replica, audit copy and headroom')
     if stats['free'] < MIN_FREE_BYTES:
         raise RuntimeError('Production lacks WAL growth headroom')
@@ -91,10 +89,15 @@ def replicate_live(client, *, password: str, expected_sha: str,
         host_key = client.get_transport().get_remote_server_key()
         known_hosts = local / 'known_hosts'
         known_hosts.write_text(f'{HOST} {host_key.get_name()} {host_key.get_base64()}\n')
+        askpass = local / 'askpass'
+        askpass.write_text('#!/bin/sh\nprintf %s "$SQLITE_RSYNC_SSH_PASSWORD"\n')
+        askpass.chmod(0o700)
         ssh = local / 'ssh'
-        ssh.write_text('#!/bin/sh\nexec sshpass -e ssh -o StrictHostKeyChecking=yes '
-                       '-o ServerAliveInterval=15 -o ServerAliveCountMax=2 '
-                       '-o UserKnownHostsFile=' + shlex.quote(str(known_hosts)) + ' "$@"\n')
+        ssh.write_text(
+            '#!/bin/sh\nexport SSH_ASKPASS_REQUIRE=force DISPLAY=:0\n'
+            'exec setsid -w ssh -o StrictHostKeyChecking=yes '
+            '-o ServerAliveInterval=15 -o ServerAliveCountMax=2 '
+            '-o UserKnownHostsFile=' + shlex.quote(str(known_hosts)) + ' "$@"\n')
         ssh.chmod(0o700)
         try:
             _exec(client, 'mkdir -m 700 ' + shlex.quote(remote_dir), timeout=10)
@@ -111,7 +114,8 @@ def replicate_live(client, *, password: str, expected_sha: str,
             process = subprocess.Popen(
                 [str(binary), f'root@{HOST}:{REMOTE_DATABASE}', str(output.resolve()),
                  '--exe', remote_wrapper, '--ssh', str(ssh), '-v'],
-                env={**os.environ, 'SSHPASS': password}, start_new_session=True,
+                env={**os.environ, 'SQLITE_RSYNC_SSH_PASSWORD': password,
+                     'SSH_ASKPASS': str(askpass)}, start_new_session=True,
             )
             while True:
                 try:

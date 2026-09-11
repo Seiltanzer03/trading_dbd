@@ -641,6 +641,77 @@ def snapshot(args: argparse.Namespace) -> int:
     return 0
 
 
+def live_snapshot(args: argparse.Namespace) -> int:
+    """Copy a consistent live DB directly to the worker without VPS disk use."""
+    from offhost_sqlite_snapshot import replicate_live
+
+    output = pathlib.Path(args.output_db)
+    manifest_output = output.with_name(output.name + ".manifest.json")
+    selection_output = output.with_name(output.name + ".selection.json")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    exact_run = bool(args.require_acceptance_marker)
+    if exact_run and not str(args.acceptance_run_id or "").strip():
+        raise ValueError("--acceptance-run-id is required with --require-acceptance-marker")
+    client = _connect(args.password)
+    primary_error: BaseException | None = None
+    try:
+        _verify_sha(client, args.expected_sha)
+        if exact_run:
+            _exec(client, " ".join([
+                shlex.quote(str(REMOTE_PYTHON)), shlex.quote(str(REMOTE_ORCHESTRATOR)),
+                "wait-marker", "--stage", "ede-inventory", "--acceptance-run-id",
+                shlex.quote(args.acceptance_run_id), "--expected-sha",
+                shlex.quote(args.expected_sha), "--timeout-seconds", "2400",
+                "--poll-seconds", "5",
+            ]), timeout=2450)
+            _verify_sha(client, args.expected_sha)
+            _exec(client, " ".join([
+                shlex.quote(str(REMOTE_PYTHON)), shlex.quote(str(REMOTE_ORCHESTRATOR)),
+                "validate-gate", "--acceptance-run-id",
+                shlex.quote(args.acceptance_run_id), "--expected-sha",
+                shlex.quote(args.expected_sha),
+            ]))
+        for path in (output, manifest_output, selection_output):
+            path.unlink(missing_ok=True)
+        manifest = replicate_live(
+            client, password=args.password, expected_sha=args.expected_sha,
+            run_id=str(args.run_id), output=output,
+        )
+        manifest_output.write_text(
+            json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        selection_output.write_text(json.dumps({
+            "source": "LIVE_SQLITE_RSYNC", "expected_sha": args.expected_sha,
+            "cutoff_ts": manifest["started_ts"],
+            "database_sha256": manifest["database_sha256"],
+            "database_size_bytes": manifest["database_size_bytes"],
+            "production_authority": False,
+        }, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        print("EDE_OFFLOAD_SNAPSHOT_SOURCE=LIVE_SQLITE_RSYNC")
+        print(f"EDE_OFFLOAD_SNAPSHOT_BYTES={output.stat().st_size}")
+    except BaseException as exc:
+        primary_error = exc
+    finally:
+        client.close()
+
+    release_error: BaseException | None = None
+    if exact_run:
+        try:
+            _release_gate(args.password, acceptance_run_id=args.acceptance_run_id,
+                          expected_sha=args.expected_sha)
+            print("EDE_OFFLOAD_GATE_RELEASED=1")
+        except BaseException as exc:
+            release_error = exc
+    if primary_error is not None:
+        if release_error is not None:
+            raise RuntimeError(
+                f"live snapshot failed ({primary_error}); gate release also failed ({release_error})"
+            ) from primary_error
+        raise primary_error
+    if release_error is not None:
+        raise release_error
+    return 0
+
+
 def fetch_ledgers(args: argparse.Namespace) -> int:
     output = pathlib.Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -720,6 +791,15 @@ def parser() -> argparse.ArgumentParser:
     snap.add_argument("--run-id", required=True)
     snap.add_argument("--output-db", required=True)
     snap.set_defaults(func=snapshot)
+
+    live = sub.add_parser("live-snapshot")
+    live.add_argument("--password", required=True)
+    live.add_argument("--expected-sha", required=True)
+    live.add_argument("--acceptance-run-id")
+    live.add_argument("--require-acceptance-marker", action="store_true")
+    live.add_argument("--run-id", required=True)
+    live.add_argument("--output-db", required=True)
+    live.set_defaults(func=live_snapshot)
 
     install = sub.add_parser("install-historical-bundle")
     install.add_argument("--password", required=True)

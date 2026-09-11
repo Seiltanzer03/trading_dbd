@@ -48,18 +48,26 @@ def _transition_available_feature_ids(rows: list[dict[str, Any]]) -> set[str]:
     }
 
 
-def audit(database: Path) -> dict:
+def audit(database: Path, *, verified_immutable_input: bool = False) -> dict:
     started = time.time()
-    with tempfile.TemporaryDirectory(prefix="ede-transition-production-") as temporary:
-        snapshot = Path(temporary) / "immutable-production-copy.sqlite3"
+    temporary = None
+    if verified_immutable_input:
+        if any(Path(str(database) + suffix).exists() for suffix in ("-wal", "-shm")):
+            raise RuntimeError("verified immutable input has mutable SQLite sidecars")
+        snapshot = database
+    else:
+        temporary = tempfile.TemporaryDirectory(prefix="ede-transition-production-")
+        snapshot = Path(temporary.name) / "immutable-production-copy.sqlite3"
         immutable_snapshot(database, snapshot)
-        runtime = ReadOnlyRuntime(snapshot)
-        try:
-            adapter = ProspectiveFeatureAdapter(runtime)
-            all_rows = adapter.rows(resolved_only=False, strict=False)
-            transition_coverage = augment_rows_from_frozen_v3(runtime, all_rows)
-        finally:
-            runtime.close()
+    runtime = ReadOnlyRuntime(snapshot)
+    try:
+        adapter = ProspectiveFeatureAdapter(runtime)
+        all_rows = adapter.rows(resolved_only=False, strict=False)
+        transition_coverage = augment_rows_from_frozen_v3(runtime, all_rows)
+    finally:
+        runtime.close()
+        if temporary is not None:
+            temporary.cleanup()
 
     resolved_all = [
         row for row in all_rows
@@ -108,8 +116,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", type=Path, default=Path("/opt/seiltanzer/data/trades.db"))
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--verified-immutable-input", action="store_true")
     args = parser.parse_args(argv)
-    report = audit(args.database)
+    report = audit(args.database, verified_immutable_input=args.verified_immutable_input)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         temporary = args.output.with_suffix(args.output.suffix + ".tmp")
