@@ -79,15 +79,13 @@ jobs:
       - name: Install WebKit system dependencies
         timeout-minutes: 5
         run: |
-          # GitHub hosted runners normally resolve Ubuntu through an Azure
-          # mirrorlist. That mirror has repeatedly stalled while the rest of CI
-          # is green. Replace the mirrorlist source entirely with canonical
-          # Ubuntu archives and bound every apt network attempt.
+          # Use the runner-region archive directly. The canonical archive
+          # repeatedly timed out on individual packages in otherwise green jobs.
           sudo tee /etc/apt/sources.list >/dev/null <<'EOF'
-          deb https://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
-          deb https://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
-          deb https://archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse
-          deb https://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
+          deb https://azure.archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
+          deb https://azure.archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
+          deb https://azure.archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse
+          deb https://azure.archive.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
           EOF
           sudo rm -f /etc/apt/sources.list.d/ubuntu.sources
           sudo tee /etc/apt/apt.conf.d/99-ci-network >/dev/null <<'EOF'
@@ -129,3 +127,4 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
             -d "{\"state\":\"$state\",\"context\":\"ci/full-webkit\",\"description\":\"$description\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+
