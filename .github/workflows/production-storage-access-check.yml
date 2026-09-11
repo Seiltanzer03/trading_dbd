@@ -57,8 +57,14 @@ jobs:
               with response['Body'] as stream:
                   actual = stream.read()
               actual_digest = hashlib.sha256(actual).hexdigest()
-              get_metadata = response.get('Metadata', {})
-              head_metadata = head.get('Metadata', {})
+              get_metadata = {
+                  str(name).lower(): str(value)
+                  for name, value in response.get('Metadata', {}).items()
+              }
+              head_metadata = {
+                  str(name).lower(): str(value)
+                  for name, value in head.get('Metadata', {}).items()
+              }
               print('Storage probe diagnostics: '
                     f'expected_bytes={len(body)} actual_bytes={len(actual)} '
                     f'body_sha_match={actual_digest == digest} '
