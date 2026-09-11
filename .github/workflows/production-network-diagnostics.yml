@@ -2,7 +2,7 @@ name: production-network-diagnostics
 
 on:
   push:
-    branches: [main]
+    branches: [main, agent/fix-scheduled-ede-snapshot]
     paths:
       - ".github/workflows/production-network-diagnostics.yml"
   workflow_dispatch:
@@ -44,7 +44,31 @@ jobs:
             du -xhd1 /opt/seiltanzer/data /opt/seiltanzer/data/backups /root/.cache /var/cache /var/log 2>/dev/null | sort -h | tail -n 30
             find /tmp /opt/seiltanzer/data/backups/local -maxdepth 1 -type f -size +100M -printf '%s %b %p\n' 2>/dev/null
             journalctl --disk-usage
-            echo '=== LISTENERS ==='
+            echo '=== RESOURCE AND WEBSOCKET ERRORS ==='
+            free -m
+            vmstat 1 3
+            systemctl show seiltanzer -p NRestarts -p MemoryCurrent -p ActiveEnterTimestamp
+            journalctl -u seiltanzer --since '-24 hours' --no-pager | grep -E 'Traceback|Error|Exception|WebSocket|websocket|keepalive|timed out|No space|Killed|Stopping|Started' | tail -n 100
+            journalctl -k --since '-24 hours' --no-pager | grep -Ei 'oom|killed process|out of memory' | tail -n 30
+            echo '=== BOUNDED OUTCOME SAMPLE (READ ONLY) ==='
+            cd /opt/seiltanzer
+            PYTHONPATH=/opt/seiltanzer timeout 90s .venv/bin/python - <<'PYCODE'
+            import json, time
+            from pathlib import Path
+            from scripts.production_ede_v13_audit import ReadOnlyRuntime
+            from seiltanzer.edge_discovery.prospective import ProspectiveFeatureAdapter
+            from seiltanzer.edge_discovery.universal_outcome_adapter import ProspectiveUniversalOutcomeAdapter
+            runtime=ReadOnlyRuntime(Path('/opt/seiltanzer/data/trades.db'))
+            rows=runtime._conn.execute("SELECT g.*,r.resolved_ts,r.terminal_log_return,r.direction_label,r.mfe_log_return,r.mae_log_return,r.path_quality_status FROM g1s_resolutions r JOIN g1s_observations g USING(observation_id) ORDER BY r.resolved_ts DESC LIMIT 12").fetchall()
+            adapter=ProspectiveFeatureAdapter(runtime, available_asof=time.time())
+            adapter._source_rows=lambda **kw: [dict(r) for r in rows]
+            samples=ProspectiveUniversalOutcomeAdapter(runtime).attach(adapter.rows(resolved_only=False,strict=False))
+            for r in samples:
+                u=r.get('universal_outcome') or {}
+                print(json.dumps({'id':r['observation_id'],'t0':r['captured_ts'],'target':r['target_ts'],'resolved':r['resolved_ts'],'horizon':r['horizon_minutes'],'rv60':r['ede_features'].get('vol.rv_60m'),'outcome':u}))
+            runtime.close()
+            PYCODE
+            echo '=== LISTENERS ===' 
             ss -lntp | grep -E '(:8790\b|State|LISTEN)' || true
             echo '=== ADDRESSES / ROUTES ==='
             ip -br addr || true
