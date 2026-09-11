@@ -29,14 +29,14 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     assert '"ede-inventory"' in offload
     assert '"validate-gate"' in offload
     assert "EDE_OFFLOAD_GATE_RELEASED=1" in offload
-    assert ede.index("Export immutable production DB and release exact-run gate") < ede.index(
+    assert ede.index("Export a consistent live DB directly to this offhost worker") < ede.index(
         "Run EDE v1.3 research off production VPS"
     )
+    assert "production_ede_offload.py live-snapshot" in ede
+    assert "--verified-immutable-input" in ede
 
-    # Snapshot export reuses an immutable, verified exact-SHA local backup,
-    # preferring deploy prestart and falling back to a scheduled recovery point
-    # if low-disk retention rotated the 5.3-GiB prestart pair. It must never
-    # start a second whole live-DB copy.
+    # The legacy immutable-backup selector remains available for recovery, while
+    # scheduled audit export no longer needs a second whole database on the VPS.
     assert "MAX_EXACT_BACKUP_AGE_SECONDS" in offload
     assert "MAX_FALLBACK_BACKUP_AGE_SECONDS" in offload
     assert "EDE_VERIFIED_BACKUP_SELECTION" in offload
@@ -60,7 +60,10 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
         "_probe_api(client)", offload.index("def snapshot")
     )
     assert "PRAGMA quick_check" in offload
-    assert "path: ${{ runner.temp }}/ede-source.sqlite3*" in ede
+    assert "path: ${{ runner.temp }}/ede-source.sqlite3*" not in ede
+    assert "sqlite3_rsync" in (root / "scripts/offhost_sqlite_snapshot.py").read_text()
+    assert "daily-slot-${slot}" in ede
+    assert "upload_verified_snapshot.py" in ede
 
     # Heavy jobs are serialized off-host; compact outputs are returned atomically
     # so existing production research paths remain compatible.
