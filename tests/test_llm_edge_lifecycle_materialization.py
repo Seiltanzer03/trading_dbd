@@ -18,6 +18,12 @@ class Runtime:
 def test_materialization_reports_cutoff_from_latest_evaluation(tmp_path, monkeypatch):
     monkeypatch.setenv("SEILTANZER_EDE_CANDIDATE_REGISTRY", str(tmp_path / "registry.jsonl"))
     runtime = Runtime()
+    with runtime._conn:
+        runtime._conn.execute("""CREATE TABLE g1s_observations(
+            observation_id TEXT PRIMARY KEY, captured_ts REAL,
+            horizon_minutes INTEGER)""")
+        runtime._conn.execute("""CREATE TABLE g1s_resolutions(
+            observation_id TEXT PRIMARY KEY, resolved_ts REAL)""")
     ensure_research_tables(runtime)
     ensure_evaluation_tables(runtime)
     with runtime._conn:
