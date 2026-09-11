@@ -3,7 +3,9 @@ import sqlite3
 import threading
 from types import SimpleNamespace
 
+from seiltanzer.llm_edge_evaluator import _ensure_tables as ensure_evaluation_tables
 from seiltanzer.llm_edge_lifecycle import materialize_lifecycle
+from seiltanzer.llm_edge_researcher import _ensure_tables as ensure_research_tables
 
 
 class Runtime:
@@ -16,27 +18,30 @@ class Runtime:
 def test_materialization_reports_cutoff_from_latest_evaluation(tmp_path, monkeypatch):
     monkeypatch.setenv("SEILTANZER_EDE_CANDIDATE_REGISTRY", str(tmp_path / "registry.jsonl"))
     runtime = Runtime()
+    ensure_research_tables(runtime)
+    ensure_evaluation_tables(runtime)
     with runtime._conn:
-        runtime._conn.execute("CREATE TABLE llm_edge_research_runs(run_id TEXT PRIMARY KEY)")
-        runtime._conn.execute("""CREATE TABLE llm_edge_hypotheses(
-            hypothesis_id TEXT PRIMARY KEY, name TEXT, target_id TEXT,
-            target_family TEXT, horizon_minutes INTEGER, conditions_json TEXT,
-            status TEXT, evaluation_state TEXT, created_ts REAL)""")
-        runtime._conn.execute("""CREATE TABLE llm_edge_evaluations(
-            evaluation_id TEXT PRIMARY KEY, run_id TEXT, hypothesis_id TEXT,
-            evaluation_cutoff_ts REAL, result_json TEXT, created_ts REAL)""")
         runtime._conn.execute(
-            "INSERT INTO llm_edge_hypotheses VALUES(?,?,?,?,?,?,?,?,?)",
-            ("hyp-1", "test", "DIRECTION", "DIRECTION", 60, "[]",
-             "RESEARCH", "INSUFFICIENT_DATA", 1000.0),
+            """INSERT INTO llm_edge_hypotheses(
+                hypothesis_id, first_run_id, first_observation_id,
+                first_snapshot_sha256, name, target_id, target_family,
+                horizon_minutes, conditions_json, rationale, source, status,
+                evaluation_state, created_ts
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("hyp-1", "run-1", "obs-1", "s" * 64, "test", "DIRECTION",
+             "DIRECTION", 60, "[]", "test", "LLM", "RESEARCH",
+             "INSUFFICIENT_DATA", 1000.0),
         )
         for evaluation_id, cutoff, created, raw_rows in (
             ("eval-old", 1010.0, 1011.0, 10),
             ("eval-new", 2020.0, 2021.0, 20),
         ):
             runtime._conn.execute(
-                "INSERT INTO llm_edge_evaluations VALUES(?,?,?,?,?,?)",
-                (evaluation_id, "run-1", "hyp-1", cutoff,
+                """INSERT INTO llm_edge_evaluations(
+                    evaluation_id, run_id, hypothesis_id, evaluation_cutoff_ts,
+                    dataset_sha256, measurement_contract, result_json, created_ts
+                ) VALUES(?,?,?,?,?,?,?,?)""",
+                (evaluation_id, "run-1", "hyp-1", cutoff, str(raw_rows) * 64, "test",
                  json.dumps({"status": "INSUFFICIENT_DATA", "raw_rows": raw_rows,
                              "reason": "NO_ELIGIBLE_TARGET_ROWS"}), created),
             )
