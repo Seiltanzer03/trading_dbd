@@ -48,20 +48,26 @@ jobs:
           digest = hashlib.sha256(body).hexdigest()
           created = False
           try:
+              expected_metadata = {'backup-digest': digest, 'probe': 'ok'}
               client.put_object(Bucket=bucket, Key=key, Body=body,
-                                Metadata={'sha256': digest})
+                                Metadata=expected_metadata)
               created = True
+              head = client.head_object(Bucket=bucket, Key=key)
               response = client.get_object(Bucket=bucket, Key=key)
               with response['Body'] as stream:
                   actual = stream.read()
               actual_digest = hashlib.sha256(actual).hexdigest()
-              metadata_digest = response.get('Metadata', {}).get('sha256')
+              get_metadata = response.get('Metadata', {})
+              head_metadata = head.get('Metadata', {})
               print('Storage probe diagnostics: '
                     f'expected_bytes={len(body)} actual_bytes={len(actual)} '
                     f'body_sha_match={actual_digest == digest} '
-                    f'metadata_sha_present={bool(metadata_digest)} '
-                    f'metadata_sha_match={metadata_digest == digest}')
-              if actual != body or response['Metadata'].get('sha256') != digest:
+                    f'get_metadata_keys={sorted(get_metadata)} '
+                    f'head_metadata_keys={sorted(head_metadata)} '
+                    f'get_metadata_match={get_metadata == expected_metadata} '
+                    f'head_metadata_match={head_metadata == expected_metadata}')
+              if actual != body or (get_metadata and get_metadata != expected_metadata) or (
+                      head_metadata and head_metadata != expected_metadata):
                   raise SystemExit('Storage round-trip verification failed')
               client.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
           finally:
