@@ -2,6 +2,9 @@ name: production-storage-access-check
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - agent/storage-probe-diagnostics
 
 permissions:
   contents: read
@@ -51,6 +54,13 @@ jobs:
               response = client.get_object(Bucket=bucket, Key=key)
               with response['Body'] as stream:
                   actual = stream.read()
+              actual_digest = hashlib.sha256(actual).hexdigest()
+              metadata_digest = response.get('Metadata', {}).get('sha256')
+              print('Storage probe diagnostics: '
+                    f'expected_bytes={len(body)} actual_bytes={len(actual)} '
+                    f'body_sha_match={actual_digest == digest} '
+                    f'metadata_sha_present={bool(metadata_digest)} '
+                    f'metadata_sha_match={metadata_digest == digest}')
               if actual != body or response['Metadata'].get('sha256') != digest:
                   raise SystemExit('Storage round-trip verification failed')
               client.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
