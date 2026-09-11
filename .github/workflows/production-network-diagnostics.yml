@@ -2,7 +2,7 @@ name: production-network-diagnostics
 
 on:
   push:
-    branches: [main]
+    branches: [main, agent/fix-scheduled-ede-snapshot]
     paths:
       - ".github/workflows/production-network-diagnostics.yml"
   workflow_dispatch:
@@ -37,6 +37,13 @@ jobs:
             set +e
             echo '=== SERVICE ==='
             systemctl status seiltanzer --no-pager -l
+            echo '=== STORAGE CAPACITY (READ ONLY) ==='
+            git -C /opt/seiltanzer rev-parse HEAD
+            df -h /
+            du -xhd1 /opt /var /root /tmp 2>/dev/null | sort -h | tail -n 35
+            du -xhd1 /opt/seiltanzer/data /opt/seiltanzer/data/backups /root/.cache /var/cache /var/log 2>/dev/null | sort -h | tail -n 30
+            find /tmp /opt/seiltanzer/data/backups/local -maxdepth 1 -type f -size +100M -printf '%s %b %p\\n' 2>/dev/null
+            journalctl --disk-usage
             echo '=== LISTENERS ==='
             ss -lntp | grep -E '(:8790\b|State|LISTEN)' || true
             echo '=== ADDRESSES / ROUTES ==='
