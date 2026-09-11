@@ -106,3 +106,24 @@ def test_unresolved_prospective_row_does_not_get_future_outcome():
     attached = adapter.attach([row])[0]
     assert attached["universal_outcome"] is None
     assert attached["universal_outcome_reason"] == "OUTCOME_NOT_RESOLVED"
+
+
+def test_indexed_bar_selection_matches_frozen_time_filters():
+    runtime = _Runtime()
+    with runtime._conn:
+        runtime._conn.executemany(
+            'INSERT INTO passive_market_bars VALUES(?,?,?,?,?,?,?)',
+            [('NAS100', float(t), float(t + 60), 101, 99, 100, float(t + 80))
+             for t in range(0, 10000, 60)],
+        )
+    adapter = ProspectiveUniversalOutcomeAdapter(runtime)
+    for captured, target, resolved in [(1000, 1180, 1300), (1000.3, 4000.3, 4100),
+                                       (0, 60, 60), (10000, 10100, 10200)]:
+        row = {'instrument': 'NAS100', 'captured_ts': captured, 'target_ts': target}
+        expected = [bar for bar in adapter._bars['NAS100']
+                    if bar['bar_start_ts'] >= captured - 1e-6
+                    and bar['bar_end_ts'] <= target + 1e-6
+                    and (bar.get('created_ts') or bar['bar_end_ts']) <= resolved + 1e-6]
+        assert adapter._bars_for(row, resolved) == expected
+    assert adapter._bars_for(row, None) == []
+    assert adapter._bars_for(dict(row, instrument='UNKNOWN'), 10200) == []
