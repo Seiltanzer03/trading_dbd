@@ -88,7 +88,8 @@ def replicate_live(client, *, password: str, expected_sha: str,
                            shlex.quote(remote_binary) + ' "$@"\n')
         host_key = client.get_transport().get_remote_server_key()
         known_hosts = local / 'known_hosts'
-        known_hosts.write_text(f'{HOST} {host_key.get_name()} {host_key.get_base64()}\n')
+        host_key_type = host_key.get_name()
+        known_hosts.write_text(f'{HOST} {host_key_type} {host_key.get_base64()}\n')
         askpass = local / 'askpass'
         askpass.write_text('#!/bin/sh\nprintf %s "$SQLITE_RSYNC_SSH_PASSWORD"\n')
         askpass.chmod(0o700)
@@ -97,6 +98,7 @@ def replicate_live(client, *, password: str, expected_sha: str,
             '#!/bin/sh\nexport SSH_ASKPASS_REQUIRE=force DISPLAY=:0\n'
             'exec setsid -w ssh -o StrictHostKeyChecking=yes '
             '-o ServerAliveInterval=15 -o ServerAliveCountMax=2 '
+            '-o HostKeyAlgorithms=' + shlex.quote(host_key_type) + ' '
             '-o UserKnownHostsFile=' + shlex.quote(str(known_hosts)) + ' "$@"\n')
         ssh.chmod(0o700)
         try:
