@@ -1,6 +1,9 @@
 name: production-storage-access-check
 
 on:
+  push:
+    branches: [agent/offhost-durable-snapshots]
+    paths: ['.github/workflows/production-storage-access-check.yml']
   workflow_dispatch:
 
 permissions:
