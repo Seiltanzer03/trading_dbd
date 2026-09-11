@@ -40,6 +40,21 @@ LIVE_STATE_REFRESH_PERIOD_PRODUCTION_SEC = 10.0
 LIVE_STATE_REFRESH_PERIOD_FAST_SEC = 2.0
 
 
+async def broadcast_live_tick(clients, payload, *, timeout=2.0):
+    """Isolate disconnected/slow consumers from the shared live tick owner."""
+    async def send(ws):
+        try:
+            await asyncio.wait_for(ws.send_json(payload), timeout=timeout)
+        except Exception:
+            clients.discard(ws)
+            # Closing is bounded too: a stalled transport must not pin polling.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(ws.close(code=1013), timeout=timeout)
+
+    # Clients can join/leave at every await; never iterate the mutable registry.
+    await asyncio.gather(*(send(ws) for ws in tuple(clients)))
+
+
 class TradeOpen(BaseModel):
     setup: int
     direction: str
@@ -459,14 +474,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     payload,
                     build_ms=(time.monotonic() - build_started) * 1000.0,
                 )
-                dead = []
-                for ws in clients:
-                    try:
-                        await ws.send_json(payload)
-                    except Exception:  # noqa: BLE001
-                        dead.append(ws)
-                for ws in dead:
-                    clients.discard(ws)
+                await broadcast_live_tick(clients, payload)
                 # Full journal/ridge/setup materialization may wait on SQLite.
                 # The HTTP route serves the last encoded generation directly, so
                 # production does not need a new build for every 2s live tick.
@@ -1005,7 +1013,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await ws.close(code=1008)
                 return
 
-        clients.add(ws)
         try:
             # The background owner may still be producing the first production
             # snapshot.  Wait boundedly without running canonical scenario math
@@ -1016,11 +1023,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await ws.close(code=1013)
                     return
                 await asyncio.sleep(0.05)
-            await ws.send_json(live_tick_snapshot["payload"])
+            await asyncio.wait_for(
+                ws.send_json(live_tick_snapshot["payload"]), timeout=2.0,
+            )
+            clients.add(ws)
             while True:
                 await ws.receive_text()  # клиент ничего не шлёт; держим сокет
         except WebSocketDisconnect:
             pass
+        except TimeoutError:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(ws.close(code=1013), timeout=2.0)
         finally:
             clients.discard(ws)
 

@@ -2,7 +2,7 @@ name: production-network-diagnostics
 
 on:
   push:
-    branches: [main, agent/fix-scheduled-ede-snapshot]
+    branches: [main]
     paths:
       - ".github/workflows/production-network-diagnostics.yml"
   workflow_dispatch:

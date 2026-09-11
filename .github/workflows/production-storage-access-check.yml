@@ -1,0 +1,62 @@
+name: production-storage-access-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install S3 client
+        run: pip install boto3
+      - name: Verify private backup bucket access with a disposable object
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import os
+          import uuid
+          import boto3
+          from botocore.config import Config
+
+          for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'):
+              if not os.environ.get(name):
+                  raise SystemExit('Required YC_STORAGE_* GitHub Actions secrets are missing')
+          client = boto3.client('s3', endpoint_url='https://storage.yandexcloud.net',
+                                config=Config(connect_timeout=10, read_timeout=20,
+                                              retries={'max_attempts': 2}))
+          bucket = 'trading-dbd-backups-2026'
+          key = ('access-check/' + os.environ['RUN_ID'] + '-' +
+                 os.environ['RUN_ATTEMPT'] + '-' + uuid.uuid4().hex + '.txt')
+          body = b'trading_dbd disposable storage access check\n'
+          digest = hashlib.sha256(body).hexdigest()
+          created = False
+          try:
+              client.put_object(Bucket=bucket, Key=key, Body=body,
+                                Metadata={'sha256': digest})
+              created = True
+              response = client.get_object(Bucket=bucket, Key=key)
+              with response['Body'] as stream:
+                  actual = stream.read()
+              if actual != body or response['Metadata'].get('sha256') != digest:
+                  raise SystemExit('Storage round-trip verification failed')
+              client.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
+          finally:
+              if created:
+                  # Only this run's UUID-scoped disposable probe may be deleted.
+                  client.delete_object(Bucket=bucket, Key=key)
+          print('Storage upload/read/list/delete check passed; no database transferred')
+          PY
