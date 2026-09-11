@@ -98,7 +98,7 @@ function renderHypotheses(payload) {
             ? 'Есть результаты наблюдений, но после временного разделения и условий гипотезы недостаточно обучающих или проверочных выборок.'
             : 'В зафиксированной выборке нет допустимых результатов для этого таргета. Для метрик пути нужны достаточное покрытие котировками и исходная волатильность.'}
           Строк: ${value(item.evaluation_sample?.raw_rows)}; допустимых: ${value(item.evaluation_sample?.target_rows)}; временных разбиений: ${value(item.evaluation_sample?.fold_count)}.
-          Оценка использует данные на момент создания гипотезы; новые наблюдения не меняют этот сохранённый результат.
+          Оценка зафиксирована на срезе ${utc(item.evaluation_sample?.evaluation_cutoff_ts)} конкретного исследовательского запуска; последующие наблюдения не меняют этот сохранённый результат.
           (${esc(item.rejection_reason || 'NO_ELIGIBLE_TARGET_ROWS')}).</div>`
         : `<div class="evidence">
             <div><span>P-VALUE</span><b>${value(item.p_value)}</b></div>
