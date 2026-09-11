@@ -231,6 +231,12 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
             "effect": effect,
             "folds_stable": folds,
             "rejection_reason": reason,
+            "evaluation_sample": {
+                "raw_rows": (eval_result or {}).get("raw_rows"),
+                "target_rows": (eval_result or {}).get("target_rows"),
+                "fold_count": (eval_result or {}).get("fold_count"),
+                "cutoff_frozen_at_proposal_time": True,
+            },
         })
 
     statuses = [str(item.get("state") or "") for item in details]

@@ -10,7 +10,8 @@ on:
         required: true
         type: string
   schedule:
-    - cron: "17 */6 * * *"
+    # Heavy research once daily (04:17 Moscow); exact deploy handoffs stay explicit.
+    - cron: "17 1 * * *"
 
 permissions:
   actions: write

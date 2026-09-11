@@ -94,7 +94,12 @@ function renderHypotheses(payload) {
       const metrics = isPending
         ? '<div class="honesty-note" style="margin-top:6px;font-size:10px;padding:6px;">Сформулировано LLM. Ожидает расчёта Purged Walk-Forward CV.</div>'
         : isInsufficient
-        ? `<div class="honesty-note" style="margin-top:6px;font-size:10px;padding:6px;border-left-color:var(--amber);">Недостаточно строк таргета для проверки (${esc(item.rejection_reason || 'NO_ELIGIBLE_TARGET_ROWS')}).</div>`
+        ? `<div class="honesty-note" style="margin-top:6px;font-size:10px;padding:6px;border-left-color:var(--amber);">${item.rejection_reason === 'NO_EVALUABLE_PURGED_WALK_FORWARD_FOLDS'
+            ? 'Есть результаты наблюдений, но после временного разделения и условий гипотезы недостаточно обучающих или проверочных выборок.'
+            : 'В зафиксированной выборке нет допустимых результатов для этого таргета. Для метрик пути нужны достаточное покрытие котировками и исходная волатильность.'}
+          Строк: ${value(item.evaluation_sample?.raw_rows)}; допустимых: ${value(item.evaluation_sample?.target_rows)}; временных разбиений: ${value(item.evaluation_sample?.fold_count)}.
+          Оценка использует данные на момент создания гипотезы; новые наблюдения не меняют этот сохранённый результат.
+          (${esc(item.rejection_reason || 'NO_ELIGIBLE_TARGET_ROWS')}).</div>`
         : `<div class="evidence">
             <div><span>P-VALUE</span><b>${value(item.p_value)}</b></div>
             <div><span>Q-VALUE (FDR)</span><b>${value(item.q_value)}</b></div>

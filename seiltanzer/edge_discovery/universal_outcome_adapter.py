@@ -62,6 +62,10 @@ class ProspectiveUniversalOutcomeAdapter:
     def __init__(self, runtime: Any):
         self.runtime = runtime
         self._bars = self._load_bars()
+        self._bar_starts = {
+            instrument: [float(bar["bar_start_ts"]) for bar in bars]
+            for instrument, bars in self._bars.items()
+        }
 
     def _load_bars(self) -> dict[str, list[dict[str, Any]]]:
         with self.runtime._lock:
@@ -108,8 +112,13 @@ class ProspectiveUniversalOutcomeAdapter:
         target = float(row["target_ts"])
         if resolved_ts is None:
             return []
+        instrument = str(row["instrument"])
+        bars = self._bars.get(instrument, [])
+        starts = self._bar_starts.get(instrument, [])
+        left = bisect.bisect_left(starts, t0 - 1e-6)
+        right = bisect.bisect_right(starts, target + 1e-6)
         return [
-            bar for bar in self._bars.get(str(row["instrument"]), [])
+            bar for bar in bars[left:right]
             if float(bar["bar_start_ts"]) >= t0 - 1e-6
             and float(bar["bar_end_ts"]) <= target + 1e-6
             and float(bar.get("created_ts") or bar["bar_end_ts"]) <= resolved_ts + 1e-6
