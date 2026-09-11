@@ -79,13 +79,13 @@ jobs:
       - name: Install WebKit system dependencies
         timeout-minutes: 5
         run: |
-          # Use the runner-region archive directly. The canonical archive
-          # repeatedly timed out on individual packages in otherwise green jobs.
+          # Ubuntu metadata is signed. Use HTTP because this runner pool cannot
+          # connect reliably to the archive HTTPS endpoints.
           sudo tee /etc/apt/sources.list >/dev/null <<'EOF'
-          deb https://azure.archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
-          deb https://azure.archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
-          deb https://azure.archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse
-          deb https://azure.archive.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
+          deb http://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
+          deb http://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
+          deb http://archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse
+          deb http://archive.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
           EOF
           sudo rm -f /etc/apt/sources.list.d/ubuntu.sources
           sudo tee /etc/apt/apt.conf.d/99-ci-network >/dev/null <<'EOF'
