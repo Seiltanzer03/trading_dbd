@@ -180,39 +180,8 @@ jobs:
               "FOMC_DETERMINISTIC_BOOTSTRAP" \
               "http://127.0.0.1:8790/api/research/macro/fomc-deterministic/refresh" \
               "OK|PARTIAL"
-      - name: Export immutable production DB and release exact-run gate
-        id: snapshot_export
-        env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
-          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
-          EXACT_CHAIN: ${{ env.EXACT_CHAIN }}
-          RUN_ID: ${{ github.run_id }}
-          OUTPUT_DB: ${{ runner.temp }}/ede-source.sqlite3
-        run: |
-          set -euo pipefail
-          args=(
-            --password "$SSH_PASSWORD"
-            --expected-sha "$EXPECTED_SHA"
-            --acceptance-run-id "$ACCEPTANCE_RUN_ID"
-            --run-id "$RUN_ID"
-            --output-db "$OUTPUT_DB"
-          )
-          if [ "$EXACT_CHAIN" = "true" ]; then
-            args+=(--require-acceptance-marker)
-          fi
-          python scripts/production_ede_offload.py snapshot "${args[@]}"
-      - name: Guarantee exact remote EDE snapshot cleanup with a fresh SSH session
-        if: always()
-        env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          python scripts/production_ede_offload.py cleanup-snapshot \
-            --password "$SSH_PASSWORD" \
-            --run-id "$RUN_ID"
       - name: Release gate if snapshot phase failed before normal release
-        if: always() && needs.resolve.outputs.exact_chain == 'true' && steps.snapshot_export.outcome != 'success'
+        if: always() && needs.resolve.outputs.exact_chain == 'true' && job.status != 'success'
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
@@ -229,11 +198,6 @@ jobs:
               /opt/seiltanzer/scripts/production_research_acceptance.py release-gate \
               --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA" || true
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ede-production-snapshot-${{ github.run_id }}
-          path: ${{ runner.temp }}/ede-source.sqlite3*
-          retention-days: 1
 
   audit:
     needs: [resolve, snapshot]
@@ -252,11 +216,67 @@ jobs:
       - name: Install research runtime
         run: |
           pip install -e ".[dev]"
-          pip install paramiko
-      - uses: actions/download-artifact@v4
+          pip install paramiko boto3
+      - name: Export a consistent live DB directly to this offhost worker
+        id: snapshot_export
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.expected_sha }}
+          ACCEPTANCE_RUN_ID: ${{ needs.resolve.outputs.acceptance_run_id }}
+          EXACT_CHAIN: ${{ needs.resolve.outputs.exact_chain }}
+          RUN_ID: ${{ github.run_id }}
+          OUTPUT_DB: ${{ runner.temp }}/ede-source/ede-source.sqlite3
+        run: |
+          set -euo pipefail
+          args=(--password "$SSH_PASSWORD" --expected-sha "$EXPECTED_SHA"
+                --acceptance-run-id "$ACCEPTANCE_RUN_ID" --run-id "$RUN_ID"
+                --output-db "$OUTPUT_DB")
+          if [ "$EXACT_CHAIN" = "true" ]; then
+            args+=(--require-acceptance-marker)
+          fi
+          python scripts/production_ede_offload.py live-snapshot "${args[@]}"
+      - name: Store the verified snapshot in bounded private Object Storage slots
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
+          SOURCE_DB: ${{ runner.temp }}/ede-source/ede-source.sqlite3
+          BUCKET: trading-dbd-backups-2026
+        run: |
+          set -euo pipefail
+          slot="$(( $(date -u +%s) / 86400 % 7 ))"
+          key="backups/v1/daily-slot-${slot}/snapshot.sqlite3.gz"
+          python scripts/upload_verified_snapshot.py \
+            --database "$SOURCE_DB" \
+            --source-manifest "$SOURCE_DB.manifest.json" \
+            --bucket "$BUCKET" --key "$key" \
+            --output-manifest "$SOURCE_DB.offhost-manifest.json"
+      - name: Reverify immutable input before research
+        env:
+          SOURCE_DB: ${{ runner.temp }}/ede-source/ede-source.sqlite3
+        run: |
+          python scripts/verify_immutable_snapshot.py \
+            --database "$SOURCE_DB" \
+            --manifest "$SOURCE_DB.manifest.json"
+      - name: Release gate if live export failed before normal release
+        if: always() && needs.resolve.outputs.exact_chain == 'true' && steps.snapshot_export.outcome != 'success'
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ needs.resolve.outputs.expected_sha }}
+          ACCEPTANCE_RUN_ID: ${{ needs.resolve.outputs.acceptance_run_id }}
         with:
-          name: ede-production-snapshot-${{ github.run_id }}
-          path: ${{ runner.temp }}/ede-source
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
+          script: |
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/production_research_acceptance.py release-gate \
+              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+              --expected-sha "$EXPECTED_SHA" || true
       - name: Fetch latest serialized EDE ledgers
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -283,10 +303,12 @@ jobs:
             --database "$SOURCE_DB" \
             --output "$OUTPUT_DIR/ede_v13_latest_audit.json" \
             --evidence-ledger "$OUTPUT_DIR/ede_frozen_evidence.jsonl" \
-            --candidate-registry "$OUTPUT_DIR/ede_v13_candidate_registry.jsonl"
+            --candidate-registry "$OUTPUT_DIR/ede_v13_candidate_registry.jsonl" \
+            --verified-immutable-input
           python scripts/production_ede_transition_audit.py \
             --database "$SOURCE_DB" \
-            --output "$OUTPUT_DIR/ede_transition_latest_audit.json"
+            --output "$OUTPUT_DIR/ede_transition_latest_audit.json" \
+            --verified-immutable-input
       - uses: actions/upload-artifact@v4
         with:
           name: ede-v13-research-${{ github.run_id }}

@@ -115,26 +115,35 @@ def _register_evaluations(
 def audit(
     database: Path, *, evidence_ledger: Path | None = None,
     shadow_ledger: Path | None = None, candidate_registry: Path | None = None,
+    verified_immutable_input: bool = False,
 ) -> dict[str, Any]:
     materialized_at = time.time()
-    with tempfile.TemporaryDirectory(prefix="ede-v13-production-") as temporary:
-        snapshot = Path(temporary)/"immutable-production-copy.sqlite3"
+    temporary = None
+    if verified_immutable_input:
+        if any(Path(str(database) + suffix).exists() for suffix in ("-wal", "-shm")):
+            raise RuntimeError("verified immutable input has mutable SQLite sidecars")
+        snapshot = database
+    else:
+        temporary = tempfile.TemporaryDirectory(prefix="ede-v13-production-")
+        snapshot = Path(temporary.name)/"immutable-production-copy.sqlite3"
         immutable_snapshot(database, snapshot)
-        runtime = ReadOnlyRuntime(snapshot)
-        try:
-            adapter = ProspectiveFeatureAdapter(runtime)
-            inventory = adapter.feature_capture_audit()
-            all_rows = adapter.rows(resolved_only=False, strict=False)
-            resolved_rows_all = [
-                row for row in all_rows
-                if row.get("outcome_available")
-                and int(row["horizon_minutes"]) in SELECTIVE_HORIZONS]
-            pending_rows = [
-                row for row in all_rows
-                if not row.get("outcome_available")
-                and int(row["horizon_minutes"]) in SELECTIVE_HORIZONS]
-        finally:
-            runtime.close()
+    runtime = ReadOnlyRuntime(snapshot)
+    try:
+        adapter = ProspectiveFeatureAdapter(runtime)
+        inventory = adapter.feature_capture_audit()
+        all_rows = adapter.rows(resolved_only=False, strict=False)
+        resolved_rows_all = [
+            row for row in all_rows
+            if row.get("outcome_available")
+            and int(row["horizon_minutes"]) in SELECTIVE_HORIZONS]
+        pending_rows = [
+            row for row in all_rows
+            if not row.get("outcome_available")
+            and int(row["horizon_minutes"]) in SELECTIVE_HORIZONS]
+    finally:
+        runtime.close()
+        if temporary is not None:
+            temporary.cleanup()
 
     # GLOBAL_RET5_PERSISTENCE is the primary comparator. Missing ret5/ret15 at
     # T0 is missing evidence, never zero. Gate before temporal folds so the
@@ -258,12 +267,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence-ledger", type=Path, default=None)
     parser.add_argument("--shadow-ledger", type=Path, default=None)
     parser.add_argument("--candidate-registry", type=Path, default=None)
+    parser.add_argument("--verified-immutable-input", action="store_true")
     args = parser.parse_args(argv)
 
     report = audit(
         args.database, evidence_ledger=args.evidence_ledger,
         shadow_ledger=args.shadow_ledger,
-        candidate_registry=args.candidate_registry)
+        candidate_registry=args.candidate_registry,
+        verified_immutable_input=args.verified_immutable_input)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         temporary = args.output.with_suffix(args.output.suffix+".tmp")

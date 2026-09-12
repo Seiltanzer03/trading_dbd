@@ -3,7 +3,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/production-ede-v12-audit.yml"
-OFFLOAD = ROOT / "scripts/production_ede_offload.py"
 
 
 def _workflow_text() -> str:
@@ -30,30 +29,24 @@ def test_stale_snapshot_cleanup_is_bounded_to_closed_old_tmp_files() -> None:
     assert "/opt/seiltanzer/data" not in block
 
 
-def test_exact_snapshot_cleanup_uses_fresh_always_session_and_numeric_run_id() -> None:
-    text = _workflow_text()
-    export_pos = text.index("- name: Export immutable production DB and release exact-run gate")
-    cleanup_pos = text.index(
-        "- name: Guarantee exact remote EDE snapshot cleanup with a fresh SSH session"
+def test_live_snapshot_transport_cleanup_is_run_scoped_and_unconditional() -> None:
+    script = (ROOT / "scripts" / "offhost_sqlite_snapshot.py").read_text(
+        encoding="utf-8"
     )
-    upload_pos = text.index("- uses: actions/upload-artifact@v4", cleanup_pos)
-    block = text[cleanup_pos:upload_pos]
-
-    assert export_pos < cleanup_pos < upload_pos
-    assert "if: always()" in block
-    assert "production_ede_offload.py cleanup-snapshot" in block
-    assert "SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}" in block
-    assert "RUN_ID: ${{ github.run_id }}" in block
-    script = OFFLOAD.read_text(encoding="utf-8")
-    assert "if not str(args.run_id).isdigit()" in script
-    assert 'f"/tmp/seiltanzer-ede-source-{args.run_id}.sqlite3"' in script
-    assert "_retry_ssh_operation(args.password, operation)" in script
-    assert 'f"rm -f -- {quoted} && {checks}"' in script
-    assert "/opt/seiltanzer/data" not in block
+    assert "if not run_id.isdigit()" in script
+    assert "remote_dir = f'/tmp/seiltanzer-sqlite-tools-{run_id}'" in script
+    assert "finally:" in script
+    assert "if created_remote:" in script
+    assert "'rm -f -- '" in script
+    assert "' && rmdir -- '" in script
+    assert "REMOTE_DATABASE" in script
+    assert "rm -f -- /opt/seiltanzer/data" not in script
 
 
-def test_stale_cleanup_runs_before_new_snapshot_export() -> None:
+def test_stale_cleanup_runs_before_snapshot_preparation() -> None:
     text = _workflow_text()
     stale_pos = text.index("- name: Remove only stale closed EDE snapshot leftovers")
-    export_pos = text.index("- name: Export immutable production DB and release exact-run gate")
-    assert stale_pos < export_pos
+    materialize_pos = text.index(
+        "- name: Materialize point-in-time macro archives before immutable snapshot"
+    )
+    assert stale_pos < materialize_pos

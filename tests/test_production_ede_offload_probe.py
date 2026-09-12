@@ -263,3 +263,26 @@ def test_downloaded_backup_from_another_sha_is_rejected(tmp_path):
         MODULE._verify_local_exact_backup(
             database, manifest, expected_sha="a" * 40
         )
+
+
+def test_live_snapshot_failure_still_releases_exact_gate(monkeypatch, tmp_path):
+    import sys
+    from types import SimpleNamespace
+
+    class Client:
+        def close(self):
+            pass
+
+    released = []
+    fake_transfer = SimpleNamespace(replicate_live=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('copy failed')))
+    monkeypatch.setitem(sys.modules, 'offhost_sqlite_snapshot', fake_transfer)
+    monkeypatch.setattr(MODULE, '_connect', lambda password: Client())
+    monkeypatch.setattr(MODULE, '_verify_sha', lambda *args, **kwargs: None)
+    monkeypatch.setattr(MODULE, '_exec', lambda *args, **kwargs: '')
+    monkeypatch.setattr(MODULE, '_release_gate', lambda password, **kwargs: released.append(kwargs))
+    args = SimpleNamespace(password='secret', expected_sha='a' * 40,
+                           acceptance_run_id='123', require_acceptance_marker=True,
+                           run_id='456', output_db=str(tmp_path / 'snapshot.db'))
+    with pytest.raises(RuntimeError, match='copy failed'):
+        MODULE.live_snapshot(args)
+    assert released == [{'acceptance_run_id': '123', 'expected_sha': 'a' * 40}]
