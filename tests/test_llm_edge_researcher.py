@@ -303,7 +303,7 @@ def test_edge_researcher_evaluate_routes_and_background_execution(monkeypatch):
     assert st_cached["pending_summary"]["rejected"] == 24
 
 
-def test_three_condition_hypothesis_accepted_and_four_rejected():
+def test_three_and_four_condition_hypotheses_are_rejected():
     t0 = 1_800_000_000.0
     runtime = Runtime(frozen={
         "g1s_evidence_v3": {
@@ -332,9 +332,8 @@ def test_three_condition_hypothesis_accepted_and_four_rejected():
         }]}
 
     report = propose_edge_hypotheses(runtime, "obs-1", provider=provider_3)
-    assert report["status"] == "OK"
-    assert len(report["hypotheses"]) == 1
-    assert len(report["hypotheses"][0]["conditions"]) == 3
+    assert report["status"] == "NO_VALID_HYPOTHESES"
+    assert report["rejections"] == ["0:INVALID_CONDITION_COUNT"]
 
     # Test that 4 conditions are rejected as exceeding MAX_CONDITIONS
     runtime_4 = Runtime(frozen={
@@ -367,6 +366,27 @@ def test_three_condition_hypothesis_accepted_and_four_rejected():
     report_4 = propose_edge_hypotheses(runtime_4, "obs-2", provider=provider_4)
     assert report_4["status"] == "NO_VALID_HYPOTHESES"
     assert "0:INVALID_CONDITION_COUNT" in report_4["rejections"]
+
+
+def test_path_target_is_withheld_until_authoritative_history_exists():
+    runtime = Runtime()
+
+    def provider(summary, model, max_hypotheses):
+        assert summary["allowed_target_ids"] == ["DIRECTION", "RETURN_SIGMA"]
+        return {"hypotheses": [{
+            "name": "Unsupported path target",
+            "target_id": "MFE_SIGMA",
+            "conditions": [{
+                "feature_id": "regime.asset",
+                "kind": "categorical",
+                "state": "NAS100",
+            }],
+            "rationale": "Must fail closed until the path evidence is authoritative.",
+        }]}
+
+    report = propose_edge_hypotheses(runtime, "obs-1", provider=provider)
+    assert report["status"] == "NO_VALID_HYPOTHESES"
+    assert report["rejections"] == ["0:TARGET_NOT_EVIDENCE_READY"]
 
 
 
