@@ -20,20 +20,42 @@ import time
 import urllib.request
 import zipfile
 
-TOOLS_URL = 'https://www.sqlite.org/2026/sqlite-tools-linux-x64-3530400.zip'
-TOOLS_SHA3 = '6eeb57e8f2aef7687f9f016a980992cf2799c8c07a87c5e21495530f91915047'
+SQLITE_VERSION = '3530400'
+SOURCE_SHA3 = 'b834d474b9b393d85a9e3ee4cc11f1329e007e9376a424ee740796f5c4bda3a8'
+AMALGAMATION_SHA3 = '628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed76285612227934e'
 MIN_FREE_BYTES = 1024 ** 3
 
 
+def _verified_archive(product: str, digest: str) -> zipfile.ZipFile:
+    url = f'https://www.sqlite.org/2026/sqlite-{product}-{SQLITE_VERSION}.zip'
+    with urllib.request.urlopen(url, timeout=30) as response:
+        archive = response.read(20 * 1024 ** 2)
+    if hashlib.sha3_256(archive).hexdigest() != digest:
+        raise RuntimeError('SQLite source archive checksum mismatch')
+    return zipfile.ZipFile(io.BytesIO(archive))
+
+
 def install_rsync(destination: Path) -> Path:
-    with urllib.request.urlopen(TOOLS_URL, timeout=30) as response:
-        archive = response.read(8 * 1024 ** 2)
-    if hashlib.sha3_256(archive).hexdigest() != TOOLS_SHA3:
-        raise RuntimeError('SQLite tools archive checksum mismatch')
-    with zipfile.ZipFile(io.BytesIO(archive)) as package:
-        executable = package.read('sqlite3_rsync')
-    destination.write_bytes(executable)
+    # Official prebuilt tools require GLIBC_2.38, absent on Ubuntu 22.04.
+    # Build the same pinned sources statically on the worker, never on the VPS.
+    with tempfile.TemporaryDirectory(prefix='sqlite-rsync-build-') as temporary:
+        source = Path(temporary)
+        with _verified_archive('src', SOURCE_SHA3) as archive:
+            (source / 'sqlite3_rsync.c').write_bytes(
+                archive.read(f'sqlite-src-{SQLITE_VERSION}/tool/sqlite3_rsync.c'))
+        with _verified_archive('amalgamation', AMALGAMATION_SHA3) as archive:
+            for name in ('sqlite3.c', 'sqlite3.h'):
+                (source / name).write_bytes(
+                    archive.read(f'sqlite-amalgamation-{SQLITE_VERSION}/{name}'))
+        subprocess.run([
+            'cc', '-O2', '-static', '-DSQLITE_ENABLE_DBPAGE_VTAB',
+            '-DSQLITE_THREADSAFE=0', '-DSQLITE_OMIT_LOAD_EXTENSION',
+            '-DSQLITE_OMIT_DEPRECATED', '-I', str(source),
+            str(source / 'sqlite3_rsync.c'), str(source / 'sqlite3.c'),
+            '-lm', '-o', str(destination.resolve()),
+        ], check=True, timeout=240)
     destination.chmod(0o700)
+    subprocess.run([str(destination.resolve()), '--version'], check=True, timeout=10)
     return destination
 
 
@@ -112,6 +134,7 @@ def replicate_live(client, *, password: str, expected_sha: str,
             remote_hash = _exec(client, 'sha256sum ' + shlex.quote(remote_binary), timeout=10).split()[0]
             if remote_hash != hashlib.sha256(binary.read_bytes()).hexdigest():
                 raise RuntimeError('Uploaded SQLite executable checksum mismatch')
+            _exec(client, shlex.quote(remote_wrapper) + ' --version', timeout=10)
             started = time.time()
             process = subprocess.Popen(
                 [str(binary), f'root@{HOST}:{REMOTE_DATABASE}', str(output.resolve()),
