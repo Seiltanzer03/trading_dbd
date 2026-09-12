@@ -31,3 +31,10 @@ def test_corrupt_replica_fails_closed(tmp_path):
     database.write_bytes(b'not a SQLite database')
     with pytest.raises(sqlite3.DatabaseError):
         module.verify_replica(database)
+
+
+def test_source_archive_checksum_rejected_before_compilation(monkeypatch):
+    import io
+    monkeypatch.setattr(module.urllib.request, 'urlopen', lambda *a, **k: io.BytesIO(b'wrong-source'))
+    with pytest.raises(RuntimeError, match='checksum mismatch'):
+        module._verified_archive('src', module.SOURCE_SHA3)
