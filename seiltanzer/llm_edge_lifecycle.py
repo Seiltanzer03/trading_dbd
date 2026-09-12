@@ -164,9 +164,15 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
                 SELECT h.hypothesis_id, h.name, h.target_id, h.target_family,
                        h.horizon_minutes, h.conditions_json, h.status,
                        h.evaluation_state, h.created_ts,
-                       e.result_json
+                       e.evaluation_cutoff_ts, e.result_json
                 FROM llm_edge_hypotheses h
-                LEFT JOIN llm_edge_evaluations e ON h.hypothesis_id = e.hypothesis_id
+                LEFT JOIN llm_edge_evaluations e ON e.evaluation_id = (
+                    SELECT e2.evaluation_id
+                    FROM llm_edge_evaluations e2
+                    WHERE e2.hypothesis_id = h.hypothesis_id
+                    ORDER BY e2.created_ts DESC, e2.evaluation_id DESC
+                    LIMIT 1
+                )
                 ORDER BY h.created_ts DESC
                 LIMIT 30
             """).fetchall()
@@ -231,6 +237,12 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
             "effect": effect,
             "folds_stable": folds,
             "rejection_reason": reason,
+            "evaluation_sample": {
+                "raw_rows": (eval_result or {}).get("raw_rows"),
+                "target_rows": (eval_result or {}).get("target_rows"),
+                "fold_count": (eval_result or {}).get("fold_count"),
+                "evaluation_cutoff_ts": row.get("evaluation_cutoff_ts"),
+            },
         })
 
     statuses = [str(item.get("state") or "") for item in details]

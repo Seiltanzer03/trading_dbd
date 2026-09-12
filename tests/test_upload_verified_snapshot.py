@@ -8,6 +8,16 @@ _spec = importlib.util.spec_from_file_location(
 module = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(module)
 
 
+def test_normalized_metadata_accepts_yandex_preserved_key_casing():
+    assert module.normalized_metadata({
+        'Source-Sha256': 'abc',
+        'Source-Size': '42',
+    }) == {
+        'source-sha256': 'abc',
+        'source-size': '42',
+    }
+
+
 def test_streaming_parts_round_trip_without_staging_archive(tmp_path):
     source = tmp_path / 'database.sqlite3'
     payload = os.urandom(20000) + b'authoritative-row' * 1000

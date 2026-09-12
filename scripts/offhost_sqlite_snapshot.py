@@ -70,9 +70,9 @@ def replicate_live(client, *, password: str, expected_sha: str,
         )
     )
     stats = json.loads(_exec(client, stat_command, timeout=10).strip())
-    # The audit currently makes a second immutable worker copy. Account for it.
+    # Reserve room for the replica plus bounded worker headroom.
     if shutil.disk_usage(output.parent).free < stats['size'] + 2 * MIN_FREE_BYTES:
-        raise RuntimeError('Worker lacks space for replica, audit copy and headroom')
+        raise RuntimeError('Worker lacks space for replica and bounded headroom')
     if stats['free'] < MIN_FREE_BYTES:
         raise RuntimeError('Production lacks WAL growth headroom')
     remote_dir = f'/tmp/seiltanzer-sqlite-tools-{run_id}'

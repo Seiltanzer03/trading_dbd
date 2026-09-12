@@ -15,6 +15,11 @@ PART_SIZE = 64 * 1024 * 1024
 READ_SIZE = 4 * 1024 * 1024
 
 
+def normalized_metadata(value: dict | None) -> dict[str, str]:
+    """Normalize S3-compatible providers that preserve metadata key casing."""
+    return {str(key).lower(): str(item) for key, item in (value or {}).items()}
+
+
 def compressed_parts(path: Path, part_size: int = PART_SIZE):
     compressor = zlib.compressobj(level=6, wbits=31)
     pending = bytearray()
@@ -75,7 +80,8 @@ def upload(database: Path, source_manifest: Path, *, bucket: str, key: str) -> d
         client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
         raise
     head = client.head_object(Bucket=bucket, Key=key)
-    if int(head['ContentLength']) != compressed_size or head.get('Metadata') != metadata:
+    if (int(head['ContentLength']) != compressed_size or
+            normalized_metadata(head.get('Metadata')) != metadata):
         raise RuntimeError('uploaded snapshot HEAD verification failed')
     first = client.get_object(Bucket=bucket, Key=key,
                               Range=f'bytes=0-{len(first_sample)-1}')['Body'].read()

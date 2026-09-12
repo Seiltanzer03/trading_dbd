@@ -51,7 +51,11 @@ jobs:
               response = client.get_object(Bucket=bucket, Key=key)
               with response['Body'] as stream:
                   actual = stream.read()
-              if actual != body or response['Metadata'].get('sha256') != digest:
+              metadata = {
+                  str(name).lower(): str(value)
+                  for name, value in response.get('Metadata', {}).items()
+              }
+              if actual != body or metadata.get('sha256') != digest:
                   raise SystemExit('Storage round-trip verification failed')
               client.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
           finally:
