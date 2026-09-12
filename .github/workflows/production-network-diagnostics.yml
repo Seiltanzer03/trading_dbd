@@ -1,4 +1,4 @@
-name: production-network-diagnostics
+name: production-hypothesis-cloud-diagnostics
 on:
   push:
     branches: [agent/offhost-headroom-recovery]
@@ -6,88 +6,29 @@ on:
 permissions:
   contents: read
 jobs:
-  recover:
+  diagnose:
     runs-on: ubuntu-22.04
-    timeout-minutes: 80
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/offhost-headroom-recovery
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - run: pip install paramiko boto3 -e '.[dev]'
-      - name: Reclaim regenerable package index and compress closed rotated logs
-        uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 5m
-          script: |
-            set -eu
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = d8f01d9fdd33ae3706c93f54d2053d032efda2c4
-            python3 - <<'PY'
-            import fcntl, pathlib
-            root=pathlib.Path('/var/lib/apt/lists')
-            with (root/'lock').open('a') as lock:
-                fcntl.lockf(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                freed=0
-                for p in root.iterdir():
-                    if p.name != 'lock' and p.is_file() and not p.is_symlink():
-                        freed+=p.stat().st_size
-                        p.unlink()
-                print('REGENERABLE_APT_INDEX_BYTES_REMOVED',freed)
-            PY
-            command -v lsof >/dev/null
-            for file in /var/log/btmp.1 /var/log/syslog.1 /var/log/auth.log.1; do
-              test -f "$file" || continue
-              test ! -L "$file" || exit 1
-              test ! -e "$file.gz" || continue
-              if lsof -- "$file" >/dev/null 2>&1; then continue; fi
-              original=$(sha256sum "$file" | cut -d' ' -f1)
-              nice -n 19 gzip -k "$file"
-              gzip -t "$file.gz"
-              recovered=$(gzip -dc "$file.gz" | sha256sum | cut -d' ' -f1)
-              test "$original" = "$recovered"
-              current=$(sha256sum "$file" | cut -d' ' -f1)
-              test "$original" = "$current"
-              if lsof -- "$file" >/dev/null 2>&1; then exit 1; fi
-              rm -- "$file"
-              echo "ROTATED_LOG_PRESERVED=$file.gz"
-            done
-            df -B1 /
-      - name: Export consistent live snapshot with existing headroom guards
-        env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-        run: |
-          python scripts/offhost_sqlite_snapshot.py --expected-sha d8f01d9fdd33ae3706c93f54d2053d032efda2c4 --run-id "${{ github.run_id }}" --output-db "${{ runner.temp }}/source.sqlite3"
-      - name: Store verified daily backup
+          python-version: "3.11"
+      - run: pip install boto3 -e ".[dev]"
+      - name: Restore verified cloud snapshot and diagnose frozen folds
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ru-central1
-          AWS_EC2_METADATA_DISABLED: 'true'
-        run: |
-          slot="$(( $(date -u +%s) / 86400 % 7 ))"
-          python scripts/upload_verified_snapshot.py --database "${{ runner.temp }}/source.sqlite3" --source-manifest "${{ runner.temp }}/source.sqlite3.manifest.json" --bucket trading-dbd-backups-2026 --key "backups/v1/daily-slot-${slot}/snapshot.sqlite3.gz" --output-manifest "${{ runner.temp }}/offhost-manifest.json"
-      - name: Full cloud restore drill and read-only hypothesis evaluation
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ru-central1
-          AWS_EC2_METADATA_DISABLED: 'true'
+          AWS_EC2_METADATA_DISABLED: "true"
           EXPECTED_SHA: d8f01d9fdd33ae3706c93f54d2053d032efda2c4
-        run: |
-          rm -- "${{ runner.temp }}/source.sqlite3"
-          export BACKUP_KEY="$(python -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/offhost-manifest.json"))["object_key"])')"
-          python scripts/verify_cloud_backup_research.py
+          BACKUP_KEY: backups/v1/daily-slot-2/snapshot.sqlite3.gz
+        run: python scripts/verify_cloud_backup_research.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: offhost-backup-manifests
-          path: |
-            ${{ runner.temp }}/source.sqlite3.manifest.json
-            ${{ runner.temp }}/offhost-manifest.json
-            ${{ runner.temp }}/verified-research.json
-          retention-days: 30
+          name: hypothesis-fold-diagnostics
+          path: ${{ runner.temp }}/verified-research.json
+          retention-days: 14
