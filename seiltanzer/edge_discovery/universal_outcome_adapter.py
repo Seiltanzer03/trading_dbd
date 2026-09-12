@@ -9,12 +9,21 @@ from __future__ import annotations
 
 import bisect
 from collections import defaultdict
+import math
 from typing import Any
 
 from .universal_outcomes import resolve_universal_market_outcome
 
 
 UNIVERSAL_OUTCOME_ADAPTER_VERSION = "g1s-universal-outcome-adapter-v2"
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
 
 
 def resolve_historical_universal_outcome(
@@ -155,24 +164,12 @@ class ProspectiveUniversalOutcomeAdapter:
             # Older prospective rows often retain the immutable G1S resolution
             # but not every source bar needed to reconstruct the same outcome.
             # Reuse only fields frozen in that resolution; never infer a path.
-            terminal = context.get("terminal_log_return")
-            try:
-                terminal = float(terminal) if terminal is not None else None
-            except (TypeError, ValueError):
-                terminal = None
-            sigma_h = result.get("t0_local_sigma_h")
-            if terminal is not None and sigma_h is not None and float(sigma_h) > 0.0:
+            terminal = _finite_float(context.get("terminal_log_return"))
+            sigma_h = _finite_float(result.get("t0_local_sigma_h"))
+            if terminal is not None and sigma_h is not None and sigma_h > 0.0:
                 resolution_path_complete = path_quality == "complete"
-                mfe = context.get("mfe_log_return")
-                mae = context.get("mae_log_return")
-                try:
-                    mfe = float(mfe) if mfe is not None else None
-                except (TypeError, ValueError):
-                    mfe = None
-                try:
-                    mae = float(mae) if mae is not None else None
-                except (TypeError, ValueError):
-                    mae = None
+                mfe = _finite_float(context.get("mfe_log_return"))
+                mae = _finite_float(context.get("mae_log_return"))
                 result.update({
                     "available": True,
                     "reason": None,
@@ -184,11 +181,11 @@ class ProspectiveUniversalOutcomeAdapter:
                     "mfe_log_return": mfe if resolution_path_complete else None,
                     "mae_log_return": mae if resolution_path_complete else None,
                     "mfe_sigma": (
-                        mfe / float(sigma_h)
+                        mfe / sigma_h
                         if resolution_path_complete and mfe is not None else None
                     ),
                     "mae_sigma": (
-                        mae / float(sigma_h)
+                        mae / sigma_h
                         if resolution_path_complete and mae is not None else None
                     ),
                     "evidence_source": "IMMUTABLE_G1S_RESOLUTION_FIELDS",
