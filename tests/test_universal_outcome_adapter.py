@@ -45,7 +45,8 @@ class _Runtime:
             self._conn.execute("""
                 CREATE TABLE g1s_resolutions(
                     observation_id TEXT PRIMARY KEY, resolved_ts REAL,
-                    path_quality_status TEXT
+                    path_quality_status TEXT, terminal_log_return REAL,
+                    direction_label TEXT, mfe_log_return REAL, mae_log_return REAL
                 )""")
             self._conn.execute("""
                 CREATE TABLE passive_market_bars(
@@ -55,7 +56,8 @@ class _Runtime:
             self._conn.execute(
                 "INSERT INTO g1s_observations VALUES('obs-1',100.0)")
             self._conn.execute(
-                "INSERT INTO g1s_resolutions VALUES('obs-1',1300.0,'complete')")
+                "INSERT INTO g1s_resolutions VALUES("
+                "'obs-1',1300.0,'complete',0.025,'UP',0.02,-0.01)")
             self._conn.executemany(
                 "INSERT INTO passive_market_bars VALUES(?,?,?,?,?,?,?)",
                 [
@@ -106,6 +108,31 @@ def test_unresolved_prospective_row_does_not_get_future_outcome():
     attached = adapter.attach([row])[0]
     assert attached["universal_outcome"] is None
     assert attached["universal_outcome_reason"] == "OUTCOME_NOT_RESOLVED"
+
+
+def test_immutable_resolution_fields_recover_targets_without_retained_future_bars():
+    runtime = _Runtime()
+    adapter = ProspectiveUniversalOutcomeAdapter(runtime)
+    row = {
+        "observation_id": "obs-1",
+        "instrument": "XAU",
+        "captured_ts": 1000.0,
+        "target_ts": 1180.0,
+        "resolved_ts": 1300.0,
+        "horizon_minutes": 60,
+        "outcome_available": True,
+        "ede_features": {"vol.rv_60m": 0.02},
+    }
+    outcome = adapter.attach([row])[0]["universal_outcome"]
+    assert outcome["available"] is True
+    assert outcome["terminal_complete"] is True
+    assert outcome["path_complete"] is False
+    assert outcome["resolution_path_complete"] is True
+    assert outcome["terminal_log_return"] == 0.025
+    assert outcome["mfe_sigma"] == 1.0
+    assert outcome["evidence_source"] == "IMMUTABLE_G1S_RESOLUTION_FIELDS"
+    assert outcome["resolution_fields_frozen"] is True
+    assert outcome["forward_rv_log_return"] is None
 
 
 def test_indexed_bar_selection_matches_frozen_time_filters():
