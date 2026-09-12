@@ -140,6 +140,22 @@ def test_eligible_target_rows_never_invent_missing_outcomes() -> None:
     assert eligible[0]["universal_target_value"] == pytest.approx(0.2)
 
 
+def test_terminal_resolution_supports_return_without_inventing_path_targets() -> None:
+    outcome = {
+        "available": True,
+        "terminal_complete": True,
+        "path_complete": False,
+        "t0_local_sigma_h": 0.01,
+        "terminal_log_return": 0.003,
+        "mfe_sigma": 1.4,
+    }
+    specs = {spec.target_id: spec for spec in universal_target_specs(())}
+    row = {"universal_outcome": outcome}
+    assert target_value(row, specs["RETURN_SIGMA"]) == pytest.approx(0.3)
+    assert target_value(row, specs["MFE_SIGMA"]) is None
+    assert target_value(row, specs["FORWARD_VOL_RATIO"]) is None
+
+
 def test_paired_significance_clusters_intraday_t0_and_cross_assets_into_days() -> None:
     spec = UniversalTargetSpec("RETURN_SIGMA", "RETURN", "CONTINUOUS", (),
                                ("mae", "rmse"))
@@ -219,4 +235,3 @@ def test_direction_target_fallback_to_causal_resolution() -> None:
         },
     }
     assert target_value(row_complete, spec) == "UP"
-

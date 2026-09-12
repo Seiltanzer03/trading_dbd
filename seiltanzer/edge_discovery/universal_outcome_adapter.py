@@ -2,7 +2,8 @@
 
 No new market data is invented here. Historical outcomes use the immutable bar
 source already consumed by the historical walk-forward. Prospective outcomes use
-only bars recorded in SQLite no later than the existing resolution timestamp.
+bars recorded no later than resolution, with a bounded fallback to the terminal,
+MFE and MAE values already frozen inside the immutable G1S resolution.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from typing import Any
 from .universal_outcomes import resolve_universal_market_outcome
 
 
-UNIVERSAL_OUTCOME_ADAPTER_VERSION = "g1s-universal-outcome-adapter-v1"
+UNIVERSAL_OUTCOME_ADAPTER_VERSION = "g1s-universal-outcome-adapter-v2"
 
 
 def resolve_historical_universal_outcome(
@@ -94,18 +95,14 @@ class ProspectiveUniversalOutcomeAdapter:
     def _resolution_context(self, observation_id: str) -> dict[str, Any]:
         with self.runtime._lock:
             row = self.runtime._conn.execute(
-                "SELECT g.market_price,r.resolved_ts,r.path_quality_status "
+                "SELECT g.market_price,r.* "
                 "FROM g1s_observations g LEFT JOIN g1s_resolutions r USING(observation_id) "
                 "WHERE g.observation_id=?",
                 (str(observation_id),),
             ).fetchone()
         if row is None:
             return {}
-        return {
-            "market_price": float(row["market_price"]),
-            "resolved_ts": (float(row["resolved_ts"]) if row["resolved_ts"] is not None else None),
-            "path_quality_status": row["path_quality_status"],
-        }
+        return dict(row)
 
     def _bars_for(self, row: dict[str, Any], resolved_ts: float | None) -> list[dict[str, Any]]:
         t0 = float(row["captured_ts"])
@@ -155,8 +152,52 @@ class ProspectiveUniversalOutcomeAdapter:
                 bars=bars,
                 path_complete=path_complete,
             )
+            # Older prospective rows often retain the immutable G1S resolution
+            # but not every source bar needed to reconstruct the same outcome.
+            # Reuse only fields frozen in that resolution; never infer a path.
+            terminal = context.get("terminal_log_return")
+            try:
+                terminal = float(terminal) if terminal is not None else None
+            except (TypeError, ValueError):
+                terminal = None
+            sigma_h = result.get("t0_local_sigma_h")
+            if terminal is not None and sigma_h is not None and float(sigma_h) > 0.0:
+                resolution_path_complete = path_quality == "complete"
+                mfe = context.get("mfe_log_return")
+                mae = context.get("mae_log_return")
+                try:
+                    mfe = float(mfe) if mfe is not None else None
+                except (TypeError, ValueError):
+                    mfe = None
+                try:
+                    mae = float(mae) if mae is not None else None
+                except (TypeError, ValueError):
+                    mae = None
+                result.update({
+                    "available": True,
+                    "reason": None,
+                    "terminal_complete": True,
+                    "terminal_log_return": terminal,
+                    "direction_label": context.get("direction_label"),
+                    "path_complete": bool(result.get("path_complete")),
+                    "resolution_path_complete": resolution_path_complete,
+                    "mfe_log_return": mfe if resolution_path_complete else None,
+                    "mae_log_return": mae if resolution_path_complete else None,
+                    "mfe_sigma": (
+                        mfe / float(sigma_h)
+                        if resolution_path_complete and mfe is not None else None
+                    ),
+                    "mae_sigma": (
+                        mae / float(sigma_h)
+                        if resolution_path_complete and mae is not None else None
+                    ),
+                    "evidence_source": "IMMUTABLE_G1S_RESOLUTION_FIELDS",
+                    "resolution_fields_frozen": True,
+                })
+                if not reaches_target:
+                    result["forward_rv_log_return"] = None
             result["adapter_version"] = UNIVERSAL_OUTCOME_ADAPTER_VERSION
-            result["evidence_source"] = "RECORDED_PROSPECTIVE_OHLC_AT_RESOLUTION"
+            result.setdefault("evidence_source", "RECORDED_PROSPECTIVE_OHLC_AT_RESOLUTION")
             result["source_path_quality_status"] = context.get("path_quality_status")
             result["retained_path_reaches_target"] = reaches_target
             result["bars_created_no_later_than_resolution"] = True

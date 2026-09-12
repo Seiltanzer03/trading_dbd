@@ -89,22 +89,32 @@ def target_value(row: dict[str, Any], spec: UniversalTargetSpec) -> float | str 
         dir_label = str(row.get("direction_label") or outcome.get("direction_label") or "")
         return dir_label if dir_label in {"UP", "DOWN"} else None
 
-    if not bool(outcome.get("available")) or not bool(outcome.get("path_complete")):
+    if not bool(outcome.get("available")):
         return None
     sigma = _finite(outcome.get("t0_local_sigma_h"))
     if sigma is None or sigma <= 0.0:
         return None
     if spec.target_id == "RETURN_SIGMA":
+        if not bool(outcome.get("terminal_complete") or outcome.get("path_complete")):
+            return None
         value = _finite(outcome.get("terminal_log_return"))
         return None if value is None else value/sigma
     if spec.target_id == "MFE_SIGMA":
+        if not bool(outcome.get("path_complete") or outcome.get("resolution_path_complete")):
+            return None
         return _finite(outcome.get("mfe_sigma"))
     if spec.target_id == "MAE_SIGMA":
+        if not bool(outcome.get("path_complete") or outcome.get("resolution_path_complete")):
+            return None
         return _finite(outcome.get("mae_sigma"))
     if spec.target_id == "FORWARD_VOL_RATIO":
+        if not bool(outcome.get("path_complete")):
+            return None
         value = _finite(outcome.get("forward_rv_log_return"))
         return None if value is None else value/sigma
     if spec.target_id.startswith("FIRST_TOUCH:"):
+        if not bool(outcome.get("path_complete")):
+            return None
         barrier_id = spec.target_id.split(":", 1)[1]
         barrier = (outcome.get("barriers") or {}).get(barrier_id) or {}
         if not bool(barrier.get("clean_label")):
