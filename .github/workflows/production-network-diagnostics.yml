@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: d8f01d9fdd33ae3706c93f54d2053d032efda2c4
+          ref: agent/offhost-headroom-recovery
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -71,6 +71,17 @@ jobs:
         run: |
           slot="$(( $(date -u +%s) / 86400 % 7 ))"
           python scripts/upload_verified_snapshot.py --database "${{ runner.temp }}/source.sqlite3" --source-manifest "${{ runner.temp }}/source.sqlite3.manifest.json" --bucket trading-dbd-backups-2026 --key "backups/v1/daily-slot-${slot}/snapshot.sqlite3.gz" --output-manifest "${{ runner.temp }}/offhost-manifest.json"
+      - name: Full cloud restore drill and read-only hypothesis evaluation
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+          EXPECTED_SHA: d8f01d9fdd33ae3706c93f54d2053d032efda2c4
+        run: |
+          rm -- "${{ runner.temp }}/source.sqlite3"
+          export BACKUP_KEY="$(python -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/offhost-manifest.json"))["object_key"])')"
+          python scripts/verify_cloud_backup_research.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -78,4 +89,5 @@ jobs:
           path: |
             ${{ runner.temp }}/source.sqlite3.manifest.json
             ${{ runner.temp }}/offhost-manifest.json
+            ${{ runner.temp }}/verified-research.json
           retention-days: 30
