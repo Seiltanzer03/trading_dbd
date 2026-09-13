@@ -436,6 +436,8 @@ class ProspectiveFeatureAdapter:
                     _finite(source.get("terminal_log_return")) if outcome_available else None),
                 "mfe_log_return": _finite(source.get("mfe_log_return")) if outcome_available else None,
                 "mae_log_return": _finite(source.get("mae_log_return")) if outcome_available else None,
+                "path_quality_status": (
+                    source.get("path_quality_status") if outcome_available else None),
                 "outcome_available": outcome_available,
                 "outcome_available_asof": self.available_asof,
                 "features": {
