@@ -18,6 +18,7 @@ import time
 from typing import Any, Callable
 
 from . import llm_edge_evaluator as _evaluator
+from . import llm_edge_exploratory as _exploratory
 from . import llm_edge_lifecycle as _lifecycle
 from . import llm_edge_prospective_evaluation as _prospective
 from . import llm_edge_researcher as _researcher
@@ -833,9 +834,22 @@ def llm_edge_research_tick(engine: Any, *, now: float | None = None) -> dict[str
                     materialize_lifecycle(engine, now=current)
             except Exception:
                 pass
+    exploratory = {"status": "UNAVAILABLE"}
+    runtime = getattr(engine, "short_horizon", None)
+    if runtime is not None:
+        try:
+            exploratory = _exploratory.refresh_if_due(runtime, now=current)
+            if exploratory.get("status") == "OK":
+                materialize_lifecycle(engine, now=current)
+        except Exception as exc:
+            exploratory = {
+                "status": "ERROR",
+                "reason": f"{type(exc).__name__}: {str(exc)[:240]}",
+            }
     return {
         **base,
         "automation": automatic,
+        "exploratory": exploratory,
         "pr_c_contract_version": PR_C_CONTRACT_VERSION,
         "research_order": [
             "PROSPECTIVE_OUTCOMES",
@@ -843,6 +857,7 @@ def llm_edge_research_tick(engine: Any, *, now: float | None = None) -> dict[str
             "EXISTING_DISCOVERY_FREEZE",
             "NEW_T0_OPPORTUNITIES",
             "AUTOMATIC_LLM_PROPOSAL_LAST",
+            "ROLLING_EXPLORATORY_VERDICTS",
         ],
     }
 
