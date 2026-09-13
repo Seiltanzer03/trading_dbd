@@ -138,6 +138,8 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
     if runtime is None:
         return {"status": "UNAVAILABLE", "reason": "G1S_RUNTIME_UNAVAILABLE"}
     initialize_journal_storage(runtime)
+    from .llm_edge_exploratory import ensure_tables as ensure_exploratory_tables
+    ensure_exploratory_tables(runtime)
     registry = registry_for_engine(engine)
     candidates = llm_candidate_states(registry)
     promotions = active_promotions(engine)
@@ -164,7 +166,9 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
                 SELECT h.hypothesis_id, h.name, h.target_id, h.target_family,
                        h.horizon_minutes, h.conditions_json, h.status,
                        h.evaluation_state, h.created_ts,
-                       e.evaluation_cutoff_ts, e.result_json
+                       e.evaluation_cutoff_ts, e.result_json,
+                       x.evaluated_asof_ts AS exploratory_evaluated_asof_ts,
+                       x.result_json AS exploratory_result_json
                 FROM llm_edge_hypotheses h
                 LEFT JOIN llm_edge_evaluations e ON e.evaluation_id = (
                     SELECT e2.evaluation_id
@@ -173,11 +177,16 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
                     ORDER BY e2.created_ts DESC, e2.evaluation_id DESC
                     LIMIT 1
                 )
+                LEFT JOIN llm_edge_exploratory_evaluations x
+                  ON x.hypothesis_id = h.hypothesis_id
                 ORDER BY h.created_ts DESC
-                LIMIT 30
+                LIMIT 200
             """).fetchall()
         except Exception:
             recent_rows = []
+        exploratory_rows = runtime._conn.execute(
+            "SELECT result_json FROM llm_edge_exploratory_evaluations"
+        ).fetchall()
 
     discovery = rejected = 0
     for raw in evaluations:
@@ -199,6 +208,12 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
         if row.get("result_json"):
             try:
                 eval_result = json.loads(str(row["result_json"]))
+            except Exception:
+                pass
+        exploratory_result = None
+        if row.get("exploratory_result_json"):
+            try:
+                exploratory_result = json.loads(str(row["exploratory_result_json"]))
             except Exception:
                 pass
 
@@ -243,6 +258,7 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
                 "fold_count": (eval_result or {}).get("fold_count"),
                 "evaluation_cutoff_ts": row.get("evaluation_cutoff_ts"),
             },
+            "exploratory_verdict": exploratory_result,
         })
 
     statuses = [str(item.get("state") or "") for item in details]
@@ -252,6 +268,12 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
         and float((item.get("prospective") or {})["q"]) <= 0.10
     )
     pending_hypotheses = max(0, hypotheses - len(evaluations))
+    exploratory_statuses = []
+    for raw in exploratory_rows:
+        try:
+            exploratory_statuses.append(str(json.loads(str(raw[0])).get("status") or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
     payload = {
         "contract_version": LIFECYCLE_CONTRACT_VERSION,
         "status": "OK" if researcher_enabled() else "DISABLED",
@@ -272,6 +294,11 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
             "active_edge": len(promotions),
             "strict_reference": strict_reference,
             "rejected": rejected,
+            "early_evaluated": sum(bool(code) for code in exploratory_statuses),
+            "early_advantage": exploratory_statuses.count("EARLY_ADVANTAGE"),
+            "early_disadvantage": exploratory_statuses.count("EARLY_DISADVANTAGE"),
+            "early_mixed": exploratory_statuses.count("EARLY_MIXED"),
+            "early_undecided": exploratory_statuses.count("EARLY_UNDECIDED"),
         },
         "prospective_journal": {
             "opportunities_total": int(journal["total_n"] or 0),

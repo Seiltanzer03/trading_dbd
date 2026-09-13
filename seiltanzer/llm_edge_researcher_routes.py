@@ -12,6 +12,10 @@ from .llm_edge_evaluator import (
     evaluate_pending_edge_research_runs,
     pending_edge_research_summary,
 )
+from .llm_edge_exploratory import (
+    ensure_tables as ensure_exploratory_tables,
+    evaluate_all as evaluate_all_exploratory,
+)
 from .llm_edge_lifecycle import (
     read_cached_materialized_lifecycle,
     read_cached_materialized_lifecycle_json,
@@ -34,6 +38,7 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
 
     # Startup-only additive DDL. GET endpoints below remain materialized reads.
     initialize_journal_storage(runtime)
+    ensure_exploratory_tables(runtime)
 
     # PR C must be visible immediately after app startup instead of waiting for
     # the low-priority research worker.  The startup upgrader preserves the
@@ -50,12 +55,33 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
         "last_result": None,
         "last_error": None,
     }
+    explore_lock = threading.Lock()
+    explore_state = {
+        "running": False,
+        "started_ts": None,
+        "finished_ts": None,
+        "last_result": None,
+        "last_error": None,
+    }
 
     def status():
+        cached = read_cached_materialized_lifecycle(runtime)
+        summary = cached.get("researcher") or {}
         return {
             **edge_researcher_status(runtime),
             "deterministic_evaluator": edge_evaluator_status(runtime),
             "evaluator_job": dict(eval_state),
+            "exploratory": {
+                "status": cached.get("status", "INITIALIZING"),
+                "evaluated_n": int(summary.get("early_evaluated") or 0),
+                "advantage_n": int(summary.get("early_advantage") or 0),
+                "disadvantage_n": int(summary.get("early_disadvantage") or 0),
+                "mixed_n": int(summary.get("early_mixed") or 0),
+                "undecided_n": int(summary.get("early_undecided") or 0),
+                "production_authority": False,
+                "position_manager_weight": 0.0,
+            },
+            "exploratory_job": dict(explore_state),
         }
 
     app.add_api_route(
@@ -183,6 +209,60 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
         evaluate_status,
         methods=["GET"],
         name="g1s_llm_edge_researcher_evaluate_status",
+    )
+
+    def _execute_exploratory(max_hypotheses: int):
+        try:
+            result = evaluate_all_exploratory(
+                runtime, max_hypotheses=max_hypotheses)
+            with explore_lock:
+                explore_state["last_result"] = result
+            engine = getattr(app.state, "engine", None)
+            if engine is not None:
+                from .llm_edge_lifecycle import materialize_lifecycle
+                materialize_lifecycle(engine)
+        except Exception as exc:
+            with explore_lock:
+                explore_state["last_error"] = f"{type(exc).__name__}: {str(exc)}"
+            logger.exception("Exploratory verdict background worker failed")
+        finally:
+            with explore_lock:
+                explore_state["finished_ts"] = time.time()
+                explore_state["running"] = False
+            try:
+                trim_memory_for_pressure()
+            except Exception:
+                pass
+
+    def explore(max_hypotheses: int = 200):
+        max_hypotheses = max(1, min(int(max_hypotheses), 500))
+        with explore_lock:
+            if explore_state["running"]:
+                return {
+                    "status": "ALREADY_RUNNING",
+                    "started_ts": explore_state["started_ts"],
+                }
+            explore_state["running"] = True
+            explore_state["started_ts"] = time.time()
+            explore_state["last_error"] = None
+        worker_thread = threading.Thread(
+            target=_execute_exploratory,
+            args=(max_hypotheses,),
+            daemon=True,
+            name="edge-research-exploratory",
+        )
+        worker_thread.start()
+        return {
+            "status": "ACCEPTED",
+            "max_hypotheses": max_hypotheses,
+            "production_authority": False,
+        }
+
+    app.add_api_route(
+        "/api/research/g1s/edge-researcher/explore",
+        explore,
+        methods=["POST"],
+        name="g1s_llm_edge_researcher_explore",
     )
 
     install_ml_research_broadcast(app)

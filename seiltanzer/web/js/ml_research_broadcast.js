@@ -44,6 +44,7 @@ function renderSummary(payload) {
   const data = payload.researcher_summary || {};
   const rows = [
     ['PROPOSAL RUNS', data.proposal_runs], ['HYPOTHESES', data.hypotheses],
+    ['EARLY VERDICTS', data.early_evaluated], ['EARLY ADVANTAGE', data.early_advantage],
     ['DISCOVERY', data.discovery_signals], ['LIVE OOS', data.collecting],
     ['VALIDATED', data.validated], ['FAILED LIVE', data.failed_live],
     ['RESEARCH REJECTED', data.rejected_research], ['ACTIVE EDGE', data.active_edge],
@@ -73,7 +74,7 @@ function renderHypotheses(payload) {
   }
 
   if (research.length > 0) {
-    html += '<div style="grid-column:1/-1;margin:12px 0 4px;font-size:11px;color:var(--amber);letter-spacing:0.08em;font-weight:bold;">● ИССЛЕДУЕМЫЕ ГИПОТЕЗЫ (DETERMINISTIC WALK-FORWARD CV)</div>';
+    html += '<div style="grid-column:1/-1;margin:12px 0 4px;font-size:11px;color:var(--amber);letter-spacing:0.08em;font-weight:bold;">● ИССЛЕДУЕМЫЕ ГИПОТЕЗЫ (БЫСТРЫЙ ROLLING + СТРОГИЙ WALK-FORWARD)</div>';
     html += research.map((item) => {
       const conditions = (item.conditions || []).map((row) => {
         const feat = row.feature_id || 'N/A';
@@ -83,8 +84,21 @@ function renderHypotheses(payload) {
       const isPending = item.stage?.code === 'PENDING_DETERMINISTIC_EVALUATION';
       const isDiscovery = item.stage?.code === 'DISCOVERY_SIGNAL';
       const isInsufficient = item.stage?.code === 'INSUFFICIENT_DATA';
+      const early = item.exploratory_verdict || null;
+      const earlyCode = early?.status || '';
+      const earlyBadge = earlyCode === 'EARLY_ADVANTAGE'
+        ? '<span class="status good">РАННИЙ ПЕРЕВЕС</span>'
+        : earlyCode === 'EARLY_DISADVANTAGE'
+        ? '<span class="status bad">РАННИЙ АНТИ-СИГНАЛ</span>'
+        : earlyCode === 'EARLY_MIXED'
+        ? '<span class="status working">СМЕШАННЫЙ РЕЗУЛЬТАТ</span>'
+        : earlyCode === 'EARLY_UNDECIDED'
+        ? '<span class="status muted">ПОКА НЕТ ВЕРДИКТА</span>'
+        : '';
       const stageBadge = isDiscovery
         ? '<span class="status good">СТАТИСТИЧЕСКИЙ ПЕРЕВЕС</span>'
+        : earlyBadge
+        ? earlyBadge
         : isPending
         ? '<span class="status working">В ОЧЕРЕДИ НА ОЦЕНКУ</span>'
         : isInsufficient
@@ -107,6 +121,19 @@ function renderHypotheses(payload) {
             <div><span>СТАБИЛЬНЫХ ФОЛДОВ</span><b>${value(item.folds_stable)}</b></div>
           </div>`;
 
+      const earlyMetrics = early
+        ? `<div class="evidence">
+            <div><span>РАННИЙ EFFECT</span><b>${pct(early.primary_improvement)}</b></div>
+            <div><span>СОВПАЛО В TEST</span><b>${value(early.selected_test_n)}</b></div>
+            <div><span>ФОЛДОВ</span><b>${value(early.evaluated_fold_count)}</b></div>
+            <div><span>УВЕРЕННОСТЬ</span><b>${esc(early.confidence || 'NONE')}</b></div>
+          </div><div class="honesty-note" style="margin-top:6px;font-size:10px;padding:6px;border-left-color:var(--cyan);">
+            Быстрый rolling-вердикт по всем доступным историческим данным; q=${value(early.q_value)}.
+            Он обновляется при новых исходах, имеет вес 0 в Position Manager и не является торговой командой.
+            ${early.reason ? `(${esc(early.reason)}).` : ''}
+          </div>`
+        : '';
+
       const rejected = (item.rejection_reason && !isDiscovery && !isPending && !isInsufficient)
         ? `<div class="rejection">ПРИЧИНА ОТСЕВА: ${esc(item.rejection_reason)}</div>`
         : '';
@@ -120,6 +147,7 @@ function renderHypotheses(payload) {
           ${stageBadge}
         </div>
         <div class="conditions">${conditions || '<span class="condition">CONDITIONS N/A</span>'}</div>
+        ${earlyMetrics}
         ${metrics}
         ${rejected}
       </article>`;
@@ -183,6 +211,7 @@ function renderEdeBreakthrough(payload) {
   node.innerHTML = `<div class="ede-stats-grid">
     <div class="ede-stat"><span>АКТИВНЫХ ПАР</span><b>${pairs}</b></div>
     <div class="ede-stat"><span>СЕМЕЙСТВ</span><b>${value(ede.families_count || 10)}</b></div>
+    <div class="ede-stat"><span>УСЛОВИЙ В ГИПОТЕЗЕ</span><b>ДО ${value(ede.max_conditions_per_hypothesis || 3)}</b></div>
     <div class="ede-stat"><span>DISCOVERY СИГНАЛЫ</span><b>${value(ede.discovery_signals)}</b></div>
   </div><div>
     <span class="muted" style="font-size:10px">СЕМЕЙСТВА ВЗАИМОДЕЙСТВИЙ:</span>
@@ -228,6 +257,13 @@ if (triggerBtn) {
         body: JSON.stringify({ background: true, max_runs: 20 })
       });
       const dataEval = await resEval.json();
+
+      // 3. Immediately rescore all existing hypotheses with the rolling,
+      // low-confidence historical verdict. This does not call the LLM.
+      triggerBtn.textContent = 'БЫСТРЫЙ ВЕРДИКТ...';
+      await fetch('/api/research/g1s/edge-researcher/explore?max_hypotheses=200', {
+        method: 'POST'
+      });
 
       triggerBtn.textContent = 'ПЕРЕБОР В ФОНЕ!';
       setTimeout(() => {

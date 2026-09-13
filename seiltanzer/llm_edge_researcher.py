@@ -24,12 +24,12 @@ from .edge_discovery.universal_templates import universal_feature_definitions
 from .g1_short_horizon_p2e_segmented_persistence import ASSET_FAMILY_BY_INSTRUMENT, session_utc
 
 CONTRACT_VERSION = "llm-edge-researcher-v1"
-PROMPT_VERSION = "llm-edge-hypothesis-proposal-v2-evidence-ready"
+PROMPT_VERSION = "llm-edge-hypothesis-proposal-v3-rolling-exploratory"
 DEFAULT_MODEL = "openai/gpt-4o-mini"
 DEFAULT_TIMEOUT_SEC = 10.0
 MAX_OUTPUT_TOKENS = 2048
 MAX_HYPOTHESES = 8
-MAX_CONDITIONS = 2
+MAX_CONDITIONS = 3
 
 TARGET_FAMILY_BY_ID = {
     "DIRECTION": "DIRECTION",
@@ -42,16 +42,13 @@ TARGET_FAMILY_BY_ID = {
     "FIRST_TOUCH:up_0p5s_down_1s": "FIRST_TOUCH",
     "FIRST_TOUCH:up_1s_down_1s": "FIRST_TOUCH",
 }
-# The production evidence currently preserves clean terminal outcomes, while
-# path-dependent targets require a full authoritative 1m path.  Yahoo bars are
-# useful context but are explicitly non-authoritative, and the five-day bar
-# retention cannot support the frozen multi-fold history.  Keep those target
-# definitions registered for a future evidence upgrade, but do not ask the LLM
-# to propose hypotheses the deterministic evaluator cannot honestly score.
-ALLOWED_TARGET_IDS = ("DIRECTION", "RETURN_SIGMA")
+# All registered targets can now receive a clearly labelled rolling exploratory
+# verdict from the accumulated frozen outcomes.  The immutable strict evaluator
+# still rejects path evidence that is not authoritative enough for promotion.
+ALLOWED_TARGET_IDS = tuple(TARGET_FAMILY_BY_ID)
 
 SYSTEM_PROMPT = """Ты research-only генератор проверяемых гипотез для Edge Discovery Engine.
-Тебе передан только причинный T0 snapshot без будущих исходов. Предлагай 1-2 взаимодополняющих условия (комбинация драйвера и режима рынка или контекста подтверждения),
+Тебе передан только причинный T0 snapshot без будущих исходов. Предлагай 1-3 взаимодополняющих условия (комбинация драйвера, режима рынка и контекста подтверждения),
 используя ТОЛЬКО allowed feature IDs, condition kinds/states и allowed feature pairs.
 Числовые пороги не придумывай: numeric condition всегда train_relative +
 ABOVE_MEDIAN/BELOW_MEDIAN, а порог позже фитится детерминированно только на train-cut.

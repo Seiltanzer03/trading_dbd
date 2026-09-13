@@ -312,6 +312,10 @@ LAST_GOOD_CACHE → MATHEMATICAL_PROXY. Используй fallback только
 soft-ranking только внутри hard-risk/CVaR eligible policies; EDE causal/prospective
 shadow сам по себе не имеет production directional authority и не может вызвать
 CLOSE/EXIT.
+ROLLING_EXPLORATORY_VERDICTS — быстрые низкоуверенные гипотезы по накопленной
+истории. Их можно использовать только как слабый объяснительный контекст:
+position_manager_weight=0, production_authority=false, без самостоятельного
+BUY/SELL/HOLD/CLOSE и без изменения CVaR/stop/size.
 """
 _impl.SYSTEM_PROMPT = SYSTEM_PROMPT
 
@@ -413,14 +417,60 @@ def _compact_ede_shadow(engine, snapshot: dict) -> dict:
     }
 
 
+def _compact_exploratory_verdicts(engine) -> dict:
+    runtime = getattr(engine, "short_horizon", None)
+    if runtime is None:
+        return {"status": "UNAVAILABLE", "items": []}
+    try:
+        from .llm_edge_lifecycle import read_cached_materialized_lifecycle
+        lifecycle = read_cached_materialized_lifecycle(runtime)
+    except Exception:
+        return {"status": "UNAVAILABLE", "items": []}
+    rows = []
+    for item in lifecycle.get("research_hypotheses") or []:
+        early = item.get("exploratory_verdict") or {}
+        if early.get("status") != "EARLY_ADVANTAGE":
+            continue
+        rows.append({
+            "hypothesis_id": item.get("hypothesis_id"),
+            "name": item.get("name"),
+            "target": item.get("target"),
+            "horizon_minutes": item.get("horizon_minutes"),
+            "conditions": (item.get("conditions") or [])[:3],
+            "confidence": early.get("confidence"),
+            "selected_test_n": early.get("selected_test_n"),
+            "evaluated_fold_count": early.get("evaluated_fold_count"),
+            "primary_improvement": early.get("primary_improvement"),
+            "q_value": early.get("q_value"),
+            "prediction_shift": early.get("prediction_shift"),
+            "evidence_quality": early.get("evidence_quality"),
+        })
+    rows.sort(key=lambda row: (
+        row.get("confidence") == "LIMITED",
+        float(row.get("primary_improvement") or 0.0),
+    ), reverse=True)
+    return {
+        "contract_version": "ai-rolling-exploratory-context-v1",
+        "status": "AVAILABLE" if rows else "NO_EARLY_ADVANTAGE",
+        "items": rows[:8],
+        "total_early_advantage": len(rows),
+        "rolling_result": True,
+        "production_authority": False,
+        "position_manager_weight": 0.0,
+        "may_trigger_exit_or_close": False,
+    }
+
+
 def build_snapshot(engine) -> dict:
     """V18 snapshot plus compact v1.3 prospective-shadow research evidence."""
     snapshot = _BASE_BUILD_SNAPSHOT_V18(engine)
     shadow = _compact_ede_shadow(engine, snapshot)
+    exploratory = _compact_exploratory_verdicts(engine)
     context = snapshot.get("ede_causal_context")
     if isinstance(context, dict):
         _normalize_ede_maturity_language(context)
         context["prospective_shadow"] = shadow
+        context["rolling_exploratory_verdicts"] = exploratory
         lines = context.get("context_lines_ru")
         selected = shadow.get("selected_candidate") or {}
         if isinstance(lines, list) and selected:
@@ -430,6 +480,7 @@ def build_snapshot(engine) -> dict:
                 "это research evidence без trading authority.")
     else:
         snapshot["ede_prospective_shadow"] = shadow
+        snapshot["ede_rolling_exploratory_verdicts"] = exploratory
     _impl._enforce_snapshot_budget(snapshot)
     return snapshot
 
