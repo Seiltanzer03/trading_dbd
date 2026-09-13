@@ -16,7 +16,7 @@ from types import ModuleType
 from typing import Any
 
 
-CONTRACT_VERSION = "active-edge-policy-weight-v2"
+CONTRACT_VERSION = "active-edge-policy-weight-v3"
 MAX_EDGE_WEIGHT = 0.40
 HIGH_RISK_ONLY_CAP = 0.30
 SOFT_DECISION_SCALE_FLOOR_R = 0.12
@@ -241,7 +241,17 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
         )
         choice, rule = original_raw(adjusted, r0, cvar_floor=cvar_floor)
         rule = dict(rule or {})
-        rule["active_edge_provisional_weight"] = audit
+        rule["combined_edge_soft_weight"] = audit
+        if float(profile.get("exploratory_component_weight") or 0.0) > 0.0:
+            rule["llm_edge_exploratory_weight"] = {
+                "applied": bool(audit.get("applied")),
+                "component_weight_fraction": profile.get("exploratory_component_weight"),
+                "combined_weight_fraction": audit.get("weight_fraction"),
+                "direction_score": profile.get("direction_score"),
+                "preferred_close_fraction": profile.get("preferred_close_fraction"),
+                "hard_risk_modified": False,
+                "cvar_modified": False,
+            }
         return choice, rule
 
     for module in _module_chain(policy_module):
@@ -254,7 +264,17 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
         previous_evidence: dict | None = None,
     ):
         context = _active_context(engine, tick, trade)
-        profile = edge_weight_profile(context)
+        active_profile = edge_weight_profile(context)
+        from . import active_edge_ai_integration as integration
+        from .llm_edge_exploratory_policy_weight import (
+            combine_weight_profiles,
+            exploratory_weight_profile,
+        )
+        snapshot = _strategy_snapshot(engine, tick, trade) or {}
+        exploratory_profile = exploratory_weight_profile(
+            engine, snapshot, integration)
+        profile = combine_weight_profiles(
+            active_profile, exploratory_profile, absolute_cap=MAX_EDGE_WEIGHT)
         token = _PROFILE_CTX.set(profile)
         try:
             result = original_analyze(
@@ -266,11 +286,21 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
             _PROFILE_CTX.reset(token)
 
         result["active_edge_provisional_weight"] = {
-            **profile,
+            **active_profile,
             "production_role": "BOUNDED_SOFT_POLICY_RANKING",
             "hard_risk_override": False,
             "may_override_cvar_floor": False,
             "may_widen_stop": False,
+            "automatic_execution_source": False,
+        }
+        result["llm_edge_exploratory_weight"] = exploratory_profile
+        result["combined_edge_soft_weight"] = {
+            **profile,
+            "production_role": "BOUNDED_COMBINED_SOFT_POLICY_RANKING",
+            "hard_risk_override": False,
+            "may_override_cvar_floor": False,
+            "may_widen_stop": False,
+            "may_increase_position": False,
             "automatic_execution_source": False,
         }
         phase = result.get("phase_e_authority_contract")
@@ -278,8 +308,12 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
             phase["active_edge_soft_weight"] = (
                 "provisional historical-OOS weight, bounded to 40%, inside hard-risk eligible set"
             )
+            if exploratory_profile.get("available"):
+                phase["exploratory_edge_soft_weight"] = (
+                    "rolling LIMITED evidence, bounded to 15%, inside hard-risk eligible set"
+                )
             phase["production_recommendation_source"] = (
-                "authoritative policy path + bounded active-edge soft ranking"
+                "authoritative policy path + bounded active/rolling-edge soft ranking"
             )
         return result
 

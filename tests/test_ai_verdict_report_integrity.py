@@ -116,6 +116,20 @@ def _snapshot() -> dict:
                 "may_widen_stop": False,
                 "automatic_execution_source": False,
             },
+            "llm_edge_exploratory_weight": {
+                "contract_version": "llm-edge-exploratory-policy-weight-v1",
+                "available": True,
+                "weight_fraction": 0.15,
+                "max_weight_fraction": 0.15,
+                "direction_score": -1.0,
+                "preferred_close_fraction": 1.0,
+                "matched_limited_hypothesis_n": 3,
+                "production_role": "BOUNDED_EARLY_SOFT_POLICY_RANKING",
+                "hard_risk_override": False,
+                "may_override_cvar_floor": False,
+                "may_widen_stop": False,
+                "automatic_execution_source": False,
+            },
         },
     }
 
@@ -138,6 +152,8 @@ def test_report_facts_survive_byte_compaction():
     assert manager["evidence"]["option_barrier"]["p_take"] == 0.58
     assert manager["active_edge_provisional_weight"]["weight_fraction"] == 0.37
     assert manager["active_edge_provisional_weight"]["production_role"] == "BOUNDED_SOFT_POLICY_RANKING"
+    assert manager["llm_edge_exploratory_weight"]["weight_fraction"] == 0.15
+    assert manager["llm_edge_exploratory_weight"]["hard_risk_override"] is False
     assert manager["policies"]["HOLD"]["p_final_loss"] == 0.36
     assert "debug_blob" not in manager["raw_optimizer_stability"]
     assert "debug_blob" not in manager["scenario_geometry"]
@@ -161,6 +177,7 @@ def test_prompt_forbids_missing_equals_zero_and_separates_edge_authority():
     normalized = " ".join(ai_verdict.SYSTEM_PROMPT.split())
     assert "missing/unavailable != 0" in normalized
     assert "active_edge_provisional_weight" in normalized
+    assert "до 15%" in normalized
     assert "EDE causal/prospective shadow" in normalized
     assert "execution-MC" in normalized
     assert "PRIMARY → FALLBACK_SOURCE → LAST_GOOD_CACHE → MATHEMATICAL_PROXY" in normalized

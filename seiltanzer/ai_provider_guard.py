@@ -217,6 +217,10 @@ def _minimal_provider_projection(snapshot: dict[str, Any], original_bytes: int) 
         "management_arbiter": _bounded(manager.get("management_arbiter") or {}),
         "cancellation_boundary": _bounded(manager.get("cancellation_boundary") or {}),
         "counterfactual_attribution": _bounded(manager.get("counterfactual_attribution") or {}),
+        "llm_edge_exploratory_weight": _bounded(
+            manager.get("llm_edge_exploratory_weight") or {}),
+        "combined_edge_soft_weight": _bounded(
+            manager.get("combined_edge_soft_weight") or {}),
     }
 
     exact_levels = observation.get("exact_levels") or {}
@@ -237,6 +241,10 @@ def _minimal_provider_projection(snapshot: dict[str, Any], original_bytes: int) 
             snapshot.get("position_management_risk_long") or {}),
         "active_edge_provisional_weight": _bounded(
             snapshot.get("active_edge_provisional_weight") or {}),
+        "llm_edge_exploratory_weight": _bounded(
+            manager.get("llm_edge_exploratory_weight") or {}),
+        "combined_edge_soft_weight": _bounded(
+            manager.get("combined_edge_soft_weight") or {}),
         "active_edge": _bounded(snapshot.get("active_edge") or {}),
         "policy_manager": compact_manager,
         "ede_causal_context": _compact_ede(snapshot.get("ede_causal_context")),
@@ -352,6 +360,8 @@ def compact_provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         "calibration_contract", "derivative_switch_thresholds", "shadow_policy_contract",
         "phase_e_authority_contract", "decision_inputs", "decision_influence",
         "influence_report", "option_derivative_state",
+        "active_edge_provisional_weight", "llm_edge_exploratory_weight",
+        "combined_edge_soft_weight",
     )
     compact_manager = _pick(manager, manager_fields)
     compact_manager["policies"] = _compact_policies(manager.get("policies"))
@@ -363,6 +373,7 @@ def compact_provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         "captured_ts", "trade_id", "strategy", "position_state", "trade_geometry",
         "time_context", "observation", "metric_coverage", "validation",
         "position_management_risk_long", "active_edge_provisional_weight",
+        "llm_edge_exploratory_weight", "combined_edge_soft_weight",
         "active_edge", "active_edge_context", "short_horizon_policy", "ai_review_mode",
     ))
     payload["policy_manager"] = compact_manager

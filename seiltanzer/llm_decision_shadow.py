@@ -122,6 +122,8 @@ def _shadow_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
         "metric_changes",
         "monte_carlo_validation",
         "active_edge_provisional_weight",
+        "llm_edge_exploratory_weight",
+        "combined_edge_soft_weight",
         "inputs",
         "input_audit",
         "management_model_scope",
@@ -382,6 +384,8 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
         "key_evidence": parsed["key_evidence"],
         "counter_evidence": parsed["counter_evidence"],
     }
+    from .llm_shadow_working_action import build_working_action
+    result["working_action"] = build_working_action(snapshot, result)
     record_shadow_decision(result)
     return result
 
@@ -456,8 +460,15 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
         lines.append("Ключевые аргументы LLM: " + " | ".join(shadow["key_evidence"]))
     if shadow.get("counter_evidence"):
         lines.append("Контраргументы LLM: " + " | ".join(shadow["counter_evidence"]))
-    lines.append(
-        "Это исследовательское сравнение. Оно не меняет management_decision, "
-        "не создаёт ордер и не расширяет execution authority."
-    )
+    action = shadow.get("working_action") or {}
+    if action.get("status") == "READY_FOR_MANUAL_CONFIRMATION":
+        lines.append("LLM ACTION VARIANT: " + str(action.get("instruction_ru") or policy) + ".")
+        lines.append(
+            "Это рабочий вариант только для ручного подтверждения: сервер сам ордер не создаёт."
+        )
+    else:
+        lines.append(
+            "Вариант не готов к действию: " + str(action.get("reason") or "PARAMETERS_UNAVAILABLE")
+            + ". Он не меняет management_decision и не создаёт ордер."
+        )
     return "\n".join(lines).strip()
