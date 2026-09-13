@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from seiltanzer.llm_edge_evaluator import _ensure_tables as ensure_evaluation_tables
 from seiltanzer.llm_edge_lifecycle import materialize_lifecycle
+from seiltanzer.llm_edge_exploratory import ensure_tables as ensure_exploratory_tables
 from seiltanzer.llm_edge_researcher import _ensure_tables as ensure_research_tables
 
 
@@ -26,6 +27,7 @@ def test_materialization_reports_cutoff_from_latest_evaluation(tmp_path, monkeyp
             observation_id TEXT PRIMARY KEY, resolved_ts REAL)""")
     ensure_research_tables(runtime)
     ensure_evaluation_tables(runtime)
+    ensure_exploratory_tables(runtime)
     with runtime._conn:
         runtime._conn.execute(
             """INSERT INTO llm_edge_hypotheses(
@@ -51,6 +53,19 @@ def test_materialization_reports_cutoff_from_latest_evaluation(tmp_path, monkeyp
                  json.dumps({"status": "INSUFFICIENT_DATA", "raw_rows": raw_rows,
                              "reason": "NO_ELIGIBLE_TARGET_ROWS"}), created),
             )
+        early = {
+            "status": "EARLY_ADVANTAGE", "confidence": "VERY_LOW",
+            "selected_test_n": 7, "primary_improvement": 0.04,
+            "production_authority": False, "position_manager_weight": 0.0,
+        }
+        runtime._conn.execute(
+            """INSERT INTO llm_edge_exploratory_evaluations(
+                hypothesis_id,run_id,evaluated_asof_ts,source_resolved_watermark,
+                dataset_sha256,contract_version,result_json,updated_ts
+            ) VALUES(?,?,?,?,?,?,?,?)""",
+            ("hyp-1", "run-1", 2500.0, 2000.0, "x" * 64, "test",
+             json.dumps(early), 2500.0),
+        )
 
     engine = SimpleNamespace(short_horizon=runtime, settings=SimpleNamespace(data_dir=tmp_path))
     payload = materialize_lifecycle(engine, now=3000.0)
@@ -58,3 +73,5 @@ def test_materialization_reports_cutoff_from_latest_evaluation(tmp_path, monkeyp
     assert len(payload["research_hypotheses"]) == 1
     assert hypothesis["evaluation_sample"]["evaluation_cutoff_ts"] == 2020.0
     assert hypothesis["evaluation_sample"]["raw_rows"] == 20
+    assert hypothesis["exploratory_verdict"]["status"] == "EARLY_ADVANTAGE"
+    assert payload["researcher"]["early_advantage"] == 1
