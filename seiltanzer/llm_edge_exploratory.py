@@ -282,7 +282,8 @@ def _evaluate_one(rows: list[dict[str, Any]], hypothesis: dict[str, Any],
             "research_only": True,
             "production_authority": False,
             "automatic_execution": False,
-            "position_manager_weight": 0.0,
+            "position_manager_weight_cap": 0.15,
+            "position_manager_weight_requires": "LIMITED_AND_CURRENT_T0_MATCH",
         }
     target_rows = exploratory_target_rows(horizon_rows, spec, path_metrics)
     template = _template(hypothesis)
@@ -314,7 +315,8 @@ def _evaluate_one(rows: list[dict[str, Any]], hypothesis: dict[str, Any],
         "research_only": True,
         "production_authority": False,
         "automatic_execution": False,
-        "position_manager_weight": 0.0,
+        "position_manager_weight_cap": 0.15,
+        "position_manager_weight_requires": "LIMITED_AND_CURRENT_T0_MATCH",
     }
     if not occurrences:
         return {**base, "status": "EARLY_UNDECIDED",
@@ -445,7 +447,8 @@ def evaluate_all(runtime: Any, *, now: float | None = None,
             "undecided_n": sum(item.get("status") == "EARLY_UNDECIDED" for item in results),
             "source_resolved_watermark": float(watermark or 0),
             "production_authority": False,
-            "position_manager_weight": 0.0,
+            "position_manager_weight_cap": 0.15,
+            "position_manager_weight_requires": "LIMITED_AND_CURRENT_T0_MATCH",
         }
 
 
@@ -499,5 +502,6 @@ def status(runtime: Any) -> dict[str, Any]:
         "rolling_result": True,
         "strict_gate_unchanged": True,
         "production_authority": False,
-        "position_manager_weight": 0.0,
+        "position_manager_weight_cap": 0.15,
+        "position_manager_weight_requires": "LIMITED_AND_CURRENT_T0_MATCH",
     }

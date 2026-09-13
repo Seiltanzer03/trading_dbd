@@ -79,7 +79,8 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
                 "mixed_n": int(summary.get("early_mixed") or 0),
                 "undecided_n": int(summary.get("early_undecided") or 0),
                 "production_authority": False,
-                "position_manager_weight": 0.0,
+                "position_manager_weight_cap": 0.15,
+                "position_manager_weight_requires": "LIMITED_AND_CURRENT_T0_MATCH",
             },
             "exploratory_job": dict(explore_state),
         }

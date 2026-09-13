@@ -129,7 +129,8 @@ function renderHypotheses(payload) {
             <div><span>УВЕРЕННОСТЬ</span><b>${esc(early.confidence || 'NONE')}</b></div>
           </div><div class="honesty-note" style="margin-top:6px;font-size:10px;padding:6px;border-left-color:var(--cyan);">
             Быстрый rolling-вердикт по всем доступным историческим данным; q=${value(early.q_value)}.
-            Он обновляется при новых исходах, имеет вес 0 в Position Manager и не является торговой командой.
+            Он обновляется при новых исходах. LIMITED + совпадение текущих T0-условий дают до 15% веса
+            в выборе HOLD / CLOSE 10% / 25% / 50% / EXIT; hard-risk/CVaR остаются обязательными.
             ${early.reason ? `(${esc(early.reason)}).` : ''}
           </div>`
         : '';
@@ -190,6 +191,10 @@ function renderDisagreement(payload) {
   const confidence = latest.confidence != null ? `${(Number(latest.confidence) * 100).toFixed(0)}%` : '—';
   const guard = latest.blocked_by_hard_guard ? 'BLOCKED by hard guard' : 'PASS hard-risk guard';
   const evidence = (latest.key_evidence || []).map((e) => `• ${esc(e)}`).join('<br>') || esc(latest.reason_ru || 'Без аргументов');
+  const working = latest.working_action || {};
+  const workingText = working.status === 'READY_FOR_MANUAL_CONFIRMATION'
+    ? `<br><br><strong>РУЧНОЙ ACTION VARIANT:</strong> ${esc(working.instruction_ru || working.policy || '—')}`
+    : `<br><br><strong>ACTION VARIANT НЕ ГОТОВ:</strong> ${esc(working.reason || 'нет проверенных параметров')}`;
 
   node.innerHTML = `${cat}<div class="disagreement-main">
     <div class="disagreement-party"><span>QUANT PRODUCTION</span><b>${quant}</b></div>
@@ -198,7 +203,7 @@ function renderDisagreement(payload) {
   </div><div class="disagreement-stats">
     <span>Уверенность: <strong>${confidence}</strong></span>
     <span>Ограничения: <strong>${guard}</strong></span>
-  </div><div class="disagreement-evidence">${evidence}</div>`;
+  </div><div class="disagreement-evidence">${evidence}${workingText}</div>`;
 }
 
 function renderEdeBreakthrough(payload) {

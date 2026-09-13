@@ -78,6 +78,18 @@ def _large_management_snapshot() -> dict:
                 "p_unresolved_full_horizon": 0.362,
                 "full_horizon_minutes": 240,
             },
+            "llm_edge_exploratory_weight": {
+                "available": True,
+                "weight_fraction": 0.15,
+                "max_weight_fraction": 0.15,
+                "direction_score": -0.6,
+                "preferred_close_fraction": 0.8,
+            },
+            "combined_edge_soft_weight": {
+                "available": True,
+                "weight_fraction": 0.15,
+                "direction_score": -0.6,
+            },
             # These are valid canonical research/debug surfaces but must never be
             # copied wholesale into the provider request.
             "derived_scenario_ensemble": {
@@ -127,6 +139,7 @@ def test_oversized_canonical_snapshot_is_projected_not_rejected():
     assert set(projected["policy_manager"]["policies"]) == {
         "HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"
     }
+    assert projected["policy_manager"]["llm_edge_exploratory_weight"]["weight_fraction"] == 0.15
     for name, row in projected["policy_manager"]["policies"].items():
         assert row["expected_final_r"] == original["policy_manager"]["policies"][name]["expected_final_r"]
         assert row["cvar10_r"] == original["policy_manager"]["policies"][name]["cvar10_r"]

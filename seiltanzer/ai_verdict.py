@@ -58,6 +58,17 @@ _ACTIVE_EDGE_KEYS = (
     "hard_risk_override", "may_override_cvar_floor", "may_widen_stop",
     "automatic_execution_source", "reason",
 )
+_EXPLORATORY_WEIGHT_KEYS = (
+    "contract_version", "available", "weight_fraction", "max_weight_fraction",
+    "direction_score", "agreement", "preferred_close_fraction",
+    "matched_limited_hypothesis_n", "matched_directional_advantage_n",
+    "matched_uncertainty_n", "very_low_ignored_n", "independent_bucket_n",
+    "basis", "rolling_result", "strict_gate_passed", "production_authority",
+    "production_role", "hard_risk_override", "may_override_cvar_floor",
+    "may_widen_stop", "may_increase_position", "automatic_execution_source",
+    "may_influence_policy_selection", "eligible_policies",
+    "reason",
+)
 _OPTION_BARRIER_KEYS = (
     "available", "p_take", "p_stop", "no_touch", "barrier_ev_r",
     "source", "status", "authority", "independent_vote",
@@ -195,6 +206,8 @@ def _capture_report_integrity(snapshot: dict) -> dict:
             manager.get("monte_carlo_validation") or {}, _MC_VALIDATION_KEYS),
         "active_edge_provisional_weight": _report_row(
             manager.get("active_edge_provisional_weight") or {}, _ACTIVE_EDGE_KEYS),
+        "llm_edge_exploratory_weight": _report_row(
+            manager.get("llm_edge_exploratory_weight") or {}, _EXPLORATORY_WEIGHT_KEYS),
         "option_barrier": _report_row(
             ((manager.get("evidence") or {}).get("option_barrier") or {}),
             _OPTION_BARRIER_KEYS),
@@ -232,6 +245,7 @@ def _restore_report_integrity_views(snapshot: dict, report: dict) -> None:
     for key in (
         "scenario_geometry", "raw_optimizer_stability", "stability",
         "risk_tradeoff", "monte_carlo_validation", "active_edge_provisional_weight",
+        "llm_edge_exploratory_weight",
     ):
         preserved = report.get(key) or {}
         if not preserved:
@@ -313,9 +327,10 @@ soft-ranking только внутри hard-risk/CVaR eligible policies; EDE cau
 shadow сам по себе не имеет production directional authority и не может вызвать
 CLOSE/EXIT.
 ROLLING_EXPLORATORY_VERDICTS — быстрые низкоуверенные гипотезы по накопленной
-истории. Их можно использовать только как слабый объяснительный контекст:
-position_manager_weight=0, production_authority=false, без самостоятельного
-BUY/SELL/HOLD/CLOSE и без изменения CVaR/stop/size.
+истории. LIMITED-гипотезы, совпавшие с текущим T0-контекстом, имеют до 15%
+веса в soft-ranking вариантов HOLD/CLOSE_10/CLOSE_25/CLOSE_50/EXIT. Они не
+обходят hard-risk/CVaR и не разрешают самостоятельно исполнение, расширение
+стопа, увеличение позиции, BUY/SELL или разворот.
 """
 _impl.SYSTEM_PROMPT = SYSTEM_PROMPT
 
@@ -450,14 +465,17 @@ def _compact_exploratory_verdicts(engine) -> dict:
         float(row.get("primary_improvement") or 0.0),
     ), reverse=True)
     return {
-        "contract_version": "ai-rolling-exploratory-context-v1",
+        "contract_version": "ai-rolling-exploratory-context-v2",
         "status": "AVAILABLE" if rows else "NO_EARLY_ADVANTAGE",
         "items": rows[:8],
         "total_early_advantage": len(rows),
         "rolling_result": True,
         "production_authority": False,
-        "position_manager_weight": 0.0,
-        "may_trigger_exit_or_close": False,
+        "position_manager_weight_cap": 0.15,
+        "position_manager_weight_requires": "LIMITED_AND_CURRENT_T0_MATCH",
+        "eligible_policies": ["HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"],
+        "may_influence_policy_selection": True,
+        "may_independently_trigger_exit_or_close": False,
     }
 
 

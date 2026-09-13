@@ -24,6 +24,7 @@ from .llm_decision_shadow import (
     append_shadow_section,
     record_shadow_decision,
 )
+from .llm_shadow_working_action import build_working_action
 
 
 REPORT_VERSION = "ai-runtime-report-v20"
@@ -56,7 +57,9 @@ Delayed/proxy data reduces confidence and is not automatically directional.
 Correlated metrics from one family are not independent votes. Hard-CVaR eligibility
 is mandatory. Never widen stops, average down, or add to a losing position.
 First form the independent shadow opinion; quant_management_decision is only for
-comparison. Shadow has zero production and zero automatic-execution authority.
+comparison. A hard-guarded choice with enough confidence may become an exact
+manual-confirmation action variant. It still has zero automatic-execution authority;
+missing numeric stop/take/time parameters block the variant.
 """.strip()
 
 
@@ -322,6 +325,7 @@ def request_explanation_with_shadow(
         "key_evidence": parsed_shadow["key_evidence"],
         "counter_evidence": parsed_shadow["counter_evidence"],
     }
+    shadow["working_action"] = build_working_action(authority, shadow)
     record_shadow_decision(shadow)
     combined = (
         deterministic.rstrip()
