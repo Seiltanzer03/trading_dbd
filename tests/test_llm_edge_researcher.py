@@ -211,6 +211,7 @@ def test_status_and_routes_are_research_only():
     assert paths["/api/research/g1s/edge-researcher/status"] == {"GET"}
     assert paths["/api/research/g1s/edge-researcher/lifecycle"] == {"GET"}
     assert paths["/api/research/g1s/edge-researcher/propose"] == {"POST"}
+    assert paths["/api/research/g1s/edge-researcher/explore"] == {"POST"}
     lifecycle_route = next(
         route for route in app.routes
         if route.path == "/api/research/g1s/edge-researcher/lifecycle"
@@ -303,7 +304,7 @@ def test_edge_researcher_evaluate_routes_and_background_execution(monkeypatch):
     assert st_cached["pending_summary"]["rejected"] == 24
 
 
-def test_three_and_four_condition_hypotheses_are_rejected():
+def test_three_condition_hypothesis_is_allowed_but_four_are_rejected():
     t0 = 1_800_000_000.0
     runtime = Runtime(frozen={
         "g1s_evidence_v3": {
@@ -332,8 +333,8 @@ def test_three_and_four_condition_hypotheses_are_rejected():
         }]}
 
     report = propose_edge_hypotheses(runtime, "obs-1", provider=provider_3)
-    assert report["status"] == "NO_VALID_HYPOTHESES"
-    assert report["rejections"] == ["0:INVALID_CONDITION_COUNT"]
+    assert report["status"] == "OK"
+    assert len(report["hypotheses"][0]["conditions"]) == 3
 
     # Test that 4 conditions are rejected as exceeding MAX_CONDITIONS
     runtime_4 = Runtime(frozen={
@@ -368,11 +369,11 @@ def test_three_and_four_condition_hypotheses_are_rejected():
     assert "0:INVALID_CONDITION_COUNT" in report_4["rejections"]
 
 
-def test_path_target_is_withheld_until_authoritative_history_exists():
+def test_path_target_can_be_proposed_for_exploratory_verdict():
     runtime = Runtime()
 
     def provider(summary, model, max_hypotheses):
-        assert summary["allowed_target_ids"] == ["DIRECTION", "RETURN_SIGMA"]
+        assert "MFE_SIGMA" in summary["allowed_target_ids"]
         return {"hypotheses": [{
             "name": "Unsupported path target",
             "target_id": "MFE_SIGMA",
@@ -385,9 +386,7 @@ def test_path_target_is_withheld_until_authoritative_history_exists():
         }]}
 
     report = propose_edge_hypotheses(runtime, "obs-1", provider=provider)
-    assert report["status"] == "NO_VALID_HYPOTHESES"
-    assert report["rejections"] == ["0:TARGET_NOT_EVIDENCE_READY"]
-
-
+    assert report["status"] == "OK"
+    assert report["hypotheses"][0]["target_id"] == "MFE_SIGMA"
 
 
