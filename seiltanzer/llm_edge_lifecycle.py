@@ -20,8 +20,31 @@ from .llm_edge_prospective_journal import (
     initialize_journal_storage,
 )
 
-LIFECYCLE_CONTRACT_VERSION = "llm-edge-lifecycle-v1.3-pr-b"
+LIFECYCLE_CONTRACT_VERSION = "llm-edge-lifecycle-v1.4-contextual-weight"
 _MATERIALIZED_CACHE_ATTR = "_llm_edge_lifecycle_payload_json"
+
+_EXPLORATORY_POLICY_WEIGHT_CAP = 0.15
+_EXPLORATORY_POLICY_WEIGHT_REQUIRES = "LIMITED_AND_CURRENT_T0_MATCH"
+
+
+def _normalize_exploratory_policy_weight(result: Any) -> Any:
+    """Expose contextual policy authority without rewriting stored evidence.
+
+    Rows evaluated before the bounded policy bridge was installed contain the
+    obsolete literal ``position_manager_weight: 0``.  Keeping that field in a
+    freshly materialized lifecycle is misleading: weight is now calculated at
+    decision time from a fresh T0 match, not persisted with the verdict.
+    """
+    if not isinstance(result, dict):
+        return result
+    normalized = dict(result)
+    normalized.pop("position_manager_weight", None)
+    normalized["position_manager_weight_mode"] = "DYNAMIC_CURRENT_T0"
+    normalized["position_manager_weight_cap"] = _EXPLORATORY_POLICY_WEIGHT_CAP
+    normalized["position_manager_weight_requires"] = (
+        _EXPLORATORY_POLICY_WEIGHT_REQUIRES
+    )
+    return normalized
 
 
 def _initializing_materialized_lifecycle() -> dict[str, Any]:
@@ -216,6 +239,9 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
                 exploratory_result = json.loads(str(row["exploratory_result_json"]))
             except Exception:
                 pass
+        exploratory_result = _normalize_exploratory_policy_weight(
+            exploratory_result
+        )
 
         if eval_result is None:
             stage_code = "PENDING_DETERMINISTIC_EVALUATION"
