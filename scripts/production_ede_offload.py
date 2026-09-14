@@ -238,7 +238,10 @@ def _release_gate(
 
 
 def _local_quick_check(path: pathlib.Path) -> None:
-    conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=30.0)
+    conn = sqlite3.connect(
+        path.resolve().as_uri() + "?mode=ro&immutable=1",
+        uri=True, timeout=30.0,
+    )
     try:
         verdict = conn.execute("PRAGMA quick_check").fetchone()[0]
         if verdict != "ok":

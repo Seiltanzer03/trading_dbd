@@ -344,3 +344,22 @@ def test_live_snapshot_failure_still_releases_exact_gate(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match='copy failed'):
         MODULE.live_snapshot(args)
     assert released == [{'acceptance_run_id': '123', 'expected_sha': 'a' * 40}]
+
+
+def test_local_quick_check_uses_immutable_sqlite_mode(tmp_path, monkeypatch):
+    database = tmp_path / "snapshot.sqlite3"
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE evidence(value TEXT)")
+    real_connect = MODULE.sqlite3.connect
+    opened = []
+
+    def recording_connect(target, *args, **kwargs):
+        opened.append(str(target))
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(MODULE.sqlite3, "connect", recording_connect)
+    MODULE._local_quick_check(database)
+
+    assert opened[0].endswith("?mode=ro&immutable=1")
+    assert not pathlib.Path(str(database) + "-wal").exists()
+    assert not pathlib.Path(str(database) + "-shm").exists()

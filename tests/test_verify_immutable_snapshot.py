@@ -40,3 +40,21 @@ def test_hash_or_mutable_sidecar_fails_closed(tmp_path):
     Path(str(database) + '-wal').touch()
     with pytest.raises(RuntimeError, match='sidecars'):
         module.verify(database, manifest)
+
+
+def test_verification_opens_snapshot_in_immutable_mode(tmp_path, monkeypatch):
+    database, manifest = create_snapshot(tmp_path)
+    real_connect = module.sqlite3.connect
+    opened = []
+
+    def recording_connect(target, *args, **kwargs):
+        opened.append(str(target))
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(module.sqlite3, 'connect', recording_connect)
+    module.verify(database, manifest)
+
+    assert opened
+    assert opened[0].endswith('?mode=ro&immutable=1')
+    assert not Path(str(database) + '-wal').exists()
+    assert not Path(str(database) + '-shm').exists()

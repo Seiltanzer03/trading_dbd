@@ -25,7 +25,10 @@ def verify(database: Path, manifest_path: Path) -> dict:
             digest.update(chunk)
     if digest.hexdigest() != str(manifest.get('database_sha256') or ''):
         raise RuntimeError('snapshot SHA256 does not match manifest')
-    with sqlite3.connect(f'file:{database.resolve()}?mode=ro', uri=True, timeout=30) as conn:
+    with sqlite3.connect(
+        database.resolve().as_uri() + '?mode=ro&immutable=1',
+        uri=True, timeout=30,
+    ) as conn:
         conn.execute('PRAGMA query_only=ON')
         if conn.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise RuntimeError('snapshot quick_check failed')
