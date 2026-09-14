@@ -59,6 +59,11 @@ def test_deploy_has_bounded_progress_visible_prestart_window():
     assert "required_kb=$((512 * 1024))" in workflow
     assert "git fetch origin main" not in workflow
 
+    # A superseded research reader must not compete with startup quick_check
+    # for the same production DB after the exact SHA has started delivery.
+    assert "scripts/[p]roduction_ede_inventory.py" in workflow
+    assert "scripts/[p]roduction_ede_offload.py" in workflow
+
     # Cold-start durability allowance must not weaken live acceptance limits.
     assert "--connect-timeout 1 --max-time 3" in workflow
     assert "production_readiness_check.py" in workflow
