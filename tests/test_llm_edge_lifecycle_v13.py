@@ -224,6 +224,26 @@ def test_stale_feature_is_unavailable_not_no_match(monkeypatch):
     assert context["stale"] is True
 
 
+def test_frozen_t0_adapter_missing_price_data_does_not_require_constructor():
+    runtime = Runtime()
+    observation = {
+        "observation_id": "frozen-only",
+        "instrument": "NAS100",
+        "captured_ts": 1010.0,
+        "target_ts": 2000.0,
+        "horizon_minutes": 60,
+        "frozen_features_json": "{}",
+        "created_ts": 1010.0,
+    }
+
+    records = journal._frozen_t0_records(
+        runtime, observation, ["price.ret_5m"]
+    )
+
+    assert records["price.ret_5m"]["availability"] == "UNAVAILABLE"
+    assert records["price.ret_5m"]["stale"] is False
+
+
 def test_duplicate_opportunity_and_cursor_restart_are_idempotent():
     runtime = Runtime()
     journal.initialize_journal_storage(runtime)

@@ -239,10 +239,17 @@ class ProspectiveFeatureAdapter:
         if self._causal_bars is None:
             self._causal_bars = self._load_causal_bars()
         bars = self._causal_bars.get(instrument, [])
-        ends = self._causal_bar_ends.get(instrument)
+        # A small frozen-only journal adapter is intentionally constructed via
+        # ``__new__`` to avoid opening historical tables.  Keep this cache lazy
+        # so that constructor-bypassing read paths remain safe as well.
+        bar_ends = getattr(self, "_causal_bar_ends", None)
+        if bar_ends is None:
+            bar_ends = {}
+            self._causal_bar_ends = bar_ends
+        ends = bar_ends.get(instrument)
         if ends is None:
             ends = [float(bar["bar_end_ts"]) for bar in bars]
-            self._causal_bar_ends[instrument] = ends
+            bar_ends[instrument] = ends
         return bars, ends
 
     def _causal_bar_index(

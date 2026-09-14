@@ -205,6 +205,7 @@ def _frozen_t0_records(
     adapter.available_asof = float(observation["captured_ts"])
     adapter.tables = set()
     adapter._causal_bars = {}
+    adapter._causal_bar_ends = {}
     adapter._causal_bar_cache = {}
     values, _rejected, provenance = adapter._feature_values(observation, strict=False)
     records: dict[str, dict[str, Any]] = {}
