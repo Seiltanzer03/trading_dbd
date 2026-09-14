@@ -9,16 +9,17 @@ def test_deploy_has_bounded_progress_visible_prestart_window():
         encoding="utf-8"
     )
 
-    # Production exceeded 210 seconds to real HTTP availability on 2026-08-30
-    # while verifying the 5.3 GiB prestart snapshot. Keep bounded headroom without changing any
+    # Production exceeded seven minutes to real HTTP availability on 2026-09-14
+    # while rechecking the 9 GiB live DB. Keep bounded headroom without changing any
     # live readiness/smoke timeout or acceptance criterion.
-    assert "cold_start_attempts=210" in workflow
+    assert "cold_start_attempts=360" in workflow
     assert "command_timeout: 15m" in workflow
     assert 'seq 1 "$cold_start_attempts"' in workflow
     assert "prestart_backup_bytes=$(find" in workflow
     assert "-name '.*.tmp.sqlite3'" in workflow
     assert "prestart_backup_bytes=${prestart_backup_bytes:-0}" in workflow
-    assert "exceeded 210 seconds" in workflow
+    assert "exceeded seven minutes" in workflow
+    assert "bounded twelve-minute" in workflow
 
     # A slow stop may SIGKILL the old process while it owns a young hidden backup
     # temp. The next start must not inherit that multi-GiB orphan and attempt a
