@@ -1,9 +1,11 @@
 name: G1S P2E segmented persistence research
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+  schedule:
+    # Full multi-GiB recovery-point research is independent of deploy readiness.
+    # Run it weekly, outside the daily EDE window, instead of on every main push.
+    - cron: "43 12 * * 0"
 
 permissions:
   contents: read
