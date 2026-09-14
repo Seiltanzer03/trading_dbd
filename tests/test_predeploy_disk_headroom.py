@@ -21,6 +21,11 @@ def test_deploy_recovers_bounded_disk_headroom_before_git_fetch():
     assert "journalctl --vacuum-size=128M" in workflow
     assert "/root/.cache" in workflow
     assert "apt-get clean" in workflow
+    assert "/root/wheels" in workflow
+    assert "[ ! -L /root/wheels ]" in workflow
+    assert "readlink -f /root/wheels" in workflow
+    assert "DEPLOY_WHEEL_CACHE_BYTES_REMOVED=" in workflow
+    assert "rm -rf /root/wheels" not in workflow
     assert "g1e1_cleanup_venv.py" in workflow
     assert "Insufficient safe pre-fetch headroom" in workflow
     assert "du -xhd1 /opt" in workflow

@@ -144,6 +144,16 @@ jobs:
                 >/dev/null 2>&1 || true
             fi
             rm -rf /root/.npm/_cacache >/dev/null 2>&1 || true
+            # /root/wheels is a reproducible package cache, not application data.
+            # Remove only wheel artifacts and refuse symlinked/unexpected scope.
+            wheel_cache_before=0
+            wheel_cache_after=0
+            if [ -d /root/wheels ] && [ ! -L /root/wheels ] && [ "$(readlink -f /root/wheels)" = /root/wheels ]; then
+              wheel_cache_before=$(du -sb /root/wheels 2>/dev/null | awk '{print $1}')
+              find /root/wheels -xdev -type f -name '*.whl' -delete
+              wheel_cache_after=$(du -sb /root/wheels 2>/dev/null | awk '{print $1}')
+            fi
+            echo "DEPLOY_WHEEL_CACHE_BYTES_REMOVED=$(( wheel_cache_before - wheel_cache_after ))"
             apt-get clean >/dev/null 2>&1 || true
             journalctl --vacuum-size=128M >/dev/null 2>&1 || true
             find /tmp -xdev -mindepth 1 -maxdepth 1 \
