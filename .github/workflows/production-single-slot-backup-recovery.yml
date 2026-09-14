@@ -157,6 +157,7 @@ jobs:
             done < <(systemctl list-units --all --type=service --no-legend 'seiltanzer-ede-*' || true)
             pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_v13_audit.py' >/dev/null 2>&1 || true
             pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_transition_audit.py' >/dev/null 2>&1 || true
+            pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_inventory.py' >/dev/null 2>&1 || true
             pkill -f '/opt/seiltanzer/scripts/[p]roduction_ede_offload.py' >/dev/null 2>&1 || true
             command -v lsof >/dev/null 2>&1 || {
               echo "STOP: lsof is required for closed EDE snapshot cleanup" >&2
