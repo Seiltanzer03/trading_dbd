@@ -8,6 +8,11 @@ _spec = importlib.util.spec_from_file_location(
 module = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(module)
 
 
+def test_production_part_size_is_safe_for_slow_yandex_uploads():
+    assert module.PART_SIZE == 16 * 1024 * 1024
+    assert module.PART_SIZE >= 5 * 1024 * 1024
+
+
 def test_normalized_metadata_accepts_yandex_preserved_key_casing():
     assert module.normalized_metadata({
         'Source-Sha256': 'abc',
