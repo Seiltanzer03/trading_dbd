@@ -115,3 +115,37 @@ def test_same_t0_on_next_horizon_reuses_backfill_without_rescanning_bars():
     second = adapter._recomputed_price_context(second_source)
     assert second["price.ret_5m"] == first["price.ret_5m"]
     assert second["price.ret_15m"] == first["price.ret_15m"]
+
+
+def test_backfill_uses_indexed_recent_window_not_full_bar_history():
+    runtime = _Runtime()
+    adapter = ProspectiveFeatureAdapter(runtime, available_asof=2_000_000.0)
+    t0 = 2_000_000.0
+    bars = []
+    for index in range(10_000):
+        end = t0 - (10_000 - index) * 300.0
+        bars.append({
+            "instrument": "NAS100", "bar_end_ts": end,
+            "high": 101.0, "low": 99.0, "close": 100.0,
+            "quality": 1.0, "created_ts": end,
+        })
+    for index in range(13):
+        end = t0 - 3600.0 + index * 300.0
+        bars.append({
+            "instrument": "NAS100", "bar_end_ts": end,
+            "high": 101.0 + index, "low": 99.0 + index,
+            "close": 100.0 + index, "quality": 1.0, "created_ts": end,
+        })
+
+    class _NoFullHistoryIteration(list):
+        def __iter__(self):
+            raise AssertionError("backfill iterated the full retained bar history")
+
+    adapter._causal_bars = {"NAS100": _NoFullHistoryIteration(bars)}
+    adapter._causal_bar_ends = {
+        "NAS100": [float(bar["bar_end_ts"]) for bar in bars]
+    }
+    result = adapter._recomputed_price_context(_source(t0=t0))
+
+    assert (result.get("_meta") or {}).get("baseline_price_backfill") is True
+    assert math.isclose(result["price.ret_5m"], math.log(112.0 / 111.0))

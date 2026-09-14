@@ -49,47 +49,55 @@ class ProspectiveFeatureAdapter(_BaseAdapter):
         instrument = str(row["instrument"])
         t0 = float(row["captured_ts"])
         capture_recorded_ts = _finite(row.get("created_ts")) or t0
-        all_bars = self._causal_bars.get(instrument, [])
-        eligible = [
-            bar for bar in all_bars
-            if float(bar["bar_end_ts"]) <= t0 + 1e-6
-            and float(bar.get("created_ts") or bar["bar_end_ts"])
-            <= capture_recorded_ts + 1e-6
-            and (_finite(bar.get("close")) or 0.0) > 0.0
-        ]
-        if len(eligible) < 2:
-            return result
-
-        ends = [float(bar["bar_end_ts"]) for bar in eligible]
-        end_index = bisect.bisect_right(ends, t0 + 1e-6) - 1
-        if end_index < 1 or t0 - ends[end_index] > 5 * 60.0:
+        _all_bars, ends = self._causal_series(instrument)
+        end_index = self._causal_bar_index(
+            instrument, t0, capture_recorded_ts, positive_close=True)
+        if (
+            end_index < 0
+            or not self._has_causal_bar_count(
+                instrument, end_index, capture_recorded_ts, 2,
+                positive_close=True)
+            or t0 - ends[end_index] > 5 * 60.0
+        ):
             return result
         end_ts = ends[end_index]
-        end_price = float(eligible[end_index]["close"])
+        end_price = float(_all_bars[end_index]["close"])
 
         def return_over(seconds: float) -> float | None:
             anchor_ts = end_ts - seconds
-            index = bisect.bisect_right(
-                ends, anchor_ts + 1e-6, hi=end_index) - 1
+            index = self._causal_bar_index(
+                instrument, anchor_ts, capture_recorded_ts,
+                hi=end_index, positive_close=True)
             if index < 0:
                 return None
             # Reject an anchor that is materially older than one retained bar;
             # otherwise a data gap would masquerade as a 5m/15m return.
             if anchor_ts - ends[index] > 5 * 60.0 + 1e-6:
                 return None
-            start_price = float(eligible[index]["close"])
+            start_price = float(_all_bars[index]["close"])
             if start_price <= 0.0 or end_price <= 0.0:
                 return None
             return math.log(end_price / start_price)
 
+        first_index = self._causal_bar_index(
+            instrument, end_ts - 60 * 60.0, capture_recorded_ts,
+            hi=end_index, positive_close=True)
+        window_start = (
+            first_index if first_index >= 0
+            else bisect.bisect_right(ends, end_ts - 60 * 60.0)
+        )
+        window = self._causal_bar_window(
+            instrument, window_start, end_index,
+            capture_recorded_ts, positive_close=True)
         steps: list[tuple[float, float]] = []
-        for index in range(1, end_index + 1):
-            previous = float(eligible[index - 1]["close"])
-            current = float(eligible[index]["close"])
-            dt = ends[index] - ends[index - 1]
+        for index in range(1, len(window)):
+            previous = float(window[index - 1]["close"])
+            current = float(window[index]["close"])
+            step_ts = float(window[index]["bar_end_ts"])
+            dt = step_ts - float(window[index - 1]["bar_end_ts"])
             if previous <= 0.0 or current <= 0.0 or dt <= 0.0 or dt > 10 * 60.0:
                 continue
-            steps.append((ends[index], math.log(current / previous)))
+            steps.append((step_ts, math.log(current / previous)))
 
         def realized_vol(seconds: float) -> float | None:
             values = [
