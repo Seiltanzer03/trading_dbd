@@ -762,8 +762,14 @@ def materialize_lifecycle(engine: Any, *, now: float | None = None) -> dict[str,
     return payload
 
 
-def _materialized_status(runtime: Any) -> dict[str,Any]:
-    payload = _lifecycle.read_cached_materialized_lifecycle(runtime)
+def _materialized_status(
+    runtime: Any, *, materialized_payload: dict[str, Any] | None = None
+) -> dict[str,Any]:
+    payload = (
+        materialized_payload
+        if materialized_payload is not None
+        else _lifecycle.read_cached_materialized_lifecycle(runtime)
+    )
     summary = payload.get("researcher") or {}
     return {
         "contract_version": _researcher.CONTRACT_VERSION,
@@ -787,8 +793,14 @@ def _materialized_status(runtime: Any) -> dict[str,Any]:
     }
 
 
-def _materialized_evaluator_status(runtime: Any) -> dict[str, Any]:
-    payload = _lifecycle.read_cached_materialized_lifecycle(runtime)
+def _materialized_evaluator_status(
+    runtime: Any, *, materialized_payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    payload = (
+        materialized_payload
+        if materialized_payload is not None
+        else _lifecycle.read_cached_materialized_lifecycle(runtime)
+    )
     quality = payload.get("research_quality") or {}
     researcher = payload.get("researcher") or {}
     return {

@@ -80,6 +80,17 @@ def test_successful_recovery_dispatches_existing_deploy_workflow():
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     assert "actions: write" in workflow
-    assert "needs.recover.result == 'success'" in workflow
+    assert "needs.recover.result == 'success' && needs.recover.outputs.rotated == 'true'" in workflow
     assert "/actions/workflows/deploy.yml/dispatches" in workflow
     assert r'\"expected_sha\":\"$EXPECTED_SHA\"' in workflow
+
+
+def test_automatic_recovery_skips_an_already_healthy_exact_sha():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "RECOVERY_NOT_REQUIRED_EXACT_SHA_HEALTHY=1" in workflow
+    assert '"$(git -C /opt/seiltanzer rev-parse HEAD 2>/dev/null || true)" = "$EXPECTED_SHA"' in workflow
+    assert "systemctl is-active --quiet seiltanzer" in workflow
+    assert "http://127.0.0.1:8790/api/state" in workflow
+    assert "capture_stdout: true" in workflow
+    assert "rotated=false" in workflow

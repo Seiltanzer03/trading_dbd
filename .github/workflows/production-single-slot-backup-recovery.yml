@@ -84,19 +84,34 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-22.04
     timeout-minutes: 20
+    outputs:
+      rotated: ${{ steps.rotation-result.outputs.rotated }}
     steps:
       - name: Rotate duplicate local backups and rebuild one verified slot
         id: recovery
         uses: appleboy/ssh-action@v1
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
           command_timeout: 18m
-          envs: EXPECTED_SHA
+          envs: EXPECTED_SHA,EVENT_NAME
+          capture_stdout: true
           script: |
             set -euo pipefail
+            # A deploy may fail only in a post-release functional check after
+            # the exact SHA is already active and serving. Automatic recovery
+            # must not stop that healthy terminal or rotate its backup slot.
+            if [ "$EVENT_NAME" = workflow_run ] \
+              && [ "$(git -C /opt/seiltanzer rev-parse HEAD 2>/dev/null || true)" = "$EXPECTED_SHA" ] \
+              && systemctl is-active --quiet seiltanzer \
+              && [ "$(curl -sS -o /dev/null --connect-timeout 1 --max-time 3 -w '%{http_code}' http://127.0.0.1:8790/api/state 2>/dev/null || true)" = 200 ]; then
+              echo "RECOVERY_NOT_REQUIRED_EXACT_SHA_HEALTHY=1"
+              exit 0
+            fi
             # Recovery deliberately stops the writer while validating and rotating
             # disposable backup copies. Restore the terminal on every exit path,
             # including fail-closed disk/integrity errors, so a failed rotation
@@ -642,13 +657,29 @@ jobs:
             restart_needed=0
             df -h /
 
+      - name: Record whether backup rotation ran
+        id: rotation-result
+        if: steps.recovery.outcome == 'success'
+        env:
+          REMOTE_STDOUT: ${{ steps.recovery.outputs.stdout }}
+        run: |
+          if grep -Fq 'RECOVERY_NOT_REQUIRED_EXACT_SHA_HEALTHY=1' <<< "$REMOTE_STDOUT"; then
+            echo "rotated=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "rotated=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish exact-SHA recovery status
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           OUTCOME: ${{ steps.recovery.outcome }}
+          ROTATED: ${{ steps.rotation-result.outputs.rotated }}
         run: |
-          if [ "$OUTCOME" = success ]; then
+          if [ "$OUTCOME" = success ] && [ "${ROTATED:-false}" = false ]; then
+            state=success
+            description="Exact SHA is already active and healthy; recovery skipped"
+          elif [ "$OUTCOME" = success ]; then
             state=success
             description="Backup-only rotation rebuilt one verified exact-SHA recovery slot"
           else
@@ -666,7 +697,7 @@ jobs:
 
   redeploy:
     needs: recover
-    if: needs.recover.result == 'success'
+    if: needs.recover.result == 'success' && needs.recover.outputs.rotated == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:

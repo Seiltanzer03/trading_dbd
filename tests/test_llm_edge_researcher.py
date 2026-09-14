@@ -229,6 +229,31 @@ def test_status_and_routes_are_research_only():
     assert (after["automation"] or {}).get("manual_post_only") is False
 
 
+def test_status_route_uses_bounded_materialized_projection(monkeypatch):
+    runtime = Runtime()
+    app = FastAPI()
+    app.state.engine = type("Engine", (), {"short_horizon": runtime})()
+    install_llm_edge_researcher_routes(app)
+    status_route = next(
+        route for route in app.routes
+        if route.path == "/api/research/g1s/edge-researcher/status"
+    )
+
+    from seiltanzer import llm_edge_researcher_routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "read_cached_materialized_lifecycle",
+        lambda _runtime: (_ for _ in ()).throw(
+            AssertionError("status must not parse the full lifecycle")
+        ),
+    )
+    payload = status_route.endpoint()
+
+    assert payload["request_time_history_scan"] is False
+    assert payload["deterministic_evaluator"]["request_time_history_scan"] is False
+
+
 def test_resilient_extract_json_handles_fences_and_truncation():
     from seiltanzer.llm_edge_researcher import _resilient_extract_json
 
@@ -388,5 +413,3 @@ def test_path_target_can_be_proposed_for_exploratory_verdict():
     report = propose_edge_hypotheses(runtime, "obs-1", provider=provider)
     assert report["status"] == "OK"
     assert report["hypotheses"][0]["target_id"] == "MFE_SIGMA"
-
-

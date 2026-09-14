@@ -22,6 +22,7 @@ from .llm_edge_prospective_journal import (
 
 LIFECYCLE_CONTRACT_VERSION = "llm-edge-lifecycle-v1.4-contextual-weight"
 _MATERIALIZED_CACHE_ATTR = "_llm_edge_lifecycle_payload_json"
+_MATERIALIZED_STATUS_CACHE_ATTR = "_llm_edge_lifecycle_status"
 
 _EXPLORATORY_POLICY_WEIGHT_CAP = 0.15
 _EXPLORATORY_POLICY_WEIGHT_REQUIRES = "LIMITED_AND_CURRENT_T0_MATCH"
@@ -69,7 +70,36 @@ def _initializing_materialized_lifecycle() -> dict[str, Any]:
 
 def publish_materialized_lifecycle_cache(runtime: Any, payload_json: str) -> None:
     """Atomically expose one committed serialized singleton to HTTP readers."""
-    setattr(runtime, _MATERIALIZED_CACHE_ATTR, str(payload_json))
+    serialized = str(payload_json)
+    setattr(runtime, _MATERIALIZED_CACHE_ATTR, serialized)
+    try:
+        payload = json.loads(serialized)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = _initializing_materialized_lifecycle()
+    if not isinstance(payload, dict):
+        payload = _initializing_materialized_lifecycle()
+    # Keep status latency independent from the number and evidence size of
+    # hypotheses in the full immutable lifecycle document.
+    setattr(runtime, _MATERIALIZED_STATUS_CACHE_ATTR, {
+        "status": payload.get("status", "INITIALIZING"),
+        "researcher": dict(payload.get("researcher") or {}),
+        "automation": dict(payload.get("automation") or {}),
+        "research_quality": dict(payload.get("research_quality") or {}),
+    })
+
+
+def read_cached_materialized_status(runtime: Any) -> dict[str, Any]:
+    """Read the bounded status projection without parsing full evidence JSON."""
+    payload = getattr(runtime, _MATERIALIZED_STATUS_CACHE_ATTR, None)
+    if isinstance(payload, dict):
+        return payload
+    initializing = _initializing_materialized_lifecycle()
+    return {
+        "status": initializing["status"],
+        "researcher": dict(initializing["researcher"]),
+        "automation": {},
+        "research_quality": {},
+    }
 
 
 def read_cached_materialized_lifecycle_json(runtime: Any) -> str:
