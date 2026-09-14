@@ -265,6 +265,26 @@ def test_downloaded_backup_from_another_sha_is_rejected(tmp_path):
         )
 
 
+def test_offhost_bootstrap_has_a_separate_bounded_fallback_age(monkeypatch):
+    commands = []
+
+    def fake_exec(_client, command: str, *, timeout=None):
+        commands.append(command)
+        return 'EDE_VERIFIED_BACKUP_SELECTION={"backup_id":"verified"}\n'
+
+    monkeypatch.setattr(MODULE, "_exec", fake_exec)
+    selected = MODULE._select_remote_exact_backup(
+        object(),
+        expected_sha="a" * 40,
+        max_fallback_age_seconds=MODULE.MAX_OFFHOST_BOOTSTRAP_BACKUP_AGE_SECONDS,
+    )
+
+    assert selected["backup_id"] == "verified"
+    assert MODULE.MAX_FALLBACK_BACKUP_AGE_SECONDS == 7 * 86400
+    assert MODULE.MAX_OFFHOST_BOOTSTRAP_BACKUP_AGE_SECONDS == 14 * 86400
+    assert "MAX_FALLBACK_AGE_SECONDS=1209600" in commands[0]
+
+
 def test_live_snapshot_failure_still_releases_exact_gate(monkeypatch, tmp_path):
     import sys
     from types import SimpleNamespace

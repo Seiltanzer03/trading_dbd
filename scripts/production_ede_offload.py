@@ -42,6 +42,10 @@ SSH_KEEPALIVE_SECONDS = 30
 SSH_OPERATION_ATTEMPTS = 4
 MAX_EXACT_BACKUP_AGE_SECONDS = 24 * 3600
 MAX_FALLBACK_BACKUP_AGE_SECONDS = 7 * 86400
+# One-time bounded bridge for the currently verified local recovery point.  It
+# lets the first paid Object Storage upload complete without weakening the
+# normal seven-day research freshness rule or touching the live database.
+MAX_OFFHOST_BOOTSTRAP_BACKUP_AGE_SECONDS = 14 * 86400
 BACKUP_CONTRACT_VERSION = "seiltanzer-backup-v1"
 EXACT_BACKUP_REASONS = frozenset(("prestart", "scheduled"))
 
@@ -304,7 +308,12 @@ def _verify_local_exact_backup(
     return payload
 
 
-def _select_remote_exact_backup(client, *, expected_sha: str) -> dict[str, Any]:
+def _select_remote_exact_backup(
+    client,
+    *,
+    expected_sha: str,
+    max_fallback_age_seconds: int = MAX_FALLBACK_BACKUP_AGE_SECONDS,
+) -> dict[str, Any]:
     """Select one recent immutable exact-SHA backup without touching the live DB.
 
     Prefer the deploy-created prestart recovery point.  On the small production
@@ -404,7 +413,7 @@ print("EDE_VERIFIED_BACKUP_SELECTION=" + json.dumps(selected, sort_keys=True))
         + " MAX_EXACT_AGE_SECONDS="
         + shlex.quote(str(MAX_EXACT_BACKUP_AGE_SECONDS))
         + " MAX_FALLBACK_AGE_SECONDS="
-        + shlex.quote(str(MAX_FALLBACK_BACKUP_AGE_SECONDS))
+        + shlex.quote(str(max_fallback_age_seconds))
         + " MAX_AGE_SECONDS="
         + shlex.quote(str(MAX_EXACT_BACKUP_AGE_SECONDS))
         + " python3 - <<'REMOTE'\n"
@@ -488,6 +497,7 @@ def snapshot(args: argparse.Namespace) -> int:
     manifest_output = output.with_name(output.name + ".manifest.json")
     selection_output = output.with_name(output.name + ".selection.json")
     exact_run = bool(args.require_acceptance_marker)
+    offhost_bootstrap = bool(getattr(args, "bootstrap_offhost", False))
     if exact_run and not str(args.acceptance_run_id or "").strip():
         raise ValueError(
             "--acceptance-run-id is required with --require-acceptance-marker"
@@ -536,7 +546,16 @@ def snapshot(args: argparse.Namespace) -> int:
                 ),
             )
 
-        selected = _select_remote_exact_backup(client, expected_sha=args.expected_sha)
+        fallback_max_age = (
+            MAX_OFFHOST_BOOTSTRAP_BACKUP_AGE_SECONDS
+            if offhost_bootstrap
+            else MAX_FALLBACK_BACKUP_AGE_SECONDS
+        )
+        selected = _select_remote_exact_backup(
+            client,
+            expected_sha=args.expected_sha,
+            max_fallback_age_seconds=fallback_max_age,
+        )
         output.unlink(missing_ok=True)
         manifest_output.unlink(missing_ok=True)
         progress_state = {"bucket": -1}
@@ -582,6 +601,8 @@ def snapshot(args: argparse.Namespace) -> int:
         )
         if not is_exact_sha:
             snapshot_source = f"FALLBACK_{snapshot_source}"
+        if offhost_bootstrap:
+            snapshot_source = f"OFFHOST_BOOTSTRAP_{snapshot_source}"
         selection_output.write_text(
             json.dumps(
                 {
@@ -594,8 +615,9 @@ def snapshot(args: argparse.Namespace) -> int:
                     "max_age_sec": (
                         MAX_EXACT_BACKUP_AGE_SECONDS
                         if selected.get("exact_sha_match")
-                        else MAX_FALLBACK_BACKUP_AGE_SECONDS
+                        else fallback_max_age
                     ),
+                    "offhost_bootstrap": offhost_bootstrap,
                     "database_sha256": manifest["database_sha256"],
                     "production_authority": False,
                 },
@@ -790,6 +812,7 @@ def parser() -> argparse.ArgumentParser:
     snap.add_argument("--require-acceptance-marker", action="store_true")
     snap.add_argument("--run-id", required=True)
     snap.add_argument("--output-db", required=True)
+    snap.add_argument("--bootstrap-offhost", action="store_true")
     snap.set_defaults(func=snapshot)
 
     live = sub.add_parser("live-snapshot")
