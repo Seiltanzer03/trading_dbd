@@ -42,8 +42,15 @@ SSH_KEEPALIVE_SECONDS = 30
 SSH_OPERATION_ATTEMPTS = 4
 MAX_EXACT_BACKUP_AGE_SECONDS = 24 * 3600
 MAX_FALLBACK_BACKUP_AGE_SECONDS = 7 * 86400
+# One-time bounded bridge for the currently verified local recovery point.  It
+# lets the first paid Object Storage upload complete without weakening the
+# normal seven-day research freshness rule or touching the live database.
+MAX_OFFHOST_BOOTSTRAP_BACKUP_AGE_SECONDS = 14 * 86400
 BACKUP_CONTRACT_VERSION = "seiltanzer-backup-v1"
 EXACT_BACKUP_REASONS = frozenset(("prestart", "scheduled"))
+OFFHOST_BOOTSTRAP_BACKUP_REASONS = frozenset(
+    (*EXACT_BACKUP_REASONS, "g1m-schema-identity")
+)
 
 LEDGER_NAMES = (
     "ede_frozen_evidence.jsonl",
@@ -270,6 +277,7 @@ def _verify_local_exact_backup(
     *,
     expected_sha: str,
     allow_verified_fallback: bool = False,
+    allow_offhost_bootstrap_reason: bool = False,
 ) -> dict[str, Any]:
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -282,7 +290,12 @@ def _verify_local_exact_backup(
     if payload.get("verified") is not True:
         raise RuntimeError("downloaded backup is not verified")
     reason = str(payload.get("reason") or "")
-    if reason not in EXACT_BACKUP_REASONS:
+    accepted_reasons = (
+        OFFHOST_BOOTSTRAP_BACKUP_REASONS
+        if allow_offhost_bootstrap_reason
+        else EXACT_BACKUP_REASONS
+    )
+    if reason not in accepted_reasons:
         raise RuntimeError("downloaded backup reason is not accepted for EDE")
     is_exact_sha = str(payload.get("git_commit") or "") == expected_sha
     if not is_exact_sha and not allow_verified_fallback:
@@ -304,7 +317,13 @@ def _verify_local_exact_backup(
     return payload
 
 
-def _select_remote_exact_backup(client, *, expected_sha: str) -> dict[str, Any]:
+def _select_remote_exact_backup(
+    client,
+    *,
+    expected_sha: str,
+    max_fallback_age_seconds: int = MAX_FALLBACK_BACKUP_AGE_SECONDS,
+    allow_offhost_bootstrap_reason: bool = False,
+) -> dict[str, Any]:
     """Select one recent immutable exact-SHA backup without touching the live DB.
 
     Prefer the deploy-created prestart recovery point.  On the small production
@@ -323,6 +342,7 @@ import time
 root = pathlib.Path(os.environ["BACKUP_ROOT"]).resolve()
 expected_sha = os.environ["EXPECTED_SHA"]
 source_db = pathlib.Path(os.environ["SOURCE_DB"])
+allow_bootstrap_reason = os.environ.get("ALLOW_BOOTSTRAP_REASON") == "1"
 legacy_max_age = os.environ.get("MAX_AGE_SECONDS")
 max_exact_age = float(os.environ.get("MAX_EXACT_AGE_SECONDS") or legacy_max_age or (24 * 3600))
 max_fallback_age = float(os.environ.get("MAX_FALLBACK_AGE_SECONDS") or legacy_max_age or (7 * 86400))
@@ -355,7 +375,10 @@ for manifest_path in root.glob("*.manifest.json"):
         if payload.get("backup_contract_version") != "seiltanzer-backup-v1":
             continue
         reason = str(payload.get("reason") or "")
-        if payload.get("verified") is not True or reason not in ("prestart", "scheduled"):
+        accepted_reasons = {"prestart", "scheduled"}
+        if allow_bootstrap_reason:
+            accepted_reasons.add("g1m-schema-identity")
+        if payload.get("verified") is not True or reason not in accepted_reasons:
             continue
         is_exact_sha = (str(payload.get("git_commit") or "") == expected_sha)
         sha_priority = 2 if is_exact_sha else 1
@@ -404,9 +427,11 @@ print("EDE_VERIFIED_BACKUP_SELECTION=" + json.dumps(selected, sort_keys=True))
         + " MAX_EXACT_AGE_SECONDS="
         + shlex.quote(str(MAX_EXACT_BACKUP_AGE_SECONDS))
         + " MAX_FALLBACK_AGE_SECONDS="
-        + shlex.quote(str(MAX_FALLBACK_BACKUP_AGE_SECONDS))
+        + shlex.quote(str(max_fallback_age_seconds))
         + " MAX_AGE_SECONDS="
         + shlex.quote(str(MAX_EXACT_BACKUP_AGE_SECONDS))
+        + " ALLOW_BOOTSTRAP_REASON="
+        + ("1" if allow_offhost_bootstrap_reason else "0")
         + " python3 - <<'REMOTE'\n"
         + selector
         + "\nREMOTE"
@@ -488,6 +513,7 @@ def snapshot(args: argparse.Namespace) -> int:
     manifest_output = output.with_name(output.name + ".manifest.json")
     selection_output = output.with_name(output.name + ".selection.json")
     exact_run = bool(args.require_acceptance_marker)
+    offhost_bootstrap = bool(getattr(args, "bootstrap_offhost", False))
     if exact_run and not str(args.acceptance_run_id or "").strip():
         raise ValueError(
             "--acceptance-run-id is required with --require-acceptance-marker"
@@ -536,7 +562,17 @@ def snapshot(args: argparse.Namespace) -> int:
                 ),
             )
 
-        selected = _select_remote_exact_backup(client, expected_sha=args.expected_sha)
+        fallback_max_age = (
+            MAX_OFFHOST_BOOTSTRAP_BACKUP_AGE_SECONDS
+            if offhost_bootstrap
+            else MAX_FALLBACK_BACKUP_AGE_SECONDS
+        )
+        selected = _select_remote_exact_backup(
+            client,
+            expected_sha=args.expected_sha,
+            max_fallback_age_seconds=fallback_max_age,
+            allow_offhost_bootstrap_reason=offhost_bootstrap,
+        )
         output.unlink(missing_ok=True)
         manifest_output.unlink(missing_ok=True)
         progress_state = {"bucket": -1}
@@ -571,17 +607,24 @@ def snapshot(args: argparse.Namespace) -> int:
         finally:
             sftp.close()
         manifest = _verify_local_exact_backup(
-            output, manifest_output, expected_sha=args.expected_sha, allow_verified_fallback=True
+            output,
+            manifest_output,
+            expected_sha=args.expected_sha,
+            allow_verified_fallback=True,
+            allow_offhost_bootstrap_reason=offhost_bootstrap,
         )
         backup_reason = str(manifest["reason"])
         is_exact_sha = bool(str(manifest.get("git_commit") or "") == args.expected_sha)
-        snapshot_source = (
-            "DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP"
-            if backup_reason == "prestart"
-            else "SCHEDULED_VERIFIED_LOCAL_BACKUP"
-        )
+        if backup_reason == "prestart":
+            snapshot_source = "DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP"
+        elif backup_reason == "scheduled":
+            snapshot_source = "SCHEDULED_VERIFIED_LOCAL_BACKUP"
+        else:
+            snapshot_source = "SCHEMA_IDENTITY_VERIFIED_LOCAL_BACKUP"
         if not is_exact_sha:
             snapshot_source = f"FALLBACK_{snapshot_source}"
+        if offhost_bootstrap:
+            snapshot_source = f"OFFHOST_BOOTSTRAP_{snapshot_source}"
         selection_output.write_text(
             json.dumps(
                 {
@@ -594,8 +637,9 @@ def snapshot(args: argparse.Namespace) -> int:
                     "max_age_sec": (
                         MAX_EXACT_BACKUP_AGE_SECONDS
                         if selected.get("exact_sha_match")
-                        else MAX_FALLBACK_BACKUP_AGE_SECONDS
+                        else fallback_max_age
                     ),
+                    "offhost_bootstrap": offhost_bootstrap,
                     "database_sha256": manifest["database_sha256"],
                     "production_authority": False,
                 },
@@ -790,6 +834,7 @@ def parser() -> argparse.ArgumentParser:
     snap.add_argument("--require-acceptance-marker", action="store_true")
     snap.add_argument("--run-id", required=True)
     snap.add_argument("--output-db", required=True)
+    snap.add_argument("--bootstrap-offhost", action="store_true")
     snap.set_defaults(func=snapshot)
 
     live = sub.add_parser("live-snapshot")

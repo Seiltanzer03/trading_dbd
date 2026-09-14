@@ -265,6 +265,64 @@ def test_downloaded_backup_from_another_sha_is_rejected(tmp_path):
         )
 
 
+def test_schema_identity_backup_is_accepted_only_for_offhost_bootstrap(tmp_path):
+    database = tmp_path / "schema.sqlite3"
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY)")
+    payload = {
+        "backup_contract_version": MODULE.BACKUP_CONTRACT_VERSION,
+        "backup_id": "schema-bootstrap",
+        "reason": "g1m-schema-identity",
+        "created_ts": 123.0,
+        "source_db": str(MODULE.REMOTE_DATABASE),
+        "database_file": database.name,
+        "database_size_bytes": database.stat().st_size,
+        "database_sha256": hashlib.sha256(database.read_bytes()).hexdigest(),
+        "git_commit": "b" * 40,
+        "verified": True,
+    }
+    manifest = tmp_path / "schema.manifest.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="reason is not accepted"):
+        MODULE._verify_local_exact_backup(
+            database,
+            manifest,
+            expected_sha="a" * 40,
+            allow_verified_fallback=True,
+        )
+    verified = MODULE._verify_local_exact_backup(
+        database,
+        manifest,
+        expected_sha="a" * 40,
+        allow_verified_fallback=True,
+        allow_offhost_bootstrap_reason=True,
+    )
+    assert verified["backup_id"] == "schema-bootstrap"
+
+
+def test_offhost_bootstrap_has_a_separate_bounded_fallback_age(monkeypatch):
+    commands = []
+
+    def fake_exec(_client, command: str, *, timeout=None):
+        commands.append(command)
+        return 'EDE_VERIFIED_BACKUP_SELECTION={"backup_id":"verified"}\n'
+
+    monkeypatch.setattr(MODULE, "_exec", fake_exec)
+    selected = MODULE._select_remote_exact_backup(
+        object(),
+        expected_sha="a" * 40,
+        max_fallback_age_seconds=MODULE.MAX_OFFHOST_BOOTSTRAP_BACKUP_AGE_SECONDS,
+        allow_offhost_bootstrap_reason=True,
+    )
+
+    assert selected["backup_id"] == "verified"
+    assert MODULE.MAX_FALLBACK_BACKUP_AGE_SECONDS == 7 * 86400
+    assert MODULE.MAX_OFFHOST_BOOTSTRAP_BACKUP_AGE_SECONDS == 14 * 86400
+    assert "MAX_FALLBACK_AGE_SECONDS=1209600" in commands[0]
+    assert "ALLOW_BOOTSTRAP_REASON=1" in commands[0]
+
+
 def test_live_snapshot_failure_still_releases_exact_gate(monkeypatch, tmp_path):
     import sys
     from types import SimpleNamespace

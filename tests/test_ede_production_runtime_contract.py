@@ -29,16 +29,18 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     assert '"ede-inventory"' in offload
     assert '"validate-gate"' in offload
     assert "EDE_OFFLOAD_GATE_RELEASED=1" in offload
-    assert ede.index("Export a consistent live DB directly to this offhost worker") < ede.index(
+    assert ede.index("Export the verified recovery point for Object Storage bootstrap") < ede.index(
         "Run EDE v1.3 research off production VPS"
     )
-    assert "production_ede_offload.py live-snapshot" in ede
+    assert "production_ede_offload.py snapshot" in ede
+    assert "--bootstrap-offhost" in ede
     assert "--verified-immutable-input" in ede
 
     # The legacy immutable-backup selector remains available for recovery, while
     # scheduled audit export no longer needs a second whole database on the VPS.
     assert "MAX_EXACT_BACKUP_AGE_SECONDS" in offload
     assert "MAX_FALLBACK_BACKUP_AGE_SECONDS" in offload
+    assert "MAX_OFFHOST_BOOTSTRAP_BACKUP_AGE_SECONDS" in offload
     assert "EDE_VERIFIED_BACKUP_SELECTION" in offload
     assert "DEPLOY_PRESTART_VERIFIED_LOCAL_BACKUP" in offload
     assert "SCHEDULED_VERIFIED_LOCAL_BACKUP" in offload
