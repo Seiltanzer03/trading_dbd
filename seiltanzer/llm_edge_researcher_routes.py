@@ -19,6 +19,7 @@ from .llm_edge_exploratory import (
 from .llm_edge_lifecycle import (
     read_cached_materialized_lifecycle,
     read_cached_materialized_lifecycle_json,
+    read_cached_materialized_status,
 )
 from .llm_edge_prospective_journal import initialize_journal_storage
 from .llm_edge_researcher import edge_researcher_status, propose_edge_hypotheses
@@ -65,11 +66,13 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
     }
 
     def status():
-        cached = read_cached_materialized_lifecycle(runtime)
+        cached = read_cached_materialized_status(runtime)
         summary = cached.get("researcher") or {}
         return {
-            **edge_researcher_status(runtime),
-            "deterministic_evaluator": edge_evaluator_status(runtime),
+            **edge_researcher_status(runtime, materialized_payload=cached),
+            "deterministic_evaluator": edge_evaluator_status(
+                runtime, materialized_payload=cached
+            ),
             "evaluator_job": dict(eval_state),
             "exploratory": {
                 "status": cached.get("status", "INITIALIZING"),
@@ -192,7 +195,7 @@ def install_llm_edge_researcher_routes(app: FastAPI) -> None:
     )
 
     def evaluate_status():
-        cached = read_cached_materialized_lifecycle(runtime)
+        cached = read_cached_materialized_status(runtime)
         researcher = cached.get("researcher") or cached.get("summary") or {}
         return {
             "status": "OK",
