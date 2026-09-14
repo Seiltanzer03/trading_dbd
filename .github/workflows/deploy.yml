@@ -150,7 +150,7 @@ jobs:
             wheel_cache_after=0
             if [ -d /root/wheels ] && [ ! -L /root/wheels ] && [ "$(readlink -f /root/wheels)" = /root/wheels ]; then
               wheel_cache_before=$(du -sb /root/wheels 2>/dev/null | awk '{print $1}')
-              find /root/wheels -xdev -type f -name '*.whl' -delete
+              find /root/wheels -xdev -type f -name '*.whl' -delete || true
               wheel_cache_after=$(du -sb /root/wheels 2>/dev/null | awk '{print $1}')
             fi
             echo "DEPLOY_WHEEL_CACHE_BYTES_REMOVED=$(( wheel_cache_before - wheel_cache_after ))"
