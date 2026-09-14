@@ -213,6 +213,7 @@ class ProspectiveFeatureAdapter:
         # block.  Loading every retained passive bar eagerly made a read-only
         # inventory consume memory proportional to the full production DB.
         self._causal_bars: dict[str, list[dict[str, Any]]] | None = None
+        self._causal_bar_ends: dict[str, list[float]] = {}
         self._causal_bar_cache: dict[tuple[str, float, float], dict[str, Any]] = {}
 
     def _load_causal_bars(self) -> dict[str, list[dict[str, Any]]]:
@@ -232,6 +233,84 @@ class ProspectiveFeatureAdapter:
             grouped[str(row["instrument"])].append(dict(row))
         return dict(grouped)
 
+    def _causal_series(
+        self, instrument: str
+    ) -> tuple[list[dict[str, Any]], list[float]]:
+        if self._causal_bars is None:
+            self._causal_bars = self._load_causal_bars()
+        bars = self._causal_bars.get(instrument, [])
+        # A small frozen-only journal adapter is intentionally constructed via
+        # ``__new__`` to avoid opening historical tables.  Keep this cache lazy
+        # so that constructor-bypassing read paths remain safe as well.
+        bar_ends = getattr(self, "_causal_bar_ends", None)
+        if bar_ends is None:
+            bar_ends = {}
+            self._causal_bar_ends = bar_ends
+        ends = bar_ends.get(instrument)
+        if ends is None:
+            ends = [float(bar["bar_end_ts"]) for bar in bars]
+            bar_ends[instrument] = ends
+        return bars, ends
+
+    def _causal_bar_index(
+        self, instrument: str, upper_ts: float, capture_recorded_ts: float,
+        *, hi: int | None = None, positive_close: bool = False,
+    ) -> int:
+        """Find the latest causally available bar at or before ``upper_ts``.
+
+        The old adapter rebuilt the complete eligible prefix for every T0.  A
+        binary search plus a short backwards check preserves the two-dimensional
+        end-time/created-time cutoff while avoiding repeated full-history scans.
+        """
+        bars, ends = self._causal_series(instrument)
+        upper = len(ends) if hi is None else max(0, min(int(hi), len(ends)))
+        index = bisect.bisect_right(ends, upper_ts + 1e-6, hi=upper) - 1
+        while index >= 0:
+            bar = bars[index]
+            created_ts = float(bar.get("created_ts") or bar["bar_end_ts"])
+            close = _finite(bar.get("close"))
+            if (
+                created_ts <= capture_recorded_ts + 1e-6
+                and (not positive_close or (close is not None and close > 0.0))
+            ):
+                return index
+            index -= 1
+        return -1
+
+    def _causal_bar_window(
+        self, instrument: str, start_index: int, end_index: int,
+        capture_recorded_ts: float, *, positive_close: bool = False,
+    ) -> list[dict[str, Any]]:
+        bars, _ends = self._causal_series(instrument)
+        return [
+            bar for bar in bars[max(0, start_index):end_index + 1]
+            if float(bar.get("created_ts") or bar["bar_end_ts"])
+            <= capture_recorded_ts + 1e-6
+            and (
+                not positive_close
+                or ((_finite(bar.get("close")) or 0.0) > 0.0)
+            )
+        ]
+
+    def _has_causal_bar_count(
+        self, instrument: str, end_index: int, capture_recorded_ts: float,
+        minimum: int, *, positive_close: bool = False,
+    ) -> bool:
+        bars, _ends = self._causal_series(instrument)
+        count = 0
+        for index in range(end_index, -1, -1):
+            bar = bars[index]
+            created_ts = float(bar.get("created_ts") or bar["bar_end_ts"])
+            close = _finite(bar.get("close"))
+            if (
+                created_ts <= capture_recorded_ts + 1e-6
+                and (not positive_close or (close is not None and close > 0.0))
+            ):
+                count += 1
+                if count >= minimum:
+                    return True
+        return False
+
     def _recomputed_price_context(self, row: dict[str, Any]) -> dict[str, Any]:
         """Recompute only from bars demonstrably admitted by the T0 capture."""
         instrument = str(row["instrument"])
@@ -241,28 +320,26 @@ class ProspectiveFeatureAdapter:
         cached = self._causal_bar_cache.get(key)
         if cached is not None:
             return cached
-        if self._causal_bars is None:
-            self._causal_bars = self._load_causal_bars()
-        all_bars = self._causal_bars.get(instrument, [])
-        eligible = [bar for bar in all_bars
-                    if float(bar["bar_end_ts"]) <= t0+1e-6
-                    and float(bar.get("created_ts") or bar["bar_end_ts"])
-                    <= capture_recorded_ts+1e-6]
-        if len(eligible) < 12:
-            self._causal_bar_cache[key] = {}
-            return {}
-        ends = [float(bar["bar_end_ts"]) for bar in eligible]
-        end_index = bisect.bisect_right(ends, t0+1e-6)-1
-        if end_index < 1 or t0-ends[end_index] > 5*60.0:
+        _all_bars, ends = self._causal_series(instrument)
+        end_index = self._causal_bar_index(
+            instrument, t0, capture_recorded_ts)
+        if (
+            end_index < 0
+            or not self._has_causal_bar_count(
+                instrument, end_index, capture_recorded_ts, 12)
+            or t0-ends[end_index] > 5*60.0
+        ):
             self._causal_bar_cache[key] = {}
             return {}
         end_ts = ends[end_index]
         target = end_ts-60*60.0
-        start_index = bisect.bisect_right(ends, target+1e-6, hi=end_index)-1
+        start_index = self._causal_bar_index(
+            instrument, target, capture_recorded_ts, hi=end_index)
         if start_index < 0 or target-ends[start_index] > 2*60.0:
             self._causal_bar_cache[key] = {}
             return {}
-        window = eligible[start_index:end_index+1]
+        window = self._causal_bar_window(
+            instrument, start_index, end_index, capture_recorded_ts)
         closes = [float(bar["close"]) for bar in window]
         if len(closes) < 10 or any(value <= 0 for value in closes):
             self._causal_bar_cache[key] = {}
