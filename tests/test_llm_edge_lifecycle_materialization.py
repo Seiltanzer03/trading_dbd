@@ -74,4 +74,12 @@ def test_materialization_reports_cutoff_from_latest_evaluation(tmp_path, monkeyp
     assert hypothesis["evaluation_sample"]["evaluation_cutoff_ts"] == 2020.0
     assert hypothesis["evaluation_sample"]["raw_rows"] == 20
     assert hypothesis["exploratory_verdict"]["status"] == "EARLY_ADVANTAGE"
+    assert "position_manager_weight" not in hypothesis["exploratory_verdict"]
+    assert hypothesis["exploratory_verdict"]["position_manager_weight_mode"] == (
+        "DYNAMIC_CURRENT_T0"
+    )
+    assert hypothesis["exploratory_verdict"]["position_manager_weight_cap"] == 0.15
+    assert hypothesis["exploratory_verdict"]["position_manager_weight_requires"] == (
+        "LIMITED_AND_CURRENT_T0_MATCH"
+    )
     assert payload["researcher"]["early_advantage"] == 1
