@@ -13,12 +13,25 @@ def test_gate_does_not_pass_actions_payload_through_environment():
 
 def test_manual_health_dispatch_still_requires_exact_green_main():
     source = WORKFLOW.read_text(encoding='utf-8')
-    exact = source.index('refs/heads/main | cut -f1)\" = \"$EXPECTED_SHA\"')
+    exact = source.index('current_main=$(git ls-remote')
     green = source.index('test "$ci" = success')
     manual = source.index('if [ "$EVENT_NAME" = workflow_dispatch ]')
     assert exact < manual
     assert green < manual
     assert 'echo "needs_recovery=true" >> "$GITHUB_OUTPUT"' in source[manual:]
+
+
+def test_superseded_automatic_deploy_is_a_clean_noop():
+    source = WORKFLOW.read_text(encoding='utf-8')
+    stale = source.index('if [ "$current_main" != "$EXPECTED_SHA" ]')
+    ci = source.index('ci=$(curl')
+    assert stale < ci
+    block = source[stale:ci]
+    assert 'if [ "$EVENT_NAME" = workflow_run ]' in block
+    assert 'echo "needs_recovery=false" >> "$GITHUB_OUTPUT"' in block
+    assert 'superseded deploy completion' in block
+    assert 'exit 0' in block
+    assert 'Manual recovery SHA is not current main' in block
 
 
 def test_automatic_gate_uses_completed_deploy_event_directly():
