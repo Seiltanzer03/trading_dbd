@@ -36,7 +36,16 @@ jobs:
           DEPLOY_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
-          test "$(git ls-remote https://github.com/${{ github.repository }} refs/heads/main | cut -f1)" = "$EXPECTED_SHA"
+          current_main=$(git ls-remote https://github.com/${{ github.repository }} refs/heads/main | cut -f1)
+          if [ "$current_main" != "$EXPECTED_SHA" ]; then
+            if [ "$EVENT_NAME" = workflow_run ]; then
+              echo "superseded deploy completion: expected=$EXPECTED_SHA current_main=$current_main"
+              echo "needs_recovery=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Manual recovery SHA is not current main: expected=$EXPECTED_SHA current_main=$current_main"
+            exit 1
+          fi
 
           ci=$(curl -fsS --max-time 8 \
             -H "Accept: application/vnd.github+json" \
