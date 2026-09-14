@@ -11,7 +11,12 @@ from pathlib import Path
 import time
 import zlib
 
-PART_SIZE = 64 * 1024 * 1024
+# Yandex validates the SigV4 timestamp after receiving an UploadPart request.
+# A 64 MiB part took more than twenty minutes on the observed runner route and
+# was rejected as RequestTimeTooSkewed.  Sixteen MiB stays well above S3's
+# 5 MiB multipart minimum while keeping each signed request bounded on a slow
+# connection (and still supports snapshots up to 160 GiB within 10,000 parts).
+PART_SIZE = 16 * 1024 * 1024
 READ_SIZE = 4 * 1024 * 1024
 
 
