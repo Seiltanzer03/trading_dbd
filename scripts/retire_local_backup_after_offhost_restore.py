@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import shlex
+import time
 
 from production_ede_offload import _connect, _exec, _probe_api
 
@@ -58,6 +59,17 @@ with database.open("rb") as stream:
         digest.update(chunk)
 if digest.hexdigest() != expected_sha:
     raise SystemExit("local backup SHA changed")
+live = Path("/opt/seiltanzer/data/trades.db")
+if not live.is_file():
+    raise SystemExit("authoritative live database is missing")
+live_connection = sqlite3.connect(
+    live.resolve().as_uri() + "?mode=ro", uri=True, timeout=120.0
+)
+try:
+    if live_connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+        raise SystemExit("authoritative live database quick_check failed")
+finally:
+    live_connection.close()
 before = os.statvfs(root).f_bavail * os.statvfs(root).f_frsize
 allocated = int(database.stat().st_blocks) * 512
 database.unlink()
@@ -76,6 +88,29 @@ print("LOCAL_BACKUP_RETIRED=" + json.dumps({
     "recoverable_from_verified_offhost_restore": True,
 }, sort_keys=True))
 '''
+
+
+def _start_and_wait_for_api(client) -> None:
+    _exec(
+        client,
+        "systemctl reset-failed seiltanzer >/dev/null 2>&1 || true; "
+        "systemctl start seiltanzer",
+        timeout=30,
+    )
+    error: BaseException | None = None
+    for _attempt in range(240):
+        try:
+            _exec(
+                client,
+                "curl -fsS --max-time 2 http://127.0.0.1:8790/ >/dev/null",
+                timeout=5,
+            )
+            _probe_api(client)
+            return
+        except BaseException as exc:
+            error = exc
+            time.sleep(2)
+    raise RuntimeError("production API did not recover after local backup retirement") from error
 
 
 def retire(*, password: str, restore_result: Path) -> dict:
@@ -100,14 +135,13 @@ def retire(*, password: str, restore_result: Path) -> dict:
 
     client = _connect(password)
     try:
-        _probe_api(client)
         command = " ".join([
             "python3", "-c", shlex.quote(REMOTE_SCRIPT),
             shlex.quote(backup_id), shlex.quote(database_sha),
             shlex.quote(str(database_size)),
         ])
         output = _exec(client, command, timeout=900)
-        _probe_api(client)
+        _start_and_wait_for_api(client)
     finally:
         client.close()
     if "LOCAL_BACKUP_ALREADY_RETIRED=1" in output:

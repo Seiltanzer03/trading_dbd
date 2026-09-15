@@ -12,6 +12,7 @@ on:
       - "scripts/retire_local_backup_after_offhost_restore.py"
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -25,7 +26,16 @@ jobs:
           python-version: "3.11"
       - name: Install private storage and SSH clients
         run: pip install boto3 paramiko
+      - name: Reuse the persisted exact bootstrap restore proof
+        if: github.event_name == 'push'
+        uses: actions/download-artifact@v4
+        with:
+          name: offhost-restore-proof-34928308516
+          path: ${{ runner.temp }}/offhost-restore
+          github-token: ${{ github.token }}
+          run-id: 34928308516
       - name: Fully restore and verify private Object Storage snapshot
+        if: github.event_name != 'push'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
@@ -38,12 +48,9 @@ jobs:
           set -euo pipefail
           args=(--bucket trading-dbd-backups-2026
                 --destination "$RESTORED_DB" --result "$RESTORE_RESULT")
-          if [ "$EVENT_NAME" = "push" ]; then
-            args+=(--key backups/v1/daily-slot-4/snapshot.sqlite3.gz
-                   --expected-backup-id 20260905T180524Z-local-524722)
-          fi
           python scripts/restore_verified_snapshot.py "${args[@]}"
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'push'
         with:
           name: offhost-restore-proof-${{ github.run_id }}
           path: ${{ runner.temp }}/offhost-restore/result.json
