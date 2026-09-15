@@ -22,8 +22,11 @@ def test_restore_drill_proves_exact_object_before_bounded_local_retirement():
     assert "compressed_digest.hexdigest() != compressed_sha" in restore
     assert "database_digest.hexdigest() != database_sha" in restore
     assert "if: github.event_name == 'push'" in workflow
-    assert "--expected-backup-id 20260905T180524Z-local-524722" in workflow
-    assert "--key backups/v1/daily-slot-4/snapshot.sqlite3.gz" in workflow
+    assert "offhost-restore-proof-34928308516" in workflow
+    assert "run-id: 34928308516" in workflow
+    assert "github-token: ${{ github.token }}" in workflow
     assert "database.unlink()" in retire
     assert "manifest_path.unlink()" in retire
     assert "LOCAL_BACKUP_ALREADY_RETIRED=1" in retire
+    assert "authoritative live database quick_check failed" in retire
+    assert "systemctl start seiltanzer" in retire

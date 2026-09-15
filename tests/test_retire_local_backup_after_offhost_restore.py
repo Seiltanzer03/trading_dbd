@@ -43,17 +43,20 @@ def test_retirement_requires_restore_proof_and_confines_exact_pair(tmp_path, mon
 
     def fake_exec(_client, command, timeout):
         commands.append((command, timeout))
-        return "LOCAL_BACKUP_RETIRED=" + json.dumps({
-            "backup_id": "20260905T180524Z-local-524722",
-            "database_sha256": "a" * 64,
-            "database_size_bytes": 6729957376,
-        })
+        if "python3 -c" in command:
+            return "LOCAL_BACKUP_RETIRED=" + json.dumps({
+                "backup_id": "20260905T180524Z-local-524722",
+                "database_sha256": "a" * 64,
+                "database_size_bytes": 6729957376,
+            })
+        return ""
 
     monkeypatch.setattr(MODULE, "_exec", fake_exec)
     proof = MODULE.retire(password="secret", restore_result=result)
     assert proof["backup_id"] == "20260905T180524Z-local-524722"
-    assert len(probes) == 2
+    assert len(probes) == 1
     assert commands[0][1] == 900
     assert "/opt/seiltanzer/data/backups/local" in commands[0][0]
     assert "database.unlink()" in commands[0][0]
     assert "trades.db" in commands[0][0]
+    assert any("systemctl start seiltanzer" in command for command, _ in commands)
