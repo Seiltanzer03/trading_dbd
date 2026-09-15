@@ -29,11 +29,11 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     assert '"ede-inventory"' in offload
     assert '"validate-gate"' in offload
     assert "EDE_OFFLOAD_GATE_RELEASED=1" in offload
-    assert ede.index("Export the verified recovery point for Object Storage bootstrap") < ede.index(
+    assert ede.index("Export a current consistent live snapshot without VPS disk use") < ede.index(
         "Run EDE v1.3 research off production VPS"
     )
-    assert "production_ede_offload.py snapshot" in ede
-    assert "--bootstrap-offhost" in ede
+    assert "production_ede_offload.py live-snapshot" in ede
+    assert "--bootstrap-offhost" not in ede
     assert "--verified-immutable-input" in ede
 
     # The legacy immutable-backup selector remains available for recovery, while

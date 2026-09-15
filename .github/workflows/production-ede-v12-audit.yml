@@ -217,7 +217,7 @@ jobs:
         run: |
           pip install -e ".[dev]"
           pip install paramiko boto3
-      - name: Export the verified recovery point for Object Storage bootstrap
+      - name: Export a current consistent live snapshot without VPS disk use
         id: snapshot_export
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -234,8 +234,7 @@ jobs:
           if [ "$EXACT_CHAIN" = "true" ]; then
             args+=(--require-acceptance-marker)
           fi
-          python scripts/production_ede_offload.py snapshot \
-            --bootstrap-offhost "${args[@]}"
+          python scripts/production_ede_offload.py live-snapshot "${args[@]}"
       - name: Store the verified snapshot in bounded private Object Storage slots
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}

@@ -1,0 +1,70 @@
+name: production-offhost-restore-drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "31 2 * * 0"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/production-offhost-restore-drill.yml"
+      - "scripts/restore_verified_snapshot.py"
+      - "scripts/retire_local_backup_after_offhost_restore.py"
+
+permissions:
+  contents: read
+
+jobs:
+  restore:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install private storage and SSH clients
+        run: pip install boto3 paramiko
+      - name: Fully restore and verify private Object Storage snapshot
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
+          EVENT_NAME: ${{ github.event_name }}
+          RESTORED_DB: ${{ runner.temp }}/offhost-restore/restored.sqlite3
+          RESTORE_RESULT: ${{ runner.temp }}/offhost-restore/result.json
+        run: |
+          set -euo pipefail
+          args=(--bucket trading-dbd-backups-2026
+                --destination "$RESTORED_DB" --result "$RESTORE_RESULT")
+          if [ "$EVENT_NAME" = "push" ]; then
+            args+=(--key backups/v1/daily-slot-4/snapshot.sqlite3.gz
+                   --expected-backup-id 20260905T180524Z-local-524722)
+          fi
+          python scripts/restore_verified_snapshot.py "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offhost-restore-proof-${{ github.run_id }}
+          path: ${{ runner.temp }}/offhost-restore/result.json
+          retention-days: 90
+      - name: Retire only the exact restored legacy local backup
+        if: github.event_name == 'push'
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          RESTORE_RESULT: ${{ runner.temp }}/offhost-restore/result.json
+        run: |
+          python scripts/retire_local_backup_after_offhost_restore.py \
+            --password "$SSH_PASSWORD" --restore-result "$RESTORE_RESULT"
+      - name: Remove disposable runner restore
+        if: always()
+        env:
+          RESTORED_DB: ${{ runner.temp }}/offhost-restore/restored.sqlite3
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          database = Path(os.environ["RESTORED_DB"])
+          for path in (database, Path(str(database) + "-wal"), Path(str(database) + "-shm")):
+              path.unlink(missing_ok=True)
+          PY
