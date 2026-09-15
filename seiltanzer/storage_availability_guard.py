@@ -3,14 +3,17 @@
 A verified local recovery point must never be silently relabelled as fresh, but a
 healthy authoritative database also must not remain permanently offline merely
 because the filesystem cannot hold a second multi-GiB snapshot.  This refinement
-sits outside the existing fail-closed backup guards and handles only two narrow
+sits outside the existing fail-closed backup guards and handles only three narrow
 cases:
 
 * background backups that are mathematically impossible are deferred before any
   full-database scan/copy begins; and
 * prestart ENOSPC may reuse the newest *already verified* recovery point only
   after re-hashing that immutable backup and running a fresh read-only quick_check
-  of the authoritative database.
+  of the authoritative database; and
+* post-schema identity snapshots may remain explicitly degraded when a second
+  full database cannot fit, after a fresh post-schema quick_check. The durable
+  off-host workflow then owns creation of the next recovery point.
 
 The original backup timestamp is preserved, so storage readiness remains visibly
 BACKUP_STALE when the 15-minute RPO is missed.  No authoritative data is written,
@@ -32,11 +35,13 @@ from .storage_disk_guard import (
 )
 
 
-AVAILABILITY_GUARD_VERSION = "storage-availability-guard-v1-low-disk-defer"
+AVAILABILITY_GUARD_VERSION = "storage-availability-guard-v2-schema-identity-defer"
 DEGRADED_REUSE_REASON = "LOW_DISK_STALE_VERIFIED_BACKUP_AVAILABILITY_REUSE"
 DEGRADED_ZERO_BACKUP_REASON = "LOW_DISK_ZERO_BACKUP_AVAILABILITY_SERVE"
+DEGRADED_SCHEMA_IDENTITY_REASON = "LOW_DISK_SCHEMA_IDENTITY_OFFHOST_PENDING"
 BACKGROUND_DEFER_REASON = "LOW_DISK_BACKGROUND_BACKUP_DEFERRED"
 _BACKGROUND_REASONS = {"scheduled", "clean_shutdown"}
+_SCHEMA_IDENTITY_REASONS = {"g1m-schema-identity", "g1s-schema-identity"}
 _LOW_DISK_RETRY_MIN_SEC = 5 * 60
 
 
@@ -255,6 +260,87 @@ def _reuse_verified_for_degraded_prestart(
     )
 
 
+def _defer_schema_identity_to_offhost(
+    self: Any,
+    *,
+    reason: str,
+    plan: dict[str, int],
+    original_error: BaseException,
+):
+    """Keep startup available when a post-schema local copy cannot fit.
+
+    The synthetic result is deliberately unverified. A fresh quick_check proves
+    only that the post-migration live database is readable; the EDE/off-host
+    workflow must still create and verify a real recovery object outside the VPS.
+    """
+    cached = getattr(self, "_degraded_schema_identity_result", None)
+    reasons = set(getattr(self, "_degraded_schema_identity_reasons", set()))
+    reasons.add(reason)
+    self._degraded_schema_identity_reasons = reasons
+    if cached is not None:
+        if isinstance(self._startup_integrity, dict):
+            self._startup_integrity["schema_identity_reasons"] = sorted(reasons)
+        return cached
+
+    source_ok, source_detail = _s._sqlite_integrity(self.db_path, full=False)
+    if not source_ok:
+        raise RuntimeError(
+            "authoritative trades.db quick_check failed after schema migration: "
+            f"{source_detail}"
+        ) from original_error
+
+    checked_ts = time.time()
+    startup = dict(self._startup_integrity or {})
+    startup.update(
+        {
+            "checked_ts": checked_ts,
+            "ok": True,
+            "detail": source_detail,
+            "check_kind": "quick_check",
+            "verification_scope": "post_schema_authoritative_source",
+            "durability_degraded": True,
+            "schema_identity_backup_created": False,
+            "schema_identity_checked_ts": checked_ts,
+            "schema_identity_reasons": sorted(reasons),
+            "reason": DEGRADED_SCHEMA_IDENTITY_REASON,
+            "availability_guard_version": AVAILABILITY_GUARD_VERSION,
+        }
+    )
+    self._startup_integrity = startup
+    self._prestart_integrity_ready = True
+    message = (
+        "post-schema local backup deferred to off-host workflow after deterministic "
+        f"low-disk proof; reason={reason} authoritative_quick_check={source_detail} "
+        f"available={plan['available_bytes']} "
+        f"compact_required={plan['compact_required_bytes']} error={original_error}"
+    )
+    self._last_error = message
+    self._recovery_actions.append(
+        {
+            "ts": checked_ts,
+            "action": "defer_schema_identity_backup_to_offhost",
+            "reason": DEGRADED_SCHEMA_IDENTITY_REASON,
+            "requested_backup_reason": reason,
+            "source_quick_check": source_detail,
+            "durability_degraded": True,
+            **plan,
+            "authoritative_db_deleted": False,
+            "authoritative_db_modified": False,
+        }
+    )
+    result = _s.BackupResult(
+        backup_id="degraded-schema-identity",
+        kind="local",
+        database_path=str(self.db_path),
+        manifest_path="",
+        verified=False,
+        created_ts=checked_ts,
+        sha256="",
+    )
+    self._degraded_schema_identity_result = result
+    return result
+
+
 def install_storage_availability_guard() -> None:
     """Install outside disk/sparse/single-slot guards before prepare_storage()."""
     manager_cls = _s.StorageManager
@@ -320,26 +406,50 @@ def install_storage_availability_guard() -> None:
                     ),
                 )
 
-        try:
+        if kind == "local" and reason in _SCHEMA_IDENTITY_REASONS:
+            impossible, plan = _background_copy_is_impossible(self, directory)
+            if impossible:
+                return _defer_schema_identity_to_offhost(
+                    self,
+                    reason=reason,
+                    plan=plan,
+                    original_error=OSError(
+                        errno.ENOSPC,
+                        "schema identity backup skipped to preserve service availability",
+                    ),
+                )
 
+        try:
             return guarded_create(self, kind=kind, reason=reason)
         except (OSError, sqlite3.OperationalError) as exc:
-            if not (
-                kind == "local"
-                and reason == "prestart"
-                and (
-                    not isinstance(exc, OSError)
-                    or exc.errno in (errno.ENOSPC, errno.EDQUOT)
-                    or "disk is full" in str(exc).lower()
-                    or "disk i/o error" in str(exc).lower()
-                )
-            ):
-                raise
-            return _reuse_verified_for_degraded_prestart(
-                self,
-                directory=directory,
-                original_error=exc,
+            error_text = str(exc).lower()
+            explicit_space_error = (
+                isinstance(exc, OSError)
+                and exc.errno in (errno.ENOSPC, errno.EDQUOT)
+            ) or "disk is full" in error_text or "disk i/o error" in error_text
+            prestart_fallback = reason == "prestart" and (
+                not isinstance(exc, OSError) or explicit_space_error
             )
+            schema_fallback = (
+                reason in _SCHEMA_IDENTITY_REASONS and explicit_space_error
+            )
+            if not (kind == "local" and (prestart_fallback or schema_fallback)):
+                raise
+            if reason == "prestart":
+                return _reuse_verified_for_degraded_prestart(
+                    self,
+                    directory=directory,
+                    original_error=exc,
+                )
+            if reason in _SCHEMA_IDENTITY_REASONS:
+                _impossible, plan = _background_copy_is_impossible(self, directory)
+                return _defer_schema_identity_to_offhost(
+                    self,
+                    reason=reason,
+                    plan=plan,
+                    original_error=exc,
+                )
+            raise
 
     manager_cls.create_backup = create_backup
     manager_cls._storage_availability_guard_version = AVAILABILITY_GUARD_VERSION

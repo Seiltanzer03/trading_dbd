@@ -214,7 +214,33 @@ def test_impossible_prestart_serves_without_backup_when_no_recovery_point_exists
         assert manager._startup_integrity["ok"] is True
         assert manager._startup_integrity["durability_degraded"] is True
         assert manager._startup_integrity["reason"] == availability.DEGRADED_ZERO_BACKUP_REASON
+
+        schema_result = manager.create_backup(
+            kind="local", reason="g1m-schema-identity"
+        )
+        repeated = manager.create_backup(
+            kind="local", reason="g1s-schema-identity"
+        )
+        assert schema_result.backup_id == "degraded-schema-identity"
+        assert repeated is schema_result
+        assert manager._startup_integrity["ok"] is True
+        assert manager._startup_integrity["verification_scope"] == (
+            "post_schema_authoritative_source"
+        )
+        assert manager._startup_integrity["schema_identity_backup_created"] is False
+        assert manager._startup_integrity["schema_identity_reasons"] == [
+            "g1m-schema-identity",
+            "g1s-schema-identity",
+        ]
+        schema_actions = [
+            action
+            for action in manager._recovery_actions
+            if action.get("action") == "defer_schema_identity_backup_to_offhost"
+        ]
+        assert len(schema_actions) == 1
+        assert schema_actions[0]["authoritative_db_deleted"] is False
+        assert schema_actions[0]["authoritative_db_modified"] is False
+        assert list(manager.local_dir.glob("*.sqlite3")) == []
     finally:
         storage.StorageManager.create_backup = orig_create
-
 
