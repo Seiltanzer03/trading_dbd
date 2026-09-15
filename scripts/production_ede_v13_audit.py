@@ -45,7 +45,7 @@ EVALUATION_MEASUREMENT_CONTRACT = (
 class ReadOnlyRuntime:
     def __init__(self, database: Path):
         self._conn = sqlite3.connect(
-            f"file:{database.resolve()}?mode=ro", uri=True,
+            database.resolve().as_uri() + "?mode=ro&immutable=1", uri=True,
             check_same_thread=False, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA query_only=ON")
