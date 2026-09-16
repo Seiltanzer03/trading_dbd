@@ -31,3 +31,56 @@ def test_fallback_returns_structured_management_decision(client):
     assert edge["may_widen_stop"] is False
     assert edge["may_increase_position"] is False
     assert edge["automatic_execution_allowed"] is False
+
+
+def test_extended_shadow_action_is_registered_and_manually_acknowledged(
+    client, monkeypatch,
+):
+    def fake_verdict(snapshot):
+        geometry = snapshot["trade_geometry"]
+        current = float(geometry["current"])
+        active_stop = float(geometry["active_risk_barrier"])
+        target = active_stop + (current - active_stop) * 0.5
+        return {
+            "verdict": "test shadow action",
+            "model": "test-provider",
+            "llm_shadow_decision": {
+                "status": "ok",
+                "policy": "TIGHTEN_STOP",
+                "confidence": 0.8,
+                "production_authority": False,
+                "automatic_execution_allowed": False,
+                "working_action": {
+                    "contract_version": "llm-shadow-manual-action-v1",
+                    "status": "READY_FOR_MANUAL_CONFIRMATION",
+                    "policy": "TIGHTEN_STOP",
+                    "confidence": 0.8,
+                    "instruction_ru": f"Подтянуть стоп к {target:g}",
+                    "parameters": {"stop_price": target, "anchor": "TEST"},
+                    "manual_confirmation_required": True,
+                    "automatic_execution_allowed": False,
+                    "may_widen_stop": False,
+                    "may_increase_position": False,
+                },
+            },
+        }
+
+    monkeypatch.setattr("seiltanzer.app.request_verdict", fake_verdict)
+    response = client.post("/api/ai/verdict")
+    assert response.status_code == 200
+    body = response.json()
+    action = body["llm_shadow_decision"]["working_action"]
+    assert action["action_id"].startswith("shadow-action-")
+    assert action["execution_status"] == "pending_execution"
+    assert action["production_authority"] is False
+
+    acknowledged = client.post("/api/ai/shadow-action/ack", json={
+        "action_id": action["action_id"],
+        "trade_id": action["trade_id"],
+        "executed": True,
+    })
+    assert acknowledged.status_code == 200
+    result = acknowledged.json()
+    assert result["execution_status"] == "executed"
+    assert result["position_state"]["active_stop_type"] == "TIGHTENED"
+    assert client.get("/api/position").json()["shadow_actions"][-1]["status"] == "executed"

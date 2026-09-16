@@ -205,15 +205,22 @@ def _observation(tick: dict, policy: dict, trade: dict) -> dict:
     # request and occasionally breached the snapshot budget without adding any
     # information.  Keep only unique position geometry plus explicit references
     # so model and deterministic renderers share one canonical metric copy.
+    position_state = tick.get("trade", {}).get("position_state") or {}
     return {
         "position": {
             "price": _rnd(price), "r": _rnd(prob.get("r"), 4),
             "max_r": _rnd(_at(tick, "ladder", "max_r"), 4),
             "to_take_r": _rnd((prob.get("T") or 0) - (prob.get("r") or 0), 4),
-            "to_stop_r": _rnd((prob.get("r") or 0) + 1.0, 4),
+            "to_stop_r": _rnd(_at(tick, "state", "to_stop_r"), 4),
         },
-        "exact_levels": {"entry": trade.get("entry"), "stop": trade.get("stop"),
-                         "take": trade.get("take"), "current": price},
+        "exact_levels": {
+            "entry": trade.get("entry"),
+            "stop": position_state.get("active_stop_price", trade.get("stop")),
+            "take": position_state.get("take", trade.get("take")),
+            "original_stop": trade.get("stop"),
+            "original_take": trade.get("take"),
+            "current": price,
+        },
         "canonical_metric_paths": {
             "market_evidence": "policy_manager.evidence",
             "option_path_inputs": "policy_manager.inputs",
@@ -274,7 +281,7 @@ def build_snapshot(engine) -> dict:
         "original_stop": _rnd(trade.get("stop")),
         "active_risk_barrier": _rnd(position_state.get("active_stop_price")),
         "active_risk_barrier_type": position_state.get("active_stop_type"),
-        "final_take": _rnd(trade.get("take")),
+        "final_take": _rnd(position_state.get("take", trade.get("take"))),
         "current_r": _rnd(_at(tick, "prob", "r")),
         "r_to_active_stop": _rnd((_num(_at(tick, "prob", "r")) or 0.0)
                                   - (risk_barrier_r if risk_barrier_r is not None else -1.0)),

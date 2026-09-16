@@ -196,7 +196,9 @@ class AISnapshotMaterializer:
             (switch or {}).get("r") if isinstance(switch, dict) else None,
             clock.get("risk_barrier_r"),
         ]
-        take = _finite(trade.get("take"))
+        take = _finite((snapshot.get("trade_geometry") or {}).get("final_take"))
+        if take is None:
+            take = _finite(trade.get("take"))
         if take is not None:
             values.append(_r_from_price(trade, take))
         output = []

@@ -168,7 +168,9 @@ def _snapshot(payload: dict) -> dict | None:
     if take_r is None:
         entry = _number(trade.get("entry"))
         stop = _number(trade.get("stop"))
-        take = _number(trade.get("take"))
+        take = _number(trade.get("active_take"))
+        if take is None:
+            take = _number(trade.get("take"))
         if None not in (entry, stop, take) and entry != stop:
             take_r = abs((take - entry) / (entry - stop))
     take_r = take_r if take_r is not None else 2.5
@@ -215,7 +217,8 @@ def _snapshot(payload: dict) -> dict | None:
 def _signature(trade: dict) -> str:
     values = [
         trade.get("id"), trade.get("direction"), trade.get("entry"),
-        trade.get("stop"), trade.get("take"),
+        trade.get("active_stop", trade.get("stop")),
+        trade.get("active_take", trade.get("take")),
     ]
     return json.dumps(values, separators=(",", ":"), ensure_ascii=False)
 

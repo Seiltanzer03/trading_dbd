@@ -1,6 +1,8 @@
 import numpy as np
 
-from seiltanzer.ai_policy import PolicyInputs, first_touch_clock, simulate_option_paths
+from seiltanzer.ai_policy import (
+    PolicyInputs, extract_policy_inputs, first_touch_clock, simulate_option_paths,
+)
 from seiltanzer.ai_policy_base import PathSimulation
 
 
@@ -63,6 +65,29 @@ def test_already_armed_be_uses_zero_risk_barrier():
     clock = first_touch_clock(sim, _inputs(r0=0.8, max_r=1.6))
     assert clock["risk_barrier_r"] == 0.0
     assert np.count_nonzero(sim.strategy_exit_reason == "breakeven") > 0
+
+
+def test_confirmed_tight_stop_is_authoritative_in_original_r_units():
+    tick = {
+        "prob": {"r": 1.0, "T": 4.0, "sigma_R": 1.0, "available": True},
+        "cone": {}, "market": {"available": True}, "ladder": {"max_r": 1.0},
+        "trade": {
+            "entry": 100.0, "stop": 90.0, "take": 140.0,
+            "direction": "long",
+            "position_state": {
+                "original_stop": 90.0, "active_stop_price": 105.0,
+                "take": 140.0, "be_armed": False,
+            },
+        },
+    }
+    inputs = extract_policy_inputs(tick)
+    assert inputs.r0 == 1.0
+    assert inputs.T == 4.0
+    assert inputs.stop_r == 0.5
+    sim = simulate_option_paths(inputs, n_paths=600, n_steps=80, seed=17)
+    clock = first_touch_clock(sim, inputs)
+    assert clock["risk_barrier_r"] == 0.5
+    assert np.all(sim.strategy_exit_r[sim.strategy_exit_reason == "stop"] >= 0.5)
 
 
 def test_unavailable_option_state_cannot_fabricate_p50():

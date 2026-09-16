@@ -147,6 +147,8 @@ class PolicyInputs:
     chain_status: str | None
     proxy_quality: str | None
     source: str | None
+    # Active execution barrier in the immutable original-R coordinate system.
+    stop_r: float = -1.0
 
     def as_dict(self) -> dict:
         return {
@@ -159,7 +161,7 @@ class PolicyInputs:
             "option_available": self.option_available,
             "chain_age_sec": _rnd(self.chain_age_sec, 1),
             "chain_status": self.chain_status, "proxy_quality": self.proxy_quality,
-            "source": self.source,
+            "source": self.source, "stop_r": _rnd(self.stop_r, 4),
         }
 
 
@@ -204,6 +206,8 @@ def extract_policy_inputs(tick: dict) -> PolicyInputs:
     market = tick.get("market") or {}
     ladder = tick.get("ladder") or {}
     chain = _at(tick, "feeds", "chain", default={}) or {}
+    trade = tick.get("trade") or {}
+    position = trade.get("position_state") or tick.get("position_state") or {}
     r0 = _num(prob.get("r")) or 0.0
     T = max(_num(prob.get("T")) or 1.0, 0.05)
     sigma_R = max(_num(cone.get("sigma_R")) or _num(prob.get("sigma_R")) or 1.0, 0.08)
@@ -212,6 +216,23 @@ def extract_policy_inputs(tick: dict) -> PolicyInputs:
         horizon_years * 365.0 * 24.0 * 60.0 if horizon_years and horizon_years > 0
         else 5.0 * 24.0 * 60.0
     )
+    entry = _num(trade.get("entry"))
+    original_stop = _num(position.get("original_stop"))
+    if original_stop is None:
+        original_stop = _num(trade.get("original_stop"))
+    if original_stop is None:
+        original_stop = _num(trade.get("stop"))
+    active_stop = _num(position.get("active_stop_price"))
+    if active_stop is None:
+        active_stop = _num(trade.get("active_stop"))
+    direction = str(trade.get("direction") or "").lower()
+    risk = abs(entry - original_stop) if entry is not None and original_stop is not None else 0.0
+    if risk > 0 and active_stop is not None:
+        sign = 1.0 if direction in {"long", "buy", "лонг"} else -1.0
+        stop_r = sign * (active_stop - entry) / risk
+    else:
+        stop_r = 0.0 if bool(position.get("be_armed")) else -1.0
+    stop_r = min(max(float(stop_r), -1.0), float(r0) - 1e-8)
     return PolicyInputs(
         r0=float(r0), T=float(T), sigma_R=float(min(sigma_R, 8.0)),
         drift_R=float(_num(cone.get("drift_R")) or 0.0),
@@ -225,7 +246,7 @@ def extract_policy_inputs(tick: dict) -> PolicyInputs:
         option_available=bool(prob.get("available") and market.get("available")),
         chain_age_sec=_num(market.get("chain_age_sec")) or _num(chain.get("age_sec")),
         chain_status=chain.get("status"), proxy_quality=market.get("quality"),
-        source=market.get("source") or prob.get("source"),
+        source=market.get("source") or prob.get("source"), stop_r=stop_r,
     )
 
 
@@ -323,14 +344,15 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
             strategy_exit_reason[target] = "take"
             strategy_alive[target] = False
         active = strategy_alive[idx]
-        active_floor = np.where(be_armed[idx], 0.0, -1.0)
+        active_floor = np.where(be_armed[idx], max(inputs.stop_r, 0.0), inputs.stop_r)
         economic_stop = active & (cur <= active_floor)
         if economic_stop.any():
             target = idx[economic_stop]
             strategy_exit_r[target] = active_floor[economic_stop]
             strategy_exit_time[target] = frac
             strategy_exit_reason[target] = np.where(
-                be_armed[target], "breakeven", "stop")
+                be_armed[target] & (np.abs(active_floor[economic_stop]) <= 1e-12),
+                "breakeven", "stop")
             strategy_alive[target] = False
 
         hit_take = cur >= inputs.T
@@ -365,10 +387,14 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
             raw_bridge_stop = idx[ii[bridge_stop]]
             econ_stop = raw_bridge_stop[strategy_alive[raw_bridge_stop]]
             if econ_stop.size:
-                strategy_exit_r[econ_stop] = np.where(be_armed[econ_stop], 0.0, -1.0)
+                strategy_exit_r[econ_stop] = np.where(
+                    be_armed[econ_stop], max(inputs.stop_r, 0.0), inputs.stop_r)
                 strategy_exit_time[econ_stop] = frac
+                raw_exit_levels = np.where(
+                    be_armed[econ_stop], max(inputs.stop_r, 0.0), inputs.stop_r)
                 strategy_exit_reason[econ_stop] = np.where(
-                    be_armed[econ_stop], "breakeven", "stop")
+                    be_armed[econ_stop] & (np.abs(raw_exit_levels) <= 1e-12),
+                    "breakeven", "stop")
                 strategy_alive[econ_stop] = False
             raw_bridge_take = idx[ii[bridge_take]]
             econ_take = raw_bridge_take[strategy_alive[raw_bridge_take]]
@@ -393,22 +419,30 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
                 strategy_exit_reason[econ_take] = "take"
                 strategy_alive[econ_take] = False
 
-        # Brownian bridges can cross an armed 0R barrier and return while both
-        # endpoints remain positive.  Sample that event explicitly.  This state
-        # is absorbing and therefore cannot later become a take.
+        # Brownian bridges can cross the active managed stop and return while
+        # both endpoints remain above it.  This includes original stop,
+        # manually tightened stops, break-even and stops already above entry.
+        managed_floor = np.where(
+            be_armed[idx], max(inputs.stop_r, 0.0), inputs.stop_r)
         bridge_candidates = idx[
-            strategy_alive[idx] & be_armed[idx] & (prev > 0.0) & (cur > 0.0)]
+            strategy_alive[idx]
+            & (managed_floor > -1.0 + 1e-12)
+            & (prev > managed_floor) & (cur > managed_floor)]
         if bridge_candidates.size:
             positions = np.searchsorted(idx, bridge_candidates)
-            p_be = np.exp(
-                -2.0 * prev[positions] * cur[positions]
+            floors = managed_floor[positions]
+            p_stop = np.exp(
+                -2.0 * (prev[positions] - floors) * (cur[positions] - floors)
                 / max(float(var_steps[step]), 1e-12))
-            hit_be = execution_rng.random(bridge_candidates.size) < p_be
-            if hit_be.any():
-                target = bridge_candidates[hit_be]
-                strategy_exit_r[target] = 0.0
+            hit_managed_stop = execution_rng.random(bridge_candidates.size) < p_stop
+            if hit_managed_stop.any():
+                target = bridge_candidates[hit_managed_stop]
+                exit_levels = floors[hit_managed_stop]
+                strategy_exit_r[target] = exit_levels
                 strategy_exit_time[target] = frac
-                strategy_exit_reason[target] = "breakeven"
+                strategy_exit_reason[target] = np.where(
+                    be_armed[target] & (np.abs(exit_levels) <= 1e-12),
+                    "breakeven", "stop")
                 strategy_alive[target] = False
 
         if hit_take.any():
@@ -431,6 +465,7 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
         current_r=inputs.r0, max_r=inputs.max_r, take_r=inputs.T,
         rungs=inputs.rungs, rung_fraction_original=inputs.rung_fraction,
         be_after_r=inputs.be_after,
+        stop_r=inputs.stop_r,
     )
     return PathSimulation(terminal=terminal, max_r=max_r, min_r=min_r,
                           stop_time=stop_time, take_time=take_time,
@@ -458,7 +493,10 @@ def first_touch_clock(sim: PathSimulation, inputs: PolicyInputs) -> dict:
         "horizon_minutes": round(float(inputs.horizon_minutes), 6),
         "path_count": int(np.asarray(sim.terminal).size),
         "step_count": int(sim.step_count or 0),
-        "risk_barrier_r": 0.0 if inputs.max_r >= inputs.be_after - 1e-12 else -1.0,
+        "risk_barrier_r": (
+            max(inputs.stop_r, 0.0)
+            if inputs.max_r >= inputs.be_after - 1e-12 else inputs.stop_r
+        ),
         "authority": "measurement_only",
         "changes_distribution": False,
     }
@@ -1327,6 +1365,7 @@ def counterfactual_attribution(current: PolicyInputs,
             chain_age_sec=_num(previous.get("chain_age_sec")),
             chain_status=previous.get("chain_status"),
             proxy_quality=previous.get("proxy_quality"), source=previous.get("source"),
+            stop_r=float(previous.get("stop_r", -1.0)),
         )
     except (KeyError, TypeError, ValueError):
         return {"available": False, "reason": "previous policy inputs incompatible"}
