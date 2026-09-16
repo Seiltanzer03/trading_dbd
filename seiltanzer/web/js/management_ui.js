@@ -105,6 +105,79 @@ export function mountEdgeManagement(container, payload) {
   container.appendChild(panel);
 }
 
+// Optional LLM extended action. It is a separate manual lane and never replaces
+// the authoritative quant management decision rendered below.
+export function mountShadowWorkingAction(container, shadow, post, onApplied = () => {}) {
+  container.replaceChildren();
+  const action = shadow?.working_action;
+  if (!action || !action.action_id || action.execution_status !== 'pending_execution' ||
+      !action.manual_execution_required) return;
+
+  const panel = document.createElement('section');
+  panel.className = 'ai-shadow-working-action';
+  appendTextLine(panel, 'ai-execution-title', 'РАСШИРЕННЫЙ ВАРИАНТ LLM · РУЧНО');
+  appendTextLine(
+    panel, 'ai-shadow-action-instruction',
+    action.instruction_ru || action.policy || 'Расширенный вариант без инструкции.',
+  );
+  appendTextLine(
+    panel, 'tiny amber',
+    'Это альтернативный LLM-вариант, не production-решение quant. Подтверждайте только после фактического изменения у брокера.',
+  );
+  const status = document.createElement('div');
+  status.className = 'tiny dim';
+  const actions = document.createElement('div');
+  actions.className = 'form-actions';
+  const yes = document.createElement('button');
+  yes.className = 'btn btn-primary';
+  yes.textContent = action.policy === 'TIME_STOP' || action.policy === 'SCALE_OUT_ON_SPIKE'
+    ? 'УСЛОВИЕ УСТАНОВЛЕНО' : 'ВЫПОЛНЕНО';
+  const no = document.createElement('button');
+  no.className = 'btn';
+  no.textContent = 'НЕ ВЫПОЛНЕНО';
+  actions.append(yes, no);
+  panel.append(actions, status);
+  container.appendChild(panel);
+
+  let submitting = false;
+  let settled = false;
+  const submit = async (executed) => {
+    if (submitting || settled) return;
+    submitting = true;
+    yes.disabled = true; no.disabled = true;
+    try {
+      const result = await post('/api/ai/shadow-action/ack', {
+        action_id: action.action_id,
+        trade_id: action.trade_id,
+        executed,
+      });
+      settled = true;
+      actions.remove();
+      status.className = 'tiny green';
+      if (!executed) {
+        status.textContent = 'Вариант записан как неисполненный.';
+      } else if (result.execution_status === 'armed') {
+        status.textContent = 'Условие записано как установленное у брокера.';
+      } else {
+        const stop = finiteNumber(result.position_state?.active_stop_price);
+        const take = finiteNumber(result.position_state?.take);
+        status.textContent = `Исполнение записано.${stop !== null ? ` Стоп: ${stop}.` : ''}${take !== null ? ` Take: ${take}.` : ''}`;
+      }
+      await onApplied(result);
+    } catch (error) {
+      status.className = 'tiny red';
+      const message = typeof error?.message === 'string' && error.message
+        ? error.message : 'Не удалось сохранить расширенное действие.';
+      status.textContent = message;
+      yes.disabled = false; no.disabled = false;
+    } finally {
+      submitting = false;
+    }
+  };
+  yes.addEventListener('click', () => submit(true));
+  no.addEventListener('click', () => submit(false));
+}
+
 // Pure management-decision UI. The backend remains authoritative.
 export function mountManagementDecision(container, decision, post, onApplied = () => {}) {
   container.replaceChildren();

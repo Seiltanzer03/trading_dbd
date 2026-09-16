@@ -23,6 +23,7 @@ CRITICAL_TABLES = (
     "policy_shadow_reviews", "decision_snapshots", "decision_path_points",
     "decision_replays", "human_decisions", "experiment_registry",
     "trade_market_path", "position_management_events", "management_decisions",
+    "llm_shadow_manual_actions",
     "passive_market_observations", "passive_market_path", "passive_market_bars",
     "virtual_position_observations", "passive_collector_state",
     "g1_q_capture_attempts", "g1_dataset_membership", "g1_contract_errors",

@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from .config import INSTRUMENTS, SETUPS, Settings, settings_from_env
 from .decision_research import canonical_snapshot
-from .position_state import StaleDecisionError
+from .position_state import EXTENDED_POLICIES, StaleDecisionError
 from .engine import Engine
 from .ai_verdict import build_snapshot, render_policy_report, request_verdict
 from .ai_api import (
@@ -124,6 +124,12 @@ class HumanDecisionRecord(BaseModel):
 
 class ManagementExecution(BaseModel):
     decision_id: str
+    trade_id: int
+    executed: bool
+
+
+class ShadowActionExecution(BaseModel):
+    action_id: str
     trade_id: int
     executed: bool
 
@@ -858,7 +864,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "original_stop": active_trade["stop"],
                     "active_risk_barrier": position_state["active_stop_price"],
                     "active_risk_barrier_type": position_state["active_stop_type"],
-                    "final_take": active_trade["take"],
+                    "final_take": position_state["take"],
                     "remaining_position_fraction":
                         position_state["remaining_position_fraction"],
                     "realized_position_fraction":
@@ -933,6 +939,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 if decision:
                     result["management_decision"] = decision
+                shadow = result.get("llm_shadow_decision")
+                if (
+                    active_trade and isinstance(shadow, dict)
+                    and str(shadow.get("policy") or "") in EXTENDED_POLICIES
+                ):
+                    registered = engine.position.register_shadow_action(
+                        snapshot, review_id, active_trade, shadow)
+                    if registered is not None:
+                        shadow = dict(shadow)
+                        shadow["working_action"] = registered
+                        result["llm_shadow_decision"] = shadow
+                        snapshot["llm_shadow_decision"] = shadow
                 engine.journal.record_ai_verdict(
                     trade_id, snapshot,
                     result["verdict"], result.get("model"))
@@ -981,6 +999,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         invalidate_live_state()
         return acknowledged
 
+    @app.post("/api/ai/shadow-action/ack")
+    def api_ai_shadow_action_ack(req: ShadowActionExecution):
+        try:
+            trade = engine.journal.active_trade()
+            if trade is None or int(trade["id"]) != int(req.trade_id):
+                raise StaleDecisionError("active trade changed")
+            tick = engine.tick_payload()
+            acknowledged = engine.position.acknowledge_shadow_action(
+                action_id=req.action_id, trade=trade, executed=req.executed,
+                execution_price=((tick.get("feeds") or {}).get("price") or {}).get("value"),
+                execution_r=((tick.get("prob") or {}).get("r")),
+            )
+        except StaleDecisionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        invalidate_live_state()
+        return acknowledged
+
     @app.get("/api/position")
     def api_position_state():
         trade = engine.journal.active_trade()
@@ -988,6 +1025,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "trade_id": trade["id"] if trade else None,
             "position_state": engine.position.state(trade) if trade else None,
             "events": engine.position.events(trade["id"]) if trade else [],
+            "shadow_actions": engine.position.shadow_actions(trade["id"]) if trade else [],
         }
 
     # -------------------------------------------------------------------- ws

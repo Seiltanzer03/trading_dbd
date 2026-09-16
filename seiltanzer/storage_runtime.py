@@ -41,6 +41,7 @@ CRITICAL_TABLES = (
     "human_decisions",
     "position_management_events",
     "management_decisions",
+    "llm_shadow_manual_actions",
     "passive_observations",
     "q_capture_attempts",
     "g1_dataset_membership",

@@ -16,7 +16,9 @@ import { initCorrelation, updateCorrelation } from './correlation.js';
 import { initRegimePhase, updateLiveRegimePhase } from './regime_phase.js';
 import { initWavelet } from './wavelet.js';
 import { fetchStructured } from './safe_fetch.js';
-import { mountEdgeManagement, mountManagementDecision } from './management_ui.js';
+import {
+  mountEdgeManagement, mountManagementDecision, mountShadowWorkingAction,
+} from './management_ui.js';
 
 initTooltips();
 
@@ -1071,6 +1073,7 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     <pre id="ai-verdict-text" class="ai-verdict-text">АНАЛИЗИРУЮ ТЕКУЩЕЕ СОСТОЯНИЕ…</pre>
     <div id="ai-edge-management"></div>
     <div id="ai-management-execution"></div>
+    <div id="ai-shadow-action"></div>
     <div class="modal-actions"><button class="btn" id="ai-close">ЗАКРЫТЬ</button></div>`);
   $('#ai-close').addEventListener('click', closeModal);
   const out = $('#ai-verdict-text');
@@ -1084,6 +1087,9 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     mountEdgeManagement($("#ai-edge-management"), body.edge_management);
     mountManagementDecision(
       $("#ai-management-execution"), body.management_decision, apiPost,
+      async () => { await refreshJournalAndSetups(); });
+    mountShadowWorkingAction(
+      $("#ai-shadow-action"), body.llm_shadow_decision, apiPost,
       async () => { await refreshJournalAndSetups(); });
     await refreshAiHistory();
   } catch (err) {

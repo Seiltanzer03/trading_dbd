@@ -150,6 +150,8 @@ def test_frontend_has_one_authoritative_ack_ui():
     ui = open("seiltanzer/web/js/management_ui.js", encoding="utf-8").read()
     assert "import './ai_decision_ack.js'" not in util
     assert "mountManagementDecision" in app
+    assert "mountShadowWorkingAction" in app
     assert "ВЫПОЛНЕНО" in ui
     assert "НЕ ВЫПОЛНЕНО" in ui
     assert "/api/ai/decision/ack" in ui
+    assert "/api/ai/shadow-action/ack" in ui

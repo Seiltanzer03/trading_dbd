@@ -282,13 +282,24 @@ class Engine:
 
     # ------------------------------------------------------------- payloads
 
+    def _managed_trade(self, trade: dict | None) -> dict | None:
+        """Attach active management geometry without mutating original levels."""
+        if not trade:
+            return None
+        position_state = self.position.sync_be(trade)
+        return {
+            **trade,
+            "position_state": position_state,
+            "original_stop": float(trade["stop"]),
+            "original_take": float(trade["take"]),
+            "active_stop": float(position_state["active_stop_price"]),
+            "active_take": float(position_state["take"]),
+        }
+
     def tick_payload(self) -> dict:
         now = time.time()
         account = self._account_payload()
-        trade = self.journal.active_trade()
-        if trade:
-            self.position.sync_be(trade)
-            trade = {**trade, "position_state": self.position.state(trade)}
+        trade = self._managed_trade(self.journal.active_trade())
         atr = self._atr_payload()
         sigma = self.market.sigma_ratio()
         raw_price = self.market.price.get("value")
@@ -625,7 +636,13 @@ class Engine:
 
     def _trade_payloads(self, trade: dict, price: float, sigma: dict,
                         atr: dict) -> dict:
-        entry, stop, take = trade["entry"], trade["stop"], trade["take"]
+        # R always remains denominated in the risk accepted at entry.  Manual
+        # management may move the live risk barrier or final take, but it must
+        # never silently redefine the historical 1R unit.
+        entry = trade["entry"]
+        stop = trade["stop"]
+        take = float((trade.get("position_state") or {}).get(
+            "take", trade.get("active_take", trade["take"])))
         direction = trade["direction"]
         r = pb.r_coordinate(price, entry, stop, direction)
         T = pb.target_rr_from_levels(entry, stop, take, direction)
@@ -1004,7 +1021,13 @@ class Engine:
             price = self._current_instrument_price(trade)
         r, T = prob["r"], prob["T"]
         atr_abs = (p.get("atr") or {}).get("atr_abs")
-        stop, take = trade["stop"], trade["take"]
+        position = trade.get("position_state") or {}
+        stop = float(position.get("active_stop_price", trade["stop"]))
+        take = float(position.get("take", trade["take"]))
+        original_risk = abs(float(trade["entry"]) - float(trade["stop"]))
+        direction_sign = 1.0 if trade["direction"] == "long" else -1.0
+        stop_r = (direction_sign * (stop - float(trade["entry"])) / original_risk
+                  if original_risk > 0 else -1.0)
         to_take_atr = (abs(take - price) / atr_abs) if (atr_abs and price) else None
         to_stop_atr = (abs(price - stop) / atr_abs) if (atr_abs and price) else None
         market = p.get("market")
@@ -1015,7 +1038,8 @@ class Engine:
         ladder = p.get("ladder") or {}
         return {
             "r": r, "T": T,
-            "to_take_r": T - r, "to_stop_r": r + 1.0,
+            "to_take_r": T - r, "to_stop_r": r - stop_r,
+            "active_stop_r": stop_r,
             "to_take_atr": to_take_atr, "to_stop_atr": to_stop_atr,
             "atr_abs": atr_abs,
             "p": prob["p"], "p_lo": prob["p_lo"], "p_hi": prob["p_hi"],
@@ -1071,8 +1095,10 @@ class Engine:
         flip_levels = (self._map_proxy_levels([gex["zero_flip"]], price, m)
                        if gex.get("zero_flip") is not None else None)
         flip = flip_levels[0] if flip_levels else None
+        position = trade.get("position_state") or {}
+        active_take = float(position.get("take", trade["take"]))
         res = gamma_pin(strikes_instr, gex["net"], flip, price,
-                        trade["entry"], trade["stop"], trade["take"], trade["direction"])
+                        trade["entry"], trade["stop"], active_take, trade["direction"])
         from .core.gex_field import analytic_gex_field
         field = analytic_gex_field(strikes_instr, gex["net"], price)
         if field.get("available"):
@@ -1105,8 +1131,13 @@ class Engine:
             return None
         try:
             from .core.options import market_r_distribution
+            # Market paths remain expressed in original-R coordinates.  The
+            # active stop is applied later by the execution simulator, while a
+            # confirmed take adjustment changes the upper market barrier.
+            take = float((trade.get("position_state") or {}).get(
+                "take", trade.get("active_take", trade["take"])))
             md = market_r_distribution(dens, 1.0, trade["entry"], trade["stop"],
-                                       trade["take"], trade["direction"], T)
+                                       take, trade["direction"], T)
         except (TypeError, ValueError, KeyError):
             return None
         md.update({
@@ -1415,7 +1446,13 @@ class Engine:
             if raw_day else None)
         levels = {
             "price": price,
-            "entry": trade["entry"], "stop": trade["stop"], "take": trade["take"],
+            "entry": trade["entry"],
+            "stop": float((trade.get("position_state") or {}).get(
+                "active_stop_price", trade["stop"])),
+            "take": float((trade.get("position_state") or {}).get(
+                "take", trade["take"])),
+            "original_stop": float(trade["stop"]),
+            "original_take": float(trade["take"]),
             "direction": trade["direction"],
             "zones": trade.get("zones") or [],
             "vwap": vwap,
@@ -1469,7 +1506,7 @@ class Engine:
             return {"available": False,
                     "reason": "ещё нет ни одного снапшота цепочки",
                     "snapshots": []}
-        trade = self.journal.active_trade()
+        trade = self._managed_trade(self.journal.active_trade())
         price = self._current_instrument_price(trade)
         proxy_spot = self._current_proxy_spot(snaps[-1])
         if price is None or proxy_spot is None:
@@ -1499,12 +1536,14 @@ class Engine:
             dens = RNDensity(strikes=np.asarray(latest["density"]["strikes"]),
                              density=np.asarray(latest["density"]["q"]),
                              t_years=latest["t_years"])
+            active_stop = float(trade["active_stop"])
+            active_take = float(trade["active_take"])
             if trade["direction"] == "long":
-                p_take_side = dens.tail_probs(trade["take"])[0]
-                p_stop_side = dens.tail_probs(trade["stop"])[1]
+                p_take_side = dens.tail_probs(active_take)[0]
+                p_stop_side = dens.tail_probs(active_stop)[1]
             else:
-                p_take_side = dens.tail_probs(trade["take"])[1]
-                p_stop_side = dens.tail_probs(trade["stop"])[0]
+                p_take_side = dens.tail_probs(active_take)[1]
+                p_stop_side = dens.tail_probs(active_stop)[0]
             rn_probs = {"p_beyond_take": p_take_side, "p_beyond_stop": p_stop_side,
                         "expiry": latest.get("expiry"), "demo": latest.get("demo")}
         return clean_nans({
@@ -1516,8 +1555,11 @@ class Engine:
             "proxy_transform": inst.proxy_transform,
             "proxy_spot_current": proxy_spot,
             "snapshots": mapped_snaps,
-            "trade": ({"entry": trade["entry"], "stop": trade["stop"],
-                       "take": trade["take"], "direction": trade["direction"]}
+            "trade": ({"entry": trade["entry"], "stop": trade["active_stop"],
+                       "take": trade["active_take"],
+                       "original_stop": trade["original_stop"],
+                       "original_take": trade["original_take"],
+                       "direction": trade["direction"]}
                       if trade else None),
             "price": price,
             "rn_probs": rn_probs,
@@ -1541,10 +1583,14 @@ class Engine:
             }
         from .core.gex_migration import compute_gex_migration
 
-        trade = self.journal.active_trade()
+        trade = self._managed_trade(self.journal.active_trade())
         price = ridge.get("price")
         snaps = ridge.get("snapshots") or []
-        res = compute_gex_migration(snaps, price, trade)
+        context_trade = (
+            {**trade, "stop": trade["active_stop"], "take": trade["active_take"]}
+            if trade else None
+        )
+        res = compute_gex_migration(snaps, price, context_trade)
         return clean_nans(res)
 
     def macro_regime_payload(self) -> dict:
@@ -1737,7 +1783,7 @@ class Engine:
         if trade and effective and data_ready:
             try:
                 target_r = pb.target_rr_from_levels(
-                    trade["entry"], trade["stop"], trade["take"],
+                    trade["entry"], trade["original_stop"], trade["active_take"],
                     trade["direction"])
                 trade_dist = self._market_dist(trade, effective, target_r)
             except (KeyError, TypeError, ValueError):
