@@ -24,6 +24,9 @@ class _Runtime:
     def edge(self):
         return {"edge_claim_allowed": False}
 
+    def edge_frequency(self):
+        return {"contract_version": "g1m-edge-decision-frequency-v1"}
+
     def research_cuts(self, **kwargs):
         return {"items": [], "filters": kwargs}
 
@@ -45,6 +48,7 @@ def test_management_routes_are_read_only_and_bounded():
         "/api/research/g1/management/policies",
         "/api/research/g1/management/cohorts",
         "/api/research/g1/management/edge",
+        "/api/research/g1/management/edge-frequency",
         "/api/research/g1/management/cuts",
         "/management-edge",
     ]
@@ -70,3 +74,5 @@ def test_management_page_has_explicit_research_authority_boundary():
     assert "RESEARCH ONLY" in html
     assert "production authority OFF" in html
     assert "PRODUCTION POLICY vs HOLD" in html
+    assert "КАК ЧАСТО ПЕРЕВЕСЫ" in html
+    assert "/api/research/g1/management/edge-frequency" in html

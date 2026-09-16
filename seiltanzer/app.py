@@ -29,6 +29,7 @@ from .ai_api import (
     request_id as new_ai_request_id,
     success_body as ai_success_body,
 )
+from .g1_management_edge_frequency import current_edge_management_payload
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 
@@ -953,6 +954,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 result, req_id, degraded=degraded,
                 provider_failure=provider_failure,
             )
+            body["edge_management"] = current_edge_management_payload(snapshot)
             body["context_reviews"] = len(snapshot.get("previous_reviews") or [])
             log_ai_event(
                 req_id=req_id, trade_id=trade_id, stage="complete", started=started,

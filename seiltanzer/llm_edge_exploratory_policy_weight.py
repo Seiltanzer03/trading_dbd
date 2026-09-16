@@ -115,6 +115,12 @@ def exploratory_weight_profile(
     uncertainty_n = 0
     very_low_ignored_n = 0
     details = []
+    matched_details = []
+    matched_status_counts: dict[str, int] = defaultdict(int)
+    matched_horizons: set[int] = set()
+    matched_target_families: set[str] = set()
+    matched_advantage_supporting_n = 0
+    matched_advantage_opposing_n = 0
     for hypothesis in lifecycle.get("research_hypotheses") or []:
         if not isinstance(hypothesis, dict):
             continue
@@ -124,8 +130,14 @@ def exploratory_weight_profile(
         if confidence != "LIMITED":
             very_low_ignored_n += int(confidence == "VERY_LOW")
             continue
+        deployment_rule = verdict.get("deployment_rule") or []
+        conditions = (
+            deployment_rule.get("conditions") or []
+            if isinstance(deployment_rule, dict)
+            else deployment_rule
+        )
         candidate = {
-            "conditions": verdict.get("deployment_rule") or [],
+            "conditions": conditions if isinstance(conditions, list) else [],
             "prediction_shift": _prediction_shift(verdict),
         }
         fresh = bool(candidate["conditions"])
@@ -147,15 +159,44 @@ def exploratory_weight_profile(
         matched_limited_n += 1
         bias = integration._bias(candidate)
         relation = integration._relation(direction, bias)
+        target_id = str(verdict.get("target_id") or hypothesis.get("target") or "UNKNOWN")
+        horizon = int(verdict.get("horizon_minutes") or hypothesis.get("horizon_minutes") or 0)
+        family = integration._target_family(target_id)
+        matched_status_counts[status or "UNKNOWN"] += 1
+        matched_horizons.add(horizon)
+        matched_target_families.add(family)
+        matched_details.append({
+            "hypothesis_id": hypothesis.get("hypothesis_id"),
+            "status": status or "UNKNOWN",
+            "confidence": confidence,
+            "target_id": target_id,
+            "target_family": family,
+            "horizon_minutes": horizon,
+            "condition_count": int(verdict.get("condition_count") or len(candidate["conditions"])),
+            "conditions": [
+                {
+                    "feature_id": condition.get("feature_id"),
+                    "state": condition.get("state"),
+                }
+                for condition in candidate["conditions"][:3]
+                if isinstance(condition, dict)
+            ],
+            "position_relation": relation,
+            "prediction_shift": candidate.get("prediction_shift"),
+            "selected_test_n": verdict.get("selected_test_n"),
+            "selected_effective_n": verdict.get("selected_effective_n"),
+            "evaluated_fold_count": verdict.get("evaluated_fold_count"),
+            "positive_fold_count": verdict.get("positive_fold_count"),
+            "primary_improvement": verdict.get("primary_improvement"),
+        })
         if status != "EARLY_ADVANTAGE" or relation not in {
             "SUPPORTS_POSITION", "OPPOSES_POSITION",
         }:
             uncertainty_n += 1
             continue
         vote = 1.0 if relation == "SUPPORTS_POSITION" else -1.0
-        target_id = str(verdict.get("target_id") or hypothesis.get("target") or "UNKNOWN")
-        horizon = int(verdict.get("horizon_minutes") or hypothesis.get("horizon_minutes") or 0)
-        family = integration._target_family(target_id)
+        matched_advantage_supporting_n += int(relation == "SUPPORTS_POSITION")
+        matched_advantage_opposing_n += int(relation == "OPPOSES_POSITION")
         buckets[(family, horizon)].append(vote)
         matched_directional_n += 1
         details.append({
@@ -178,6 +219,12 @@ def exploratory_weight_profile(
             matched_directional_advantage_n=0,
             matched_uncertainty_n=uncertainty_n,
             very_low_ignored_n=very_low_ignored_n,
+            matched_status_counts=dict(matched_status_counts),
+            matched_horizons=sorted(matched_horizons),
+            matched_target_families=sorted(matched_target_families),
+            matched_advantage_supporting_n=matched_advantage_supporting_n,
+            matched_advantage_opposing_n=matched_advantage_opposing_n,
+            matched_signals=matched_details[:8],
         )
 
     raw_direction = sum(bucket_scores) / len(bucket_scores)
@@ -205,6 +252,11 @@ def exploratory_weight_profile(
         "matched_directional_advantage_n": matched_directional_n,
         "matched_uncertainty_n": uncertainty_n,
         "very_low_ignored_n": very_low_ignored_n,
+        "matched_status_counts": dict(matched_status_counts),
+        "matched_horizons": sorted(matched_horizons),
+        "matched_target_families": sorted(matched_target_families),
+        "matched_advantage_supporting_n": matched_advantage_supporting_n,
+        "matched_advantage_opposing_n": matched_advantage_opposing_n,
         "independent_bucket_n": len(bucket_scores),
         "basis": "current_t0_matched_limited_target_family_x_horizon_votes",
         "rolling_result": True,
@@ -219,6 +271,7 @@ def exploratory_weight_profile(
         "may_increase_position": False,
         "automatic_execution_source": False,
         "signals": details[:8],
+        "matched_signals": matched_details[:8],
     }
 
 

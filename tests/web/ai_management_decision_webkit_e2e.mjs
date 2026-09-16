@@ -13,9 +13,9 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, {'content-type':'text/html; charset=utf-8'});
       res.end(`<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<div id="execution"></div>
+<div id="edge"></div><div id="execution"></div>
 <script type="module">
-import {mountManagementDecision} from '/seiltanzer/web/js/management_ui.js';
+import {mountEdgeManagement,mountManagementDecision} from '/seiltanzer/web/js/management_ui.js';
 const decision={
   trade_id:7,decision_id:'decision-e2e-close25',policy:'CLOSE_25',
   execution_status:'pending_execution',manual_execution_required:true,
@@ -23,6 +23,7 @@ const decision={
   remaining_fraction_after_action:.75,
   instruction_ru:'Закрыть 25% текущего остатка позиции.'
 };
+const edge={available:true,action_now:'CLOSE_25',direction_ru:'поддерживает более раннюю частичную фиксацию',weights:{combined:.15},counterfactual:{raw_policy_without_edge:'HOLD',raw_policy_with_edge:'CLOSE_25',raw_policy_changed:true},top_signals:[{target_family:'RETURN',horizon_minutes:30,status:'EARLY_ADVANTAGE',position_relation:'OPPOSES_POSITION',prediction_shift:{candidate_minus_structural_baseline:-.12,unit:'sigma'},selected_effective_n:24,positive_fold_count:2,evaluated_fold_count:3}],hard_risk_cvar_preserved:true,measurement_note_ru:'Улучшение прогноза — не доходность сделки. Вес не отменяет hard-risk/CVaR.'};
 window.__calls=[];
 window.__applied=null;
 const post=async (url,payload)=>{
@@ -31,6 +32,7 @@ const post=async (url,payload)=>{
     execution_status:payload.executed?'executed':'recommended_not_executed',
     position_state:{remaining_position_fraction:payload.executed?.75:1}};
 };
+mountEdgeManagement(document.querySelector('#edge'),edge);
 mountManagementDecision(document.querySelector('#execution'),decision,post,
   result=>{window.__applied=result});
 </script>`);
@@ -55,7 +57,10 @@ const page=await context.newPage();
 await page.goto(`http://127.0.0.1:${server.address().port}/fixture`,
   {waitUntil:'networkidle'});
 await page.getByText('ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ').waitFor();
-assert.match(await page.locator('.ai-execution-instruction').innerText(),
+await page.getByText('ПЕРЕВЕСЫ В РЕШЕНИИ').waitFor();
+assert.match(await page.locator('#edge').innerText(),/Без перевеса: HOLD → с перевесом: CLOSE_25/);
+assert.match(await page.locator('#edge').innerText(),/раннее преимущество/);
+assert.match(await page.locator('#execution .ai-execution-instruction').innerText(),
   /Закрыть 25% текущего остатка/);
 assert.equal(await page.getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).count(),1);
 assert.equal(await page.getByRole('button',{name:'НЕ ВЫПОЛНЕНО',exact:true}).count(),1);

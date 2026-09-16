@@ -25,3 +25,9 @@ def test_fallback_returns_structured_management_decision(client):
     assert decision["policy"] in {"HOLD","CLOSE_10","CLOSE_25","CLOSE_50","EXIT"}
     assert decision["fraction_semantics"] == "fraction_of_current_remaining_position"
     assert body["mode"] == "deterministic_fallback"
+    edge = body["edge_management"]
+    assert edge["action_now"] == decision["policy"]
+    assert edge["hard_risk_cvar_preserved"] is True
+    assert edge["may_widen_stop"] is False
+    assert edge["may_increase_position"] is False
+    assert edge["automatic_execution_allowed"] is False

@@ -5,6 +5,7 @@ from .engine import Engine
 from .passive_learning import PassiveLearningEngine
 from .g1_management_runtime import ManagementEdgeRuntime
 from .g1_management_active_edge_t0 import install_g1_management_active_edge_t0
+from .g1_management_edge_frequency import install_g1_management_edge_frequency
 from .g1_management_status_nonblocking import install_g1_management_status_nonblocking
 
 
@@ -20,6 +21,7 @@ def install_g1_management_integration() -> None:
     # Freeze the already-present active-edge context only inside G1-M research.
     # This patch does not wrap AI Verdict or alter execution authority.
     install_g1_management_active_edge_t0()
+    install_g1_management_edge_frequency()
 
     original_engine_init = Engine.__init__
     original_engine_close = Engine.close
