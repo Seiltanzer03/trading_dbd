@@ -116,6 +116,25 @@ def test_current_match_gets_fifteen_percent_across_all_existing_actions():
     ]
     assert profile["hard_risk_override"] is False
     assert profile["automatic_execution_source"] is False
+    assert profile["matched_status_counts"] == {"EARLY_ADVANTAGE": 1}
+    assert profile["matched_horizons"] == [30]
+    assert profile["matched_advantage_supporting_n"] == 1
+
+
+def test_production_deployment_rule_object_is_read_from_conditions_field():
+    row = _hypothesis("production-shape")
+    verdict = row["exploratory_verdict"]
+    verdict["deployment_rule"] = {
+        "template_id": "ede-template-production",
+        "complexity": 3,
+        "conditions": verdict["deployment_rule"],
+    }
+    profile = exploratory_weight_profile(
+        _engine([row]), _snapshot(), Integration,
+    )
+    assert profile["available"] is True
+    assert profile["weight_fraction"] == 0.15
+    assert profile["matched_limited_hypothesis_n"] == 1
 
 
 def test_very_low_and_nonmatching_hypotheses_have_zero_weight():

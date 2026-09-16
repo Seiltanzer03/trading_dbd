@@ -16,7 +16,7 @@ import { initCorrelation, updateCorrelation } from './correlation.js';
 import { initRegimePhase, updateLiveRegimePhase } from './regime_phase.js';
 import { initWavelet } from './wavelet.js';
 import { fetchStructured } from './safe_fetch.js';
-import { mountManagementDecision } from './management_ui.js';
+import { mountEdgeManagement, mountManagementDecision } from './management_ui.js';
 
 initTooltips();
 
@@ -1069,6 +1069,7 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     <h3>ИИ · ДИНАМИЧЕСКИЙ РАЗБОР СДЕЛКИ</h3>
     <div class="tiny dim">Снимок всех расчётных метрик фиксируется сервером в момент нажатия.</div>
     <pre id="ai-verdict-text" class="ai-verdict-text">АНАЛИЗИРУЮ ТЕКУЩЕЕ СОСТОЯНИЕ…</pre>
+    <div id="ai-edge-management"></div>
     <div id="ai-management-execution"></div>
     <div class="modal-actions"><button class="btn" id="ai-close">ЗАКРЫТЬ</button></div>`);
   $('#ai-close').addEventListener('click', closeModal);
@@ -1080,6 +1081,7 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
         + body.request_id + '\n\n'
       : '';
     out.textContent = warning + body.verdict;
+    mountEdgeManagement($("#ai-edge-management"), body.edge_management);
     mountManagementDecision(
       $("#ai-management-execution"), body.management_decision, apiPost,
       async () => { await refreshJournalAndSetups(); });

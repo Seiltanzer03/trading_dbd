@@ -47,6 +47,11 @@ def install_g1_management_routes(app: FastAPI) -> None:
         "/api/research/g1/management/edge", runtime.edge,
         methods=["GET"], name="g1m_edge",
     )
+    if hasattr(runtime, "edge_frequency"):
+        app.add_api_route(
+            "/api/research/g1/management/edge-frequency", runtime.edge_frequency,
+            methods=["GET"], name="g1m_edge_frequency",
+        )
     app.add_api_route(
         "/api/research/g1/management/cuts",
         lambda limit=50: runtime.research_cuts(limit=limit),

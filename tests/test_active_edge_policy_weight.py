@@ -5,6 +5,7 @@ from copy import deepcopy
 from seiltanzer.active_edge_policy_weight import (
     MAX_EDGE_WEIGHT,
     HIGH_RISK_ONLY_CAP,
+    _PROFILE_CTX,
     adjust_metrics_for_edge,
     edge_weight_profile,
 )
@@ -95,3 +96,26 @@ def test_hard_risk_ineligible_policy_never_receives_soft_adjustment():
     assert audit["applied"] is False
     assert audit["reason"] == "FEWER_THAN_TWO_HARD_RISK_ELIGIBLE_POLICIES"
     assert adjusted is metrics
+
+
+def test_installed_selector_freezes_policy_before_and_after_edge():
+    from seiltanzer import ai_policy
+
+    metrics = {
+        "HOLD": {"name": "HOLD", "expected_final_r": 0.10, "cvar10_r": -0.50},
+        "CLOSE_10": {"name": "CLOSE_10", "expected_final_r": 0.11, "cvar10_r": -0.18},
+        "CLOSE_25": {"name": "CLOSE_25", "expected_final_r": 0.12, "cvar10_r": -0.15},
+        "CLOSE_50": {"name": "CLOSE_50", "expected_final_r": 0.13, "cvar10_r": -0.10},
+        "EXIT": {"name": "EXIT", "expected_final_r": 0.14, "cvar10_r": 0.00},
+    }
+    token = _PROFILE_CTX.set(edge_weight_profile(_context(strict=True)))
+    try:
+        choice, rule = ai_policy._raw_policy_choice(
+            metrics, 0.0, cvar_floor=-0.50)
+    finally:
+        _PROFILE_CTX.reset(token)
+    audit = rule["combined_edge_soft_weight"]
+    assert audit["raw_policy_without_edge"] == "CLOSE_10"
+    assert audit["raw_policy_with_edge"] == choice == "HOLD"
+    assert audit["raw_policy_changed"] is True
+    assert audit["raw_policy_transition"] == "CLOSE_10->HOLD"

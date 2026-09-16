@@ -235,11 +235,24 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
         profile = _PROFILE_CTX.get()
         if not profile or not profile.get("available"):
             return original_raw(metrics, r0, cvar_floor=cvar_floor)
+        # Freeze the exact same deterministic selector without edge before the
+        # bounded soft blend.  This is a cheap counterfactual over already-built
+        # policy metrics; it does not rerun paths or mutate the production choice.
+        policy_without_edge, _base_rule = original_raw(
+            metrics, r0, cvar_floor=cvar_floor)
         adjusted, audit = adjust_metrics_for_edge(
             metrics, profile, r0, cvar_floor=cvar_floor,
             policy_fractions=policy_fractions,
         )
         choice, rule = original_raw(adjusted, r0, cvar_floor=cvar_floor)
+        audit = dict(audit or {})
+        audit.update({
+            "raw_policy_without_edge": policy_without_edge,
+            "raw_policy_with_edge": choice,
+            "raw_policy_changed": choice != policy_without_edge,
+            "raw_policy_transition": f"{policy_without_edge}->{choice}",
+            "counterfactual_scope": "same_frozen_metrics_before_soft_edge_blend",
+        })
         rule = dict(rule or {})
         rule["combined_edge_soft_weight"] = audit
         if float(profile.get("exploratory_component_weight") or 0.0) > 0.0:
