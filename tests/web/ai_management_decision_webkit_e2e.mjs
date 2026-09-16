@@ -60,7 +60,7 @@ await page.getByText('ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ').waitFor();
 await page.getByText('ПЕРЕВЕСЫ В РЕШЕНИИ').waitFor();
 assert.match(await page.locator('#edge').innerText(),/Без перевеса: HOLD → с перевесом: CLOSE_25/);
 assert.match(await page.locator('#edge').innerText(),/раннее преимущество/);
-assert.match(await page.locator('.ai-execution-instruction').innerText(),
+assert.match(await page.locator('#execution .ai-execution-instruction').innerText(),
   /Закрыть 25% текущего остатка/);
 assert.equal(await page.getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).count(),1);
 assert.equal(await page.getByRole('button',{name:'НЕ ВЫПОЛНЕНО',exact:true}).count(),1);
