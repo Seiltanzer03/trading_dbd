@@ -398,7 +398,14 @@ class TestEngineDemo:
         assert tick["options_summary"] is None
         assert tick["sigma"]["applied"] is False
 
-    def test_no_chain_disables_edge_but_keeps_visual_fallback(self, engine):
+    def test_no_chain_disables_edge_but_keeps_visual_fallback(
+        self, engine, monkeypatch,
+    ):
+        # This test isolates option-anchor semantics.  Live demo filters use
+        # fetched daily data and can independently produce a valid strategy
+        # block, which would make the asserted verdict depend on the runner's
+        # transient market response rather than on the missing option chain.
+        monkeypatch.setattr(engine, "_filters_payload", lambda _trade: [])
         engine.market.set_instrument("JPY100")
         engine.market.refresh_price()
         price = engine.market.price["value"]
