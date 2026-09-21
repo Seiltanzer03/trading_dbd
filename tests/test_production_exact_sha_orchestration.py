@@ -36,6 +36,15 @@ def test_deploy_acquires_existing_gate_before_readiness_and_keeps_owner_downstre
     assert '"$PY" "$ORCH" validate-gate' in post_research
 
 
+def test_deploy_timeout_covers_startup_grace_core_and_acceptance_checks():
+    deploy = _workflow("deploy.yml")
+    assert "timeout-minutes: 50" in deploy
+    preacceptance = deploy[deploy.index("id: preacceptance"):]
+    assert "command_timeout: 20m" in preacceptance.split(
+        "- name: Verify exact production readiness", 1
+    )[0]
+
+
 def test_deploy_materializes_exact_sha_offhost_macro_before_unchanged_smoke():
     deploy = _workflow("deploy.yml")
     build = "python scripts/build_offhost_macro_bundle.py"
