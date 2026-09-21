@@ -120,6 +120,8 @@ def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
 
     assert smoke.PASSIVE_STATUS_TIMEOUT_SEC == 50.0
     assert smoke.PASSIVE_EDGE_TIMEOUT_SEC >= 20.0
+    assert smoke.CALIBRATOR_STATUS_TIMEOUT_SEC == 50.0
+    assert smoke.MATERIALIZED_STATUS_TIMEOUT_SEC == 15.0
 
     recorded_timeouts = {}
 
@@ -144,6 +146,11 @@ def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
     smoke.verify("fake")
     assert recorded_timeouts["/api/research/passive/status"] == smoke.PASSIVE_STATUS_TIMEOUT_SEC
     assert recorded_timeouts["/api/research/passive/edge"] == smoke.PASSIVE_EDGE_TIMEOUT_SEC
+    assert recorded_timeouts["/api/research/g1/calibrators/status"] == (
+        smoke.CALIBRATOR_STATUS_TIMEOUT_SEC
+    )
+    for path in smoke.MATERIALIZED_STATUS_PATHS:
+        assert recorded_timeouts[path] == smoke.MATERIALIZED_STATUS_TIMEOUT_SEC
     assert recorded_timeouts["/api/state"] == 5.0
 
 
