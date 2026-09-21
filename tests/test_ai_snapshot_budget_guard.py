@@ -71,3 +71,59 @@ def test_non_budget_runtime_error_is_not_hidden():
         ai_verdict._enforce_snapshot_budget_with_report_integrity = original_public
         ai_verdict._impl._enforce_snapshot_budget = original_impl
         guard._INSTALLED = False
+
+
+def test_base_overflow_retries_with_strict_authoritative_compaction():
+    original_public = ai_verdict._enforce_snapshot_budget_with_report_integrity
+    original_impl = ai_verdict._impl._enforce_snapshot_budget
+    original_base = ai_verdict._BASE_ENFORCE_SNAPSHOT_BUDGET_V18
+    guard._INSTALLED = False
+    calls = []
+
+    def overflowing(snapshot: dict) -> None:
+        snapshot.update({
+            "trade_id": "128",
+            "strategy": {"instrument": "NAS100"},
+            "policy_manager": {
+                "management_decision": "CLOSE_25",
+                "recommendation": "CLOSE_25",
+                "policies": {
+                    "HOLD": {"expected_final_r": 0.1, "cvar10_r": -0.8},
+                    "CLOSE_25": {"expected_final_r": 0.08, "cvar10_r": -0.4},
+                },
+                "risk_constraint": {"cvar_floor_r": -0.5},
+                "evidence": {"oversized": "x" * 70_000},
+            },
+            "ede_causal_context": {"oversized": "y" * 70_000},
+            "snapshot_budget": {},
+        })
+        raise RuntimeError("AI snapshot byte budget exceeded")
+
+    def base(snapshot: dict) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("AI snapshot byte budget exceeded")
+        snapshot.setdefault("snapshot_budget", {})["compacted"] = True
+
+    try:
+        ai_verdict._enforce_snapshot_budget_with_report_integrity = overflowing
+        ai_verdict._BASE_ENFORCE_SNAPSHOT_BUDGET_V18 = base
+        guard.install_ai_snapshot_budget_guard()
+
+        snapshot: dict = {}
+        ai_verdict._impl._enforce_snapshot_budget(snapshot)
+
+        manager = snapshot["policy_manager"]
+        assert manager["management_decision"] == "CLOSE_25"
+        assert manager["policies"]["HOLD"]["cvar10_r"] == -0.8
+        assert manager["risk_constraint"]["cvar_floor_r"] == -0.5
+        assert "evidence" not in manager
+        assert "ede_causal_context" not in snapshot
+        assert len(calls) == 2
+        assert snapshot["snapshot_budget"]["report_integrity_degraded"] is True
+        assert snapshot["snapshot_budget"]["final_bytes"] < ai_verdict.SNAPSHOT_LIMIT_BYTES
+    finally:
+        ai_verdict._enforce_snapshot_budget_with_report_integrity = original_public
+        ai_verdict._impl._enforce_snapshot_budget = original_impl
+        ai_verdict._BASE_ENFORCE_SNAPSHOT_BUDGET_V18 = original_base
+        guard._INSTALLED = False

@@ -50,6 +50,47 @@ def _drop_explanation_only_contracts(snapshot: dict[str, Any]) -> None:
                 active["details_truncated"] = True
 
 
+def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
+    """Keep the completed decision while dropping oversized explanation views.
+
+    The v18 compactor normally gets below the hard ceiling by bounding evidence.
+    A production snapshot can still exceed it when several independently bounded
+    research contracts are present at once.  At that point the decision has
+    already been calculated: only the LLM/explanation transport is oversized.
+    Keep the fields needed to explain and audit the chosen management policy and
+    discard duplicated research workspaces rather than making the verdict route
+    permanently unavailable.
+    """
+    manager = snapshot.get("policy_manager")
+    if not isinstance(manager, dict):
+        manager = {}
+
+    manager_keep = (
+        "version", "management_decision", "recommendation", "policies",
+        "selection_rule", "gate", "inputs", "risk_constraint",
+        "management_arbiter", "state_change_attribution",
+        "calibration_contract", "recalculation_triggers",
+        "cancellation_boundary", "phase_e_authority_contract",
+        "shadow_actions", "extended_actions",
+    )
+    compact_manager = {
+        key: manager[key] for key in manager_keep if key in manager
+    }
+
+    root_keep = (
+        "trade_id", "strategy", "trade_geometry", "position_state",
+        "validation", "data_quality", "market_state", "hard_risk",
+        "risk_constraints", "policy_manager", "snapshot_budget",
+    )
+    compact_root = {
+        key: snapshot[key] for key in root_keep
+        if key in snapshot and key != "policy_manager"
+    }
+    compact_root["policy_manager"] = compact_manager
+    snapshot.clear()
+    snapshot.update(compact_root)
+
+
 def install_ai_snapshot_budget_guard() -> None:
     """Prevent report-integrity byte pressure from becoming an HTTP 500."""
     global _INSTALLED
@@ -82,7 +123,13 @@ def install_ai_snapshot_budget_guard() -> None:
         # Defensive retry through the proven v18 allowlist compactor. This keeps
         # management_decision/recommendation/policies/risk constraints while
         # bounding explanatory workspaces.
-        base(snapshot)
+        try:
+            base(snapshot)
+        except RuntimeError as exc:
+            if not _is_budget_error(exc):
+                raise
+            _strict_authoritative_compaction(snapshot)
+            base(snapshot)
         budget = snapshot.setdefault("snapshot_budget", {})
         budget["report_integrity_degraded"] = True
         budget["degrade_reason"] = "BASE_REPORT_INTEGRITY_BYTE_BUDGET"
