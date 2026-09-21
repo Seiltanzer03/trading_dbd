@@ -19,6 +19,20 @@ AI_VERDICT_MAX_MS = 12_000.0
 # its transport allowance separate from the strict live trading/API gates.
 PASSIVE_STATUS_TIMEOUT_SEC = 50.0
 PASSIVE_EDGE_TIMEOUT_SEC = 30.0
+CALIBRATOR_STATUS_TIMEOUT_SEC = 50.0
+MATERIALIZED_STATUS_TIMEOUT_SEC = 15.0
+MATERIALIZED_STATUS_PATHS = frozenset({
+    "/api/research/g1s/status",
+    "/api/research/g1/q/audit",
+    "/api/research/g1/management/status",
+    "/api/research/g1/management/local-status",
+    "/api/system/storage/status",
+    "/api/system/database-authority",
+    "/api/analytics/gex-migration",
+    "/api/analytics/regime-phase",
+    "/api/analytics/wavelet",
+    "/api/analytics/correlation-graph",
+})
 AI_VERDICT_TRANSPORT_TIMEOUT_SEC = 14.0
 AI_MATERIALIZER_WAIT_SEC = 150.0
 EDGE_RESEARCHER_MAX_MS = 250.0
@@ -336,6 +350,10 @@ def verify(expected_sha: str) -> None:
             assert_route(path, timeout=PASSIVE_STATUS_TIMEOUT_SEC)
         elif path == "/api/research/passive/edge":
             assert_route(path, timeout=PASSIVE_EDGE_TIMEOUT_SEC)
+        elif path == "/api/research/g1/calibrators/status":
+            assert_route(path, timeout=CALIBRATOR_STATUS_TIMEOUT_SEC)
+        elif path in MATERIALIZED_STATUS_PATHS:
+            assert_route(path, timeout=MATERIALIZED_STATUS_TIMEOUT_SEC)
         else:
             assert_route(path)
 
