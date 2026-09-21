@@ -163,6 +163,47 @@ def test_failed_event_build_does_not_revalidate_old_crossed_snapshot():
         mat.cached_build_snapshot(engine)
 
 
+def test_slow_build_anchors_next_review_to_completion_market_state():
+    engine = FakeEngine()
+    engine.journal.active_trade = lambda: {
+        "id": 1,
+        "instrument": "NAS100",
+        "entry": 100.0,
+        "stop": 90.0,
+        "take": 130.0,
+        "direction": "long",
+    }
+    quote = {"value": 101.0, "status": "no_data", "fresh": False}
+    engine.canonical_tick_payload = lambda **_: {
+        "instrument": "NAS100",
+        "feeds": {"price": dict(quote)},
+    }
+
+    def builder(_engine):
+        # The quote becomes available and moves 0.20R while the expensive
+        # deterministic build is in flight.
+        quote.update({"value": 103.0, "status": "ok", "fresh": True})
+        row = snapshot(current_r=0.10)
+        row["strategy"] = {"instrument": "NAS100"}
+        row["policy_manager"]["input_audit"] = {
+            "rows": {"instrument_price": {"available": False}},
+        }
+        return row
+
+    mat = AISnapshotMaterializer(engine, builder, watch_interval_sec=1)
+    mat._build_once()
+
+    status = mat.status()
+    assert status["ready"] is True
+    assert status["baseline_r"] == 0.3
+    assert status["canonical_quote_available"] is True
+    assert mat._event_reason() is None
+    frozen = mat.cached_build_snapshot(engine)
+    assert frozen["next_review_trigger"]["baseline_r"] == 0.3
+    assert frozen["next_review_trigger"]["lower_price"] == 101.5
+    assert frozen["next_review_trigger"]["upper_price"] == 104.5
+
+
 def test_no_active_trade_is_fast_unavailable_not_a_fake_snapshot():
     engine = FakeEngine(None)
     mat = AISnapshotMaterializer(engine, lambda _: (_ for _ in ()).throw(AssertionError()),

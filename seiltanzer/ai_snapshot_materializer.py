@@ -208,9 +208,21 @@ class AISnapshotMaterializer:
                 output.append(number)
         return tuple(sorted(output))
 
-    def _annotate_review_trigger(self, snapshot: dict[str, Any], trade: dict[str, Any]) -> dict[str, Any]:
+    def _annotate_review_trigger(
+        self,
+        snapshot: dict[str, Any],
+        trade: dict[str, Any],
+        *,
+        completion_r: float | None = None,
+    ) -> dict[str, Any]:
         geometry = snapshot.get("trade_geometry") or {}
-        baseline_r = _finite(geometry.get("current_r"))
+        # A production build can take tens of seconds. Anchor the *next* rebuild
+        # to the market state at completion, otherwise movement during the build
+        # immediately invalidates the new snapshot and starts an endless rebuild
+        # loop. The completed snapshot and its decision inputs remain unchanged.
+        baseline_r = _finite(completion_r)
+        if baseline_r is None:
+            baseline_r = _finite(geometry.get("current_r"))
         if baseline_r is None:
             baseline_r = self._current_r(trade)
         lower_r = baseline_r - self.review_delta_r if baseline_r is not None else None
@@ -357,7 +369,11 @@ class AISnapshotMaterializer:
             ):
                 raise RuntimeError("BUILT_SNAPSHOT_TRADE_MISMATCH_OR_UNAVAILABLE")
             final_trade = self.current_trade() or current_trade_row or {}
-            trigger = self._annotate_review_trigger(snapshot, final_trade)
+            completion_instrument, completion_quote_available, _ = self._current_quote()
+            completion_r = self._current_r(final_trade)
+            trigger = self._annotate_review_trigger(
+                snapshot, final_trade, completion_r=completion_r,
+            )
             finished = time.time()
             build_ms = (time.monotonic() - started_mono) * 1000.0
             annotated = copy.deepcopy(snapshot)
@@ -378,8 +394,10 @@ class AISnapshotMaterializer:
             audit_price = (((snapshot.get("policy_manager") or {})
                             .get("input_audit") or {}).get("rows") or {}).get(
                                 "instrument_price") or {}
-            baseline_quote_available = bool(audit_price.get("available") is True)
-            baseline_instrument = canonical_instrument_code(
+            baseline_quote_available = completion_quote_available
+            if baseline_quote_available is None:
+                baseline_quote_available = bool(audit_price.get("available") is True)
+            baseline_instrument = completion_instrument or canonical_instrument_code(
                 ((snapshot.get("strategy") or {}).get("instrument")
                  or (final_trade or {}).get("instrument"))) or None
             with self._lock:
