@@ -118,7 +118,7 @@ def test_functional_smoke_accepts_configured_required_new_resolved_t0(monkeypatc
 def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
     smoke = _load_script("production_functional_smoke")
 
-    assert smoke.PASSIVE_STATUS_TIMEOUT_SEC >= 20.0
+    assert smoke.PASSIVE_STATUS_TIMEOUT_SEC == 50.0
     assert smoke.PASSIVE_EDGE_TIMEOUT_SEC >= 20.0
 
     recorded_timeouts = {}
