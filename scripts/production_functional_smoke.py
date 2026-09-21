@@ -14,7 +14,10 @@ BASE = "http://127.0.0.1:8790"
 TRANSIENT_ATTEMPTS = 3
 TRANSIENT_RETRY_DELAY_SEC = 1.0
 AI_VERDICT_MAX_MS = 12_000.0
-PASSIVE_STATUS_TIMEOUT_SEC = 30.0
+# This research-only aggregate scans the 9+ GiB production SQLite database and
+# currently returns a valid materialized status in roughly 39-43 seconds. Keep
+# its transport allowance separate from the strict live trading/API gates.
+PASSIVE_STATUS_TIMEOUT_SEC = 50.0
 PASSIVE_EDGE_TIMEOUT_SEC = 30.0
 AI_VERDICT_TRANSPORT_TIMEOUT_SEC = 14.0
 AI_MATERIALIZER_WAIT_SEC = 150.0
