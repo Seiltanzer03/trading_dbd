@@ -16,7 +16,6 @@ from seiltanzer.g1_short_horizon_p2e_segmented_persistence import (
     ASSET_FAMILY_BY_INSTRUMENT,
     session_utc,
 )
-from seiltanzer.g1_short_horizon_historical_wf import _weights
 
 from .feature_view import FeatureValue, causal_dynamics, feature_value
 from .historical import aligned_cross_asset_context
@@ -734,45 +733,92 @@ class ProspectiveFeatureAdapter:
             totals += horizon_total
             resolved_outcome_count += sum(
                 bool(row["outcome_available"]) for row in rows)
+            horizon_stats: dict[str, dict[str, Any]] = {
+                definition.feature_id: {
+                    "present": 0, "stale": 0, "eligible": 0,
+                    "resolved": 0, "dependency_keys": set(), "days": set(),
+                    "recomputed": 0, "first_t0": None, "latest_t0": None,
+                    "available_release_ids": set(), "resolved_release_ids": set(),
+                }
+                for definition in FEATURES
+            }
+            # One row/feature pass replaces five full row-list scans plus a
+            # NumPy weight vector for every registry feature. Inventory only
+            # needs the dependency-group cardinality represented by that vector.
+            for row in rows:
+                t0 = float(row["captured_ts"])
+                outcome_available = bool(row["outcome_available"])
+                dependency_key = (
+                    f"{row['instrument']}|{int(row['horizon_minutes'])}|"
+                    f"{int(t0 // (int(row['horizon_minutes']) * 60.0))}"
+                )
+                day = time.strftime("%Y-%m-%d", time.gmtime(t0))
+                for feature_id, value in row["feature_values"].items():
+                    stats = horizon_stats.get(feature_id)
+                    if stats is None or not value:
+                        continue
+                    stats["recomputed"] += int(
+                        value.get("provenance") == "CAUSAL_RECOMPUTED")
+                    if value.get("availability") != "AVAILABLE":
+                        continue
+                    stats["present"] += 1
+                    stats["stale"] += int(bool(value.get("stale")))
+                    stats["first_t0"] = (
+                        t0 if stats["first_t0"] is None
+                        else min(float(stats["first_t0"]), t0))
+                    stats["latest_t0"] = (
+                        t0 if stats["latest_t0"] is None
+                        else max(float(stats["latest_t0"]), t0))
+                    if not value.get("training_eligible"):
+                        continue
+                    stats["eligible"] += 1
+                    release_id = str(value.get("release_id") or "").strip()
+                    if release_id:
+                        stats["available_release_ids"].add(release_id)
+                    if outcome_available:
+                        stats["resolved"] += 1
+                        stats["dependency_keys"].add(dependency_key)
+                        stats["days"].add(day)
+                        if release_id:
+                            stats["resolved_release_ids"].add(release_id)
+
             for definition in FEATURES:
                 feature_id = definition.feature_id
-                values = [row["feature_values"].get(feature_id) for row in rows]
-                present_pairs = [
-                    (row, value) for row, value in zip(rows, values)
-                    if value and value["availability"] == "AVAILABLE"]
-                eligible_rows = [
-                    row for row, value in zip(rows, values)
-                    if value and value.get("training_eligible")]
-                resolved_rows = [
-                    row for row in eligible_rows if row["outcome_available"]]
-                _unused_weights, effective = _weights(resolved_rows) if resolved_rows else ([], 0)
-                temporal_blocks = len({
-                    time.strftime("%Y-%m-%d", time.gmtime(float(row["captured_ts"])))
-                    for row in resolved_rows})
+                horizon_feature = horizon_stats[feature_id]
+                effective = len(horizon_feature["dependency_keys"])
+                temporal_blocks = len(horizon_feature["days"])
                 maturity = data_maturity(
-                    raw_n=len(resolved_rows), effective_n=int(effective),
+                    raw_n=int(horizon_feature["resolved"]),
+                    effective_n=int(effective),
                     temporal_blocks=temporal_blocks)
                 stats = aggregate[feature_id]
-                stats["by_horizon"][str(horizon)] = {
-                    "raw": len(eligible_rows),
+                bucket = {
+                    "raw": int(horizon_feature["eligible"]),
                     "effective": int(effective),
-                    "resolved": len(resolved_rows),
+                    "resolved": int(horizon_feature["resolved"]),
                     "temporal_blocks": temporal_blocks,
-                    "coverage_pct": 100.0*len(eligible_rows)/max(1, horizon_total),
+                    "coverage_pct": (
+                        100.0*int(horizon_feature["eligible"])/max(1, horizon_total)),
                     "data_maturity": maturity,
                     "edge_maturity": "INSUFFICIENT_DATA",
                 }
-                stats["present"] += len(present_pairs)
-                stats["stale"] += sum(bool(value["stale"])
-                                      for _, value in present_pairs)
-                stats["eligible"] += sum(bool(value["training_eligible"])
-                                         for _, value in present_pairs)
-                stats["recomputed"] += sum(
-                    bool(value and value.get("provenance") == "CAUSAL_RECOMPUTED")
-                    for value in values)
-                t0s = [float(row["captured_ts"]) for row, _ in present_pairs]
-                if t0s:
-                    first_t0, latest_t0 = min(t0s), max(t0s)
+                available_releases = horizon_feature["available_release_ids"]
+                if available_releases:
+                    bucket.update({
+                        "independent_release_n": len(
+                            horizon_feature["resolved_release_ids"]),
+                        "available_release_n": len(available_releases),
+                        "dependency_unit": "OFFICIAL_MACRO_RELEASE_ID",
+                        "repeated_t0_increases_effective_n": False,
+                    })
+                stats["by_horizon"][str(horizon)] = bucket
+                stats["present"] += int(horizon_feature["present"])
+                stats["stale"] += int(horizon_feature["stale"])
+                stats["eligible"] += int(horizon_feature["eligible"])
+                stats["recomputed"] += int(horizon_feature["recomputed"])
+                if horizon_feature["first_t0"] is not None:
+                    first_t0 = float(horizon_feature["first_t0"])
+                    latest_t0 = float(horizon_feature["latest_t0"])
                     stats["first_t0"] = (
                         first_t0 if stats["first_t0"] is None
                         else min(float(stats["first_t0"]), first_t0))
@@ -781,7 +827,11 @@ class ProspectiveFeatureAdapter:
                         else max(float(stats["latest_t0"]), latest_t0))
             # Do not retain the expanded feature dictionaries while loading
             # the next horizon batch.
-            del values, present_pairs, eligible_rows, resolved_rows, t0s, rows
+            del horizon_stats, rows
+
+        # Historical macro refinements consume the release cardinalities
+        # collected above instead of expanding all five horizons again.
+        self._feature_capture_release_stats_complete = True
 
         records: list[dict[str, Any]] = []
         for definition in FEATURES:
