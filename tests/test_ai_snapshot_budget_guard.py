@@ -82,6 +82,7 @@ def test_base_overflow_retries_with_strict_authoritative_compaction():
 
     def overflowing(snapshot: dict) -> None:
         snapshot.update({
+            "captured_ts": 1_790_024_400.0,
             "trade_id": "128",
             "strategy": {"instrument": "NAS100"},
             "policy_manager": {
@@ -114,6 +115,7 @@ def test_base_overflow_retries_with_strict_authoritative_compaction():
         ai_verdict._impl._enforce_snapshot_budget(snapshot)
 
         manager = snapshot["policy_manager"]
+        assert snapshot["captured_ts"] == 1_790_024_400.0
         assert manager["management_decision"] == "CLOSE_25"
         assert manager["policies"]["HOLD"]["cvar10_r"] == -0.8
         assert manager["risk_constraint"]["cvar_floor_r"] == -0.5
