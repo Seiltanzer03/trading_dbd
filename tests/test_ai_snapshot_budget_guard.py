@@ -42,6 +42,7 @@ def test_base_snapshot_integrity_overflow_degrades_instead_of_raising():
         assert snapshot["snapshot_budget"]["degrade_reason"] == (
             "BASE_REPORT_INTEGRITY_BYTE_BUDGET"
         )
+        assert snapshot["snapshot_budget"]["degrade_level"] == "EXPLANATION_ONLY"
         assert snapshot["snapshot_budget"]["final_bytes"] < ai_verdict.SNAPSHOT_LIMIT_BYTES
     finally:
         ai_verdict._enforce_snapshot_budget_with_report_integrity = original_public
@@ -123,6 +124,7 @@ def test_base_overflow_retries_with_strict_authoritative_compaction():
         assert "ede_causal_context" not in snapshot
         assert len(calls) == 2
         assert snapshot["snapshot_budget"]["report_integrity_degraded"] is True
+        assert snapshot["snapshot_budget"]["degrade_level"] == "STRICT_AUTHORITATIVE"
         assert snapshot["snapshot_budget"]["final_bytes"] < ai_verdict.SNAPSHOT_LIMIT_BYTES
     finally:
         ai_verdict._enforce_snapshot_budget_with_report_integrity = original_public
