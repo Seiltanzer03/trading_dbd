@@ -424,11 +424,24 @@ def cancellation_boundaries(inputs: _base.PolicyInputs, selected: str) -> dict:
     return _base.cancellation_boundaries(inputs, selected)
 
 
+def _main_policy_run(engine, inputs: _base.PolicyInputs):
+    """Reuse the engine-owned deterministic path bank when it is available."""
+    if hasattr(engine, "authoritative_execution_mc"):
+        sim = engine.authoritative_execution_mc(inputs)
+        distributions = _base.build_policy_distributions(sim, inputs)
+        metrics = {
+            name: _base.policy_metrics(policy, sim, inputs)
+            for name, policy in distributions.items()
+        }
+        return metrics, sim
+    return _base._run_once(inputs, n_paths=6500, n_steps=340, seed=0xA17E)
+
+
 def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
                      *, previous_policy_inputs: dict | None = None,
                      previous_evidence: dict | None = None) -> dict:
     inputs = _base.extract_policy_inputs(tick)
-    metrics, sim = _base._run_once(inputs, n_paths=6500, n_steps=340, seed=0xA17E)
+    metrics, sim = _main_policy_run(engine, inputs)
     raw_choice, selection_rule = _raw_policy_choice(metrics, inputs.r0)
     evidence = build_metric_evidence(engine, tick, ridge, trade, inputs, sim, metrics)
     all_stability = stability_analysis(inputs, raw_choice)
