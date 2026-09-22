@@ -122,6 +122,9 @@ class AISnapshotMaterializer:
         self._boundaries_r: tuple[float, ...] = ()
         self._baseline_quote_available: bool | None = None
         self._baseline_instrument: str | None = None
+        self._budget_degraded_build_n = 0
+        self._strict_compaction_build_n = 0
+        self._last_budget_status: dict[str, Any] = {}
 
     def current_trade(self) -> dict[str, Any] | None:
         try:
@@ -400,6 +403,19 @@ class AISnapshotMaterializer:
             baseline_instrument = completion_instrument or canonical_instrument_code(
                 ((snapshot.get("strategy") or {}).get("instrument")
                  or (final_trade or {}).get("instrument"))) or None
+            snapshot_budget = snapshot.get("snapshot_budget") or {}
+            budget_status = {
+                "final_bytes": snapshot_budget.get("final_bytes"),
+                "target_bytes": snapshot_budget.get("target_bytes"),
+                "limit_bytes": snapshot_budget.get("limit_bytes"),
+                "normal_compaction": bool(snapshot_budget.get("compacted")),
+                "late_enrichment_compacted": bool(
+                    snapshot_budget.get("late_enrichment_compacted")
+                ),
+                "degraded": bool(snapshot_budget.get("report_integrity_degraded")),
+                "degrade_reason": snapshot_budget.get("degrade_reason"),
+                "degrade_level": snapshot_budget.get("degrade_level"),
+            }
             with self._lock:
                 self._snapshot = annotated
                 self._snapshot_trade_id = snapshot_trade
@@ -412,6 +428,11 @@ class AISnapshotMaterializer:
                 self._chain_marker = chain_marker
                 self._baseline_quote_available = baseline_quote_available
                 self._baseline_instrument = baseline_instrument
+                self._last_budget_status = budget_status
+                if budget_status["degraded"]:
+                    self._budget_degraded_build_n += 1
+                if budget_status["degrade_level"] == "STRICT_AUTHORITATIVE":
+                    self._strict_compaction_build_n += 1
                 self._invalidated_reason = None
         except Exception as exc:
             with self._lock:
@@ -453,6 +474,11 @@ class AISnapshotMaterializer:
                 "build_ms": round(self._build_ms, 1) if self._build_ms is not None else None,
                 "build_started_at": self._build_started_at,
                 "build_n": self._build_n,
+                "snapshot_budget": {
+                    **self._last_budget_status,
+                    "degraded_build_n": self._budget_degraded_build_n,
+                    "strict_compaction_build_n": self._strict_compaction_build_n,
+                },
                 "last_error": self._last_error,
                 "request_path_heavy_build": False,
                 "periodic_heavy_recompute": False,
