@@ -146,27 +146,38 @@ class Engine:
         from .ai_policy_base import simulate_option_paths
 
         live_clock = purpose == "live_clock"
-        key = (
-            round(float(inputs.r0), 2 if live_clock else 4), round(float(inputs.T), 4),
+        policy_key = (
+            round(float(inputs.r0), 4), round(float(inputs.T), 4),
             round(float(inputs.sigma_R), 4), round(float(inputs.drift_R), 4),
             round(float(inputs.skew_R), 4), round(float(inputs.term_slope), 4),
             round(float(inputs.horizon_minutes), 3),
-            round(float(inputs.max_r), 2 if live_clock else 4),
+            round(float(inputs.max_r), 4),
             tuple(round(float(x), 4) for x in inputs.rungs),
             round(float(inputs.rung_fraction), 6), round(float(inputs.be_after), 4),
             bool(inputs.option_available),
             bool(inputs.max_r >= inputs.be_after - 1e-12),
         )
+        live_key = (
+            round(float(inputs.r0), 2), *policy_key[1:7],
+            round(float(inputs.max_r), 2), *policy_key[8:],
+        )
         if live_clock:
-            if key != self._live_clock_mc_cache_key or self._live_clock_mc_cache is None:
+            if (live_key != self._live_clock_mc_cache_key
+                    or self._live_clock_mc_cache is None):
                 self._live_clock_mc_cache = simulate_option_paths(
                     inputs, n_paths=6500, n_steps=340, seed=0xA17E)
-                self._live_clock_mc_cache_key = key
+                self._live_clock_mc_cache_key = live_key
+                # The policy request for this same frozen input can reuse the
+                # exact bank. A later input inside the clock's rounded bucket
+                # has a different policy key and will still be recomputed.
+                self._execution_mc_cache_key = policy_key
+                self._execution_mc_cache = self._live_clock_mc_cache
             return self._live_clock_mc_cache
-        if key != self._execution_mc_cache_key or self._execution_mc_cache is None:
+        if (policy_key != self._execution_mc_cache_key
+                or self._execution_mc_cache is None):
             self._execution_mc_cache = simulate_option_paths(
                 inputs, n_paths=6500, n_steps=340, seed=0xA17E)
-            self._execution_mc_cache_key = key
+            self._execution_mc_cache_key = policy_key
         return self._execution_mc_cache
 
     def on_trade_opened(self, trade: dict) -> None:
