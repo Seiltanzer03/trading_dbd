@@ -248,3 +248,28 @@ def test_early_ede_context_reaches_verdict_without_action_authority():
     assert "EDGE_MATURITY=INSUFFICIENT_DATA" in report
     assert "may_trigger_exit_or_close=false" in report
     assert snapshot["policy_manager"]["management_decision"] == before
+
+
+def test_terminal_exit_replaces_stale_hold_cancellation_text():
+    snapshot = _snapshot()
+    snapshot["policy_manager"]["management_decision"].update({
+        "policy": "EXIT",
+        "authority": "STRATEGY",
+        "execution_status": "pending_execution",
+        "manual_execution_required": True,
+        "strategy_terminal_event": "FINAL_TAKE_REACHED",
+    })
+    text = _legacy_text() + """
+
+**ГРАНИЦА ОТМЕНЫ** —
+Для HOLD границы отмены до исполнения нет; переоценка по событиям.
+
+**СЛЕДУЮЩИЙ ПЕРЕСЧЁТ** —
+потом.
+"""
+
+    report = v19.normalize_final_report(text, snapshot)
+
+    assert "Для EXIT по терминальному событию стратегии FINAL_TAKE_REACHED" in report
+    assert "граница отмены не применяется" in report
+    assert "Для HOLD границы отмены" not in report

@@ -139,6 +139,21 @@ def _plan_lines(snapshot: dict) -> list[str]:
     ]
 
 
+def _terminal_cancellation_lines(snapshot: dict) -> list[str] | None:
+    """Keep cancellation text aligned with the authoritative terminal action."""
+    manager = snapshot.get("policy_manager") or {}
+    decision = manager.get("management_decision") or {}
+    event = decision.get("strategy_terminal_event")
+    policy = decision.get("policy")
+    if not event or policy == "HOLD":
+        return None
+    return [
+        f"Для {policy} по терминальному событию стратегии {event} граница отмены не применяется. "
+        "До подтверждения ручного исполнения команда остаётся действующей; если позиция уже "
+        "закрыта у брокера, нужно подтвердить исполнение в терминале."
+    ]
+
+
 def _trade_geometry_lines(snapshot: dict) -> list[str]:
     g = snapshot.get("trade_geometry") or {}
     position = snapshot.get("position_state") or {}
@@ -466,6 +481,9 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
     if not _structured_contract(snapshot): return text
     lines = text.splitlines()
     _replace_section(lines, "**ЕДИНЫЙ ПЛАН МЕНЕДЖМЕНТА**", _plan_lines(snapshot)); _replace_section(lines, "**ГЕОМЕТРИЯ СДЕЛКИ**", _trade_geometry_lines(snapshot)); _replace_take_stop_body(lines, _take_stop_lines(snapshot)); _replace_section(lines, "**ОБЩАЯ ГЕОМЕТРИЯ СЦЕНАРИЕВ**", _scenario_geometry_lines(snapshot)); _replace_section(lines, "**ПОЧЕМУ ВЫБРАНО**", _risk_lines(snapshot)); _replace_section(lines, "**КАЧЕСТВО ДАННЫХ**", _quality_lines(snapshot))
+    terminal_cancellation = _terminal_cancellation_lines(snapshot)
+    if terminal_cancellation is not None:
+        _replace_section(lines, "**ГРАНИЦА ОТМЕНЫ**", terminal_cancellation)
     manager = snapshot.get("policy_manager") or {}; _replace_section(lines, "**ЧТО УЛУЧШИЛОСЬ**", _material_change_lines(manager, "what_improved")); _replace_section(lines, "**ЧТО УХУДШИЛОСЬ**", _material_change_lines(manager, "what_deteriorated"))
     lines = _repair_degraded_manual_summary(lines, snapshot)
     lines = [line.replace("Shadow metrics:", "Derived shadow scenario distribution:") for line in lines]
