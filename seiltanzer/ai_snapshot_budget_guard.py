@@ -78,7 +78,7 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
     }
 
     root_keep = (
-        "trade_id", "strategy", "trade_geometry", "position_state",
+        "captured_ts", "trade_id", "strategy", "trade_geometry", "position_state",
         "validation", "data_quality", "market_state", "hard_risk",
         "risk_constraints", "policy_manager", "snapshot_budget",
     )
