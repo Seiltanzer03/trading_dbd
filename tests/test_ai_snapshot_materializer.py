@@ -217,6 +217,49 @@ def test_no_active_trade_is_fast_unavailable_not_a_fake_snapshot():
     assert mat._snapshot is None
 
 
+def test_status_distinguishes_normal_and_emergency_budget_compaction():
+    engine = FakeEngine()
+    answers = [
+        {
+            **snapshot(),
+            "snapshot_budget": {
+                "compacted": True,
+                "final_bytes": 70_000,
+                "target_bytes": 80_000,
+                "limit_bytes": 96_000,
+            },
+        },
+        {
+            **snapshot(),
+            "snapshot_budget": {
+                "compacted": True,
+                "final_bytes": 72_000,
+                "target_bytes": 80_000,
+                "limit_bytes": 96_000,
+                "report_integrity_degraded": True,
+                "degrade_reason": "BASE_REPORT_INTEGRITY_BYTE_BUDGET",
+                "degrade_level": "STRICT_AUTHORITATIVE",
+            },
+        },
+    ]
+    mat = AISnapshotMaterializer(engine, lambda _: answers.pop(0),
+                                 watch_interval_sec=1)
+
+    mat._build_once()
+    normal = mat.status()["snapshot_budget"]
+    assert normal["normal_compaction"] is True
+    assert normal["degraded"] is False
+    assert normal["degraded_build_n"] == 0
+
+    mat.request_refresh("TEST_REFRESH")
+    mat._build_once()
+    degraded = mat.status()["snapshot_budget"]
+    assert degraded["degraded"] is True
+    assert degraded["degrade_level"] == "STRICT_AUTHORITATIVE"
+    assert degraded["degraded_build_n"] == 1
+    assert degraded["strict_compaction_build_n"] == 1
+
+
 def test_install_defers_worker_until_real_fastapi_lifespan(monkeypatch):
     app = FastAPI()
     engine = FakeEngine()
