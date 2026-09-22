@@ -10,6 +10,7 @@ import math
 import time
 import bisect
 from collections import defaultdict
+from dataclasses import replace
 from typing import Any, Callable
 
 from seiltanzer.g1_short_horizon_p2e_segmented_persistence import (
@@ -217,6 +218,51 @@ class ProspectiveFeatureAdapter:
             str, tuple[int, int, int, list[float]]
         ] = {}
         self._causal_bar_cache: dict[tuple[str, float, float], dict[str, Any]] = {}
+        self._macro_record_cache: dict[str, tuple[
+            float, dict[str, FeatureValue], dict[str, dict[str, Any]]
+        ]] = {}
+        self._macro_cache_t0: float | None = None
+        self._macro_cache_data_version: int | None = None
+        self._definitions_by_id = {
+            item.feature_id: item for item in FEATURES
+        }
+
+    def _cached_macro_feature_records(
+        self, namespace: str, *, instrument: str, t0: float, horizon: int,
+        loader: Callable[[], tuple[
+            dict[str, FeatureValue], dict[str, dict[str, Any]]
+        ]],
+    ) -> tuple[dict[str, FeatureValue], dict[str, dict[str, Any]]]:
+        """Reuse tiny historical-release lookups across instruments at one T0."""
+        t0 = float(t0)
+        cache = getattr(self, "_macro_record_cache", None)
+        if cache is None:
+            cache = {}
+            self._macro_record_cache = cache
+        if getattr(self, "_macro_cache_t0", None) != t0:
+            with self.runtime._lock:
+                row = self.runtime._conn.execute("PRAGMA data_version").fetchone()
+            data_version = int(row[0]) if row is not None else 0
+            if getattr(self, "_macro_cache_data_version", None) != data_version:
+                cache.clear()
+                self._macro_cache_data_version = data_version
+            self._macro_cache_t0 = t0
+
+        cached = cache.get(str(namespace))
+        if cached is None or cached[0] != t0:
+            values, provenance = loader()
+            cache[str(namespace)] = (t0, values, provenance)
+            return values, provenance
+
+        _cached_t0, values, provenance = cached
+        return (
+            {
+                feature_id: replace(
+                    record, instrument=str(instrument), horizon=int(horizon))
+                for feature_id, record in values.items()
+            },
+            {feature_id: dict(meta) for feature_id, meta in provenance.items()},
+        )
 
     def _load_causal_bars(self) -> dict[str, list[dict[str, Any]]]:
         if "passive_market_bars" not in self.tables:
@@ -474,7 +520,10 @@ class ProspectiveFeatureAdapter:
         values: dict[str, FeatureValue] = {}
         rejected: list[str] = []
         provenance_by_feature: dict[str, dict[str, Any]] = {}
-        definitions = {item.feature_id: item for item in FEATURES}
+        definitions = getattr(self, "_definitions_by_id", None)
+        if definitions is None:
+            definitions = {item.feature_id: item for item in FEATURES}
+            self._definitions_by_id = definitions
         recomputed: dict[str, Any] | None = None
         for feature_id, extractor in EXTRACTORS.items():
             value, block = extractor(frozen)
