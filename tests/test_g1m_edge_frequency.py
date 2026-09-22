@@ -117,7 +117,9 @@ def _snapshot(*, matched: bool) -> dict:
     }
 
 
-def _store(runtime: _Runtime, index: int, *, matched: bool) -> bool:
+def _store(
+    runtime: _Runtime, index: int, *, matched: bool, trade_id: int | None = None,
+) -> bool:
     activation = runtime._conn.execute(
         "SELECT activation_ts FROM g1m_edge_frequency_activation WHERE id=1"
     ).fetchone()[0]
@@ -129,7 +131,7 @@ def _store(runtime: _Runtime, index: int, *, matched: bool) -> bool:
     runtime._conn.commit()
     return _store_edge_decision_t0(runtime, {
         "review_id": review_id,
-        "trade_id": index,
+        "trade_id": index if trade_id is None else trade_id,
         "captured_ts": float(activation) + index,
         "snapshot_json": json.dumps(_snapshot(matched=matched)),
     })
@@ -198,3 +200,20 @@ def test_pre_activation_snapshot_is_not_backfilled_as_prospective_truth():
     assert runtime._conn.execute(
         "SELECT COUNT(*) FROM g1m_edge_decision_t0"
     ).fetchone()[0] == 0
+
+
+def test_dependency_weighted_rates_give_each_trade_total_weight_one():
+    runtime = _runtime()
+    assert _store(runtime, 1, matched=True, trade_id=10)
+    assert _store(runtime, 2, matched=True, trade_id=10)
+    assert _store(runtime, 3, matched=False, trade_id=20)
+
+    all_time = edge_frequency(runtime)["windows"]["all"]
+    assert all_time["early_any_match_rate"] == pytest.approx(2 / 3)
+    weighted = all_time["dependency_weighted"]
+    assert weighted["eligible_trade_weight"] == 2.0
+    assert weighted["exploratory_eligible_trade_weight"] == 2.0
+    assert weighted["early_any_match_trade_weight"] == 1.0
+    assert weighted["early_any_match_rate"] == 0.5
+    assert weighted["raw_choice_changed_trade_weight"] == 1.0
+    assert weighted["raw_choice_changed_rate"] == 0.5
