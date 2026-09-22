@@ -188,11 +188,13 @@ def install_bls_historical_ede_refinement() -> None:
 
     def feature_values(self, row: dict[str, Any], *, strict: bool):
         values, rejected, provenance = previous_feature_values(self, row, strict=strict)
-        historical_values, historical_provenance = historical_feature_records_from_runtime(
-            self.runtime,
-            instrument=str(row["instrument"]),
-            t0=float(row["captured_ts"]),
-            horizon=int(row["horizon_minutes"]),
+        instrument = str(row["instrument"])
+        t0 = float(row["captured_ts"])
+        horizon = int(row["horizon_minutes"])
+        historical_values, historical_provenance = self._cached_macro_feature_records(
+            "bls_historical", instrument=instrument, t0=t0, horizon=horizon,
+            loader=lambda: historical_feature_records_from_runtime(
+                self.runtime, instrument=instrument, t0=t0, horizon=horizon),
         )
         for feature_id, record in historical_values.items():
             current = values.get(feature_id)
