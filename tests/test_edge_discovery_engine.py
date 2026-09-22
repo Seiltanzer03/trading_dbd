@@ -423,13 +423,9 @@ def test_feature_capture_audit_reads_one_horizon_batch_at_a_time(monkeypatch):
     monkeypatch.setattr(adapter, "_source_rows", tracked_source_rows)
     audit = adapter.feature_capture_audit()
 
-    # Base coverage plus the official-macro release-independence overlay each
-    # make one bounded pass; neither may materialize all horizons together.
-    assert requested
-    assert len(requested) % len(HORIZONS) == 0
-    assert all(
-        requested[index:index + len(HORIZONS)] == list(HORIZONS)
-        for index in range(0, len(requested), len(HORIZONS)))
+    # Base coverage and official-macro release independence share one bounded
+    # pass; the overlay must not expand all observations a second time.
+    assert requested == list(HORIZONS)
     assert None not in requested
     assert audit["observation_count"] == len(HORIZONS)
     assert audit["resolved_outcome_count"] == 0
