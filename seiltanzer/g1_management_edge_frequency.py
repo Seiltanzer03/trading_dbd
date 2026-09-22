@@ -387,6 +387,21 @@ def _rate(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator > 0 else None
 
 
+def _trade_weights(rows: list[dict[str, Any]]) -> list[float]:
+    """Give every trade total weight one, split across its frozen reviews."""
+    reviews_per_trade = Counter(int(row["trade_id"]) for row in rows)
+    return [1.0 / reviews_per_trade[int(row["trade_id"])] for row in rows]
+
+
+def _weighted_rate(rows: list[dict[str, Any]], predicate) -> tuple[float, float | None]:
+    weights = _trade_weights(rows)
+    denominator = sum(weights)
+    numerator = sum(
+        weight for row, weight in zip(rows, weights) if bool(predicate(row))
+    )
+    return numerator, numerator / denominator if denominator > 0.0 else None
+
+
 def _dimension(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -453,6 +468,43 @@ def _aggregate(rows: list[dict[str, Any]], *, label: str, cutoff_ts: float | Non
 
     unique_trades = len({int(row["trade_id"]) for row in eligible})
     eligible_n = len(eligible)
+    dependency_weighted: dict[str, Any] = {
+        "eligible_trade_weight": float(unique_trades),
+        "exploratory_eligible_trade_weight": float(len({
+            int(row["trade_id"]) for row in exploratory_eligible
+        })),
+    }
+    weighted_metrics = {
+        "early_any_match": (
+            exploratory_eligible, lambda row: int(row["matched_limited_n"]) > 0),
+        "early_advantage": (
+            exploratory_eligible, lambda row: int(row["matched_advantage_n"]) > 0),
+        "early_disadvantage": (
+            exploratory_eligible, lambda row: int(row["matched_disadvantage_n"]) > 0),
+        "early_mixed_or_undecided": (
+            exploratory_eligible, lambda row: int(row["matched_mixed_n"]) > 0),
+        "active_any_match": (
+            eligible, lambda row: int(row["active_matched_n"]) > 0),
+        "any_edge_match": (
+            eligible, lambda row: (
+                int(row["matched_limited_n"]) > 0
+                or int(row["active_matched_n"]) > 0
+            )),
+        "supports_position": (
+            eligible, lambda row: row["signal_state"] == "SUPPORTS_POSITION"),
+        "opposes_position": (
+            eligible, lambda row: row["signal_state"] == "OPPOSES_POSITION"),
+        "conflicted": (
+            eligible, lambda row: row["signal_state"] == "CONFLICTED"),
+        "raw_choice_changed": (
+            eligible, lambda row: bool(row["raw_choice_changed"])),
+        "weighted_raw_reached_recommendation": (
+            eligible, lambda row: bool(row["weighted_raw_reached_recommendation"])),
+    }
+    for name, (metric_rows, predicate) in weighted_metrics.items():
+        numerator_weight, rate = _weighted_rate(metric_rows, predicate)
+        dependency_weighted[f"{name}_trade_weight"] = numerator_weight
+        dependency_weighted[f"{name}_rate"] = rate
     return {
         "window": label,
         "cutoff_ts": cutoff_ts,
@@ -461,6 +513,7 @@ def _aggregate(rows: list[dict[str, Any]], *, label: str, cutoff_ts: float | Non
         "exploratory_eligible_reviews": denominator,
         "unique_trades": unique_trades,
         "dependency_weighted_effective_n": unique_trades,
+        "dependency_weighted": dependency_weighted,
         "early_any_match_reviews": early_any,
         "early_any_match_rate": _rate(early_any, denominator),
         "early_advantage_reviews": advantage,
