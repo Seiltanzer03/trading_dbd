@@ -13,7 +13,7 @@ def test_deploy_has_bounded_progress_visible_prestart_window():
     # while rechecking the 9 GiB live DB. Keep bounded headroom without changing any
     # live readiness/smoke timeout or acceptance criterion.
     assert "cold_start_attempts=360" in workflow
-    assert "command_timeout: 15m" in workflow
+    assert "command_timeout: 20m" in workflow
     assert 'seq 1 "$cold_start_attempts"' in workflow
     assert "prestart_backup_bytes=$(find" in workflow
     assert "-name '.*.tmp.sqlite3'" in workflow
