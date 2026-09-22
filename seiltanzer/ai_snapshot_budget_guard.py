@@ -118,6 +118,8 @@ def install_ai_snapshot_budget_guard() -> None:
         budget["degrade_reason"] = "BASE_REPORT_INTEGRITY_BYTE_BUDGET"
         size = _sync_final_bytes(ai_verdict, snapshot)
         if size < ai_verdict._impl.SNAPSHOT_LIMIT_BYTES:
+            budget["degrade_level"] = "EXPLANATION_ONLY"
+            _sync_final_bytes(ai_verdict, snapshot)
             return
 
         # Defensive retry through the proven v18 allowlist compactor. This keeps
@@ -125,14 +127,17 @@ def install_ai_snapshot_budget_guard() -> None:
         # bounding explanatory workspaces.
         try:
             base(snapshot)
+            degrade_level = "BASE_RECOMPACTION"
         except RuntimeError as exc:
             if not _is_budget_error(exc):
                 raise
             _strict_authoritative_compaction(snapshot)
             base(snapshot)
+            degrade_level = "STRICT_AUTHORITATIVE"
         budget = snapshot.setdefault("snapshot_budget", {})
         budget["report_integrity_degraded"] = True
         budget["degrade_reason"] = "BASE_REPORT_INTEGRITY_BYTE_BUDGET"
+        budget["degrade_level"] = degrade_level
         size = _sync_final_bytes(ai_verdict, snapshot)
         if size >= ai_verdict._impl.SNAPSHOT_LIMIT_BYTES:
             raise RuntimeError("AI authoritative snapshot exceeds hard byte budget")
