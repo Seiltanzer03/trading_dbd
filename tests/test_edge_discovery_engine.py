@@ -435,6 +435,38 @@ def test_feature_capture_audit_reads_one_horizon_batch_at_a_time(monkeypatch):
         str(horizon): 1 for horizon in HORIZONS}
 
 
+def test_macro_release_records_are_loaded_once_per_shared_t0():
+    runtime = _ProspectiveRuntime()
+    adapter = ProspectiveFeatureAdapter(runtime, available_asof=150.0)
+    calls = 0
+
+    def loader():
+        nonlocal calls
+        calls += 1
+        return ({
+            "macro.test": feature_value(
+                instrument="NAS100", t0=100.0, horizon=15,
+                feature_id="macro.test", value=1.0, asof=90.0,
+            )
+        }, {"macro.test": {"release_id": "release-1"}})
+
+    first, _ = adapter._cached_macro_feature_records(
+        "test", instrument="NAS100", t0=100.0, horizon=15, loader=loader)
+    second, provenance = adapter._cached_macro_feature_records(
+        "test", instrument="SP500", t0=100.0, horizon=30, loader=loader)
+
+    assert calls == 1
+    assert first["macro.test"].instrument == "NAS100"
+    assert second["macro.test"].instrument == "SP500"
+    assert second["macro.test"].horizon == 30
+    assert provenance["macro.test"]["release_id"] == "release-1"
+
+    adapter._cached_macro_feature_records(
+        "test", instrument="NAS100", t0=101.0, horizon=15, loader=loader)
+    assert calls == 2
+    assert len(adapter._macro_record_cache) == 1
+
+
 def test_complete_frozen_price_context_never_loads_passive_bar_history():
     runtime = _ProspectiveRuntime()
     frozen = json.loads(_prospective_features(100.0))
