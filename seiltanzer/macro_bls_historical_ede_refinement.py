@@ -63,47 +63,62 @@ def _recompute_macro_inventory_maturity(adapter, report: dict[str, Any], prospec
         for item in report.get("features") or []
     }
     for horizon in prospective.HORIZONS:
-        horizon_rows = adapter.rows(
-            resolved_only=False, strict=False, horizon_minutes=int(horizon))
+        needs_fallback = not bool(getattr(
+            adapter, "_feature_capture_release_stats_complete", False)) and any(
+            "independent_release_n" not in (
+                (feature_rows.get(feature_id) or {}).get("by_horizon") or {}
+            ).get(str(horizon), {})
+            for feature_id in MACRO_FEATURE_FAMILY
+            if feature_rows.get(feature_id) is not None
+        )
+        horizon_rows = (
+            adapter.rows(
+                resolved_only=False, strict=False, horizon_minutes=int(horizon))
+            if needs_fallback else []
+        )
         for feature_id in MACRO_FEATURE_FAMILY:
             item = feature_rows.get(feature_id)
             if item is None:
                 continue
             by_horizon = item.get("by_horizon") or {}
-            eligible_rows = [
-                row for row in horizon_rows
-                if ((row.get("feature_values") or {}).get(feature_id) or {}).get(
-                    "training_eligible")
-                and _release_id(row, feature_id)
-            ]
-            resolved_rows = [row for row in eligible_rows if row.get("outcome_available")]
-            resolved_release_ids = {
-                _release_id(row, feature_id) for row in resolved_rows
-            } - {None}
-            eligible_release_ids = {
-                _release_id(row, feature_id) for row in eligible_rows
-            } - {None}
-            independent_n = len(resolved_release_ids)
+            target = by_horizon.setdefault(str(horizon), {})
+            if "independent_release_n" not in target:
+                eligible_rows = [
+                    row for row in horizon_rows
+                    if ((row.get("feature_values") or {}).get(feature_id) or {}).get(
+                        "training_eligible")
+                    and _release_id(row, feature_id)
+                ]
+                resolved_rows = [
+                    row for row in eligible_rows if row.get("outcome_available")]
+                target.update({
+                    "raw": len(eligible_rows),
+                    "resolved": len(resolved_rows),
+                    "coverage_pct": (
+                        100.0*len(eligible_rows)/max(1, len(horizon_rows))),
+                    "independent_release_n": len({
+                        _release_id(row, feature_id) for row in resolved_rows
+                    } - {None}),
+                    "available_release_n": len({
+                        _release_id(row, feature_id) for row in eligible_rows
+                    } - {None}),
+                })
+            independent_n = int(target.get("independent_release_n") or 0)
             maturity = prospective.data_maturity(
-                raw_n=len(resolved_rows),
+                raw_n=int(target.get("resolved") or 0),
                 effective_n=independent_n,
                 temporal_blocks=independent_n,
             )
-            target = by_horizon.setdefault(str(horizon), {})
             target.update({
-                "raw": len(eligible_rows),
                 "effective": independent_n,
-                "resolved": len(resolved_rows),
                 "temporal_blocks": independent_n,
-                "coverage_pct": 100.0*len(eligible_rows)/max(1, len(horizon_rows)),
                 "data_maturity": maturity,
                 "edge_maturity": "INSUFFICIENT_DATA",
                 "independent_release_n": independent_n,
-                "available_release_n": len(eligible_release_ids),
+                "available_release_n": int(target.get("available_release_n") or 0),
                 "dependency_unit": "OFFICIAL_MACRO_RELEASE_ID",
                 "repeated_t0_increases_effective_n": False,
             })
-        del eligible_rows, resolved_rows, horizon_rows
 
     for feature_id in MACRO_FEATURE_FAMILY:
         item = feature_rows.get(feature_id)
