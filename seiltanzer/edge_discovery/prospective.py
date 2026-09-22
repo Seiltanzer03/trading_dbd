@@ -214,6 +214,9 @@ class ProspectiveFeatureAdapter:
         # inventory consume memory proportional to the full production DB.
         self._causal_bars: dict[str, list[dict[str, Any]]] | None = None
         self._causal_bar_ends: dict[str, list[float]] = {}
+        self._causal_availability: dict[
+            str, tuple[int, int, int, list[float]]
+        ] = {}
         self._causal_bar_cache: dict[tuple[str, float, float], dict[str, Any]] = {}
 
     def _load_causal_bars(self) -> dict[str, list[dict[str, Any]]]:
@@ -252,6 +255,54 @@ class ProspectiveFeatureAdapter:
             bar_ends[instrument] = ends
         return bars, ends
 
+    def _causal_availability_tree(
+        self, instrument: str,
+    ) -> tuple[int, list[float]]:
+        """Return a range-min tree over each bar's causal availability time."""
+        bars, _ends = self._causal_series(instrument)
+        cache = getattr(self, "_causal_availability", None)
+        if cache is None:
+            cache = {}
+            self._causal_availability = cache
+        cached = cache.get(instrument)
+        if cached is not None and cached[:2] == (id(bars), len(bars)):
+            return cached[2], cached[3]
+
+        size = 1
+        while size < len(bars):
+            size *= 2
+        tree = [math.inf] * (2 * size)
+        for index in range(len(bars)):
+            bar = bars[index]
+            created_ts = float(bar.get("created_ts") or bar["bar_end_ts"])
+            if not math.isnan(created_ts):
+                tree[size + index] = created_ts
+        for index in range(size - 1, 0, -1):
+            tree[index] = min(tree[index * 2], tree[index * 2 + 1])
+        cache[instrument] = (id(bars), len(bars), size, tree)
+        return size, tree
+
+    @staticmethod
+    def _rightmost_available_index(
+        size: int, tree: list[float], end_index: int, cutoff: float,
+    ) -> int:
+        """Find the rightmost index in a prefix whose availability is causal."""
+        if end_index < 0 or not tree or tree[1] > cutoff:
+            return -1
+
+        def search(node: int, left: int, right: int) -> int:
+            if left > end_index or tree[node] > cutoff:
+                return -1
+            if left == right:
+                return left
+            middle = (left + right) // 2
+            found = search(node * 2 + 1, middle + 1, right)
+            if found >= 0:
+                return found
+            return search(node * 2, left, middle)
+
+        return search(1, 0, size - 1)
+
     def _causal_bar_index(
         self, instrument: str, upper_ts: float, capture_recorded_ts: float,
         *, hi: int | None = None, positive_close: bool = False,
@@ -264,17 +315,18 @@ class ProspectiveFeatureAdapter:
         """
         bars, ends = self._causal_series(instrument)
         upper = len(ends) if hi is None else max(0, min(int(hi), len(ends)))
-        index = bisect.bisect_right(ends, upper_ts + 1e-6, hi=upper) - 1
-        while index >= 0:
-            bar = bars[index]
-            created_ts = float(bar.get("created_ts") or bar["bar_end_ts"])
-            close = _finite(bar.get("close"))
-            if (
-                created_ts <= capture_recorded_ts + 1e-6
-                and (not positive_close or (close is not None and close > 0.0))
-            ):
+        end_index = bisect.bisect_right(ends, upper_ts + 1e-6, hi=upper) - 1
+        size, tree = self._causal_availability_tree(instrument)
+        cutoff = capture_recorded_ts + 1e-6
+        while end_index >= 0:
+            index = self._rightmost_available_index(
+                size, tree, end_index, cutoff)
+            if index < 0:
+                return -1
+            close = _finite(bars[index].get("close"))
+            if not positive_close or (close is not None and close > 0.0):
                 return index
-            index -= 1
+            end_index = index - 1
         return -1
 
     def _causal_bar_window(
@@ -297,19 +349,19 @@ class ProspectiveFeatureAdapter:
         minimum: int, *, positive_close: bool = False,
     ) -> bool:
         bars, _ends = self._causal_series(instrument)
+        size, tree = self._causal_availability_tree(instrument)
+        cutoff = capture_recorded_ts + 1e-6
+        cursor = end_index
         count = 0
-        for index in range(end_index, -1, -1):
-            bar = bars[index]
-            created_ts = float(bar.get("created_ts") or bar["bar_end_ts"])
-            close = _finite(bar.get("close"))
-            if (
-                created_ts <= capture_recorded_ts + 1e-6
-                and (not positive_close or (close is not None and close > 0.0))
-            ):
+        while count < max(0, minimum):
+            cursor = self._rightmost_available_index(size, tree, cursor, cutoff)
+            if cursor < 0:
+                return False
+            close = _finite(bars[cursor].get("close"))
+            if not positive_close or (close is not None and close > 0.0):
                 count += 1
-                if count >= minimum:
-                    return True
-        return False
+            cursor -= 1
+        return True
 
     def _recomputed_price_context(self, row: dict[str, Any]) -> dict[str, Any]:
         """Recompute only from bars demonstrably admitted by the T0 capture."""
