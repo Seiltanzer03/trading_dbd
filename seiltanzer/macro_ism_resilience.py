@@ -30,6 +30,7 @@ from .macro_numeric_data import (
 
 
 ISM_RESILIENCE_VERSION = "ism-official-resilience-v2"
+ISM_TRANSPORT_TOTAL_DEADLINE_SEC = 12.0
 _BASE = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-pmi-reports"
 _ROUNDUP_BASE = (
     "https://www.ismworld.org/supply-management-news-and-reports/news-publications/"
@@ -240,10 +241,12 @@ def _fetch_previous_direct(
     family: str,
     year: int,
     month: int,
+    *,
+    timeout: Any = None,
 ) -> dict[str, Any]:
     prev_year, prev_month = _shift_month(year, month, -1)
     url = _direct_url(family, _month_slug(prev_year, prev_month))
-    response = client.get(url)
+    response = client.get(url, timeout=timeout() if callable(timeout) else timeout)
     response.raise_for_status()
     parsed = parse_ism_report(response.text, family, str(response.url))
     expected = f"{prev_year:04d}-{prev_month:02d}"
@@ -257,13 +260,16 @@ def _try_roundup(
     family: str,
     year: int,
     month: int,
+    *,
+    timeout: Any = None,
 ) -> dict[str, Any]:
     url = _roundup_url(family, year, month)
-    response = client.get(url)
+    response = client.get(url, timeout=timeout() if callable(timeout) else timeout)
     response.raise_for_status()
     if not _official_ism_roundup_url(str(response.url), family, year, month):
         raise ValueError("ISM_ROUNDUP_REDIRECTED_OFFICIAL_PATH")
-    previous = _fetch_previous_direct(client, family, year, month)
+    previous = _fetch_previous_direct(
+        client, family, year, month, timeout=timeout)
     parsed = parse_ism_roundup(
         response.text, family, str(response.url), year=year, month=month,
         previous_report=previous,
@@ -290,6 +296,16 @@ def fetch_latest_direct_ism(
     """Return newest causally fetchable official ISM release for both families."""
     result: dict[str, dict[str, Any]] = {}
     failures: dict[str, list[str]] = {}
+    deadline = time.monotonic() + ISM_TRANSPORT_TOTAL_DEADLINE_SEC
+
+    def remaining_timeout() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            # Let the transport wrapper immediately use the already verified
+            # exact-SHA off-host bundle instead of exhausting every old page.
+            raise TimeoutError("ISM_TRANSPORT_TOTAL_DEADLINE_EXHAUSTED")
+        return max(0.1, min(float(source.timeout_sec), remaining))
+
     with source._client() as client:
         for family in ("ISM_MANUFACTURING", "ISM_SERVICES"):
             family_failures: list[str] = []
@@ -297,7 +313,8 @@ def fetch_latest_direct_ism(
                 expected = f"{year:04d}-{month:02d}"
                 direct_url = _direct_url(family, slug)
                 try:
-                    response = client.get(direct_url)
+                    response = client.get(
+                        direct_url, timeout=remaining_timeout())
                     response.raise_for_status()
                     parsed = parse_ism_report(response.text, family, str(response.url))
                     if parsed.get("period") != expected:
@@ -322,7 +339,10 @@ def fetch_latest_direct_ism(
                 # only if its title/body period and previous official report join
                 # all validate.
                 try:
-                    parsed = _try_roundup(client, family, year, month)
+                    parsed = _try_roundup(
+                        client, family, year, month,
+                        timeout=remaining_timeout,
+                    )
                     result[family] = parsed
                     break
                 except (httpx.HTTPError, ValueError, TypeError) as roundup_exc:

@@ -1,7 +1,9 @@
 import pytest
 
 from seiltanzer.macro_ism_parser_refinement import install_ism_roundup_parser_refinement
+from seiltanzer import macro_ism_resilience as resilience
 from seiltanzer.macro_ism_resilience import parse_ism_roundup
+from seiltanzer.macro_numeric_data import NumericMacroRuntime
 
 
 install_ism_roundup_parser_refinement()
@@ -107,3 +109,71 @@ def test_roundup_rejects_wrong_period_or_unofficial_host():
             "https://www.ismworld.org/supply-management-news-and-reports/news-publications/inside-supply-management-magazine/blog/2026/2026-08/ism-pmi-reports-roundup-june-2026-manufacturing/",
             year=2026, month=7, previous_report=PREVIOUS_MFG,
         )
+
+
+def test_ism_transport_uses_remaining_total_deadline(monkeypatch):
+    clock = [0.0]
+    timeouts = []
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, _url, *, timeout):
+            timeouts.append(timeout)
+            clock[0] += 4.0
+            raise resilience.httpx.ReadTimeout("slow official source")
+
+    class Source:
+        timeout_sec = 10.0
+
+        @staticmethod
+        def _client():
+            return Client()
+
+    monkeypatch.setattr(resilience.time, "monotonic", lambda: clock[0])
+
+    with pytest.raises(
+        TimeoutError, match="ISM_TRANSPORT_TOTAL_DEADLINE_EXHAUSTED"
+    ):
+        resilience.fetch_latest_direct_ism(Source(), now=1_787_220_000.0)
+
+    assert timeouts == [10.0, 8.0, 4.0]
+    assert clock[0] == resilience.ISM_TRANSPORT_TOTAL_DEADLINE_SEC
+
+
+def test_ism_deadline_immediately_uses_verified_offhost_fallback(monkeypatch):
+    from seiltanzer import macro_offhost_bundle as offhost
+    from seiltanzer import macro_transport_refinement as transport
+
+    transport.install_macro_transport_refinement()
+    captured = {}
+    expected = [
+        {"status": "CACHED", "family": "ISM_MANUFACTURING"},
+        {"status": "CACHED", "family": "ISM_SERVICES"},
+    ]
+
+    class Source:
+        @staticmethod
+        def fetch_ism():
+            raise TimeoutError("ISM_TRANSPORT_TOTAL_DEADLINE_EXHAUSTED")
+
+    runtime = NumericMacroRuntime.__new__(NumericMacroRuntime)
+    runtime.source = Source()
+    runtime.store = object()
+
+    def ingest(runtime_arg, families, *, upstream_error):
+        captured["runtime"] = runtime_arg
+        captured["families"] = families
+        captured["error"] = upstream_error
+        return expected
+
+    monkeypatch.setattr(offhost, "ingest_offhost_families", ingest)
+
+    assert NumericMacroRuntime._ingest_ism(runtime) == expected
+    assert captured["runtime"] is runtime
+    assert captured["families"] == ("ISM_MANUFACTURING", "ISM_SERVICES")
+    assert "ISM_TRANSPORT_TOTAL_DEADLINE_EXHAUSTED" in str(captured["error"])
