@@ -124,8 +124,10 @@ def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
     assert smoke.MATERIALIZED_STATUS_TIMEOUT_SEC == 15.0
 
     recorded_timeouts = {}
+    call_order = []
 
     def fake_assert_route(path: str, *, timeout: float = 5.0):
+        call_order.append(path)
         recorded_timeouts[path] = timeout
         return {}
 
@@ -141,9 +143,11 @@ def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
     monkeypatch.setattr(smoke, "verify_universe_routes", lambda: None)
     monkeypatch.setattr(smoke, "verify_edge_researcher", lambda: None)
     monkeypatch.setattr(smoke, "verify_ai_verdict", lambda: None)
-    monkeypatch.setattr(smoke, "verify_macro_runtime", lambda: None)
+    monkeypatch.setattr(smoke, "verify_macro_runtime", lambda: call_order.append("macro"))
 
     smoke.verify("fake")
+    assert call_order[0] == "macro"
+    assert call_order.index("macro") < call_order.index("/api/research/passive/status")
     assert recorded_timeouts["/api/research/passive/status"] == smoke.PASSIVE_STATUS_TIMEOUT_SEC
     assert recorded_timeouts["/api/research/passive/edge"] == smoke.PASSIVE_EDGE_TIMEOUT_SEC
     assert recorded_timeouts["/api/research/g1/calibrators/status"] == (
