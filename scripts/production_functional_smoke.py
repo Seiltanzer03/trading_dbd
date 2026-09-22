@@ -334,9 +334,11 @@ def verify(expected_sha: str) -> None:
     assert actual == expected_sha, (actual, expected_sha)
     assert sh("systemctl", "is-active", "seiltanzer") == "active"
 
-    # Run the bounded macro refresh before scan-heavy research status routes.
-    # A timed-out synchronous status request keeps running server-side; putting
-    # macro last could therefore make its store writes wait on duplicate scans.
+    # The background AI materializer can still own the shared DB immediately
+    # after readiness. Wait for its nonblocking status contract first, then run
+    # macro before any scan-heavy research status route. A timed-out synchronous
+    # status request keeps running server-side and must not precede macro writes.
+    verify_ai_verdict()
     verify_macro_runtime()
 
     paths = (
@@ -364,7 +366,6 @@ def verify(expected_sha: str) -> None:
 
     verify_universe_routes()
     verify_edge_researcher()
-    verify_ai_verdict()
 
 
 def main(argv: list[str] | None = None) -> int:
