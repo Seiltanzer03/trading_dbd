@@ -50,6 +50,34 @@ def _drop_explanation_only_contracts(snapshot: dict[str, Any]) -> None:
                 active["details_truncated"] = True
 
 
+def _compact_input_audit(value: Any) -> dict[str, Any]:
+    """Preserve price authority/provenance under the emergency byte guard."""
+    audit = value if isinstance(value, dict) else {}
+    row_keys = (
+        "available", "status", "source", "role", "age_sec", "symbol",
+        "reason", "value", "quality", "proxy_quality", "is_proxy",
+        "fallback_tier",
+    )
+    rows: dict[str, Any] = {}
+    for name, row in (audit.get("rows") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        rows[str(name)] = {key: row[key] for key in row_keys if key in row}
+    result = {"rows": rows}
+    for key in (
+        "snapshot_utc", "all_required_available", "missing_required",
+        "degraded_inputs", "required_count", "available_count", "total_count",
+    ):
+        if key in audit:
+            result[key] = audit[key]
+    return result
+
+
+def _compact_scalars(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    row = value if isinstance(value, dict) else {}
+    return {key: row[key] for key in keys if key in row}
+
+
 def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
     """Keep the completed decision while dropping oversized explanation views.
 
@@ -71,16 +99,28 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
         "management_arbiter", "state_change_attribution",
         "calibration_contract", "recalculation_triggers",
         "cancellation_boundary", "phase_e_authority_contract",
-        "shadow_actions", "extended_actions",
+        "shadow_actions", "extended_actions", "input_audit",
+        "scenario_geometry", "raw_optimizer_stability", "stability",
+        "risk_tradeoff",
     )
     compact_manager = {
         key: manager[key] for key in manager_keep if key in manager
     }
+    compact_manager["input_audit"] = _compact_input_audit(
+        manager.get("input_audit"))
+    compact_manager["scenario_geometry"] = _compact_scalars(
+        manager.get("scenario_geometry"), (
+            "scenario_count", "next_rung_r", "p_next_rung_before_stop",
+            "rung_first_count", "p_stop_before_next_rung", "stop_first_count",
+            "p_unresolved_full_horizon", "unresolved_count", "resolved_count",
+            "full_horizon_minutes", "mean_event_minutes_given_resolved",
+            "take_first_probability", "stop_or_be_first_probability",
+        ))
 
     root_keep = (
         "captured_ts", "trade_id", "strategy", "trade_geometry", "position_state",
         "validation", "data_quality", "market_state", "hard_risk",
-        "risk_constraints", "policy_manager", "snapshot_budget",
+        "risk_constraints", "metric_coverage", "policy_manager", "snapshot_budget",
     )
     compact_root = {
         key: snapshot[key] for key in root_keep

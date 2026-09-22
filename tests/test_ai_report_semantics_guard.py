@@ -41,8 +41,7 @@ def test_break_even_distance_uses_position_space_sign_short():
 def test_compact_report_does_not_render_zero_audit_or_bounded_placeholders():
     snapshot = {
         "snapshot_budget": {
-            "report_integrity_degraded": True,
-            "degrade_reason": "BASE_REPORT_INTEGRITY_BYTE_BUDGET",
+            "compacted": True,
         },
         "policy_manager": {
             "policies": {
