@@ -41,6 +41,32 @@ LIVE_STATE_REFRESH_PERIOD_PRODUCTION_SEC = 10.0
 LIVE_STATE_REFRESH_PERIOD_FAST_SEC = 2.0
 
 
+def _refresh_management_decision(engine, snapshot: dict, trade: dict) -> dict:
+    """Refresh executable geometry without discarding the frozen arbiter result."""
+    manager = snapshot.get("policy_manager") or {}
+    existing = manager.get("management_decision") or {}
+    if not isinstance(existing, dict):
+        existing = {}
+
+    # ``preview_decision`` historically reads recommendation.policy.  Once the
+    # arbiter has resolved a single effective policy, that frozen decision must
+    # own the operational preview as well.
+    preview_snapshot = snapshot
+    effective_policy = existing.get("policy")
+    if effective_policy:
+        preview_manager = dict(manager)
+        preview_recommendation = dict(preview_manager.get("recommendation") or {})
+        preview_recommendation["policy"] = effective_policy
+        preview_manager["recommendation"] = preview_recommendation
+        preview_snapshot = {**snapshot, "policy_manager": preview_manager}
+
+    operational = engine.position.preview_decision(preview_snapshot, trade)
+    decision = {**existing, **operational}
+    manager["management_decision"] = decision
+    snapshot["policy_manager"] = manager
+    return decision
+
+
 async def broadcast_live_tick(clients, payload, *, timeout=2.0):
     """Isolate disconnected/slow consumers from the shared live tick owner."""
     async def send(ws):
@@ -871,9 +897,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         position_state["realized_position_fraction"],
                 })
                 snapshot["trade_geometry"] = geometry
-                decision = engine.position.preview_decision(
-                    snapshot, active_trade)
-                snapshot["policy_manager"]["management_decision"] = decision
+                decision = _refresh_management_decision(
+                    engine, snapshot, active_trade)
             else:
                 decision = ((snapshot.get("policy_manager") or {})
                             .get("management_decision"))

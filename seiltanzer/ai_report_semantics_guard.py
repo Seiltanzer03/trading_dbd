@@ -85,7 +85,11 @@ def repair_snapshot_geometry(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 def _compacted(snapshot: dict[str, Any]) -> bool:
     budget = snapshot.get("snapshot_budget") or {}
-    return bool(budget.get("report_integrity_degraded")) or (
+    return bool(
+        budget.get("compacted")
+        or budget.get("normal_compaction")
+        or budget.get("report_integrity_degraded")
+    ) or (
         str(budget.get("degrade_reason") or "") == "BASE_REPORT_INTEGRITY_BYTE_BUDGET"
     )
 

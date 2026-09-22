@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 import seiltanzer.app as app_module
-from seiltanzer.app import create_app
+from seiltanzer.app import _refresh_management_decision, create_app
 from seiltanzer.config import Settings
 
 
@@ -24,6 +24,52 @@ def _client(tmp_path, monkeypatch, verdict):
     monkeypatch.setattr(app_module, "render_policy_report", lambda _snapshot: "DETERMINISTIC")
     monkeypatch.setattr(app_module, "request_verdict", verdict)
     return app, TestClient(app, raise_server_exceptions=False)
+
+
+def test_api_boundary_preview_preserves_rich_arbiter_decision():
+    seen = {}
+
+    class Position:
+        @staticmethod
+        def preview_decision(snapshot, _trade):
+            seen["policy"] = snapshot["policy_manager"]["recommendation"]["policy"]
+            return {
+                "policy": "HOLD",
+                "execution_status": "not_required",
+                "geometry_version": "geometry-current",
+                "decision_id": "decision-current",
+                "incremental_close_fraction": 0.0,
+                "remaining_fraction_after_action": 1.0,
+            }
+
+    engine = type("Engine", (), {"position": Position()})()
+    snapshot = {
+        "policy_manager": {
+            "recommendation": {"policy": "CLOSE_50"},
+            "management_decision": {
+                "policy": "HOLD",
+                "authority": "STRATEGY",
+                "model_policy": "CLOSE_50",
+                "arbiter_winner": "STRATEGY",
+                "arbiter_reason": "evidence gate rejected active overlay",
+                "continuity": "strategy_continues",
+                "execution_status": "strategy_active",
+            },
+        }
+    }
+
+    decision = _refresh_management_decision(engine, snapshot, {"id": 1})
+
+    assert seen["policy"] == "HOLD"
+    assert decision["policy"] == "HOLD"
+    assert decision["authority"] == "STRATEGY"
+    assert decision["model_policy"] == "CLOSE_50"
+    assert decision["arbiter_winner"] == "STRATEGY"
+    assert decision["arbiter_reason"] == "evidence gate rejected active overlay"
+    assert decision["continuity"] == "strategy_continues"
+    assert decision["geometry_version"] == "geometry-current"
+    assert decision["execution_status"] == "not_required"
+    assert snapshot["policy_manager"]["management_decision"] == decision
 
 
 def test_llm_success_has_stable_contract(tmp_path, monkeypatch):

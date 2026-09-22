@@ -63,29 +63,38 @@ def _bounded(value: Any, *, depth: int = 0) -> Any:
     return value
 
 
+def _compact_input_audit(audit: Any) -> dict[str, Any]:
+    audit = audit if isinstance(audit, dict) else {}
+    compact_rows: dict[str, Any] = {}
+    for name, row in (audit.get("rows") or {}).items():
+        compact = _small_row(row, (
+            "available", "status", "source", "role", "age_sec", "symbol",
+            "reason", "value", "quality", "proxy_quality", "is_proxy",
+            "fallback_tier",
+        ))
+        if isinstance(row, dict) and isinstance(row.get("items"), list):
+            compact["items"] = [
+                _small_row(item, (
+                    "symbol", "available", "status", "source", "age_sec", "value"))
+                for item in row["items"][:12]
+            ]
+            compact["item_count"] = len(row["items"])
+        compact_rows[name] = compact
+    return {
+        "rows": compact_rows,
+        **{key: audit.get(key) for key in (
+            "snapshot_utc", "all_required_available", "missing_required",
+            "degraded_inputs", "required_count", "available_count", "total_count",
+        ) if key in audit},
+    }
+
+
 def _compact_snapshot_payload(snapshot: dict) -> None:
     """Remove API/research detail which is redundant for the verdict model."""
     manager = snapshot.get("policy_manager") or {}
     audit = manager.get("input_audit") or {}
     if isinstance(audit.get("rows"), dict):
-        compact_rows = {}
-        for name, row in audit["rows"].items():
-            compact = _small_row(row, (
-                "available", "status", "source", "role", "age_sec", "symbol",
-                "reason"))
-            if isinstance(row, dict) and isinstance(row.get("items"), list):
-                compact["items"] = [
-                    _small_row(item, ("symbol", "available", "status", "source", "age_sec"))
-                    for item in row["items"][:12]
-                ]
-                compact["item_count"] = len(row["items"])
-            compact_rows[name] = compact
-        manager["input_audit"] = {
-            "rows": compact_rows,
-            **{key: audit.get(key) for key in (
-                "all_required_available", "missing_required", "degraded_inputs")
-               if key in audit},
-        }
+        manager["input_audit"] = _compact_input_audit(audit)
     evidence = manager.get("evidence") or {}
     iv = evidence.get("iv_surface") or {}
     if iv:
@@ -166,7 +175,8 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
         manager = snapshot["policy_manager"]
     if _snapshot_bytes(snapshot) > SNAPSHOT_TARGET_BYTES:
         manager["evidence"] = _bounded(manager.get("evidence") or {})
-        manager["input_audit"] = _bounded(manager.get("input_audit") or {})
+        manager["input_audit"] = _bounded(
+            _compact_input_audit(manager.get("input_audit") or {}))
         manager["option_derivative_state"] = _bounded(
             manager.get("option_derivative_state") or {})
         manager["gate"] = _bounded(manager.get("gate") or {})
@@ -174,6 +184,8 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
         manager["policies"] = {
             name: _small_row(policy, (
                 "expected_final_r", "median_final_r", "cvar10_r",
+                "p_final_profit", "p_giveback_0_25_from_now",
+                "p_giveback_0_50_from_now",
                 "p_next_rung_before_stop", "p_stop_before_next_rung",
                 "no_event_probability", "eligible", "reason"))
             for name, policy in policies.items()

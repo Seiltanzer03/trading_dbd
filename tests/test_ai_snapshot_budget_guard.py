@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from seiltanzer import ai_snapshot_budget_guard as guard
 from seiltanzer import ai_verdict
+from seiltanzer.ai_report_semantics_guard import authoritative_current_price_available
 
 
 def test_base_snapshot_integrity_overflow_degrades_instead_of_raising():
@@ -86,6 +87,7 @@ def test_base_overflow_retries_with_strict_authoritative_compaction():
             "captured_ts": 1_790_024_400.0,
             "trade_id": "128",
             "strategy": {"instrument": "NAS100"},
+            "trade_geometry": {"current": 4328.75},
             "policy_manager": {
                 "management_decision": "CLOSE_25",
                 "recommendation": "CLOSE_25",
@@ -94,7 +96,29 @@ def test_base_overflow_retries_with_strict_authoritative_compaction():
                     "CLOSE_25": {"expected_final_r": 0.08, "cvar10_r": -0.4},
                 },
                 "risk_constraint": {"cvar_floor_r": -0.5},
+                "input_audit": {
+                    "snapshot_utc": "2026-09-22T14:00:00Z",
+                    "available_count": 7,
+                    "total_count": 8,
+                    "rows": {
+                        "instrument_price": {
+                            "available": True,
+                            "status": "live",
+                            "source": "broker",
+                            "value": 4328.75,
+                            "oversized": "z" * 20_000,
+                        }
+                    },
+                },
+                "scenario_geometry": {
+                    "scenario_count": 10_000,
+                    "take_first_probability": 0.41,
+                    "paths": ["oversized"] * 10_000,
+                },
                 "evidence": {"oversized": "x" * 70_000},
+            },
+            "metric_coverage": {
+                "summary": {"available_groups": 7, "total_groups": 8}
             },
             "ede_causal_context": {"oversized": "y" * 70_000},
             "snapshot_budget": {},
@@ -120,6 +144,20 @@ def test_base_overflow_retries_with_strict_authoritative_compaction():
         assert manager["management_decision"] == "CLOSE_25"
         assert manager["policies"]["HOLD"]["cvar10_r"] == -0.8
         assert manager["risk_constraint"]["cvar_floor_r"] == -0.5
+        assert manager["input_audit"]["available_count"] == 7
+        assert manager["input_audit"]["total_count"] == 8
+        assert manager["input_audit"]["rows"]["instrument_price"] == {
+            "available": True,
+            "status": "live",
+            "source": "broker",
+            "value": 4328.75,
+        }
+        assert manager["scenario_geometry"] == {
+            "scenario_count": 10_000,
+            "take_first_probability": 0.41,
+        }
+        assert snapshot["metric_coverage"]["summary"]["available_groups"] == 7
+        assert authoritative_current_price_available(snapshot) is True
         assert "evidence" not in manager
         assert "ede_causal_context" not in snapshot
         assert len(calls) == 2
