@@ -149,3 +149,42 @@ def test_backfill_uses_indexed_recent_window_not_full_bar_history():
 
     assert (result.get("_meta") or {}).get("baseline_price_backfill") is True
     assert math.isclose(result["price.ret_5m"], math.log(112.0 / 111.0))
+
+
+def test_late_created_history_uses_availability_index_after_warmup():
+    runtime = _Runtime()
+    adapter = ProspectiveFeatureAdapter(runtime, available_asof=2_000_000.0)
+    t0 = 2_000_000.0
+
+    class _CountingBar(dict):
+        accesses = 0
+
+        def get(self, *args, **kwargs):
+            type(self).accesses += 1
+            return super().get(*args, **kwargs)
+
+    bars = [
+        _CountingBar({
+            "instrument": "NAS100",
+            "bar_end_ts": t0 - (10_000 - index) * 300.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.0,
+            "quality": 1.0,
+            "created_ts": t0 + 60.0,
+        })
+        for index in range(10_000)
+    ]
+    adapter._causal_bars = {"NAS100": bars}
+    adapter._causal_bar_ends = {
+        "NAS100": [float(bar["bar_end_ts"]) for bar in bars]
+    }
+
+    assert adapter._causal_bar_index(
+        "NAS100", t0, t0, positive_close=True) == -1
+    _CountingBar.accesses = 0
+    assert adapter._causal_bar_index(
+        "NAS100", t0 - 300.0, t0, positive_close=True) == -1
+    assert not adapter._has_causal_bar_count(
+        "NAS100", len(bars) - 1, t0, 12, positive_close=True)
+    assert _CountingBar.accesses == 0
