@@ -158,6 +158,27 @@ def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
     assert recorded_timeouts["/api/state"] == 5.0
 
 
+def test_ai_verdict_rechecks_snapshot_after_post(monkeypatch):
+    smoke = _load_script("production_functional_smoke")
+    calls = []
+
+    monkeypatch.setattr(
+        smoke, "wait_for_ai_snapshot_ready", lambda: calls.append("snapshot") or {})
+    monkeypatch.setattr(
+        smoke,
+        "request",
+        lambda *args, **kwargs: (
+            200,
+            {"ok": True, "mode": "deterministic_fallback", "verdict": "ok"},
+            1.0,
+        ),
+    )
+
+    smoke.verify_ai_verdict()
+
+    assert calls == ["snapshot", "snapshot"]
+
+
 def test_functional_smoke_macro_latest_uses_dedicated_timeout(monkeypatch):
     smoke = _load_script("production_functional_smoke")
 

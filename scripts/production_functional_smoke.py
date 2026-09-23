@@ -161,7 +161,7 @@ def verify_edge_researcher() -> None:
     assert (status.get("automation") or {}).get("manual_post_only") is False, status
 
 
-def verify_ai_verdict() -> None:
+def wait_for_ai_snapshot_ready() -> dict:
     status = assert_route("/api/ai/snapshot/status")
     assert isinstance(status, dict), status
     assert status.get("periodic_heavy_recompute") is False, status
@@ -180,6 +180,12 @@ def verify_ai_verdict() -> None:
             time.sleep(2.0)
             status = assert_route("/api/ai/snapshot/status")
         assert status.get("ready") is True, status
+        assert status.get("building") is not True, status
+    return status
+
+
+def verify_ai_verdict() -> None:
+    wait_for_ai_snapshot_ready()
 
     # Every individual POST must remain below the reverse-proxy budget. If the
     # market crosses a review trigger between the status read and POST, a fast
@@ -207,6 +213,11 @@ def verify_ai_verdict() -> None:
                 "no_active_trade", "ai_rate_limited", "ai_request_in_progress"
             }, body
         break
+
+    # A fresh option chain can invalidate the snapshot while the verdict POST is
+    # in flight. That background rebuild shares the runtime store with macro
+    # status. Wait again so macro acceptance never races a newly-started build.
+    wait_for_ai_snapshot_ready()
 
 
 def _verify_fomc_semantic() -> None:
