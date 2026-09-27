@@ -218,7 +218,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         name="macro_data_factory_fomc_refresh")
 
     def refresh_numeric():
-        return numeric_runtime.refresh()
+        return numeric_runtime.request_refresh()
 
     app.add_api_route(
         "/api/research/macro/numeric/refresh", refresh_numeric, methods=["POST"],

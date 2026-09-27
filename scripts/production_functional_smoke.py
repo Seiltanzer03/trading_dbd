@@ -38,7 +38,7 @@ AI_MATERIALIZER_WAIT_SEC = 150.0
 EDGE_RESEARCHER_MAX_MS = 250.0
 EDGE_RESEARCHER_WAIT_SEC = 75.0
 FOMC_WAIT_SEC = 45.0
-MACRO_NUMERIC_REFRESH_WAIT_SEC = 30.0
+MACRO_NUMERIC_REFRESH_WAIT_SEC = 120.0
 MACRO_NUMERIC_REFRESH_POLL_SEC = 1.0
 MACRO_LATEST_TIMEOUT_SEC = 20.0
 FOMC_PROMPT_VERSION = "fomc-semantic-v2-json-schema"
@@ -268,9 +268,9 @@ def _wait_for_macro_numeric_refresh(
 ) -> dict:
     """Accept only a completed successful official numeric refresh.
 
-    The POST can legitimately return IN_PROGRESS when the startup worker already
-    owns the refresh. Do not turn that transient state into success: poll the
-    existing runtime for a short bounded window and validate its completed result.
+    The POST reserves background work and returns IN_PROGRESS. Do not turn that
+    transient state into success: poll for a bounded window and validate the
+    completed result. This also covers an already running startup refresh.
     """
     assert isinstance(initial_body, dict), initial_body
     if initial_body.get("status") == "OK":
