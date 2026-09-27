@@ -18,6 +18,7 @@ import { initWavelet } from './wavelet.js';
 import { fetchStructured } from './safe_fetch.js';
 import {
   mountEdgeManagement, mountManagementDecision, mountShadowWorkingAction,
+  mountArmedShadowActions,
 } from './management_ui.js';
 
 initTooltips();
@@ -1074,6 +1075,7 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     <div id="ai-edge-management"></div>
     <div id="ai-management-execution"></div>
     <div id="ai-shadow-action"></div>
+    <div id="ai-armed-actions"></div>
     <div class="modal-actions"><button class="btn" id="ai-close">ЗАКРЫТЬ</button></div>`);
   $('#ai-close').addEventListener('click', closeModal);
   const out = $('#ai-verdict-text');
@@ -1091,6 +1093,12 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     mountShadowWorkingAction(
       $("#ai-shadow-action"), body.llm_shadow_decision, apiPost,
       async () => { await refreshJournalAndSetups(); });
+    try {
+      const position = await fetchStructured('/api/position');
+      mountArmedShadowActions(
+        $("#ai-armed-actions"), position.shadow_actions, apiPost,
+        async () => { await refreshJournalAndSetups(); });
+    } catch (_) { /* A position refresh must not hide the completed verdict. */ }
     await refreshAiHistory();
   } catch (err) {
     const status = err.status ? ` · HTTP ${err.status}` : '';

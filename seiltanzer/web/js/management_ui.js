@@ -107,6 +107,43 @@ export function mountEdgeManagement(container, payload) {
 
 // Optional LLM extended action. It is a separate manual lane and never replaces
 // the authoritative quant management decision rendered below.
+export function mountArmedShadowActions(container, actions, post, onApplied = () => {}) {
+  container.replaceChildren();
+  for (const action of actions || []) {
+    if (action.status !== 'armed') continue;
+    const panel = document.createElement('section');
+    panel.className = 'ai-shadow-working-action';
+    appendTextLine(panel, 'ai-execution-title',
+      `${action.policy} · УСЛОВИЕ УСТАНОВЛЕНО У БРОКЕРА`);
+    const status = document.createElement('div');
+    status.className = 'tiny dim';
+    const yes = document.createElement('button');
+    yes.className = 'btn btn-primary';
+    yes.textContent = 'ИСПОЛНЕНО У БРОКЕРА';
+    const no = document.createElement('button');
+    no.className = 'btn';
+    no.textContent = 'УСЛОВИЕ ОТМЕНЕНО';
+    const submit = async (executed) => {
+      yes.disabled = true; no.disabled = true;
+      try {
+        const result = await post('/api/ai/shadow-action/ack', {
+          action_id: action.action_id, trade_id: action.trade_id, executed,
+        });
+        yes.remove(); no.remove();
+        status.textContent = executed ? 'Исполнение записано в остаток позиции.' : 'Условие отменено.';
+        await onApplied(result);
+      } catch (error) {
+        status.textContent = error?.message || 'Не удалось сохранить исполнение.';
+        yes.disabled = false; no.disabled = false;
+      }
+    };
+    yes.addEventListener('click', () => submit(true));
+    no.addEventListener('click', () => submit(false));
+    panel.append(yes, no, status);
+    container.appendChild(panel);
+  }
+}
+
 export function mountShadowWorkingAction(container, shadow, post, onApplied = () => {}) {
   container.replaceChildren();
   const action = shadow?.working_action;

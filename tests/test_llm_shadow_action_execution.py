@@ -118,6 +118,79 @@ def test_conditional_action_is_armed_without_fake_position_reduction(tmp_path):
     ledger.close()
 
 
+def test_armed_spike_fill_reduces_remaining_once(tmp_path):
+    ledger = PositionLedger(str(tmp_path / "trades.db"))
+    trade = _trade()
+    action = _register(ledger, trade, _shadow("SCALE_OUT_ON_SPIKE", {
+        "trigger_price": 120.0, "close_fraction": 0.10,
+    }))
+    ledger.acknowledge_shadow_action(
+        action_id=action["action_id"], trade=trade, executed=True,
+        execution_price=110.0, execution_r=1.0,
+    )
+    assert ledger.state(trade)["remaining_position_fraction"] == 1.0
+    filled = ledger.acknowledge_shadow_action(
+        action_id=action["action_id"], trade=trade, executed=True,
+        execution_price=120.0, execution_r=2.0,
+    )
+    assert filled["position_state"]["remaining_position_fraction"] == 0.9
+    assert filled["position_state"]["armed_conditional_actions"] == []
+    assert ledger.acknowledge_shadow_action(
+        action_id=action["action_id"], trade=trade, executed=True,
+        execution_price=120.0, execution_r=2.0,
+    )["idempotent"] is True
+    assert ledger.state(trade)["remaining_position_fraction"] == 0.9
+    ledger.close()
+
+
+def test_time_stop_requires_deadline_then_records_broker_exit(tmp_path):
+    ledger = PositionLedger(str(tmp_path / "trades.db"))
+    trade = _trade()
+    action = _register(ledger, trade, _shadow("TIME_STOP", {
+        "deadline_ts": time.time() + 60,
+    }))
+    ledger.acknowledge_shadow_action(
+        action_id=action["action_id"], trade=trade, executed=True,
+        execution_price=110.0, execution_r=1.0,
+    )
+    with pytest.raises(StaleDecisionError, match="deadline has not arrived"):
+        ledger.acknowledge_shadow_action(
+            action_id=action["action_id"], trade=trade, executed=True,
+            execution_price=110.0, execution_r=1.0,
+        )
+    ledger._conn.execute(
+        "UPDATE llm_shadow_manual_actions SET parameters_json=? WHERE action_id=?",
+        ('{"deadline_ts": 1}', action["action_id"]),
+    )
+    filled = ledger.acknowledge_shadow_action(
+        action_id=action["action_id"], trade=trade, executed=True,
+        execution_price=110.0, execution_r=1.0,
+    )
+    assert filled["position_state"]["remaining_position_fraction"] == 0
+    assert filled["position_state"]["armed_conditional_actions"] == []
+    ledger.close()
+
+
+def test_cancelled_armed_condition_disappears_without_closing(tmp_path):
+    ledger = PositionLedger(str(tmp_path / "trades.db"))
+    trade = _trade()
+    action = _register(ledger, trade, _shadow("SCALE_OUT_ON_SPIKE", {
+        "trigger_price": 120.0, "close_fraction": 0.10,
+    }))
+    ledger.acknowledge_shadow_action(
+        action_id=action["action_id"], trade=trade, executed=True,
+        execution_price=110.0, execution_r=1.0,
+    )
+    cancelled = ledger.acknowledge_shadow_action(
+        action_id=action["action_id"], trade=trade, executed=False,
+        execution_price=110.0, execution_r=1.0,
+    )
+    assert cancelled["execution_status"] == "cancelled"
+    assert cancelled["position_state"]["armed_conditional_actions"] == []
+    assert cancelled["position_state"]["remaining_position_fraction"] == 1.0
+    ledger.close()
+
+
 def test_stale_or_widening_shadow_action_fails_closed(tmp_path):
     ledger = PositionLedger(str(tmp_path / "trades.db"))
     trade = _trade()
