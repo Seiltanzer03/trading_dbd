@@ -649,12 +649,46 @@ class NumericMacroRuntime:
             for family, payload in releases.items()
         ]
 
-    def refresh(self) -> dict[str, Any]:
+    def _claim_refresh(self) -> bool:
         with self._lock:
             if self.running:
-                return {"status": "IN_PROGRESS", "research_only": True}
+                return False
             self.running = True
-        self.last_started_at = time.time()
+            self.last_started_at = time.time()
+            self.last_finished_at = None
+            self.last_result = None
+            self.last_error = None
+            return True
+
+    def request_refresh(self) -> dict[str, Any]:
+        """Reserve before replying: polling must never accept the previous result."""
+        if self._claim_refresh():
+            try:
+                threading.Thread(
+                    target=self._refresh_claimed, name="numeric-macro-refresh", daemon=True,
+                ).start()
+            except Exception as exc:
+                self._refresh_failed(exc)
+                with self._lock:
+                    self.running = False
+                raise
+        return {"status": "IN_PROGRESS", "research_only": True, "production_authority": False}
+
+    def refresh(self) -> dict[str, Any]:
+        if not self._claim_refresh():
+            return {"status": "IN_PROGRESS", "research_only": True}
+        return self._refresh_claimed()
+
+    def _refresh_failed(self, exc: Exception) -> dict[str, Any]:
+        self.last_error = f"{type(exc).__name__}:{str(exc)[:180]}"
+        self.last_finished_at = time.time()
+        self.last_result = {
+            "status": "FAILED", "errors": {"runtime": self.last_error},
+            "no_placeholders": True, "research_only": True, "production_authority": False,
+        }
+        return self.last_result
+
+    def _refresh_claimed(self) -> dict[str, Any]:
         output: dict[str, Any] = {"BLS": None, "ISM": None}
         errors: dict[str, str] = {}
         try:
@@ -676,6 +710,10 @@ class NumericMacroRuntime:
                 "production_authority": False,
             }
             return self.last_result
+        except Exception as exc:
+            # Storage/unexpected failures must not leave an old successful result
+            # visible or kill the periodic worker permanently.
+            return self._refresh_failed(exc)
         finally:
             self.last_finished_at = time.time()
             with self._lock:
