@@ -358,13 +358,25 @@ class PositionLedger:
         policy = str(action.get("policy") or "")
         if policy not in EXTENDED_POLICIES:
             return None
+        if (shadow.get("status") != "ok" or shadow.get("blocked_by_hard_guard")
+                or shadow.get("policy") != policy):
+            return None
         if action.get("status") != "READY_FOR_MANUAL_CONFIRMATION":
             return None
         confidence = _finite(action.get("confidence"))
         parameters = action.get("parameters")
-        if confidence is None or not isinstance(parameters, dict):
+        if (confidence is None or confidence < 0.65
+                or action.get("manual_confirmation_required") is not True
+                or action.get("automatic_execution_allowed") is not False
+                or not isinstance(parameters, dict)):
             raise ValueError("invalid extended shadow action")
         state = self.state(trade)
+        if float(state["remaining_position_fraction"]) <= 1e-12:
+            return None
+        if policy in EXTENDED_CONDITIONAL_POLICIES and any(
+            armed["policy"] == policy for armed in state["armed_conditional_actions"]
+        ):
+            return None
         geometry_version = self._geometry_version(trade, state)
         snapshot_state = snapshot.get("position_state") or {}
         if snapshot_state and int(snapshot_state.get("state_version") or 0) != int(

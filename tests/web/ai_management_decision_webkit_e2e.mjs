@@ -14,6 +14,7 @@ const server = http.createServer(async (req, res) => {
       res.end(`<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <div id="edge"></div><div id="execution"></div><div id="shadow"></div>
+<div id="extended-execution"></div><div id="extended-shadow"></div>
 <script type="module">
 import {mountEdgeManagement,mountManagementDecision,mountShadowWorkingAction} from '/seiltanzer/web/js/management_ui.js';
 const decision={
@@ -38,6 +39,10 @@ mountEdgeManagement(document.querySelector('#edge'),edge);
 mountManagementDecision(document.querySelector('#execution'),decision,post,
   result=>{window.__applied=result});
 mountShadowWorkingAction(document.querySelector('#shadow'),shadow,post);
+const extended={...decision,decision_id:'shadow-action-e2e',policy:'TIGHTEN_STOP',
+  instruction_ru:'Подтянуть стоп к 107',quant_baseline_policy:'HOLD'};
+mountManagementDecision(document.querySelector('#extended-execution'),extended,post);
+mountShadowWorkingAction(document.querySelector('#extended-shadow'),shadow,post,()=>{},extended);
 </script>`);
       return;
     }
@@ -78,9 +83,14 @@ assert.equal(state.applied.position_state.remaining_position_fraction,.75);
 assert.equal(await page.locator('#execution').getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).count(),0);
 assert.equal(await page.locator('#execution').getByRole('button',{name:'НЕ ВЫПОЛНЕНО',exact:true}).count(),0);
 await page.locator('#shadow').getByText('РАСШИРЕННЫЙ ВАРИАНТ LLM').waitFor();
+assert.equal(await page.locator('#extended-shadow').getByRole('button').count(),0);
+await page.locator('#extended-execution').getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).tap();
+const extendedCall=await page.evaluate(()=>window.__calls[1]);
+assert.equal(extendedCall.url,'/api/ai/decision/ack');
+assert.equal(extendedCall.payload.decision_id,'shadow-action-e2e');
 await page.locator('#shadow').getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).tap();
 await page.getByText('Исполнение записано. Стоп: 107. Take: 130.').waitFor();
-const shadowCall=await page.evaluate(()=>window.__calls[1]);
+const shadowCall=await page.evaluate(()=>window.__calls[2]);
 assert.equal(shadowCall.url,'/api/ai/shadow-action/ack');
 assert.deepEqual(shadowCall.payload,{action_id:'shadow-action-e2e',trade_id:7,executed:true});
 await browser.close();

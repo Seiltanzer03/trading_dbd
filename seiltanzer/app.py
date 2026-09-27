@@ -67,6 +67,26 @@ def _refresh_management_decision(engine, snapshot: dict, trade: dict) -> dict:
     return decision
 
 
+def _extended_manual_decision(base: dict, action: dict) -> dict:
+    """Offer one guarded manual action where the quantitative plan is HOLD."""
+    if base.get("policy") != "HOLD" or base.get("manual_execution_required"):
+        return base
+    if action.get("execution_status") != "pending_execution":
+        return base
+    return {
+        **action,
+        "decision_id": action["action_id"],
+        "authority": "HUMAN_CONFIRMED_EXTENDED",
+        "fraction_semantics": "fraction_of_current_remaining_position",
+        "incremental_close_fraction": 0.0,
+        "remaining_fraction_before_action": base["remaining_fraction_before_action"],
+        "remaining_fraction_after_action": base["remaining_fraction_before_action"],
+        "quant_baseline_policy": "HOLD",
+        "manual_execution_required": True,
+        "automatic_execution_allowed": False,
+    }
+
+
 async def broadcast_live_tick(clients, payload, *, timeout=2.0):
     """Isolate disconnected/slow consumers from the shared live tick owner."""
     async def send(ws):
@@ -967,6 +987,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 shadow = result.get("llm_shadow_decision")
                 if (
                     active_trade and isinstance(shadow, dict)
+                    and decision and decision.get("policy") == "HOLD"
                     and str(shadow.get("policy") or "") in EXTENDED_POLICIES
                 ):
                     registered = engine.position.register_shadow_action(
@@ -976,6 +997,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         shadow["working_action"] = registered
                         result["llm_shadow_decision"] = shadow
                         snapshot["llm_shadow_decision"] = shadow
+                        if decision:
+                            decision = _extended_manual_decision(decision, registered)
+                            result["management_decision"] = decision
+                            if decision.get("decision_id") == registered["action_id"]:
+                                result["verdict"] += (
+                                    "\n\n**РУЧНОЕ РАСШИРЕННОЕ ДЕЙСТВИЕ** — "
+                                    + registered["instruction_ru"]
+                                    + ". Выполнить только вручную у брокера и затем подтвердить "
+                                    "кнопкой. Расчётный HOLD остаётся базовым планом до подтверждения."
+                                )
                 engine.journal.record_ai_verdict(
                     trade_id, snapshot,
                     result["verdict"], result.get("model"))
@@ -1013,10 +1044,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if trade is None or int(trade["id"]) != int(req.trade_id):
                 raise StaleDecisionError("active trade changed")
             tick = engine.tick_payload()
-            acknowledged = engine.position.acknowledge(
-                decision_id=req.decision_id, trade=trade, executed=req.executed,
-                execution_price=((tick.get("feeds") or {}).get("price") or {}).get("value"),
-                execution_r=((tick.get("prob") or {}).get("r")))
+            execution_price = ((tick.get("feeds") or {}).get("price") or {}).get("value")
+            execution_r = ((tick.get("prob") or {}).get("r"))
+            if req.decision_id.startswith("shadow-action-"):
+                acknowledged = engine.position.acknowledge_shadow_action(
+                    action_id=req.decision_id, trade=trade, executed=req.executed,
+                    execution_price=execution_price, execution_r=execution_r)
+                acknowledged["decision_id"] = req.decision_id
+            else:
+                acknowledged = engine.position.acknowledge(
+                    decision_id=req.decision_id, trade=trade, executed=req.executed,
+                    execution_price=execution_price, execution_r=execution_r)
         except StaleDecisionError as exc:
             raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:

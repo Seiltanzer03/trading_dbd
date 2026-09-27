@@ -1087,18 +1087,22 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
       : '';
     out.textContent = warning + body.verdict;
     mountEdgeManagement($("#ai-edge-management"), body.edge_management);
+    const refreshArmed = async () => {
+      try {
+        const position = await fetchStructured('/api/position');
+        mountArmedShadowActions(
+          $("#ai-armed-actions"), position.shadow_actions, apiPost,
+          async () => { await refreshJournalAndSetups(); });
+      } catch (_) { /* A position refresh must not hide the completed verdict. */ }
+    };
     mountManagementDecision(
       $("#ai-management-execution"), body.management_decision, apiPost,
-      async () => { await refreshJournalAndSetups(); });
+      async () => { await refreshJournalAndSetups(); await refreshArmed(); });
     mountShadowWorkingAction(
       $("#ai-shadow-action"), body.llm_shadow_decision, apiPost,
-      async () => { await refreshJournalAndSetups(); });
-    try {
-      const position = await fetchStructured('/api/position');
-      mountArmedShadowActions(
-        $("#ai-armed-actions"), position.shadow_actions, apiPost,
-        async () => { await refreshJournalAndSetups(); });
-    } catch (_) { /* A position refresh must not hide the completed verdict. */ }
+      async () => { await refreshJournalAndSetups(); await refreshArmed(); },
+      body.management_decision);
+    await refreshArmed();
     await refreshAiHistory();
   } catch (err) {
     const status = err.status ? ` · HTTP ${err.status}` : '';

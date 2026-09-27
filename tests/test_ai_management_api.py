@@ -2,6 +2,15 @@ import pytest
 from fastapi.testclient import TestClient
 from seiltanzer.app import create_app
 from seiltanzer.config import Settings
+from seiltanzer.app import _extended_manual_decision
+
+
+def test_extended_action_cannot_replace_a_pending_partial_close():
+    base = {"policy": "CLOSE_25", "manual_execution_required": True,
+            "remaining_fraction_before_action": 1.0}
+    action = {"policy": "TIGHTEN_STOP", "action_id": "shadow-action-1",
+              "execution_status": "pending_execution"}
+    assert _extended_manual_decision(base, action) is base
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
@@ -36,6 +45,14 @@ def test_fallback_returns_structured_management_decision(client):
 def test_extended_shadow_action_is_registered_and_manually_acknowledged(
     client, monkeypatch,
 ):
+    from seiltanzer.app import _refresh_management_decision
+
+    def force_hold(engine, snapshot, trade):
+        snapshot["policy_manager"]["management_decision"]["policy"] = "HOLD"
+        return _refresh_management_decision(engine, snapshot, trade)
+
+    monkeypatch.setattr("seiltanzer.app._refresh_management_decision", force_hold)
+
     def fake_verdict(snapshot):
         geometry = snapshot["trade_geometry"]
         current = float(geometry["current"])
@@ -73,9 +90,14 @@ def test_extended_shadow_action_is_registered_and_manually_acknowledged(
     assert action["action_id"].startswith("shadow-action-")
     assert action["execution_status"] == "pending_execution"
     assert action["production_authority"] is False
+    decision = body["management_decision"]
+    assert decision["policy"] == "TIGHTEN_STOP"
+    assert decision["decision_id"] == action["action_id"]
+    assert decision["quant_baseline_policy"] == "HOLD"
+    assert decision["automatic_execution_allowed"] is False
 
-    acknowledged = client.post("/api/ai/shadow-action/ack", json={
-        "action_id": action["action_id"],
+    acknowledged = client.post("/api/ai/decision/ack", json={
+        "decision_id": decision["decision_id"],
         "trade_id": action["trade_id"],
         "executed": True,
     })
