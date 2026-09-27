@@ -40,7 +40,8 @@ mountManagementDecision(document.querySelector('#execution'),decision,post,
   result=>{window.__applied=result});
 mountShadowWorkingAction(document.querySelector('#shadow'),shadow,post);
 const extended={...decision,decision_id:'shadow-action-e2e',policy:'TIGHTEN_STOP',
-  instruction_ru:'Подтянуть стоп к 107',quant_baseline_policy:'HOLD'};
+  instruction_ru:'Подтянуть стоп к 107',quant_baseline_policy:'HOLD',
+  authority:'HUMAN_CONFIRMED_EXTENDED'};
 mountManagementDecision(document.querySelector('#extended-execution'),extended,post);
 mountShadowWorkingAction(document.querySelector('#extended-shadow'),shadow,post,()=>{},extended);
 mountArmedShadowActions(document.querySelector('#armed'),[
