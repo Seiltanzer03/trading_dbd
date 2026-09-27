@@ -64,7 +64,7 @@ const context=await browser.newContext({
 const page=await context.newPage();
 await page.goto(`http://127.0.0.1:${server.address().port}/fixture`,
   {waitUntil:'networkidle'});
-await page.getByText('ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ').waitFor();
+await page.locator('#execution').getByText('ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ').waitFor();
 await page.getByText('ПЕРЕВЕСЫ В РЕШЕНИИ').waitFor();
 assert.match(await page.locator('#edge').innerText(),/Без перевеса: HOLD → с перевесом: CLOSE_25/);
 assert.match(await page.locator('#edge').innerText(),/раннее преимущество/);
