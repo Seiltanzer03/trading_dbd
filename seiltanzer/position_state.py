@@ -486,7 +486,20 @@ class PositionLedger:
                 relative = float(parameters["close_fraction"]) if policy == "SCALE_OUT_ON_SPIKE" else 1.0
                 if not 0 < relative <= 1:
                     raise StaleDecisionError("invalid conditional close fraction")
-                closed, after = before * relative, before * (1 - relative)
+                if policy == "SCALE_OUT_ON_SPIKE":
+                    armed = self._conn.execute(
+                        "SELECT fraction_before FROM position_management_events "
+                        "WHERE trade_id=? AND decision_id=? AND event_type='AI_SCALE_OUT_ARM'",
+                        (int(trade["id"]), action_id),
+                    ).fetchone()
+                    if armed is None:
+                        raise StaleDecisionError("conditional order size is unavailable")
+                    closed = float(armed["fraction_before"]) * relative
+                    if closed > before + 1e-12:
+                        raise StaleDecisionError("broker order exceeds remaining position")
+                else:
+                    closed = before
+                after = max(0.0, before - closed)
                 self._event(
                     trade=trade,
                     event_type=("AI_SCALE_OUT_FILL" if policy == "SCALE_OUT_ON_SPIKE"

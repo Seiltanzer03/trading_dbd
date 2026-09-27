@@ -129,17 +129,19 @@ def test_armed_spike_fill_reduces_remaining_once(tmp_path):
         execution_price=110.0, execution_r=1.0,
     )
     assert ledger.state(trade)["remaining_position_fraction"] == 1.0
+    ledger._event(trade=trade, event_type="MANUAL_REDUCTION", source="real_user_trade",
+                  before=1.0, closed=0.5, after=0.5, active_stop=90.0)
     filled = ledger.acknowledge_shadow_action(
         action_id=action["action_id"], trade=trade, executed=True,
         execution_price=120.0, execution_r=2.0,
     )
-    assert filled["position_state"]["remaining_position_fraction"] == 0.9
+    assert filled["position_state"]["remaining_position_fraction"] == 0.4
     assert filled["position_state"]["armed_conditional_actions"] == []
     assert ledger.acknowledge_shadow_action(
         action_id=action["action_id"], trade=trade, executed=True,
         execution_price=120.0, execution_r=2.0,
     )["idempotent"] is True
-    assert ledger.state(trade)["remaining_position_fraction"] == 0.9
+    assert ledger.state(trade)["remaining_position_fraction"] == 0.4
     ledger.close()
 
 
