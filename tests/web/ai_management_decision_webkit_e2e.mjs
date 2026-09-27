@@ -87,10 +87,12 @@ assert.equal(await page.locator('#execution').getByRole('button',{name:'ВЫПО
 assert.equal(await page.locator('#execution').getByRole('button',{name:'НЕ ВЫПОЛНЕНО',exact:true}).count(),0);
 await page.locator('#shadow').getByText('РАСШИРЕННЫЙ ВАРИАНТ LLM').waitFor();
 assert.equal(await page.locator('#extended-shadow').getByRole('button').count(),0);
+await page.locator('#extended-execution input').fill('110');
 await page.locator('#extended-execution').getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).tap();
 const extendedCall=await page.evaluate(()=>window.__calls[1]);
 assert.equal(extendedCall.url,'/api/ai/decision/ack');
 assert.equal(extendedCall.payload.decision_id,'shadow-action-e2e');
+assert.equal(extendedCall.payload.execution_price,110);
 await page.locator('#shadow').getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).tap();
 await page.getByText('Исполнение записано. Стоп: 107. Take: 130.').waitFor();
 const shadowCall=await page.evaluate(()=>window.__calls[2]);

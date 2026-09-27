@@ -244,6 +244,14 @@ export function mountManagementDecision(container, decision, post, onApplied = (
   const hint = document.createElement('div');
   hint.className = 'tiny dim';
   hint.textContent = 'Отметьте результат только после фактического действия у брокера. Повторное подтверждение этого же решения не требуется.';
+  const extended = decision.authority === 'HUMAN_CONFIRMED_EXTENDED';
+  const priceLabel = document.createElement('label');
+  priceLabel.textContent = 'Текущая цена у брокера: ';
+  const priceInput = document.createElement('input');
+  priceInput.type = 'number';
+  priceInput.step = 'any';
+  priceInput.min = '0';
+  priceLabel.appendChild(priceInput);
   const status = document.createElement('div');
   status.className = 'tiny dim';
   const actions = document.createElement('div');
@@ -256,11 +264,18 @@ export function mountManagementDecision(container, decision, post, onApplied = (
   no.className = 'btn';
   no.textContent = 'НЕ ВЫПОЛНЕНО';
   actions.append(yes, no);
-  container.append(title, instruction, hint, actions, status);
+  container.append(title, instruction, hint);
+  if (extended) container.appendChild(priceLabel);
+  container.append(actions, status);
   let submitting = false;
   let settled = false;
   const submit = async (executed) => {
     if (submitting || settled) return;
+    const brokerPrice = extended ? finiteNumber(priceInput.value) : null;
+    if (executed && extended && (brokerPrice === null || brokerPrice <= 0)) {
+      status.textContent = 'Укажите текущую цену у брокера.';
+      return;
+    }
     submitting = true;
     yes.disabled = true; no.disabled = true;
     try {
@@ -268,6 +283,7 @@ export function mountManagementDecision(container, decision, post, onApplied = (
         decision_id: decision.decision_id,
         trade_id: decision.trade_id,
         executed,
+        ...(executed && extended ? { execution_price: brokerPrice } : {}),
       });
       settled = true;
       actions.remove();
