@@ -107,9 +107,60 @@ export function mountEdgeManagement(container, payload) {
 
 // Optional LLM extended action. It is a separate manual lane and never replaces
 // the authoritative quant management decision rendered below.
-export function mountShadowWorkingAction(container, shadow, post, onApplied = () => {}) {
+export function mountArmedShadowActions(container, actions, post, onApplied = () => {}) {
+  container.replaceChildren();
+  for (const action of actions || []) {
+    if (action.status !== 'armed') continue;
+    const panel = document.createElement('section');
+    panel.className = 'ai-shadow-working-action';
+    appendTextLine(panel, 'ai-execution-title',
+      `${action.policy} · УСЛОВИЕ УСТАНОВЛЕНО У БРОКЕРА`);
+    const status = document.createElement('div');
+    status.className = 'tiny dim';
+    const priceLabel = document.createElement('label');
+    priceLabel.textContent = 'Фактическая цена исполнения у брокера: ';
+    const priceInput = document.createElement('input');
+    priceInput.type = 'number';
+    priceInput.step = 'any';
+    priceInput.min = '0';
+    priceLabel.appendChild(priceInput);
+    const yes = document.createElement('button');
+    yes.className = 'btn btn-primary';
+    yes.textContent = 'ИСПОЛНЕНО У БРОКЕРА';
+    const no = document.createElement('button');
+    no.className = 'btn';
+    no.textContent = 'УСЛОВИЕ ОТМЕНЕНО';
+    const submit = async (executed) => {
+      const price = finiteNumber(priceInput.value);
+      if (executed && (price === null || price <= 0)) {
+        status.textContent = 'Укажите фактическую цену исполнения у брокера.';
+        return;
+      }
+      yes.disabled = true; no.disabled = true;
+      try {
+        const result = await post('/api/ai/shadow-action/ack', {
+          action_id: action.action_id, trade_id: action.trade_id, executed,
+          ...(executed ? { execution_price: price } : {}),
+        });
+        yes.remove(); no.remove();
+        status.textContent = executed ? 'Исполнение записано в остаток позиции.' : 'Условие отменено.';
+        await onApplied(result);
+      } catch (error) {
+        status.textContent = error?.message || 'Не удалось сохранить исполнение.';
+        yes.disabled = false; no.disabled = false;
+      }
+    };
+    yes.addEventListener('click', () => submit(true));
+    no.addEventListener('click', () => submit(false));
+    panel.append(priceLabel, yes, no, status);
+    container.appendChild(panel);
+  }
+}
+
+export function mountShadowWorkingAction(container, shadow, post, onApplied = () => {}, decision = null) {
   container.replaceChildren();
   const action = shadow?.working_action;
+  if (action?.action_id && action.action_id === decision?.decision_id) return;
   if (!action || !action.action_id || action.execution_status !== 'pending_execution' ||
       !action.manual_execution_required) return;
 
@@ -188,26 +239,43 @@ export function mountManagementDecision(container, decision, post, onApplied = (
   title.textContent = 'ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ У БРОКЕРА';
   const instruction = document.createElement('div');
   instruction.className = 'ai-execution-instruction';
-  instruction.textContent = 'Решение ИИ: ' + decision.instruction_ru;
+  instruction.textContent = (decision.authority === 'HUMAN_CONFIRMED_EXTENDED'
+    ? 'Ручной вариант LLM (базовый план HOLD): ' : 'Решение ИИ: ') + decision.instruction_ru;
   const hint = document.createElement('div');
   hint.className = 'tiny dim';
   hint.textContent = 'Отметьте результат только после фактического действия у брокера. Повторное подтверждение этого же решения не требуется.';
+  const extended = decision.authority === 'HUMAN_CONFIRMED_EXTENDED';
+  const priceLabel = document.createElement('label');
+  priceLabel.textContent = 'Текущая цена у брокера: ';
+  const priceInput = document.createElement('input');
+  priceInput.type = 'number';
+  priceInput.step = 'any';
+  priceInput.min = '0';
+  priceLabel.appendChild(priceInput);
   const status = document.createElement('div');
   status.className = 'tiny dim';
   const actions = document.createElement('div');
   actions.className = 'form-actions';
   const yes = document.createElement('button');
   yes.className = 'btn btn-primary';
-  yes.textContent = 'ВЫПОЛНЕНО';
+  yes.textContent = decision.policy === 'TIME_STOP' || decision.policy === 'SCALE_OUT_ON_SPIKE'
+    ? 'УСЛОВИЕ УСТАНОВЛЕНО' : 'ВЫПОЛНЕНО';
   const no = document.createElement('button');
   no.className = 'btn';
   no.textContent = 'НЕ ВЫПОЛНЕНО';
   actions.append(yes, no);
-  container.append(title, instruction, hint, actions, status);
+  container.append(title, instruction, hint);
+  if (extended) container.appendChild(priceLabel);
+  container.append(actions, status);
   let submitting = false;
   let settled = false;
   const submit = async (executed) => {
     if (submitting || settled) return;
+    const brokerPrice = extended ? finiteNumber(priceInput.value) : null;
+    if (executed && extended && (brokerPrice === null || brokerPrice <= 0)) {
+      status.textContent = 'Укажите текущую цену у брокера.';
+      return;
+    }
     submitting = true;
     yes.disabled = true; no.disabled = true;
     try {
@@ -215,13 +283,16 @@ export function mountManagementDecision(container, decision, post, onApplied = (
         decision_id: decision.decision_id,
         trade_id: decision.trade_id,
         executed,
+        ...(executed && extended ? { execution_price: brokerPrice } : {}),
       });
       settled = true;
       actions.remove();
       const remaining = Number(result.position_state?.remaining_position_fraction);
       status.className = 'tiny green';
       if (executed) {
-        status.textContent = Number.isFinite(remaining)
+        status.textContent = result.execution_status === 'armed'
+          ? 'Условие записано как установленное у брокера.'
+          : Number.isFinite(remaining)
           ? 'Исполнение записано. Остаток: ' + (remaining * 100).toFixed(1) + '%.'
           : 'Исполнение записано.';
       } else {

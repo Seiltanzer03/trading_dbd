@@ -19,6 +19,7 @@ EVENT_TYPES = {
     "MANUAL_REDUCTION", "LADDER_REDUCTION", "BE_ARM", "STOP_EXIT", "BE_EXIT",
     "TAKE_EXIT", "MANUAL_EXIT", "POSITION_CORRECTION", "AI_MOVE_TO_BE",
     "AI_TIGHTEN_STOP", "AI_ADJUST_TAKE", "AI_SCALE_OUT_ARM", "AI_TIME_STOP_ARM",
+    "AI_SCALE_OUT_FILL", "AI_TIME_STOP_FILL", "AI_CONDITIONAL_CANCEL",
 }
 
 
@@ -223,7 +224,12 @@ class PositionLedger:
             }
             for row in rows if row["event_type"] in {
                 "AI_SCALE_OUT_ARM", "AI_TIME_STOP_ARM",
-            }
+            } and not any(
+                later["decision_id"] in {
+                    f"{row['decision_id']}:fill", f"{row['decision_id']}:cancel"
+                } and later["id"] > row["id"]
+                for later in rows
+            )
         ]
         return {
             "version": self.version, "position_origin": "real_user_trade",
@@ -352,13 +358,25 @@ class PositionLedger:
         policy = str(action.get("policy") or "")
         if policy not in EXTENDED_POLICIES:
             return None
+        if (shadow.get("status") != "ok" or shadow.get("blocked_by_hard_guard")
+                or shadow.get("policy") != policy):
+            return None
         if action.get("status") != "READY_FOR_MANUAL_CONFIRMATION":
             return None
         confidence = _finite(action.get("confidence"))
         parameters = action.get("parameters")
-        if confidence is None or not isinstance(parameters, dict):
+        if (confidence is None or confidence < 0.65
+                or action.get("manual_confirmation_required") is not True
+                or action.get("automatic_execution_allowed") is not False
+                or not isinstance(parameters, dict)):
             raise ValueError("invalid extended shadow action")
         state = self.state(trade)
+        if float(state["remaining_position_fraction"]) <= 1e-12:
+            return None
+        if policy in EXTENDED_CONDITIONAL_POLICIES and any(
+            armed["policy"] == policy for armed in state["armed_conditional_actions"]
+        ):
+            return None
         geometry_version = self._geometry_version(trade, state)
         snapshot_state = snapshot.get("position_state") or {}
         if snapshot_state and int(snapshot_state.get("state_version") or 0) != int(
@@ -430,12 +448,78 @@ class PositionLedger:
             row = dict(raw)
             if int(row["trade_id"]) != int(trade["id"]):
                 raise StaleDecisionError("shadow action belongs to another trade")
-            if row["status"] in {"executed", "armed"}:
+            if row["status"] == "executed":
                 return {
                     "ok": True, "idempotent": True, "action_id": action_id,
                     "execution_status": row["status"],
                     "position_state": self.state(trade),
                 }
+            if row["status"] == "armed":
+                state = self.state(trade)
+                policy = str(row["policy"])
+                if policy not in EXTENDED_CONDITIONAL_POLICIES:
+                    raise StaleDecisionError("only conditional actions can be armed")
+                if not executed:
+                    self._event(
+                        trade=trade, event_type="AI_CONDITIONAL_CANCEL",
+                        source="human_confirmed_llm_shadow",
+                        before=float(state["remaining_position_fraction"]),
+                        closed=0.0, after=float(state["remaining_position_fraction"]),
+                        review_id=row["review_id"], decision_id=f"{action_id}:cancel",
+                        active_stop=float(state["active_stop_price"]),
+                        take_price=float(state["take"]),
+                        metadata={"policy": policy},
+                    )
+                    self._conn.execute(
+                        "UPDATE llm_shadow_manual_actions SET status='cancelled',"
+                        "acknowledged_ts=? WHERE action_id=?", (time.time(), action_id),
+                    )
+                    return {"ok": True, "idempotent": False, "action_id": action_id,
+                            "execution_status": "cancelled", "position_state": self.state(trade)}
+                price = _finite(execution_price)
+                if price is None or float(state["remaining_position_fraction"]) <= 0:
+                    raise StaleDecisionError("open position and execution price required")
+                parameters = json.loads(row["parameters_json"] or "{}")
+                if policy == "TIME_STOP" and time.time() < float(parameters["deadline_ts"]):
+                    raise StaleDecisionError("time-stop deadline has not arrived")
+                before = float(state["remaining_position_fraction"])
+                relative = float(parameters["close_fraction"]) if policy == "SCALE_OUT_ON_SPIKE" else 1.0
+                if not 0 < relative <= 1:
+                    raise StaleDecisionError("invalid conditional close fraction")
+                if policy == "SCALE_OUT_ON_SPIKE":
+                    armed = self._conn.execute(
+                        "SELECT fraction_before FROM position_management_events "
+                        "WHERE trade_id=? AND decision_id=? AND event_type='AI_SCALE_OUT_ARM'",
+                        (int(trade["id"]), action_id),
+                    ).fetchone()
+                    if armed is None:
+                        raise StaleDecisionError("conditional order size is unavailable")
+                    closed = float(armed["fraction_before"]) * relative
+                    if closed > before + 1e-12:
+                        raise StaleDecisionError("broker order exceeds remaining position")
+                else:
+                    closed = before
+                after = max(0.0, before - closed)
+                self._event(
+                    trade=trade,
+                    event_type=("AI_SCALE_OUT_FILL" if policy == "SCALE_OUT_ON_SPIKE"
+                                else "AI_TIME_STOP_FILL"),
+                    source="human_confirmed_llm_shadow", before=before,
+                    closed=closed, after=after, review_id=row["review_id"],
+                    decision_id=f"{action_id}:fill", execution_price=price,
+                    execution_r=execution_r,
+                    active_stop=float(state["active_stop_price"]),
+                    take_price=float(state["take"]),
+                    metadata={"policy": policy, "broker_confirmed": True,
+                              "fraction_semantics": "fraction_of_current_remaining_position"},
+                )
+                self._conn.execute(
+                    "UPDATE llm_shadow_manual_actions SET status='executed',"
+                    "acknowledged_ts=?,execution_price=?,execution_r=? WHERE action_id=?",
+                    (time.time(), price, _finite(execution_r), action_id),
+                )
+                return {"ok": True, "idempotent": False, "action_id": action_id,
+                        "execution_status": "executed", "position_state": self.state(trade)}
             if row["status"] != "pending_execution":
                 raise StaleDecisionError(f"shadow action is {row['status']}")
             latest = self._conn.execute(
