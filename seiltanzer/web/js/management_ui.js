@@ -117,6 +117,13 @@ export function mountArmedShadowActions(container, actions, post, onApplied = ()
       `${action.policy} · УСЛОВИЕ УСТАНОВЛЕНО У БРОКЕРА`);
     const status = document.createElement('div');
     status.className = 'tiny dim';
+    const priceLabel = document.createElement('label');
+    priceLabel.textContent = 'Фактическая цена исполнения у брокера: ';
+    const priceInput = document.createElement('input');
+    priceInput.type = 'number';
+    priceInput.step = 'any';
+    priceInput.min = '0';
+    priceLabel.appendChild(priceInput);
     const yes = document.createElement('button');
     yes.className = 'btn btn-primary';
     yes.textContent = 'ИСПОЛНЕНО У БРОКЕРА';
@@ -124,10 +131,16 @@ export function mountArmedShadowActions(container, actions, post, onApplied = ()
     no.className = 'btn';
     no.textContent = 'УСЛОВИЕ ОТМЕНЕНО';
     const submit = async (executed) => {
+      const price = finiteNumber(priceInput.value);
+      if (executed && (price === null || price <= 0)) {
+        status.textContent = 'Укажите фактическую цену исполнения у брокера.';
+        return;
+      }
       yes.disabled = true; no.disabled = true;
       try {
         const result = await post('/api/ai/shadow-action/ack', {
           action_id: action.action_id, trade_id: action.trade_id, executed,
+          ...(executed ? { execution_price: price } : {}),
         });
         yes.remove(); no.remove();
         status.textContent = executed ? 'Исполнение записано в остаток позиции.' : 'Условие отменено.';
@@ -139,7 +152,7 @@ export function mountArmedShadowActions(container, actions, post, onApplied = ()
     };
     yes.addEventListener('click', () => submit(true));
     no.addEventListener('click', () => submit(false));
-    panel.append(yes, no, status);
+    panel.append(priceLabel, yes, no, status);
     container.appendChild(panel);
   }
 }

@@ -14,9 +14,9 @@ const server = http.createServer(async (req, res) => {
       res.end(`<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <div id="edge"></div><div id="execution"></div><div id="shadow"></div>
-<div id="extended-execution"></div><div id="extended-shadow"></div>
+<div id="extended-execution"></div><div id="extended-shadow"></div><div id="armed"></div>
 <script type="module">
-import {mountEdgeManagement,mountManagementDecision,mountShadowWorkingAction} from '/seiltanzer/web/js/management_ui.js';
+import {mountEdgeManagement,mountManagementDecision,mountShadowWorkingAction,mountArmedShadowActions} from '/seiltanzer/web/js/management_ui.js';
 const decision={
   trade_id:7,decision_id:'decision-e2e-close25',policy:'CLOSE_25',
   execution_status:'pending_execution',manual_execution_required:true,
@@ -43,6 +43,9 @@ const extended={...decision,decision_id:'shadow-action-e2e',policy:'TIGHTEN_STOP
   instruction_ru:'Подтянуть стоп к 107',quant_baseline_policy:'HOLD'};
 mountManagementDecision(document.querySelector('#extended-execution'),extended,post);
 mountShadowWorkingAction(document.querySelector('#extended-shadow'),shadow,post,()=>{},extended);
+mountArmedShadowActions(document.querySelector('#armed'),[
+  {action_id:'shadow-action-armed',trade_id:7,policy:'SCALE_OUT_ON_SPIKE',status:'armed'},
+],post);
 </script>`);
       return;
     }
@@ -93,6 +96,13 @@ await page.getByText('Исполнение записано. Стоп: 107. Take
 const shadowCall=await page.evaluate(()=>window.__calls[2]);
 assert.equal(shadowCall.url,'/api/ai/shadow-action/ack');
 assert.deepEqual(shadowCall.payload,{action_id:'shadow-action-e2e',trade_id:7,executed:true});
+await page.locator('#armed').getByRole('button',{name:'ИСПОЛНЕНО У БРОКЕРА'}).tap();
+assert.equal((await page.evaluate(()=>window.__calls)).length,3);
+await page.locator('#armed input').fill('120');
+await page.locator('#armed').getByRole('button',{name:'ИСПОЛНЕНО У БРОКЕРА'}).tap();
+const armedCall=await page.evaluate(()=>window.__calls[3]);
+assert.deepEqual(armedCall.payload,{
+  action_id:'shadow-action-armed',trade_id:7,executed:true,execution_price:120});
 await browser.close();
 await new Promise(resolve=>server.close(resolve));
 console.log('AI management CLOSE_25 WebKit E2E: PASS');

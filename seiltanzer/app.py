@@ -87,6 +87,22 @@ def _extended_manual_decision(base: dict, action: dict) -> dict:
     }
 
 
+def _acknowledged_execution(trade: dict, tick: dict,
+                            broker_price: float | None) -> tuple[float | None, float | None]:
+    if broker_price is None:
+        return (
+            ((tick.get("feeds") or {}).get("price") or {}).get("value"),
+            (tick.get("prob") or {}).get("r"),
+        )
+    if not math.isfinite(broker_price) or broker_price <= 0:
+        raise ValueError("broker execution price must be positive and finite")
+    risk = abs(float(trade["entry"]) - float(trade["stop"]))
+    direction = 1 if str(trade.get("direction") or "").lower() in {"long", "buy"} else -1
+    if risk <= 0:
+        raise ValueError("trade risk must be positive")
+    return broker_price, direction * (broker_price - float(trade["entry"])) / risk
+
+
 async def broadcast_live_tick(clients, payload, *, timeout=2.0):
     """Isolate disconnected/slow consumers from the shared live tick owner."""
     async def send(ws):
@@ -172,12 +188,14 @@ class ManagementExecution(BaseModel):
     decision_id: str
     trade_id: int
     executed: bool
+    execution_price: float | None = None
 
 
 class ShadowActionExecution(BaseModel):
     action_id: str
     trade_id: int
     executed: bool
+    execution_price: float | None = None
 
 
 class ExperimentRegister(BaseModel):
@@ -1044,8 +1062,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if trade is None or int(trade["id"]) != int(req.trade_id):
                 raise StaleDecisionError("active trade changed")
             tick = engine.tick_payload()
-            execution_price = ((tick.get("feeds") or {}).get("price") or {}).get("value")
-            execution_r = ((tick.get("prob") or {}).get("r"))
+            execution_price, execution_r = _acknowledged_execution(
+                trade, tick, req.execution_price)
             if req.decision_id.startswith("shadow-action-"):
                 acknowledged = engine.position.acknowledge_shadow_action(
                     action_id=req.decision_id, trade=trade, executed=req.executed,
@@ -1069,10 +1087,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if trade is None or int(trade["id"]) != int(req.trade_id):
                 raise StaleDecisionError("active trade changed")
             tick = engine.tick_payload()
+            execution_price, execution_r = _acknowledged_execution(
+                trade, tick, req.execution_price)
             acknowledged = engine.position.acknowledge_shadow_action(
                 action_id=req.action_id, trade=trade, executed=req.executed,
-                execution_price=((tick.get("feeds") or {}).get("price") or {}).get("value"),
-                execution_r=((tick.get("prob") or {}).get("r")),
+                execution_price=execution_price, execution_r=execution_r,
             )
         except StaleDecisionError as exc:
             raise HTTPException(409, str(exc)) from exc

@@ -1079,6 +1079,15 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     <div class="modal-actions"><button class="btn" id="ai-close">ЗАКРЫТЬ</button></div>`);
   $('#ai-close').addEventListener('click', closeModal);
   const out = $('#ai-verdict-text');
+  const refreshArmed = async () => {
+    try {
+      const position = await fetchStructured('/api/position');
+      mountArmedShadowActions(
+        $("#ai-armed-actions"), position.shadow_actions, apiPost,
+        async () => { await refreshJournalAndSetups(); });
+    } catch (_) { /* Keep the verdict and existing controls usable. */ }
+  };
+  await refreshArmed();
   try {
     const body = await fetchStructured('/api/ai/verdict', { method: 'POST' });
     const warning = body.degraded
@@ -1087,14 +1096,6 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
       : '';
     out.textContent = warning + body.verdict;
     mountEdgeManagement($("#ai-edge-management"), body.edge_management);
-    const refreshArmed = async () => {
-      try {
-        const position = await fetchStructured('/api/position');
-        mountArmedShadowActions(
-          $("#ai-armed-actions"), position.shadow_actions, apiPost,
-          async () => { await refreshJournalAndSetups(); });
-      } catch (_) { /* A position refresh must not hide the completed verdict. */ }
-    };
     mountManagementDecision(
       $("#ai-management-execution"), body.management_decision, apiPost,
       async () => { await refreshJournalAndSetups(); await refreshArmed(); });

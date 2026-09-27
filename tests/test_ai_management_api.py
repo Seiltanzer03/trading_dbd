@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from seiltanzer.app import create_app
 from seiltanzer.config import Settings
-from seiltanzer.app import _extended_manual_decision
+from seiltanzer.app import _acknowledged_execution, _extended_manual_decision
 
 
 def test_extended_action_cannot_replace_a_pending_partial_close():
@@ -11,6 +11,11 @@ def test_extended_action_cannot_replace_a_pending_partial_close():
     action = {"policy": "TIGHTEN_STOP", "action_id": "shadow-action-1",
               "execution_status": "pending_execution"}
     assert _extended_manual_decision(base, action) is base
+
+
+def test_broker_fill_price_supplies_r_when_market_quote_is_absent():
+    trade = {"entry": 100.0, "stop": 90.0, "direction": "long"}
+    assert _acknowledged_execution(trade, {"feeds": {}, "prob": {}}, 115.0) == (115.0, 1.5)
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
@@ -100,6 +105,8 @@ def test_extended_shadow_action_is_registered_and_manually_acknowledged(
         "decision_id": decision["decision_id"],
         "trade_id": action["trade_id"],
         "executed": True,
+        "execution_price": client.app.state.engine._current_instrument_price(
+            client.app.state.engine.journal.active_trade()),
     })
     assert acknowledged.status_code == 200
     result = acknowledged.json()
