@@ -727,7 +727,12 @@ class NumericMacroRuntime:
             self._wake.wait(self.poll_sec)
             self._wake.clear()
 
-    def status(self) -> dict[str, Any]:
+    def progress(self) -> dict[str, Any]:
+        """In-memory completion state; safe to poll while storage is busy."""
+        with self._lock:
+            return self._progress_unlocked()
+
+    def _progress_unlocked(self) -> dict[str, Any]:
         return {
             "contract_version": NUMERIC_MACRO_CONTRACT_VERSION,
             "running": self.running,
@@ -737,7 +742,6 @@ class NumericMacroRuntime:
             "last_finished_at": self.last_finished_at,
             "last_error": self.last_error,
             "last_result": self.last_result,
-            "store": self.store.status(),
             "sources": {
                 "BLS": BLS_API_URL,
                 "ISM": ISM_INDEX_URL,
@@ -747,3 +751,6 @@ class NumericMacroRuntime:
             "research_only": True,
             "production_authority": False,
         }
+
+    def status(self) -> dict[str, Any]:
+        return {**self.progress(), "store": self.store.status()}

@@ -220,6 +220,14 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     def refresh_numeric():
         return numeric_runtime.request_refresh()
 
+    async def numeric_refresh_status():
+        # No SQLite/factory scans or worker-pool dependency during ingestion.
+        return {"numeric": numeric_runtime.progress()}
+
+    app.add_api_route(
+        "/api/research/macro/numeric/status", numeric_refresh_status, methods=["GET"],
+        name="macro_numeric_refresh_status")
+
     app.add_api_route(
         "/api/research/macro/numeric/refresh", refresh_numeric, methods=["POST"],
         name="macro_numeric_refresh")

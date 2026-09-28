@@ -24,6 +24,7 @@ def test_refresh_returns_before_source_finishes_and_is_single_flight(monkeypatch
         assert runtime.request_refresh()["status"] == "IN_PROGRESS"
         assert entered.wait(1)
         assert runtime.running is True
+        assert runtime.progress()["running"] is True
         assert runtime.last_result is None
         assert runtime.last_finished_at is None
         assert runtime.request_refresh()["status"] == "IN_PROGRESS"
@@ -55,6 +56,18 @@ def test_refresh_failure_cannot_reuse_old_success(monkeypatch, error, expected):
     monkeypatch.setattr(runtime, "_ingest_bls", lambda: [])
     assert runtime.refresh()["status"] == "OK"
     assert runtime.last_error is None
+
+
+def test_progress_does_not_query_busy_storage():
+    def unavailable_store():
+        raise AssertionError("progress must not query storage")
+
+    runtime = NumericMacroRuntime(SimpleNamespace(status=unavailable_store))
+    assert runtime._claim_refresh() is True
+    progress = runtime.progress()
+    assert progress["running"] is True
+    assert progress["last_result"] is None
+    assert "store" not in progress
 
 
 def test_thread_start_failure_releases_reservation(monkeypatch):
