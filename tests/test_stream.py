@@ -61,7 +61,8 @@ def test_price_never_uses_proxy_as_instrument_quote(tmp_path):
         cache.close()
 
 
-def test_index_uses_exact_broker_snapshot_not_cash_index(tmp_path, monkeypatch):
+@pytest.mark.parametrize("transport", ["snapshot", "websocket"])
+def test_index_uses_exact_broker_snapshot_not_cash_index(tmp_path, monkeypatch, transport):
     cache = DiskCache(str(tmp_path / "cache.db"))
     try:
         md = MarketData(Settings(stream=True, data_dir=str(tmp_path)), cache)
@@ -70,13 +71,47 @@ def test_index_uses_exact_broker_snapshot_not_cash_index(tmp_path, monkeypatch):
             "seiltanzer.data.feeds._fetch_tradingview_quote",
             lambda symbol: {"value": 28_341.5, "bid": 28_340.5,
                             "ask": 28_342.5, "ts": time.time(),
+                            "transport": transport,
                             "update_mode": "streaming",
                             "description": "US Nas 100"})
         md.refresh_price()
         assert md.price["value"] == pytest.approx(28_341.5)
-        assert md.price["source"] == "TradingView snapshot OANDA:NAS100USD"
+        assert md.price["source"] == f"TradingView {transport} OANDA:NAS100USD"
         assert md.price["instrument_type"] == "broker_cfd"
         assert md.price["derived"] is False
+        assert md._has_direct_price_scale() is True
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize("known_timezone", [True, False])
+def test_index_fallback_cannot_rejuvenate_previous_session(tmp_path, monkeypatch, known_timezone):
+    import pandas as pd
+    import yfinance as yf
+    from types import SimpleNamespace
+
+    stamp = pd.Timestamp.now(tz="UTC").floor("min") - pd.Timedelta(days=1)
+    if not known_timezone:
+        stamp = stamp.tz_localize(None)
+    history = pd.DataFrame({"Close": [20000.0]}, index=[stamp])
+    monkeypatch.setattr(yf, "Ticker", lambda _: SimpleNamespace(history=lambda **_: history))
+    monkeypatch.setattr(
+        "seiltanzer.data.feeds._fetch_tradingview_quote",
+        lambda _: (_ for _ in ()).throw(RuntimeError("broker unavailable")))
+    cache = DiskCache(str(tmp_path / "cache.db"))
+    try:
+        md = MarketData(Settings(stream=False, data_dir=str(tmp_path)), cache)
+        for _ in range(2):
+            md._last_price_rest_attempt = md._last_broker_rest_attempt = 0
+            md.refresh_price()
+            if known_timezone:
+                assert md.price["ts"] == stamp.timestamp()
+                assert md.price["status"] == "delayed"
+                assert md.price["instrument_type"] == "cash_index"
+                assert md._has_direct_price_scale() is False
+            else:
+                assert md.price["status"] == "no_data"
+                assert md.price["value"] is None
     finally:
         cache.close()
 

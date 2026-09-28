@@ -12,6 +12,7 @@ import { initFan } from './fan.js';
 import { initVrp, updateVrp } from './vrp.js';
 import { initGex, updateGex, updateLiveGex } from './gex.js';
 import { initIVSurface } from './iv_surface.js';
+import { selectIVSurface, updateBybitContext } from './bybit_context.js';
 import { initCorrelation, updateCorrelation } from './correlation.js';
 import { initRegimePhase, updateLiveRegimePhase } from './regime_phase.js';
 import { initWavelet } from './wavelet.js';
@@ -149,7 +150,13 @@ function onTick() {
     proxyPrice: S.tick?.feeds?.proxy_price?.value,
     trade: S.tick?.trade || null,
   });
-  ivSurface.render(S.tick?.state, S.tick?.iv_surface);
+  const ivSource = document.getElementById('iv-source-select');
+  if (ivSource && !ivSource.onchange) ivSource.onchange = () => onTick();
+  const surface = selectIVSurface(S.tick?.iv_surface, S.tick?.bybit, ivSource?.value);
+  const ivLabel = document.getElementById('iv-source-label');
+  if (ivLabel) ivLabel.textContent = surface?.source || surface?.error || '';
+  ivSurface.render(surface?.production_authority === false ? null : S.tick?.state, surface);
+  updateBybitContext(S.tick?.bybit);
   updateCorrelation(S.tick?.correlation?.value);
 }
 
@@ -283,10 +290,13 @@ function handleLivePrice(t) {
   const stale = t.feeds?.price?.fresh === false;
   const idle = t.feeds?.price?.idle_secs;
   $('#lat-price-instr').textContent = t.instrument
+    + (t.feeds.price.fallback ? ' · BYBIT РЕЗЕРВ ≈' : '')
     + (streaming ? ' ⚡' : '')
     + (derived ? (experimental ? ' · EXP MAP' : ' · PROXY MAP') : '')
     + (stale ? ' · ⏸ ЗАКРЫТ' : '');
-  $('#lat-price-instr').title = stale
+  $('#lat-price-instr').title = t.feeds.price.fallback
+    ? `${t.feeds.price.source} — резервная расчётная цена; стоп/БУ проверять у брокера`
+    : stale
     ? `нет свежих тиков ${fmtIdle(idle)} — рынок закрыт или неторговое время; цена = последняя котировка`
     : (derived
       ? `derived live${experimental ? ' (экспериментальный)' : ''}: уровень якорится к ${t.feeds.price.anchor_ticker}, движение приходит из ${t.feeds.price.driver_ticker}`

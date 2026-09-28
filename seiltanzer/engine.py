@@ -204,11 +204,11 @@ class Engine:
 
     def _trade_quote_offset(self, trade: dict | None) -> float:
         """Калибровка брокера; старый futures→CFD basis после смены фида недействителен."""
-        if not trade:
+        if not trade or self.market.price.get("fallback"):
             return 0.0
         offset = float(trade.get("quote_offset") or 0.0)
         direct_source = ("Swissquote OTC" if self.market.instrument.swissquote_pair
-                         else "TradingView snapshot"
+                         else "TradingView "
                          if self.market.instrument.tradingview_symbol else None)
         if (offset and not self.settings.demo and direct_source
                 and direct_source not in str(trade.get("quote_source") or "")):
@@ -321,11 +321,13 @@ class Engine:
             "raw_value": raw_price,
             "effective_value": price,
             "basis_offset": self._trade_quote_offset(trade),
-            "ticker": (self.market.instrument.tradingview_symbol
+            "ticker": (self.market.price.get("symbol") if self.market.price.get("fallback") else
+                       self.market.instrument.tradingview_symbol
                        or self.market.instrument.swissquote_pair
                        or self.market.instrument.yahoo),
             "history_ticker": self.market.instrument.yahoo,
-            "label": self.market.instrument.price_label or self.market.instrument.yahoo,
+            "label": (self.market.price.get("source") if self.market.price.get("fallback")
+                      else self.market.instrument.price_label or self.market.instrument.yahoo),
         })
 
         payload = {
@@ -353,6 +355,7 @@ class Engine:
             "state": None,
             "options_summary": self._options_summary(price),
             "iv_surface": self._live_iv_surface(),
+            "bybit": self.market.bybit_payload(),
             "correlation": getattr(self.market, "correlation", {}),
             "vrp": self._vrp_payload(),
             "filters": self._filters_payload(trade),

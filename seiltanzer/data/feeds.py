@@ -29,6 +29,7 @@ from ..config import (ALL_INSTRUMENTS, CRYPTO_INSTRUMENTS, CRYPTO_VOL_INDEX,
 from ..core import options as opt
 from .cache import DiskCache, production_chain_snapshot
 from .deribit import DeribitFetcher
+from .bybit import BybitPublic, PRODUCTS, fallback_quote, fresh_quote, missing
 
 # yfinance шумит в stderr про делистинги (например ^V1X/VDAX недоступен) —
 # это ожидаемо и обрабатывается статусом no_data, поэтому глушим его логгер.
@@ -251,6 +252,14 @@ class MarketData:
         self.demo = settings.demo
         self.demo_market = DemoMarket(seed=7) if self.demo else None
         self.stream = None          # StreamHub | None (живой WS-стрим цены)
+        self.bybit_client = BybitPublic()
+        self.bybit_quote = missing("awaiting first quote")
+        self.bybit_options = missing("awaiting listed option chain")
+        self._bybit_anchor = None
+        self._bybit_options_attempt = 0.0
+        self._bybit_retry_at = 0.0
+        self._bybit_anchor_attempt = 0.0
+        self._primary_price = _status_dict()
         self.instrument_code: str = "NAS100"
 
         self.price = _status_dict()
@@ -292,13 +301,19 @@ class MarketData:
         source = str(self.price.get("source") or "")
         return (bool(self.instrument.swissquote_pair and source.startswith("Swissquote OTC"))
                 or bool(self.instrument.tradingview_symbol
-                        and source.startswith("TradingView snapshot")))
+                        and source.startswith("TradingView ")))
 
     def set_instrument(self, code: str) -> None:
         if code not in ALL_INSTRUMENTS:
             raise ValueError(f"неизвестный инструмент: {code}")
         if code != self.instrument_code:
             self.instrument_code = code
+            self.bybit_quote = missing("instrument changed")
+            self.bybit_options = missing("instrument changed")
+            self._bybit_anchor = None
+            self._bybit_options_attempt = 0.0
+            self._bybit_anchor_attempt = 0.0
+            self._primary_price = _status_dict()
             self.price = _status_dict()
             self.proxy_price = _status_dict()
             self._price_prev_val = None
@@ -491,7 +506,73 @@ class MarketData:
         except Exception as e:  # noqa: BLE001
             self._mark_fail(self.proxy_price, self.settings.proxy_poll_sec, str(e))
 
+    def refresh_bybit(self) -> None:
+        code = self.instrument_code
+        if self.demo or os.environ.get("BYBIT_PUBLIC_ENABLED", "1") == "0":
+            return
+        if code not in PRODUCTS:
+            self.bybit_quote = missing("no verified product mapping")
+            self.bybit_options = missing("no verified product mapping")
+            return
+        now = time.time()
+        if now < self._bybit_retry_at:
+            return
+        try:
+            quote = self.bybit_client.quote(code)
+        except Exception as exc:
+            quote = missing(exc)
+            self._bybit_retry_at = now + 60
+            # Respect access restrictions; do not rotate hosts or use an AI proxy.
+            response = getattr(exc, "response", None)
+            if getattr(response, "status_code", None) in {401, 403, 429}:
+                self._bybit_retry_at = now + 3600
+        if self.instrument_code != code:
+            return
+        self.bybit_quote = quote
+        if (quote.get("mapped_proxy") and not self._bybit_anchor
+                and now - self._bybit_anchor_attempt >= 300):
+            self._bybit_anchor_attempt = now
+            try:
+                anchor = self.bybit_client.historical_anchor(code, dict(self._primary_price))
+                if self.instrument_code == code:
+                    self._bybit_anchor = anchor
+            except Exception:
+                pass  # No historical pair means no fabricated index price.
+        if self._bybit_retry_at >= now + 3600:
+            return
+        if now - self._bybit_options_attempt >= self.settings.chain_poll_sec:
+            self._bybit_options_attempt = now
+            try:
+                context = self.bybit_client.options(code)
+            except Exception as exc:
+                context = missing(exc)
+            if self.instrument_code == code:
+                self.bybit_options = context
+
+    def bybit_payload(self) -> dict:
+        now = time.time()
+        quote = self.bybit_quote if fresh_quote(self.bybit_quote, now, 45) else missing(
+            self.bybit_quote.get("error") or "quote unavailable/stale")
+        context = self.bybit_options
+        if now - float(context.get("ts") or 0) > max(1200, self.settings.chain_poll_sec * 2):
+            context = missing(context.get("error") or "option snapshot stale")
+        return {"quote": quote, "options": context, "production_authority": False}
+
     def refresh_price(self) -> None:
+        if self.price.get("fallback"):
+            self.price = dict(self._primary_price)
+        self._refresh_primary_price()
+        self._primary_price = dict(self.price)
+        if self.demo or os.environ.get("BYBIT_PUBLIC_ENABLED", "1") == "0":
+            return
+        now = time.time()
+        if fresh_quote(self.price, now, 30) and fresh_quote(self.bybit_quote, now, 30):
+            self._bybit_anchor = {"price": self.price["value"], "proxy": self.bybit_quote["value"],
+                                  "ts": min(self.price["ts"], self.bybit_quote["ts"]),
+                                  "symbol": self.bybit_quote["symbol"], "instrument": self.instrument_code}
+        self.price = fallback_quote(self.price, self.bybit_quote, self._bybit_anchor, now)
+
+    def _refresh_primary_price(self) -> None:
         if self.demo:
             self.demo_market.step()
             p = self.demo_market.prices[self.instrument_code]
@@ -633,22 +714,36 @@ class MarketData:
             import yfinance as yf
             t = yf.Ticker(self.instrument.yahoo)
             p = None
-            try:
-                p = float(t.fast_info.last_price)
-            except Exception:
-                pass
+            quote_ts = None
+            if not broker_symbol:
+                try:
+                    p = float(t.fast_info.last_price)
+                except Exception:
+                    pass
             if p is None or not math.isfinite(p) or p <= 0:
                 hist = t.history(period="1d", interval="1m")
                 if len(hist) == 0:
                     raise RuntimeError("Yahoo вернул пустую историю")
                 p = float(hist["Close"].iloc[-1])
+                if not math.isfinite(p) or p <= 0:
+                    raise RuntimeError("Yahoo вернул некорректную цену")
+                if broker_symbol:
+                    stamp = hist.index[-1]
+                    if getattr(stamp, "tzinfo", None) is None:
+                        raise RuntimeError("Yahoo не указал часовой пояс котировки")
+                    quote_ts = float(stamp.timestamp())
+                    if not math.isfinite(quote_ts) or not 0 < quote_ts <= time.time() + 60:
+                        raise RuntimeError("Yahoo вернул некорректное время котировки")
             anchor_now = time.time()
             self.price = _status_dict(
-                p, "delayed", anchor_now,
+                p, "delayed", quote_ts if quote_ts is not None else anchor_now,
                 error=broker_error,
                 source=(f"yfinance REST {self.instrument.yahoo} (indicative)"
                         + ("; broker feed fallback" if broker_error else "")))
             self.price["derived"] = False
+            if broker_symbol:
+                self.price["instrument_type"] = "cash_index"
+                self.price["timestamp_kind"] = "bar_start"
             self._annotate_freshness()
         except Exception as e:  # noqa: BLE001 — фид обязан пережить любой сбой источника
             self._mark_fail(self.price, self.settings.price_poll_sec, str(e))
