@@ -168,7 +168,16 @@ def _fetch_tradingview_ws_quote(symbol: str, timeout: float = 5.0) -> dict:
                     value = float(data.get("lp"))
                     if not math.isfinite(value) or value <= 0:
                         continue
-                    result = {"value": value, "ts": time.time(),
+                    now = time.time()
+                    try:
+                        provider_ts = float(data.get("lp_time"))
+                        if provider_ts > 1e11:  # Some transports encode milliseconds.
+                            provider_ts /= 1000
+                    except (TypeError, ValueError):
+                        provider_ts = 0.0
+                    verified = math.isfinite(provider_ts) and 0 < provider_ts <= now + 5
+                    result = {"value": value, "ts": provider_ts if verified else now,
+                              "provider_timestamp_verified": verified,
                               "update_mode": data.get("update_mode"),
                               "description": data.get("description"),
                               "transport": "stream"}
@@ -663,6 +672,9 @@ class MarketData:
             self._last_broker_rest_attempt = now
             try:
                 quote = _fetch_tradingview_quote(broker_symbol)
+                if (quote.get("provider_timestamp_verified") is False
+                        or now - float(quote["ts"]) > self.PRICE_IDLE_SEC):
+                    raise RuntimeError("TradingView broker tick has no recent provider timestamp")
                 mode = str(quote.get("update_mode") or "").lower()
                 status = ("delayed" if "delayed" in mode or "endofday" in mode
                           else "live")

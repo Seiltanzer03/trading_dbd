@@ -5,7 +5,7 @@ import pytest
 
 from seiltanzer.config import Settings
 from seiltanzer.data.cache import DiskCache
-from seiltanzer.data.feeds import MarketData
+from seiltanzer.data.feeds import MarketData, _fetch_tradingview_ws_quote, _tv_frame
 from seiltanzer.data.stream import StreamHub, parse_yaticker
 
 
@@ -15,6 +15,24 @@ def _yaticker(symbol: str, price: float) -> bytes:
     out += bytes([(1 << 3) | 2, len(symbol)]) + symbol.encode()
     out += bytes([(2 << 3) | 5]) + struct.pack("<f", price)
     return bytes(out)
+
+
+def test_tradingview_snapshot_preserves_last_provider_tick(monkeypatch):
+    stamp = int(time.time()) - 3600
+    class Socket:
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+        def send(self, *args): pass
+        def recv(self, **kwargs):
+            if not hasattr(self, "handshake"):
+                self.handshake = True
+                return "session"
+            return _tv_frame("qsd", ["session", {"n": "OANDA:NAS100USD",
+                "v": {"lp": 20000, "lp_time": stamp}}])
+    monkeypatch.setattr("websockets.sync.client.connect", lambda *args, **kwargs: Socket())
+    result = _fetch_tradingview_ws_quote("OANDA:NAS100USD")
+    assert result["ts"] == stamp
+    assert result["provider_timestamp_verified"] is True
 
 
 def test_parse_yaticker_extracts_id_and_price():
