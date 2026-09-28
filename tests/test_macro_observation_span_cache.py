@@ -17,7 +17,10 @@ def test_observation_span_cached_and_bounded():
     conn.execute(
         "INSERT INTO g1s_observations VALUES ('obs1', 1000.0), ('obs2', 2000.0)"
     )
+    conn.execute("CREATE INDEX ix_g1s_obs_captured_ts ON g1s_observations(captured_ts)")
     conn.commit()
+    queries = []
+    conn.set_trace_callback(queries.append)
 
     lock = threading.Lock()
     runtime = SimpleNamespace(_conn=conn, _lock=lock)
@@ -25,6 +28,8 @@ def test_observation_span_cached_and_bounded():
 
     span1 = observation_span(runtime)
     assert span1 == (1000.0, 2000.0)
+    assert len([query for query in queries if "ORDER BY captured_ts" in query]) == 2
+    assert not any("MIN(captured_ts)" in query for query in queries)
 
     # Modify table to verify subsequent call reads from memory cache
     conn.execute("DELETE FROM g1s_observations")
@@ -49,3 +54,19 @@ def test_observation_span_cached_and_bounded():
     finally:
         barrier.wait()
         t.join(timeout=2.0)
+
+
+def test_observation_span_never_queries_busy_storage_on_first_request():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE g1s_observations (captured_ts REAL)")
+    lock = threading.Lock()
+    runtime = SimpleNamespace(_conn=conn, _lock=lock)
+    _OBSERVATION_SPAN_CACHE.clear()
+    queries = []
+    conn.set_trace_callback(queries.append)
+    lock.acquire()
+    try:
+        assert observation_span(runtime) is None
+        assert queries == []
+    finally:
+        lock.release()
