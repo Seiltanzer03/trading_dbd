@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
 
 from seiltanzer.ai_report_semantics_guard import (
     repair_report_semantics,
@@ -36,6 +37,43 @@ def test_break_even_distance_uses_position_space_sign_short():
     }
     repair_snapshot_geometry(snapshot)
     assert snapshot["trade_geometry"]["r_to_active_stop"] == pytest.approx(0.75)
+
+
+def test_breached_break_even_cannot_be_reported_as_risk_free_hold():
+    snapshot = {
+        "trade_geometry": {"entry": 30391.0, "original_stop": 30246.0,
+                           "active_risk_barrier": 30391.0,
+                           "active_risk_barrier_type": "BREAK_EVEN",
+                           "current": 30330.2422, "current_r": -0.419},
+        "policy_manager": {"management_decision": {"policy": "HOLD"}},
+    }
+    repair_snapshot_geometry(snapshot)
+    assert snapshot["trade_geometry"]["active_risk_barrier_breached"] is True
+    report = """**ДЕЙСТВИЕ СЕЙЧАС** — HOLD ПОДТВЕРЖДЁН.
+Безопасно удерживать позицию.
+
+**РАСЧЁТ ПОЛИТИК** —
+HOLD: Expected net +0.000R; CVaR10 net +0.000R.
+
+**ПОЧЕМУ ВЫБРАНО** —
+HOLD проходит CVaR: +0.000R.
+"""
+    repaired = repair_report_semantics(report, snapshot)
+    assert "HOLD ПОДТВЕРЖДЁН" not in repaired
+    assert "CVaR10 net +0.000R" not in repaired
+    assert "ПРОВЕРИТЬ У БРОКЕРА" in repaired
+    assert "нул" in repaired.lower()
+
+    from seiltanzer.app import _refresh_management_decision
+    position = SimpleNamespace(preview_decision=lambda current, trade: {
+        "policy": current["policy_manager"]["recommendation"]["policy"],
+        "manual_execution_required": True, "execution_status": "pending_execution"})
+    snapshot["policy_manager"].update({"management_decision": {"policy": "EXIT"},
+                                       "recommendation": {"policy": "EXIT"}})
+    decision = _refresh_management_decision(SimpleNamespace(position=position), snapshot, {})
+    assert decision["policy"] == "HOLD"
+    assert decision["manual_execution_required"] is False
+    assert decision["risk_barrier_execution_unverified"] is True
 
 
 def test_compact_report_does_not_render_zero_audit_or_bounded_placeholders():

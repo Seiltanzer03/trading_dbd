@@ -477,6 +477,7 @@ class TestEngineDemo:
             trade = {"quote_offset": 25.0, "quote_source": "TradingView stream OANDA:NAS100USD"}
             live.market.price = {"value": 30000.0, "source": "stream ^NDX (broker fallback)"}
             assert live._effective_price(trade, 30000.0) == pytest.approx(30000.0)
+            assert live.tick_payload()["feeds"]["price"]["ticker"] == "^NDX"
             live.market.price = {"value": 30075.0, "source": "Bybit QQQUSDT mapped", "fallback": True}
             assert live._effective_price(trade, 30075.0) == pytest.approx(30075.0)
             live.market.price = {"value": 30100.0, "source": "TradingView stream OANDA:NAS100USD"}

@@ -361,6 +361,28 @@ def verify(expected_sha: str) -> None:
         "options_error": bybit["options"].get("error"), "active_price": bybit.get("active_price"),
     }, ensure_ascii=False))
 
+    # Compare like with like: QQQUSDT perpetual vs QQQ ETF. NAS100/^NDX is
+    # roughly forty times QQQ and cannot be compared without a paired anchor.
+    if bybit.get("instrument") == "NAS100":
+        state = assert_route("/api/state", timeout=5.0)
+        feeds = state.get("feeds") or {}
+        proxy = feeds.get("proxy_price") or {}
+        active = feeds.get("price") or {}
+        quote = bybit["quote"]
+        qqq, perp = proxy.get("value"), quote.get("value")
+        comparison = {
+            "perp_symbol": quote.get("symbol"), "perp_value": perp,
+            "perp_index_price": quote.get("index_price"),
+            "qqq_value": qqq, "qqq_source": proxy.get("source"),
+            "nas100_value": active.get("value"), "nas100_source": active.get("source"),
+        }
+        if quote.get("symbol") == "QQQUSDT" and isinstance(qqq, (float, int)) and qqq > 0 and isinstance(perp, (float, int)):
+            comparison["qqq_perp_premium_pct"] = round(100 * (perp / qqq - 1), 4)
+            index = quote.get("index_price")
+            if isinstance(index, (float, int)) and index > 0:
+                comparison["qqq_index_premium_pct"] = round(100 * (index / qqq - 1), 4)
+        print("BYBIT NAS100 PAIRED COMPARISON " + json.dumps(comparison, ensure_ascii=False))
+
     paths = (
         "/api/state", "/api/validation", "/api/research/counterfactual",
         "/api/research/passive/status", "/api/research/passive/calibration",

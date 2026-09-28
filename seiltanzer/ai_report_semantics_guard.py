@@ -1,4 +1,4 @@
-"""Repair AI Verdict report semantics without changing policy math.
+"""Repair AI Verdict report semantics and reject invalid live stop geometry.
 
 This guard exists at the presentation/snapshot boundary only. It keeps the
 stateful active stop and its R-distance on one canonical geometry source, and it
@@ -70,9 +70,13 @@ def repair_snapshot_geometry(snapshot: dict[str, Any]) -> dict[str, Any]:
     active_stop = _number(geometry.get("active_risk_barrier"))
     if active_stop is None:
         geometry["r_to_active_stop"] = None
+        geometry["active_risk_barrier_breached"] = False
     else:
         active_stop_r = sign * (active_stop - entry) / risk
         geometry["r_to_active_stop"] = round(current_r - active_stop_r, 4)
+        # A stop beyond the current price cannot guarantee the quoted BE fill.
+        # Broker execution status is unknown until the trader reconciles it.
+        geometry["active_risk_barrier_breached"] = current_r < active_stop_r - 0.02
 
     final_take = _number(geometry.get("final_take"))
     if final_take is None:
@@ -202,6 +206,42 @@ def _repair_missing_current_price(lines: list[str], snapshot: dict[str, Any]) ->
     return lines
 
 
+def _repair_breached_stop(lines: list[str], snapshot: dict[str, Any]) -> list[str]:
+    if not (snapshot.get("trade_geometry") or {}).get("active_risk_barrier_breached"):
+        return lines
+    action = _section_bounds(lines, "**ДЕЙСТВИЕ СЕЙЧАС**")
+    if action:
+        lines[action[0]] = (
+            "**ДЕЙСТВИЕ СЕЙЧАС** — ПРОВЕРИТЬ У БРОКЕРА ИСПОЛНЕНИЕ СТОПА: "
+            "ТЕКУЩАЯ ЦЕНА УЖЕ ЗА УКАЗАННЫМ РИСК-БАРЬЕРОМ."
+        )
+    for title, body in {
+        "**ДЕЙСТВИЕ СЕЙЧАС**": [
+            "Статус фактического исполнения неизвестен. Сверьте остаток позиции "
+            "и стоп у брокера до принятия нового решения; расчётный HOLD не подтверждён.",
+            "Арбитр: STRATEGY → без новой команды AI до сверки исполнения."],
+        "**TAKE vs STOP/BE · execution-MC estimate**": [
+            "UNAVAILABLE: стоп уже пересечён; фактическое исполнение у брокера не подтверждено."],
+        "**ОБЩАЯ ГЕОМЕТРИЯ СЦЕНАРИЕВ**": [
+            "UNAVAILABLE для текущего остатка до сверки фактического стопа и позиции у брокера."],
+        "**РАСЧЁТ ПОЛИТИК**": [
+            "Expected/median/CVaR и P прибыли: UNAVAILABLE для текущего остатка: "
+            "модель предполагает исполнение BE/стопа по цене барьера, "
+            "хотя текущая цена уже за ним. Нули здесь не являются оценкой риска."],
+        "**ЭКОНОМИЧЕСКАЯ БЛИЗОСТЬ ПОЛИТИК**": [
+            "UNAVAILABLE до подтверждения фактического исполнения стопа у брокера."],
+        "**ПОЧЕМУ ВЫБРАНО**": [
+            "Расчётный HOLD и его CVaR неприменимы к текущей позиции: "
+            "стоп уже пересечён, но исполнение неизвестно. "
+            "Новых AI-решений нет; сначала сверить остаток и стоп у брокера."],
+        "**ПОСЛЕ ИСПОЛНЕНИЯ**": [
+            "Статус исполнения стопа неизвестен; сверить позицию у брокера. "
+            "Новые внеплановые ордера этим отчётом не выставляются."],
+    }.items():
+        _replace_section_body(lines, title, body)
+    return lines
+
+
 def _section_bounds(lines: list[str], title: str) -> tuple[int, int] | None:
     start = next((i for i, line in enumerate(lines) if line.startswith(title)), None)
     if start is None:
@@ -303,6 +343,7 @@ def repair_report_semantics(text: str, snapshot: dict[str, Any]) -> str:
 
     lines = _repair_source_stability(lines, snapshot)
     lines = _repair_missing_current_price(lines, snapshot)
+    lines = _repair_breached_stop(lines, snapshot)
 
     authority = (snapshot.get("ede_causal_context") or {}).get("authority") or {}
     if authority.get("production_directional_authority") is False:
