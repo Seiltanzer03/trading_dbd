@@ -569,7 +569,7 @@ class MarketData:
         if fresh_quote(self.price, now, 30) and fresh_quote(self.bybit_quote, now, 30):
             self._bybit_anchor = {"price": self.price["value"], "proxy": self.bybit_quote["value"],
                                   "ts": min(self.price["ts"], self.bybit_quote["ts"]),
-                                  "symbol": self.bybit_quote["symbol"]}
+                                  "symbol": self.bybit_quote["symbol"], "instrument": self.instrument_code}
         self.price = fallback_quote(self.price, self.bybit_quote, self._bybit_anchor, now)
 
     def _refresh_primary_price(self) -> None:

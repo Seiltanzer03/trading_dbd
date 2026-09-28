@@ -11,7 +11,7 @@ import httpx
 # QQQ is deliberately a mapped proxy, never a NAS100 price in its native scale.
 PRODUCTS = {
     "NAS100": ("QQQUSDT", "QQQ", True),
-    "SP500": ("SPXUSDT", "SPY", False),
+    "SP500": ("SPYUSDT", "SPY", True),
     "XAU": ("XAUUSDT", "GLD", False),
     "XAG": ("XAGUSDT", "SLV", False),
     "EURUSD": ("EURUSDUSDT", "EURUSD", False),
@@ -19,6 +19,17 @@ PRODUCTS = {
     "ETHUSD": ("ETHUSDT", "ETH", False),
     "SOLUSD": ("SOLUSDT", "SOL", False),
 }
+NATIVE_TICKERS = {
+    "NAS100": {"QQQ"}, "SP500": {"SPY"},
+    "XAU": {"XAU", "XAUUSD"}, "XAG": {"XAG", "XAGUSD"}, "EURUSD": {"EURUSD"},
+}
+
+
+def matches_underlying(instrument, spec):
+    if instrument in NATIVE_TICKERS:
+        native = str(spec.get("underlyingTicker") or "").upper().replace("/", "")
+        return native in NATIVE_TICKERS[instrument]
+    return spec.get("baseCoin") == PRODUCTS[instrument][1]
 
 
 def number(value, *, positive=False):
@@ -66,6 +77,7 @@ class BybitPublic:
         info = self.get("instruments-info", {"category": "linear", "symbol": symbol}, 3600)
         specs = info.get("result", {}).get("list", [])
         if not any(x.get("symbol") == symbol and x.get("status") == "Trading"
+                   and matches_underlying(instrument, x)
                    and x.get("settleCoin") == "USDT" and not x.get("isPreListing")
                    and x.get("contractType") == "LinearPerpetual" for x in specs):
             raise ValueError("Bybit perpetual not listed/trading: " + symbol)
@@ -129,7 +141,8 @@ class BybitPublic:
         if not rows or int(rows[0][0]) != start:
             return None
         proxy = number(rows[0][4], positive=True)
-        return {"price": price, "proxy": proxy, "ts": stamp, "symbol": symbol} if proxy else None
+        return {"price": price, "proxy": proxy, "ts": stamp, "symbol": symbol,
+                "instrument": instrument} if proxy else None
 
 
 def option_context(base, specs, tickers, now):
@@ -194,8 +207,9 @@ def fallback_quote(primary, quote, anchor, now):
         factor = anchor["price"] / anchor["proxy"]
         for key in ("value", "bid", "ask"):
             result[key] *= factor
-        result.update({"anchor_ts": anchor["ts"], "anchor_ticker": "NAS100",
-                       "driver_ticker": quote["symbol"], "source": quote["source"] + " → NAS100 mapped"})
+        instrument = anchor.get("instrument", "index")
+        result.update({"anchor_ts": anchor["ts"], "anchor_ticker": instrument,
+                       "driver_ticker": quote["symbol"], "source": quote["source"] + f" → {instrument} mapped"})
     result.update({"fallback": True, "error": "Primary unavailable/stale; Bybit reference, verify broker stop/BE",
                    "primary_source": primary.get("source")})
     return result

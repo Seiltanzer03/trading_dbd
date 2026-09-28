@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from seiltanzer.data.bybit import BybitPublic, fallback_quote, fresh_quote, missing, option_context
+from seiltanzer.data.bybit import BybitPublic, PRODUCTS, fallback_quote, fresh_quote, missing, option_context, matches_underlying
 from seiltanzer.config import Settings
 from seiltanzer.data.cache import DiskCache
 from seiltanzer.data.feeds import MarketData
@@ -51,7 +51,7 @@ def test_quote_validates_listing_spread_and_preserves_server_time(monkeypatch):
     def get(path, *args):
         if path == "instruments-info":
             return {"result": {"list": [{"symbol": "XAUUSDT", "status": "Trading",
-                     "settleCoin": "USDT", "contractType": "LinearPerpetual"}]}}
+                     "settleCoin": "USDT", "contractType": "LinearPerpetual", "underlyingTicker": "XAU/USD"}]}}
         return {"time": now*1000, "result": {"list": [row]}}
     monkeypatch.setattr(client, "get", get)
     result = client.quote("XAU")
@@ -73,6 +73,14 @@ def test_cold_start_anchor_requires_matching_completed_minute(monkeypatch):
     row[0] -= 60000
     assert client.historical_anchor("NAS100", primary) is None
     assert client.historical_anchor("NAS100", {**primary, "timestamp_kind": "unknown"}) is None
+
+
+def test_spx_memecoin_or_unknown_underlying_cannot_replace_index():
+    assert PRODUCTS["SP500"][0] == "SPYUSDT"
+    assert PRODUCTS["SP500"][2] is True
+    assert not matches_underlying("SP500", {"baseCoin": "SPX", "fullName": "SPX6900"})
+    assert not matches_underlying("NAS100", {"baseCoin": "QQQ"})
+    assert matches_underlying("SP500", {"underlyingTicker": "SPY"})
 
 
 def fixtures(now):
