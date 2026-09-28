@@ -153,6 +153,36 @@ def test_market_recovers_primary_and_clears_on_instrument_switch(tmp_path, monke
         cache.close()
 
 
+def test_nas100_fallback_keeps_oanda_scale_across_yahoo_and_restart(tmp_path, monkeypatch):
+    cache = DiskCache(str(tmp_path / "cache.db"))
+    try:
+        md = MarketData(Settings(data_dir=str(tmp_path)), cache)
+        now = time.time()
+        md.bybit_quote = quote(now, 400, mapped=True)
+        broker = {"value": 20000, "ts": now, "status": "live",
+                  "source": "TradingView WebSocket OANDA:NAS100USD"}
+        monkeypatch.setattr(md, "_refresh_primary_price", lambda: setattr(md, "price", broker))
+        md.refresh_price()
+        assert md.price is broker
+        yahoo = {"value": 23000, "ts": now, "status": "delayed",
+                 "source": "yfinance REST ^NDX (indicative)"}
+        monkeypatch.setattr(md, "_refresh_primary_price", lambda: setattr(md, "price", yahoo))
+        md.bybit_quote = quote(now, 404, mapped=True)
+        md.refresh_price()
+        assert md.price["value"] == pytest.approx(20200)
+        assert md.price["fallback"] is True
+        restored = MarketData(Settings(data_dir=str(tmp_path)), cache)
+        restored.bybit_quote = quote(now, 404, mapped=True)
+        monkeypatch.setattr(restored, "_refresh_primary_price", lambda: setattr(restored, "price", yahoo))
+        restored.refresh_price()
+        assert restored.price["value"] == pytest.approx(20200)
+        restored.bybit_quote = missing("feed down")
+        restored.refresh_price()
+        assert restored.price["value"] is None
+    finally:
+        cache.close()
+
+
 def test_http_access_denied_backs_off_without_option_requests(tmp_path, monkeypatch):
     cache = DiskCache(str(tmp_path / "cache.db"))
     try:
