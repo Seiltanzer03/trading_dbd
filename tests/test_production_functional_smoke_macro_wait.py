@@ -22,6 +22,16 @@ def _ok_result() -> dict:
     }
 
 
+def test_live_state_waits_for_price_source_materialization(monkeypatch):
+    replies = [(503, {"detail": "live state snapshot is warming"}, 2.0),
+               (200, {"feeds": {"price": {"value": 30273.5}}}, 3.0)]
+    monkeypatch.setattr(smoke, "request", lambda path, **kwargs: replies.pop(0))
+    monkeypatch.setattr(smoke.time, "sleep", lambda _: None)
+    state = smoke.wait_for_live_state(wait_sec=5.0)
+    assert state["feeds"]["price"]["value"] == 30273.5
+    assert replies == []
+
+
 def test_macro_refresh_immediate_ok_does_not_poll(monkeypatch):
     def _unexpected_poll(*_args, **_kwargs):
         raise AssertionError("completed refresh must not poll runtime")

@@ -4,6 +4,7 @@ import pytest
 from types import SimpleNamespace
 
 from seiltanzer.ai_report_semantics_guard import (
+    authoritative_current_price_available,
     repair_report_semantics,
     repair_snapshot_geometry,
 )
@@ -74,6 +75,39 @@ HOLD проходит CVaR: +0.000R.
     assert decision["policy"] == "HOLD"
     assert decision["manual_execution_required"] is False
     assert decision["risk_barrier_execution_unverified"] is True
+
+
+def test_bybit_reference_price_cannot_authorize_new_manual_ai_action():
+    snapshot = {
+        "trade_geometry": {"current": 30330.0},
+        "policy_manager": {
+            "input_audit": {"rows": {"instrument_price": {
+                "available": True, "status": "delayed",
+                "source": "Bybit QQQUSDT perpetual bid/ask · indicative → NAS100 mapped",
+            }}},
+            "management_decision": {"policy": "EXIT"},
+            "recommendation": {"policy": "EXIT"},
+        },
+    }
+    assert authoritative_current_price_available(snapshot) is False
+    from seiltanzer.app import _refresh_management_decision
+    position = SimpleNamespace(preview_decision=lambda current, trade: {
+        "policy": current["policy_manager"]["recommendation"]["policy"],
+        "manual_execution_required": True, "execution_status": "pending_execution"})
+    decision = _refresh_management_decision(SimpleNamespace(position=position), snapshot, {})
+    assert decision["policy"] == "HOLD"
+    assert decision["manual_execution_required"] is False
+    assert decision["indicative_fallback_price"] is True
+    report = """**ДЕЙСТВИЕ СЕЙЧАС** — HOLD ПОДТВЕРЖДЁН.
+Выставить новый ордер.
+
+**РАСЧЁТ ПОЛИТИК** —
+HOLD: Expected net +0.2R.
+"""
+    repaired = repair_report_semantics(report, snapshot)
+    assert "HOLD ПОДТВЕРЖДЁН" not in repaired
+    assert "НОВЫЕ AI-ДЕЙСТВИЯ" in repaired
+    assert "HOLD: Expected net +0.2R" in repaired
 
 
 def test_compact_report_does_not_render_zero_audit_or_bounded_placeholders():

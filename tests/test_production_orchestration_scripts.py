@@ -135,6 +135,8 @@ def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
         return {}
 
     monkeypatch.setattr(smoke, "assert_route", fake_assert_route)
+    monkeypatch.setattr(smoke, "wait_for_live_state",
+                        lambda: fake_assert_route("/api/state"))
     def fake_sh(*args):
         if args == ("git", "-C", "/opt/seiltanzer", "rev-parse", "HEAD"):
             return "fake"
