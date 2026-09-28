@@ -292,7 +292,7 @@ class MarketData:
         source = str(self.price.get("source") or "")
         return (bool(self.instrument.swissquote_pair and source.startswith("Swissquote OTC"))
                 or bool(self.instrument.tradingview_symbol
-                        and source.startswith("TradingView snapshot")))
+                        and source.startswith("TradingView ")))
 
     def set_instrument(self, code: str) -> None:
         if code not in ALL_INSTRUMENTS:
@@ -633,22 +633,35 @@ class MarketData:
             import yfinance as yf
             t = yf.Ticker(self.instrument.yahoo)
             p = None
-            try:
-                p = float(t.fast_info.last_price)
-            except Exception:
-                pass
+            quote_ts = None
+            if not broker_symbol:
+                try:
+                    p = float(t.fast_info.last_price)
+                except Exception:
+                    pass
             if p is None or not math.isfinite(p) or p <= 0:
                 hist = t.history(period="1d", interval="1m")
                 if len(hist) == 0:
                     raise RuntimeError("Yahoo вернул пустую историю")
                 p = float(hist["Close"].iloc[-1])
+                if not math.isfinite(p) or p <= 0:
+                    raise RuntimeError("Yahoo вернул некорректную цену")
+                if broker_symbol:
+                    stamp = hist.index[-1]
+                    if getattr(stamp, "tzinfo", None) is None:
+                        raise RuntimeError("Yahoo не указал часовой пояс котировки")
+                    quote_ts = float(stamp.timestamp())
+                    if not math.isfinite(quote_ts) or not 0 < quote_ts <= time.time() + 60:
+                        raise RuntimeError("Yahoo вернул некорректное время котировки")
             anchor_now = time.time()
             self.price = _status_dict(
-                p, "delayed", anchor_now,
+                p, "delayed", quote_ts if quote_ts is not None else anchor_now,
                 error=broker_error,
                 source=(f"yfinance REST {self.instrument.yahoo} (indicative)"
                         + ("; broker feed fallback" if broker_error else "")))
             self.price["derived"] = False
+            if broker_symbol:
+                self.price["instrument_type"] = "cash_index"
             self._annotate_freshness()
         except Exception as e:  # noqa: BLE001 — фид обязан пережить любой сбой источника
             self._mark_fail(self.price, self.settings.price_poll_sec, str(e))
