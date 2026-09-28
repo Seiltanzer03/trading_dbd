@@ -54,7 +54,11 @@ def _refresh_management_decision(engine, snapshot: dict, trade: dict) -> dict:
     preview_snapshot = snapshot
     breached_stop = bool((snapshot.get("trade_geometry") or {}).get(
         "active_risk_barrier_breached"))
-    effective_policy = "HOLD" if breached_stop else existing.get("policy")
+    price_row = (((manager.get("input_audit") or {}).get("rows") or {})
+                 .get("instrument_price") or {})
+    indicative_price = (str(price_row.get("source") or "").startswith("Bybit ")
+                        or price_row.get("production_authority") is False)
+    effective_policy = "HOLD" if breached_stop or indicative_price else existing.get("policy")
     if effective_policy:
         preview_manager = dict(manager)
         preview_recommendation = dict(preview_manager.get("recommendation") or {})
@@ -71,6 +75,14 @@ def _refresh_management_decision(engine, snapshot: dict, trade: dict) -> dict:
             "automatic_execution_allowed": False,
             "risk_barrier_execution_unverified": True,
             "reason": "BROKER_STOP_EXECUTION_UNVERIFIED",
+        })
+    elif indicative_price:
+        decision.update({
+            "authority": "STRATEGY", "policy": "HOLD",
+            "execution_status": "not_required", "manual_execution_required": False,
+            "automatic_execution_allowed": False,
+            "indicative_fallback_price": True,
+            "reason": "BYBIT_REFERENCE_PRICE_NOT_BROKER_QUOTE",
         })
     manager["management_decision"] = decision
     snapshot["policy_manager"] = manager
@@ -1028,6 +1040,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     and decision and decision.get("policy") == "HOLD"
                     and not (snapshot.get("trade_geometry") or {}).get(
                         "active_risk_barrier_breached")
+                    and not decision.get("indicative_fallback_price")
                     and str(shadow.get("policy") or "") in EXTENDED_POLICIES
                 ):
                     registered = engine.position.register_shadow_action(

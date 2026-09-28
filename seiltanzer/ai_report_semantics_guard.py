@@ -104,8 +104,11 @@ def authoritative_current_price_available(snapshot: dict[str, Any]) -> bool:
     row = (((manager.get("input_audit") or {}).get("rows") or {})
            .get("instrument_price") or {})
     status = str(row.get("status") or "").lower()
+    source = str(row.get("source") or "")
     current = _number((snapshot.get("trade_geometry") or {}).get("current"))
-    return bool(row.get("available") is True and status != "no_data" and current is not None)
+    return bool(row.get("available") is True and status != "no_data"
+                and current is not None and not source.startswith("Bybit ")
+                and row.get("production_authority") is not False)
 
 
 def _current_price_explicitly_unavailable(snapshot: dict[str, Any]) -> bool:
@@ -242,6 +245,27 @@ def _repair_breached_stop(lines: list[str], snapshot: dict[str, Any]) -> list[st
     return lines
 
 
+def _repair_indicative_price(lines: list[str], snapshot: dict[str, Any]) -> list[str]:
+    row = (((snapshot.get("policy_manager") or {}).get("input_audit") or {})
+           .get("rows") or {}).get("instrument_price") or {}
+    source = str(row.get("source") or "")
+    if not source.startswith("Bybit ") and row.get("production_authority") is not False:
+        return lines
+    bounds = _section_bounds(lines, "**ДЕЙСТВИЕ СЕЙЧАС**")
+    if bounds:
+        lines[bounds[0]] = (
+            "**ДЕЙСТВИЕ СЕЙЧАС** — ДЕЙСТВУЕТ СТРАТЕГИЯ; "
+            "НОВЫЕ AI-ДЕЙСТВИЯ ПО ОРИЕНТИРОВОЧНОЙ ЦЕНЕ BYBIT ЗАПРЕЩЕНЫ."
+        )
+    _replace_section_body(lines, "**ДЕЙСТВИЕ СЕЙЧАС**", [
+        "Цена инструмента привязана к Bybit proxy; она не подтверждает брокерский "
+        "стоп и исполнение. Сверьте цену и остаток позиции у брокера.",
+        "Численные оценки ниже относятся только к proxy-сценарию и не дают "
+        "права выставить новые ордера вне стратегии.",
+    ])
+    return lines
+
+
 def _section_bounds(lines: list[str], title: str) -> tuple[int, int] | None:
     start = next((i for i, line in enumerate(lines) if line.startswith(title)), None)
     if start is None:
@@ -343,6 +367,7 @@ def repair_report_semantics(text: str, snapshot: dict[str, Any]) -> str:
 
     lines = _repair_source_stability(lines, snapshot)
     lines = _repair_missing_current_price(lines, snapshot)
+    lines = _repair_indicative_price(lines, snapshot)
     lines = _repair_breached_stop(lines, snapshot)
 
     authority = (snapshot.get("ede_causal_context") or {}).get("authority") or {}
