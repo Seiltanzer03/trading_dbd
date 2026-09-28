@@ -538,14 +538,16 @@ class MarketData:
         if self.instrument_code != code:
             return
         self.bybit_quote = quote
-        if (quote.get("mapped_proxy") and not self.instrument.tradingview_symbol
-                and not self._bybit_anchor
+        if (quote.get("mapped_proxy") and not self._bybit_anchor
                 and now - self._bybit_anchor_attempt >= 300):
             self._bybit_anchor_attempt = now
             try:
                 anchor = self.bybit_client.historical_anchor(code, dict(self._primary_price))
                 if self.instrument_code == code:
                     self._bybit_anchor = anchor
+                    if anchor and self.instrument.tradingview_symbol and hasattr(self.cache, "put"):
+                        anchor["kind"] = "index"
+                        self.cache.put(f"bybit_index_anchor_{code}", anchor)
             except Exception:
                 pass  # No historical pair means no fabricated index price.
         if self._bybit_retry_at >= now + 3600:
@@ -572,7 +574,8 @@ class MarketData:
         if (code not in PRODUCTS or not ALL_INSTRUMENTS[code].tradingview_symbol
                 or not hasattr(self.cache, "get")):
             return None
-        cached = self.cache.get(f"bybit_broker_anchor_{code}", max_age=72 * 3600)
+        cached = (self.cache.get(f"bybit_broker_anchor_{code}", max_age=72 * 3600)
+                  or self.cache.get(f"bybit_index_anchor_{code}", max_age=72 * 3600))
         anchor = cached[0] if cached else None
         return anchor if isinstance(anchor, dict) and anchor.get("instrument") == code else None
 
@@ -587,15 +590,23 @@ class MarketData:
         broker_scale = bool(self.instrument.tradingview_symbol)
         direct_broker = str(self.price.get("source") or "").startswith(
             f"TradingView ") and self.instrument.tradingview_symbol in str(self.price.get("source"))
+        direct_index = broker_scale and (
+            self.price.get("instrument_type") == "cash_index"
+            or str(self.price.get("source") or "").startswith(f"stream {self.instrument.yahoo}"))
         if (fresh_quote(self.price, now, 30) and fresh_quote(self.bybit_quote, now, 30)
-                and (not broker_scale or direct_broker)):
+                and (not broker_scale or direct_broker
+                     or (direct_index and (self._bybit_anchor is None
+                                           or self._bybit_anchor.get("kind") == "index")))):
+            kind = "broker" if direct_broker else "index"
             self._bybit_anchor = {"price": self.price["value"], "proxy": self.bybit_quote["value"],
                                   "ts": min(self.price["ts"], self.bybit_quote["ts"]),
-                                  "symbol": self.bybit_quote["symbol"], "instrument": self.instrument_code}
+                                  "symbol": self.bybit_quote["symbol"], "instrument": self.instrument_code,
+                                  "kind": kind}
             if broker_scale and hasattr(self.cache, "put"):
-                self.cache.put(f"bybit_broker_anchor_{self.instrument_code}", self._bybit_anchor)
+                self.cache.put(f"bybit_{kind}_anchor_{self.instrument_code}", self._bybit_anchor)
         primary = self.price
-        if broker_scale and self._bybit_anchor and not direct_broker:
+        if (broker_scale and self._bybit_anchor
+                and self._bybit_anchor.get("kind") != "index" and not direct_broker):
             # Never alternate a broker-anchored Bybit index with Yahoo ^NDX.
             primary = missing("OANDA quote unavailable; waiting for broker-anchored Bybit")
         self.price = fallback_quote(primary, self.bybit_quote, self._bybit_anchor, now)

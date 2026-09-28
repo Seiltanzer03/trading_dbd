@@ -183,6 +183,31 @@ def test_nas100_fallback_keeps_oanda_scale_across_yahoo_and_restart(tmp_path, mo
         cache.close()
 
 
+def test_nas100_yahoo_scale_continues_when_oanda_never_available(tmp_path, monkeypatch):
+    cache = DiskCache(str(tmp_path / "cache.db"))
+    try:
+        md = MarketData(Settings(data_dir=str(tmp_path)), cache)
+        now = time.time()
+        yahoo = {"value": 30000, "ts": now, "status": "live", "source": "stream ^NDX (broker fallback)"}
+        md.bybit_quote = quote(now, 400, mapped=True)
+        monkeypatch.setattr(md, "_refresh_primary_price", lambda: setattr(md, "price", yahoo))
+        md.refresh_price()
+        assert md.price is yahoo
+        md.bybit_quote = quote(now, 401, mapped=True)
+        monkeypatch.setattr(md, "_refresh_primary_price", lambda: setattr(md, "price", missing("Yahoo closed")))
+        md.refresh_price()
+        assert md.price["value"] == pytest.approx(30075)
+        assert md.price["fallback"] is True
+        restarted = MarketData(Settings(data_dir=str(tmp_path)), cache)
+        restarted.bybit_quote = quote(now, 401, mapped=True)
+        monkeypatch.setattr(restarted, "_refresh_primary_price",
+                            lambda: setattr(restarted, "price", missing("Yahoo closed")))
+        restarted.refresh_price()
+        assert restarted.price["value"] == pytest.approx(30075)
+    finally:
+        cache.close()
+
+
 def test_http_access_denied_backs_off_without_option_requests(tmp_path, monkeypatch):
     cache = DiskCache(str(tmp_path / "cache.db"))
     try:
