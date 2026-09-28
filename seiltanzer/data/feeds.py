@@ -530,11 +530,17 @@ class MarketData:
             quote = self.bybit_client.quote(code)
         except Exception as exc:
             quote = missing(exc)
-            self._bybit_retry_at = now + 60
+            self._bybit_retry_at = now + 10
             # Respect access restrictions; do not rotate hosts or use an AI proxy.
             response = getattr(exc, "response", None)
             if getattr(response, "status_code", None) in {401, 403, 429}:
                 self._bybit_retry_at = now + 3600
+            elif fresh_quote(self.bybit_quote, now, 45):
+                # A single failed REST request must not erase a still-fresh,
+                # previously verified price. Its original timestamp remains.
+                quote = dict(self.bybit_quote)
+                quote["status"] = "delayed"
+                quote["error"] = f"Bybit retry: {type(exc).__name__}"
         if self.instrument_code != code:
             return
         self.bybit_quote = quote
