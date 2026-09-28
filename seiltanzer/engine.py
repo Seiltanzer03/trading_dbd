@@ -211,7 +211,8 @@ class Engine:
                          else "TradingView "
                          if self.market.instrument.tradingview_symbol else None)
         if (offset and not self.settings.demo and direct_source
-                and direct_source not in str(trade.get("quote_source") or "")):
+                and (direct_source not in str(trade.get("quote_source") or "")
+                     or direct_source not in str(self.market.price.get("source") or ""))):
             return 0.0
         return offset
 
