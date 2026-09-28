@@ -225,3 +225,25 @@ def test_http_access_denied_backs_off_without_option_requests(tmp_path, monkeypa
         assert md._bybit_retry_at > time.time() + 3500
     finally:
         cache.close()
+
+
+def test_transient_bybit_rest_failure_preserves_only_still_fresh_quote(tmp_path):
+    cache = DiskCache(str(tmp_path / "cache.db"))
+    try:
+        md = MarketData(Settings(data_dir=str(tmp_path)), cache)
+        now = time.time()
+        md.bybit_quote = quote(now - 5, 400, mapped=True)
+        md.bybit_client = SimpleNamespace(quote=lambda _: (_ for _ in ()).throw(
+            TimeoutError("temporary timeout")))
+        md.refresh_bybit()
+        assert md.bybit_quote["value"] == 400
+        assert md.bybit_quote["status"] == "delayed"
+        assert md.bybit_quote["ts"] == pytest.approx(now - 5)
+        assert "Bybit retry" in md.bybit_quote["error"]
+        assert md._bybit_retry_at < now + 12
+        md._bybit_retry_at = 0
+        md.bybit_quote["ts"] = now - 46
+        md.refresh_bybit()
+        assert md.bybit_quote["status"] == "no_data"
+    finally:
+        cache.close()
