@@ -89,6 +89,22 @@ def assert_route(path: str, *, timeout: float = 5.0) -> dict | list | None:
     raise AssertionError((path, "retry loop exhausted"))
 
 
+def wait_for_live_state(*, wait_sec: float = 45.0) -> dict:
+    """Price-source changes can briefly invalidate the materialized live tick."""
+    deadline = time.monotonic() + wait_sec
+    while True:
+        code, body, elapsed = request("/api/state", timeout=5.0)
+        if code == 200:
+            print(f"/api/state: 200 {elapsed:.0f}ms")
+            assert isinstance(body, dict), body
+            return body
+        if (code != 503 or not isinstance(body, dict)
+                or body.get("detail") != "live state snapshot is warming"
+                or time.monotonic() >= deadline):
+            raise AssertionError(("/api/state", code, body))
+        time.sleep(1.0)
+
+
 def verify_universe_routes() -> None:
     rates = assert_route("/api/visual/rates-orbit", timeout=15.0)
     assert isinstance(rates, dict), rates
@@ -363,11 +379,16 @@ def verify(expected_sha: str) -> None:
     # Compare like with like: QQQUSDT perpetual vs QQQ ETF. NAS100/^NDX is
     # roughly forty times QQQ and cannot be compared without a paired anchor.
     if bybit.get("instrument") == "NAS100":
-        state = assert_route("/api/state", timeout=5.0)
+        quote = bybit["quote"]
+        print("BYBIT NAS100 RAW QUOTE " + json.dumps({
+            "symbol": quote.get("symbol"), "value": quote.get("value"),
+            "index_price": quote.get("index_price"),
+            "mark_price": quote.get("mark_price"), "ts": quote.get("ts"),
+        }, ensure_ascii=False))
+        state = wait_for_live_state()
         feeds = state.get("feeds") or {}
         proxy = feeds.get("proxy_price") or {}
         active = feeds.get("price") or {}
-        quote = bybit["quote"]
         qqq, perp = proxy.get("value"), quote.get("value")
         comparison = {
             "perp_symbol": quote.get("symbol"), "perp_value": perp,
@@ -396,7 +417,9 @@ def verify(expected_sha: str) -> None:
         "/api/analytics/correlation-graph",
     )
     for path in paths:
-        if path == "/api/research/passive/status":
+        if path == "/api/state":
+            wait_for_live_state()
+        elif path == "/api/research/passive/status":
             assert_route(path, timeout=PASSIVE_STATUS_TIMEOUT_SEC)
         elif path == "/api/research/passive/edge":
             assert_route(path, timeout=PASSIVE_EDGE_TIMEOUT_SEC)
