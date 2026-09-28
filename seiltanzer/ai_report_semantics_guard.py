@@ -417,6 +417,20 @@ def repair_report_semantics(text: str, snapshot: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def _renderer_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Read already computed facts preserved outside a byte-compacted manager."""
+    preserved = snapshot.get("report_integrity") or {}
+    manager = snapshot.get("policy_manager") or {}
+    restored = dict(manager)
+    for key in ("scenario_geometry", "raw_optimizer_stability", "stability",
+                "monte_carlo_validation", "risk_tradeoff"):
+        if not restored.get(key) and isinstance(preserved.get(key), dict):
+            restored[key] = preserved[key]
+    if restored == manager:
+        return snapshot
+    return {**snapshot, "policy_manager": restored}
+
+
 def install_ai_report_semantics_guard() -> None:
     """Patch API snapshot/report references captured before app creation."""
     global _INSTALLED
@@ -434,7 +448,8 @@ def install_ai_report_semantics_guard() -> None:
         return repair_snapshot_geometry(snapshot)
 
     def guarded_normalize(text: str, snapshot: dict[str, Any]) -> str:
-        return repair_report_semantics(original_normalize(text, snapshot), snapshot)
+        view = _renderer_snapshot(snapshot)
+        return repair_report_semantics(original_normalize(text, view), view)
 
     app_module.build_snapshot = guarded_build_snapshot
     v19.normalize_structured_report = guarded_normalize

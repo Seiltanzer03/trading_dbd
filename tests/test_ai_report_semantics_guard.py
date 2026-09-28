@@ -4,6 +4,7 @@ import pytest
 from types import SimpleNamespace
 
 from seiltanzer.ai_report_semantics_guard import (
+    _renderer_snapshot,
     authoritative_current_price_available,
     repair_report_semantics,
     repair_snapshot_geometry,
@@ -108,6 +109,23 @@ HOLD: Expected net +0.2R.
     assert "HOLD ПОДТВЕРЖДЁН" not in repaired
     assert "НОВЫЕ AI-ДЕЙСТВИЯ" in repaired
     assert "HOLD: Expected net +0.2R" in repaired
+
+
+def test_compacted_snapshot_renders_real_preserved_scenario_and_stability():
+    from seiltanzer.ai_verdict_v19 import _scenario_geometry_lines
+
+    snapshot = {
+        "policy_manager": {"scenario_geometry": {}, "raw_optimizer_stability": {}},
+        "report_integrity": {
+            "scenario_geometry": {"scenario_count": 6500, "next_rung_r": 1.0,
+                                  "p_next_rung_before_stop": 0.542},
+            "raw_optimizer_stability": {"checks": 8, "selected_count": 7},
+        },
+    }
+    view = _renderer_snapshot(snapshot)
+    assert view["policy_manager"]["raw_optimizer_stability"]["selected_count"] == 7
+    assert "6500" in " ".join(_scenario_geometry_lines(view))
+    assert snapshot["policy_manager"]["scenario_geometry"] == {}
 
 
 def test_compact_report_does_not_render_zero_audit_or_bounded_placeholders():
