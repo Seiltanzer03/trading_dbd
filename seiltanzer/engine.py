@@ -323,6 +323,8 @@ class Engine:
             "effective_value": price,
             "basis_offset": self._trade_quote_offset(trade),
             "ticker": (self.market.price.get("symbol") if self.market.price.get("fallback") else
+                       self.market.instrument.yahoo if str(self.market.price.get("source") or "").startswith(
+                           f"stream {self.market.instrument.yahoo}") else
                        self.market.instrument.tradingview_symbol
                        or self.market.instrument.swissquote_pair
                        or self.market.instrument.yahoo),

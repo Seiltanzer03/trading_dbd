@@ -52,7 +52,9 @@ def _refresh_management_decision(engine, snapshot: dict, trade: dict) -> dict:
     # arbiter has resolved a single effective policy, that frozen decision must
     # own the operational preview as well.
     preview_snapshot = snapshot
-    effective_policy = existing.get("policy")
+    breached_stop = bool((snapshot.get("trade_geometry") or {}).get(
+        "active_risk_barrier_breached"))
+    effective_policy = "HOLD" if breached_stop else existing.get("policy")
     if effective_policy:
         preview_manager = dict(manager)
         preview_recommendation = dict(preview_manager.get("recommendation") or {})
@@ -62,6 +64,14 @@ def _refresh_management_decision(engine, snapshot: dict, trade: dict) -> dict:
 
     operational = engine.position.preview_decision(preview_snapshot, trade)
     decision = {**existing, **operational}
+    if breached_stop:
+        decision.update({
+            "authority": "STRATEGY", "policy": "HOLD",
+            "execution_status": "not_required", "manual_execution_required": False,
+            "automatic_execution_allowed": False,
+            "risk_barrier_execution_unverified": True,
+            "reason": "BROKER_STOP_EXECUTION_UNVERIFIED",
+        })
     manager["management_decision"] = decision
     snapshot["policy_manager"] = manager
     return decision
@@ -943,6 +953,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         position_state["realized_position_fraction"],
                 })
                 snapshot["trade_geometry"] = geometry
+                from .ai_report_semantics_guard import repair_snapshot_geometry
+                repair_snapshot_geometry(snapshot)
                 decision = _refresh_management_decision(
                     engine, snapshot, active_trade)
             else:
@@ -1014,6 +1026,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if (
                     active_trade and isinstance(shadow, dict)
                     and decision and decision.get("policy") == "HOLD"
+                    and not (snapshot.get("trade_geometry") or {}).get(
+                        "active_risk_barrier_breached")
                     and str(shadow.get("policy") or "") in EXTENDED_POLICIES
                 ):
                     registered = engine.position.register_shadow_action(
