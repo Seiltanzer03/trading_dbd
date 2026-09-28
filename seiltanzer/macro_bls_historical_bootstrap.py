@@ -687,6 +687,8 @@ def _table_exists(runtime: Any, table: str) -> bool:
             acquired = lock.acquire(timeout=0.25)
         except Exception:
             acquired = False
+        if not acquired:
+            return False
     try:
         row = runtime._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
@@ -905,23 +907,28 @@ def observation_span(runtime: Any) -> tuple[float, float] | None:
             acquired = lock.acquire(timeout=0.25)
         except Exception:
             acquired = False
-    if not acquired and cached is not None:
-        return cached[1]
+    if lock is not None and not acquired:
+        return cached[1] if cached is not None else None
 
     try:
-        row = runtime._conn.execute(
-            "SELECT MIN(captured_ts),MAX(captured_ts) FROM g1s_observations"
-        ).fetchone()
+        # Separate LIMIT 1 probes use ix_g1s_obs_captured_ts in both directions;
+        # a combined MIN/MAX may scan the whole multi-GiB observation index.
+        first = runtime._conn.execute(
+            "SELECT captured_ts FROM g1s_observations WHERE captured_ts IS NOT NULL "
+            "ORDER BY captured_ts ASC LIMIT 1").fetchone()
+        last = runtime._conn.execute(
+            "SELECT captured_ts FROM g1s_observations WHERE captured_ts IS NOT NULL "
+            "ORDER BY captured_ts DESC LIMIT 1").fetchone()
     except Exception:
         return cached[1] if cached is not None else None
     finally:
         if acquired and lock is not None:
             lock.release()
 
-    if row is None or row[0] is None or row[1] is None:
+    if first is None or last is None:
         span: tuple[float, float] | None = None
     else:
-        start, end = float(row[0]), float(row[1])
+        start, end = float(first[0]), float(last[0])
         span = (start, end) if math.isfinite(start) and math.isfinite(end) else None
     _OBSERVATION_SPAN_CACHE[runtime_id] = (now, span)
     return span

@@ -471,6 +471,19 @@ class TestEngineDemo:
         finally:
             live.close()
 
+    def test_broker_offset_does_not_jump_between_yahoo_and_bybit(self, tmp_path):
+        live = Engine(Settings(demo=False, data_dir=str(tmp_path)))
+        try:
+            trade = {"quote_offset": 25.0, "quote_source": "TradingView stream OANDA:NAS100USD"}
+            live.market.price = {"value": 30000.0, "source": "stream ^NDX (broker fallback)"}
+            assert live._effective_price(trade, 30000.0) == pytest.approx(30000.0)
+            live.market.price = {"value": 30075.0, "source": "Bybit QQQUSDT mapped", "fallback": True}
+            assert live._effective_price(trade, 30075.0) == pytest.approx(30075.0)
+            live.market.price = {"value": 30100.0, "source": "TradingView stream OANDA:NAS100USD"}
+            assert live._effective_price(trade, 30100.0) == pytest.approx(30125.0)
+        finally:
+            live.close()
+
     def test_inverse_proxy_disables_only_gex(self, engine):
         engine.market.set_instrument("USDCAD")
         engine.market.refresh_price()
