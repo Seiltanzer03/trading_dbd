@@ -1,6 +1,9 @@
 from pathlib import Path
 import importlib.util
+import json
 import sqlite3
+
+import pytest
 
 from seiltanzer.edge_discovery.registry import FEATURES
 
@@ -162,6 +165,32 @@ def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
     for path in smoke.MATERIALIZED_STATUS_PATHS:
         assert recorded_timeouts[path] == smoke.MATERIALIZED_STATUS_TIMEOUT_SEC
     assert recorded_timeouts["/api/state"] == 5.0
+
+
+def test_nas100_comparison_reads_actual_tick_feeds(monkeypatch, capsys):
+    smoke = _load_script("production_functional_smoke")
+    monkeypatch.setattr(smoke, "sh", lambda *args: "active" if args[0] == "systemctl" else "sha")
+    monkeypatch.setattr(smoke, "verify_ai_verdict", lambda: None)
+    monkeypatch.setattr(smoke, "assert_route", lambda path, **kwargs: {
+        "instrument": "NAS100", "production_authority": False,
+        "quote": {"status": "delayed", "symbol": "QQQUSDT", "value": 740.0,
+                  "index_price": 739.0}, "options": {}, "active_price": {},
+    } if path == "/api/market/bybit" else {})
+    monkeypatch.setattr(smoke, "wait_for_live_state", lambda: {"tick": {"feeds": {
+        "price": {"value": 30200.0, "source": "stream ^NDX"},
+        "proxy_price": {"value": 738.0, "source": "stream QQQ"},
+    }}})
+    def stop_after_comparison():
+        raise RuntimeError("comparison captured")
+    monkeypatch.setattr(smoke, "verify_macro_runtime", stop_after_comparison)
+    with pytest.raises(RuntimeError, match="comparison captured"):
+        smoke.verify("sha")
+    line = next(line for line in capsys.readouterr().out.splitlines()
+                if line.startswith("BYBIT NAS100 PAIRED COMPARISON "))
+    row = json.loads(line.removeprefix("BYBIT NAS100 PAIRED COMPARISON "))
+    assert row["qqq_value"] == 738.0
+    assert row["nas100_value"] == 30200.0
+    assert row["qqq_perp_premium_pct"] == pytest.approx(100 * (740 / 738 - 1), abs=0.0001)
 
 
 def test_ai_verdict_rechecks_snapshot_after_post(monkeypatch):
