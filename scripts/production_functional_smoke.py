@@ -350,7 +350,6 @@ def verify(expected_sha: str) -> None:
     # macro before any scan-heavy research status route. A timed-out synchronous
     # status request keeps running server-side and must not precede macro writes.
     verify_ai_verdict()
-    verify_macro_runtime()
 
     bybit = assert_route("/api/market/bybit", timeout=5.0)
     assert bybit.get("production_authority") is False, bybit
@@ -382,6 +381,8 @@ def verify(expected_sha: str) -> None:
             if isinstance(index, (float, int)) and index > 0:
                 comparison["qqq_index_premium_pct"] = round(100 * (index / qqq - 1), 4)
         print("BYBIT NAS100 PAIRED COMPARISON " + json.dumps(comparison, ensure_ascii=False))
+
+    verify_macro_runtime()
 
     paths = (
         "/api/state", "/api/validation", "/api/research/counterfactual",

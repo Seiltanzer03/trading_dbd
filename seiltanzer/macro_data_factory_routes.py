@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import time
+import threading
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -148,17 +150,58 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     fomc_deterministic_runtime.start()
     treasury_runtime.start()
 
-    def status():
+    # Several research stores share SQLite with the startup materializer. A
+    # synchronous aggregate status can monopolize a request thread for minutes
+    # while that writer owns the DB. Keep one refresh in flight, and serve the
+    # last completed *real* sample; unavailable counts stay absent until ready.
+    status_lock = threading.Lock()
+    status_refreshing = False
+    status_sample = None
+    status_sample_at = 0.0
+
+    def _status_detail():
         return {
             **factory.status(),
             "numeric": numeric_runtime.status(),
-            "numeric_transport": macro_transport_status(),
             "historical_bls": historical_bls_runtime.status(),
             "historical_ism": historical_ism_runtime.status(),
-            "historical_offhost_transport": historical_offhost_transport_status(),
             "fomc_deterministic": fomc_deterministic_runtime.status(),
             "fomc_runtime": fomc_runtime.status(),
             "treasury_live_t0": treasury_runtime.status(),
+        }
+
+    def _refresh_status_detail():
+        nonlocal status_refreshing, status_sample, status_sample_at
+        try:
+            sample = _status_detail()
+            with status_lock:
+                status_sample = sample
+                status_sample_at = time.time()
+        except Exception:
+            logging.getLogger(__name__).exception("Macro status detail refresh failed")
+            with status_lock:
+                status_sample_at = time.time()
+        finally:
+            with status_lock:
+                status_refreshing = False
+
+    async def status():
+        nonlocal status_refreshing
+        if app.state.engine.settings.demo:
+            detail = _status_detail()
+        else:
+            with status_lock:
+                if not status_refreshing and time.time() - status_sample_at >= 60:
+                    status_refreshing = True
+                    threading.Thread(target=_refresh_status_detail, daemon=True,
+                                     name="macro-status-refresh").start()
+                detail = dict(status_sample) if status_sample is not None else {
+                    "status": "DETAIL_PENDING", "detail_available": False,
+                }
+        return {
+            **detail,
+            "numeric_transport": macro_transport_status(),
+            "historical_offhost_transport": historical_offhost_transport_status(),
             "llm_cost_guard": cost_guard_status(),
             "official_families": [
                 "CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES", "FOMC_STATEMENT"
