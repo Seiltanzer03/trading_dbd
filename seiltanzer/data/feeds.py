@@ -255,7 +255,7 @@ class MarketData:
         self.bybit_client = BybitPublic()
         self.bybit_quote = missing("awaiting first quote")
         self.bybit_options = missing("awaiting listed option chain")
-        self._bybit_anchor = None
+        self._bybit_anchor = self._cached_broker_anchor("NAS100")
         self._bybit_options_attempt = 0.0
         self._bybit_retry_at = 0.0
         self._bybit_anchor_attempt = 0.0
@@ -310,7 +310,7 @@ class MarketData:
             self.instrument_code = code
             self.bybit_quote = missing("instrument changed")
             self.bybit_options = missing("instrument changed")
-            self._bybit_anchor = None
+            self._bybit_anchor = self._cached_broker_anchor(code)
             self._bybit_options_attempt = 0.0
             self._bybit_anchor_attempt = 0.0
             self._primary_price = _status_dict()
@@ -529,7 +529,8 @@ class MarketData:
         if self.instrument_code != code:
             return
         self.bybit_quote = quote
-        if (quote.get("mapped_proxy") and not self._bybit_anchor
+        if (quote.get("mapped_proxy") and not self.instrument.tradingview_symbol
+                and not self._bybit_anchor
                 and now - self._bybit_anchor_attempt >= 300):
             self._bybit_anchor_attempt = now
             try:
@@ -558,6 +559,14 @@ class MarketData:
             context = missing(context.get("error") or "option snapshot stale")
         return {"quote": quote, "options": context, "production_authority": False}
 
+    def _cached_broker_anchor(self, code: str) -> dict | None:
+        if (code not in PRODUCTS or not ALL_INSTRUMENTS[code].tradingview_symbol
+                or not hasattr(self.cache, "get")):
+            return None
+        cached = self.cache.get(f"bybit_broker_anchor_{code}", max_age=72 * 3600)
+        anchor = cached[0] if cached else None
+        return anchor if isinstance(anchor, dict) and anchor.get("instrument") == code else None
+
     def refresh_price(self) -> None:
         if self.price.get("fallback"):
             self.price = dict(self._primary_price)
@@ -566,11 +575,21 @@ class MarketData:
         if self.demo or os.environ.get("BYBIT_PUBLIC_ENABLED", "1") == "0":
             return
         now = time.time()
-        if fresh_quote(self.price, now, 30) and fresh_quote(self.bybit_quote, now, 30):
+        broker_scale = bool(self.instrument.tradingview_symbol)
+        direct_broker = str(self.price.get("source") or "").startswith(
+            f"TradingView ") and self.instrument.tradingview_symbol in str(self.price.get("source"))
+        if (fresh_quote(self.price, now, 30) and fresh_quote(self.bybit_quote, now, 30)
+                and (not broker_scale or direct_broker)):
             self._bybit_anchor = {"price": self.price["value"], "proxy": self.bybit_quote["value"],
                                   "ts": min(self.price["ts"], self.bybit_quote["ts"]),
                                   "symbol": self.bybit_quote["symbol"], "instrument": self.instrument_code}
-        self.price = fallback_quote(self.price, self.bybit_quote, self._bybit_anchor, now)
+            if broker_scale and hasattr(self.cache, "put"):
+                self.cache.put(f"bybit_broker_anchor_{self.instrument_code}", self._bybit_anchor)
+        primary = self.price
+        if broker_scale and self._bybit_anchor and not direct_broker:
+            # Never alternate a broker-anchored Bybit index with Yahoo ^NDX.
+            primary = missing("OANDA quote unavailable; waiting for broker-anchored Bybit")
+        self.price = fallback_quote(primary, self.bybit_quote, self._bybit_anchor, now)
 
     def _refresh_primary_price(self) -> None:
         if self.demo:
