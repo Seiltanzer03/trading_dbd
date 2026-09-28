@@ -560,7 +560,8 @@ class MarketData:
         return {"quote": quote, "options": context, "production_authority": False}
 
     def _cached_broker_anchor(self, code: str) -> dict | None:
-        if code not in PRODUCTS or not ALL_INSTRUMENTS[code].tradingview_symbol:
+        if (code not in PRODUCTS or not ALL_INSTRUMENTS[code].tradingview_symbol
+                or not hasattr(self.cache, "get")):
             return None
         cached = self.cache.get(f"bybit_broker_anchor_{code}", max_age=72 * 3600)
         anchor = cached[0] if cached else None
@@ -582,7 +583,7 @@ class MarketData:
             self._bybit_anchor = {"price": self.price["value"], "proxy": self.bybit_quote["value"],
                                   "ts": min(self.price["ts"], self.bybit_quote["ts"]),
                                   "symbol": self.bybit_quote["symbol"], "instrument": self.instrument_code}
-            if broker_scale:
+            if broker_scale and hasattr(self.cache, "put"):
                 self.cache.put(f"bybit_broker_anchor_{self.instrument_code}", self._bybit_anchor)
         primary = self.price
         if broker_scale and self._bybit_anchor and not direct_broker:
