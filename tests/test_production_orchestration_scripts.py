@@ -129,6 +129,9 @@ def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
     def fake_assert_route(path: str, *, timeout: float = 5.0):
         call_order.append(path)
         recorded_timeouts[path] = timeout
+        if path == "/api/market/bybit":
+            return {"production_authority": False, "quote": {"status": "no_data"},
+                    "options": {"status": "no_data"}}
         return {}
 
     monkeypatch.setattr(smoke, "assert_route", fake_assert_route)
