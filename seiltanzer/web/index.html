@@ -236,6 +236,11 @@
       </div>
     </div>
     <div class="analytics-human-line" id="gex-human-line">TAKE PATH: WAITING FOR REAL GEX STATE</div>
+    <details id="bybit-gamma-context">
+      <summary id="bybit-context-status">Bybit · дополнительный опционный контекст</summary>
+      <p>Отдельный рынок Bybit. Концентрация гаммы без предположения о стороне дилеров. Не влияет на решения.</p>
+      <div id="bybit-gamma-plot"></div>
+    </details>
     <div class="panel-body" style="display: flex; flex-wrap: wrap; gap: 12px; padding: 12px;">
       <div class="canvas-holder gex-evol-holder" style="flex: 1 1 65%; min-width: 300px; height: 420px; position: relative;">
         <div id="gex-evol-canvas" style="width: 100%; height: 100%;"></div>
@@ -361,6 +366,11 @@
         <span class="badge" id="gamma-regime-gauge" style="display:none; margin-right: 8px;"></span>
         <span class="badge" id="iv-skew-momentum" style="display:none; margin-right: 8px;"></span>
         <span class="badge" id="iv-surface-status">○ ЗАГРУЗКА</span>
+        <select id="iv-source-select" aria-label="Источник IV Surface">
+          <option value="auto">Основной / резерв Bybit</option>
+          <option value="bybit">Bybit · отдельный контекст</option>
+        </select>
+        <span id="iv-source-label"></span>
       </div>
     </div>
     <div class="panel-body">

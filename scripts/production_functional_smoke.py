@@ -352,6 +352,15 @@ def verify(expected_sha: str) -> None:
     verify_ai_verdict()
     verify_macro_runtime()
 
+    bybit = assert_route("/api/market/bybit", timeout=5.0)
+    assert bybit.get("production_authority") is False, bybit
+    assert isinstance(bybit.get("quote"), dict) and isinstance(bybit.get("options"), dict), bybit
+    print("BYBIT PUBLIC STATUS " + json.dumps({
+        "instrument": bybit.get("instrument"), "quote": bybit["quote"].get("status"),
+        "quote_error": bybit["quote"].get("error"), "options": bybit["options"].get("status"),
+        "options_error": bybit["options"].get("error"), "active_price": bybit.get("active_price"),
+    }, ensure_ascii=False))
+
     paths = (
         "/api/state", "/api/validation", "/api/research/counterfactual",
         "/api/research/passive/status", "/api/research/passive/calibration",
