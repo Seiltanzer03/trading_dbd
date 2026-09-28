@@ -149,7 +149,8 @@ def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
     monkeypatch.setattr(smoke, "verify_macro_runtime", lambda: call_order.append("macro"))
 
     smoke.verify("fake")
-    assert call_order[:2] == ["ai", "macro"]
+    assert call_order[:2] == ["ai", "/api/market/bybit"]
+    assert call_order.index("/api/market/bybit") < call_order.index("macro")
     assert call_order.index("macro") < call_order.index("/api/research/passive/status")
     assert recorded_timeouts["/api/research/passive/status"] == smoke.PASSIVE_STATUS_TIMEOUT_SEC
     assert recorded_timeouts["/api/research/passive/edge"] == smoke.PASSIVE_EDGE_TIMEOUT_SEC
