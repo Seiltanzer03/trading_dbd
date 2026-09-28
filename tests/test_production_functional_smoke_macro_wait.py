@@ -49,7 +49,7 @@ def test_macro_refresh_in_progress_waits_for_existing_worker(monkeypatch):
     ]
 
     def _status(path: str, *, timeout: float = 5.0):
-        assert path == "/api/research/macro/status"
+        assert path == "/api/research/macro/numeric/status"
         assert timeout == 5.0
         return states.pop(0)
 

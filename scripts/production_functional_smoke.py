@@ -280,7 +280,7 @@ def _wait_for_macro_numeric_refresh(
     deadline = time.monotonic() + max(0.0, wait_sec)
     last_numeric: object = initial_body
     while time.monotonic() < deadline:
-        runtime = assert_route("/api/research/macro/status", timeout=5.0)
+        runtime = assert_route("/api/research/macro/numeric/status", timeout=5.0)
         assert isinstance(runtime, dict), runtime
         numeric = runtime.get("numeric") or {}
         assert isinstance(numeric, dict), numeric
