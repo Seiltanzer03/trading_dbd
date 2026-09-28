@@ -386,7 +386,7 @@ def verify(expected_sha: str) -> None:
             "mark_price": quote.get("mark_price"), "ts": quote.get("ts"),
         }, ensure_ascii=False))
         state = wait_for_live_state()
-        feeds = state.get("feeds") or {}
+        feeds = (state.get("tick") or {}).get("feeds") or {}
         proxy = feeds.get("proxy_price") or {}
         active = feeds.get("price") or {}
         qqq, perp = proxy.get("value"), quote.get("value")
