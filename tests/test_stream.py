@@ -5,7 +5,8 @@ import pytest
 
 from seiltanzer.config import Settings
 from seiltanzer.data.cache import DiskCache
-from seiltanzer.data.feeds import MarketData, _fetch_tradingview_ws_quote, _tv_frame
+from seiltanzer.data.feeds import (MarketData, _fetch_tradingview_quote,
+                                  _fetch_tradingview_ws_quote, _tv_frame)
 from seiltanzer.data.stream import StreamHub, parse_yaticker
 
 
@@ -17,22 +18,54 @@ def _yaticker(symbol: str, price: float) -> bytes:
     return bytes(out)
 
 
-def test_tradingview_snapshot_preserves_last_provider_tick(monkeypatch):
+def test_tradingview_anonymous_snapshot_waits_for_complete_fresh_tick(monkeypatch):
+    monkeypatch.delenv("TRADINGVIEW_AUTH_TOKEN", raising=False)
+    stamp = int(time.time())
+    class Socket:
+        def __init__(self):
+            self.sent = []
+            self.frames = ["session",
+                           _tv_frame("qsd", ["session", {"n": "OANDA:NAS100USD",
+                               "v": {"bid": 30165.0, "ask": 30167.0}}]),
+                           _tv_frame("qsd", ["session", {"n": "OANDA:NAS100USD",
+                               "v": {"lp": 30166.0, "lp_time": stamp,
+                                     "update_mode": "streaming"}}])]
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+        def send(self, frame): self.sent.append(frame)
+        def recv(self, **kwargs):
+            return self.frames.pop(0)
+    socket = Socket()
+    monkeypatch.setattr("websockets.sync.client.connect", lambda *args, **kwargs: socket)
+    result = _fetch_tradingview_quote("OANDA:NAS100USD")
+    assert result["ts"] == stamp
+    assert result["provider_timestamp_verified"] is True
+    assert result["bid"] == 30165 and result["ask"] == 30167
+    assert result["value"] == 30166
+    assert any("unauthorized_user_token" in frame for frame in socket.sent)
+    assert any('quote_add_symbols' in frame and 'force_permission' not in frame
+               for frame in socket.sent)
+
+
+def test_tradingview_rejects_stale_broker_tick(monkeypatch):
     stamp = int(time.time()) - 3600
     class Socket:
         def __enter__(self): return self
         def __exit__(self, *args): return None
-        def send(self, *args): pass
+        def send(self, frame): pass
         def recv(self, **kwargs):
             if not hasattr(self, "handshake"):
                 self.handshake = True
                 return "session"
-            return _tv_frame("qsd", ["session", {"n": "OANDA:NAS100USD",
-                "v": {"lp": 20000, "lp_time": stamp}}])
+            if not hasattr(self, "quote"):
+                self.quote = True
+                return _tv_frame("qsd", ["session", {"n": "OANDA:NAS100USD",
+                    "v": {"lp": 30166, "bid": 30165, "ask": 30167,
+                          "lp_time": stamp, "update_mode": "streaming"}}])
+            raise TimeoutError
     monkeypatch.setattr("websockets.sync.client.connect", lambda *args, **kwargs: Socket())
-    result = _fetch_tradingview_ws_quote("OANDA:NAS100USD")
-    assert result["ts"] == stamp
-    assert result["provider_timestamp_verified"] is True
+    with pytest.raises(RuntimeError, match="timeout"):
+        _fetch_tradingview_ws_quote("OANDA:NAS100USD")
 
 
 def test_parse_yaticker_extracts_id_and_price():

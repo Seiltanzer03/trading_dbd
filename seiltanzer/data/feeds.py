@@ -84,13 +84,11 @@ def _fetch_swissquote_quote(pair: str, timeout: float = 5.0) -> dict:
 
 
 def _fetch_tradingview_quote(symbol: str, timeout: float = 5.0) -> dict:
-    """Последняя цена конкретного broker CFD из TradingView scanner.
+    """Последняя цена конкретного broker CFD из TradingView quote stream.
 
     Это snapshot, а не выдуманная конверсия cash index. Символ включает
     поставщика (например OANDA:NAS100USD или FPMARKETS:GER40).
     """
-    if not os.environ.get("TRADINGVIEW_AUTH_TOKEN"):
-        raise RuntimeError("TRADINGVIEW_AUTH_TOKEN не задан; используется Yahoo fallback")
     return _fetch_tradingview_ws_quote(symbol, timeout)
 
 
@@ -125,7 +123,7 @@ def _tv_payloads(raw: str | bytes):
 
 
 def _fetch_tradingview_ws_quote(symbol: str, timeout: float = 5.0) -> dict:
-    """Одноразовый anonymous WebSocket snapshot конкретного broker symbol."""
+    """Одноразовый WebSocket snapshot конкретного broker symbol."""
     try:
         from websockets.sync.client import connect
     except ImportError as e:  # pragma: no cover — dependency обязательна в prod
@@ -146,9 +144,9 @@ def _fetch_tradingview_ws_quote(symbol: str, timeout: float = 5.0) -> dict:
             ws.send(_tv_frame("quote_set_fields", [session, "lp", "bid", "ask",
                                                      "lp_time", "update_mode",
                                                      "description"]))
-            ws.send(_tv_frame("quote_add_symbols", [session, symbol,
-                                                      {"flags": ["force_permission"]}]))
+            ws.send(_tv_frame("quote_add_symbols", [session, symbol]))
             ws.send(_tv_frame("quote_fast_symbols", [session, symbol]))
+            fields: dict = {}
             while time.monotonic() < deadline:
                 raw = ws.recv(timeout=max(0.1, deadline - time.monotonic()))
                 for payload in _tv_payloads(raw):
@@ -165,28 +163,32 @@ def _fetch_tradingview_ws_quote(symbol: str, timeout: float = 5.0) -> dict:
                     if item.get("n") != symbol:
                         continue
                     data = item.get("v") or {}
-                    value = float(data.get("lp"))
-                    if not math.isfinite(value) or value <= 0:
+                    if not isinstance(data, dict):
+                        continue
+                    fields.update(data)  # qsd may deliver bid/ask before lp_time.
+                    try:
+                        value = float(fields["lp"])
+                        bid = float(fields["bid"])
+                        ask = float(fields["ask"])
+                        provider_ts = float(fields["lp_time"])
+                    except (KeyError, TypeError, ValueError):
                         continue
                     now = time.time()
-                    try:
-                        provider_ts = float(data.get("lp_time"))
-                        if provider_ts > 1e11:  # Some transports encode milliseconds.
-                            provider_ts /= 1000
-                    except (TypeError, ValueError):
-                        provider_ts = 0.0
-                    verified = math.isfinite(provider_ts) and 0 < provider_ts <= now + 5
-                    result = {"value": value, "ts": provider_ts if verified else now,
-                              "provider_timestamp_verified": verified,
-                              "update_mode": data.get("update_mode"),
-                              "description": data.get("description"),
-                              "transport": "stream"}
-                    for key in ("bid", "ask"):
-                        raw_value = data.get(key)
-                        if (raw_value is not None and math.isfinite(float(raw_value))
-                                and float(raw_value) > 0):
-                            result[key] = float(raw_value)
-                    return result
+                    if provider_ts > 1e11:  # Some transports encode milliseconds.
+                        provider_ts /= 1000
+                    if (not all(math.isfinite(x) for x in (value, bid, ask, provider_ts))
+                            or value <= 0 or bid <= 0 or ask < bid):
+                        continue
+                    if not -5 <= now - provider_ts <= 30:
+                        continue
+                    mode = str(fields.get("update_mode") or "").lower()
+                    if "delayed" in mode or "endofday" in mode:
+                        continue
+                    return {"value": value, "bid": bid, "ask": ask,
+                            "ts": provider_ts, "provider_timestamp_verified": True,
+                            "update_mode": fields.get("update_mode"),
+                            "description": fields.get("description"),
+                            "transport": "stream"}
     except TimeoutError as e:
         raise RuntimeError(f"TradingView WebSocket timeout для {symbol}") from e
     raise RuntimeError(f"TradingView WebSocket не вернул {symbol}")
