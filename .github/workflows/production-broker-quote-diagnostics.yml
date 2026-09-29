@@ -44,8 +44,7 @@ jobs:
                       ('quote_create_session', [session]),
                       ('quote_set_fields', [session, 'lp', 'bid', 'ask',
                                             'lp_time', 'update_mode']),
-                      ('quote_add_symbols', [session, symbol,
-                                             {'flags': ['force_permission']}]),
+                      ('quote_add_symbols', [session, symbol]),
                       ('quote_fast_symbols', [session, symbol]),
                   ):
                       ws.send(frame(method, params))
@@ -103,7 +102,7 @@ jobs:
 
           try:
               scanner = urllib.request.Request(
-                  'https://scanner.tradingview.com/global/scan',
+                  'https://scanner.tradingview.com/forex/scan',
                   data=json.dumps({
                       'symbols': {'tickers': [symbol]},
                       'columns': ['close', 'bid', 'ask', 'update_mode', 'lp_time'],
