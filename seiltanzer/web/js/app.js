@@ -1164,18 +1164,22 @@ $('#btn-new-trade').addEventListener('click', () => {
   // совпадает с активным (для которого сейчас идёт фид цены). Иначе — пусто.
   const prefill = () => {
     const su = S.setups.find((s) => s.num === Number($('#f-setup').value));
-    const price = S.tick?.feeds?.price?.value;
+    const feed = S.tick?.feeds?.price;
+    const price = feed?.value;
     const sameInstr = su && su.instrument === S.tick?.instrument;
-    if (sameInstr && price) {
+    const usable = sameInstr && price && feed.status === 'live' && !feed.fallback;
+    const directBroker = feed?.source?.startsWith('TradingView ')
+      || feed?.source?.startsWith('Swissquote OTC');
+    if (usable) {
       $('#f-entry').value = price.toPrecision(8);
-      $('#f-reference').value = price.toPrecision(8);
+      $('#f-reference').value = directBroker ? price.toPrecision(8) : '';
       $('#f-rr-hint').textContent =
         `вход подставлен из фида ${su.instrument} (${price.toPrecision(8)}); тейк можно оставить пустым — рассчитаю из RR (правило 2.8)`;
     } else {
       $('#f-entry').value = '';
       $('#f-reference').value = '';
       $('#f-rr-hint').textContent = su
-        ? `инструмент сетапа — ${su.instrument}; нет живого фида для него, введите вход вручную. Тейк можно оставить пустым (рассчитаю из RR).`
+        ? `инструмент сетапа — ${su.instrument}; нет прямой свежей котировки. Введите вход по брокеру вручную; резерв Bybit ≈ не является ценой брокера.`
         : 'тейк можно оставить пустым — рассчитаю из целевого RR сетапа (правило 2.8)';
     }
   };

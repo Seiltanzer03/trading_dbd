@@ -33,6 +33,20 @@ from .g1_management_edge_frequency import current_edge_management_payload
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 
+
+def _validate_reference_source(market) -> None:
+    """Do not save a broker basis that the engine will immediately ignore."""
+    price = market.price
+    source = str(price.get("source") or "")
+    if price.get("fallback"):
+        raise ValueError("резервная цена Bybit не является котировкой брокера; basis сейчас недоступен")
+    if price.get("status") != "live" or price.get("fresh") is False:
+        raise ValueError("нет свежей котировки брокера; basis сейчас недоступен")
+    if market.instrument.tradingview_symbol and not source.startswith("TradingView "):
+        raise ValueError("нет прямой котировки брокера; basis по ориентиру сейчас недоступен")
+    if market.instrument.swissquote_pair and not source.startswith("Swissquote OTC"):
+        raise ValueError("нет прямой spot-котировки; basis по ориентиру сейчас недоступен")
+
 # The live tick remains frequent, but the complete /api/state payload is a
 # cached journal/ridge/setup snapshot. A short production refresh interval and
 # a post-build idle gap prevent SQLite/JSON work from retrying in a tight loop
@@ -824,6 +838,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reference = req.reference_price
             if reference is not None and (not math.isfinite(reference) or reference <= 0):
                 raise ValueError("текущая цена брокера должна быть положительным числом")
+            if reference is not None:
+                _validate_reference_source(engine.market)
             if reference is not None and raw_price is None:
                 raise ValueError(
                     "не удалось получить бесплатную котировку выбранного "
