@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import seiltanzer.ai_policy_v2 as policy_v2
 import seiltanzer.ai_policy_base as policy_base
 from seiltanzer.engine import Engine
+from seiltanzer.config import Settings
 
 
 def test_main_policy_run_reuses_engine_authoritative_path_bank(monkeypatch):
@@ -109,3 +110,28 @@ def test_active_stop_change_invalidates_execution_and_clock_banks(monkeypatch):
     clock = engine.authoritative_execution_mc(_cache_inputs(stop_r=0.2), purpose="live_clock")
     assert clock is not first
     assert len(calls) == 3
+
+
+def test_cone_clock_receives_managed_trade_stop_after_be(tmp_path, monkeypatch):
+    original_extract = policy_base.extract_policy_inputs
+    clock_trades = []
+
+    def capture_extract(tick):
+        if "prob" in tick and "cone" in tick and "ladder" in tick:
+            clock_trades.append(tick.get("trade"))
+        return original_extract(tick)
+
+    monkeypatch.setattr(policy_base, "extract_policy_inputs", capture_extract)
+    engine = Engine(Settings(demo=True, data_dir=str(tmp_path)))
+    try:
+        trade = engine.journal.open_trade(
+            3, "NAS100", "long", 21500, 21450, 21625)
+        engine.on_trade_opened(trade)
+        engine.journal.update_max_r(trade["id"], 1.6)
+        tick = engine.tick_payload()
+        assert tick["trade"]["position_state"]["active_stop_price"] == 21500
+        assert clock_trades
+        assert clock_trades[-1]["position_state"]["active_stop_price"] == 21500
+        assert tick["cone"]["first_touch_clock"]["risk_barrier_r"] == 0.0
+    finally:
+        engine.close()

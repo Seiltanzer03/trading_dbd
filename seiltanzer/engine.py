@@ -929,6 +929,7 @@ class Engine:
         from .ai_policy_base import extract_policy_inputs, first_touch_clock
         clock_inputs = extract_policy_inputs({
             "prob": prob, "cone": cone, "market": market, "ladder": ladder,
+            "trade": trade,
             "feeds": {"chain": {k: v for k, v in self.market.chain.items()
                                 if k != "metrics"}},
         })
