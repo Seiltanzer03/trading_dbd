@@ -668,7 +668,10 @@ class MarketData:
                     trade = r.json()[-1]
                 p = float(trade["p"])
                 tick_ts = float(trade["T"]) / 1000.0
-                if p <= 0 or not 0 <= now - tick_ts <= self.PRICE_IDLE_SEC:
+                received_at = time.time()
+                # The trade may occur while the HTTP request is in flight.
+                # Allow bounded exchange clock skew, but reject stale trades.
+                if p <= 0 or not -2 <= received_at - tick_ts <= self.PRICE_IDLE_SEC:
                     raise RuntimeError("Binance spot trade is stale or invalid")
                 self.price = _status_dict(
                     p, "live", tick_ts, source=f"Binance REST trade {binance_sym}")

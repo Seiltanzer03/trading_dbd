@@ -101,3 +101,37 @@ def test_crypto_rest_quote_is_exact_spot_trade_with_exchange_time(tmp_path, monk
         cache.close()
 
 
+def test_crypto_rest_accepts_trade_arriving_during_request(tmp_path, monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [{"p": "80000", "T": int(time.time() * 1000)}]
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, url, params):
+            time.sleep(0.02)
+            return Response()
+
+    monkeypatch.setattr("httpx.Client", Client)
+    cache = DiskCache(str(tmp_path / "cache.db"))
+    try:
+        md = MarketData(Settings(stream=False, data_dir=str(tmp_path)), cache)
+        md.set_instrument("BTCUSD")
+        md.refresh_price()
+        assert md.price["value"] == pytest.approx(80000)
+        assert md.price["status"] == "live"
+        assert md.price["provider_timestamp_verified"] is True
+    finally:
+        cache.close()
+
