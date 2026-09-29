@@ -46,6 +46,8 @@ def test_replica_progress_detects_rewrites_without_file_growth(tmp_path):
     replica.write_bytes(b'initial')
     first = module._replica_progress(os.getpid(), replica)
     replica.write_bytes(b'updated')
+    # Hosted filesystems can report identical mtimes for immediate rewrites.
+    os.utime(replica, ns=(first[2] + 1_000_000_000, first[2] + 1_000_000_000))
     second = module._replica_progress(os.getpid(), replica)
     assert first[1] == second[1]
     assert second[2] > first[2]
