@@ -638,8 +638,10 @@ class MarketData:
             if self.stream is not None:
                 sp = self.stream.fresh(binance_sym, max_age=8.0)
                 if sp is not None:
+                    tick_ts = (getattr(self.stream, "latest", {}).get(binance_sym)
+                               or (sp, now))[1]
                     self.price = _status_dict(
-                        sp, "live", now, source=f"Binance WS {binance_sym}")
+                        sp, "live", tick_ts, source=f"Binance WS {binance_sym}")
                     self.price.update({
                         "derived": False,
                         "instrument_type": "crypto_spot",
