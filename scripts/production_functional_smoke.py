@@ -122,6 +122,9 @@ def broker_bybit_observation(active: dict, quote: dict) -> dict:
     if (not all(math.isfinite(x) for x in (broker, perp, broker_ts, perp_ts))
             or min(broker, perp, broker_ts, perp_ts) <= 0):
         return {"status": "UNAVAILABLE", "reason": "invalid_quote_value_or_timestamp"}
+    now = time.time()
+    if any(not -5 <= now - ts <= 30 for ts in (broker_ts, perp_ts)):
+        return {"status": "UNAVAILABLE", "reason": "quote_stale"}
     skew = abs(broker_ts - perp_ts)
     if skew > 15:
         return {"status": "UNAVAILABLE", "reason": "quotes_not_simultaneous",

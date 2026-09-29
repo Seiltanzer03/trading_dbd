@@ -193,8 +193,9 @@ def test_nas100_comparison_reads_actual_tick_feeds(monkeypatch, capsys):
     assert row["qqq_perp_premium_pct"] == pytest.approx(100 * (740 / 738 - 1), abs=0.0001)
 
 
-def test_broker_bybit_observation_requires_direct_synchronized_broker_tick():
+def test_broker_bybit_observation_requires_direct_synchronized_broker_tick(monkeypatch):
     smoke = _load_script("production_functional_smoke")
+    monkeypatch.setattr(smoke.time, "time", lambda: 1005.0)
     broker = {"value": 30166.0, "ts": 1000.0, "status": "live",
               "source": "TradingView stream OANDA:NAS100USD", "instrument_type": "broker_cfd"}
     perp = {"value": 733.5, "ts": 1004.0, "status": "delayed", "symbol": "QQQUSDT"}
@@ -202,7 +203,8 @@ def test_broker_bybit_observation_requires_direct_synchronized_broker_tick():
     assert row["status"] == "PAIRED"
     assert row["broker_to_perp_ratio"] == pytest.approx(30166 / 733.5, abs=1e-8)
     assert smoke.broker_bybit_observation({**broker, "source": "stream ^NDX"}, perp)["status"] == "UNAVAILABLE"
-    assert smoke.broker_bybit_observation(broker, {**perp, "ts": 1020.0})["reason"] == "quotes_not_simultaneous"
+    assert smoke.broker_bybit_observation(broker, {**perp, "ts": 980.0})["reason"] == "quotes_not_simultaneous"
+    assert smoke.broker_bybit_observation(broker, {**perp, "ts": 950.0})["reason"] == "quote_stale"
 
 
 def test_ai_verdict_rechecks_snapshot_after_post(monkeypatch):
