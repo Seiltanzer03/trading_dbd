@@ -105,6 +105,18 @@ def test_extended_shadow_action_is_registered_and_manually_acknowledged(
     assert decision["authority"] == "AI_RISK_OVERLAY_EXTENDED"
     assert decision["automatic_execution_allowed"] is False
 
+    journal = client.app.state.engine.journal
+    stored = journal._conn.execute(
+        "SELECT review_id,production_policy,snapshot_json FROM decision_snapshots "
+        "ORDER BY recorded_ts DESC LIMIT 1").fetchone()
+    assert stored["production_policy"] == "TIGHTEN_STOP"
+    assert journal._conn.execute(
+        "SELECT review_id FROM management_decisions WHERE review_id=?",
+        (stored["review_id"],)).fetchone()[0] == stored["review_id"]
+    assert client.app.state.engine.position._conn.execute(
+        "SELECT review_id FROM llm_shadow_manual_actions WHERE action_id=?",
+        (action["action_id"],)).fetchone()[0] == stored["review_id"]
+
     acknowledged = client.post("/api/ai/decision/ack", json={
         "decision_id": decision["decision_id"],
         "trade_id": action["trade_id"],

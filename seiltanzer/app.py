@@ -993,6 +993,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             .get("management_decision"))
             try:
                 review_id = canonical_snapshot(snapshot)["review_id"]
+                # The review identity is frozen before provider output and manual
+                # action registration; the final persisted bytes still get their
+                # own independently verified content hash.
+                snapshot["review_id"] = review_id
             except Exception as exc:
                 log_ai_event(
                     req_id=req_id, trade_id=trade_id, stage="snapshot_error",

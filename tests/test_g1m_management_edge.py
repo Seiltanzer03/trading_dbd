@@ -225,6 +225,29 @@ def _runtime(tmp_path):
     return ManagementEdgeRuntime(engine)
 
 
+def test_extended_action_is_recorded_but_excluded_from_fixed_policy_edge(tmp_path):
+    runtime = _runtime(tmp_path)
+    review, _, snap = _insert_decision(runtime, _snapshot(policy="HOLD"))
+    snap["effective_management_decision"] = {
+        "policy": "TIGHTEN_STOP", "quant_baseline_policy": "HOLD"}
+    raw = _json(snap)
+    runtime._conn.execute(
+        "UPDATE decision_snapshots SET snapshot_json=?,snapshot_sha256=?,"
+        "production_policy=? WHERE review_id=?",
+        (raw, _sha_text(raw), "TIGHTEN_STOP", review))
+    runtime._conn.commit()
+    assert runtime.capture_new() == 1
+    obs = runtime.observations()["items"][0]
+    assert obs["production_policy"] == "TIGHTEN_STOP"
+    assert obs["policy_edge_eligible"] == 0
+    assert obs["exclusion_reason"] == "EXTENDED_POLICY_NOT_IN_FIXED_ACTION_SET"
+    _resolve(runtime, review, snap)
+    assert runtime._conn.execute(
+        "SELECT COUNT(*) FROM g1m_resolutions").fetchone()[0] == 0
+    assert runtime._conn.execute(
+        "SELECT COUNT(*) FROM g1m_contract_errors WHERE critical=1").fetchone()[0] == 0
+
+
 def test_policy_edge_and_actual_execution_are_separate(tmp_path):
     runtime = _runtime(tmp_path)
     review, decision, snap = _insert_decision(runtime, _snapshot(), status="executed")
