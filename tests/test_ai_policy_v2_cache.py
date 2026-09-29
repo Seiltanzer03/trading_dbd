@@ -127,6 +127,7 @@ def test_cone_clock_receives_managed_trade_stop_after_be(tmp_path, monkeypatch):
         trade = engine.journal.open_trade(
             3, "NAS100", "long", 21500, 21450, 21625)
         engine.on_trade_opened(trade)
+        engine.market.refresh_price()
         engine.journal.update_max_r(trade["id"], 1.6)
         tick = engine.tick_payload()
         assert tick["trade"]["position_state"]["active_stop_price"] == 21500
