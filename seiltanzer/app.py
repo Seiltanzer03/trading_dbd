@@ -106,15 +106,16 @@ def _refresh_management_decision(engine, snapshot: dict, trade: dict) -> dict:
 
 
 def _extended_manual_decision(base: dict, action: dict) -> dict:
-    """Offer one guarded manual action where the quantitative plan is HOLD."""
+    """Offer one quantified manual action while the strategy remains active."""
     if base.get("policy") != "HOLD" or base.get("manual_execution_required"):
         return base
-    if action.get("execution_status") != "pending_execution":
+    if (action.get("execution_status") != "pending_execution"
+            or action.get("production_authority") is not True):
         return base
     return {
         **action,
         "decision_id": action["action_id"],
-        "authority": "HUMAN_CONFIRMED_EXTENDED",
+        "authority": "AI_RISK_OVERLAY_EXTENDED",
         "fraction_semantics": "fraction_of_current_remaining_position",
         "incremental_close_fraction": 0.0,
         "remaining_fraction_before_action": base["remaining_fraction_before_action"],
@@ -1060,6 +1061,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "active_risk_barrier_breached")
                     and not decision.get("indicative_fallback_price")
                     and str(shadow.get("policy") or "") in EXTENDED_POLICIES
+                    and (shadow.get("quant_evaluation") or {}).get("status") == "eligible"
                 ):
                     registered = engine.position.register_shadow_action(
                         snapshot, review_id, active_trade, shadow)
@@ -1072,11 +1074,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             decision = _extended_manual_decision(decision, registered)
                             result["management_decision"] = decision
                             if decision.get("decision_id") == registered["action_id"]:
-                                result["verdict"] += (
-                                    "\n\n**РУЧНОЕ РАСШИРЕННОЕ ДЕЙСТВИЕ** — "
+                                result["verdict"] = (
+                                    "**РАСШИРЕННОЕ РЕШЕНИЕ · РУЧНОЕ ПОДТВЕРЖДЕНИЕ** — "
                                     + registered["instruction_ru"]
-                                    + ". Выполнить только вручную у брокера и затем подтвердить "
-                                    "кнопкой. Расчётный HOLD остаётся базовым планом до подтверждения."
+                                    + ". Контрфактический Expected/CVaR прошёл проверку; "
+                                    "ордер не создаётся автоматически. Выполните изменение у брокера "
+                                    "и подтвердите в терминале. До подтверждения действует "
+                                    "текущий стоп/БУ и лестница.\n\n"
+                                    + result["verdict"].replace(
+                                        "**ДЕЙСТВИЕ СЕЙЧАС**",
+                                        "**БАЗОВЫЙ ПЛАН ДО ПОДТВЕРЖДЕНИЯ**", 1)
                                 )
                 engine.journal.record_ai_verdict(
                     trade_id, snapshot,
@@ -1117,7 +1124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tick = engine.tick_payload()
             execution_price, execution_r = _acknowledged_execution(
                 trade, tick, req.execution_price)
-            if req.decision_id.startswith("shadow-action-"):
+            if req.decision_id.startswith(("shadow-action-", "management-action-")):
                 acknowledged = engine.position.acknowledge_shadow_action(
                     action_id=req.decision_id, trade=trade, executed=req.executed,
                     execution_price=execution_price, execution_r=execution_r)

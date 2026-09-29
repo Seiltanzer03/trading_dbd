@@ -18,6 +18,7 @@ from . import ai_provider_explanation as _provider
 from .llm_decision_shadow import (
     _disagreement_category,
     _extract_json_object,
+    finalize_extended_shadow,
     _hard_guard,
     _quant_policy,
     _validate_model_payload,
@@ -25,7 +26,6 @@ from .llm_decision_shadow import (
     record_shadow_decision,
 )
 from .llm_shadow_working_action import build_working_action
-from .extended_policy_evaluation import evaluate_extended_action
 
 
 REPORT_VERSION = "ai-runtime-report-v20"
@@ -353,17 +353,7 @@ def request_explanation_with_shadow(
         "counter_evidence": parsed_shadow["counter_evidence"],
     }
     shadow["working_action"] = build_working_action(authority, shadow)
-    if parsed_shadow["policy"] in (
-        "MOVE_TO_BE", "TRAIL_GAMMA_FLIP", "TIGHTEN_STOP", "EXTEND_TAKE",
-        "REDUCE_TAKE", "SCALE_OUT_ON_SPIKE", "TIME_STOP",
-    ):
-        evaluation = evaluate_extended_action(authority, shadow["working_action"])
-        shadow["quant_evaluation"] = evaluation
-        if evaluation["status"] != "eligible":
-            shadow["status"] = "blocked"
-            shadow["blocked_by_hard_guard"] = True
-            shadow["hard_guard_reasons"] = [evaluation["reason"]]
-            shadow["working_action"] = build_working_action(authority, shadow)
+    finalize_extended_shadow(authority, shadow)
     record_shadow_decision(shadow)
     combined = (
         deterministic.rstrip()

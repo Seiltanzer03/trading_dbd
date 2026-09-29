@@ -270,7 +270,7 @@ jobs:
                 if instrument.asset_class == 'crypto':
                     print('DIRECT_SOURCE=' + json.dumps({
                         'instrument': code, 'source': 'Binance spot',
-                        'note': 'separate live Binance/Deribit path'}, flush=True)
+                        'note': 'separate live Binance/Deribit path'}), flush=True)
                     continue
                 symbol = instrument.tradingview_symbol
                 pair = instrument.swissquote_pair

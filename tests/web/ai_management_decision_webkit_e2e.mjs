@@ -39,9 +39,9 @@ mountEdgeManagement(document.querySelector('#edge'),edge);
 mountManagementDecision(document.querySelector('#execution'),decision,post,
   result=>{window.__applied=result});
 mountShadowWorkingAction(document.querySelector('#shadow'),shadow,post);
-const extended={...decision,decision_id:'shadow-action-e2e',policy:'TIGHTEN_STOP',
+const extended={...decision,decision_id:'management-action-e2e',policy:'TIGHTEN_STOP',
   instruction_ru:'Подтянуть стоп к 107',quant_baseline_policy:'HOLD',
-  authority:'HUMAN_CONFIRMED_EXTENDED'};
+  authority:'AI_RISK_OVERLAY_EXTENDED'};
 mountManagementDecision(document.querySelector('#extended-execution'),extended,post);
 mountShadowWorkingAction(document.querySelector('#extended-shadow'),shadow,post,()=>{},extended);
 mountArmedShadowActions(document.querySelector('#armed'),[
@@ -92,7 +92,7 @@ await page.locator('#extended-execution input').fill('110');
 await page.locator('#extended-execution').getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).tap();
 const extendedCall=await page.evaluate(()=>window.__calls[1]);
 assert.equal(extendedCall.url,'/api/ai/decision/ack');
-assert.equal(extendedCall.payload.decision_id,'shadow-action-e2e');
+assert.equal(extendedCall.payload.decision_id,'management-action-e2e');
 assert.equal(extendedCall.payload.execution_price,110);
 await page.locator('#shadow').getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).tap();
 await page.getByText('Исполнение записано. Стоп: 107. Take: 130.').waitFor();

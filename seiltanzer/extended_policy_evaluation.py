@@ -49,7 +49,11 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
         return _blocked("CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT")
     price = (((manager.get("input_audit") or {}).get("rows") or {})
              .get("instrument_price") or {})
-    if price.get("available") is not True or price.get("production_authority") is False:
+    source = str(price.get("source") or "")
+    if (price.get("available") is not True
+            or price.get("production_authority") is False
+            or str(price.get("status") or "").lower() not in {"live", "ok"}
+            or source.startswith(("Bybit ", "yfinance "))):
         return _blocked("AUTHORITATIVE_INSTRUMENT_PRICE_UNAVAILABLE")
     reliability = ((((manager.get("evidence") or {}).get("data_quality") or {})
                     .get("reliability") or {}).get("level") or "").lower()
@@ -77,6 +81,9 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
     sign = 1.0 if stop < entry else -1.0
     risk = abs(entry - stop)
     params = action.get("parameters") or {}
+    if policy in {"TRAIL_GAMMA_FLIP", "TIGHTEN_STOP"} and params.get(
+        "anchor") == "ZERO_GAMMA":
+        return _blocked("GEX_CONTEXT_NOT_A_VERIFIED_EXECUTION_ANCHOR")
     target = _number(params.get("stop_price" if policy in STOP_POLICIES else "take_price"))
     if target is None:
         return _blocked("EXACT_TARGET_PRICE_UNAVAILABLE")

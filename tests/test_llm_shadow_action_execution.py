@@ -25,7 +25,9 @@ def _shadow(policy, parameters, instruction="Выполнить действие
         "status": "ok",
         "policy": policy,
         "confidence": 0.8,
-        "production_authority": False,
+        "production_authority": True,
+        "quant_evaluation": {"status": "eligible", "production_authority": True,
+                             "reason": "ROBUST_EXPECTED_GAIN_AND_CVAR_PASS"},
         "automatic_execution_allowed": False,
         "working_action": {
             "contract_version": "llm-shadow-manual-action-v1",
@@ -59,7 +61,7 @@ def test_confirmed_tighter_stop_is_durable_and_idempotent(tmp_path):
         _shadow("TIGHTEN_STOP", {"stop_price": 105.0, "anchor": "STRUCTURE"}),
     )
     assert action["execution_status"] == "pending_execution"
-    assert action["production_authority"] is False
+    assert action["production_authority"] is True
     result = ledger.acknowledge_shadow_action(
         action_id=action["action_id"], trade=trade, executed=True,
         execution_price=110.0, execution_r=1.0,
@@ -76,7 +78,7 @@ def test_confirmed_tighter_stop_is_durable_and_idempotent(tmp_path):
 
     reopened = PositionLedger(path)
     assert reopened.state(trade)["active_stop_price"] == 105.0
-    assert reopened.events(trade["id"])[-1]["source"] == "human_confirmed_llm_shadow"
+    assert reopened.events(trade["id"])[-1]["source"] == "human_confirmed_ai_extended"
     reopened.close()
 
 
