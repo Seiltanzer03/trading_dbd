@@ -25,7 +25,9 @@ def _shadow(policy, parameters, instruction="Выполнить действие
         "status": "ok",
         "policy": policy,
         "confidence": 0.8,
-        "production_authority": False,
+        "production_authority": True,
+        "quant_evaluation": {"status": "eligible", "production_authority": True,
+                             "reason": "ROBUST_EXPECTED_GAIN_AND_CVAR_PASS"},
         "automatic_execution_allowed": False,
         "working_action": {
             "contract_version": "llm-shadow-manual-action-v1",
@@ -59,7 +61,7 @@ def test_confirmed_tighter_stop_is_durable_and_idempotent(tmp_path):
         _shadow("TIGHTEN_STOP", {"stop_price": 105.0, "anchor": "STRUCTURE"}),
     )
     assert action["execution_status"] == "pending_execution"
-    assert action["production_authority"] is False
+    assert action["production_authority"] is True
     result = ledger.acknowledge_shadow_action(
         action_id=action["action_id"], trade=trade, executed=True,
         execution_price=110.0, execution_r=1.0,
@@ -76,7 +78,7 @@ def test_confirmed_tighter_stop_is_durable_and_idempotent(tmp_path):
 
     reopened = PositionLedger(path)
     assert reopened.state(trade)["active_stop_price"] == 105.0
-    assert reopened.events(trade["id"])[-1]["source"] == "human_confirmed_llm_shadow"
+    assert reopened.events(trade["id"])[-1]["source"] == "human_confirmed_ai_extended"
     reopened.close()
 
 
@@ -129,6 +131,11 @@ def test_armed_spike_fill_reduces_remaining_once(tmp_path):
         execution_price=110.0, execution_r=1.0,
     )
     assert ledger.state(trade)["remaining_position_fraction"] == 1.0
+    with pytest.raises(StaleDecisionError, match="spike trigger"):
+        ledger.acknowledge_shadow_action(
+            action_id=action["action_id"], trade=trade, executed=True,
+            execution_price=119.0, execution_r=1.9,
+        )
     ledger._event(trade=trade, event_type="MANUAL_REDUCTION", source="real_user_trade",
                   before=1.0, closed=0.5, after=0.5, active_stop=90.0)
     filled = ledger.acknowledge_shadow_action(
@@ -142,6 +149,22 @@ def test_armed_spike_fill_reduces_remaining_once(tmp_path):
         execution_price=120.0, execution_r=2.0,
     )["idempotent"] is True
     assert ledger.state(trade)["remaining_position_fraction"] == 0.4
+    ledger.close()
+
+
+def test_failed_publication_cannot_leave_pending_extended_action(tmp_path):
+    ledger = PositionLedger(str(tmp_path / "trades.db"))
+    trade = _trade()
+    action = _register(ledger, trade, _shadow("TIGHTEN_STOP", {
+        "stop_price": 95.0, "anchor": "TEST",
+    }))
+    ledger.cancel_unpublished_shadow_action(action["action_id"])
+    assert ledger.shadow_actions(trade["id"])[-1]["status"] == "publication_failed"
+    with pytest.raises(StaleDecisionError, match="publication_failed"):
+        ledger.acknowledge_shadow_action(
+            action_id=action["action_id"], trade=trade, executed=True,
+            execution_price=110.0, execution_r=1.0,
+        )
     ledger.close()
 
 

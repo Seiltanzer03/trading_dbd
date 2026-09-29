@@ -72,6 +72,20 @@ def test_canonical_snapshot_has_stable_content_hash_and_versions():
     assert first["simulator_version"] == "execution-simulator-f0-v1"
 
 
+def test_canonical_snapshot_preserves_frozen_review_and_extended_policy():
+    snapshot = _snapshot()
+    frozen_id = canonical_snapshot(snapshot)["review_id"]
+    snapshot["review_id"] = frozen_id
+    snapshot["effective_management_decision"] = {
+        "policy": "TIGHTEN_STOP", "quant_baseline_policy": "HOLD"}
+    record = canonical_snapshot(snapshot)
+    assert record["review_id"] == frozen_id
+    assert record["production_policy"] == "TIGHTEN_STOP"
+    assert record["snapshot_sha256"] != canonical_snapshot(_snapshot())["snapshot_sha256"]
+    with pytest.raises(ValueError, match="review_id mismatch"):
+        canonical_snapshot({**snapshot, "review_id": "review-incorrect"})
+
+
 def test_counterfactual_replay_uses_same_be_ladder_and_cost_contract():
     snapshot = _snapshot()
     path = [

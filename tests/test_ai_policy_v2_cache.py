@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import seiltanzer.ai_policy_v2 as policy_v2
 import seiltanzer.ai_policy_base as policy_base
 from seiltanzer.engine import Engine
+from seiltanzer.config import Settings
 
 
 def test_main_policy_run_reuses_engine_authoritative_path_bank(monkeypatch):
@@ -50,12 +51,13 @@ def test_main_policy_run_keeps_standalone_fallback(monkeypatch):
     assert policy_v2._main_policy_run(SimpleNamespace(), object()) is expected
 
 
-def _cache_inputs(*, r0=1.2345):
+def _cache_inputs(*, r0=1.2345, stop_r=0.0):
     return SimpleNamespace(
         r0=r0, T=2.5, sigma_R=0.8, drift_R=0.01, skew_R=-0.1,
         term_slope=0.0, horizon_minutes=600.0, max_r=r0,
         rungs=(1.0, 1.5, 2.0), rung_fraction=0.1, be_after=1.5,
         option_available=True,
+        stop_r=stop_r,
     )
 
 
@@ -84,3 +86,53 @@ def test_live_clock_seeds_exact_policy_cache_without_stale_bucket_reuse(monkeypa
     second = engine.authoritative_execution_mc(second_inputs)
     assert second is not first
     assert len(generated) == 2
+
+
+def test_active_stop_change_invalidates_execution_and_clock_banks(monkeypatch):
+    engine = object.__new__(Engine)
+    engine._execution_mc_cache_key = None
+    engine._execution_mc_cache = None
+    engine._live_clock_mc_cache_key = None
+    engine._live_clock_mc_cache = None
+    calls = []
+
+    def fake_simulate(inputs, **kwargs):
+        result = object()
+        calls.append((inputs.stop_r, result))
+        return result
+
+    monkeypatch.setattr(policy_base, "simulate_option_paths", fake_simulate)
+    first = engine.authoritative_execution_mc(_cache_inputs(stop_r=0.0), purpose="live_clock")
+    assert engine.authoritative_execution_mc(_cache_inputs(stop_r=0.0)) is first
+    tightened = engine.authoritative_execution_mc(_cache_inputs(stop_r=0.2))
+    assert tightened is not first
+    assert engine.authoritative_execution_mc(_cache_inputs(stop_r=0.2)) is tightened
+    clock = engine.authoritative_execution_mc(_cache_inputs(stop_r=0.2), purpose="live_clock")
+    assert clock is not first
+    assert len(calls) == 3
+
+
+def test_cone_clock_receives_managed_trade_stop_after_be(tmp_path, monkeypatch):
+    original_extract = policy_base.extract_policy_inputs
+    clock_trades = []
+
+    def capture_extract(tick):
+        if "prob" in tick and "cone" in tick and "ladder" in tick:
+            clock_trades.append(tick.get("trade"))
+        return original_extract(tick)
+
+    monkeypatch.setattr(policy_base, "extract_policy_inputs", capture_extract)
+    engine = Engine(Settings(demo=True, data_dir=str(tmp_path)))
+    try:
+        trade = engine.journal.open_trade(
+            3, "NAS100", "long", 21500, 21450, 21625)
+        engine.on_trade_opened(trade)
+        engine.market.refresh_price()
+        engine.journal.update_max_r(trade["id"], 1.6)
+        tick = engine.tick_payload()
+        assert tick["trade"]["position_state"]["active_stop_price"] == 21500
+        assert clock_trades
+        assert clock_trades[-1]["position_state"]["active_stop_price"] == 21500
+        assert tick["cone"]["first_touch_clock"]["risk_barrier_r"] == 0.0
+    finally:
+        engine.close()

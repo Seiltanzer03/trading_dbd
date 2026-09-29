@@ -353,7 +353,7 @@ class PositionLedger:
 
     def register_shadow_action(self, snapshot: dict, review_id: str,
                                trade: dict, shadow: dict) -> dict | None:
-        """Freeze one exact LLM extended action for optional manual execution."""
+        """Freeze an exact, independently risk-checked manual management action."""
         action = dict(shadow.get("working_action") or {})
         policy = str(action.get("policy") or "")
         if policy not in EXTENDED_POLICIES:
@@ -362,6 +362,10 @@ class PositionLedger:
                 or shadow.get("policy") != policy):
             return None
         if action.get("status") != "READY_FOR_MANUAL_CONFIRMATION":
+            return None
+        assessment = shadow.get("quant_evaluation") or {}
+        if assessment.get("status") != "eligible" or assessment.get(
+            "production_authority") is not True:
             return None
         confidence = _finite(action.get("confidence"))
         parameters = action.get("parameters")
@@ -391,7 +395,8 @@ class PositionLedger:
             "geometry_version": geometry_version,
             "execution_status": "pending_execution",
             "manual_execution_required": True,
-            "production_authority": False,
+            "production_authority": True,
+            "quant_evaluation": assessment,
             "automatic_execution_allowed": False,
         }
         raw = _json({
@@ -399,7 +404,7 @@ class PositionLedger:
             "policy": policy, "parameters": parameters,
             "geometry_version": geometry_version,
         })
-        action_id = "shadow-action-" + hashlib.sha256(raw.encode()).hexdigest()[:28]
+        action_id = "management-action-" + hashlib.sha256(raw.encode()).hexdigest()[:28]
         action_payload["action_id"] = action_id
         with self._lock, self._conn:
             self._conn.execute(
@@ -417,6 +422,15 @@ class PositionLedger:
                  _json(parameters), _json(action_payload)),
             )
         return action_payload
+
+    def cancel_unpublished_shadow_action(self, action_id: str) -> None:
+        """Drop a pending proposal if the corresponding AI journal write failed."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE llm_shadow_manual_actions SET status='publication_failed' "
+                "WHERE action_id=? AND status='pending_execution'",
+                (str(action_id),),
+            )
 
     def shadow_actions(self, trade_id: int) -> list[dict]:
         with self._lock:
@@ -487,6 +501,13 @@ class PositionLedger:
                 if not 0 < relative <= 1:
                     raise StaleDecisionError("invalid conditional close fraction")
                 if policy == "SCALE_OUT_ON_SPIKE":
+                    trigger = _finite(parameters.get("trigger_price"))
+                    direction = _direction(trade)
+                    if (trigger is None or
+                            (direction == "long" and price < trigger) or
+                            (direction == "short" and price > trigger) or
+                            direction not in {"long", "short"}):
+                        raise StaleDecisionError("broker fill did not reach the spike trigger")
                     armed = self._conn.execute(
                         "SELECT fraction_before FROM position_management_events "
                         "WHERE trade_id=? AND decision_id=? AND event_type='AI_SCALE_OUT_ARM'",
@@ -504,7 +525,10 @@ class PositionLedger:
                     trade=trade,
                     event_type=("AI_SCALE_OUT_FILL" if policy == "SCALE_OUT_ON_SPIKE"
                                 else "AI_TIME_STOP_FILL"),
-                    source="human_confirmed_llm_shadow", before=before,
+                    source=("human_confirmed_ai_extended" if bool(
+                        (json.loads(row["payload_json"] or "{}")).get(
+                            "production_authority")) else "human_confirmed_llm_shadow"),
+                    before=before,
                     closed=closed, after=after, review_id=row["review_id"],
                     decision_id=f"{action_id}:fill", execution_price=price,
                     execution_r=execution_r,
@@ -557,10 +581,12 @@ class PositionLedger:
                 raise StaleDecisionError("current execution price unavailable")
             event_type: str
             final_status = "executed"
+            authority = bool((json.loads(row["payload_json"] or "{}")).get(
+                "production_authority"))
             event_metadata = {
                 "policy": policy, "parameters": parameters,
-                "accepted_llm_shadow_action": True,
-                "production_authority": False,
+                "accepted_ai_extended_action": authority,
+                "production_authority": authority,
                 "broker_confirmed": True,
             }
             if policy in EXTENDED_STOP_POLICIES:
@@ -616,7 +642,8 @@ class PositionLedger:
 
             self._event(
                 trade=trade, event_type=event_type,
-                source="human_confirmed_llm_shadow", before=before, closed=0.0,
+                source=("human_confirmed_ai_extended" if authority
+                        else "human_confirmed_llm_shadow"), before=before, closed=0.0,
                 after=before, review_id=row["review_id"], decision_id=action_id,
                 execution_price=current_price, execution_r=execution_r,
                 active_stop=active_stop, take_price=active_take,

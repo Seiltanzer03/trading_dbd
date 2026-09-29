@@ -18,6 +18,7 @@ from typing import Any
 
 from .decision_research import POLICY_FRACTIONS
 from .execution_simulator import ExecutionSpec, replay_execution_path
+from .position_state import EXTENDED_POLICIES
 
 
 G1M_STAGE = "G.1-M"
@@ -369,7 +370,8 @@ class ManagementEdgeRuntime:
                         critical=True, review_id=review_id, trade_id=trade_id)
             return False
         production = str(source["production_policy"] or "HOLD")
-        if production not in ACTION_SET:
+        extended_policy = production in EXTENDED_POLICIES
+        if production not in ACTION_SET and not extended_policy:
             self._error(code="UNSUPPORTED_PRODUCTION_POLICY", detail=production,
                         critical=True, review_id=review_id, trade_id=trade_id)
             return False
@@ -386,7 +388,12 @@ class ManagementEdgeRuntime:
                   "LIVE_PROSPECTIVE" if captured >= self.activation_ts - 1e-9
                   else "RESEARCH_BACKFILL")
         exclusion = None
-        if remaining is None or not (0.0 <= remaining <= 1.0):
+        if extended_policy:
+            # An extended stop/take action has different path geometry from the
+            # fixed partial-close comparators. Retain the observation and its
+            # actual policy, but exclude it from their outcome attribution.
+            exclusion = "EXTENDED_POLICY_NOT_IN_FIXED_ACTION_SET"
+        elif remaining is None or not (0.0 <= remaining <= 1.0):
             exclusion = "INVALID_REMAINING_FRACTION"
         elif current_r is None:
             exclusion = "MISSING_T0_R"
@@ -647,7 +654,7 @@ class ManagementEdgeRuntime:
                 FROM g1m_management_observations g
                 JOIN decision_replays r ON r.review_id=g.review_id
                 LEFT JOIN g1m_resolutions z ON z.observation_id=g.observation_id
-                WHERE z.observation_id IS NULL
+                WHERE z.observation_id IS NULL AND g.policy_edge_eligible=1
                 ORDER BY r.resolved_ts ASC LIMIT ?
             """, (max(1, min(int(limit), 2000)),)).fetchall()
         resolved = 0

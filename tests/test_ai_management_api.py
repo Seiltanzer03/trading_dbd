@@ -66,11 +66,13 @@ def test_extended_shadow_action_is_registered_and_manually_acknowledged(
         return {
             "verdict": "test shadow action",
             "model": "test-provider",
-            "llm_shadow_decision": {
-                "status": "ok",
-                "policy": "TIGHTEN_STOP",
-                "confidence": 0.8,
-                "production_authority": False,
+                "llm_shadow_decision": {
+                    "status": "ok",
+                    "policy": "TIGHTEN_STOP",
+                    "confidence": 0.8,
+                    "production_authority": False,
+                    "quant_evaluation": {"status": "eligible", "production_authority": True,
+                                         "reason": "ROBUST_EXPECTED_GAIN_AND_CVAR_PASS"},
                 "automatic_execution_allowed": False,
                 "working_action": {
                     "contract_version": "llm-shadow-manual-action-v1",
@@ -92,14 +94,28 @@ def test_extended_shadow_action_is_registered_and_manually_acknowledged(
     assert response.status_code == 200
     body = response.json()
     action = body["llm_shadow_decision"]["working_action"]
-    assert action["action_id"].startswith("shadow-action-")
+    assert body["llm_shadow_decision"]["production_authority"] is True
+    assert action["action_id"].startswith("management-action-")
     assert action["execution_status"] == "pending_execution"
-    assert action["production_authority"] is False
+    assert action["production_authority"] is True
     decision = body["management_decision"]
     assert decision["policy"] == "TIGHTEN_STOP"
     assert decision["decision_id"] == action["action_id"]
     assert decision["quant_baseline_policy"] == "HOLD"
+    assert decision["authority"] == "AI_RISK_OVERLAY_EXTENDED"
     assert decision["automatic_execution_allowed"] is False
+
+    journal = client.app.state.engine.journal
+    stored = journal._conn.execute(
+        "SELECT review_id,production_policy,snapshot_json FROM decision_snapshots "
+        "ORDER BY recorded_ts DESC LIMIT 1").fetchone()
+    assert stored["production_policy"] == "TIGHTEN_STOP"
+    assert journal._conn.execute(
+        "SELECT review_id FROM management_decisions WHERE review_id=?",
+        (stored["review_id"],)).fetchone()[0] == stored["review_id"]
+    assert client.app.state.engine.position._conn.execute(
+        "SELECT review_id FROM llm_shadow_manual_actions WHERE action_id=?",
+        (action["action_id"],)).fetchone()[0] == stored["review_id"]
 
     acknowledged = client.post("/api/ai/decision/ack", json={
         "decision_id": decision["decision_id"],
@@ -113,3 +129,23 @@ def test_extended_shadow_action_is_registered_and_manually_acknowledged(
     assert result["execution_status"] == "executed"
     assert result["position_state"]["active_stop_type"] == "TIGHTENED"
     assert client.get("/api/position").json()["shadow_actions"][-1]["status"] == "executed"
+
+
+def test_unquantified_llm_action_cannot_replace_production_hold(client, monkeypatch):
+    monkeypatch.setattr("seiltanzer.app.request_verdict", lambda snapshot: {
+        "verdict": "Unverified candidate", "model": "test-provider",
+        "llm_shadow_decision": {
+            "status": "ok", "policy": "TIGHTEN_STOP", "confidence": .9,
+            "working_action": {
+                "status": "READY_FOR_MANUAL_CONFIRMATION", "policy": "TIGHTEN_STOP",
+                "confidence": .9, "parameters": {"stop_price": 1},
+                "manual_confirmation_required": True,
+                "automatic_execution_allowed": False,
+            },
+        },
+    })
+    response = client.post("/api/ai/verdict")
+    assert response.status_code == 200
+    assert response.json()["management_decision"]["policy"] in {
+        "HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
+    assert client.get("/api/position").json()["shadow_actions"] == []

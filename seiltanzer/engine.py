@@ -156,6 +156,7 @@ class Engine:
             round(float(inputs.rung_fraction), 6), round(float(inputs.be_after), 4),
             bool(inputs.option_available),
             bool(inputs.max_r >= inputs.be_after - 1e-12),
+            round(float(inputs.stop_r), 4),
         )
         live_key = (
             round(float(inputs.r0), 2), *policy_key[1:7],
@@ -928,6 +929,7 @@ class Engine:
         from .ai_policy_base import extract_policy_inputs, first_touch_clock
         clock_inputs = extract_policy_inputs({
             "prob": prob, "cone": cone, "market": market, "ladder": ladder,
+            "trade": trade,
             "feeds": {"chain": {k: v for k, v in self.market.chain.items()
                                 if k != "metrics"}},
         })

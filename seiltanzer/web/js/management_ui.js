@@ -239,12 +239,12 @@ export function mountManagementDecision(container, decision, post, onApplied = (
   title.textContent = 'ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ У БРОКЕРА';
   const instruction = document.createElement('div');
   instruction.className = 'ai-execution-instruction';
-  instruction.textContent = (decision.authority === 'HUMAN_CONFIRMED_EXTENDED'
-    ? 'Ручной вариант LLM (базовый план HOLD): ' : 'Решение ИИ: ') + decision.instruction_ru;
+  instruction.textContent = (decision.authority === 'AI_RISK_OVERLAY_EXTENDED'
+    ? 'Расширенное решение после проверки Expected/CVaR: ' : 'Решение ИИ: ') + decision.instruction_ru;
   const hint = document.createElement('div');
   hint.className = 'tiny dim';
   hint.textContent = 'Отметьте результат только после фактического действия у брокера. Повторное подтверждение этого же решения не требуется.';
-  const extended = decision.authority === 'HUMAN_CONFIRMED_EXTENDED';
+  const extended = decision.authority === 'AI_RISK_OVERLAY_EXTENDED';
   const priceLabel = document.createElement('label');
   priceLabel.textContent = 'Текущая цена у брокера: ';
   const priceInput = document.createElement('input');

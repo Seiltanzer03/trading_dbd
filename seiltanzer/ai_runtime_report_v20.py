@@ -18,6 +18,7 @@ from . import ai_provider_explanation as _provider
 from .llm_decision_shadow import (
     _disagreement_category,
     _extract_json_object,
+    finalize_extended_shadow,
     _hard_guard,
     _quant_policy,
     _validate_model_payload,
@@ -113,11 +114,14 @@ def _quality_lines(snapshot: dict) -> list[str]:
     operational = "PARTIAL" if partial else "FULL"
     detail = "; ".join(f"{key}={value}" for key, value in states.items())
     lines.insert(1, f"Операционная численная доступность: {operational}; {detail}.")
-    lines.insert(
-        2,
-        "12/12 означает, что все decision-family имеют определённый контракт/роль; "
-        "это НЕ означает, что каждая производная и каждая вероятность численно доступна в текущем snapshot.",
-    )
+    lines.insert(2, "Покрытие семейств означает наличие контракта и роли; "
+                 "НЕ означает численную доступность каждой производной и вероятности.")
+    geometry = snapshot.get("trade_geometry") or {}
+    entry = _number(geometry.get("entry"))
+    active = _number(geometry.get("active_risk_barrier"))
+    if entry is not None and active is not None and abs(entry - active) < 1e-8:
+        lines.insert(3, "Нулевой нижний исход HOLD в модели связан с активным БУ "
+                     "на цене входа; проскальзывание и издержки могут изменить фактический результат.")
     return lines
 
 
@@ -240,6 +244,69 @@ def _normalize_structured_report(text: str, snapshot: dict) -> str:
     return normalized
 
 
+def _control_summary(snapshot: dict[str, Any]) -> str:
+    """Server-verified facts; never publish unchecked provider prose as evidence."""
+    manager = snapshot.get("policy_manager") or {}
+    decision = manager.get("management_decision") or {}
+    name = str(decision.get("policy") or "UNAVAILABLE")
+    row = (manager.get("policies") or {}).get(name) or {}
+    expected = _policy_metric(row, "expected_final_r_net", "expected_final_r")
+    cvar = _policy_metric(row, "cvar10_r_net", "cvar10_r")
+    gate = manager.get("gate") or {}
+    reliability = (((manager.get("evidence") or {}).get("data_quality") or {})
+                   .get("reliability") or {})
+    availability = _operational_availability(snapshot)
+    number = lambda value: "нет расчёта" if value is None else f"{value:+.3f}R"
+    return (
+        f"Действующий план {name}; Expected {number(expected)}, CVaR10 {number(cvar)}. "
+        f"Gate: {gate.get('status') or 'не опубликован'}; надёжность данных: "
+        f"{reliability.get('level') or 'не опубликована'}. "
+        f"Execution-MC: {availability['execution_mc']}; геометрия сценариев: "
+        f"{availability['scenario_geometry']}. Модельный комментарий не меняет "
+        "рассчитанное действие; исполнение у брокера требует отдельного подтверждения."
+    )
+
+
+def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
+    manager = snapshot.get("policy_manager") or {}
+    arbiter = manager.get("management_arbiter") or {}
+    gate = manager.get("gate") or {}
+    rule = manager.get("selection_rule") or {}
+    combined_edge = (manager.get("combined_edge_soft_weight") or
+                     rule.get("combined_edge_soft_weight") or {})
+    exploratory = (manager.get("llm_edge_exploratory_weight") or
+                   rule.get("llm_edge_exploratory_weight") or {})
+    edge_weight = _number(combined_edge.get("weight_fraction"))
+    exploratory_weight = _number(exploratory.get("weight_fraction"))
+    if exploratory_weight is None:
+        exploratory_weight = _number(exploratory.get("component_weight_fraction"))
+    selected = (gate.get("degraded_authority_overlay") or {}).get("selected") or {}
+    llm = shadow.get("policy") or "UNAVAILABLE"
+    llm_role = ("проверенный кандидат для ручного подтверждения"
+                if shadow.get("production_authority") else "отдельное мнение; вес в арбитре 0")
+    return (
+        "**ВЕСА И РОЛИ РЕШЕНИЯ** —\n"
+        "Количественный счёт: Expected + 0.35 × CVaR10; при подтверждённом "
+        "AI overlay арбитр добавляет +0.015R приоритета. Это коэффициенты "
+        "кода, а не вероятности исхода.\n"
+        f"Структурный Active Edge и исторические LLM-гипотезы: мягкий общий вес "
+        f"{f'{edge_weight:.1%}' if edge_weight is not None else 'UNAVAILABLE'} "
+        f"(лимит 40%); исследовательский LLM-компонент "
+        f"{f'{exploratory_weight:.1%}' if exploratory_weight is not None else 'UNAVAILABLE'} "
+        "(лимит 15%). Они меняют только ранжирование прошедших hard CVaR "
+        "базовых политик и не меняют риск-порог.\n"
+        f"Арбитр: {arbiter.get('winner') or 'UNAVAILABLE'}; "
+        f"gate={gate.get('status') or 'UNAVAILABLE'}; "
+        f"degraded overlay={'выбран' if selected else 'не выбран'}. "
+        "Семейства подтверждений учитываются gate, а качество и свежесть "
+        "ограничивают их авторитет; производные одной опционной цепочки "
+        "не становятся независимыми голосами.\n"
+        f"LLM-разбор текущего снимка: {llm}; {llm_role}. Это отдельный голос "
+        "от исторических LLM-гипотез. Самооценка LLM не является "
+        "калиброванной вероятностью и не отменяет hard CVaR."
+    )
+
+
 def _provider_payload(content: str) -> tuple[str, dict[str, Any]]:
     payload = _extract_json_object(content)
     explanation = _provider._sanitize_explanation(payload.get("explanation_ru"))
@@ -304,7 +371,7 @@ def request_explanation_with_shadow(
         raise RuntimeError(f"OpenRouter connection failed: {type(exc).__name__}") from exc
 
     content = ((result.get("choices") or [{}])[0].get("message") or {}).get("content")
-    explanation, parsed_shadow = _provider_payload(content)
+    _explanation, parsed_shadow = _provider_payload(content)
     quant_policy = _quant_policy(authority)
     guard_ok, guard_reasons = _hard_guard(authority, parsed_shadow["policy"])
     disagreement_cat = _disagreement_category(parsed_shadow["policy"], quant_policy)
@@ -326,13 +393,17 @@ def request_explanation_with_shadow(
         "counter_evidence": parsed_shadow["counter_evidence"],
     }
     shadow["working_action"] = build_working_action(authority, shadow)
+    finalize_extended_shadow(authority, shadow)
     record_shadow_decision(shadow)
     combined = (
         deterministic.rstrip()
-        + "\n\n**LLM EXPLANATION · OPENROUTER** —\n"
-        + explanation
+        + "\n\n**ПРОВЕРЕННЫЙ ВЫВОД** —\n"
+        + _control_summary(authority)
     )
     combined = append_shadow_section(combined, shadow)
+    combined = combined.replace("\n\n**ПРОВЕРЕННЫЙ ВЫВОД**",
+                                "\n\n" + _decision_weights(authority, shadow)
+                                + "\n\n**ПРОВЕРЕННЫЙ ВЫВОД**", 1)
     violations = ai_verdict._validate_model_report(combined, authority)
     hard_violations = [
         violation for violation in violations

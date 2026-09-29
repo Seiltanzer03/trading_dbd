@@ -56,7 +56,7 @@ def test_quote_validates_listing_spread_and_preserves_server_time(monkeypatch):
     monkeypatch.setattr(client, "get", get)
     result = client.quote("XAU")
     assert result["value"] == 4000.5
-    assert result["ts"] == now
+    assert result["ts"] == pytest.approx(now, abs=1e-6, rel=0)
     assert result["index_price"] == 3999
     row["ask1Price"] = "5000"
     with pytest.raises(ValueError):

@@ -72,7 +72,8 @@ def canonical_snapshot(snapshot: dict) -> dict:
         raise ValueError("decision snapshot requires captured_ts and trade_id")
     validate_no_future_timestamps(snapshot, captured)
     manager = snapshot.get("policy_manager") or {}
-    decision = manager.get("management_decision") or {}
+    decision = (snapshot.get("effective_management_decision")
+                or manager.get("management_decision") or {})
     production = (
         decision.get("policy")
         or _at(manager, "recommendation", "policy")
@@ -85,7 +86,12 @@ def canonical_snapshot(snapshot: dict) -> dict:
     payload = json.dumps(
         snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    review_id = f"review-{int(trade_id)}-{int(captured * 1_000_000)}-{digest[:10]}"
+    review_prefix = f"review-{int(trade_id)}-{int(captured * 1_000_000)}-"
+    review_id = snapshot.get("review_id") or review_prefix + digest[:10]
+    if (not isinstance(review_id, str) or not review_id.startswith(review_prefix)
+            or len(review_id) != len(review_prefix) + 10
+            or any(char not in "0123456789abcdef" for char in review_id[-10:])):
+        raise ValueError("decision snapshot review_id mismatch")
     return {
         "schema_version": DECISION_SCHEMA_VERSION,
         "review_id": review_id, "trade_id": int(trade_id),
@@ -212,7 +218,8 @@ def counterfactual_replay(snapshot: dict, path_points: Iterable[dict]) -> dict:
     best = max(outcomes, key=lambda name: outcomes[name]["net_realized_r"])
     best_value = outcomes[best]["net_realized_r"]
     production = (
-        _at(manager, "management_decision", "policy")
+        _at(snapshot, "effective_management_decision", "policy")
+        or _at(manager, "management_decision", "policy")
         or _at(manager, "recommendation", "policy") or "HOLD")
     shadow = (
         _at(manager, "shadow_policy_contract", "new_candidate_policy")

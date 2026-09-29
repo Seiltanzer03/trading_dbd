@@ -251,7 +251,8 @@ def extract_policy_inputs(tick: dict) -> PolicyInputs:
 
 
 def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
-                          n_steps: int = 320, seed: int = 0xA17E) -> PathSimulation:
+                          n_steps: int = 320, seed: int = 0xA17E,
+                          paired_stable_stream: bool = False) -> PathSimulation:
     """Simulate the same option drivers used by the cone, retaining path events.
 
     The total variance is exactly ``sigma_R**2`` over the option horizon. Term
@@ -261,6 +262,8 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
     n_paths = max(int(n_paths), 300)
     n_steps = max(int(n_steps), 40)
     rng = np.random.default_rng(int(seed))
+    bridge_rng = (np.random.default_rng(int(seed) ^ 0xB21D63)
+                  if paired_stable_stream else None)
     r0 = min(max(inputs.r0, -1.0 + 1e-8), inputs.T - 1e-8)
     r = np.full(n_paths, r0, dtype=float)
     max_r = r.copy()
@@ -298,11 +301,22 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
     drift_step = inputs.drift_R / n_steps
 
     for step in range(n_steps):
+        # In a counterfactual pair, absorption at different take levels must
+        # not shift the random stream for every other path. Draw by stable
+        # path ID, including paths already absorbed in either variant.
+        path_noise = (rng.standard_normal(n_paths) if paired_stable_stream
+                      else None)
+        bridge_noise = (bridge_rng.random(n_paths) if bridge_rng is not None
+                        else None)
+        execution_noise = (execution_rng.random(n_paths)
+                           if paired_stable_stream else None)
         idx = np.flatnonzero(alive)
         if idx.size == 0:
             break
         prev = r[idx].copy()
-        z = _centered_skew_noise(rng.standard_normal(idx.size), inputs.skew_R)
+        z = _centered_skew_noise(
+            path_noise[idx] if path_noise is not None else rng.standard_normal(idx.size),
+            inputs.skew_R)
         cur = prev + drift_step + math.sqrt(float(var_steps[step])) * z
         r[idx] = cur
         max_r[idx] = np.maximum(max_r[idx], cur)
@@ -361,7 +375,8 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
         if inside.any():
             lo_p, up_p = _bridge_probs(prev[inside], cur[inside], -1.0, inputs.T,
                                         float(var_steps[step]))
-            u = rng.random(inside.sum())
+            u = (bridge_noise[idx[inside]] if bridge_noise is not None
+                 else rng.random(inside.sum()))
             bridge_stop = u < lo_p
             bridge_take = ~bridge_stop & (u < lo_p + up_p)
             ii = np.flatnonzero(inside)
@@ -434,7 +449,9 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
             p_stop = np.exp(
                 -2.0 * (prev[positions] - floors) * (cur[positions] - floors)
                 / max(float(var_steps[step]), 1e-12))
-            hit_managed_stop = execution_rng.random(bridge_candidates.size) < p_stop
+            u_stop = (execution_noise[bridge_candidates] if execution_noise is not None
+                      else execution_rng.random(bridge_candidates.size))
+            hit_managed_stop = u_stop < p_stop
             if hit_managed_stop.any():
                 target = bridge_candidates[hit_managed_stop]
                 exit_levels = floors[hit_managed_stop]

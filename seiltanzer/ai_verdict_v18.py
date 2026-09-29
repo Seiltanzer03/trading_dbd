@@ -147,7 +147,13 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
         # remain available through policy and validation APIs.
         manager.pop("raw_optimizer_stability", None)
         manager.pop("monte_carlo_validation", None)
-        manager.pop("scenario_geometry", None)
+        geometry = manager.get("scenario_geometry") or {}
+        manager["scenario_geometry"] = _small_row(geometry, (
+            "scenario_count", "next_rung_r", "p_next_rung_before_stop",
+            "rung_first_count", "p_stop_before_next_rung", "stop_first_count",
+            "p_unresolved_full_horizon", "unresolved_count", "resolved_count",
+            "full_horizon_minutes", "mean_event_minutes_given_resolved",
+        ))
         metric_history = snapshot.get("metric_history") or {}
         snapshot["metric_history"] = _small_row(
             metric_history, ("samples", "first_ts", "latest_ts", "status"))
@@ -167,6 +173,7 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
             "version", "management_decision", "recommendation", "policies",
             "selection_rule", "gate", "evidence", "inputs", "risk_constraint",
             "management_arbiter", "state_change_attribution", "input_audit",
+            "scenario_geometry",
             "option_derivative_state", "calibration_contract", "recalculation_triggers",
             "cancellation_boundary", "phase_e_authority_contract",
         )
@@ -215,6 +222,13 @@ def build_snapshot(engine) -> dict:
     """
     snapshot = _BASE_BUILD_SNAPSHOT(engine)
     manager = snapshot.get("policy_manager") or {}
+    clock = manager.get("first_touch_clock") or {}
+    if clock:
+        manager["first_touch_clock"] = _small_row(clock, (
+            "version", "available", "source", "reason", "path_count",
+            "horizon_minutes", "median_resolution_minutes", "median_status",
+            "survival_probability_horizon", "cause_probability_horizon",
+        ))
     # ``next_attempt_ts`` is scheduler output in the future, not information
     # observed from the market at capture time.  Persisting it in the immutable
     # research snapshot both adds no explanatory value and correctly trips the

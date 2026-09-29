@@ -230,7 +230,7 @@ def _disagreement_category(shadow_policy: str, quant_policy: str | None) -> str 
 
 
 def _hard_guard(snapshot: dict[str, Any], policy: str) -> tuple[bool, list[str]]:
-    """Fail closed against the published hard-risk/CVaR contract."""
+    """Check base feasible set; extended policies need a second path replay."""
     manager = snapshot.get("policy_manager") or {}
     rule = manager.get("selection_rule") or {}
     policies = manager.get("policies") or {}
@@ -242,8 +242,9 @@ def _hard_guard(snapshot: dict[str, Any], policy: str) -> tuple[bool, list[str]]
     floor = _number(rule.get("cvar_floor_r"))
 
     if policy in EXTENDED_DYNAMIC_POLICIES:
-        # Dynamic stop, take-profit and time-based policies do not widen the strategy stop;
-        # their tail downside risk is bounded by HOLD.
+        # This is only a preliminary HOLD feasibility check. Altering a stop,
+        # take or holding time can change the outcome distribution. The caller
+        # must also run finalize_extended_shadow below before publication.
         effective_base = "HOLD"
         row = policies.get(effective_base) if isinstance(policies, dict) else None
         cvar = _number((row or {}).get("cvar10_r")) if isinstance(row, dict) else None
@@ -274,6 +275,28 @@ def _hard_guard(snapshot: dict[str, Any], policy: str) -> tuple[bool, list[str]]
             reasons.append("POLICY_CVAR10_BELOW_HARD_FLOOR")
 
     return (not reasons), reasons
+
+
+def finalize_extended_shadow(snapshot: dict[str, Any], shadow: dict[str, Any]) -> dict[str, Any]:
+    """Block extended actions unless their own paths pass the quantitative gate."""
+    policy = shadow.get("policy")
+    if policy not in EXTENDED_DYNAMIC_POLICIES:
+        return shadow
+    from .extended_policy_evaluation import evaluate_extended_action
+    from .llm_shadow_working_action import build_working_action
+
+    evaluation = evaluate_extended_action(snapshot, shadow.get("working_action") or {})
+    shadow["quant_evaluation"] = evaluation
+    if evaluation["status"] != "eligible":
+        shadow["status"] = "blocked"
+        shadow["blocked_by_hard_guard"] = True
+        shadow["hard_guard_reasons"] = list(dict.fromkeys([
+            *(shadow.get("hard_guard_reasons") or []), evaluation["reason"]]))
+        shadow["working_action"] = build_working_action(snapshot, shadow)
+    else:
+        # Eligible paths alone do not constitute a registered trade decision.
+        shadow["quant_eligible_manual_candidate"] = True
+    return shadow
 
 
 def unavailable_shadow(snapshot: dict[str, Any], reason: str) -> dict[str, Any]:
@@ -386,6 +409,7 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
     from .llm_shadow_working_action import build_working_action
     result["working_action"] = build_working_action(snapshot, result)
+    finalize_extended_shadow(snapshot, result)
     record_shadow_decision(result)
     return result
 
@@ -422,7 +446,11 @@ def get_shadow_history(limit: int = 20) -> list[dict[str, Any]]:
 
 def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
     """Append one explicit research-only section to the human report."""
-    lines = [report.rstrip(), "", "**LLM SHADOW DECISION · БЕЗ PRODUCTION AUTHORITY** —"]
+    approved = shadow.get("production_authority") is True and bool(
+        (shadow.get("working_action") or {}).get("action_id"))
+    header = ("**РАСШИРЕННЫЙ МЕНЕДЖМЕНТ · РУЧНОЕ ПОДТВЕРЖДЕНИЕ** —"
+              if approved else "**LLM SHADOW DECISION · БЕЗ PRODUCTION AUTHORITY** —")
+    lines = [report.rstrip(), "", header]
     status = shadow.get("status")
     quant_policy = shadow.get("quant_policy") or "—"
     if status == "unavailable":
@@ -452,20 +480,37 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
         f"Quant: {quant_policy}. Независимый LLM: {policy}; confidence {confidence_text}; "
         f"с quant {agreement_text}; {guard}."
     )
+    lines.append("Confidence — самооценка модели, не калиброванная вероятность "
+                 "успеха сделки и не независимое подтверждение решения.")
+    if confidence is not None and confidence < 0.65:
+        lines.append("Низкая самооценка LLM: совпадение с quant не добавляет "
+                     "авторитета действующему плану.")
     if shadow.get("hard_guard_reasons"):
         lines.append("Hard guard: " + "; ".join(shadow["hard_guard_reasons"]) + ".")
+    evaluation = shadow.get("quant_evaluation") or {}
+    if evaluation:
+        lines.append(
+            "Расширенная политика: " + str(evaluation.get("status"))
+            + "; причина " + str(evaluation.get("reason"))
+            + (f"; ΔExpected {evaluation['expected_delta_vs_hold_r']:+.3f}R; "
+               f"нижняя 95% граница {evaluation['paired_delta_ci95_lower_r']:+.3f}R; "
+               f"gross CVaR10 worst seed {evaluation['worst_seed_cvar10_gross_r']:+.3f}R."
+               if all(key in evaluation for key in (
+                   "expected_delta_vs_hold_r", "paired_delta_ci95_lower_r",
+                   "worst_seed_cvar10_gross_r")) else ".")
+        )
     if shadow.get("reason_ru"):
-        lines.append("Почему LLM так решил: " + str(shadow["reason_ru"]))
+        lines.append("Непроверенный аргумент LLM: " + str(shadow["reason_ru"]))
     if shadow.get("key_evidence"):
-        lines.append("Ключевые аргументы LLM: " + " | ".join(shadow["key_evidence"]))
+        lines.append("Заявленные моделью аргументы: " + " | ".join(shadow["key_evidence"]))
     if shadow.get("counter_evidence"):
         lines.append("Контраргументы LLM: " + " | ".join(shadow["counter_evidence"]))
     action = shadow.get("working_action") or {}
     if action.get("status") == "READY_FOR_MANUAL_CONFIRMATION":
         lines.append("LLM ACTION VARIANT: " + str(action.get("instruction_ru") or policy) + ".")
-        lines.append(
-            "Это рабочий вариант только для ручного подтверждения: сервер сам ордер не создаёт."
-        )
+        lines.append("Кандидат прошёл отдельную проверку путей, Expected и CVaR; "
+                     "сервер сам ордер не создаёт. До подтверждения у брокера "
+                     "действует прежний стоп/БУ и лестница.")
     else:
         lines.append(
             "Вариант не готов к действию: " + str(action.get("reason") or "PARAMETERS_UNAVAILABLE")
