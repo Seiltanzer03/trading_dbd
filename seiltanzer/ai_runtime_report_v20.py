@@ -25,6 +25,7 @@ from .llm_decision_shadow import (
     record_shadow_decision,
 )
 from .llm_shadow_working_action import build_working_action
+from .extended_policy_evaluation import evaluate_extended_action
 
 
 REPORT_VERSION = "ai-runtime-report-v20"
@@ -113,11 +114,14 @@ def _quality_lines(snapshot: dict) -> list[str]:
     operational = "PARTIAL" if partial else "FULL"
     detail = "; ".join(f"{key}={value}" for key, value in states.items())
     lines.insert(1, f"Операционная численная доступность: {operational}; {detail}.")
-    lines.insert(
-        2,
-        "12/12 означает, что все decision-family имеют определённый контракт/роль; "
-        "это НЕ означает, что каждая производная и каждая вероятность численно доступна в текущем snapshot.",
-    )
+    lines.insert(2, "Покрытие семейств означает наличие контракта и роли; "
+                 "НЕ означает численную доступность каждой производной и вероятности.")
+    geometry = snapshot.get("trade_geometry") or {}
+    entry = _number(geometry.get("entry"))
+    active = _number(geometry.get("active_risk_barrier"))
+    if entry is not None and active is not None and abs(entry - active) < 1e-8:
+        lines.insert(3, "Нулевой нижний исход HOLD в модели связан с активным БУ "
+                     "на цене входа; проскальзывание и издержки могут изменить фактический результат.")
     return lines
 
 
@@ -240,6 +244,29 @@ def _normalize_structured_report(text: str, snapshot: dict) -> str:
     return normalized
 
 
+def _control_summary(snapshot: dict[str, Any]) -> str:
+    """Server-verified facts; never publish unchecked provider prose as evidence."""
+    manager = snapshot.get("policy_manager") or {}
+    decision = manager.get("management_decision") or {}
+    name = str(decision.get("policy") or "UNAVAILABLE")
+    row = (manager.get("policies") or {}).get(name) or {}
+    expected = _policy_metric(row, "expected_final_r_net", "expected_final_r")
+    cvar = _policy_metric(row, "cvar10_r_net", "cvar10_r")
+    gate = manager.get("gate") or {}
+    reliability = (((manager.get("evidence") or {}).get("data_quality") or {})
+                   .get("reliability") or {})
+    availability = _operational_availability(snapshot)
+    number = lambda value: "нет расчёта" if value is None else f"{value:+.3f}R"
+    return (
+        f"Действующий план {name}; Expected {number(expected)}, CVaR10 {number(cvar)}. "
+        f"Gate: {gate.get('status') or 'не опубликован'}; надёжность данных: "
+        f"{reliability.get('level') or 'не опубликована'}. "
+        f"Execution-MC: {availability['execution_mc']}; геометрия сценариев: "
+        f"{availability['scenario_geometry']}. Модельный комментарий не меняет "
+        "рассчитанное действие; исполнение у брокера требует отдельного подтверждения."
+    )
+
+
 def _provider_payload(content: str) -> tuple[str, dict[str, Any]]:
     payload = _extract_json_object(content)
     explanation = _provider._sanitize_explanation(payload.get("explanation_ru"))
@@ -304,7 +331,7 @@ def request_explanation_with_shadow(
         raise RuntimeError(f"OpenRouter connection failed: {type(exc).__name__}") from exc
 
     content = ((result.get("choices") or [{}])[0].get("message") or {}).get("content")
-    explanation, parsed_shadow = _provider_payload(content)
+    _explanation, parsed_shadow = _provider_payload(content)
     quant_policy = _quant_policy(authority)
     guard_ok, guard_reasons = _hard_guard(authority, parsed_shadow["policy"])
     disagreement_cat = _disagreement_category(parsed_shadow["policy"], quant_policy)
@@ -326,11 +353,22 @@ def request_explanation_with_shadow(
         "counter_evidence": parsed_shadow["counter_evidence"],
     }
     shadow["working_action"] = build_working_action(authority, shadow)
+    if parsed_shadow["policy"] in (
+        "MOVE_TO_BE", "TRAIL_GAMMA_FLIP", "TIGHTEN_STOP", "EXTEND_TAKE",
+        "REDUCE_TAKE", "SCALE_OUT_ON_SPIKE", "TIME_STOP",
+    ):
+        evaluation = evaluate_extended_action(authority, shadow["working_action"])
+        shadow["quant_evaluation"] = evaluation
+        if evaluation["status"] != "eligible":
+            shadow["status"] = "blocked"
+            shadow["blocked_by_hard_guard"] = True
+            shadow["hard_guard_reasons"] = [evaluation["reason"]]
+            shadow["working_action"] = build_working_action(authority, shadow)
     record_shadow_decision(shadow)
     combined = (
         deterministic.rstrip()
-        + "\n\n**LLM EXPLANATION · OPENROUTER** —\n"
-        + explanation
+        + "\n\n**ПРОВЕРЕННЫЙ ВЫВОД** —\n"
+        + _control_summary(authority)
     )
     combined = append_shadow_section(combined, shadow)
     violations = ai_verdict._validate_model_report(combined, authority)

@@ -452,12 +452,29 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
         f"Quant: {quant_policy}. Независимый LLM: {policy}; confidence {confidence_text}; "
         f"с quant {agreement_text}; {guard}."
     )
+    lines.append("Confidence — самооценка модели, не калиброванная вероятность "
+                 "успеха сделки и не независимое подтверждение решения.")
+    if confidence is not None and confidence < 0.65:
+        lines.append("Низкая самооценка LLM: совпадение с quant не добавляет "
+                     "авторитета действующему плану.")
     if shadow.get("hard_guard_reasons"):
         lines.append("Hard guard: " + "; ".join(shadow["hard_guard_reasons"]) + ".")
+    evaluation = shadow.get("quant_evaluation") or {}
+    if evaluation:
+        lines.append(
+            "Расширенная политика: " + str(evaluation.get("status"))
+            + "; причина " + str(evaluation.get("reason"))
+            + (f"; ΔExpected {evaluation['expected_delta_vs_hold_r']:+.3f}R; "
+               f"нижняя 95% граница {evaluation['paired_delta_ci95_lower_r']:+.3f}R; "
+               f"gross CVaR10 worst seed {evaluation['worst_seed_cvar10_gross_r']:+.3f}R."
+               if all(key in evaluation for key in (
+                   "expected_delta_vs_hold_r", "paired_delta_ci95_lower_r",
+                   "worst_seed_cvar10_gross_r")) else ".")
+        )
     if shadow.get("reason_ru"):
-        lines.append("Почему LLM так решил: " + str(shadow["reason_ru"]))
+        lines.append("Непроверенный аргумент LLM: " + str(shadow["reason_ru"]))
     if shadow.get("key_evidence"):
-        lines.append("Ключевые аргументы LLM: " + " | ".join(shadow["key_evidence"]))
+        lines.append("Заявленные моделью аргументы: " + " | ".join(shadow["key_evidence"]))
     if shadow.get("counter_evidence"):
         lines.append("Контраргументы LLM: " + " | ".join(shadow["counter_evidence"]))
     action = shadow.get("working_action") or {}

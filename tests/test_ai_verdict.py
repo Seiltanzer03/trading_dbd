@@ -97,6 +97,13 @@ def test_snapshot_contains_quant_policy_and_all_recent_metric_families(tmp_path)
             separators=(",", ":")).encode("utf-8"))
         assert size <= ai_verdict_v18.SNAPSHOT_TARGET_BYTES
         assert snapshot["snapshot_budget"]["final_bytes"] == size
+        geometry = snapshot["trade_geometry"]
+        if (manager.get("inputs") or {}).get("option_available"):
+            assert all(geometry.get(key) is not None for key in (
+                "take_first", "stop_or_be_first", "no_touch"))
+            assert abs(sum(float(geometry[key]) for key in (
+                "take_first", "stop_or_be_first", "no_touch")) - 1.0) < 1e-5
+        assert (manager.get("scenario_geometry") or {}).get("scenario_count", 0) > 0
         chain_trigger = (manager.get("recalculation_triggers") or {}).get("chain_refresh") or {}
         assert "next_attempt_ts" not in chain_trigger
         assert canonical_snapshot(snapshot)["trade_id"] == trade["id"]
