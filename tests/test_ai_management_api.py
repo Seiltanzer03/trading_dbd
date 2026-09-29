@@ -104,6 +104,8 @@ def test_extended_shadow_action_is_registered_and_manually_acknowledged(
     assert decision["quant_baseline_policy"] == "HOLD"
     assert decision["authority"] == "AI_RISK_OVERLAY_EXTENDED"
     assert decision["automatic_execution_allowed"] is False
+    assert body["edge_management"]["action_now"] == "TIGHTEN_STOP"
+    assert body["edge_management"]["instruction_ru"] == action["instruction_ru"]
 
     journal = client.app.state.engine.journal
     stored = journal._conn.execute(

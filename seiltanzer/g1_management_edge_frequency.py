@@ -190,7 +190,8 @@ def current_edge_management_payload(snapshot: Any) -> dict[str, Any]:
     active = _mapping(manager.get("active_edge_provisional_weight"))
     combined = _mapping(manager.get("combined_edge_soft_weight"))
     audit = _mapping(_at(manager, "selection_rule", "combined_edge_soft_weight"))
-    decision = _mapping(manager.get("management_decision"))
+    decision = _mapping(root.get("effective_management_decision")
+                        or manager.get("management_decision"))
     recommendation = _mapping(manager.get("recommendation"))
     score = _finite(combined.get("direction_score"))
     if score is None or abs(score) <= 1e-12:
