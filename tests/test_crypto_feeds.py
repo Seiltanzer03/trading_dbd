@@ -1,4 +1,5 @@
 import pytest
+import time
 
 from seiltanzer.config import Settings, get_instrument
 from seiltanzer.data.cache import DiskCache
@@ -62,5 +63,41 @@ def test_market_data_set_instrument_crypto(tmp_path):
     assert md.proxy_price["source"] == "direct scale (crypto native)"
     assert md.proxy_price["value"] == md.price["value"]
 
+
+def test_crypto_rest_quote_is_exact_spot_trade_with_exchange_time(tmp_path, monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [{"p": "123456.78", "T": int((time.time() - 2) * 1000)}]
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, url, params):
+            assert url.endswith("/aggTrades")
+            assert params == {"symbol": "BTCUSDT", "limit": 1}
+            return Response()
+
+    monkeypatch.setattr("httpx.Client", Client)
+    cache = DiskCache(str(tmp_path / "cache.db"))
+    try:
+        md = MarketData(Settings(stream=False, data_dir=str(tmp_path)), cache)
+        md.set_instrument("BTCUSD")
+        md.refresh_price()
+        assert md.price["value"] == pytest.approx(123456.78)
+        assert md.price["source"] == "Binance REST trade BTCUSDT"
+        assert md.price["instrument_type"] == "crypto_spot"
+        assert 1 <= time.time() - md.price["ts"] <= 8
+    finally:
+        cache.close()
 
 

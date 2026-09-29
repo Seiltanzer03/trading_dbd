@@ -1,5 +1,7 @@
 import struct
 import time
+import asyncio
+import json
 
 import pytest
 
@@ -87,6 +89,31 @@ def test_streamhub_fresh_window():
     assert hub.fresh("QQQ", max_age=8.0) == 500.0
     hub.latest["QQQ"] = (500.0, time.time() - 100)
     assert hub.fresh("QQQ", max_age=8.0) is None  # протухло
+
+
+def test_binance_combined_stream_uses_exchange_trade_time(monkeypatch):
+    hub = StreamHub([], ["BTCUSDT", "ETHUSDT"])
+    received = []
+
+    class Socket:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def __aiter__(self):
+            yield json.dumps({"stream": "btcusdt@trade", "data": {
+                "s": "BTCUSDT", "p": "80000.12",
+                "T": int((time.time() - 2) * 1000)}})
+            hub._stop = True
+
+    def connect(url, **kwargs):
+        received.append(url)
+        return Socket()
+
+    monkeypatch.setattr("websockets.connect", connect)
+    asyncio.run(hub._run_binance())
+    assert received == [
+        "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/ethusdt@trade"]
+    assert hub.fresh("BTCUSDT") == pytest.approx(80000.12)
+    assert 1 <= time.time() - hub.latest["BTCUSDT"][1] <= 8
 
 
 class _StubStream:
@@ -204,7 +231,7 @@ def test_gold_uses_direct_spot_quote_not_futures_stream(tmp_path, monkeypatch):
         monkeypatch.setattr(
             "seiltanzer.data.feeds._fetch_swissquote_quote",
             lambda pair: {"value": 4044.0, "bid": 4043.7, "ask": 4044.3,
-                          "ts": time.time()})
+                          "ts": time.time(), "provider_timestamp_verified": True})
         md.refresh_price()
         assert md.price["value"] == pytest.approx(4044.0)
         assert md.price["source"].startswith("Swissquote OTC XAU/USD")

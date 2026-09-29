@@ -80,7 +80,8 @@ def _fetch_swissquote_quote(pair: str, timeout: float = 5.0) -> dict:
     timestamps = [float(v.get("ts", 0)) / 1000 for v in payload if v.get("ts")]
     bid, ask = statistics.median(bids), statistics.median(asks)
     return {"value": (bid + ask) / 2, "bid": bid, "ask": ask,
-            "ts": max(timestamps) if timestamps else time.time()}
+            "ts": max(timestamps) if timestamps else time.time(),
+            "provider_timestamp_verified": bool(timestamps)}
 
 
 def _fetch_tradingview_quote(symbol: str, timeout: float = 5.0) -> dict:
@@ -637,11 +638,14 @@ class MarketData:
             if self.stream is not None:
                 sp = self.stream.fresh(binance_sym, max_age=8.0)
                 if sp is not None:
+                    tick_ts = (getattr(self.stream, "latest", {}).get(binance_sym)
+                               or (sp, now))[1]
                     self.price = _status_dict(
-                        sp, "live", now, source=f"Binance WS {binance_sym}")
+                        sp, "live", tick_ts, source=f"Binance WS {binance_sym}")
                     self.price.update({
                         "derived": False,
                         "instrument_type": "crypto_spot",
+                        "provider_timestamp_verified": hasattr(self.stream, "latest"),
                     })
                     self._annotate_freshness()
                     self.refresh_proxy_price()
@@ -649,30 +653,29 @@ class MarketData:
                     self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
                     return
 
-            # 2. REST fallback: Deribit Index или Binance REST
+            # 2. Exact Binance spot trade, with the exchange's trade timestamp.
+            # Deribit's USD index is a different instrument and must never be
+            # published as a live Binance USDT spot execution quote.
             if now - self._last_price_rest_attempt < self.settings.price_poll_sec:
                 return
             self._last_price_rest_attempt = now
             try:
-                curr = self.instrument.deribit_currency or "BTC"
-                fetcher = getattr(self, "_deribit_fetcher", None)
-                if fetcher is None:
-                    fetcher = DeribitFetcher()
-                    self._deribit_fetcher = fetcher
-                p = fetcher.fetch_index_price(curr)
-                if p is None or p <= 0:
-                    import httpx
-                    client = httpx.Client(timeout=4.0)
-                    r = client.get(f"https://api.binance.com/api/v3/ticker/price?symbol={binance_sym}")
-                    if r.status_code == 200:
-                        p = float(r.json().get("price", 0.0))
-                if p is None or p <= 0:
-                    raise RuntimeError("не удалось получить крипто-котировку с Deribit/Binance")
+                import httpx
+                with httpx.Client(timeout=4.0) as client:
+                    r = client.get("https://api.binance.com/api/v3/aggTrades",
+                                   params={"symbol": binance_sym, "limit": 1})
+                    r.raise_for_status()
+                    trade = r.json()[-1]
+                p = float(trade["p"])
+                tick_ts = float(trade["T"]) / 1000.0
+                if p <= 0 or not 0 <= now - tick_ts <= self.PRICE_IDLE_SEC:
+                    raise RuntimeError("Binance spot trade is stale or invalid")
                 self.price = _status_dict(
-                    p, "live", now, source=f"Binance/Deribit REST {binance_sym}")
+                    p, "live", tick_ts, source=f"Binance REST trade {binance_sym}")
                 self.price.update({
                     "derived": False,
                     "instrument_type": "crypto_spot",
+                    "provider_timestamp_verified": True,
                 })
                 self._annotate_freshness()
                 self.refresh_proxy_price()
@@ -728,13 +731,16 @@ class MarketData:
             try:
                 quote = _fetch_swissquote_quote(pair)
                 age = max(0.0, now - float(quote["ts"]))
-                status = "live" if age <= 30 else "delayed"
+                status = ("live" if quote.get("provider_timestamp_verified") is True
+                          and age <= 30 else "delayed")
                 self.price = _status_dict(
                     quote["value"], status, quote["ts"],
                     source=f"Swissquote OTC {pair} bid/ask")
                 self.price.update({"bid": quote["bid"], "ask": quote["ask"],
                                    "spread": quote["ask"] - quote["bid"],
-                                   "derived": False, "instrument_type": "spot_otc"})
+                                   "derived": False, "instrument_type": "spot_otc",
+                                   "provider_timestamp_verified": quote.get(
+                                       "provider_timestamp_verified", False)})
                 self._annotate_freshness()
                 self.intraday.append((now, quote["value"], 0.0))
                 self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]
