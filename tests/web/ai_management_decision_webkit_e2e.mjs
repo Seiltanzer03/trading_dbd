@@ -43,7 +43,9 @@ const extended={...decision,decision_id:'management-action-e2e',policy:'TIGHTEN_
   instruction_ru:'Подтянуть стоп к 107',quant_baseline_policy:'HOLD',
   authority:'AI_RISK_OVERLAY_EXTENDED'};
 mountManagementDecision(document.querySelector('#extended-execution'),extended,post);
-mountShadowWorkingAction(document.querySelector('#extended-shadow'),shadow,post,()=>{},extended);
+mountShadowWorkingAction(document.querySelector('#extended-shadow'),{
+  working_action:{...shadow.working_action,action_id:'management-action-e2e'},
+},post,()=>{},extended);
 mountArmedShadowActions(document.querySelector('#armed'),[
   {action_id:'shadow-action-armed',trade_id:7,policy:'SCALE_OUT_ON_SPIKE',status:'armed'},
 ],post);

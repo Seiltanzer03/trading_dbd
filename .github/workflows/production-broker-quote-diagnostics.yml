@@ -262,15 +262,52 @@ jobs:
           script: |
             cd /opt/seiltanzer
             .venv/bin/python - <<'PY'
-            import json, time
+            import json, time, urllib.request
             from seiltanzer.config import ALL_INSTRUMENTS
             from seiltanzer.data.feeds import _fetch_swissquote_quote, _fetch_tradingview_quote
 
+            references = {
+                'NAS100': ('TVC:NDX', 'cash_index'),
+                'SP500': ('TVC:SPX', 'cash_index'),
+                'US30': ('TVC:DJI', 'cash_index'),
+                'GER40': ('TVC:DEU40', 'cash_index'),
+                'UK100': ('TVC:UKX', 'cash_index'),
+                'JPY100': ('TVC:NI225', 'cash_index'),
+                'XAU': ('OANDA:XAUUSD', 'different_venue_spot'),
+                'XAG': ('OANDA:XAGUSD', 'different_venue_spot'),
+                'EURUSD': ('OANDA:EURUSD', 'different_venue_spot'),
+                'USDCAD': ('OANDA:USDCAD', 'different_venue_spot'),
+            }
+
             for code, instrument in ALL_INSTRUMENTS.items():
                 if instrument.asset_class == 'crypto':
-                    print('DIRECT_SOURCE=' + json.dumps({
-                        'instrument': code, 'source': 'Binance spot',
-                        'note': 'separate live Binance/Deribit path'}), flush=True)
+                    symbol = instrument.binance_symbol
+                    try:
+                        url = 'https://api.binance.com/api/v3/aggTrades?symbol=' + symbol + '&limit=1'
+                        with urllib.request.urlopen(url, timeout=7) as response:
+                            trade = json.load(response)[-1]
+                        age = round(time.time() - float(trade['T']) / 1000, 1)
+                        result = {'instrument': code, 'source': 'Binance spot ' + symbol,
+                                  'price': float(trade['p']), 'age_sec': age,
+                                  'fresh': -5 <= age <= 30,
+                                  'provider_timestamp_verified': True}
+                        try:
+                            reference = _fetch_tradingview_quote('BINANCE:' + symbol, timeout=7)
+                            skew = abs(float(trade['T']) / 1000 - float(reference['ts']))
+                            result['reference'] = {
+                                'source': 'TradingView BINANCE:' + symbol,
+                                'price': reference['value'],
+                                'timestamp_skew_sec': round(skew, 1),
+                                'difference_pct': round(
+                                    100 * (float(trade['p']) / reference['value'] - 1), 4),
+                                'paired_within_15s': skew <= 15,
+                            }
+                        except Exception as exc:
+                            result['reference_error'] = type(exc).__name__ + ': ' + str(exc)[:80]
+                    except Exception as exc:
+                        result = {'instrument': code, 'source': 'Binance spot ' + symbol,
+                                  'error': type(exc).__name__ + ': ' + str(exc)[:120]}
+                    print('DIRECT_SOURCE=' + json.dumps(result), flush=True)
                     continue
                 symbol = instrument.tradingview_symbol
                 pair = instrument.swissquote_pair
@@ -287,8 +324,25 @@ jobs:
                     result = {'instrument': code, 'source': source,
                               'price': quote['value'], 'age_sec': age,
                               'fresh': -5 <= age <= 30,
+                              'provider_timestamp_verified': quote.get('provider_timestamp_verified'),
                               'bid': quote['bid'], 'ask': quote['ask'],
                               'mode': quote.get('update_mode')}
+                    reference_symbol, reference_kind = references.get(code, (None, None))
+                    if reference_symbol:
+                        try:
+                            reference = _fetch_tradingview_quote(reference_symbol, timeout=7)
+                            skew = abs(float(quote['ts']) - float(reference['ts']))
+                            result['reference'] = {
+                                'source': reference_symbol, 'kind': reference_kind,
+                                'price': reference['value'],
+                                'timestamp_skew_sec': round(skew, 1),
+                                'difference_pct': round(
+                                    100 * (quote['value'] / reference['value'] - 1), 4),
+                                'paired_within_15s': skew <= 15,
+                                'note': 'cash index or another venue; basis is not a pricing error',
+                            }
+                        except Exception as exc:
+                            result['reference_error'] = type(exc).__name__ + ': ' + str(exc)[:80]
                 except Exception as exc:
                     result = {'instrument': code, 'source': symbol or pair,
                               'error': type(exc).__name__ + ': ' + str(exc)[:120]}
