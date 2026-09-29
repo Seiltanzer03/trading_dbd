@@ -71,13 +71,14 @@ def _initializing_materialized_lifecycle() -> dict[str, Any]:
 def publish_materialized_lifecycle_cache(runtime: Any, payload_json: str) -> None:
     """Atomically expose one committed serialized singleton to HTTP readers."""
     serialized = str(payload_json)
-    setattr(runtime, _MATERIALIZED_CACHE_ATTR, serialized)
     try:
         payload = json.loads(serialized)
     except (TypeError, ValueError, json.JSONDecodeError):
-        payload = _initializing_materialized_lifecycle()
+        payload = None
     if not isinstance(payload, dict):
         payload = _initializing_materialized_lifecycle()
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    setattr(runtime, _MATERIALIZED_CACHE_ATTR, serialized)
     # Keep status latency independent from the number and evidence size of
     # hypotheses in the full immutable lifecycle document.
     setattr(runtime, _MATERIALIZED_STATUS_CACHE_ATTR, {
@@ -105,12 +106,9 @@ def read_cached_materialized_status(runtime: Any) -> dict[str, Any]:
 def read_cached_materialized_lifecycle_json(runtime: Any) -> str:
     payload_json = getattr(runtime, _MATERIALIZED_CACHE_ATTR, None)
     if isinstance(payload_json, str):
-        try:
-            payload = json.loads(payload_json)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            payload = None
-        if isinstance(payload, dict):
-            return payload_json
+        # Publication validates and normalizes once; GET must never parse the
+        # potentially large immutable document on the trading API thread.
+        return payload_json
     return json.dumps(
         _initializing_materialized_lifecycle(),
         sort_keys=True,
