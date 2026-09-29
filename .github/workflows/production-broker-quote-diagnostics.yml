@@ -5,13 +5,82 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/production-broker-quote-diagnostics.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/production-broker-quote-diagnostics.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  anonymous-quote:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Check whether the public OANDA chart supplies a verifiable live tick
+        run: |
+          python -m pip install --quiet 'websockets>=12'
+          python - <<'PY'
+          import json, secrets, time
+          from websockets.sync.client import connect
+
+          symbol = 'OANDA:NAS100USD'
+          session = 'qs_' + secrets.token_hex(6)
+          def frame(method, params):
+              data = json.dumps({'m': method, 'p': params}, separators=(',', ':'))
+              return f'~m~{len(data.encode())}~m~{data}'
+
+          try:
+              with connect('wss://data.tradingview.com/socket.io/websocket',
+                           origin='https://data.tradingview.com',
+                           open_timeout=8, close_timeout=1) as ws:
+                  ws.recv(timeout=8)
+                  for method, params in (
+                      ('set_auth_token', ['unauthorized_user_token']),
+                      ('quote_create_session', [session]),
+                      ('quote_set_fields', [session, 'lp', 'bid', 'ask',
+                                            'lp_time', 'update_mode']),
+                      ('quote_add_symbols', [session, symbol,
+                                             {'flags': ['force_permission']}]),
+                      ('quote_fast_symbols', [session, symbol]),
+                  ):
+                      ws.send(frame(method, params))
+                  deadline = time.monotonic() + 15
+                  while time.monotonic() < deadline:
+                      raw = ws.recv(timeout=max(0.1, deadline-time.monotonic()))
+                      for part in raw.split('~m~'):
+                          if not part.startswith('{'):
+                              continue
+                          try:
+                              msg = json.loads(part)
+                          except ValueError:
+                              continue
+                          if msg.get('m') != 'qsd':
+                              continue
+                          item = (msg.get('p') or [None, {}])[1] or {}
+                          if item.get('n') != symbol:
+                              continue
+                          value = item.get('v') or {}
+                          if not isinstance(value, dict):
+                              continue
+                          print('ANONYMOUS_OANDA_FIELDS=' + json.dumps({
+                              'lp': value.get('lp'), 'bid': value.get('bid'),
+                              'ask': value.get('ask'), 'lp_time': value.get('lp_time'),
+                              'update_mode': value.get('update_mode'),
+                          }))
+                          stamp = float(value.get('lp_time') or 0)
+                          if stamp > 1e11:
+                              stamp /= 1000
+                          print('ANONYMOUS_OANDA_FRESH=' + str(
+                              bool(value.get('lp') and 0 <= time.time()-stamp <= 30)).lower())
+                          raise SystemExit(0)
+                  print('ANONYMOUS_OANDA_STATUS=NO_QUOTE')
+          except Exception as exc:
+              print('ANONYMOUS_OANDA_STATUS=' + type(exc).__name__)
+          PY
   broker-quote:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
