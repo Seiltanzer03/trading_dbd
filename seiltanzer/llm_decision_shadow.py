@@ -294,7 +294,8 @@ def finalize_extended_shadow(snapshot: dict[str, Any], shadow: dict[str, Any]) -
             *(shadow.get("hard_guard_reasons") or []), evaluation["reason"]]))
         shadow["working_action"] = build_working_action(snapshot, shadow)
     else:
-        shadow["production_authority"] = True
+        # Eligible paths alone do not constitute a registered trade decision.
+        shadow["quant_eligible_manual_candidate"] = True
     return shadow
 
 
@@ -445,7 +446,8 @@ def get_shadow_history(limit: int = 20) -> list[dict[str, Any]]:
 
 def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
     """Append one explicit research-only section to the human report."""
-    approved = (shadow.get("quant_evaluation") or {}).get("status") == "eligible"
+    approved = shadow.get("production_authority") is True and bool(
+        (shadow.get("working_action") or {}).get("action_id"))
     header = ("**РАСШИРЕННЫЙ МЕНЕДЖМЕНТ · РУЧНОЕ ПОДТВЕРЖДЕНИЕ** —"
               if approved else "**LLM SHADOW DECISION · БЕЗ PRODUCTION AUTHORITY** —")
     lines = [report.rstrip(), "", header]

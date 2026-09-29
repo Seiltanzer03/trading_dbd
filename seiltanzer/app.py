@@ -1067,12 +1067,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         snapshot, review_id, active_trade, shadow)
                     if registered is not None:
                         shadow = dict(shadow)
+                        shadow["production_authority"] = True
                         shadow["working_action"] = registered
                         result["llm_shadow_decision"] = shadow
                         snapshot["llm_shadow_decision"] = shadow
+                        from .llm_decision_shadow import append_shadow_section
+                        report = result["verdict"]
+                        marker = "\n\n**LLM SHADOW DECISION · БЕЗ PRODUCTION AUTHORITY**"
+                        if marker in report:
+                            report = report.split(marker, 1)[0]
+                            result["verdict"] = append_shadow_section(report, shadow)
                         if decision:
                             decision = _extended_manual_decision(decision, registered)
                             result["management_decision"] = decision
+                            snapshot["effective_management_decision"] = decision
                             if decision.get("decision_id") == registered["action_id"]:
                                 result["verdict"] = (
                                     "**РАСШИРЕННОЕ РЕШЕНИЕ · РУЧНОЕ ПОДТВЕРЖДЕНИЕ** — "

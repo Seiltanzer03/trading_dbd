@@ -267,6 +267,30 @@ def _control_summary(snapshot: dict[str, Any]) -> str:
     )
 
 
+def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
+    manager = snapshot.get("policy_manager") or {}
+    arbiter = manager.get("management_arbiter") or {}
+    gate = manager.get("gate") or {}
+    selected = (gate.get("degraded_authority_overlay") or {}).get("selected") or {}
+    llm = shadow.get("policy") or "UNAVAILABLE"
+    llm_role = ("проверенный кандидат для ручного подтверждения"
+                if shadow.get("production_authority") else "отдельное мнение; вес в арбитре 0")
+    return (
+        "**ВЕСА И РОЛИ РЕШЕНИЯ** —\n"
+        "Количественный счёт: Expected + 0.35 × CVaR10; при подтверждённом "
+        "AI overlay арбитр добавляет +0.015R приоритета. Это коэффициенты "
+        "кода, а не вероятности исхода.\n"
+        f"Арбитр: {arbiter.get('winner') or 'UNAVAILABLE'}; "
+        f"gate={gate.get('status') or 'UNAVAILABLE'}; "
+        f"degraded overlay={'выбран' if selected else 'не выбран'}. "
+        "Семейства подтверждений учитываются gate, а качество и свежесть "
+        "ограничивают их авторитет; производные одной опционной цепочки "
+        "не становятся независимыми голосами.\n"
+        f"LLM: {llm}; {llm_role}. Самооценка LLM не является "
+        "калиброванной вероятностью и не отменяет hard CVaR."
+    )
+
+
 def _provider_payload(content: str) -> tuple[str, dict[str, Any]]:
     payload = _extract_json_object(content)
     explanation = _provider._sanitize_explanation(payload.get("explanation_ru"))
@@ -361,6 +385,9 @@ def request_explanation_with_shadow(
         + _control_summary(authority)
     )
     combined = append_shadow_section(combined, shadow)
+    combined = combined.replace("\n\n**ПРОВЕРЕННЫЙ ВЫВОД**",
+                                "\n\n" + _decision_weights(authority, shadow)
+                                + "\n\n**ПРОВЕРЕННЫЙ ВЫВОД**", 1)
     violations = ai_verdict._validate_model_report(combined, authority)
     hard_violations = [
         violation for violation in violations
