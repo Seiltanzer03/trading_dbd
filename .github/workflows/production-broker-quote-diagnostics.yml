@@ -50,8 +50,13 @@ jobs:
                       ws.send(frame(method, params))
                   deadline = time.monotonic() + 15
                   observed = set()
+                  values = {}
+                  bid_ask_updates = []
                   while time.monotonic() < deadline:
-                      raw = ws.recv(timeout=max(0.1, deadline-time.monotonic()))
+                      try:
+                          raw = ws.recv(timeout=max(0.1, deadline-time.monotonic()))
+                      except TimeoutError:
+                          break
                       for part in raw.split('~m~'):
                           if not part.startswith('{'):
                               continue
@@ -71,18 +76,21 @@ jobs:
                           value = item.get('v') or {}
                           if not isinstance(value, dict):
                               continue
-                          print('ANONYMOUS_OANDA_FIELDS=' + json.dumps({
-                              'lp': value.get('lp'), 'bid': value.get('bid'),
-                              'ask': value.get('ask'), 'lp_time': value.get('lp_time'),
-                              'update_mode': value.get('update_mode'),
-                          }))
-                          stamp = float(value.get('lp_time') or 0)
-                          if stamp > 1e11:
-                              stamp /= 1000
-                          print('ANONYMOUS_OANDA_FRESH=' + str(
-                              bool(value.get('lp') and 0 <= time.time()-stamp <= 30)).lower())
-                          raise SystemExit(0)
-                  print('ANONYMOUS_OANDA_STATUS=NO_QUOTE')
+                          values.update(value)
+                          if 'bid' in value or 'ask' in value:
+                              bid_ask_updates.append([round(time.time(), 2),
+                                                      values.get('bid'), values.get('ask')])
+                  print('ANONYMOUS_OANDA_FIELDS=' + json.dumps({
+                      key: values.get(key) for key in
+                      ('lp', 'bid', 'ask', 'lp_time', 'update_mode')}))
+                  print('ANONYMOUS_OANDA_UPDATE_COUNT=' + str(len(bid_ask_updates)))
+                  print('ANONYMOUS_OANDA_DISTINCT_QUOTES=' + str(len({
+                      (row[1], row[2]) for row in bid_ask_updates})))
+                  stamp = float(values.get('lp_time') or 0)
+                  if stamp > 1e11:
+                      stamp /= 1000
+                  print('ANONYMOUS_OANDA_PROVIDER_TIME_FRESH=' + str(
+                      bool(stamp and 0 <= time.time()-stamp <= 30)).lower())
           except Exception as exc:
               print('ANONYMOUS_OANDA_STATUS=' + type(exc).__name__)
               print('ANONYMOUS_OANDA_MESSAGE_TYPES=' + json.dumps(sorted(locals().get('observed', []))))
