@@ -118,6 +118,20 @@ def test_functional_smoke_accepts_configured_required_new_resolved_t0(monkeypatc
         smoke.verify_edge_researcher()
 
 
+def test_edge_research_latency_gate_tolerates_one_outlier_but_not_two(monkeypatch):
+    smoke = _load_script("production_functional_smoke")
+    samples = iter([814.0, 61.0, 70.0])
+    monkeypatch.setattr(smoke, "request", lambda path, *, timeout:
+                        (200, {"status": "OK"}, next(samples)))
+    assert smoke._bounded_edge_research_route("/lifecycle") == {"status": "OK"}
+
+    samples = iter([814.0, 660.0, 70.0])
+    monkeypatch.setattr(smoke, "request", lambda path, *, timeout:
+                        (200, {"status": "OK"}, next(samples)))
+    with pytest.raises(AssertionError):
+        smoke._bounded_edge_research_route("/status")
+
+
 def test_functional_smoke_passive_routes_use_dedicated_timeouts(monkeypatch):
     smoke = _load_script("production_functional_smoke")
 
