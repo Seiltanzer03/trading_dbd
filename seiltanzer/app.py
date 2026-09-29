@@ -36,6 +36,8 @@ WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 
 def _validate_reference_source(market) -> None:
     """Do not save a broker basis that the engine will immediately ignore."""
+    if getattr(market, "demo", False):
+        return
     price = market.price
     source = str(price.get("source") or "")
     if price.get("fallback"):

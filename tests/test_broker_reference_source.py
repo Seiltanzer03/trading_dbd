@@ -25,3 +25,6 @@ def test_broker_basis_accepts_only_fresh_direct_quote():
     _validate_reference_source(market(direct))
     with pytest.raises(ValueError, match="свежей"):
         _validate_reference_source(market({**direct, "fresh": False}))
+    demo = market({"value": 30166, "status": "demo", "source": "demo GBM"})
+    demo.demo = True
+    _validate_reference_source(demo)
