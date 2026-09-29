@@ -24,6 +24,25 @@ SQLITE_VERSION = '3530400'
 SOURCE_SHA3 = 'b834d474b9b393d85a9e3ee4cc11f1329e007e9376a424ee740796f5c4bda3a8'
 AMALGAMATION_SHA3 = '628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed76285612227934e'
 MIN_FREE_BYTES = 1024 ** 3
+REPLICA_IDLE_SECONDS = 600
+REPLICA_MAX_SECONDS = 2700
+
+
+def _replica_progress(pid: int, output: Path) -> tuple[int, int, int]:
+    """Observe actual worker writes, including rewrites of a pre-sized DB file."""
+    written = 0
+    try:
+        for line in Path(f'/proc/{pid}/io').read_text().splitlines():
+            if line.startswith('write_bytes:'):
+                written = int(line.split(':', 1)[1])
+                break
+    except (OSError, ValueError):
+        pass
+    try:
+        stat = output.stat()
+        return written, stat.st_size, stat.st_mtime_ns
+    except OSError:
+        return written, 0, 0
 
 
 def _verified_archive(product: str, digest: str) -> zipfile.ZipFile:
@@ -136,6 +155,10 @@ def replicate_live(client, *, password: str, expected_sha: str,
                 raise RuntimeError('Uploaded SQLite executable checksum mismatch')
             _exec(client, shlex.quote(remote_wrapper) + ' --version', timeout=10)
             started = time.time()
+            clock_started = time.monotonic()
+            last_progress = clock_started
+            last_log = clock_started
+            observed = (0, 0, 0)
             process = subprocess.Popen(
                 [str(binary), f'root@{HOST}:{REMOTE_DATABASE}', str(output.resolve()),
                  '--exe', remote_wrapper, '--ssh', str(ssh), '-v'],
@@ -149,8 +172,21 @@ def replicate_live(client, *, password: str, expected_sha: str,
                         raise RuntimeError(f'Live SQLite replication failed: exit {status}')
                     break
                 except subprocess.TimeoutExpired:
-                    if time.time() - started > 1200:
-                        raise RuntimeError('Live SQLite replication exceeded 20 minutes')
+                    now = time.monotonic()
+                    progress = _replica_progress(process.pid, output)
+                    if progress != observed:
+                        observed = progress
+                        last_progress = now
+                    if now - last_log >= 60:
+                        print(f'LIVE_SQLITE_RSYNC_PROGRESS elapsed={int(now - clock_started)}s '
+                              f'idle={int(now - last_progress)}s '
+                              f'file_bytes={progress[1]} worker_write_bytes={progress[0]}',
+                              flush=True)
+                        last_log = now
+                    if now - clock_started > REPLICA_MAX_SECONDS:
+                        raise RuntimeError('Live SQLite replication exceeded 45 minutes')
+                    if now - last_progress > REPLICA_IDLE_SECONDS:
+                        raise RuntimeError('Live SQLite replication stalled for 10 minutes')
                     stats = json.loads(_exec(client, stat_command, timeout=10).strip())
                     if stats['free'] < MIN_FREE_BYTES:
                         raise RuntimeError('Aborting live replica: production WAL headroom exhausted')

@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 import sqlite3
 
@@ -38,3 +39,16 @@ def test_source_archive_checksum_rejected_before_compilation(monkeypatch):
     monkeypatch.setattr(module.urllib.request, 'urlopen', lambda *a, **k: io.BytesIO(b'wrong-source'))
     with pytest.raises(RuntimeError, match='checksum mismatch'):
         module._verified_archive('src', module.SOURCE_SHA3)
+
+
+def test_replica_progress_detects_rewrites_without_file_growth(tmp_path):
+    replica = tmp_path / 'replica.sqlite3'
+    replica.write_bytes(b'initial')
+    first = module._replica_progress(os.getpid(), replica)
+    replica.write_bytes(b'updated')
+    # Hosted filesystems can report identical mtimes for immediate rewrites.
+    os.utime(replica, ns=(first[2] + 1_000_000_000, first[2] + 1_000_000_000))
+    second = module._replica_progress(os.getpid(), replica)
+    assert first[1] == second[1]
+    assert second[2] > first[2]
+    assert module._replica_progress(os.getpid(), tmp_path / 'missing')[1:] == (0, 0)
