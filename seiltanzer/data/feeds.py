@@ -645,6 +645,7 @@ class MarketData:
                     self.price.update({
                         "derived": False,
                         "instrument_type": "crypto_spot",
+                        "provider_timestamp_verified": hasattr(self.stream, "latest"),
                     })
                     self._annotate_freshness()
                     self.refresh_proxy_price()
@@ -674,6 +675,7 @@ class MarketData:
                 self.price.update({
                     "derived": False,
                     "instrument_type": "crypto_spot",
+                    "provider_timestamp_verified": True,
                 })
                 self._annotate_freshness()
                 self.refresh_proxy_price()
