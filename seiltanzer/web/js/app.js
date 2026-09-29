@@ -38,6 +38,7 @@ initWavelet();
 
 const S = {
   tick: null,
+  instruments: {},
   ridge: null,
   setups: [],
   journal: [],
@@ -61,6 +62,7 @@ async function boot() {
   try {
     const st = await (await fetch('/api/state')).json();
     S.tick = st.tick;
+    S.instruments = st.instruments || {};
     S.ridge = st.ridge;
     S.setups = st.setups;
     S.journal = st.journal;
@@ -289,13 +291,18 @@ function handleLivePrice(t) {
   const experimental = !!t.feeds?.price?.driver_experimental;
   const stale = t.feeds?.price?.fresh === false;
   const idle = t.feeds?.price?.idle_secs;
+  const brokerIndexFallback = Boolean(S.instruments[t.instrument]?.broker_symbol)
+    && t.feeds.price.instrument_type === 'cash_index';
   $('#lat-price-instr').textContent = t.instrument
     + (t.feeds.price.fallback ? ' · BYBIT РЕЗЕРВ ≈' : '')
+    + (brokerIndexFallback ? ' · ИНДЕКС ≈' : '')
     + (streaming ? ' ⚡' : '')
     + (derived ? (experimental ? ' · EXP MAP' : ' · PROXY MAP') : '')
     + (stale ? ' · ⏸ ЗАКРЫТ' : '');
   $('#lat-price-instr').title = t.feeds.price.fallback
     ? `${t.feeds.price.source} — резервная расчётная цена; стоп/БУ проверять у брокера`
+    : brokerIndexFallback
+    ? `${t.feeds.price.source} — индексный ориентир, не котировка брокера; стоп/БУ проверять у брокера`
     : stale
     ? `нет свежих тиков ${fmtIdle(idle)} — рынок закрыт или неторговое время; цена = последняя котировка`
     : (derived
@@ -1150,7 +1157,7 @@ $('#btn-new-trade').addEventListener('click', () => {
       <label>Стоп</label><input id="f-stop" type="number" step="any">
       <label>Тейк</label><input id="f-take" type="number" step="any">
       <label>Цена у брокера сейчас</label><input id="f-reference" type="number" step="any">
-      <span class="form-hint">Необязательно. Для XAU/XAG/CFD укажите текущую котировку брокера: терминал зафиксирует basis к бесплатному фьючерсу и дальше будет двигать её живыми тиками.</span>
+      <span class="form-hint">Необязательно. Калибровка доступна только при свежей прямой котировке брокера в терминале. При резервном фиде оставьте поле пустым.</span>
       <span class="form-hint" id="f-rr-hint">тейк можно оставить пустым — рассчитаю из целевого RR сетапа (правило 2.8)</span>
       <label>Заметки</label><textarea id="f-notes"></textarea>
     </div>
@@ -1167,9 +1174,15 @@ $('#btn-new-trade').addEventListener('click', () => {
     const feed = S.tick?.feeds?.price;
     const price = feed?.value;
     const sameInstr = su && su.instrument === S.tick?.instrument;
-    const usable = sameInstr && price && feed.status === 'live' && !feed.fallback;
-    const directBroker = feed?.source?.startsWith('TradingView ')
-      || feed?.source?.startsWith('Swissquote OTC');
+    const instrument = S.instruments[su?.instrument] || {};
+    const brokerSymbol = instrument.broker_symbol;
+    const quotePair = instrument.quote_pair;
+    const directBroker = (Boolean(brokerSymbol)
+      && feed?.source?.startsWith('TradingView ')
+      && feed.source.includes(brokerSymbol))
+      || (Boolean(quotePair) && feed?.source?.startsWith('Swissquote OTC'));
+    const usable = sameInstr && price && feed.status === 'live' && !feed.fallback
+      && (!(brokerSymbol || quotePair) || directBroker);
     if (usable) {
       $('#f-entry').value = price.toPrecision(8);
       $('#f-reference').value = directBroker ? price.toPrecision(8) : '';
