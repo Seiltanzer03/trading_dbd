@@ -72,7 +72,8 @@ and removed during an explicit production-venv maintenance window, followed by
 `pip install -e ".[dev]"` and the full deploy gate. The deploy workflow does not
 blindly delete site-packages directories.
 
-`TRADINGVIEW_AUTH_TOKEN` remains an optional deployment secret. When absent,
-the direct TradingView fetch raises an explicit provenance error and the Yahoo
-fallback is labelled as indicative/broker fallback; it is not silently labelled
-authenticated or direct.
+`TRADINGVIEW_AUTH_TOKEN` remains optional. The public TradingView quote stream
+can provide a direct broker CFD bid/ask without it. The feed accepts only a
+complete, current provider timestamp and a non-delayed mode; unavailable or
+stale data falls back to a labelled indicative source. This does not grant
+trading authority to Yahoo or Bybit proxies.

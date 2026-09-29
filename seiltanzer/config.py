@@ -75,7 +75,7 @@ class Instrument:
     # Прямая OTC/spot-котировка Swissquote. Если задана, именно она является
     # отображаемой ценой; Yahoo-фьючерс используется только для истории.
     swissquote_pair: str | None = None
-    # Точный broker CFD symbol в бесплатном TradingView scanner snapshot.
+    # Точный broker CFD symbol в публичном TradingView quote stream.
     # Yahoo остаётся резервом и источником истории, но не основной ценой.
     tradingview_symbol: str | None = None
     # Crypto additions:

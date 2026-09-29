@@ -5,13 +5,127 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/production-broker-quote-diagnostics.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/production-broker-quote-diagnostics.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  anonymous-quote:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Check whether the public OANDA chart supplies a verifiable live tick
+        run: |
+          python -m pip install --quiet 'websockets>=12'
+          python - <<'PY'
+          import json, re, secrets, time, urllib.request
+          from websockets.sync.client import connect
+
+          symbol = 'OANDA:NAS100USD'
+          session = 'qs_' + secrets.token_hex(6)
+          def frame(method, params):
+              data = json.dumps({'m': method, 'p': params}, separators=(',', ':'))
+              return f'~m~{len(data.encode())}~m~{data}'
+
+          try:
+              print('ANONYMOUS_OANDA_STAGE=connecting', flush=True)
+              with connect('wss://data.tradingview.com/socket.io/websocket',
+                           origin='https://data.tradingview.com',
+                           open_timeout=8, close_timeout=1) as ws:
+                  print('ANONYMOUS_OANDA_STAGE=connected', flush=True)
+                  ws.recv(timeout=8)
+                  print('ANONYMOUS_OANDA_STAGE=handshake', flush=True)
+                  for method, params in (
+                      ('set_auth_token', ['unauthorized_user_token']),
+                      ('quote_create_session', [session]),
+                      ('quote_set_fields', [session, 'lp', 'bid', 'ask',
+                                            'lp_time', 'update_mode']),
+                      ('quote_add_symbols', [session, symbol]),
+                      ('quote_fast_symbols', [session, symbol]),
+                  ):
+                      ws.send(frame(method, params))
+                  deadline = time.monotonic() + 15
+                  observed = set()
+                  values = {}
+                  bid_ask_updates = []
+                  while time.monotonic() < deadline:
+                      try:
+                          raw = ws.recv(timeout=max(0.1, deadline-time.monotonic()))
+                      except TimeoutError:
+                          break
+                      for part in raw.split('~m~'):
+                          if not part.startswith('{'):
+                              continue
+                          try:
+                              msg = json.loads(part)
+                          except ValueError:
+                              continue
+                          observed.add(str(msg.get('m')))
+                          if msg.get('m') == 'critical_error':
+                              print('ANONYMOUS_OANDA_REJECTION=' +
+                                    json.dumps(msg.get('p'))[:250])
+                          if msg.get('m') != 'qsd':
+                              continue
+                          item = (msg.get('p') or [None, {}])[1] or {}
+                          if item.get('n') != symbol:
+                              continue
+                          value = item.get('v') or {}
+                          if not isinstance(value, dict):
+                              continue
+                          values.update(value)
+                          if 'bid' in value or 'ask' in value:
+                              bid_ask_updates.append([round(time.time(), 2),
+                                                      values.get('bid'), values.get('ask')])
+                  print('ANONYMOUS_OANDA_FIELDS=' + json.dumps({
+                      key: values.get(key) for key in
+                      ('lp', 'bid', 'ask', 'lp_time', 'update_mode')}))
+                  print('ANONYMOUS_OANDA_UPDATE_COUNT=' + str(len(bid_ask_updates)))
+                  print('ANONYMOUS_OANDA_DISTINCT_QUOTES=' + str(len({
+                      (row[1], row[2]) for row in bid_ask_updates})))
+                  stamp = float(values.get('lp_time') or 0)
+                  if stamp > 1e11:
+                      stamp /= 1000
+                  print('ANONYMOUS_OANDA_PROVIDER_TIME_FRESH=' + str(
+                      bool(stamp and 0 <= time.time()-stamp <= 30)).lower())
+          except Exception as exc:
+              print('ANONYMOUS_OANDA_STATUS=' + type(exc).__name__)
+              print('ANONYMOUS_OANDA_MESSAGE_TYPES=' + json.dumps(sorted(locals().get('observed', []))))
+
+          try:
+              with urllib.request.urlopen(
+                  'https://www.oanda.com/bvi-en/cfds/instruments/', timeout=12) as response:
+                  body = response.read(2_000_000).decode('utf-8', 'ignore')
+              phrase = re.search(r'US Nas 100.{0,200}', body, re.I)
+              print('PUBLIC_OANDA_PAGE=' + json.dumps({
+                  'bytes': len(body), 'has_nas100': bool(phrase),
+                  'excerpt': re.sub(r'<[^>]+>', ' ', phrase.group(0))[:180]
+                      if phrase else None,
+              }))
+          except Exception as exc:
+              print('PUBLIC_OANDA_PAGE_ERROR=' + type(exc).__name__)
+
+          try:
+              scanner = urllib.request.Request(
+                  'https://scanner.tradingview.com/forex/scan',
+                  data=json.dumps({
+                      'symbols': {'tickers': [symbol]},
+                      'columns': ['close', 'bid', 'ask', 'update_mode', 'lp_time'],
+                  }).encode(),
+                  headers={'Content-Type': 'application/json',
+                           'User-Agent': 'Mozilla/5.0'},
+              )
+              with urllib.request.urlopen(scanner, timeout=10) as response:
+                  data = json.load(response)
+              print('ANONYMOUS_SCANNER=' + json.dumps(data)[:600])
+          except Exception as exc:
+              print('ANONYMOUS_SCANNER_STATUS=' + type(exc).__name__)
+          PY
   broker-quote:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
@@ -67,4 +181,68 @@ jobs:
                     print('OANDA_BYBIT_PAIRED=UNAVAILABLE_NOT_SIMULTANEOUS')
             except Exception:
                 print('OANDA_BYBIT_PAIRED=UNAVAILABLE_BYBIT_API')
+            PY
+  vps-public-quote:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Probe anonymous OANDA chart stream from production network
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 90s
+          script: |
+            cd /opt/seiltanzer
+            .venv/bin/python - <<'PY'
+            import json, secrets, time
+            from websockets.sync.client import connect
+
+            symbol = 'OANDA:NAS100USD'
+            session = 'qs_' + secrets.token_hex(6)
+            def frame(method, params):
+                body = json.dumps({'m': method, 'p': params}, separators=(',', ':'))
+                return f'~m~{len(body.encode())}~m~{body}'
+            try:
+                with connect('wss://data.tradingview.com/socket.io/websocket',
+                             origin='https://data.tradingview.com',
+                             open_timeout=8, close_timeout=1) as ws:
+                    ws.recv(timeout=8)
+                    for method, params in (
+                        ('set_auth_token', ['unauthorized_user_token']),
+                        ('quote_create_session', [session]),
+                        ('quote_set_fields', [session, 'lp', 'bid', 'ask',
+                                              'lp_time', 'update_mode']),
+                        ('quote_add_symbols', [session, symbol]),
+                        ('quote_fast_symbols', [session, symbol]),
+                    ):
+                        ws.send(frame(method, params))
+                    fields = {}
+                    deadline = time.monotonic() + 12
+                    while time.monotonic() < deadline:
+                        raw = ws.recv(timeout=max(.1, deadline-time.monotonic()))
+                        for part in raw.split('~m~'):
+                            if not part.startswith('{'): continue
+                            try: msg = json.loads(part)
+                            except ValueError: continue
+                            if msg.get('m') != 'qsd': continue
+                            item = (msg.get('p') or [None, {}])[1] or {}
+                            if item.get('n') != symbol: continue
+                            fields.update(item.get('v') or {})
+                            if all(k in fields for k in ('lp', 'bid', 'ask', 'lp_time')):
+                                ts = float(fields['lp_time'])
+                                if ts > 1e11: ts /= 1000
+                                print('VPS_OANDA_PUBLIC=' + json.dumps({
+                                    'lp': fields['lp'], 'bid': fields['bid'],
+                                    'ask': fields['ask'],
+                                    'provider_age_sec': round(time.time()-ts, 2),
+                                    'update_mode': fields.get('update_mode'),
+                                }))
+                                raise SystemExit(0)
+                    print('VPS_OANDA_PUBLIC=INCOMPLETE')
+            except Exception as exc:
+                print('VPS_OANDA_PUBLIC_ERROR=' + type(exc).__name__)
             PY
