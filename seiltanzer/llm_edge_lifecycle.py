@@ -23,6 +23,7 @@ from .llm_edge_prospective_journal import (
 LIFECYCLE_CONTRACT_VERSION = "llm-edge-lifecycle-v1.4-contextual-weight"
 _MATERIALIZED_CACHE_ATTR = "_llm_edge_lifecycle_payload_json"
 _MATERIALIZED_STATUS_CACHE_ATTR = "_llm_edge_lifecycle_status"
+_MATERIALIZED_VALIDATED_ATTR = "_llm_edge_lifecycle_validated_json"
 
 _EXPLORATORY_POLICY_WEIGHT_CAP = 0.15
 _EXPLORATORY_POLICY_WEIGHT_REQUIRES = "LIMITED_AND_CURRENT_T0_MATCH"
@@ -79,6 +80,7 @@ def publish_materialized_lifecycle_cache(runtime: Any, payload_json: str) -> Non
         payload = _initializing_materialized_lifecycle()
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     setattr(runtime, _MATERIALIZED_CACHE_ATTR, serialized)
+    setattr(runtime, _MATERIALIZED_VALIDATED_ATTR, serialized)
     # Keep status latency independent from the number and evidence size of
     # hypotheses in the full immutable lifecycle document.
     setattr(runtime, _MATERIALIZED_STATUS_CACHE_ATTR, {
@@ -106,9 +108,15 @@ def read_cached_materialized_status(runtime: Any) -> dict[str, Any]:
 def read_cached_materialized_lifecycle_json(runtime: Any) -> str:
     payload_json = getattr(runtime, _MATERIALIZED_CACHE_ATTR, None)
     if isinstance(payload_json, str):
-        # Publication validates and normalizes once; GET must never parse the
-        # potentially large immutable document on the trading API thread.
-        return payload_json
+        # Normal publication validates once. If another writer bypassed it,
+        # retain the old fail-closed behavior for a corrupt cache value.
+        if payload_json is getattr(runtime, _MATERIALIZED_VALIDATED_ATTR, None):
+            return payload_json
+        try:
+            if isinstance(json.loads(payload_json), dict):
+                return payload_json
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
     return json.dumps(
         _initializing_materialized_lifecycle(),
         sort_keys=True,
