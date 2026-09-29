@@ -267,12 +267,12 @@ jobs:
             from seiltanzer.data.feeds import _fetch_swissquote_quote, _fetch_tradingview_quote
 
             references = {
-                'NAS100': ('^NDX', 'cash_index'),
-                'SP500': ('^GSPC', 'cash_index'),
-                'US30': ('^DJI', 'cash_index'),
-                'GER40': ('^GDAXI', 'cash_index'),
-                'UK100': ('^FTSE', 'cash_index'),
-                'JPY100': ('^N225', 'cash_index'),
+                'NAS100': ('FOREXCOM:NSXUSD', 'different_venue_cfd'),
+                'SP500': ('FOREXCOM:SPXUSD', 'different_venue_cfd'),
+                'US30': ('FOREXCOM:DJI', 'different_venue_cfd'),
+                'GER40': ('FOREXCOM:GER40', 'different_venue_cfd'),
+                'UK100': ('FOREXCOM:UKXGBP', 'different_venue_cfd'),
+                'JPY100': ('FOREXCOM:JP225', 'different_venue_cfd'),
                 'XAU': ('OANDA:XAUUSD', 'different_venue_spot'),
                 'XAG': ('OANDA:XAGUSD', 'different_venue_spot'),
                 'EURUSD': ('OANDA:EURUSD', 'different_venue_spot'),
@@ -330,20 +330,7 @@ jobs:
                     reference_symbol, reference_kind = references.get(code, (None, None))
                     if reference_symbol:
                         try:
-                            if reference_kind == 'cash_index':
-                                import yfinance as yf
-                                history = yf.Ticker(reference_symbol).history(
-                                    period='1d', interval='1m')
-                                if history.empty:
-                                    raise RuntimeError('cash index minute bar unavailable')
-                                reference = {
-                                    'value': float(history['Close'].iloc[-1]),
-                                    'ts': history.index[-1].timestamp(),
-                                }
-                                # A 1m bar's index is its opening time.
-                                reference['ts'] += 60
-                            else:
-                                reference = _fetch_tradingview_quote(reference_symbol, timeout=7)
+                            reference = _fetch_tradingview_quote(reference_symbol, timeout=7)
                             skew = abs(float(quote['ts']) - float(reference['ts']))
                             result['reference'] = {
                                 'source': reference_symbol, 'kind': reference_kind,
@@ -352,7 +339,7 @@ jobs:
                                 'difference_pct': round(
                                     100 * (quote['value'] / reference['value'] - 1), 4),
                                 'paired_within_15s': skew <= 15,
-                                'note': 'cash index or another venue; basis is not a pricing error',
+                                'note': 'different venue CFD or spot; basis is not necessarily a pricing error',
                             }
                         except Exception as exc:
                             result['reference_error'] = type(exc).__name__ + ': ' + str(exc)[:80]
