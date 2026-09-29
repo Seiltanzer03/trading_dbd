@@ -204,7 +204,7 @@ def test_gold_uses_direct_spot_quote_not_futures_stream(tmp_path, monkeypatch):
         monkeypatch.setattr(
             "seiltanzer.data.feeds._fetch_swissquote_quote",
             lambda pair: {"value": 4044.0, "bid": 4043.7, "ask": 4044.3,
-                          "ts": time.time()})
+                          "ts": time.time(), "provider_timestamp_verified": True})
         md.refresh_price()
         assert md.price["value"] == pytest.approx(4044.0)
         assert md.price["source"].startswith("Swissquote OTC XAU/USD")

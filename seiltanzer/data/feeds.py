@@ -727,7 +727,7 @@ class MarketData:
             try:
                 quote = _fetch_swissquote_quote(pair)
                 age = max(0.0, now - float(quote["ts"]))
-                status = ("live" if quote.get("provider_timestamp_verified") is not False
+                status = ("live" if quote.get("provider_timestamp_verified") is True
                           and age <= 30 else "delayed")
                 self.price = _status_dict(
                     quote["value"], status, quote["ts"],
