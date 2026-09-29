@@ -492,6 +492,13 @@ class PositionLedger:
                 if not 0 < relative <= 1:
                     raise StaleDecisionError("invalid conditional close fraction")
                 if policy == "SCALE_OUT_ON_SPIKE":
+                    trigger = _finite(parameters.get("trigger_price"))
+                    direction = _direction(trade)
+                    if (trigger is None or
+                            (direction == "long" and price < trigger) or
+                            (direction == "short" and price > trigger) or
+                            direction not in {"long", "short"}):
+                        raise StaleDecisionError("broker fill did not reach the spike trigger")
                     armed = self._conn.execute(
                         "SELECT fraction_before FROM position_management_events "
                         "WHERE trade_id=? AND decision_id=? AND event_type='AI_SCALE_OUT_ARM'",
@@ -509,7 +516,10 @@ class PositionLedger:
                     trade=trade,
                     event_type=("AI_SCALE_OUT_FILL" if policy == "SCALE_OUT_ON_SPIKE"
                                 else "AI_TIME_STOP_FILL"),
-                    source="human_confirmed_llm_shadow", before=before,
+                    source=("human_confirmed_ai_extended" if bool(
+                        (json.loads(row["payload_json"] or "{}")).get(
+                            "production_authority")) else "human_confirmed_llm_shadow"),
+                    before=before,
                     closed=closed, after=after, review_id=row["review_id"],
                     decision_id=f"{action_id}:fill", execution_price=price,
                     execution_r=execution_r,
