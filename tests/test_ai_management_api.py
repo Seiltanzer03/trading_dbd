@@ -70,7 +70,7 @@ def test_extended_shadow_action_is_registered_and_manually_acknowledged(
                     "status": "ok",
                     "policy": "TIGHTEN_STOP",
                     "confidence": 0.8,
-                    "production_authority": True,
+                    "production_authority": False,
                     "quant_evaluation": {"status": "eligible", "production_authority": True,
                                          "reason": "ROBUST_EXPECTED_GAIN_AND_CVAR_PASS"},
                 "automatic_execution_allowed": False,
@@ -94,6 +94,7 @@ def test_extended_shadow_action_is_registered_and_manually_acknowledged(
     assert response.status_code == 200
     body = response.json()
     action = body["llm_shadow_decision"]["working_action"]
+    assert body["llm_shadow_decision"]["production_authority"] is True
     assert action["action_id"].startswith("management-action-")
     assert action["execution_status"] == "pending_execution"
     assert action["production_authority"] is True
