@@ -1,8 +1,10 @@
 from types import SimpleNamespace
+from dataclasses import replace
 
 import numpy as np
 
 from seiltanzer import extended_policy_evaluation as evaluation
+from seiltanzer.ai_policy_base import PolicyInputs, simulate_option_paths
 
 
 def _snapshot():
@@ -61,3 +63,20 @@ def test_extended_action_rejects_no_benefit_even_if_cvar_passes(monkeypatch):
     row = evaluation.evaluate_extended_action(_snapshot(), _action())
     assert row["status"] == "blocked"
     assert row["reason"] == "NO_MATERIAL_ROBUST_EXPECTED_GAIN"
+
+
+def test_counterfactual_stream_keeps_unaffected_path_ids_identical():
+    data = _snapshot()["policy_manager"]["inputs"]
+    base = PolicyInputs(**{**data, "rungs": tuple(data["rungs"])})
+    low_take = simulate_option_paths(base, n_paths=600, n_steps=80, seed=71,
+                                     paired_stable_stream=True)
+    high_take = simulate_option_paths(replace(base, T=4.0), n_paths=600,
+                                      n_steps=80, seed=71, paired_stable_stream=True)
+    # Other paths may have exited at 3R in one replay. That must not change
+    # the random shocks assigned to the paths that never touched either take.
+    unaffected = (low_take.max_r < 2.9) & (high_take.max_r < 2.9)
+    assert unaffected.sum() > 100
+    np.testing.assert_array_equal(low_take.terminal[unaffected],
+                                  high_take.terminal[unaffected])
+    np.testing.assert_array_equal(low_take.strategy_outcome[unaffected],
+                                  high_take.strategy_outcome[unaffected])

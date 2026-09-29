@@ -107,8 +107,10 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
     cvars: list[float] = []
     means: list[float] = []
     for seed in (0xA17E, 0xB17E):
-        base = simulate_option_paths(inputs, n_paths=1200, n_steps=160, seed=seed)
-        variant = simulate_option_paths(alternate, n_paths=1200, n_steps=160, seed=seed)
+        base = simulate_option_paths(inputs, n_paths=1200, n_steps=160, seed=seed,
+                                     paired_stable_stream=True)
+        variant = simulate_option_paths(alternate, n_paths=1200, n_steps=160, seed=seed,
+                                        paired_stable_stream=True)
         if base.strategy_outcome is None or variant.strategy_outcome is None:
             return _blocked("EXECUTION_OUTCOMES_UNAVAILABLE")
         base_out = np.asarray(base.strategy_outcome, dtype=float)
@@ -138,7 +140,7 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
         "worst_seed_cvar10_gross_r": round(variant_cvar, 5),
         "hard_gross_floor_r": floor, "materiality_band_r": material,
         "broker_execution_cost_measured": costs.get("assumed") is False,
-        "method": "two_seed_paired_counterfactual_execution_paths",
+        "method": "two_seed_stable_path_id_paired_counterfactual_execution_paths",
     }
     if variant_cvar < floor - 1e-8:
         return _blocked("VARIANT_CVAR_BELOW_HARD_FLOOR", **evidence)
