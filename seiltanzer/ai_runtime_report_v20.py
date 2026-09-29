@@ -271,6 +271,15 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
     manager = snapshot.get("policy_manager") or {}
     arbiter = manager.get("management_arbiter") or {}
     gate = manager.get("gate") or {}
+    rule = manager.get("selection_rule") or {}
+    combined_edge = (manager.get("combined_edge_soft_weight") or
+                     rule.get("combined_edge_soft_weight") or {})
+    exploratory = (manager.get("llm_edge_exploratory_weight") or
+                   rule.get("llm_edge_exploratory_weight") or {})
+    edge_weight = _number(combined_edge.get("weight_fraction"))
+    exploratory_weight = _number(exploratory.get("weight_fraction"))
+    if exploratory_weight is None:
+        exploratory_weight = _number(exploratory.get("component_weight_fraction"))
     selected = (gate.get("degraded_authority_overlay") or {}).get("selected") or {}
     llm = shadow.get("policy") or "UNAVAILABLE"
     llm_role = ("проверенный кандидат для ручного подтверждения"
@@ -280,13 +289,20 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
         "Количественный счёт: Expected + 0.35 × CVaR10; при подтверждённом "
         "AI overlay арбитр добавляет +0.015R приоритета. Это коэффициенты "
         "кода, а не вероятности исхода.\n"
+        f"Структурный Active Edge и исторические LLM-гипотезы: мягкий общий вес "
+        f"{f'{edge_weight:.1%}' if edge_weight is not None else 'UNAVAILABLE'} "
+        f"(лимит 40%); исследовательский LLM-компонент "
+        f"{f'{exploratory_weight:.1%}' if exploratory_weight is not None else 'UNAVAILABLE'} "
+        "(лимит 15%). Они меняют только ранжирование прошедших hard CVaR "
+        "базовых политик и не меняют риск-порог.\n"
         f"Арбитр: {arbiter.get('winner') or 'UNAVAILABLE'}; "
         f"gate={gate.get('status') or 'UNAVAILABLE'}; "
         f"degraded overlay={'выбран' if selected else 'не выбран'}. "
         "Семейства подтверждений учитываются gate, а качество и свежесть "
         "ограничивают их авторитет; производные одной опционной цепочки "
         "не становятся независимыми голосами.\n"
-        f"LLM: {llm}; {llm_role}. Самооценка LLM не является "
+        f"LLM-разбор текущего снимка: {llm}; {llm_role}. Это отдельный голос "
+        "от исторических LLM-гипотез. Самооценка LLM не является "
         "калиброванной вероятностью и не отменяет hard CVaR."
     )
 
