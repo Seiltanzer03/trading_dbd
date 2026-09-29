@@ -122,7 +122,9 @@ class StreamHub:
             return
         import json  # noqa: PLC0415
         streams = "/".join(f"{s.lower()}@trade" for s in self.binance_symbols)
-        url = f"{BINANCE_WS_URL}/{streams}"
+        # Multiple raw stream names under /ws/ are not a combined subscription.
+        # Binance wraps combined events in {stream, data}.
+        url = f"{BINANCE_WS_URL.replace('/ws', '/stream?streams=')}{streams}"
         backoff = 2.0
         while not self._stop:
             try:
@@ -132,13 +134,15 @@ class StreamHub:
                     log.info("Binance WS стрим подключён: %s", ",".join(self.binance_symbols))
                     async for raw in ws:
                         try:
-                            data = json.loads(raw)
+                            packet = json.loads(raw)
+                            data = packet.get("data", packet)
                             sym = data.get("s", "").upper()
                             price_str = data.get("p")
                             if sym and price_str:
                                 p = float(price_str)
-                                if p > 0:
-                                    self.latest[sym] = (p, time.time())
+                                trade_ts = float(data.get("T") or 0) / 1000
+                                if p > 0 and 0 <= time.time() - trade_ts <= 30:
+                                    self.latest[sym] = (p, trade_ts)
                         except Exception:
                             pass
             except asyncio.CancelledError:

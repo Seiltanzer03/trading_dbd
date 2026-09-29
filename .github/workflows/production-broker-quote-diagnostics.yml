@@ -246,3 +246,125 @@ jobs:
             except Exception as exc:
                 print('VPS_OANDA_PUBLIC_ERROR=' + type(exc).__name__)
             PY
+  instrument-matrix:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - name: Probe every configured direct CFD and spot source from production network
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 3m
+          script: |
+            cd /opt/seiltanzer
+            .venv/bin/python - <<'PY'
+            import json, time, urllib.request
+            from seiltanzer.config import ALL_INSTRUMENTS
+            from seiltanzer.data.feeds import _fetch_swissquote_quote, _fetch_tradingview_quote
+
+            references = {
+                'NAS100': ('FOREXCOM:NSXUSD', 'different_venue_cfd'),
+                'SP500': ('FOREXCOM:SPXUSD', 'different_venue_cfd'),
+                'US30': ('FOREXCOM:DJI', 'different_venue_cfd'),
+                'GER40': ('FOREXCOM:GER40', 'different_venue_cfd'),
+                'UK100': ('FOREXCOM:UKXGBP', 'different_venue_cfd'),
+                'JPY100': ('FOREXCOM:JP225', 'different_venue_cfd'),
+                'XAU': ('OANDA:XAUUSD', 'different_venue_spot'),
+                'XAG': ('OANDA:XAGUSD', 'different_venue_spot'),
+                'EURUSD': ('OANDA:EURUSD', 'different_venue_spot'),
+                'USDCAD': ('OANDA:USDCAD', 'different_venue_spot'),
+            }
+
+            for code, instrument in ALL_INSTRUMENTS.items():
+                if instrument.asset_class == 'crypto':
+                    symbol = instrument.binance_symbol
+                    try:
+                        url = 'https://api.binance.com/api/v3/aggTrades?symbol=' + symbol + '&limit=1'
+                        with urllib.request.urlopen(url, timeout=7) as response:
+                            trade = json.load(response)[-1]
+                        age = round(time.time() - float(trade['T']) / 1000, 1)
+                        result = {'instrument': code, 'source': 'Binance spot ' + symbol,
+                                  'price': float(trade['p']), 'age_sec': age,
+                                  'fresh': -5 <= age <= 30,
+                                  'provider_timestamp_verified': True}
+                        try:
+                            reference = _fetch_tradingview_quote('BINANCE:' + symbol, timeout=7)
+                            skew = abs(float(trade['T']) / 1000 - float(reference['ts']))
+                            result['reference'] = {
+                                'source': 'TradingView BINANCE:' + symbol,
+                                'price': reference['value'],
+                                'timestamp_skew_sec': round(skew, 1),
+                                'difference_pct': round(
+                                    100 * (float(trade['p']) / reference['value'] - 1), 4),
+                                'paired_within_15s': skew <= 15,
+                            }
+                        except Exception as exc:
+                            result['reference_error'] = type(exc).__name__ + ': ' + str(exc)[:80]
+                    except Exception as exc:
+                        result = {'instrument': code, 'source': 'Binance spot ' + symbol,
+                                  'error': type(exc).__name__ + ': ' + str(exc)[:120]}
+                    print('DIRECT_SOURCE=' + json.dumps(result), flush=True)
+                    continue
+                symbol = instrument.tradingview_symbol
+                pair = instrument.swissquote_pair
+                try:
+                    if symbol:
+                        quote = _fetch_tradingview_quote(symbol, timeout=7)
+                        source = symbol
+                    elif pair:
+                        quote = _fetch_swissquote_quote(pair, timeout=7)
+                        source = 'Swissquote ' + pair
+                    else:
+                        raise RuntimeError('no direct source configured')
+                    age = round(time.time() - float(quote['ts']), 1)
+                    result = {'instrument': code, 'source': source,
+                              'price': quote['value'], 'age_sec': age,
+                              'fresh': -5 <= age <= 30,
+                              'provider_timestamp_verified': quote.get('provider_timestamp_verified'),
+                              'bid': quote['bid'], 'ask': quote['ask'],
+                              'mode': quote.get('update_mode')}
+                    reference_symbol, reference_kind = references.get(code, (None, None))
+                    if reference_symbol:
+                        try:
+                            reference = _fetch_tradingview_quote(reference_symbol, timeout=7)
+                            skew = abs(float(quote['ts']) - float(reference['ts']))
+                            result['reference'] = {
+                                'source': reference_symbol, 'kind': reference_kind,
+                                'price': reference['value'],
+                                'timestamp_skew_sec': round(skew, 1),
+                                'difference_pct': round(
+                                    100 * (quote['value'] / reference['value'] - 1), 4),
+                                'paired_within_15s': skew <= 15,
+                                'note': 'different venue CFD or spot; basis is not necessarily a pricing error',
+                            }
+                        except Exception as exc:
+                            result['reference_error'] = type(exc).__name__ + ': ' + str(exc)[:80]
+                except Exception as exc:
+                    result = {'instrument': code, 'source': symbol or pair,
+                              'error': type(exc).__name__ + ': ' + str(exc)[:120]}
+                print('DIRECT_SOURCE=' + json.dumps(result), flush=True)
+            try:
+                from websockets.sync.client import connect
+                url = ('wss://stream.binance.com:9443/stream?streams='
+                       'btcusdt@trade/ethusdt@trade/solusdt@trade')
+                seen = {}
+                with connect(url, open_timeout=5, close_timeout=1) as ws:
+                    deadline = time.monotonic() + 12
+                    while len(seen) < 3 and time.monotonic() < deadline:
+                        packet = json.loads(ws.recv(timeout=max(.1, deadline-time.monotonic())))
+                        trade = packet.get('data') or {}
+                        symbol = trade.get('s')
+                        if symbol in {'BTCUSDT', 'ETHUSDT', 'SOLUSDT'}:
+                            seen[symbol] = {
+                                'price': float(trade['p']),
+                                'trade_age_sec': round(time.time() - float(trade['T'])/1000, 2),
+                            }
+                print('BINANCE_COMBINED_WS=' + json.dumps(seen), flush=True)
+            except Exception as exc:
+                print('BINANCE_COMBINED_WS_ERROR=' + type(exc).__name__
+                      + ': REST trade fallback remains available', flush=True)
+            PY
