@@ -156,6 +156,7 @@ class Engine:
             round(float(inputs.rung_fraction), 6), round(float(inputs.be_after), 4),
             bool(inputs.option_available),
             bool(inputs.max_r >= inputs.be_after - 1e-12),
+            round(float(inputs.stop_r), 4),
         )
         live_key = (
             round(float(inputs.r0), 2), *policy_key[1:7],
