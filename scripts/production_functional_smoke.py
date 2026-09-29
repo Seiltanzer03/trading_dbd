@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import socket
 import subprocess
 import time
@@ -103,6 +104,36 @@ def wait_for_live_state(*, wait_sec: float = 45.0) -> dict:
                 or time.monotonic() >= deadline):
             raise AssertionError(("/api/state", code, body))
         time.sleep(1.0)
+
+
+def broker_bybit_observation(active: dict, quote: dict) -> dict:
+    """Report a simultaneous broker/perpetual ratio without equating their units."""
+    if (active.get("instrument_type") != "broker_cfd"
+            or "OANDA:NAS100USD" not in str(active.get("source") or "")
+            or active.get("status") != "live"):
+        return {"status": "UNAVAILABLE", "reason": "direct_broker_quote_missing"}
+    if quote.get("symbol") != "QQQUSDT" or quote.get("status") not in {"live", "delayed"}:
+        return {"status": "UNAVAILABLE", "reason": "bybit_quote_missing"}
+    try:
+        broker, perp = float(active["value"]), float(quote["value"])
+        broker_ts, perp_ts = float(active["ts"]), float(quote["ts"])
+    except (KeyError, TypeError, ValueError):
+        return {"status": "UNAVAILABLE", "reason": "invalid_quote_value_or_timestamp"}
+    if (not all(math.isfinite(x) for x in (broker, perp, broker_ts, perp_ts))
+            or min(broker, perp, broker_ts, perp_ts) <= 0):
+        return {"status": "UNAVAILABLE", "reason": "invalid_quote_value_or_timestamp"}
+    now = time.time()
+    if any(not -5 <= now - ts <= 30 for ts in (broker_ts, perp_ts)):
+        return {"status": "UNAVAILABLE", "reason": "quote_stale"}
+    skew = abs(broker_ts - perp_ts)
+    if skew > 15:
+        return {"status": "UNAVAILABLE", "reason": "quotes_not_simultaneous",
+                "timestamp_skew_sec": round(skew, 2)}
+    return {"status": "PAIRED", "broker_value": broker, "broker_ts": broker_ts,
+            "bybit_perp_value": perp, "bybit_ts": perp_ts,
+            "broker_to_perp_ratio": round(broker / perp, 8),
+            "timestamp_skew_sec": round(skew, 2),
+            "units": "NAS100 broker points / QQQUSDT; ratio is an anchor, not a spread"}
 
 
 def verify_universe_routes() -> None:
@@ -402,6 +433,8 @@ def verify(expected_sha: str) -> None:
             if isinstance(index, (float, int)) and index > 0:
                 comparison["qqq_index_premium_pct"] = round(100 * (index / qqq - 1), 4)
         print("BYBIT NAS100 PAIRED COMPARISON " + json.dumps(comparison, ensure_ascii=False))
+        print("OANDA BYBIT BASIS OBSERVATION " + json.dumps(
+            broker_bybit_observation(active, quote), ensure_ascii=False))
 
     verify_macro_runtime()
 

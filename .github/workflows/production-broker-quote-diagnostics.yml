@@ -1,0 +1,70 @@
+name: production-broker-quote-diagnostics
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/production-broker-quote-diagnostics.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  broker-quote:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Probe direct OANDA price without revealing service credentials
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 3m
+          script: |
+            set -euo pipefail
+            SERVICE_PID="$(systemctl show seiltanzer -p MainPID --value)"
+            test "$SERVICE_PID" -gt 1
+            export SERVICE_PID
+            cd /opt/seiltanzer
+            PYTHONPATH=/opt/seiltanzer .venv/bin/python - <<'PY'
+            import json, os, time, urllib.request
+            from seiltanzer.data.feeds import _fetch_tradingview_quote
+
+            entries = open(f'/proc/{os.environ["SERVICE_PID"]}/environ', 'rb').read().split(b'\0')
+            token = next((row.partition(b'=')[2] for row in entries
+                          if row.startswith(b'TRADINGVIEW_AUTH_TOKEN=')), b'')
+            print('BROKER_TOKEN_CONFIGURED=' + str(bool(token)).lower())
+            if not token:
+                print('DIRECT_OANDA_STATUS=UNAVAILABLE_MISSING_TOKEN')
+                raise SystemExit(0)
+            os.environ['TRADINGVIEW_AUTH_TOKEN'] = token.decode()
+            try:
+                quote = _fetch_tradingview_quote('OANDA:NAS100USD', timeout=8.0)
+            except Exception as exc:
+                print('DIRECT_OANDA_STATUS=UNAVAILABLE_' + type(exc).__name__)
+                raise SystemExit(0)
+            print('DIRECT_OANDA_QUOTE=' + json.dumps({
+                'value': quote['value'], 'provider_ts': quote['ts'],
+                'age_sec': round(time.time() - quote['ts'], 2),
+                'provider_timestamp_verified': quote['provider_timestamp_verified'],
+                'update_mode': quote.get('update_mode'),
+            }))
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/market/bybit', timeout=5) as r:
+                    bybit = json.load(r)['quote']
+                skew = abs(quote['ts'] - bybit['ts'])
+                if (bybit.get('symbol') == 'QQQUSDT' and skew <= 15
+                        and quote['provider_timestamp_verified']):
+                    print('OANDA_BYBIT_PAIRED=' + json.dumps({
+                        'broker': quote['value'], 'bybit_perp': bybit['value'],
+                        'ratio': round(quote['value'] / bybit['value'], 8),
+                        'timestamp_skew_sec': round(skew, 2),
+                    }))
+                else:
+                    print('OANDA_BYBIT_PAIRED=UNAVAILABLE_NOT_SIMULTANEOUS')
+            except Exception:
+                print('OANDA_BYBIT_PAIRED=UNAVAILABLE_BYBIT_API')
+            PY
