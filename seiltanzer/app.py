@@ -1050,6 +1050,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "ai_internal_error", "Не удалось сформировать ИИ-разбор",
                         req_id, retriable=False),
                 )
+            registered_action_id = None
             try:
                 if decision:
                     result["management_decision"] = decision
@@ -1066,6 +1067,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     registered = engine.position.register_shadow_action(
                         snapshot, review_id, active_trade, shadow)
                     if registered is not None:
+                        registered_action_id = registered["action_id"]
                         shadow = dict(shadow)
                         shadow["production_authority"] = True
                         shadow["working_action"] = registered
@@ -1097,6 +1099,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     trade_id, snapshot,
                     result["verdict"], result.get("model"))
             except Exception as exc:
+                if registered_action_id is not None:
+                    with contextlib.suppress(Exception):
+                        engine.position.cancel_unpublished_shadow_action(
+                            registered_action_id)
                 log_ai_event(
                     req_id=req_id, trade_id=trade_id, stage="journal_error",
                     review_id=review_id,

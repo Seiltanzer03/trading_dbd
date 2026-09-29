@@ -423,6 +423,15 @@ class PositionLedger:
             )
         return action_payload
 
+    def cancel_unpublished_shadow_action(self, action_id: str) -> None:
+        """Drop a pending proposal if the corresponding AI journal write failed."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE llm_shadow_manual_actions SET status='publication_failed' "
+                "WHERE action_id=? AND status='pending_execution'",
+                (str(action_id),),
+            )
+
     def shadow_actions(self, trade_id: int) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(

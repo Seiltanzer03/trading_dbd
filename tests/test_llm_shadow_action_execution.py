@@ -152,6 +152,22 @@ def test_armed_spike_fill_reduces_remaining_once(tmp_path):
     ledger.close()
 
 
+def test_failed_publication_cannot_leave_pending_extended_action(tmp_path):
+    ledger = PositionLedger(str(tmp_path / "trades.db"))
+    trade = _trade()
+    action = _register(ledger, trade, _shadow("TIGHTEN_STOP", {
+        "stop_price": 95.0, "anchor": "TEST",
+    }))
+    ledger.cancel_unpublished_shadow_action(action["action_id"])
+    assert ledger.shadow_actions(trade["id"])[-1]["status"] == "publication_failed"
+    with pytest.raises(StaleDecisionError, match="publication_failed"):
+        ledger.acknowledge_shadow_action(
+            action_id=action["action_id"], trade=trade, executed=True,
+            execution_price=110.0, execution_r=1.0,
+        )
+    ledger.close()
+
+
 def test_time_stop_requires_deadline_then_records_broker_exit(tmp_path):
     ledger = PositionLedger(str(tmp_path / "trades.db"))
     trade = _trade()
