@@ -61,6 +61,9 @@ jobs:
                           except ValueError:
                               continue
                           observed.add(str(msg.get('m')))
+                          if msg.get('m') == 'critical_error':
+                              print('ANONYMOUS_OANDA_REJECTION=' +
+                                    json.dumps(msg.get('p'))[:250])
                           if msg.get('m') != 'qsd':
                               continue
                           item = (msg.get('p') or [None, {}])[1] or {}
@@ -97,6 +100,22 @@ jobs:
               }))
           except Exception as exc:
               print('PUBLIC_OANDA_PAGE_ERROR=' + type(exc).__name__)
+
+          try:
+              scanner = urllib.request.Request(
+                  'https://scanner.tradingview.com/global/scan',
+                  data=json.dumps({
+                      'symbols': {'tickers': [symbol]},
+                      'columns': ['close', 'bid', 'ask', 'update_mode', 'lp_time'],
+                  }).encode(),
+                  headers={'Content-Type': 'application/json',
+                           'User-Agent': 'Mozilla/5.0'},
+              )
+              with urllib.request.urlopen(scanner, timeout=10) as response:
+                  data = json.load(response)
+              print('ANONYMOUS_SCANNER=' + json.dumps(data)[:600])
+          except Exception as exc:
+              print('ANONYMOUS_SCANNER_STATUS=' + type(exc).__name__)
           PY
   broker-quote:
     if: github.event_name != 'pull_request'
