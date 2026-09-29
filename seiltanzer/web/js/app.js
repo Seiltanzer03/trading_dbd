@@ -291,13 +291,18 @@ function handleLivePrice(t) {
   const experimental = !!t.feeds?.price?.driver_experimental;
   const stale = t.feeds?.price?.fresh === false;
   const idle = t.feeds?.price?.idle_secs;
+  const brokerIndexFallback = Boolean(S.instruments[t.instrument]?.broker_symbol)
+    && t.feeds.price.instrument_type === 'cash_index';
   $('#lat-price-instr').textContent = t.instrument
     + (t.feeds.price.fallback ? ' · BYBIT РЕЗЕРВ ≈' : '')
+    + (brokerIndexFallback ? ' · ИНДЕКС ≈' : '')
     + (streaming ? ' ⚡' : '')
     + (derived ? (experimental ? ' · EXP MAP' : ' · PROXY MAP') : '')
     + (stale ? ' · ⏸ ЗАКРЫТ' : '');
   $('#lat-price-instr').title = t.feeds.price.fallback
     ? `${t.feeds.price.source} — резервная расчётная цена; стоп/БУ проверять у брокера`
+    : brokerIndexFallback
+    ? `${t.feeds.price.source} — индексный ориентир, не котировка брокера; стоп/БУ проверять у брокера`
     : stale
     ? `нет свежих тиков ${fmtIdle(idle)} — рынок закрыт или неторговое время; цена = последняя котировка`
     : (derived
