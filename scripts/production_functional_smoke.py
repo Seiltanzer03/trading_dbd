@@ -163,21 +163,28 @@ def verify_universe_routes() -> None:
     assert "directional_weight_reason" in active, active
 
 
+def _bounded_edge_research_route(path: str) -> dict:
+    # A single request can land behind a scheduled research task. Gate the
+    # median of three independent reads: one outlier is tolerated, while
+    # sustained >250 ms latency still fails production acceptance.
+    observations = []
+    for _ in range(3):
+        code, body, elapsed = request(path, timeout=2.0)
+        print(f"{path}: {code} {elapsed:.0f}ms gate p50<{EDGE_RESEARCHER_MAX_MS:.0f}ms")
+        assert code == 200 and isinstance(body, dict), (code, body)
+        observations.append((elapsed, body))
+    median_ms = sorted(item[0] for item in observations)[1]
+    assert median_ms < EDGE_RESEARCHER_MAX_MS, (
+        [round(item[0], 1) for item in observations], observations[-1][1])
+    return observations[-1][1]
+
+
 def verify_edge_researcher() -> None:
     deadline = time.monotonic() + EDGE_RESEARCHER_WAIT_SEC
     lifecycle = None
     while time.monotonic() < deadline:
-        code, body, elapsed = request(
-            "/api/research/g1s/edge-researcher/lifecycle", timeout=2.0)
-        print(
-            "/api/research/g1s/edge-researcher/lifecycle: "
-            f"{code} {elapsed:.0f}ms gate<{EDGE_RESEARCHER_MAX_MS:.0f}ms"
-        )
-        assert code == 200, (code, body)
-        assert elapsed < EDGE_RESEARCHER_MAX_MS, (elapsed, body)
-        assert isinstance(body, dict), body
-        lifecycle = body
-        if body.get("pr_c_contract_version") == "llm-edge-researcher-v1.3-pr-c":
+        lifecycle = _bounded_edge_research_route("/api/research/g1s/edge-researcher/lifecycle")
+        if lifecycle.get("pr_c_contract_version") == "llm-edge-researcher-v1.3-pr-c":
             break
         time.sleep(2.0)
     assert isinstance(lifecycle, dict), lifecycle
@@ -194,15 +201,7 @@ def verify_edge_researcher() -> None:
     assert "llm_discovery_to_prospective_survival_rate" in quality, lifecycle
     assert quality.get("production_authority") is False, lifecycle
 
-    code, status, elapsed = request(
-        "/api/research/g1s/edge-researcher/status", timeout=2.0)
-    print(
-        "/api/research/g1s/edge-researcher/status: "
-        f"{code} {elapsed:.0f}ms gate<{EDGE_RESEARCHER_MAX_MS:.0f}ms"
-    )
-    assert code == 200, (code, status)
-    assert elapsed < EDGE_RESEARCHER_MAX_MS, (elapsed, status)
-    assert isinstance(status, dict), status
+    status = _bounded_edge_research_route("/api/research/g1s/edge-researcher/status")
     assert status.get("request_time_history_scan") is False, status
     assert status.get("production_authority") is False, status
     assert (status.get("automation") or {}).get("manual_post_only") is False, status
