@@ -347,4 +347,24 @@ jobs:
                     result = {'instrument': code, 'source': symbol or pair,
                               'error': type(exc).__name__ + ': ' + str(exc)[:120]}
                 print('DIRECT_SOURCE=' + json.dumps(result), flush=True)
+            try:
+                from websockets.sync.client import connect
+                url = ('wss://stream.binance.com:9443/stream?streams='
+                       'btcusdt@trade/ethusdt@trade/solusdt@trade')
+                seen = {}
+                with connect(url, open_timeout=5, close_timeout=1) as ws:
+                    deadline = time.monotonic() + 12
+                    while len(seen) < 3 and time.monotonic() < deadline:
+                        packet = json.loads(ws.recv(timeout=max(.1, deadline-time.monotonic())))
+                        trade = packet.get('data') or {}
+                        symbol = trade.get('s')
+                        if symbol in {'BTCUSDT', 'ETHUSDT', 'SOLUSDT'}:
+                            seen[symbol] = {
+                                'price': float(trade['p']),
+                                'trade_age_sec': round(time.time() - float(trade['T'])/1000, 2),
+                            }
+                print('BINANCE_COMBINED_WS=' + json.dumps(seen), flush=True)
+            except Exception as exc:
+                print('BINANCE_COMBINED_WS_ERROR=' + type(exc).__name__
+                      + ': REST trade fallback remains available', flush=True)
             PY
