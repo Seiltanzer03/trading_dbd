@@ -46,6 +46,31 @@ def _replay_with_effective_stop(path: list[float], spec) -> Any:
     return replay_execution_path(path, spec)
 
 
+def _frozen_opposing_edge(manager: dict) -> tuple[float | None, str | None]:
+    """Use the T0 combined profile, or the frozen legacy active profile.
+
+    Do not mix two profiles from the same review: their directional votes are
+    correlated. The legacy field predates the combined soft weight and allows
+    retrospective coverage without reconstructing signals after T0.
+    """
+    combined = manager.get("combined_edge_soft_weight")
+    source = "COMBINED_T0" if isinstance(combined, dict) else "LEGACY_ACTIVE_T0"
+    edge = combined if isinstance(combined, dict) else manager.get("active_edge_provisional_weight")
+    if not isinstance(edge, dict) or edge.get("available") is not True:
+        return None, None
+    direction = _finite(edge.get("direction_score"))
+    weight = _finite(edge.get(
+        "weight_fraction" if source == "LEGACY_ACTIVE_T0" else
+        "active_edge_component_weight"))
+    exploratory = (
+        (_finite(edge.get("exploratory_component_weight")) or 0.0)
+        if source == "COMBINED_T0" else 0.0
+    )
+    if direction is None or direction >= 0 or (weight or 0.0) + exploratory <= 0:
+        return None, None
+    return direction, source
+
+
 def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
     """Return paired gross R outcomes, or explicit reasons for unavailable rules."""
     spec = _execution_spec(snapshot)
@@ -187,12 +212,8 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
             "anchor": "FROZEN_T0_MFE_AT_LEAST_1R",
         }
 
-    edge = (snapshot.get("policy_manager") or {}).get("combined_edge_soft_weight") or {}
-    direction = _finite(edge.get("direction_score"))
-    if (edge.get("available") is not True or direction is None
-            or direction >= 0
-            or not (edge.get("active_edge_component_weight") or
-                    edge.get("exploratory_component_weight"))):
+    direction, source = _frozen_opposing_edge(snapshot.get("policy_manager") or {})
+    if direction is None:
         result["EXIT_ON_THESIS_BREAK"] = {"reason": "NO_FROZEN_OPPOSING_EDGE_AT_T0"}
     else:
         result["EXIT_ON_THESIS_BREAK"] = {
@@ -200,6 +221,7 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
             "delta_r": spec.current_r - baseline.outcome_r,
             "target_r": spec.current_r,
             "direction_score": direction,
+            "signal_source": source,
             "anchor": "FROZEN_T0_OPPOSING_DIRECTIONAL_EDGE",
         }
     return result
@@ -215,6 +237,7 @@ def audit_database(database: str) -> dict:
     seen: dict[str, set[int]] = {name: set() for name in RULES}
     by_instrument: dict[str, dict[str, list[float]]] = {
         name: defaultdict(list) for name in RULES}
+    by_signal_source: dict[str, list[float]] = defaultdict(list)
     total = 0
     try:
         rows = db.execute(
@@ -245,10 +268,13 @@ def audit_database(database: str) -> dict:
                 deltas[name].append(float(value["delta_r"]))
                 instrument = str((snapshot.get("strategy") or {}).get("instrument") or "UNKNOWN")
                 by_instrument[name][instrument].append(float(value["delta_r"]))
+                if name == "EXIT_ON_THESIS_BREAK":
+                    by_signal_source[str(value["signal_source"])].append(
+                        float(value["delta_r"]))
     finally:
         db.close()
     return {
-        "contract_version": "historical-conditional-management-audit-v2",
+        "contract_version": "historical-conditional-management-audit-v3",
         "historical_resolved_reviews": total,
         "path_assumption": "recorded_points_piecewise_linear_no_slippage",
         "partially_shared_hypotheses": {
@@ -266,6 +292,11 @@ def audit_database(database: str) -> dict:
                 "trade_n": len(values),
                 "mean_paired_delta_gross_r": round(sum(values) / len(values), 6),
             } for instrument, values in sorted(by_instrument[name].items())},
+            **({"by_signal_source": {source: {
+                "trade_n": len(values),
+                "mean_paired_delta_gross_r": round(sum(values) / len(values), 6),
+            } for source, values in sorted(by_signal_source.items())}}
+               if name == "EXIT_ON_THESIS_BREAK" else {}),
             "excluded": dict(counts[name]),
         } for name in RULES},
     }
