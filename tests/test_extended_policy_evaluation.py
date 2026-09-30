@@ -13,6 +13,8 @@ def _snapshot():
                            "active_risk_barrier": 90, "current": 110,
                            "final_take": 130},
         "policy_manager": {
+            "execution_cost_model": {"deferred_full_close_r": .01, "immediate_full_close_r": .01,
+                                     "assumed": True, "source": "fallback test"},
             "input_audit": {"rows": {"instrument_price": {
                 "available": True, "status": "live", "source": "direct"}}},
             "evidence": {"data_quality": {"reliability": {"level": "высокая"}}},

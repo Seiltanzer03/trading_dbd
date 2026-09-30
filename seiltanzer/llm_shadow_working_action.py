@@ -194,7 +194,9 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
     elif policy == "SCALE_OUT_ON_SPIKE":
         rung_r, rung_price = _next_rung(snapshot, geometry)
         inputs = (snapshot.get("policy_manager") or {}).get("inputs") or {}
-        target_r = (float(geometry["sign"]) * (float(geometry["current"]) - float(geometry["entry"])) / float(geometry["risk"])) + .5
+        current_r = (float(geometry["sign"]) * (float(geometry["current"]) - float(geometry["entry"])) / float(geometry["risk"]))
+        past_max = _number(inputs.get("max_r"))
+        target_r = max(current_r, past_max if past_max is not None else current_r) + .5
         rungs = inputs.get("rungs") or ([rung_r] if rung_r is not None else [])
         while any(abs(target_r - float(x)) < .05 for x in rungs):
             target_r += .25
@@ -241,6 +243,11 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
         params = {"take_price": target, "target_r": rung_r}
         instruction = f"ВРУЧНУЮ ПОДТЯНУТЬ TAKE К СЛЕДУЮЩЕЙ СТУПЕНИ: {target:g}"
     elif policy == "EXTEND_TAKE":
+        inputs = (snapshot.get("policy_manager") or {}).get("inputs") or {}
+        if (inputs.get("chain_status") not in {"live", "ok"}
+                or _number(inputs.get("chain_age_sec")) is None
+                or float(inputs["chain_age_sec"]) > 120):
+            return _unavailable(policy, "OPTION_WALL_NOT_A_VERIFIED_EXECUTION_ANCHOR", confidence)
         distance_name = (
             "distance_to_call_wall_r" if geometry["direction"] == "long"
             else "distance_to_put_wall_r"

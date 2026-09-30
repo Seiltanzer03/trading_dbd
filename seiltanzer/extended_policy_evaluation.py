@@ -81,8 +81,11 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
             or str(price.get("status") or "").lower() not in {"live", "ok"}
             or source.startswith(("Bybit ", "yfinance "))):
         return _blocked("AUTHORITATIVE_INSTRUMENT_PRICE_UNAVAILABLE")
-    reliability = ((((manager.get("evidence") or {}).get("data_quality") or {})
-                    .get("reliability") or {}).get("level") or "").lower()
+    from .management_contract import decision_reliability
+    quality = decision_reliability(snapshot)
+    if not quality["available"]:
+        return _blocked("DATA_RELIABILITY_UNAVAILABLE")
+    reliability = quality["level"]
     if reliability in {"низкая", "low"}:
         overlay = (manager.get("gate") or {}).get("degraded_authority_overlay") or {}
         evidence = overlay.get("evidence") or {}
@@ -118,6 +121,9 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
         or float(data["chain_age_sec"]) > 120
     ):
         return _blocked("GEX_CONTEXT_NOT_A_VERIFIED_EXECUTION_ANCHOR")
+    if policy == "EXTEND_TAKE" and (data.get("chain_status") not in {"live", "ok"}
+        or _number(data.get("chain_age_sec")) is None or float(data["chain_age_sec"]) > 120):
+        return _blocked("OPTION_WALL_NOT_A_VERIFIED_EXECUTION_ANCHOR")
     target = _number(params.get("stop_price" if policy in STOP_POLICIES else "take_price"))
     captured = _number(snapshot.get("captured_ts"))
     if policy in CONDITIONAL_POLICIES:
@@ -157,13 +163,22 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
             return _blocked("TAKE_ALREADY_CROSSED_DURING_TRADE")
         alternate = replace(inputs, T=target_r)
 
+    costs = (manager.get("execution_cost_model") or rule.get("execution_cost_model") or {})
+    deferred_cost = _number(costs.get("deferred_full_close_r"))
+    if deferred_cost is None or deferred_cost < 0:
+        return _blocked("EXECUTION_COST_MODEL_UNAVAILABLE")
+    net_floor = floor - deferred_cost
     deltas: list[float] = []
     cvars: list[float] = []
     means: list[float] = []
+    base_means: list[float] = []
+    base_cvars: list[float] = []
     seed_lower_bounds: list[float] = []
     for seed in (0xA17E, 0xB17E):
         if policy in CONDITIONAL_POLICIES:
             base_out, variant_out = _conditional_outcomes(inputs, params, policy, captured, seed)
+            base_means.append(float(np.mean(base_out)))
+            base_cvars.append(_cvar(base_out))
             seed_delta = variant_out - base_out
             seed_lower_bounds.append(float(np.mean(seed_delta) - 1.96 *
                 np.std(seed_delta, ddof=1) / math.sqrt(seed_delta.size)))
@@ -181,6 +196,8 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
         variant_out = np.asarray(variant.strategy_outcome, dtype=float)
         if not np.isfinite(base_out).all() or not np.isfinite(variant_out).all():
             return _blocked("NONFINITE_EXECUTION_OUTCOMES")
+        base_means.append(float(np.mean(base_out)))
+        base_cvars.append(_cvar(base_out))
         seed_delta = variant_out - base_out
         seed_lower_bounds.append(float(np.mean(seed_delta) - 1.96 *
             np.std(seed_delta, ddof=1) / math.sqrt(seed_delta.size)))
@@ -191,11 +208,8 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
     gain = float(np.mean(paired))
     standard_error = float(np.std(paired, ddof=1) / math.sqrt(paired.size))
     lower = min(gain - 1.96 * standard_error, *seed_lower_bounds)
-    costs = (manager.get("execution_cost_model") or
-             rule.get("execution_cost_model") or {})
-    # The broker's actual commission/slippage is unknown in many positions.
-    # Compare gross outcomes with the gross strategy floor instead of silently
-    # treating the 0.01R reporting fallback as a measured broker cost.
+    # Constant unit-volume future close cost is applied equally to both replays.
+    # It cancels in the paired delta; assumed costs remain explicitly labelled.
     variant_cvar = min(cvars)
     band = _number(rule.get("indifference_band_r"))
     material = max(0.0, band if band is not None else .03)
@@ -203,7 +217,17 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
         "target_r": round(target_r, 5) if target_r is not None else None, "paths": len(deltas),
         "expected_delta_vs_hold_r": round(gain, 5),
         "paired_delta_ci95_lower_r": round(lower, 5),
-        "expected_variant_gross_r": round(min(means), 5),
+        "expected_variant_gross_r": round(float(np.mean(means)), 5),
+        "expected_variant_net_r": round(float(np.mean(means)) - deferred_cost, 5),
+        "expected_hold_net_r": round(float(np.mean(base_means)) - deferred_cost, 5),
+        "worst_seed_hold_cvar10_net_r": round(min(base_cvars) - deferred_cost, 5),
+        "seed_delta_ci95_lower_r": [round(x, 5) for x in seed_lower_bounds],
+        "worst_seed_cvar10_net_r": round(variant_cvar - deferred_cost, 5),
+        "hard_net_floor_r": net_floor,
+        "execution_cost_r": deferred_cost,
+        "cost_source": costs.get("source") or "UNAVAILABLE",
+        "cost_assumed": costs.get("assumed") is not False,
+        "data_reliability": reliability,
         "worst_seed_cvar10_gross_r": round(variant_cvar, 5),
         "hard_gross_floor_r": floor, "materiality_band_r": material,
         "broker_execution_cost_measured": costs.get("assumed") is False,
@@ -212,7 +236,7 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
         "statistically_validated_advantage": False,
         "authority_mode": "degraded_manual" if reliability in {"низкая", "low"} else "manual",
     }
-    if variant_cvar < floor - 1e-8:
+    if variant_cvar - deferred_cost < net_floor - 1e-8:
         return _blocked("VARIANT_CVAR_BELOW_HARD_FLOOR", **evidence)
     if lower <= material:
         return _blocked("NO_MATERIAL_ROBUST_EXPECTED_GAIN", **evidence)

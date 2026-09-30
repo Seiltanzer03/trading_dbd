@@ -450,7 +450,8 @@ def _quality_lines(snapshot: dict) -> list[str]:
         if audit_available is not None and audit_total is not None else "UNAVAILABLE"
     )
     evidence = manager.get("evidence") or {}
-    reliability = ((evidence.get("data_quality") or {}).get("reliability") or {}) or coverage.get("reliability") or {}
+    from .management_contract import decision_reliability
+    reliability = decision_reliability(snapshot)
     inputs = manager.get("inputs") or {}
     scope = manager.get("management_model_scope") or {}
     reasons = reliability.get("reasons")

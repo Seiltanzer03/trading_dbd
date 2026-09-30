@@ -91,10 +91,11 @@ def test_low_confidence_or_failed_guard_never_becomes_actionable():
 
 
 def test_extend_take_requires_a_farther_authoritative_wall():
-    action = build_working_action(_snapshot(), _shadow("EXTEND_TAKE"))
+    snapshot = _snapshot()
+    snapshot["policy_manager"]["inputs"] = {"chain_status": "live", "chain_age_sec": 10}
+    action = build_working_action(snapshot, _shadow("EXTEND_TAKE"))
     assert action["status"] == "READY_FOR_MANUAL_CONFIRMATION"
     assert action["parameters"]["take_price"] == 135.0
-    snapshot = _snapshot()
     snapshot["policy_manager"]["option_derivative_state"]["gex_geometry"][
         "distance_to_call_wall_r"
     ] = 1.0

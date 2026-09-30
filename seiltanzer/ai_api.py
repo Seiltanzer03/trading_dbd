@@ -64,6 +64,12 @@ def success_body(result: dict, req_id: str, *, degraded: bool = False,
     if isinstance(shadow, dict):
         # Research-only comparison. It never replaces management_decision.
         body["llm_shadow_decision"] = shadow
+    audit = result.get("management_calculation_audit")
+    if isinstance(audit, dict):
+        body["management_calculation_audit"] = audit
+    candidates = result.get("active_management_candidates")
+    if isinstance(candidates, list):
+        body["active_management_candidates"] = candidates
     if provider_failure:
         body["provider_error"] = provider_failure
     if result.get("captured_ts") is not None:

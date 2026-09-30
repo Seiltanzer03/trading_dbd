@@ -232,7 +232,8 @@ def test_ai_verdict_rechecks_snapshot_after_post(monkeypatch):
         "request",
         lambda *args, **kwargs: (
             200,
-            {"ok": True, "mode": "deterministic_fallback", "verdict": "ok"},
+            {"ok": True, "mode": "deterministic_fallback", "verdict": "ok",
+             "management_calculation_audit": {"version": "management-calculation-audit-v1", "status": "UNAVAILABLE"}},
             1.0,
         ),
     )

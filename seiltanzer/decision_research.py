@@ -42,8 +42,21 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
     """Reject numeric source timestamps newer than the decision capture."""
     violations: list[str] = []
 
-    def visit(value: Any, path: tuple[str, ...]) -> None:
+    def planned_deadline(path: tuple[str, ...], policy: str | None) -> bool:
+        # A frozen TIME_STOP order deadline is a future instruction, not a
+        # future market observation. All source ts/asof timestamps stay guarded.
+        if policy != "TIME_STOP":
+            return False
+        return (path == ("effective_management_decision", "parameters", "deadline_ts")
+            or path == ("llm_shadow_decision", "working_action", "parameters", "deadline_ts")
+            or (len(path) == 4 and path[0] == "active_management_candidates"
+                and path[1].isdigit() and path[2:] == ("parameters", "deadline_ts"))
+            or (len(path) == 5 and path[:2] == ("position_state", "armed_conditional_actions")
+                and path[2].isdigit() and path[3:] == ("parameters", "deadline_ts")))
+
+    def visit(value: Any, path: tuple[str, ...], policy: str | None = None) -> None:
         if isinstance(value, dict):
+            policy = value.get("policy", policy)
             for key, child in value.items():
                 child_path = (*path, str(key))
                 if (key == "ts" or key.endswith("_ts") or key.endswith("_at")):
@@ -51,12 +64,13 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
                     # Epoch-like values only. Durations and sample indices can
                     # also be named "ts" in third-party payloads.
                     if (timestamp is not None and timestamp > 1_000_000_000
-                            and timestamp > captured_ts + tolerance_sec):
+                            and timestamp > captured_ts + tolerance_sec
+                            and not planned_deadline(child_path, policy)):
                         violations.append(".".join(child_path))
-                visit(child, child_path)
+                visit(child, child_path, policy)
         elif isinstance(value, list):
             for index, child in enumerate(value):
-                visit(child, (*path, str(index)))
+                visit(child, (*path, str(index)), policy)
 
     visit(snapshot, ())
     if violations:

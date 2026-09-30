@@ -90,7 +90,7 @@ def _compact_input_audit(audit: Any) -> dict[str, Any]:
         compact = _small_row(row, (
             "available", "status", "source", "role", "age_sec", "symbol",
             "reason", "value", "quality", "proxy_quality", "is_proxy",
-            "fallback_tier",
+            "fallback_tier", "production_authority",
         ))
         if isinstance(row, dict) and isinstance(row.get("items"), list):
             compact["items"] = [
@@ -112,6 +112,8 @@ def _compact_input_audit(audit: Any) -> dict[str, Any]:
 def _compact_snapshot_payload(snapshot: dict) -> None:
     """Remove API/research detail which is redundant for the verdict model."""
     manager = snapshot.get("policy_manager") or {}
+    from .management_contract import decision_reliability
+    manager["decision_reliability"] = decision_reliability(snapshot)
     audit = manager.get("input_audit") or {}
     if isinstance(audit.get("rows"), dict):
         manager["input_audit"] = _compact_input_audit(audit)
@@ -190,7 +192,7 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
         # Last-resort deterministic allowlist. Management decision and every
         # compared policy stay intact; only explanatory workspaces are omitted.
         keep_manager = (
-            "position_economics", "repeat_intervention_gate",
+            "position_economics", "repeat_intervention_gate", "decision_reliability", "execution_cost_model",
             "version", "management_decision", "recommendation", "policies",
             "selection_rule", "gate", "evidence", "inputs", "risk_constraint",
             "management_arbiter", "state_change_attribution", "input_audit",

@@ -428,6 +428,10 @@ def _main_policy_run(engine, inputs: _base.PolicyInputs):
     """Reuse the engine-owned deterministic path bank when it is available."""
     if hasattr(engine, "authoritative_execution_mc"):
         sim = engine.authoritative_execution_mc(inputs)
+        from .ai_policy_v4 import _COST_CTX, metrics_from_execution_paths
+        costs = _COST_CTX.get()
+        if costs:
+            return metrics_from_execution_paths(sim, inputs, costs, seed=0xA17E), sim
         distributions = _base.build_policy_distributions(sim, inputs)
         metrics = {
             name: _base.policy_metrics(policy, sim, inputs)

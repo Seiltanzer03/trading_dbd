@@ -194,6 +194,12 @@ def _run_once(inputs: PolicyInputs, *, n_paths: int, n_steps: int, seed: int):
         return _BASE_RUN_ONCE(inputs, n_paths=n_paths, n_steps=n_steps, seed=seed)
     np = _impl._impl.np
     sim = _impl._impl.simulate_option_paths(inputs, n_paths=n_paths, n_steps=n_steps, seed=seed)
+    return metrics_from_execution_paths(sim, inputs, costs, seed=seed), sim
+
+
+def metrics_from_execution_paths(sim, inputs, costs, *, seed=None):
+    """Price every policy on an existing path bank without resampling it."""
+    np = _impl._impl.np
     baseline = _impl._impl.baseline_strategy_outcomes(sim, inputs)
     immediate = float(costs["immediate_full_close_r"])
     deferred = float(costs["deferred_full_close_r"])
@@ -215,17 +221,21 @@ def _run_once(inputs: PolicyInputs, *, n_paths: int, n_steps: int, seed: int):
         gross_expected = float(np.mean(gross))
         metric.update({
             "gross_expected_final_r": round(gross_expected, 4),
+            "expected_final_r_net": metric["expected_final_r"],
+            "median_final_r_net": metric["median_final_r"],
+            "cvar10_r_net": metric["cvar10_r"],
+            "gross_cvar10_r": round(_impl._impl._cvar(gross, .10), 4),
             "execution_cost_r": round(gross_expected - float(np.mean(net)), 4),
             "outcomes_include_execution_costs": True,
             "event_geometry": geometry,
             "monte_carlo": {
-                "seed": int(seed), "steps": int(n_steps),
-                "scenarios": int(n_paths),
+                "seed": seed, "steps": getattr(sim, "step_count", None),
+                "scenarios": int(baseline.size),
                 "common_random_numbers": True,
             },
         })
         metrics[name] = metric
-    return metrics, sim
+    return metrics
 
 
 def _raw_policy_choice(metrics: dict[str, dict], r0: float, *, cvar_floor=None):

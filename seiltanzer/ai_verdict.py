@@ -1,6 +1,7 @@
 """Stable public facade for the quantitative AI verdict v18 + v19 renderer."""
 from __future__ import annotations
 
+from .management_contract import decision_reliability
 from . import ai_verdict_v18 as _impl
 # Import installs the structured v19 renderer into the v18 render chain while
 # preserving the established public request/normalization facade identities.
@@ -23,7 +24,8 @@ _AVAILABILITY_CONTRACT_VERSION = "ai-metric-availability-v1"
 
 _POLICY_REPORT_KEYS = (
     "expected_final_r", "median_final_r", "cvar10_r",
-    "expected_final_r_net", "cvar10_r_net",
+    "expected_final_r_net", "median_final_r_net", "cvar10_r_net",
+    "gross_expected_final_r", "gross_cvar10_r", "execution_cost_r", "outcomes_include_execution_costs",
     "p_final_profit", "p_final_loss",
     "p_giveback_0_25_from_now", "p_giveback_0_50_from_now",
     "p_next_rung_before_stop", "p_stop_before_next_rung",
@@ -186,6 +188,8 @@ def _capture_report_integrity(snapshot: dict) -> dict:
     manager = snapshot.get("policy_manager") or {}
     policies = manager.get("policies") or {}
     report = {
+        "decision_reliability": decision_reliability(snapshot),
+        "execution_cost_model": _report_scalar_map(manager.get("execution_cost_model") or {}),
         "contract_version": _REPORT_INTEGRITY_VERSION,
         "role": "PRESENTATION_FACT_PRESERVATION_ONLY",
         "decision_authority": False,
@@ -243,6 +247,7 @@ def _restore_report_integrity_views(snapshot: dict, report: dict) -> None:
     """Restore only the tiny views consumed by the renderer and verdict model."""
     manager = snapshot.setdefault("policy_manager", {})
     for key in (
+        "decision_reliability", "execution_cost_model",
         "scenario_geometry", "raw_optimizer_stability", "stability",
         "risk_tradeoff", "monte_carlo_validation", "active_edge_provisional_weight",
         "llm_edge_exploratory_weight",

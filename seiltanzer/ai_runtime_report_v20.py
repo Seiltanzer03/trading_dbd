@@ -55,6 +55,8 @@ IV/RV/VRP/skew/term/GEX/barrier/hazard derivatives, live tape/order-flow,
 cross-asset/regime, metric changes, freshness/source quality, Active Edge/EDE only
 within their published authority. Missing/UNAVAILABLE/COMPACTED is never zero.
 Delayed/proxy data reduces confidence and is not automatically directional.
+Low reliability is not an absolute ban: only the server degraded-manual gate can authorize an override.
+Never assert stress stability when its numeric checks are UNAVAILABLE.
 Correlated metrics from one family are not independent votes. Hard-CVaR eligibility
 is mandatory. Never widen stops, average down, or add to a losing position.
 First form the independent shadow opinion; quant_management_decision is only for
@@ -253,8 +255,8 @@ def _control_summary(snapshot: dict[str, Any]) -> str:
     expected = _policy_metric(row, "expected_final_r_net", "expected_final_r")
     cvar = _policy_metric(row, "cvar10_r_net", "cvar10_r")
     gate = manager.get("gate") or {}
-    reliability = (((manager.get("evidence") or {}).get("data_quality") or {})
-                   .get("reliability") or {})
+    from .management_contract import decision_reliability
+    reliability = decision_reliability(snapshot)
     availability = _operational_availability(snapshot)
     number = lambda value: "нет расчёта" if value is None else f"{value:+.3f}R"
     return (
@@ -286,9 +288,9 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
                 if shadow.get("production_authority") else "отдельное мнение; вес в арбитре 0")
     return (
         "**ВЕСА И РОЛИ РЕШЕНИЯ** —\n"
-        "Количественный счёт: Expected + 0.35 × CVaR10; при подтверждённом "
-        "AI overlay арбитр добавляет +0.015R приоритета. Это коэффициенты "
-        "кода, а не вероятности исхода.\n"
+        "Диагностический счёт: Expected + 0.35 × CVaR10; бонус +0.015R "
+        "публикуется для диагностики и не определяет победителя. "
+        "Подтверждённый overlay получает приоритет только после gate.\n"
         f"Структурный Active Edge и исторические LLM-гипотезы: мягкий общий вес "
         f"{f'{edge_weight:.1%}' if edge_weight is not None else 'UNAVAILABLE'} "
         f"(лимит 40%); исследовательский LLM-компонент "
@@ -394,6 +396,8 @@ def request_explanation_with_shadow(
     }
     shadow["working_action"] = build_working_action(authority, shadow)
     finalize_extended_shadow(authority, shadow)
+    from .llm_decision_shadow import audit_report_claims
+    audit_report_claims(authority, shadow)
     record_shadow_decision(shadow)
     combined = (
         deterministic.rstrip()

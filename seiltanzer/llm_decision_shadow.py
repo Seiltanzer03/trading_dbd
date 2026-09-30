@@ -410,6 +410,7 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
     from .llm_shadow_working_action import build_working_action
     result["working_action"] = build_working_action(snapshot, result)
     finalize_extended_shadow(snapshot, result)
+    audit_report_claims(snapshot, result)
     record_shadow_decision(result)
     return result
 
@@ -509,10 +510,14 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
                    "expected_delta_vs_hold_r", "paired_delta_ci95_lower_r",
                    "worst_seed_cvar10_gross_r")) else ".")
         )
-    if shadow.get("reason_ru"):
+    safe_claims = shadow.get("audited_key_evidence", shadow.get("key_evidence"))
+    if shadow.get("reason_ru") and not shadow.get("report_claim_conflicts"):
         lines.append("Непроверенный аргумент LLM: " + str(shadow["reason_ru"]))
-    if shadow.get("key_evidence"):
-        lines.append("Заявленные моделью аргументы: " + " | ".join(shadow["key_evidence"]))
+    if safe_claims:
+        lines.append("Заявленные моделью аргументы: " + " | ".join(safe_claims))
+    if shadow.get("report_claim_conflicts"):
+        lines.append("Противоречащие снимку утверждения LLM исключены из объяснения: "
+                     + "; ".join(shadow["report_claim_conflicts"]) + ". Действует проверенный вывод сервера.")
     if shadow.get("counter_evidence"):
         lines.append("Контраргументы LLM: " + " | ".join(shadow["counter_evidence"]))
     action = shadow.get("working_action") or {}
@@ -527,3 +532,29 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
             + ". Он не меняет management_decision и не создаёт ордер."
         )
     return "\n".join(lines).strip()
+
+
+
+def audit_report_claims(snapshot: dict, shadow: dict) -> None:
+    """Withhold explicit contradictions to frozen authority facts from prose."""
+    from .management_contract import decision_reliability
+    manager = snapshot.get("policy_manager") or {}
+    quality = decision_reliability(snapshot)
+    stability = manager.get("stability") or {}
+    verified_stress = isinstance(stability, dict) and isinstance(stability.get("checks"), (int, float)) and stability["checks"] > 0
+    safe, conflicts = [], []
+    claims = [shadow.get("reason_ru") or "", *(shadow.get("key_evidence") or [])]
+    for index, claim in enumerate(claims):
+        text = str(claim).lower()
+        conflict = None
+        if quality["level"] == "низкая" and "запрещ" in text and ("надежност" in text or "надёжност" in text):
+            conflict = "низкая надёжность требует degraded-manual gate и не является абсолютным запретом"
+        if "устойчив" in text and ("стресс" in text or "stress" in text) and not verified_stress:
+            conflict = "численная стресс-устойчивость в снимке не опубликована"
+        if conflict:
+            if conflict not in conflicts:
+                conflicts.append(conflict)
+        elif index > 0:
+            safe.append(claim)
+    shadow["audited_key_evidence"] = safe
+    shadow["report_claim_conflicts"] = conflicts
