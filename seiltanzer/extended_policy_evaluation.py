@@ -41,12 +41,14 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
     """Require source authority, hard CVaR and material paired-path benefit."""
     manager = snapshot.get("policy_manager") or {}
     policy = str(action.get("policy") or "")
-    if action.get("status") != "READY_FOR_MANUAL_CONFIRMATION":
-        return _blocked("ACTION_PARAMETERS_UNAVAILABLE")
     if policy not in STOP_POLICIES | TAKE_POLICIES:
         # A strategy time limit or a distinct, non-duplicating scale-out
         # trigger is not present in the current policy contract.
         return _blocked("CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT")
+    if policy == "TRAIL_GAMMA_FLIP":
+        return _blocked("GEX_CONTEXT_NOT_A_VERIFIED_EXECUTION_ANCHOR")
+    if action.get("status") != "READY_FOR_MANUAL_CONFIRMATION":
+        return _blocked(str(action.get("reason") or "ACTION_PARAMETERS_UNAVAILABLE"))
     price = (((manager.get("input_audit") or {}).get("rows") or {})
              .get("instrument_price") or {})
     source = str(price.get("source") or "")
@@ -81,7 +83,7 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
     sign = 1.0 if stop < entry else -1.0
     risk = abs(entry - stop)
     params = action.get("parameters") or {}
-    if policy in {"TRAIL_GAMMA_FLIP", "TIGHTEN_STOP"} and params.get(
+    if policy == "TIGHTEN_STOP" and params.get(
         "anchor") == "ZERO_GAMMA":
         return _blocked("GEX_CONTEXT_NOT_A_VERIFIED_EXECUTION_ANCHOR")
     target = _number(params.get("stop_price" if policy in STOP_POLICIES else "take_price"))

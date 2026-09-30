@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from seiltanzer.llm_shadow_working_action import build_working_action
+from seiltanzer.llm_decision_shadow import finalize_extended_shadow
 
 
 def _snapshot():
@@ -41,11 +42,11 @@ def test_base_policy_becomes_exact_manual_variant_without_auto_execution():
     assert action["manual_confirmation_required"] is True
 
 
-def test_gamma_flip_uses_authoritative_non_widening_price():
+def test_gamma_flip_proxy_never_becomes_manual_order_anchor():
     action = build_working_action(_snapshot(), _shadow("TRAIL_GAMMA_FLIP"))
-    assert action["status"] == "READY_FOR_MANUAL_CONFIRMATION"
-    assert action["parameters"] == {"stop_price": 107.0, "anchor": "ZERO_GAMMA"}
-    assert action["may_widen_stop"] is False
+    assert action["status"] == "NOT_ACTIONABLE"
+    assert action["reason"] == "GEX_CONTEXT_NOT_A_VERIFIED_EXECUTION_ANCHOR"
+    assert "parameters" not in action
 
 
 def test_move_to_be_is_blocked_when_it_would_not_tighten_stop():
@@ -57,15 +58,25 @@ def test_move_to_be_is_blocked_when_it_would_not_tighten_stop():
     assert action["reason"] == "BREAK_EVEN_IS_NOT_A_VALID_TIGHTER_STOP"
 
 
-def test_scale_out_and_time_stop_get_deterministic_parameters():
+def test_conditional_actions_need_independent_execution_contracts():
     scale = build_working_action(_snapshot(), _shadow("SCALE_OUT_ON_SPIKE"))
-    assert scale["parameters"] == {
-        "trigger_price": 115.0, "trigger_r": 1.5, "close_fraction": 0.10,
-    }
     timed = build_working_action(_snapshot(), _shadow("TIME_STOP"))
-    assert timed["parameters"] == {
-        "deadline_ts": 1_900_014_400.0, "horizon_minutes": 240.0,
-    }
+    for action in (scale, timed):
+        assert action["status"] == "NOT_ACTIONABLE"
+        assert action["reason"] == "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT"
+        assert "parameters" not in action
+
+
+def test_finalized_shadow_keeps_specific_block_reason_without_manual_instruction():
+    snapshot = _snapshot()
+    for policy in ("TRAIL_GAMMA_FLIP", "SCALE_OUT_ON_SPIKE", "TIME_STOP"):
+        shadow = _shadow(policy)
+        shadow["working_action"] = build_working_action(snapshot, shadow)
+        finalize_extended_shadow(snapshot, shadow)
+        assert shadow["status"] == "blocked"
+        assert shadow["quant_evaluation"]["reason"] == shadow["working_action"]["reason"]
+        assert shadow["working_action"]["status"] == "NOT_ACTIONABLE"
+        assert "instruction_ru" not in shadow["working_action"]
 
 
 def test_low_confidence_or_failed_guard_never_becomes_actionable():
