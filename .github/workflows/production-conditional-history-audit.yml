@@ -1,6 +1,10 @@
 name: production-conditional-history-audit
 
 on:
+  workflow_run:
+    workflows: ["deploy"]
+    branches: [main]
+    types: [completed]
   workflow_dispatch:
     inputs:
       expected_sha:
@@ -12,13 +16,17 @@ permissions:
 
 jobs:
   audit:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-22.04
     timeout-minutes: 8
     steps:
       - name: Replay three conditional rules against immutable historical reviews
         uses: appleboy/ssh-action@v1
         env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_sha }}
         with:
           host: 94.241.171.182
           username: root

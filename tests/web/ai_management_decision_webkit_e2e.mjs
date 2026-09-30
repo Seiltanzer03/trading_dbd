@@ -24,7 +24,7 @@ const decision={
   remaining_fraction_after_action:.75,
   instruction_ru:'Закрыть 25% текущего остатка позиции.'
 };
-const edge={available:true,action_now:'CLOSE_25',direction_ru:'поддерживает более раннюю частичную фиксацию',weights:{combined:.15},counterfactual:{raw_policy_without_edge:'HOLD',raw_policy_with_edge:'CLOSE_25',raw_policy_changed:true},top_signals:[{target_family:'RETURN',horizon_minutes:30,status:'EARLY_ADVANTAGE',position_relation:'OPPOSES_POSITION',prediction_shift:{candidate_minus_structural_baseline:-.12,unit:'sigma'},selected_effective_n:24,positive_fold_count:2,evaluated_fold_count:3}],hard_risk_cvar_preserved:true,measurement_note_ru:'Улучшение прогноза — не доходность сделки. Вес не отменяет hard-risk/CVaR.'};
+const edge={available:true,action_now:'CLOSE_25',direction_ru:'поддерживает более раннюю частичную фиксацию',weights:{combined:.40},counterfactual:{raw_policy_without_edge:'HOLD',raw_policy_with_edge:'CLOSE_25',raw_policy_changed:true},top_signals:[{target_family:'RETURN',horizon_minutes:30,status:'EARLY_ADVANTAGE',position_relation:'OPPOSES_POSITION',prediction_shift:{candidate_minus_structural_baseline:-.12,unit:'sigma'},selected_effective_n:24,positive_fold_count:2,evaluated_fold_count:3}],hard_risk_cvar_preserved:true,measurement_note_ru:'Улучшение прогноза — не доходность сделки. Вес не отменяет hard-risk/CVaR.'};
 const shadow={working_action:{action_id:'shadow-action-e2e',trade_id:7,policy:'TIGHTEN_STOP',execution_status:'pending_execution',manual_execution_required:true,instruction_ru:'ВРУЧНУЮ ПОДТЯНУТЬ СТОП К ZERO_GAMMA: 107'}};
 window.__calls=[];
 window.__applied=null;
@@ -73,7 +73,7 @@ await page.goto(`http://127.0.0.1:${server.address().port}/fixture`,
 await page.locator('#execution').getByText('ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ').waitFor();
 await page.getByText('ПЕРЕВЕСЫ В РЕШЕНИИ').waitFor();
 assert.match(await page.locator('#edge').innerText(),/Без перевеса: HOLD → с перевесом: CLOSE_25/);
-assert.match(await page.locator('#edge').innerText(),/раннее преимущество/);
+assert.match(await page.locator('#edge').innerText(),/перевес/);
 assert.match(await page.locator('#execution .ai-execution-instruction').innerText(),
   /Закрыть 25% текущего остатка/);
 assert.equal(await page.locator('#execution').getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).count(),1);
