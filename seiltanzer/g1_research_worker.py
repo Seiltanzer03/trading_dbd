@@ -234,7 +234,18 @@ def install_research_worker(app) -> None:
         state["process_started_ts"] = process_started_ts
         try:
             state["first_cycle_not_before_ts"] = time.time() + RESEARCH_STARTUP_GRACE_SEC
-            await asyncio.sleep(RESEARCH_STARTUP_GRACE_SEC)
+            # The deploy lease is acquired only after real HTTP readiness.
+            # Expedite its required bounded core instead of idling five minutes.
+            while time.time() < state["first_cycle_not_before_ts"]:
+                gate = worker_acceptance_gate_state(
+                    process_started_ts=process_started_ts,
+                    last_finished_ts=state.get("last_finished_ts"),
+                )
+                if gate["active"]:
+                    state["first_cycle_not_before_ts"] = time.time()
+                    break
+                await asyncio.sleep(min(1.0, max(0.0,
+                    state["first_cycle_not_before_ts"] - time.time())))
             while True:
                 gate = worker_acceptance_gate_state(
                     process_started_ts=process_started_ts,

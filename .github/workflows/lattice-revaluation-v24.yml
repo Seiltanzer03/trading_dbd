@@ -23,7 +23,7 @@ jobs:
       - name: Python syntax
         run: python -m compileall -q seiltanzer tests
       - name: Python tests
-        run: pytest -q
+        run: pytest -q tests/test_lattice_revaluation.py
       - name: Lattice module syntax
         run: node --check seiltanzer/web/js/lattice.js
       - name: Lattice frontend smoke

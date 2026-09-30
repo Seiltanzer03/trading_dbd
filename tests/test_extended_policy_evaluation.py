@@ -54,18 +54,20 @@ def test_extended_action_rejects_low_reliability_and_missing_geometry():
         "LOW_DATA_RELIABILITY_FOR_EXTENDED_OVERRIDE")
     snapshot = _snapshot()
     assert evaluation.evaluate_extended_action(snapshot, _action("TIME_STOP", deadline_ts=123))["reason"] == (
-        "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT")
+        "INVALID_TIME_STOP_DEADLINE")
 
 
 def test_unverified_conditional_actions_remain_blocked_even_with_forged_parameters():
     snapshot = _snapshot()
+    snapshot["captured_ts"] = 1_900_000_000
+    snapshot["policy_manager"]["inputs"]["chain_status"] = "delayed"
     cases = (
         ("TRAIL_GAMMA_FLIP", {"stop_price": 105.0, "anchor": "ENTRY_PRICE"},
          "GEX_CONTEXT_NOT_A_VERIFIED_EXECUTION_ANCHOR"),
         ("SCALE_OUT_ON_SPIKE", {"trigger_price": 115.0, "close_fraction": .10},
-         "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT"),
-        ("TIME_STOP", {"deadline_ts": 1_900_014_400.0},
-         "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT"),
+         "SPIKE_DUPLICATES_STRATEGY_RUNG"),
+        ("TIME_STOP", {"deadline_ts": 1_900_014_401.0},
+         "INVALID_TIME_STOP_DEADLINE"),
     )
     for policy, parameters, reason in cases:
         result = evaluation.evaluate_extended_action(snapshot, _action(policy, **parameters))

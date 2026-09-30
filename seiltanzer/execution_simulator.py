@@ -28,6 +28,9 @@ class ExecutionSpec:
     rung_fraction_original: float
     be_after_r: float
     stop_r: float = -1.0
+    spike_r: float | None = None
+    spike_fraction: float = 0.0
+    time_stop_fraction: float | None = None
 
     @classmethod
     def from_values(
@@ -113,6 +116,15 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
         raise ValueError("path must be a non-empty finite one-dimensional sequence")
     if abs(float(values[0]) - spec.current_r) > 1e-7:
         raise ValueError("path must start at ExecutionSpec.current_r")
+    if spec.time_stop_fraction is not None:
+        if not 0 < spec.time_stop_fraction <= 1:
+            raise ValueError("invalid time stop fraction")
+        coordinate = (values.size - 1) * spec.time_stop_fraction
+        index = int(coordinate)
+        endpoint = float(np.interp(coordinate, np.arange(values.size), values))
+        values = np.concatenate((values[:index + 1], [endpoint]))
+    if not 0 <= spec.spike_fraction <= 1:
+        raise ValueError("invalid spike close fraction")
 
     remaining = 1.0
     realized = 0.0
@@ -121,6 +133,7 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
     pending = list(spec.future_rungs)
     be_armed = spec.max_r >= spec.be_after_r - EPSILON
     be_step: int | None = 0 if be_armed else None
+    spike_pending = spec.spike_r is not None and spec.spike_r > spec.current_r + EPSILON
 
     def finish(exit_r: float, reason: str, step: int,
                fraction: float) -> ExecutionResult:
@@ -143,6 +156,9 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
         previous, current = float(previous), float(current)
         if current >= previous:
             events: list[tuple[float, int, str, float]] = []
+            if spike_pending and previous < spec.spike_r - EPSILON <= current + EPSILON:
+                events.append((_crossing_fraction(previous, current, spec.spike_r),
+                               0, "spike", spec.spike_r))
             for rung in pending:
                 if previous < rung - EPSILON <= current + EPSILON:
                     # A rung at the BE level is booked before BE is armed.  Both
@@ -158,7 +174,17 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
                 events.append((_crossing_fraction(previous, current, spec.take_r),
                                2, "take", spec.take_r))
             for fraction, _priority, kind, level in sorted(events):
-                if kind == "rung" and level in pending and remaining > EPSILON:
+                if kind == "spike" and spike_pending:
+                    fill = remaining * spec.spike_fraction
+                    realized += fill * level
+                    remaining -= fill
+                    spike_pending = False
+                    event_timeline.append({"type": "spike", "r": float(level),
+                        "step": step, "fill_fraction": float(fill),
+                        "remaining_after": float(remaining)})
+                    if remaining <= EPSILON:
+                        return finish(level, "take", step, fraction)
+                elif kind == "rung" and level in pending and remaining > EPSILON:
                     fill = min(spec.future_fill_fraction, remaining)
                     realized += fill * level
                     remaining -= fill
@@ -185,14 +211,15 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
                 elif kind == "take":
                     return finish(spec.take_r, "take", step, fraction)
         else:
-            active_stop = 0.0 if be_armed else spec.stop_r
+            active_stop = max(0.0, spec.stop_r) if be_armed else spec.stop_r
             if current <= active_stop + EPSILON < previous:
                 return finish(
                     active_stop, "breakeven" if be_armed else "stop", step,
                     _crossing_fraction(previous, current, active_stop),
                 )
 
-    return finish(float(values[-1]), "horizon", values.size - 1, 1.0)
+    return finish(float(values[-1]), "time_stop" if spec.time_stop_fraction is not None
+                  else "horizon", values.size - 1, 1.0)
 
 
 def execution_contract(spec: ExecutionSpec) -> dict:
