@@ -100,7 +100,7 @@ def test_evaluate_all_persists_non_authoritative_rolling_advantage(monkeypatch):
     stored = exploratory.status(runtime)
     assert stored["advantage_n"] == 1
     assert stored["production_authority"] is False
-    assert stored["position_manager_weight_cap"] == 0.15
+    assert stored["position_manager_weight_cap"] == 0.40
     assert stored["position_manager_weight_requires"] == "LIMITED_AND_CURRENT_T0_MATCH"
 
     row = runtime._conn.execute(
@@ -135,7 +135,7 @@ def test_ai_context_includes_only_early_advantages_with_bounded_authority():
     context = ai_verdict._compact_exploratory_verdicts(
         SimpleNamespace(short_horizon=runtime))
     assert [item["hypothesis_id"] for item in context["items"]] == ["adv"]
-    assert context["position_manager_weight_cap"] == 0.15
+    assert context["position_manager_weight_cap"] == 0.40
     assert context["may_influence_policy_selection"] is True
     assert context["production_authority"] is False
     assert context["may_independently_trigger_exit_or_close"] is False

@@ -1,8 +1,9 @@
-"""Bounded production soft weight for rolling exploratory LLM hypotheses.
+"""Production soft weight for current, historically tested LLM hypotheses.
 
 Only worker-materialized LIMITED-confidence results are read on the request
 path.  A hypothesis must match the current frozen T0 feature context before it
-can contribute.  The resulting vote is capped at fifteen percent and can only
+can contribute.  The resulting vote has the same forty percent ceiling as the
+active-edge layer and can only
 rank policies which already passed the deterministic hard-risk/CVaR gate.
 """
 from __future__ import annotations
@@ -12,8 +13,8 @@ from collections import defaultdict
 from typing import Any
 
 
-CONTRACT_VERSION = "llm-edge-exploratory-policy-weight-v1"
-MAX_EXPLORATORY_WEIGHT = 0.15
+CONTRACT_VERSION = "llm-edge-operational-policy-weight-v2"
+MAX_EXPLORATORY_WEIGHT = 0.40
 ELIGIBLE_POLICIES = ("HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT")
 
 
@@ -70,7 +71,7 @@ def _unavailable(reason: str, **extra: Any) -> dict[str, Any]:
         "direction_score": 0.0,
         "preferred_close_fraction": None,
         "reason": reason,
-        "production_role": "BOUNDED_EARLY_SOFT_POLICY_RANKING",
+        "production_role": "OPERATIONAL_EDGE_SOFT_POLICY_RANKING",
         "may_influence_policy_selection": False,
         "eligible_policies": list(ELIGIBLE_POLICIES),
         "hard_risk_override": False,
@@ -262,7 +263,7 @@ def exploratory_weight_profile(
         "rolling_result": True,
         "strict_gate_passed": False,
         "production_authority": False,
-        "production_role": "BOUNDED_EARLY_SOFT_POLICY_RANKING",
+        "production_role": "OPERATIONAL_EDGE_SOFT_POLICY_RANKING",
         "may_influence_policy_selection": True,
         "eligible_policies": list(ELIGIBLE_POLICIES),
         "hard_risk_override": False,

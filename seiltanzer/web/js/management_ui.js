@@ -6,7 +6,7 @@ import './trade_delete_ui_guard.js';
 mountG1SEvidencePanel();
 
 const EDGE_STATUS_RU = {
-  EARLY_ADVANTAGE: 'раннее преимущество',
+  EARLY_ADVANTAGE: 'перевес',
   EARLY_DISADVANTAGE: 'гипотеза хуже базовой (не обратный сигнал)',
   EARLY_MIXED: 'смешанный результат',
   EARLY_UNDECIDED: 'результат пока не определён',
@@ -14,7 +14,7 @@ const EDGE_STATUS_RU = {
 
 const EDGE_RELATION_RU = {
   SUPPORTS_POSITION: 'за текущую позицию',
-  OPPOSES_POSITION: 'против текущей позиции',
+  OPPOSES_POSITION: 'антисигнал для позиции',
   NON_DIRECTIONAL: 'без направления',
 };
 

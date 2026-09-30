@@ -326,8 +326,8 @@ LAST_GOOD_CACHE → MATHEMATICAL_PROXY. Используй fallback только
 soft-ranking только внутри hard-risk/CVaR eligible policies; EDE causal/prospective
 shadow сам по себе не имеет production directional authority и не может вызвать
 CLOSE/EXIT.
-ROLLING_EXPLORATORY_VERDICTS — быстрые низкоуверенные гипотезы по накопленной
-истории. LIMITED-гипотезы, совпавшие с текущим T0-контекстом, имеют до 15%
+ROLLING_EXPLORATORY_VERDICTS — операционные гипотезы по накопленной
+истории. LIMITED-гипотезы, совпавшие с текущим T0-контекстом, имеют до 40%
 веса в soft-ranking вариантов HOLD/CLOSE_10/CLOSE_25/CLOSE_50/EXIT. Они не
 обходят hard-risk/CVaR и не разрешают самостоятельно исполнение, расширение
 стопа, увеличение позиции, BUY/SELL или разворот.
@@ -471,7 +471,7 @@ def _compact_exploratory_verdicts(engine) -> dict:
         "total_early_advantage": len(rows),
         "rolling_result": True,
         "production_authority": False,
-        "position_manager_weight_cap": 0.15,
+        "position_manager_weight_cap": 0.40,
         "position_manager_weight_requires": "LIMITED_AND_CURRENT_T0_MATCH",
         "eligible_policies": ["HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"],
         "may_influence_policy_selection": True,
