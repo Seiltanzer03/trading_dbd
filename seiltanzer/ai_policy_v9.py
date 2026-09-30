@@ -94,6 +94,8 @@ def _arbiter(policy_result: dict) -> dict:
         "overlay_qualified": bool(selected_overlay),
         "reason": reason,
         "single_authority": True,
+        "selection_mechanism": "confirmed_overlay_priority",
+        "scores_determine_winner": False,
     }
 
 

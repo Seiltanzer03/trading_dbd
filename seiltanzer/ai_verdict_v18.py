@@ -63,6 +63,26 @@ def _bounded(value: Any, *, depth: int = 0) -> Any:
     return value
 
 
+def _bounded_gate(gate: dict) -> dict:
+    """Keep the bounded, four-candidate causal audit beyond the depth cutoff."""
+    result = _bounded(gate)
+    overlay = gate.get("degraded_authority_overlay") or {}
+    if not overlay:
+        return result
+    compact = result.setdefault("degraded_authority_overlay", {})
+    compact["candidate_summary"] = {
+        name: _bounded(row) for name, row in (overlay.get("candidate_summary") or {}).items()
+        if name in {"CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
+    }
+    evidence = overlay.get("evidence") or {}
+    if "observed_metrics" in evidence:
+        compact.setdefault("evidence", {})["observed_metrics"] = [
+            _bounded(_small_row(row, ("metric", "family", "value", "threshold", "direction", "source", "age_sec", "status")))
+            for row in evidence["observed_metrics"][:12] if isinstance(row, dict)
+        ]
+    return result
+
+
 def _compact_input_audit(audit: Any) -> dict[str, Any]:
     audit = audit if isinstance(audit, dict) else {}
     compact_rows: dict[str, Any] = {}
@@ -170,6 +190,7 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
         # Last-resort deterministic allowlist. Management decision and every
         # compared policy stay intact; only explanatory workspaces are omitted.
         keep_manager = (
+            "position_economics", "repeat_intervention_gate",
             "version", "management_decision", "recommendation", "policies",
             "selection_rule", "gate", "evidence", "inputs", "risk_constraint",
             "management_arbiter", "state_change_attribution", "input_audit",
@@ -186,7 +207,7 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
             _compact_input_audit(manager.get("input_audit") or {}))
         manager["option_derivative_state"] = _bounded(
             manager.get("option_derivative_state") or {})
-        manager["gate"] = _bounded(manager.get("gate") or {})
+        manager["gate"] = _bounded_gate(manager.get("gate") or {})
         policies = manager.get("policies") or {}
         manager["policies"] = {
             name: _small_row(policy, (

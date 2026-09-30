@@ -30,6 +30,9 @@ def _observed_active_evidence(evidence: dict) -> dict:
         observed_metrics.append({
             "metric": item.get("metric"),
             "family": family,
+            **{key: item[key] for key in (
+                "value", "threshold", "direction", "source", "age_sec", "status",
+            ) if key in item and isinstance(item[key], (str, int, float, bool, type(None)))},
         })
 
     # A family label without an underlying metric row is not enough to authorize
@@ -82,6 +85,10 @@ def _compact_overlay(raw_choice: str, base_result: dict,
             "cvar_gain_r": row["cvar_gain_vs_hold_r"],
             "local_support": row["support"]["local_support"],
             "source_support": row["support"]["source_support"],
+            "utility": row["utility"],
+            "support_basis": row["support"]["basis"],
+            "required_families": row["requirements"]["min_total_adverse_families"],
+            "required_live_families": row["requirements"]["min_live_adverse_families"],
             "failed": _failure_codes(row),
         }
         for row in rows
@@ -93,6 +100,9 @@ def _compact_overlay(raw_choice: str, base_result: dict,
         "total_adverse_count": evidence_summary["total_adverse_count"],
         "live_adverse_count": evidence_summary["live_adverse_count"],
         "observed_adverse_item_count": evidence_summary["observed_adverse_item_count"],
+        "observed_metrics": evidence_summary["observed_metrics"][:12],
+        "supportive_families": evidence_summary["supportive_families"],
+        "mixed_families": evidence_summary["mixed_families"],
         "option_only": evidence_summary["option_only"],
         "incomplete_family_labels": evidence_summary["incomplete_family_labels"],
     }

@@ -134,9 +134,43 @@ def _plan_lines(snapshot: dict) -> list[str]:
         f"Авторитет плана: {authority}; production policy: {production}; shadow/model candidate: {model_policy}.",
         f"Статус исполнения: {_text(decision.get('execution_status'))}; continuity={continuity}.",
         f"Новая доля закрытия текущего остатка: {_fraction_pct(decision.get('incremental_close_fraction'))}; остаток после действия: {_fraction_pct(decision.get('remaining_fraction_after_action'))}.",
-        f"Арбитражный счёт: стратегия {_score(arbiter.get('strategy_score'))}; ИИ до приоритета {_score(arbiter.get('ai_score_before_priority'))}; ИИ после приоритета {_score(arbiter.get('ai_score_after_priority'))}.",
+        f"Диагностические баллы: стратегия {_score(arbiter.get('strategy_score'))}; overlay до бонуса {_score(arbiter.get('ai_score_before_priority'))}; после бонуса {_score(arbiter.get('ai_score_after_priority'))}. Баллы и бонус не определяют победителя: подтверждённый overlay получает приоритет по правилу.",
         "Приоритет ИИ действует только после evidence/CVaR/stress gate; после выбора арбитра второй параллельной команды нет; production authority этим отчётом не расширяется.",
+        *_position_economics_lines(snapshot),
     ]
+
+
+def _position_economics_lines(snapshot: dict) -> list[str]:
+    manager = snapshot.get("policy_manager") or {}
+    decision = manager.get("management_decision") or {}
+    position = snapshot.get("position_state") or {}
+    economics = manager.get("position_economics") or {}
+    before = _number(decision.get("remaining_fraction_before_action"))
+    if before is None:
+        before = _number(position.get("remaining_position_fraction"))
+    after = _number(decision.get("remaining_fraction_after_action"))
+    fraction = _number(decision.get("incremental_close_fraction"))
+    lines = ["Expected, медиана и CVaR таблицы политик даны на единицу текущего остатка; R отсчитывается от исходного риска сделки. P прибыли относится к будущему результату остатка, а не всей частично закрытой сделки."]
+    if before is not None and fraction is not None:
+        lines.append(f"Объём относительно исходной позиции: до {_pct(before)}; закрыть {_pct(before * fraction)}; после {_pct(after)}.")
+    selected = decision.get("policy") or (manager.get("recommendation") or {}).get("policy")
+    row = (economics.get("policies") or {}).get(selected) or {}
+    if row:
+        lines.append(f"Польза {selected} против HOLD для всей сделки: Expected {_r(row.get('expected_delta_total_r'))}; CVaR10 {_r(row.get('cvar_gain_total_r'))}.")
+        lines.append(f"Вся сделка при {selected}: Expected {_r(row.get('expected_total_r'))}; CVaR10 {_r(row.get('cvar10_total_r'))}; зафиксировано {_r(economics.get('realized_r_weighted'))}. Исторические издержки исполненных закрытий не учтены; будущие издержки включены в модель.")
+        if economics.get("realized_price_basis") not in {"user_supplied_broker_fill", "NOT_APPLICABLE"}:
+            lines.append("Зафиксированный результат использует оценку/неуточнённые цены закрытий; точность результата всей сделки зависит от фактических цен исполнения у брокера.")
+    previous = decision.get("previous_executed_reduction") or {}
+    if previous:
+        lines.append(f"Последнее подтверждённое сокращение: {previous.get('policy')}; остаток {_pct(previous.get('remaining_before'))} → {_pct(previous.get('remaining_after'))} исходной позиции; decision_id={previous.get('decision_id')}.")
+        if decision.get("repeat_reduction"):
+            lines.append("Это новое сокращение обновлённого остатка по новому расчёту; прежнее исполнение не повторяется. Дополнительное сокращение требует актуального gate.")
+    repeat_gate = manager.get("repeat_intervention_gate") or {}
+    if repeat_gate.get("status") == "deferred_no_material_change":
+        lines.append(f"Повторный {repeat_gate.get('candidate_policy')} отложен: предыдущее сокращение учтено, существенного нового основания нет. Сейчас HOLD для остатка. Нужны ухудшение на 0.15R, усиление расчётной пользы или новые независимые подтверждения; новое время котировки не считается подтверждением.")
+    elif repeat_gate.get("allowed"):
+        lines.append("Основания нового сокращения после исполнения: " + ", ".join(repeat_gate.get("reasons") or []) + ".")
+    return lines
 
 
 def _terminal_cancellation_lines(snapshot: dict) -> list[str] | None:
@@ -145,6 +179,13 @@ def _terminal_cancellation_lines(snapshot: dict) -> list[str] | None:
     decision = manager.get("management_decision") or {}
     event = decision.get("strategy_terminal_event")
     policy = decision.get("policy")
+    if not event and policy != "HOLD" and decision.get("execution_status") == "pending_execution":
+        boundary = manager.get("cancellation_boundary") or {}
+        switch = boundary.get("hold_switch") or {}
+        return [
+            f"Граница базового net-оптимизатора: r={_r(switch.get('r'))} → HOLD. Это не граница отмены итогового {policy} от risk-overlay.",
+            "Итоговую команду подтверждает или заменяет новый арбитражный пересчёт с актуальными evidence/CVaR/stress проверками. Изменение остатка, стопа или тейка делает старое исполнение недопустимым; нужен новый разбор.",
+        ]
     if not event or policy == "HOLD":
         return None
     return [
@@ -283,12 +324,13 @@ def _risk_lines(snapshot: dict) -> list[str]:
             "наименее вмешивающаяся допустимая политика."
         )
 
-    tradeoff = manager.get("risk_tradeoff") or {}; delta = _number(tradeoff.get("expected_delta_vs_hold_r"))
+    integrity = snapshot.get("report_integrity") or {}
+    tradeoff = manager.get("risk_tradeoff") or integrity.get("risk_tradeoff") or {}; delta = _number(tradeoff.get("expected_delta_vs_hold_r"))
     if delta is not None:
         label = tradeoff.get("expected_delta_label") or "расчётное преимущество над HOLD"
         lines.append(f"{label}: {_r(delta)}; улучшение CVaR10 относительно HOLD: {_r(tradeoff.get('cvar_improvement_vs_hold_r'))}.")
-    raw_stability = manager.get("raw_optimizer_stability") or {}
-    final_stability = manager.get("stability") or {}
+    raw_stability = manager.get("raw_optimizer_stability") or integrity.get("raw_optimizer_stability") or {}
+    final_stability = manager.get("stability") or integrity.get("stability") or {}
     selected = rec.get("policy") or raw
     lines.append(
         f"Параметрическая устойчивость сырого {raw}: "
@@ -309,8 +351,32 @@ def _risk_lines(snapshot: dict) -> list[str]:
     else:
         lines.append(
             f"Устойчивость к источнику данных для {selected}: "
-            f"{int(source_count)}/{int(source_checks)} ({_pct(gate.get('source_stability_share'))})."
+            f"{int(source_count)}/{int(source_checks)} ({_pct(source_count / source_checks)}); это доля побед при смене источников, а не допустимость overlay."
         )
+    overlay = gate.get("degraded_authority_overlay") or {}
+    selected_overlay = overlay.get("selected") or {}
+    support = selected_overlay.get("support") or {}
+    requirements = selected_overlay.get("requirements") or {}
+    if selected_overlay:
+        lines.append(f"Кандидат deterministic risk-overlay: {selected_overlay.get('policy')}; базовый оптимизатор: {raw}; итоговая команда: {(manager.get('management_decision') or {}).get('policy') or selected}.")
+        lines.append(f"Overlay против HOLD на единицу остатка: Expected {_r(selected_overlay.get('expected_delta_vs_hold_r'))}; улучшение CVaR10 {_r(selected_overlay.get('cvar_gain_vs_hold_r'))}; требуется минимум {_r(requirements.get('min_cvar_gain_r'))}.")
+        local = support.get("local_support", selected_overlay.get("local_support"))
+        source = support.get("source_support", selected_overlay.get("source_support"))
+        lines.append(f"Поддержка gate ({support.get('basis') or 'тип не опубликован'}): параметрическая {_pct(local)}, минимум {_pct(requirements.get('min_local_support'))}; источники {_pct(source)}, минимум {_pct(requirements.get('min_source_support'))}. Допустимость в стрессах не означает статистически доказанного преимущества.")
+        alternatives = overlay.get("candidate_summary") or {}
+        for name, row in alternatives.items():
+            if name == selected_overlay.get("policy"):
+                continue
+            failures = row.get("failed") or []
+            failure_labels = {
+                "expected_and_cvar": "экономика/CVaR", "total_adverse": "число независимых семей",
+                "live_adverse": "число живых семей", "local_support": "параметрические стрессы",
+                "source_support": "проверки источников", "not_option_only": "независимое живое подтверждение",
+            }
+            failures = [failure_labels.get(code, code) for code in failures]
+            result = "допустим, но уступил выбранному по utility" if row.get("qualified") else "не прошёл: " + ", ".join(failures)
+            lines.append(f"Почему не {name}: {result}; нужны семьи {_text(row.get('required_families'))}, живые {_text(row.get('required_live_families'))}; utility {_score(row.get('utility'))}.")
+        lines.append("Utility overlay учитывает Expected, CVaR10, вероятность отдачи 0.50R и долю сокращения; это заданный критерий управления риском, а не доказанный исторический перевес.")
 
     evidence_summary, total_families, live_families, observed_items = _degraded_evidence_summary(gate)
     if gate.get("status") == "confirmed_degraded_manual":
@@ -338,7 +404,9 @@ def _risk_lines(snapshot: dict) -> list[str]:
         and decision.get("manual_execution_required") is True
         and decision.get("policy") not in (None, "", "HOLD")
     )
-    if manual_pending:
+    if (manager.get("repeat_intervention_gate") or {}).get("status") == "deferred_no_material_change":
+        work_action = "HOLD для обновлённого остатка; повторное вмешательство отложено до существенного нового основания"
+    elif manual_pending:
         instruction = (
             decision.get("instruction_ru")
             or rec.get("execution_action_ru")
@@ -473,6 +541,17 @@ def _repair_degraded_manual_summary(lines: list[str], snapshot: dict) -> list[st
         elif "Отдельных строк метрик:" in line:
             item_text = "—" if observed_items is None else str(int(observed_items))
             line = f"Отдельных adverse строк метрик: {item_text}."
+        elif line.startswith("Однонаправленные семьи против удержания:"):
+            line = f"Однонаправленные семьи против удержания по observed gate: {family_text}."
+        elif line.startswith("Метрики против удержания:") and "нет." in line:
+            metrics = evidence.get("observed_metrics") or []
+            names = ", ".join(str(row.get("metric")) for row in metrics if isinstance(row, dict))
+            count = "—" if observed_items is None else str(int(observed_items))
+            line = f"Метрики против удержания: observed gate сохранил {count} строк; {names or 'детали не опубликованы в компактном снимке'}. Значения и пороги не восстановлены из отсутствующих данных."
+        elif line.startswith("Однонаправленные семьи в пользу удержания:") and "supportive_families" not in evidence:
+            line = "Семьи в пользу удержания: детали не опубликованы в компактном снимке."
+        elif line.startswith("Смешанные семьи,") and "mixed_families" not in evidence:
+            line = "Смешанные семьи: детали не опубликованы в компактном снимке."
         repaired.append(line)
     return repaired
 
@@ -486,6 +565,13 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
         _replace_section(lines, "**ГРАНИЦА ОТМЕНЫ**", terminal_cancellation)
     manager = snapshot.get("policy_manager") or {}; _replace_section(lines, "**ЧТО УЛУЧШИЛОСЬ**", _material_change_lines(manager, "what_improved")); _replace_section(lines, "**ЧТО УХУДШИЛОСЬ**", _material_change_lines(manager, "what_deteriorated"))
     lines = _repair_degraded_manual_summary(lines, snapshot)
+    lines = [line.replace("AI priority bonus", "диагностический бонус (не определяет выбор)") for line in lines]
+    decision = manager.get("management_decision") or {}
+    if decision.get("execution_status") == "pending_execution" and decision.get("policy") in {"CLOSE_10", "CLOSE_25", "CLOSE_50"}:
+        _replace_section(lines, "**ПОСЛЕ ИСПОЛНЕНИЯ**", [
+            "Подтвердите действие только после исполнения у брокера: терминал уменьшит остаток и учтёт зафиксированный результат. Повторное подтверждение того же decision_id не уменьшает позицию второй раз.",
+            "Новое сокращение возможно после нового расчёта для обновлённого остатка и прохождения актуального gate; стандартный стоп/БУ и лестница продолжаются для остатка.",
+        ])
     lines = [line.replace("Shadow metrics:", "Derived shadow scenario distribution:") for line in lines]
     bounds = _section(lines, "**РАСЧЁТ ПОЛИТИК**")
     if bounds is not None:

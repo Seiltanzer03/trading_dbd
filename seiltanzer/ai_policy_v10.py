@@ -15,7 +15,8 @@ _BASE_ANALYZE = _impl.analyze_policies
 def _compact_diagnostics(result: dict) -> None:
     gate = result.get("gate") or {}
     overlay = gate.get("degraded_authority_overlay") or {}
-    overlay.pop("candidate_summary", None)
+    # These four compact rows explain why the selected size beat alternatives.
+    # They are causal facts, not a duplicate Monte Carlo workspace.
     selected = overlay.get("selected")
     if isinstance(selected, dict):
         support = selected.get("support") or {}
@@ -29,6 +30,10 @@ def _compact_diagnostics(result: dict) -> None:
             "emergency_exit": bool(selected.get("emergency_exit")),
             "local_support": support.get("local_support"),
             "source_support": support.get("source_support"),
+            "support": support,
+            "requirements": selected.get("requirements"),
+            "checks": selected.get("checks"),
+            "utility": selected.get("utility"),
         }
     if overlay:
         gate["degraded_authority_overlay"] = overlay

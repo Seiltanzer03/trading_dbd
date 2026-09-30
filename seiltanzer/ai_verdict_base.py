@@ -312,13 +312,8 @@ def build_snapshot(engine) -> dict:
     }
     decision = engine.position.preview_decision(snapshot, trade)
     snapshot["policy_manager"]["management_decision"] = decision
-    remaining = float(position_state.get("remaining_position_fraction") or 0.0)
-    realized = float(position_state.get("realized_r_weighted") or 0.0)
-    for metrics in (snapshot["policy_manager"].get("policies") or {}).values():
-        future = _num(metrics.get("expected_final_r"))
-        metrics["expected_future_r_on_remaining"] = future
-        metrics["expected_total_trade_r"] = (
-            None if future is None else round(realized + remaining * future, 6))
+    from .management_economics import attach_position_economics
+    attach_position_economics(snapshot)
     return snapshot
 
 

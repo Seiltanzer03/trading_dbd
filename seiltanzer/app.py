@@ -84,6 +84,25 @@ def _refresh_management_decision(engine, snapshot: dict, trade: dict) -> dict:
 
     operational = engine.position.preview_decision(preview_snapshot, trade)
     decision = {**existing, **operational}
+    from .management_economics import repeat_intervention_gate
+    repeat_gate = repeat_intervention_gate(snapshot, decision)
+    if repeat_gate is not None:
+        manager["repeat_intervention_gate"] = repeat_gate
+        if not repeat_gate["allowed"]:
+            hold_manager = {**manager, "recommendation": {**(manager.get("recommendation") or {}), "policy": "HOLD"}}
+            operational = engine.position.preview_decision({**snapshot, "policy_manager": hold_manager}, trade)
+            decision = {**existing, **operational, "authority": "STRATEGY",
+                        "arbiter_winner": "STRATEGY",
+                        "arbiter_reason": "повторное сокращение требует существенного нового основания",
+                        "model_policy": repeat_gate["candidate_policy"],
+                        "reason": "REPEAT_REDUCTION_REQUIRES_MATERIAL_CHANGE",
+                        "continuity": "previous_reduction_accounted_no_new_material_change"}
+            manager["recommendation"] = hold_manager["recommendation"]
+            manager["management_arbiter"] = {
+                **(manager.get("management_arbiter") or {}),
+                "winner": "STRATEGY", "effective_policy": "HOLD",
+                "reason": "после исполненного сокращения нет существенного нового основания для повторного вмешательства",
+            }
     if breached_stop:
         decision.update({
             "authority": "STRATEGY", "policy": "HOLD",
@@ -102,6 +121,8 @@ def _refresh_management_decision(engine, snapshot: dict, trade: dict) -> dict:
         })
     manager["management_decision"] = decision
     snapshot["policy_manager"] = manager
+    from .management_economics import attach_position_economics
+    attach_position_economics(snapshot)
     return decision
 
 
@@ -1150,7 +1171,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 acknowledged = engine.position.acknowledge(
                     decision_id=req.decision_id, trade=trade, executed=req.executed,
-                    execution_price=execution_price, execution_r=execution_r)
+                    execution_price=execution_price, execution_r=execution_r,
+                    execution_price_source=("user_supplied_broker_fill" if req.execution_price is not None
+                                            else "quote_at_acknowledgement_estimate"))
         except StaleDecisionError as exc:
             raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:

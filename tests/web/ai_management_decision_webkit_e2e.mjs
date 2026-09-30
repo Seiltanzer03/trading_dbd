@@ -14,7 +14,7 @@ const server = http.createServer(async (req, res) => {
       res.end(`<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <div id="edge"></div><div id="execution"></div><div id="shadow"></div>
-<div id="extended-execution"></div><div id="extended-shadow"></div><div id="armed"></div>
+<div id="extended-execution"></div><div id="extended-shadow"></div><div id="armed"></div><div id="repeat"></div>
 <script type="module">
 import {mountEdgeManagement,mountManagementDecision,mountShadowWorkingAction,mountArmedShadowActions} from '/seiltanzer/web/js/management_ui.js';
 const decision={
@@ -33,11 +33,15 @@ const post=async (url,payload)=>{
   if(url==='/api/ai/shadow-action/ack') return {ok:true,action_id:payload.action_id,execution_status:'executed',position_state:{active_stop_price:107,take:130}};
   return {ok:true,decision_id:payload.decision_id,
     execution_status:payload.executed?'executed':'recommended_not_executed',
-    position_state:{remaining_position_fraction:payload.executed?.75:1}};
+    position_state:{remaining_position_fraction:payload.executed?(payload.decision_id==='decision-repeat-close50'?.25:.75):1}};
 };
 mountEdgeManagement(document.querySelector('#edge'),edge);
 mountManagementDecision(document.querySelector('#execution'),decision,post,
   result=>{window.__applied=result});
+mountManagementDecision(document.querySelector('#repeat'),{...decision,
+  decision_id:'decision-repeat-close50',policy:'CLOSE_50',incremental_close_fraction:.5,
+  remaining_fraction_before_action:.5,remaining_fraction_after_action:.25,
+  repeat_reduction:true,instruction_ru:'Закрыть 50% текущего остатка позиции.'},post);
 mountShadowWorkingAction(document.querySelector('#shadow'),shadow,post);
 const extended={...decision,decision_id:'management-action-e2e',policy:'TIGHTEN_STOP',
   instruction_ru:'Подтянуть стоп к 107',quant_baseline_policy:'HOLD',
@@ -108,6 +112,14 @@ await page.locator('#armed').getByRole('button',{name:'ИСПОЛНЕНО У Б�
 const armedCall=await page.evaluate(()=>window.__calls[3]);
 assert.deepEqual(armedCall.payload,{
   action_id:'shadow-action-armed',trade_id:7,executed:true,execution_price:120});
+assert.match(await page.locator('#repeat').innerText(),/осталось 50.0%, закрыть 25.0%, останется 25.0%/);
+assert.match(await page.locator('#repeat').innerText(),/предыдущее исполнение учтено/);
+await page.locator('#repeat input').fill('30470.1');
+await page.locator('#repeat').getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).tap();
+const repeatCall=await page.evaluate(()=>window.__calls[4]);
+assert.deepEqual(repeatCall.payload,{
+  decision_id:'decision-repeat-close50',trade_id:7,executed:true,execution_price:30470.1});
+assert.match(await page.locator('#repeat').innerText(),/Остаток: 25.0%/);
 await browser.close();
 await new Promise(resolve=>server.close(resolve));
 console.log('AI management CLOSE_25 WebKit E2E: PASS');
