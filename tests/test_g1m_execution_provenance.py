@@ -15,5 +15,5 @@ def test_execution_provenance_contract_is_explicit_in_source():
     assert '"user_ack_source": "management_decisions"' in source
     assert '"broker_confirmed": False' in source
     assert '"broker_execution_id": None' in source
-    assert REFINEMENT_VERSION == "g1m-execution-provenance-v2"
+    assert REFINEMENT_VERSION == "g1m-execution-provenance-v3"
     assert G1M_ATTRIBUTION_VERSION == "g1m-execution-attribution-v1"
