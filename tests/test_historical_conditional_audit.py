@@ -113,6 +113,27 @@ def test_positive_protection_stop_remains_effective_after_break_even_armed():
     assert result["variant_r"] == .5
 
 
+def test_legacy_t0_edge_is_used_only_when_combined_profile_did_not_exist():
+    snapshot = _snapshot()
+    snapshot["policy_manager"]["active_edge_provisional_weight"] = {
+        "available": True, "weight_fraction": .25, "direction_score": -.8,
+    }
+    points = [
+        {"ts": 1000, "r": .2}, {"ts": 1100, "r": .4},
+        {"ts": 1200, "r": .1}, {"ts": 1300, "r": -.2},
+    ]
+    candidate = replay_rules(snapshot, points)["EXIT_ON_THESIS_BREAK"]
+    assert candidate["signal_source"] == "LEGACY_ACTIVE_T0"
+    assert candidate["target_r"] == .2
+
+    snapshot["policy_manager"]["combined_edge_soft_weight"] = {
+        "available": True, "direction_score": .1,
+        "active_edge_component_weight": .25,
+    }
+    blocked = replay_rules(snapshot, points)["EXIT_ON_THESIS_BREAK"]
+    assert blocked["reason"] == "NO_FROZEN_OPPOSING_EDGE_AT_T0"
+
+
 def test_database_audit_deduplicates_trades_and_reports_coverage(tmp_path):
     path = tmp_path / "history.sqlite3"
     points = [(1000, .2), (1300, 1.2), (1600, 1.4), (1900, .5),
