@@ -323,7 +323,8 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
             )
             if exploratory_profile.get("available"):
                 phase["exploratory_edge_soft_weight"] = (
-                    "rolling LIMITED evidence, bounded to 15%, inside hard-risk eligible set"
+                    "current matched historical evidence, bounded to the shared 40% ceiling, "
+                    "inside hard-risk eligible set"
                 )
             phase["production_recommendation_source"] = (
                 "authoritative policy path + bounded active/rolling-edge soft ranking"

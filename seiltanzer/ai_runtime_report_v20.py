@@ -293,7 +293,7 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
         f"{f'{edge_weight:.1%}' if edge_weight is not None else 'UNAVAILABLE'} "
         f"(лимит 40%); исследовательский LLM-компонент "
         f"{f'{exploratory_weight:.1%}' if exploratory_weight is not None else 'UNAVAILABLE'} "
-        "(лимит 15%). Они меняют только ранжирование прошедших hard CVaR "
+        "(общий лимит 40%). Они меняют только ранжирование прошедших hard CVaR "
         "базовых политик и не меняют риск-порог.\n"
         f"Арбитр: {arbiter.get('winner') or 'UNAVAILABLE'}; "
         f"gate={gate.get('status') or 'UNAVAILABLE'}; "

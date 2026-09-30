@@ -104,12 +104,12 @@ def _snapshot(direction="long"):
     }}
 
 
-def test_current_match_gets_fifteen_percent_across_all_existing_actions():
+def test_current_match_gets_full_soft_weight_across_all_existing_actions():
     profile = exploratory_weight_profile(
         _engine([_hypothesis("up")]), _snapshot(), Integration,
     )
     assert profile["available"] is True
-    assert profile["weight_fraction"] == MAX_EXPLORATORY_WEIGHT == 0.15
+    assert profile["weight_fraction"] == MAX_EXPLORATORY_WEIGHT == 0.40
     assert profile["preferred_close_fraction"] == 0.0
     assert profile["eligible_policies"] == [
         "HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT",
@@ -133,7 +133,7 @@ def test_production_deployment_rule_object_is_read_from_conditions_field():
         _engine([row]), _snapshot(), Integration,
     )
     assert profile["available"] is True
-    assert profile["weight_fraction"] == 0.15
+    assert profile["weight_fraction"] == 0.40
     assert profile["matched_limited_hypothesis_n"] == 1
 
 
@@ -170,7 +170,7 @@ def test_negative_and_mixed_matches_reduce_but_do_not_invert_advantage():
         Integration,
     )
     assert profile["available"] is True
-    assert profile["weight_fraction"] == 0.05
+    assert profile["weight_fraction"] == 0.133333
     assert profile["direction_score"] == round(1 / 3, 6)
     assert profile["matched_uncertainty_n"] == 2
 

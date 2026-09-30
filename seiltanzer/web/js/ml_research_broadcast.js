@@ -74,7 +74,7 @@ function renderHypotheses(payload) {
   }
 
   if (research.length > 0) {
-    html += '<div style="grid-column:1/-1;margin:12px 0 4px;font-size:11px;color:var(--amber);letter-spacing:0.08em;font-weight:bold;">● ИССЛЕДУЕМЫЕ ГИПОТЕЗЫ (БЫСТРЫЙ ROLLING + СТРОГИЙ WALK-FORWARD)</div>';
+    html += '<div style="grid-column:1/-1;margin:12px 0 4px;font-size:11px;color:var(--amber);letter-spacing:0.08em;font-weight:bold;">● ПЕРЕВЕСЫ И ГИПОТЕЗЫ (ИСТОРИЧЕСКИЙ ROLLING + WALK-FORWARD)</div>';
     html += research.map((item) => {
       const conditions = (item.conditions || []).map((row) => {
         const feat = row.feature_id || 'N/A';
@@ -87,9 +87,9 @@ function renderHypotheses(payload) {
       const early = item.exploratory_verdict || null;
       const earlyCode = early?.status || '';
       const earlyBadge = earlyCode === 'EARLY_ADVANTAGE'
-        ? '<span class="status good">РАННИЙ ПЕРЕВЕС</span>'
+        ? '<span class="status good">ПЕРЕВЕС</span>'
         : earlyCode === 'EARLY_DISADVANTAGE'
-        ? '<span class="status bad">РАННИЙ АНТИ-СИГНАЛ</span>'
+        ? '<span class="status bad">ГИПОТЕЗА ХУЖЕ БАЗОВОЙ</span>'
         : earlyCode === 'EARLY_MIXED'
         ? '<span class="status working">СМЕШАННЫЙ РЕЗУЛЬТАТ</span>'
         : earlyCode === 'EARLY_UNDECIDED'
@@ -123,13 +123,13 @@ function renderHypotheses(payload) {
 
       const earlyMetrics = early
         ? `<div class="evidence">
-            <div><span>РАННИЙ EFFECT</span><b>${pct(early.primary_improvement)}</b></div>
+            <div><span>EFFECT</span><b>${pct(early.primary_improvement)}</b></div>
             <div><span>СОВПАЛО В TEST</span><b>${value(early.selected_test_n)}</b></div>
             <div><span>ФОЛДОВ</span><b>${value(early.evaluated_fold_count)}</b></div>
             <div><span>УВЕРЕННОСТЬ</span><b>${esc(early.confidence || 'NONE')}</b></div>
           </div><div class="honesty-note" style="margin-top:6px;font-size:10px;padding:6px;border-left-color:var(--cyan);">
             Быстрый rolling-вердикт по всем доступным историческим данным; q=${value(early.q_value)}.
-            Он обновляется при новых исходах. LIMITED + совпадение текущих T0-условий дают до 15% веса
+            Он обновляется при новых исходах. LIMITED + совпадение текущих T0-условий дают до 40% веса
             в выборе HOLD / CLOSE 10% / 25% / 50% / EXIT; hard-risk/CVaR остаются обязательными.
             ${early.reason ? `(${esc(early.reason)}).` : ''}
           </div>`
