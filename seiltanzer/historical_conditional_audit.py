@@ -16,9 +16,13 @@ from .decision_research import _execution_spec
 from .execution_simulator import replay_execution_path
 from .llm_shadow_working_action import _distance, _geometry, _price_from_current_distance
 
-RULES = ("TRAIL_GAMMA_FLIP", "SCALE_OUT_ON_SPIKE", "TIME_STOP")
+RULES = (
+    "TRAIL_GAMMA_FLIP", "SCALE_OUT_ON_SPIKE", "TIME_STOP",
+    "PROTECT_GAIN", "PARTIAL_AT_RUNG", "EXIT_ON_THESIS_BREAK",
+)
 SCALE_FRACTION = 0.25  # Additional fraction of the remainder at the next rung.
 TIME_FRACTION = 0.50  # Half the frozen option horizon from the review.
+PROTECT_GAIN_STOP_R = 0.50  # Frozen T0 candidate, after an observed +1R MFE.
 MAX_POINT_GAP_SECONDS = 300.0
 
 
@@ -28,6 +32,18 @@ def _finite(value: Any) -> float | None:
         return number if math.isfinite(number) else None
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _replay_with_effective_stop(path: list[float], spec) -> Any:
+    """Honor a positive manual stop even when the strategy BE is armed.
+
+    The shared v1 simulator's BE branch otherwise replaces *any* stop with
+    0R. A positive stop subsumes the 0R BE floor, so suppressing that redundant
+    BE event preserves the effective barrier without changing production code.
+    """
+    if spec.stop_r > 0:
+        spec = replace(spec, be_after_r=math.inf)
+    return replay_execution_path(path, spec)
 
 
 def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
@@ -57,7 +73,8 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
                 for name in RULES}
     if abs(path[0][1] - spec.current_r) > 1e-7:
         return {name: {"reason": "T0_PRICE_MISMATCH"} for name in RULES}
-    baseline = replay_execution_path([value for _, value in path], spec)
+    observed = [value for _, value in path]
+    baseline = _replay_with_effective_stop(observed, spec)
     result: dict[str, dict] = {}
 
     geometry = _geometry(snapshot)
@@ -76,8 +93,8 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
         if stop_r <= spec.stop_r:
             result["TRAIL_GAMMA_FLIP"] = {"reason": "T0_GAMMA_STOP_NOT_TIGHTER"}
         else:
-            variant = replay_execution_path(
-                [value for _, value in path], replace(spec, stop_r=stop_r))
+            variant = _replay_with_effective_stop(
+                observed, replace(spec, stop_r=stop_r))
             result["TRAIL_GAMMA_FLIP"] = {
                 "baseline_r": baseline.outcome_r, "variant_r": variant.outcome_r,
                 "delta_r": variant.outcome_r - baseline.outcome_r,
@@ -140,7 +157,7 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
             (t0, r0), (t1, r1) = segment
             value = r0 + (r1 - r0) * (deadline - t0) / (t1 - t0)
             truncated = [r for ts, r in path if ts < deadline] + [value]
-            variant = replay_execution_path(truncated, spec)
+            variant = _replay_with_effective_stop(truncated, spec)
             result["TIME_STOP"] = {
                 "baseline_r": baseline.outcome_r,
                 "variant_r": variant.outcome_r,
@@ -148,6 +165,43 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
                 "deadline_minutes": TIME_FRACTION * horizon,
                 "anchor": "FROZEN_T0_OPTION_HORIZON",
             }
+    # A rung touch is the only measured event for the additional 25% sale.
+    # Reuse the exact same paired result instead of calling it an independent
+    # spike detector or counting these observations twice.
+    result["PARTIAL_AT_RUNG"] = {
+        **result["SCALE_OUT_ON_SPIKE"],
+        **({"anchor": "FROZEN_T0_NEXT_STRATEGY_RUNG"}
+           if "delta_r" in result["SCALE_OUT_ON_SPIKE"] else {}),
+    }
+
+    if (spec.max_r < 1.0 or spec.current_r <= PROTECT_GAIN_STOP_R
+            or spec.stop_r >= PROTECT_GAIN_STOP_R):
+        result["PROTECT_GAIN"] = {"reason": "T0_GAIN_STOP_NOT_ELIGIBLE"}
+    else:
+        variant = _replay_with_effective_stop(
+            observed, replace(spec, stop_r=PROTECT_GAIN_STOP_R))
+        result["PROTECT_GAIN"] = {
+            "baseline_r": baseline.outcome_r, "variant_r": variant.outcome_r,
+            "delta_r": variant.outcome_r - baseline.outcome_r,
+            "target_r": PROTECT_GAIN_STOP_R,
+            "anchor": "FROZEN_T0_MFE_AT_LEAST_1R",
+        }
+
+    edge = (snapshot.get("policy_manager") or {}).get("combined_edge_soft_weight") or {}
+    direction = _finite(edge.get("direction_score"))
+    if (edge.get("available") is not True or direction is None
+            or direction >= 0
+            or not (edge.get("active_edge_component_weight") or
+                    edge.get("exploratory_component_weight"))):
+        result["EXIT_ON_THESIS_BREAK"] = {"reason": "NO_FROZEN_OPPOSING_EDGE_AT_T0"}
+    else:
+        result["EXIT_ON_THESIS_BREAK"] = {
+            "baseline_r": baseline.outcome_r, "variant_r": spec.current_r,
+            "delta_r": spec.current_r - baseline.outcome_r,
+            "target_r": spec.current_r,
+            "direction_score": direction,
+            "anchor": "FROZEN_T0_OPPOSING_DIRECTIONAL_EDGE",
+        }
     return result
 
 
@@ -194,9 +248,12 @@ def audit_database(database: str) -> dict:
     finally:
         db.close()
     return {
-        "contract_version": "historical-conditional-management-audit-v1",
+        "contract_version": "historical-conditional-management-audit-v2",
         "historical_resolved_reviews": total,
         "path_assumption": "recorded_points_piecewise_linear_no_slippage",
+        "partially_shared_hypotheses": {
+            "PARTIAL_AT_RUNG": "same_25_percent_next_rung_proxy_as_SCALE_OUT_ON_SPIKE"
+        },
         "no_auto_promotion": True,
         "rules": {name: {
             "independent_trade_n": len(deltas[name]),

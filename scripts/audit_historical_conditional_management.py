@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the read-only conditional management replay from an existing DB."""
+"""Print the read-only six-hypothesis management replay from an existing DB."""
 import argparse
 import json
 from seiltanzer.historical_conditional_audit import audit_database

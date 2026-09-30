@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 8
     steps:
-      - name: Replay three conditional rules against immutable historical reviews
+      - name: Replay six manual management hypotheses against immutable reviews
         uses: appleboy/ssh-action@v1
         env:
           EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_sha }}
