@@ -230,6 +230,33 @@ def wait_for_ai_snapshot_ready() -> dict:
     return status
 
 
+def verify_management_calculation_audit(body: dict) -> None:
+    audit = body.get("management_calculation_audit") or {}
+    assert audit.get("version") == "management-calculation-audit-v1", audit
+    assert audit.get("status") in {"AVAILABLE", "UNAVAILABLE"}, audit
+    if audit["status"] == "AVAILABLE":
+        rows = audit["policies"]
+        costs = audit["execution_cost_model"]
+        assert set(rows) == {"HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}, rows
+        for row in rows.values():
+            assert row["outcomes_include_execution_costs"] is True
+            assert abs(row["gross_expected_final_r"] - row["execution_cost_r"]
+                       - row["expected_final_r_net"]) < .00021, row
+        assert abs(rows["EXIT"]["expected_final_r_net"] -
+                   (audit["model_current_r"] - costs["immediate_full_close_r"])) < .00011, audit
+        print("MANAGEMENT_NET_COST_AUDIT success")
+    candidates = body.get("active_management_candidates")
+    if candidates:
+        assert len(candidates) == 7, candidates
+        for row in candidates:
+            assert row["status"] in {"blocked", "eligible", "already_armed"}, row
+            if row["status"] == "eligible":
+                assert row["paired_delta_ci95_lower_r"] > row["materiality_band_r"], row
+                assert row["worst_seed_cvar10_net_r"] >= row["hard_net_floor_r"] - 1e-8, row
+                assert row["automatic_execution_allowed"] is False, row
+        print("MANAGEMENT_ALL_ACTIONS_AUDIT success")
+
+
 def verify_ai_verdict() -> None:
     wait_for_ai_snapshot_ready()
 
@@ -254,6 +281,7 @@ def verify_ai_verdict() -> None:
         if body["ok"]:
             assert body.get("mode") in {"llm", "deterministic_fallback"}, body
             assert isinstance(body.get("verdict"), str) and body["verdict"], body
+            verify_management_calculation_audit(body)
         else:
             assert (body.get("error") or {}).get("code") in {
                 "no_active_trade", "ai_rate_limited", "ai_request_in_progress"

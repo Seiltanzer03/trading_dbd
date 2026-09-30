@@ -151,3 +151,44 @@ def test_unquantified_llm_action_cannot_replace_production_hold(client, monkeypa
     assert response.json()["management_decision"]["policy"] in {
         "HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
     assert client.get("/api/position").json()["shadow_actions"] == []
+
+
+def test_deterministic_active_action_without_llm_is_saved_and_manually_confirmed(client, monkeypatch):
+    from seiltanzer.app import _refresh_management_decision
+    def hold(engine, snapshot, trade):
+        snapshot['policy_manager']['management_decision']['policy'] = 'HOLD'
+        snapshot['policy_manager']['selection_rule']['eligible'] = ['HOLD']
+        return _refresh_management_decision(engine, snapshot, trade)
+    monkeypatch.setattr('seiltanzer.app._refresh_management_decision', hold)
+    def offline(snapshot):
+        # A controlled adverse model fixture exercises the actual selector and
+        # ledger; no candidate or quant gate is mocked.
+        manager = snapshot['policy_manager']
+        manager['decision_reliability'] = {'level': 'высокая'}
+        manager['evidence']['data_quality']['reliability'] = {'level': 'высокая'}
+        snapshot['metric_coverage'] = {}
+        manager['gate']['data_reliability'] = 'высокая'
+        manager['input_audit']['rows']['instrument_price'].update(
+            available=True, status='live', source='test direct', production_authority=True)
+        manager['inputs'].update(drift_R=-2, sigma_R=.3)
+        raise RuntimeError('OpenRouter connection failed: ReadTimeout')
+    monkeypatch.setattr('seiltanzer.app.request_verdict', offline)
+    response = client.post('/api/ai/verdict')
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['mode'] == 'deterministic_fallback'
+    action = body['management_decision']
+    assert action['policy'] in {'TIME_STOP', 'TIGHTEN_STOP', 'MOVE_TO_BE'}
+    assert action['automatic_execution_allowed'] is False
+    assert '**РАСШИРЕННОЕ РЕШЕНИЕ' in body['verdict']
+    assert len(body['active_management_candidates']) == 7
+    assert body['management_calculation_audit']['status'] == 'AVAILABLE'
+    result = client.post('/api/ai/decision/ack', json={
+        'decision_id': action['decision_id'], 'trade_id': action['trade_id'],
+        'executed': True,
+        'execution_price': client.app.state.engine._current_instrument_price(
+            client.app.state.engine.journal.active_trade()),
+    })
+    assert result.status_code == 200, result.text
+    assert result.json()['execution_status'] == ('armed' if action['policy'] == 'TIME_STOP' else 'executed')
+    assert result.json()['position_state']['remaining_position_fraction'] == 1

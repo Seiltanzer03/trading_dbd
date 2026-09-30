@@ -56,7 +56,7 @@ def _compact_input_audit(value: Any) -> dict[str, Any]:
     row_keys = (
         "available", "status", "source", "role", "age_sec", "symbol",
         "reason", "value", "quality", "proxy_quality", "is_proxy",
-        "fallback_tier",
+        "fallback_tier", "production_authority",
     )
     rows: dict[str, Any] = {}
     for name, row in (audit.get("rows") or {}).items():
@@ -94,7 +94,7 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
         manager = {}
 
     manager_keep = (
-        "position_economics", "repeat_intervention_gate",
+        "position_economics", "repeat_intervention_gate", "decision_reliability", "execution_cost_model",
         "version", "management_decision", "recommendation", "policies",
         "selection_rule", "gate", "inputs", "risk_constraint",
         "management_arbiter", "state_change_attribution",
@@ -107,6 +107,8 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
     compact_manager = {
         key: manager[key] for key in manager_keep if key in manager
     }
+    from .management_contract import decision_reliability
+    compact_manager["decision_reliability"] = decision_reliability(snapshot)
     compact_manager["input_audit"] = _compact_input_audit(
         manager.get("input_audit"))
     compact_manager["scenario_geometry"] = _compact_scalars(
@@ -156,7 +158,8 @@ def _emergency_authoritative_compaction(snapshot: dict[str, Any], ai_verdict: An
             "p_final_profit", "p_final_loss", "p_giveback_0_25_from_now",
             "p_giveback_0_50_from_now", "p_next_rung_before_stop",
             "p_stop_before_next_rung", "no_event_probability", "eligible",
-            "reason", "execution_cost_r",
+            "reason", "execution_cost_r", "gross_expected_final_r",
+            "expected_final_r_net", "median_final_r_net", "cvar10_r_net", "outcomes_include_execution_costs",
         ))
         for name, row in (manager.get("policies") or {}).items()
     }

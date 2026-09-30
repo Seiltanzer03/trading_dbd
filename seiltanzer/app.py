@@ -1116,6 +1116,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             result["management_decision"] = decision
                             snapshot["effective_management_decision"] = decision
                             if decision.get("decision_id") == registered["action_id"]:
+                                import re
+                                final_text = (f"Выбран {decision['policy']}; ожидает ручного исполнения. "
+                                    + registered["instruction_ru"]
+                                    + ". До подтверждения у брокера действует текущий стоп/БУ и лестница; автоматическое исполнение запрещено.")
+                                result["verdict"] = re.sub(
+                                    r"(\*\*ПРОВЕРЕННЫЙ ВЫВОД\*\* —\n).*?(?=\n\n\*\*|$)",
+                                    lambda match: match.group(1) + final_text,
+                                    result["verdict"], flags=re.S)
                                 result["verdict"] = (
                                     "**РАСШИРЕННОЕ РЕШЕНИЕ · РУЧНОЕ ПОДТВЕРЖДЕНИЕ** — "
                                     + registered["instruction_ru"]
@@ -1125,13 +1133,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                     "текущий стоп/БУ и лестница.\n\n"
                                     + result["verdict"].replace(
                                         "**ДЕЙСТВИЕ СЕЙЧАС**",
-                                        "**БАЗОВЫЙ ПЛАН ДО ПОДТВЕРЖДЕНИЯ**", 1)
+                                        "**БАЗОВЫЙ ПЛАН ДО ПОДТВЕРЖДЕНИЯ**", 1).replace(
+                                        "**ЕДИНЫЙ ПЛАН МЕНЕДЖМЕНТА**",
+                                        "**СТРАТЕГИЯ ДО ПОДТВЕРЖДЕНИЯ**", 1)
                                 )
                 rows = result.get("active_management_candidates") or []
                 if rows:
-                    result["verdict"] += "\n\n**ПРОВЕРКА АКТИВНОГО МЕНЕДЖМЕНТА** —\n" + "\n".join(
-                        f"{row['policy']}: {row['status']} · {row.get('reason', 'уже установлено')}."
-                        for row in rows)
+                    from .active_management import render_active_management
+                    remaining = (snapshot.get("position_state") or {}).get("remaining_position_fraction")
+                    result["verdict"] += "\n\n" + render_active_management(rows, remaining)
+                from .management_contract import calculation_audit
+                result["management_calculation_audit"] = calculation_audit(snapshot)
                 engine.journal.record_ai_verdict(
                     trade_id, snapshot,
                     result["verdict"], result.get("model"))
