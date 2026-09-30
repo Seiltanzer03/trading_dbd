@@ -214,6 +214,11 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
         manager["policies"] = {
             name: _small_row(policy, (
                 "expected_final_r", "median_final_r", "cvar10_r",
+                # This pass precedes the facade's report-integrity capture.
+                # Keep the net-cost proof alongside the values it explains.
+                "expected_final_r_net", "median_final_r_net", "cvar10_r_net",
+                "gross_expected_final_r", "execution_cost_r",
+                "outcomes_include_execution_costs",
                 "p_final_profit", "p_giveback_0_25_from_now",
                 "p_giveback_0_50_from_now",
                 "p_next_rung_before_stop", "p_stop_before_next_rung",
