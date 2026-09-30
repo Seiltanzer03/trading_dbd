@@ -84,6 +84,22 @@ def test_extended_action_rejects_no_benefit_even_if_cvar_passes(monkeypatch):
     assert row["reason"] == "NO_MATERIAL_ROBUST_EXPECTED_GAIN"
 
 
+def test_low_quality_needs_observed_independent_and_live_support(monkeypatch):
+    snapshot = _snapshot()
+    snapshot['policy_manager']['evidence']['data_quality']['reliability']['level'] = 'низкая'
+    snapshot['policy_manager']['gate'] = {'degraded_authority_overlay': {'evidence': {
+        'adverse_families': ['live_tape', 'option_distribution'],
+        'live_adverse_families': ['live_tape'], 'observed_adverse_item_count': 2}}}
+    monkeypatch.setattr(evaluation, 'simulate_option_paths', lambda inputs, **kw:
+        SimpleNamespace(strategy_outcome=np.full(1200, .1 if inputs.stop_r < 0 else .2)))
+    row = evaluation.evaluate_extended_action(snapshot, _action())
+    assert row['status'] == 'eligible'
+    assert row['authority_mode'] == 'degraded_manual'
+    assert row['automatic_execution_allowed'] is False
+    snapshot['policy_manager']['gate']['degraded_authority_overlay']['evidence']['observed_adverse_item_count'] = 0
+    assert evaluation.evaluate_extended_action(snapshot, _action())['status'] == 'blocked'
+
+
 def test_counterfactual_stream_keeps_unaffected_path_ids_identical():
     data = _snapshot()["policy_manager"]["inputs"]
     base = PolicyInputs(**{**data, "rungs": tuple(data["rungs"])})

@@ -84,7 +84,12 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
     reliability = ((((manager.get("evidence") or {}).get("data_quality") or {})
                     .get("reliability") or {}).get("level") or "").lower()
     if reliability in {"низкая", "low"}:
-        return _blocked("LOW_DATA_RELIABILITY_FOR_EXTENDED_OVERRIDE")
+        overlay = (manager.get("gate") or {}).get("degraded_authority_overlay") or {}
+        evidence = overlay.get("evidence") or {}
+        if not (len(evidence.get("adverse_families") or []) >= 2
+                and len(evidence.get("live_adverse_families") or []) >= 1
+                and int(evidence.get("observed_adverse_item_count") or 0) >= 2):
+            return _blocked("LOW_DATA_RELIABILITY_FOR_EXTENDED_OVERRIDE")
     rule = manager.get("selection_rule") or {}
     if "HOLD" not in (rule.get("eligible") or []):
         return _blocked("HOLD_OUTSIDE_HARD_CVAR_FEASIBLE_SET")
@@ -205,6 +210,7 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
         "method": ("two_seed_piecewise_linear_paired_option_paths" if policy in CONDITIONAL_POLICIES
                    else "two_seed_stable_path_id_paired_counterfactual_execution_paths"),
         "statistically_validated_advantage": False,
+        "authority_mode": "degraded_manual" if reliability in {"низкая", "low"} else "manual",
     }
     if variant_cvar < floor - 1e-8:
         return _blocked("VARIANT_CVAR_BELOW_HARD_FLOOR", **evidence)
