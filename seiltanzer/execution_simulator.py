@@ -175,7 +175,9 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
                                2, "take", spec.take_r))
             for fraction, _priority, kind, level in sorted(events):
                 if kind == "spike" and spike_pending:
-                    fill = remaining * spec.spike_fraction
+                    # Broker quantity is frozen at arming, in units of T0
+                    # remainder. An oversized order is not an executable fill.
+                    fill = spec.spike_fraction if spec.spike_fraction <= remaining + EPSILON else 0.0
                     realized += fill * level
                     remaining -= fill
                     spike_pending = False
