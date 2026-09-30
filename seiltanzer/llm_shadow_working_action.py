@@ -146,9 +146,16 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
     policy = str(shadow.get("policy") or "") or None
     confidence = _number(shadow.get("confidence"))
     if shadow.get("status") != "ok" or shadow.get("blocked_by_hard_guard"):
-        return _unavailable(policy, "LLM_SHADOW_DID_NOT_PASS_HARD_GUARD", confidence)
+        evaluation = shadow.get("quant_evaluation") or {}
+        reason = (evaluation.get("reason") if evaluation.get("status") == "blocked"
+                  else None) or "LLM_SHADOW_DID_NOT_PASS_HARD_GUARD"
+        return _unavailable(policy, str(reason), confidence)
     if confidence is None or confidence < MIN_CONFIDENCE:
         return _unavailable(policy, "LLM_CONFIDENCE_BELOW_MANUAL_ACTION_THRESHOLD", confidence)
+    if policy == "TRAIL_GAMMA_FLIP":
+        return _unavailable(policy, "GEX_CONTEXT_NOT_A_VERIFIED_EXECUTION_ANCHOR", confidence)
+    if policy in {"SCALE_OUT_ON_SPIKE", "TIME_STOP"}:
+        return _unavailable(policy, "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT", confidence)
     if policy in BASE_FRACTIONS:
         fraction = BASE_FRACTIONS[policy]
         instruction = (
@@ -182,19 +189,17 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
             return _unavailable(policy, "BREAK_EVEN_IS_NOT_A_VALID_TIGHTER_STOP", confidence)
         params = {"stop_price": target, "anchor": "ENTRY_PRICE"}
         instruction = f"ВРУЧНУЮ ПЕРЕНЕСТИ СТОП В БУ: {target:g}"
-    elif policy in {"TRAIL_GAMMA_FLIP", "TIGHTEN_STOP"}:
+    elif policy == "TIGHTEN_STOP":
         zero = _price_from_current_distance(
             geometry, _distance(snapshot, "distance_to_zero_gamma"))
         anchors = [("ZERO_GAMMA", zero), ("ENTRY_PRICE", geometry.get("entry"))]
         valid = [(name, value) for name, value in anchors if _is_tighter_stop(geometry, value)]
-        if policy == "TRAIL_GAMMA_FLIP":
-            valid = [item for item in valid if item[0] == "ZERO_GAMMA"]
         if not valid:
             return _unavailable(policy, "NO_AUTHORITATIVE_NON_WIDENING_STOP_ANCHOR", confidence)
         name, target = min(valid, key=lambda item: abs(float(geometry["current"]) - float(item[1])))
         params = {"stop_price": target, "anchor": name}
         instruction = f"ВРУЧНУЮ ПОДТЯНУТЬ СТОП К {name}: {target:g}"
-    elif policy in {"REDUCE_TAKE", "SCALE_OUT_ON_SPIKE"}:
+    elif policy == "REDUCE_TAKE":
         rung_r, target = _next_rung(snapshot, geometry)
         current = float(geometry["current"])
         take = geometry.get("take")
@@ -204,12 +209,8 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
         )
         if not valid:
             return _unavailable(policy, "NEXT_STRATEGY_RUNG_PRICE_UNAVAILABLE", confidence)
-        if policy == "REDUCE_TAKE":
-            params = {"take_price": target, "target_r": rung_r}
-            instruction = f"ВРУЧНУЮ ПОДТЯНУТЬ TAKE К СЛЕДУЮЩЕЙ СТУПЕНИ: {target:g}"
-        else:
-            params = {"trigger_price": target, "trigger_r": rung_r, "close_fraction": 0.10}
-            instruction = f"ВРУЧНУЮ ЗАКРЫТЬ 10% НА СЛЕДУЮЩЕЙ СТУПЕНИ: {target:g}"
+        params = {"take_price": target, "target_r": rung_r}
+        instruction = f"ВРУЧНУЮ ПОДТЯНУТЬ TAKE К СЛЕДУЮЩЕЙ СТУПЕНИ: {target:g}"
     elif policy == "EXTEND_TAKE":
         distance_name = (
             "distance_to_call_wall_r" if geometry["direction"] == "long"
@@ -224,16 +225,6 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
             return _unavailable(policy, "FARTHER_AUTHORITATIVE_OPTION_WALL_UNAVAILABLE", confidence)
         params = {"take_price": target, "anchor": distance_name}
         instruction = f"ВРУЧНУЮ ПЕРЕНЕСТИ TAKE К ОПЦИОННОЙ СТЕНЕ: {target:g}"
-    elif policy == "TIME_STOP":
-        minutes = _first_number(snapshot, (
-            ("policy_manager", "scenario_geometry", "full_horizon_minutes"),
-            ("policy_manager", "inputs", "horizon_minutes"),
-        ))
-        captured = _number(snapshot.get("captured_ts"))
-        if minutes is None or minutes <= 0 or captured is None:
-            return _unavailable(policy, "MODEL_TIME_HORIZON_UNAVAILABLE", confidence)
-        params = {"deadline_ts": captured + minutes * 60.0, "horizon_minutes": minutes}
-        instruction = f"ВРУЧНУЮ ЗАКРЫТЬ ПО TIME-STOP ЧЕРЕЗ {minutes:g} МИНУТ, ЕСЛИ СДЕЛКА ЕЩЁ ОТКРЫТА"
     else:
         return _unavailable(policy, "UNSUPPORTED_DYNAMIC_POLICY", confidence)
 

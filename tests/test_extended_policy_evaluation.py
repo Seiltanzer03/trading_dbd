@@ -57,6 +57,23 @@ def test_extended_action_rejects_low_reliability_and_missing_geometry():
         "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT")
 
 
+def test_unverified_conditional_actions_remain_blocked_even_with_forged_parameters():
+    snapshot = _snapshot()
+    cases = (
+        ("TRAIL_GAMMA_FLIP", {"stop_price": 105.0, "anchor": "ENTRY_PRICE"},
+         "GEX_CONTEXT_NOT_A_VERIFIED_EXECUTION_ANCHOR"),
+        ("SCALE_OUT_ON_SPIKE", {"trigger_price": 115.0, "close_fraction": .10},
+         "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT"),
+        ("TIME_STOP", {"deadline_ts": 1_900_014_400.0},
+         "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT"),
+    )
+    for policy, parameters, reason in cases:
+        result = evaluation.evaluate_extended_action(snapshot, _action(policy, **parameters))
+        assert result["status"] == "blocked"
+        assert result["reason"] == reason
+        assert result["production_authority"] is False
+
+
 def test_extended_action_rejects_no_benefit_even_if_cvar_passes(monkeypatch):
     monkeypatch.setattr(evaluation, "simulate_option_paths", lambda inputs, **kw:
                         SimpleNamespace(strategy_outcome=np.full(1200, .1)))
