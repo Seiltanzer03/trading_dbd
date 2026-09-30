@@ -10,10 +10,10 @@ def spec():
 
 
 def test_spike_closes_current_remainder_once_then_ladder_continues():
-    # .1 at 1R; 25% of .9 at 1.25R; .675 exits at -1R.
+    # .1 at 1R; frozen .25 of T0 size at 1.25R; .65 exits at -1R.
     result = replay_execution_path([0, 1.4, .2, -1], replace(spec(),
                                   spike_r=1.25, spike_fraction=.25))
-    assert abs(result.outcome_r - (.1 + .225 * 1.25 - .675)) < 1e-9
+    assert abs(result.outcome_r - (.1 + .25 * 1.25 - .65)) < 1e-9
     assert sum(e['type'] == 'spike' for e in result.events) == 1
 
 
