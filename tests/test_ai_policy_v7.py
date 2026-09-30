@@ -1,8 +1,11 @@
 from types import SimpleNamespace
+from dataclasses import replace
+from copy import deepcopy
 
 import seiltanzer.ai_policy as policy
 import seiltanzer.ai_policy_v8 as policy_v8
 import seiltanzer.ai_policy_v9 as policy_v9
+from seiltanzer.ai_policy_v10 import _compact_diagnostics
 import seiltanzer.ai_verdict as verdict
 import seiltanzer.ai_verdict_v9 as verdict_v9
 
@@ -95,6 +98,48 @@ def _evidence(families):
         "mixed_confirmation_families": [],
         "data_quality": {"reliability": {"level": "низкая"}},
     }
+
+
+def test_reported_close50_keeps_causal_audit_and_exit_failure(monkeypatch):
+    metrics = {
+        "HOLD": _metric(-.315, -1., .729, .701),
+        "CLOSE_10": _metric(-.312, -.929, .729, .669),
+        "CLOSE_25": _metric(-.308, -.822, .701, .669),
+        "CLOSE_50": _metric(-.301, -.644, .701, 0.),
+        "EXIT": _metric(-.287, -.287, 0., 0.),
+    }
+    base = _base_result("HOLD")
+    base["authority_stability"].update({
+        "winner_counts": {"CLOSE_50": 1}, "winner_shares": {"CLOSE_50": .125},
+        "feasible_counts": {name: 8 for name in metrics},
+    })
+    monkeypatch.setattr(policy_v8, "_BASE_SELECT", lambda *a, **k: deepcopy(base))
+    stability = {"checks": 11, "policy_stats": {
+        name: {"winner_share": .125, "feasible_share": 1.} for name in metrics}}
+    evidence = _evidence(["live_tape", "option_distribution"])
+    inputs = replace(_inputs(), r0=-.287, max_r=0.)
+    gate = policy.select_final_policy("HOLD", stability, metrics, evidence, inputs,
+                                      {"cvar_floor_r": -1.01, "eligible": list(metrics)})
+    assert gate["policy"] == "CLOSE_50"
+    assert gate["status"] == "confirmed_degraded_manual"
+    manager = {"gate": gate, "policies": metrics, "recommendation": {"policy": "CLOSE_50"}}
+    _compact_diagnostics(manager)
+    overlay = gate["degraded_authority_overlay"]
+    assert overlay["selected"]["cvar_gain_vs_hold_r"] == .356
+    assert overlay["selected"]["requirements"]["min_cvar_gain_r"] == .35
+    assert overlay["selected"]["support"]["source_winner_share"] == .125
+    assert overlay["selected"]["support"]["source_support"] == 1.
+    assert overlay["candidate_summary"]["EXIT"]["qualified"] is False
+    assert set(overlay["candidate_summary"]["EXIT"]["failed"]) == {"total_adverse", "live_adverse"}
+    arbiter = policy_v9._arbiter(manager)
+    assert arbiter["effective_policy"] == "CLOSE_50"
+    assert arbiter["scores_determine_winner"] is False
+    # Passing the same evidence with no material tail-risk benefit preserves HOLD.
+    metrics["CLOSE_50"]["cvar10_r"] = -.9
+    hold = policy.select_final_policy("HOLD", stability, metrics, evidence, inputs,
+                                      {"cvar_floor_r": -1.01, "eligible": ["HOLD", "CLOSE_50"]})
+    assert hold["policy"] == "HOLD"
+
 
 
 def test_low_reliability_can_confirm_close50_for_manual_execution(monkeypatch):

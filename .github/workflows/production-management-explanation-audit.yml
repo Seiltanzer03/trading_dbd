@@ -1,0 +1,73 @@
+name: production-management-explanation-audit
+
+# Bounded read-only reconstruction of a reported decision. No new verdict,
+# replay, broker action, database write or service restart is performed.
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/production-management-explanation-audit.yml"]
+  workflow_dispatch:
+    inputs:
+      decision_id:
+        description: Exact management decision to inspect
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - name: Read immutable decision and confirmed position events
+        uses: appleboy/ssh-action@v1
+        env:
+          AUDIT_DECISION_ID: ${{ inputs.decision_id || 'decision-80774af24d4d32badaef86487a97' }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 2m
+          envs: AUDIT_DECISION_ID
+          script: |
+            set -euo pipefail
+            git -C /opt/seiltanzer rev-parse HEAD
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import json, os, sqlite3
+            from pathlib import Path
+            path = Path('/opt/seiltanzer/data/trades.db')
+            conn = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)
+            conn.row_factory = sqlite3.Row
+            conn.execute('PRAGMA query_only=ON')
+            conn.execute('PRAGMA busy_timeout=5000')
+            requested = os.environ['AUDIT_DECISION_ID']
+            found = None
+            for row in conn.execute('SELECT id,trade_id,ts,snapshot_json,model FROM ai_verdicts ORDER BY id DESC LIMIT 200'):
+                snapshot = json.loads(row['snapshot_json'])
+                manager = snapshot.get('policy_manager') or {}
+                decision = manager.get('management_decision') or {}
+                if decision.get('decision_id') != requested:
+                    continue
+                gate = manager.get('gate') or {}
+                found = {
+                    'found': True, 'review_row_id': row['id'], 'model': row['model'],
+                    'captured_ts': snapshot.get('captured_ts'), 'policy_version': manager.get('version'),
+                    'decision': decision, 'position_at_review': snapshot.get('position_state'),
+                    'recommendation': manager.get('recommendation'), 'policies': manager.get('policies'),
+                    'selection_rule': manager.get('selection_rule'),
+                    'arbiter': manager.get('management_arbiter'),
+                    'gate_status': gate.get('status'),
+                    'overlay': gate.get('degraded_authority_overlay'),
+                    'authority_stability': gate.get('authority_stability'),
+                }
+                ledger = conn.execute('SELECT policy,status,remaining_before,remaining_after,execution_r FROM management_decisions WHERE decision_id=?', (requested,)).fetchone()
+                found['ledger_decision_now'] = dict(ledger) if ledger else None
+                events = conn.execute('SELECT event_type,fraction_before,fraction_closed,fraction_after,execution_r,decision_id FROM position_management_events WHERE trade_id=? ORDER BY id DESC LIMIT 12', (row['trade_id'],)).fetchall()
+                found['recent_position_events'] = [dict(event) for event in events]
+                break
+            conn.close()
+            print(json.dumps(found or {'found': False, 'reason': 'not_in_latest_200_reviews', 'decision_id': requested}, ensure_ascii=False, allow_nan=False))
+            PY

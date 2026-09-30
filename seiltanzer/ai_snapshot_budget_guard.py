@@ -94,6 +94,7 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
         manager = {}
 
     manager_keep = (
+        "position_economics", "repeat_intervention_gate",
         "version", "management_decision", "recommendation", "policies",
         "selection_rule", "gate", "inputs", "risk_constraint",
         "management_arbiter", "state_change_attribution",
@@ -162,7 +163,8 @@ def _emergency_authoritative_compaction(snapshot: dict[str, Any], ai_verdict: An
     bound = ai_verdict._impl._bounded
     for key in ("management_arbiter", "selection_rule", "gate"):
         if key in manager:
-            manager[key] = bound(manager[key])
+            manager[key] = (ai_verdict._impl._bounded_gate(manager[key])
+                            if key == "gate" else bound(manager[key]))
     snapshot["policy_manager"] = manager
 
 

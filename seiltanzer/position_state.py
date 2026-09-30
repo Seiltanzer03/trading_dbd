@@ -183,6 +183,9 @@ class PositionLedger:
             float(row["fraction_closed"]) * float(row["execution_r"])
             for row in rows if row.get("execution_r") is not None
             and float(row.get("fraction_closed") or 0) > 0)
+        unpriced_fills = sum(
+            1 for row in rows if float(row.get("fraction_closed") or 0) > 0
+            and row.get("execution_r") is None)
         stop_event = next((row for row in reversed(rows) if row["event_type"] in {
             "BE_ARM", "AI_MOVE_TO_BE", "AI_TIGHTEN_STOP",
         }), None)
@@ -236,7 +239,15 @@ class PositionLedger:
             "trade_id": int(trade["id"]), "initial_position_fraction": 1.0,
             "remaining_position_fraction": round(remaining, 12),
             "realized_position_fraction": round(1.0 - remaining, 12),
-            "realized_r_weighted": round(realised, 8),
+            "realized_r_weighted": None if unpriced_fills else round(realised, 8),
+            "realized_result_status": "UNAVAILABLE" if unpriced_fills else "AVAILABLE",
+            "unpriced_fill_count": unpriced_fills,
+            "realized_costs_status": "UNAVAILABLE" if remaining < 1.0 else "NOT_APPLICABLE",
+            "realized_price_basis": (
+                "user_supplied_broker_fill" if all(
+                    row["metadata"].get("execution_price_source") == "user_supplied_broker_fill"
+                    for row in rows if float(row.get("fraction_closed") or 0) > 0)
+                and remaining < 1.0 else "estimate_or_unspecified" if remaining < 1.0 else "NOT_APPLICABLE"),
             "future_r_semantics": "per_unit_of_current_remaining_position",
             "total_r_semantics":
                 "realized_r_weighted + remaining_fraction * future_r",
@@ -300,6 +311,8 @@ class PositionLedger:
             raise ValueError(f"unsupported management policy: {policy}")
         state = snapshot.get("position_state") or self.state(trade)
         before = float(state["remaining_position_fraction"])
+        if before <= 1e-12:
+            policy = "HOLD"
         incremental = POLICY_FRACTIONS[policy]
         after = before * (1.0 - incremental)
         captured = float(snapshot["captured_ts"])
@@ -307,6 +320,17 @@ class PositionLedger:
         raw = f"{trade['id']}|{captured:.6f}|{policy}|{geometry_version}"
         decision_id = "decision-" + hashlib.sha256(raw.encode()).hexdigest()[:28]
         manual = incremental > 0.0
+        with self._lock:
+            last_executed = self._conn.execute(
+                "SELECT decision_id,policy,remaining_before,remaining_after,execution_r,payload_json "
+                "FROM management_decisions WHERE trade_id=? AND status='executed' "
+                "ORDER BY executed_ts DESC,rowid DESC LIMIT 1",
+                (int(trade["id"]),)).fetchone()
+        previous_reduction = dict(last_executed) if last_executed else None
+        if previous_reduction:
+            payload = json.loads(previous_reduction.pop("payload_json") or "{}")
+            previous_reduction["economic_review_basis"] = payload.get("economic_review_basis")
+        from .management_economics import intervention_basis
         instruction = (f"Закрыть {incremental * 100:.0f}% текущего остатка позиции."
                        if manual else "Не сокращать текущий остаток позиции.")
         return {
@@ -319,6 +343,12 @@ class PositionLedger:
             "fraction_semantics": "fraction_of_current_remaining_position",
             "remaining_fraction_before_action": round(before, 12),
             "remaining_fraction_after_action": round(after, 12),
+            "closed_fraction_of_initial_position": round(before * incremental, 12),
+            "position_state_version": state.get("state_version"),
+            "previous_executed_reduction": previous_reduction,
+            "economic_review_basis": intervention_basis(snapshot, policy),
+            "repeat_reduction": bool(manual and last_executed
+                                     and last_executed["policy"] == policy),
             "geometry_version": geometry_version, "instruction_ru": instruction}
 
     def register_decision(self, snapshot: dict, review_id: str, trade: dict) -> dict:
@@ -661,7 +691,8 @@ class PositionLedger:
         }
 
     def acknowledge(self, *, decision_id: str, trade: dict, executed: bool,
-                    execution_price: float | None, execution_r: float | None) -> dict:
+                    execution_price: float | None, execution_r: float | None,
+                    execution_price_source: str = "unspecified") -> dict:
         self.ensure_trade(trade)
         with self._lock, self._conn:
             row = self._conn.execute(
@@ -715,6 +746,7 @@ class PositionLedger:
                 execution_r=execution_r,
                 active_stop=float(state["active_stop_price"]),
                 metadata={"policy": policy, "accepted_ai_recommendation": True,
+                          "execution_price_source": execution_price_source,
                           "fraction_semantics":
                               "fraction_of_current_remaining_position"})
             self._conn.execute(

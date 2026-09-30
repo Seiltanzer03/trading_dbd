@@ -92,3 +92,30 @@ def test_raw_optimizer_indifference_band_is_explained_numerically():
     assert "Лучший Expected -0.269R" in report
     assert "HOLD отстаёт на +0.013R" in report
     assert "наименее вмешивающаяся допустимая политика" in report
+
+
+def test_missing_details_do_not_contradict_observed_gate_and_boundary():
+    snapshot = _snapshot()
+    snapshot["policy_manager"]["cancellation_boundary"] = {"hold_switch": {"r": -.287}}
+    snapshot["policy_manager"]["gate"]["authority_stability"]["winner_counts"]["CLOSE_50"] = 1
+    snapshot["report_integrity"] = {
+        "raw_optimizer_stability": {"selected_count": 9, "checks": 11, "selected_share": 9 / 11},
+    }
+    text = """**ПОДТВЕРЖДЕНИЯ И ПРОТИВОРЕЧИЯ** —
+Однонаправленные семьи против удержания: нет.
+Метрики против удержания: нет.
+
+**ГРАНИЦА ОТМЕНЫ** —
+Пересчитать около r=-0.287R: там net-оптимизатор переключается на HOLD.
+
+**ПОЧЕМУ ВЫБРАНО** —
+старый текст
+"""
+    report = v19.normalize_final_report(text, snapshot)
+    assert "Однонаправленные семьи против удержания: нет" not in report
+    assert "Метрики против удержания: нет" not in report
+    assert "gate сохранил 4 строк" in report
+    assert "Это не граница отмены итогового CLOSE_50" in report
+    assert "1/8 (12.5%)" in report
+    assert "1/8 (87.5%)" not in report
+    assert "9/11 (81.8%)" in report

@@ -244,9 +244,19 @@ export function mountManagementDecision(container, decision, post, onApplied = (
   const hint = document.createElement('div');
   hint.className = 'tiny dim';
   hint.textContent = 'Отметьте результат только после фактического действия у брокера. Повторное подтверждение этого же решения не требуется.';
+  const before = finiteNumber(decision.remaining_fraction_before_action);
+  const after = finiteNumber(decision.remaining_fraction_after_action);
+  const fraction = finiteNumber(decision.incremental_close_fraction);
+  if (before !== null && after !== null && fraction !== null && fraction > 0) {
+    hint.textContent += ` Из исходной позиции: осталось ${(before * 100).toFixed(1)}%, закрыть ${(before * fraction * 100).toFixed(1)}%, останется ${(after * 100).toFixed(1)}%.`;
+  }
+  if (decision.repeat_reduction) {
+    hint.textContent += ' Новое сокращение уже уменьшенного остатка; предыдущее исполнение учтено.';
+  }
   const extended = decision.authority === 'AI_RISK_OVERLAY_EXTENDED';
   const priceLabel = document.createElement('label');
-  priceLabel.textContent = 'Текущая цена у брокера: ';
+  priceLabel.textContent = extended ? 'Текущая цена у брокера: '
+    : 'Цена фактического исполнения (необязательно; иначе оценка по котировке при подтверждении): ';
   const priceInput = document.createElement('input');
   priceInput.type = 'number';
   priceInput.step = 'any';
@@ -265,14 +275,14 @@ export function mountManagementDecision(container, decision, post, onApplied = (
   no.textContent = 'НЕ ВЫПОЛНЕНО';
   actions.append(yes, no);
   container.append(title, instruction, hint);
-  if (extended) container.appendChild(priceLabel);
+  container.appendChild(priceLabel);
   container.append(actions, status);
   let submitting = false;
   let settled = false;
   const submit = async (executed) => {
     if (submitting || settled) return;
-    const brokerPrice = extended ? finiteNumber(priceInput.value) : null;
-    if (executed && extended && (brokerPrice === null || brokerPrice <= 0)) {
+    const brokerPrice = finiteNumber(priceInput.value);
+    if (executed && ((extended && brokerPrice === null) || (brokerPrice !== null && brokerPrice <= 0))) {
       status.textContent = 'Укажите текущую цену у брокера.';
       return;
     }
@@ -283,7 +293,7 @@ export function mountManagementDecision(container, decision, post, onApplied = (
         decision_id: decision.decision_id,
         trade_id: decision.trade_id,
         executed,
-        ...(executed && extended ? { execution_price: brokerPrice } : {}),
+        ...(executed && brokerPrice !== null ? { execution_price: brokerPrice } : {}),
       });
       settled = true;
       actions.remove();
