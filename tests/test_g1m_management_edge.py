@@ -305,6 +305,33 @@ def test_open_position_has_no_execution_terminal_truth(tmp_path):
     assert runtime.status()["execution_edge_resolved_n"] == 0
 
 
+@pytest.mark.parametrize("missing_r", [None, float("inf")])
+def test_closed_position_with_unpriced_cut_has_no_terminal_execution_result(tmp_path, missing_r):
+    runtime = _runtime(tmp_path)
+    review, decision, snap = _insert_decision(runtime, _snapshot(), status="executed")
+    runtime.capture_new()
+    _open_ledger(runtime, snap)
+    _event(runtime, trade_id=1, ts=snap["captured_ts"] + 15,
+           event_type="AI_CLOSE_50", before=1.0, closed=0.5, after=0.5,
+           execution_r=missing_r, decision_id=decision, review_id=review)
+    _event(runtime, trade_id=1, ts=snap["captured_ts"] + 240,
+           event_type="STOP_EXIT", before=0.5, closed=0.5, after=0.0,
+           execution_r=-1.0)
+    _resolve(runtime, review, snap)
+    obs = runtime.observations()["items"][0]
+    attr = runtime.decision(obs["observation_id"])["execution_attribution"]
+    payload = json.loads(attr["attribution_json"])
+    assert attr["actual_terminal_r"] is None
+    assert attr["compliance_delta_r"] is None
+    assert payload["position_closed"] is True
+    assert payload["position_terminal_known"] is False
+    assert payload["position_unpriced_close_count"] == 1
+    assert payload["actual_terminal_result_status"] == "UNAVAILABLE_UNPRICED_CLOSE"
+    assert payload["execution_edge_eligible"] is False
+    assert payload["net_execution_edge_eligible"] is False
+    assert runtime.status()["execution_edge_resolved_n"] == 0
+
+
 def test_backfill_never_enters_policy_edge(tmp_path):
     runtime = _runtime(tmp_path)
     review, _, snap = _insert_decision(runtime, _snapshot(), old=True)
@@ -319,6 +346,18 @@ def test_backfill_never_enters_policy_edge(tmp_path):
            execution_r=-1.0)
     _resolve(runtime, review, snap)
     assert runtime.status()["prospective_resolved"] == 0
+
+
+def test_missing_realized_position_result_is_excluded_from_policy_edge(tmp_path):
+    runtime = _runtime(tmp_path)
+    _insert_decision(runtime, _snapshot(remaining=0.5, realized=None))
+    assert runtime.capture_new() == 1
+    obs = runtime.observations()["items"][0]
+    assert obs["policy_edge_eligible"] == 0
+    assert obs["exclusion_reason"] == "MISSING_REALIZED_POSITION_R"
+    frozen = json.loads(obs["observation_json"])
+    assert frozen["realized_before_r"] is None
+    assert runtime.resolve_new() == 0
 
 
 def test_decision_after_known_outcome_is_rejected(tmp_path):

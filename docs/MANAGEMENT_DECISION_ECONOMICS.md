@@ -74,3 +74,17 @@ chronological out-of-sample evaluation and uncertainty intervals for Expected,
 drawdown/CVaR and intervention cost. Many reviews of one trade are not independent
 statistical confirmations. No new statistical validation or calibration is claimed
 by this explanation change.
+
+## Research result availability
+
+The policy-edge observation is excluded when realised pre-review R is unknown.
+Its frozen payload keeps this value null. The legacy NOT NULL storage column
+retains its compatibility placeholder only on the excluded row; that placeholder
+must never enter replay or evidence aggregation.
+
+Execution attribution requires finite R for every closed fraction in the event
+ledger. A fully closed position with an unpriced earlier cut is closed but has
+no known terminal result, compliance delta or execution-edge eligibility.
+Known terminal ledger results are gross initial-position R. Historical fill costs
+remain unavailable and net execution-edge eligibility is false. A user-supplied
+fill price does not establish independent broker confirmation.

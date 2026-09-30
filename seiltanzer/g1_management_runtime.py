@@ -395,6 +395,8 @@ class ManagementEdgeRuntime:
             exclusion = "EXTENDED_POLICY_NOT_IN_FIXED_ACTION_SET"
         elif remaining is None or not (0.0 <= remaining <= 1.0):
             exclusion = "INVALID_REMAINING_FRACTION"
+        elif realized is None:
+            exclusion = "MISSING_REALIZED_POSITION_R"
         elif current_r is None:
             exclusion = "MISSING_T0_R"
         elif current_price is None and origin == "LIVE_PROSPECTIVE":
@@ -413,7 +415,7 @@ class ManagementEdgeRuntime:
             "snapshot_sha256": source_sha,
             "current_price": current_price, "current_r": current_r,
             "remaining_before": remaining,
-            "realized_before_r": realized or 0.0,
+            "realized_before_r": realized,
             "active_stop": _finite(position.get("active_stop_price")),
             "original_stop": _finite(position.get("original_stop")),
             "take_r": take_r,
