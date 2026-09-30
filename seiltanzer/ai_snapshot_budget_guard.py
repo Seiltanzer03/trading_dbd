@@ -131,6 +131,41 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
     snapshot.update(compact_root)
 
 
+def _emergency_authoritative_compaction(snapshot: dict[str, Any], ai_verdict: Any) -> None:
+    """Bound the transport after an unusually large live option-chain update.
+
+    The policy has already been selected. Keep its decision, all compared
+    policy outcomes, risk inputs and price provenance; remove only redundant
+    explanations and per-policy Monte Carlo workspaces. This tier is reached
+    only when the normal and strict compaction still exceed the byte ceiling.
+    """
+    for key in ("validation", "market_state", "data_quality", "metric_coverage"):
+        snapshot.pop(key, None)
+    manager = snapshot.get("policy_manager") or {}
+    for key in (
+        "state_change_attribution", "recalculation_triggers",
+        "cancellation_boundary", "phase_e_authority_contract",
+        "shadow_actions", "extended_actions", "raw_optimizer_stability",
+        "stability", "risk_tradeoff",
+    ):
+        manager.pop(key, None)
+    manager["policies"] = {
+        name: _compact_scalars(row, (
+            "expected_final_r", "median_final_r", "cvar10_r",
+            "p_final_profit", "p_final_loss", "p_giveback_0_25_from_now",
+            "p_giveback_0_50_from_now", "p_next_rung_before_stop",
+            "p_stop_before_next_rung", "no_event_probability", "eligible",
+            "reason", "execution_cost_r",
+        ))
+        for name, row in (manager.get("policies") or {}).items()
+    }
+    bound = ai_verdict._impl._bounded
+    for key in ("management_arbiter", "selection_rule", "gate"):
+        if key in manager:
+            manager[key] = bound(manager[key])
+    snapshot["policy_manager"] = manager
+
+
 def install_ai_snapshot_budget_guard() -> None:
     """Prevent report-integrity byte pressure from becoming an HTTP 500."""
     global _INSTALLED
@@ -172,13 +207,25 @@ def install_ai_snapshot_budget_guard() -> None:
             if not _is_budget_error(exc):
                 raise
             _strict_authoritative_compaction(snapshot)
-            base(snapshot)
-            degrade_level = "STRICT_AUTHORITATIVE"
+            try:
+                base(snapshot)
+                degrade_level = "STRICT_AUTHORITATIVE"
+            except RuntimeError as strict_exc:
+                if not _is_budget_error(strict_exc):
+                    raise
+                _emergency_authoritative_compaction(snapshot, ai_verdict)
+                degrade_level = "EMERGENCY_AUTHORITATIVE_TRANSPORT"
         budget = snapshot.setdefault("snapshot_budget", {})
         budget["report_integrity_degraded"] = True
         budget["degrade_reason"] = "BASE_REPORT_INTEGRITY_BYTE_BUDGET"
         budget["degrade_level"] = degrade_level
         size = _sync_final_bytes(ai_verdict, snapshot)
+        if (size >= ai_verdict._impl.SNAPSHOT_LIMIT_BYTES
+                and degrade_level != "EMERGENCY_AUTHORITATIVE_TRANSPORT"):
+            _emergency_authoritative_compaction(snapshot, ai_verdict)
+            budget = snapshot.setdefault("snapshot_budget", {})
+            budget["degrade_level"] = "EMERGENCY_AUTHORITATIVE_TRANSPORT"
+            size = _sync_final_bytes(ai_verdict, snapshot)
         if size >= ai_verdict._impl.SNAPSHOT_LIMIT_BYTES:
             raise RuntimeError("AI authoritative snapshot exceeds hard byte budget")
 
