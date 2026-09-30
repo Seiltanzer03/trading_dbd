@@ -22,6 +22,7 @@ const rates = {
 };
 const edge = {
   instrument:'NAS100', production_authority:false, visualization_only:true,
+  transport:{cache_state:'FRESH'},
   active_edge:{
     available:true,matched_structured_signal_n:8,supporting_position_n:0,opposing_position_n:0,
     directional_matched_signal_n:0,non_directional_matched_signal_n:8,matched_group_n:2,
