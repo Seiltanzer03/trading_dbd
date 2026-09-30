@@ -177,7 +177,7 @@ def test_prompt_forbids_missing_equals_zero_and_separates_edge_authority():
     normalized = " ".join(ai_verdict.SYSTEM_PROMPT.split())
     assert "missing/unavailable != 0" in normalized
     assert "active_edge_provisional_weight" in normalized
-    assert "до 15%" in normalized
+    assert "до 40%" in normalized
     assert "EDE causal/prospective shadow" in normalized
     assert "execution-MC" in normalized
     assert "PRIMARY → FALLBACK_SOURCE → LAST_GOOD_CACHE → MATHEMATICAL_PROXY" in normalized
