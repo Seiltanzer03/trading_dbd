@@ -233,7 +233,7 @@ def wait_for_ai_snapshot_ready() -> dict:
 def verify_management_calculation_audit(body: dict) -> None:
     audit = body.get("management_calculation_audit") or {}
     assert audit.get("version") == "management-calculation-audit-v1", audit
-    assert audit.get("status") in {"AVAILABLE", "UNAVAILABLE"}, audit
+    assert audit.get("status") == "AVAILABLE", audit
     if audit["status"] == "AVAILABLE":
         rows = audit["policies"]
         costs = audit["execution_cost_model"]

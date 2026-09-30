@@ -221,6 +221,30 @@ def test_broker_bybit_observation_requires_direct_synchronized_broker_tick(monke
     assert smoke.broker_bybit_observation(broker, {**perp, "ts": 950.0})["reason"] == "quote_stale"
 
 
+def _management_cost_audit():
+    return {"version": "management-calculation-audit-v1", "status": "AVAILABLE",
+            "model_current_r": 1.0,
+            "execution_cost_model": {"immediate_full_close_r": .01},
+            "policies": {name: {"gross_expected_final_r": 1.0,
+                                "execution_cost_r": .01,
+                                "expected_final_r_net": .99,
+                                "outcomes_include_execution_costs": True}
+                         for name in ("HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT")}}
+
+
+def test_smoke_requires_net_cost_proof_and_rejects_incorrect_arithmetic(capsys):
+    smoke = _load_script("production_functional_smoke")
+    audit = _management_cost_audit()
+    smoke.verify_management_calculation_audit({"management_calculation_audit": audit})
+    assert "MANAGEMENT_NET_COST_AUDIT success" in capsys.readouterr().out
+    audit["policies"]["EXIT"]["expected_final_r_net"] = 1.0
+    with pytest.raises(AssertionError):
+        smoke.verify_management_calculation_audit({"management_calculation_audit": audit})
+    with pytest.raises(AssertionError):
+        smoke.verify_management_calculation_audit({"management_calculation_audit": {
+            "version": "management-calculation-audit-v1", "status": "UNAVAILABLE"}})
+
+
 def test_ai_verdict_rechecks_snapshot_after_post(monkeypatch):
     smoke = _load_script("production_functional_smoke")
     calls = []
@@ -233,7 +257,7 @@ def test_ai_verdict_rechecks_snapshot_after_post(monkeypatch):
         lambda *args, **kwargs: (
             200,
             {"ok": True, "mode": "deterministic_fallback", "verdict": "ok",
-             "management_calculation_audit": {"version": "management-calculation-audit-v1", "status": "UNAVAILABLE"}},
+             "management_calculation_audit": _management_cost_audit()},
             1.0,
         ),
     )

@@ -14,7 +14,7 @@ from seiltanzer.decision_research import canonical_snapshot
 from seiltanzer.extended_policy_evaluation import evaluate_extended_action
 from seiltanzer.llm_decision_shadow import append_shadow_section, audit_report_claims
 from seiltanzer.llm_shadow_working_action import build_working_action
-from seiltanzer.management_contract import decision_reliability
+from seiltanzer.management_contract import calculation_audit, decision_reliability
 from test_extended_policy_evaluation import _snapshot, _action
 
 
@@ -47,6 +47,28 @@ def test_cached_main_path_costs_match_fresh_stress_costs_without_resampling():
     assert main['EXIT']['expected_final_r_net'] == .98
     assert main['HOLD']['execution_cost_r'] == .03
     assert main['CLOSE_50']['execution_cost_r'] == .025
+
+
+def test_first_snapshot_budget_pass_preserves_net_cost_audit_before_facade_capture():
+    row = snapshot()
+    data = row['policy_manager']['inputs']
+    inputs = PolicyInputs(**{**data, 'rungs': tuple(data['rungs'])})
+    sim = simulate_option_paths(inputs, n_paths=400, n_steps=60, seed=19)
+    policies = ai_policy_v4.metrics_from_execution_paths(
+        sim, inputs, row['policy_manager']['execution_cost_model'])
+    row['policy_manager']['policies'] = policies
+    row['retained_context'] = 'x' * 51_000
+    for policy in policies.values():
+        policy['redundant_debug_workspace'] = 'x' * 5000
+    before = calculation_audit(row)
+    assert before['status'] == 'AVAILABLE'
+    # This base pass runs before the facade can capture report integrity.
+    ai_verdict._BASE_ENFORCE_SNAPSHOT_BUDGET_V18(row)
+    assert row['snapshot_budget']['original_bytes'] > 60_000
+    assert row['snapshot_budget']['final_bytes'] < 60_000
+    assert calculation_audit(row) == before
+    ai_verdict._enforce_snapshot_budget_with_report_integrity(row)
+    assert calculation_audit(row) == before
 
 
 @pytest.mark.parametrize('compact', ['normal', 'strict', 'emergency'])
