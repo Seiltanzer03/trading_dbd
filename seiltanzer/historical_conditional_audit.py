@@ -16,9 +16,13 @@ from .decision_research import _execution_spec
 from .execution_simulator import replay_execution_path
 from .llm_shadow_working_action import _distance, _geometry, _price_from_current_distance
 
-RULES = ("TRAIL_GAMMA_FLIP", "SCALE_OUT_ON_SPIKE", "TIME_STOP")
+RULES = (
+    "TRAIL_GAMMA_FLIP", "SCALE_OUT_ON_SPIKE", "TIME_STOP",
+    "PROTECT_GAIN", "PARTIAL_AT_RUNG", "EXIT_ON_THESIS_BREAK",
+)
 SCALE_FRACTION = 0.25  # Additional fraction of the remainder at the next rung.
 TIME_FRACTION = 0.50  # Half the frozen option horizon from the review.
+PROTECT_GAIN_STOP_R = 0.50  # Frozen T0 candidate, after an observed +1R MFE.
 MAX_POINT_GAP_SECONDS = 300.0
 
 
@@ -148,6 +152,44 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
                 "deadline_minutes": TIME_FRACTION * horizon,
                 "anchor": "FROZEN_T0_OPTION_HORIZON",
             }
+    # A rung touch is the only measured event for the additional 25% sale.
+    # Reuse the exact same paired result instead of calling it an independent
+    # spike detector or counting these observations twice.
+    result["PARTIAL_AT_RUNG"] = {
+        **result["SCALE_OUT_ON_SPIKE"],
+        **({"anchor": "FROZEN_T0_NEXT_STRATEGY_RUNG"}
+           if "delta_r" in result["SCALE_OUT_ON_SPIKE"] else {}),
+    }
+
+    if (spec.max_r < 1.0 or spec.current_r <= PROTECT_GAIN_STOP_R
+            or spec.stop_r >= PROTECT_GAIN_STOP_R):
+        result["PROTECT_GAIN"] = {"reason": "T0_GAIN_STOP_NOT_ELIGIBLE"}
+    else:
+        variant = replay_execution_path(
+            [value for _, value in path],
+            replace(spec, stop_r=PROTECT_GAIN_STOP_R))
+        result["PROTECT_GAIN"] = {
+            "baseline_r": baseline.outcome_r, "variant_r": variant.outcome_r,
+            "delta_r": variant.outcome_r - baseline.outcome_r,
+            "target_r": PROTECT_GAIN_STOP_R,
+            "anchor": "FROZEN_T0_MFE_AT_LEAST_1R",
+        }
+
+    edge = (snapshot.get("policy_manager") or {}).get("combined_edge_soft_weight") or {}
+    direction = _finite(edge.get("direction_score"))
+    if (edge.get("available") is not True or direction is None
+            or direction >= 0
+            or not (edge.get("active_edge_component_weight") or
+                    edge.get("exploratory_component_weight"))):
+        result["EXIT_ON_THESIS_BREAK"] = {"reason": "NO_FROZEN_OPPOSING_EDGE_AT_T0"}
+    else:
+        result["EXIT_ON_THESIS_BREAK"] = {
+            "baseline_r": baseline.outcome_r, "variant_r": spec.current_r,
+            "delta_r": spec.current_r - baseline.outcome_r,
+            "target_r": spec.current_r,
+            "direction_score": direction,
+            "anchor": "FROZEN_T0_OPPOSING_DIRECTIONAL_EDGE",
+        }
     return result
 
 
@@ -194,9 +236,12 @@ def audit_database(database: str) -> dict:
     finally:
         db.close()
     return {
-        "contract_version": "historical-conditional-management-audit-v1",
+        "contract_version": "historical-conditional-management-audit-v2",
         "historical_resolved_reviews": total,
         "path_assumption": "recorded_points_piecewise_linear_no_slippage",
+        "partially_shared_hypotheses": {
+            "PARTIAL_AT_RUNG": "same_25_percent_next_rung_proxy_as_SCALE_OUT_ON_SPIKE"
+        },
         "no_auto_promotion": True,
         "rules": {name: {
             "independent_trade_n": len(deltas[name]),
