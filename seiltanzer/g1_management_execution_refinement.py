@@ -12,10 +12,11 @@ from .g1_management_runtime import (
     ManagementEdgeRuntime,
     _json,
     _sha_text,
+    _finite,
 )
 
 
-REFINEMENT_VERSION = "g1m-execution-provenance-v2"
+REFINEMENT_VERSION = "g1m-execution-provenance-v3"
 _ORIGINAL_STATUS = ManagementEdgeRuntime.status
 
 
@@ -46,13 +47,18 @@ def _position_ledger_truth(self, *, trade_id: int, decision_id: str | None) -> d
             "decision_event": None,
         }
     total = 0.0
+    unpriced_close_count = 0
     for row in rows:
         closed = float(row["fraction_closed"] or 0.0)
-        execution_r = row["execution_r"]
-        if closed > 0.0 and execution_r is not None:
-            total += closed * float(execution_r)
+        execution_r = _finite(row["execution_r"])
+        if closed > 0.0:
+            if execution_r is None:
+                unpriced_close_count += 1
+            else:
+                total += closed * execution_r
     latest_fraction = float(rows[-1]["fraction_after"])
-    terminal_known = latest_fraction <= 1e-9
+    position_closed = latest_fraction <= 1e-9
+    terminal_known = position_closed and unpriced_close_count == 0
     decision_event = None
     if decision_id:
         for row in rows:
@@ -63,13 +69,19 @@ def _position_ledger_truth(self, *, trade_id: int, decision_id: str | None) -> d
                     "event_type": str(row["event_type"]),
                     "source": str(row["source"]),
                     "fraction_closed": float(row["fraction_closed"]),
-                    "execution_price": row["execution_price"],
-                    "execution_r": row["execution_r"],
+                    "execution_price": _finite(row["execution_price"]),
+                    "execution_r": _finite(row["execution_r"]),
                 }
                 break
     return {
         "available": True,
         "terminal_known": terminal_known,
+        "position_closed": position_closed,
+        "unpriced_close_count": unpriced_close_count,
+        "terminal_result_status": (
+            "UNAVAILABLE_UNPRICED_CLOSE" if unpriced_close_count
+            else "AVAILABLE_GROSS" if position_closed else "UNRESOLVED_OPEN_POSITION"
+        ),
         "terminal_r": total if terminal_known else None,
         "latest_fraction_after": latest_fraction,
         "decision_event": decision_event,
@@ -140,6 +152,12 @@ def _write_execution_attribution(self, obs, values: dict[str, float]) -> None:
             "execution_r": row["execution_r"] if row is not None else None,
         },
         "position_terminal_known": bool(ledger.get("terminal_known")),
+        "position_closed": bool(ledger.get("position_closed")),
+        "position_unpriced_close_count": ledger.get("unpriced_close_count"),
+        "actual_terminal_result_status": ledger.get("terminal_result_status", "UNAVAILABLE_LEDGER"),
+        "actual_terminal_result_basis": "gross_initial_position_r",
+        "historical_fill_costs_status": "UNAVAILABLE",
+        "net_execution_edge_eligible": False,
         "position_latest_fraction_after": ledger.get("latest_fraction_after"),
         "interpretation": (
             "Actual terminal R comes from the event-sourced position ledger. "
