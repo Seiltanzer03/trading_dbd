@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from seiltanzer import ai_snapshot_budget_guard as guard
 from seiltanzer import ai_verdict
 from seiltanzer.ai_report_semantics_guard import authoritative_current_price_available
@@ -163,6 +165,65 @@ def test_base_overflow_retries_with_strict_authoritative_compaction():
         assert len(calls) == 2
         assert snapshot["snapshot_budget"]["report_integrity_degraded"] is True
         assert snapshot["snapshot_budget"]["degrade_level"] == "STRICT_AUTHORITATIVE"
+        assert snapshot["snapshot_budget"]["final_bytes"] < ai_verdict.SNAPSHOT_LIMIT_BYTES
+    finally:
+        ai_verdict._enforce_snapshot_budget_with_report_integrity = original_public
+        ai_verdict._impl._enforce_snapshot_budget = original_impl
+        ai_verdict._BASE_ENFORCE_SNAPSHOT_BUDGET_V18 = original_base
+        guard._INSTALLED = False
+
+
+@pytest.mark.parametrize("base_raises", [False, True])
+def test_live_chain_overflow_preserves_decision_and_policy_metrics(base_raises):
+    original_public = ai_verdict._enforce_snapshot_budget_with_report_integrity
+    original_impl = ai_verdict._impl._enforce_snapshot_budget
+    original_base = ai_verdict._BASE_ENFORCE_SNAPSHOT_BUDGET_V18
+    guard._INSTALLED = False
+    decision = {"policy": "HOLD", "decision_id": "review-129", "instruction_ru": "Удерживать"}
+
+    def overflowing(snapshot: dict) -> None:
+        snapshot.update({
+            "trade_id": 129, "captured_ts": 1_790_742_322.0,
+            "trade_geometry": {"entry": 100, "current": 102, "original_stop": 90},
+            "policy_manager": {
+                "management_decision": decision,
+                "recommendation": {"policy": "HOLD"},
+                "policies": {
+                    name: {"expected_final_r": .12, "cvar10_r": -.4,
+                           "monte_carlo": "x" * 14_000}
+                    for name in ("HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT")
+                },
+                "inputs": {"r0": .2, "T": 2.5},
+                "risk_constraint": {"gross_cvar_floor_r": -.8},
+                "input_audit": {"rows": {"instrument_price": {
+                    "available": True, "source": "direct", "value": 102}}},
+                "selection_rule": {"eligible": ["HOLD"], "explanation": "y" * 20_000},
+            },
+            "snapshot_budget": {},
+        })
+        raise RuntimeError("AI snapshot byte budget exceeded")
+
+    try:
+        ai_verdict._enforce_snapshot_budget_with_report_integrity = overflowing
+        def base(_snapshot: dict) -> None:
+            if base_raises:
+                raise RuntimeError("AI snapshot byte budget exceeded")
+
+        ai_verdict._BASE_ENFORCE_SNAPSHOT_BUDGET_V18 = base
+        guard.install_ai_snapshot_budget_guard()
+        snapshot: dict = {}
+        ai_verdict._impl._enforce_snapshot_budget(snapshot)
+        manager = snapshot["policy_manager"]
+        assert manager["management_decision"] == decision
+        assert set(manager["policies"]) == {"HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
+        assert manager["policies"]["HOLD"] == {
+            "expected_final_r": .12, "cvar10_r": -.4}
+        assert manager["risk_constraint"]["gross_cvar_floor_r"] == -.8
+        assert manager["input_audit"]["rows"]["instrument_price"]["value"] == 102
+        assert snapshot["snapshot_budget"]["degrade_level"] == (
+            "EMERGENCY_AUTHORITATIVE_TRANSPORT")
+        assert snapshot["snapshot_budget"]["final_bytes"] == (
+            ai_verdict._impl._snapshot_bytes(snapshot))
         assert snapshot["snapshot_budget"]["final_bytes"] < ai_verdict.SNAPSHOT_LIMIT_BYTES
     finally:
         ai_verdict._enforce_snapshot_budget_with_report_integrity = original_public
