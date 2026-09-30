@@ -460,6 +460,16 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
         )
         return "\n".join(lines).strip()
 
+    if shadow.get("source") == "deterministic_active_management":
+        action = shadow.get("working_action") or {}
+        evaluation = shadow.get("quant_evaluation") or {}
+        lines.append(f"Deterministic: {shadow.get('policy')}. "
+            f"Expected против HOLD {evaluation.get('expected_delta_vs_hold_r')}R; "
+            f"нижний MC CI {evaluation.get('paired_delta_ci95_lower_r')}R. "
+            "Это расчётный эффект, статистический перевес на реальных сделках не подтверждён.")
+        lines.append(str(action.get("instruction_ru") or "Параметры действия недоступны"))
+        return "\n".join(lines).strip()
+
     policy = shadow.get("policy") or "—"
     confidence = _number(shadow.get("confidence"))
     confidence_text = "—" if confidence is None else f"{confidence * 100:.1f}%"

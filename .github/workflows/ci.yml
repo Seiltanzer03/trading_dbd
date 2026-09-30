@@ -29,6 +29,12 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Run Python tests
         run: pytest -q
+
+  browser:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
       - name: Check frontend modules
         run: |
           node --check seiltanzer/web/js/plotly_camera_guard.js
@@ -108,11 +114,17 @@ jobs:
           node tests/web/correlation_controls_webkit_e2e.mjs
           node tests/web/ai_management_decision_webkit_e2e.mjs
           node tests/web/universe_render_webkit_e2e.mjs
+
+  acceptance:
+    runs-on: ubuntu-22.04
+    needs: [test, browser]
+    if: always()
+    steps:
       - name: Publish full CI status
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          JOB_STATUS: ${{ job.status }}
+          JOB_STATUS: ${{ needs.test.result == 'success' && needs.browser.result == 'success' && 'success' || 'failure' }}
         run: |
           if [ "$JOB_STATUS" = "success" ]; then
             state="success"

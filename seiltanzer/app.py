@@ -1080,6 +1080,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if decision:
                     result["management_decision"] = decision
                 shadow = result.get("llm_shadow_decision")
+                if active_trade and decision and decision.get("policy") == "HOLD":
+                    from .active_management import select_active_management
+                    candidate = await asyncio.to_thread(select_active_management, snapshot)
+                    if candidate is not None:
+                        shadow = candidate
+                        result["llm_shadow_decision"] = shadow
+                    result["active_management_candidates"] = snapshot.get("active_management_candidates", [])
                 if (
                     active_trade and isinstance(shadow, dict)
                     and decision and decision.get("policy") == "HOLD"
@@ -1120,6 +1127,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                         "**ДЕЙСТВИЕ СЕЙЧАС**",
                                         "**БАЗОВЫЙ ПЛАН ДО ПОДТВЕРЖДЕНИЯ**", 1)
                                 )
+                rows = result.get("active_management_candidates") or []
+                if rows:
+                    result["verdict"] += "\n\n**ПРОВЕРКА АКТИВНОГО МЕНЕДЖМЕНТА** —\n" + "\n".join(
+                        f"{row['policy']}: {row['status']} · {row.get('reason', 'уже установлено')}."
+                        for row in rows)
                 engine.journal.record_ai_verdict(
                     trade_id, snapshot,
                     result["verdict"], result.get("model"))

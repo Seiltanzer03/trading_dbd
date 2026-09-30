@@ -152,10 +152,6 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
         return _unavailable(policy, str(reason), confidence)
     if confidence is None or confidence < MIN_CONFIDENCE:
         return _unavailable(policy, "LLM_CONFIDENCE_BELOW_MANUAL_ACTION_THRESHOLD", confidence)
-    if policy == "TRAIL_GAMMA_FLIP":
-        return _unavailable(policy, "GEX_CONTEXT_NOT_A_VERIFIED_EXECUTION_ANCHOR", confidence)
-    if policy in {"SCALE_OUT_ON_SPIKE", "TIME_STOP"}:
-        return _unavailable(policy, "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT", confidence)
     if policy in BASE_FRACTIONS:
         fraction = BASE_FRACTIONS[policy]
         instruction = (
@@ -183,7 +179,40 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
 
     params: dict[str, Any] = {}
     instruction = ""
-    if policy == "MOVE_TO_BE":
+    if policy == "TRAIL_GAMMA_FLIP":
+        inputs = (snapshot.get("policy_manager") or {}).get("inputs") or {}
+        if (inputs.get("chain_status") not in {"live", "ok"}
+                or not inputs.get("option_available")
+                or (_number(inputs.get("chain_age_sec")) is None)
+                or float(inputs["chain_age_sec"]) > 120):
+            return _unavailable(policy, "GEX_CONTEXT_NOT_A_VERIFIED_EXECUTION_ANCHOR", confidence)
+        target = _price_from_current_distance(geometry, _distance(snapshot, "distance_to_zero_gamma"))
+        if not _is_tighter_stop(geometry, target):
+            return _unavailable(policy, "NO_VALID_GAMMA_FLIP_STOP", confidence)
+        params = {"stop_price": target, "anchor": "ZERO_GAMMA", "trailing_mode": "frozen_level_reassessed_on_review"}
+        instruction = f"ВРУЧНУЮ ПОДТЯНУТЬ СТОП К GAMMA FLIP: {target:g}; обновлять только после нового разбора"
+    elif policy == "SCALE_OUT_ON_SPIKE":
+        rung_r, rung_price = _next_rung(snapshot, geometry)
+        inputs = (snapshot.get("policy_manager") or {}).get("inputs") or {}
+        target_r = (float(geometry["sign"]) * (float(geometry["current"]) - float(geometry["entry"])) / float(geometry["risk"])) + .5
+        rungs = inputs.get("rungs") or ([rung_r] if rung_r is not None else [])
+        while any(abs(target_r - float(x)) < .05 for x in rungs):
+            target_r += .25
+        target = _price_at_r(geometry, target_r)
+        if geometry.get("take") is None or float(geometry["sign"]) * (float(geometry["take"]) - target) <= 0:
+            return _unavailable(policy, "NO_DISTINCT_SPIKE_TRIGGER_BEFORE_TAKE", confidence)
+        params = {"trigger_price": target, "close_fraction": .25, "target_r": target_r}
+        instruction = f"ПОДГОТОВИТЬ РУЧНОЕ СОКРАЩЕНИЕ 25% ОСТАТКА ПРИ ИМПУЛЬСЕ ДО {target:g}"
+    elif policy == "TIME_STOP":
+        captured = _number(snapshot.get("captured_ts"))
+        horizon = _first_number(snapshot, (("policy_manager", "inputs", "horizon_minutes"),
+                    ("policy_manager", "scenario_geometry", "full_horizon_minutes")))
+        if captured is None or horizon is None or horizon <= 0:
+            return _unavailable(policy, "TIME_STOP_HORIZON_UNAVAILABLE", confidence)
+        minutes = horizon * .5
+        params = {"deadline_ts": captured + minutes * 60, "timeout_minutes": minutes}
+        instruction = f"ПОДГОТОВИТЬ РУЧНОЙ ВЫХОД ОСТАТКА ЧЕРЕЗ {minutes:g} МИН, ЕСЛИ СТОП/ТЕЙК НЕ СРАБОТАЕТ РАНЬШЕ"
+    elif policy == "MOVE_TO_BE":
         target = geometry.get("entry")
         if not _is_tighter_stop(geometry, target):
             return _unavailable(policy, "BREAK_EVEN_IS_NOT_A_VALID_TIGHTER_STOP", confidence)
@@ -192,7 +221,7 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
     elif policy == "TIGHTEN_STOP":
         zero = _price_from_current_distance(
             geometry, _distance(snapshot, "distance_to_zero_gamma"))
-        anchors = [("ZERO_GAMMA", zero), ("ENTRY_PRICE", geometry.get("entry"))]
+        anchors = [("RISK_BUFFER_0_5_R", float(geometry["current"]) - float(geometry["sign"]) * .5 * float(geometry["risk"])), ("ENTRY_PRICE", geometry.get("entry"))]
         valid = [(name, value) for name, value in anchors if _is_tighter_stop(geometry, value)]
         if not valid:
             return _unavailable(policy, "NO_AUTHORITATIVE_NON_WIDENING_STOP_ANCHOR", confidence)

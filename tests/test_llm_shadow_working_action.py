@@ -58,13 +58,14 @@ def test_move_to_be_is_blocked_when_it_would_not_tighten_stop():
     assert action["reason"] == "BREAK_EVEN_IS_NOT_A_VALID_TIGHTER_STOP"
 
 
-def test_conditional_actions_need_independent_execution_contracts():
+def test_conditional_actions_have_exact_trigger_and_deadline():
     scale = build_working_action(_snapshot(), _shadow("SCALE_OUT_ON_SPIKE"))
     timed = build_working_action(_snapshot(), _shadow("TIME_STOP"))
-    for action in (scale, timed):
-        assert action["status"] == "NOT_ACTIONABLE"
-        assert action["reason"] == "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT"
-        assert "parameters" not in action
+    assert scale["status"] == "READY_FOR_MANUAL_CONFIRMATION"
+    assert scale["parameters"]["target_r"] != 1.5
+    assert scale["parameters"]["close_fraction"] == .25
+    assert timed["parameters"]["deadline_ts"] == 1_900_000_000 + 120 * 60
+    assert timed["automatic_execution_allowed"] is False
 
 
 def test_finalized_shadow_keeps_specific_block_reason_without_manual_instruction():

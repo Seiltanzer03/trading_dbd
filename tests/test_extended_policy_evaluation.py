@@ -54,18 +54,20 @@ def test_extended_action_rejects_low_reliability_and_missing_geometry():
         "LOW_DATA_RELIABILITY_FOR_EXTENDED_OVERRIDE")
     snapshot = _snapshot()
     assert evaluation.evaluate_extended_action(snapshot, _action("TIME_STOP", deadline_ts=123))["reason"] == (
-        "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT")
+        "INVALID_TIME_STOP_DEADLINE")
 
 
 def test_unverified_conditional_actions_remain_blocked_even_with_forged_parameters():
     snapshot = _snapshot()
+    snapshot["captured_ts"] = 1_900_000_000
+    snapshot["policy_manager"]["inputs"]["chain_status"] = "delayed"
     cases = (
         ("TRAIL_GAMMA_FLIP", {"stop_price": 105.0, "anchor": "ENTRY_PRICE"},
          "GEX_CONTEXT_NOT_A_VERIFIED_EXECUTION_ANCHOR"),
         ("SCALE_OUT_ON_SPIKE", {"trigger_price": 115.0, "close_fraction": .10},
-         "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT"),
-        ("TIME_STOP", {"deadline_ts": 1_900_014_400.0},
-         "CONDITIONAL_POLICY_HAS_NO_QUANTIFIED_EXECUTION_CONTRACT"),
+         "SPIKE_DUPLICATES_STRATEGY_RUNG"),
+        ("TIME_STOP", {"deadline_ts": 1_900_014_401.0},
+         "INVALID_TIME_STOP_DEADLINE"),
     )
     for policy, parameters, reason in cases:
         result = evaluation.evaluate_extended_action(snapshot, _action(policy, **parameters))
@@ -80,6 +82,22 @@ def test_extended_action_rejects_no_benefit_even_if_cvar_passes(monkeypatch):
     row = evaluation.evaluate_extended_action(_snapshot(), _action())
     assert row["status"] == "blocked"
     assert row["reason"] == "NO_MATERIAL_ROBUST_EXPECTED_GAIN"
+
+
+def test_low_quality_needs_observed_independent_and_live_support(monkeypatch):
+    snapshot = _snapshot()
+    snapshot['policy_manager']['evidence']['data_quality']['reliability']['level'] = 'низкая'
+    snapshot['policy_manager']['gate'] = {'degraded_authority_overlay': {'evidence': {
+        'adverse_families': ['live_tape', 'option_distribution'],
+        'live_adverse_families': ['live_tape'], 'observed_adverse_item_count': 2}}}
+    monkeypatch.setattr(evaluation, 'simulate_option_paths', lambda inputs, **kw:
+        SimpleNamespace(strategy_outcome=np.full(1200, .1 if inputs.stop_r < 0 else .2)))
+    row = evaluation.evaluate_extended_action(snapshot, _action())
+    assert row['status'] == 'eligible'
+    assert row['authority_mode'] == 'degraded_manual'
+    assert row['automatic_execution_allowed'] is False
+    snapshot['policy_manager']['gate']['degraded_authority_overlay']['evidence']['observed_adverse_item_count'] = 0
+    assert evaluation.evaluate_extended_action(snapshot, _action())['status'] == 'blocked'
 
 
 def test_counterfactual_stream_keeps_unaffected_path_ids_identical():
