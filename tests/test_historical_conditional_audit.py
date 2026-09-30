@@ -94,6 +94,25 @@ def test_additional_candidates_share_rung_and_require_frozen_t0_evidence():
     assert blocked["EXIT_ON_THESIS_BREAK"]["reason"] == "NO_FROZEN_OPPOSING_EDGE_AT_T0"
 
 
+def test_positive_protection_stop_remains_effective_after_break_even_armed():
+    snapshot = _snapshot()
+    snapshot["policy_manager"]["inputs"].update({"r0": 1.1, "max_r": 1.6})
+    snapshot["trade_geometry"]["current"] = 111
+    points = [
+        {"ts": 1000, "r": 1.1}, {"ts": 1100, "r": .6},
+        {"ts": 1200, "r": .4}, {"ts": 1300, "r": -.1},
+    ]
+    result = replay_rules(snapshot, points)["PROTECT_GAIN"]
+    assert result["variant_r"] == .5
+    assert result["baseline_r"] == 0
+    assert result["delta_r"] == .5
+
+    snapshot["policy_manager"]["inputs"]["stop_r"] = .2
+    result = replay_rules(snapshot, points)["PROTECT_GAIN"]
+    assert result["baseline_r"] == .2
+    assert result["variant_r"] == .5
+
+
 def test_database_audit_deduplicates_trades_and_reports_coverage(tmp_path):
     path = tmp_path / "history.sqlite3"
     points = [(1000, .2), (1300, 1.2), (1600, 1.4), (1900, .5),

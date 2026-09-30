@@ -34,6 +34,18 @@ def _finite(value: Any) -> float | None:
         return None
 
 
+def _replay_with_effective_stop(path: list[float], spec) -> Any:
+    """Honor a positive manual stop even when the strategy BE is armed.
+
+    The shared v1 simulator's BE branch otherwise replaces *any* stop with
+    0R. A positive stop subsumes the 0R BE floor, so suppressing that redundant
+    BE event preserves the effective barrier without changing production code.
+    """
+    if spec.stop_r > 0:
+        spec = replace(spec, be_after_r=math.inf)
+    return replay_execution_path(path, spec)
+
+
 def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
     """Return paired gross R outcomes, or explicit reasons for unavailable rules."""
     spec = _execution_spec(snapshot)
@@ -61,7 +73,8 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
                 for name in RULES}
     if abs(path[0][1] - spec.current_r) > 1e-7:
         return {name: {"reason": "T0_PRICE_MISMATCH"} for name in RULES}
-    baseline = replay_execution_path([value for _, value in path], spec)
+    observed = [value for _, value in path]
+    baseline = _replay_with_effective_stop(observed, spec)
     result: dict[str, dict] = {}
 
     geometry = _geometry(snapshot)
@@ -80,8 +93,8 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
         if stop_r <= spec.stop_r:
             result["TRAIL_GAMMA_FLIP"] = {"reason": "T0_GAMMA_STOP_NOT_TIGHTER"}
         else:
-            variant = replay_execution_path(
-                [value for _, value in path], replace(spec, stop_r=stop_r))
+            variant = _replay_with_effective_stop(
+                observed, replace(spec, stop_r=stop_r))
             result["TRAIL_GAMMA_FLIP"] = {
                 "baseline_r": baseline.outcome_r, "variant_r": variant.outcome_r,
                 "delta_r": variant.outcome_r - baseline.outcome_r,
@@ -144,7 +157,7 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
             (t0, r0), (t1, r1) = segment
             value = r0 + (r1 - r0) * (deadline - t0) / (t1 - t0)
             truncated = [r for ts, r in path if ts < deadline] + [value]
-            variant = replay_execution_path(truncated, spec)
+            variant = _replay_with_effective_stop(truncated, spec)
             result["TIME_STOP"] = {
                 "baseline_r": baseline.outcome_r,
                 "variant_r": variant.outcome_r,
@@ -165,9 +178,8 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
             or spec.stop_r >= PROTECT_GAIN_STOP_R):
         result["PROTECT_GAIN"] = {"reason": "T0_GAIN_STOP_NOT_ELIGIBLE"}
     else:
-        variant = replay_execution_path(
-            [value for _, value in path],
-            replace(spec, stop_r=PROTECT_GAIN_STOP_R))
+        variant = _replay_with_effective_stop(
+            observed, replace(spec, stop_r=PROTECT_GAIN_STOP_R))
         result["PROTECT_GAIN"] = {
             "baseline_r": baseline.outcome_r, "variant_r": variant.outcome_r,
             "delta_r": variant.outcome_r - baseline.outcome_r,
