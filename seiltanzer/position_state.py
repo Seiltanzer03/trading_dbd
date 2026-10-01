@@ -1,6 +1,7 @@
 """Authoritative event-sourced economic state for a real user trade."""
 from __future__ import annotations
 import hashlib, json, math, sqlite3, threading, time
+from contextlib import contextmanager
 from typing import Any
 
 POLICY_FRACTIONS = {"HOLD": 0.0, "CLOSE_10": .10, "CLOSE_25": .25,
@@ -466,6 +467,53 @@ class PositionLedger:
                 (str(action_id),),
             )
 
+    @contextmanager
+    def decision_publication(self, trade_id: int, review_id: str):
+        """Restore pending proposals when their corresponding journal write fails.
+
+        Registration and the journal use separate SQLite connections. Hold the
+        ledger lock throughout publication so acknowledgement cannot interleave
+        with compensation. Previously published pending actions are restored;
+        new unpublished rows remain auditable but cannot be acknowledged.
+        """
+        tables = (("management_decisions", "decision_id"),
+                  ("llm_shadow_manual_actions", "action_id"))
+        with self._lock:
+            pending, existing = {}, {}
+            for table, key in tables:
+                pending[table] = [row[0] for row in self._conn.execute(
+                    f"SELECT {key} FROM {table} WHERE trade_id=? AND status='pending_execution'",
+                    (int(trade_id),))]
+                existing[table] = {row[0] for row in self._conn.execute(
+                    f"SELECT {key} FROM {table} WHERE review_id=?", (str(review_id),))}
+            try:
+                yield
+            except BaseException:
+                with self._conn:
+                    for table, key in tables:
+                        rows = self._conn.execute(
+                            f"SELECT {key} FROM {table} WHERE review_id=?", (str(review_id),)).fetchall()
+                        for row in rows:
+                            if row[0] not in existing[table]:
+                                self._conn.execute(
+                                    f"UPDATE {table} SET status='publication_failed' WHERE {key}=? "
+                                    "AND status IN ('pending_execution','not_required','superseded')", (row[0],))
+                        for identity in pending[table]:
+                            self._conn.execute(
+                                f"UPDATE {table} SET status='pending_execution' WHERE {key}=? "
+                                "AND status='superseded'", (identity,))
+                raise
+
+    def supersede_other_pending_actions(self, trade_id: int, selected_id: str) -> None:
+        """One published review exposes at most one pending manual command."""
+        with self._lock, self._conn:
+            for table, key in (("management_decisions", "decision_id"),
+                               ("llm_shadow_manual_actions", "action_id")):
+                self._conn.execute(
+                    f"UPDATE {table} SET status='superseded' WHERE trade_id=? "
+                    f"AND status='pending_execution' AND {key}<>?",
+                    (int(trade_id), str(selected_id)))
+
     def shadow_actions(self, trade_id: int) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
@@ -583,7 +631,7 @@ class PositionLedger:
             if row["status"] != "pending_execution":
                 raise StaleDecisionError(f"shadow action is {row['status']}")
             latest = self._conn.execute(
-                "SELECT action_id FROM llm_shadow_manual_actions WHERE trade_id=? "
+                "SELECT action_id FROM llm_shadow_manual_actions WHERE trade_id=? AND status<>'publication_failed' "
                 "ORDER BY created_ts DESC,rowid DESC LIMIT 1",
                 (int(trade["id"]),),
             ).fetchone()
@@ -717,7 +765,7 @@ class PositionLedger:
             if row["status"] != "pending_execution":
                 raise StaleDecisionError(f"decision is {row['status']}")
             latest = self._conn.execute(
-                "SELECT decision_id FROM management_decisions WHERE trade_id=? "
+                "SELECT decision_id FROM management_decisions WHERE trade_id=? AND status<>'publication_failed' "
                 "ORDER BY created_ts DESC,rowid DESC LIMIT 1",
                 (int(trade["id"]),)).fetchone()
             if latest is None or latest[0] != decision_id:

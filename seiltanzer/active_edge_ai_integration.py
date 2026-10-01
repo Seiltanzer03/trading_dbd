@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .ai_verdict_budget_bridge import enforce_public_snapshot_budget
+from .edge_regime import build_edge_regime_context
 from .runtime_git_identity import runtime_git_sha
 
 
@@ -422,6 +423,8 @@ def install_active_edge_ai_integration() -> None:
 
     def build_snapshot(engine):
         snapshot = original(engine)
+        snapshot["edge_regime"] = build_edge_regime_context(engine, snapshot)
+        snapshot["market_regime"] = snapshot["edge_regime"]["regime"]
         context = build_active_edge_context(engine, snapshot)
         ede = snapshot.get("ede_causal_context")
         if not isinstance(ede, dict):

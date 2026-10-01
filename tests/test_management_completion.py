@@ -147,6 +147,13 @@ def test_time_stop_future_instruction_is_saved_but_future_source_data_is_rejecte
     row['effective_management_decision'] = {'policy': 'TIME_STOP', 'parameters': {'deadline_ts': deadline}}
     row['llm_shadow_decision'] = {'policy': 'TIME_STOP', 'working_action': {
         'policy': 'TIME_STOP', 'parameters': {'deadline_ts': deadline}}}
+    row['selected_management_action'] = {'policy': 'TIME_STOP', 'working_action': {
+        'policy': 'TIME_STOP', 'parameters': {'deadline_ts': deadline}}}
+    row['policy_manager']['management_decision'] = {'policy': 'TIME_STOP',
+        'parameters': {'deadline_ts': deadline}}
+    row['policy_manager']['unified_edge_ensemble'] = {'candidates': [
+        {'policy': 'TIME_STOP', 'parameters': {'deadline_ts': deadline},
+         'quant_evaluation': {'policy': 'TIME_STOP', 'parameters': {'deadline_ts': deadline}}}]}
     assert canonical_snapshot(row)['production_policy'] == 'TIME_STOP'
     row['market_state'] = {'policy': 'TIME_STOP', 'parameters': {'deadline_ts': deadline}}
     with pytest.raises(ValueError, match='market_state.parameters.deadline_ts'):

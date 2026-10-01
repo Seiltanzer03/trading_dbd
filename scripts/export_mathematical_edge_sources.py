@@ -6,13 +6,14 @@ import gzip
 import json
 import shlex
 from pathlib import Path
+from seiltanzer.config import ALL_INSTRUMENTS
 from scripts.production_ede_offload import _connect
 
 # Stdlib-only program executes on the existing server, including before deploy.
 # Indexed per-instrument ranges, no database backup, no writes, no training.
 REMOTE_EXPORT = r'''
 import sqlite3,gzip,json,hashlib,time,base64,math
-codes=('NAS100','SP500','US30','GER40','UK100','JPY100','EURUSD','USDCAD','XAU','XAG')
+codes=__CONFIGURED_INSTRUMENT_CODES__
 c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=3)
 c.row_factory=sqlite3.Row
 c.execute('PRAGMA query_only=ON')
@@ -49,7 +50,7 @@ c.close()
 raw=json.dumps(dict(sources=sources,errors=errors,exported_ts=now,read_only=True),allow_nan=False).encode()
 if len(raw)>64000000:raise ValueError('export exceeds bound')
 print(base64.b64encode(gzip.compress(raw)).decode())
-'''
+'''.replace('__CONFIGURED_INSTRUMENT_CODES__', repr(tuple(ALL_INSTRUMENTS)))
 
 
 def main():

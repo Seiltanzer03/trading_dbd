@@ -7,6 +7,7 @@ legacy snapshots and LLM-only responses retain their established contract.
 from __future__ import annotations
 
 from typing import Any
+import re
 
 from . import ai_verdict_v18 as _impl
 
@@ -128,14 +129,23 @@ def _plan_lines(snapshot: dict) -> list[str]:
     rec = manager.get("recommendation") or {}
     authority = decision.get("authority") or arbiter.get("winner") or "—"
     production = decision.get("policy") or rec.get("policy") or "—"
-    model_policy = decision.get("model_policy") or shadow.get("new_candidate_policy") or rec.get("raw_optimizer_policy") or production
+    unified = manager.get("unified_edge_ensemble") or {}
+    model_policy = unified.get("selected_policy") or decision.get("model_policy") or shadow.get("new_candidate_policy") or rec.get("raw_optimizer_policy") or production
     continuity = decision.get("continuity") or "none (первый разбор)"
+    ranking_line = (
+        f"Единый ансамбль выбрал {unified.get('selected_policy') or '—'}: веса компонентов ранжируют допустимые действия; hard-risk/CVaR и ограничения исполнения обязательны. Балл не является Expected или исторической прибылью."
+        if unified.get("applied", unified.get("available")) else
+        f"Выбор ансамбля не применён: {unified.get('operational_guard_reason') or 'нет допустимого варианта'}. Действует {production} после проверок исполнения."
+        if unified else
+        f"Диагностические баллы: стратегия {_score(arbiter.get('strategy_score'))}; overlay до бонуса {_score(arbiter.get('ai_score_before_priority'))}; после бонуса {_score(arbiter.get('ai_score_after_priority'))}. Баллы и бонус не определяют победителя: подтверждённый overlay получает приоритет по правилу."
+    )
     return [
         f"Авторитет плана: {authority}; production policy: {production}; shadow/model candidate: {model_policy}.",
         f"Статус исполнения: {_text(decision.get('execution_status'))}; continuity={continuity}.",
         f"Новая доля закрытия текущего остатка: {_fraction_pct(decision.get('incremental_close_fraction'))}; остаток после действия: {_fraction_pct(decision.get('remaining_fraction_after_action'))}.",
-        f"Диагностические баллы: стратегия {_score(arbiter.get('strategy_score'))}; overlay до бонуса {_score(arbiter.get('ai_score_before_priority'))}; после бонуса {_score(arbiter.get('ai_score_after_priority'))}. Баллы и бонус не определяют победителя: подтверждённый overlay получает приоритет по правилу.",
-        "Приоритет ИИ действует только после evidence/CVaR/stress gate; после выбора арбитра второй параллельной команды нет; production authority этим отчётом не расширяется.",
+        ranking_line,
+        ("Единый выбор учитывает все опубликованные компоненты; после обязательных риск-проверок второй параллельной команды нет."
+         if unified else "Приоритет ИИ действует только после evidence/CVaR/stress gate; после выбора арбитра второй параллельной команды нет; production authority этим отчётом не расширяется."),
         *_position_economics_lines(snapshot),
     ]
 
@@ -301,7 +311,8 @@ def _risk_lines(snapshot: dict) -> list[str]:
     arithmetic_ok = bool(chosen_cvar is not None and net is not None and chosen_cvar >= net - 1e-12)
     eligible_text = "UNAVAILABLE" if eligible is None else (", ".join(eligible) if eligible else "нет")
     lines = [
-        f"Расчётный выбор: {raw}. Допустимы по NET CVaR: {eligible_text}.",
+        (f"Базовый quant-выбор: {raw}. Допустимы по NET CVaR в базовом расчёте: {eligible_text}."
+         if manager.get('unified_edge_ensemble') else f"Расчётный выбор: {raw}. Допустимы по NET CVaR: {eligible_text}."),
         f"Gross strategy CVaR floor: {_r(gross)}.",
         f"Unavoidable deferred close cost: {_r(deferred)}.",
         f"Net selection floor: {_r(net)}.",
@@ -591,9 +602,22 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
     math_section = render_math_edge(manager.get('mathematical_edge') or {},
         manager.get('combined_edge_soft_weight'),
         (manager.get('selection_rule') or {}).get('combined_edge_soft_weight'))
+    unified = manager.get("unified_edge_ensemble") or {}
+    if unified:
+        math_component = next((row for row in unified.get("components") or []
+                               if row.get("component_id") == "mathematical_edge"), {})
+        math_section = re.sub(
+            r"Мягкий вес базовых политик [^\n]*?общий лимит 40%\.",
+            f"Единый ансамбль: математический edge {_pct(math_component.get('nominal_weight'))} номинально → {_pct(math_component.get('effective_weight'))} фактически для допустимых действий.",
+            math_section)
     _replace_section(lines, '**МАТЕМАТИЧЕСКИЙ EDGE**', math_section.strip().splitlines()[1:])
     if not any(line.startswith('**МАТЕМАТИЧЕСКИЙ EDGE**') for line in lines):
         lines.extend(['', *math_section.strip().splitlines()])
+    unified_lines = render_unified_ensemble_lines(unified)
+    if unified_lines:
+        _replace_section(lines, "**ЕДИНЫЙ ВЫБОР ДЕЙСТВИЯ**", unified_lines[1:])
+        if not any(line.startswith("**ЕДИНЫЙ ВЫБОР ДЕЙСТВИЯ**") for line in lines):
+            lines.extend(["", *unified_lines])
     return "\n".join(lines).strip()
 
 

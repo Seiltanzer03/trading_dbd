@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import time
 
 import seiltanzer.app as app_module
 from seiltanzer.app import _refresh_management_decision, create_app
@@ -7,7 +8,7 @@ from seiltanzer.config import Settings
 
 def _snapshot():
     return {
-        "captured_ts": 1_700_000_000.0,
+        "captured_ts": time.time(),
         "trade_id": 1,
         "policy_manager": {
             "version": "test",
@@ -20,6 +21,8 @@ def _snapshot():
 
 def _client(tmp_path, monkeypatch, verdict):
     app = create_app(Settings(demo=True, data_dir=str(tmp_path)))
+    trade = app.state.engine.journal.open_trade(3, "NAS100", "long", 100., 90., 125.)
+    app.state.engine.position.open_trade(trade)
     monkeypatch.setattr(app_module, "build_snapshot", lambda _engine: _snapshot())
     monkeypatch.setattr(app_module, "render_policy_report", lambda _snapshot: "DETERMINISTIC")
     monkeypatch.setattr(app_module, "request_verdict", verdict)
@@ -81,7 +84,8 @@ def test_llm_success_has_stable_contract(tmp_path, monkeypatch):
         assert response.headers["content-type"].startswith("application/json")
         body = response.json()
         assert body["ok"] is True
-        assert body["verdict"] == "LLM"
+        assert body["verdict"].startswith("LLM")
+        assert "**ЕДИНЫЙ ВЫБОР ДЕЙСТВИЯ**" in body["verdict"]
         assert body["model"] == "test-model"
         assert body["mode"] == "llm"
         assert body["degraded"] is False
@@ -98,7 +102,7 @@ def test_provider_timeout_returns_deterministic_fallback(tmp_path, monkeypatch):
         response = client.post("/api/ai/verdict")
         body = response.json()
         assert response.status_code == 200
-        assert body["verdict"] == "DETERMINISTIC"
+        assert body["verdict"].startswith("DETERMINISTIC")
         assert body["mode"] == "deterministic_fallback"
         assert body["provider_error"] == {"code": "provider_timeout", "retriable": True}
     finally:

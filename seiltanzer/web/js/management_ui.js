@@ -46,10 +46,146 @@ function appendTextLine(parent, className, text) {
   parent.appendChild(line);
 }
 
+const COMPONENT_LABELS_RU = {
+  quant: 'Количественная база', quantitative_base: 'Количественная база',
+  mathematical_edge: 'Математический edge', active_edge: 'Active Edge',
+  historical_llm: 'Исторические LLM-гипотезы',
+  historical_llm_hypotheses: 'Исторические LLM-гипотезы', current_llm: 'Текущий LLM',
+};
+
+const componentLabel = (value) => COMPONENT_LABELS_RU[value] || value || '—';
+const percent = (value) => {
+  const number = finiteNumber(value);
+  return number === null ? '—' : `${(number * 100).toFixed(1)}%`;
+};
+const signed = (value, unit = '') => {
+  const number = finiteNumber(value);
+  return number === null ? '—' : `${number >= 0 ? '+' : ''}${number.toFixed(3)}${unit}`;
+};
+const parameterText = (value) => value && typeof value === 'object'
+  ? Object.entries(value).map(([key, item]) => `${key}=${item}`).join(', ') : '';
+const contributionEntries = (value) => Array.isArray(value)
+  ? value.map((row) => [row.component_id, row.contribution]) : Object.entries(value || {});
+const contributionText = (value) => Array.isArray(value)
+  ? value.map((row) => `${componentLabel(row.component_id)} ${signed(row.contribution)} (оценка ${signed(row.score)}, вес ${percent(row.effective_weight)})`).join(' · ')
+  : contributionEntries(value).map(([key, score]) => `${componentLabel(key)} ${signed(score)}`).join(' · ');
+
+function appendAuditTable(parent, headers, rows) {
+  const scroller = document.createElement('div');
+  scroller.className = 'ai-unified-audit-table';
+  scroller.style.overflowX = 'auto';
+  const table = document.createElement('table');
+  table.className = 'tiny';
+  const head = document.createElement('thead');
+  const heading = document.createElement('tr');
+  for (const text of headers) {
+    const cell = document.createElement('th');
+    cell.textContent = text;
+    heading.appendChild(cell);
+  }
+  head.appendChild(heading);
+  const body = document.createElement('tbody');
+  for (const values of rows) {
+    const row = document.createElement('tr');
+    for (const value of values) {
+      const cell = document.createElement('td');
+      cell.textContent = value === null || value === undefined ? '—' : String(value);
+      row.appendChild(cell);
+    }
+    body.appendChild(row);
+  }
+  table.append(head, body);
+  scroller.appendChild(table);
+  parent.appendChild(scroller);
+}
+
+// Presentation only: the backend freezes eligibility, ranking and the single
+// execution plan. A scenario score must never be displayed as historical P&L.
+export function mountUnifiedEdgeEnsemble(container, audit) {
+  container.replaceChildren();
+  if (!audit || typeof audit !== 'object') return;
+  const panel = document.createElement('section');
+  panel.className = 'ai-edge-management ai-unified-edge-ensemble';
+  appendTextLine(panel, 'ai-execution-title', 'ЕДИНЫЙ ВЫБОР · ПЕРЕВЕСЫ В РЕШЕНИИ');
+  const selected = audit.selected_candidate_id;
+  const candidates = Array.isArray(audit.candidates) ? audit.candidates : [];
+  const chosen = candidates.find((row) => row.candidate_id === selected) || {};
+  appendTextLine(panel, 'ai-execution-instruction',
+    `${audit.selected_policy || '—'} · ${parameterText(chosen.parameters) || selected || '—'} · схема ${audit.scheme || '—'} · ${audit.instrument || '—'} · режим ${audit.regime || '—'}`);
+  appendTextLine(panel, 'tiny',
+    `Модельная экономика после издержек: Expected ${signed(chosen.expected_net_r, 'R')} · CVaR10 ${signed(chosen.cvar10_net_r, 'R')} · ΔExpected к HOLD ${signed(chosen.delta_expected_r, 'R')}.`);
+  if (audit.regime_context) appendTextLine(panel, 'tiny dim',
+    `Применимость по режиму: ${audit.regime_context.reason || 'UNKNOWN'} · качество ${audit.regime_context.quality ?? 0}. Рабочая классификация без дополнительного голоса и динамической смены долей.`);
+  appendTextLine(panel, 'tiny dim',
+    'Баллы ранжируют допустимые действия; не являются прибылью или вероятностью. Expected/CVaR — модельные сценарии. Историческая прибыль и частота лишних вмешательств оцениваются отдельно.');
+  appendTextLine(panel, 'tiny dim', audit.shared_scenario_bank
+    ? 'Кандидаты с оценкой рассчитаны на общих сценариях.'
+    : `Общий набор сценариев не подтверждён; расширенные действия используют парное сравнение с HOLD. ${audit.economics_scope || ''}`);
+  const bank = audit.scenario_bank || audit.comparison_bank;
+  if (bank) appendTextLine(panel, 'tiny dim',
+    `Банк ${bank.bank_id || '—'} · источник ${bank.source || '—'} · исходный авторитетный банк: ${bank.exact_authoritative_bank ? 'использован' : 'не использован'} · исполнение ${bank.execution_assumption || '—'}.`);
+  appendTextLine(panel, 'tiny dim',
+    'Вес не отменяет hard-risk/CVaR. Исполняется единственный действующий план после обязательных ограничений риска.');
+  const components = Array.isArray(audit.components) ? audit.components : [];
+  appendAuditTable(panel, ['Компонент', 'Номинальный → фактический вес', 'Качество · возраст', 'Доступность / снижение влияния'],
+    components.map((row) => [componentLabel(row.component_id),
+      `${percent(row.nominal_weight)} → ${percent(row.effective_weight)}`,
+      `${percent(row.quality)} · ${row.age_sec === null || row.age_sec === undefined ? '—' : row.age_sec} сек`,
+      `${row.availability ?? row.available ?? '—'} · ${row.reason || 'доступен'}${Array.isArray(row.suppression_reasons) && row.suppression_reasons.length ? ' · ' + row.suppression_reasons.join(', ') : ''}`]));
+  for (const row of components) {
+    const source = (row.source_ids || []).join(', ') || '—';
+    const family = (row.evidence_family_ids || []).join(', ') || '—';
+    const freshness = finiteNumber(row.freshness_multiplier ?? row.freshness_factor);
+    const dependence = finiteNumber(row.dependence_multiplier ?? row.duplicate_factor);
+    const suppression = `${freshness !== null && freshness < 1 ? ' · свежесть ×' + freshness.toFixed(3) : ''}${dependence !== null && dependence < 1 ? ' · повторные доказательства ×' + dependence.toFixed(3) : ''}`;
+    appendTextLine(panel, 'tiny dim', `${componentLabel(row.component_id)} · источники: ${source} · семьи доказательств: ${family}${suppression}.`);
+  }
+  const rawContributions = chosen.component_contributions || {};
+  const contributions = contributionEntries(rawContributions);
+  if (contributions.length) appendTextLine(panel, 'tiny',
+    'Вклад в балл выбранного действия: ' + contributionText(rawContributions));
+
+  const detail = document.createElement('details');
+  const summary = document.createElement('summary');
+  summary.textContent = `Все кандидаты и причины исключения (${candidates.length})`;
+  detail.appendChild(summary);
+  appendAuditTable(detail, ['Действие · параметры', 'Статус / причина', 'Expected net', 'CVaR10 net', 'ΔExpected/HOLD', 'Балл', 'Вклад компонентов'],
+    candidates.map((row) => [
+      `${row.policy || '—'} · ${parameterText(row.parameters) || row.candidate_id || '—'}`,
+      `${row.candidate_id === selected ? 'выбран' : (row.ranking_eligible ?? row.eligible) ? 'допустим' : 'исключён'}${row.ranking_reason || row.reason ? ' · ' + (row.ranking_reason || row.reason) : ''}`,
+      signed(row.expected_net_r, 'R'), signed(row.cvar10_net_r, 'R'),
+      signed(row.delta_expected_r, 'R'), signed(row.score), contributionText(row.component_contributions),
+    ]));
+  panel.appendChild(detail);
+  const counterfactuals = Array.isArray(audit.counterfactuals) ? audit.counterfactuals : [];
+  appendAuditTable(panel, ['Решение без компонента', 'Действие', 'Изменение'],
+    counterfactuals.map((row) => [componentLabel(row.excluded_component_id),
+      `${row.selected_policy || '—'} · ${row.selected_candidate_id || '—'}`,
+      !row.selected_candidate_id ? 'недоступно' : row.selected_candidate_id === selected ? 'не изменилось' : 'изменилось']));
+  appendTextLine(panel, 'tiny', 'Сравнение схем при неизменной модельной экономике кандидатов:');
+  const schemes = Array.isArray(audit.scheme_comparisons) ? audit.scheme_comparisons : [];
+  appendAuditTable(panel, ['Схема', 'Выбранное действие', 'Expected net', 'CVaR10 net'],
+    schemes.map((row) => [row.scheme, row.selected_policy, signed(row.expected_net_r, 'R'), signed(row.cvar10_net_r, 'R')]));
+  const edgeFamilies = Array.isArray(audit.edge_families) ? audit.edge_families
+    : Object.entries(audit.edge_families || {}).map(([family_id, row]) => ({family_id, ...row}));
+  if (edgeFamilies.length) {
+    appendTextLine(panel, 'tiny', 'Семейства edge:');
+    appendAuditTable(panel, ['Семейство', 'Статус', 'Причина'], edgeFamilies.map((row) => [
+      row.family_id || row.edge_family || row.family || row.name || '—',
+      row.status ?? row.available ?? '—', row.reason || 'доступен',
+    ]));
+  }
+  container.appendChild(panel);
+}
+
 // Human-readable explanation of the edge layer already used by the backend.
 // It is informational: execution remains bound to management_decision below.
 export function mountEdgeManagement(container, payload) {
   container.replaceChildren();
+  if (payload?.unified_edge_ensemble) {
+    mountUnifiedEdgeEnsemble(container, payload.unified_edge_ensemble);
+    return;
+  }
   if (!payload || !payload.available) return;
 
   const panel = document.createElement('section');

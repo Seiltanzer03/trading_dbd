@@ -6,6 +6,8 @@ from . import ai_verdict_v18 as _impl
 # Import installs the structured v19 renderer into the v18 render chain while
 # preserving the established public request/normalization facade identities.
 from . import ai_verdict_v19 as _v19  # noqa: F401
+from .unified_edge_audit import compact_unified_ensemble
+from .operational_edge_compaction import compact_operational_profile, compact_operational_edges, PROFILE_KEYS, EXCLUDED_REASON
 
 # The public facade contract deliberately remains v18. V19 is a presentation
 # integrity extension, not a new decision-authority API.
@@ -190,7 +192,8 @@ def _capture_report_integrity(snapshot: dict) -> dict:
     report = {
         "decision_reliability": decision_reliability(snapshot),
         "execution_cost_model": _report_scalar_map(manager.get("execution_cost_model") or {}),
-        "mathematical_edge": manager.get("mathematical_edge") or {},
+        "unified_edge_ensemble": compact_unified_ensemble(manager.get("unified_edge_ensemble")),
+        "mathematical_edge": compact_operational_profile(manager.get("mathematical_edge") or {}),
         "combined_edge_soft_weight": _report_row(manager.get("combined_edge_soft_weight") or {}, (
             'available', 'weight_fraction', 'mathematical_component_weight',
             'mathematical_extended_component_weight', 'active_component_weight',
@@ -214,10 +217,10 @@ def _capture_report_integrity(snapshot: dict) -> dict:
             manager.get("risk_tradeoff") or {}, _RISK_TRADEOFF_KEYS),
         "monte_carlo_validation": _report_row(
             manager.get("monte_carlo_validation") or {}, _MC_VALIDATION_KEYS),
-        "active_edge_provisional_weight": _report_row(
-            manager.get("active_edge_provisional_weight") or {}, _ACTIVE_EDGE_KEYS),
-        "llm_edge_exploratory_weight": _report_row(
-            manager.get("llm_edge_exploratory_weight") or {}, _EXPLORATORY_WEIGHT_KEYS),
+        "active_edge_provisional_weight": compact_operational_profile(
+            manager.get("active_edge_provisional_weight") or {}),
+        "llm_edge_exploratory_weight": compact_operational_profile(
+            manager.get("llm_edge_exploratory_weight") or {}),
         "option_barrier": _report_row(
             ((manager.get("evidence") or {}).get("option_barrier") or {}),
             _OPTION_BARRIER_KEYS),
@@ -245,6 +248,10 @@ def _capture_report_integrity(snapshot: dict) -> dict:
         report["trade_geometry"] = _report_scalar_map(trade_geometry)
     previous = snapshot.get("report_integrity") or {}
     if isinstance(previous, dict):
+        # A removed operational input cannot be resurrected from a richer
+        # presentation copy, especially path heads usable without direction.
+        previous = {key: value for key, value in previous.items()
+                    if key not in PROFILE_KEYS or report.get(key, {}).get("reason") != EXCLUDED_REASON}
         _merge_missing(report, previous)
     return {key: value for key, value in report.items() if value not in ({}, [], None)}
 
@@ -254,6 +261,7 @@ def _restore_report_integrity_views(snapshot: dict, report: dict) -> None:
     manager = snapshot.setdefault("policy_manager", {})
     for key in (
         "decision_reliability", "execution_cost_model",
+        "unified_edge_ensemble",
         "scenario_geometry", "raw_optimizer_stability", "stability",
         "risk_tradeoff", "monte_carlo_validation", "active_edge_provisional_weight",
         "llm_edge_exploratory_weight", "mathematical_edge", "combined_edge_soft_weight",
@@ -297,6 +305,7 @@ def _enforce_snapshot_budget_with_report_integrity(snapshot: dict) -> None:
     # Capture both facts and provenance before v18 drops oversized explanatory
     # workspaces. On a second budget pass, merge the previous richer compact
     # contract instead of replacing it with a poorer already-compacted view.
+    compact_operational_edges(snapshot)
     snapshot["metric_availability_contract"] = _build_metric_availability_contract(snapshot)
     report = _capture_report_integrity(snapshot)
     snapshot["report_integrity"] = report
@@ -309,7 +318,7 @@ def _enforce_snapshot_budget_with_report_integrity(snapshot: dict) -> None:
         # duplicate restored manager views are lower priority.
         for key in (
             "raw_optimizer_stability", "stability",
-            "risk_tradeoff", "monte_carlo_validation", "active_edge_provisional_weight",
+            "risk_tradeoff", "monte_carlo_validation",
         ):
             (snapshot.get("policy_manager") or {}).pop(key, None)
         budget["final_bytes"] = _impl._snapshot_bytes(snapshot)
@@ -338,8 +347,12 @@ soft-ranking только внутри hard-risk/CVaR eligible policies; EDE cau
 shadow сам по себе не имеет production directional authority и не может вызвать
 CLOSE/EXIT.
 ROLLING_EXPLORATORY_VERDICTS — операционные гипотезы по накопленной
-истории. LIMITED-гипотезы, совпавшие с текущим T0-контекстом, имеют до 40%
-веса в soft-ranking вариантов HOLD/CLOSE_10/CLOSE_25/CLOSE_50/EXIT. Они не
+истории. При наличии policy_manager.unified_edge_ensemble используй опубликованные
+nominal_weight/effective_weight каждого компонента и единый выбор всех действий.
+Текущий LLM имеет ненулевой вес только когда его доступная оценка опубликована
+в этом контракте. Устаревшие и повторные доказательства снижают фактический вес.
+Без этого контракта LIMITED-гипотезы, совпавшие с текущим T0-контекстом, имеют до 40%
+веса в legacy soft-ranking вариантов HOLD/CLOSE_10/CLOSE_25/CLOSE_50/EXIT. Они не
 обходят hard-risk/CVaR и не разрешают самостоятельно исполнение, расширение
 стопа, увеличение позиции, BUY/SELL или разворот.
 """
@@ -514,9 +527,9 @@ def build_snapshot(engine) -> dict:
     return snapshot
 
 
-# LLM Decision Shadow v1 is deliberately additive. The established v18/v19
-# verdict remains authoritative; the second provider call can only append a
-# research comparison and a machine-readable shadow object.
+# The independent provider call publishes a structured opinion and comparison.
+# The runtime may use this bounded opinion in the unified selector; it cannot
+# replace the execution plan directly or grant itself risk authority.
 from .llm_decision_shadow import (
     VALID_POLICIES,
     append_shadow_section as _append_llm_shadow_section,

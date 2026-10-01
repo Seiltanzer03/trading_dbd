@@ -8,6 +8,8 @@ hard byte ceiling.
 from __future__ import annotations
 
 from typing import Any
+from .unified_edge_audit import compact_unified_ensemble
+from .operational_edge_compaction import compact_operational_edges, compact_evidence_lineage, FAMILY_ROOTS
 
 _INSTALLED = False
 
@@ -83,12 +85,12 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
 
     The v18 compactor normally gets below the hard ceiling by bounding evidence.
     A production snapshot can still exceed it when several independently bounded
-    research contracts are present at once.  At that point the decision has
-    already been calculated: only the LLM/explanation transport is oversized.
-    Keep the fields needed to explain and audit the chosen management policy and
-    discard duplicated research workspaces rather than making the verdict route
-    permanently unavailable.
+    research contracts are present at once. The legacy decision already exists,
+    but the unified selector still consumes the cached expert inputs later.
+    Preserve those bounded causal inputs alongside the policy and risk facts;
+    discard duplicated research workspaces.
     """
+    compact_operational_edges(snapshot)
     manager = snapshot.get("policy_manager")
     if not isinstance(manager, dict):
         manager = {}
@@ -98,6 +100,9 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
         "version", "management_decision", "recommendation", "policies",
         "selection_rule", "gate", "inputs", "risk_constraint",
         "management_arbiter", "state_change_attribution",
+        "unified_edge_ensemble",
+        "mathematical_edge", "active_edge_provisional_weight", "llm_edge_exploratory_weight",
+        "market_regime",
         "calibration_contract", "recalculation_triggers",
         "cancellation_boundary", "phase_e_authority_contract",
         "shadow_actions", "extended_actions", "input_audit",
@@ -107,6 +112,11 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
     compact_manager = {
         key: manager[key] for key in manager_keep if key in manager
     }
+    lineage = compact_evidence_lineage(manager.get("evidence"))
+    if lineage:
+        compact_manager["evidence"] = lineage
+    if manager.get("unified_edge_ensemble"):
+        compact_manager["unified_edge_ensemble"] = compact_unified_ensemble(manager["unified_edge_ensemble"])
     from .management_contract import decision_reliability
     compact_manager["decision_reliability"] = decision_reliability(snapshot)
     compact_manager["input_audit"] = _compact_input_audit(
@@ -124,7 +134,8 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
         "captured_ts", "trade_id", "strategy", "trade_geometry", "position_state",
         "validation", "data_quality", "market_state", "hard_risk",
         "risk_constraints", "metric_coverage", "policy_manager", "snapshot_budget",
-    )
+        "market_regime", "regime", "edge_regime", "edge_family_budget_status",
+    ) + FAMILY_ROOTS
     compact_root = {
         key: snapshot[key] for key in root_keep
         if key in snapshot and key != "policy_manager"
@@ -137,14 +148,22 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
 def _emergency_authoritative_compaction(snapshot: dict[str, Any], ai_verdict: Any) -> None:
     """Bound the transport after an unusually large live option-chain update.
 
-    The policy has already been selected. Keep its decision, all compared
-    policy outcomes, risk inputs and price provenance; remove only redundant
+    Keep the legacy decision and the downstream selector's expert inputs, all
+    compared policy outcomes, risk inputs and price provenance; remove redundant
     explanations and per-policy Monte Carlo workspaces. This tier is reached
     only when the normal and strict compaction still exceed the byte ceiling.
     """
+    compact_operational_edges(snapshot)
     for key in ("validation", "market_state", "data_quality", "metric_coverage"):
         snapshot.pop(key, None)
     manager = snapshot.get("policy_manager") or {}
+    lineage = compact_evidence_lineage(manager.get("evidence"))
+    if lineage:
+        manager["evidence"] = lineage
+    else:
+        manager.pop("evidence", None)
+    if manager.get("unified_edge_ensemble"):
+        manager["unified_edge_ensemble"] = compact_unified_ensemble(manager["unified_edge_ensemble"])
     for key in (
         "state_change_attribution", "recalculation_triggers",
         "cancellation_boundary", "phase_e_authority_contract",
