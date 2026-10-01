@@ -277,8 +277,34 @@ def verify_management_ack_guard_contract() -> None:
         guard._INSTALLED = installed
 
 
+def verify_trade_settlement_contract() -> None:
+    """Check installed accounting on a temporary DB, never on a user position."""
+    import tempfile
+    from pathlib import Path
+    from seiltanzer.journal import Journal
+    from seiltanzer.position_state import PositionLedger
+    with tempfile.TemporaryDirectory() as directory:
+        path = str(Path(directory) / 'settlement.sqlite3')
+        journal, position = Journal(path), PositionLedger(path)
+        try:
+            trade = journal.open_trade(3, 'NAS100', 'long', 30500, 30396, 30770)
+            position.open_trade(trade)
+            position.record_manual_fill(trade, request_id='smoke-partial',
+                                        close_fraction_current=.5, execution_price=30396, execution_r=-1)
+            position.terminal_exit(trade, execution_price=30833, execution_r=333 / 104,
+                                   execution_price_source='user_supplied_broker_fill')
+            closed = journal.get_trade(trade['id'])
+            assert closed['status'] == 'closed' and journal.active_trade() is None, closed
+            assert abs(closed['result_r'] - (-.5 + .5 * 333 / 104)) < 1e-7, closed
+            assert journal.list_trades()[0]['management_summary']['fill_count'] == 2
+            print('TRADE_SETTLEMENT_CONTRACT success')
+        finally:
+            position.close(); journal.close()
+
+
 def verify_ai_verdict() -> None:
     verify_management_ack_guard_contract()
+    verify_trade_settlement_contract()
     wait_for_ai_snapshot_ready()
 
     # Every individual POST must remain below the reverse-proxy budget. If the

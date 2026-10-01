@@ -68,7 +68,7 @@ def install_trade_delete_lifecycle() -> None:
                 "ORDER BY opened_at DESC LIMIT ?",
                 (max(1, int(limit)),),
             ).fetchall()
-        return [self._row_to_dict(row) for row in rows]
+        return self._attach_management_summaries([self._row_to_dict(row) for row in rows])
 
     def close_trade(self: Journal, trade_id: int, result_r: float,
                     notes: str | None = None) -> dict:
@@ -125,7 +125,7 @@ def install_trade_delete_lifecycle() -> None:
                 "SELECT COUNT(*) AS n, "
                 "SUM(CASE WHEN result_r > 0 THEN 1 ELSE 0 END) AS wins "
                 "FROM trades WHERE setup=? AND status='closed' "
-                "AND deleted_at IS NULL",
+                "AND deleted_at IS NULL AND result_r IS NOT NULL",
                 (setup,),
             ).fetchone()
         journal_n = row["n"] or 0
@@ -157,7 +157,7 @@ def install_trade_delete_lifecycle() -> None:
                 "SELECT COUNT(*) AS n, "
                 "SUM(CASE WHEN result_r > 0 THEN 1 ELSE 0 END) AS wins "
                 "FROM trades WHERE setup=? AND status='closed' "
-                "AND deleted_at IS NULL",
+                "AND deleted_at IS NULL AND result_r IS NOT NULL",
                 (setup,),
             ).fetchone()
         return row["n"] or 0, row["wins"] or 0

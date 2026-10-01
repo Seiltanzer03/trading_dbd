@@ -85,6 +85,12 @@ class Journal:
             if "quote_source" not in cols:
                 self._conn.execute(
                     "ALTER TABLE trades ADD COLUMN quote_source TEXT")
+            for column, kind in {
+                'result_basis': "TEXT NOT NULL DEFAULT 'legacy_manual_total'",
+                'result_status': "TEXT NOT NULL DEFAULT 'UNSPECIFIED'",
+            }.items():
+                if column not in cols:
+                    self._conn.execute(f'ALTER TABLE trades ADD COLUMN {column} {kind}')
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS account (
                     id INTEGER PRIMARY KEY CHECK(id = 1),
@@ -354,7 +360,8 @@ class Journal:
                 raise ValueError("сделка уже закрыта")
             self._conn.execute(
                 "UPDATE trades SET status='closed', closed_at=?, result_r=?, "
-                "notes=COALESCE(?, notes) WHERE id=?",
+                "notes=COALESCE(?, notes),result_basis='manual_total_override',"
+                "result_status='USER_REPORTED' WHERE id=?",
                 (time.time(), result_r, notes, trade_id))
             risk = abs(float(row["entry"]) - float(row["stop"]))
             target_r = abs(float(row["take"]) - float(row["entry"])) / max(risk, 1e-12)
@@ -1128,6 +1135,8 @@ class Journal:
         upd = {k: v for k, v in upd.items() if cur.get(k) != v}
         if not upd:
             return cur
+        if 'result_r' in upd:
+            upd.update(result_basis='manual_total_override', result_status='USER_REPORTED')
         merged = {**cur, **upd}
         if merged["setup"] not in SETUPS:
             raise ValueError(f"неизвестный сетап: {merged['setup']}")
@@ -1233,7 +1242,50 @@ class Journal:
             rows = self._conn.execute(
                 "SELECT * FROM trades ORDER BY opened_at DESC LIMIT ?",
                 (limit,)).fetchall()
-        return [self._row_to_dict(r) for r in rows]
+        trades = [self._row_to_dict(r) for r in rows]
+        return self._attach_management_summaries(trades)
+
+    def _attach_management_summaries(self, trades: list[dict]) -> list[dict]:
+        from .trade_settlement import management_summary
+        with self._lock:
+            if self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='position_management_events'",
+            ).fetchone():
+                # One indexed batch per 900 trades; no per-row journal query.
+                for start in range(0, len(trades), 900):
+                    batch = trades[start:start + 900]
+                    grouped = {trade['id']: [] for trade in batch}
+                    marks = ','.join('?' for _ in batch)
+                    for row in self._conn.execute(
+                        f'SELECT * FROM position_management_events WHERE trade_id IN ({marks}) ORDER BY id',
+                        tuple(grouped),
+                    ).fetchall():
+                        event = dict(row)
+                        event['metadata'] = json.loads(event.pop('metadata_json') or '{}')
+                        grouped[event['trade_id']].append(event)
+                    for trade in batch:
+                        events = grouped[trade['id']]
+                        if events:
+                            trade['management_summary'] = management_summary(events)
+        return trades
+
+    def reconcile_position_closures(self) -> list[int]:
+        """Repair old ACK-only exits, without changing explicit manual totals."""
+        from .trade_settlement import settle_from_ledger
+        repaired = []
+        with self._lock, self._conn:
+            ids = self._conn.execute(
+                'SELECT e.trade_id FROM position_management_events e JOIN trades t ON t.id=e.trade_id '
+                'WHERE e.id=(SELECT MAX(last.id) FROM position_management_events last '
+                'WHERE last.trade_id=e.trade_id) AND e.fraction_after<=1e-12 '
+                "AND (t.status='open' OR t.result_basis='legacy_manual_total')",
+            ).fetchall()
+            for row in ids:
+                if settle_from_ledger(self._conn, row[0]):
+                    repaired.append(int(row[0]))
+        for trade_id in repaired:
+            self.resolve_decision_replays(trade_id)
+        return repaired
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -1253,7 +1305,7 @@ class Journal:
             row = self._conn.execute(
                 "SELECT COUNT(*) AS n, "
                 "SUM(CASE WHEN result_r > 0 THEN 1 ELSE 0 END) AS wins "
-                "FROM trades WHERE setup=? AND status='closed'", (setup,)).fetchone()
+                "FROM trades WHERE setup=? AND status='closed' AND result_r IS NOT NULL", (setup,)).fetchone()
         jn = row["n"] or 0
         jw = row["wins"] or 0
         eff = setup_efficiency(jw, jn - jw)
@@ -1270,12 +1322,12 @@ class Journal:
             row = self._conn.execute(
                 "SELECT COUNT(*) AS n, "
                 "SUM(CASE WHEN result_r > 0 THEN 1 ELSE 0 END) AS wins "
-                "FROM trades WHERE setup=? AND status='closed'", (setup,)).fetchone()
+                "FROM trades WHERE setup=? AND status='closed' AND result_r IS NOT NULL", (setup,)).fetchone()
         return row["n"] or 0, row["wins"] or 0
 
     def export_csv(self) -> str:
         cols = ["id", "opened_at", "closed_at", "setup", "instrument", "direction",
-                "entry", "stop", "take", "result_r", "status", "notes"]
+                "entry", "stop", "take", "result_r", "status", "notes", "result_basis", "result_status"]
         lines = [";".join(cols)]
         for t in reversed(self.list_trades(limit=100000)):
             vals = []

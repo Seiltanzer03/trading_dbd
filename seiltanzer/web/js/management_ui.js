@@ -300,7 +300,9 @@ export function mountManagementDecision(container, decision, post, onApplied = (
       const remaining = Number(result.position_state?.remaining_position_fraction);
       status.className = 'tiny green';
       if (executed) {
-        status.textContent = result.execution_status === 'armed'
+        status.textContent = result.trade_closed
+          ? 'Сделка закрыта. Все фиксации учтены в журнале; повторно закрывать её не нужно.'
+          : result.execution_status === 'armed'
           ? 'Условие записано как установленное у брокера.'
           : Number.isFinite(remaining)
           ? 'Исполнение записано. Остаток: ' + (remaining * 100).toFixed(1) + '%.'

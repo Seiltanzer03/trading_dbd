@@ -60,6 +60,15 @@ def test_ack_route_accepts_fill_provenance_with_production_guard(
             assert event['metadata']['execution_price_source'] == (
                 'user_supplied_broker_fill' if broker_price is not None
                 else 'quote_at_acknowledgement_estimate')
+            journal_trade = engine.journal.get_trade(trade['id'])
+            assert journal_trade['status'] == ('closed' if terminal else 'open')
+            if terminal:
+                expected_r = .5 * (-30 / 104) + .5 * ((
+                    broker_price if broker_price is not None else quote) - 30500) / 104
+                assert journal_trade['result_r'] == pytest.approx(expected_r)
+                assert journal_trade['result_basis'] == 'ledger_weighted'
+                assert result['trade_closed'] is True
+                assert engine.journal.active_trade() is None
             count = len(engine.position.events(trade['id']))
             repeat = client.post('/api/ai/decision/ack', json=request)
             assert repeat.status_code == 200 and repeat.json()['idempotent'] is True

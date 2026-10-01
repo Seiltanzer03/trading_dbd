@@ -194,8 +194,18 @@ class TradeOpen(BaseModel):
 
 class TradeClose(BaseModel):
     trade_id: int
-    result_r: float
+    result_r: float | None = None  # Explicit whole-trade override for old clients.
+    execution_price: float | None = None
     notes: str | None = None
+
+
+class TradeFill(BaseModel):
+    trade_id: int
+    request_id: str
+    close_fraction_current: float
+    execution_price: float
+    ladder: bool = False
+    expected_state_version: int | None = None
 
 
 class ZonesUpdate(BaseModel):
@@ -887,11 +897,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_trade_close(req: TradeClose):
         try:
             live_trade = engine.journal.get_trade(req.trade_id)
-            closed = engine.journal.close_trade(req.trade_id, req.result_r, req.notes)
+            if live_trade['status'] == 'closed':
+                return {**live_trade, 'idempotent': True,
+                        'position_state': engine.position.state(live_trade)}
+            if req.execution_price is not None and req.result_r is not None:
+                raise ValueError('укажите цену остатка или общий результат сделки, не оба значения')
+            if req.result_r is not None:
+                if not math.isfinite(req.result_r):
+                    raise ValueError('результат R должен быть конечным числом')
+                state = engine.position.state(live_trade)
+                realized = state['realized_r_weighted']
+                remaining = state['remaining_position_fraction']
+                execution_r = ((req.result_r - realized) / remaining
+                               if realized is not None and remaining > 0 else None)
+                execution_price = None
+                source = 'user_supplied_whole_trade_result'
+            else:
+                execution_price, execution_r = _acknowledged_execution(
+                    live_trade, engine.tick_payload(), req.execution_price)
+                if execution_r is None:
+                    raise ValueError('нет цены исполнения; укажите фактическую цену закрытия остатка')
+                source = ('user_supplied_broker_fill' if req.execution_price is not None
+                          else 'quote_at_acknowledgement_estimate')
             engine.position.terminal_exit(
                 live_trade, event_type="MANUAL_EXIT",
-                execution_price=engine._current_instrument_price(live_trade),
-                execution_r=req.result_r)
+                execution_price=execution_price, execution_r=execution_r,
+                execution_price_source=source, manual_total_r=req.result_r)
+            if req.notes is not None:
+                engine.journal.edit_trade(req.trade_id, notes=req.notes)
+            engine.journal.resolve_decision_replays(req.trade_id)
+            closed = engine.journal.get_trade(req.trade_id)
             invalidate_live_state()
             return {**closed, "position_state": engine.position.state(live_trade)}
         except ValueError as e:
@@ -905,6 +940,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, str(e)) from e
         invalidate_live_state()
         return updated
+
+    @app.post('/api/trade/fill')
+    def api_trade_fill(req: TradeFill):
+        try:
+            trade = engine.journal.get_trade(req.trade_id)
+            price, execution_r = _acknowledged_execution(trade, {}, req.execution_price)
+            result = engine.position.record_manual_fill(
+                trade, request_id=req.request_id, close_fraction_current=req.close_fraction_current,
+                execution_price=price, execution_r=execution_r, ladder=req.ladder,
+                expected_state_version=req.expected_state_version)
+        except StaleDecisionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return complete_ack(trade, result)
 
     @app.post("/api/trade/edit")
     def api_trade_edit(req: TradeEdit):
@@ -1181,16 +1231,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/ai/decision/ack")
     def api_ai_decision_ack(req: ManagementExecution):
         try:
-            trade = engine.journal.active_trade()
-            if trade is None or int(trade["id"]) != int(req.trade_id):
-                raise StaleDecisionError("active trade changed")
+            trade = execution_trade(req.trade_id, req.decision_id, req.executed)
             tick = engine.tick_payload()
             execution_price, execution_r = _acknowledged_execution(
                 trade, tick, req.execution_price)
             if req.decision_id.startswith(("shadow-action-", "management-action-")):
                 acknowledged = engine.position.acknowledge_shadow_action(
                     action_id=req.decision_id, trade=trade, executed=req.executed,
-                    execution_price=execution_price, execution_r=execution_r)
+                    execution_price=execution_price, execution_r=execution_r,
+                    execution_price_source=execution_source(req.execution_price))
                 acknowledged["decision_id"] = req.decision_id
             else:
                 acknowledged = engine.position.acknowledge(
@@ -1202,28 +1251,70 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        invalidate_live_state()
-        return acknowledged
+        return complete_ack(trade, acknowledged)
 
     @app.post("/api/ai/shadow-action/ack")
     def api_ai_shadow_action_ack(req: ShadowActionExecution):
         try:
-            trade = engine.journal.active_trade()
-            if trade is None or int(trade["id"]) != int(req.trade_id):
-                raise StaleDecisionError("active trade changed")
+            trade = execution_trade(req.trade_id, req.action_id, req.executed)
             tick = engine.tick_payload()
             execution_price, execution_r = _acknowledged_execution(
                 trade, tick, req.execution_price)
             acknowledged = engine.position.acknowledge_shadow_action(
                 action_id=req.action_id, trade=trade, executed=req.executed,
                 execution_price=execution_price, execution_r=execution_r,
+                execution_price_source=execution_source(req.execution_price),
             )
         except StaleDecisionError as exc:
             raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        return complete_ack(trade, acknowledged)
+
+    def execution_source(price):
+        return ('user_supplied_broker_fill' if price is not None
+                else 'quote_at_acknowledgement_estimate')
+
+    def execution_trade(trade_id, action_id, executed):
+        trade = engine.journal.get_trade(trade_id)
+        if trade['status'] == 'open':
+            active = engine.journal.active_trade()
+            if active and active['id'] == trade_id:
+                return trade
+        elif executed:
+            # Network retries remain idempotent even after automatic closure,
+            # including when the user has already opened the next trade.
+            table, key = ('llm_shadow_manual_actions', 'action_id') if action_id.startswith(
+                ('shadow-action-', 'management-action-')) else ('management_decisions', 'decision_id')
+            with engine.position._lock:
+                row = engine.position._conn.execute(
+                    f'SELECT status FROM {table} WHERE {key}=? AND trade_id=?',
+                    (action_id, trade_id),
+                ).fetchone()
+            if row and row['status'] == 'executed':
+                return trade
+        raise StaleDecisionError('active trade changed')
+
+    def complete_ack(trade, acknowledged):
+        closed = engine.journal.get_trade(trade['id'])
+        if closed['status'] == 'closed':
+            engine.position.supersede_trade(trade['id'], 'position_closed')
+            if not acknowledged.get('idempotent'):
+                engine.journal.resolve_decision_replays(trade['id'])
+            acknowledged.update(trade_closed=True, trade=closed,
+                                journal_result_r=closed['result_r'])
         invalidate_live_state()
         return acknowledged
+
+    @app.get('/api/trade/management')
+    def api_trade_management(trade_id: int):
+        from .trade_settlement import management_summary
+        try:
+            trade = engine.journal.get_trade(trade_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        events = engine.position.events(trade_id)
+        return {'trade': trade, 'events': events, 'summary': management_summary(events)}
 
     @app.get("/api/position")
     def api_position_state():

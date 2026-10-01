@@ -255,7 +255,9 @@ def test_fresh_live_state_rebuilds_after_journal_mutation(tmp_path):
         source.index("async function refreshJournalAndSetups()"):
         source.index("async function maybeRefreshRidge()")
     ]
-    assert "S.tick =" not in refresh_source
+    # A post-mutation generation may update position state, but an older state
+    # response must never overwrite a newer WebSocket tick.
+    assert 'st.tick.ts >= S.tick.ts' in refresh_source
 
 
 def test_failed_live_state_refresh_fails_closed_and_recovers(

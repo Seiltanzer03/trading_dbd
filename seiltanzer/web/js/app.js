@@ -17,6 +17,7 @@ import { initCorrelation, updateCorrelation } from './correlation.js';
 import { initRegimePhase, updateLiveRegimePhase } from './regime_phase.js';
 import { initWavelet } from './wavelet.js';
 import { fetchStructured } from './safe_fetch.js';
+import { mountJournalManagement, totalAfterRemainingExit } from './journal_management.js';
 import {
   mountEdgeManagement, mountManagementDecision, mountShadowWorkingAction,
   mountArmedShadowActions,
@@ -182,6 +183,7 @@ async function refreshJournalAndSetups() {
   S.ridge = st.ridge;
   // WebSocket is the canonical tick owner. This state build may have started
   // before a newer WS tick and must never roll live price/position data back.
+  if (st.tick && (!S.tick || st.tick.ts >= S.tick.ts)) S.tick = st.tick;
   S.edge_track = st.edge_track;
   S.validation = st.validation;
   renderAll();
@@ -259,10 +261,12 @@ function renderHeader() {
     $('#hdr-setup').textContent =
       `СЕТАП №${trade.setup} · ${su ? su.name : ''} · ${trade.instrument} · ${trade.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'}`;
     $('#btn-close-trade').hidden = false;
+    $('#btn-record-fill').hidden = false;
     $('#btn-new-trade').disabled = true;
   } else {
     $('#hdr-setup').textContent = `НЕТ ОТКРЫТОЙ СДЕЛКИ · ИНСТРУМЕНТ ${t.instrument}`;
     $('#btn-close-trade').hidden = true;
+    $('#btn-record-fill').hidden = true;
     $('#btn-new-trade').disabled = false;
   }
 
@@ -932,10 +936,11 @@ function renderJournal() {
       `<td>${t.id}</td><td>${fmtTs(t.opened_at)}</td><td>№${t.setup}</td>` +
       `<td>${t.instrument}</td><td>${t.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'}</td>` +
       `<td>${fmtPrice(t.entry)}</td><td>${fmtPrice(t.stop)}</td><td>${fmtPrice(t.take)}</td>` +
-      `<td class="${res > 0 ? 'green' : res < 0 ? 'red' : ''}">${res == null ? '—' : fmtR(res)}</td>` +
+      `<td class="${res > 0 ? 'green' : res < 0 ? 'red' : ''}" title="${t.result_basis === 'ledger_weighted' ? 'Вся сделка с учётом закрытых долей; комиссии и свопы не подтверждены' : 'Общий результат указан вручную'}">${res == null ? '—' : (t.result_status === 'ESTIMATED' ? '≈' : '') + fmtR(res)}</td>` +
       `<td>${t.status === 'open' ? '● ОТКРЫТА' : 'закрыта'}</td>` +
       `<td class="notes">${(t.notes || '').slice(0, 90)}</td>` +
-      `<td class="jrow-actions"><button class="jbtn j-edit" data-id="${t.id}" title="Редактировать">✎</button>` +
+      `<td class="jrow-actions"><button class="jbtn j-management" data-id="${t.id}" title="Фиксации и менеджмент">${t.management_summary?.fill_count || 0} фиксаций</button>` +
+      `<button class="jbtn j-edit" data-id="${t.id}" title="Редактировать">✎</button>` +
       `<button class="jbtn j-del" data-id="${t.id}" title="Удалить">✕</button></td>`;
     tbody.appendChild(tr);
   }
@@ -943,6 +948,18 @@ function renderJournal() {
     b.addEventListener('click', () => editTradeModal(Number(b.dataset.id))));
   tbody.querySelectorAll('.j-del').forEach((b) =>
     b.addEventListener('click', () => deleteTradeModal(Number(b.dataset.id))));
+  tbody.querySelectorAll('.j-management').forEach((b) =>
+    b.addEventListener('click', () => managementHistoryModal(Number(b.dataset.id))));
+}
+
+async function managementHistoryModal(id) {
+  openModal(`<h3>ФИКСАЦИИ И МЕНЕДЖМЕНТ · СДЕЛКА №${id}</h3><div id="journal-management">Загрузка…</div>`);
+  const container = $('#journal-management');
+  try {
+    const response = await fetch(`/api/trade/management?trade_id=${id}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    mountJournalManagement(container, await response.json());
+  } catch (error) { container.textContent = error.message; }
 }
 
 function editTradeModal(id) {
@@ -1229,13 +1246,15 @@ $('#btn-new-trade').addEventListener('click', () => {
 $('#btn-close-trade').addEventListener('click', () => {
   const t = S.tick?.trade;
   if (!t) return;
-  const rNow = S.tick?.prob?.r;
+  const price = S.tick?.feeds?.price?.value;
+  const position = t.position_state;
   openModal(`
     <h3>ЗАКРЫТЬ СДЕЛКУ №${t.id} (СЕТАП №${t.setup})</h3>
     <div class="form-grid">
-      <label>Результат, R</label>
-      <input id="f-result" type="number" step="any" value="${rNow != null ? rNow.toFixed(2) : ''}">
-      <span class="form-hint">текущий r = ${rNow != null ? rNow.toFixed(2) : '—'}; впишите фактический результат (с учётом частичных фиксаций)</span>
+      <label>Цена закрытия текущего остатка</label>
+      <input id="f-execution-price" type="number" min="0" step="any" placeholder="Фактическая цена у брокера">
+      <span class="form-hint">Остаток: ${((position?.remaining_position_fraction ?? 1) * 100).toFixed(1)}% исходного объёма. Без цены — оценка по котировке при подтверждении. Предыдущие фиксации учитываются автоматически.</span>
+      <span class="form-hint" id="f-total-preview"></span>
       <label>Заметки</label><textarea id="f-notes">${t.notes || ''}</textarea>
     </div>
     <div class="form-error" id="f-err"></div>
@@ -1244,18 +1263,56 @@ $('#btn-close-trade').addEventListener('click', () => {
       <button class="btn btn-primary" id="f-close">ЗАКРЫТЬ</button>
     </div>`);
   $('#f-cancel').onclick = closeModal;
+  const updatePreview = () => {
+    const supplied = $('#f-execution-price').value;
+    const total = totalAfterRemainingExit(t, position, supplied === '' ? price : supplied);
+    $('#f-total-preview').textContent = total == null ? 'Итог всей сделки пока не определён: не хватает цен исполнений.'
+      : `Итог всей сделки ${supplied === '' ? '(оценка)' : '(по указанной цене остатка)'}: ${fmtR(total)}. Комиссии и свопы не включены.`;
+  };
+  $('#f-execution-price').oninput = updatePreview;
+  updatePreview();
   $('#f-close').onclick = async () => {
+    $('#f-close').disabled = true;
     try {
       await apiPost('/api/trade/close', {
         trade_id: t.id,
-        result_r: Number($('#f-result').value),
+        ...($('#f-execution-price').value !== '' ? { execution_price: Number($('#f-execution-price').value) } : {}),
         notes: $('#f-notes').value,
       });
       closeModal();
       await refreshJournalAndSetups();
     } catch (e) {
       $('#f-err').textContent = e.message;
+      $('#f-close').disabled = false;
     }
+  };
+});
+
+$('#btn-record-fill').addEventListener('click', () => {
+  const trade = S.tick?.trade;
+  if (!trade) return;
+  const position = trade.position_state;
+  const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  openModal(`<h3>ЗАПИСАТЬ ФИКСАЦИЮ · СДЕЛКА №${trade.id}</h3>
+    <div class="form-grid">
+      <label>Закрыто, % текущего остатка</label><input id="f-fraction" type="number" min="0" max="100" step="any" value="10">
+      <span class="form-hint">Текущий остаток: ${((position?.remaining_position_fraction ?? 1) * 100).toFixed(1)}% исходной позиции. Записывайте только фактическое исполнение у брокера. Уже подтверждённое действие ИИ повторно сюда не вносите.</span>
+      <label>Цена фактического исполнения</label><input id="f-fill-price" type="number" min="0" step="any">
+      <label>Тип фиксации</label><select id="f-fill-kind"><option value="manual">Ручная</option><option value="ladder">По лестнице стратегии</option></select>
+    </div><div class="form-error" id="f-err"></div>
+    <div class="form-actions"><button class="btn" id="f-cancel">ОТМЕНА</button><button class="btn btn-primary" id="f-fill">ЗАПИСАТЬ</button></div>`);
+  $('#f-cancel').onclick = closeModal;
+  $('#f-fill').onclick = async () => {
+    $('#f-fill').disabled = true;
+    try {
+      if ($('#f-fill-price').value === '') throw new Error('Укажите фактическую цену исполнения.');
+      await apiPost('/api/trade/fill', { trade_id: trade.id, request_id: requestId,
+        close_fraction_current: Number($('#f-fraction').value) / 100,
+        execution_price: Number($('#f-fill-price').value), ladder: $('#f-fill-kind').value === 'ladder',
+        expected_state_version: position?.state_version });
+      closeModal();
+      await refreshJournalAndSetups();
+    } catch (error) { $('#f-err').textContent = error.message; $('#f-fill').disabled = false; }
   };
 });
 

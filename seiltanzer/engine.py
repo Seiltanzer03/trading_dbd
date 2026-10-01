@@ -60,6 +60,7 @@ class Engine:
         self.cache = DiskCache(settings.cache_db)
         self.journal = Journal(settings.trades_db)
         self.position = PositionLedger(settings.trades_db)
+        self.journal.reconcile_position_closures()
         self.passive = PassiveLearningEngine(
             settings.trades_db, settings, self.cache)
         self.market = MarketData(settings, self.cache)
