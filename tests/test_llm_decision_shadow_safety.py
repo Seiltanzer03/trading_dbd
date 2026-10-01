@@ -1,8 +1,41 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 from seiltanzer import llm_decision_shadow as shadow
+
+
+def test_structured_preferences_cover_all_actions_and_do_not_use_confidence_as_score():
+    scores = {policy: 0.0 for policy in shadow.VALID_POLICIES}
+    scores["HOLD"] = .7
+    parsed = shadow._validate_model_payload({"policy": "HOLD", "confidence": .1,
+        "reason_ru": "Сохранён импульс", "policy_scores": scores,
+        "evidence_families": ["price_bars"], "invalidation_conditions": ["Новый adverse импульс"]})
+    assert parsed["policy_scores"]["HOLD"] == .7
+    assert parsed["confidence"] == .1
+    assert parsed["evidence_families"] == ["price_bars"]
+
+
+@pytest.mark.parametrize("invalid", [{"HOLD": .2},
+    {policy: float("nan") for policy in shadow.VALID_POLICIES},
+    {policy: 1.1 for policy in shadow.VALID_POLICIES},
+    {policy: True for policy in shadow.VALID_POLICIES}])
+def test_malformed_structured_preferences_are_rejected(invalid):
+    with pytest.raises(RuntimeError, match="shadow_invalid_policy_scores"):
+        shadow._validate_model_payload({"policy": "HOLD", "confidence": .8,
+                                       "reason_ru": "test", "policy_scores": invalid})
+
+
+def test_independent_projection_masks_nested_server_selection():
+    snapshot = _snapshot(eligible=["HOLD", "CLOSE_25"])
+    snapshot["policy_manager"]["gate"] = {"winner": "AI", "effective_policy": "CLOSE_25",
+        "degraded_authority_overlay": {"selected": {"policy": "CLOSE_25"},
+                                      "candidate_summary": {"CLOSE_25": {"qualified": True}}}}
+    projection = shadow._shadow_projection(snapshot)
+    gate = projection["policy_manager"]["gate"]
+    assert "winner" not in gate and "effective_policy" not in gate
+    assert projection["policy_manager"]["policies"]["CLOSE_25"]["cvar10_r"] == -.5
 
 
 def _snapshot(*, eligible=None, include_floor=True):

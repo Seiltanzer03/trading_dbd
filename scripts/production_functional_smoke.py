@@ -257,6 +257,24 @@ def verify_management_calculation_audit(body: dict) -> None:
         print("MANAGEMENT_ALL_ACTIONS_AUDIT success")
 
 
+def verify_unified_management_contract(body: dict) -> None:
+    audit = body.get("unified_edge_ensemble") or {}
+    assert audit.get("contract_version") == "unified-edge-ensemble-v1", audit
+    candidates = audit.get("candidates") or []
+    from seiltanzer.llm_decision_shadow import VALID_POLICIES
+    assert {row.get("policy") for row in candidates} == set(VALID_POLICIES), audit
+    assert len(audit.get("components") or []) == 5, audit
+    assert len(audit.get("counterfactuals") or []) == 5, audit
+    assert len(audit.get("scheme_comparisons") or []) == 4, audit
+    assert audit.get("automatic_execution_allowed") is False, audit
+    assert audit.get("hard_risk_override") is False, audit
+    if audit.get("applied"):
+        winner = next(row for row in candidates
+                      if row["candidate_id"] == audit["selected_candidate_id"])
+        assert winner.get("eligible") is True, winner
+    print("UNIFIED_MANAGEMENT_12_ACTIONS success applied=" + str(audit.get("applied")))
+
+
 def verify_management_ack_guard_contract() -> None:
     """Check the deployed production guard without acknowledging a real trade."""
     import inspect
@@ -329,6 +347,7 @@ def verify_ai_verdict() -> None:
             assert body.get("mode") in {"llm", "deterministic_fallback"}, body
             assert isinstance(body.get("verdict"), str) and body["verdict"], body
             verify_management_calculation_audit(body)
+            verify_unified_management_contract(body)
         else:
             assert (body.get("error") or {}).get("code") in {
                 "no_active_trade", "ai_rate_limited", "ai_request_in_progress"

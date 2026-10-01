@@ -16,6 +16,7 @@ import math
 import os
 import random
 import statistics
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -292,6 +293,8 @@ class MarketData:
         self.daily = {"bars": None, **_status_dict()}
         self.intraday: list[tuple[float, float, float]] = []  # (ts, price, volume)
         self.intraday_ohlcv: list[tuple[float, float, float, float, float, float]] = []
+        self.intraday_source_authority: dict = {}
+        self._intraday_lock = threading.RLock()
         self.intraday_is_offset: bool = False
         self.vols = {k: _status_dict() for k in VOL_INDEX_TICKERS}
         self.chain = {"metrics": None, **_status_dict()}
@@ -316,6 +319,10 @@ class MarketData:
                         and source.startswith("TradingView ")))
 
     def set_instrument(self, code: str) -> None:
+        with self._intraday_lock:
+            self._set_instrument(code)
+
+    def _set_instrument(self, code: str) -> None:
         if code not in ALL_INSTRUMENTS:
             raise ValueError(f"неизвестный инструмент: {code}")
         if code != self.instrument_code:
@@ -338,6 +345,9 @@ class MarketData:
             self._price_anchor_driver = None
             self._price_anchor_ts = None
             self.intraday = []
+            self.intraday_ohlcv = []
+            self.intraday_source_authority = {}
+            self.intraday_is_offset = False
             self.daily = {"bars": None, **_status_dict()}
             self.chain = {"metrics": None, **_status_dict()}
             self.iv_surface = _status_dict()
@@ -807,52 +817,91 @@ class MarketData:
         except Exception as e:  # noqa: BLE001 — фид обязан пережить любой сбой источника
             self._mark_fail(self.price, self.settings.price_poll_sec, str(e))
 
+    def _capture_intraday_source_authority(self, provider: str, symbol: str,
+                                           available_at: float) -> None:
+        """Record actual fetched series provenance; never borrow quote authority."""
+        from ..edge_regime import AUTHORITY_CONTRACT
+        ends = [float(row[0]) + 60 for row in self.intraday_ohlcv
+                if math.isfinite(float(row[0])) and float(row[0]) + 60 <= available_at]
+        if not ends:
+            self.intraday_source_authority = {}
+            return
+        exact_fx = provider == "Yahoo" and {
+            "EURUSD": "EURUSD=X", "USDCAD": "CAD=X",
+        }.get(self.instrument_code) == symbol
+        direct = exact_fx and not self.intraday_is_offset and not self.demo
+        self.intraday_source_authority = {
+            "contract_version": AUTHORITY_CONTRACT,
+            "source_id": provider + ":" + symbol + ":1m",
+            "provider": provider, "source_symbol": symbol,
+            "source_instrument": self.instrument_code if direct else symbol,
+            "target_instrument": self.instrument_code,
+            "observed_ts": max(ends), "available_at": available_at,
+            "interval_sec": 60, "source_verified": not self.demo,
+            "direct_source": direct, "derived": self.intraday_is_offset,
+            "proxy": not direct, "quality": .75 if direct else 0.,
+            "broker_execution_bars": False,
+            "authority_role": "DIRECT_QUOTED_FX_PAIR_CONTEXT" if direct else "PROXY_CONTEXT_ONLY",
+        }
+
     def refresh_intraday(self) -> None:
         """1m-бары дня для VWAP (объём нужен; у кэш-индексов его нет — честно None)."""
-        if self.demo:
-            return
-        if self.instrument.asset_class == "crypto":
+        with self._intraday_lock:
+            self.intraday_source_authority = {}
+            requested_code = self.instrument_code
+            requested_instrument = self.instrument
+            if self.demo:
+                return
+        if requested_instrument.asset_class == "crypto":
             try:
                 import httpx
-                binance_sym = self.instrument.binance_symbol or "BTCUSDT"
+                binance_sym = requested_instrument.binance_symbol or "BTCUSDT"
                 client = httpx.Client(timeout=6.0)
                 resp = client.get(
                     f"https://api.binance.com/api/v3/klines?symbol={binance_sym}&interval=1m&limit=120"
                 )
                 if resp.status_code == 200:
                     raw_bars = resp.json()
-                    self.intraday_is_offset = False
-                    self.intraday_ohlcv = [
-                        (float(b[0]) / 1000.0, float(b[1]), float(b[2]), float(b[3]), float(b[4]), float(b[5]))
-                        for b in raw_bars
-                    ]
-                    self.intraday = [
-                        (float(b[0]) / 1000.0, float(b[4]), float(b[5]))
-                        for b in raw_bars
-                    ]
+                    with self._intraday_lock:
+                        if self.instrument_code != requested_code:
+                            return
+                        self.intraday_is_offset = False
+                        self.intraday_ohlcv = [
+                            (float(b[0]) / 1000.0, float(b[1]), float(b[2]), float(b[3]), float(b[4]), float(b[5]))
+                            for b in raw_bars
+                        ]
+                        self.intraday = [
+                            (float(b[0]) / 1000.0, float(b[4]), float(b[5]))
+                            for b in raw_bars
+                        ]
+                        self._capture_intraday_source_authority("Binance", binance_sym, time.time())
             except Exception:
                 pass
             return
         try:
             import yfinance as yf
-            hist = yf.Ticker(self.instrument.yahoo).history(period="1d", interval="1m")
+            hist = yf.Ticker(requested_instrument.yahoo).history(period="1d", interval="1m")
             if len(hist):
-                offset = 0.0
-                if self.instrument.swissquote_pair or self.instrument.tradingview_symbol:
-                    if self.price.get("value") is None:
-                        return  # не публикуем чужую шкалу под именем broker/spot
-                    # Фьючерсные бары служат формой/объёмом, но вся шкала
-                    # переносится в текущий spot одним внутридневным basis.
-                    if self._has_direct_price_scale():
-                        offset = (float(self.price["value"])
-                                  - float(hist["Close"].iloc[-1]))
-                self.intraday_is_offset = (offset != 0.0)
-                self.intraday_ohlcv = [
-                    (ts.timestamp(), float(r["Open"]) + offset, float(r["High"]) + offset, float(r["Low"]) + offset, float(r["Close"]) + offset, float(r["Volume"]))
-                    for ts, r in hist.iterrows()]
-                self.intraday = [
-                    (ts.timestamp(), float(r["Close"]) + offset, float(r["Volume"]))
-                    for ts, r in hist.iterrows()]
+                with self._intraday_lock:
+                    if self.instrument_code != requested_code:
+                        return
+                    offset = 0.0
+                    if requested_instrument.swissquote_pair or requested_instrument.tradingview_symbol:
+                        if self.price.get("value") is None:
+                            return  # не публикуем чужую шкалу под именем broker/spot
+                        # Фьючерсные бары служат формой/объёмом, но вся шкала
+                        # переносится в текущий spot одним внутридневным basis.
+                        if self._has_direct_price_scale():
+                            offset = (float(self.price["value"])
+                                      - float(hist["Close"].iloc[-1]))
+                    self.intraday_is_offset = (offset != 0.0)
+                    self.intraday_ohlcv = [
+                        (ts.timestamp(), float(r["Open"]) + offset, float(r["High"]) + offset, float(r["Low"]) + offset, float(r["Close"]) + offset, float(r["Volume"]))
+                        for ts, r in hist.iterrows()]
+                    self.intraday = [
+                        (ts.timestamp(), float(r["Close"]) + offset, float(r["Volume"]))
+                        for ts, r in hist.iterrows()]
+                    self._capture_intraday_source_authority("Yahoo", requested_instrument.yahoo, time.time())
         except Exception:
             pass  # VWAP просто останется в no_data
 

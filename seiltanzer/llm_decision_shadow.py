@@ -1,8 +1,7 @@
-"""Independent LLM trade-management opinion with zero production authority.
+"""Independent, structured LLM input to the guarded management ensemble.
 
-The deterministic policy manager remains the only source of production execution
-state. This module asks the configured LLM for a separate, machine-readable
-opinion so disagreements can be observed before any future authority change.
+The opinion has no direct execution authority. The common ranking may use its
+preferences, and the ordinary risk and publication guards still own execution.
 """
 from __future__ import annotations
 
@@ -35,7 +34,7 @@ _DEFAULT_SHADOW_TIMEOUT_SEC = 10.0
 _MAX_SHADOW_TIMEOUT_SEC = 15.0
 
 SHADOW_SYSTEM_PROMPT = """Ты — независимый риск-менеджер уже ОТКРЫТОЙ сделки.
-Это SHADOW-анализ: твой ответ НЕ исполняется и НЕ меняет production policy.
+Твой ответ является входом общего ансамбля; он самостоятельно НЕ исполняется.
 
 Самостоятельно выбери ровно одну профессиональную политику:
 1. Базовые:
@@ -67,18 +66,24 @@ Active Edge и EDE только в пределах явно опубликов�
 не может автоматически превращаться ни в bullish, ни в bearish аргумент. Не считай
 несколько коррелированных метрик одной семьи независимыми голосами.
 
-quant_management_decision дан только для сравнения. Сначала сформируй собственное
-решение по данным, затем объясни, почему оно совпадает или расходится с quant.
+Выбранная quant-политика скрыта, чтобы не привязывать тебя к чужому решению.
+Оцени каждое действие независимо по доступным фактам и его экономике.
 
 Ответ ТОЛЬКО валидным JSON-объектом без markdown и без текста снаружи:
 {
   "policy": "HOLD|CLOSE_10|CLOSE_25|CLOSE_50|EXIT|MOVE_TO_BE|TRAIL_GAMMA_FLIP|TIGHTEN_STOP|EXTEND_TAKE|REDUCE_TAKE|SCALE_OUT_ON_SPIKE|TIME_STOP",
   "confidence": 0.0,
+  "policy_scores": {"HOLD": 0.0, "CLOSE_10": 0.0, "CLOSE_25": 0.0, "CLOSE_50": 0.0, "EXIT": 0.0, "MOVE_TO_BE": 0.0, "TRAIL_GAMMA_FLIP": 0.0, "TIGHTEN_STOP": 0.0, "EXTEND_TAKE": 0.0, "REDUCE_TAKE": 0.0, "SCALE_OUT_ON_SPIKE": 0.0, "TIME_STOP": 0.0},
   "reason_ru": "краткое числовое объяснение решения",
   "key_evidence": ["3-6 самых важных аргументов с числами, если они доступны"],
-  "counter_evidence": ["0-4 важных аргумента против собственного решения"]
+  "counter_evidence": ["0-4 важных аргумента против собственного решения"],
+  "evidence_families": ["фактические семейства из shadow_contract.available_evidence_family_ids; option_distribution, price_path"],
+  "invalidation_conditions": ["проверяемые условия отмены предпочтения"]
 }
-confidence — число от 0 до 1. Не придумывай отсутствующие числа."""
+confidence — самооценка от 0 до 1, она не задаёт вес модели. policy_scores —
+относительные предпочтения от -1 до 1 для всех 12 действий, НЕ вероятность и
+НЕ Expected в R. Лучшее допустимое действие должно иметь наибольшую оценку.
+Недоступные данные нельзя выдумывать; недопустимое действие не выбирай."""
 
 
 def _number(value: Any) -> float | None:
@@ -101,8 +106,6 @@ def _shadow_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Keep decision-relevant compact facts without duplicating research ledgers."""
     manager = snapshot.get("policy_manager") or {}
     manager_keys = (
-        "management_decision",
-        "recommendation",
         "policies",
         "selection_rule",
         "risk_constraint",
@@ -113,7 +116,6 @@ def _shadow_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
         "raw_optimizer_stability",
         "stability",
         "gate",
-        "management_arbiter",
         "evidence",
         "option_derivative_state",
         "option_center",
@@ -142,6 +144,8 @@ def _shadow_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
         "ede_causal_context",
         "ede_prospective_shadow",
         "active_edge_context",
+        "macro_context_v1",
+        "edge_regime", "market_regime",
     )
     projection = {key: snapshot[key] for key in root_keys if key in snapshot}
     projection["policy_manager"] = {
@@ -151,10 +155,41 @@ def _shadow_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
         "version": SHADOW_VERSION,
         "production_authority": False,
         "automatic_execution_allowed": False,
-        "quant_management_decision": manager.get("management_decision"),
+        "quant_selection_masked": True,
         "valid_policies": list(VALID_POLICIES),
     }
-    return projection
+    from .edge_family_adapters import build_edge_family_evidence
+    observed = build_edge_family_evidence(snapshot).get("families") or {}
+    projection["edge_family_facts"] = {family: {
+        key: row[key] for key in ("available", "reason", "features", "feature_provenance", "source_ids",
+                                  "evidence_family_ids", "observed_ts", "published_ts",
+                                  "received_ts", "needs_data", "budget_excluded_roots")
+        if key in row} for family, row in observed.items()}
+    families = {"option_distribution", "price_path"}
+    for row in observed.values():
+        if row.get("available"):
+            for family in row.get("evidence_family_ids") or []:
+                families.add("option_distribution" if str(family).endswith(":option_distribution") else str(family))
+    projection["shadow_contract"]["available_evidence_family_ids"] = sorted(families)
+    if isinstance(projection["policy_manager"].get("gate"), dict):
+        projection["policy_manager"]["gate"] = {key: value for key, value in projection["policy_manager"]["gate"].items()
+                                                 if key != "policy"}
+    projection["active_management_candidates"] = snapshot.get("active_management_candidates") or []
+    # Some nested audit structures also repeat the final picked policy. Keep
+    # economics and source facts, but withhold all server preference outputs.
+    hidden = {"management_decision", "effective_management_decision", "recommendation",
+              "management_arbiter", "winner", "selected_policy", "effective_policy",
+              "raw_optimizer_policy", "candidate_policy", "quant_policy",
+              "raw_policy", "provisional_policy", "execution_policy", "model_policy",
+              "raw_policy_with_edge", "raw_policy_without_edge", "raw_policy_without_mathematical_edge",
+              "selected", "selected_candidate", "unified_edge_ensemble", "strategy_next_step"}
+    def mask(value):
+        if isinstance(value, dict):
+            return {key: mask(child) for key, child in value.items() if key not in hidden}
+        if isinstance(value, list):
+            return [mask(child) for child in value]
+        return value
+    return mask(projection)
 
 
 def _extract_json_object(content: str) -> dict[str, Any]:
@@ -202,7 +237,7 @@ def _validate_model_payload(payload: dict[str, Any]) -> dict[str, Any]:
     reason = _bounded_text(payload.get("reason_ru"), max_chars=_MAX_REASON_CHARS)
     if not reason:
         raise RuntimeError("shadow_missing_reason")
-    return {
+    result = {
         "policy": policy,
         "confidence": round(confidence, 4),
         "reason_ru": reason,
@@ -210,7 +245,19 @@ def _validate_model_payload(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("key_evidence"), max_items=_MAX_EVIDENCE_ITEMS),
         "counter_evidence": _bounded_text_list(
             payload.get("counter_evidence"), max_items=4),
+        "evidence_families": _bounded_text_list(payload.get("evidence_families"), max_items=8),
+        "invalidation_conditions": _bounded_text_list(payload.get("invalidation_conditions"), max_items=4),
     }
+    scores = payload.get("policy_scores")
+    if scores is not None:
+        if not isinstance(scores, dict) or set(scores) != set(VALID_POLICIES):
+            raise RuntimeError("shadow_invalid_policy_scores")
+        parsed_scores = {name: _number(value) for name, value in scores.items()}
+        if any(isinstance(scores[name], bool) or value is None or not -1 <= value <= 1
+               for name, value in parsed_scores.items()):
+            raise RuntimeError("shadow_invalid_policy_scores")
+        result["policy_scores"] = parsed_scores
+    return result
 
 
 def _disagreement_category(shadow_policy: str, quant_policy: str | None) -> str | None:
@@ -336,7 +383,7 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
     body = {
         "model": model,
         "temperature": 0.0,
-        "max_tokens": 700,
+        "max_tokens": 1100,
         "messages": [
             {"role": "system", "content": SHADOW_SYSTEM_PROMPT},
             {
@@ -406,7 +453,12 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
         "reason_ru": parsed["reason_ru"],
         "key_evidence": parsed["key_evidence"],
         "counter_evidence": parsed["counter_evidence"],
+        "evidence_families": parsed["evidence_families"],
+        "invalidation_conditions": parsed["invalidation_conditions"],
+        "selection_masked": True,
     }
+    if "policy_scores" in parsed:
+        result["policy_scores"] = parsed["policy_scores"]
     from .llm_shadow_working_action import build_working_action
     result["working_action"] = build_working_action(snapshot, result)
     finalize_extended_shadow(snapshot, result)
@@ -457,7 +509,7 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
     if status == "unavailable":
         lines.append(
             f"Shadow LLM: UNAVAILABLE ({shadow.get('reason_code') or 'SHADOW_UNAVAILABLE'}). "
-            f"Текущее production-решение quant остаётся {quant_policy} без изменений."
+            "Текущий LLM не добавляет предпочтения в общий выбор; итоговое действие публикует сервер."
         )
         return "\n".join(lines).strip()
 

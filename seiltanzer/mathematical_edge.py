@@ -28,6 +28,13 @@ TARGET_CONTRACT = {'direction': 'UP_GIVEN_ABS_RETURN_GT_2BP',
 MAX_ARTIFACT_BYTES = 500_000
 MAX_ARTIFACT_AGE = 7 * 86400
 MAX_PRICE_AGE = 900
+SEARCH_HORIZONS = (15, 30, 60, 120)
+PATH_TARGET_CONTRACT = {
+    'downside_excursion': 'FUTURE_LOW_REACHES_T0_CLOSE_EXP_MINUS_2BP',
+    'upside_excursion': 'FUTURE_HIGH_REACHES_T0_CLOSE_EXP_PLUS_2BP',
+    'upper_before_lower': 'UPPER_2BP_FIRST_GIVEN_RESOLVED_FIRST_TOUCH_NO_SAME_BAR_TIES',
+    'early_first_touch': 'FIRST_2BP_TOUCH_COMPLETED_BAR_END_WITHIN_HALF_HORIZON',
+}
 
 
 def number(value):
@@ -141,23 +148,120 @@ def head_indices(indices, y, col):
     return indices[y[indices, 1] == 1] if col == 0 else indices
 
 
-def train_instrument(code, bars, captured_ts):
+def path_dataset(bars, horizon):
+    """Generic 2bp path events; never infer stop/TP ordering inside one OHLC bar."""
+    bars = sorted(bars, key=lambda row: row['bar_end_ts'])
+    x, _, times, ends = dataset(bars, horizon)
+    lookup = {row['bar_end_ts']: index for index, row in enumerate(bars)}
+    targets = []
+    for t0 in times:
+        index = lookup[t0]
+        path = bars[index + 1:index + horizon // 5 + 1]
+        lower = bars[index]['close'] * math.exp(-MOVE_RETURN_THRESHOLD)
+        upper = bars[index]['close'] * math.exp(MOVE_RETURN_THRESHOLD)
+        down = [row for row in path if row['low'] <= lower]
+        up = [row for row in path if row['high'] >= upper]
+        first_down = down[0]['bar_end_ts'] if down else None
+        first_up = up[0]['bar_end_ts'] if up else None
+        first = min(value for value in (first_down, first_up) if value is not None) if down or up else None
+        # With no touch or a same-bar tie, the upper-first outcome is unknown.
+        ordered = (float(first_up == first) if first is not None and first_down != first_up else float('nan'))
+        early = float(first is not None and first - t0 <= horizon * 30)
+        targets.append((float(bool(down)), float(bool(up)), ordered, early))
+    return x, np.asarray(targets), times, ends
+
+
+def train_path_heads(bars, boundaries, horizons):
+    """Finite independent heads; one untouched common final time block."""
+    candidates = {name: [] for name in PATH_TARGET_CONTRACT}
+    audits = {name: {} for name in PATH_TARGET_CONTRACT}
+    final_cutoff = boundaries[-1]
+    for horizon in horizons:
+        x, targets, times, ends = path_dataset(bars, horizon)
+        for col, name in enumerate(PATH_TARGET_CONTRACT):
+            audit = audits[name][str(horizon)] = {'status': 'INSUFFICIENT_SAMPLE', 'nonoverlapping_n': len(x)}
+            if len(x) < 180:
+                continue
+            observed = np.isfinite(targets[:, col])
+            y = targets[:, col]
+            validation = []
+            for start, stop in zip(boundaries[:-1], boundaries[1:]):
+                train = np.flatnonzero(observed & (ends < start - 300))
+                valid = np.flatnonzero(observed & (times >= start) & (times < stop) & (ends < final_cutoff - 300))
+                if len(train) < 20 or len(valid) < 3 or len(np.unique(y[train])) < 2:
+                    break
+                head = fit_head(x[train], y[train])
+                validation.append(gain(y[valid], predict(head, x[valid]), head['baseline']))
+            if len(validation) != 3:
+                audit['status'] = 'INSUFFICIENT_VARIATION_OR_VALIDATION_SAMPLE'
+                continue
+            audit.update(status='VALIDATED_FOR_SELECTION', validation_gains_mbit=validation,
+                         selection_gain_mbit=float(np.mean(validation)), final_test_touched_for_selection=False)
+            candidates[name].append((float(np.mean(validation)), horizon, x, y, observed, times, ends, validation))
+    results = {}
+    for name in PATH_TARGET_CONTRACT:
+        base = {'target_semantics': PATH_TARGET_CONTRACT[name], 'threshold_log_return': MOVE_RETURN_THRESHOLD,
+                'candidate_audit': audits[name], 'search_completed': True, 'net_economic_proof': False,
+                'intrabar_order_inferred': False, 'generic_barriers_are_trade_stop_take': False,
+                'working_supported': False, 'head': None}
+        if not candidates[name]:
+            results[name] = {**base, 'status': 'UNRESOLVED', 'reason': 'INSUFFICIENT_VARIATION_OR_SAMPLE'}
+            continue
+        mean_gain, horizon, x, y, observed, times, ends, validation = max(candidates[name], key=lambda candidate: candidate[0])
+        train = np.flatnonzero(observed & (ends < final_cutoff - 300))
+        test = np.flatnonzero(observed & (times >= final_cutoff))
+        if len(train) < 20 or len(test) < 9 or len(np.unique(y[train])) < 2:
+            results[name] = {**base, 'horizon_minutes': horizon, 'status': 'UNRESOLVED',
+                             'reason': 'INSUFFICIENT_FINAL_SAMPLE', 'test_n': len(test)}
+            continue
+        head = fit_head(x[train], y[train])
+        chronological_chunks = np.array_split(np.flatnonzero(times >= final_cutoff), 3)
+        chunks = [chunk[observed[chunk]] for chunk in chronological_chunks]
+        block_gains = [gain(y[ix], predict(head, x[ix]), head['baseline']) if len(ix) >= 3 else None for ix in chunks]
+        test_gain = gain(y[test], predict(head, x[test]), head['baseline'])
+        positive = sum(value is not None and value > 0 for value in block_gains)
+        supported = (mean_gain > 0 and sum(value > 0 for value in validation) >= 2
+                     and test_gain > 0 and positive >= 2 and all(value is not None for value in block_gains))
+        all_observed = np.flatnonzero(observed)
+        test_brier = float(np.mean((predict(head, x[test]) - y[test]) ** 2))
+        baseline_brier = float(np.mean((head['baseline'] - y[test]) ** 2))
+        results[name] = {**base, 'horizon_minutes': horizon,
+                         'status': 'WORKING_SUPPORTED' if supported else 'NO_SUPPORTED_ADVANTAGE_YET',
+                         'working_supported': supported, 'gain_mbit': round(test_gain, 5),
+                         'block_gains_mbit': block_gains, 'positive_blocks': positive, 'blocks': 3,
+                         'validation_gains_mbit': validation, 'validation_mean_gain_mbit': mean_gain,
+                         'test_n': len(test), 'test_brier': test_brier, 'baseline_brier': baseline_brier,
+                         'brier_gain': baseline_brier-test_brier, 'training_n': len(all_observed),
+                         'training_cutoff': float(ends[all_observed[-1]]), 'test_cutoff': final_cutoff,
+                         'head': fit_head(x[all_observed], y[all_observed])}
+    return results
+
+
+def train_instrument(code, bars, captured_ts, horizons=SEARCH_HORIZONS):
+    horizons = tuple(dict.fromkeys(horizons))
+    if not horizons or any(h not in SEARCH_HORIZONS for h in horizons):
+        raise ValueError('unsupported mathematical edge search horizons')
     bars = sorted([b for b in bars if b['bar_end_ts'] <= captured_ts], key=lambda b: b['bar_end_ts'])
     candidates = []
+    candidate_audit = {}
     anchor_x, _, anchor_times, _ = dataset(bars, 15)
     if len(anchor_x) < 180:
-        return {'instrument': code, 'status': 'UNRESOLVED', 'reason': 'INSUFFICIENT_COMPLETED_NONOVERLAPPING_BARS', 'weight_fraction': 0.}
+        return {'instrument': code, 'status': 'UNRESOLVED', 'reason': 'INSUFFICIENT_COMPLETED_NONOVERLAPPING_BARS', 'weight_fraction': 0.,
+                'requested_horizons_minutes': list(horizons), 'search_completed': True,
+                'candidate_audit': {str(h): {'status': 'INSUFFICIENT_ANCHOR_SAMPLE'} for h in horizons}}
     # Freeze one time grid BEFORE trying horizons or conditional head masks.
     boundaries = [float(anchor_times[int(len(anchor_times)*f)]) for f in (.4,.55,.7,.8)]
     final_cutoff = boundaries[-1]
     # Fixed small candidate set. Select on earlier validation, final 20% untouched.
-    for horizon in (15, 30, 60):
+    for horizon in horizons:
         x, y, times, ends = dataset([b for b in bars if b['bar_end_ts'] <= captured_ts], horizon)
         n = len(x)
+        candidate_audit[str(horizon)] = {'nonoverlapping_n': n, 'status': 'INSUFFICIENT_SAMPLE'}
         if n < 180:
             continue
         split = int(np.searchsorted(times, final_cutoff))
         if split >= n or n-split < 9:
+            candidate_audit[str(horizon)]['status'] = 'INSUFFICIENT_FINAL_SAMPLE'
             continue
         rows = []
         for a_time, b_time in zip(boundaries[:-1], boundaries[1:]):
@@ -176,14 +280,22 @@ def train_instrument(code, bars, captured_ts):
                 values.append(gain(y[test_ix, col], predict(head, x[test_ix]), head['baseline']))
             rows.append(values)
         if len(rows) < 3:
+            candidate_audit[str(horizon)]['status'] = 'INSUFFICIENT_VALIDATION_BLOCKS'
             continue
         scores = [float(np.mean([r[k] for r in rows])) for k in (0, 1) if all(r[k] is not None for r in rows)]
         if not scores:
+            candidate_audit[str(horizon)]['status'] = 'CONDITIONAL_HEAD_SAMPLE_UNAVAILABLE'
             continue
         score = max(scores)
+        candidate_audit[str(horizon)].update(status='VALIDATED_FOR_SELECTION',
+                                            selection_gain_mbit=score,
+                                            validation_gains_mbit=rows,
+                                            final_test_touched_for_selection=False)
         candidates.append((score, horizon, x, y, times, ends, split, rows))
     if not candidates:
-        return {'instrument': code, 'status': 'UNRESOLVED', 'reason': 'INSUFFICIENT_COMPLETED_NONOVERLAPPING_BARS', 'weight_fraction': 0.}
+        return {'instrument': code, 'status': 'UNRESOLVED', 'reason': 'INSUFFICIENT_COMPLETED_NONOVERLAPPING_BARS', 'weight_fraction': 0.,
+                'requested_horizons_minutes': list(horizons), 'search_completed': True,
+                'candidate_audit': candidate_audit}
     _, horizon, x, y, times, ends, split, validation = max(candidates, key=lambda c: c[0])
     train = np.flatnonzero(ends < final_cutoff - 300)
     diagnostics, heads = {}, {}
@@ -200,25 +312,36 @@ def train_instrument(code, bars, captured_ts):
         fold_gain = [gain(y[ix, col], predict(head, x[ix]), head['baseline']) if len(ix) >= 3 else None for ix in chunks]
         test_gain = gain(y[test_ix, col], predict(head, x[test_ix]), head['baseline'])
         valid_positive = sum(row[col] is not None and row[col] > 0 for row in validation)
+        validation_mean = float(np.mean([row[col] for row in validation])) if all(row[col] is not None for row in validation) else None
         positive = sum(g is not None and g > 0 for g in fold_gain)
-        eligible = test_gain > 0 and valid_positive >= 2 and positive >= 2 and all(g is not None for g in fold_gain)
+        eligible = (test_gain > 0 and validation_mean is not None and validation_mean > 0
+                    and valid_positive >= 2 and positive >= 2 and all(g is not None for g in fold_gain))
         diagnostics[name] = {'gain_mbit': round(test_gain, 5), 'block_gains_mbit': fold_gain,
                              'positive_blocks': positive, 'blocks': len(fold_gain),
-                             'validation_gains_mbit': [r[col] for r in validation], 'working_supported': eligible,
+                             'validation_gains_mbit': [r[col] for r in validation], 'validation_mean_gain_mbit': validation_mean,
+                             'working_supported': eligible,
                              'test_n': len(test_ix), 'test_brier': float(np.mean((predict(head, x[test_ix]) - y[test_ix, col]) ** 2)),
+                             'baseline_brier': float(np.mean((head['baseline'] - y[test_ix, col]) ** 2)),
                              'target_semantics': 'UP_GIVEN_ABS_RETURN_GT_2BP' if col == 0 else 'ABS_RETURN_GT_2BP'}
+        diagnostics[name]['brier_gain'] = diagnostics[name]['baseline_brier'] - diagnostics[name]['test_brier']
         all_ix = head_indices(np.arange(len(x)), y, col)
         heads[name] = fit_head(x[all_ix], y[all_ix, col])
-    supported = any(d['working_supported'] for d in diagnostics.values())
+    path_heads = train_path_heads(bars, boundaries, horizons)
+    price_supported = any(d['working_supported'] for d in diagnostics.values())
+    path_supported = any(d['working_supported'] for d in path_heads.values())
+    supported = price_supported or path_supported
     body = {'instrument': code, 'horizon_minutes': horizon, 'status': 'WORKING_SUPPORTED' if supported else 'NO_SUPPORTED_ADVANTAGE_YET',
             'feature_contract': FEATURE_CONTRACT, 'features': list(FEATURES), 'heads': heads,
             'target_contract': dict(TARGET_CONTRACT),
             'diagnostics': diagnostics, 'training_cutoff': float(ends[-1]),
+            'path_target_contract': dict(PATH_TARGET_CONTRACT), 'path_heads': path_heads,
             'training_n': len(x), 'training_days': len(set((times // 86400).astype(int))),
             'test_cutoff': final_cutoff, 'validation_time_boundaries': boundaries,
             'candidate_test_cutoffs': {str(c[1]): final_cutoff for c in candidates}, 'source_sha256': fingerprint(bars),
             'working_eligible': supported, 'formal_eligible': False, 'net_economic_proof': False,
+            'price_heads_supported': price_supported, 'path_heads_supported': path_supported,
             'evidence_label': 'HISTORICAL_CHRONOLOGICAL_WORKING', 'candidate_count': len(candidates),
+            'requested_horizons_minutes': list(horizons), 'candidate_audit': candidate_audit, 'search_completed': True,
             'selection': 'earlier_three_validation_blocks_then_untouched_final_20pct',
             'GEX_status': 'NOT_SUPPORTED_OR_ARCHIVED_FEATURE_CONTRACT_MISSING'}
     body['model_sha256'] = fingerprint(body)
@@ -287,6 +410,36 @@ def runtime_gex_diagnostics(engine, code, captured, movement):
     return h2
 
 
+def runtime_path_predictions(model, features, captured):
+    """Separate generic path probabilities, with no implied direction or order."""
+    if model.get('path_target_contract') != PATH_TARGET_CONTRACT:
+        return {}
+    output = {}
+    for name, semantics in PATH_TARGET_CONTRACT.items():
+        row = (model.get('path_heads') or {}).get(name) or {}
+        if not row.get('working_supported') or row.get('target_semantics') != semantics or not row.get('head'):
+            continue
+        cutoff = number(row.get('training_cutoff'))
+        if cutoff is None or cutoff > captured:
+            continue
+        probability = float(predict(row['head'], features))
+        if not math.isfinite(probability) or not 0 <= probability <= 1:
+            continue
+        age_days = (captured-cutoff)/86400
+        quality = (min(1., max(0., row['gain_mbit']/20))
+                   * min(1., row['positive_blocks']/max(1, row['blocks']))
+                   * min(1., row['test_n']/100) * max(0., 1-age_days/90))
+        output[name] = {'probability': probability, 'baseline_probability': row['head']['baseline'],
+                        'horizon_minutes': row['horizon_minutes'], 'target_semantics': semantics,
+                        'test_n': row['test_n'], 'gain_mbit': row['gain_mbit'],
+                        'quality_multiplier': round(quality, 6),
+                        'max_effective_weight_fraction': round(MAX_WEIGHT*quality, 6),
+                        'training_age_days': round(age_days, 2), 'ranking_only': True,
+                        'net_economic_proof': False, 'independent_evidence_vote': False,
+                        'intrabar_order_inferred': False, 'generic_barriers_are_trade_stop_take': False}
+    return output
+
+
 def runtime_profile(engine, tick, trade):
     captured = number(tick.get('ts'))
     base = {'contract_version': CONTRACT, 'available': False, 'weight_fraction': 0.,
@@ -320,7 +473,10 @@ def runtime_profile(engine, tick, trade):
     features = price_features(completed_live_bars(getattr(feed, 'intraday_ohlcv', []), captured), captured)
     if features is None:
         return {**base, 'reason': 'COMPLETED_CAUSAL_5M_PRICE_FEATURES_UNAVAILABLE'}
+    completed = completed_live_bars(getattr(feed, 'intraday_ohlcv', []), captured)
+    base.update(captured_ts=captured, latest_bar_end_ts=completed[-1]['bar_end_ts'])
     try:
+        base['path_predictions'] = runtime_path_predictions(model, features, captured)
         ps = {name: float(predict(model['heads'][name], features)) if model['heads'].get(name) else None for name in ('direction', 'movement')}
         if any(p is not None and (not math.isfinite(p) or not 0 <= p <= 1) for p in ps.values()):
             raise ValueError('nonfinite probability')

@@ -248,6 +248,7 @@ def test_smoke_requires_net_cost_proof_and_rejects_incorrect_arithmetic(capsys):
 def test_ai_verdict_rechecks_snapshot_after_post(monkeypatch):
     smoke = _load_script("production_functional_smoke")
     calls = []
+    monkeypatch.setattr(smoke, "verify_unified_management_contract", lambda body: None)
 
     monkeypatch.setattr(
         smoke, "wait_for_ai_snapshot_ready", lambda: calls.append("snapshot") or {})
@@ -265,6 +266,25 @@ def test_ai_verdict_rechecks_snapshot_after_post(monkeypatch):
     smoke.verify_ai_verdict()
 
     assert calls == ["snapshot", "snapshot"]
+
+
+def test_unified_smoke_rejects_missing_actions_and_ineligible_applied_winner():
+    from seiltanzer.llm_decision_shadow import VALID_POLICIES
+    smoke = _load_script("production_functional_smoke")
+    audit = {"contract_version": "unified-edge-ensemble-v1", "applied": True,
+             "selected_candidate_id": "HOLD", "components": [{}] * 5,
+             "counterfactuals": [{}] * 5, "scheme_comparisons": [{}] * 4,
+             "automatic_execution_allowed": False, "hard_risk_override": False,
+             "candidates": [{"policy": p, "candidate_id": p, "eligible": True}
+                            for p in VALID_POLICIES]}
+    smoke.verify_unified_management_contract({"unified_edge_ensemble": audit})
+    audit["candidates"][0]["eligible"] = False
+    with pytest.raises(AssertionError):
+        smoke.verify_unified_management_contract({"unified_edge_ensemble": audit})
+    audit["applied"] = False
+    audit["candidates"].pop()
+    with pytest.raises(AssertionError):
+        smoke.verify_unified_management_contract({"unified_edge_ensemble": audit})
 
 
 def test_production_smoke_checks_ack_guard_without_changing_global_installation(capsys):

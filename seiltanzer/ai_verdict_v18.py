@@ -6,6 +6,8 @@ import json
 from typing import Any
 
 from . import ai_verdict_v17 as _impl
+from .unified_edge_audit import compact_unified_ensemble, render_unified_ensemble_lines
+from .operational_edge_compaction import compact_operational_edges, compact_evidence_lineage, LINEAGE_KEYS
 
 
 globals().update({
@@ -111,7 +113,10 @@ def _compact_input_audit(audit: Any) -> dict[str, Any]:
 
 def _compact_snapshot_payload(snapshot: dict) -> None:
     """Remove API/research detail which is redundant for the verdict model."""
+    compact_operational_edges(snapshot)
     manager = snapshot.get("policy_manager") or {}
+    if manager.get("unified_edge_ensemble"):
+        manager["unified_edge_ensemble"] = compact_unified_ensemble(manager["unified_edge_ensemble"])
     from .management_contract import decision_reliability
     manager["decision_reliability"] = decision_reliability(snapshot)
     audit = manager.get("input_audit") or {}
@@ -185,6 +190,8 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
             "live_price", "atr_regime", "iv_surface", "correlation", "strike_oi_gex",
             "option_derivative_state", "cone_rnd", "levels", "data_quality",
             "adverse_confirmations", "supportive_contradictions", "uncertainty_flags",
+            "adverse_confirmation_families", "supportive_confirmation_families", "context_observations",
+            "lineage_budget_status",
             "decision_roles",
         )
         manager["evidence"] = {key: evidence.get(key) for key in keep if key in evidence}
@@ -196,6 +203,9 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
             "version", "management_decision", "recommendation", "policies",
             "selection_rule", "gate", "evidence", "inputs", "risk_constraint",
             "management_arbiter", "state_change_attribution", "input_audit",
+            "unified_edge_ensemble",
+            "mathematical_edge", "active_edge_provisional_weight", "llm_edge_exploratory_weight",
+            "market_regime",
             "scenario_geometry",
             "option_derivative_state", "calibration_contract", "recalculation_triggers",
             "cancellation_boundary", "phase_e_authority_contract",
@@ -204,7 +214,11 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
             key: manager.get(key) for key in keep_manager if key in manager}
         manager = snapshot["policy_manager"]
     if _snapshot_bytes(snapshot) > SNAPSHOT_TARGET_BYTES:
-        manager["evidence"] = _bounded(manager.get("evidence") or {})
+        original_evidence = manager.get("evidence") or {}
+        manager["evidence"] = _bounded(original_evidence)
+        for key in LINEAGE_KEYS:
+            manager["evidence"].pop(key, None)
+        manager["evidence"].update(compact_evidence_lineage(original_evidence))
         manager["input_audit"] = _bounded(
             _compact_input_audit(manager.get("input_audit") or {}))
         manager["option_derivative_state"] = _bounded(
@@ -573,6 +587,9 @@ def render_policy_report(snapshot: dict) -> str:
     block = _dynamic_block(manager)
     if block and "**ГЛАВНАЯ ПРИЧИНА**" not in text:
         lines[insert_at:insert_at] = ["", *block]
+    unified = render_unified_ensemble_lines(manager.get("unified_edge_ensemble"))
+    if unified and "**ЕДИНЫЙ ВЫБОР ДЕЙСТВИЯ**" not in text:
+        lines.extend(["", *unified])
     return "\n".join(lines).strip()
 
 

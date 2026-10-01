@@ -48,9 +48,16 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
         if policy != "TIME_STOP":
             return False
         return (path == ("effective_management_decision", "parameters", "deadline_ts")
+            or path == ("policy_manager", "management_decision", "parameters", "deadline_ts")
             or path == ("llm_shadow_decision", "working_action", "parameters", "deadline_ts")
+            or path == ("selected_management_action", "working_action", "parameters", "deadline_ts")
             or (len(path) == 4 and path[0] == "active_management_candidates"
                 and path[1].isdigit() and path[2:] == ("parameters", "deadline_ts"))
+            or (path[:2] == ("policy_manager", "unified_edge_ensemble")
+                and ((len(path) == 6 and path[2] == "candidates" and path[3].isdigit()
+                      and path[4:] == ("parameters", "deadline_ts"))
+                     or (len(path) == 7 and path[2] == "candidates" and path[3].isdigit()
+                         and path[4:] == ("quant_evaluation", "parameters", "deadline_ts"))))
             or (len(path) == 5 and path[:2] == ("position_state", "armed_conditional_actions")
                 and path[2].isdigit() and path[3:] == ("parameters", "deadline_ts")))
 

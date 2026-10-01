@@ -147,6 +147,133 @@ def _extended_manual_decision(base: dict, action: dict) -> dict:
     }
 
 
+def _unified_operational_choice(engine, snapshot: dict, trade: dict,
+                                audit: dict) -> tuple[dict, dict | None]:
+    """Translate one ensemble winner through the existing execution guards."""
+    manager = snapshot["policy_manager"]
+    previous = dict(manager.get("management_decision") or {})
+    policy = audit.get("selected_policy")
+    candidate = next((row for row in audit.get("candidates") or []
+                      if row.get("candidate_id") == audit.get("selected_candidate_id")), None)
+    protected = (previous.get("strategy_terminal_event")
+                 or previous.get("risk_barrier_execution_unverified")
+                 or previous.get("indicative_fallback_price"))
+    if protected or not candidate or candidate.get("eligible") is not True:
+        audit["operational_guard_reason"] = (
+            "MANDATORY_STRATEGY_OR_PRICE_GUARD" if protected else "ENSEMBLE_WINNER_NOT_ELIGIBLE")
+        return previous, None
+    if policy not in {"HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"} | EXTENDED_POLICIES:
+        raise ValueError("unsupported unified ensemble policy")
+    # Extended registration needs a non-executing baseline. The chosen action
+    # is then the only manual command, even when the legacy base chose a close.
+    operational_policy = "HOLD" if policy in EXTENDED_POLICIES else policy
+    manager["management_decision"] = {**previous, "policy": operational_policy,
+        "authority": "UNIFIED_EDGE_ENSEMBLE", "arbiter_winner": "UNIFIED_EDGE_ENSEMBLE",
+        "arbiter_reason": "единое ранжирование допустимых действий",
+        "automatic_execution_allowed": False}
+    manager["recommendation"] = {**(manager.get("recommendation") or {}),
+                                  "policy": operational_policy}
+    manager["management_arbiter"] = {**(manager.get("management_arbiter") or {}),
+        "winner": "UNIFIED_EDGE_ENSEMBLE", "effective_policy": policy,
+        "selection_mechanism": "unified_guarded_weighted_ranking",
+        "scores_determine_winner": True, "single_authority": True,
+        "reason": "единое ранжирование всех допустимых обычных и расширенных действий"}
+    decision = _refresh_management_decision(engine, snapshot, trade)
+    if policy not in EXTENDED_POLICIES:
+        if decision.get("policy") != policy:
+            audit["operational_guard_reason"] = decision.get("reason") or "OPERATIONAL_GUARD_CHANGED_POLICY"
+        return decision, None
+    if (decision.get("risk_barrier_execution_unverified")
+            or decision.get("indicative_fallback_price")):
+        audit["operational_guard_reason"] = decision.get("reason")
+        return decision, None
+    source_row = next((row for row in snapshot.get("active_management_candidates") or []
+                       if row.get("policy") == policy and row.get("parameters") == candidate.get("parameters")), None)
+    if not source_row or source_row.get("status") != "eligible":
+        raise ValueError("unified extended winner lacks quantified frozen action")
+    assessment = dict(candidate.get("quant_evaluation") or source_row)
+    if assessment.get("status") != "eligible" or assessment.get("production_authority") is not True:
+        raise ValueError("unified extended winner did not pass execution risk gate")
+    proposal = {"policy": policy, "status": "ok", "source": "unified_edge_ensemble",
+        "confidence": .65, "confidence_semantics": "manual_registration_contract_not_probability",
+        "automatic_execution_allowed": False, "production_authority": False,
+        "quant_evaluation": assessment, "working_action": {
+            "contract_version": "llm-shadow-manual-action-v1", "status": "READY_FOR_MANUAL_CONFIRMATION",
+            "policy": policy, "confidence": .65,
+            "instruction_ru": source_row.get("instruction_ru"),
+            "parameters": dict(source_row.get("parameters") or {}),
+            "manual_confirmation_required": True, "automatic_execution_allowed": False,
+            "may_widen_stop": False, "may_increase_position": False}}
+    return decision, proposal
+
+
+def _publish_unified_review(engine, snapshot: dict, result: dict, review_id: str,
+                            trade: dict, audit: dict) -> dict:
+    """Publish the exact ranked decision and its frozen audit, or restore pending work."""
+    with engine.journal._lock, engine.position.decision_publication(int(trade["id"]), review_id):
+        active = engine.journal.active_trade()
+        if not active or int(active["id"]) != int(trade["id"]) or active.get("status") != "open":
+            raise StaleDecisionError("active trade changed before unified publication")
+        frozen = (snapshot.get("policy_manager") or {}).get("management_decision") or {}
+        current_version = engine.position._geometry_version(active, engine.position.state(active))
+        if frozen.get("geometry_version") != current_version:
+            raise StaleDecisionError("position geometry changed before unified publication")
+        decision, proposal = _unified_operational_choice(engine, snapshot, active, audit)
+        engine.position.register_decision(snapshot, review_id, active)
+        if proposal:
+            registered = engine.position.register_shadow_action(snapshot, review_id, active, proposal)
+            if registered is None:
+                audit["operational_guard_reason"] = "EXTENDED_ACTION_NOT_REGISTERED"
+            else:
+                decision = _extended_manual_decision(decision, registered)
+                proposal = {**proposal, "production_authority": True, "working_action": registered}
+                result["selected_management_action"] = proposal
+                snapshot["selected_management_action"] = proposal
+        # Keep the model's independent opinion distinct from the selected
+        # deterministic action. Confidence never becomes its ensemble weight.
+        if isinstance(result.get("llm_shadow_decision"), dict):
+            snapshot["llm_shadow_decision"] = result["llm_shadow_decision"]
+        snapshot["policy_manager"]["management_decision"] = decision
+        snapshot["effective_management_decision"] = decision
+        audit["ranking_selected_policy"] = audit.get("selected_policy")
+        audit["ranking_selected_candidate_id"] = audit.get("selected_candidate_id")
+        audit["ranking_available"] = audit.get("available") is True
+        audit["selected_policy"] = decision["policy"]
+        operational_row = next((row for row in audit.get("candidates") or []
+            if row.get("policy") == decision["policy"]
+            and (not decision.get("parameters") or row.get("parameters") == decision["parameters"])), None)
+        audit["selected_candidate_id"] = (operational_row or {}).get("candidate_id") or decision["policy"]
+        audit["applied"] = audit["selected_candidate_id"] == audit["ranking_selected_candidate_id"]
+        audit["operational_decision_id"] = decision["decision_id"]
+        audit["automatic_execution_allowed"] = False
+        snapshot["policy_manager"]["unified_edge_ensemble"] = audit
+        result["management_decision"] = decision
+        result["unified_edge_ensemble"] = audit
+        engine.position.supersede_other_pending_actions(int(active["id"]), decision["decision_id"])
+        from .ai_verdict_v19 import normalize_final_report
+        result["verdict"] = normalize_final_report(result["verdict"], snapshot)
+        if proposal and proposal.get("production_authority"):
+            result["verdict"] = (
+                "**РАСШИРЕННОЕ РЕШЕНИЕ · РУЧНОЕ ПОДТВЕРЖДЕНИЕ** — "
+                + str(decision.get("instruction_ru") or decision["policy"])
+                + ". Выполните действие у брокера и подтвердите в терминале. "
+                  "До подтверждения действует текущий стоп/БУ и лестница.\n\n"
+                + result["verdict"])
+        from .unified_edge_audit import render_unified_ensemble_lines
+        if "**ЕДИНЫЙ ВЫБОР ДЕЙСТВИЯ**" not in result["verdict"]:
+            result["verdict"] += "\n\n" + "\n".join(render_unified_ensemble_lines(audit))
+        from .active_management import render_active_management
+        rows = snapshot.get("active_management_candidates") or []
+        result["active_management_candidates"] = rows
+        if rows:
+            remaining = (snapshot.get("position_state") or {}).get("remaining_position_fraction")
+            result["verdict"] += "\n\n" + render_active_management(rows, remaining)
+        from .management_contract import calculation_audit
+        result["management_calculation_audit"] = calculation_audit(snapshot)
+        engine.journal.record_ai_verdict(int(active["id"]), snapshot, result["verdict"], result.get("model"))
+    return decision
+
+
 def _acknowledged_execution(trade: dict, tick: dict,
                             broker_price: float | None) -> tuple[float | None, float | None]:
     if broker_price is None:
@@ -1062,6 +1189,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 decision = ((snapshot.get("policy_manager") or {})
                             .get("management_decision"))
+                return JSONResponse(status_code=409, content=ai_error_body(
+                    "stale_decision", "Активная сделка изменилась во время расчёта",
+                    req_id, retriable=True))
+            # Evaluate every extended action alongside the base policies. The
+            # independent provider sees quantified candidates, not a picked winner.
+            macro_factory = getattr(getattr(engine, "passive", None), "_macro_data_factory", None)
+            if macro_factory is not None:
+                from .macro_t0_context import build_macro_t0_context
+                snapshot["macro_context_v1"] = await asyncio.to_thread(
+                    build_macro_t0_context, macro_factory, float(snapshot["captured_ts"]))
+            from .edge_regime import refine_regime_with_events
+            refine_regime_with_events(snapshot)
+            from .active_management import select_active_management
+            await asyncio.to_thread(select_active_management, snapshot)
             try:
                 review_id = canonical_snapshot(snapshot)["review_id"]
                 # The review identity is frozen before provider output and manual
@@ -1077,21 +1218,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     content=ai_error_body(
                         "snapshot_error", "Снимок сделки не прошёл проверку целостности",
                         req_id, retriable=False),
-                )
-            try:
-                if decision and active_trade:
-                    engine.position.register_decision(
-                        snapshot, review_id, active_trade)
-            except StaleDecisionError as exc:
-                log_ai_event(
-                    req_id=req_id, trade_id=trade_id, stage="stale_decision",
-                    review_id=review_id, started=started, exc=exc)
-                return JSONResponse(
-                    status_code=409,
-                    content=ai_error_body(
-                        "stale_decision",
-                        "Состояние позиции изменилось во время расчёта; запросите новый разбор",
-                        req_id, retriable=True),
                 )
             degraded = False
             provider_failure = None
@@ -1125,83 +1251,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "ai_internal_error", "Не удалось сформировать ИИ-разбор",
                         req_id, retriable=False),
                 )
-            registered_action_id = None
             try:
-                if decision:
-                    result["management_decision"] = decision
-                shadow = result.get("llm_shadow_decision")
-                if active_trade and decision and decision.get("policy") == "HOLD":
-                    from .active_management import select_active_management
-                    candidate = await asyncio.to_thread(select_active_management, snapshot)
-                    if candidate is not None:
-                        shadow = candidate
-                        result["llm_shadow_decision"] = shadow
-                    result["active_management_candidates"] = snapshot.get("active_management_candidates", [])
-                if (
-                    active_trade and isinstance(shadow, dict)
-                    and decision and decision.get("policy") == "HOLD"
-                    and not (snapshot.get("trade_geometry") or {}).get(
-                        "active_risk_barrier_breached")
-                    and not decision.get("indicative_fallback_price")
-                    and str(shadow.get("policy") or "") in EXTENDED_POLICIES
-                    and (shadow.get("quant_evaluation") or {}).get("status") == "eligible"
-                ):
-                    registered = engine.position.register_shadow_action(
-                        snapshot, review_id, active_trade, shadow)
-                    if registered is not None:
-                        registered_action_id = registered["action_id"]
-                        shadow = dict(shadow)
-                        shadow["production_authority"] = True
-                        shadow["working_action"] = registered
-                        result["llm_shadow_decision"] = shadow
-                        snapshot["llm_shadow_decision"] = shadow
-                        from .llm_decision_shadow import append_shadow_section
-                        report = result["verdict"]
-                        marker = "\n\n**LLM SHADOW DECISION · БЕЗ PRODUCTION AUTHORITY**"
-                        if marker in report:
-                            report = report.split(marker, 1)[0]
-                            result["verdict"] = append_shadow_section(report, shadow)
-                        if decision:
-                            decision = _extended_manual_decision(decision, registered)
-                            result["management_decision"] = decision
-                            snapshot["effective_management_decision"] = decision
-                            if decision.get("decision_id") == registered["action_id"]:
-                                import re
-                                final_text = (f"Выбран {decision['policy']}; ожидает ручного исполнения. "
-                                    + registered["instruction_ru"]
-                                    + ". До подтверждения у брокера действует текущий стоп/БУ и лестница; автоматическое исполнение запрещено.")
-                                result["verdict"] = re.sub(
-                                    r"(\*\*ПРОВЕРЕННЫЙ ВЫВОД\*\* —\n).*?(?=\n\n\*\*|$)",
-                                    lambda match: match.group(1) + final_text,
-                                    result["verdict"], flags=re.S)
-                                result["verdict"] = (
-                                    "**РАСШИРЕННОЕ РЕШЕНИЕ · РУЧНОЕ ПОДТВЕРЖДЕНИЕ** — "
-                                    + registered["instruction_ru"]
-                                    + ". Контрфактический Expected/CVaR прошёл проверку; "
-                                    "ордер не создаётся автоматически. Выполните изменение у брокера "
-                                    "и подтвердите в терминале. До подтверждения действует "
-                                    "текущий стоп/БУ и лестница.\n\n"
-                                    + result["verdict"].replace(
-                                        "**ДЕЙСТВИЕ СЕЙЧАС**",
-                                        "**БАЗОВЫЙ ПЛАН ДО ПОДТВЕРЖДЕНИЯ**", 1).replace(
-                                        "**ЕДИНЫЙ ПЛАН МЕНЕДЖМЕНТА**",
-                                        "**СТРАТЕГИЯ ДО ПОДТВЕРЖДЕНИЯ**", 1)
-                                )
-                rows = result.get("active_management_candidates") or []
-                if rows:
-                    from .active_management import render_active_management
-                    remaining = (snapshot.get("position_state") or {}).get("remaining_position_fraction")
-                    result["verdict"] += "\n\n" + render_active_management(rows, remaining)
-                from .management_contract import calculation_audit
-                result["management_calculation_audit"] = calculation_audit(snapshot)
-                engine.journal.record_ai_verdict(
-                    trade_id, snapshot,
-                    result["verdict"], result.get("model"))
+                from .unified_edge_ensemble import build_unified_ensemble
+                audit = await asyncio.to_thread(
+                    build_unified_ensemble, snapshot, result.get("llm_shadow_decision"))
+                decision = await asyncio.to_thread(
+                    _publish_unified_review, engine, snapshot, result, review_id,
+                    active_trade, audit)
+            except StaleDecisionError as exc:
+                log_ai_event(
+                    req_id=req_id, trade_id=trade_id, stage="stale_decision",
+                    review_id=review_id, started=started, exc=exc)
+                return JSONResponse(
+                    status_code=409,
+                    content=ai_error_body(
+                        "stale_decision", "Состояние позиции изменилось во время расчёта; запросите новый разбор",
+                        req_id, retriable=True))
             except Exception as exc:
-                if registered_action_id is not None:
-                    with contextlib.suppress(Exception):
-                        engine.position.cancel_unpublished_shadow_action(
-                            registered_action_id)
                 log_ai_event(
                     req_id=req_id, trade_id=trade_id, stage="journal_error",
                     review_id=review_id,
@@ -1219,7 +1285,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 result, req_id, degraded=degraded,
                 provider_failure=provider_failure,
             )
+            body["unified_edge_ensemble"] = result["unified_edge_ensemble"]
+            if result.get("selected_management_action"):
+                body["selected_management_action"] = result["selected_management_action"]
             body["edge_management"] = current_edge_management_payload(snapshot)
+            body["edge_management"]["unified_edge_ensemble"] = result["unified_edge_ensemble"]
+            body["edge_management"]["available"] = True
             body["context_reviews"] = len(snapshot.get("previous_reviews") or [])
             log_ai_event(
                 req_id=req_id, trade_id=trade_id, stage="complete", started=started,

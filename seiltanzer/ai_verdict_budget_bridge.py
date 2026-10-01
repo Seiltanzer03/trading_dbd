@@ -8,6 +8,7 @@ payload is degraded before any decision-bearing snapshot fields are sacrificed.
 from __future__ import annotations
 
 from typing import Any
+from .operational_edge_compaction import compact_operational_edges
 
 
 def _compact_active_edge_context(snapshot: dict[str, Any]) -> None:
@@ -27,6 +28,7 @@ def _compact_active_edge_context(snapshot: dict[str, Any]) -> None:
 
 
 def _drop_duplicate_integrity_views(snapshot: dict[str, Any]) -> None:
+    compact_operational_edges(snapshot)
     manager = snapshot.get("policy_manager")
     if not isinstance(manager, dict):
         return
@@ -40,7 +42,7 @@ def _drop_duplicate_integrity_views(snapshot: dict[str, Any]) -> None:
     # presentation conveniences and are the first thing to drop under pressure.
     for key in (
         "raw_optimizer_stability", "stability",
-        "risk_tradeoff", "monte_carlo_validation", "active_edge_provisional_weight",
+        "risk_tradeoff", "monte_carlo_validation",
     ):
         manager.pop(key, None)
 
@@ -136,6 +138,7 @@ def enforce_public_snapshot_budget(snapshot: dict[str, Any]) -> None:
     snapshot compactor; policy/CVaR/arbiter inputs remain untouched.
     """
     from . import ai_verdict
+    compact_operational_edges(snapshot)
 
     enforce = getattr(ai_verdict, "_enforce_snapshot_budget_with_report_integrity", None)
     if not callable(enforce):

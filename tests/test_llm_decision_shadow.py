@@ -71,7 +71,11 @@ def test_shadow_projection_is_bounded_and_marks_zero_authority():
     assert "previous_reviews" not in projection
     assert projection["shadow_contract"]["production_authority"] is False
     assert projection["shadow_contract"]["automatic_execution_allowed"] is False
-    assert projection["shadow_contract"]["quant_management_decision"]["policy"] == "HOLD"
+    assert projection["shadow_contract"]["quant_selection_masked"] is True
+    assert "quant_management_decision" not in projection["shadow_contract"]
+    assert "management_decision" not in projection["policy_manager"]
+    assert "recommendation" not in projection["policy_manager"]
+    assert projection["policy_manager"]["policies"]["CLOSE_25"]["expected_final_r"] == 0.09
 
 
 def test_shadow_hard_guard_blocks_policy_outside_published_feasible_set():

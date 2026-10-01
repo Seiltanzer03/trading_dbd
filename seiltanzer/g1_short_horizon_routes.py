@@ -48,7 +48,9 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
                     'production_authority': False, 'automatic_execution': False}
         # Small frozen artifact only: no SQLite, network or fitting in HTTP.
         return {**report, 'state': 'WORKING_MODELS_LOADED', 'instruments': {
-            code: {k: v for k, v in model.items() if k != 'heads'}
+            code: {**{k: v for k, v in model.items() if k not in {'heads', 'path_heads'}},
+                   'path_heads': {name: {k: v for k, v in head.items() if k != 'head'}
+                                  for name, head in (model.get('path_heads') or {}).items()}}
             for code, model in report['instruments'].items()}}
 
     app.add_api_route('/api/research/mathematical-edge', mathematical_edge_status,

@@ -1,0 +1,68 @@
+name: unified-edge-comparison
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'seiltanzer/unified*.py'
+      - 'seiltanzer/edge_family*.py'
+      - 'seiltanzer/execution_simulator.py'
+      - 'scripts/*unified_edge*.py'
+      - 'tests/test_unified_edge_comparison.py'
+      - '.github/workflows/unified-edge-comparison.yml'
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unified-edge-comparison-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frozen-review-comparison:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha || github.event.pull_request.head.sha || github.sha }}
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+    steps:
+      - name: Require immutable checkout SHA
+        run: '[[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - name: Verify exact checkout
+        run: 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -q -e '.[dev]' paramiko
+      - name: Verify bounded comparison contracts
+        run: python -m pytest -q tests/test_unified_edge_comparison.py
+      - name: Export frozen reviews and separate actual paths read-only
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: python -m scripts.export_unified_edge_reviews --max-reviews 32 --output unified_actual_reviews.json
+      - name: Compare on runner without LLM calls or production writes
+        run: >-
+          python -m scripts.run_unified_edge_comparison
+          --reviews unified_actual_reviews.json
+          --expected-sha "$EXPECTED_SHA"
+          --output unified_edge_comparison.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unified-edge-comparison-${{ env.EXPECTED_SHA }}
+          path: |
+            unified_actual_reviews.json
+            unified_edge_comparison.json
+          if-no-files-found: warn
+          retention-days: 14
