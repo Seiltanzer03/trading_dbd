@@ -28,10 +28,11 @@ for code in codes:
   bars=json.loads(raw)
   if len(bars)>20000:raise ValueError('source exceeds bound')
  recent=c.execute('SELECT bar_start_ts,bar_end_ts,open,high,low,close,source,kind,created_ts FROM passive_market_bars WHERE instrument=? AND bar_start_ts>=? ORDER BY bar_start_ts DESC LIMIT 6000',(code,now-14*86400)).fetchall()
- groups={};kinds={};providers={};excluded_derived=0
+ groups={};kinds={};providers={};excluded_derived=0;excluded_partial=0
  for r in recent:
   kinds[r['kind']]=kinds.get(r['kind'],0)+1;providers[r['source'] or 'UNAVAILABLE']=providers.get(r['source'] or 'UNAVAILABLE',0)+1
   if r['kind']!='direct':excluded_derived+=1;continue
+  if r['created_ts'] is None or r['created_ts']<r['bar_end_ts']:excluded_partial+=1;continue
   if r['bar_end_ts']>now or abs(r['bar_end_ts']-r['bar_start_ts']-60)>1:continue
   start=math.floor(r['bar_start_ts']/300)*300
   groups.setdefault(start,{})[int(r['bar_start_ts'])]=dict(r)
@@ -43,7 +44,7 @@ for code in codes:
  merged={b['bar_end_ts']:b for b in bars}
  merged.update({b['bar_end_ts']:b for b in appended})
  if not merged:errors[code]='SOURCE_BARS_UNAVAILABLE';continue
- sources.append(dict(instrument=code,bars=list(sorted(merged.values(),key=lambda x:x['bar_end_ts'])),source_id=row['source_id'] if row else None,cached_sha256=row['source_sha256'] if row else None,recent_completed_5m_n=len(appended),source_kind='historical_provider_bars_plus_direct_retained_only',recent_kind_counts=kinds,recent_provider_counts=providers,excluded_derived_minute_n=excluded_derived,cached_ticker=row['ticker'] if row else None,cached_provider=row['provider'] if row else None,cached_interval=row['interval'] if row else None,cached_semantics=json.loads(row['source_semantics_json']) if row else None,not_broker_execution_bars=True))
+ sources.append(dict(instrument=code,bars=list(sorted(merged.values(),key=lambda x:x['bar_end_ts'])),source_id=row['source_id'] if row else None,cached_sha256=row['source_sha256'] if row else None,recent_completed_5m_n=len(appended),source_kind='historical_provider_bars_plus_direct_retained_only',recent_kind_counts=kinds,recent_provider_counts=providers,excluded_derived_minute_n=excluded_derived,excluded_partial_minute_n=excluded_partial,cached_ticker=row['ticker'] if row else None,cached_provider=row['provider'] if row else None,cached_interval=row['interval'] if row else None,cached_semantics=json.loads(row['source_semantics_json']) if row else None,not_broker_execution_bars=True))
 c.close()
 raw=json.dumps(dict(sources=sources,errors=errors,exported_ts=now,read_only=True),allow_nan=False).encode()
 if len(raw)>64000000:raise ValueError('export exceeds bound')

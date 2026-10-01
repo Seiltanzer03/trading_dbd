@@ -143,6 +143,22 @@ const repeatCall=await page.evaluate(()=>window.__calls[4]);
 assert.deepEqual(repeatCall.payload,{
   decision_id:'decision-repeat-close50',trade_id:7,executed:true,execution_price:30470.1});
 assert.match(await page.locator('#repeat').innerText(),/Остаток: 25.0%/);
+await page.evaluate(async () => {
+  const {mountEdgeManagement} = await import('/seiltanzer/web/js/management_ui.js');
+  mountEdgeManagement(document.querySelector('#edge'), {
+    available:true, action_now:'HOLD', direction_ru:'нет чистого направления',
+    weights:{combined:0,combined_base:0,combined_extended:.03,mathematical_base:0,mathematical_extended:.03},
+    mathematical_edge:{instrument:'NAS100',role:'LOW_MOVEMENT_TIME_MANAGEMENT',horizon_minutes:30,
+      probabilities:{direction:.5,movement:.2}},
+    counterfactual:{extended_policy_without_mathematical_edge:'REDUCE_TAKE',extended_policy_with_mathematical_edge:'TIME_STOP'},
+  });
+});
+const mathText = await page.locator('#edge').innerText();
+assert.match(mathText,/базовый вес 0.0% · расширенный 3.0%/);
+assert.match(mathText,/Математический edge · NAS100 · 30 мин/);
+assert.match(mathText,/P\(move >2bp\) 20.0%/);
+assert.match(mathText,/Расширенный кандидат без математического edge: REDUCE_TAKE → с ним: TIME_STOP/);
+assert.equal((await page.evaluate(()=>window.__calls)).length,5);
 await browser.close();
 await new Promise(resolve=>server.close(resolve));
 console.log('AI management CLOSE_25 WebKit E2E: PASS');

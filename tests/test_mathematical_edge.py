@@ -210,14 +210,17 @@ def test_source_export_is_read_only_and_rejects_retroactive_offset_bars(tmp_path
         c.execute('CREATE TABLE g1s_historical_sources (source_id TEXT, source_sha256 TEXT, bars_gzip BLOB, ticker TEXT, provider TEXT, interval TEXT, source_semantics_json TEXT, instrument TEXT, contract_version TEXT, created_ts REAL)')
         c.execute('CREATE TABLE passive_market_bars (instrument TEXT, bar_start_ts REAL, bar_end_ts REAL, open REAL, high REAL, low REAL, close REAL, source TEXT, kind TEXT, created_ts REAL)')
         c.execute('INSERT INTO g1s_historical_sources VALUES (?,?,?,?,?,?,?,?,?,?)',('src',hashlib.sha256(raw).hexdigest(),gzip.compress(raw),'^NDX','yahoo','5m','{}','NAS100','g1s-historical-wf-real-bars-v1',now))
-        for group,kind in [(0,'direct'),(1,'derived')]:
+        for group,kind in [(-1,'partial'),(0,'direct'),(1,'derived')]:
             for k in range(5):
                 ts=start+group*300+k*60
-                c.execute('INSERT INTO passive_market_bars VALUES (?,?,?,?,?,?,?,?,?,?)',('NAS100',ts,ts+60,100,101,99,100,'yahoo_1m',kind,now))
+                stored_kind='direct' if kind=='partial' else kind
+                created=ts+30 if kind=='partial' else now
+                c.execute('INSERT INTO passive_market_bars VALUES (?,?,?,?,?,?,?,?,?,?)',('NAS100',ts,ts+60,100,101,99,100,'yahoo_1m',stored_kind,created))
     before=db.read_bytes()
     exec(REMOTE_EXPORT.replace('/opt/seiltanzer/data/trades.db',str(db)),{})
     result=json.loads(gzip.decompress(base64.b64decode(capsys.readouterr().out.strip())))
     source=result['sources'][0]
     assert result['read_only'] and db.read_bytes()==before
     assert source['recent_completed_5m_n']==1 and source['excluded_derived_minute_n']==5
+    assert source['excluded_partial_minute_n']==5
     assert len(source['bars'])==2 and source['not_broker_execution_bars']

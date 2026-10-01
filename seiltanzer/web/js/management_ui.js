@@ -56,12 +56,35 @@ export function mountEdgeManagement(container, payload) {
   panel.className = 'ai-edge-management';
   appendTextLine(panel, 'ai-execution-title', 'ПЕРЕВЕСЫ В РЕШЕНИИ');
 
-  const weight = finiteNumber(payload.weights?.combined) || 0;
+  const weight = finiteNumber(payload.weights?.combined_base ?? payload.weights?.combined) || 0;
+  const extendedWeight = finiteNumber(payload.weights?.combined_extended) || 0;
   appendTextLine(
     panel,
     'ai-execution-instruction',
-    `Сейчас: ${payload.action_now || 'HOLD'} · ${payload.direction_ru || 'нет чистого направления'} · вес ${(weight * 100).toFixed(1)}%`,
+    `Сейчас: ${payload.action_now || 'HOLD'} · ${payload.direction_ru || 'нет чистого направления'} · базовый вес ${(weight * 100).toFixed(1)}% · расширенный ${(extendedWeight * 100).toFixed(1)}%`,
   );
+
+  const mathematical = payload.mathematical_edge || {};
+  if (mathematical.instrument) {
+    const base = finiteNumber(payload.weights?.mathematical_base) || 0;
+    const extended = finiteNumber(payload.weights?.mathematical_extended) || 0;
+    const probabilities = mathematical.probabilities || {};
+    const probabilityText = (value) => {
+      const number = finiteNumber(value);
+      return number === null ? 'нет оценки' : `${(number * 100).toFixed(1)}%`;
+    };
+    appendTextLine(panel, 'tiny',
+      `Математический edge · ${mathematical.instrument} · ${mathematical.horizon_minutes || '—'} мин: базовые решения ${(base * 100).toFixed(1)}%, расширенные ${(extended * 100).toFixed(1)}%.`);
+    if (mathematical.role) {
+      const role = mathematical.role === 'LOW_MOVEMENT_TIME_MANAGEMENT'
+        ? 'вероятность движения: влияет на TIME_STOP/REDUCE_TAKE'
+        : 'направление цены';
+      appendTextLine(panel, 'tiny dim',
+        `${role} · P(up | move) ${probabilityText(probabilities.direction)} · P(move >2bp) ${probabilityText(probabilities.movement)}.`);
+    } else if (mathematical.reason) {
+      appendTextLine(panel, 'tiny dim', `Причина нулевого веса: ${mathematical.reason}.`);
+    }
+  }
 
   const counterfactual = payload.counterfactual || {};
   if (counterfactual.raw_policy_without_edge && counterfactual.raw_policy_with_edge) {
@@ -71,6 +94,17 @@ export function mountEdgeManagement(container, payload) {
       counterfactual.raw_policy_changed ? 'tiny amber' : 'tiny dim',
       `Без перевеса: ${counterfactual.raw_policy_without_edge} → с перевесом: ${counterfactual.raw_policy_with_edge} (${changed}).`,
     );
+  }
+  for (const [beforeKey, afterKey, stage] of [
+    ['raw_policy_without_mathematical_edge', 'raw_policy_with_mathematical_edge', 'Базовый выбор'],
+    ['extended_policy_without_mathematical_edge', 'extended_policy_with_mathematical_edge', 'Расширенный кандидат'],
+  ]) {
+    const before = counterfactual[beforeKey];
+    const after = counterfactual[afterKey];
+    if (before && after) {
+      appendTextLine(panel, before === after ? 'tiny dim' : 'tiny amber',
+        `${stage} без математического edge: ${before} → с ним: ${after}. Финальное действие определяется gate и арбитром.`);
+    }
   }
 
   const signals = Array.isArray(payload.top_signals) ? payload.top_signals : [];

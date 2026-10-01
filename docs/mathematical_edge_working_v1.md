@@ -27,9 +27,9 @@ Price-модели уже участвуют в ручном менеджмен�
 
 Общие временные границы 40/55/70/80% фиксируются по 15m anchor timeline до выбора горизонта и фильтрации conditional direction. Три ранние validation части выбирают горизонт; последние 20% времени не используются для выбора. Training outcomes должны завершиться раньше начала проверки с embargo 5 минут. Поздняя validation не использует outcomes после начала финального теста. Для личного working допуска нужен положительный средний proper-score gain и положительный результат минимум в двух из трёх validation и test частей. После проверки выбранные головы переобучаются на уже завершившихся наблюдениях.
 
-`docs/verification/mathematical_edge_historical_working.json` содержит фактический run на сохранённых исторических provider-барах. Допуск проверяется по каждой голове; положительное среднее число без устойчивости само по себе не включает вес. Proper-score в mbit/event измеряет качество вероятностного прогноза, **не R, деньги или net PnL**.
+`docs/verification/mathematical_edge_historical_working.json` содержит фактический GitHub Actions run на сохранённых исторических provider-барах и завершённых direct минутных барах. Допуск проверяется по каждой голове; положительное среднее число без устойчивости само по себе не включает вес. Proper-score в mbit/event измеряет качество вероятностного прогноза, **не R, деньги или net PnL**.
 
-Экспорт production read-only и ограничен десятью инструментами: cached Yahoo 5m плюс retained **direct** minute bars. Бары `derived`, включая `yahoo_1m_offset_adjusted`, исключаются из обучения: неизвестный исторический offset не восстанавливается предположением. Provider, ticker, source semantics, counts direct/derived и исключения сохраняются в отчёте. Эти цены могут быть reference proxies, не фактическими исполнениями у брокера. Runtime intraday Yahoo признаки также явно помечены proxy/current-basis.
+Экспорт production read-only и ограничен десятью инструментами: cached Yahoo 5m плюс retained **direct** minute bars. Бары `derived`, включая `yahoo_1m_offset_adjusted`, исключаются из обучения: неизвестный исторический offset не восстанавливается предположением. Минуты, впервые сохранённые до их завершения (created_ts < bar_end_ts), также исключаются. Provider, ticker, source semantics, counts direct/derived и исключения сохраняются в отчёте. Эти цены могут быть reference proxies, не фактическими исполнениями у брокера. Runtime intraday Yahoo признаки также явно помечены proxy/current-basis.
 
 ## Что воспроизведено из архива
 
@@ -45,4 +45,4 @@ SHA-256 компактного и полного ZIP проверены. Все 
 
 Локальная проверка архива: `python -m scripts.verify_mathematical_edge_archive --raw-dir <extracted>/90_RAW_SOURCE_DATA --output archive-audit.json` (optional pandas/pyarrow). Проверка моделей: `python -m scripts.run_mathematical_edge --sources mathematical_sources.json --output mathematical_edge_latest.json`. Raw источники не коммитятся и не загружаются в терминал вместе с кодом.
 
-Интеграционные проверки проходят Engine→snapshot→отчёт. Подтверждённые CLOSE_50 учитывают исходный остаток 100%→50%→25%, realized + remaining × outcome и idempotency: повтор старого подтверждения не сокращает .25 ещё раз. Наличие математического веса эти правила не меняет.
+Интеграционные проверки проходят Engine→snapshot→отчёт: математический вес действительно присутствует в ранжировании и отчёте, исходные Expected/CVaR не меняются, hard CVaR и допуски расширенных действий сохраняются.

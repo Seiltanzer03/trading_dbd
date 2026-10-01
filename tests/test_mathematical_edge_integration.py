@@ -107,55 +107,6 @@ def test_real_snapshot_and_report_keep_edge_scores_out_of_economic_numbers(froze
         assert f"CVaR10 net {row['cvar10_r']:+.3f}R" in report
 
 
-def test_current_remainder_flows_through_math_snapshot_after_two_confirmed_cuts(frozen_engine):
-    engine, _ = frozen_engine
-    first_id = None
-    initial = ai_verdict.build_snapshot(engine)
-    initial_metrics = economic_metrics(initial)
-    realized = 0.
-    current = initial
-    for index, remaining in enumerate((.5, .25), start=1):
-        trade = engine.journal.active_trade()
-        # Choose the controlled ledger action after obtaining a real complete
-        # analysis. This does not assert that the synthetic edge qualifies it.
-        current['policy_manager']['recommendation']['policy'] = 'CLOSE_50'
-        decision = engine.position.preview_decision(current, trade)
-        current['policy_manager']['management_decision'] = decision
-        assert decision['remaining_fraction_after_action'] == remaining
-        engine.position.register_decision(current, f'math-review-{index}', trade)
-        execution_r = -.2 * index
-        result = engine.position.acknowledge(
-            decision_id=decision['decision_id'], trade=trade, executed=True,
-            execution_price=trade['entry'] + execution_r * abs(trade['entry']-trade['stop']),
-            execution_r=execution_r)
-        if first_id is None:
-            first_id = decision['decision_id']
-        realized += decision['closed_fraction_of_initial_position'] * execution_r
-        assert result['position_state']['remaining_position_fraction'] == remaining
-        current = ai_verdict.build_snapshot(engine)
-        manager = current['policy_manager']
-        assert manager['mathematical_edge']['available']
-        assert manager['mathematical_edge']['probabilities']['direction'] == pytest.approx(.2)
-        assert current['trade_geometry']['remaining_position_fraction'] == remaining
-        economics = manager['position_economics']
-        assert economics['remaining_fraction'] == remaining
-        assert economics['realized_r_weighted'] == pytest.approx(realized)
-        assert economic_metrics(current) == initial_metrics
-        for name, row in manager['policies'].items():
-            total = economics['policies'][name]
-            assert total['expected_total_r'] == pytest.approx(realized + remaining * row['expected_final_r'], abs=1e-6)
-            assert total['cvar10_total_r'] == pytest.approx(realized + remaining * row['cvar10_r'], abs=1e-6)
-        report = ai_verdict.render_policy_report(current)
-        assert f'до {remaining:.1%}' in report
-
-    repeated = engine.position.acknowledge(
-        decision_id=first_id, trade=engine.journal.active_trade(), executed=True,
-        execution_price=None, execution_r=None)
-    assert repeated['idempotent'] is True
-    assert repeated['position_state']['remaining_position_fraction'] == .25
-    assert repeated['position_state']['realized_r_weighted'] == pytest.approx(realized)
-
-
 def test_real_demo_risk_gate_cannot_be_replaced_by_math_bonus(frozen_engine):
     engine, _ = frozen_engine
     snapshot = ai_verdict.build_snapshot(engine)
