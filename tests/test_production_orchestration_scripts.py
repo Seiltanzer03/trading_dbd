@@ -267,6 +267,15 @@ def test_ai_verdict_rechecks_snapshot_after_post(monkeypatch):
     assert calls == ["snapshot", "snapshot"]
 
 
+def test_production_smoke_checks_ack_guard_without_changing_global_installation(capsys):
+    from seiltanzer.position_state import PositionLedger
+    from seiltanzer import strategy_terminal_guard as guard
+    before = (PositionLedger.preview_decision, PositionLedger.acknowledge, guard._INSTALLED)
+    _load_script("production_functional_smoke").verify_management_ack_guard_contract()
+    assert "MANAGEMENT_ACK_GUARD_CONTRACT success" in capsys.readouterr().out
+    assert (PositionLedger.preview_decision, PositionLedger.acknowledge, guard._INSTALLED) == before
+
+
 def test_functional_smoke_macro_latest_uses_dedicated_timeout(monkeypatch):
     smoke = _load_script("production_functional_smoke")
 
