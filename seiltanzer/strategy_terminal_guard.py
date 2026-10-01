@@ -114,11 +114,13 @@ def install_strategy_terminal_guard() -> None:
 
     def guarded_acknowledge(self: Any, *, decision_id: str, trade: dict[str, Any],
                             executed: bool, execution_price: float | None,
-                            execution_r: float | None) -> dict[str, Any]:
+                            execution_r: float | None,
+                            execution_price_source: str = "unspecified") -> dict[str, Any]:
         if not executed:
             return original_ack(
                 self, decision_id=decision_id, trade=trade, executed=executed,
                 execution_price=execution_price, execution_r=execution_r,
+                execution_price_source=execution_price_source,
             )
 
         self.ensure_trade(trade)
@@ -131,6 +133,7 @@ def install_strategy_terminal_guard() -> None:
             return original_ack(
                 self, decision_id=decision_id, trade=trade, executed=executed,
                 execution_price=execution_price, execution_r=execution_r,
+                execution_price_source=execution_price_source,
             )
         try:
             payload = json.loads(probe[0] or "{}")
@@ -145,6 +148,7 @@ def install_strategy_terminal_guard() -> None:
             return original_ack(
                 self, decision_id=decision_id, trade=trade, executed=executed,
                 execution_price=execution_price, execution_r=execution_r,
+                execution_price_source=execution_price_source,
             )
 
         with self._lock, self._conn:
@@ -190,6 +194,7 @@ def install_strategy_terminal_guard() -> None:
                     "policy": "EXIT",
                     "authority": "STRATEGY",
                     "strategy_terminal_event": "FINAL_TAKE_REACHED",
+                    "execution_price_source": execution_price_source,
                     "fraction_semantics": "fraction_of_current_remaining_position",
                 },
             )

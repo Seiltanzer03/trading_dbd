@@ -257,7 +257,28 @@ def verify_management_calculation_audit(body: dict) -> None:
         print("MANAGEMENT_ALL_ACTIONS_AUDIT success")
 
 
+def verify_management_ack_guard_contract() -> None:
+    """Check the deployed production guard without acknowledging a real trade."""
+    import inspect
+    from seiltanzer.position_state import PositionLedger
+    from seiltanzer import strategy_terminal_guard as guard
+    preview, acknowledge, installed = (
+        PositionLedger.preview_decision, PositionLedger.acknowledge, guard._INSTALLED)
+    try:
+        guard.install_strategy_terminal_guard()
+        parameter = inspect.signature(PositionLedger.acknowledge).parameters.get(
+            "execution_price_source")
+        assert parameter is not None, "production ACK guard rejects broker fill provenance"
+        assert parameter.default == "unspecified", parameter
+        print("MANAGEMENT_ACK_GUARD_CONTRACT success")
+    finally:
+        PositionLedger.preview_decision = preview
+        PositionLedger.acknowledge = acknowledge
+        guard._INSTALLED = installed
+
+
 def verify_ai_verdict() -> None:
+    verify_management_ack_guard_contract()
     wait_for_ai_snapshot_ready()
 
     # Every individual POST must remain below the reverse-proxy budget. If the
