@@ -144,7 +144,11 @@ class PositionLedger:
              float(active_stop if active_stop is not None else trade["stop"]),
              float(take_price if take_price is not None else trade["take"]),
              _json(metadata or {})))
-        return int(cur.lastrowid)
+        event_id = int(cur.lastrowid)
+        if closed > 0 and after <= 1e-12:
+            from .trade_settlement import settle_from_ledger
+            settle_from_ledger(self._conn, int(trade['id']))
+        return event_id
 
     def ensure_trade(self, trade: dict) -> None:
         with self._lock, self._conn:
@@ -479,6 +483,7 @@ class PositionLedger:
     def acknowledge_shadow_action(
         self, *, action_id: str, trade: dict, executed: bool,
         execution_price: float | None, execution_r: float | None,
+        execution_price_source: str = 'unspecified',
     ) -> dict:
         """Record a broker-confirmed manual extended action, never place an order."""
         self.ensure_trade(trade)
@@ -565,6 +570,7 @@ class PositionLedger:
                     active_stop=float(state["active_stop_price"]),
                     take_price=float(state["take"]),
                     metadata={"policy": policy, "broker_confirmed": True,
+                              "execution_price_source": execution_price_source,
                               "fraction_semantics": "fraction_of_current_remaining_position"},
                 )
                 self._conn.execute(
@@ -771,21 +777,66 @@ class PositionLedger:
 
     def terminal_exit(self, trade: dict, *, event_type: str = "MANUAL_EXIT",
                       execution_price: float | None = None,
-                      execution_r: float | None = None) -> dict:
+                      execution_r: float | None = None,
+                      execution_price_source: str = 'unspecified',
+                      manual_total_r: float | None = None) -> dict:
         if event_type not in {"STOP_EXIT", "BE_EXIT", "TAKE_EXIT", "MANUAL_EXIT"}:
             raise ValueError("invalid terminal exit type")
-        state = self.state(trade)
-        before = float(state["remaining_position_fraction"])
-        if before <= 1e-12:
-            return state
         with self._lock, self._conn:
+            state = self.state(trade)
+            before = float(state['remaining_position_fraction'])
+            if before <= 1e-12:
+                return state
             self._event(
                 trade=trade, event_type=event_type, source="real_user_trade",
                 before=before, closed=before, after=0.0,
                 execution_price=execution_price, execution_r=execution_r,
-                active_stop=float(state["active_stop_price"]))
+                active_stop=float(state["active_stop_price"]),
+                metadata={'execution_price_source': execution_price_source})
+            if manual_total_r is not None:
+                self._conn.execute(
+                    "UPDATE trades SET result_r=?,result_basis='manual_total_override',"
+                    "result_status='USER_REPORTED' WHERE id=?",
+                    (manual_total_r, int(trade['id'])),
+                )
+                self._conn.execute('UPDATE policy_shadow_reviews SET final_result_r=? WHERE trade_id=?',
+                                   (manual_total_r, int(trade['id'])))
             self.supersede_trade(int(trade["id"]), "position_closed")
         return self.state(trade)
+
+    def record_manual_fill(self, trade: dict, *, request_id: str,
+                           close_fraction_current: float, execution_price: float,
+                           execution_r: float, ladder: bool = False,
+                           expected_state_version: int | None = None) -> dict:
+        if not request_id or len(request_id) > 100:
+            raise ValueError('идентификатор исполнения обязателен')
+        fraction = _finite(close_fraction_current)
+        if fraction is None or not 0 < fraction <= 1:
+            raise ValueError('доля фиксации должна быть больше 0 и не больше 100% остатка')
+        decision_id = 'manual-fill-' + request_id
+        with self._lock, self._conn:
+            previous = self._conn.execute(
+                'SELECT trade_id FROM position_management_events WHERE decision_id=?',
+                (decision_id,),
+            ).fetchone()
+            if previous:
+                if previous['trade_id'] != trade['id']:
+                    raise StaleDecisionError('fill belongs to another trade')
+                return {'ok': True, 'idempotent': True, 'position_state': self.state(trade)}
+            state = self.state(trade)
+            before = state['remaining_position_fraction']
+            if (before <= 0 or trade['status'] != 'open' or
+                    (expected_state_version is not None and expected_state_version != state['state_version'])):
+                raise StaleDecisionError('остаток изменился; обновите форму фиксации')
+            self._event(trade=trade, event_type='LADDER_REDUCTION' if ladder else 'MANUAL_REDUCTION',
+                        source='user_supplied_broker_fill', before=before,
+                        closed=before * fraction, after=before * (1 - fraction),
+                        decision_id=decision_id, execution_price=execution_price,
+                        execution_r=execution_r, active_stop=state['active_stop_price'],
+                        take_price=state['take'],
+                        metadata={'execution_price_source': 'user_supplied_broker_fill',
+                                  'fraction_semantics': 'fraction_of_current_remaining_position'})
+        return {'ok': True, 'idempotent': False, 'position_state': self.state(trade)}
 
     def close(self) -> None:
         with self._lock:

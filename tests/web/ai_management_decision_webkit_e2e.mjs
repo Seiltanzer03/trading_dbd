@@ -15,8 +15,10 @@ const server = http.createServer(async (req, res) => {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <div id="edge"></div><div id="execution"></div><div id="shadow"></div>
 <div id="extended-execution"></div><div id="extended-shadow"></div><div id="armed"></div><div id="repeat"></div>
+<div id="journal-management"></div><div id="closed-execution"></div>
 <script type="module">
 import {mountEdgeManagement,mountManagementDecision,mountShadowWorkingAction,mountArmedShadowActions} from '/seiltanzer/web/js/management_ui.js';
+import {mountJournalManagement,totalAfterRemainingExit} from '/seiltanzer/web/js/journal_management.js';
 const decision={
   trade_id:7,decision_id:'decision-e2e-close25',policy:'CLOSE_25',
   execution_status:'pending_execution',manual_execution_required:true,
@@ -53,6 +55,17 @@ mountShadowWorkingAction(document.querySelector('#extended-shadow'),{
 mountArmedShadowActions(document.querySelector('#armed'),[
   {action_id:'shadow-action-armed',trade_id:7,policy:'SCALE_OUT_ON_SPIKE',status:'armed'},
 ],post);
+mountManagementDecision(document.querySelector('#closed-execution'),{...decision,
+  decision_id:'final-exit',policy:'EXIT',instruction_ru:'Закрыть остаток'},async()=>({
+  trade_closed:true,position_state:{remaining_position_fraction:0}}));
+const trade={entry:30500,stop:30396,direction:'long',result_r:1.37019231,result_basis:'ledger_weighted',result_status:'ESTIMATED'};
+window.__totalPreview=totalAfterRemainingExit(trade,{realized_r_weighted:-.23076923,remaining_position_fraction:.5},30833);
+window.__missingPreview=totalAfterRemainingExit(trade,{realized_r_weighted:null,remaining_position_fraction:.5},30833);
+mountJournalManagement(document.querySelector('#journal-management'),{trade,
+  summary:{remaining_position_fraction:0,fill_count:2},events:[
+  {event_type:'AI_CLOSE_50',timestamp:1000,fraction_closed:.5,execution_price:30452,execution_r:-48/104,active_stop:30396,take:30770,metadata:{execution_price_source:'user_supplied_broker_fill'}},
+  {event_type:'TAKE_EXIT',timestamp:2000,fraction_closed:.5,execution_price:30833,execution_r:333/104,active_stop:30500,take:30770,metadata:{}},
+  ]});
 </script>`);
       return;
     }
@@ -74,6 +87,16 @@ const context=await browser.newContext({
 const page=await context.newPage();
 await page.goto(`http://127.0.0.1:${server.address().port}/fixture`,
   {waitUntil:'networkidle'});
+assert.match(await page.locator('#journal-management').innerText(),/Сумма результатов закрытых долей/);
+assert.match(await page.locator('#journal-management').innerText(),/Часть цен исполнения оценочная/);
+assert.equal(await page.locator('#journal-management tr').count(),3);
+assert.match(await page.locator('#journal-management').innerText(),/Фактическая/);
+assert.match(await page.locator('#journal-management').innerText(),/Оценка/);
+const previews=await page.evaluate(()=>({total:window.__totalPreview,missing:window.__missingPreview}));
+assert.ok(Math.abs(previews.total-1.37019231)<1e-7);
+assert.equal(previews.missing,null);
+await page.locator('#closed-execution').getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).tap();
+await page.locator('#closed-execution').getByText('Сделка закрыта. Все фиксации учтены в журнале; повторно закрывать её не нужно.').waitFor();
 await page.locator('#execution').getByText('ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ').waitFor();
 await page.getByText('ПЕРЕВЕСЫ В РЕШЕНИИ').waitFor();
 assert.match(await page.locator('#edge').innerText(),/Без перевеса: HOLD → с перевесом: CLOSE_25/);

@@ -44,6 +44,7 @@ jobs:
           node --check seiltanzer/web/js/touch_clock.js
           node --check seiltanzer/web/js/safe_fetch.js
           node --check seiltanzer/web/js/management_ui.js
+          node --check seiltanzer/web/js/journal_management.js
           node --check seiltanzer/web/js/trade_delete_ui_guard.js
           node --check seiltanzer/web/js/g1s_evidence.js
           node --check seiltanzer/web/js/cone.js
