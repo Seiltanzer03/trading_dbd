@@ -12,7 +12,8 @@ def select_active_management(snapshot):
     rows, candidates = [], []
     manager = snapshot.get('policy_manager') or {}
     mathematical = manager.get('mathematical_edge') or {}
-    effective = (manager.get('combined_edge_soft_weight') or {}).get('mathematical_component_weight')
+    combined = manager.get('combined_edge_soft_weight') or {}
+    effective = combined.get('mathematical_extended_component_weight', combined.get('mathematical_component_weight'))
     armed = {x.get("policy") for x in (snapshot.get("position_state") or {}).get(
         "armed_conditional_actions", [])}
     for policy in POLICIES:

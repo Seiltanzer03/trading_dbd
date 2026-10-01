@@ -31,7 +31,7 @@ def main():
     path.write_text(json.dumps(report, ensure_ascii=False, allow_nan=False))
     for code, row in rows.items():
         print(code, row['status'], row.get('horizon_minutes'),
-              {k: round(v['gain_mbit'], 3) for k, v in row.get('diagnostics', {}).items()})
+              {k: round(v['gain_mbit'], 3) if v.get('gain_mbit') is not None else None for k, v in row.get('diagnostics', {}).items()})
 
 if __name__ == '__main__':
     main()

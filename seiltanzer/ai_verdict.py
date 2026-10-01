@@ -191,7 +191,11 @@ def _capture_report_integrity(snapshot: dict) -> dict:
         "decision_reliability": decision_reliability(snapshot),
         "execution_cost_model": _report_scalar_map(manager.get("execution_cost_model") or {}),
         "mathematical_edge": manager.get("mathematical_edge") or {},
-        "combined_edge_soft_weight": manager.get("combined_edge_soft_weight") or {},
+        "combined_edge_soft_weight": _report_row(manager.get("combined_edge_soft_weight") or {}, (
+            'available', 'weight_fraction', 'mathematical_component_weight',
+            'mathematical_extended_component_weight', 'active_component_weight',
+            'exploratory_component_weight', 'direction_score', 'preferred_close_fraction',
+            'shared_cap', 'basis', 'hard_risk_override', 'automatic_execution_source')),
         "contract_version": _REPORT_INTEGRITY_VERSION,
         "role": "PRESENTATION_FACT_PRESERVATION_ONLY",
         "decision_authority": False,
@@ -304,7 +308,7 @@ def _enforce_snapshot_budget_with_report_integrity(snapshot: dict) -> None:
         # Keep root compact contracts even in an unusually large snapshot;
         # duplicate restored manager views are lower priority.
         for key in (
-            "scenario_geometry", "raw_optimizer_stability", "stability",
+            "raw_optimizer_stability", "stability",
             "risk_tradeoff", "monte_carlo_validation", "active_edge_provisional_weight",
         ):
             (snapshot.get("policy_manager") or {}).pop(key, None)

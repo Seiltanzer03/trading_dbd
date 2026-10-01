@@ -1,0 +1,27 @@
+{
+  "archive_sha256": "45fcb99fff145ae8d3b201f780c03d3a91255fe1e4bb61e78845ab1f7f8aa74d",
+  "full_archive_sha256": "5745250ed52981d72ce186973995581af8fcd929157ba3660de69f18149ccd84",
+  "n": 167,
+  "veto_n": 8,
+  "delta_gross_bp_per_base": 0.07244231955423992,
+  "theta": 1.38343,
+  "movement_threshold": 0.38,
+  "gex_derivative_path": "g1s_evidence_v3.gex.dynamics.force_score.slope",
+  "all_golden_rows_reproduced": true,
+  "prospective_profit_proof": false,
+  "authority": "ARCHIVE_REPRODUCTION_DIAGNOSTIC_ONLY",
+  "indices_metals_gex_authority": false,
+  "price_decoder_coefficients_in_results_archive": false,
+  "raw_files": {
+    "events.parquet": "9118e5bc13fee0d5515f4fb13efca5b86c03a4d5933df9f9e4bd276c1b83501d",
+    "bars.parquet": "8a3b5e8ef40644bbfd0723118bc7b837011da57a05558b41e720d892be486471"
+  },
+  "raw_phi_g_reconstruction": {
+    "selected_rows": 60,
+    "row_id_sha256": "f376f9d6091e0ea229f340027bfb36fa13a665f6c7ce50d454cbc8e1cf53717c",
+    "max_mean_error": 5.421010862427522e-20,
+    "max_sample_sd_error": 0.0,
+    "h2_derivative_matching_rows": 167,
+    "h2_derivative_max_error": 0.0
+  }
+}

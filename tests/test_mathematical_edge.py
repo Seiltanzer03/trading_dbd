@@ -21,9 +21,11 @@ def runtime_fixture(tmp_path, monkeypatch):
     now = time.time()
     rows = bars(end=math.floor(now/300)*300)
     raw = [[b['bar_end_ts']-300+k*60, b['open'], b['high'], b['low'], b['close']] for b in rows for k in range(5)]
-    head = dict(mean=[0.]*8, scale=[1.]*8, beta=[math.log(.2/.8)] + [0.]*8, baseline=.5)
+    n = len(edge.FEATURES)
+    head = dict(mean=[0.]*n, scale=[1.]*n, beta=[math.log(.2/.8)] + [0.]*n, baseline=.5)
     diagnostic = dict(gain_mbit=20., positive_blocks=3, blocks=3, working_supported=True, test_n=120)
     model = dict(instrument='NAS100', horizon_minutes=15, feature_contract=edge.FEATURE_CONTRACT,
+                 target_contract=dict(edge.TARGET_CONTRACT),
                  features=list(edge.FEATURES), heads={'direction':head,'movement':head},
                  diagnostics={'direction':diagnostic,'movement':diagnostic}, training_cutoff=now-86400)
     model['model_sha256'] = edge.fingerprint(model)
@@ -83,6 +85,8 @@ def test_training_rejects_future_outcomes_and_is_stable_to_future_append():
     assert a['training_cutoff']<=300000
     assert a['test_cutoff']<a['training_cutoff']
     assert a['selection']=='earlier_three_validation_blocks_then_untouched_final_20pct'
+    assert set(a['candidate_test_cutoffs'].values())=={a['test_cutoff']}
+    assert a['target_contract']==edge.TARGET_CONTRACT
 
 
 def test_runtime_changes_soft_preference_and_reverses_for_short(tmp_path,monkeypatch):
@@ -90,9 +94,15 @@ def test_runtime_changes_soft_preference_and_reverses_for_short(tmp_path,monkeyp
     long=edge.runtime_profile(engine,tick,trade)
     short=edge.runtime_profile(engine,tick,{**trade,'direction':'short'})
     assert long['available'] and 0<long['weight_fraction']<=.15
-    assert long['direction_score']==pytest.approx(-.6)
-    assert short['direction_score']==pytest.approx(.6)
+    assert long['direction_score']==pytest.approx(-.12)
+    assert short['direction_score']==pytest.approx(.12)
     assert not long['hard_risk_modified'] and not long['independent_evidence_vote']
+
+
+def test_flat_outcomes_cannot_become_down_votes_in_direction_head():
+    y=np.array([[0,0,0.],[1,0,.0001],[0,1,-.001],[1,1,.001]])
+    assert list(edge.head_indices(np.arange(4),y,0))==[2,3]
+    assert list(edge.head_indices(np.arange(4),y,1))==[0,1,2,3]
 
 
 @pytest.mark.parametrize('case',['hash','future_training','sha','stale','future_report','feed','nan'])
@@ -127,6 +137,42 @@ def test_shared_weights_and_hard_floor_are_preserved():
     assert all(adjusted[k]['cvar10_r']==metrics[k]['cvar10_r'] for k in metrics)
 
 
+def test_movement_only_does_not_become_direction_or_close_preference(tmp_path,monkeypatch):
+    engine,tick,trade,report,dest=runtime_fixture(tmp_path,monkeypatch)
+    model=report['instruments']['NAS100']
+    # Avoid shared fixture diagnostic object while changing only one head.
+    model['diagnostics']['direction']={**model['diagnostics']['direction'], 'working_supported':False}
+    model['model_sha256']=edge.fingerprint({k:v for k,v in model.items() if k!='model_sha256'})
+    dest.write_text(json.dumps(report))
+    profile=edge.runtime_profile(engine,tick,trade)
+    assert profile['available'] and not profile['base_policy_eligible']
+    combined=edge.combine_math_profile({'available':False,'weight_fraction':0.},profile)
+    assert not combined['available'] and combined['mathematical_component_weight']==0
+    assert combined['mathematical_extended_component_weight']>0
+    assert edge.extended_ranking_bonus('TIME_STOP',profile)>0
+    assert edge.extended_ranking_bonus('TIGHTEN_STOP',profile)==0
+    assert edge.extended_ranking_bonus('EXIT',profile)==0
+
+
+def test_math_preserves_hold_in_indifference_and_never_buys_material_expected_loss():
+    from seiltanzer import ai_policy
+    from seiltanzer.active_edge_policy_weight import _PROFILE_CTX
+    names=['HOLD','CLOSE_10','CLOSE_25','CLOSE_50','EXIT']
+    math_profile=dict(available=True,weight_fraction=.15,direction_score=1,mathematical_component_weight=.15,preferred_close_fraction=0)
+    def choice(values):
+        metrics={n:dict(name=n,expected_final_r=e,cvar10_r=0.) for n,e in zip(names,values)}
+        token=_PROFILE_CTX.set(math_profile)
+        try:return ai_policy._raw_policy_choice(metrics,0,cvar_floor=-.5),metrics
+        finally:_PROFILE_CTX.reset(token)
+    (selected,rule),_=choice([.1]*5)
+    assert selected=='HOLD'
+    (selected,rule),metrics=choice([.1,.11,.12,.13,.15])
+    assert selected!='HOLD'
+    assert .15-metrics[selected]['expected_final_r']<=.03+1e-12
+    assert rule['best_expected_r']==.15
+    assert rule['combined_edge_soft_weight']['weighted_value_semantics']=='RANKING_SCORE_NOT_EXPECTED_RETURN'
+
+
 def test_extended_edge_bonus_never_resurrects_blocked_candidates(monkeypatch):
     from seiltanzer import active_management as active
     monkeypatch.setattr(active,'build_working_action',lambda s,p:dict(policy=p['policy']))
@@ -148,6 +194,30 @@ def test_compaction_preserves_math_weight_and_ui_explanation(tmp_path,monkeypatc
     compact={'policy_manager':{}}
     _restore_report_integrity_views(compact,frozen)
     assert compact['policy_manager']['mathematical_edge']==profile
-    assert compact['policy_manager']['combined_edge_soft_weight']==combined
+    assert compact['policy_manager']['combined_edge_soft_weight']['weight_fraction']==combined['weight_fraction']
+    assert compact['policy_manager']['combined_edge_soft_weight']['mathematical_component_weight']==combined['mathematical_component_weight']
     text=edge.render_math_edge(profile,combined,{'raw_policy_without_mathematical_edge':'HOLD','raw_policy_with_edge':'CLOSE_25'})
     assert 'HOLD' in text and 'CLOSE_25' in text and 'proper-score' in text
+
+
+def test_source_export_is_read_only_and_rejects_retroactive_offset_bars(tmp_path,capsys):
+    import sqlite3,gzip,hashlib,base64
+    from scripts.export_mathematical_edge_sources import REMOTE_EXPORT
+    db=tmp_path/'sources.db';now=time.time(); start=math.floor((now-600)/300)*300
+    historical=[dict(bar_end_ts=start-600,open=100.,high=101.,low=99.,close=100.)]
+    raw=json.dumps(historical).encode()
+    with sqlite3.connect(db) as c:
+        c.execute('CREATE TABLE g1s_historical_sources (source_id TEXT, source_sha256 TEXT, bars_gzip BLOB, ticker TEXT, provider TEXT, interval TEXT, source_semantics_json TEXT, instrument TEXT, contract_version TEXT, created_ts REAL)')
+        c.execute('CREATE TABLE passive_market_bars (instrument TEXT, bar_start_ts REAL, bar_end_ts REAL, open REAL, high REAL, low REAL, close REAL, source TEXT, kind TEXT, created_ts REAL)')
+        c.execute('INSERT INTO g1s_historical_sources VALUES (?,?,?,?,?,?,?,?,?,?)',('src',hashlib.sha256(raw).hexdigest(),gzip.compress(raw),'^NDX','yahoo','5m','{}','NAS100','g1s-historical-wf-real-bars-v1',now))
+        for group,kind in [(0,'direct'),(1,'derived')]:
+            for k in range(5):
+                ts=start+group*300+k*60
+                c.execute('INSERT INTO passive_market_bars VALUES (?,?,?,?,?,?,?,?,?,?)',('NAS100',ts,ts+60,100,101,99,100,'yahoo_1m',kind,now))
+    before=db.read_bytes()
+    exec(REMOTE_EXPORT.replace('/opt/seiltanzer/data/trades.db',str(db)),{})
+    result=json.loads(gzip.decompress(base64.b64decode(capsys.readouterr().out.strip())))
+    source=result['sources'][0]
+    assert result['read_only'] and db.read_bytes()==before
+    assert source['recent_completed_5m_n']==1 and source['excluded_derived_minute_n']==5
+    assert len(source['bars'])==2 and source['not_broker_execution_bars']

@@ -15,13 +15,16 @@ from .g1_short_horizon_runtime import _fit_logistic, _sigmoid
 
 CONTRACT = 'mathematical-edge-working-v1'
 FEATURE_CONTRACT = 'math-completed-5m-price-v1'
-FEATURES = ('ret5', 'ret15', 'ret60', 'rv15', 'rv60', 'range_position', 'tod_sin', 'tod_cos')
+FEATURES = ('ret5', 'ret15', 'ret30', 'ret60', 'absret5', 'absret15', 'absret30',
+            'rv15', 'rv30', 'rv60', 'range_position', 'tod_sin', 'tod_cos')
 MAX_WEIGHT = .15
 SHARED_CAP = .40
 H2_INTERVAL = (-.00067862, -.00004046)
 H2_THETA = 1.38343
 H2_MOVEMENT_THRESHOLD = .38
 MOVE_RETURN_THRESHOLD = .0002
+TARGET_CONTRACT = {'direction': 'UP_GIVEN_ABS_RETURN_GT_2BP',
+                   'movement': 'ABS_RETURN_GT_2BP', 'threshold_log_return': MOVE_RETURN_THRESHOLD}
 MAX_ARTIFACT_BYTES = 500_000
 MAX_ARTIFACT_AGE = 7 * 86400
 MAX_PRICE_AGE = 900
@@ -59,9 +62,10 @@ def price_features(bars, captured_ts):
         return None
     hi, lo = max(highs), min(lows)
     phase = 2 * math.pi * (ends[-1] % 86400) / 86400
-    return [float(returns[-1]), float(np.log(closes[-1] / closes[-4])),
-            float(np.log(closes[-1] / closes[-13])), float(np.std(returns[-3:])),
-            float(np.std(returns)), (closes[-1] - lo) / (hi - lo) if hi > lo else .5,
+    r5, r15, r30, r60 = (float(np.log(closes[-1] / closes[-k])) for k in (2, 4, 7, 13))
+    return [r5, r15, r30, r60, abs(r5), abs(r15), abs(r30),
+            float(np.sqrt(np.mean(returns[-3:] ** 2))), float(np.sqrt(np.mean(returns[-6:] ** 2))),
+            float(np.sqrt(np.mean(returns ** 2))), (closes[-1] - lo) / (hi - lo) if hi > lo else .5,
             math.sin(phase), math.cos(phase)]
 
 
@@ -132,54 +136,87 @@ def gain(y, p, baseline):
     return float(np.mean(base - losses) * 1000)
 
 
+def head_indices(indices, y, col):
+    """Direction is UP/DOWN conditional on MOVE; flat is never DOWN."""
+    return indices[y[indices, 1] == 1] if col == 0 else indices
+
+
 def train_instrument(code, bars, captured_ts):
     bars = sorted([b for b in bars if b['bar_end_ts'] <= captured_ts], key=lambda b: b['bar_end_ts'])
     candidates = []
+    anchor_x, _, anchor_times, _ = dataset(bars, 15)
+    if len(anchor_x) < 180:
+        return {'instrument': code, 'status': 'UNRESOLVED', 'reason': 'INSUFFICIENT_COMPLETED_NONOVERLAPPING_BARS', 'weight_fraction': 0.}
+    # Freeze one time grid BEFORE trying horizons or conditional head masks.
+    boundaries = [float(anchor_times[int(len(anchor_times)*f)]) for f in (.4,.55,.7,.8)]
+    final_cutoff = boundaries[-1]
     # Fixed small candidate set. Select on earlier validation, final 20% untouched.
     for horizon in (15, 30, 60):
         x, y, times, ends = dataset([b for b in bars if b['bar_end_ts'] <= captured_ts], horizon)
         n = len(x)
         if n < 180:
             continue
-        split = int(n * .8)
+        split = int(np.searchsorted(times, final_cutoff))
+        if split >= n or n-split < 9:
+            continue
         rows = []
-        for frac in (.4, .55, .7):
-            a, b = int(n * frac), min(split, int(n * (frac + .15)))
-            train = np.flatnonzero(ends[:a] < times[a] - 300)
-            if len(train) < 60 or b - a < 10:
+        for a_time, b_time in zip(boundaries[:-1], boundaries[1:]):
+            train = np.flatnonzero(ends < a_time - 300)
+            valid = np.flatnonzero((times >= a_time) & (times < b_time) & (ends < final_cutoff - 300))
+            if len(train) < 60 or len(valid) < 10:
                 continue
             values = []
             for col in (0, 1):
-                head = fit_head(x[train], y[train, col])
-                values.append(gain(y[a:b, col], predict(head, x[a:b]), head['baseline']))
+                train_ix = head_indices(train, y, col)
+                test_ix = head_indices(valid, y, col)
+                if len(train_ix) < 20 or len(test_ix) < 3:
+                    values.append(None)
+                    continue
+                head = fit_head(x[train_ix], y[train_ix, col])
+                values.append(gain(y[test_ix, col], predict(head, x[test_ix]), head['baseline']))
             rows.append(values)
         if len(rows) < 3:
             continue
-        score = max(float(np.mean(np.array(rows)[:, k])) for k in (0, 1))
+        scores = [float(np.mean([r[k] for r in rows])) for k in (0, 1) if all(r[k] is not None for r in rows)]
+        if not scores:
+            continue
+        score = max(scores)
         candidates.append((score, horizon, x, y, times, ends, split, rows))
     if not candidates:
         return {'instrument': code, 'status': 'UNRESOLVED', 'reason': 'INSUFFICIENT_COMPLETED_NONOVERLAPPING_BARS', 'weight_fraction': 0.}
     _, horizon, x, y, times, ends, split, validation = max(candidates, key=lambda c: c[0])
-    train = np.flatnonzero(ends[:split] < times[split] - 300)
+    train = np.flatnonzero(ends < final_cutoff - 300)
     diagnostics, heads = {}, {}
     for col, name in enumerate(('direction', 'movement')):
-        head = fit_head(x[train], y[train, col])
-        chunks = np.array_split(np.arange(split, len(x)), 3)
-        fold_gain = [gain(y[ix, col], predict(head, x[ix]), head['baseline']) for ix in chunks if len(ix)]
-        test_gain = gain(y[split:, col], predict(head, x[split:]), head['baseline'])
-        valid_positive = sum(row[col] > 0 for row in validation)
-        eligible = test_gain > 0 and valid_positive >= 2 and sum(g > 0 for g in fold_gain) >= 2
+        train_ix = head_indices(train, y, col)
+        test_ix = head_indices(np.arange(split, len(x)), y, col)
+        if len(train_ix) < 20 or len(test_ix) < 9:
+            diagnostics[name] = {'gain_mbit': None, 'working_supported': False, 'test_n': len(test_ix),
+                                 'status': 'CONDITIONAL_HEAD_SAMPLE_UNAVAILABLE'}
+            heads[name] = None
+            continue
+        head = fit_head(x[train_ix], y[train_ix, col])
+        chunks = [head_indices(ix, y, col) for ix in np.array_split(np.arange(split, len(x)), 3)]
+        fold_gain = [gain(y[ix, col], predict(head, x[ix]), head['baseline']) if len(ix) >= 3 else None for ix in chunks]
+        test_gain = gain(y[test_ix, col], predict(head, x[test_ix]), head['baseline'])
+        valid_positive = sum(row[col] is not None and row[col] > 0 for row in validation)
+        positive = sum(g is not None and g > 0 for g in fold_gain)
+        eligible = test_gain > 0 and valid_positive >= 2 and positive >= 2 and all(g is not None for g in fold_gain)
         diagnostics[name] = {'gain_mbit': round(test_gain, 5), 'block_gains_mbit': fold_gain,
-                             'positive_blocks': sum(g > 0 for g in fold_gain), 'blocks': len(fold_gain),
+                             'positive_blocks': positive, 'blocks': len(fold_gain),
                              'validation_gains_mbit': [r[col] for r in validation], 'working_supported': eligible,
-                             'test_n': len(x) - split, 'test_brier': float(np.mean((predict(head, x[split:]) - y[split:, col]) ** 2))}
-        heads[name] = fit_head(x, y[:, col])
+                             'test_n': len(test_ix), 'test_brier': float(np.mean((predict(head, x[test_ix]) - y[test_ix, col]) ** 2)),
+                             'target_semantics': 'UP_GIVEN_ABS_RETURN_GT_2BP' if col == 0 else 'ABS_RETURN_GT_2BP'}
+        all_ix = head_indices(np.arange(len(x)), y, col)
+        heads[name] = fit_head(x[all_ix], y[all_ix, col])
     supported = any(d['working_supported'] for d in diagnostics.values())
     body = {'instrument': code, 'horizon_minutes': horizon, 'status': 'WORKING_SUPPORTED' if supported else 'NO_SUPPORTED_ADVANTAGE_YET',
             'feature_contract': FEATURE_CONTRACT, 'features': list(FEATURES), 'heads': heads,
+            'target_contract': dict(TARGET_CONTRACT),
             'diagnostics': diagnostics, 'training_cutoff': float(ends[-1]),
             'training_n': len(x), 'training_days': len(set((times // 86400).astype(int))),
-            'test_cutoff': float(times[split]), 'source_sha256': fingerprint(bars),
+            'test_cutoff': final_cutoff, 'validation_time_boundaries': boundaries,
+            'candidate_test_cutoffs': {str(c[1]): final_cutoff for c in candidates}, 'source_sha256': fingerprint(bars),
             'working_eligible': supported, 'formal_eligible': False, 'net_economic_proof': False,
             'evidence_label': 'HISTORICAL_CHRONOLOGICAL_WORKING', 'candidate_count': len(candidates),
             'selection': 'earlier_three_validation_blocks_then_untouched_final_20pct',
@@ -218,11 +255,36 @@ def load_artifact(path, captured_ts):
         if report.get('automatic_execution') is not False or report.get('production_authority') is not False:
             return None
         from .runtime_git_identity import runtime_git_sha
-        if report.get('published_for_sha') != runtime_git_sha():
+        expected = runtime_git_sha()
+        if not expected or len(expected) != 40 or report.get('published_for_sha') != expected:
             return None
         return report
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def runtime_gex_diagnostics(engine, code, captured, movement):
+    """Read an existing causal frozen observation; never recompute its history."""
+    from .mathematical_edge_archive import phi_g
+    from .edge_discovery.ai_context import _latest_frozen_context
+    context = _latest_frozen_context(engine, {'captured_ts': captured, 'strategy': {'instrument': code}})
+    observed = number(context.get('observation_t0'))
+    gex = context.get('gex') or {}
+    source_ts = number(gex.get('ts'))
+    if observed is None or source_ts is None or not 0 <= captured-observed <= 900 or not 0 <= captured-source_ts <= 1800:
+        return h2_controller(code, movement, None)
+    dynamics = gex.get('dynamics') or {}
+    force = dynamics.get('force_score') or {}
+    h2 = h2_controller(code, movement, force.get('slope') if force.get('available') else None, 'archived-dot-gex-v1')
+    h2['source_ts'] = source_ts
+    h2['gex_derivative_path'] = 'g1s_evidence_v3.gex.dynamics.force_score.slope'
+    h2['phi_g'] = phi_g((context.get('v2_option_context') or {}).get('gex_net_balance'),
+                         (dynamics.get('field_score') or {}).get('slope'), force.get('slope'),
+                         (dynamics.get('stiffness_score') or {}).get('slope'))
+    h2['price_decoder_is_archived'] = False
+    h2['probability_semantics'] = 'NEW_WORKING_HEAD_ARCHIVE_THETA_COUNTERFACTUAL_ONLY'
+    h2['entry_veto_is_not_existing_position_exit'] = True
+    return h2
 
 
 def runtime_profile(engine, tick, trade):
@@ -250,7 +312,8 @@ def runtime_profile(engine, tick, trade):
         digest = fingerprint(body)
     except (TypeError, ValueError):
         return {**base, 'reason': 'WORKING_MODEL_INVALID'}
-    if (model.get('feature_contract') != FEATURE_CONTRACT or model.get('features') != list(FEATURES)
+    if (model.get('instrument') != code or model.get('feature_contract') != FEATURE_CONTRACT or model.get('features') != list(FEATURES)
+            or model.get('target_contract') != TARGET_CONTRACT
             or model.get('model_sha256') != digest
             or number(model.get('training_cutoff')) is None or model['training_cutoff'] > captured):
         return {**base, 'reason': 'MODEL_CONTRACT_HASH_OR_CAUSAL_CUTOFF_INVALID'}
@@ -258,8 +321,8 @@ def runtime_profile(engine, tick, trade):
     if features is None:
         return {**base, 'reason': 'COMPLETED_CAUSAL_5M_PRICE_FEATURES_UNAVAILABLE'}
     try:
-        ps = {name: float(predict(model['heads'][name], features)) for name in ('direction', 'movement')}
-        if any(not math.isfinite(p) or not 0 <= p <= 1 for p in ps.values()):
+        ps = {name: float(predict(model['heads'][name], features)) if model['heads'].get(name) else None for name in ('direction', 'movement')}
+        if any(p is not None and (not math.isfinite(p) or not 0 <= p <= 1) for p in ps.values()):
             raise ValueError('nonfinite probability')
         ds = model['diagnostics']
         direction = str(trade.get('direction') or '').lower()
@@ -267,12 +330,12 @@ def runtime_profile(engine, tick, trade):
             return {**base, 'reason': 'POSITION_DIRECTION_UNAVAILABLE'}
         sign = 1 if direction in {'long', 'buy'} else -1
         if ds['direction']['working_supported']:
-            d = sign * (2 * ps['direction'] - 1)
+            d = sign * (2 * ps['direction'] - 1) * ps['movement']
             diagnostic = ds['direction']; role = 'PRICE_DIRECTION'
         elif ds['movement']['working_supported']:
             baseline = model['heads']['movement']['baseline']
             d = -max(0., (baseline - ps['movement']) / max(baseline, .01))
-            diagnostic = ds['movement']; role = 'LOW_MOVEMENT_CAUTION'
+            diagnostic = ds['movement']; role = 'LOW_MOVEMENT_TIME_MANAGEMENT'
         else:
             return {**base, 'reason': 'NO_SUPPORTED_ADVANTAGE_YET', 'probabilities': ps}
         quality = max(0., min(1., diagnostic['gain_mbit'] / 20)) * min(1., diagnostic['positive_blocks'] / max(1, diagnostic['blocks']))
@@ -284,10 +347,13 @@ def runtime_profile(engine, tick, trade):
         bars = completed_live_bars(getattr(feed, 'intraday_ohlcv', []), captured)
         return {**base, 'available': w > 0, 'reason': 'WORKING_PRICE_EDGE' if w > 0 else 'NO_DIRECTIONAL_MANAGEMENT_PREFERENCE',
                 'weight_fraction': round(w, 6), 'direction_score': round(d, 6), 'preferred_close_fraction': round((1-d)/2, 6),
+                'base_policy_eligible': role == 'PRICE_DIRECTION',
+                'eligible_extended_roles': list(('TIME_STOP', 'REDUCE_TAKE')) if role != 'PRICE_DIRECTION' else None,
                 'probabilities': ps, 'role': role, 'latest_bar_end_ts': bars[-1]['bar_end_ts'], 'captured_ts': captured,
                 'feature_values': dict(zip(FEATURES, features)), 'working_eligible': True,
+                'runtime_price_feature_source': 'Yahoo intraday OHLCV; may be mapped to current broker basis; price proxy, not broker execution bars',
                 'training_age_days': round(age_days, 2), 'quality_multiplier': round(quality, 6),
-                'h2': h2_controller(code, ps['movement'], None), 'ranking_only': True,
+                'h2': runtime_gex_diagnostics(engine, code, captured, ps['movement']), 'ranking_only': True,
                 'net_economic_proof': False}
     except (KeyError, TypeError, ValueError, IndexError, ZeroDivisionError):
         return {**base, 'reason': 'WORKING_MODEL_INVALID'}
@@ -297,14 +363,20 @@ def combine_math_profile(profile, mathematical):
     """One shared cap, no extra independent evidence family for price transforms."""
     mw = min(MAX_WEIGHT, max(0., number(mathematical.get('weight_fraction')) or 0.)) if mathematical.get('available') else 0.
     if mw == 0:
-        return {**profile, 'mathematical_component_weight': 0.}
+        return {**profile, 'mathematical_component_weight': 0., 'mathematical_extended_component_weight': 0.}
     old = max(0., number(profile.get('weight_fraction')) or 0.)
+    if mathematical.get('base_policy_eligible') is False:
+        return {**profile, 'mathematical_component_weight': 0.,
+                'mathematical_extended_component_weight': round(min(mw, max(0., SHARED_CAP-old)), 6),
+                'mathematical_base_role': 'MOVEMENT_IS_NOT_A_CLOSE_OR_DIRECTION_SIGNAL'}
     total = old + mw
     d = (old * (number(profile.get('direction_score')) or 0.) + mw * mathematical['direction_score']) / total
     scale = min(SHARED_CAP, total) / total
     return {**profile, 'available': True, 'weight_fraction': round(total * scale, 6),
+            'max_weight_fraction': SHARED_CAP,
             'direction_score': round(d, 6), 'preferred_close_fraction': round((1-d)/2, 6),
             'mathematical_component_weight': round(mw * scale, 6), 'pre_math_weight_fraction': old,
+            'mathematical_extended_component_weight': round(mw * scale, 6),
             'pre_math_direction_score': profile.get('direction_score'),
             'pre_math_profile': {k: profile.get(k) for k in ('available', 'weight_fraction', 'direction_score', 'preferred_close_fraction')},
             'active_component_weight': round((number(profile.get('active_component_weight')) or 0.) * scale, 6),
@@ -315,29 +387,41 @@ def combine_math_profile(profile, mathematical):
 
 def render_math_edge(profile, combined=None, ranking_audit=None):
     combined = combined or {}
-    if not profile.get('available'):
+    if not profile.get('probabilities'):
         return '\n\n**МАТЕМАТИЧЕСКИЙ EDGE** —\nВес 0; причина: ' + str(profile.get('reason') or 'UNAVAILABLE') + '. Расчёт продолжается без этого веса.'
     ps = profile.get('probabilities') or {}
+    def probability(value):
+        return f'{value:.1%}' if number(value) is not None else 'UNAVAILABLE'
     audit = ranking_audit or {}
+    chosen_diagnostic = (profile.get('diagnostics') or {}).get('direction' if profile.get('role') == 'PRICE_DIRECTION' else 'movement', {})
+    score = number(chosen_diagnostic.get('gain_mbit'))
+    gain_text = f'{score:+.3f}' if score is not None else 'UNAVAILABLE'
     transition = ''
     if audit.get('raw_policy_without_mathematical_edge') and audit.get('raw_policy_with_edge'):
         transition = f"Выбор до gate без mathematical edge: {audit['raw_policy_without_mathematical_edge']}; с ним: {audit['raw_policy_with_edge']}. Финальный план определяется gate и арбитром.\n"
     return ('\n\n**МАТЕМАТИЧЕСКИЙ EDGE** —\n'
             f"{profile['instrument']}, горизонт {profile.get('horizon_minutes')} мин.; роль {profile.get('role')}. "
-            f"P(up) {ps.get('direction', 0):.1%}; P(move) {ps.get('movement', 0):.1%}. "
-            f"Мягкий вес {profile['weight_fraction']:.1%}; внутри общего лимита 40%: "
-            f"{combined.get('mathematical_component_weight', profile['weight_fraction']):.1%}.\n"
-            f"Проверка вне обучения: {(profile.get('diagnostics') or {}).get('direction' if profile.get('role') == 'PRICE_DIRECTION' else 'movement', {}).get('gain_mbit', 0):+.3f} mbit/event; "
+            f"P(up | move) {probability(ps.get('direction'))}; P(move >2bp) {probability(ps.get('movement'))}. "
+            'Это оценки модели, а не гарантия исхода. '
+            f"Мягкий вес базовых политик {combined.get('mathematical_component_weight', profile['weight_fraction']):.1%}; "
+            f"расширенных действий {combined.get('mathematical_extended_component_weight', profile['weight_fraction']):.1%}; общий лимит 40%.\n"
+            f"Проверка вне обучения: {gain_text} mbit/event; "
             f"модель {str(profile.get('model_sha256') or '')[:12]}.\n"
             + transition +
+            'Источник признаков: intraday Yahoo proxy; возможна привязка к текущей шкале брокера. Это не история фактических исполнений.\n'
             'Рабочая историческая модель; proper-score не является доказательством прибыли. '
             'Price-признаки не создают новую независимую семью. Hard CVaR и допуски действий обязательны. '
-            f"GEX H2: {(profile.get('h2') or {}).get('reason') or 'диагностика'}.")
+            'Влияние Price на базовый выбор ограничено потерей не более 0.03R исходного net Expected относительно лучшей допустимой политики. '
+            f"GEX H2: {(profile.get('h2') or {}).get('reason') or (profile.get('h2') or {}).get('action') or 'диагностика'}; вес 0. "
+            'Самостоятельный сигнал пониженной вероятности движения влияет только на TIME_STOP/REDUCE_TAKE; это не направление цены и не команда закрыть позицию.')
 
 
 def extended_ranking_bonus(policy, profile, effective_weight=None):
     """At most .0045R; applied AFTER every extended-action hard gate."""
     if not profile.get('available'):
+        return 0.
+    roles = profile.get('eligible_extended_roles')
+    if roles is not None and policy not in roles:
         return 0.
     w = min(MAX_WEIGHT, max(0., number(effective_weight if effective_weight is not None else profile.get('weight_fraction')) or 0.))
     d = max(-1., min(1., number(profile.get('direction_score')) or 0.))

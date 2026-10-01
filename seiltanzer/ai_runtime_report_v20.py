@@ -15,7 +15,6 @@ import httpx
 from . import ai_verdict
 from . import ai_verdict_v19 as _v19
 from . import ai_provider_explanation as _provider
-from .mathematical_edge import render_math_edge
 from .llm_decision_shadow import (
     _disagreement_category,
     _extract_json_object,
@@ -307,8 +306,6 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
         f"LLM-разбор текущего снимка: {llm}; {llm_role}. Это отдельный голос "
         "от исторических LLM-гипотез. Самооценка LLM не является "
         "калиброванной вероятностью и не отменяет hard CVaR."
-        + render_math_edge(
-            manager.get('mathematical_edge') or {}, combined_edge, rule.get('combined_edge_soft_weight'))
     )
 
 

@@ -244,6 +244,18 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
             metrics, profile, r0, cvar_floor=cvar_floor,
             policy_fractions=policy_fractions,
         )
+        # A new working Price opinion cannot buy an arbitrarily large expected
+        # loss. Keep its winner within the existing .03R economic tolerance.
+        if audit.get('applied') and float(profile.get('mathematical_component_weight') or 0.) > 0:
+            names = [row['policy'] for row in audit['rows']]
+            best_economic = max(float(metrics[n]['expected_final_r']) for n in names)
+            near = [n for n in names if best_economic - float(metrics[n]['expected_final_r']) <= .03 + 1e-12]
+            best_rank = max(float(adjusted[n]['expected_final_r']) for n in near)
+            for name in set(names)-set(near):
+                adjusted[name]['expected_final_r'] = min(adjusted[name]['expected_final_r'], best_rank-.030001)
+            audit['mathematical_economic_guard'] = {'max_expected_sacrifice_r': .03, 'eligible': near,
+                                                    'basis': 'original_net_expected_before_soft_ranking'}
+            audit['weighted_value_semantics'] = 'RANKING_SCORE_NOT_EXPECTED_RETURN'
         choice, rule = original_raw(adjusted, r0, cvar_floor=cvar_floor)
         without_math = profile.get('pre_math_profile')
         choice_without_math = policy_without_edge
