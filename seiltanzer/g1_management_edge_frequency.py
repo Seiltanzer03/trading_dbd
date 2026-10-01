@@ -188,11 +188,38 @@ def current_edge_management_payload(snapshot: Any) -> dict[str, Any]:
     manager = _mapping(root.get("policy_manager"))
     exploratory = _mapping(manager.get("llm_edge_exploratory_weight"))
     active = _mapping(manager.get("active_edge_provisional_weight"))
+    mathematical = _mapping(manager.get("mathematical_edge"))
     combined = _mapping(manager.get("combined_edge_soft_weight"))
     audit = _mapping(_at(manager, "selection_rule", "combined_edge_soft_weight"))
     decision = _mapping(root.get("effective_management_decision")
                         or manager.get("management_decision"))
     recommendation = _mapping(manager.get("recommendation"))
+    base_weight = _finite(combined.get("weight_fraction")) or 0.0
+    mathematical_base = _finite(combined.get("mathematical_component_weight")) or 0.0
+    mathematical_extended = _finite(combined.get("mathematical_extended_component_weight")) or 0.0
+    active_weight = _finite(combined.get("active_component_weight"))
+    exploratory_weight = _finite(combined.get("exploratory_component_weight"))
+    # Frozen base and extended comparisons are different ranking stages. A
+    # movement-only model never enters the base direction/close selector.
+    without_math = audit.get("raw_policy_without_mathematical_edge")
+    with_math = audit.get("raw_policy_with_edge")
+    if mathematical_base == 0.0 and mathematical.get("available"):
+        raw = recommendation.get("raw_optimizer_policy")
+        without_math = without_math or raw
+        with_math = with_math or raw
+    eligible_extended = []
+    for row in root.get("active_management_candidates") or []:
+        if not isinstance(row, dict) or row.get("status") != "eligible":
+            continue
+        lower = _finite(row.get("paired_delta_ci95_lower_r"))
+        cvar = _finite(row.get("worst_seed_cvar10_gross_r"))
+        if lower is not None and cvar is not None:
+            eligible_extended.append((row, lower, cvar))
+    extended_without_math = extended_with_math = None
+    if eligible_extended:
+        extended_without_math = max(eligible_extended, key=lambda item: (item[1], item[2]))[0].get("policy")
+        extended_with_math = max(eligible_extended, key=lambda item: (
+            item[1] + (_finite(item[0].get("mathematical_edge_ranking_bonus_r")) or 0.0), item[2]))[0].get("policy")
     score = _finite(combined.get("direction_score"))
     if score is None or abs(score) <= 1e-12:
         direction = "NEUTRAL"
@@ -205,16 +232,38 @@ def current_edge_management_payload(snapshot: Any) -> dict[str, Any]:
         direction_ru = "поддерживает более раннюю частичную фиксацию"
     return {
         "contract_version": EDGE_FREQUENCY_VERSION,
-        "available": bool(exploratory or active or combined),
+        "available": bool(exploratory or active or combined or mathematical),
         "action_now": decision.get("policy") or recommendation.get("policy") or "HOLD",
         "instruction_ru": decision.get("instruction_ru"),
         "direction": direction,
         "direction_ru": direction_ru,
         "weights": {
-            "exploratory": _finite(exploratory.get("weight_fraction")) or 0.0,
-            "active": _finite(active.get("weight_fraction")) or 0.0,
-            "combined": _finite(combined.get("weight_fraction")) or 0.0,
+            "exploratory": exploratory_weight if exploratory_weight is not None else (_finite(exploratory.get("weight_fraction")) or 0.0),
+            "active": active_weight if active_weight is not None else (_finite(active.get("weight_fraction")) or 0.0),
+            # Preserve the old key as the base-policy total. Extended action
+            # ranking currently receives only the mathematical component.
+            "combined": base_weight,
+            "combined_base": base_weight,
+            "combined_extended": mathematical_extended,
+            "mathematical_base": mathematical_base,
+            "mathematical_extended": mathematical_extended,
             "preferred_close_fraction": _finite(combined.get("preferred_close_fraction")),
+        },
+        "weight_semantics": {
+            "combined": "BASE_POLICY_SOFT_RANKING",
+            "combined_extended": "ELIGIBLE_EXTENDED_ACTION_SOFT_RANKING",
+            "not_expected_return": True,
+        },
+        "mathematical_edge": {
+            "available": bool(mathematical.get("available")),
+            "instrument": mathematical.get("instrument"),
+            "role": mathematical.get("role"),
+            "reason": mathematical.get("reason"),
+            "model_sha256": mathematical.get("model_sha256"),
+            "horizon_minutes": mathematical.get("horizon_minutes"),
+            "probabilities": _mapping(mathematical.get("probabilities")),
+            "eligible_extended_roles": mathematical.get("eligible_extended_roles"),
+            "base_policy_eligible": bool(mathematical.get("base_policy_eligible")),
         },
         "matched_status_counts": _mapping(exploratory.get("matched_status_counts")),
         "top_signals": list(exploratory.get("matched_signals") or [])[:3],
@@ -224,10 +273,22 @@ def current_edge_management_payload(snapshot: Any) -> dict[str, Any]:
             "raw_policy_changed": bool(audit.get("raw_policy_changed")),
             "recommendation_policy": recommendation.get("policy"),
             "scope": audit.get("counterfactual_scope"),
+            "raw_policy_without_mathematical_edge": without_math,
+            "raw_policy_with_mathematical_edge": with_math,
+            "mathematical_edge_changed_raw_policy": (
+                bool(without_math and with_math) and without_math != with_math),
+            "mathematical_base_comparison_available": bool(without_math and with_math),
+            "extended_policy_without_mathematical_edge": extended_without_math,
+            "extended_policy_with_mathematical_edge": extended_with_math,
+            "mathematical_edge_changed_extended_candidate": (
+                bool(extended_without_math and extended_with_math)
+                and extended_without_math != extended_with_math),
+            "mathematical_extended_comparison_available": bool(eligible_extended),
+            "extended_scope": "same_eligible_extended_assessments_before_manual_registration",
         },
         "blocked_reason": (
             audit.get("reason") if combined.get("available") and not audit.get("applied")
-            else exploratory.get("reason") if not combined.get("available") else None
+            else exploratory.get("reason") if not combined.get("available") and mathematical_extended == 0.0 else None
         ),
         "hard_risk_cvar_preserved": True,
         "may_widen_stop": False,
@@ -235,7 +296,10 @@ def current_edge_management_payload(snapshot: Any) -> dict[str, Any]:
         "automatic_execution_allowed": False,
         "measurement_note_ru": (
             "Улучшение прогноза — не доходность сделки. Вес меняет только мягкое "
-            "ранжирование действий, не отменяет hard-risk/CVaR."
+            "ранжирование действий, не отменяет hard-risk/CVaR. Базовый вес относится "
+            "к выбору HOLD/CLOSE/EXIT; отдельный расширенный вес — к ранжированию "
+            "уже допустимых расширенных действий. Пониженная вероятность движения "
+            "может иметь расширенный вес при нулевом базовом весе."
         ),
     }
 

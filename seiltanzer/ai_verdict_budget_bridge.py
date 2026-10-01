@@ -30,10 +30,16 @@ def _drop_duplicate_integrity_views(snapshot: dict[str, Any]) -> None:
     manager = snapshot.get("policy_manager")
     if not isinstance(manager, dict):
         return
+    geometry = manager.get('scenario_geometry') or (snapshot.get('report_integrity') or {}).get('scenario_geometry') or {}
+    if geometry:
+        manager['scenario_geometry'] = {key: geometry[key] for key in (
+            'scenario_count', 'next_rung_r', 'p_next_rung_before_stop', 'p_stop_before_next_rung',
+            'p_unresolved_full_horizon', 'full_horizon_minutes', 'resolved_count',
+            'mean_event_minutes_given_resolved') if key in geometry}
     # Root report_integrity preserves these same facts. The manager replicas are
     # presentation conveniences and are the first thing to drop under pressure.
     for key in (
-        "scenario_geometry", "raw_optimizer_stability", "stability",
+        "raw_optimizer_stability", "stability",
         "risk_tradeoff", "monte_carlo_validation", "active_edge_provisional_weight",
     ):
         manager.pop(key, None)

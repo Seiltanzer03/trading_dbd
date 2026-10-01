@@ -1,0 +1,1264 @@
+{
+  "contract_version": "mathematical-edge-working-v1",
+  "created_ts": 1790864460.3590157,
+  "instruments": {
+    "NAS100": {
+      "instrument": "NAS100",
+      "horizon_minutes": 30,
+      "status": "WORKING_SUPPORTED",
+      "feature_contract": "math-completed-5m-price-v1",
+      "features": [
+        "ret5",
+        "ret15",
+        "ret30",
+        "ret60",
+        "absret5",
+        "absret15",
+        "absret30",
+        "rv15",
+        "rv30",
+        "rv60",
+        "range_position",
+        "tod_sin",
+        "tod_cos"
+      ],
+      "target_contract": {
+        "direction": "UP_GIVEN_ABS_RETURN_GT_2BP",
+        "movement": "ABS_RETURN_GT_2BP",
+        "threshold_log_return": 0.0002
+      },
+      "diagnostics": {
+        "direction": {
+          "gain_mbit": -12.95775,
+          "block_gains_mbit": [
+            -19.13034232956113,
+            -25.969462972706136,
+            7.499156256866508
+          ],
+          "positive_blocks": 1,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            -2.0967350777624665,
+            -16.6156844994251,
+            2.7345196508917553
+          ],
+          "working_supported": false,
+          "test_n": 110,
+          "test_brier": 0.2544998563902805,
+          "target_semantics": "UP_GIVEN_ABS_RETURN_GT_2BP"
+        },
+        "movement": {
+          "gain_mbit": 37.30636,
+          "block_gains_mbit": [
+            22.022248327651706,
+            72.80130487701025,
+            16.590259236448308
+          ],
+          "positive_blocks": 3,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            35.071903802662874,
+            19.90941882913191,
+            26.077892984064583
+          ],
+          "working_supported": true,
+          "test_n": 122,
+          "test_brier": 0.085537261986496,
+          "target_semantics": "ABS_RETURN_GT_2BP"
+        }
+      },
+      "training_cutoff": 1790624100.0,
+      "training_n": 610,
+      "training_days": 61,
+      "test_cutoff": 1785263700.0,
+      "validation_time_boundaries": [
+        1782232500.0,
+        1783444800.0,
+        1784570700.0,
+        1785263700.0
+      ],
+      "candidate_test_cutoffs": {
+        "15": 1785263700.0,
+        "30": 1785263700.0,
+        "60": 1785263700.0
+      },
+      "source_sha256": "f8394ad378707c7a42d6c70f1b49ce799e690920a71d1da3f973a4be2654697c",
+      "working_eligible": true,
+      "formal_eligible": false,
+      "net_economic_proof": false,
+      "evidence_label": "HISTORICAL_CHRONOLOGICAL_WORKING",
+      "candidate_count": 3,
+      "selection": "earlier_three_validation_blocks_then_untouched_final_20pct",
+      "GEX_status": "NOT_SUPPORTED_OR_ARCHIVED_FEATURE_CONTRACT_MISSING",
+      "model_sha256": "34ca73a715ce75c8ca9ee8082787fb699cfed5defc4145270daaa5985db2196c"
+    },
+    "SP500": {
+      "instrument": "SP500",
+      "horizon_minutes": 30,
+      "status": "NO_SUPPORTED_ADVANTAGE_YET",
+      "feature_contract": "math-completed-5m-price-v1",
+      "features": [
+        "ret5",
+        "ret15",
+        "ret30",
+        "ret60",
+        "absret5",
+        "absret15",
+        "absret30",
+        "rv15",
+        "rv30",
+        "rv60",
+        "range_position",
+        "tod_sin",
+        "tod_cos"
+      ],
+      "target_contract": {
+        "direction": "UP_GIVEN_ABS_RETURN_GT_2BP",
+        "movement": "ABS_RETURN_GT_2BP",
+        "threshold_log_return": 0.0002
+      },
+      "diagnostics": {
+        "direction": {
+          "gain_mbit": -35.8015,
+          "block_gains_mbit": [
+            -68.0176523739415,
+            0.5598685972443885,
+            -39.97932036847545
+          ],
+          "positive_blocks": 1,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            -18.6657142589092,
+            33.921590826576654,
+            8.697801498224567
+          ],
+          "working_supported": false,
+          "test_n": 104,
+          "test_brier": 0.26298415435521016,
+          "target_semantics": "UP_GIVEN_ABS_RETURN_GT_2BP"
+        },
+        "movement": {
+          "gain_mbit": -5.82428,
+          "block_gains_mbit": [
+            -78.53156273748327,
+            33.45691693651744,
+            28.437472919408535
+          ],
+          "positive_blocks": 2,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            17.009419169712384,
+            6.506944342863066,
+            27.329051720048593
+          ],
+          "working_supported": false,
+          "test_n": 122,
+          "test_brier": 0.1267766656964209,
+          "target_semantics": "ABS_RETURN_GT_2BP"
+        }
+      },
+      "training_cutoff": 1790624100.0,
+      "training_n": 610,
+      "training_days": 61,
+      "test_cutoff": 1785263700.0,
+      "validation_time_boundaries": [
+        1782232500.0,
+        1783444800.0,
+        1784570700.0,
+        1785263700.0
+      ],
+      "candidate_test_cutoffs": {
+        "15": 1785263700.0,
+        "30": 1785263700.0,
+        "60": 1785263700.0
+      },
+      "source_sha256": "4547767bd147306f118608d191c3120c766a550b2d6911a341d93756265f22af",
+      "working_eligible": false,
+      "formal_eligible": false,
+      "net_economic_proof": false,
+      "evidence_label": "HISTORICAL_CHRONOLOGICAL_WORKING",
+      "candidate_count": 3,
+      "selection": "earlier_three_validation_blocks_then_untouched_final_20pct",
+      "GEX_status": "NOT_SUPPORTED_OR_ARCHIVED_FEATURE_CONTRACT_MISSING",
+      "model_sha256": "42c25f17bd41175485c475ea4372be1a018838a963fb1a99e3f18d2b69cc3f18"
+    },
+    "US30": {
+      "instrument": "US30",
+      "horizon_minutes": 30,
+      "status": "NO_SUPPORTED_ADVANTAGE_YET",
+      "feature_contract": "math-completed-5m-price-v1",
+      "features": [
+        "ret5",
+        "ret15",
+        "ret30",
+        "ret60",
+        "absret5",
+        "absret15",
+        "absret30",
+        "rv15",
+        "rv30",
+        "rv60",
+        "range_position",
+        "tod_sin",
+        "tod_cos"
+      ],
+      "target_contract": {
+        "direction": "UP_GIVEN_ABS_RETURN_GT_2BP",
+        "movement": "ABS_RETURN_GT_2BP",
+        "threshold_log_return": 0.0002
+      },
+      "diagnostics": {
+        "direction": {
+          "gain_mbit": -3.99696,
+          "block_gains_mbit": [
+            -31.62679485046673,
+            38.047054690757605,
+            -15.820837524162409
+          ],
+          "positive_blocks": 1,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            -7.325280897463994,
+            28.6081554820935,
+            -14.700804113614282
+          ],
+          "working_supported": false,
+          "test_n": 99,
+          "test_brier": 0.2509860416604406,
+          "target_semantics": "UP_GIVEN_ABS_RETURN_GT_2BP"
+        },
+        "movement": {
+          "gain_mbit": 7.4212,
+          "block_gains_mbit": [
+            -11.565885610690449,
+            14.84150856686738,
+            19.277146264270367
+          ],
+          "positive_blocks": 2,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            -11.002530480846577,
+            -31.826095311709732,
+            -9.073973976445483
+          ],
+          "working_supported": false,
+          "test_n": 122,
+          "test_brier": 0.15447332216705847,
+          "target_semantics": "ABS_RETURN_GT_2BP"
+        }
+      },
+      "training_cutoff": 1790624100.0,
+      "training_n": 610,
+      "training_days": 61,
+      "test_cutoff": 1785263700.0,
+      "validation_time_boundaries": [
+        1782232500.0,
+        1783444800.0,
+        1784570700.0,
+        1785263700.0
+      ],
+      "candidate_test_cutoffs": {
+        "15": 1785263700.0,
+        "30": 1785263700.0,
+        "60": 1785263700.0
+      },
+      "source_sha256": "8830bfbd77766ccbea13b053e39eec82b83d3c408e62e3680ecf63f3d006c619",
+      "working_eligible": false,
+      "formal_eligible": false,
+      "net_economic_proof": false,
+      "evidence_label": "HISTORICAL_CHRONOLOGICAL_WORKING",
+      "candidate_count": 3,
+      "selection": "earlier_three_validation_blocks_then_untouched_final_20pct",
+      "GEX_status": "NOT_SUPPORTED_OR_ARCHIVED_FEATURE_CONTRACT_MISSING",
+      "model_sha256": "1ebfe90d6ee2cc974c7f481c7ddcbf3a669b57cf2e6c27e68b459d34a1e4f5d9"
+    },
+    "GER40": {
+      "instrument": "GER40",
+      "horizon_minutes": 30,
+      "status": "NO_SUPPORTED_ADVANTAGE_YET",
+      "feature_contract": "math-completed-5m-price-v1",
+      "features": [
+        "ret5",
+        "ret15",
+        "ret30",
+        "ret60",
+        "absret5",
+        "absret15",
+        "absret30",
+        "rv15",
+        "rv30",
+        "rv60",
+        "range_position",
+        "tod_sin",
+        "tod_cos"
+      ],
+      "target_contract": {
+        "direction": "UP_GIVEN_ABS_RETURN_GT_2BP",
+        "movement": "ABS_RETURN_GT_2BP",
+        "threshold_log_return": 0.0002
+      },
+      "diagnostics": {
+        "direction": {
+          "gain_mbit": -6.95012,
+          "block_gains_mbit": [
+            -11.79476823624988,
+            -12.065436991641752,
+            3.7332636639584442
+          ],
+          "positive_blocks": 1,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            -24.097670841385405,
+            -24.48708719692699,
+            -49.400293175717884
+          ],
+          "working_supported": false,
+          "test_n": 151,
+          "test_brier": 0.25241542689501334,
+          "target_semantics": "UP_GIVEN_ABS_RETURN_GT_2BP"
+        },
+        "movement": {
+          "gain_mbit": -0.66706,
+          "block_gains_mbit": [
+            -0.12722215104118348,
+            -5.2715077584875,
+            3.3880754004656883
+          ],
+          "positive_blocks": 1,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            6.809015494201847,
+            -18.876123396463957,
+            -7.691782234915032
+          ],
+          "working_supported": false,
+          "test_n": 172,
+          "test_brier": 0.10772181107594797,
+          "target_semantics": "ABS_RETURN_GT_2BP"
+        }
+      },
+      "training_cutoff": 1790678400.0,
+      "training_n": 858,
+      "training_days": 62,
+      "test_cutoff": 1785312300.0,
+      "validation_time_boundaries": [
+        1782300900.0,
+        1783429500.0,
+        1784557200.0,
+        1785312300.0
+      ],
+      "candidate_test_cutoffs": {
+        "15": 1785312300.0,
+        "30": 1785312300.0,
+        "60": 1785312300.0
+      },
+      "source_sha256": "53b728f542892f6df0af12e7633185b1ec87706c4851b023344b6824bfec84fc",
+      "working_eligible": false,
+      "formal_eligible": false,
+      "net_economic_proof": false,
+      "evidence_label": "HISTORICAL_CHRONOLOGICAL_WORKING",
+      "candidate_count": 3,
+      "selection": "earlier_three_validation_blocks_then_untouched_final_20pct",
+      "GEX_status": "NOT_SUPPORTED_OR_ARCHIVED_FEATURE_CONTRACT_MISSING",
+      "model_sha256": "31d2c8b29e4df27b0b8f85003b0165fc8c50d7848e8683c953b3f5aa9f464f08"
+    },
+    "UK100": {
+      "instrument": "UK100",
+      "horizon_minutes": 60,
+      "status": "NO_SUPPORTED_ADVANTAGE_YET",
+      "feature_contract": "math-completed-5m-price-v1",
+      "features": [
+        "ret5",
+        "ret15",
+        "ret30",
+        "ret60",
+        "absret5",
+        "absret15",
+        "absret30",
+        "rv15",
+        "rv30",
+        "rv60",
+        "range_position",
+        "tod_sin",
+        "tod_cos"
+      ],
+      "target_contract": {
+        "direction": "UP_GIVEN_ABS_RETURN_GT_2BP",
+        "movement": "ABS_RETURN_GT_2BP",
+        "threshold_log_return": 0.0002
+      },
+      "diagnostics": {
+        "direction": {
+          "gain_mbit": 12.9673,
+          "block_gains_mbit": [
+            17.882087623227125,
+            32.47005657240779,
+            -10.139077072393041
+          ],
+          "positive_blocks": 2,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            21.69513069246013,
+            -126.5918711185251,
+            -107.39831356528907
+          ],
+          "working_supported": false,
+          "test_n": 77,
+          "test_brier": 0.2540850984570069,
+          "target_semantics": "UP_GIVEN_ABS_RETURN_GT_2BP"
+        },
+        "movement": {
+          "gain_mbit": -13.89504,
+          "block_gains_mbit": [
+            21.508709394771454,
+            51.60750635613864,
+            -114.80134874914896
+          ],
+          "positive_blocks": 2,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            -39.23189072441907,
+            22.068481702449432,
+            63.50188042406281
+          ],
+          "working_supported": false,
+          "test_n": 84,
+          "test_brier": 0.07789063486051487,
+          "target_semantics": "ABS_RETURN_GT_2BP"
+        }
+      },
+      "training_cutoff": 1790676300.0,
+      "training_n": 428,
+      "training_days": 62,
+      "test_cutoff": 1785313200.0,
+      "validation_time_boundaries": [
+        1782301800.0,
+        1783429500.0,
+        1784558100.0,
+        1785313200.0
+      ],
+      "candidate_test_cutoffs": {
+        "15": 1785313200.0,
+        "30": 1785313200.0,
+        "60": 1785313200.0
+      },
+      "source_sha256": "95d88a8594b2f0e329136fea7303ee6088869f336d62b6c2f2b5643526902b52",
+      "working_eligible": false,
+      "formal_eligible": false,
+      "net_economic_proof": false,
+      "evidence_label": "HISTORICAL_CHRONOLOGICAL_WORKING",
+      "candidate_count": 3,
+      "selection": "earlier_three_validation_blocks_then_untouched_final_20pct",
+      "GEX_status": "NOT_SUPPORTED_OR_ARCHIVED_FEATURE_CONTRACT_MISSING",
+      "model_sha256": "1b50450ac87bf0c471fed908273b31f4e0abbb63c7ef51af81e9d0680b0626e2"
+    },
+    "JPY100": {
+      "instrument": "JPY100",
+      "horizon_minutes": 30,
+      "status": "NO_SUPPORTED_ADVANTAGE_YET",
+      "feature_contract": "math-completed-5m-price-v1",
+      "features": [
+        "ret5",
+        "ret15",
+        "ret30",
+        "ret60",
+        "absret5",
+        "absret15",
+        "absret30",
+        "rv15",
+        "rv30",
+        "rv60",
+        "range_position",
+        "tod_sin",
+        "tod_cos"
+      ],
+      "target_contract": {
+        "direction": "UP_GIVEN_ABS_RETURN_GT_2BP",
+        "movement": "ABS_RETURN_GT_2BP",
+        "threshold_log_return": 0.0002
+      },
+      "diagnostics": {
+        "direction": {
+          "gain_mbit": 4.57827,
+          "block_gains_mbit": [
+            34.16040176486057,
+            13.896226151726056,
+            -31.74945211079356
+          ],
+          "positive_blocks": 2,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            -125.9272735591839,
+            -27.14696497749744,
+            -93.59842685066977
+          ],
+          "working_supported": false,
+          "test_n": 67,
+          "test_brier": 0.2481561582567987,
+          "target_semantics": "UP_GIVEN_ABS_RETURN_GT_2BP"
+        },
+        "movement": {
+          "gain_mbit": -87.79735,
+          "block_gains_mbit": [
+            -169.93000436693978,
+            13.837995334208994,
+            -103.87784835544785
+          ],
+          "positive_blocks": 1,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            14.570562677027722,
+            15.004042639993699,
+            53.09550128972195
+          ],
+          "working_supported": false,
+          "test_n": 73,
+          "test_brier": 0.08094360516992653,
+          "target_semantics": "ABS_RETURN_GT_2BP"
+        }
+      },
+      "training_cutoff": 1790660100.0,
+      "training_n": 365,
+      "training_days": 62,
+      "test_cutoff": 1785215100.0,
+      "validation_time_boundaries": [
+        1782180300.0,
+        1783312500.0,
+        1784263800.0,
+        1785215100.0
+      ],
+      "candidate_test_cutoffs": {
+        "15": 1785215100.0,
+        "30": 1785215100.0
+      },
+      "source_sha256": "6b31aa8ac6def8e705702589c31d3b6b4b0ba7eb075b261bb468cd9ce2f153fd",
+      "working_eligible": false,
+      "formal_eligible": false,
+      "net_economic_proof": false,
+      "evidence_label": "HISTORICAL_CHRONOLOGICAL_WORKING",
+      "candidate_count": 2,
+      "selection": "earlier_three_validation_blocks_then_untouched_final_20pct",
+      "GEX_status": "NOT_SUPPORTED_OR_ARCHIVED_FEATURE_CONTRACT_MISSING",
+      "model_sha256": "9d4d26d546adafa3a103ae918654df07dfc583acc6000f4ae44d2ed8ac9c260d"
+    },
+    "EURUSD": {
+      "instrument": "EURUSD",
+      "horizon_minutes": 15,
+      "status": "WORKING_SUPPORTED",
+      "feature_contract": "math-completed-5m-price-v1",
+      "features": [
+        "ret5",
+        "ret15",
+        "ret30",
+        "ret60",
+        "absret5",
+        "absret15",
+        "absret30",
+        "rv15",
+        "rv30",
+        "rv60",
+        "range_position",
+        "tod_sin",
+        "tod_cos"
+      ],
+      "target_contract": {
+        "direction": "UP_GIVEN_ABS_RETURN_GT_2BP",
+        "movement": "ABS_RETURN_GT_2BP",
+        "threshold_log_return": 0.0002
+      },
+      "diagnostics": {
+        "direction": {
+          "gain_mbit": -0.79722,
+          "block_gains_mbit": [
+            -20.08984670587292,
+            16.71445726218987,
+            10.945255344393653
+          ],
+          "positive_blocks": 2,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            -1.4421165406226861,
+            -12.268007295667385,
+            0.8413361308744622
+          ],
+          "working_supported": false,
+          "test_n": 497,
+          "test_brier": 0.2509940910102995,
+          "target_semantics": "UP_GIVEN_ABS_RETURN_GT_2BP"
+        },
+        "movement": {
+          "gain_mbit": 85.61578,
+          "block_gains_mbit": [
+            90.01605502561645,
+            70.93761019411586,
+            95.89367222367355
+          ],
+          "positive_blocks": 3,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            32.796381397585144,
+            36.54510293258098,
+            37.94139403002299
+          ],
+          "working_supported": true,
+          "test_n": 1110,
+          "test_brier": 0.22009361209962156,
+          "target_semantics": "ABS_RETURN_GT_2BP"
+        }
+      },
+      "training_cutoff": 1786595700.0,
+      "training_n": 5550,
+      "training_days": 60,
+      "test_cutoff": 1785231300.0,
+      "validation_time_boundaries": [
+        1782319800.0,
+        1783434000.0,
+        1784548200.0,
+        1785231300.0
+      ],
+      "candidate_test_cutoffs": {
+        "15": 1785231300.0,
+        "30": 1785231300.0,
+        "60": 1785231300.0
+      },
+      "source_sha256": "320ef72564c4c581c77a1f4197e9d705c0dad6fe1b7620f22a8e0b9acb971e64",
+      "working_eligible": true,
+      "formal_eligible": false,
+      "net_economic_proof": false,
+      "evidence_label": "HISTORICAL_CHRONOLOGICAL_WORKING",
+      "candidate_count": 3,
+      "selection": "earlier_three_validation_blocks_then_untouched_final_20pct",
+      "GEX_status": "NOT_SUPPORTED_OR_ARCHIVED_FEATURE_CONTRACT_MISSING",
+      "model_sha256": "75d9169682427f4cf755ed3576f29d47dbcd9377819cbb52473797a4bf339514"
+    },
+    "USDCAD": {
+      "instrument": "USDCAD",
+      "horizon_minutes": 15,
+      "status": "WORKING_SUPPORTED",
+      "feature_contract": "math-completed-5m-price-v1",
+      "features": [
+        "ret5",
+        "ret15",
+        "ret30",
+        "ret60",
+        "absret5",
+        "absret15",
+        "absret30",
+        "rv15",
+        "rv30",
+        "rv60",
+        "range_position",
+        "tod_sin",
+        "tod_cos"
+      ],
+      "target_contract": {
+        "direction": "UP_GIVEN_ABS_RETURN_GT_2BP",
+        "movement": "ABS_RETURN_GT_2BP",
+        "threshold_log_return": 0.0002
+      },
+      "diagnostics": {
+        "direction": {
+          "gain_mbit": 40.20893,
+          "block_gains_mbit": [
+            -15.009347849318646,
+            71.8490812822838,
+            75.8831642690631
+          ],
+          "positive_blocks": 2,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            34.71011038156893,
+            20.519456510474317,
+            43.301868502474505
+          ],
+          "working_supported": true,
+          "test_n": 436,
+          "test_brier": 0.23758815705071273,
+          "target_semantics": "UP_GIVEN_ABS_RETURN_GT_2BP"
+        },
+        "movement": {
+          "gain_mbit": 49.07666,
+          "block_gains_mbit": [
+            48.63210767738777,
+            40.00749205785667,
+            58.59158583633854
+          ],
+          "positive_blocks": 3,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            35.51003060996111,
+            29.30837178454732,
+            30.485122759609787
+          ],
+          "working_supported": true,
+          "test_n": 1108,
+          "test_brier": 0.22340746297824482,
+          "target_semantics": "ABS_RETURN_GT_2BP"
+        }
+      },
+      "training_cutoff": 1786595700.0,
+      "training_n": 5538,
+      "training_days": 60,
+      "test_cutoff": 1785231300.0,
+      "validation_time_boundaries": [
+        1782319800.0,
+        1783434000.0,
+        1784549100.0,
+        1785231300.0
+      ],
+      "candidate_test_cutoffs": {
+        "15": 1785231300.0,
+        "30": 1785231300.0,
+        "60": 1785231300.0
+      },
+      "source_sha256": "9886420fbf98fd50fa67ffdaa03c2d04fd4bd3cb5461b61ee6b9f8142a41c402",
+      "working_eligible": true,
+      "formal_eligible": false,
+      "net_economic_proof": false,
+      "evidence_label": "HISTORICAL_CHRONOLOGICAL_WORKING",
+      "candidate_count": 3,
+      "selection": "earlier_three_validation_blocks_then_untouched_final_20pct",
+      "GEX_status": "NOT_SUPPORTED_OR_ARCHIVED_FEATURE_CONTRACT_MISSING",
+      "model_sha256": "9c0ae3dd2c941aaaeff8d8c493a81f133ecdd4ad6abaf271cdfae9e25a518ed4"
+    },
+    "XAU": {
+      "instrument": "XAU",
+      "horizon_minutes": 15,
+      "status": "WORKING_SUPPORTED",
+      "feature_contract": "math-completed-5m-price-v1",
+      "features": [
+        "ret5",
+        "ret15",
+        "ret30",
+        "ret60",
+        "absret5",
+        "absret15",
+        "absret30",
+        "rv15",
+        "rv30",
+        "rv60",
+        "range_position",
+        "tod_sin",
+        "tod_cos"
+      ],
+      "target_contract": {
+        "direction": "UP_GIVEN_ABS_RETURN_GT_2BP",
+        "movement": "ABS_RETURN_GT_2BP",
+        "threshold_log_return": 0.0002
+      },
+      "diagnostics": {
+        "direction": {
+          "gain_mbit": -15.1111,
+          "block_gains_mbit": [
+            -13.390998031478736,
+            -17.978855386163158,
+            -13.992125878281136
+          ],
+          "positive_blocks": 0,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            -3.017328360254189,
+            -5.477427961040219,
+            6.530045704644216
+          ],
+          "working_supported": false,
+          "test_n": 716,
+          "test_brier": 0.2561394852060484,
+          "target_semantics": "UP_GIVEN_ABS_RETURN_GT_2BP"
+        },
+        "movement": {
+          "gain_mbit": 8.34065,
+          "block_gains_mbit": [
+            16.071072953665716,
+            17.941377817525094,
+            -9.01820281417561
+          ],
+          "positive_blocks": 2,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            19.541084544287266,
+            32.36809652286137,
+            -9.282433719577268
+          ],
+          "working_supported": true,
+          "test_n": 838,
+          "test_brier": 0.12276288174469181,
+          "target_semantics": "ABS_RETURN_GT_2BP"
+        }
+      },
+      "training_cutoff": 1786506600.0,
+      "training_n": 4190,
+      "training_days": 61,
+      "test_cutoff": 1785318600.0,
+      "validation_time_boundaries": [
+        1782886800.0,
+        1783924200.0,
+        1784723700.0,
+        1785318600.0
+      ],
+      "candidate_test_cutoffs": {
+        "15": 1785318600.0,
+        "30": 1785318600.0,
+        "60": 1785318600.0
+      },
+      "source_sha256": "0704515c999acc01c38df994dd29539cbdc5ac1a6633cf285f25851d8c2e8687",
+      "working_eligible": true,
+      "formal_eligible": false,
+      "net_economic_proof": false,
+      "evidence_label": "HISTORICAL_CHRONOLOGICAL_WORKING",
+      "candidate_count": 3,
+      "selection": "earlier_three_validation_blocks_then_untouched_final_20pct",
+      "GEX_status": "NOT_SUPPORTED_OR_ARCHIVED_FEATURE_CONTRACT_MISSING",
+      "model_sha256": "c1a6935203cd89caa5a60d44f06f8154e4c3c80e72261faa0a160c382c6a99cd"
+    },
+    "XAG": {
+      "instrument": "XAG",
+      "horizon_minutes": 60,
+      "status": "WORKING_SUPPORTED",
+      "feature_contract": "math-completed-5m-price-v1",
+      "features": [
+        "ret5",
+        "ret15",
+        "ret30",
+        "ret60",
+        "absret5",
+        "absret15",
+        "absret30",
+        "rv15",
+        "rv30",
+        "rv60",
+        "range_position",
+        "tod_sin",
+        "tod_cos"
+      ],
+      "target_contract": {
+        "direction": "UP_GIVEN_ABS_RETURN_GT_2BP",
+        "movement": "ABS_RETURN_GT_2BP",
+        "threshold_log_return": 0.0002
+      },
+      "diagnostics": {
+        "direction": {
+          "gain_mbit": -49.11844,
+          "block_gains_mbit": [
+            -29.496767630558356,
+            -47.0706366712908,
+            -71.19687012178649
+          ],
+          "positive_blocks": 0,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            14.384966881019263,
+            -2.1037913691089036,
+            23.528595252612348
+          ],
+          "working_supported": false,
+          "test_n": 193,
+          "test_brier": 0.27214438110975325,
+          "target_semantics": "UP_GIVEN_ABS_RETURN_GT_2BP"
+        },
+        "movement": {
+          "gain_mbit": 1.27473,
+          "block_gains_mbit": [
+            12.577069376602815,
+            11.842463353955848,
+            -20.92670478680044
+          ],
+          "positive_blocks": 2,
+          "blocks": 3,
+          "validation_gains_mbit": [
+            6.192985796345758,
+            12.76577288832505,
+            -14.26352324745262
+          ],
+          "working_supported": true,
+          "test_n": 200,
+          "test_brier": 0.03367513973992026,
+          "target_semantics": "ABS_RETURN_GT_2BP"
+        }
+      },
+      "training_cutoff": 1786503900.0,
+      "training_n": 1003,
+      "training_days": 60,
+      "test_cutoff": 1785324300.0,
+      "validation_time_boundaries": [
+        1782890400.0,
+        1783932300.0,
+        1784727300.0,
+        1785324300.0
+      ],
+      "candidate_test_cutoffs": {
+        "15": 1785324300.0,
+        "30": 1785324300.0,
+        "60": 1785324300.0
+      },
+      "source_sha256": "5e239a34668dce676cc787d2177d056eaba8bc74634e60563b9381371cf86a46",
+      "working_eligible": true,
+      "formal_eligible": false,
+      "net_economic_proof": false,
+      "evidence_label": "HISTORICAL_CHRONOLOGICAL_WORKING",
+      "candidate_count": 3,
+      "selection": "earlier_three_validation_blocks_then_untouched_final_20pct",
+      "GEX_status": "NOT_SUPPORTED_OR_ARCHIVED_FEATURE_CONTRACT_MISSING",
+      "model_sha256": "5580f7b513a58114b8ea262785b280f508deca7a013b828d69cda90a357043b9"
+    }
+  },
+  "production_authority": false,
+  "automatic_execution": false,
+  "user_policy": "PERSONAL_WORKING_EVIDENCE_BOUNDED_SOFT_RANKING",
+  "source_errors": {},
+  "archived_fx_reproduction": {
+    "archive_sha256": "45fcb99fff145ae8d3b201f780c03d3a91255fe1e4bb61e78845ab1f7f8aa74d",
+    "full_archive_sha256": "5745250ed52981d72ce186973995581af8fcd929157ba3660de69f18149ccd84",
+    "n": 167,
+    "veto_n": 8,
+    "delta_gross_bp_per_base": 0.07244231955423992,
+    "theta": 1.38343,
+    "movement_threshold": 0.38,
+    "gex_derivative_path": "g1s_evidence_v3.gex.dynamics.force_score.slope",
+    "all_golden_rows_reproduced": true,
+    "prospective_profit_proof": false,
+    "authority": "ARCHIVE_REPRODUCTION_DIAGNOSTIC_ONLY",
+    "indices_metals_gex_authority": false,
+    "price_decoder_coefficients_in_results_archive": false
+  },
+  "sources": [
+    {
+      "instrument": "NAS100",
+      "source_id": "g1s-hist-src-0ddaeadd1d205a204d02838ab55f",
+      "cached_sha256": "efbe04a936b6e6b3ffb5206420f8072c9a2d8fdbb48f50f3cc5ab97af08f0997",
+      "recent_completed_5m_n": 77,
+      "source_kind": "historical_provider_bars_plus_direct_retained_only",
+      "recent_kind_counts": {
+        "derived": 789,
+        "direct": 386
+      },
+      "recent_provider_counts": {
+        "yahoo_1m_offset_adjusted": 789,
+        "yahoo_1m_direct": 386
+      },
+      "excluded_derived_minute_n": 789,
+      "cached_ticker": "^NDX",
+      "cached_provider": "Yahoo Finance via yfinance",
+      "cached_interval": "5m",
+      "cached_semantics": {
+        "bar_timestamp_semantics": "provider timestamp is interval start; T0 is bar_start+300s",
+        "completed_bars_only_for_features": true,
+        "exact_live_broker_series": false,
+        "historical_price_is_yahoo_series": true,
+        "interval": "5m",
+        "option_history_used": false,
+        "provider": "Yahoo Finance via yfinance",
+        "requested_period": "60d",
+        "returns_not_absolute_price_used_by_model": true,
+        "synthetic_option_history": false,
+        "ticker": "^NDX"
+      },
+      "not_broker_execution_bars": true,
+      "bar_count": 4757
+    },
+    {
+      "instrument": "SP500",
+      "source_id": "g1s-hist-src-d59132b04928e8dc0445f368dcc0",
+      "cached_sha256": "1d1a543a845068022436d0ddbf2edd2736d9bba9b0f1f176f299a7f706fa41c3",
+      "recent_completed_5m_n": 77,
+      "source_kind": "historical_provider_bars_plus_direct_retained_only",
+      "recent_kind_counts": {
+        "derived": 772,
+        "direct": 388
+      },
+      "recent_provider_counts": {
+        "yahoo_1m_offset_adjusted": 772,
+        "yahoo_1m_direct": 388
+      },
+      "excluded_derived_minute_n": 772,
+      "cached_ticker": "^GSPC",
+      "cached_provider": "Yahoo Finance via yfinance",
+      "cached_interval": "5m",
+      "cached_semantics": {
+        "bar_timestamp_semantics": "provider timestamp is interval start; T0 is bar_start+300s",
+        "completed_bars_only_for_features": true,
+        "exact_live_broker_series": false,
+        "historical_price_is_yahoo_series": true,
+        "interval": "5m",
+        "option_history_used": false,
+        "provider": "Yahoo Finance via yfinance",
+        "requested_period": "60d",
+        "returns_not_absolute_price_used_by_model": true,
+        "synthetic_option_history": false,
+        "ticker": "^GSPC"
+      },
+      "not_broker_execution_bars": true,
+      "bar_count": 4757
+    },
+    {
+      "instrument": "US30",
+      "source_id": "g1s-hist-src-0e16ab005e08ad51961198307f30",
+      "cached_sha256": "0e48b2edb87b9ac038ae7f86003f19e8b979ba99ba940f79908acdcfb3cee17e",
+      "recent_completed_5m_n": 74,
+      "source_kind": "historical_provider_bars_plus_direct_retained_only",
+      "recent_kind_counts": {
+        "derived": 778,
+        "direct": 373
+      },
+      "recent_provider_counts": {
+        "yahoo_1m_offset_adjusted": 778,
+        "yahoo_1m_direct": 373
+      },
+      "excluded_derived_minute_n": 778,
+      "cached_ticker": "^DJI",
+      "cached_provider": "Yahoo Finance via yfinance",
+      "cached_interval": "5m",
+      "cached_semantics": {
+        "bar_timestamp_semantics": "provider timestamp is interval start; T0 is bar_start+300s",
+        "completed_bars_only_for_features": true,
+        "exact_live_broker_series": false,
+        "historical_price_is_yahoo_series": true,
+        "interval": "5m",
+        "option_history_used": false,
+        "provider": "Yahoo Finance via yfinance",
+        "requested_period": "60d",
+        "returns_not_absolute_price_used_by_model": true,
+        "synthetic_option_history": false,
+        "ticker": "^DJI"
+      },
+      "not_broker_execution_bars": true,
+      "bar_count": 4754
+    },
+    {
+      "instrument": "GER40",
+      "source_id": "g1s-hist-src-d0cf68108c2cb926187d49393537",
+      "cached_sha256": "58bdcc6b852dca477a915db35f2266966bb37706b5c43ea84785392a312c3c1d",
+      "recent_completed_5m_n": 141,
+      "source_kind": "historical_provider_bars_plus_direct_retained_only",
+      "recent_kind_counts": {
+        "direct": 720,
+        "derived": 1110
+      },
+      "recent_provider_counts": {
+        "yahoo_1m_direct": 720,
+        "yahoo_1m_offset_adjusted": 1110
+      },
+      "excluded_derived_minute_n": 1110,
+      "cached_ticker": "^GDAXI",
+      "cached_provider": "Yahoo Finance via yfinance",
+      "cached_interval": "5m",
+      "cached_semantics": {
+        "bar_timestamp_semantics": "provider timestamp is interval start; T0 is bar_start+300s",
+        "completed_bars_only_for_features": true,
+        "exact_live_broker_series": false,
+        "historical_price_is_yahoo_series": true,
+        "interval": "5m",
+        "option_history_used": false,
+        "provider": "Yahoo Finance via yfinance",
+        "requested_period": "60d",
+        "returns_not_absolute_price_used_by_model": true,
+        "synthetic_option_history": false,
+        "ticker": "^GDAXI"
+      },
+      "not_broker_execution_bars": true,
+      "bar_count": 6260
+    },
+    {
+      "instrument": "UK100",
+      "source_id": "g1s-hist-src-4831c540adffd45c2c3bf48e9881",
+      "cached_sha256": "1cb2602b9c6f769d2a32029b68262480021b22250573db1bc101d19ad94acf41",
+      "recent_completed_5m_n": 142,
+      "source_kind": "historical_provider_bars_plus_direct_retained_only",
+      "recent_kind_counts": {
+        "derived": 1157,
+        "direct": 712
+      },
+      "recent_provider_counts": {
+        "yahoo_1m_offset_adjusted": 1157,
+        "yahoo_1m_direct": 712
+      },
+      "excluded_derived_minute_n": 1157,
+      "cached_ticker": "^FTSE",
+      "cached_provider": "Yahoo Finance via yfinance",
+      "cached_interval": "5m",
+      "cached_semantics": {
+        "bar_timestamp_semantics": "provider timestamp is interval start; T0 is bar_start+300s",
+        "completed_bars_only_for_features": true,
+        "exact_live_broker_series": false,
+        "historical_price_is_yahoo_series": true,
+        "interval": "5m",
+        "option_history_used": false,
+        "provider": "Yahoo Finance via yfinance",
+        "requested_period": "60d",
+        "returns_not_absolute_price_used_by_model": true,
+        "synthetic_option_history": false,
+        "ticker": "^FTSE"
+      },
+      "not_broker_execution_bars": true,
+      "bar_count": 6262
+    },
+    {
+      "instrument": "JPY100",
+      "source_id": "g1s-hist-src-572c783ce33ac122dbab9e96b8f2",
+      "cached_sha256": "a0436283e432198937e2ba7935a6574501e4ef76acb467a6a345c7b7c86581d1",
+      "recent_completed_5m_n": 113,
+      "source_kind": "historical_provider_bars_plus_direct_retained_only",
+      "recent_kind_counts": {
+        "derived": 545,
+        "direct": 569
+      },
+      "recent_provider_counts": {
+        "yahoo_1m_offset_adjusted": 545,
+        "yahoo_1m_direct": 569
+      },
+      "excluded_derived_minute_n": 545,
+      "cached_ticker": "^N225",
+      "cached_provider": "Yahoo Finance via yfinance",
+      "cached_interval": "5m",
+      "cached_semantics": {
+        "bar_timestamp_semantics": "provider timestamp is interval start; T0 is bar_start+300s",
+        "completed_bars_only_for_features": true,
+        "exact_live_broker_series": false,
+        "historical_price_is_yahoo_series": true,
+        "interval": "5m",
+        "option_history_used": false,
+        "provider": "Yahoo Finance via yfinance",
+        "requested_period": "60d",
+        "returns_not_absolute_price_used_by_model": true,
+        "synthetic_option_history": false,
+        "ticker": "^N225"
+      },
+      "not_broker_execution_bars": true,
+      "bar_count": 4168
+    },
+    {
+      "instrument": "EURUSD",
+      "source_id": "g1s-hist-src-9ae8bc44b6e61dde1784f7752303",
+      "cached_sha256": "320ef72564c4c581c77a1f4197e9d705c0dad6fe1b7620f22a8e0b9acb971e64",
+      "recent_completed_5m_n": 0,
+      "source_kind": "historical_provider_bars_plus_direct_retained_only",
+      "recent_kind_counts": {
+        "derived": 4978
+      },
+      "recent_provider_counts": {
+        "yahoo_1m_offset_adjusted": 4978
+      },
+      "excluded_derived_minute_n": 4978,
+      "cached_ticker": "EURUSD=X",
+      "cached_provider": "Yahoo Finance via yfinance",
+      "cached_interval": "5m",
+      "cached_semantics": {
+        "bar_timestamp_semantics": "provider timestamp is interval start; T0 is bar_start+300s",
+        "completed_bars_only_for_features": true,
+        "exact_live_broker_series": false,
+        "historical_price_is_yahoo_series": true,
+        "interval": "5m",
+        "option_history_used": false,
+        "provider": "Yahoo Finance via yfinance",
+        "requested_period": "60d",
+        "returns_not_absolute_price_used_by_model": true,
+        "synthetic_option_history": false,
+        "ticker": "EURUSD=X"
+      },
+      "not_broker_execution_bars": true,
+      "bar_count": 16844
+    },
+    {
+      "instrument": "USDCAD",
+      "source_id": "g1s-hist-src-3e2c8a3cc3b2a74f9d60d7c905eb",
+      "cached_sha256": "9886420fbf98fd50fa67ffdaa03c2d04fd4bd3cb5461b61ee6b9f8142a41c402",
+      "recent_completed_5m_n": 0,
+      "source_kind": "historical_provider_bars_plus_direct_retained_only",
+      "recent_kind_counts": {
+        "derived": 5007
+      },
+      "recent_provider_counts": {
+        "yahoo_1m_offset_adjusted": 5007
+      },
+      "excluded_derived_minute_n": 5007,
+      "cached_ticker": "CAD=X",
+      "cached_provider": "Yahoo Finance via yfinance",
+      "cached_interval": "5m",
+      "cached_semantics": {
+        "bar_timestamp_semantics": "provider timestamp is interval start; T0 is bar_start+300s",
+        "completed_bars_only_for_features": true,
+        "exact_live_broker_series": false,
+        "historical_price_is_yahoo_series": true,
+        "interval": "5m",
+        "option_history_used": false,
+        "provider": "Yahoo Finance via yfinance",
+        "requested_period": "60d",
+        "returns_not_absolute_price_used_by_model": true,
+        "synthetic_option_history": false,
+        "ticker": "CAD=X"
+      },
+      "not_broker_execution_bars": true,
+      "bar_count": 16796
+    },
+    {
+      "instrument": "XAU",
+      "source_id": "g1s-hist-src-edac43e84909640081c84662144a",
+      "cached_sha256": "0704515c999acc01c38df994dd29539cbdc5ac1a6633cf285f25851d8c2e8687",
+      "recent_completed_5m_n": 0,
+      "source_kind": "historical_provider_bars_plus_direct_retained_only",
+      "recent_kind_counts": {
+        "derived": 4983
+      },
+      "recent_provider_counts": {
+        "yahoo_1m_offset_adjusted": 4983
+      },
+      "excluded_derived_minute_n": 4983,
+      "cached_ticker": "GC=F",
+      "cached_provider": "Yahoo Finance via yfinance",
+      "cached_interval": "5m",
+      "cached_semantics": {
+        "bar_timestamp_semantics": "provider timestamp is interval start; T0 is bar_start+300s",
+        "completed_bars_only_for_features": true,
+        "exact_live_broker_series": false,
+        "historical_price_is_yahoo_series": true,
+        "interval": "5m",
+        "option_history_used": false,
+        "provider": "Yahoo Finance via yfinance",
+        "requested_period": "60d",
+        "returns_not_absolute_price_used_by_model": true,
+        "synthetic_option_history": false,
+        "ticker": "GC=F"
+      },
+      "not_broker_execution_bars": true,
+      "bar_count": 13376
+    },
+    {
+      "instrument": "XAG",
+      "source_id": "g1s-hist-src-5be08cc6ff89176dcde1eada3f58",
+      "cached_sha256": "5e239a34668dce676cc787d2177d056eaba8bc74634e60563b9381371cf86a46",
+      "recent_completed_5m_n": 0,
+      "source_kind": "historical_provider_bars_plus_direct_retained_only",
+      "recent_kind_counts": {
+        "derived": 4906
+      },
+      "recent_provider_counts": {
+        "yahoo_1m_offset_adjusted": 4906
+      },
+      "excluded_derived_minute_n": 4906,
+      "cached_ticker": "SI=F",
+      "cached_provider": "Yahoo Finance via yfinance",
+      "cached_interval": "5m",
+      "cached_semantics": {
+        "bar_timestamp_semantics": "provider timestamp is interval start; T0 is bar_start+300s",
+        "completed_bars_only_for_features": true,
+        "exact_live_broker_series": false,
+        "historical_price_is_yahoo_series": true,
+        "interval": "5m",
+        "option_history_used": false,
+        "provider": "Yahoo Finance via yfinance",
+        "requested_period": "60d",
+        "returns_not_absolute_price_used_by_model": true,
+        "synthetic_option_history": false,
+        "ticker": "SI=F"
+      },
+      "not_broker_execution_bars": true,
+      "bar_count": 13369
+    }
+  ],
+  "verification_run": {
+    "kind": "GitHub Actions actual cached/direct market data",
+    "run_id": 36875549022,
+    "commit_sha": "0e59a80c1ad265d33a7733eb73d28a69d6f42e5d",
+    "note": "Historical verification snapshot; current runtime artifact is refreshed separately."
+  }
+}

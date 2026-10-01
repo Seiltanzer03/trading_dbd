@@ -318,11 +318,18 @@ def _risk_lines(snapshot: dict) -> list[str]:
     raw_expected = _number((policies.get(raw) or {}).get("expected_final_r"))
     if indifference is not None and best_expected is not None and raw_expected is not None:
         gap = max(0.0, best_expected - raw_expected)
-        lines.append(
+        soft = rule.get('combined_edge_soft_weight') or {}
+        if soft.get('applied'):
+            lines.append(
+                f"Лучший исходный Expected {_r(best_expected)}; Expected {raw} {_r(raw_expected)}; разрыв {_r(gap)}. "
+                f"Выбор использует мягкое ранжирование edge с зоной безразличия {_r(indifference)}. "
+                "Поправка ранжирования не является дополнительным Expected или прибылью.")
+        else:
+            lines.append(
             f"Зона безразличия Expected: {_r(indifference)}. Лучший Expected {_r(best_expected)}; "
             f"{raw} отстаёт на {_r(gap)}. При разрыве не больше зоны выбирается "
             "наименее вмешивающаяся допустимая политика."
-        )
+            )
 
     integrity = snapshot.get("report_integrity") or {}
     tradeoff = manager.get("risk_tradeoff") or integrity.get("risk_tradeoff") or {}; delta = _number(tradeoff.get("expected_delta_vs_hold_r"))
@@ -580,6 +587,13 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
         if start + 1 >= len(lines) or lines[start + 1] != label: lines.insert(start + 1, label)
     if not any(line.startswith("**EDE CAUSAL MARKET CONTEXT**") for line in lines): lines.extend(["", "**EDE CAUSAL MARKET CONTEXT** —", *_ede_context_lines(snapshot)])
     if not any(line.startswith("**FULL METRIC AUDIT**") for line in lines): lines.extend(["", "**FULL METRIC AUDIT** —", *_metric_audit_lines(snapshot)])
+    from .mathematical_edge import render_math_edge
+    math_section = render_math_edge(manager.get('mathematical_edge') or {},
+        manager.get('combined_edge_soft_weight'),
+        (manager.get('selection_rule') or {}).get('combined_edge_soft_weight'))
+    _replace_section(lines, '**МАТЕМАТИЧЕСКИЙ EDGE**', math_section.strip().splitlines()[1:])
+    if not any(line.startswith('**МАТЕМАТИЧЕСКИЙ EDGE**') for line in lines):
+        lines.extend(['', *math_section.strip().splitlines()])
     return "\n".join(lines).strip()
 
 

@@ -244,7 +244,25 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
             metrics, profile, r0, cvar_floor=cvar_floor,
             policy_fractions=policy_fractions,
         )
+        # A new working Price opinion cannot buy an arbitrarily large expected
+        # loss. Keep its winner within the existing .03R economic tolerance.
+        if audit.get('applied') and float(profile.get('mathematical_component_weight') or 0.) > 0:
+            names = [row['policy'] for row in audit['rows']]
+            best_economic = max(float(metrics[n]['expected_final_r']) for n in names)
+            near = [n for n in names if best_economic - float(metrics[n]['expected_final_r']) <= .03 + 1e-12]
+            best_rank = max(float(adjusted[n]['expected_final_r']) for n in near)
+            for name in set(names)-set(near):
+                adjusted[name]['expected_final_r'] = min(adjusted[name]['expected_final_r'], best_rank-.030001)
+            audit['mathematical_economic_guard'] = {'max_expected_sacrifice_r': .03, 'eligible': near,
+                                                    'basis': 'original_net_expected_before_soft_ranking'}
+            audit['weighted_value_semantics'] = 'RANKING_SCORE_NOT_EXPECTED_RETURN'
         choice, rule = original_raw(adjusted, r0, cvar_floor=cvar_floor)
+        without_math = profile.get('pre_math_profile')
+        choice_without_math = policy_without_edge
+        if without_math and without_math.get('available'):
+            legacy_adjusted, _ = adjust_metrics_for_edge(metrics, without_math, r0,
+                cvar_floor=cvar_floor, policy_fractions=policy_fractions)
+            choice_without_math, _ = original_raw(legacy_adjusted, r0, cvar_floor=cvar_floor)
         audit = dict(audit or {})
         audit.update({
             "raw_policy_without_edge": policy_without_edge,
@@ -252,8 +270,14 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
             "raw_policy_changed": choice != policy_without_edge,
             "raw_policy_transition": f"{policy_without_edge}->{choice}",
             "counterfactual_scope": "same_frozen_metrics_before_soft_edge_blend",
+            "raw_policy_without_mathematical_edge": choice_without_math,
+            "mathematical_edge_changed_raw_policy": choice != choice_without_math,
         })
         rule = dict(rule or {})
+        if audit.get('applied'):
+            rule['best_soft_ranking_value_r'] = rule.get('best_expected_r')
+            eligible_names = rule.get('eligible') or []
+            rule['best_expected_r'] = max(float(metrics[n]['expected_final_r']) for n in eligible_names)
         rule["combined_edge_soft_weight"] = audit
         if float(profile.get("exploratory_component_weight") or 0.0) > 0.0:
             rule["llm_edge_exploratory_weight"] = {
@@ -288,6 +312,9 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
             engine, snapshot, integration)
         profile = combine_weight_profiles(
             active_profile, exploratory_profile, absolute_cap=MAX_EDGE_WEIGHT)
+        from .mathematical_edge import runtime_profile, combine_math_profile
+        mathematical = runtime_profile(engine, tick, trade)
+        profile = combine_math_profile(profile, mathematical)
         token = _PROFILE_CTX.set(profile)
         try:
             result = original_analyze(
@@ -298,6 +325,7 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
         finally:
             _PROFILE_CTX.reset(token)
 
+        result["mathematical_edge"] = mathematical
         result["active_edge_provisional_weight"] = {
             **active_profile,
             "production_role": "BOUNDED_SOFT_POLICY_RANKING",
@@ -327,7 +355,7 @@ def install_active_edge_policy_weight(policy_module: ModuleType) -> None:
                     "inside hard-risk eligible set"
                 )
             phase["production_recommendation_source"] = (
-                "authoritative policy path + bounded active/rolling-edge soft ranking"
+                "authoritative policy path + bounded active/rolling/mathematical edge soft ranking"
             )
         return result
 

@@ -38,6 +38,22 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
     def cached(name: str):
         return runtime.materialized_evidence_report(name)
 
+    def mathematical_edge_status():
+        import time
+        from .mathematical_edge import CONTRACT, load_artifact
+        data_dir = app.state.engine.settings.data_dir
+        report = load_artifact(Path(data_dir) / 'research' / 'mathematical_edge_latest.json', time.time())
+        if report is None:
+            return {'contract_version': CONTRACT, 'state': 'CURRENT_WORKING_MODEL_UNAVAILABLE',
+                    'production_authority': False, 'automatic_execution': False}
+        # Small frozen artifact only: no SQLite, network or fitting in HTTP.
+        return {**report, 'state': 'WORKING_MODELS_LOADED', 'instruments': {
+            code: {k: v for k, v in model.items() if k != 'heads'}
+            for code, model in report['instruments'].items()}}
+
+    app.add_api_route('/api/research/mathematical-edge', mathematical_edge_status,
+                      methods=['GET'], name='mathematical_edge_status')
+
     def preencoded(name: str):
         async def endpoint():
             # Evidence reports can contain many frozen model/cohort/reliability

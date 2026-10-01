@@ -291,7 +291,7 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
         "Диагностический счёт: Expected + 0.35 × CVaR10; бонус +0.015R "
         "публикуется для диагностики и не определяет победителя. "
         "Подтверждённый overlay получает приоритет только после gate.\n"
-        f"Структурный Active Edge и исторические LLM-гипотезы: мягкий общий вес "
+        f"Active Edge, исторические LLM-гипотезы и mathematical edge: мягкий общий вес "
         f"{f'{edge_weight:.1%}' if edge_weight is not None else 'UNAVAILABLE'} "
         f"(лимит 40%); исследовательский LLM-компонент "
         f"{f'{exploratory_weight:.1%}' if exploratory_weight is not None else 'UNAVAILABLE'} "
