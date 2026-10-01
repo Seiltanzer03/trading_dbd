@@ -46,7 +46,7 @@ jobs:
           cache: pip
       - run: pip install -q -e '.[dev]' paramiko
       - name: Verify bounded comparison contracts
-        run: pytest -q tests/test_unified_edge_comparison.py
+        run: python -m pytest -q tests/test_unified_edge_comparison.py
       - name: Export frozen reviews and separate actual paths read-only
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}

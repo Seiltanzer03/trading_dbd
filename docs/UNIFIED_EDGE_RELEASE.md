@@ -60,7 +60,6 @@ the unchanged sparse-backup WAL quiescence test. The identical failure reproduce
 on base main `c435974dc034d9faa7e0eaf3deace509648ae13a`; that storage code is not
 modified here. All frontend module checks and Node smoke commands passed.
 Operational compaction, mathematical-report compatibility and regime changes
-also passed their targeted regressions. Real WebKit, runner comparisons, deployment and production
-acceptance remain pending until the branch can be pushed: automatic approval
-review rejected GitHub publication twice, including the retry with retrieved
-prior authorization. No alternate publication route is used.
+also passed their targeted regressions. GitHub release acceptance runs separately:
+full Python/frontend/WebKit CI and runner comparisons must pass on the final PR
+revision before merge, followed by automatic deployment and production acceptance.
