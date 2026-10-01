@@ -190,6 +190,8 @@ def _capture_report_integrity(snapshot: dict) -> dict:
     report = {
         "decision_reliability": decision_reliability(snapshot),
         "execution_cost_model": _report_scalar_map(manager.get("execution_cost_model") or {}),
+        "mathematical_edge": manager.get("mathematical_edge") or {},
+        "combined_edge_soft_weight": manager.get("combined_edge_soft_weight") or {},
         "contract_version": _REPORT_INTEGRITY_VERSION,
         "role": "PRESENTATION_FACT_PRESERVATION_ONLY",
         "decision_authority": False,
@@ -250,7 +252,7 @@ def _restore_report_integrity_views(snapshot: dict, report: dict) -> None:
         "decision_reliability", "execution_cost_model",
         "scenario_geometry", "raw_optimizer_stability", "stability",
         "risk_tradeoff", "monte_carlo_validation", "active_edge_provisional_weight",
-        "llm_edge_exploratory_weight",
+        "llm_edge_exploratory_weight", "mathematical_edge", "combined_edge_soft_weight",
     ):
         preserved = report.get(key) or {}
         if not preserved:

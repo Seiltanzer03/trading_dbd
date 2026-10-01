@@ -15,6 +15,7 @@ import httpx
 from . import ai_verdict
 from . import ai_verdict_v19 as _v19
 from . import ai_provider_explanation as _provider
+from .mathematical_edge import render_math_edge
 from .llm_decision_shadow import (
     _disagreement_category,
     _extract_json_object,
@@ -291,7 +292,7 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
         "Диагностический счёт: Expected + 0.35 × CVaR10; бонус +0.015R "
         "публикуется для диагностики и не определяет победителя. "
         "Подтверждённый overlay получает приоритет только после gate.\n"
-        f"Структурный Active Edge и исторические LLM-гипотезы: мягкий общий вес "
+        f"Active Edge, исторические LLM-гипотезы и mathematical edge: мягкий общий вес "
         f"{f'{edge_weight:.1%}' if edge_weight is not None else 'UNAVAILABLE'} "
         f"(лимит 40%); исследовательский LLM-компонент "
         f"{f'{exploratory_weight:.1%}' if exploratory_weight is not None else 'UNAVAILABLE'} "
@@ -306,6 +307,8 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
         f"LLM-разбор текущего снимка: {llm}; {llm_role}. Это отдельный голос "
         "от исторических LLM-гипотез. Самооценка LLM не является "
         "калиброванной вероятностью и не отменяет hard CVaR."
+        + render_math_edge(
+            manager.get('mathematical_edge') or {}, combined_edge, rule.get('combined_edge_soft_weight'))
     )
 
 

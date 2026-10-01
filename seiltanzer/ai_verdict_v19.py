@@ -318,11 +318,18 @@ def _risk_lines(snapshot: dict) -> list[str]:
     raw_expected = _number((policies.get(raw) or {}).get("expected_final_r"))
     if indifference is not None and best_expected is not None and raw_expected is not None:
         gap = max(0.0, best_expected - raw_expected)
-        lines.append(
+        soft = rule.get('combined_edge_soft_weight') or {}
+        if soft.get('applied'):
+            lines.append(
+                f"Лучший исходный Expected {_r(best_expected)}; Expected {raw} {_r(raw_expected)}; разрыв {_r(gap)}. "
+                f"Выбор использует мягкое ранжирование edge с зоной безразличия {_r(indifference)}. "
+                "Поправка ранжирования не является дополнительным Expected или прибылью.")
+        else:
+            lines.append(
             f"Зона безразличия Expected: {_r(indifference)}. Лучший Expected {_r(best_expected)}; "
             f"{raw} отстаёт на {_r(gap)}. При разрыве не больше зоны выбирается "
             "наименее вмешивающаяся допустимая политика."
-        )
+            )
 
     integrity = snapshot.get("report_integrity") or {}
     tradeoff = manager.get("risk_tradeoff") or integrity.get("risk_tradeoff") or {}; delta = _number(tradeoff.get("expected_delta_vs_hold_r"))

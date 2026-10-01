@@ -1,6 +1,7 @@
 """Independent deterministic extended-action candidates, manual execution only."""
 from .llm_shadow_working_action import build_working_action
 from .extended_policy_evaluation import evaluate_extended_action
+from .mathematical_edge import extended_ranking_bonus
 
 POLICIES = ("MOVE_TO_BE", "TIGHTEN_STOP", "TRAIL_GAMMA_FLIP", "REDUCE_TAKE",
             "EXTEND_TAKE", "SCALE_OUT_ON_SPIKE", "TIME_STOP")
@@ -9,6 +10,9 @@ POLICIES = ("MOVE_TO_BE", "TIGHTEN_STOP", "TRAIL_GAMMA_FLIP", "REDUCE_TAKE",
 def select_active_management(snapshot):
     """Select only quantified improvements; no candidate is also a valid result."""
     rows, candidates = [], []
+    manager = snapshot.get('policy_manager') or {}
+    mathematical = manager.get('mathematical_edge') or {}
+    effective = (manager.get('combined_edge_soft_weight') or {}).get('mathematical_component_weight')
     armed = {x.get("policy") for x in (snapshot.get("position_state") or {}).get(
         "armed_conditional_actions", [])}
     for policy in POLICIES:
@@ -21,6 +25,8 @@ def select_active_management(snapshot):
         proposal["working_action"] = build_working_action(snapshot, proposal)
         assessment = evaluate_extended_action(snapshot, proposal["working_action"])
         proposal["quant_evaluation"] = assessment
+        bonus = extended_ranking_bonus(policy, mathematical, effective) if assessment['status'] == 'eligible' else 0.
+        assessment['mathematical_edge_ranking_bonus_r'] = bonus
         rows.append({"policy": policy, "parameters": proposal["working_action"].get("parameters") or {},
             "instruction_ru": proposal["working_action"].get("instruction_ru"), **assessment})
         if assessment["status"] == "eligible":
@@ -29,9 +35,9 @@ def select_active_management(snapshot):
     if not candidates:
         return None
     selected = max(candidates, key=lambda p: (
-        p["quant_evaluation"]["paired_delta_ci95_lower_r"],
+        p["quant_evaluation"]["paired_delta_ci95_lower_r"] + p['quant_evaluation']['mathematical_edge_ranking_bonus_r'],
         p["quant_evaluation"]["worst_seed_cvar10_gross_r"]))
-    selected["reason_ru"] = "Максимальный нижний предел расчётного прироста Expected среди допустимых расширенных действий; HOLD остаётся базовым сравнением."
+    selected["reason_ru"] = "Максимальный нижний предел расчётного прироста Expected с ограниченной поправкой mathematical edge среди допустимых расширенных действий; HOLD остаётся базовым сравнением."
     selected["production_authority"] = False
     selected["statistically_validated_advantage"] = False
     return selected
@@ -79,6 +85,8 @@ def render_active_management(rows: list[dict], remaining: float | None = None) -
         if levels:
             lines.append("Параметры: " + "; ".join(levels) + ".")
         if "expected_delta_vs_hold_r" in row:
+            if row.get('mathematical_edge_ranking_bonus_r'):
+                lines.append(f"Мягкая поправка edge к ранжированию {number(row['mathematical_edge_ranking_bonus_r'])}; она не включена в Expected/CVaR и не разрешает заблокированное действие.")
             lines.append(f"Expected net: HOLD {number(row.get('expected_hold_net_r'))} → вариант {number(row.get('expected_variant_net_r'))}; Δ {number(row.get('expected_delta_vs_hold_r'))}. "
                 f"Нижняя MC-граница Δ {number(row.get('paired_delta_ci95_lower_r'))}; порог {number(row.get('materiality_band_r'))}. "
                 f"CVaR10 net worst seed: HOLD {number(row.get('worst_seed_hold_cvar10_net_r'))} → вариант {number(row.get('worst_seed_cvar10_net_r'))}; floor {number(row.get('hard_net_floor_r'))}. Пути: {row.get('paths')}.")

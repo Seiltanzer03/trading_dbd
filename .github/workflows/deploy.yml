@@ -522,6 +522,24 @@ jobs:
           echo "::error::Public terminal is unreachable at ${url}"
           exit 1
 
+      - name: Start exact-SHA mathematical edge refresh off-host
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          payload=$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({'ref': 'main', 'inputs': {'expected_sha': os.environ['EXPECTED_SHA']}}))
+          PY
+          )
+          curl --fail-with-body --silent --show-error \
+            --retry 3 --retry-delay 2 --retry-max-time 15 --retry-all-errors \
+            -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/mathematical-edge.yml/dispatches" \
+            -d "$payload"
+          echo "MATHEMATICAL_EDGE_REFRESH_DISPATCHED expected_sha=$EXPECTED_SHA"
+
       - name: Start exact-SHA post-deploy research acceptance
         id: orchestration
         env:

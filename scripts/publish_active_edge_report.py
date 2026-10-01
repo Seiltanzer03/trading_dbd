@@ -17,6 +17,7 @@ from production_ede_offload import (
 
 
 ALLOWED_NAMES = {
+    "mathematical_edge_latest.json",
     "active_structured_15m_latest.json",
     "active_structured_30m_latest.json",
     "active_structured_60m_latest.json",

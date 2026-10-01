@@ -1,0 +1,64 @@
+name: mathematical-edge
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'seiltanzer/mathematical_edge*.py'
+      - 'scripts/*mathematical_edge*.py'
+      - 'research_fixtures/mathematical_edge/**'
+      - '.github/workflows/mathematical-edge.yml'
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        required: true
+        type: string
+  schedule:
+    - cron: '17 3 * * 1-5'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mathematical-edge-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  working-model:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha || github.event.pull_request.head.sha || github.sha }}
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -q -e '.[dev]' paramiko
+      - name: Read cached actual market bars without production writes
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: python -m scripts.export_mathematical_edge_sources --password "$SSH_PASSWORD" --output mathematical_sources.json
+      - name: Fit and validate on runner
+        run: python -m scripts.run_mathematical_edge --sources mathematical_sources.json --output mathematical_edge_latest.json
+      - name: Publish working model for exact production SHA
+        if: github.event_name != 'pull_request'
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: >-
+          python scripts/publish_active_edge_report.py --password "$SSH_PASSWORD"
+          --expected-sha "$EXPECTED_SHA" --input mathematical_edge_latest.json
+          --remote-name mathematical_edge_latest.json --run-id "${{ github.run_id }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mathematical-edge-${{ env.EXPECTED_SHA }}
+          path: |
+            mathematical_edge_latest.json
+            mathematical_sources.json
+          retention-days: 30
