@@ -21,9 +21,15 @@ repricing/publication и фактическая ACK-телеметрия. Рег
 равна наличию обученной модели; импортный контракт не равен работающему
 подключению executing account.
 
-Deploy run 36996647296: delivery прошёл, остальные production gates на момент
-этой контрольной точки ещё выполняются. Итоговые exact-SHA evidence сохраняются
-в [PR #391](https://github.com/Seiltanzer03/trading_dbd/pull/391).
+Deploy run 36996647296 завершился success: delivery, safe research pause,
+exact-SHA readiness, functional smoke и public HTTP прошли. Все семь
+CI/production contexts — success. Isolated smoke проверил 12 действий
+(7 extended), orders=0, paid calls=0, real position mutations=0.
+Post-research 36998178346 также прошёл. Source run 36998175454 опубликовал
+184235 bytes для этого SHA: 13 instruments, 16 requests, errors=0, models=0.
+Math run 36998173081 опубликовал 251817 bytes для того же SHA и завершился success.
+Это не утверждение доступности всех forecasts, реального broker fill или profit.
+Итоговые evidence сохраняются в [PR #391](https://github.com/Seiltanzer03/trading_dbd/pull/391).
 
 ## Остаток именно в реализации
 

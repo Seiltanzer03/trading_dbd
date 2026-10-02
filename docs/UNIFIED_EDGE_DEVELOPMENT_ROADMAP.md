@@ -4,9 +4,10 @@
 разделы 1–12. Этот документ сохраняет полный объём исходного плана и не заменяет
 его более узким планом предыдущего выпуска `EDGE_COMPLETION_PLAN.md`.
 
-Последняя подтверждённая production-база: PR #390, main
-`229e5dd5dd5f5b6af622c46c3be040898ee155c6` (2026-10-02).
-Текущая ветка интеграции: `feat/unified-edge-full-integration`.
+Последняя подтверждённая production-база: PR #391, main
+`2bf3bfba598ced862dbcee05fcdcc93885a512e0` (2026-10-02).
+Ветка runtime-интеграции `feat/unified-edge-full-integration` объединена.
+Текущая контрольная точка остатка: `docs/unified-edge-residual-audit`.
 
 ## Порядок и граница текущей работы
 
@@ -93,14 +94,15 @@ USDT или в исполняемый брокерный CFD.
   Оба дефекта воспроизведены RED, исправлены GREEN и перепроверены reviewer.
 - Некорректный глубоко вложенный pinned broker JSON отклоняется без API crash;
   regression RED→GREEN и независимая проверка выполнены.
-- Локальный полный интеграционный прогон: 1971 passed, один известный baseline
+- Финальный локальный полный прогон: 1972 passed, один известный baseline
   failure `test_quiescent_sparse_clone_replays_wal_only_into_backup` в Python
   3.12/SQLite. Не объявляется green; тест и защитный код не отключены.
 - Frontend syntax/smoke прошли; локальный real WebKit не запустился без
   Playwright. Штатный обязательный CI использует Python 3.11 и устанавливает
   Playwright/WebKit. Merge разрешён только после его полного green на final SHA.
-- Новая ветка ещё не считается production-релизом до PR/merge, exact-SHA
-  deploy/readiness/smoke и публикации источников/математических отчётов.
+- PR #391 выпущен: green обязательный PR/main CI, exact-SHA deploy/readiness/
+  smoke/public HTTP и публикация source/math отчётов подтверждены.
+  Все семь CI/production contexts — success. Подробности в следующей сверке.
 
 Дополнительная сверка полного §7/§9 выявила остатки именно в коде, а не только
 в данных: family artifact producer/PIT dataset, producer broker identity/units
