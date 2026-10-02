@@ -21,12 +21,13 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from contextlib import nullcontext
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from .config import INSTRUMENTS, Settings
+from .config import CRYPTO_INSTRUMENTS, INSTRUMENTS, Settings
 from .data.feeds import MarketData
 from .option_q_adapter import (
     EXPIRY_CLOCK_VERSION,
@@ -630,6 +631,64 @@ class PassiveLearningEngine:
             return "large_price_displacement"
         return None
 
+    def record_configured_intraday_archive(self, feed: MarketData, now: float | None = None) -> int:
+        """Retain already fetched completed bars, with no network or forecasts.
+
+        Crypto source identity comes from its actual frozen authority, never the
+        old hardcoded Yahoo label. Existing mislabeled/partial rows stay intact.
+        """
+        receipt = time.time()
+        now = receipt if now is None else now
+        with getattr(feed, '_intraday_lock', None) or nullcontext():
+            instrument = getattr(feed, 'instrument_code', None)
+            raw = getattr(feed, 'intraday_ohlcv', None)
+            raw = list(raw[-4096:]) if isinstance(raw, (list, tuple)) else []
+            authority = getattr(feed, 'intraday_source_authority', None)
+            authority = dict(authority) if isinstance(authority, dict) else {}
+            is_offset = getattr(feed, 'intraday_is_offset', False)
+            demo = getattr(feed, 'demo', False) or self.settings.demo
+        if demo or not raw or instrument not in {**INSTRUMENTS, **CRYPTO_INSTRUMENTS}:
+            return 0
+        cutoff = receipt
+        kind = 'derived' if is_offset else 'direct'
+        source = 'yahoo_1m_offset_adjusted' if is_offset else 'yahoo_1m_direct'
+        if instrument in CRYPTO_INSTRUMENTS:
+            symbol = CRYPTO_INSTRUMENTS[instrument].binance_symbol
+            observed = _finite(authority.get('observed_ts'))
+            available = _finite(authority.get('available_at'))
+            if (authority.get('provider') != 'Binance' or authority.get('source_symbol') != symbol
+                    or authority.get('target_instrument') != instrument
+                    or authority.get('source_verified') is not True or authority.get('derived') is not False
+                    or is_offset or observed is None or available is None
+                    or not 0 < observed <= available <= receipt or receipt-observed > 900):
+                return 0
+            cutoff = observed
+            source = 'binance_1m_direct:' + symbol
+        rows = []
+        for row in raw:
+            if not isinstance(row, (list, tuple)) or len(row) != 6:
+                continue
+            start, open_, high, low, close, _volume = [_finite(value) for value in row]
+            if (any(value is None for value in (start, open_, high, low, close))
+                    or start < 0 or abs(start % 60) > 1e-6 or start+60 > cutoff
+                    or min(open_, high, low, close) <= 0
+                    or low > min(open_, close) or high < max(open_, close)):
+                continue
+            rows.append((instrument, start, start+60, open_, high, low, close, source, 1., kind, receipt))
+        if not rows:
+            return 0
+        with self._lock, self._conn:
+            before = self._conn.total_changes
+            self._conn.executemany(
+                'INSERT OR IGNORE INTO passive_market_bars('
+                'instrument,bar_start_ts,bar_end_ts,open,high,low,close,source,quality,kind,created_ts) '
+                'VALUES(?,?,?,?,?,?,?,?,?,?,?)', rows)
+            inserted = self._conn.total_changes-before
+            self._conn.execute('DELETE FROM passive_market_bars WHERE instrument=? AND bar_end_ts < ?',
+                               (instrument, now-5*86400))
+            self._last_successful_bar_capture_ts = receipt
+        return inserted
+
     def _collect_instrument(self, instrument: str, now: float) -> list[str]:
         feed = self._feed(instrument)
         feed.refresh_price()
@@ -665,20 +724,7 @@ class PassiveLearningEngine:
         
         try:
             feed.refresh_intraday()
-            if getattr(feed, "intraday_ohlcv", None):
-                b_kind = "derived" if getattr(feed, "intraday_is_offset", False) else "direct"
-                b_source = "yahoo_1m_offset_adjusted" if b_kind == "derived" else "yahoo_1m_direct"
-                with self._lock, self._conn:
-                    for b_ts, b_open, b_high, b_low, b_close, b_vol in feed.intraday_ohlcv:
-                        self._conn.execute(
-                            "INSERT OR IGNORE INTO passive_market_bars("
-                            "instrument,bar_start_ts,bar_end_ts,open,high,low,close,"
-                            "source,quality,kind,created_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                            (instrument, b_ts, b_ts + 60.0, b_open, b_high, b_low, b_close,
-                             b_source, 1.0, b_kind, time.time()))
-                    limit_ts = now - 5 * 86400
-                    self._conn.execute("DELETE FROM passive_market_bars WHERE instrument=? AND bar_end_ts < ?", (instrument, limit_ts))
-                    self._last_successful_bar_capture_ts = now
+            self.record_configured_intraday_archive(feed, now)
         except Exception:
             pass
         vol_info = self._reference_volatility(feed)

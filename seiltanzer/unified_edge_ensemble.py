@@ -360,7 +360,7 @@ def _prepare_components(specs, snapshot, nominal, excluded=None):
                     "excluded": identity == excluded})
     # Common lineage is counted once within additional opinion budgets. Quant
     # remains the fallback; its compulsory risk calculation is never discounted.
-    live = [row for row in rows if row["available"] and not row["excluded"]]
+    live = [row for row in rows if row["available"] and not row["excluded"] and row["nominal_weight"] > 0]
     for row in live:
         if row["component_id"] == "quantitative_base":
             continue
@@ -439,13 +439,15 @@ def _comparison(scheme, selected):
 
 
 def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
-    if scheme not in SCHEMES:
-        raise ValueError("unknown unified weight scheme")
     candidates = collect_candidates(snapshot)
     from .unified_candidate_economics import price_unified_candidates
     economics = price_unified_candidates(snapshot, candidates)
+    if (not economics.get("available") and
+            (snapshot.get("policy_manager") or {}).get("execution_cost_repricing_required") is True):
+        economics = {**economics, "reason": "DECLARED_EXECUTION_COST_REPRICE_REQUIRED:" +
+                     str(economics.get("reason"))}
     invalid_common = not economics.get("available") and (
-        str(economics.get("reason") or "").startswith(("INVALID_", "FROZEN_", "DECLARED_"))
+        str(economics.get("reason") or "").startswith(("INVALID_", "FROZEN_", "DECLARED_", "BROKER_ROLLOVER_"))
         or economics.get("reason") == "EXECUTION_COST_MODEL_UNAVAILABLE")
     if invalid_common:
         for row in candidates:
@@ -469,14 +471,20 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
                 if (number(priced.get("paired_delta_ci95_lower_r")) or 0.) <= band:
                     row.update(eligible=False, reason="COMMON_SCENARIO_NO_ROBUST_MATERIAL_BENEFIT")
     specs, families = collect_components(snapshot, candidates, current_llm)
-    selected, candidates, components = rank_candidates(candidates, specs, snapshot, SCHEMES[scheme])
+    from .expert_registry import resolve_expert_registry
+    registered, schemes, registry = resolve_expert_registry(snapshot, SCHEMES, candidates)
+    if scheme not in schemes:
+        raise ValueError("unknown unified weight scheme")
+    specs.extend(registered)
+    component_ids = tuple(row["component_id"] for row in specs)
+    selected, candidates, components = rank_candidates(candidates, specs, snapshot, schemes[scheme])
     counterfactuals = []
-    for identity in COMPONENTS:
-        without, _, _ = rank_candidates(candidates, specs, snapshot, SCHEMES[scheme], identity)
+    for identity in component_ids:
+        without, _, _ = rank_candidates(candidates, specs, snapshot, schemes[scheme], identity)
         counterfactuals.append({"excluded_component_id": identity, **_comparison("without_" + identity, without),
                                "risk_and_cost_evaluation_preserved": True})
     comparisons = []
-    for name, nominal in SCHEMES.items():
+    for name, nominal in schemes.items():
         choice, _, _ = rank_candidates(candidates, specs, snapshot, nominal)
         comparisons.append(_comparison(name, choice))
     legacy = ((snapshot.get("policy_manager") or {}).get("management_decision") or {}).get("policy")
@@ -489,6 +497,8 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
                                if key in {"contract_version", "available", "reason", "quality", "price_regime",
                                           "threshold_status", "training_proof", "profit_proof"}},
             "scheme": scheme, "selected_candidate_id": selected.get("candidate_id") if selected else None,
+            "expert_registry": registry, "component_order": list(component_ids),
+            "nominal_weights": {identity: schemes[scheme].get(identity, 0.) for identity in component_ids},
             "selected_policy": selected.get("policy") if selected else None,
             "reason": "WEIGHTED_AUTHORIZED_CANDIDATES" if selected else "NO_AUTHORIZED_CANDIDATE",
             "candidates": candidates, "components": components, "edge_families": families,
@@ -501,6 +511,7 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
                                 "authoritative base and paired extended economics; common bank unavailable"),
             "shared_scenario_bank": economics.get("shared_scenario_bank") is True,
             "common_economics_reason": economics.get("reason"),
+            "common_economics_invalid": invalid_common,
             "scenario_bank": economics.get("bank"),
             "authoritative_bank_reused": economics.get("authoritative_bank_reused") is True,
             "historical_profit_proven": False,

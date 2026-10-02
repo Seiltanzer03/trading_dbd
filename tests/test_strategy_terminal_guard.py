@@ -75,6 +75,8 @@ def test_final_take_crossed_requires_manual_strategy_exit_and_records_take_exit(
         )
         assert result["execution_status"] == "executed"
         assert result["position_state"]["remaining_position_fraction"] == 0.0
+        observed = ledger._conn.execute("SELECT stage FROM execution_ack_observations").fetchall()
+        assert [row[0] for row in observed] == ["executed"]
         latest = ledger.events(trade["id"])[-1]
         assert latest["event_type"] == "TAKE_EXIT"
         assert latest["source"] == "human_confirmed_strategy"

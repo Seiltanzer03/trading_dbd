@@ -118,6 +118,25 @@ class PositionLedger:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_shadow_action_trade_ts "
                 "ON llm_shadow_manual_actions(trade_id,created_ts)")
+            from .execution_ack_telemetry import ensure_execution_ack_schema
+            ensure_execution_ack_schema(self._conn)
+
+    def _observe_ack(self, decision: dict, status: str, *,
+                     execution_price_source: str = 'unspecified',
+                     execution_price: float | None = None,
+                     execution_r: float | None = None) -> dict:
+        """Observational journal only; the caller already accepted the action."""
+        from .execution_ack_telemetry import record_execution_ack
+        shadow = 'action_id' in decision
+        table = 'llm_shadow_manual_actions' if shadow else 'management_decisions'
+        key = 'action_id' if shadow else 'decision_id'
+        clock = 'acknowledged_ts' if shadow else 'executed_ts'
+        row = self._conn.execute(
+            f'SELECT {clock} FROM {table} WHERE {key}=?', (decision[key],)).fetchone()
+        received = row[0] if row and row[0] is not None and status != 'recommended_not_executed' else time.time()
+        return record_execution_ack(self._conn, decision=decision, status=status,
+            acknowledged_ts=received, execution_price_source=execution_price_source,
+            execution_price=execution_price, execution_r=execution_r)
 
     def _event(self, *, trade: dict, event_type: str, source: str,
                before: float, closed: float, after: float,
@@ -571,6 +590,7 @@ class PositionLedger:
                         "UPDATE llm_shadow_manual_actions SET status='cancelled',"
                         "acknowledged_ts=? WHERE action_id=?", (time.time(), action_id),
                     )
+                    self._observe_ack(row, 'cancelled')
                     return {"ok": True, "idempotent": False, "action_id": action_id,
                             "execution_status": "cancelled", "position_state": self.state(trade)}
                 price = _finite(execution_price)
@@ -626,6 +646,8 @@ class PositionLedger:
                     "acknowledged_ts=?,execution_price=?,execution_r=? WHERE action_id=?",
                     (time.time(), price, _finite(execution_r), action_id),
                 )
+                self._observe_ack(row, 'executed', execution_price_source=execution_price_source,
+                                  execution_price=price, execution_r=execution_r)
                 return {"ok": True, "idempotent": False, "action_id": action_id,
                         "execution_status": "executed", "position_state": self.state(trade)}
             if row["status"] != "pending_execution":
@@ -649,6 +671,7 @@ class PositionLedger:
                     "UPDATE llm_shadow_manual_actions SET status='recommended_not_executed',"
                     "acknowledged_ts=? WHERE action_id=?", (time.time(), action_id),
                 )
+                self._observe_ack(row, 'recommended_not_executed')
                 return {
                     "ok": True, "idempotent": False, "action_id": action_id,
                     "execution_status": "recommended_not_executed",
@@ -738,6 +761,8 @@ class PositionLedger:
                 "execution_price=?,execution_r=? WHERE action_id=?",
                 (final_status, time.time(), current_price, _finite(execution_r), action_id),
             )
+            self._observe_ack(row, final_status, execution_price_source=execution_price_source,
+                              execution_price=current_price, execution_r=execution_r)
         return {
             "ok": True, "idempotent": False, "action_id": action_id,
             "execution_status": final_status,
@@ -781,6 +806,7 @@ class PositionLedger:
                     "UPDATE management_decisions "
                     "SET status='recommended_not_executed' WHERE decision_id=?",
                     (decision_id,))
+                self._observe_ack(row, 'recommended_not_executed')
                 return {"ok": True, "idempotent": False,
                         "decision_id": decision_id,
                         "execution_status": "recommended_not_executed",
@@ -808,6 +834,8 @@ class PositionLedger:
                 "execution_price=?,execution_r=? WHERE decision_id=?",
                 (time.time(), _finite(execution_price), _finite(execution_r),
                  decision_id))
+            self._observe_ack(row, 'executed', execution_price_source=execution_price_source,
+                              execution_price=execution_price, execution_r=execution_r)
         return {"ok": True, "idempotent": False, "decision_id": decision_id,
                 "execution_status": "executed",
                 "position_state": self.state(trade)}

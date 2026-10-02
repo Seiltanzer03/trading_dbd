@@ -1,5 +1,7 @@
 from pathlib import Path
+import json
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,7 +11,7 @@ def workflow(name):
     return yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
 
 
-def test_family_collection_exact_sha_pr_read_only_bounded_and_complete():
+def test_family_collection_exact_sha_pr_read_only_bounded_and_complete(tmp_path, monkeypatch):
     value = workflow("edge-family-sources.yml")
     job = value["jobs"]["collect"]
     assert job["timeout-minutes"] <= 10
@@ -19,10 +21,27 @@ def test_family_collection_exact_sha_pr_read_only_bounded_and_complete():
     assert publish["if"] == "github.event_name != 'pull_request'"
     assert '--expected-sha "$EXPECTED_SHA"' in publish["run"]
     collect = next(step for step in steps if step.get("name", "").startswith("Collect public"))["run"]
-    assert "set(ALL_INSTRUMENTS)" in collect and "set(FAMILIES)" in collect
-    assert "950_000" in collect and "['requests'] <= 13" in collect
-    cache = next(step for step in steps if step.get("uses") == "actions/cache/save@v4")
-    assert "github.event_name != 'pull_request'" in cache["if"]
+    from seiltanzer.config import ALL_INSTRUMENTS
+    from seiltanzer.edge_family_adapters import FAMILIES
+    report = {"instruments": {code: {"readiness": {
+        family: {"forecast_available": False} for family in FAMILIES}}
+        for code in ALL_INSTRUMENTS}, "models_produced": 0,
+        "production_authority": False, "captured_ts": 1,
+        "raw_sources": {}, "collection_limits": {
+            "requests": 16, "body_bytes_received": 16_000_000},
+        "refresh_policy": {"scheduled_interval_sec": 600,
+            "order_flow_max_age_sec": 60,
+            "order_flow_continuous_freshness_guaranteed": False}}
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "edge_family_sources_latest.json"
+    validation = compile(collect.split("python - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0],
+                         "source_workflow_validation", "exec")
+    path.write_text(json.dumps(report))
+    exec(validation, {})
+    report["collection_limits"]["requests"] = 17
+    path.write_text(json.dumps(report))
+    with pytest.raises(AssertionError):
+        exec(validation, {})
 
 
 def test_math_source_refresh_is_offhost_bounded_and_receipts_exported():

@@ -200,6 +200,10 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8790
     data_dir: str = field(default_factory=lambda: os.environ.get("SEILTANZER_DATA_DIR", "."))
+    unified_edge_context_path: str = field(default_factory=lambda: os.environ.get("SEILTANZER_UNIFIED_EDGE_CONTEXT_PATH", ""))
+    unified_edge_context_sha256: str = field(default_factory=lambda: os.environ.get("SEILTANZER_UNIFIED_EDGE_CONTEXT_SHA256", ""))
+    execution_cost_context_path: str = field(default_factory=lambda: os.environ.get("SEILTANZER_EXECUTION_COST_CONTEXT_PATH", ""))
+    execution_cost_context_sha256: str = field(default_factory=lambda: os.environ.get("SEILTANZER_EXECUTION_COST_CONTEXT_SHA256", ""))
     price_poll_sec: float = 4.0     # ТЗ: 3–5 сек
     chain_poll_sec: float = 600.0   # ТЗ: 5–10 мин
     proxy_poll_sec: float = 60.0    # REST-прокси; при --stream обновляется тиково

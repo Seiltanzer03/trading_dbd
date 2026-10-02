@@ -47,6 +47,30 @@ def budget():
     return source.RequestBudget(seconds=30., min_interval=0.)
 
 
+@pytest.mark.parametrize("clock_key", ["fetched_ts", "captured_ts", "receipt_observed_ts"])
+def test_exact_retained_crypto_rejects_future_archive_clocks(clock_key):
+    cutoff = 90000.
+    bar = source._bar(cutoff-300, 100., 101., 99., 100.)
+    seed = source._make_source("BTCUSD", "Binance", "BTCUSDT", [bar], cutoff, {})
+    seed["source_kind"] = "SINGLE_RETAINED_PROVIDER_COMPLETED_5M"
+    seed[clock_key] = cutoff+60
+    assert source.retained_crypto_source("BTCUSD", cutoff, seed, None) is None
+    assert source.retained_crypto_source("BTCUSD", cutoff, None, seed) is None
+
+
+def test_verified_exact_archive_is_reused_without_any_public_request(monkeypatch):
+    cutoff = 90000.
+    monkeypatch.setattr(source.time, 'time', lambda: cutoff)
+    bar = source._bar(cutoff-300, 100., 101., 99., 100.)
+    seed = source._make_source('BTCUSD', 'Binance', 'BTCUSDT', [bar], cutoff, {})
+    result = source.retained_crypto_source('BTCUSD', cutoff, seed, None)
+    assert result is not None
+    assert result['provider'] == 'Binance'
+    assert result['collection']['network_requests'] == 0
+    assert result['bars'] == [bar]
+    assert result['source_semantics']['currency_basis_mismatch'] is False
+
+
 def test_coinbase_pagination_has_bounded_ranges_dedup_and_completed_bars():
     def reply(url, params):
         lower, upper = timestamp(params['start']), timestamp(params['end'])

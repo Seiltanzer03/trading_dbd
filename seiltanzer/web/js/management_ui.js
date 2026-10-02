@@ -66,9 +66,9 @@ const parameterText = (value) => value && typeof value === 'object'
   ? Object.entries(value).map(([key, item]) => `${key}=${item}`).join(', ') : '';
 const contributionEntries = (value) => Array.isArray(value)
   ? value.map((row) => [row.component_id, row.contribution]) : Object.entries(value || {});
-const contributionText = (value) => Array.isArray(value)
-  ? value.map((row) => `${componentLabel(row.component_id)} ${signed(row.contribution)} (оценка ${signed(row.score)}, вес ${percent(row.effective_weight)})`).join(' · ')
-  : contributionEntries(value).map(([key, score]) => `${componentLabel(key)} ${signed(score)}`).join(' · ');
+const contributionText = (value, label = componentLabel) => Array.isArray(value)
+  ? value.map((row) => `${label(row.component_id)} ${signed(row.contribution)} (оценка ${signed(row.score)}, вес ${percent(row.effective_weight)})`).join(' · ')
+  : contributionEntries(value).map(([key, score]) => `${label(key)} ${signed(score)}`).join(' · ');
 
 function appendAuditTable(parent, headers, rows) {
   const scroller = document.createElement('div');
@@ -104,6 +104,9 @@ function appendAuditTable(parent, headers, rows) {
 export function mountUnifiedEdgeEnsemble(container, audit) {
   container.replaceChildren();
   if (!audit || typeof audit !== 'object') return;
+  const definitions = Array.isArray(audit.expert_registry?.definitions) ? audit.expert_registry.definitions : [];
+  const expertLabels = new Map(definitions.map((row) => [row.expert_id, row.label || row.expert_id]));
+  const label = (id) => expertLabels.get(id) || componentLabel(id);
   const panel = document.createElement('section');
   panel.className = 'ai-edge-management ai-unified-edge-ensemble';
   appendTextLine(panel, 'ai-execution-title', 'ЕДИНЫЙ ВЫБОР · ПЕРЕВЕСЫ В РЕШЕНИИ');
@@ -128,7 +131,7 @@ export function mountUnifiedEdgeEnsemble(container, audit) {
     'Вес не отменяет hard-risk/CVaR. Исполняется единственный действующий план после обязательных ограничений риска.');
   const components = Array.isArray(audit.components) ? audit.components : [];
   appendAuditTable(panel, ['Компонент', 'Номинальный → фактический вес', 'Качество · возраст', 'Доступность / снижение влияния'],
-    components.map((row) => [componentLabel(row.component_id),
+    components.map((row) => [row.label || label(row.component_id),
       `${percent(row.nominal_weight)} → ${percent(row.effective_weight)}`,
       `${percent(row.quality)} · ${row.age_sec === null || row.age_sec === undefined ? '—' : row.age_sec} сек`,
       `${row.availability ?? row.available ?? '—'} · ${row.reason || 'доступен'}${Array.isArray(row.suppression_reasons) && row.suppression_reasons.length ? ' · ' + row.suppression_reasons.join(', ') : ''}`]));
@@ -138,12 +141,12 @@ export function mountUnifiedEdgeEnsemble(container, audit) {
     const freshness = finiteNumber(row.freshness_multiplier ?? row.freshness_factor);
     const dependence = finiteNumber(row.dependence_multiplier ?? row.duplicate_factor);
     const suppression = `${freshness !== null && freshness < 1 ? ' · свежесть ×' + freshness.toFixed(3) : ''}${dependence !== null && dependence < 1 ? ' · повторные доказательства ×' + dependence.toFixed(3) : ''}`;
-    appendTextLine(panel, 'tiny dim', `${componentLabel(row.component_id)} · источники: ${source} · семьи доказательств: ${family}${suppression}.`);
+    appendTextLine(panel, 'tiny dim', `${row.label || label(row.component_id)} · источники: ${source} · семьи доказательств: ${family}${suppression}.`);
   }
   const rawContributions = chosen.component_contributions || {};
   const contributions = contributionEntries(rawContributions);
   if (contributions.length) appendTextLine(panel, 'tiny',
-    'Вклад в балл выбранного действия: ' + contributionText(rawContributions));
+    'Вклад в балл выбранного действия: ' + contributionText(rawContributions, label));
 
   const detail = document.createElement('details');
   const summary = document.createElement('summary');
@@ -154,12 +157,12 @@ export function mountUnifiedEdgeEnsemble(container, audit) {
       `${row.policy || '—'} · ${parameterText(row.parameters) || row.candidate_id || '—'}`,
       `${row.candidate_id === selected ? 'выбран' : (row.ranking_eligible ?? row.eligible) ? 'допустим' : 'исключён'}${row.ranking_reason || row.reason ? ' · ' + (row.ranking_reason || row.reason) : ''}`,
       signed(row.expected_net_r, 'R'), signed(row.cvar10_net_r, 'R'),
-      signed(row.delta_expected_r, 'R'), signed(row.score), contributionText(row.component_contributions),
+      signed(row.delta_expected_r, 'R'), signed(row.score), contributionText(row.component_contributions, label),
     ]));
   panel.appendChild(detail);
   const counterfactuals = Array.isArray(audit.counterfactuals) ? audit.counterfactuals : [];
   appendAuditTable(panel, ['Решение без компонента', 'Действие', 'Изменение'],
-    counterfactuals.map((row) => [componentLabel(row.excluded_component_id),
+    counterfactuals.map((row) => [label(row.excluded_component_id),
       `${row.selected_policy || '—'} · ${row.selected_candidate_id || '—'}`,
       !row.selected_candidate_id ? 'недоступно' : row.selected_candidate_id === selected ? 'не изменилось' : 'изменилось']));
   appendTextLine(panel, 'tiny', 'Сравнение схем при неизменной модельной экономике кандидатов:');

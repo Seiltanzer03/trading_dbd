@@ -199,6 +199,7 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
         # Last-resort deterministic allowlist. Management decision and every
         # compared policy stay intact; only explanatory workspaces are omitted.
         keep_manager = (
+            "expert_registry",
             "position_economics", "repeat_intervention_gate", "decision_reliability", "execution_cost_model",
             "version", "management_decision", "recommendation", "policies",
             "selection_rule", "gate", "evidence", "inputs", "risk_constraint",

@@ -158,13 +158,41 @@ def test_hard_floor_unavailable_cannot_be_replaced_by_zero_or_expert_vote():
     assert not build_unified_ensemble(frozen, llm())["available"]
 
 
-def test_invalid_common_bank_blocks_new_expert_selection(monkeypatch):
+@pytest.mark.parametrize("reason", ["INVALID_SCENARIO_BANK",
+    "BROKER_ROLLOVER_SOURCE_IDENTITY_OR_CLOCK_INVALID",
+    "BROKER_ROLLOVER_HORIZON_NOT_COVERED", "EXECUTION_COST_MODEL_UNAVAILABLE"])
+def test_invalid_common_bank_blocks_new_expert_selection(monkeypatch, reason):
     monkeypatch.setattr("seiltanzer.unified_candidate_economics.price_unified_candidates",
-                        lambda *_: {"available": False, "reason": "INVALID_SCENARIO_BANK"})
+                        lambda *_: {"available": False, "reason": reason})
     audit = build_unified_ensemble(snapshot(), llm())
     assert not audit["available"]
+    assert audit["common_economics_invalid"] is True
     assert audit["selected_candidate_id"] is None
     assert all(not row["eligible"] for row in audit["candidates"])
+
+
+def test_rejected_real_rollover_contract_never_falls_back_to_original_economics():
+    from test_unified_candidate_economics import snapshot as bank_snapshot
+    frozen = snapshot()
+    bank = bank_snapshot([[1, 1, 1]], [1.])
+    for key in ("inputs", "execution_cost_model", "unified_scenario_bank"):
+        frozen["policy_manager"][key] = bank["policy_manager"][key]
+    frozen["broker_rollover_schedule"] = {"source_verified": False}
+    audit = build_unified_ensemble(frozen, llm())
+    assert audit["common_economics_reason"].startswith("BROKER_ROLLOVER_")
+    assert audit["common_economics_invalid"] is True
+    assert audit["selected_policy"] is None
+    assert all(not row["eligible"] for row in audit["candidates"])
+
+
+def test_changed_declared_costs_require_common_repricing_before_any_selection(monkeypatch):
+    frozen = snapshot()
+    frozen["policy_manager"]["execution_cost_repricing_required"] = True
+    monkeypatch.setattr("seiltanzer.unified_candidate_economics.price_unified_candidates",
+                        lambda *_: {"available": False, "reason": "OPTION_PATH_DISTRIBUTION_UNAVAILABLE"})
+    audit = build_unified_ensemble(frozen, llm())
+    assert audit["common_economics_invalid"] is True
+    assert audit["selected_policy"] is None
 
 
 def test_profile_regime_and_freshness_limits_are_applied():

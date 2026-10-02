@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import shlex
+import time
 
 from scripts.production_ede_offload import _connect
 
@@ -59,7 +60,7 @@ def export_reviews(connection, maximum=32):
                    json_extract(snapshot_json,'$.instrument'),'UNKNOWN') AS instrument
         FROM decision_snapshots WHERE length(snapshot_json)<=2000000
         ORDER BY rowid DESC LIMIT 512''')]
-    reviews = []
+    reviews, acknowledgement_observations = [], []
     for item in select_reviews(metadata, maximum):
         row = dict(connection.execute('''SELECT review_id,trade_id,captured_ts,
           snapshot_json,snapshot_sha256,production_policy
@@ -107,8 +108,19 @@ def export_reviews(connection, maximum=32):
               (item['review_id'],)).fetchone()
             replay = dict(value) if value else None
         row['stored_replay'] = replay
+        if 'execution_ack_observations' in tables:
+            acknowledgements = [dict(value) for value in connection.execute('''
+                SELECT decision_id,stage,trade_id,review_id,decision_created_ts,
+                       acknowledged_ts,acknowledgement_delay_sec,execution_price_source
+                FROM execution_ack_observations WHERE review_id=?
+                ORDER BY acknowledged_ts LIMIT 129''', (item['review_id'],))]
+            row['acknowledgement_observations_truncated'] = len(acknowledgements) > 128
+            acknowledgement_observations.extend(acknowledgements[:128])
         reviews.append(row)
     return {'read_only': True, 'reviews': reviews, 'recent_metadata_n': len(metadata),
+            'exported_ts': time.time(),
+            'execution_ack_observations': acknowledgement_observations,
+            'execution_ack_scope': 'observed_acknowledgements_for_selected_reviews_max128_each; not_broker_fill_times',
             'selection': 'max32_instrument_round_robin_time_spread_from_latest512_rowids',
             'max_snapshot_bytes': 2000000, 'max_points_per_review': 6000,
             'outcomes_separate_from_decision_inputs': True}

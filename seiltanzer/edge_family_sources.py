@@ -11,13 +11,15 @@ import json
 import math
 import re
 import time
+from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
 from typing import Callable
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from zoneinfo import ZoneInfo
 
 from .canonical_market_context import canonical_instrument_code
@@ -33,6 +35,11 @@ NYSE = "https://www.nyse.com/trade/hours-calendars"
 # Futures market identities, NOT validated mappings to a broker's CFD.
 COT_MARKETS = {"XAU": "088691", "XAG": "084691", "EURUSD": "099741"}
 CRYPTO = {"BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD", "SOLUSD": "SOL-USD"}
+BINANCE_SYMBOLS = {code: ALL_INSTRUMENTS[code].binance_symbol for code in CRYPTO}
+MAX_REQUESTS = 16
+MAX_TOTAL_BYTES = 16_000_000
+COLLECTION_SECONDS = 120.
+MIN_REQUEST_INTERVAL = .2
 NYSE_HOLIDAYS_2026 = {"2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03",
                       "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
                       "2026-11-26", "2026-12-25"}
@@ -63,6 +70,76 @@ class _CalendarTables(HTMLParser):
             self.row = None
 
 
+def _allowed_url(url: str) -> bool:
+    return any(url == base or url.startswith(base + "/") or url.startswith(base + "?")
+               for base in (COINBASE, CFTC, NYSE))
+
+
+class _SourceRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # urllib drains redirect bodies and retries outside our shared budget.
+        # Even allowlisted redirects must not silently bypass those bounds.
+        raise ValueError("SOURCE_REDIRECT_DISABLED")
+
+
+class SourceBudget:
+    """One shared request/rate/byte/deadline budget; denial never means retry."""
+    def __init__(self, *, monotonic=time.monotonic, pause=time.sleep,
+                 min_interval=MIN_REQUEST_INTERVAL, seconds=COLLECTION_SECONDS):
+        self.monotonic, self.pause = monotonic, pause
+        self.min_interval, self.deadline = min_interval, monotonic() + seconds
+        self.lock, self.requests, self.body_bytes = Lock(), 0, 0
+        self.body_reserved = 0
+        self.last_start, self.stopped_hosts = None, set()
+
+    def remaining(self):
+        return max(0., self.deadline - self.monotonic())
+
+    def reserve(self, host):
+        with self.lock:
+            if host in self.stopped_hosts:
+                raise ValueError("SOURCE_HOST_STOPPED_AFTER_DENIAL")
+            if self.body_bytes >= MAX_TOTAL_BYTES:
+                raise ValueError("SOURCE_GLOBAL_BODY_BOUND")
+            if self.requests >= MAX_REQUESTS or self.remaining() <= 0:
+                raise ValueError("SOURCE_GLOBAL_REQUEST_OR_TIME_BOUND")
+            delay = 0 if self.last_start is None else max(0., self.last_start + self.min_interval - self.monotonic())
+            if delay >= self.remaining():
+                raise ValueError("SOURCE_GLOBAL_REQUEST_OR_TIME_BOUND")
+            if delay:
+                self.pause(delay)
+            if self.remaining() <= 0:
+                raise ValueError("SOURCE_GLOBAL_REQUEST_OR_TIME_BOUND")
+            self.last_start = self.monotonic()
+            self.requests += 1
+
+    def accept_body(self, size):
+        with self.lock:
+            self.body_bytes += size
+            if self.body_bytes > MAX_TOTAL_BYTES:
+                raise ValueError("SOURCE_GLOBAL_BODY_BOUND")
+
+    def read_chunk(self, response, maximum):
+        """Reserve bytes before socket reads, across all concurrent workers."""
+        with self.lock:
+            count = min(maximum, MAX_TOTAL_BYTES - self.body_bytes - self.body_reserved)
+            if count <= 0:
+                raise ValueError("SOURCE_GLOBAL_BODY_BOUND")
+            self.body_reserved += count
+        chunk = b""
+        try:
+            chunk = response.read1(count)
+            return chunk
+        finally:
+            with self.lock:
+                self.body_reserved -= count
+                self.body_bytes += len(chunk)
+
+    def stop_host(self, host):
+        with self.lock:
+            self.stopped_hosts.add(host)
+
+
 def _number(value) -> float:
     if isinstance(value, bool):
         raise ValueError("BOOLEAN_NOT_NUMERIC")
@@ -77,18 +154,37 @@ def _ts(value: str) -> float:
     return parsed.replace(tzinfo=timezone.utc).timestamp() if parsed.tzinfo is None else parsed.timestamp()
 
 
-def fetch_public(url: str, *, timeout: float = 12., max_bytes: int = 4_000_000) -> bytes:
+def fetch_public(url: str, *, timeout: float = 12., max_bytes: int = 4_000_000,
+                 budget: SourceBudget | None = None) -> bytes:
     """Allowlisted GET, capped response, no credentials and no retries."""
-    if not any(url == base or url.startswith(base + "/") or url.startswith(base + "?")
-               for base in (COINBASE, CFTC, NYSE)):
+    if not _allowed_url(url):
         raise ValueError("SOURCE_URL_NOT_ALLOWLISTED")
+    timeout = min(12., max(.01, timeout))
+    deadline = time.monotonic() + timeout
     request = Request(url, headers={"User-Agent": "trading-dbd-source-audit/1", "Accept": "application/json,text/html"})
-    with urlopen(request, timeout=min(30., max(1., timeout))) as response:
+    with build_opener(_SourceRedirects()).open(request, timeout=timeout) as response:
         final_url = response.geturl()
-        if not any(final_url == base or final_url.startswith(base + "/") or final_url.startswith(base + "?")
-                   for base in (COINBASE, CFTC, NYSE)):
+        if not _allowed_url(final_url):
             raise ValueError("SOURCE_REDIRECT_NOT_ALLOWLISTED")
-        body = response.read(max_bytes + 1)
+        chunks, size = [], 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("SOURCE_RESPONSE_DEADLINE")
+            # HTTPResponse.read1 performs one buffered/socket read rather than
+            # waiting to fill a chunk indefinitely from a trickling response.
+            sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+            if sock is not None:
+                sock.settimeout(remaining)
+            count = min(65536, max_bytes + 1 - size)
+            chunk = budget.read_chunk(response, count) if budget is not None else response.read1(count)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > max_bytes:
+                raise ValueError("SOURCE_BODY_TOO_LARGE")
+        body = b"".join(chunks)
     if len(body) > max_bytes:
         raise ValueError("SOURCE_BODY_TOO_LARGE")
     return body
@@ -164,6 +260,90 @@ def parse_coinbase_book(body: bytes, *, product: str, receipt: float, source_id:
         record["previous_top"] = previous["current_top"]
         record["previous_source_id"] = previous["source_id"]
     return record
+
+
+def _binance_identity(code: str, symbol: str) -> None:
+    configured = ALL_INSTRUMENTS.get(code)
+    if (configured is None or configured.binance_symbol != symbol
+            or configured.tradingview_symbol != "BINANCE:" + symbol):
+        raise ValueError("BINANCE_SYMBOL_NOT_EXACT_CONFIGURED_VENUE")
+
+
+def parse_binance_book(body: bytes, *, code: str, symbol: str, receipt: float,
+                       source_id: str, previous: dict | None = None) -> dict:
+    """Two sampled actual REST books, not a fabricated full incremental stream.
+
+    Spot depth REST has no exchange event timestamp. Its observation time is the
+    local completed response receipt, explicitly NOT a claimed exchange clock.
+    """
+    _binance_identity(code, symbol)
+    root = json.loads(body)
+    sequence = _number(root["lastUpdateId"])
+    if sequence < 0 or not sequence.is_integer():
+        raise ValueError("BINANCE_BOOK_SEQUENCE_INVALID")
+    bids, asks = root["bids"], root["asks"]
+    if not (isinstance(bids, list) and isinstance(asks, list)
+            and 0 < len(bids) <= 5 and 0 < len(asks) <= 5):
+        raise ValueError("BINANCE_BOOK_DEPTH_BOUND")
+    values = [_number(v) for v in (bids[0][0], bids[0][1], asks[0][0], asks[0][1])]
+    if min(values) <= 0 or values[0] >= values[2]:
+        raise ValueError("BINANCE_BOOK_PRICES_OR_SIZES_INVALID")
+    current = dict(zip(("bid_price", "bid_size", "ask_price", "ask_size"), values), ts=receipt)
+    record = {**_meta(source_id, code, receipt, receipt), "kind": "exchange_order_book",
+              "venue": "BINANCE_SPOT", "venue_instrument": symbol, "quote_currency": "USDT",
+              "exact_configured_venue": True, "sequence": int(sequence), "current_top": current,
+              "clock_basis": "LOCAL_RESPONSE_OBSERVATION_NOT_EXCHANGE_EVENT_TIMESTAMP",
+              "flow_scope": "SAMPLED_TWO_TOP_OBSERVATIONS_NOT_FULL_INCREMENTAL_OFI",
+              "max_age_sec": 60., "dependency_group": "binance:" + symbol + ":book_tape"}
+    if (isinstance(previous, dict) and previous.get("source_verified") is True
+            and previous.get("instrument") == code and previous.get("venue_instrument") == symbol
+            and previous.get("venue") == "BINANCE_SPOT"
+            and previous.get("observed_ts") == previous.get("received_ts")
+            and previous.get("current_top", {}).get("ts") == previous.get("observed_ts")
+            and previous["observed_ts"] < receipt <= previous["observed_ts"] + 60
+            and previous.get("sequence", int(sequence)) < int(sequence)):
+        record["previous_top"] = previous["current_top"]
+        record["previous_source_id"] = previous["source_id"]
+        record["supporting_source_ids"] = [previous["source_id"], source_id]
+        record["pair_status"] = "TWO_ACTUAL_ADVANCING_RESPONSES_WITHIN_60S"
+    else:
+        record["pair_status"] = "NO_CAUSAL_ADVANCING_PREVIOUS_RESPONSE"
+    return record
+
+
+def parse_binance_tape(body: bytes, *, code: str, symbol: str, receipt: float,
+                       source_id: str) -> dict:
+    _binance_identity(code, symbol)
+    rows = json.loads(body)
+    if not isinstance(rows, list) or not rows or len(rows) > 1000:
+        raise ValueError("BINANCE_TAPE_ROWS_INVALID")
+    seen, trades = set(), []
+    for row in rows:
+        identity = _number(row["a"])
+        observed, quantity, price = _number(row["T"]) / 1000., _number(row["q"]), _number(row["p"])
+        if not identity.is_integer() or identity < 0 or not isinstance(row["m"], bool):
+            raise ValueError("BINANCE_AGG_TRADE_ID_OR_MAKER_SIDE_INVALID")
+        if observed > receipt or min(quantity, price) <= 0:
+            raise ValueError("BINANCE_TAPE_CLOCK_OR_VALUE_INVALID")
+        if identity in seen:
+            raise ValueError("BINANCE_TAPE_DUPLICATE_AGG_TRADE")
+        seen.add(identity)
+        trades.append((observed, quantity, row["m"]))
+    latest = max(row[0] for row in trades)
+    if receipt - latest > 60:
+        raise ValueError("BINANCE_TAPE_STALE")
+    window = [row for row in trades if latest - 60 <= row[0] <= latest]
+    first = min(row[0] for row in window)
+    if first >= latest:
+        raise ValueError("BINANCE_TAPE_WINDOW_MISSING")
+    return {**_meta(source_id, code, latest, receipt), "kind": "exchange_trade_tape",
+            "venue": "BINANCE_SPOT", "venue_instrument": symbol, "quote_currency": "USDT",
+            "exact_configured_venue": True, "window_start_ts": first, "window_end_ts": latest,
+            "aggressive_buy_volume": sum(qty for _, qty, buyer_maker in window if not buyer_maker),
+            "aggressive_sell_volume": sum(qty for _, qty, buyer_maker in window if buyer_maker),
+            "window_complete": False, "coverage": "LATEST_LIMITED_AGGREGATE_PAGE_NOT_COMPLETE_60S_TAPE",
+            "aggregate_trade_count": len(window), "size_unit": "BASE_ASSET", "buyer_maker_inverted": True,
+            "max_age_sec": 60., "dependency_group": "binance:" + symbol + ":book_tape"}
 
 
 def parse_cot(body: bytes, *, contract: str, receipt: float, source_id: str) -> dict:
@@ -270,13 +450,14 @@ def parse_nyse_calendar(body: bytes, *, receipt: float, source_id: str) -> dict:
 
 def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_public,
                  clock: Callable = time.time, existing: dict | None = None,
-                 previous: dict | None = None) -> dict:
-    """At most 13 GETs, four workers; unavailable endpoints become explicit errors."""
+                 previous: dict | None = None, budget: SourceBudget | None = None) -> dict:
+    """At most 16 GETs, four workers; unavailable endpoints become explicit errors."""
     instruments = tuple(dict.fromkeys(canonical_instrument_code(x) for x in instruments))
     if not instruments or len(instruments) > 32 or any(not x for x in instruments):
         raise ValueError("INSTRUMENTS_INVALID")
     existing = existing if isinstance(existing, dict) else {}
     previous = previous if isinstance(previous, dict) else {}
+    budget = budget or SourceBudget()
     # Provider-default windows are not the bounded window requested by this
     # collector. Request one common, already-completed window for all leaders;
     # retaining the parser cap also rejects a provider that ignores these bounds.
@@ -299,18 +480,27 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
 
     def get(item):
         key, url = item
+        host = url.split("/")[2]
         try:
-            body = fetch(url)
+            budget.reserve(host)
+            body = fetch(url, timeout=min(12., budget.remaining()), budget=budget) if fetch is fetch_public else fetch(url)
             receipt = _number(clock())
             if not isinstance(body, bytes) or len(body) > 4_000_000:
                 raise ValueError("FETCH_BODY_INVALID")
+            if fetch is not fetch_public:
+                budget.accept_body(len(body))
             digest = hashlib.sha256(body).hexdigest()
             return key, body, {"official_url": url, "body_sha256": digest,
                     "source_id": key + ":" + digest,
                     "received_ts": receipt, "fetch_status": "FETCHED", "body_bytes": len(body)}, None
         except Exception as exc:
+            status = exc.code if isinstance(exc, HTTPError) else None
+            if status in {403, 451, 429, 418}:
+                budget.stop_host(host)
+            reason = "HTTP_" + str(status) if status is not None else str(exc) if isinstance(exc, ValueError) else type(exc).__name__
             return key, None, {"official_url": url, "received_ts": _number(clock()),
-                    "fetch_status": "UNAVAILABLE", "body_sha256": None}, type(exc).__name__
+                    "fetch_status": "UNAVAILABLE", "body_sha256": None,
+                    "http_status": status}, reason[:160]
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         for key, body, meta, error in executor.map(get, jobs.items()):
@@ -349,15 +539,27 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
     for code, product in CRYPTO.items():
         if code not in output:
             continue
-        prior = previous.get("instruments", {}).get(code, {}).get("edge_family_sources", {}).get("order_flow", [])
-        prior = next((row for row in reversed(prior) if row.get("kind") == "exchange_order_book"), None)
-        for kind, parser in (("book", parse_coinbase_book), ("tape", parse_coinbase_tape)):
-            kwargs = {"product": product}
-            if kind == "book":
-                kwargs["previous"] = prior
-            record = parse(f"coinbase:{code}:{kind}", parser, **kwargs)
-            if record:
-                output[code]["edge_family_sources"]["order_flow"].append(_proxy(record, code))
+        first_book = parse(f"coinbase:{code}:book", parse_coinbase_book, product=product)
+        second_key = f"coinbase:{code}:book_second"
+        key, body, meta, error = get((second_key, f"{COINBASE}/products/{product}/book?level=1"))
+        raw[key] = meta
+        if error:
+            errors.append({"source_id": key, "phase": "fetch", "reason": error})
+        else:
+            bodies[key] = body
+        second_book = parse(second_key, parse_coinbase_book, product=product, previous=first_book)
+        # Only the pair acquired in this run can supply sampled OFI. A 10/20
+        # minute previous-bundle cache cannot invent a within-60s observation.
+        chosen_book = second_book or first_book
+        if chosen_book:
+            chosen_book["flow_scope"] = "SAMPLED_TWO_TOP_OBSERVATIONS_NOT_FULL_INCREMENTAL_OFI"
+            chosen_book["max_age_sec"] = 60.
+            if chosen_book.get("previous_source_id"):
+                chosen_book["supporting_source_ids"] = [chosen_book["previous_source_id"], chosen_book["source_id"]]
+            output[code]["edge_family_sources"]["order_flow"].append(_proxy(chosen_book, code))
+        record = parse(f"coinbase:{code}:tape", parse_coinbase_tape, product=product)
+        if record:
+            output[code]["edge_family_sources"]["order_flow"].append(_proxy(record, code))
     closes = {}
     for code in CRYPTO:
         key = f"coinbase:{code}:candles"
@@ -408,5 +610,11 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
     return {"contract_version": CONTRACT, "captured_ts": captured,
             "production_authority": False, "edge_policy": EDGE_POLICY,
             "instruments": output, "raw_sources": raw, "errors": errors,
-            "collection_limits": {"requests": len(jobs), "workers": 4, "max_body_bytes": 4_000_000},
+            "collection_limits": {"requests": budget.requests, "source_attempts": len(raw),
+                "max_requests": MAX_REQUESTS, "workers": 4, "max_body_bytes": 4_000_000,
+                "body_bytes_received": budget.body_bytes, "max_total_body_bytes": MAX_TOTAL_BYTES,
+                "min_request_interval_sec": MIN_REQUEST_INTERVAL, "global_deadline_sec": COLLECTION_SECONDS},
+            "refresh_policy": {"scheduled_interval_sec": 600, "intermarket_max_age_sec": 900,
+                "order_flow_max_age_sec": 60, "order_flow_continuous_freshness_guaranteed": False,
+                "binance_rest_collection": "DISABLED_AFTER_OBSERVED_GEOGRAPHIC_DENIAL_NO_BYPASS"},
             "models_produced": 0, "exact_publication_times_inferred": False}

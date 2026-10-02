@@ -210,6 +210,8 @@ def _unified_operational_choice(engine, snapshot: dict, trade: dict,
 def _publish_unified_review(engine, snapshot: dict, result: dict, review_id: str,
                             trade: dict, audit: dict) -> dict:
     """Publish the exact ranked decision and its frozen audit, or restore pending work."""
+    if audit.get("common_economics_invalid") is True:
+        raise ValueError("invalid common economics cannot publish a management decision")
     with engine.journal._lock, engine.position.decision_publication(int(trade["id"]), review_id):
         active = engine.journal.active_trade()
         if not active or int(active["id"]) != int(trade["id"]) or active.get("status") != "open":
@@ -315,6 +317,14 @@ def _attach_family_source_bundle(engine, snapshot: dict) -> None:
         existing[family] = merged
     if skipped:
         audit["existing_families_preserved_unmergeable"] = skipped[:8]
+
+
+def _refresh_intraday_archive(engine) -> None:
+    """Persist only bars obtained by the existing configured feed refresh."""
+    engine.market.refresh_intraday()
+    recorder = getattr(getattr(engine, "passive", None), "record_configured_intraday_archive", None)
+    if callable(recorder):
+        recorder(engine.market)
 
 
 def _acknowledged_execution(trade: dict, tick: dict,
@@ -749,7 +759,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         jobs = {
             "price": engine.market.refresh_price,
             "proxy_price": engine.market.refresh_proxy_price,
-            "intraday": engine.market.refresh_intraday,
+            "intraday": lambda: _refresh_intraday_archive(engine),
             "vols": engine.market.refresh_vols,
             "daily": engine.market.refresh_daily,
             "chain": engine.market.refresh_chain,
@@ -1238,6 +1248,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Evaluate every extended action alongside the base policies. The
             # independent provider sees quantified candidates, not a picked winner.
             await asyncio.to_thread(_attach_family_source_bundle, engine, snapshot)
+            from .unified_edge_runtime_context import attach_unified_edge_context
+            from .runtime_git_identity import runtime_git_sha
+            await asyncio.to_thread(attach_unified_edge_context, engine, snapshot,
+                                    expected_sha=runtime_git_sha())
             macro_factory = getattr(getattr(engine, "passive", None), "_macro_data_factory", None)
             if macro_factory is not None:
                 from .macro_t0_context import build_macro_t0_context
@@ -1299,6 +1313,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 from .unified_edge_ensemble import build_unified_ensemble
                 audit = await asyncio.to_thread(
                     build_unified_ensemble, snapshot, result.get("llm_shadow_decision"))
+                if audit.get("common_economics_invalid") is True:
+                    return JSONResponse(status_code=422, content={
+                        **ai_error_body("invalid_common_economics",
+                            "Экономика действий не прошла проверку: обновите данные издержек и повторите разбор",
+                            req_id, retriable=True),
+                        "common_economics_reason": audit.get("common_economics_reason"),
+                    })
                 decision = await asyncio.to_thread(
                     _publish_unified_review, engine, snapshot, result, review_id,
                     active_trade, audit)

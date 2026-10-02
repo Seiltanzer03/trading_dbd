@@ -15,7 +15,7 @@ import threading
 import time
 
 from .config import ALL_INSTRUMENTS
-from .mathematical_edge import fingerprint, number
+from .mathematical_edge import crypto_training_source_admission, fingerprint, number
 
 BAR_SECONDS = 300
 MAX_BARS = 20000
@@ -119,6 +119,7 @@ def _make_source(code, provider, ticker, bars, captured, metadata):
         raise ValueError('SOURCE_EMPTY_OR_EXCEEDS_BOUND')
     instrument = ALL_INSTRUMENTS[code]
     is_crypto = instrument.asset_class == 'crypto'
+    exact_crypto = (is_crypto and provider == 'Binance' and ticker == instrument.binance_symbol)
     digest = fingerprint(bars)
     return {'instrument': code, 'provider': provider, 'ticker': ticker, 'interval': '5m',
             'bars': bars, 'source_sha256': digest, 'source_id': f'math-real-{code}-{digest[:24]}',
@@ -130,10 +131,10 @@ def _make_source(code, provider, ticker, bars, captured, metadata):
                 'completed_bars_only_for_features': True, 'exact_live_broker_series': False,
                 'synthetic_price_history': False, 'synthetic_option_history': False,
                 'option_history_used': False, 'returns_not_absolute_price_used_by_model': True,
-                'proxy_for_configured_series': True, 'configured_price_series': instrument.price_label,
-                'provider_quote_currency': 'USD' if is_crypto else None,
+                'proxy_for_configured_series': not exact_crypto, 'configured_price_series': instrument.price_label,
+                'provider_quote_currency': ('USDT' if exact_crypto else 'USD') if is_crypto else None,
                 'configured_quote_currency': 'USDT' if is_crypto else None,
-                'currency_basis_mismatch': is_crypto, 'gaps_filled': False,
+                'currency_basis_mismatch': is_crypto and not exact_crypto, 'gaps_filled': False,
                 'provider_documentation': PROVIDER_DOCS.get(provider)},
             'coverage': source_coverage(bars), 'collection': metadata}
 
@@ -153,6 +154,7 @@ def _cache_load(directory, code, provider, captured):
                 or not bars or len({row['bar_end_ts'] for row in bars}) != len(bars)
                 or source.get('ticker') != (COINBASE_PRODUCTS.get(code) if provider == 'Coinbase Exchange'
                                           else KRAKEN_PAIRS.get(code) if provider == 'Kraken'
+                                          else ALL_INSTRUMENTS[code].binance_symbol if provider == 'Binance'
                                           else ALL_INSTRUMENTS[code].yahoo)
                 or source.get('source_sha256') != fingerprint(bars)):
             return None
@@ -163,6 +165,63 @@ def _cache_load(directory, code, provider, captured):
         return source
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def _exact_crypto_archive(source, code, captured):
+    """Verify an existing archive, never infer mislabeled legacy bars' venue."""
+    if not isinstance(source, dict) or source.get('instrument') != code:
+        return None
+    bars = source.get('bars')
+    if not isinstance(bars, list) or not 0 < len(bars) <= MAX_BARS:
+        return None
+    try:
+        clocks = [source[key] for key in ('captured_ts', 'fetched_ts', 'receipt_observed_ts') if key in source]
+        collection_clock = (source.get('collection') or {}).get('archive_receipt_observed_ts')
+        if collection_clock is not None:
+            clocks.append(collection_clock)
+        if not clocks or any(number(clock) is None or not 0 < number(clock) <= captured for clock in clocks):
+            return None
+        if any(_bar(row['bar_end_ts']-BAR_SECONDS, row['open'], row['high'], row['low'], row['close']) != row
+               or row['bar_end_ts'] > captured for row in bars):
+            return None
+        if len({row['bar_end_ts'] for row in bars}) != len(bars):
+            return None
+        digest = fingerprint(bars)
+        if source.get('source_sha256') != digest:
+            return None
+        admission = crypto_training_source_admission(
+            {'sources': [{**source, 'validated_bars_sha256': digest}]}, {'source_sha256': digest}, code)
+        return source if admission['available'] else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def retained_crypto_source(code, captured, seed, cached, *, days=60):
+    """Accumulate only verified exact-feed archived observations off-host.
+
+    No Binance request is made. Previously denied public access is not rerouted
+    to another IP; the existing normally configured collector owns acquisition.
+    """
+    seed = _exact_crypto_archive(seed, code, captured)
+    cached = _exact_crypto_archive(cached, code, captured)
+    if seed is None:
+        return {**cached, 'collection_fallback': 'HASH_VERIFIED_EXACT_CONFIGURED_SOURCE_CACHE'} if cached else None
+    start = captured-days*86400
+    merged = {row['bar_end_ts']: row for row in (cached or {}).get('bars', []) if start < row['bar_end_ts'] <= captured}
+    revised = sum(row['bar_end_ts'] in merged and merged[row['bar_end_ts']] != row for row in seed['bars'])
+    merged.update({row['bar_end_ts']: row for row in seed['bars'] if start < row['bar_end_ts'] <= captured})
+    bars = [merged[end] for end in sorted(merged)]
+    if not bars:
+        return None
+    result = _make_source(code, 'Binance', ALL_INSTRUMENTS[code].binance_symbol, bars, captured,
+                          {'acquisition': 'READ_ONLY_EXACT_CONFIGURED_RETAINED_ARCHIVE',
+                           'network_requests': 0, 'archive_receipt_observed_ts': seed.get('receipt_observed_ts'),
+                           'cache_used': cached is not None, 'same_provider_revised_overlap_bars': revised,
+                           'archive_source_id': seed.get('source_id'), 'requested_days': days,
+                           'direct_public_api_attempted': False})
+    result['source_kind'] = 'SINGLE_RETAINED_PROVIDER_COMPLETED_5M'
+    result['source_semantics']['bar_timestamp_semantics'] = 'five consecutive completed direct Binance one-minute bars'
+    return result
 
 
 def _cache_save(directory, source):
@@ -298,6 +357,14 @@ def collect_fresh_sources(captured, *, seed_sources=(), cache_dir=None, days=60,
         failures = []
         source = None
         if code in COINBASE_PRODUCTS:
+            exact_cached = _cache_load(cache_dir, code, 'Binance', captured)
+            source = retained_crypto_source(code, captured, seeds.get(code), exact_cached, days=days)
+            if source is not None:
+                # Old USD providers remain diagnostic caches/artifacts, never
+                # splice them into an exact Binance/USDT training series.
+                if not source.get('collection_fallback'):
+                    _cache_save(cache_dir, source)
+                return code, source, []
             cached = _cache_load(cache_dir, code, 'Coinbase Exchange', captured)
             kraken_cached = _cache_load(cache_dir, code, 'Kraken', captured)
             with client_factory() as client:

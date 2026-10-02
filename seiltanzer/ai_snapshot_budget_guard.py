@@ -101,6 +101,7 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
         "selection_rule", "gate", "inputs", "risk_constraint",
         "management_arbiter", "state_change_attribution",
         "unified_edge_ensemble",
+        "expert_registry",
         "mathematical_edge", "active_edge_provisional_weight", "llm_edge_exploratory_weight",
         "market_regime",
         "calibration_contract", "recalculation_triggers",
