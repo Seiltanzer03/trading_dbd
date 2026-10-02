@@ -101,3 +101,8 @@ USDT или в исполняемый брокерный CFD.
   Playwright/WebKit. Merge разрешён только после его полного green на final SHA.
 - Новая ветка ещё не считается production-релизом до PR/merge, exact-SHA
   deploy/readiness/smoke и публикации источников/математических отчётов.
+
+Дополнительная сверка полного §7/§9 выявила остатки именно в коде, а не только
+в данных: family artifact producer/PIT dataset, producer broker identity/units
+и расширение comparison report. См. `UNIFIED_EDGE_REMAINING_IMPLEMENTATION.md`.
+Этот остаток не закрывается наличием импортных адаптеров или green CI.
