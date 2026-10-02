@@ -65,7 +65,7 @@ def _instrument_matrix(rows, sources, captured_ts):
             admission = crypto_training_source_admission({'sources': sources}, row, code)
         matrix[code] = {
             'configured_price_source': instrument.price_label,
-            'historical_ticker': source.get('cached_ticker') or source.get('ticker') or instrument.yahoo,
+            'historical_ticker': source.get('ticker') or source.get('cached_ticker') or instrument.yahoo,
             'source_available': bool(source), 'status': row['status'],
             'reason': row.get('reason'), 'search_completed': bool(row.get('search_completed')),
             'requested_horizons_minutes': row.get('requested_horizons_minutes', []),
@@ -166,9 +166,11 @@ def main():
     if not horizons or any(h not in SEARCH_HORIZONS for h in horizons):
         parser.error('--horizons must be a subset of 15,30,60,120')
     sources, errors, attempts = [], {}, {}
+    diagnostic_sources = []
     if args.sources:
         data = json.loads(Path(args.sources).read_text())
         sources, errors = data['sources'], data.get('errors', {})
+        diagnostic_sources = data.get('diagnostic_sources', [])
     if args.refresh_sources or not args.sources:
         from seiltanzer.mathematical_edge_sources import collect_fresh_sources
         sources, errors, attempts = collect_fresh_sources(
@@ -179,9 +181,13 @@ def main():
         path = Path(args.sources_output)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({'sources': sources, 'errors': errors, 'exported_ts': captured,
+                                   'diagnostic_sources': diagnostic_sources,
                                    'collection_attempts': attempts}, ensure_ascii=False, allow_nan=False))
     report = build_report(sources, errors, captured, horizons)
     report['collection_attempts'] = attempts
+    report['diagnostic_source_inventory'] = [{k: v for k, v in source.items() if k != 'bars'} | {
+        'bar_count': len(source.get('bars', [])), 'runtime_admission': False,
+    } for source in diagnostic_sources]
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, ensure_ascii=False, allow_nan=False))

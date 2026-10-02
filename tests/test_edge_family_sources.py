@@ -1,17 +1,25 @@
 from datetime import datetime, timezone
 import json
 from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError
 
 import pytest
 
 from seiltanzer.edge_family_adapters import FAMILIES, build_edge_family_evidence
 from seiltanzer.config import ALL_INSTRUMENTS
 from seiltanzer.edge_family_sources import (
-    CRYPTO, NYSE_HOLIDAYS_2026, build_bundle, fetch_public, parse_coinbase_book,
+    CRYPTO, NYSE_HOLIDAYS_2026, SourceBudget, build_bundle as _build_bundle, fetch_public, parse_coinbase_book,
     parse_coinbase_closes, parse_coinbase_tape, parse_cot, parse_nyse_calendar,
+    parse_binance_book, parse_binance_tape,
 )
 
 T0 = datetime(2026, 10, 1, 15, tzinfo=timezone.utc).timestamp()
+
+
+def build_bundle(**kwargs):
+    # Unit fixtures do not spend wall time on the real public-request limiter.
+    kwargs.setdefault("budget", SourceBudget(min_interval=0))
+    return _build_bundle(**kwargs)
 
 
 def encoded(value):
@@ -133,6 +141,72 @@ def test_fetch_is_allowlisted_before_network():
         fetch_public("https://example.com/")
 
 
+def test_redirect_cannot_drain_unbudgeted_body_or_issue_another_request(monkeypatch):
+    import io
+    from email.message import Message
+    from urllib.request import BaseHandler, build_opener
+    from urllib.response import addinfourl
+    from seiltanzer import edge_family_sources as module
+
+    downloaded = []
+    requests = []
+    class Stream(io.BytesIO):
+        def read(self, size=-1):
+            body = super().read(size)
+            downloaded.append(len(body))
+            return body
+        def read1(self, size=-1):
+            return self.read(size)
+    class Transport(BaseHandler):
+        handler_order = 0
+        def https_open(self, request):
+            requests.append(request.full_url)
+            first = len(requests) == 1
+            headers = Message()
+            if first:
+                headers['Location'] = module.COINBASE + '/end'
+            response = addinfourl(Stream(b'x' * 1500 if first else b'ok'),
+                                  headers, request.full_url, 302 if first else 200)
+            response.msg = 'Found' if first else 'OK'
+            return response
+    opener = build_opener(module._SourceRedirects(), Transport())
+    monkeypatch.setattr(module, 'build_opener', lambda *args: opener)
+    monkeypatch.setattr(module, 'MAX_TOTAL_BYTES', 1000)
+    budget = SourceBudget(min_interval=0)
+    budget.reserve('api.exchange.coinbase.com')
+    with pytest.raises(ValueError, match='SOURCE_REDIRECT_DISABLED'):
+        fetch_public(module.COINBASE + '/start', budget=budget)
+    assert requests == [module.COINBASE + '/start']
+    assert sum(downloaded) == budget.body_bytes == 0
+
+
+def test_streaming_global_body_budget_bounds_actual_reads(monkeypatch):
+    from seiltanzer import edge_family_sources as module
+    class Response:
+        def __init__(self): self.remaining = 4_000_000
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def geturl(self): return "https://api.exchange.coinbase.com/products/BTC-USD/book?level=1"
+        def read1(self, size):
+            n = min(size, self.remaining)
+            self.remaining -= n
+            downloaded[0] += n
+            return b"x" * n
+    downloaded = [0]
+    opener = type("Opener", (), {"open": lambda self, *args, **kwargs: Response()})()
+    monkeypatch.setattr(module, "build_opener", lambda *args: opener)
+    limit = SourceBudget(min_interval=0)
+    for _ in range(16):
+        try:
+            limit.reserve("api.exchange.coinbase.com")
+            module.fetch_public("https://api.exchange.coinbase.com/products/BTC-USD/book?level=1", budget=limit)
+        except ValueError:
+            pass
+    assert downloaded[0] <= module.MAX_TOTAL_BYTES
+    assert limit.body_bytes == downloaded[0]
+    assert limit.requests <= 5
+
+
 def test_bundle_has_all_eight_honest_rows_actual_hashes_and_no_model_authority():
     calls = []
     def fetch(url):
@@ -149,7 +223,7 @@ def test_bundle_has_all_eight_honest_rows_actual_hashes_and_no_model_authority()
     bundle = build_bundle(instruments=("XAU", "BTCUSD", "NAS100"), fetch=fetch, clock=lambda: T0)
     assert bundle["production_authority"] is False
     assert bundle["models_produced"] == 0
-    assert len(calls) == 11
+    assert len(calls) == 12
     assert not bundle["errors"]
     for code, entry in bundle["instruments"].items():
         assert set(entry["readiness"]) == set(FAMILIES)

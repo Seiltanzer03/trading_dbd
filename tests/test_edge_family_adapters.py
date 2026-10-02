@@ -39,6 +39,15 @@ def snapshot(family, data, feature):
             "edge_family_models": {family: model(family, feature)}}
 
 
+def test_family_net_action_forecast_must_match_frozen_comparison_horizon():
+    data = source(features={"macro.expected_rate_change": -.2})
+    frozen = snapshot("macro", data, "macro.expected_rate_change")
+    frozen["policy_manager"] = {"inputs": {"horizon_minutes": 240}}
+    result = build_edge_family_evidence(frozen)
+    assert not result["families"]["macro"]["forecast_available"]
+    assert result["families"]["macro"]["forecast_rejections"][0]["reason"] == "MODEL_FORECAST_HORIZON_MISMATCH"
+
+
 def family_fixture(family):
     if family == "macro":
         return source(features={"macro.expected_rate_change": -.2}), "macro.expected_rate_change"

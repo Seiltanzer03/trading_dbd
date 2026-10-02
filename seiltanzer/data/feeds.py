@@ -829,7 +829,10 @@ class MarketData:
         exact_fx = provider == "Yahoo" and {
             "EURUSD": "EURUSD=X", "USDCAD": "CAD=X",
         }.get(self.instrument_code) == symbol
-        direct = exact_fx and not self.intraday_is_offset and not self.demo
+        exact_crypto = (provider == "Binance" and self.instrument.asset_class == "crypto"
+                        and bool(self.instrument.binance_symbol)
+                        and self.instrument.binance_symbol == symbol)
+        direct = (exact_fx or exact_crypto) and not self.intraday_is_offset and not self.demo
         self.intraday_source_authority = {
             "contract_version": AUTHORITY_CONTRACT,
             "source_id": provider + ":" + symbol + ":1m",
@@ -841,7 +844,8 @@ class MarketData:
             "direct_source": direct, "derived": self.intraday_is_offset,
             "proxy": not direct, "quality": .75 if direct else 0.,
             "broker_execution_bars": False,
-            "authority_role": "DIRECT_QUOTED_FX_PAIR_CONTEXT" if direct else "PROXY_CONTEXT_ONLY",
+            "authority_role": ("DIRECT_CONFIGURED_CRYPTO_SPOT_CONTEXT" if direct and exact_crypto else
+                               "DIRECT_QUOTED_FX_PAIR_CONTEXT" if direct else "PROXY_CONTEXT_ONLY"),
         }
 
     def refresh_intraday(self) -> None:

@@ -14,12 +14,13 @@ from scripts.production_ede_offload import _connect
 REMOTE_EXPORT = r'''
 import sqlite3,gzip,json,hashlib,time,base64,math,io
 codes=__CONFIGURED_INSTRUMENT_CODES__
+crypto_symbols=__CONFIGURED_CRYPTO_SYMBOLS__
 c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=3)
 c.row_factory=sqlite3.Row
 c.execute('PRAGMA query_only=ON')
 started=time.monotonic()
 c.set_progress_handler(lambda: int(time.monotonic()-started>25),10000)
-sources=[];errors={};now=time.time()
+sources=[];diagnostic_sources=[];errors={};now=time.time()
 for code in codes:
  row=c.execute('SELECT source_id,source_sha256,bars_gzip,ticker,provider,interval,source_semantics_json FROM g1s_historical_sources WHERE instrument=? AND contract_version=? ORDER BY created_ts DESC LIMIT 1',(code,'g1s-historical-wf-real-bars-v1')).fetchone()
  bars=[]
@@ -47,8 +48,18 @@ for code in codes:
   if completed:retained[provider]=completed
  # Historical and retained feeds have different series semantics: never splice them.
  selected_provider=row['provider'] if row else None
+ selected_ticker=row['ticker'] if row else code
  selected_kind='SINGLE_HISTORICAL_PROVIDER_COMPLETED_5M'
  semantics=json.loads(row['source_semantics_json']) if row else {}
+ exact_label='binance_1m_direct:'+crypto_symbols[code] if code in crypto_symbols else None
+ if exact_label and exact_label in retained:
+  # Never reinterpret legacy yahoo-labeled rows as Binance, even for crypto.
+  if bars:
+   original_digest=hashlib.sha256(json.dumps(bars,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+   diagnostic_sources.append(dict(instrument=code,bars=bars,source_id=row['source_id'],source_sha256=original_digest,provider=row['provider'],ticker=row['ticker'],interval=row['interval'],source_kind='SINGLE_HISTORICAL_PROVIDER_COMPLETED_5M',source_semantics=semantics,diagnostic_only=True))
+  selected_provider='Binance';selected_ticker=crypto_symbols[code]
+  bars=retained[exact_label];selected_kind='SINGLE_RETAINED_PROVIDER_COMPLETED_5M'
+  semantics=dict(provider='Binance',ticker=selected_ticker,provider_quote_currency='USDT',configured_quote_currency='USDT',currency_basis_mismatch=False,proxy_for_configured_series=False,bar_timestamp_semantics='five consecutive completed direct Binance one-minute bars',gaps_filled=False,synthetic_price_history=False,exact_live_broker_series=False)
  if not bars and retained:
   selected_provider=max(retained,key=lambda p:(len(retained[p]),retained[p][-1]['bar_end_ts']))
   bars=retained[selected_provider];selected_kind='SINGLE_RETAINED_PROVIDER_COMPLETED_5M'
@@ -56,12 +67,13 @@ for code in codes:
  if not bars:errors[code]='SOURCE_BARS_UNAVAILABLE';continue
  bars=sorted(bars,key=lambda x:x['bar_end_ts'])
  digest=hashlib.sha256(json.dumps(bars,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
- sources.append(dict(instrument=code,bars=bars,source_id='math-export-'+code+'-'+digest[:24],source_sha256=digest,cached_source_id=row['source_id'] if row else None,cached_sha256=row['source_sha256'] if row else None,recent_completed_5m_n=sum(len(v) for v in retained.values()),retained_provider_completed_counts={p:len(v) for p,v in retained.items()},source_kind=selected_kind,provider=selected_provider,ticker=row['ticker'] if row else code,interval='5m',source_semantics=semantics,mixed_provider_splicing=False,recent_kind_counts=kinds,recent_provider_counts=providers,excluded_derived_minute_n=excluded_derived,excluded_partial_minute_n=excluded_partial,cached_ticker=row['ticker'] if row else None,cached_provider=row['provider'] if row else None,cached_interval=row['interval'] if row else None,cached_semantics=json.loads(row['source_semantics_json']) if row else None,not_broker_execution_bars=True,receipt_observed_ts=now))
+ sources.append(dict(instrument=code,bars=bars,source_id='math-export-'+code+'-'+digest[:24],source_sha256=digest,cached_source_id=row['source_id'] if row else None,cached_sha256=row['source_sha256'] if row else None,recent_completed_5m_n=sum(len(v) for v in retained.values()),retained_provider_completed_counts={p:len(v) for p,v in retained.items()},source_kind=selected_kind,provider=selected_provider,ticker=selected_ticker,interval='5m',source_semantics=semantics,mixed_provider_splicing=False,recent_kind_counts=kinds,recent_provider_counts=providers,excluded_derived_minute_n=excluded_derived,excluded_partial_minute_n=excluded_partial,cached_ticker=row['ticker'] if row else None,cached_provider=row['provider'] if row else None,cached_interval=row['interval'] if row else None,cached_semantics=json.loads(row['source_semantics_json']) if row else None,not_broker_execution_bars=True,receipt_observed_ts=now))
 c.close()
-raw=json.dumps(dict(sources=sources,errors=errors,exported_ts=now,read_only=True),allow_nan=False).encode()
+raw=json.dumps(dict(sources=sources,diagnostic_sources=diagnostic_sources,errors=errors,exported_ts=now,read_only=True),allow_nan=False).encode()
 if len(raw)>64000000:raise ValueError('export exceeds bound')
 print(base64.b64encode(gzip.compress(raw)).decode())
-'''.replace('__CONFIGURED_INSTRUMENT_CODES__', repr(tuple(ALL_INSTRUMENTS)))
+'''.replace('__CONFIGURED_INSTRUMENT_CODES__', repr(tuple(ALL_INSTRUMENTS))).replace(
+    '__CONFIGURED_CRYPTO_SYMBOLS__', repr({code: item.binance_symbol for code, item in ALL_INSTRUMENTS.items() if item.asset_class == 'crypto'}))
 
 
 def main():

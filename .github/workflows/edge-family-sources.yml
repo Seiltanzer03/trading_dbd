@@ -15,7 +15,7 @@ on:
         required: true
         type: string
   schedule:
-    - cron: '7,27,47 * * * *'
+    - cron: '7,17,27,37,47,57 * * * *'
 
 permissions:
   contents: read
@@ -44,20 +44,10 @@ jobs:
       - run: pip install -q -e '.[dev]' paramiko
       - name: Verify bounded causal collectors and local reader
         run: python -m pytest -q tests/test_edge_family_sources.py tests/test_edge_family_source_runtime.py
-      - name: Restore previous actual source receipts
-        uses: actions/cache/restore@v4
-        with:
-          path: .edge-source-cache
-          key: edge-source-v1-${{ hashFiles('seiltanzer/edge_family_sources.py', 'seiltanzer/config.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: edge-source-v1-${{ hashFiles('seiltanzer/edge_family_sources.py', 'seiltanzer/config.py') }}-
       - name: Collect public source facts off-host, never fabricate models
         run: |
           set -euo pipefail
-          args=()
-          if [ -f .edge-source-cache/previous.json ]; then
-            args+=(--previous-bundle .edge-source-cache/previous.json)
-          fi
-          python -m scripts.build_edge_family_sources --output edge_family_sources_latest.json "${args[@]}"
+          python -m scripts.build_edge_family_sources --output edge_family_sources_latest.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -68,7 +58,12 @@ jobs:
           assert path.stat().st_size < 950_000, 'local reader has 1MB hard bound'
           assert set(report['instruments']) == set(ALL_INSTRUMENTS)
           assert report['models_produced'] == 0 and report['production_authority'] is False
-          assert report['collection_limits']['requests'] <= 13
+          assert report['collection_limits']['requests'] <= 16
+          assert report['collection_limits']['body_bytes_received'] <= 16_000_000
+          assert report['refresh_policy']['scheduled_interval_sec'] == 600
+          assert report['refresh_policy']['order_flow_max_age_sec'] == 60
+          assert report['refresh_policy']['order_flow_continuous_freshness_guaranteed'] is False
+          assert all('api.binance' not in row['official_url'] for row in report['raw_sources'].values())
           for source in report['raw_sources'].values():
               assert source['received_ts'] <= report['captured_ts']
               if source['fetch_status'] == 'FETCHED':
@@ -79,13 +74,6 @@ jobs:
               print('EDGE_SOURCE_READINESS', code, json.dumps(row['readiness'], sort_keys=True))
           print('EDGE_SOURCE_COLLECTION_PASS', len(report['instruments']), 'models=0')
           PY
-          mkdir -p .edge-source-cache
-          cp edge_family_sources_latest.json .edge-source-cache/previous.json
-      - uses: actions/cache/save@v4
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        with:
-          path: .edge-source-cache
-          key: edge-source-v1-${{ hashFiles('seiltanzer/edge_family_sources.py', 'seiltanzer/config.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Publish source facts for exact production SHA only
         if: github.event_name != 'pull_request'
         env:

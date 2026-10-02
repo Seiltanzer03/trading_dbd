@@ -247,10 +247,12 @@ def _average(values):
 def summarize(reviews):
     # Use the identical cohort for every observed scheme comparison. Overlapping
     # reviews of one trade are explicitly not independent portfolio returns.
+    shared = set.intersection(*(set(row['schemes']) for row in reviews)) if reviews else set()
+    names = sorted((set(SCHEMES) | shared) - {'legacy_control'})
     paired = [r for r in reviews if r['observed_hold_control'].get('available')
-              and all((r['schemes'][s]['observed_path']).get('available') for s in SCHEMES)]
+              and all((r['schemes'][s]['observed_path']).get('available') for s in names)]
     result = {}
-    for scheme in SCHEMES:
+    for scheme in names:
         selected = [r['schemes'][scheme]['selection'] for r in reviews]
         paths = [r['schemes'][scheme]['observed_path'] for r in paired]
         net = [p['net_r_on_remaining'] for p in paths]
@@ -289,6 +291,36 @@ def summarize(reviews):
     return result
 
 
+def summarize_acknowledgements(source):
+    """Actual receipt observations, never inferred fills or latency costs."""
+    cutoff = number(source.get('exported_ts'))
+    rows, seen = [], set()
+    supplied = source.get('execution_ack_observations')
+    for row in supplied[:4096] if isinstance(supplied, list) else []:
+        if not isinstance(row, dict):
+            continue
+        timestamp = number(row.get('acknowledged_ts'))
+        identity = row.get('decision_id')
+        stage = row.get('stage')
+        key = (identity, stage)
+        if (not isinstance(identity, str) or not identity or not isinstance(stage, str)
+                or stage not in {'armed', 'executed', 'cancelled', 'declined'}
+                or cutoff is None or timestamp is None or not 0 < timestamp <= cutoff or key in seen):
+            continue
+        seen.add(key)
+        rows.append(row)
+    delays = [number(row.get('acknowledgement_delay_sec')) for row in rows]
+    delays = [value for value in delays if value is not None and value >= 0]
+    stages = {stage: sum(row['stage'] == stage for row in rows) for stage in sorted({row['stage'] for row in rows})}
+    return {'available': bool(rows), 'observation_n': len(rows),
+            'distinct_decision_n': len({row['decision_id'] for row in rows}), 'stages': stages,
+            'mean_acknowledgement_delay_sec': _average(delays),
+            'maximum_acknowledgement_delay_sec': max(delays) if delays else None,
+            'evidence_type': 'ACTUAL_USER_ACK_RECEIPTS_NOT_MODEL_SCENARIOS_OR_BROKER_FILL_TIMES',
+            'actual_broker_fill_time_verified_n': 0, 'manual_latency_cost_r': None,
+            'profit_or_effectiveness_proven': False}
+
+
 def run_comparison(source, *, expected_sha=None):
     if source.get('read_only') is not True or len(source.get('reviews', [])) > 32:
         raise ValueError('requires a bounded read-only actual-review export')
@@ -308,6 +340,7 @@ def run_comparison(source, *, expected_sha=None):
             'instrument_coverage': instruments,
             'unobserved_configured_instruments': sorted(set(ALL_INSTRUMENTS) - set(instruments)),
             'summary': summarize(reviews),
+            'actual_execution_observations': summarize_acknowledgements(source),
             'promotion_authorized': False,
             'reason': 'BOUNDED_REAL_REVIEW_DESCRIPTIVE_COMPARISON' if reviews else 'ACTUAL_REVIEWS_UNAVAILABLE_OR_REJECTED'}
 

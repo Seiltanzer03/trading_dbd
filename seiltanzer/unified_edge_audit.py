@@ -42,7 +42,7 @@ def _row(value: Any, keys: tuple[str, ...]) -> dict:
 
 
 def compact_unified_ensemble(value: Any) -> dict:
-    """Preserve every action's eligibility and all five components, no paths."""
+    """Preserve every action and bounded registered expert, never scenario paths."""
     if not isinstance(value, dict) or not value:
         return {}
     out = _row(value, (
@@ -54,6 +54,7 @@ def compact_unified_ensemble(value: Any) -> dict:
         "hard_risk_cvar_preserved", "nominal_weights", "effective_weights",
         "component_order", "measurement_note_ru", "legacy_policy",
         "economics_scope", "shared_scenario_bank", "historical_profit_proven",
+        "common_economics_invalid", "common_economics_reason",
         "score_semantics", "regime_weight_semantics", "hard_risk_override",
         "automatic_execution_allowed",
         "ranking_available", "ranking_selected_policy", "ranking_selected_candidate_id",
@@ -61,6 +62,16 @@ def compact_unified_ensemble(value: Any) -> dict:
         "operational_guard_reason", "operational_decision_id",
         "authoritative_bank_reused", "execution_assumption", "bridge_events_reproduced",
     ))
+    registry = value.get("expert_registry")
+    if isinstance(registry, dict):
+        out["expert_registry"] = _row(registry, (
+            "contract_version", "available", "reason", "definition_sha256",
+            "registered_expert_ids", "admitted_schemes", "budgets",
+            "rejected_experts", "rejected_schemes", "score_semantics"))
+        definition_keys = ("expert_id", "label", "instrument", "model_version", "source_ids",
+                           "evidence_family_ids", "max_age_sec", "supported_regimes", "score_semantics")
+        out["expert_registry"]["definitions"] = [
+            _row(row, definition_keys) for row in (registry.get("definitions") or [])[:11]]
     for key in ("scenario_bank", "comparison_bank"):
         if isinstance(value.get(key), dict):
             out[key] = _row(value[key], (
@@ -79,6 +90,9 @@ def compact_unified_ensemble(value: Any) -> dict:
         ),
         "components": (
             "component_id", "nominal_weight", "effective_weight", "availability",
+            "label", "registered_expert", "registry_definition_sha256", "instrument",
+            "received_ts", "source_lineage_verified",
+            "observed_ts", "max_age_sec", "model_version", "score_semantics",
             "available", "reason", "quality", "age_sec", "source_ids",
             "evidence_family_ids", "freshness_factor", "duplicate_factor",
             "dedup_factor", "suppression_reasons", "redistributed_weight",
@@ -150,6 +164,8 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
          if audit.get("shared_scenario_bank") else "Общий набор сценариев не подтверждён; расширенные варианты используют парное сравнение с HOLD. " + str(audit.get("economics_scope") or "")),
         "Номинальный → фактический вес:",
     ]
+    labels = {**COMPONENT_LABELS, **{row.get("component_id"): row.get("label")
+                                  for row in audit.get("components") or [] if row.get("label")}}
     bank = audit.get("scenario_bank") or audit.get("comparison_bank") or {}
     regime = audit.get("regime_context") or {}
     if regime:
@@ -171,7 +187,7 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
         if dependence is not None and dependence < 1:
             suppression += f"; повторные доказательства ×{dependence:.3f}"
         lines.append(
-            f"• {COMPONENT_LABELS.get(component, component)}: {_pct(row.get('nominal_weight'))} → {_pct(row.get('effective_weight'))}; "
+            f"• {labels.get(component, component)}: {_pct(row.get('nominal_weight'))} → {_pct(row.get('effective_weight'))}; "
             f"качество {_pct(row.get('quality'))}; возраст {row.get('age_sec') if row.get('age_sec') is not None else '—'} сек; "
             f"статус {row.get('availability', row.get('available', '—'))}; {row.get('reason') or 'доступен'}; семьи {provenance}{suppression}."
         )
@@ -194,11 +210,11 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
                              for item in contributions if isinstance(item, dict)}
         if row.get("candidate_id") == selected and isinstance(contributions, dict):
             lines.append("Вклад в балл выбранного действия: " + "; ".join(
-                f"{COMPONENT_LABELS.get(str(key), str(key))} {_format(item)}"
+                f"{labels.get(str(key), str(key))} {_format(item)}"
                 for key, item in contributions.items()) + ".")
     for row in audit.get("counterfactuals") or []:
         component = str(row.get("excluded_component_id") or "—")
-        lines.append(f"Без {COMPONENT_LABELS.get(component, component)}: {row.get('selected_policy') or '—'} ({row.get('selected_candidate_id') or '—'}).")
+        lines.append(f"Без {labels.get(component, component)}: {row.get('selected_policy') or '—'} ({row.get('selected_candidate_id') or '—'}).")
     lines.append("Сравнение схем при неизменной экономике кандидатов:")
     for row in audit.get("scheme_comparisons") or []:
         lines.append(

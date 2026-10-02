@@ -580,6 +580,13 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
         if row is None:
             continue
         for artifact in _rows(artifacts):
+            comparison_horizon = _num(_dict(_dict(snapshot.get('policy_manager')).get('inputs')).get('horizon_minutes'))
+            artifact_horizon = _num(artifact.get('horizon_minutes'))
+            if comparison_horizon is not None and (artifact_horizon is None or
+                    not math.isclose(comparison_horizon, artifact_horizon, rel_tol=0, abs_tol=1e-6)):
+                row['forecast_rejections'].append({'model_version': artifact.get('model_version'),
+                                                  'reason': 'MODEL_FORECAST_HORIZON_MISMATCH'})
+                continue
             component, reason = _action_models(row, artifact, cutoff, regime, regime_contract)
             if component:
                 forecasts.append(component)

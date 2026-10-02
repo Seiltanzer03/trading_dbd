@@ -204,6 +204,8 @@ def install_strategy_terminal_guard() -> None:
                 (time.time(), position_module._finite(execution_price),
                  position_module._finite(execution_r), decision_id),
             )
+            self._observe_ack(row, 'executed', execution_price_source=execution_price_source,
+                              execution_price=execution_price, execution_r=execution_r)
         return {
             "ok": True, "idempotent": False, "decision_id": decision_id,
             "execution_status": "executed", "position_state": self.state(trade),
