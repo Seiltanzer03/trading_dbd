@@ -198,10 +198,19 @@ def parse_cot(body: bytes, *, contract: str, receipt: float, source_id: str) -> 
             "dependency_group": "cftc:legacy-futures:" + contract}
 
 
-def parse_coinbase_closes(body: bytes, *, receipt: float) -> dict[float, float]:
+def parse_coinbase_closes(body: bytes, *, receipt: float,
+                          start_ts: float | None = None,
+                          end_ts: float | None = None) -> dict[float, float]:
     rows = json.loads(body)
     if not isinstance(rows, list) or len(rows) > 300:
-        raise ValueError("CANDLE_ROWS_INVALID")
+        raise ValueError("CANDLE_ROWS_INVALID:type=" + type(rows).__name__
+                         + ":n=" + str(len(rows) if isinstance(rows, (list, dict)) else "unknown"))
+    if (start_ts is None) != (end_ts is None):
+        raise ValueError("CANDLE_REQUEST_WINDOW_INCOMPLETE")
+    if start_ts is not None:
+        start_ts, end_ts = _number(start_ts), _number(end_ts)
+        if not start_ts < end_ts <= receipt or start_ts % 60 or end_ts % 60:
+            raise ValueError("CANDLE_REQUEST_WINDOW_INVALID")
     result = {}
     for row in rows:
         if not isinstance(row, list) or len(row) != 6:
@@ -209,7 +218,8 @@ def parse_coinbase_closes(body: bytes, *, receipt: float) -> dict[float, float]:
         start, close = _number(row[0]), _number(row[4])
         if start % 60 or close <= 0:
             raise ValueError("CANDLE_VALUE_INVALID")
-        if start + 60 <= receipt:
+        if (start + 60 <= receipt and (start_ts is None
+                or start >= start_ts and start + 60 <= end_ts)):
             if start + 60 in result and result[start + 60] != close:
                 raise ValueError("CONFLICTING_CANDLE_DUPLICATES")
             result[start + 60] = close
@@ -267,10 +277,18 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
         raise ValueError("INSTRUMENTS_INVALID")
     existing = existing if isinstance(existing, dict) else {}
     previous = previous if isinstance(previous, dict) else {}
+    # Provider-default windows are not the bounded window requested by this
+    # collector. Request one common, already-completed window for all leaders;
+    # retaining the parser cap also rejects a provider that ignores these bounds.
+    candle_end = math.floor(_number(clock()) / 60) * 60
+    candle_start = candle_end - 30 * 60
+    candle_query = urlencode({"granularity": 60,
+        "start": datetime.fromtimestamp(candle_start, timezone.utc).isoformat(),
+        "end": datetime.fromtimestamp(candle_end, timezone.utc).isoformat()})
     jobs = {"nyse:calendar": NYSE}
     for code, product in CRYPTO.items():
         for kind, suffix in (("book", "book?level=1"), ("tape", "trades?limit=1000"),
-                             ("candles", "candles?granularity=60")):
+                             ("candles", "candles?" + candle_query)):
             jobs[f"coinbase:{code}:{kind}"] = f"{COINBASE}/products/{product}/{suffix}"
     for code, contract in COT_MARKETS.items():
         if code in instruments:
@@ -345,8 +363,11 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
         key = f"coinbase:{code}:candles"
         if key in bodies:
             try:
-                closes[code] = parse_coinbase_closes(bodies[key], receipt=raw[key]["received_ts"])
+                closes[code] = parse_coinbase_closes(bodies[key], receipt=raw[key]["received_ts"],
+                                                   start_ts=candle_start, end_ts=candle_end)
                 raw[key]["parse_status"] = "PARSED"
+                raw[key]["requested_window_start_ts"] = candle_start
+                raw[key]["requested_window_end_ts"] = candle_end
             except Exception as exc:
                 raw[key]["parse_status"] = "REJECTED"
                 errors.append({"source_id": key, "phase": "parse", "reason": str(exc)[:160]})
@@ -365,6 +386,8 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
                           "linked_returns": links, "supporting_source_ids": ids,
                           "dependency_group": "intermarket:coinbase:5min-completed",
                           "context_scope": "RELATED_VENUE_RETURNS_NOT_TARGET_BROKER_PRICE",
+                          "collection_window_start_ts": candle_start,
+                          "collection_window_end_ts": candle_end,
                           "target_price_equivalence_asserted": False}
                 output[code]["edge_family_sources"]["intermarket"].append(record)
     for code, contract in COT_MARKETS.items():

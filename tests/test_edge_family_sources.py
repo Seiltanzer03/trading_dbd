@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import json
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -98,6 +99,21 @@ def test_candles_exclude_in_progress_and_detect_conflicting_duplicates():
         parse_coinbase_closes(encoded(rows), receipt=T0)
 
 
+def test_candles_strict_response_cap_and_requested_completed_window():
+    rows = [[T0 - 60 * n, 90, 110, 99, 100, 5] for n in range(302)]
+    with pytest.raises(ValueError, match="CANDLE_ROWS_INVALID:type=list:n=302"):
+        parse_coinbase_closes(encoded(rows), receipt=T0, start_ts=T0 - 1800, end_ts=T0)
+    closes = parse_coinbase_closes(encoded(rows[:40]), receipt=T0 + 120,
+                                  start_ts=T0 - 1800, end_ts=T0)
+    assert len(closes) == 30
+    assert min(closes) == T0 - 1740
+    assert max(closes) == T0
+    with pytest.raises(ValueError, match="WINDOW_INCOMPLETE"):
+        parse_coinbase_closes(candles(), receipt=T0, start_ts=T0 - 1800)
+    with pytest.raises(ValueError, match="WINDOW_INVALID"):
+        parse_coinbase_closes(candles(), receipt=T0, start_ts=T0 - 1800, end_ts=T0 + 60)
+
+
 def test_cash_calendar_holiday_early_close_and_dst_not_cfd_authority():
     for date, close_hour in (("2026-11-27T15:00:00+00:00", 18), ("2026-10-01T15:00:00+00:00", 20)):
         stamp = datetime.fromisoformat(date).timestamp()
@@ -149,6 +165,43 @@ def test_bundle_has_all_eight_honest_rows_actual_hashes_and_no_model_authority()
     links = bundle["instruments"]["NAS100"]["edge_family_sources"]["intermarket"][0]["linked_returns"]
     assert len({(row["start_ts"], row["end_ts"]) for row in links}) == 1
     assert all(row["end_ts"] - row["start_ts"] == 300 for row in links)
+
+
+def test_shared_explicit_crypto_request_bounds_and_immutable_source_lineage():
+    calls, bodies = [], {}
+    def fetch(url):
+        calls.append(url)
+        body = candles() if "/candles?" in url else book() if "/book?" in url else tape()
+        bodies[url] = body
+        if "nyse.com" in url:
+            return calendar()
+        return body
+    # A non-minute wall clock must not admit a provider's unfinished or
+    # out-of-window candle even if the HTTP response arrives later.
+    bundle = build_bundle(instruments=("BTCUSD", "ETHUSD", "SOLUSD"),
+                          fetch=fetch, clock=lambda: T0 + 29)
+    urls = [url for url in calls if "/candles?" in url]
+    assert len(urls) == 3
+    queries = [parse_qs(urlparse(url).query) for url in urls]
+    assert all(query == queries[0] for query in queries)
+    query = queries[0]
+    start = datetime.fromisoformat(query["start"][0]).timestamp()
+    end = datetime.fromisoformat(query["end"][0]).timestamp()
+    assert end == T0 and end - start == 1800
+    assert query["granularity"] == ["60"]
+    import hashlib
+    for code, entry in bundle["instruments"].items():
+        record = entry["edge_family_sources"]["intermarket"][0]
+        assert record["collection_window_start_ts"] == start
+        assert record["collection_window_end_ts"] == end
+        assert all(start <= link["start_ts"] < link["end_ts"] <= end for link in record["linked_returns"])
+        for leader in CRYPTO:
+            raw = bundle["raw_sources"][f"coinbase:{leader}:candles"]
+            digest = hashlib.sha256(bodies[raw["official_url"]]).hexdigest()
+            assert raw["body_sha256"] == digest
+            assert raw["source_id"] in record["supporting_source_ids"]
+            assert raw["requested_window_end_ts"] == end
+            assert raw["received_ts"] <= bundle["captured_ts"]
 
 
 def test_all_unavailable_sources_remain_explicit_no_fill_forward_or_zero_carry():

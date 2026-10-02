@@ -21,7 +21,11 @@ requirements. Availability of context is not OOS validation or profit evidence.
   is used for OFI only when supplied by `--previous-bundle` within 60 seconds and
   with a larger exchange sequence. One book does not invent a previous update.
 * Coinbase completed one-minute closes use the same two endpoints separated by
-  five minutes across at least two related markets. In-progress candles are
+  five minutes across at least two related markets. Every request shares an
+  explicit 30-minute start/end window ending at the last completed UTC minute;
+  provider-default unbounded windows are never used. The 300-row cap remains
+  strict even when the provider returns out-of-window rows. Observations are
+  filtered to the requested completed window before synchronization. In-progress candles are
   excluded, mismatched/absent endpoints do not fabricate synchronous prices.
   These are explicitly related venue returns, not claimed broker CFD prices.
 * CFTC Legacy Futures Only reports for gold, silver and euro FX. Noncommercial
