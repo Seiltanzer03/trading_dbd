@@ -17,6 +17,7 @@ from production_ede_offload import (
 
 
 ALLOWED_NAMES = {
+    "edge_family_sources_latest.json",
     "mathematical_edge_latest.json",
     "active_structured_15m_latest.json",
     "active_structured_30m_latest.json",
@@ -60,7 +61,8 @@ def _stamp_report(source: pathlib.Path, *, expected_sha: str, run_id: str) -> in
         encoding="utf-8",
     )
     size = source.stat().st_size
-    if size <= 0 or size > MAX_BYTES:
+    limit = 1_000_000 if payload.get("contract_version") == "edge-family-source-bundle-v1" else MAX_BYTES
+    if size <= 0 or size > limit:
         raise RuntimeError(f"active edge report size outside bounded contract: {size}")
     return size
 

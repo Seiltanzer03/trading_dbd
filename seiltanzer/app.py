@@ -274,6 +274,49 @@ def _publish_unified_review(engine, snapshot: dict, result: dict, review_id: str
     return decision
 
 
+def _attach_family_source_bundle(engine, snapshot: dict) -> None:
+    """Merge bounded local source facts without replacing existing T0 records."""
+    from .edge_family_source_runtime import load_family_source_context
+    from .runtime_git_identity import runtime_git_sha
+    loaded = load_family_source_context(engine, snapshot, expected_sha=runtime_git_sha())
+    audit = loaded["edge_family_source_bundle_audit"]
+    snapshot["edge_family_source_bundle_audit"] = audit
+    incoming = loaded.get("edge_family_sources") or {}
+    if not incoming:
+        return
+    existing = snapshot.get("edge_family_sources")
+    if existing is None:
+        existing = {}
+        snapshot["edge_family_sources"] = existing
+    if not isinstance(existing, dict):
+        audit["existing_sources_preserved_unmergeable"] = True
+        return
+    skipped = []
+    for family, records in incoming.items():
+        prior = existing.get(family)
+        if prior is None:
+            merged = []
+        elif isinstance(prior, dict):
+            merged = [prior]
+        elif isinstance(prior, list):
+            merged = list(prior)
+        else:
+            skipped.append(family)
+            continue
+        seen = {str(record["source_id"]) for record in merged
+                if isinstance(record, dict) and record.get("source_id")}
+        for record in records:
+            source_id = str(record.get("source_id") or "")
+            if source_id and source_id in seen:
+                continue
+            merged.append(record)
+            if source_id:
+                seen.add(source_id)
+        existing[family] = merged
+    if skipped:
+        audit["existing_families_preserved_unmergeable"] = skipped[:8]
+
+
 def _acknowledged_execution(trade: dict, tick: dict,
                             broker_price: float | None) -> tuple[float | None, float | None]:
     if broker_price is None:
@@ -1194,6 +1237,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     req_id, retriable=True))
             # Evaluate every extended action alongside the base policies. The
             # independent provider sees quantified candidates, not a picked winner.
+            await asyncio.to_thread(_attach_family_source_bundle, engine, snapshot)
             macro_factory = getattr(getattr(engine, "passive", None), "_macro_data_factory", None)
             if macro_factory is not None:
                 from .macro_t0_context import build_macro_t0_context

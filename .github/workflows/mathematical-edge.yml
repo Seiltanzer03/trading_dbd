@@ -6,6 +6,7 @@ on:
     paths:
       - 'seiltanzer/mathematical_edge*.py'
       - 'scripts/*mathematical_edge*.py'
+      - 'tests/test_mathematical_edge*.py'
       - 'research_fixtures/mathematical_edge/**'
       - '.github/workflows/mathematical-edge.yml'
   workflow_dispatch:
@@ -41,12 +42,33 @@ jobs:
           python-version: '3.11'
           cache: pip
       - run: pip install -q -e '.[dev]' paramiko
+      - name: Restore hash-verified per-provider market-bar cache
+        id: math-source-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .math-source-cache
+          # Collector/config changes invalidate cache semantics. PRs restore only;
+          # only main can save, never exporting SSH material or fitted models.
+          key: ${{ runner.os }}-math-source-v1-${{ hashFiles('seiltanzer/mathematical_edge_sources.py', 'seiltanzer/config.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-math-source-v1-${{ hashFiles('seiltanzer/mathematical_edge_sources.py', 'seiltanzer/config.py') }}-
       - name: Read cached actual market bars without production writes
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: python -m scripts.export_mathematical_edge_sources --password "$SSH_PASSWORD" --output mathematical_sources.json
-      - name: Fit and validate on runner
-        run: python -m scripts.run_mathematical_edge --sources mathematical_sources.json --output mathematical_edge_latest.json
+      - name: Refresh actual bars, fit and validate on runner
+        id: math-fit
+        run: >-
+          python -m scripts.run_mathematical_edge --sources mathematical_sources.json
+          --refresh-sources --sources-output refreshed_sources.json
+          --cache-dir .math-source-cache --source-budget-seconds 180
+          --output mathematical_edge_latest.json
+      - name: Save per-provider market-bar cache from trusted main only
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.math-fit.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .math-source-cache
+          key: ${{ steps.math-source-cache.outputs.cache-primary-key }}
       - name: Publish working model for exact production SHA
         if: github.event_name != 'pull_request'
         env:
@@ -61,4 +83,5 @@ jobs:
           path: |
             mathematical_edge_latest.json
             mathematical_sources.json
+            refreshed_sources.json
           retention-days: 30

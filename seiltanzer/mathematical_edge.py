@@ -440,6 +440,46 @@ def runtime_path_predictions(model, features, captured):
     return output
 
 
+def crypto_training_source_admission(report, model, code):
+    """Bind crypto training to the actual configured quote/venue, not its alias.
+
+    USD/USDT and cross-venue return transfer require measured validation. There
+    is no such transfer contract implemented here: a `validated: true` flag or
+    USD≈USDT assertion never admits a proxy. Offline searches remain permitted.
+    """
+    from .config import CRYPTO_INSTRUMENTS
+    instrument = CRYPTO_INSTRUMENTS.get(code)
+    if instrument is None:
+        return {'available': True, 'reason': 'LEGACY_TRADFI_WORKING_PROXY_POLICY'}
+    base = {'available': False, 'configured_symbol': instrument.binance_symbol,
+            'configured_quote_currency': 'USDT', 'measured_transfer_mapping_available': False}
+    raw = report.get('sources')
+    sources = [row for row in raw if isinstance(row, dict) and row.get('instrument') == code] if isinstance(raw, list) else []
+    if len(sources) != 1:
+        return {**base, 'reason': 'CRYPTO_TRAINING_SOURCE_PROVENANCE_UNAVAILABLE'}
+    source = sources[0]
+    semantics = source.get('source_semantics') or {}
+    if not isinstance(semantics, dict):
+        return {**base, 'reason': 'CRYPTO_TRAINING_SOURCE_PROVENANCE_INVALID'}
+    base.update(provider=source.get('provider'), ticker=source.get('ticker'),
+                provider_quote_currency=semantics.get('provider_quote_currency'),
+                currency_basis_mismatch=semantics.get('currency_basis_mismatch'))
+    if (semantics.get('currency_basis_mismatch') is not False
+            or semantics.get('provider_quote_currency') != 'USDT'
+            or semantics.get('configured_quote_currency') != 'USDT'):
+        return {**base, 'reason': 'CRYPTO_USD_USDT_PRICE_MAPPING_UNVALIDATED'}
+    if (source.get('provider') != 'Binance' or source.get('ticker') != instrument.binance_symbol
+            or source.get('interval') != '5m'
+            or source.get('source_kind') not in {'SINGLE_PROVIDER_COMPLETED_5M', 'SINGLE_RETAINED_PROVIDER_COMPLETED_5M'}
+            or semantics.get('synthetic_price_history') is not False):
+        return {**base, 'reason': 'CRYPTO_PRICE_VENUE_OR_SERIES_MAPPING_UNVALIDATED'}
+    digest = model.get('source_sha256')
+    if (not isinstance(digest, str) or len(digest) != 64
+            or source.get('validated_bars_sha256') != digest):
+        return {**base, 'reason': 'CRYPTO_MODEL_TRAINING_SOURCE_HASH_UNBOUND'}
+    return {**base, 'available': True, 'reason': 'EXACT_CONFIGURED_BINANCE_USDT_TRAINING_SERIES'}
+
+
 def runtime_profile(engine, tick, trade):
     captured = number(tick.get('ts'))
     base = {'contract_version': CONTRACT, 'available': False, 'weight_fraction': 0.,
@@ -470,6 +510,23 @@ def runtime_profile(engine, tick, trade):
             or model.get('model_sha256') != digest
             or number(model.get('training_cutoff')) is None or model['training_cutoff'] > captured):
         return {**base, 'reason': 'MODEL_CONTRACT_HASH_OR_CAUSAL_CUTOFF_INVALID'}
+    from .config import CRYPTO_INSTRUMENTS
+    if code in CRYPTO_INSTRUMENTS:
+        admission = crypto_training_source_admission(report, model, code)
+        base['training_price_source_admission'] = admission
+        if not admission['available']:
+            return {**base, 'reason': admission['reason']}
+        # Training provenance cannot lend its authority to another live series.
+        authority = getattr(feed, 'intraday_source_authority', None)
+        authority = authority if isinstance(authority, dict) else {}
+        observed, received = number(authority.get('observed_ts')), number(authority.get('available_at'))
+        if (authority.get('provider') != 'Binance'
+                or authority.get('source_symbol') != CRYPTO_INSTRUMENTS[code].binance_symbol
+                or authority.get('target_instrument') != code
+                or authority.get('source_verified') is not True or authority.get('derived') is not False
+                or observed is None or received is None
+                or not 0 < observed <= received <= captured or captured-observed > MAX_PRICE_AGE):
+            return {**base, 'reason': 'CRYPTO_LIVE_CONFIGURED_SERIES_AUTHORITY_UNAVAILABLE'}
     features = price_features(completed_live_bars(getattr(feed, 'intraday_ohlcv', []), captured), captured)
     if features is None:
         return {**base, 'reason': 'COMPLETED_CAUSAL_5M_PRICE_FEATURES_UNAVAILABLE'}
@@ -507,7 +564,8 @@ def runtime_profile(engine, tick, trade):
                 'eligible_extended_roles': list(('TIME_STOP', 'REDUCE_TAKE')) if role != 'PRICE_DIRECTION' else None,
                 'probabilities': ps, 'role': role, 'latest_bar_end_ts': bars[-1]['bar_end_ts'], 'captured_ts': captured,
                 'feature_values': dict(zip(FEATURES, features)), 'working_eligible': True,
-                'runtime_price_feature_source': 'Yahoo intraday OHLCV; may be mapped to current broker basis; price proxy, not broker execution bars',
+                'runtime_price_feature_source': ('Exact configured Binance USDT completed OHLCV; not broker execution bars'
+                    if code in CRYPTO_INSTRUMENTS else 'Yahoo intraday OHLCV; may be mapped to current broker basis; price proxy, not broker execution bars'),
                 'training_age_days': round(age_days, 2), 'quality_multiplier': round(quality, 6),
                 'h2': runtime_gex_diagnostics(engine, code, captured, ps['movement']), 'ranking_only': True,
                 'net_economic_proof': False}

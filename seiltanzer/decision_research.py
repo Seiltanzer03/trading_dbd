@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from typing import Any, Iterable
 
 from .execution_simulator import (
@@ -42,6 +43,33 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
     """Reject numeric source timestamps newer than the decision capture."""
     violations: list[str] = []
 
+    def model_output_receipt(path: tuple[str, ...], timestamp: float) -> bool:
+        # A provider answer arrives after the frozen market-input clock. This
+        # one explicit model-output field is not a future market observation.
+        # No source ts/received_ts elsewhere gains an exemption.
+        if path != ("llm_shadow_decision", "provider_response_received_ts"):
+            return False
+        shadow = snapshot.get("llm_shadow_decision") or {}
+        if not isinstance(shadow, dict):
+            return False
+        contract = shadow.get("input_contract") or {}
+        if not isinstance(contract, dict):
+            return False
+        frozen_json = contract.get("frozen_input_json")
+        response_json = shadow.get("provider_response_json")
+        return bool(
+            contract.get("version") == "independent-llm-transport-v1"
+            and contract.get("quant_selection_masked") is True
+            and shadow.get("selection_masked") is True
+            and _finite(shadow.get("input_captured_ts")) == captured_ts
+            and _finite(contract.get("input_captured_ts")) == captured_ts
+            and captured_ts <= timestamp <= time.time() + tolerance_sec
+            and isinstance(frozen_json, str) and isinstance(response_json, str)
+            and hashlib.sha256(frozen_json.encode("utf-8")).hexdigest()
+                == contract.get("frozen_input_sha256")
+            and hashlib.sha256(response_json.encode("utf-8")).hexdigest()
+                == shadow.get("provider_response_sha256"))
+
     def planned_deadline(path: tuple[str, ...], policy: str | None) -> bool:
         # A frozen TIME_STOP order deadline is a future instruction, not a
         # future market observation. All source ts/asof timestamps stay guarded.
@@ -49,8 +77,13 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
             return False
         return (path == ("effective_management_decision", "parameters", "deadline_ts")
             or path == ("policy_manager", "management_decision", "parameters", "deadline_ts")
+            or path == ("effective_management_decision", "quant_evaluation", "parameters", "deadline_ts")
+            or path == ("policy_manager", "management_decision", "quant_evaluation", "parameters", "deadline_ts")
             or path == ("llm_shadow_decision", "working_action", "parameters", "deadline_ts")
+            or path == ("llm_shadow_decision", "quant_evaluation", "parameters", "deadline_ts")
             or path == ("selected_management_action", "working_action", "parameters", "deadline_ts")
+            or path == ("selected_management_action", "quant_evaluation", "parameters", "deadline_ts")
+            or path == ("selected_management_action", "working_action", "quant_evaluation", "parameters", "deadline_ts")
             or (len(path) == 4 and path[0] == "active_management_candidates"
                 and path[1].isdigit() and path[2:] == ("parameters", "deadline_ts"))
             or (path[:2] == ("policy_manager", "unified_edge_ensemble")
@@ -72,13 +105,34 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
                     # also be named "ts" in third-party payloads.
                     if (timestamp is not None and timestamp > 1_000_000_000
                             and timestamp > captured_ts + tolerance_sec
-                            and not planned_deadline(child_path, policy)):
+                            and not planned_deadline(child_path, policy)
+                            and not model_output_receipt(child_path, timestamp)):
                         violations.append(".".join(child_path))
                 visit(child, child_path, policy)
         elif isinstance(value, list):
             for index, child in enumerate(value):
                 visit(child, (*path, str(index)), policy)
 
+    # The exact transport input is persisted as JSON text to avoid duplicating
+    # audit views. Validate that embedded frozen document as market input too;
+    # JSON strings must not become a hiding place for post-T0 source facts.
+    shadow = snapshot.get("llm_shadow_decision") or {}
+    contract = (shadow.get("input_contract") or {}) if isinstance(shadow, dict) else {}
+    if isinstance(contract, dict) and contract.get("version") == "independent-llm-transport-v1":
+        frozen_json = contract.get("frozen_input_json")
+        if (not isinstance(frozen_json, str)
+                or len(frozen_json.encode("utf-8")) > 60_000
+                or hashlib.sha256(frozen_json.encode("utf-8")).hexdigest()
+                    != contract.get("frozen_input_sha256")):
+            raise ValueError("independent LLM frozen input integrity failure")
+        try:
+            frozen_input = json.loads(frozen_json)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("independent LLM frozen input is not JSON") from exc
+        if (not isinstance(frozen_input, dict)
+                or _finite(frozen_input.get("captured_ts")) != captured_ts):
+            raise ValueError("independent LLM frozen input capture mismatch")
+        validate_no_future_timestamps(frozen_input, captured_ts, tolerance_sec)
     visit(snapshot, ())
     if violations:
         raise ValueError(

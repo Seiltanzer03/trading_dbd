@@ -12,7 +12,7 @@ from scripts.production_ede_offload import _connect
 # Stdlib-only program executes on the existing server, including before deploy.
 # Indexed per-instrument ranges, no database backup, no writes, no training.
 REMOTE_EXPORT = r'''
-import sqlite3,gzip,json,hashlib,time,base64,math
+import sqlite3,gzip,json,hashlib,time,base64,math,io
 codes=__CONFIGURED_INSTRUMENT_CODES__
 c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=3)
 c.row_factory=sqlite3.Row
@@ -24,7 +24,7 @@ for code in codes:
  row=c.execute('SELECT source_id,source_sha256,bars_gzip,ticker,provider,interval,source_semantics_json FROM g1s_historical_sources WHERE instrument=? AND contract_version=? ORDER BY created_ts DESC LIMIT 1',(code,'g1s-historical-wf-real-bars-v1')).fetchone()
  bars=[]
  if row:
-  raw=gzip.decompress(row['bars_gzip'])
+  with gzip.GzipFile(fileobj=io.BytesIO(row['bars_gzip'])) as reader:raw=reader.read(8000001)
   if len(raw)>8000000 or hashlib.sha256(raw).hexdigest()!=row['source_sha256']:raise ValueError('invalid historical source')
   bars=json.loads(raw)
   if len(bars)>20000:raise ValueError('source exceeds bound')
@@ -36,16 +36,27 @@ for code in codes:
   if r['created_ts'] is None or r['created_ts']<r['bar_end_ts']:excluded_partial+=1;continue
   if r['bar_end_ts']>now or abs(r['bar_end_ts']-r['bar_start_ts']-60)>1:continue
   start=math.floor(r['bar_start_ts']/300)*300
-  groups.setdefault(start,{})[int(r['bar_start_ts'])]=dict(r)
- appended=[]
- for start,g in sorted(groups.items()):
-  if set(g)!={int(start+k*60) for k in range(5)}:continue
-  v=[g[int(start+k*60)] for k in range(5)]
-  appended.append(dict(bar_end_ts=start+300,open=v[0]['open'],high=max(x['high'] for x in v),low=min(x['low'] for x in v),close=v[-1]['close']))
- merged={b['bar_end_ts']:b for b in bars}
- merged.update({b['bar_end_ts']:b for b in appended})
- if not merged:errors[code]='SOURCE_BARS_UNAVAILABLE';continue
- sources.append(dict(instrument=code,bars=list(sorted(merged.values(),key=lambda x:x['bar_end_ts'])),source_id=row['source_id'] if row else None,cached_sha256=row['source_sha256'] if row else None,recent_completed_5m_n=len(appended),source_kind='historical_provider_bars_plus_direct_retained_only',recent_kind_counts=kinds,recent_provider_counts=providers,excluded_derived_minute_n=excluded_derived,excluded_partial_minute_n=excluded_partial,cached_ticker=row['ticker'] if row else None,cached_provider=row['provider'] if row else None,cached_interval=row['interval'] if row else None,cached_semantics=json.loads(row['source_semantics_json']) if row else None,not_broker_execution_bars=True))
+  groups.setdefault(r['source'] or 'UNAVAILABLE',{}).setdefault(start,{})[int(r['bar_start_ts'])]=dict(r)
+ retained={}
+ for provider,provider_groups in groups.items():
+  completed=[]
+  for start,g in sorted(provider_groups.items()):
+   if set(g)!={int(start+k*60) for k in range(5)}:continue
+   v=[g[int(start+k*60)] for k in range(5)]
+   completed.append(dict(bar_end_ts=start+300,open=v[0]['open'],high=max(x['high'] for x in v),low=min(x['low'] for x in v),close=v[-1]['close']))
+  if completed:retained[provider]=completed
+ # Historical and retained feeds have different series semantics: never splice them.
+ selected_provider=row['provider'] if row else None
+ selected_kind='SINGLE_HISTORICAL_PROVIDER_COMPLETED_5M'
+ semantics=json.loads(row['source_semantics_json']) if row else {}
+ if not bars and retained:
+  selected_provider=max(retained,key=lambda p:(len(retained[p]),retained[p][-1]['bar_end_ts']))
+  bars=retained[selected_provider];selected_kind='SINGLE_RETAINED_PROVIDER_COMPLETED_5M'
+  semantics=dict(provider=selected_provider,bar_timestamp_semantics='five consecutive completed direct one-minute bars',gaps_filled=False,synthetic_price_history=False,exact_live_broker_series=False)
+ if not bars:errors[code]='SOURCE_BARS_UNAVAILABLE';continue
+ bars=sorted(bars,key=lambda x:x['bar_end_ts'])
+ digest=hashlib.sha256(json.dumps(bars,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+ sources.append(dict(instrument=code,bars=bars,source_id='math-export-'+code+'-'+digest[:24],source_sha256=digest,cached_source_id=row['source_id'] if row else None,cached_sha256=row['source_sha256'] if row else None,recent_completed_5m_n=sum(len(v) for v in retained.values()),retained_provider_completed_counts={p:len(v) for p,v in retained.items()},source_kind=selected_kind,provider=selected_provider,ticker=row['ticker'] if row else code,interval='5m',source_semantics=semantics,mixed_provider_splicing=False,recent_kind_counts=kinds,recent_provider_counts=providers,excluded_derived_minute_n=excluded_derived,excluded_partial_minute_n=excluded_partial,cached_ticker=row['ticker'] if row else None,cached_provider=row['provider'] if row else None,cached_interval=row['interval'] if row else None,cached_semantics=json.loads(row['source_semantics_json']) if row else None,not_broker_execution_bars=True,receipt_observed_ts=now))
 c.close()
 raw=json.dumps(dict(sources=sources,errors=errors,exported_ts=now,read_only=True),allow_nan=False).encode()
 if len(raw)>64000000:raise ValueError('export exceeds bound')

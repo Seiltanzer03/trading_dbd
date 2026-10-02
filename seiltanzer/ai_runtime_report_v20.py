@@ -5,9 +5,11 @@ management_decision, execution authority or research authority.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import time
 from typing import Any
 
 import httpx
@@ -21,6 +23,7 @@ from .llm_decision_shadow import (
     finalize_extended_shadow,
     _hard_guard,
     _quant_policy,
+    _shadow_projection,
     _validate_model_payload,
     append_shadow_section,
     record_shadow_decision,
@@ -29,23 +32,29 @@ from .llm_shadow_working_action import build_working_action
 
 
 REPORT_VERSION = "ai-runtime-report-v20"
-COMBINED_PROVIDER_MAX_TOKENS = 720
+COMBINED_PROVIDER_MAX_TOKENS = 1400
+INDEPENDENT_INPUT_MAX_BYTES = 60_000
+PROVIDER_RESPONSE_MAX_BYTES = 20_000
 _INSTALLED = False
 
 _COMBINED_PROMPT = """
-PRODUCTION EXPLANATION + INDEPENDENT SHADOW MODE.
+INDEPENDENT SHADOW + BOUNDED COMMENTARY MODE.
 The server owns the production management_decision and every deterministic number.
+The selected quant policy and all server winner outputs are deliberately withheld.
 You MUST NOT change, execute, or present the shadow policy as the production action.
 
 Return ONLY one valid JSON object, no markdown:
 {
-  "explanation_ru": "120-180 Russian words explaining why the existing production policy is reasonable, its strongest evidence/limitations, data quality, and next recalculation trigger; do not issue a new trading instruction here",
+  "explanation_ru": "Brief Russian commentary on the available facts, limitations, data quality, and next recalculation trigger; do not infer the hidden server action or issue a trading instruction here",
   "shadow_decision": {
     "policy": "HOLD|CLOSE_10|CLOSE_25|CLOSE_50|EXIT|MOVE_TO_BE|TRAIL_GAMMA_FLIP|TIGHTEN_STOP|EXTEND_TAKE|REDUCE_TAKE|SCALE_OUT_ON_SPIKE|TIME_STOP",
     "confidence": 0.0,
+    "policy_scores": {"HOLD": 0.0, "CLOSE_10": 0.0, "CLOSE_25": 0.0, "CLOSE_50": 0.0, "EXIT": 0.0, "MOVE_TO_BE": 0.0, "TRAIL_GAMMA_FLIP": 0.0, "TIGHTEN_STOP": 0.0, "EXTEND_TAKE": 0.0, "REDUCE_TAKE": 0.0, "SCALE_OUT_ON_SPIKE": 0.0, "TIME_STOP": 0.0},
     "reason_ru": "brief independent numerical rationale",
     "key_evidence": ["3-6 strongest facts"],
-    "counter_evidence": ["0-4 facts against your own shadow choice"]
+    "counter_evidence": ["0-4 facts against your own shadow choice"],
+    "evidence_families": ["observed family IDs from shadow_contract.available_evidence_family_ids"],
+    "invalidation_conditions": ["checkable conditions invalidating this preference"]
   }
 }
 
@@ -59,8 +68,9 @@ Low reliability is not an absolute ban: only the server degraded-manual gate can
 Never assert stress stability when its numeric checks are UNAVAILABLE.
 Correlated metrics from one family are not independent votes. Hard-CVaR eligibility
 is mandatory. Never widen stops, average down, or add to a losing position.
-First form the independent shadow opinion; quant_management_decision is only for
-comparison. A hard-guarded choice with enough confidence may become an exact
+Return all 12 policy_scores, each from -1 to 1: relative preferences, not
+probabilities or Expected R. Self-confidence never determines ensemble weight.
+No quant winner is supplied for comparison. A hard-guarded choice may become an exact
 manual-confirmation action variant. It still has zero automatic-execution authority;
 missing numeric stop/take/time parameters block the variant.
 """.strip()
@@ -260,12 +270,13 @@ def _control_summary(snapshot: dict[str, Any]) -> str:
     availability = _operational_availability(snapshot)
     number = lambda value: "нет расчёта" if value is None else f"{value:+.3f}R"
     return (
-        f"Действующий план {name}; Expected {number(expected)}, CVaR10 {number(cvar)}. "
+        f"Базовый quant-план до единого ранжирования: {name}; Expected {number(expected)}, CVaR10 {number(cvar)}. "
         f"Gate: {gate.get('status') or 'не опубликован'}; надёжность данных: "
         f"{reliability.get('level') or 'не опубликована'}. "
         f"Execution-MC: {availability['execution_mc']}; геометрия сценариев: "
-        f"{availability['scenario_geometry']}. Модельный комментарий не меняет "
-        "рассчитанное действие; исполнение у брокера требует отдельного подтверждения."
+        f"{availability['scenario_geometry']}. Текст комментария не является приказом; "
+        "структурированный голос учитывается отдельно в едином выборе ниже. "
+        "Исполнение у брокера требует отдельного подтверждения."
     )
 
 
@@ -284,10 +295,13 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
         exploratory_weight = _number(exploratory.get("component_weight_fraction"))
     selected = (gate.get("degraded_authority_overlay") or {}).get("selected") or {}
     llm = shadow.get("policy") or "UNAVAILABLE"
-    llm_role = ("проверенный кандидат для ручного подтверждения"
-                if shadow.get("production_authority") else "отдельное мнение; вес в арбитре 0")
+    llm_role = ("структурированный независимый голос для единого ранжирования"
+                if shadow.get("status") == "ok" and shadow.get("policy_scores")
+                else "недоступный или заблокированный голос; активный вес 0")
     return (
         "**ВЕСА И РОЛИ РЕШЕНИЯ** —\n"
+        "Ниже — базовая диагностика до единого выбора, не итоговые веса компонентов. "
+        "Фактические веса и окончательное действие опубликованы в разделе «ЕДИНЫЙ ВЫБОР ДЕЙСТВИЯ».\n"
         "Диагностический счёт: Expected + 0.35 × CVaR10; бонус +0.015R "
         "публикуется для диагностики и не определяет победителя. "
         "Подтверждённый overlay получает приоритет только после gate.\n"
@@ -310,13 +324,50 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
 
 
 def _provider_payload(content: str) -> tuple[str, dict[str, Any]]:
+    if not isinstance(content, str) or len(content.encode("utf-8")) > PROVIDER_RESPONSE_MAX_BYTES:
+        raise RuntimeError("combined_provider_invalid_response_budget")
     payload = _extract_json_object(content)
     explanation = _provider._sanitize_explanation(payload.get("explanation_ru"))
     shadow_raw = payload.get("shadow_decision")
     if not isinstance(shadow_raw, dict):
         raise RuntimeError("combined_provider_missing_shadow")
     shadow = _validate_model_payload(shadow_raw)
+    if "policy_scores" not in shadow:
+        raise RuntimeError("combined_provider_missing_policy_scores")
     return explanation, shadow
+
+
+def _independent_provider_input(snapshot: dict[str, Any], authority: dict[str, Any]) -> dict[str, Any]:
+    """Restore bounded facts that the older explanation-only projection drops."""
+    projected = _shadow_projection(snapshot)
+    authoritative = _shadow_projection(authority)
+    candidate_fields = (
+        "policy", "status", "reason", "parameters", "expected_variant_net_r",
+        "expected_hold_net_r", "expected_delta_vs_hold_r", "execution_cost_r",
+        "worst_seed_cvar10_net_r", "worst_seed_hold_cvar10_net_r",
+        "paired_delta_ci95_lower_r", "materiality_band_r", "hard_net_floor_r",
+        "production_authority", "automatic_execution_allowed",
+    )
+    projected["active_management_candidates"] = [
+        {key: row[key] for key in candidate_fields if key in row}
+        for row in authoritative.get("active_management_candidates") or []
+        if isinstance(row, dict)
+    ][:7]
+    for key in ("edge_family_facts", "shadow_contract", "edge_regime", "market_regime"):
+        if key in authoritative:
+            projected[key] = authoritative[key]
+    from .ai_provider_guard import _bounded
+    for key in ("execution_cost_model", "scenario_geometry", "management_model_scope"):
+        value = (authoritative.get("policy_manager") or {}).get(key)
+        if isinstance(value, dict):
+            projected["policy_manager"][key] = _bounded(value)
+    if isinstance(authority.get("edge_family_source_bundle_audit"), dict):
+        projected["edge_family_source_bundle_audit"] = _bounded(authority["edge_family_source_bundle_audit"])
+    # The observed family adapter supplies exact numeric macro facts and their
+    # clocks; a compact event summary supplies context without a research ledger.
+    if "macro_context_v1" in authoritative:
+        projected["macro_context_v1"] = _bounded(authoritative["macro_context_v1"])
+    return projected
 
 
 def request_explanation_with_shadow(
@@ -337,24 +388,32 @@ def request_explanation_with_shadow(
         raise RuntimeError("provider_explanation_blocked_missing_authoritative_price")
 
     deterministic = ai_verdict.render_policy_report(authority)
-    facts = _provider._explanation_facts(snapshot)
+    # Mask at the actual transport boundary. The deterministic renderer and
+    # post-response guard retain full authority locally; no winner-bearing
+    # explanation facts or verdict system prompt are uploaded to the model.
+    independent_input = _independent_provider_input(snapshot, authority)
+    from .decision_research import validate_no_future_timestamps
+    validate_no_future_timestamps(independent_input, float(authority["captured_ts"]))
+    frozen_input_json = json.dumps(independent_input, ensure_ascii=False,
+                                   sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if len(frozen_input_json.encode("utf-8")) > INDEPENDENT_INPUT_MAX_BYTES:
+        raise RuntimeError("combined_provider_independent_input_budget_exceeded")
     body = {
         "model": model,
         "temperature": 0.0,
         "max_tokens": COMBINED_PROVIDER_MAX_TOKENS,
         "messages": [
-            {"role": "system", "content": ai_verdict.SYSTEM_PROMPT + "\n\n" + _COMBINED_PROMPT},
+            {"role": "system", "content": _COMBINED_PROMPT},
             {
                 "role": "user",
                 "content": (
-                    "Bounded production snapshot:\n"
-                    + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
-                    + "\n\nAuthoritative control facts (read-only):\n"
-                    + json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
+                    "Bounded independent decision input:\n" + frozen_input_json
                 ),
             },
         ],
     }
+    provider_request_json = json.dumps(body, ensure_ascii=False, sort_keys=True,
+                                      separators=(",", ":"), allow_nan=False)
     try:
         with httpx.Client(proxy=proxy, timeout=8, trust_env=False) as client:
             response = client.post(
@@ -365,6 +424,7 @@ def request_explanation_with_shadow(
             response.raise_for_status()
             try:
                 result = response.json()
+                response_received_ts = time.time()
             except (TypeError, ValueError) as exc:
                 raise RuntimeError("provider_bad_response: malformed JSON") from exc
     except httpx.HTTPStatusError as exc:
@@ -393,6 +453,27 @@ def request_explanation_with_shadow(
         "reason_ru": parsed_shadow["reason_ru"],
         "key_evidence": parsed_shadow["key_evidence"],
         "counter_evidence": parsed_shadow["counter_evidence"],
+        "policy_scores": parsed_shadow["policy_scores"],
+        "evidence_families": parsed_shadow["evidence_families"],
+        "invalidation_conditions": parsed_shadow["invalidation_conditions"],
+        "selection_masked": True,
+        "captured_ts": authority.get("captured_ts"),
+        "input_captured_ts": authority.get("captured_ts"),
+        "provider_response_received_ts": response_received_ts,
+        "input_contract": {
+            "version": "independent-llm-transport-v1",
+            "quant_selection_masked": True,
+            "all_policy_scores_required": True,
+            "input_captured_ts": authority.get("captured_ts"),
+            "frozen_input_json": frozen_input_json,
+            "frozen_input_sha256": hashlib.sha256(frozen_input_json.encode("utf-8")).hexdigest(),
+            "provider_request_json": provider_request_json,
+            "provider_request_sha256": hashlib.sha256(provider_request_json.encode("utf-8")).hexdigest(),
+            "available_evidence_family_ids": (independent_input.get("shadow_contract") or {}).get(
+                "available_evidence_family_ids", []),
+        },
+        "provider_response_json": content,
+        "provider_response_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
     }
     shadow["working_action"] = build_working_action(authority, shadow)
     finalize_extended_shadow(authority, shadow)

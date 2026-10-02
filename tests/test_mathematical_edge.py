@@ -223,4 +223,5 @@ def test_source_export_is_read_only_and_rejects_retroactive_offset_bars(tmp_path
     assert result['read_only'] and db.read_bytes()==before
     assert source['recent_completed_5m_n']==1 and source['excluded_derived_minute_n']==5
     assert source['excluded_partial_minute_n']==5
-    assert len(source['bars'])==2 and source['not_broker_execution_bars']
+    assert source['bars']==historical and source['not_broker_execution_bars']
+    assert source['mixed_provider_splicing'] is False

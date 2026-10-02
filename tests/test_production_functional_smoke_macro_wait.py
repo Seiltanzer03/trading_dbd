@@ -22,6 +22,18 @@ def _ok_result() -> dict:
     }
 
 
+def test_isolated_unified_smoke_assesses_all_actions_without_transport(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("isolated contract fixture must not request production or a provider")
+    monkeypatch.setattr(smoke, "request", forbidden)
+    summary = smoke.verify_isolated_unified_management_contract()
+    assert summary["status"] == "PASS"
+    assert summary["actions_assessed"] == 12
+    assert summary["extended_actions_assessed"] == 7
+    assert summary["real_position_mutations"] == summary["paid_provider_calls"] == summary["orders_sent"] == 0
+    assert summary["real_profit_proven"] is False
+
+
 def test_live_state_waits_for_price_source_materialization(monkeypatch):
     replies = [(503, {"detail": "live state snapshot is warming"}, 2.0),
                (200, {"feeds": {"price": {"value": 30273.5}}}, 3.0)]

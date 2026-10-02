@@ -1,5 +1,8 @@
 import pytest
 import time
+import json
+import hashlib
+from pathlib import Path
 from fastapi.testclient import TestClient
 from seiltanzer.app import create_app
 from seiltanzer.config import Settings
@@ -46,6 +49,141 @@ def test_fallback_returns_structured_management_decision(client):
     assert edge["may_widen_stop"] is False
     assert edge["may_increase_position"] is False
     assert edge["automatic_execution_allowed"] is False
+
+
+def test_actual_provider_transport_review_freezes_independent_input_and_response(client, monkeypatch):
+    """Exercise the installed provider path, not a replacement request_verdict."""
+    from seiltanzer import ai_runtime_report_v20 as report
+    from seiltanzer import ai_provider_guard as guard
+    from seiltanzer import ai_provider_explanation as provider
+    from seiltanzer import app as app_module
+    from seiltanzer.llm_decision_shadow import VALID_POLICIES
+
+    calls = []
+    reply = json.dumps({
+        "explanation_ru": "Данные ограничивают вывод; следующий пересчёт при обновлении снимка.",
+        "shadow_decision": {"policy": "HOLD", "confidence": .7,
+            "policy_scores": {name: float(name == "HOLD") for name in VALID_POLICIES},
+            "reason_ru": "Оценка всех доступных действий с сохранением риска.",
+            "key_evidence": ["Опционная геометрия и текущая цена"],
+            "counter_evidence": ["Модельное исполнение не гарантировано"],
+            "evidence_families": ["option_distribution", "price_path"],
+            "invalidation_conditions": ["Новый снимок цены"]}}, ensure_ascii=False)
+
+    class Response:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"model": "transport-fixture", "choices": [{"message": {"content": reply}}]}
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["trust_env"] is False
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def post(self, url, **kwargs):
+            assert url == "https://openrouter.ai/api/v1/chat/completions"
+            calls.append(kwargs["json"])
+            return Response()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "transport-secret-not-to-persist")
+    # This exact-generation source is read through the real bounded local
+    # loader and reaches the real masked provider request before publication.
+    source_cutoff = time.time() - 1
+    generation = "a" * 40
+    monkeypatch.setattr("seiltanzer.runtime_git_identity.runtime_git_sha", lambda: generation)
+    source = {"source_id": "fixture:macro:rate", "source_verified": True,
+        "instrument": "NAS100", "observed_ts": source_cutoff - 10,
+        "received_ts": source_cutoff - 8, "quality": .8,
+        "features": {"macro.expected_rate_change": -.2}}
+    bundle = {"contract_version": "edge-family-source-bundle-v1",
+        "edge_policy": "g1s-manual-trader-high-risk-edge-policy-v1",
+        "production_authority": False,
+        "publication_contract_version": "active-edge-exact-sha-publication-v1",
+        "published_for_sha": generation, "captured_ts": source_cutoff,
+        "instruments": {"NAS100": {"edge_family_sources": {"macro": [source]},
+            "readiness": {"macro": {"available": True, "reason": "SOURCE_CONTEXT_ONLY"}}}}}
+    directory = Path(client.app.state.engine.settings.data_dir) / "research"
+    directory.mkdir(exist_ok=True)
+    (directory / "edge_family_sources_latest.json").write_text(json.dumps(bundle))
+    monkeypatch.setattr(report.httpx, "Client", Client)
+    # create_app alone does not run __main__'s production provider installers.
+    # Install precisely those layers, restoring module globals after this test.
+    monkeypatch.setattr(app_module, "request_verdict", app_module.request_verdict)
+    monkeypatch.setattr(provider, "request_explanation", provider.request_explanation)
+    for name in ("_quality_lines", "_metric_audit_lines", "normalize_structured_report"):
+        monkeypatch.setattr(report._v19, name, getattr(report._v19, name))
+    monkeypatch.setattr(report, "_INSTALLED", False)
+    provider.install_ai_provider_explanation()
+    report.install_ai_runtime_report_v20()
+    guard._close_circuit()
+    response = client.post("/api/ai/verdict")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["mode"] == "llm", body
+    assert len(calls) == 1
+    shadow = body["llm_shadow_decision"]
+    assert shadow["selection_masked"] is True
+    assert set(shadow["policy_scores"]) == set(VALID_POLICIES)
+    current_llm = next(row for row in body["unified_edge_ensemble"]["components"]
+                       if row["component_id"] == "current_llm")
+    assert current_llm["available"] is True
+    assert current_llm["effective_weight"] > 0
+    assert current_llm["self_confidence_used_for_weight"] is False
+    sent = json.loads(calls[0]["messages"][1]["content"].split("\n", 1)[1])
+    hidden = {"management_decision", "recommendation", "management_arbiter",
+              "winner", "selected_policy", "selected_candidate", "selected"}
+    def check_masked(value):
+        if isinstance(value, dict):
+            assert not hidden.intersection(value)
+            for child in value.values():
+                check_masked(child)
+        elif isinstance(value, list):
+            for child in value:
+                check_masked(child)
+    check_masked(sent)
+    assert len(sent["active_management_candidates"]) == 7
+    assert sent["edge_family_facts"]["macro"]["features"]["macro.expected_rate_change"] == -.2
+    assert sent["edge_family_source_bundle_audit"]["source_record_n"] == 1
+    assert sent["edge_family_source_bundle_audit"]["models_loaded"] == 0
+    assert {row["policy"] for row in sent["active_management_candidates"]} == set(VALID_POLICIES) - {
+        "HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
+    contract = shadow["input_contract"]
+    assert contract["version"] == "independent-llm-transport-v1"
+    assert contract["quant_selection_masked"] is True
+    assert json.loads(contract["provider_request_json"]) == calls[0]
+    assert sent == json.loads(contract["frozen_input_json"])
+    assert "transport-secret-not-to-persist" not in json.dumps(shadow)
+
+    stored = client.app.state.engine.journal._conn.execute(
+        "SELECT snapshot_json,snapshot_sha256 FROM decision_snapshots ORDER BY recorded_ts DESC LIMIT 1").fetchone()
+    frozen = json.loads(stored["snapshot_json"])
+    assert frozen["llm_shadow_decision"] == shadow
+    assert frozen["edge_family_sources"]["macro"] == [source]
+    assert frozen["edge_family_source_bundle_audit"]["reason"] == "EXACT_SHA_LOCAL_SOURCE_FACTS"
+    assert frozen["llm_shadow_decision"]["provider_response_json"] == reply
+    assert stored["snapshot_sha256"] == hashlib.sha256(stored["snapshot_json"].encode()).hexdigest()
+    assert shadow["input_captured_ts"] == frozen["captured_ts"]
+    assert shadow["provider_response_received_ts"] >= shadow["input_captured_ts"]
+    assert contract["frozen_input_sha256"] == hashlib.sha256(contract["frozen_input_json"].encode()).hexdigest()
+
+
+def test_local_family_bundle_merge_preserves_existing_records_and_deduplicates_ids(monkeypatch):
+    from seiltanzer.app import _attach_family_source_bundle
+    first = {"source_id": "same", "features": {"macro.value": 1}}
+    extra = {"source_id": "new", "features": {"macro.value": 2}}
+    snapshot = {"edge_family_sources": {"macro": first, "session": "preserve-malformed"}}
+    monkeypatch.setattr("seiltanzer.edge_family_source_runtime.load_family_source_context",
+        lambda *args, **kwargs: {"edge_family_sources": {
+            "macro": [{"source_id": "same", "features": {"macro.value": 999}}, extra],
+            "session": [{"source_id": "calendar"}]},
+            "edge_family_source_bundle_audit": {"available": True}})
+    _attach_family_source_bundle(object(), snapshot)
+    assert snapshot["edge_family_sources"]["macro"] == [first, extra]
+    assert snapshot["edge_family_sources"]["session"] == "preserve-malformed"
+    assert snapshot["edge_family_source_bundle_audit"]["existing_families_preserved_unmergeable"] == ["session"]
 
 
 def test_extended_shadow_action_is_registered_and_manually_acknowledged(

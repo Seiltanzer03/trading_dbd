@@ -182,7 +182,8 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
                     remaining -= fill
                     spike_pending = False
                     event_timeline.append({"type": "spike", "r": float(level),
-                        "step": step, "fill_fraction": float(fill),
+                        "step": step, "segment_fraction": float(fraction),
+                        "fill_fraction": float(fill),
                         "remaining_after": float(remaining)})
                     if remaining <= EPSILON:
                         return finish(level, "take", step, fraction)
