@@ -12,9 +12,9 @@ validated forecast sources are available in production.
 |---|---|---|
 | Macro | `macro_t0_context` + official numeric/FOMC stores | Reads actual official releases and semantic/deterministic FOMC values from `macro_context_v1`; existing research authority is preserved until a measured action model is admitted. Official changes are not called surprises. |
 | Event | Actual CPI/NFP/ISM/FOMC facts | Computes `actual-consensus` only for a separately verified consensus received before the same release, with the same period and unit. No licensed consensus collector or fitted net-action model was found. |
-| Order flow | Existing candle/volume-profile delta | Existing delta is not an exchange book/tape. Adapter computes observed Cont OFI from two real top-of-book updates, spread/depth and aggressive-volume imbalance when a venue source is attached. No true book collector was found. |
+| Order flow | Existing candle/volume-profile delta; off-host Coinbase book/tape collector | Existing delta is not an exchange book/tape. Adapter computes observed Cont OFI only from two real updates within 60 seconds. Coinbase USD venue data is not the configured broker CFD; no validated proxy mapping or fitted action head is supplied. |
 | Intermarket | Existing correlation matrix | Correlation remains context. Adapter computes log returns and lag from causal price endpoints supplied by a synchronized related-market collector. A trained return-window-specific action model is required; the current matrix is not one. |
-| Positioning | Existing option OI/GEX | OI does not reveal dealer positions. Adapter reads published COT/fund-flow/observed-OI reports and computes historical PIT net-position percentile. No COT/fund-flow collector was found. |
+| Positioning | Existing option OI/GEX; off-host official CFTC COT collector | OI does not reveal dealer positions. COT economic report date is not availability; first receipt is retained without inventing publication. Futures-to-CFD mapping and calibrated action head remain unavailable. |
 | Value/carry | No point-in-time valuation or broker rollover collector found | Reads supplied valuation/factor-carry facts. Broker rollover is a signed outcome cost, never a separate directional score. |
 | Option | Real-expiry and projected IV surface + chain age/quality | Existing IV fields remain Q context in one `instrument:option_distribution` family, consumed by quantitative_base. A separately received actual source and physical net-action calibration are required for an additional forecast. GEX is not observed dealer inventory. |
 | Session | Existing UTC time-of-day mathematical inputs and US session context | Instrument timezone uses `zoneinfo`, including DST. Clock context alone does not assert trading hours. Holiday/early-close-complete PIT calendar and measured conditional action outcomes are required for a session forecast. |
@@ -159,9 +159,15 @@ negative charge a credit. The adapter publishes the measured ratio as
 It does not apply this adjustment itself. The outcome simulator must count
 rollovers on each holding path, include the cost once, and recalculate both
 Expected net and CVaR net. It cannot be applied twice or used as an extra vote.
-Until that simulator integration and actual broker source exist, the row
-explicitly says ECONOMICS_ONLY; absence of a broker quote is never called zero
-carry.
+The common candidate bank and historical replay now consume an optional frozen
+`snapshot.broker_rollover_schedule` through `rollover_economics.py`. A verified
+quote must match instrument, causal receipt, currency/R units, full horizon
+coverage and explicit fills-before/after-rollover ordering. Each scheduled signed
+charge applies once to the quantity still held on that path, including partial
+closes and TIME_STOP. Expected net, CVaR net and paired uncertainty therefore use
+the same net outcomes. Invalid declared schedules fail closed; charges already
+included in base costs are not added twice. No actual broker quote collector is
+available: missing quotes remain explicitly unknown, not evidence of zero carry.
 
 ## Verification
 

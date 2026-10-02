@@ -1,0 +1,103 @@
+name: edge-family-sources
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'seiltanzer/edge_family*.py'
+      - 'scripts/build_edge_family_sources.py'
+      - 'scripts/publish_active_edge_report.py'
+      - 'tests/test_edge_family_source*.py'
+      - '.github/workflows/edge-family-sources.yml'
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        required: true
+        type: string
+  schedule:
+    - cron: '7,27,47 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-family-sources-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  collect:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-22.04
+    timeout-minutes: 7
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha || github.event.pull_request.head.sha || github.sha }}
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -q -e '.[dev]' paramiko
+      - name: Verify bounded causal collectors and local reader
+        run: python -m pytest -q tests/test_edge_family_sources.py tests/test_edge_family_source_runtime.py
+      - name: Restore previous actual source receipts
+        uses: actions/cache/restore@v4
+        with:
+          path: .edge-source-cache
+          key: edge-source-v1-${{ hashFiles('seiltanzer/edge_family_sources.py', 'seiltanzer/config.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: edge-source-v1-${{ hashFiles('seiltanzer/edge_family_sources.py', 'seiltanzer/config.py') }}-
+      - name: Collect public source facts off-host, never fabricate models
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -f .edge-source-cache/previous.json ]; then
+            args+=(--previous-bundle .edge-source-cache/previous.json)
+          fi
+          python -m scripts.build_edge_family_sources --output edge_family_sources_latest.json "${args[@]}"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from seiltanzer.config import ALL_INSTRUMENTS
+          from seiltanzer.edge_family_adapters import FAMILIES
+          path = Path('edge_family_sources_latest.json')
+          report = json.loads(path.read_text())
+          assert path.stat().st_size < 950_000, 'local reader has 1MB hard bound'
+          assert set(report['instruments']) == set(ALL_INSTRUMENTS)
+          assert report['models_produced'] == 0 and report['production_authority'] is False
+          assert report['collection_limits']['requests'] <= 13
+          for source in report['raw_sources'].values():
+              assert source['received_ts'] <= report['captured_ts']
+              if source['fetch_status'] == 'FETCHED':
+                  assert len(source['body_sha256']) == 64
+          for code, row in report['instruments'].items():
+              assert set(row['readiness']) == set(FAMILIES)
+              assert all(not status['forecast_available'] for status in row['readiness'].values())
+              print('EDGE_SOURCE_READINESS', code, json.dumps(row['readiness'], sort_keys=True))
+          print('EDGE_SOURCE_COLLECTION_PASS', len(report['instruments']), 'models=0')
+          PY
+          mkdir -p .edge-source-cache
+          cp edge_family_sources_latest.json .edge-source-cache/previous.json
+      - uses: actions/cache/save@v4
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        with:
+          path: .edge-source-cache
+          key: edge-source-v1-${{ hashFiles('seiltanzer/edge_family_sources.py', 'seiltanzer/config.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Publish source facts for exact production SHA only
+        if: github.event_name != 'pull_request'
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: >-
+          python scripts/publish_active_edge_report.py --password "$SSH_PASSWORD"
+          --expected-sha "$EXPECTED_SHA" --input edge_family_sources_latest.json
+          --remote-name edge_family_sources_latest.json --run-id "${{ github.run_id }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: edge-family-sources-${{ env.EXPECTED_SHA }}
+          path: edge_family_sources_latest.json
+          if-no-files-found: error
+          retention-days: 14

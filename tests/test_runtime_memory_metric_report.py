@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import threading
+import pytest
 
 from seiltanzer import ai_runtime_report_v20 as report_v20
 from seiltanzer import g1_short_horizon_champion_runtime as champion
@@ -209,6 +211,9 @@ def test_combined_provider_uses_one_call_and_returns_non_authoritative_shadow(mo
             "reason_ru": "HOLD единственная политика внутри опубликованного CVaR feasible set.",
             "key_evidence": ["HOLD CVaR10=-1.01R"],
             "counter_evidence": ["execution-MC unavailable"],
+            "policy_scores": {name: float(name == "HOLD") for name in report_v20._shadow_projection(snapshot)["shadow_contract"]["valid_policies"]},
+            "evidence_families": ["option_distribution"],
+            "invalidation_conditions": ["CVaR below hard floor"],
         },
     }, ensure_ascii=False)
 
@@ -234,6 +239,7 @@ def test_combined_provider_uses_one_call_and_returns_non_authoritative_shadow(mo
 
         def post(self, *_args, **_kwargs):
             calls["n"] += 1
+            calls["body"] = _kwargs["json"]
             return Response()
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
@@ -251,3 +257,46 @@ def test_combined_provider_uses_one_call_and_returns_non_authoritative_shadow(mo
     assert result["llm_shadow_decision"]["production_authority"] is False
     assert result["llm_shadow_decision"]["automatic_execution_allowed"] is False
     assert "LLM SHADOW DECISION" in result["verdict"]
+    shadow = result["llm_shadow_decision"]
+    assert len(shadow["policy_scores"]) == 12
+    assert shadow["evidence_families"] == ["option_distribution"]
+    assert shadow["invalidation_conditions"] == ["CVaR below hard floor"]
+    assert shadow["selection_masked"] is True
+    contract = shadow["input_contract"]
+    assert contract["frozen_input_sha256"] == hashlib.sha256(contract["frozen_input_json"].encode()).hexdigest()
+    assert json.loads(contract["provider_request_json"]) == calls["body"]
+    assert contract["provider_request_sha256"] == hashlib.sha256(contract["provider_request_json"].encode()).hexdigest()
+    assert shadow["provider_response_json"] == provider_content
+    assert shadow["provider_response_sha256"] == hashlib.sha256(provider_content.encode()).hexdigest()
+    user_input = json.loads(calls["body"]["messages"][1]["content"].split("\n", 1)[1])
+    assert user_input == json.loads(contract["frozen_input_json"])
+    assert "management_decision" not in user_input["policy_manager"]
+    assert "recommendation" not in user_input["policy_manager"]
+    assert "test-key" not in contract["provider_request_json"]
+
+
+@pytest.mark.parametrize("scores,reason", [
+    (None, "combined_provider_missing_policy_scores"),
+    ({"HOLD": 1}, "shadow_invalid_policy_scores"),
+])
+def test_combined_provider_rejects_missing_or_partial_action_scores(scores, reason):
+    shadow = {"policy": "HOLD", "confidence": .7, "reason_ru": "Удержание",
+              "key_evidence": [], "counter_evidence": []}
+    if scores is not None:
+        shadow["policy_scores"] = scores
+    with pytest.raises(RuntimeError, match=reason):
+        report_v20._provider_payload(json.dumps({"explanation_ru": "Ограниченный снимок.",
+                                                "shadow_decision": shadow}))
+
+
+def test_combined_provider_rejects_future_source_before_http(monkeypatch):
+    snapshot = _report_snapshot()
+    snapshot["captured_ts"] = 1_700_000_000.
+    snapshot["trade_id"] = 7
+    snapshot["policy_manager"]["input_audit"] = {"rows": {
+        "instrument_price": {"available": True, "status": "live", "ts": 1_700_000_005.}}}
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(report_v20.ai_verdict, "render_policy_report", lambda snapshot: "DETERMINISTIC")
+    monkeypatch.setattr(report_v20.httpx, "Client", lambda **kwargs: pytest.fail("future data reached transport"))
+    with pytest.raises(ValueError, match="post-capture"):
+        report_v20.request_explanation_with_shadow(snapshot)

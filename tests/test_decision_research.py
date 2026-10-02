@@ -1,4 +1,5 @@
 import json
+import hashlib
 
 import pytest
 
@@ -60,6 +61,37 @@ def test_future_timestamp_is_rejected_before_snapshot_persistence():
     snapshot["feeds"]["chain_ts"] = snapshot["captured_ts"] + 5.0
     with pytest.raises(ValueError, match="post-capture"):
         validate_no_future_timestamps(snapshot, snapshot["captured_ts"])
+
+
+def test_actual_llm_output_receipt_is_later_than_input_but_market_clocks_stay_frozen():
+    snapshot = _snapshot()
+    t0 = snapshot["captured_ts"]
+    input_json = json.dumps({"captured_ts": t0})
+    response_json = '{"shadow_decision":{"policy":"HOLD"}}'
+    shadow = {"selection_masked": True, "input_captured_ts": t0,
+        "provider_response_received_ts": t0 + 4,
+        "provider_response_json": response_json,
+        "provider_response_sha256": hashlib.sha256(response_json.encode()).hexdigest(),
+        "input_contract": {"version": "independent-llm-transport-v1",
+            "quant_selection_masked": True, "input_captured_ts": t0,
+            "frozen_input_json": input_json,
+            "frozen_input_sha256": hashlib.sha256(input_json.encode()).hexdigest()}}
+    snapshot["llm_shadow_decision"] = shadow
+    canonical_snapshot(snapshot)
+    snapshot["feeds"]["received_ts"] = t0 + 4
+    with pytest.raises(ValueError, match="feeds.received_ts"):
+        canonical_snapshot(snapshot)
+    del snapshot["feeds"]["received_ts"]
+    shadow["provider_response_sha256"] = "forged"
+    with pytest.raises(ValueError, match="provider_response_received_ts"):
+        canonical_snapshot(snapshot)
+    # Embedded JSON is market input, not an exempt model-output clock.
+    shadow["provider_response_sha256"] = hashlib.sha256(response_json.encode()).hexdigest()
+    future_input = json.dumps({"captured_ts": t0, "feeds": {"ts": t0 + 5}})
+    shadow["input_contract"]["frozen_input_json"] = future_input
+    shadow["input_contract"]["frozen_input_sha256"] = hashlib.sha256(future_input.encode()).hexdigest()
+    with pytest.raises(ValueError, match="feeds.ts"):
+        canonical_snapshot(snapshot)
 
 
 def test_canonical_snapshot_has_stable_content_hash_and_versions():

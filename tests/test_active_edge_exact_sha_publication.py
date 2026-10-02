@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from seiltanzer.runtime_git_identity import runtime_git_sha
 
 
@@ -69,6 +71,14 @@ def test_publisher_requires_explicit_non_authority(tmp_path: Path) -> None:
         assert "disable production authority" in str(exc)
     else:
         raise AssertionError("publisher accepted production_authority=true")
+
+
+def test_family_bundle_publication_uses_runtime_one_mb_bound(tmp_path: Path) -> None:
+    report = tmp_path / "edge_family_sources_latest.json"
+    report.write_text(json.dumps({"production_authority": False,
+        "contract_version": "edge-family-source-bundle-v1", "padding": "x" * 1_000_000}))
+    with pytest.raises(RuntimeError, match="outside bounded contract"):
+        publisher._stamp_report(report, expected_sha=SHA, run_id="source-1")
 
 
 def test_runtime_git_sha_reads_symbolic_head(tmp_path: Path) -> None:

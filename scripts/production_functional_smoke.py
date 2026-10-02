@@ -275,6 +275,109 @@ def verify_unified_management_contract(body: dict) -> None:
     print("UNIFIED_MANAGEMENT_12_ACTIONS success applied=" + str(audit.get("applied")))
 
 
+def verify_isolated_unified_management_contract() -> dict:
+    """Always exercise deployed 12-action math/publication on a disposable DB.
+
+    This is an explicitly controlled model fixture, not a real market review,
+    order, provider request, or claimed out-of-sample trading advantage.
+    """
+    import hashlib
+    import tempfile
+    from pathlib import Path
+    from types import SimpleNamespace
+    from seiltanzer.active_management import select_active_management
+    from seiltanzer.app import _publish_unified_review, _refresh_management_decision
+    from seiltanzer.decision_research import canonical_snapshot
+    from seiltanzer.journal import Journal
+    from seiltanzer.llm_decision_shadow import VALID_POLICIES
+    from seiltanzer.position_state import PositionLedger
+    from seiltanzer.unified_edge_ensemble import build_unified_ensemble
+
+    with tempfile.TemporaryDirectory(prefix="trading-dbd-contract-") as directory:
+        path = str(Path(directory) / "fixture.sqlite3")
+        journal, position = Journal(path), PositionLedger(path)
+        try:
+            trade = journal.open_trade(3, "NAS100", "long", 100, 90, 130)
+            position.ensure_trade(trade)
+            captured = time.time()
+            snapshot = {
+                "captured_ts": captured, "trade_id": trade["id"],
+                "demo": True, "contract_fixture": True,
+                "strategy": {"instrument": "NAS100", "direction": "long"},
+                "trade_geometry": {"entry": 100, "original_stop": 90,
+                    "active_risk_barrier": 90, "current": 110, "final_take": 130},
+                "observation": {"position": {"r": 1, "max_r": 1},
+                    "exact_levels": {"entry": 100, "stop": 90, "take": 130, "current": 110}},
+                "position_state": position.state(trade),
+                "policy_manager": {
+                    "version": "isolated-production-contract-fixture",
+                    "management_decision": {"policy": "HOLD"},
+                    "recommendation": {"policy": "HOLD"},
+                    "execution_cost_model": {"deferred_full_close_r": .01,
+                        "immediate_full_close_r": .01, "assumed": False,
+                        "source": "controlled_contract_fixture"},
+                    "input_audit": {"rows": {"instrument_price": {"available": True,
+                        "status": "live", "source": "controlled_contract_fixture",
+                        "production_authority": True}}},
+                    "evidence": {"data_quality": {"reliability": {"level": "высокая"}}},
+                    "selection_rule": {"eligible": ["HOLD"], "indifference_band_r": .03,
+                        "cvar_floor_r": -1.1},
+                    "risk_constraint": {"gross_cvar_floor_r": -1, "net_cvar_floor_r": -1.1},
+                    "policies": {name: {"expected_final_r": -.6, "cvar10_r": -1.01,
+                        "expected_final_r_net": -.6, "cvar10_r_net": -1.01,
+                        "execution_cost_r": .01, "outcomes_include_execution_costs": True}
+                        for name in ("HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT")},
+                    "inputs": {"r0": 1, "max_r": 1, "T": 3, "sigma_R": .3,
+                        "drift_R": -2, "skew_R": 0, "term_slope": 0,
+                        "horizon_minutes": 240, "rungs": [1.5, 2], "rung_fraction": .1,
+                        "be_after": 1.5, "stop_r": -1, "option_available": True,
+                        "chain_age_sec": 10, "chain_status": "live", "proxy_quality": "direct",
+                        "source": "controlled_contract_fixture"},
+                    "unified_scenario_bank": {"captured_ts": captured, "horizon_minutes": 240,
+                        "state_space": "R_multiple_of_initial_risk",
+                        "r_paths": [[1, .8, -1.1], [1, .75, -1.1]], "weights": [.5, .5],
+                        "source": "controlled_contract_fixture", "measure": "fixture_only",
+                        "distribution_kind": "supplied_weighted_paths"}}}
+            engine = SimpleNamespace(journal=journal, position=position)
+            _refresh_management_decision(engine, snapshot, trade)
+            select_active_management(snapshot)
+            audit = build_unified_ensemble(snapshot)
+            assert len(audit["candidates"]) == 12
+            assert {row["policy"] for row in audit["candidates"]} == set(VALID_POLICIES)
+            assert len(snapshot["active_management_candidates"]) == 7
+            assert any(row["status"] == "eligible" for row in snapshot["active_management_candidates"])
+            assert audit["available"] is True, audit
+            review_id = canonical_snapshot(snapshot)["review_id"]
+            snapshot["review_id"] = review_id
+            result = {"verdict": "Controlled isolated management contract fixture.",
+                      "model": "deterministic-contract-fixture"}
+            decision = _publish_unified_review(engine, snapshot, result, review_id, trade, audit)
+            verify_unified_management_contract(result)
+            assert decision["automatic_execution_allowed"] is False
+            assert decision["policy"] in {"TIME_STOP", "TIGHTEN_STOP", "MOVE_TO_BE"}
+            assert decision["manual_execution_required"] is True
+            assert decision["execution_status"] == "pending_execution"
+            assert position.state(trade)["remaining_position_fraction"] == 1
+            assert not position.state(trade)["armed_conditional_actions"]
+            assert journal.get_trade(trade["id"])["status"] == "open"
+            stored = journal._conn.execute(
+                "SELECT snapshot_json,snapshot_sha256,production_policy FROM decision_snapshots "
+                "WHERE review_id=?", (review_id,)).fetchone()
+            assert stored is not None
+            assert stored["production_policy"] == decision["policy"]
+            assert hashlib.sha256(stored["snapshot_json"].encode()).hexdigest() == stored["snapshot_sha256"]
+            assert json.loads(stored["snapshot_json"])["contract_fixture"] is True
+            summary = {"status": "PASS", "scope": "isolated_temporary_db_contract_fixture",
+                "actions_assessed": 12, "extended_actions_assessed": 7,
+                "selected_policy": decision["policy"], "paid_provider_calls": 0,
+                "real_position_mutations": 0, "orders_sent": 0, "real_profit_proven": False}
+            print("ISOLATED_UNIFIED_MANAGEMENT " + json.dumps(summary, sort_keys=True))
+            return summary
+        finally:
+            position.close()
+            journal.close()
+
+
 def verify_management_ack_guard_contract() -> None:
     """Check the deployed production guard without acknowledging a real trade."""
     import inspect
@@ -323,6 +426,7 @@ def verify_trade_settlement_contract() -> None:
 def verify_ai_verdict() -> None:
     verify_management_ack_guard_contract()
     verify_trade_settlement_contract()
+    verify_isolated_unified_management_contract()
     wait_for_ai_snapshot_ready()
 
     # Every individual POST must remain below the reverse-proxy budget. If the

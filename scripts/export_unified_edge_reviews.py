@@ -8,6 +8,7 @@ import gzip
 import inspect
 import io
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -64,13 +65,41 @@ def export_reviews(connection, maximum=32):
           snapshot_json,snapshot_sha256,production_policy
           FROM decision_snapshots WHERE review_id=?''', (item['review_id'],)).fetchone())
         row['instrument'] = item['instrument']
+        snapshot = json.loads(row['snapshot_json'])
+        horizon = ((snapshot.get('policy_manager') or {}).get('inputs') or {}).get('horizon_minutes')
+        try:
+            horizon_end = float(item['captured_ts']) + 60. * float(horizon)
+            if not math.isfinite(horizon_end) or float(horizon) <= 0:
+                horizon_end = None
+        except (TypeError, ValueError, OverflowError):
+            horizon_end = None
         points = []
         if 'decision_path_points' in tables:
-            points = [dict(r) for r in connection.execute('''
-              SELECT ts,price,r FROM decision_path_points WHERE review_id=? AND ts>=?
-              ORDER BY ts LIMIT 6001''', (item['review_id'], item['captured_ts']))]
+            if horizon_end is not None:
+                # Retain every observation in chronological order. One real
+                # right-hand observation brackets the exact frozen endpoint;
+                # it is not a downsampled path that can change barrier order.
+                points = [dict(r) for r in connection.execute('''
+                  SELECT ts,price,r FROM decision_path_points
+                  WHERE review_id=? AND ts>=? AND ts<=?
+                  ORDER BY ts LIMIT 6001''',
+                  (item['review_id'], item['captured_ts'], horizon_end))]
+                if len(points) <= 6000 and (not points or points[-1]['ts'] < horizon_end):
+                    after = connection.execute('''
+                      SELECT ts,price,r FROM decision_path_points
+                      WHERE review_id=? AND ts>? ORDER BY ts LIMIT 1''',
+                      (item['review_id'], horizon_end)).fetchone()
+                    if after is not None:
+                        points.append(dict(after))
+            else:
+                points = [dict(r) for r in connection.execute('''
+                  SELECT ts,price,r FROM decision_path_points WHERE review_id=? AND ts>=?
+                  ORDER BY ts LIMIT 6001''', (item['review_id'], item['captured_ts']))]
         row['path_truncated'] = len(points) > 6000
         row['path_points'] = points[:6000]
+        row['path_query_horizon_end_ts'] = horizon_end
+        row['path_query_contract'] = ('frozen_horizon_every_point_plus_first_bracketing_endpoint'
+                                      if horizon_end is not None else 'horizon_unavailable_bounded_prefix')
         replay = None
         if 'decision_replays' in tables:
             value = connection.execute('''SELECT resolved_ts,resolution_kind,replay_json
@@ -87,7 +116,7 @@ def export_reviews(connection, maximum=32):
 
 def remote_program(maximum):
     # Only these stdlib functions run remotely. Training and pricing stay off-host.
-    return ('import sqlite3,json,gzip,base64,time\n'
+    return ('import sqlite3,json,gzip,base64,time,math\n'
             + inspect.getsource(select_reviews) + '\n' + inspect.getsource(export_reviews)
             + "\nc=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=3)\n"
               'c.row_factory=sqlite3.Row\nc.execute("PRAGMA query_only=ON")\n'

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Bounded off-host search on actual bars, with a complete instrument matrix."""
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import json
 import time
 from pathlib import Path
@@ -13,42 +12,8 @@ from seiltanzer.mathematical_edge import (
 
 def _fresh_sources(captured_ts):
     """Fetch independently; one unavailable provider series does not stop others."""
-    import yfinance as yf
-    from seiltanzer.g1_short_horizon_historical_wf import _frame_to_bars
-
-    def fetch(item):
-        code, instrument = item
-        try:
-            frame = yf.Ticker(instrument.yahoo).history(
-                period='60d', interval='5m', auto_adjust=False, actions=False, timeout=15,
-            )
-            bars = [b for b in _frame_to_bars(frame) if b['bar_end_ts'] <= captured_ts]
-            if not bars:
-                return code, None, 'SOURCE_BARS_UNAVAILABLE'
-            if len(bars) > 20000:
-                return code, None, 'SOURCE_EXCEEDS_20000_BAR_BOUND'
-            return code, {
-                'instrument': code, 'bars': bars, 'source_sha256': fingerprint(bars),
-                'ticker': instrument.yahoo, 'provider': 'Yahoo Finance via yfinance',
-                'interval': '5m', 'source_kind': 'REAL_PROVIDER_COMPLETED_5M',
-                'not_broker_execution_bars': True,
-                'source_semantics': {
-                    'bar_timestamp_semantics': 'provider interval start +300s',
-                    'completed_bars_only_for_features': True,
-                    'exact_live_broker_series': False, 'synthetic_price_history': False,
-                    'synthetic_option_history': False, 'option_history_used': False,
-                },
-            }, None
-        except Exception as exc:
-            return code, None, f'{type(exc).__name__}: {str(exc)[:300]}'
-
-    sources, errors = [], {}
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        for code, source, error in pool.map(fetch, ALL_INSTRUMENTS.items()):
-            if source:
-                sources.append(source)
-            else:
-                errors[code] = error
+    from seiltanzer.mathematical_edge_sources import collect_fresh_sources
+    sources, errors, _ = collect_fresh_sources(captured_ts)
     return sources, errors
 
 
@@ -94,6 +59,10 @@ def _instrument_matrix(rows, sources, captured_ts):
         supported = [name for name, diag in row.get('diagnostics', {}).items()
                      if diag.get('working_supported')]
         path_heads = row.get('path_heads') or {}
+        admission = None
+        if instrument.asset_class == 'crypto':
+            from seiltanzer.mathematical_edge import crypto_training_source_admission
+            admission = crypto_training_source_admission({'sources': sources}, row, code)
         matrix[code] = {
             'configured_price_source': instrument.price_label,
             'historical_ticker': source.get('cached_ticker') or source.get('ticker') or instrument.yahoo,
@@ -111,12 +80,21 @@ def _instrument_matrix(rows, sources, captured_ts):
             'management_role': ('DIRECTION_SOFT_RANKING' if 'direction' in supported else
                                 'TIME_STOP_REDUCE_TAKE_ONLY' if 'movement' in supported else
                                 'GENERIC_PATH_MANAGEMENT' if any(value['working_supported'] for value in path_heads.values()) else 'NO_WEIGHT'),
+            'training_price_source_admission': admission,
             'training_age_days': round(age, 2) if age is not None else None,
             'training_age_multiplier': round(max(0., 1-age/90), 6) if age is not None else 0.,
             'training_too_old_for_runtime': age is not None and age >= 90,
             'not_broker_execution_bars': source.get('not_broker_execution_bars', True),
             'net_economic_proof': False,
+            'historical_provider': source.get('provider') or source.get('cached_provider'),
+            'source_coverage': source.get('coverage'),
+            'collection_fallback': source.get('collection_fallback'),
+            'fresh_collection_errors': source.get('fresh_collection_errors', []),
+            'source_semantics': source.get('source_semantics') or source.get('cached_semantics'),
         }
+        if admission is not None and not admission['available'] and (supported or any(
+                value.get('working_supported') for value in path_heads.values())):
+            matrix[code]['management_role'] = 'DIAGNOSTIC_ONLY_PRICE_SERIES_MAPPING_UNVALIDATED'
     return matrix
 
 
@@ -175,6 +153,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sources')
     parser.add_argument('--sources-output', help='save fetched real bars for exact offline reproduction')
+    parser.add_argument('--refresh-sources', action='store_true', help='refresh public bars off-host; --sources supplies read-only fallback')
+    parser.add_argument('--cache-dir', help='per-provider hash-verified off-host source cache')
+    parser.add_argument('--source-days', type=int, default=60)
+    parser.add_argument('--source-budget-seconds', type=float, default=360.)
     parser.add_argument('--output', required=True)
     parser.add_argument('--captured-ts', type=float, help='freeze causal observation cutoff for reproduction')
     parser.add_argument('--horizons', default=','.join(map(str, SEARCH_HORIZONS)))
@@ -183,17 +165,23 @@ def main():
     horizons = tuple(dict.fromkeys(int(item) for item in args.horizons.split(',')))
     if not horizons or any(h not in SEARCH_HORIZONS for h in horizons):
         parser.error('--horizons must be a subset of 15,30,60,120')
+    sources, errors, attempts = [], {}, {}
     if args.sources:
         data = json.loads(Path(args.sources).read_text())
         sources, errors = data['sources'], data.get('errors', {})
-    else:
-        sources, errors = _fresh_sources(captured)
-        if args.sources_output:
-            path = Path(args.sources_output)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({'sources': sources, 'errors': errors, 'exported_ts': captured},
-                                       ensure_ascii=False, allow_nan=False))
+    if args.refresh_sources or not args.sources:
+        from seiltanzer.mathematical_edge_sources import collect_fresh_sources
+        sources, errors, attempts = collect_fresh_sources(
+            captured, seed_sources=sources, cache_dir=args.cache_dir, days=args.source_days,
+            budget_seconds=args.source_budget_seconds,
+        )
+    if args.sources_output:
+        path = Path(args.sources_output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'sources': sources, 'errors': errors, 'exported_ts': captured,
+                                   'collection_attempts': attempts}, ensure_ascii=False, allow_nan=False))
     report = build_report(sources, errors, captured, horizons)
+    report['collection_attempts'] = attempts
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, ensure_ascii=False, allow_nan=False))

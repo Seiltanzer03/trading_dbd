@@ -17,6 +17,7 @@ import numpy as np
 
 from .ai_policy_base import PolicyInputs, _centered_skew_noise
 from .execution_simulator import ExecutionSpec, replay_execution_path
+from .rollover_economics import frozen_rollover_schedule, replay_rollover_cost
 
 
 VERSION = "unified-candidate-economics-v1"
@@ -235,6 +236,10 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
     if immediate is None or deferred is None or min(immediate, deferred) < 0:
         return _unavailable("EXECUTION_COST_MODEL_UNAVAILABLE")
     try:
+        rollover, rollover_audit = frozen_rollover_schedule(snapshot, inputs.horizon_minutes)
+    except ValueError as exc:
+        return _unavailable(str(exc))
+    try:
         paths, weights, groups, bank = _bank(snapshot, inputs)
     except (ValueError, TypeError, OverflowError) as exc:
         return _unavailable(str(exc))
@@ -246,11 +251,25 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
     cached = {}
     def replay(spec):
         if spec not in cached:
-            cached[spec] = np.asarray([replay_execution_path(path, spec).outcome_r
-                                       for path in paths], dtype=float)
-        return cached[spec]
+            outcomes = [replay_execution_path(path, spec) for path in paths]
+            times = np.linspace(snapshot.get("captured_ts") or 0.,
+                                (snapshot.get("captured_ts") or 0.) + 60. * inputs.horizon_minutes,
+                                paths.shape[1]).tolist()
+            if spec.time_stop_fraction is not None:
+                coordinate = (paths.shape[1] - 1) * spec.time_stop_fraction
+                index = int(coordinate)
+                deadline = times[0] + spec.time_stop_fraction * 60. * inputs.horizon_minutes
+                times = [*times[:index + 1], deadline]
+            cached[spec] = (
+                np.asarray([result.outcome_r for result in outcomes], dtype=float),
+                np.asarray([replay_rollover_cost(result, times, rollover)
+                            for result in outcomes], dtype=float))
+        return cached[spec][0]
+    def carry(spec):
+        replay(spec)
+        return cached[spec][1]
     hold_gross = replay(base)
-    hold_net = hold_gross - deferred
+    hold_net = hold_gross - deferred - carry(base)
     hold_e, hold_c = float(np.sum(weights * hold_net)), _weighted_cvar(hold_net, weights)
     floor = _number((manager.get("risk_constraint") or {}).get("net_cvar_floor_r"))
     if floor is None:
@@ -267,7 +286,8 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
         fraction = BASE_FRACTIONS.get(policy, 0.)
         gross = fraction * inputs.r0 + (1. - fraction) * replay(spec)
         cost = fraction * immediate + (1. - fraction) * deferred
-        net = gross - cost
+        carry_cost = (1. - fraction) * carry(spec)
+        net = gross - cost - carry_cost
         expected, cvar = float(np.sum(weights * net)), _weighted_cvar(net, weights)
         paired = net - hold_net
         delta = float(np.sum(weights * paired))
@@ -293,7 +313,11 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
             "expected_gross_r": float(np.sum(weights * gross)),
             "delta_expected_r": delta, "delta_cvar_r": cvar - hold_c,
             "expected_hold_net_r": hold_e, "hold_cvar10_net_r": hold_c,
-            "execution_cost_r": cost, "cost_source": costs.get("source") or "UNAVAILABLE",
+            "execution_cost_r": cost + float(np.sum(weights * carry_cost)),
+            "base_execution_cost_r": cost,
+            "expected_rollover_cost_r": float(np.sum(weights * carry_cost)),
+            "rollover_cost_audit": rollover_audit,
+            "cost_source": costs.get("source") or "UNAVAILABLE",
             "cost_assumed": costs.get("assumed") is not False,
             "paired_delta_ci95_lower_r": min(delta - 1.96 * se, *group_lowers),
             "ci_semantics": "model_monte_carlo_approximation_not_validated_market_edge",
@@ -313,5 +337,6 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
             "priced_candidate_ids": [key for key, row in result.items() if row.get("available")],
             "unpriced_candidate_ids": [key for key, row in result.items() if not row.get("available")],
             "bank": bank, "unique_execution_replays": len(cached),
+            "rollover_cost_audit": rollover_audit,
             "changes_original_admission": False,
             "statistically_validated_advantage": False}
