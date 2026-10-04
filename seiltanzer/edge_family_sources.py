@@ -368,7 +368,7 @@ def parse_cot(body: bytes, *, contract: str, receipt: float, source_id: str) -> 
     latest = history[-1]
     # This API's economic report date is NOT publication time. We only know the
     # report was public by receipt, so conservative publication bound is NOW.
-    return {**_meta(source_id, "CFTC" + contract, latest["report_ts"], receipt),
+    result = {**_meta(source_id, "CFTC" + contract, latest["report_ts"], receipt),
             "kind": "cot_report", "published_at": receipt, "report_ts": latest["report_ts"],
             "net_position": latest["net_position"], "historical_positions": history[:-1],
             "publication_clock_basis": "FIRST_SEEN_UPPER_BOUND_NOT_EXACT_PUBLICATION",
@@ -376,6 +376,14 @@ def parse_cot(body: bytes, *, contract: str, receipt: float, source_id: str) -> 
             "position_category": "NONCOMMERCIAL_LONG_MINUS_SHORT_FUTURES_ONLY",
             "market_name": str(rows[0].get("market_and_exchange_names", "")),
             "dependency_group": "cftc:legacy-futures:" + contract}
+    if len(history) > 1:
+        from .edge_family_history import POSITION_CONTRACT
+        identity = dict(series_id='CFTC' + contract, kind='cot_report', unit='contracts',
+            category=result['position_category'], venue='CFTC', body_sha256=hashlib.sha256(body).hexdigest())
+        result.update(position_history_contract=POSITION_CONTRACT, position_series=identity,
+            position_change_history=[dict(history[-2], provenance=dict(identity, source_id=source_id,
+                received_ts=receipt, published_at=receipt, source_verified=True))])
+    return result
 
 
 def parse_coinbase_closes(body: bytes, *, receipt: float,
@@ -583,6 +591,21 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
                       "end_ts": end, "start_price": values[end - 300], "end_price": values[end]}
                      for code, values in closes.items()]
             ids = [f"coinbase:{code}:candles:" + raw[f"coinbase:{code}:candles"]["body_sha256"] for code in closes]
+            # Retain the exact lagged window from these same received bodies.
+            # A gapped series stays in the original legacy facts and diagnostics;
+            # it cannot supply a reconstructed history proof.
+            histories = []
+            for leader, values in closes.items():
+                required = [end - 360 + offset * 60 for offset in range(7)]
+                if not all(stamp in values for stamp in required):
+                    errors.append({'source_id': f'coinbase:{leader}:candles', 'phase': 'history',
+                                   'reason': 'INTERMARKET_HISTORY_EXACT_WINDOW_MISSING'})
+                    continue
+                actual = raw[f'coinbase:{leader}:candles']
+                histories.append(dict(source_id=actual['source_id'], provider='COINBASE', symbol=CRYPTO[leader],
+                    base_currency=CRYPTO[leader].split('-')[0], quote_currency='USD', orientation='direct',
+                    body_sha256=actual['body_sha256'], available_at=actual['received_ts'],
+                    bars=[[stamp, values[stamp], actual['received_ts']] for stamp in required]))
             for code in instruments:
                 record = {**_meta("synced-crypto:" + hashlib.sha256("|".join(ids).encode()).hexdigest(), code, end, received),
                           "linked_returns": links, "supporting_source_ids": ids,
@@ -591,6 +614,10 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
                           "collection_window_start_ts": candle_start,
                           "collection_window_end_ts": candle_end,
                           "target_price_equivalence_asserted": False}
+                if histories:
+                    from .edge_family_history import INTERMARKET_CONTRACT
+                    record.update(intermarket_history_contract=INTERMARKET_CONTRACT,
+                                  historical_series=histories)
                 output[code]["edge_family_sources"]["intermarket"].append(record)
     for code, contract in COT_MARKETS.items():
         if code in output:

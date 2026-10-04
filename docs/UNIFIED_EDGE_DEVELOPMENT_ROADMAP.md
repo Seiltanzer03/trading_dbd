@@ -229,3 +229,47 @@ failure; storage guard и его тест не изменены. Frontend syntax
 Mandatory official Python3.11/real WebKit CI и новый release ещё требуются. Реальные позиции/расходы брокера, lawful PIT consensus, проверенные
 source mappings, достаточная выборка и закрытая off-host среда по-прежнему
 требуются. V1 не обучает geometry conditioning и не extrapolates geometry.
+
+### Portable geometry final acceptance, 2026-10-04
+
+PR #395 supersedes the earlier pending-release note. Main
+`9733ca81e8f81925c85274566a87c07b8de1ec6f`, tree
+`3fedfe84e12c03a48290a522d2175bb8bea13cf3`, passed mandatory official
+Python3.11 CI (2653 passed, 4 skipped), real WebKit, main CI `37219195480`,
+staging `37219379444` and deploy `37219379434`. Readiness, isolated 12-action,
+functional/public checks passed with zero orders/paid calls/real-position mutations.
+Actual AI unavailable-price response was authoritative retriable503, 14ms<12s,
+with no decision published. Source `37220393387` and math `37220391535`
+published on that exact pinned SHA. Coverage inventory `37220444946` reported
+65/96 DATA_READY, 27 insufficient independent evidence, 2 G1M_ONLY and
+2 QUALITY_ONLY; family models remain zero. Coverage is not efficacy.
+
+### Causal family history implementation, 2026-10-04
+
+- Bounded pure historical producers now calculate signed positioning delta and
+  report age, actual Coinbase USD five-minute returns lagged one minute, fixed
+  ordered relative-return differences and related crypto peer breadth.
+- Collector freezes received response hashes and compact proof using existing
+  GETs; original COT histories, linked returns and proxy declarations remain.
+  CFTC→CFD mappings stay unvalidated and cannot bypass admission.
+- Adapter recomputes before admitting extended sources; runtime checks proofs
+  against immutable bundle capture and the unchanged 8,000-byte selected-fact
+  cap. Constituent applicability remains binding in derived and legacy features.
+  Frozen dataset replay never reads future path observations into features.
+- Deterministic RED evidence and focused GREEN verification are preserved in
+  `.superpowers/sdd/2026-10-04-causal-family-history/task-1-report.md`. Fresh review,
+  broad exact-tree checks and mandatory exact-SHA official CI/release remain
+  integrator gates; this entry does not claim deployment or predictive efficacy.
+- Still open: general event novelty/reaction, valuation/forwards, index
+  constituent breadth, empirical learned lead-lag conditioning, real source-bound
+  family calibration and external genuine flow/OI series. No profitability claim.
+
+Causal-history task review found mapped target breadth and context-only position
+admission defects; both fixed and scoped re-review approved. Fresh whole-feature
+review found trainer nested-proof admission gap; shared bounded receipt/identity/
+hash/applicability validation now closes it and fresh final fix review approved.
+No Critical/Important finding remains. Final changed scope:526 passed. Root
+broad Python on343f53f:2715 passed,4 skipped,known unchanged Python3.12 SQLite/WAL
+baseline failure;42 frontend checks passed. Full official final-tree Python3.11/
+real WebKit and exact-SHA release are still required. Evidence and decisions:
+`docs/superpowers/reviews/2026-10-04-causal-family-history.md`.

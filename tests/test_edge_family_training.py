@@ -558,3 +558,145 @@ def test_synthetic_source_or_cost_evidence_cannot_hide_behind_real_row_flag(loca
     result = train(dataset(rows))
     assert result["models"] == []
     assert result["diagnostics"]["rejected_row_count"] == 1
+
+
+def received_history_dataset(family='intermarket', *, first_source_id=None):
+    """Actual producer→adapter→frozen dataset fixtures, never published inputs."""
+    from test_edge_family_history import intermarket, position, T0 as SOURCE_T0
+    from test_edge_family_dataset import snapshot, record, archive, build, T0 as REVIEW_T0
+    source = intermarket('NAS100') if family == 'intermarket' else position()
+    shift = REVIEW_T0 - SOURCE_T0 - (60 if family == 'intermarket' else 0)
+    def rebase(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if (key.endswith('_ts') or key.endswith('_at')) and isinstance(item, (int, float)):
+                    value[key] = item + shift
+                else: rebase(item)
+        elif isinstance(value, list):
+            for item in value: rebase(item)
+    rebase(source)
+    if family == 'intermarket':
+        if first_source_id is not None:
+            source['historical_series'][0]['source_id'] = first_source_id
+        source['available_at'] = REVIEW_T0 - 10
+        for series in source['historical_series']:
+            series['available_at'] = REVIEW_T0 - 10
+            for bar in series['bars']:
+                bar[0] += shift; bar[2] = REVIEW_T0 - 10
+    else:
+        source['proxy_mapping'] = dict(source_instrument='CFTC088691', target_instrument='NAS100',
+            validated=True, mapping_id='ci-position-map', validated_at=REVIEW_T0 - 1000)
+    frozen = snapshot(); frozen['edge_family_sources'] = {family: [source]}
+    return build(archive(record(frozen))), REVIEW_T0
+
+
+@pytest.mark.parametrize('family', ['intermarket', 'positioning'])
+def test_actual_history_producer_dataset_passes_trainer_admission(family):
+    value, captured = received_history_dataset(family)
+    original = deepcopy(value)
+    result = train(value, trained_at=captured + 100000)
+    assert value == original
+    assert result['diagnostics']['accepted_row_count'] == 5
+    assert result['diagnostics']['rejected_row_count'] == 1  # HOLD has no fit target.
+    assert not result['models']  # One trade cannot satisfy the existing OOS floors.
+
+
+@pytest.mark.parametrize('change', ['future_receipt', 'context_only', 'horizon_mismatch'])
+def test_trainer_rejects_review_nested_history_reproductions(change):
+    value, captured = received_history_dataset()
+    for row in value['rows']:
+        for meta in row['feature_provenance'].values():
+            if change == 'future_receipt': meta['constituent_provenance'][0]['received_ts'] = captured + 100
+            if change == 'context_only': meta['applicability_provenance'][0]['context_only'] = True
+            if change == 'horizon_mismatch': meta['applicability_provenance'][0]['horizon_minutes'] = 15
+    result = train(dataset(value['rows']), trained_at=captured + 100000)
+    assert result['diagnostics']['accepted_row_count'] == 0
+    assert result['diagnostics']['rejected_row_count'] == 6
+
+
+@pytest.mark.parametrize('change', [
+    'aggregate_receipt', 'missing_constituents', 'null_constituents', 'empty_constituents',
+    'unknown_contract', 'missing_contract', 'missing_hash_map', 'bad_hash', 'contradictory_hash',
+    'supporting_ids', 'duplicate_supporting_ids', 'provider', 'quote', 'base', 'symbol',
+    'endpoint', 'duplicate_constituent', 'unverified', 'nested_context', 'nested_horizon',
+    'null_applicability', 'deep_applicability', 'oversize_applicability',
+])
+def test_trainer_rejects_malformed_received_history_metadata(change):
+    value, captured = received_history_dataset()
+    for row in value['rows']:
+        for meta in row['feature_provenance'].values():
+            proof = meta['constituent_provenance'][0]
+            if change == 'aggregate_receipt': meta['received_ts'] += 1
+            if change == 'missing_constituents': meta.pop('constituent_provenance')
+            if change == 'null_constituents': meta['constituent_provenance'] = None
+            if change == 'empty_constituents': meta['constituent_provenance'] = []
+            if change == 'unknown_contract': meta['history_contract_version'] = 'unknown'
+            if change == 'missing_contract': meta.pop('history_contract_version', None)
+            if change == 'missing_hash_map': meta.pop('supporting_body_sha256', None)
+            if change == 'bad_hash': proof['body_sha256'] = 'x' * 64
+            if change == 'contradictory_hash': proof['body_sha256'] = 'f' * 64
+            if change == 'supporting_ids': meta['supporting_source_ids'] = ['unrelated-source']
+            if change == 'duplicate_supporting_ids': meta['supporting_source_ids'] *= 2
+            if change == 'provider': proof['provider'] = 'OTHER'
+            if change == 'quote': proof['quote_currency'] = 'USDT'
+            if change == 'base': proof['base_currency'] = 'UNRELATED'
+            if change == 'symbol': proof['symbol'] = 'UNRELATED-USD'
+            if change == 'endpoint': proof['start_ts'] += 60
+            if change == 'duplicate_constituent': meta['constituent_provenance'].append(deepcopy(proof))
+            if change == 'unverified': proof['source_verified'] = False
+            if change == 'nested_context': meta['applicability_provenance'][0]['nested'] = {'context_only': True}
+            if change == 'nested_horizon': meta['applicability_provenance'][0]['nested'] = {'horizon_minutes': 15}
+            if change == 'null_applicability': meta['applicability_provenance'] = None
+            if change == 'deep_applicability':
+                nested = {}
+                for _ in range(9): nested = {'nested': nested}
+                meta['applicability_provenance'][0]['extra'] = nested
+            if change == 'oversize_applicability': meta['applicability_provenance'][0]['extra'] = 'x' * 8001
+    result = train(dataset(value['rows']), trained_at=captured + 100000)
+    assert result['diagnostics']['accepted_row_count'] == 0
+    assert result['diagnostics']['rejected_row_count'] == 6
+
+
+@pytest.mark.parametrize('change', ['unit', 'kind', 'category', 'venue', 'series_id',
+    'publication', 'unverified', 'report_gap', 'hash', 'supporting_ids'])
+def test_trainer_rejects_position_constituent_inconsistency(change):
+    value, captured = received_history_dataset('positioning')
+    for row in value['rows']:
+        for name, meta in row['feature_provenance'].items():
+            if 'constituent_provenance' not in meta: continue  # Legacy current net.
+            proof = meta['constituent_provenance'][1]
+            if change in {'unit', 'kind', 'category', 'venue', 'series_id'}: proof[change] = 'OTHER'
+            if change == 'publication': proof['published_at'] = captured + 1
+            if change == 'unverified': proof['source_verified'] = False
+            if change == 'report_gap': proof['report_ts'] += 60
+            if change == 'hash': proof['body_sha256'] = 'f' * 64
+            if change == 'supporting_ids': meta['supporting_source_ids'] = ['OTHER']
+    result = train(dataset(value['rows']), trained_at=captured + 100000)
+    assert result['diagnostics']['accepted_row_count'] == 0
+    assert result['diagnostics']['rejected_row_count'] == 6
+
+
+def test_trainer_legacy_applicability_is_recursive_without_inventing_history():
+    value = dataset(count=1)
+    value['rows'][0]['feature_provenance'][FEATURE]['applicability_provenance'] = [
+        {'nested': {'horizon_minutes': 3}}]
+    result = train(dataset(value['rows']))
+    assert result['diagnostics']['accepted_row_count'] == 0
+
+
+def test_trainer_requires_same_source_identity_and_hash_across_history_features():
+    value, captured = received_history_dataset()
+    for row in value['rows']:
+        name = 'intermarket.COINBASEBTC-USD.return_5m_lag_1m'
+        meta = row['feature_provenance'][name]
+        proof = meta['constituent_provenance'][0]
+        proof['body_sha256'] = 'f' * 64
+        meta['supporting_body_sha256'][proof['source_id']] = 'f' * 64
+    result = train(dataset(value['rows']), trained_at=captured + 100000)
+    assert result['diagnostics']['accepted_row_count'] == 0
+
+
+def test_history_hash_manifest_source_ids_are_not_scope_declaration_keys():
+    value, captured = received_history_dataset(first_source_id='horizon_minutes')
+    result = train(value, trained_at=captured + 100000)
+    assert result['diagnostics']['accepted_row_count'] == 5

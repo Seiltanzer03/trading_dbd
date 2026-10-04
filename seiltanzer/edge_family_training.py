@@ -262,6 +262,7 @@ def _row_reason(row, trained):
             or not isinstance(provenance, dict) or not isinstance(windows, dict)
             or not set(windows).issubset(features)):
         return "FEATURE_SCHEMA_INVALID_OR_OVER_BOUND"
+    history_bindings = {}
     for feature, value in features.items():
         meta = provenance.get(feature)
         if (not isinstance(feature, str) or not feature
@@ -274,6 +275,22 @@ def _row_reason(row, trained):
                                  allow_global=row["family_id"] in {"macro", "event"})
         if reason:
             return reason
+        from .edge_family_history import feature_applicability_reason, history_provenance_reason
+        reason = (feature_applicability_reason(meta, horizon) or
+                  history_provenance_reason(feature, meta, captured, horizon, row['instrument']))
+        if reason:
+            return reason
+        if 'history_contract_version' in meta:
+            for proof in meta['constituent_provenance']:
+                # A source ID cannot acquire a different body/series inside one
+                # frozen row merely through correlated transforms.
+                binding = tuple(proof.get(key) for key in ('body_sha256', 'series_id',
+                    'kind', 'unit', 'category', 'venue', 'provider', 'symbol',
+                    'base_currency', 'quote_currency', 'orientation'))
+                source_id = proof['source_id']
+                if source_id in history_bindings and history_bindings[source_id] != binding:
+                    return 'FEATURE_HISTORY_PROVENANCE_INVALID'
+                history_bindings[source_id] = binding
         if row["family_id"] == "event":
             consensus = meta.get("consensus_provenance")
             if (not isinstance(consensus, dict)

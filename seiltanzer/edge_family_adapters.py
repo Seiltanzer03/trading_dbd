@@ -271,7 +271,32 @@ def _order_flow(row: dict, source: dict, meta: dict) -> None:
         row["rejected_sources"].append({"source_id": meta["source_id"], "reason": "BOOK_OR_AGGRESSION_FIELDS_MISSING"})
 
 
-def _intermarket(row: dict, source: dict, meta: dict) -> None:
+def _history(row: dict, source: dict, meta: dict, cutoff: float, *, positioning=False) -> bool:
+    from .edge_family_history import position_history_features, intermarket_history_features
+    result = (position_history_features(source, cutoff) if positioning else
+              intermarket_history_features(source, cutoff, target_instrument=row['instrument']))
+    row.setdefault('history_diagnostics', []).append({
+        'source_id': meta['source_id'], 'available': bool(result['features']),
+        'reason': ('RECEIVED_HISTORY_FEATURES' if result['features'] else
+                   result['rejections'][0]['reason'] if result['rejections'] else
+                   'POSITION_HISTORY_PROOF_UNAVAILABLE' if positioning else
+                   'INTERMARKET_HISTORY_PROOF_UNAVAILABLE')})
+    row['rejected_sources'].extend(result['rejections'])
+    if result['rejections'] and not result['features']:
+        return False
+    # Legacy facts remain in the packet, with the same binding child scope.
+    declarations = [item for proof in result['feature_provenance'].values()
+                    for item in proof.get('applicability_provenance', []) if item]
+    if declarations:
+        meta['applicability_provenance'] = declarations
+    for name, value in result['features'].items():
+        _add(row, name, value, {**meta, **result['feature_provenance'][name]})
+    return True
+
+
+def _intermarket(row: dict, source: dict, meta: dict, cutoff: float) -> None:
+    if not _history(row, source, meta, cutoff):
+        return
     for link in _rows(source.get("linked_returns")):
         leader = canonical_instrument_code(link.get("leader"))
         start, end = _num(link.get("start_ts")), _num(link.get("end_ts"))
@@ -287,6 +312,8 @@ def _intermarket(row: dict, source: dict, meta: dict) -> None:
 
 
 def _positioning(row: dict, source: dict, meta: dict, cutoff: float) -> None:
+    if not _history(row, source, meta, cutoff, positioning=True):
+        return
     report = _num(source.get("report_ts"))
     published = _num(source.get("published_at"))
     net = _num(source.get("net_position"))
@@ -615,7 +642,7 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
             elif family == "order_flow":
                 _order_flow(row, source, meta)
             elif family == "intermarket":
-                _intermarket(row, source, meta)
+                _intermarket(row, source, meta, cutoff)
             elif family == "positioning":
                 _positioning(row, source, meta, cutoff)
             elif family == "value_carry":
