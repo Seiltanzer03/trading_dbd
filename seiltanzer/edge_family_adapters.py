@@ -636,7 +636,16 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
         if row is None:
             continue
         for artifact in _rows(artifacts):
-            if 'geometry_sha256' in artifact:
+            from .edge_family_geometry import EXTENSION_FIELDS, portable_artifact_reason, portable_geometry_matches
+            if EXTENSION_FIELDS & artifact.keys():
+                reason = portable_artifact_reason(artifact)
+                if reason is None and not portable_geometry_matches(artifact, snapshot):
+                    reason = 'MODEL_GEOMETRY_MISMATCH'
+                if reason is not None:
+                    row['forecast_rejections'].append({'model_version': artifact.get('model_version'),
+                                                      'reason': reason})
+                    continue
+            elif 'geometry_sha256' in artifact:
                 geometry = artifact['geometry_sha256']
                 reason = 'MODEL_GEOMETRY_INVALID_OR_UNAVAILABLE'
                 if isinstance(geometry, str) and re.fullmatch(r'[0-9a-f]{64}', geometry):

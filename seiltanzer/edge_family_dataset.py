@@ -135,13 +135,13 @@ def _sha(value, length):
     return isinstance(value, str) and re.fullmatch('[0-9a-f]{' + str(length) + '}', value) is not None
 
 
-def family_geometry_sha256(snapshot: dict) -> str:
-    """Hash exact execution geometry, with TIME_STOP expressed relative to T0.
+def _execution_geometry(snapshot: dict) -> dict:
+    """Validate/project exact execution geometry, with TIME_STOP relative to T0.
 
     Source clocks and option distribution drivers do not define execution
     geometry. Unknown execution fields fail closed so a future rule cannot be
     silently grouped with today's action outcomes. Absolute price levels are
-    retained; this first producer intentionally uses narrow exact cohorts.
+    retained here; the optional portable contract normalizes this validated projection.
     """
     from .canonical_market_context import canonical_instrument_code
     from .unified_edge_ensemble import BASE, collect_candidates
@@ -224,13 +224,18 @@ def family_geometry_sha256(snapshot: dict) -> str:
     exposure = {key: position[key] for key in ('remaining_position_fraction',
         'realized_position_fraction', 'realized_r_weighted', 'active_stop_price',
         'active_stop_type', 'be_armed', 'original_stop', 'original_take', 'take') if key in position}
-    return _hash({'version': GEOMETRY_VERSION,
+    return {'version': GEOMETRY_VERSION,
         'instrument': canonical_instrument_code(_dict(snapshot.get('strategy')).get('instrument')
                                                 or snapshot.get('instrument')),
         'direction': direction,
         'execution_inputs': execution, 'prices': prices,
         'active_risk_barrier_type': geometry.get('active_risk_barrier_type'),
-        'exposure': exposure, 'candidate_matrix': matrix})
+        'exposure': exposure, 'candidate_matrix': matrix}
+
+
+def family_geometry_sha256(snapshot: dict) -> str:
+    """Legacy exact hash, preserving the existing strict execution validator."""
+    return _hash(_execution_geometry(snapshot))
 
 
 def _verified_costs(snapshot, horizon):
@@ -412,6 +417,9 @@ def build_family_dataset(archive: dict) -> dict:
     from .edge_family_action_binding import candidate_binding, stable_action_id
     from scripts.run_unified_edge_comparison import observed_replay
 
+    from .edge_family_geometry import (SUPPORTED, VERSION as PORTABLE_VERSION,
+        portable_geometry, geometry_descriptor_sha256, geometry_evidence)
+
     rows, exclusions = [], []
     output = {'version': VERSION, 'rows': rows, 'exclusions': exclusions,
               'label_scope': 'OBSERVED_PATH_COUNTERFACTUAL_NOT_BROKER_FILL',
@@ -441,6 +449,17 @@ def build_family_dataset(archive: dict) -> dict:
                     raise ValueError('CONFLICTING_ARCHIVE_REVIEW_IDENTITY')
                 snapshot, instrument, cutoff, horizon = _frozen_snapshot(record)
                 geometry = family_geometry_sha256(snapshot)
+                portable = None
+                portable_reason = None
+                try:
+                    descriptor = portable_geometry(snapshot)
+                    portable = {'geometry_contract': PORTABLE_VERSION,
+                        'geometry_descriptor': descriptor,
+                        'geometry_sha256': geometry_descriptor_sha256(descriptor),
+                        'exact_geometry_sha256': geometry,
+                        'geometry_evidence': geometry_evidence(snapshot)}
+                except (ValueError, TypeError, KeyError, OverflowError, RecursionError) as exc:
+                    portable_reason = str(exc)
                 costs = _verified_costs(snapshot, horizon)
                 # Original adapter clock/identity/mapping checks remain intact.
                 feature_snapshot = _feature_snapshot(snapshot, horizon, review_id, exclusions)
@@ -457,6 +476,10 @@ def build_family_dataset(archive: dict) -> dict:
                 admitted = []
                 for candidate in collect_candidates(snapshot):
                     if candidate['policy'] not in {'HOLD', 'CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT'} and not candidate['parameters']:
+                        continue
+                    if candidate['policy'] in {*SUPPORTED, 'TIME_STOP'} and portable is None:
+                        exclusions.append({'review_id': review_id, 'action': candidate['candidate_id'],
+                                           'reason': portable_reason or 'PORTABLE_GEOMETRY_INVALID'})
                         continue
                     binding = None
                     action = candidate['candidate_id']
@@ -497,7 +520,9 @@ def build_family_dataset(archive: dict) -> dict:
                         rows.append({'trade_id': record['trade_id'], 'review_id': record['review_id'],
                             'captured_ts': cutoff, 'label_end_ts': max(label_end, cutoff + replay['observed_horizon_minutes'] * 60.),
                             'instrument': instrument, 'family_id': family_id, 'horizon_minutes': horizon,
-                            'geometry_sha256': geometry, 'features': deepcopy(features), 'feature_provenance': deepcopy(metas),
+                            'geometry_sha256': geometry,
+                            **(deepcopy(portable) if candidate['policy'] in {*SUPPORTED, 'TIME_STOP'} else {}),
+                            'features': deepcopy(features), 'feature_provenance': deepcopy(metas),
                             'feature_windows_sec': deepcopy(windows), 'action': action,
                             **({'action_binding': deepcopy(binding)} if binding is not None else {}),
                             'candidate': {key: deepcopy(candidate[key]) for key in ('candidate_id', 'policy', 'parameters')},

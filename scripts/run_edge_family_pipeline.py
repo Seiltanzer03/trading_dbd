@@ -118,6 +118,9 @@ def package_runtime_context(models, *, expected_sha, captured_ts, dataset):
     for model in models:
         if not isinstance(model, dict) or not isinstance(model.get('validation'), dict):
             raise ValueError('UNVALIDATED_MODEL_NOT_PUBLISHABLE')
+        from seiltanzer.edge_family_geometry import portable_artifact_reason
+        if portable_artifact_reason(model) is not None:
+            raise ValueError('UNVALIDATED_PORTABLE_GEOMETRY_NOT_PUBLISHABLE')
         validation = model.get('validation', {})
         clocks = [model.get(key) for key in ('train_end_ts', 'validation_start_ts',
                                             'validation_end_ts', 'trained_at')]

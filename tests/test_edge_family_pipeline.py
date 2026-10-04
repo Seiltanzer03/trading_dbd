@@ -272,7 +272,12 @@ def test_ci_full_archive_dataset_trainer_runtime_consumer_path(tmp_path):
     assert audit['available'] is True
     frozen.update(loaded)
     models = frozen['edge_family_models']['intermarket']
-    assert all(value['geometry_sha256'] == family_geometry_sha256(frozen) for value in models)
+    from seiltanzer.edge_family_geometry import portable_geometry_matches
+    portable = [value for value in models if 'geometry_contract' in value]
+    exact = [value for value in models if 'geometry_contract' not in value]
+    assert portable and exact
+    assert all(portable_geometry_matches(value, frozen) for value in portable)
+    assert all(value['geometry_sha256'] == family_geometry_sha256(frozen) for value in exact)
     assert build_edge_family_evidence(frozen)['components']
     frozen['position_state']['remaining_position_fraction'] = .7
     assert build_edge_family_evidence(frozen)['components'] == []

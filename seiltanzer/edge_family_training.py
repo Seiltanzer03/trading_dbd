@@ -241,6 +241,10 @@ def _row_reason(row, trained):
             or not isinstance(row.get("action"), str) or not row["action"]
             or row["action"] == "HOLD"):
         return "COHORT_IDENTITY_OR_GEOMETRY_INVALID"
+    from .edge_family_geometry import portable_row_reason
+    reason = portable_row_reason(row)
+    if reason:
+        return reason
     from .edge_family_action_binding import action_binding_valid, candidate_binding, validate_binding
     if not action_binding_valid(row['action'], row):
         return 'TIME_STOP_ACTION_BINDING_INVALID'
@@ -294,7 +298,8 @@ def _row_reason(row, trained):
 def _cohort_key(row):
     return (row["instrument"], row["family_id"], float(row["horizon_minutes"]),
             row["geometry_sha256"], row["action"], tuple(sorted(row["features"])),
-            tuple(sorted((k, float(v)) for k, v in row["feature_windows_sec"].items())))
+            tuple(sorted((k, float(v)) for k, v in row["feature_windows_sec"].items())),
+            row.get("geometry_contract", ""))
 
 
 def _fit(rows, features):
@@ -313,7 +318,7 @@ def _fit(rows, features):
 
 
 def _train_cohort(key, rows, dataset_hash, trained):
-    instrument, family, horizon, geometry, action, features, windows = key
+    instrument, family, horizon, geometry, action, features, windows, geometry_contract = key
     groups = defaultdict(list)
     for row in rows:
         groups[str(row["trade_id"])].append(row)
@@ -416,6 +421,10 @@ def _train_cohort(key, rows, dataset_hash, trained):
             "evidence_kind": "OBSERVED_PATH_COUNTERFACTUAL_NOT_BROKER_FILL"},
         "action_models": {action: {"validated": True, "kind": "linear_net_action",
             "intercept_r": intercept, "coefficients": dict(zip(features, map(float, beta)))}}}
+    if geometry_contract:
+        from copy import deepcopy
+        artifact.update(geometry_contract=geometry_contract,
+                        geometry_descriptor=deepcopy(rows[0]['geometry_descriptor']))
     if 'action_binding' in rows[0]:
         from .edge_family_action_binding import validate_binding
         artifact['action_models'][action]['action_binding'] = validate_binding(rows[0]['action_binding'])
