@@ -143,9 +143,10 @@ passed; 42 dataset review regressions RED→GREEN, 131 dataset passed; frontend
 execution range/direction, 1 с несогласованным price/R. Runtime artifact не
 создан. Эти результаты не означают оценку эффективности или прибыльности.
 
-Остаётся реализация: переносимая модель/представление геометрии без exact-price
-starvation, причинные исторические
-feature producers при наличии исходных observations. Остаются входы: реальные
+Переносимая affine-R геометрия реализована локально отдельной веткой 2026-10-04;
+её review/CI/release ещё должны завершиться. Остаются learned geometry
+conditioning/support ranges и причинные исторические feature producers при
+наличии исходных observations. Остаются входы: реальные
 позиция/расходы брокера, lawful PIT consensus и проверенные source mappings,
 достаточная выборка и доверенная закрытая off-host среда. Эти пункты нельзя
 считать завершёнными вследствие green CI или наличия import boundary.
@@ -197,3 +198,34 @@ Raw live quote availability и frozen source authority имеют разные �
 кэш не перестраивается и authority не повышается через сравнение этих флагов.
 Остатки переносимой геометрии, causal historical features и реальных входов
 сохраняются; эти изменения не доказывают эффективность или прибыльность.
+
+
+2026-10-04: статус PR #394 выше уточнён фактическим acceptance. Main
+`29bbb28a692d2ef37cae4129b6c632735a52c579` прошёл main CI `37202760946`
+(2595 passed, 4 skipped), deploy `37202917087` с readiness/functional/public
+проверками; source `37203959101` и math `37203957738` опубликованы на том же
+pinned SHA. Read-only inventory `37203996160`: 65/96 DATA_READY, 27 с
+недостаточной independent evidence. Coverage не является доказательством
+эффективности или прибыльности.
+
+Отдельная текущая ветка реализует `edge-family-affine-r-geometry-v1` для
+CLOSE_10/25/50, EXIT и relative TIME_STOP. Original concrete candidates,
+observed-path net labels, cost/position proof, purge/holdouts/floors и runtime
+risk admission сохраняются. Descriptor equality снимает только абсолютную
+price partitioning: разные R-state/exposure/horizon/instrument/direction,
+barrier/candidate topology и nonprice parameter presence остаются отдельными.
+Extended price actions и legacy artifacts сохраняют exact geometry. Trainer
+перепроверяет bounded frozen proof, original candidate membership и independent
+position consistency; artifact/runtime/packaging отклоняют unknown/partial
+extensions и unsupported portable actions. HOLD остаётся replay control.
+Новые artificial contract fixtures не являются broker outcomes.
+
+Локально focused portable/dataset/training/adapters/TIME_STOP/pipeline:
+495 passed после initial 30 failed/1 passed и дополнительных test-first
+hardening/namespace/canonical regressions. Два независимых read-only review
+(task и весь feature diff) прошли без Critical/Important findings. Полный
+локальный Python3.12: 2652 passed, 4 skipped, прежний baseline SQLite/WAL
+failure; storage guard и его тест не изменены. Frontend syntax/smoke passed.
+Mandatory official Python3.11/real WebKit CI и новый release ещё требуются. Реальные позиции/расходы брокера, lawful PIT consensus, проверенные
+source mappings, достаточная выборка и закрытая off-host среда по-прежнему
+требуются. V1 не обучает geometry conditioning и не extrapolates geometry.
