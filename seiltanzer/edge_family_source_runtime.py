@@ -94,6 +94,14 @@ def load_family_source_context(engine, snapshot, expected_sha):
                     audit["rejected_sources"].append({"family": family,
                         "source_id": str(record.get("source_id") or "")[:128], "reason": reason})
                     continue
+                if family in {'positioning', 'intermarket'}:
+                    from .edge_family_history import position_history_features, intermarket_history_features
+                    producer = position_history_features if family == 'positioning' else intermarket_history_features
+                    history = producer(record, capture)
+                    if history['rejections'] and not history['features']:
+                        audit['rejected_sources'].extend({'family': family, **reason}
+                                                        for reason in history['rejections'])
+                        continue
                 # Preserve only causally valid scoring facts. Unsupported future
                 # schedules are audit-only; they cannot poison canonical snapshots.
                 from .decision_research import validate_no_future_timestamps
