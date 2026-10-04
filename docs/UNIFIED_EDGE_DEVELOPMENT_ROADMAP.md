@@ -4,8 +4,10 @@
 разделы 1–12. Этот документ сохраняет полный объём исходного плана и не заменяет
 его более узким планом предыдущего выпуска `EDGE_COMPLETION_PLAN.md`.
 
-Последняя подтверждённая production-база: PR #391, main
-`2bf3bfba598ced862dbcee05fcdcc93885a512e0` (2026-10-02).
+Последняя полностью подтверждённая production-база: PR #392, main
+`f0c86e6b9ef8c40727892cbb4d961166bc668d2f` (2026-10-04).
+PR #393 установлен как `1b1838744d6014b072365c4988f8070654af34dc`,
+но его functional smoke не прошёл; полный production acceptance ещё не подтверждён.
 Ветка runtime-интеграции `feat/unified-edge-full-integration` объединена.
 Текущая контрольная точка остатка: `docs/unified-edge-residual-audit`.
 
@@ -171,3 +173,27 @@ retained binding, runtime после exact geometry/horizon admission перев
 в текущий concrete candidate_id. Legacy artifacts, risk/cost checks и OOS floors
 сохраняются. Это реализация контракта, а не обученная модель или результат
 эффективности; отсутствие фактических входов остаётся блокером.
+
+
+2026-10-04: PR #392 завершил официальный CI (2526 passed, 4 skipped),
+main CI/staging/deploy, exact readiness, functional/public smoke и exact-SHA
+публикации источников/математического отчёта. TIME_STOP PR #393 прошёл независимый
+review без Important/Critical findings, 437 профильных тестов и официальный
+Python3.11 CI (2561 passed, 4 skipped) с real WebKit. Локальный Python3.12:
+2560 passed, 4 skipped, прежний SQLite/WAL failure. Его delivery/readiness прошли;
+AI functional smoke вернул 422 INVALID_POLICY_INPUTS за 13.842 s при лимите 12 s.
+Проверка isolated 12-action fixture прошла без orders, paid calls и изменений
+реальной позиции. Это не полностью принятый выпуск.
+
+Узкое исправление PR #394 проверяет явно объявленную недоступность авторитетной
+цены до изменения позиции, тяжёлого enrichment/provider work и публикации.
+Ответ — отдельный retriable 503 authoritative_price_unavailable. Smoke проверяет
+его точный отрицательный контракт отдельно от успешного verdict; произвольные
+422/503 и ответы с опубликованным решением остаются отказами, лимит 12 s и
+положительная isolated 12-action проверка сохраняются. 34 регрессионных случая
+проверяются RED→GREEN через CI отдельной ветки, поскольку локальная среда
+исполнения недоступна. Final acceptance фиксируется в PR по фактическим checks.
+Raw live quote availability и frozen source authority имеют разные значения;
+кэш не перестраивается и authority не повышается через сравнение этих флагов.
+Остатки переносимой геометрии, causal historical features и реальных входов
+сохраняются; эти изменения не доказывают эффективность или прибыльность.

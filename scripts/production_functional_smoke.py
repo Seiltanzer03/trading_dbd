@@ -440,6 +440,22 @@ def verify_ai_verdict() -> None:
         print(f"/api/ai/verdict: {code} {elapsed:.0f}ms gate<{AI_VERDICT_MAX_MS:.0f}ms")
         assert elapsed < AI_VERDICT_MAX_MS, (elapsed, AI_VERDICT_MAX_MS, code, body)
         assert code != 504, body
+        if (code == 503 and isinstance(body, dict)
+                and isinstance(body.get("error"), dict)
+                and body["error"].get("code") == "authoritative_price_unavailable"):
+            from seiltanzer.ai_api import AI_API_VERSION
+            assert set(body) == {"ok", "api_version", "error"}, body
+            assert body["ok"] is False and body["api_version"] == AI_API_VERSION, body
+            error = body["error"]
+            assert set(error) == {"code", "message", "request_id", "retriable"}, body
+            assert error["retriable"] is True, body
+            assert isinstance(error["message"], str) and error["message"].strip(), body
+            req_id = error["request_id"]
+            assert (isinstance(req_id, str) and req_id.startswith("ai-")
+                    and len(req_id) == 23
+                    and all(char in "0123456789abcdef" for char in req_id[3:])), body
+            print("AI_VERDICT_PRICE_UNAVAILABLE_CONTRACT PASS decision_published=False")
+            break
         if code == 503 and ((body or {}).get("error") or {}).get("code") == "ai_snapshot_warming":
             assert time.monotonic() < deadline, body
             time.sleep(min(3.0, max(1.0, float((body or {}).get("retry_after_sec") or 2.0))))
