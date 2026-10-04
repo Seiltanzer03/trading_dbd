@@ -202,6 +202,8 @@ class Settings:
     data_dir: str = field(default_factory=lambda: os.environ.get("SEILTANZER_DATA_DIR", "."))
     unified_edge_context_path: str = field(default_factory=lambda: os.environ.get("SEILTANZER_UNIFIED_EDGE_CONTEXT_PATH", ""))
     unified_edge_context_sha256: str = field(default_factory=lambda: os.environ.get("SEILTANZER_UNIFIED_EDGE_CONTEXT_SHA256", ""))
+    position_execution_context_path: str = field(default_factory=lambda: os.environ.get("SEILTANZER_POSITION_EXECUTION_CONTEXT_PATH", ""))
+    position_execution_context_sha256: str = field(default_factory=lambda: os.environ.get("SEILTANZER_POSITION_EXECUTION_CONTEXT_SHA256", ""))
     execution_cost_context_path: str = field(default_factory=lambda: os.environ.get("SEILTANZER_EXECUTION_COST_CONTEXT_PATH", ""))
     execution_cost_context_sha256: str = field(default_factory=lambda: os.environ.get("SEILTANZER_EXECUTION_COST_CONTEXT_SHA256", ""))
     price_poll_sec: float = 4.0     # ТЗ: 3–5 сек

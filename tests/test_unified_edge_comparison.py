@@ -384,6 +384,252 @@ def test_same_complete_cohort_for_every_scheme():
     assert all(row['observed_path_replay']['paired_review_n'] == 0 for row in summarize(reviews).values())
 
 
+def test_legacy_is_in_summary_and_missing_legacy_excludes_identical_core_cohort():
+    reviews = run_comparison({'read_only': True, 'reviews': [record()]})['reviews']
+    summary = summarize(reviews)
+    assert 'legacy_control' in summary
+    assert summary['legacy_control']['observed_path_replay']['mean_net_r_on_remaining'] == pytest.approx(-.36)
+    reviews[0]['schemes'].pop('legacy_control')
+    summary = summarize(reviews)
+    for scheme in ('balanced', 'llm20', 'quant100', 'legacy_control'):
+        assert summary[scheme]['observed_path_replay']['paired_review_n'] == 0
+        assert summary[scheme]['observed_path_replay']['excluded_review_n'] == 1
+    assert summary['balanced']['model_scenarios']['review_n'] == 1
+    assert summary['legacy_control']['model_scenarios']['review_n'] == 0
+
+
+def test_ablation_replays_its_own_choice_and_reports_separate_denominator():
+    reviews = run_comparison({'read_only': True, 'reviews': [record()]})['reviews']
+    ablations = reviews[0].get('ablations', {})
+    assert 'without_quantitative_base' in ablations
+    row = ablations['without_quantitative_base']
+    assert row['selection']['selected_policy'] == 'CLOSE_10'
+    assert row['observed_path']['net_r_on_remaining'] == pytest.approx(-.63)
+    summary = summarize(reviews)
+    assert summary['without_quantitative_base']['observed_path_replay']['mean_paired_delta_vs_quant100_r'] == pytest.approx(-.27)
+    row['observed_path'] = {'available': False}
+    summary = summarize(reviews)
+    assert summary['without_quantitative_base']['observed_path_replay']['paired_review_n'] == 0
+    assert summary['balanced']['observed_path_replay']['paired_review_n'] == 1
+
+
+def test_selected_action_distribution_includes_hold_and_unavailable_denominator():
+    first, second = record(), record()
+    first['production_policy'], second['production_policy'] = 'HOLD', None
+    report = run_comparison({'read_only': True, 'reviews': [first, second]})
+    distribution = report['summary'].get('legacy_control', {}).get('selected_action_distribution', {})
+    assert distribution.get('counts', {}).get('HOLD') == 1
+    assert distribution['selected_review_n'] == 1
+    assert distribution['unavailable_review_n'] == 1
+    assert distribution['frequencies']['HOLD'] == 1.
+
+
+def test_grouped_report_labels_missing_regime_and_only_actual_signal_families():
+    report = run_comparison({'read_only': True, 'reviews': [record()]})
+    groups = report.get('grouped_summary', {})
+    assert set(groups) == {'instrument', 'regime', 'horizon_minutes', 'family'}
+    assert groups['instrument']['NAS100']['review_n'] == 1
+    assert groups['regime']['UNAVAILABLE']['review_n'] == 1
+    assert groups['horizon_minutes']['240']['review_n'] == 1
+    assert groups['family']['price_path']['review_n'] == 1
+    assert 'macro' not in groups['family']  # Adapter presence is not a signal.
+    assert groups['family']['price_path']['summary']['legacy_control']['observed_path_replay']['paired_review_n'] == 1
+
+
+def test_overlapping_review_episodes_never_form_portfolio_drawdown():
+    first, second = record(), record()
+    second.update(review_id='review-later', production_policy='EXIT')
+    report = run_comparison({'read_only': True, 'reviews': [first, second]})
+    risk = report['summary']['balanced']['observed_path_replay']
+    assert risk.get('portfolio_max_drawdown_r', 'missing') is None
+    assert risk['portfolio_drawdown_available'] is False
+    assert risk['descriptive_worst_episode_net_r_on_remaining'] == pytest.approx(-.36)
+    assert risk['paired_review_n'] == 2 and risk['paired_distinct_trade_n'] == 1
+
+
+def test_chronological_policy_reversal_counts_decisions_without_inferring_execution():
+    sources = []
+    for i, policy in enumerate(('HOLD', 'CLOSE_25', 'HOLD')):
+        value = frozen()
+        value['captured_ts'] += i * 30.
+        row = record(value)
+        row.update(review_id=f'review-{i}', production_policy=policy)
+        sources.append(row)
+    report = run_comparison({'read_only': True, 'reviews': list(reversed(sources))}, materiality_r=.5)
+    changes = report.get('review_transitions', {}).get('legacy_control', {})
+    assert changes.get('adjacent_review_pair_n') == 2
+    assert changes['decision_change_n'] == changes['policy_change_n'] == 2
+    assert changes['policy_reversal_n'] == 1
+    assert changes['policy_reversal_opportunity_n'] == 1
+    assert changes['executions_inferred'] is False
+    metrics = report['summary']['legacy_control']['observed_path_replay']
+    assert metrics['materiality_threshold_r'] == .5
+    assert metrics['economically_immaterial_intervention_n_vs_hold'] == 1
+    assert report['report_parameters']['threshold_optimality_claim'] is False
+
+
+def test_nonzero_rollover_is_separate_from_execution_subtotal_and_delta():
+    value = with_rollover(frozen())
+    costs = value['policy_manager']['execution_cost_model']
+    costs.update(assumed=False, components={channel: {'components_r': {
+        name: .0025 for name in ('commission', 'spread', 'slippage', 'manual_latency')}}
+        for channel in ('immediate', 'deferred')})
+    report = run_comparison({'read_only': True, 'reviews': [record(value)]})
+    summary = report['summary']['legacy_control']
+    breakdown = summary['cost_breakdown']
+    assert breakdown['frozen_execution_total']['mean_r'] == pytest.approx(.01)
+    assert sum(breakdown[name]['mean_r'] for name in
+               ('commission', 'spread', 'slippage', 'manual_latency')) == pytest.approx(.01)
+    assert breakdown['broker_rollover']['mean_r'] == pytest.approx(.15)
+    assert breakdown['frozen_execution_plus_rollover_total']['mean_r'] == pytest.approx(.16)
+    path = report['reviews'][0]['schemes']['legacy_control']['observed_path']
+    assert path['execution_cost_r'] == pytest.approx(.16)  # compatibility total
+    assert path['frozen_execution_cost_r'] == pytest.approx(.01)
+    replay = summary['observed_path_replay']
+    assert replay['mean_additional_frozen_execution_cost_vs_hold_r'] == pytest.approx(0.)
+    assert replay['mean_additional_broker_rollover_cost_vs_hold_r'] == pytest.approx(-.05)
+    assert replay['mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r'] == pytest.approx(-.05)
+
+
+def test_unknown_rollover_keeps_execution_subtotal_but_not_combined_cost_or_delta():
+    report = run_comparison({'read_only': True, 'reviews': [record()]})
+    summary = report['summary']['legacy_control']
+    assert summary['cost_breakdown']['frozen_execution_total']['mean_r'] == pytest.approx(.01)
+    combined = summary['cost_breakdown']['frozen_execution_plus_rollover_total']
+    assert combined['mean_r'] is None
+    assert combined['unavailable_review_n'] == 1
+    path = report['reviews'][0]['schemes']['legacy_control']['observed_path']
+    assert path['frozen_execution_cost_r'] == pytest.approx(.01)
+    replay = summary['observed_path_replay']
+    assert replay['mean_additional_frozen_execution_cost_vs_hold_r'] == pytest.approx(0.)
+    assert replay['mean_additional_broker_rollover_cost_vs_hold_r'] is None
+    assert replay['mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r'] is None
+    assert replay['additional_rollover_cost_available_intervention_n'] == 0
+    assert replay['additional_combined_cost_available_intervention_n'] == 0
+
+
+@pytest.mark.parametrize('bad_id', [123, None, '', [], {}])
+def test_malformed_review_identity_is_rejected_without_losing_tied_valid_review(bad_id):
+    valid = record()
+    bad = record()
+    bad['review_id'] = bad_id
+    report = run_comparison({'read_only': True, 'reviews': [valid, bad]})
+    assert report['review_n'] == 1
+    assert len(report['rejected']) == 1
+    assert 'REVIEW_ID' in report['rejected'][0]['reason']
+    assert report['review_transitions']['legacy_control']['adjacent_review_pair_n'] == 0
+
+
+def test_cost_breakdown_distinguishes_frozen_total_from_unknown_components():
+    report = run_comparison({'read_only': True, 'reviews': [record()]})
+    costs = report['summary']['balanced'].get('cost_breakdown', {})
+    assert costs.get('frozen_execution_total', {}).get('mean_r') == .01
+    assert costs['frozen_execution_total']['available_review_n'] == 1
+    for component in ('commission', 'spread', 'slippage', 'manual_latency', 'broker_rollover'):
+        assert costs[component]['mean_r'] is None
+        assert costs[component]['available_review_n'] == 0
+    assert costs['settled_actual_total_r'] is None
+
+
+def test_tied_transition_chronology_never_uses_mixed_identity_as_tiebreaker():
+    from scripts.run_unified_edge_comparison import review_transitions
+    rows = run_comparison({'read_only': True, 'reviews': [record()]})['reviews']
+    rows.append(deepcopy(rows[0]))
+    rows[1]['review_id'] = 123
+    observed = review_transitions(rows)['legacy_control']
+    assert observed['ambiguous_timestamp_review_n'] == 2
+    assert observed['adjacent_review_pair_n'] == 0
+
+
+@pytest.mark.parametrize('threshold', [-.01, float('nan'), True, None])
+def test_invalid_report_materiality_threshold_is_rejected(threshold):
+    with pytest.raises(ValueError, match='materiality'):
+        run_comparison({'read_only': True, 'reviews': []}, materiality_r=threshold)
+
+
+def test_explicit_frozen_cost_components_scale_with_selected_close_fraction():
+    value = frozen()
+    costs = value['policy_manager']['execution_cost_model']
+    costs.update(immediate_full_close_r=.01, deferred_full_close_r=.02, assumed=False,
+        components={'immediate': {'components_r': {'spread': .001, 'commission': .002,
+            'slippage': .003, 'manual_latency': .004}},
+            'deferred': {'components_r': {'spread': .002, 'commission': .004,
+            'slippage': .006, 'manual_latency': .008}}})
+    replay = observed_replay(value, record(value), choice('CLOSE_25'))
+    assert replay.get('commission_cost_r') == pytest.approx(.0035)
+    assert replay['spread_cost_r'] == pytest.approx(.00175)
+    assert replay['slippage_cost_r'] == pytest.approx(.00525)
+    assert replay['manual_latency_cost_r'] == pytest.approx(.007)
+    assert replay['execution_cost_r'] == pytest.approx(.0175)
+    assert replay['ledger_settled_profit_available'] is False
+    costs['components']['immediate']['components_r']['commission'] = .9
+    bad = observed_replay(value, record(value), choice('CLOSE_25'))
+    assert bad['commission_cost_r'] is None
+
+
+def test_missing_choice_and_same_capture_time_break_transition_sequence():
+    reviews = run_comparison({'read_only': True, 'reviews': [record()]})['reviews']
+    rows = []
+    for i, policy in enumerate(('HOLD', None, 'CLOSE_25', 'HOLD')):
+        row = deepcopy(reviews[0])
+        row.update(review_id=str(i), captured_ts=float(i))
+        row['schemes']['legacy_control']['selection'].update(selected_policy=policy, selected_candidate_id=policy)
+        rows.append(row)
+    from scripts.run_unified_edge_comparison import review_transitions
+    observed = review_transitions(rows)['legacy_control']
+    assert observed['adjacent_review_pair_n'] == 1
+    assert observed['policy_reversal_opportunity_n'] == 0
+    rows[3]['captured_ts'] = rows[2]['captured_ts']
+    observed = review_transitions(rows)['legacy_control']
+    assert observed['adjacent_review_pair_n'] == 0
+    assert observed['ambiguous_timestamp_review_n'] == 2
+
+
+def test_model_summary_reports_numeric_observation_denominators():
+    reviews = run_comparison({'read_only': True, 'reviews': [record()]})['reviews']
+    reviews.append(deepcopy(reviews[0]))
+    reviews[1]['schemes']['balanced']['selection']['expected_net_r'] = None
+    model = summarize(reviews)['balanced']['model_scenarios']
+    assert model.get('expected_net_r_available_review_n') == 1
+    assert model['cvar10_net_r_available_review_n'] == 2
+
+
+def test_model_expected_gain_is_separate_from_observed_episode_gain():
+    summary = run_comparison({'read_only': True, 'reviews': [record()]})['summary']
+    for scheme in ('balanced', 'legacy_control'):
+        model = summary[scheme]['model_scenarios']
+        assert model.get('mean_selected_delta_expected_vs_hold_r') == pytest.approx(.06)
+        assert model['delta_expected_vs_hold_available_review_n'] == 1
+        assert summary[scheme]['observed_path_replay']['mean_paired_delta_vs_hold_r'] == pytest.approx(.45)
+
+
+def test_unsupported_production_policy_is_not_counted_as_a_selected_action():
+    row = record()
+    row['production_policy'] = 'UNKNOWN_POLICY'
+    observed = run_comparison({'read_only': True, 'reviews': [row]})['summary'].get('legacy_control', {})
+    distribution = observed.get('selected_action_distribution', {})
+    assert distribution.get('selected_review_n') == 0
+    assert distribution['unavailable_review_n'] == 1
+
+
+@pytest.mark.parametrize('components', [[], 'bad', {'immediate': []}, {'immediate': {'components_r': 'bad'}}])
+def test_malformed_optional_cost_decomposition_does_not_lose_valid_path(components):
+    value = frozen()
+    value['policy_manager']['execution_cost_model'].update(assumed=False, components=components)
+    replay = observed_replay(value, record(value), choice('CLOSE_25'))
+    assert replay['available'] is True
+    assert replay['commission_cost_r'] is None
+
+
+def test_absent_intervention_flag_retains_path_but_reduces_model_flag_denominator():
+    reviews = run_comparison({'read_only': True, 'reviews': [record()]})['reviews']
+    reviews[0]['schemes']['balanced']['selection'].pop('intervention')
+    summary = summarize(reviews)['balanced']
+    assert summary['model_scenarios']['intervention_frequency'] is None
+    assert summary['model_scenarios']['intervention_flag_available_review_n'] == 0
+    assert summary['observed_path_replay']['paired_review_n'] == 1
+
+
 @pytest.mark.parametrize('horizon_minutes', [1., 7200., 85152.])
 def test_export_uses_actual_frozen_horizon_and_one_bracketing_observation(horizon_minutes):
     c = sqlite3.connect(':memory:')

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from copy import deepcopy
 from pathlib import Path
 
 from .canonical_market_context import canonical_instrument_code
@@ -40,6 +41,8 @@ def validate_execution_cost_context(document, *, snapshot, expected_deployment_s
     """Validate a caller-owned immutable document without writes or providers."""
     if not isinstance(document, dict) or document.get('version') != VERSION:
         return _unavailable('EXECUTION_CONTEXT_SCHEMA_INVALID')
+    if any(document.get(key) for key in ('synthetic', 'demo', 'is_demo', 'synthetic_demo', 'contract_fixture')):
+        return _unavailable('EXECUTION_CONTEXT_SYNTHETIC_EVIDENCE')
     if (not isinstance(expected_deployment_sha, str) or len(expected_deployment_sha) != 40
             or any(c not in '0123456789abcdef' for c in expected_deployment_sha)
             or document.get('deployment_sha') != expected_deployment_sha):
@@ -96,6 +99,8 @@ def validate_execution_cost_context(document, *, snapshot, expected_deployment_s
                 continue
             if not isinstance(item, dict):
                 return _unavailable('EXECUTION_CONTEXT_COMPONENT_INVALID')
+            if any(item.get(key) for key in ('synthetic', 'demo', 'is_demo', 'synthetic_demo', 'contract_fixture')):
+                return _unavailable('EXECUTION_CONTEXT_SYNTHETIC_EVIDENCE')
             value = _number(item.get('cost_currency_per_unit'))
             ts = _number(item.get('observed_ts'))
             if (value is None or value < 0 or ts is None or not 0 < ts <= observed
@@ -106,7 +111,9 @@ def validate_execution_cost_context(document, *, snapshot, expected_deployment_s
                     or any(c not in '0123456789abcdef' for c in item['evidence_sha256'])):
                 return _unavailable('EXECUTION_CONTEXT_COMPONENT_PROVENANCE_INVALID')
             values[component] = value / risk
-        channels[channel] = {'components_r': values, 'total_r': sum(values.values()) if not absent else None}
+        channels[channel] = {'components_r': values, 'total_r': sum(values.values()) if not absent else None,
+            'component_provenance': {name: deepcopy(supplied[name]) for name in COMPONENTS
+                                     if supplied.get(name) is not None}}
         missing[channel] = absent
     complete = not any(missing.values())
     result = _unavailable('VERIFIED_COMPLETE_BROKER_COSTS' if complete else 'PARTIAL_BROKER_COSTS_MISSING_COMPONENTS')
@@ -120,6 +127,8 @@ def validate_execution_cost_context(document, *, snapshot, expected_deployment_s
                   quantity_basis='current_remaining_position', horizon_minutes=horizon,
                   components=channels, missing_components=missing,
                   deployment_sha=expected_deployment_sha, document_sha256=document_sha256,
+                  source_verified=True, trade_id=document['trade_id'], instrument=instrument,
+                  direction=document['direction'], coverage_start_epoch=start, coverage_end_epoch=end,
                   includes_rollover=False, includes_settled_historical_costs=False,
                   evidence_scope='frozen_broker_cost_measurements_not_realized_total_position_net')
     return result

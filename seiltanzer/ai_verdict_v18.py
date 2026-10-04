@@ -200,7 +200,7 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
         # compared policy stay intact; only explanatory workspaces are omitted.
         keep_manager = (
             "expert_registry",
-            "position_economics", "repeat_intervention_gate", "decision_reliability", "execution_cost_model",
+            "position_economics", "repeat_intervention_gate", "decision_reliability", "execution_cost_model", "execution_cost_repricing_required",
             "version", "management_decision", "recommendation", "policies",
             "selection_rule", "gate", "evidence", "inputs", "risk_constraint",
             "management_arbiter", "state_change_attribution", "input_audit",

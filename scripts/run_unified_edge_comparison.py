@@ -16,15 +16,43 @@ from seiltanzer.decision_research import validate_no_future_timestamps
 from seiltanzer.execution_simulator import ExecutionSpec, replay_execution_path
 from seiltanzer.rollover_economics import frozen_rollover_schedule, replay_rollover_cost
 from seiltanzer.unified_candidate_economics import BASE_FRACTIONS, _variant, _weighted_cvar
-from seiltanzer.unified_edge_ensemble import build_unified_ensemble, candidate_id, number
+from seiltanzer.unified_edge_ensemble import EXTENDED, build_unified_ensemble, candidate_id, number
 
 
 SCHEMES = ('balanced', 'llm20', 'quant100', 'legacy_control')
+RAPID_CANCELLATION_SEC = 60.
+DEFAULT_MATERIALITY_R = .03
 
 
 def unavailable(reason):
     return {'available': False, 'reason': reason, 'net_r_on_remaining': None,
             'net_r_on_original_position': None}
+
+
+def _frozen_cost_components(costs, fraction):
+    """Decompose only explicit, non-assumed channel sums; never infer fills."""
+    names = ('spread', 'commission', 'slippage', 'manual_latency')
+    missing = {name + '_cost_r': None for name in names}
+    if costs.get('assumed') is not False:
+        return missing
+    channels = costs.get('components') or {}
+    if not isinstance(channels, dict):
+        return missing
+    values = {}
+    for channel in ('immediate', 'deferred'):
+        channel_values = channels.get(channel)
+        if not isinstance(channel_values, dict):
+            return missing
+        components = channel_values.get('components_r')
+        if not isinstance(components, dict):
+            return missing
+        values[channel] = {name: number(components.get(name)) for name in names}
+        total = number(costs.get(channel + '_full_close_r'))
+        if (total is None or any(v is None or v < 0 for v in values[channel].values())
+                or abs(sum(values[channel].values()) - total) > 1e-8):
+            return missing
+    return {name + '_cost_r': fraction * values['immediate'][name] +
+            (1. - fraction) * values['deferred'][name] for name in names}
 
 
 def observed_replay(snapshot, record, candidate):
@@ -119,7 +147,8 @@ def observed_replay(snapshot, record, candidate):
                          if fraction < 1. else 0.)
     except ValueError as exc:
         return unavailable(str(exc))
-    cost = fraction * immediate + (1. - fraction) * deferred + rollover_cost
+    frozen_execution_cost = fraction * immediate + (1. - fraction) * deferred
+    cost = frozen_execution_cost + rollover_cost
     net = gross - cost
     position = snapshot.get('position_state') or {}
     remaining, realized = (number(position.get('remaining_position_fraction')),
@@ -144,11 +173,16 @@ def observed_replay(snapshot, record, candidate):
     except (ValueError, TypeError):
         pass
     return {'available': True, 'reason': 'OBSERVED_PATH_COUNTERFACTUAL_WITH_FROZEN_COST_MODEL',
+            **_frozen_cost_components(costs, fraction),
             'net_r_on_remaining': float(net), 'net_r_on_original_position': total_net,
             'original_position_net_basis': 'prior_net_plus_future_modeled_net' if total_net is not None else 'UNAVAILABLE_PRIOR_NET_COSTS_OR_EXPOSURE',
             'prior_realized_costs_status': prior_costs_status or 'UNAVAILABLE',
             'prior_gross_plus_future_modeled_net_r': mixed_basis,
             'gross_r_on_remaining': float(gross), 'execution_cost_r': cost,
+            # Keep execution_cost_r's legacy partial-model total unchanged.
+            # Unknown carry is not zero in the explicitly combined subtotal.
+            'frozen_execution_cost_r': frozen_execution_cost,
+            'frozen_execution_plus_rollover_cost_r': cost if rollover_audit['available'] else None,
             'broker_rollover_cost_r': rollover_cost if rollover_audit['available'] else None,
             'broker_rollover_audit': rollover_audit,
             'net_cost_scope': ('FROZEN_EXECUTION_COSTS_AND_VERIFIED_BROKER_ROLLOVER'
@@ -170,6 +204,8 @@ def observed_replay(snapshot, record, candidate):
 
 
 def compare_review(record):
+    if not isinstance(record.get('review_id'), str) or not record['review_id'].strip():
+        raise ValueError('INVALID_REVIEW_ID; requires a nonempty string')
     raw = record['snapshot_json']
     digest = hashlib.sha256(raw.encode('utf8')).hexdigest()
     if digest != record.get('snapshot_sha256'):
@@ -217,15 +253,27 @@ def compare_review(record):
     legacy_row = by_id.get(legacy_id)
     if legacy_row is None and legacy_policy in BASE_FRACTIONS:
         legacy_row = {'candidate_id': legacy_policy, 'policy': legacy_policy, 'parameters': {}}
+    legacy_expected = number((legacy_row or {}).get('expected_net_r'))
+    hold_expected = number((by_id.get('HOLD') or {}).get('expected_net_r'))
     schemes['legacy_control'] = {'selection': {
         'scheme': 'legacy_control', 'selected_policy': legacy_policy,
         'selected_candidate_id': legacy_id, 'intervention': legacy_policy != 'HOLD',
-        'expected_net_r': number((legacy_row or {}).get('expected_net_r')),
+        'expected_net_r': legacy_expected,
+        'delta_expected_r': legacy_expected - hold_expected if legacy_expected is not None and hold_expected is not None else None,
         'cvar10_net_r': number((legacy_row or {}).get('cvar10_net_r')),
         'evidence_type': 'STORED_PRODUCTION_CHOICE_REPRICED_IN_CURRENT_MODEL'},
         'observed_path': observed_replay(snapshot, record, legacy_row)}
+    ablations = {choice['scheme']: {'selection': choice,
+        'observed_path': observed_replay(snapshot, record, by_id.get(choice['selected_candidate_id']))}
+        for choice in audit['counterfactuals']}
+    signal_families = sorted({str(family) for component in audit['components']
+        if component.get('available') is True and (number(component.get('effective_weight')) or 0.) > 0
+        for family in component.get('evidence_family_ids') or []})
     return {'review_id': record['review_id'], 'trade_id': record['trade_id'],
             'captured_ts': captured, 'instrument': audit['instrument'],
+            'regime': audit.get('regime'),
+            'horizon_minutes': number(((snapshot.get('policy_manager') or {}).get('inputs') or {}).get('horizon_minutes')),
+            'signal_family_ids': signal_families, 'ablations': ablations,
             'snapshot_sha256': digest, 'same_frozen_inputs_all_schemes': True,
             'llm_source': 'stored_actual_shadow_only' if isinstance(llm, dict) else 'unavailable',
             'legacy_llm_quant_anchoring': anchored,
@@ -244,45 +292,128 @@ def _average(values):
     return float(np.mean(values)) if values else None
 
 
-def summarize(reviews):
+def _choices(review):
+    return {**(review.get('schemes') or {}), **(review.get('ablations') or {})}
+
+
+def _path(review, scheme):
+    return (_choices(review).get(scheme) or {}).get('observed_path') or {}
+
+
+def _path_available(path):
+    return path.get('available') is True and number(path.get('net_r_on_remaining')) is not None
+
+
+def _distribution(selected, review_n):
+    counts = {policy: 0 for policy in (*BASE_FRACTIONS, *EXTENDED)}
+    for choice in selected:
+        policy = choice.get('selected_policy')
+        if isinstance(policy, str) and policy in counts:
+            counts[policy] += 1
+    total = sum(counts.values())
+    return {'counts': counts, 'frequencies': {p: n / total if total else None for p, n in counts.items()},
+            'selected_review_n': total, 'unavailable_review_n': review_n - total,
+            'denominator': 'reviews_with_selected_action; HOLD_is_an_action'}
+
+
+def _cost_breakdown(paths):
+    fields = {'frozen_execution_total': 'frozen_execution_cost_r',
+              'frozen_execution_plus_rollover_total': 'frozen_execution_plus_rollover_cost_r',
+              'broker_rollover': 'broker_rollover_cost_r',
+              'commission': 'commission_cost_r', 'spread': 'spread_cost_r',
+              'slippage': 'slippage_cost_r', 'manual_latency': 'manual_latency_cost_r'}
+    result = {}
+    for label, field in fields.items():
+        values = [number(p.get(field)) for p in paths]
+        available = [v for v in values if v is not None]
+        result[label] = {'mean_r': _average(available), 'available_review_n': len(available),
+                         'unavailable_review_n': len(paths) - len(available)}
+    result.update(settled_actual_total_r=None,
+        scope='paired_path_counterfactual_frozen_costs; components_unavailable_unless_explicit; not_actual_fills')
+    return result
+
+
+def summarize(reviews, *, materiality_r=DEFAULT_MATERIALITY_R):
     # Use the identical cohort for every observed scheme comparison. Overlapping
     # reviews of one trade are explicitly not independent portfolio returns.
-    shared = set.intersection(*(set(row['schemes']) for row in reviews)) if reviews else set()
-    names = sorted((set(SCHEMES) | shared) - {'legacy_control'})
-    paired = [r for r in reviews if r['observed_hold_control'].get('available')
-              and all((r['schemes'][s]['observed_path']).get('available') for s in names)]
+    all_names = set().union(*(_choices(r) for r in reviews)) if reviews else set()
+    core_names = set(SCHEMES) | {s for r in reviews for s in r.get('schemes') or {}}
+    names = sorted(core_names | all_names)
+    core_paired = [r for r in reviews if _path_available(r.get('observed_hold_control') or {})
+                   and all(_path_available(_path(r, s)) for s in core_names)]
     result = {}
     for scheme in names:
-        selected = [r['schemes'][scheme]['selection'] for r in reviews]
-        paths = [r['schemes'][scheme]['observed_path'] for r in paired]
+        paired = [r for r in core_paired if _path_available(_path(r, scheme))]
+        selected = [(_choices(r).get(scheme) or {}).get('selection') for r in reviews]
+        selected = [s for s in selected if isinstance(s, dict)]
+        intervention_flags = [float(s['intervention']) for s in selected
+                              if s.get('selected_policy') and isinstance(s.get('intervention'), bool)]
+        paths = [_path(r, scheme) for r in paired]
         net = [p['net_r_on_remaining'] for p in paths]
-        deltas = [r['schemes'][scheme]['observed_path']['net_r_on_remaining']
-                  - r['schemes']['quant100']['observed_path']['net_r_on_remaining'] for r in paired]
-        # Useless intervention means no net benefit against quant100 on the same
-        # held-out episode; its denominator contains only actual interventions.
-        interventions = [r for r in paired if r['schemes'][scheme]['selection'].get('intervention')]
-        useless = sum(r['schemes'][scheme]['observed_path']['net_r_on_remaining'] <=
-                      r['schemes']['quant100']['observed_path']['net_r_on_remaining'] + 1e-8 for r in interventions)
-        no_gain_vs_hold = sum(r['schemes'][scheme]['observed_path']['net_r_on_remaining'] <=
+        deltas = [_path(r, scheme)['net_r_on_remaining']
+                  - _path(r, 'quant100')['net_r_on_remaining'] for r in paired]
+        hold_deltas = [_path(r, scheme)['net_r_on_remaining']
+                       - r['observed_hold_control']['net_r_on_remaining'] for r in paired]
+        # These legacy-named metrics describe selected interventions' net
+        # episode gain; they do not establish risk value or actual execution.
+        interventions = [r for r in paired if (_choices(r)[scheme].get('selection') or {}).get('intervention')]
+        useless = sum(_path(r, scheme)['net_r_on_remaining'] <=
+                      _path(r, 'quant100')['net_r_on_remaining'] + 1e-8 for r in interventions)
+        no_gain_vs_hold = sum(_path(r, scheme)['net_r_on_remaining'] <=
                              r['observed_hold_control']['net_r_on_remaining'] + 1e-8 for r in interventions)
+        immaterial = sum(abs(_path(r, scheme)['net_r_on_remaining'] -
+                             r['observed_hold_control']['net_r_on_remaining']) <= materiality_r + 1e-8
+                         for r in interventions)
+        def additional_costs(field):
+            return [number(_path(r, scheme).get(field)) -
+                    number(r['observed_hold_control'].get(field)) for r in interventions
+                    if number(_path(r, scheme).get(field)) is not None
+                    and number(r['observed_hold_control'].get(field)) is not None]
+        execution_deltas = additional_costs('frozen_execution_cost_r')
+        rollover_deltas = additional_costs('broker_rollover_cost_r')
+        combined_deltas = additional_costs('frozen_execution_plus_rollover_cost_r')
         weights = np.full(len(net), 1. / len(net)) if net else None
         result[scheme] = {
-            'model_scenarios': {'review_n': len(selected),
+            'selected_action_distribution': _distribution(selected, len(reviews)),
+            'cost_breakdown': _cost_breakdown(paths),
+            'model_scenarios': {'review_n': len(selected), 'missing_scheme_review_n': len(reviews) - len(selected),
+                'expected_net_r_available_review_n': sum(number(s.get('expected_net_r')) is not None for s in selected),
+                'cvar10_net_r_available_review_n': sum(number(s.get('cvar10_net_r')) is not None for s in selected),
+                'delta_expected_vs_hold_available_review_n': sum(number(s.get('delta_expected_r')) is not None for s in selected),
                 'mean_selected_expected_net_r': _average(s.get('expected_net_r') for s in selected),
+                'mean_selected_delta_expected_vs_hold_r': _average(s.get('delta_expected_r') for s in selected),
                 'mean_selected_cvar10_net_r': _average(s.get('cvar10_net_r') for s in selected),
-                'intervention_frequency': _average(float(s['intervention']) for s in selected if s.get('selected_policy')),
+                'intervention_frequency': _average(intervention_flags),
+                'intervention_flag_available_review_n': len(intervention_flags),
                 'evidence_type': 'MODEL_SCENARIOS_NOT_HISTORICAL_PROFIT'},
             'observed_path_replay': {'available': bool(paths), 'paired_review_n': len(paths),
+                'input_review_n': len(reviews), 'core_paired_review_n': len(core_paired),
+                'excluded_review_n': len(reviews) - len(paths),
+                'scheme_path_available_review_n': sum(_path_available(_path(r, scheme)) for r in reviews),
+                'cohort_definition': 'complete_core_schemes_and_HOLD; ablations_also_require_own_replay',
                 'paired_distinct_trade_n': len({r['trade_id'] for r in paired}),
                 'paired_verified_broker_rollover_quote_n': sum((p.get('broker_rollover_audit') or {}).get('available') is True for p in paths),
                 'paired_broker_rollover_quote_unavailable_n': sum((p.get('broker_rollover_audit') or {}).get('available') is not True for p in paths),
                 'net_cost_scope': 'frozen_execution_cost_estimates; broker_rollover_only_where_verified; not_settled_all_cost_ledger_net',
                 'mean_net_r_on_remaining': _average(net),
+                'descriptive_worst_episode_net_r_on_remaining': min(net) if net else None,
+                'portfolio_drawdown_available': False, 'portfolio_max_drawdown_r': None,
+                'portfolio_drawdown_unavailable_reason': 'NO_COHERENT_SETTLED_PORTFOLIO_LEDGER; reviews_may_overlap',
                 'descriptive_cvar10_net_r_on_remaining': _weighted_cvar(np.asarray(net), weights) if net else None,
                 'mean_paired_delta_vs_quant100_r': _average(deltas),
+                'mean_paired_delta_vs_hold_r': _average(hold_deltas),
                 'intervention_n': len(interventions),
                 'unhelpful_intervention_frequency_vs_quant100': useless / len(interventions) if interventions else None,
                 'no_net_gain_intervention_frequency_vs_hold': no_gain_vs_hold / len(interventions) if interventions else None,
+                'materiality_threshold_r': materiality_r,
+                'economically_immaterial_intervention_n_vs_hold': immaterial,
+                'economically_immaterial_intervention_frequency_vs_hold': immaterial / len(interventions) if interventions else None,
+                'mean_additional_frozen_execution_cost_vs_hold_r': _average(execution_deltas),
+                'additional_cost_available_intervention_n': len(execution_deltas),
+                'mean_additional_broker_rollover_cost_vs_hold_r': _average(rollover_deltas),
+                'additional_rollover_cost_available_intervention_n': len(rollover_deltas),
+                'mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r': _average(combined_deltas),
+                'additional_combined_cost_available_intervention_n': len(combined_deltas),
                 'intervention_usefulness_scope': 'net_episode_gain_only; risk_reduction_not_equivalent_to_useless',
                 'inference': 'bounded_review_sample; overlapping_trades; no_independent_statistical_or_causal_profit_claim'},
             'historical_economic_completeness': {'available': False,
@@ -294,12 +425,15 @@ def summarize(reviews):
 def summarize_acknowledgements(source):
     """Actual receipt observations, never inferred fills or latency costs."""
     cutoff = number(source.get('exported_ts'))
+    if cutoff is not None and cutoff > time.time() + 1.:
+        cutoff = None
     rows, seen = [], set()
     supplied = source.get('execution_ack_observations')
     for row in supplied[:4096] if isinstance(supplied, list) else []:
         if not isinstance(row, dict):
             continue
         timestamp = number(row.get('acknowledged_ts'))
+        created = number(row.get('decision_created_ts'))
         identity = row.get('decision_id')
         stage = row.get('stage')
         key = (identity, stage)
@@ -307,21 +441,115 @@ def summarize_acknowledgements(source):
                 or stage not in {'armed', 'executed', 'cancelled', 'declined'}
                 or cutoff is None or timestamp is None or not 0 < timestamp <= cutoff or key in seen):
             continue
+        if 'decision_created_ts' in row and (created is None or not 0 < created <= timestamp):
+            continue
         seen.add(key)
         rows.append(row)
-    delays = [number(row.get('acknowledgement_delay_sec')) for row in rows]
-    delays = [value for value in delays if value is not None and value >= 0]
+    delays = []
+    for row in rows:
+        delay = number(row.get('acknowledgement_delay_sec'))
+        timestamp = number(row.get('acknowledged_ts'))
+        created = number(row.get('decision_created_ts'))
+        if (delay is not None and 0 <= delay <= timestamp
+                and (created is None or abs(delay - (timestamp - created)) <= 1e-6)):
+            delays.append(delay)
     stages = {stage: sum(row['stage'] == stage for row in rows) for stage in sorted({row['stage'] for row in rows})}
+    by_decision = {}
+    for row in rows:
+        by_decision.setdefault(row['decision_id'], {})[row['stage']] = row
+    cancellation_times = []
+    cancellation_n = 0
+    for observations in by_decision.values():
+        if 'cancelled' not in observations:
+            continue
+        cancellation_n += 1
+        if 'armed' in observations:
+            delay = number(observations['cancelled']['acknowledged_ts']) - number(observations['armed']['acknowledged_ts'])
+            if delay >= 0:
+                cancellation_times.append(delay)
+    rapid_n = sum(delay <= RAPID_CANCELLATION_SEC for delay in cancellation_times)
     return {'available': bool(rows), 'observation_n': len(rows),
             'distinct_decision_n': len({row['decision_id'] for row in rows}), 'stages': stages,
             'mean_acknowledgement_delay_sec': _average(delays),
+            'acknowledgement_delay_available_n': len(delays),
             'maximum_acknowledgement_delay_sec': max(delays) if delays else None,
+            'rapid_cancellation_threshold_sec': RAPID_CANCELLATION_SEC,
+            'armed_then_cancelled_pair_n': len(cancellation_times),
+            'rapid_cancellation_n': rapid_n,
+            'rapid_cancellation_frequency': rapid_n / len(cancellation_times) if cancellation_times else None,
+            'cancellation_timing_unavailable_n': cancellation_n - len(cancellation_times),
+            'mean_arm_to_cancel_sec': _average(cancellation_times),
+            'cancellation_definition': 'same_decision_server_arm_ACK_to_cancel_ACK; threshold_inclusive; not_broker_execution',
             'evidence_type': 'ACTUAL_USER_ACK_RECEIPTS_NOT_MODEL_SCENARIOS_OR_BROKER_FILL_TIMES',
             'actual_broker_fill_time_verified_n': 0, 'manual_latency_cost_r': None,
             'profit_or_effectiveness_proven': False}
 
 
-def run_comparison(source, *, expected_sha=None):
+def grouped_summary(reviews, *, materiality_r):
+    groups = {dimension: {} for dimension in ('instrument', 'regime', 'horizon_minutes', 'family')}
+    for review in reviews:
+        horizon = number(review.get('horizon_minutes'))
+        labels = {'instrument': [review.get('instrument') or 'UNAVAILABLE'],
+                  'regime': [review.get('regime') or 'UNAVAILABLE'],
+                  'horizon_minutes': [format(horizon, '.15g') if horizon is not None else 'UNAVAILABLE'],
+                  'family': review.get('signal_family_ids') or ['UNAVAILABLE']}
+        for dimension, values in labels.items():
+            for label in values:
+                groups[dimension].setdefault(label, []).append(review)
+    return {dimension: {label: {'review_n': len(rows),
+                               'distinct_trade_n': len({r['trade_id'] for r in rows}),
+                               'summary': summarize(rows, materiality_r=materiality_r)}
+                        for label, rows in sorted(values.items())}
+            for dimension, values in groups.items()}
+
+
+def review_transitions(reviews):
+    """Descriptive A→B→A policy reversals at three consecutive trade reviews."""
+    names = sorted(set(SCHEMES) | set().union(*(_choices(r) for r in reviews)))
+    trades = {}
+    for review in reviews:
+        trades.setdefault(review['trade_id'], []).append(review)
+    result = {}
+    for name in names:
+        pairs = changes = policy_changes = opportunities = reversals = ambiguous = 0
+        for rows in trades.values():
+            # An identity cannot establish chronology when capture times tie.
+            ordered = sorted(rows, key=lambda r: r['captured_ts'])
+            previous = []
+            timestamps = [r['captured_ts'] for r in ordered]
+            for review in ordered:
+                selection = (_choices(review).get(name) or {}).get('selection') or {}
+                policy, identity = selection.get('selected_policy'), selection.get('selected_candidate_id')
+                if timestamps.count(review['captured_ts']) > 1:
+                    ambiguous += 1
+                    previous = []
+                    continue
+                if not policy or not identity:
+                    previous = []
+                    continue
+                if previous:
+                    pairs += 1
+                    changes += identity != previous[-1][1]
+                    policy_changes += policy != previous[-1][0]
+                if len(previous) >= 2:
+                    opportunities += 1
+                    reversals += previous[-2][0] == policy and previous[-1][0] != policy
+                previous.append((policy, identity))
+                previous = previous[-2:]
+        result[name] = {'adjacent_review_pair_n': pairs, 'decision_change_n': changes,
+                        'policy_change_n': policy_changes, 'policy_reversal_opportunity_n': opportunities,
+                        'policy_reversal_n': reversals, 'ambiguous_timestamp_review_n': ambiguous,
+                        'decision_change_frequency': changes / pairs if pairs else None,
+                        'policy_reversal_frequency': reversals / opportunities if opportunities else None,
+                        'definition': 'per_trade_adjacent_chronological_candidate_changes; policy_reversal=A_B_A_with_A!=B; missing_or_tied_reviews_break_sequence',
+                        'evidence_type': 'FROZEN_DECISION_CHOICES_NOT_CONFIRMED_EXECUTIONS', 'executions_inferred': False}
+    return result
+
+
+def run_comparison(source, *, expected_sha=None, materiality_r=DEFAULT_MATERIALITY_R):
+    materiality_r = number(materiality_r)
+    if materiality_r is None or materiality_r < 0:
+        raise ValueError('materiality_r must be a finite nonnegative report threshold')
     if source.get('read_only') is not True or len(source.get('reviews', [])) > 32:
         raise ValueError('requires a bounded read-only actual-review export')
     reviews, rejected = [], []
@@ -339,7 +567,13 @@ def run_comparison(source, *, expected_sha=None):
             'review_n': len(reviews), 'reviews': reviews, 'rejected': rejected,
             'instrument_coverage': instruments,
             'unobserved_configured_instruments': sorted(set(ALL_INSTRUMENTS) - set(instruments)),
-            'summary': summarize(reviews),
+            'summary': summarize(reviews, materiality_r=materiality_r),
+            'grouped_summary': grouped_summary(reviews, materiality_r=materiality_r),
+            'grouped_summary_scope': 'descriptive_overlapping_partitions; family=available_positive_weight_component_lineage; not_independent_portfolios',
+            'review_transitions': review_transitions(reviews),
+            'report_parameters': {'materiality_threshold_r': materiality_r,
+                'materiality_definition': 'absolute_paired_net_episode_delta_vs_HOLD_at_or_below_threshold; not_risk_value_judgment',
+                'rapid_cancellation_threshold_sec': RAPID_CANCELLATION_SEC, 'threshold_optimality_claim': False},
             'actual_execution_observations': summarize_acknowledgements(source),
             'promotion_authorized': False,
             'reason': 'BOUNDED_REAL_REVIEW_DESCRIPTIVE_COMPARISON' if reviews else 'ACTUAL_REVIEWS_UNAVAILABLE_OR_REJECTED'}
@@ -350,8 +584,10 @@ def main():
     parser.add_argument('--reviews', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--expected-sha')
+    parser.add_argument('--materiality-r', type=float, default=DEFAULT_MATERIALITY_R)
     args = parser.parse_args()
-    report = run_comparison(json.loads(Path(args.reviews).read_text()), expected_sha=args.expected_sha)
+    report = run_comparison(json.loads(Path(args.reviews).read_text()), expected_sha=args.expected_sha,
+                            materiality_r=args.materiality_r)
     Path(args.output).write_text(json.dumps(report, ensure_ascii=False, allow_nan=False, indent=2))
     print(json.dumps({'review_n': report['review_n'], 'rejected_n': len(report['rejected']),
                       'historical_profit_proven': False, 'paid_llm_calls': 0}))

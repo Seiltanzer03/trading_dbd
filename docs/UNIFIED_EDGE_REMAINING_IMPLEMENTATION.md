@@ -71,8 +71,19 @@ Comparison reporting можно развивать независимо от н�
 сначала (нужны выбор провайдера/доступ и отдельная архитектура), либо оставить
 только external model import (не закрывает producer из §7).
 
-По `superpowers:brainstorming` новый training/broker subsystem требует
-согласованного дизайна, затем written spec/implementation plan. Этот документ
-фиксирует обнаруженные пробелы и предложение, а не подменяет такое согласование.
+Дизайн и план подготовлены; указанием пользователя от 2026-10-02 повторный
+document-approval этап отменён. Реализация продолжается по сохранённому плану,
+без нового согласования уже заданной архитектуры.
 Ранее завершённый runtime/review/CI не перезапускаем как незавершённую задачу.
 Проверки эффективности и оптимизация весов остаются отдельным последующим этапом.
+
+
+## Состояние реализации на 2026-10-04
+
+Archive, dataset, deterministic trainer, pinned runtime packaging, independent
+position import и полный descriptive comparison объединены в рабочей ветке.
+Они закрывают соответствующие программные границы, но не создают отсутствующие
+broker/consensus/mapping данные. Подробные результаты, verification и оставшийся
+код — в `UNIFIED_EDGE_DEVELOPMENT_ROADMAP.md`, разделе продолжения 2026-10-04.
+Exact geometry cohort starvation, TIME_STOP model action binding и часть
+исторических producers пока остаются работой, а не только зависимостью от данных.

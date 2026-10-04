@@ -89,11 +89,26 @@ def attach_unified_edge_context(engine, snapshot, *, expected_sha):
         if isinstance(existing, dict):
             for family, models in context["edge_family_models"].items():
                 existing.setdefault(family, models)
-    from .execution_cost_context import load_execution_cost_context
-    costs = load_execution_cost_context(
-        getattr(settings, "execution_cost_context_path", ""), snapshot=snapshot,
+    from .position_execution_context import load_position_execution_context
+    position_path = getattr(settings, "position_execution_context_path", "")
+    position = load_position_execution_context(
+        position_path, snapshot=snapshot,
         expected_deployment_sha=expected_sha,
-        expected_document_sha256=getattr(settings, "execution_cost_context_sha256", ""))
+        expected_document_sha256=getattr(settings, "position_execution_context_sha256", ""))
+    snapshot["position_execution_context_audit"] = position["audit"]
+    if position.get("available") is True:
+        for root in ("trade_identity", "position_execution_units"):
+            snapshot.setdefault(root, {}).update(position[root])
+    from .execution_cost_context import load_execution_cost_context, _unavailable
+    if position_path and position.get("available") is not True:
+        # An explicitly selected independent position source failed admission.
+        # Do not let legacy/unverified snapshot claims bypass that rejection.
+        costs = _unavailable("EXECUTING_BROKER_POSITION_CONTEXT_UNAVAILABLE_OR_MISMATCH")
+    else:
+        costs = load_execution_cost_context(
+            getattr(settings, "execution_cost_context_path", ""), snapshot=snapshot,
+            expected_deployment_sha=expected_sha,
+            expected_document_sha256=getattr(settings, "execution_cost_context_sha256", ""))
     snapshot["execution_cost_context_audit"] = costs
     if costs.get("complete_costs_available") is True:
         manager = snapshot.setdefault("policy_manager", {})

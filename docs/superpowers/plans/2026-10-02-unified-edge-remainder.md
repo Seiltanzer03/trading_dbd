@@ -34,7 +34,7 @@
 **Files:** Create `seiltanzer/edge_family_archive.py`, `tests/test_edge_family_archive.py`.
 **Interfaces:** `assemble_archive(exports: list[dict], previous: dict | None = None) -> dict`; output version `edge-family-archive-v1`, `episodes` original export records, `dataset_sha256` hash canonical episodes, `exclusions`, `evictions`. Episodes сохраняют snapshot_json/hash и real path; snapshots являются сохранёнными source records, не ссылки на истёкшие artifacts.
 
-- [ ] RED: тесты immutable deterministic merge, dedupe, identity hash conflict исключает обе версии, snapshot hash mismatch, oversized payload, whole-episode eviction, future export/capture chronology, synthetic demo exclusion.
+- [ ] RED: тесты immutable deterministic merge, dedupe, snapshot identity/hash conflict исключает обе версии, append-only compatible path completion допускается, conflicting past point исключает обе версии; oversized payload, whole-episode eviction, future export/capture chronology, synthetic demo exclusion.
 - [ ] Run: `python -m pytest -q tests/test_edge_family_archive.py`; подтвердить отсутствие implementation.
 - [ ] Implement с bounded JSON serialization/finite data и hash verification; вход ≤32 reviews/export, ≤512 episodes, ≤96 MB; сортировка `(captured_ts, review_id)`.
 - [ ] GREEN: профильные тесты; self-review, commit в отдельной ветке, report; независимый review.
@@ -47,13 +47,15 @@
 - [ ] RED: fewer than 20 validation rows / 2 folds / 10 groups per fold → no model; repeated trade not independent; horizon overlap purged; nonfinite/future label rejected; positive MSE gain versus train-only mean baseline; negative gain no artifact; deterministic hashes/coefficients; different geometry not pooled.
 - [ ] Run isolated tests and record RED.
 - [ ] Implement NumPy fixed ridge (lambda=1), intercept unpenalized, training-only scaling translated back to raw coefficients; at most 32 numeric features, ≥20 train groups plus two chronological validation blocks ≥10 groups each. Purge training rows whose label_end reaches validation start and omit any trade appearing in validation. Validate each fold before final artifact.
-- [ ] Artifact uses existing model/feature contracts, `regime=ALL`, fixed existing pool `mathematical_edge`, `score_scale_r=1`, HOLD=0 at consumer, positive aggregate MSE gain, geometry hash, train/validation clocks and truthful counts. Final fit only train before final untouched validation; no future/refit misuse. Input row claims independently validated again; unverified/synthetic costs fail.
+- [ ] Artifact uses existing model/feature contracts, `regime=ALL`, fixed existing pool `mathematical_edge`, `score_scale_r=1`, HOLD=0 at consumer, positive aggregate MSE gain, geometry hash, train/validation clocks and truthful counts. One fixed fit ends before the first of two untouched temporal validation blocks; evaluate the same coefficients in both, with no refit on the first holdout. Input provenance/clocks/components independently validated again; unverified/synthetic costs fail.
 - [ ] GREEN: profile tests, self-review, commit/report, independent review.
 
 ## Task 3: Causal dataset and labels
 
 **Files:** Create `seiltanzer/edge_family_dataset.py`, `tests/test_edge_family_dataset.py`.
 **Interfaces:** `build_family_dataset(archive: dict) -> dict` produces Task 2 row contract. `family_geometry_sha256(snapshot: dict) -> str` canonical hash of frozen policy inputs, remaining exposure and candidate geometry; shared with runtime Task 4.
+
+Dataset rows additionally retain `feature_provenance` from actual admitted source features and `cost_provenance` from normalized pinned broker audit (trade/instrument/direction binding, clocks, units, component totals, document/deployment hashes). Normalized evidence is not a broker fill or independently fetched raw statement. Archive preserves original frozen snapshot.
 
 - [ ] RED: future receipts/revisions, wrong instrument/horizon, context-only provenance, assumed costs, no verified broker cost context, missing HOLD continuation, conflicting archive hash, partial path; exact real candidate replay delta vs HOLD.
 - [ ] Use existing `build_edge_family_evidence`, `collect_candidates`, `observed_replay`; remove model artifacts before feature extraction. Only verified complete `execution_cost_context_audit` plus matching snapshot identity/units/cost provenance; recheck loader contract rather than trust a Boolean alone. Existing source admission must not be weakened.
@@ -87,7 +89,9 @@
 
 - [ ] Inventory existing position/trade inputs and legitimate broker identity records; record which exact producer can independently bind broker/account/trade, currency/quantity/risk units and receipt clocks.
 - [ ] If actual feed is available, RED missing/future/mismatched identity & units; implement bounded pinned position import independent of cost file; snapshot integration → cost reprice checks → GREEN/review.
-- [ ] If no executing-account input exists, preserve missing status with exact fields/provider requirements. Do not guess the user's broker or invent a configured connection. Complete other independent tasks; keep activation blocker open.
+- [ ] Inventory found no executing-account input. Implement the independent pinned position-import boundary now; retain live-source activation blocker and exact input requirements. Do not guess broker or configure a fake connection.
+
+**Pinned position subtask:** Create `seiltanzer/position_execution_context.py`, `tests/test_position_execution_context.py`; modify `config.py`, `unified_edge_runtime_context.py`, budget guard roots/tests. `load_position_execution_context(path, *, snapshot, expected_deployment_sha, expected_document_sha256) -> dict` reads ≤48 KB and accepts version `broker-position-context-v1` only. Document must have independently pinned hash, source_verified=true, measurement_kind=executing_broker_position, source_id, evidence_sha256, broker_id/account_id/broker_position_id, exact local trade_id/instrument/direction, causal observed_ts≤received_ts≤T0, max_age_sec≤60, quantity_basis=current_remaining_position, positive currency/quantity_units/risk_currency_per_unit, and exact current entry/original_stop/remaining_position_fraction binding against frozen snapshot. Partial closure/geometry edit makes old evidence inapplicable; no inferred scaling. Existing conflicting snapshot identity/units fail closed. No identity derived from cost file. Return output trade_identity/position_execution_units plus audit, explicitly broker observation not fill/effectiveness proof. Add separate settings `SEILTANZER_POSITION_EXECUTION_CONTEXT_PATH/SHA256`. Attach before cost import; unconfigured remains explicit. Keep this context through compaction, without publishing private account identifiers in general logs. RED wrong trade/position/fraction/units/hashes/future/stale/malformed/overbound/unconfigured; GREEN full attach-before-cost check and existing regression tests. No production input file is invented or activated.
 
 ## Task 7: Eight-family source/feature coverage
 

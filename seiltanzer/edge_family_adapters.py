@@ -8,6 +8,7 @@ share the five existing voting pools; raw facts never create extra votes.
 from __future__ import annotations
 
 import math
+import re
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
@@ -86,6 +87,8 @@ def _base(family: str, instrument: str) -> dict:
 def _meta(source: dict, *, family: str, instrument: str, cutoff: float,
           allow_global: bool = False) -> tuple[dict | None, str]:
     """Check actual information availability, separately from economic date."""
+    if source.get("synthetic") is True:
+        return None, "SYNTHETIC_SOURCE_NOT_ADMISSIBLE"
     if source.get("available") is False or source.get("source_verified") is not True:
         return None, "SOURCE_UNAVAILABLE_OR_UNVERIFIED"
     source_id = str(source.get("source_id") or "")
@@ -125,10 +128,13 @@ def _meta(source: dict, *, family: str, instrument: str, cutoff: float,
         dependency = "release:" + str(source["release_id"])
     elif not dependency:
         dependency = family + ":" + source_id
-    return {"source_id": source_id, "observed_ts": observed, "received_ts": received,
+    return {"source_id": source_id, "source_verified": True,
+            "observed_ts": observed, "received_ts": received,
             "published_at": published, "report_ts": _num(source.get("report_ts")),
             "quality": quality, "max_age_sec": age, "dependency_group": dependency,
-            "source_instrument": source_instrument, "proxy_mapping": mapping or None}, "OK"
+            "source_instrument": source_instrument, "proxy_mapping": mapping or None,
+            "global_context": global_source,
+            **{key: source[key] for key in ("context_only", "horizon_minutes") if key in source}}, "OK"
 
 
 def _add(row: dict, name: str, value: Any, meta: dict) -> None:
@@ -157,7 +163,9 @@ def _fact_features(row: dict, source: dict, meta: dict) -> None:
 def _official_macro(snapshot: dict, row: dict, cutoff: float) -> None:
     root = _dict(snapshot.get("macro_context_v1") or snapshot.get("macro_t0_context"))
     numeric = _dict(root.get("numeric_macro"))
-    vector = _dict(numeric.get("candidate_vector"))
+    if root.get("synthetic") is True:
+        return
+    vector = {} if numeric.get("synthetic") is True else _dict(numeric.get("candidate_vector"))
     for family, release in _dict(numeric.get("releases")).items():
         release = _dict(release)
         available = _num(release.get("available_at"))
@@ -173,6 +181,8 @@ def _official_macro(snapshot: dict, row: dict, cutoff: float) -> None:
         if not meta:
             row["rejected_sources"].append({"source_id": source["source_id"], "reason": reason})
             continue
+        meta["applicability_provenance"] = [_applicability_declarations(item) for item in
+            (root, numeric, _dict(numeric.get("releases")), vector)]
         prefix = "macro." + str(family).lower() + "_"
         for feature, value in vector.items():
             if str(feature).startswith(prefix):
@@ -191,8 +201,11 @@ def _official_macro(snapshot: dict, row: dict, cutoff: float) -> None:
             row["rejected_sources"].append({"source_id": mapped["source_id"], "reason": reason})
             continue
         values = _dict(source.get("semantic")) if key == "fomc" else _dict(source.get("payload"))
+        meta["applicability_provenance"] = [_applicability_declarations(root),
+                                             _applicability_declarations(values)]
         for name, value in values.items():
-            _add(row, "macro.fomc." + str(name), value, meta)
+            if name not in {"context_only", "horizon_minutes"}:
+                _add(row, "macro.fomc." + str(name), value, meta)
     if row["features"]:
         row["official_macro_authority"] = "RESEARCH_CONTEXT_PENDING_ACTION_MODEL"
         row["consensus_available"] = False
@@ -220,6 +233,10 @@ def _event(row: dict, source: dict, meta: dict, cutoff: float) -> None:
     combined = {**meta, "consensus_source_id": cmeta["source_id"],
                 "supporting_source_ids": [cmeta["source_id"]],
                 "consensus_received_ts": cmeta["received_ts"],
+                "release_id": source["release_id"], "period": source["period"],
+                "unit": source["unit"],
+                "consensus_provenance": {**cmeta, "release_id": consensus["release_id"],
+                                         "period": consensus["period"], "unit": consensus["unit"]},
                 "quality": min(meta["quality"], cmeta["quality"])}
     _add(row, "event." + kind + ".surprise", actual - expected, combined)
     _add(row, "event." + kind + ".age_minutes", (cutoff - published) / 60., combined)
@@ -391,13 +408,37 @@ def _finalize(row: dict) -> None:
                max_age_sec=min(p["max_age_sec"] for p in provenance))
 
 
+def _applicability_declarations(source: dict) -> dict:
+    """Retain explicit scope declarations without creating source authority."""
+    return {key: source[key] for key in ("context_only", "horizon_minutes") if key in source}
+
+
+def _applicable_feature(meta: dict, model_horizon: float, comparison_horizon: float | None) -> bool:
+    if meta.get("context_only"):
+        return False
+    if "horizon_minutes" in meta:
+        declared = _num(meta["horizon_minutes"])
+        if (declared is None or declared <= 0 or comparison_horizon is None
+                or not math.isclose(declared, model_horizon, rel_tol=0., abs_tol=1e-9)
+                or not math.isclose(declared, comparison_horizon, rel_tol=0., abs_tol=1e-9)):
+            return False
+    consensus = meta.get("consensus_provenance")
+    if isinstance(consensus, dict) and not _applicable_feature(consensus, model_horizon, comparison_horizon):
+        return False
+    return all(_applicable_feature(item, model_horizon, comparison_horizon)
+               for item in meta.get("applicability_provenance", []))
+
+
 def _action_models(row: dict, artifact: dict, cutoff: float, regime: str,
-                   regime_contract: str | None = None) -> tuple[dict | None, str]:
+                   regime_contract: str | None = None,
+                   comparison_horizon: float | None = None) -> tuple[dict | None, str]:
     """Convert measured net advantages into comparable bounded action scores.
 
     Frozen artifacts use held-out actual path outcomes, not modeled scenario
     scores. Admission is separate from the optimizer's mandatory CVaR gates.
     """
+    if artifact.get("synthetic") is True:
+        return None, "SYNTHETIC_MODEL_NOT_ADMISSIBLE"
     validation = _dict(artifact.get("validation"))
     trained, train_end, start, end = (_num(artifact.get(k)) for k in
                                       ("trained_at", "train_end_ts", "validation_start_ts", "validation_end_ts"))
@@ -448,7 +489,7 @@ def _action_models(row: dict, artifact: dict, cutoff: float, regime: str,
                     value = _num(row["features"].get(feature))
                     lower, upper = _num(condition.get("lower")), _num(condition.get("upper"))
                     meta = row["feature_provenance"].get(feature)
-                    if (value is None or not meta or meta.get("context_only")
+                    if (value is None or not meta or not _applicable_feature(meta, horizon, comparison_horizon)
                             or meta.get("received_ts") is None or lower is None or upper is None
                             or (meta.get("window_seconds") is not None
                                 and _num(_dict(artifact.get("feature_windows_sec")).get(feature)) != meta["window_seconds"])
@@ -468,7 +509,7 @@ def _action_models(row: dict, artifact: dict, cutoff: float, regime: str,
         for feature, raw_beta in coefficients.items():
             value, beta = _num(row["features"].get(feature)), _num(raw_beta)
             meta = row["feature_provenance"].get(feature)
-            if (value is None or beta is None or not meta or meta.get("context_only")
+            if (value is None or beta is None or not meta or not _applicable_feature(meta, horizon, comparison_horizon)
                     or meta.get("received_ts") is None
                     or (meta.get("window_seconds") is not None
                         and _num(_dict(artifact.get("feature_windows_sec")).get(feature)) != meta["window_seconds"] )):
@@ -537,6 +578,9 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
               "captured_ts": cutoff, "families": families, "components": [],
               "economics_adjustments": [], "risk_overrides": False,
               "network_calls": False, "runtime_fitting": False}
+    if snapshot.get("synthetic") is True:
+        result["reason"] = "SYNTHETIC_SNAPSHOT_NOT_ADMISSIBLE"
+        return result
     if not instrument or cutoff is None or cutoff <= 0:
         result["reason"] = "SNAPSHOT_INSTRUMENT_OR_TIME_MISSING"
         return result
@@ -580,6 +624,23 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
         if row is None:
             continue
         for artifact in _rows(artifacts):
+            if 'geometry_sha256' in artifact:
+                geometry = artifact['geometry_sha256']
+                reason = 'MODEL_GEOMETRY_INVALID_OR_UNAVAILABLE'
+                if isinstance(geometry, str) and re.fullmatch(r'[0-9a-f]{64}', geometry):
+                    try:
+                        # Lazy import avoids the dataset's source-adapter cycle;
+                        # this helper hashes frozen inputs only, without fitting.
+                        from .edge_family_dataset import family_geometry_sha256
+                        current_geometry = family_geometry_sha256(snapshot)
+                        reason = ('OK' if geometry == current_geometry
+                                  else 'MODEL_GEOMETRY_MISMATCH')
+                    except (ImportError, ValueError, TypeError, KeyError, OverflowError, RecursionError):
+                        pass
+                if reason != 'OK':
+                    row['forecast_rejections'].append({'model_version': artifact.get('model_version'),
+                                                      'reason': reason})
+                    continue
             comparison_horizon = _num(_dict(_dict(snapshot.get('policy_manager')).get('inputs')).get('horizon_minutes'))
             artifact_horizon = _num(artifact.get('horizon_minutes'))
             if comparison_horizon is not None and (artifact_horizon is None or
@@ -587,7 +648,7 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
                 row['forecast_rejections'].append({'model_version': artifact.get('model_version'),
                                                   'reason': 'MODEL_FORECAST_HORIZON_MISMATCH'})
                 continue
-            component, reason = _action_models(row, artifact, cutoff, regime, regime_contract)
+            component, reason = _action_models(row, artifact, cutoff, regime, regime_contract, comparison_horizon)
             if component:
                 forecasts.append(component)
                 row.update(forecast_available=True, readiness="VALIDATED_FORECAST_AVAILABLE",

@@ -1,0 +1,160 @@
+name: edge-family-training
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'seiltanzer/edge_family*.py'
+      - 'seiltanzer/unified_edge_runtime_context.py'
+      - 'scripts/run_edge_family_pipeline.py'
+      - 'tests/test_edge_family*.py'
+      - '.github/workflows/edge-family-training.yml'
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact immutable deployment/code SHA (40 lowercase hex characters)
+        required: true
+        type: string
+      archive_run_id:
+        description: Optional previous completed run ID to restore an accumulated archive
+        required: false
+        type: string
+      archive_artifact_name:
+        description: Exact previous private-repository archive artifact name; restore before 14-day expiry
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: edge-family-training-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  synthetic-contracts:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha || github.event.pull_request.head.sha || github.sha }}
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+    steps:
+      - name: Require immutable checkout SHA
+        run: '[[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - name: Verify exact checkout
+        run: 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -q -e '.[dev]'
+      - name: Verify causal pipeline and consumer contracts without credentials
+        run: >-
+          python -m pytest -q tests/test_edge_family_archive.py
+          tests/test_edge_family_dataset.py tests/test_edge_family_training.py
+          tests/test_edge_family_pipeline.py tests/test_edge_family_adapters.py
+          tests/test_unified_edge_runtime_context.py
+      - name: Synthetic CI creates diagnostics and never a runtime model artifact
+        run: |
+          python -c 'import json,time; json.dump({"read_only":True,"synthetic":True,"reviews":[],"exported_ts":time.time()},open("ci_reviews.json","w"))'
+          python -m scripts.run_edge_family_pipeline --reviews ci_reviews.json --expected-sha "$EXPECTED_SHA" --output-dir ci-output
+          test ! -e ci-output/runtime_context.json
+
+  actual-read-only-pipeline:
+    # Raw frozen snapshots and broker/account records are private data. Public
+    # repository artifacts are not an authorized private-data storage boundary.
+    # No SSH export occurs here unless the repository itself is private.
+    if: github.event_name == 'workflow_dispatch' && github.event.repository.private == true
+    needs: synthetic-contracts
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
+      ARCHIVE_ARTIFACT_NAME: ${{ inputs.archive_artifact_name }}
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+    steps:
+      - name: Validate immutable SHA and optional archive restore identity
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ -n "$ARCHIVE_RUN_ID" || -n "$ARCHIVE_ARTIFACT_NAME" ]]; then
+            [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]]
+            [[ "$ARCHIVE_ARTIFACT_NAME" =~ ^edge-family-training-[0-9a-f]{40}-[0-9]+$ ]]
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - name: Verify exact checkout
+        run: 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -q -e '.[dev]' paramiko
+      - name: Verify exact prior archive identity, completion and compressed size
+        if: inputs.archive_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prior_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARCHIVE_RUN_ID" --jq 'select(.conclusion == "success" and .name == "edge-family-training") | .id')
+          test "$prior_run" = "$ARCHIVE_RUN_ID"
+          test "${ARCHIVE_ARTIFACT_NAME##*-}" = "$ARCHIVE_RUN_ID"
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARCHIVE_RUN_ID/artifacts?per_page=100" --jq "[.artifacts[] | select(.name == \"$ARCHIVE_ARTIFACT_NAME\" and .expired == false and .size_in_bytes <= 96000000)] | length")
+          test "$count" = 1
+      - name: Restore prior bounded archive from an authorized private repository
+        if: inputs.archive_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.archive_artifact_name }}
+          run-id: ${{ inputs.archive_run_id }}
+          github-token: ${{ github.token }}
+          path: restored-archive
+      - name: Export actual frozen reviews with existing bounded read-only access
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: python -m scripts.export_unified_edge_reviews --max-reviews 32 --output actual_reviews.json
+      - name: Assemble archive, causal dataset, diagnostics and validated models off-host
+        run: |
+          archive_args=()
+          if [[ -n "$ARCHIVE_RUN_ID" ]]; then
+            test -f restored-archive/archive.json
+            archive_args=(--archive restored-archive/archive.json)
+            echo 'archive_state=RESTORED; bounded input is revalidated by CLI'
+          else
+            echo 'archive_state=INITIAL; no previous archive supplied'
+          fi
+          python -m scripts.run_edge_family_pipeline --reviews actual_reviews.json --expected-sha "$EXPECTED_SHA" --output-dir edge-family-output "${archive_args[@]}"
+      - name: Retain private accumulated archive for explicit restore before 14-day expiry
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-family-training-${{ env.EXPECTED_SHA }}-${{ github.run_id }}
+          path: edge-family-output/archive.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain private training outputs without the raw export transport
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-family-training-results-${{ env.EXPECTED_SHA }}-${{ github.run_id }}
+          path: |
+            edge-family-output/dataset.json
+            edge-family-output/diagnostics.json
+            edge-family-output/runtime_context.json
+          if-no-files-found: error
+          retention-days: 14
+
+  private-storage-unavailable:
+    if: github.event_name == 'workflow_dispatch' && github.event.repository.private != true
+    needs: synthetic-contracts
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Report the private-data prerequisite without export or training
+        run: |
+          echo 'status=UNAVAILABLE reason=PRIVATE_DATA_STORAGE_REQUIRED active_model_count=0'
+          echo 'No actual SSH export, training, archive restore, or production activation performed.'
+          echo '14-day public artifacts do not make broker/account records private.'
