@@ -217,11 +217,8 @@ def family_geometry_sha256(snapshot: dict) -> str:
         if policy not in BASE and not params:
             continue
         if policy == 'TIME_STOP':
-            deadline, captured = _number(params.get('deadline_ts')), _number(snapshot.get('captured_ts'))
-            if deadline is None or captured is None:
-                raise ValueError('TIME_STOP_DEADLINE_UNAVAILABLE')
-            params['deadline_offset_sec'] = deadline - captured
-            del params['deadline_ts']
+            from .edge_family_action_binding import candidate_binding
+            params = candidate_binding(candidate, snapshot.get('captured_ts'))['parameters']
         matrix.append({'policy': policy, 'parameters': params})
     matrix.sort(key=lambda row: _canonical(row))
     exposure = {key: position[key] for key in ('remaining_position_fraction',
@@ -412,6 +409,7 @@ def build_family_dataset(archive: dict) -> dict:
     """Build bounded deterministic family rows, rejecting incomplete net labels."""
     from .edge_family_adapters import build_edge_family_evidence
     from .unified_edge_ensemble import collect_candidates
+    from .edge_family_action_binding import candidate_binding, stable_action_id
     from scripts.run_unified_edge_comparison import observed_replay
 
     rows, exclusions = [], []
@@ -460,19 +458,23 @@ def build_family_dataset(archive: dict) -> dict:
                 for candidate in collect_candidates(snapshot):
                     if candidate['policy'] not in {'HOLD', 'CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT'} and not candidate['parameters']:
                         continue
-                    # Absolute TIME_STOP candidate IDs cannot currently bind a
-                    # relative-time trained action to a later runtime review.
+                    binding = None
+                    action = candidate['candidate_id']
                     if candidate['policy'] == 'TIME_STOP':
-                        exclusions.append({'review_id': review_id, 'action': candidate['candidate_id'],
-                                           'reason': 'TIME_STOP_RUNTIME_ACTION_ID_NOT_TIME_INVARIANT'})
-                        continue
+                        try:
+                            binding = candidate_binding(candidate, cutoff)
+                            action = stable_action_id(binding)
+                        except (ValueError, TypeError, OverflowError) as exc:
+                            exclusions.append({'review_id': review_id, 'action': action,
+                                               'reason': str(exc)})
+                            continue
                     replay = observed_replay(snapshot, record, candidate)
                     if (not replay.get('available') or replay.get('costs_assumed') is not False
                             or (not replay.get('full_forecast_horizon_observed') and replay.get('exit_reason') == 'horizon')):
                         exclusions.append({'review_id': review_id, 'action': candidate['candidate_id'],
                                            'reason': replay.get('reason', 'CANDIDATE_CONTINUATION_UNAVAILABLE')})
                         continue
-                    admitted.append((candidate, replay))
+                    admitted.append((candidate, replay, action, binding))
                 for family_id, family in sorted(evidence['families'].items()):
                     features, metas, windows = {}, {}, {}
                     for name, value in sorted(family['features'].items()):
@@ -490,13 +492,14 @@ def build_family_dataset(archive: dict) -> dict:
                         exclusions.append({'review_id': review_id, 'family_id': family_id,
                                            'reason': 'FAMILY_FEATURE_BOUND_EXCEEDED'})
                         continue
-                    for candidate, replay in admitted:
+                    for candidate, replay, action, binding in admitted:
                         delta = replay['net_r_on_remaining'] - hold['net_r_on_remaining']
                         rows.append({'trade_id': record['trade_id'], 'review_id': record['review_id'],
                             'captured_ts': cutoff, 'label_end_ts': max(label_end, cutoff + replay['observed_horizon_minutes'] * 60.),
                             'instrument': instrument, 'family_id': family_id, 'horizon_minutes': horizon,
                             'geometry_sha256': geometry, 'features': deepcopy(features), 'feature_provenance': deepcopy(metas),
-                            'feature_windows_sec': deepcopy(windows), 'action': candidate['candidate_id'],
+                            'feature_windows_sec': deepcopy(windows), 'action': action,
+                            **({'action_binding': deepcopy(binding)} if binding is not None else {}),
                             'candidate': {key: deepcopy(candidate[key]) for key in ('candidate_id', 'policy', 'parameters')},
                             'delta_net_r': delta, 'costs_verified': True, 'cost_provenance': deepcopy(costs),
                             'synthetic': False, 'label_kind': 'OBSERVED_PATH_COUNTERFACTUAL_NOT_BROKER_FILL',

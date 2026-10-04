@@ -86,6 +86,9 @@ def _ridge_actions_valid(model):
         if (not isinstance(action, str) or not action or action == 'HOLD'
                 or not isinstance(value, dict) or value.get('validated') is not True):
             return False
+        from seiltanzer.edge_family_action_binding import action_binding_valid
+        if not action_binding_valid(action, value):
+            return False
         intercept, coefficients = value.get('intercept_r'), value.get('coefficients')
         if (not isinstance(intercept, (int, float)) or isinstance(intercept, bool)
                 or not math.isfinite(intercept) or not isinstance(coefficients, dict)

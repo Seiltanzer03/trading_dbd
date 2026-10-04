@@ -119,7 +119,7 @@ USDT или в исполняемый брокерный CFD.
 | --- | --- | --- |
 | 1: archive | Bounded immutable episodes, совместимое продолжение реальных путей, конфликтующие identity исключаются обе | Накопление на доверенном off-host хранилище; 14-day artifacts не постоянный архив |
 | 2: trainer | Fixed ridge, whole-trade purge, один fit перед обоими untouched holdouts, истинные counts/clocks, fail-closed costs/provenance | Минимум 40 независимых допустимых trade groups; exact geometry cohorts могут оставаться слишком узкими |
-| 3: dataset | Причинные frozen features и net path-counterfactual labels; полная независимая position/cost evidence; original synthetic/context/horizon declarations проверяются до нормализации | Старые записи не обогащаются задним числом; TIME_STOP training action binding ещё не реализован |
+| 3: dataset | Причинные frozen features и net path-counterfactual labels; полная независимая position/cost evidence; original synthetic/context/horizon declarations проверяются до нормализации | Старые записи не обогащаются задним числом; TIME_STOP training binding реализован отдельной технической веткой, выпуск ещё не подтверждён |
 | 4: packaging/runtime | Filesystem-only pipeline, pinned SHA/hash context, geometry admission, явная unavailable диагностика, private-gated workflow | Автоматическая активация модели не включена; public repo не экспортирует private account data |
 | 5: comparison | Общая парная cohort, legacy/ablations, HOLD distribution, groups/transitions/ACK/cost breakdown | Portfolio drawdown/profit unavailable без settled portfolio ledger; replay не broker fill |
 | 6: position producer | Независимый bounded pinned read-only импорт до cost ingestion, identity/units/fraction/clock guards | Настоящий executing broker/account feed пока не предоставлен и не настроен |
@@ -142,7 +142,7 @@ execution range/direction, 1 с несогласованным price/R. Runtime 
 создан. Эти результаты не означают оценку эффективности или прибыльности.
 
 Остаётся реализация: переносимая модель/представление геометрии без exact-price
-starvation, относительная TIME_STOP action identity, причинные исторические
+starvation, причинные исторические
 feature producers при наличии исходных observations. Остаются входы: реальные
 позиция/расходы брокера, lawful PIT consensus и проверенные source mappings,
 достаточная выборка и доверенная закрытая off-host среда. Эти пункты нельзя
@@ -160,3 +160,14 @@ feature producers при наличии исходных observations. Оста�
 4 skipped, тот же baseline SQLite/WAL failure; других ошибок нет. Final tree
 готовится к draft PR; официальный Python3.11/real WebKit CI остаётся обязательным
 перед merge. Никакая production-готовность по локальному прогону не заявлена.
+
+
+2026-10-04: отдельная техническая ветка закрывает TIME_STOP family-model binding.
+Original concrete candidate и observed-path counterfactual label сохраняются;
+relative key учитывает точный offset и присутствие явно заданного timeout.
+Дробный timeout нормализуется по точной forward producer formula, geometry
+использует тот же проверенный TIME_STOP descriptor. Trainer перепроверяет
+retained binding, runtime после exact geometry/horizon admission переводит его
+в текущий concrete candidate_id. Legacy artifacts, risk/cost checks и OOS floors
+сохраняются. Это реализация контракта, а не обученная модель или результат
+эффективности; отсутствие фактических входов остаётся блокером.
