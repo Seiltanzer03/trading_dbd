@@ -300,3 +300,81 @@ def test_byte_budget_exclusion_is_explicit_without_inventing_family_forecasts():
     frozen["edge_family_models"] = {}
     result = build_edge_family_evidence(frozen)
     assert all("budget_excluded_roots" not in row for row in result["families"].values())
+
+
+def _conditional_artifact(frozen, family, feature):
+    frozen['edge_family_models'][family]['action_models'] = {'CLOSE_25': {
+        'validated': True, 'kind': 'conditional_net_outcomes', 'bins': [{
+            'conditions': [{'feature': feature, 'lower': -1e6, 'upper': 1e6}],
+            'sample_count': 60, 'mean_delta_net_r': .08}]}}
+
+
+@pytest.mark.parametrize('family', FAMILIES)
+@pytest.mark.parametrize('kind', ['linear', 'conditional'])
+@pytest.mark.parametrize('declaration,value', [('context_only', True), ('horizon_minutes', 240),
+                                              ('horizon_minutes', 'invalid')])
+def test_runtime_source_applicability_blocks_votes_but_preserves_context(family, kind, declaration, value):
+    data, feature = family_fixture(family)
+    data[declaration] = value
+    frozen = snapshot(family, data, feature)
+    frozen['policy_manager'] = {'inputs': {'horizon_minutes': 15}}
+    if kind == 'conditional':
+        _conditional_artifact(frozen, family, feature)
+    result = build_edge_family_evidence(frozen)
+    assert result['families'][family]['features'][feature] is not None
+    assert result['families'][family]['feature_provenance'][feature][declaration] == value
+    assert result['components'] == []
+
+
+@pytest.mark.parametrize('kind', ['linear', 'conditional'])
+@pytest.mark.parametrize('declaration,value', [('context_only', True), ('horizon_minutes', 240)])
+def test_event_consensus_applicability_blocks_votes(kind, declaration, value):
+    data, feature = family_fixture('event')
+    data['consensus'][declaration] = value
+    frozen = snapshot('event', data, feature)
+    frozen['policy_manager'] = {'inputs': {'horizon_minutes': 15}}
+    if kind == 'conditional':
+        _conditional_artifact(frozen, 'event', feature)
+    result = build_edge_family_evidence(frozen)
+    assert result['families']['event']['feature_provenance'][feature]['consensus_provenance'][declaration] == value
+    assert result['components'] == []
+
+
+@pytest.mark.parametrize('family', FAMILIES)
+@pytest.mark.parametrize('declared', [False, True])
+def test_compatible_source_declarations_and_legacy_documents_still_vote(family, declared):
+    data, feature = family_fixture(family)
+    if declared:
+        data.update(context_only=False, horizon_minutes=15)
+    frozen = snapshot(family, data, feature)
+    frozen['policy_manager'] = {'inputs': {'horizon_minutes': 15}}
+    assert build_edge_family_evidence(frozen)['components']
+
+
+@pytest.mark.parametrize('root_name', ['macro_context_v1', 'macro_t0_context'])
+@pytest.mark.parametrize('path', ['root', 'numeric', 'releases', 'release', 'vector',
+                                  'fomc', 'semantic', 'fomc_deterministic', 'payload'])
+@pytest.mark.parametrize('declaration,value', [('context_only', True), ('horizon_minutes', 240)])
+def test_official_macro_applicability_ancestors_block_only_affected_votes(root_name, path, declaration, value):
+    fomc = path in {'fomc', 'semantic', 'fomc_deterministic', 'payload'}
+    feature = 'macro.fomc.change' if fomc else 'macro.cpi_value'
+    frozen = snapshot('macro', {}, feature)
+    frozen.pop('edge_family_sources')
+    frozen['policy_manager'] = {'inputs': {'horizon_minutes': 15}}
+    release = {'status': 'VALID', 'release_id': 'CPI:1', 'official_source_verified': True,
+               'available_at': T0-8, 'published_at': T0-10}
+    root = {'numeric_macro': {'releases': {'cpi': release}, 'candidate_vector': {feature: 3.1}}}
+    if fomc:
+        key = 'fomc_deterministic' if path in {'fomc_deterministic', 'payload'} else 'fomc'
+        leaf = 'payload' if key == 'fomc_deterministic' else 'semantic'
+        root = {key: {**release, 'available': True, leaf: {'change': .1}}}
+        target = root[key][leaf] if path in {'semantic', 'payload'} else root[key]
+    else:
+        numeric = root['numeric_macro']
+        target = {'root': root, 'numeric': numeric, 'releases': numeric['releases'],
+                  'release': release, 'vector': numeric['candidate_vector']}[path]
+    target[declaration] = value
+    frozen[root_name] = root
+    result = build_edge_family_evidence(frozen)
+    assert feature in result['families']['macro']['features']
+    assert result['components'] == []

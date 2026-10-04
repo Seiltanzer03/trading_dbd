@@ -49,6 +49,22 @@ def test_complete_measured_costs_keep_zero_and_use_explicit_currency_risk_units(
     assert (doc, snap) == originals
 
 
+def test_normalized_audit_retains_original_binding_coverage_and_component_evidence():
+    doc = document()
+    result = check(doc)
+    assert result['trade_id'] == 1
+    assert result['instrument'] == 'NAS100'
+    assert result['direction'] == 'long'
+    assert result['source_verified'] is True
+    assert result['coverage_start_epoch'] == T0
+    assert result['coverage_end_epoch'] == T0 + 14400.
+    for channel in ('immediate', 'deferred'):
+        evidence = result['components'][channel]['component_provenance']
+        assert evidence == doc[channel]
+        evidence['spread']['source_id'] = 'modified'
+        assert doc[channel]['spread']['source_id'] == 'private-broker-export'
+
+
 def test_partial_measurements_are_not_a_complete_cost_sum():
     doc = document()
     doc['immediate']['slippage'] = None

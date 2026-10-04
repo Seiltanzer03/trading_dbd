@@ -96,7 +96,7 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
         manager = {}
 
     manager_keep = (
-        "position_economics", "repeat_intervention_gate", "decision_reliability", "execution_cost_model",
+        "position_economics", "repeat_intervention_gate", "decision_reliability", "execution_cost_model", "execution_cost_repricing_required",
         "version", "management_decision", "recommendation", "policies",
         "selection_rule", "gate", "inputs", "risk_constraint",
         "management_arbiter", "state_change_attribution",
@@ -133,6 +133,8 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
 
     root_keep = (
         "captured_ts", "trade_id", "strategy", "trade_geometry", "position_state",
+        "trade_identity", "position_execution_units", "position_execution_context_audit",
+        "execution_cost_context_audit",
         "validation", "data_quality", "market_state", "hard_risk",
         "risk_constraints", "metric_coverage", "policy_manager", "snapshot_budget",
         "market_regime", "regime", "edge_regime", "edge_family_budget_status",
