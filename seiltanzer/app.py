@@ -1214,6 +1214,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "no_active_trade", "Нет активной сделки для ИИ-разбора",
                         req_id, retriable=False),
                 )
+            # Reject explicit missing price authority before state changes or
+            # expensive enrichment. Raw quote presence is not source authority.
+            price_manager = snapshot.get("policy_manager") or {}
+            price_rows = ((price_manager.get("input_audit") or {}).get("rows") or {})
+            if isinstance(price_rows, dict) and "instrument_price" in price_rows:
+                from .ai_report_semantics_guard import authoritative_current_price_available
+                if (not isinstance(price_rows["instrument_price"], dict)
+                        or not authoritative_current_price_available(snapshot)):
+                    return JSONResponse(
+                        status_code=503,
+                        content=ai_error_body(
+                            "authoritative_price_unavailable",
+                            "Авторитетная текущая цена инструмента недоступна",
+                            req_id, retriable=True),
+                    )
             ai_last_call = time.monotonic()
             trade_id = int(snapshot["trade_id"])
             # Finalize the economic state at the API boundary. Policy analysis
