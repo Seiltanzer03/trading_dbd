@@ -298,13 +298,14 @@ def test_interpolated_horizon_label_waits_for_actual_right_bracketing_observatio
     assert all(row['label_end_ts'] == T0 + 14460. for row in result['rows'])
 
 
-def test_time_stop_absolute_candidate_ids_remain_explicitly_unavailable():
+def test_deadline_only_time_stop_retains_original_parameters_in_relative_binding():
     value = snapshot()
     value['active_management_candidates'].append({'policy': 'TIME_STOP', 'parameters': {'deadline_ts': T0 + 600.}})
     result = build(archive(record(value)))
     assert result['rows']
-    assert not any(row['candidate']['policy'] == 'TIME_STOP' for row in result['rows'])
-    assert any(item['reason'] == 'TIME_STOP_RUNTIME_ACTION_ID_NOT_TIME_INVARIANT' for item in result['exclusions'])
+    row = next(row for row in result['rows'] if row['candidate']['policy'] == 'TIME_STOP')
+    assert row['candidate']['parameters'] == {'deadline_ts': T0 + 600.}
+    assert row['action_binding']['parameters'] == {'deadline_offset_sec': 600.}
 
 
 @pytest.mark.parametrize('change', ['stop', 'take', 'current', 'short', 'trade_id', 'terminal', 'armed',

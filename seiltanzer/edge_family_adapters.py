@@ -431,7 +431,8 @@ def _applicable_feature(meta: dict, model_horizon: float, comparison_horizon: fl
 
 def _action_models(row: dict, artifact: dict, cutoff: float, regime: str,
                    regime_contract: str | None = None,
-                   comparison_horizon: float | None = None) -> tuple[dict | None, str]:
+                   comparison_horizon: float | None = None,
+                   action_snapshot: dict | None = None) -> tuple[dict | None, str]:
     """Convert measured net advantages into comparable bounded action scores.
 
     Frozen artifacts use held-out actual path outcomes, not modeled scenario
@@ -473,6 +474,17 @@ def _action_models(row: dict, artifact: dict, cutoff: float, regime: str,
     predictions, used = {}, set()
     for action, model in _dict(artifact.get("action_models")).items():
         model = _dict(model)
+        from .edge_family_action_binding import action_binding_valid, resolve_action
+        if not action_binding_valid(action, model):
+            return None, 'TIME_STOP_ACTION_BINDING_INVALID'
+        if 'action_binding' in model:
+            # The caller admits exact geometry/horizon before supplying a snapshot.
+            if action_snapshot is None or 'geometry_sha256' not in artifact or comparison_horizon is None:
+                return None, 'TIME_STOP_BINDING_GEOMETRY_OR_HORIZON_REQUIRED'
+            try:
+                action = resolve_action(action, model['action_binding'], action_snapshot)
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+                return None, 'TIME_STOP_BOUND_CANDIDATE_UNAVAILABLE'
         if model.get("validated") is not True:
             continue
         if model.get("kind") == "conditional_net_outcomes":
@@ -648,7 +660,7 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
                 row['forecast_rejections'].append({'model_version': artifact.get('model_version'),
                                                   'reason': 'MODEL_FORECAST_HORIZON_MISMATCH'})
                 continue
-            component, reason = _action_models(row, artifact, cutoff, regime, regime_contract, comparison_horizon)
+            component, reason = _action_models(row, artifact, cutoff, regime, regime_contract, comparison_horizon, snapshot)
             if component:
                 forecasts.append(component)
                 row.update(forecast_available=True, readiness="VALIDATED_FORECAST_AVAILABLE",

@@ -241,6 +241,15 @@ def _row_reason(row, trained):
             or not isinstance(row.get("action"), str) or not row["action"]
             or row["action"] == "HOLD"):
         return "COHORT_IDENTITY_OR_GEOMETRY_INVALID"
+    from .edge_family_action_binding import action_binding_valid, candidate_binding, validate_binding
+    if not action_binding_valid(row['action'], row):
+        return 'TIME_STOP_ACTION_BINDING_INVALID'
+    if 'action_binding' in row:
+        try:
+            if candidate_binding(row.get('candidate'), captured) != validate_binding(row['action_binding']):
+                return 'TIME_STOP_ACTION_BINDING_INVALID'
+        except (ValueError, TypeError, OverflowError):
+            return 'TIME_STOP_ACTION_BINDING_INVALID'
     if not _costs_valid(row, captured, horizon):
         return "COST_PROVENANCE_UNVERIFIED"
     features, provenance, windows = (row.get(k) for k in
@@ -407,6 +416,9 @@ def _train_cohort(key, rows, dataset_hash, trained):
             "evidence_kind": "OBSERVED_PATH_COUNTERFACTUAL_NOT_BROKER_FILL"},
         "action_models": {action: {"validated": True, "kind": "linear_net_action",
             "intercept_r": intercept, "coefficients": dict(zip(features, map(float, beta)))}}}
+    if 'action_binding' in rows[0]:
+        from .edge_family_action_binding import validate_binding
+        artifact['action_models'][action]['action_binding'] = validate_binding(rows[0]['action_binding'])
     digest = _hash(artifact)
     artifact.update(model_sha256=digest, model_version=VERSION + ":" + digest)
     diagnostic.update(available=True, reason="VALIDATED_PIT_NET_ACTION_FORECAST", model_sha256=digest)

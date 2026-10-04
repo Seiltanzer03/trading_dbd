@@ -50,6 +50,33 @@ Labels строятся на retained observed price path через сущес�
 
 Нельзя объединять разные stop/take/trailing/partial geometries под одним action name без conditioning. Первый producer выпускает прогноз только для geometry cohort, которую существующий consumer может однозначно идентифицировать и проверить. Если текущий контракт не может проверить cohort, соответствующее non-HOLD action остаётся `UNAVAILABLE`; необходимость расширения causal context contract выносится в отдельное согласование. Не создавать универсальную модель для всех расширенных действий из несовместимых labels.
 
+TIME_STOP теперь имеет необязательный `action_binding` в строке dataset и
+соответствующей записи `action_models`: version
+`edge-family-time-stop-binding-v1`, policy `TIME_STOP`, parameters
+`deadline_offset_sec` и `timeout_minutes`, только если timeout был явно задан.
+Family-local action key — `TIME_STOP_RELATIVE:` плюс SHA256 canonical binding;
+он не заменяет production candidate_id. Original concrete candidate, абсолютный
+`deadline_ts` и `captured_ts` остаются в dataset; trainer независимо сверяет
+policy, точные параметры, original candidate_id и stable key до fitting.
+
+При заданном timeout nominal offset равен `timeout_minutes * 60`, а абсолютный
+original deadline обязан точно равняться `captured_ts + offset`, как в
+production producer. Это устраняет epoch subtraction roundoff для дробных минут
+без допуска соседнего representable deadline. Без timeout сохраняется точный
+`deadline_ts - captured_ts`; отсутствие timeout не заполняется выдуманным
+параметром и не объединяется с явно заданным timeout. TIME_STOP geometry hashing
+использует ту же проверенную нормализацию; остальные price/exposure/action
+geometry guards сохраняются.
+
+Runtime сначала допускает exact geometry и comparison horizon, затем связывает
+binding ровно с одним текущим concrete candidate. Отсутствующее совпадение,
+malformed binding или stable key без binding дают unavailable; family-local key
+не публикуется как исполняемый action. Legacy artifacts без binding сохраняют
+прежний контракт. Label по-прежнему replay original candidate на retained
+observed path, это не broker fill или доказанная прибыль. OOS floors, издержки,
+risk gates и bounds не изменены.
+
+
 ### Обучение и validation
 
 Первый trainer — детерминированная регуляризованная линейная модель с фиксированными настройками и простым baseline. Подбор гиперпараметров по финальному holdout запрещён. Существующие contract fields и feature keys используются без переименования; модели отдельных семейств не получают скрытые общие признаки без объявленного контракта.
