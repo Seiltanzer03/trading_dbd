@@ -1242,6 +1242,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "Авторитетная текущая цена инструмента недоступна",
                             req_id, retriable=True),
                     )
+            from .ai_report_semantics_guard import execution_barrier_reached
+            barrier = execution_barrier_reached(snapshot)
+            if barrier is not None:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        **ai_error_body(
+                            "execution_barrier_reached",
+                            "Цена достигла стопа или тейка: подтвердите фактическое исполнение у брокера",
+                            req_id, retriable=False),
+                        "execution_barrier": barrier,
+                    },
+                )
             ai_last_call = time.monotonic()
             trade_id = int(snapshot["trade_id"])
             # Finalize the economic state at the API boundary. Policy analysis

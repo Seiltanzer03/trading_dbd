@@ -82,3 +82,61 @@ null-fallback/domain fixtures passed with no private numeric output. Product
 unchanged from e56e725; no repeated local broad run for workflow/report-only
 addition. Prior exact product official tests37356900469 and lattice37356900472
 both succeeded; final amended-tree official CI remains required.
+
+Actual installed-SHA diagnostic run37357880702/job111924819461 succeeded:
+active trade true, option available true, no invalid numeric keys, finite rungs,
+positive sigma/horizon, valid fraction. Raw and serialized domains false;
+lossy-domain-collapse false; serialized_take_reached true. Actual stop available,
+unbreached and not moved. This establishes a currently open manual position at
+or beyond its take, not a serialization-only explanation. Historical request
+ai-92eee6032ddd442a97a8 is still not bound to these later cached bytes.
+
+Bounded follow-up design: only explicit authoritative complete finite canonical
+price geometry can return a typed fast400 execution_barrier_reached before
+rate-limit consumption, mutable finalization, provider/enrichment/publication.
+Actual prices produce unrounded normalized-R current/barrier proof; reached
+take/stop is explicit, execution remains unconfirmed. No automatic close or
+invented broker fill. Incomplete/invalid/untrusted geometry cannot use the new
+accepted negative contract. Smoke validates its exact schema, numeric proof,
+boundary inequality and no-publication flags, while retaining the isolated
+12-action positive test, original latency budget and rejection of arbitrary422.
+User's standing waiver of design/spec approval pauses applies to this bounded
+existing-flow correction. Sole coupled writer; one consolidated final review.
+
+Coupled implementation frozen: pure complete finite positive canonical prices,
+ordered stop/take and declared source authority; raw-price comparisons include
+long/short exact boundaries without using rounded snapshot R. Fast400 occurs
+before ai_last_call, sync_be, enrichments/provider/publication. It leaves journal,
+management events and shadow actions unchanged and explicitly denies broker
+execution confirmation. Frontend safe_fetch already displays error.message;
+no UI change needed. Existing economics422 rejection remains untouched.
+
+Actual preflight TDD: initial20failed17passed1knownwarning2.86s (missing helper,
+route forbidden synchronization, smoke400 rejection); added huge-integer input
+RED1failed43deselected0.41s (OverflowError), then bounded fail-closed handling.
+Final writer command `../trading_quotes/.venv/bin/python -m pytest -q
+tests/test_ai_execution_barrier_preflight.py
+tests/test_ai_authoritative_price_preflight.py tests/test_ai_verdict_api.py
+tests/test_ai_report_semantics_guard.py`:96passed1existingStarlettewarning6.15s.
+Tests include both directions and boundaries, just-inside provider success,
+malformed/undeclared/untrusted geometry, exact strict smoke and arbitrary422/
+slow/schema/proof failures. No existing-test fixture changes or weakened guard.
+Root pre-producer-fix broad:3013passed4skipped1known unchanged sparse-WAL
+baselinefailure1existingwarning113.27s. This run is explicitly pre-I1, not final.
+
+Consolidated independent full-PR review found one Important I1: the owning
+ai_verdict_base producer rounded all five machine price fields to four decimals,
+so true interior124.999999 could become equal to take125 and yield an accepted
+negative response. No other material findings; independent narrow65passed
+1existingwarning3.96s. I1 accepted and fixed in the owning producer: finite raw
+price precision retained; R/display-derived fields remain unchanged.
+Actual producer (real Engine/journal/position with only policy analysis stub)
+to API regression RED4failed2passed44deselected1warning1.76s, then GREEN109passed
+1existingwarning8.40s including new/authority/API/semantics/ai_verdict profiles.
+Near-interior prices reach provider200; exact/reached barriers400 do not.
+Reviewer scoped I1 verification approved: independently6passed44deselected
+1existingwarning1.59s. I1 resolved; no remaining Critical/Important findings;
+whole review was not repeated.
+Final mandatory exact-tree official Python3.11 full suite and real WebKit will
+provide final broad verification; no redundant local whole-suite rerun for
+this scoped fix against the known unchanged local Python3.12 WAL failure.

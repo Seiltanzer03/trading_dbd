@@ -111,6 +111,54 @@ def authoritative_current_price_available(snapshot: dict[str, Any]) -> bool:
                 and row.get("production_authority") is not False)
 
 
+def execution_barrier_reached(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    """Prove a reached price barrier without claiming broker execution.
+
+    Only complete canonical price geometry with declared quote authority can
+    establish this operational preflight. Rounded R coordinates are not inputs.
+    """
+    manager = snapshot.get("policy_manager")
+    if not isinstance(manager, dict):
+        return None
+    audit = manager.get("input_audit")
+    rows = audit.get("rows") if isinstance(audit, dict) else None
+    if not isinstance(rows, dict) or not isinstance(rows.get("instrument_price"), dict):
+        return None
+    geometry = snapshot.get("trade_geometry")
+    if not isinstance(geometry, dict):
+        return None
+    values = [geometry.get(key) for key in
+              ("entry", "original_stop", "active_risk_barrier", "final_take", "current")]
+    if any(isinstance(value, bool) or not isinstance(value, (int, float))
+           for value in values):
+        return None
+    try:
+        if any(not math.isfinite(value) or value <= 0 for value in values):
+            return None
+    except OverflowError:
+        return None
+    if not authoritative_current_price_available(snapshot):
+        return None
+    entry, original_stop, active_stop, take, current = values
+    risk = abs(entry - original_stop)
+    if risk <= 0:
+        return None
+    sign = 1. if original_stop < entry else -1.
+    current_r = sign * (current - entry) / risk
+    stop_r = sign * (active_stop - entry) / risk
+    take_r = sign * (take - entry) / risk
+    if not all(math.isfinite(value) for value in (current_r, stop_r, take_r)) or stop_r >= take_r:
+        return None
+    if sign * (current - take) >= 0:
+        kind, barrier_r = "take", take_r
+    elif sign * (current - active_stop) <= 0:
+        kind, barrier_r = "stop", stop_r
+    else:
+        return None
+    return {"kind": kind, "current_r": current_r, "barrier_r": barrier_r,
+            "price_authority": True, "execution_confirmed": False}
+
+
 def _current_price_explicitly_unavailable(snapshot: dict[str, Any]) -> bool:
     manager = snapshot.get("policy_manager") or {}
     rows = (manager.get("input_audit") or {}).get("rows") or {}

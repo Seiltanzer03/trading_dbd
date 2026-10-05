@@ -27,7 +27,7 @@ jobs:
       - name: Read bounded policy-domain diagnostics without private values
         uses: appleboy/ssh-action@v1
         env:
-          EXPECTED_SHA: ${{ inputs.expected_sha || '3d5b3523c6d79ed8147deab9f9738e514a0a4e54' }}
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.event.pull_request.base.sha }}
         with:
           host: 94.241.171.182
           username: root
