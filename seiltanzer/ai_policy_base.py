@@ -152,7 +152,9 @@ class PolicyInputs:
 
     def as_dict(self) -> dict:
         return {
-            "r0": _rnd(self.r0, 4), "T": _rnd(self.T, 4),
+            # These coordinates feed strict execution-domain checks downstream.
+            # Display rounding can collapse a valid stop < current < take.
+            "r0": _num(self.r0), "T": _num(self.T),
             "sigma_R": _rnd(self.sigma_R, 4), "drift_R": _rnd(self.drift_R, 4),
             "skew_R": _rnd(self.skew_R, 4), "term_slope": _rnd(self.term_slope, 4),
             "horizon_minutes": _rnd(self.horizon_minutes, 1),
@@ -161,7 +163,7 @@ class PolicyInputs:
             "option_available": self.option_available,
             "chain_age_sec": _rnd(self.chain_age_sec, 1),
             "chain_status": self.chain_status, "proxy_quality": self.proxy_quality,
-            "source": self.source, "stop_r": _rnd(self.stop_r, 4),
+            "source": self.source, "stop_r": _num(self.stop_r),
         }
 
 
@@ -232,7 +234,8 @@ def extract_policy_inputs(tick: dict) -> PolicyInputs:
         stop_r = sign * (active_stop - entry) / risk
     else:
         stop_r = 0.0 if bool(position.get("be_armed")) else -1.0
-    stop_r = min(max(float(stop_r), -1.0), float(r0) - 1e-8)
+    # Preserve the actual barrier, including a reached/breached one. Moving it
+    # below current price would manufacture an interior execution domain.
     return PolicyInputs(
         r0=float(r0), T=float(T), sigma_R=float(min(sigma_R, 8.0)),
         drift_R=float(_num(cone.get("drift_R")) or 0.0),

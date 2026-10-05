@@ -1,0 +1,123 @@
+name: production-policy-input-diagnostics
+
+# Read cached HTTP state only. Never creates a verdict, refreshes feeds, starts
+# Engine, writes SQLite, restarts services or submits an order.
+on:
+  pull_request:
+    paths: [".github/workflows/production-policy-input-diagnostics.yml"]
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact installed production SHA to read
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: >-
+      github.actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - name: Read bounded policy-domain diagnostics without private values
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.event.pull_request.base.sha }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 1m
+          envs: EXPECTED_SHA
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            git -C /opt/seiltanzer diff --quiet -- seiltanzer/ai_policy_base.py
+            cd /opt/seiltanzer
+            PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/opt/seiltanzer .venv/bin/python - <<'PY'
+            import ast, json, math, sys, urllib.request
+            from dataclasses import dataclass
+            from typing import Any
+
+            # Never import seiltanzer/__init__.py or its runtime installers.
+            # Load only the pinned file's pure extraction/serialization definitions.
+            sys.excepthook = lambda kind, value, tb: print(json.dumps({'diagnostic_failed': kind.__name__}))
+            with open('seiltanzer/ai_policy_base.py') as source:
+                text = source.read(1_000_001)
+            if len(text) > 1_000_000:
+                raise ValueError('bounded_source_exceeded')
+            names = {'_num', '_rnd', '_at', 'PolicyInputs', 'extract_policy_inputs'}
+            definitions = [node for node in ast.parse(text).body
+                           if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
+            if {node.name for node in definitions} != names:
+                raise ValueError('extraction_definitions_unavailable')
+            module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0),
+                                      *definitions], type_ignores=[])
+            namespace = {'__name__': '__main__', 'math': math, 'dataclass': dataclass, 'Any': Any}
+            exec(compile(ast.fix_missing_locations(module), 'pinned-policy-extractor', 'exec'), namespace)
+            extract_policy_inputs = namespace['extract_policy_inputs']
+
+            def read_cached(path):
+                with urllib.request.urlopen('http://127.0.0.1:8790' + path, timeout=5) as response:
+                    payload = response.read(4_000_001)
+                if len(payload) > 4_000_000:
+                    raise ValueError('bounded_response_exceeded')
+                return json.loads(payload)
+
+            def finite(value):
+                return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+            state = read_cached('/api/state')
+            tick = state.get('tick') or {}
+            trade = tick.get('trade') or {}
+            if not trade:
+                print(json.dumps({'evidence_scope': 'present_cached_tick_only', 'active_trade': False}))
+                raise SystemExit(0)
+            inputs = extract_policy_inputs(tick)
+            packed = inputs.as_dict()
+            numeric_keys = ('r0', 'T', 'sigma_R', 'drift_R', 'skew_R', 'term_slope',
+                            'horizon_minutes', 'max_r', 'rung_fraction', 'be_after', 'stop_r')
+            position = trade.get('position_state') or tick.get('position_state') or {}
+            entry = trade.get('entry')
+            original = position.get('original_stop')
+            if original is None:
+                original = trade.get('original_stop')
+            if original is None:
+                original = trade.get('stop')
+            active = position.get('active_stop_price')
+            if active is None:
+                active = trade.get('active_stop')
+            actual_stop = None
+            if all(finite(value) for value in (entry, original, active)) and entry != original:
+                sign = 1. if str(trade.get('direction') or '').lower() in ('long', 'buy', 'лонг') else -1.
+                actual_stop = sign * (active - entry) / abs(entry - original)
+            raw_domain = inputs.stop_r < inputs.r0 < inputs.T
+            packed_domain = (all(finite(packed.get(key)) for key in ('stop_r', 'r0', 'T'))
+                             and packed['stop_r'] < packed['r0'] < packed['T'])
+            print(json.dumps({
+                'evidence_scope': 'present_cached_tick_only_not_failed_frozen_request',
+                'active_trade': True,
+                'option_available': packed.get('option_available') is True,
+                'invalid_numeric_keys': [key for key in numeric_keys if not finite(packed.get(key))],
+                'rungs_finite': all(finite(value) for value in packed.get('rungs', [])),
+                'sigma_positive': inputs.sigma_R > 0,
+                'horizon_positive': inputs.horizon_minutes > 0,
+                'fraction_valid': 0 <= inputs.rung_fraction <= 1,
+                'raw_domain_valid': raw_domain,
+                'serialized_domain_valid': packed_domain,
+                'lossy_domain_collapse': raw_domain and not packed_domain,
+                'serialized_stop_equals_current': packed.get('stop_r') == packed.get('r0'),
+                'serialized_take_reached': finite(packed.get('r0')) and finite(packed.get('T')) and packed['r0'] >= packed['T'],
+                'actual_stop_available': actual_stop is not None,
+                'actual_stop_reached_or_breached': actual_stop is not None and inputs.r0 <= actual_stop,
+                'actual_stop_was_moved': actual_stop is not None and inputs.stop_r != actual_stop,
+            }, allow_nan=False))
+            status = read_cached('/api/ai/snapshot/status')
+            print(json.dumps({'snapshot_status_keys': sorted(status)[:32]}, allow_nan=False))
+            PY

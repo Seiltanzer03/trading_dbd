@@ -276,12 +276,14 @@ def build_snapshot(engine) -> dict:
     clock = policy.get("first_touch_clock") or {}
     risk_barrier_r = _num(clock.get("risk_barrier_r"))
     geometry = {
-        "current": _rnd(_at(tick, "feeds", "price", "value")),
-        "entry": _rnd(trade.get("entry")),
-        "original_stop": _rnd(trade.get("stop")),
-        "active_risk_barrier": _rnd(position_state.get("active_stop_price")),
+        # These are machine execution coordinates. Rounding a price just inside
+        # a stop/take can manufacture a reached barrier; format only for display.
+        "current": _num(_at(tick, "feeds", "price", "value")),
+        "entry": _num(trade.get("entry")),
+        "original_stop": _num(trade.get("stop")),
+        "active_risk_barrier": _num(position_state.get("active_stop_price")),
         "active_risk_barrier_type": position_state.get("active_stop_type"),
-        "final_take": _rnd(position_state.get("take", trade.get("take"))),
+        "final_take": _num(position_state.get("take", trade.get("take"))),
         "current_r": _rnd(_at(tick, "prob", "r")),
         "r_to_active_stop": _rnd((_num(_at(tick, "prob", "r")) or 0.0)
                                   - (risk_barrier_r if risk_barrier_r is not None else -1.0)),

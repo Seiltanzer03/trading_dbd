@@ -456,6 +456,33 @@ def verify_ai_verdict() -> None:
                     and all(char in "0123456789abcdef" for char in req_id[3:])), body
             print("AI_VERDICT_PRICE_UNAVAILABLE_CONTRACT PASS decision_published=False")
             break
+        if (code == 400 and isinstance(body, dict)
+                and isinstance(body.get("error"), dict)
+                and body["error"].get("code") == "execution_barrier_reached"):
+            from seiltanzer.ai_api import AI_API_VERSION
+            assert set(body) == {"ok", "api_version", "error", "execution_barrier"}, body
+            assert body["ok"] is False and body["api_version"] == AI_API_VERSION, body
+            error = body["error"]
+            assert set(error) == {"code", "message", "request_id", "retriable"}, body
+            assert error["retriable"] is False, body
+            assert isinstance(error["message"], str) and error["message"].strip(), body
+            req_id = error["request_id"]
+            assert (isinstance(req_id, str) and req_id.startswith("ai-")
+                    and len(req_id) == 23
+                    and all(char in "0123456789abcdef" for char in req_id[3:])), body
+            proof = body["execution_barrier"]
+            assert isinstance(proof, dict), body
+            assert set(proof) == {"kind", "current_r", "barrier_r", "price_authority",
+                                  "execution_confirmed"}, body
+            assert proof["price_authority"] is True and proof["execution_confirmed"] is False, body
+            assert proof["kind"] in {"take", "stop"}, body
+            assert all(isinstance(proof[key], (int, float))
+                       and not isinstance(proof[key], bool) and math.isfinite(proof[key])
+                       for key in ("current_r", "barrier_r")), body
+            assert (proof["current_r"] >= proof["barrier_r"] if proof["kind"] == "take"
+                    else proof["current_r"] <= proof["barrier_r"]), body
+            print("AI_VERDICT_EXECUTION_BARRIER_CONTRACT PASS decision_published=False execution_confirmed=False")
+            break
         if code == 503 and ((body or {}).get("error") or {}).get("code") == "ai_snapshot_warming":
             assert time.monotonic() < deadline, body
             time.sleep(min(3.0, max(1.0, float((body or {}).get("retry_after_sec") or 2.0))))
