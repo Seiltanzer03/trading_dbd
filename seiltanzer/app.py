@@ -11,7 +11,7 @@ import time
 import base64
 import secrets
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -24,9 +24,7 @@ from .ai_verdict import build_snapshot, render_policy_report, request_verdict
 from .ai_api import (
     deterministic_result,
     error_body as ai_error_body,
-    log_event as log_ai_event,
     provider_error as normalize_provider_error,
-    request_id as new_ai_request_id,
     success_body as ai_success_body,
 )
 from .g1_management_edge_frequency import current_edge_management_payload
@@ -1178,10 +1176,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return account
 
     @app.post("/api/ai/verdict")
-    async def api_ai_verdict():
+    async def api_ai_verdict(request: Request = None):
+        from .ai_request_trace import AIRequestTrace
+        inherited = getattr(request.state, 'ai_request_trace', None) if request is not None else None
+        trace = inherited or AIRequestTrace()
+        try:
+            with trace.activate(), trace.span('route'):
+                response = await _ai_verdict_impl(trace, engine)
+        except BaseException as exc:
+            if inherited is None:
+                trace.finish(499 if isinstance(exc, asyncio.CancelledError) else 500)
+            raise
+        if inherited is None:
+            trace.finish(response.status_code)
+        return response
+
+    async def _ai_verdict_impl(trace, engine):
         nonlocal ai_last_call
-        req_id = new_ai_request_id()
-        started = time.monotonic()
+        req_id = trace.request_id
         if ai_lock.locked():
             return JSONResponse(
                 status_code=429,
@@ -1198,9 +1210,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         async with ai_lock:
             try:
-                snapshot = build_snapshot(engine)
+                with trace.span('cached_snapshot'):
+                    snapshot = build_snapshot(engine)
             except Exception as exc:
-                log_ai_event(req_id=req_id, stage="snapshot_error", started=started, exc=exc)
+                trace.error("snapshot_error", exc)
                 return JSONResponse(
                     status_code=500,
                     content=ai_error_body(
@@ -1233,61 +1246,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             trade_id = int(snapshot["trade_id"])
             # Finalize the economic state at the API boundary. Policy analysis
             # may have advanced max_r/BE while constructing the snapshot.
-            active_trade = engine.journal.active_trade()
-            if active_trade and int(active_trade["id"]) == trade_id:
-                position_state = engine.position.sync_be(active_trade)
-                snapshot["position_state"] = position_state
-                geometry = snapshot.get("trade_geometry") or {}
-                geometry.update({
-                    "entry": active_trade["entry"],
-                    "original_stop": active_trade["stop"],
-                    "active_risk_barrier": position_state["active_stop_price"],
-                    "active_risk_barrier_type": position_state["active_stop_type"],
-                    "final_take": position_state["take"],
-                    "remaining_position_fraction":
-                        position_state["remaining_position_fraction"],
-                    "realized_position_fraction":
-                        position_state["realized_position_fraction"],
-                })
-                snapshot["trade_geometry"] = geometry
-                from .ai_report_semantics_guard import repair_snapshot_geometry
-                repair_snapshot_geometry(snapshot)
-                decision = _refresh_management_decision(
-                    engine, snapshot, active_trade)
-            else:
-                decision = ((snapshot.get("policy_manager") or {})
-                            .get("management_decision"))
-                return JSONResponse(status_code=409, content=ai_error_body(
-                    "stale_decision", "Активная сделка изменилась во время расчёта",
-                    req_id, retriable=True))
+            with trace.span('position_finalization'):
+                active_trade = engine.journal.active_trade()
+                if active_trade and int(active_trade["id"]) == trade_id:
+                    position_state = engine.position.sync_be(active_trade)
+                    snapshot["position_state"] = position_state
+                    geometry = snapshot.get("trade_geometry") or {}
+                    geometry.update({
+                        "entry": active_trade["entry"],
+                        "original_stop": active_trade["stop"],
+                        "active_risk_barrier": position_state["active_stop_price"],
+                        "active_risk_barrier_type": position_state["active_stop_type"],
+                        "final_take": position_state["take"],
+                        "remaining_position_fraction":
+                            position_state["remaining_position_fraction"],
+                        "realized_position_fraction":
+                            position_state["realized_position_fraction"],
+                    })
+                    snapshot["trade_geometry"] = geometry
+                    from .ai_report_semantics_guard import repair_snapshot_geometry
+                    repair_snapshot_geometry(snapshot)
+                    decision = _refresh_management_decision(
+                        engine, snapshot, active_trade)
+                else:
+                    decision = ((snapshot.get("policy_manager") or {})
+                                .get("management_decision"))
+                    return JSONResponse(status_code=409, content=ai_error_body(
+                        "stale_decision", "Активная сделка изменилась во время расчёта",
+                        req_id, retriable=True))
             # Evaluate every extended action alongside the base policies. The
             # independent provider sees quantified candidates, not a picked winner.
-            await asyncio.to_thread(_attach_family_source_bundle, engine, snapshot)
+            await trace.to_thread('family_bundle', _attach_family_source_bundle, engine, snapshot)
             from .unified_edge_runtime_context import attach_unified_edge_context
             from .runtime_git_identity import runtime_git_sha
-            await asyncio.to_thread(attach_unified_edge_context, engine, snapshot,
+            await trace.to_thread('runtime_context', attach_unified_edge_context, engine, snapshot,
                                     expected_sha=runtime_git_sha())
             macro_factory = getattr(getattr(engine, "passive", None), "_macro_data_factory", None)
             if macro_factory is not None:
                 from .macro_t0_context import build_macro_t0_context
-                snapshot["macro_context_v1"] = await asyncio.to_thread(
-                    build_macro_t0_context, macro_factory, float(snapshot["captured_ts"]))
-            from .edge_family_event_reaction import attach_observed_event_reaction
-            await asyncio.to_thread(attach_observed_event_reaction, engine, snapshot)
+                snapshot["macro_context_v1"] = await trace.to_thread(
+                    'macro_context', build_macro_t0_context, macro_factory, float(snapshot["captured_ts"]))
+            from .edge_family_event_reaction import attach_observed_event_reaction_bounded
+            with trace.span('reaction_capture'):
+                await attach_observed_event_reaction_bounded(engine, snapshot)
             from .edge_regime import refine_regime_with_events
-            refine_regime_with_events(snapshot)
+            with trace.span('regime_management'):
+                refine_regime_with_events(snapshot)
             from .active_management import select_active_management
-            await asyncio.to_thread(select_active_management, snapshot)
+            await trace.to_thread('regime_management', select_active_management, snapshot)
             try:
-                review_id = canonical_snapshot(snapshot)["review_id"]
+                with trace.span('review_identity'):
+                    review_id = canonical_snapshot(snapshot)["review_id"]
                 # The review identity is frozen before provider output and manual
                 # action registration; the final persisted bytes still get their
                 # own independently verified content hash.
                 snapshot["review_id"] = review_id
             except Exception as exc:
-                log_ai_event(
-                    req_id=req_id, trade_id=trade_id, stage="snapshot_error",
-                    started=started, exc=exc)
+                trace.error("snapshot_error", exc)
                 return JSONResponse(
                     status_code=500,
                     content=ai_error_body(
@@ -1297,7 +1312,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             degraded = False
             provider_failure = None
             try:
-                result = await asyncio.to_thread(request_verdict, snapshot)
+                result = await trace.to_thread('provider', request_verdict, snapshot)
                 if not isinstance(result, dict) or not isinstance(result.get("verdict"), str):
                     raise RuntimeError("provider_invalid_payload")
             except RuntimeError as exc:
@@ -1306,20 +1321,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     provider_failure = {"code": "provider_invalid_payload", "retriable": True}
                 result = deterministic_result(snapshot, render_policy_report)
                 degraded = True
-                log_ai_event(
-                    req_id=req_id, trade_id=trade_id, stage="provider_fallback",
-                    review_id=review_id,
-                    started=started, provider="openrouter", mode="deterministic_fallback",
-                    exc=exc,
-                )
+                trace.error("provider_fallback", exc)
             except Exception as exc:
                 # ValueError/TypeError and other unexpected application failures
                 # must remain visible as programming errors, not provider outages.
-                log_ai_event(
-                    req_id=req_id, trade_id=trade_id, stage="internal_error",
-                    review_id=review_id,
-                    started=started, provider="openrouter", exc=exc,
-                )
+                trace.error("internal_error", exc)
                 return JSONResponse(
                     status_code=500,
                     content=ai_error_body(
@@ -1328,8 +1334,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             try:
                 from .unified_edge_ensemble import build_unified_ensemble
-                audit = await asyncio.to_thread(
-                    build_unified_ensemble, snapshot, result.get("llm_shadow_decision"))
+                audit = await trace.to_thread(
+                    'ensemble', build_unified_ensemble, snapshot, result.get("llm_shadow_decision"))
                 if audit.get("common_economics_invalid") is True:
                     return JSONResponse(status_code=422, content={
                         **ai_error_body("invalid_common_economics",
@@ -1337,25 +1343,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             req_id, retriable=True),
                         "common_economics_reason": audit.get("common_economics_reason"),
                     })
-                decision = await asyncio.to_thread(
-                    _publish_unified_review, engine, snapshot, result, review_id,
+                decision = await trace.to_thread(
+                    'publication', _publish_unified_review, engine, snapshot, result, review_id,
                     active_trade, audit)
             except StaleDecisionError as exc:
-                log_ai_event(
-                    req_id=req_id, trade_id=trade_id, stage="stale_decision",
-                    review_id=review_id, started=started, exc=exc)
+                trace.error("stale_decision", exc)
                 return JSONResponse(
                     status_code=409,
                     content=ai_error_body(
                         "stale_decision", "Состояние позиции изменилось во время расчёта; запросите новый разбор",
                         req_id, retriable=True))
             except Exception as exc:
-                log_ai_event(
-                    req_id=req_id, trade_id=trade_id, stage="journal_error",
-                    review_id=review_id,
-                    started=started, mode=("deterministic_fallback" if degraded else "llm"),
-                    exc=exc,
-                )
+                trace.error("journal_error", exc)
                 return JSONResponse(
                     status_code=500,
                     content=ai_error_body(
@@ -1374,11 +1373,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body["edge_management"]["unified_edge_ensemble"] = result["unified_edge_ensemble"]
             body["edge_management"]["available"] = True
             body["context_reviews"] = len(snapshot.get("previous_reviews") or [])
-            log_ai_event(
-                req_id=req_id, trade_id=trade_id, stage="complete", started=started,
-                review_id=review_id,
-                provider="openrouter", mode=body["mode"],
-            )
+
             return JSONResponse(content=body)
 
     @app.post("/api/ai/decision/ack")

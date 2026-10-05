@@ -314,3 +314,32 @@ by the prior source audit, and these artificial fixtures do not create one.
 Broader mappings/broker equivalence, lawful PIT consensus, calibrated event action
 models, general text novelty, value/carry and sufficient independent observations
 remain explicit residuals; no profitability or causal-effect claim is made.
+
+### Bounded optional reaction capture and request diagnostics, 2026-10-05
+
+Optional reaction capture now has a fixed 0.25-second API budget including shared
+executor queue time. Capture receives only a private bounded input projection;
+only a timely completed result can commit the owned source/audit fields. Existing
+source facts survive refusals, cancellation and late completion. Engine-local
+admission prevents overlapping optional work until an already-running worker
+actually completes. Received-release reads try the shared store lock for the
+whole read; feed capture tries its lock and checks the 4096-bar bound before
+copying. Historical/admissible reads and shared SQLite settings are unchanged.
+
+A focused warning-level structured trace correlates materializer preflight,
+route stages, actual thread submission/start/end and final response status with
+one server-generated request ID. It emits only stage names, monotonic timings,
+status and exception class; no request/source/financial payloads or exception
+text. Diagnostic sink failures preserve success/error/cancellation behavior,
+and direct no-argument route calls remain compatible.
+
+Local event-controlled regressions reproduce and cover lock waits, executor
+queue budget, late/cancelled work, immutable review bytes, oversized/malformed
+input and sanitized traces. Evidence and scoped verification are preserved in
+`.superpowers/sdd/2026-10-05-ai-request-latency/task-1-report.md`. These defects do
+not establish the cause of PR #397's production POST timeout: its saved log has
+no actual request stage trace. Provider guard6s/8s, acceptance12s/transport14s,
+risk/cost/geometry/proof/sample gates and zero missing-model votes remain.
+Fresh task/whole-feature review, root broad verification, mandatory exact-tree
+CI and same-SHA production acceptance remain required; no release acceptance or
+predictive efficacy is claimed here.

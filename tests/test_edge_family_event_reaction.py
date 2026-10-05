@@ -212,7 +212,8 @@ def test_producer_progresses_only_completed_bars_and_ignores_unreceived_future_p
 def engine(packet=None):
     packet = source() if packet is None else packet
     class ReceivedStore:
-        def latest_received(self, captured_ts):
+        def latest_received(self, captured_ts, *, nonblocking=False):
+            assert nonblocking is True
             assert captured_ts == packet['received_ts']
             return deepcopy(packet['reaction_release'])
         def latest_admissible(self, captured_ts):
