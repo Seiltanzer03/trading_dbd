@@ -13,6 +13,8 @@ fast retryable 503 rather than sitting behind the reverse proxy until HTTP 504.
 """
 from __future__ import annotations
 
+import asyncio
+
 import contextlib
 import copy
 import gc
@@ -560,20 +562,35 @@ def install_ai_snapshot_materializer(app: Any) -> AISnapshotMaterializer:
     @app.middleware("http")
     async def _ai_materializer_gate(request, call_next):
         if request.url.path == "/api/ai/verdict" and request.method.upper() == "POST":
-            reason = materializer._event_reason()
-            if reason:
-                if reason != "NO_ACTIVE_TRADE":
-                    materializer.request_refresh(reason)
-                return _warming_response({**materializer.status(), "reason": reason})
-            response = await call_next(request)
-            # Race backstop: if the event crossed after preflight but before the
-            # route read its snapshot, convert only that warm-up failure to 503.
-            if response.status_code == 500:
-                status = materializer.status()
-                if not status.get("ready") and (
-                    status.get("building") or status.get("invalidated_reason")
-                ):
-                    return _warming_response(status)
+            from .ai_request_trace import AIRequestTrace
+            inherited = getattr(request.state, 'ai_request_trace', None)
+            trace = inherited or AIRequestTrace()
+            request.state.ai_request_trace = trace
+            try:
+                with trace.span('preflight'):
+                    reason = materializer._event_reason()
+                    if reason:
+                        if reason != "NO_ACTIVE_TRADE":
+                            materializer.request_refresh(reason)
+                        response = _warming_response({**materializer.status(), "reason": reason})
+                    else:
+                        response = None
+                if response is None:
+                    response = await call_next(request)
+                    # Preserve the race backstop and log the actual converted status.
+                    if response.status_code == 500:
+                        status = materializer.status()
+                        if not status.get("ready") and (
+                            status.get("building") or status.get("invalidated_reason")
+                        ):
+                            response = _warming_response(status)
+            except BaseException as exc:
+                trace.error('internal_error', exc)
+                if inherited is None:
+                    trace.finish(499 if isinstance(exc, asyncio.CancelledError) else 500)
+                raise
+            if inherited is None:
+                trace.finish(response.status_code)
             return response
         return await call_next(request)
 

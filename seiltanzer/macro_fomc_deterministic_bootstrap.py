@@ -408,9 +408,17 @@ class FOMCDeterministicReleaseStore:
     def latest_admissible(self, captured_ts: float) -> dict[str, Any]:
         return _latest_release(self.runtime, captured_ts)
 
-    def latest_received(self, captured_ts: float) -> dict[str, Any]:
+    def latest_received(self, captured_ts: float, *, nonblocking: bool = False) -> dict[str, Any]:
         """Known-at-capture read; never backdate the first stored actual fetch."""
-        return _latest_release(self.runtime, captured_ts, received_only=True)
+        if not nonblocking:
+            return _latest_release(self.runtime, captured_ts, received_only=True)
+        # Admission covers table discovery, query and decoding, not only SELECT.
+        if not self._lock.acquire(blocking=False):
+            return {"status": "UNAVAILABLE", "reason": "REACTION_RELEASE_STORE_BUSY"}
+        try:
+            return _latest_release(self.runtime, captured_ts, received_only=True)
+        finally:
+            self._lock.release()
 
     def status(self) -> dict[str, Any]:
         with self._lock:

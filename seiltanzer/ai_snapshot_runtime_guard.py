@@ -1,6 +1,7 @@
 """Production safety around the event-driven AI snapshot materializer."""
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from typing import Any
@@ -59,22 +60,38 @@ def install_ai_snapshot_runtime_guard(app: Any, materializer: Any,
 
     @app.middleware("http")
     async def _no_active_trade_fast_path(request, call_next):
-        if (
-            request.url.path == "/api/ai/verdict"
-            and request.method.upper() == "POST"
-            and materializer.current_trade_id() is None
-        ):
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "ok": False,
-                    "error": {
-                        "code": "no_active_trade",
-                        "message": "Нет активной сделки для ИИ-разбора",
-                        "retriable": False,
+        if request.url.path != "/api/ai/verdict" or request.method.upper() != "POST":
+            return await call_next(request)
+        from .ai_request_trace import AIRequestTrace
+        inherited = getattr(request.state, 'ai_request_trace', None)
+        trace = inherited or AIRequestTrace()
+        request.state.ai_request_trace = trace
+        try:
+            # Production installs this middleware outside the materializer.
+            # Start timing before the synchronous journal probe can block.
+            with trace.span('runtime_guard'):
+                no_active_trade = materializer.current_trade_id() is None
+            if no_active_trade:
+                response = JSONResponse(
+                    status_code=400,
+                    content={
+                        "ok": False,
+                        "error": {
+                            "code": "no_active_trade",
+                            "message": "Нет активной сделки для ИИ-разбора",
+                            "retriable": False,
+                        },
                     },
-                },
-            )
-        return await call_next(request)
+                )
+            else:
+                response = await call_next(request)
+        except BaseException as exc:
+            trace.error('internal_error', exc)
+            if inherited is None:
+                trace.finish(499 if isinstance(exc, asyncio.CancelledError) else 500)
+            raise
+        if inherited is None:
+            trace.finish(response.status_code)
+        return response
 
     app.state.ai_snapshot_runtime_guard_installed = True

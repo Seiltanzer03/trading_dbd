@@ -5,7 +5,10 @@ receipts and completed close samples, not a raw provider HTTP response.
 """
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
+import threading
+import time
 import hashlib
 import json
 import math
@@ -269,11 +272,18 @@ def build_received_event_reaction_source(release: dict, feed, cutoff: float, ins
         _scope(normalized, normalized)
         identity = _configured_identity(instrument)
         from .edge_regime import AUTHORITY_CONTRACT
-        with feed._intraday_lock:
+        if not feed._intraday_lock.acquire(blocking=False):
+            raise ValueError('REACTION_FEED_BUSY')
+        try:
+            raw_bars = feed.intraday_ohlcv
+            if not isinstance(raw_bars, (list, tuple)) or len(raw_bars) > 4096:
+                raise ValueError('REACTION_FEED_BAR_BOUND_INVALID')
             authority = deepcopy(feed.intraday_source_authority)
-            bars = deepcopy(feed.intraday_ohlcv)
+            bars = deepcopy(raw_bars)
             if feed.demo or feed.intraday_is_offset or feed.instrument_code != instrument:
                 raise ValueError('REACTION_FEED_DEMO_OFFSET_OR_TARGET_INVALID')
+        finally:
+            feed._intraday_lock.release()
         _scope(authority, normalized)
         if (authority.get('contract_version') != AUTHORITY_CONTRACT
                 or _number(authority.get('interval_sec')) != 60
@@ -350,7 +360,10 @@ def attach_observed_event_reaction(engine, snapshot: dict) -> None:
         store = getattr(factory, 'fomc_deterministic_store', None)
         if store is None:
             return
-        release = store.latest_received(cutoff)
+        release = store.latest_received(cutoff, nonblocking=True)
+        if release.get('reason') == 'REACTION_RELEASE_STORE_BUSY':
+            audit['reason'] = 'REACTION_RELEASE_STORE_BUSY'
+            return
         produced = build_received_event_reaction_source(release, engine.market, cutoff, instrument)
         if produced['source'] is None:
             audit.update(reason=produced['rejections'][0]['reason'], rejections=produced['rejections'])
@@ -378,3 +391,133 @@ def attach_observed_event_reaction(engine, snapshot: dict) -> None:
             source_id=source['source_id'], source_bytes=len(json.dumps(source, separators=(',', ':')).encode()))
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError) as exc:
         audit['reason'] = str(exc)[:160]
+
+
+REACTION_CAPTURE_BUDGET_SEC = 0.25
+_ADMISSION_CREATION_LOCK = threading.Lock()
+
+
+def _capture_audit(reason: str) -> dict:
+    return dict(contract_version=CONTRACT, available=False, network_calls=False,
+                reason=reason, authority_role=ROLE, rejections=[])
+
+
+def _private_capture_input(snapshot: dict) -> dict:
+    """Copy only bounded JSON source facts, without invoking arbitrary deepcopy."""
+    from .edge_family_source_runtime import MAX_SELECTED_BYTES
+    remaining = MAX_SELECTED_BYTES
+
+    def charge(size):
+        nonlocal remaining
+        remaining -= size
+        if remaining < 0:
+            raise ValueError('SELECTED_SOURCE_FACTS_EXCEED_REVIEW_BYTE_BUDGET')
+
+    def copy_json(value, depth=0):
+        if depth > 8:
+            raise ValueError('REACTION_CAPTURE_INPUT_DEPTH_INVALID')
+        if isinstance(value, dict):
+            charge(2)
+            result = {}
+            for i, (key, item) in enumerate(value.items()):
+                if not isinstance(key, str):
+                    raise ValueError('REACTION_CAPTURE_INPUT_INVALID')
+                charge(2 + (2 if i else 0))  # colon and inter-item spacing
+                copy_json(key, depth+1)
+                result[key] = copy_json(item, depth+1)
+            return result
+        if isinstance(value, (list, tuple)):
+            charge(2)
+            result = []
+            for i, item in enumerate(value):
+                if i:
+                    charge(2)
+                result.append(copy_json(item, depth+1))
+            return tuple(result) if isinstance(value, tuple) else result
+        if not (value is None or isinstance(value, (str, bool, int, float))):
+            raise ValueError('REACTION_CAPTURE_INPUT_INVALID')
+        if isinstance(value, str) and len(value) > remaining:
+            raise ValueError('SELECTED_SOURCE_FACTS_EXCEED_REVIEW_BYTE_BUDGET')
+        charge(len(json.dumps(value, ensure_ascii=True, allow_nan=False).encode('utf-8')))
+        return value
+
+    strategy = snapshot.get('strategy')
+    if strategy is not None and not isinstance(strategy, dict):
+        raise ValueError('REACTION_CAPTURE_INPUT_INVALID')
+    instrument = (strategy or {}).get('instrument') or snapshot.get('instrument')
+    if not isinstance(instrument, str) or len(instrument) > 128:
+        # Preserve absent legacy instruments: synchronous canonicalization owns it.
+        if instrument is not None:
+            raise ValueError('REACTION_CAPTURE_INPUT_INVALID')
+    private = dict(captured_ts=_number(snapshot['captured_ts']),
+                   instrument=instrument, strategy={'instrument': instrument})
+    if 'edge_family_sources' in snapshot:
+        private['edge_family_sources'] = copy_json(snapshot['edge_family_sources'])
+    return private
+
+
+async def attach_observed_event_reaction_bounded(engine, snapshot: dict) -> None:
+    """Commit only a timely private result; surviving work retains admission."""
+    deadline = time.monotonic() + REACTION_CAPTURE_BUDGET_SEC
+    with _ADMISSION_CREATION_LOCK:
+        admission = getattr(engine, '_event_reaction_capture_lock', None)
+        if admission is None:
+            admission = threading.Lock()
+            engine._event_reaction_capture_lock = admission
+    if not admission.acquire(blocking=False):
+        snapshot['edge_family_event_reaction_audit'] = _capture_audit('REACTION_CAPTURE_IN_PROGRESS')
+        return
+    lifecycle = threading.Lock()
+    state = dict(started=False, abandoned=False)
+
+    def abandon():
+        with lifecycle:
+            state['abandoned'] = True
+            if not state['started']:
+                admission.release()
+
+    def capture():
+        with lifecycle:
+            if state['abandoned']:
+                return None
+            state['started'] = True
+        try:
+            attach_observed_event_reaction(engine, private)
+            return private
+        finally:
+            admission.release()
+
+    future = None
+    try:
+        try:
+            private = _private_capture_input(snapshot)
+        except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+            abandon()
+            snapshot['edge_family_event_reaction_audit'] = _capture_audit('REACTION_CAPTURE_INPUT_INVALID')
+            return
+        from .ai_request_trace import current_trace
+        trace = current_trace()
+        worker = trace.submitted_worker('reaction_capture', capture) if trace else capture
+        future = asyncio.get_running_loop().run_in_executor(None, worker)
+        result = await asyncio.wait_for(asyncio.shield(future),
+                                       timeout=max(0., deadline-time.monotonic()))
+        # Completion scheduled after the deadline cannot acquire commit rights.
+        if time.monotonic() > deadline:
+            snapshot['edge_family_event_reaction_audit'] = _capture_audit('REACTION_CAPTURE_BUDGET_EXCEEDED')
+            return
+        audit = result['edge_family_event_reaction_audit']
+        if audit.get('available') is True and 'edge_family_sources' in result:
+            snapshot['edge_family_sources'] = result['edge_family_sources']
+        snapshot['edge_family_event_reaction_audit'] = audit
+    except (TimeoutError, asyncio.CancelledError) as exc:
+        abandon()
+        if future is not None:
+            future.cancel()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        snapshot['edge_family_event_reaction_audit'] = _capture_audit('REACTION_CAPTURE_BUDGET_EXCEEDED')
+    except BaseException:
+        # Submission/projection errors also release unstarted admission.
+        if future is None:
+            abandon()
+        raise
