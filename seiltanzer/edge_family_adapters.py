@@ -213,6 +213,13 @@ def _official_macro(snapshot: dict, row: dict, cutoff: float) -> None:
 
 
 def _event(row: dict, source: dict, meta: dict, cutoff: float) -> None:
+    from .edge_family_event_reaction import event_reaction_features
+    reaction = event_reaction_features(source, cutoff, row['instrument'])
+    row['rejected_sources'].extend(reaction['rejections'])
+    if reaction['rejections']:
+        return  # An explicit invalid extension cannot fall back to surprise.
+    for name, value in reaction['features'].items():
+        _add(row, name, value, reaction['feature_provenance'][name])
     actual, consensus = _num(source.get("actual")), _dict(source.get("consensus"))
     published = _num(source.get("published_at"))
     cmeta, reason = _meta(consensus, family="macro", instrument=row["instrument"],

@@ -1272,6 +1272,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 from .macro_t0_context import build_macro_t0_context
                 snapshot["macro_context_v1"] = await asyncio.to_thread(
                     build_macro_t0_context, macro_factory, float(snapshot["captured_ts"]))
+            from .edge_family_event_reaction import attach_observed_event_reaction
+            await asyncio.to_thread(attach_observed_event_reaction, engine, snapshot)
             from .edge_regime import refine_regime_with_events
             refine_regime_with_events(snapshot)
             from .active_management import select_active_management

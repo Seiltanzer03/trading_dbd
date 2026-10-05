@@ -102,6 +102,13 @@ def load_family_source_context(engine, snapshot, expected_sha):
                         audit['rejected_sources'].extend({'family': family, **reason}
                                                         for reason in history['rejections'])
                         continue
+                if family == 'event':
+                    from .edge_family_event_reaction import event_reaction_features
+                    reaction = event_reaction_features(record, capture, instrument)
+                    if reaction['rejections']:
+                        audit['rejected_sources'].extend({'family': family, **reason}
+                                                        for reason in reaction['rejections'])
+                        continue
                 # Preserve only causally valid scoring facts. Unsupported future
                 # schedules are audit-only; they cannot poison canonical snapshots.
                 from .decision_research import validate_no_future_timestamps
