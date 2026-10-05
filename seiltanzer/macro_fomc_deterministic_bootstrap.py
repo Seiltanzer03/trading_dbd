@@ -439,6 +439,63 @@ class FOMCDeterministicReleaseStore:
             "production_authority": False,
         }
 
+    def latest_received_text_pair(self, captured_ts: float, *, nonblocking: bool = False) -> dict:
+        """Prospective exact link, under one lock, with text bounded in SQL.
+
+        Select the newest publication/vintage first, before receipt validation;
+        an invalid newest release cannot be hidden by an older received row.
+        Historical and HTTP-only readers deliberately retain their old semantics.
+        """
+        if not self._lock.acquire(blocking=not nonblocking):
+            return dict(status='UNAVAILABLE', reason='NOVELTY_RELEASE_STORE_BUSY')
+        try:
+            from .edge_family_event_novelty import validate_native_record, validate_native_pair, _number
+            cutoff = _number(captured_ts)
+            if cutoff <= 0:
+                raise ValueError('NOVELTY_CAPTURE_CLOCK_INVALID')
+            if self._conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='macro_fomc_deterministic_releases'").fetchone() is None:
+                raise ValueError('NO_FOMC_DETERMINISTIC_TABLE')
+            latest = self._conn.execute(
+                'SELECT release_id FROM macro_fomc_deterministic_releases WHERE published_at<=? '
+                'ORDER BY published_at DESC,created_ts DESC,release_id DESC LIMIT 1', (cutoff,)).fetchone()
+            if latest is None:
+                raise ValueError('NO_FOMC_STATEMENT_BEFORE_T0')
+
+            def record(release_id):
+                length = self._conn.execute(
+                    'SELECT length(CAST(body_text AS BLOB)) FROM macro_fomc_deterministic_releases '
+                    'WHERE release_id=?', (release_id,)).fetchone()
+                if length is None:
+                    raise ValueError('NOVELTY_EXACT_PREVIOUS_RELEASE_MISSING')
+                if not isinstance(length[0], int) or not 0 < length[0] <= 65536:
+                    raise ValueError('NOVELTY_SOURCE_TEXT_BYTE_BOUND_EXCEEDED')
+                keys = ('release_id', 'date_code', 'source_url', 'published_at', 'fetched_at',
+                        'body_text', 'body_sha256', 'previous_release_id', 'previous_source_url',
+                        'contract_version', 'created_ts')
+                row = self._conn.execute('SELECT ' + ','.join(keys) +
+                    ' FROM macro_fomc_deterministic_releases WHERE release_id=? '
+                    'AND length(CAST(body_text AS BLOB))<=65536', (release_id,)).fetchone()
+                if row is None:
+                    raise ValueError('NOVELTY_SOURCE_TEXT_UNAVAILABLE')
+                result = dict(zip(keys, row))
+                validate_native_record(result, cutoff)
+                result['available_at'] = max(result['fetched_at'], result['created_ts'])
+                return result
+
+            current = record(latest[0])
+            if not current['previous_release_id']:
+                raise ValueError('NOVELTY_EXACT_PREVIOUS_RELEASE_MISSING')
+            previous = record(current['previous_release_id'])
+            validate_native_pair(current, previous, cutoff)
+            return dict(status='AVAILABLE', current=current, previous=previous)
+        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            return dict(status='UNAVAILABLE', reason=str(exc)[:160])
+        except Exception:
+            return dict(status='UNAVAILABLE', reason='NOVELTY_RELEASE_STORE_UNAVAILABLE')
+        finally:
+            self._lock.release()
+
 
 def _table_exists(runtime: Any, table: str) -> bool:
     try:

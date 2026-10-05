@@ -214,12 +214,17 @@ def _official_macro(snapshot: dict, row: dict, cutoff: float) -> None:
 
 def _event(row: dict, source: dict, meta: dict, cutoff: float) -> None:
     from .edge_family_event_reaction import event_reaction_features
+    from .edge_family_event_novelty import event_novelty_features
     reaction = event_reaction_features(source, cutoff, row['instrument'])
+    novelty = event_novelty_features(source, cutoff, row['instrument'])
     row['rejected_sources'].extend(reaction['rejections'])
-    if reaction['rejections']:
+    row['rejected_sources'].extend(novelty['rejections'])
+    if reaction['rejections'] or novelty['rejections']:
         return  # An explicit invalid extension cannot fall back to surprise.
     for name, value in reaction['features'].items():
         _add(row, name, value, reaction['feature_provenance'][name])
+    for name, value in novelty['features'].items():
+        _add(row, name, value, novelty['feature_provenance'][name])
     actual, consensus = _num(source.get("actual")), _dict(source.get("consensus"))
     published = _num(source.get("published_at"))
     cmeta, reason = _meta(consensus, family="macro", instrument=row["instrument"],

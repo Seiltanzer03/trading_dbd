@@ -151,6 +151,8 @@ def test_fast_bounded_capture_matches_synchronous_proofs():
     expected, actual = frozen(), frozen()
     reaction.attach_observed_event_reaction(engine(), expected)
     asyncio.run(reaction.attach_observed_event_reaction_bounded(engine(), actual))
+    novelty = actual.pop('edge_family_event_novelty_audit')
+    assert novelty['available'] is False and novelty['network_calls'] is False
     assert actual == expected
 
 
