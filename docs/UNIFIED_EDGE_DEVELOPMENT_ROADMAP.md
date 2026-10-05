@@ -390,3 +390,27 @@ established. Daily offhost generation/hourly polling and bundle validity remain
 timely-source coverage blockers; full-statement semantics, lawful PIT consensus,
 calibrated event action models and sufficient independent observations remain
 residuals. These artificial contract fixtures do not prove profitability.
+
+### PR #400 accepted baseline and CFTC OI continuation, 2026-10-05
+
+PR #400 merged main `c85585f78afc6909796b1afbd12c2692ff1557d3`, tree
+`8c1b469c3af1d6e8f549ec32fac18c0fc1c6e98b`. Official PR/main CI: 3020 passed,
+4 skipped, one existing warning; real WebKit and all seven required contexts
+succeeded. Deploy `37360246698`, source `37362684451`, math `37362681192`
+and post-research `37362687781` passed for this exact SHA. Actual AI returned
+`503 authoritative_price_unavailable` in 78ms, no decision published. The new
+400 reached-barrier path is proven by producer→API tests, not this live request.
+Precision and terminal-event preflight do not imply broker fills or restored
+price authority. PR #399's earlier failed smoke is superseded by this exact-tree
+release acceptance, without claiming the old request's undocumented root cause.
+
+Next bounded §7 addition retains CFTC total futures open interest and its
+immediate-report change from the already fetched body. It uses the existing
+position history contract and shared dependency group, separate OI namespaces,
+conservative first-seen clocks and unchanged CFTC→CFD mapping refusal. Missing
+or malformed OI keeps the original noncommercial positioning record. No extra
+GETs, model votes, learned edge or profitability are implied. The source
+producer/profile is implemented; final review, official exact-tree CI and release
+acceptance remain pending until evidenced in the new PR. Missing independent
+executing-broker inputs, consensus, applicable mappings and model samples remain
+explicit residuals of the original plan.

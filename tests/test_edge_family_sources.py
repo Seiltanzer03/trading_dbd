@@ -42,9 +42,9 @@ def tape():
 
 def cot():
     return encoded([{"report_date_as_yyyy_mm_dd": "2026-09-29T00:00:00.000", "cftc_contract_market_code": "088691",
-                     "noncomm_positions_long_all": "100", "noncomm_positions_short_all": "30"},
+                     "noncomm_positions_long_all": "100", "noncomm_positions_short_all": "30", "open_interest_all": "240"},
                     {"report_date_as_yyyy_mm_dd": "2026-09-22T00:00:00.000", "cftc_contract_market_code": "088691",
-                     "noncomm_positions_long_all": "80", "noncomm_positions_short_all": "40"}])
+                     "noncomm_positions_long_all": "80", "noncomm_positions_short_all": "40", "open_interest_all": "200"}])
 
 
 def calendar():

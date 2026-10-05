@@ -335,7 +335,11 @@ def _positioning(row: dict, source: dict, meta: dict, cutoff: float) -> None:
     if report is None or published is None or report > published or net is None:
         row["rejected_sources"].append({"source_id": meta["source_id"], "reason": "REPORT_PUBLICATION_CLOCK_OR_NET_MISSING"})
         return
-    _add(row, "positioning.net", net, meta)
+    open_interest = source.get('kind') == 'observed_open_interest'
+    if open_interest and (net < 0 or not net.is_integer()):
+        row['rejected_sources'].append({'source_id': meta['source_id'], 'reason': 'OPEN_INTEREST_COUNT_INVALID'})
+        return
+    _add(row, 'positioning.open_interest' if open_interest else 'positioning.net', net, meta)
     history = []
     for record in _rows(source.get("historical_positions")):
         available, ts, value = _num(record.get("available_at")), _num(record.get("report_ts")), _num(record.get("net_position"))
@@ -344,8 +348,8 @@ def _positioning(row: dict, source: dict, meta: dict, cutoff: float) -> None:
     if history:
         # Midrank, including ties, against actually published prior reports.
         percentile = (sum(v < net for v in history) + .5 * sum(v == net for v in history)) / len(history)
-        _add(row, "positioning.percentile", percentile, meta)
-        _add(row, "positioning.history_n", len(history), meta)
+        _add(row, 'positioning.open_interest_percentile' if open_interest else 'positioning.percentile', percentile, meta)
+        _add(row, 'positioning.open_interest_history_n' if open_interest else 'positioning.history_n', len(history), meta)
 
 
 def _value_carry(row: dict, source: dict, meta: dict, economics: list[dict]) -> None:

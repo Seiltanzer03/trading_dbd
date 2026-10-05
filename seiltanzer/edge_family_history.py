@@ -149,6 +149,8 @@ def position_history_features(source: dict, cutoff: float) -> dict:
         if identity['kind'] not in ('cot_report', 'fund_flow', 'observed_open_interest') or identity['kind'] != source['kind']:
             raise ValueError('POSITION_HISTORY_KIND_MISMATCH')
         report = _number(source['report_ts']); published = _number(source['published_at']); net = _number(source['net_position'])
+        if identity['kind'] == 'observed_open_interest' and (net < 0 or not net.is_integer()):
+            raise ValueError('OPEN_INTEREST_COUNT_INVALID')
         if not 0 < report <= published <= receipt or observed != report:
             raise ValueError('POSITION_HISTORY_CURRENT_CLOCK_INVALID')
         history = source['position_change_history']
@@ -158,6 +160,8 @@ def position_history_features(source: dict, cutoff: float) -> dict:
         for item in history:
             _position_declarations(item, source)
             stamp = _number(item['report_ts']); value = _number(item['net_position']); available = _number(item['available_at'])
+            if identity['kind'] == 'observed_open_interest' and (value < 0 or not value.is_integer()):
+                raise ValueError('OPEN_INTEREST_COUNT_INVALID')
             proof = item['provenance']
             _position_declarations(proof, source)
             if {key: _text(proof[key]) for key in IDENTITY} != identity:
