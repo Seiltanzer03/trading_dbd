@@ -56,3 +56,29 @@ automatically rejected after its HTTPS upgrade: approval was for HTTP origin.
 No alternate route, runner, transport, security-warning bypass or production
 mutation was used to obtain the blocked data. Live linkage/full acceptance
 remain blocked pending authorized access. No blind rerun or rollback.
+
+## Authorized read-only diagnostic channel
+
+User subsequently explicitly approved all diagnostic reading, including both
+origins. Browser access is now authorized but technically unusable: HTTP is
+upgraded to HTTPS and the server does not speak TLS (browser 502). The separate
+GitHub browser is signed out; the GitHub connector remains fully connected and
+continues to own branch/PR/release operations.
+
+Added production-policy-input-diagnostics.yml to read installed exact-SHA
+cached state through the existing SSH Actions channel. Owner/same-repository
+guard; fixed two cached GETs; 5s transport, 4MB response, 1MB source and 4min job
+bounds. No verdict, refresh, Engine, package initialization, database write,
+service restart or orders. Only bounded pure extraction definitions are AST
+loaded from the clean installed file; no secrets or private numeric values are
+printed. Evidence is explicitly present cached tick, not the failed frozen AI
+request. Output flags identify invalid domain predicates and actual barrier
+crossing without fabricating attribution to the earlier request.
+
+Scoped safety review found package import/installers, nullable original-stop
+fallback mismatch and unsanitized exception text. All three addressed; reviewer
+verified fixes and approved. Root YAML/Python parse and three controlled
+null-fallback/domain fixtures passed with no private numeric output. Product
+unchanged from e56e725; no repeated local broad run for workflow/report-only
+addition. Prior exact product official tests37356900469 and lattice37356900472
+both succeeded; final amended-tree official CI remains required.
