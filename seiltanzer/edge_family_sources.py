@@ -630,6 +630,59 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
             if code in output:
                 output[code]["edge_family_sources"]["session"].append(_proxy(calendar, code))
     captured = max(_number(clock()), *(row["received_ts"] for row in raw.values()))
+    try:
+        from .fomc_official_source import fetch_recent_statements
+        from .edge_family_event_novelty import build_received_event_novelty_source, _sha
+        from datetime import datetime as _datetime
+        from zoneinfo import ZoneInfo
+        
+        docs = fetch_recent_statements(limit=2, now=captured) if fetch is fetch_public else []
+        if len(docs) >= 2:
+            current_doc, previous_doc = docs[0], docs[1]
+            def make_record(doc, prev_doc=None):
+                pub = doc['published_at']
+                code = _datetime.fromtimestamp(pub, ZoneInfo('America/New_York')).strftime('%Y%m%d')
+                url = doc['source_url']
+                body_sha = _sha(doc['text'])
+                expected_id = 'macro-fomc-det-' + _sha(f'{code}|{url}|{pub:.6f}|{body_sha}')[:28]
+                
+                prev_id = None
+                prev_url = None
+                if prev_doc:
+                    prev_pub = prev_doc['published_at']
+                    prev_code = _datetime.fromtimestamp(prev_pub, ZoneInfo('America/New_York')).strftime('%Y%m%d')
+                    prev_url = prev_doc['source_url']
+                    prev_body_sha = _sha(prev_doc['text'])
+                    prev_id = 'macro-fomc-det-' + _sha(f'{prev_code}|{prev_url}|{prev_pub:.6f}|{prev_body_sha}')[:28]
+
+                return {
+                    'release_id': expected_id,
+                    'date_code': code,
+                    'source_url': url,
+                    'published_at': pub,
+                    'fetched_at': captured,
+                    'created_ts': captured,
+                    'body_text': doc['text'],
+                    'body_sha256': body_sha,
+                    'previous_release_id': prev_id,
+                    'previous_source_url': prev_url,
+                    'contract_version': 'fomc-deterministic-point-in-time-v1'
+                }
+            
+            pair = {
+                'status': 'AVAILABLE',
+                'current': make_record(current_doc, previous_doc),
+                'previous': make_record(previous_doc)
+            }
+            novelty = build_received_event_novelty_source(pair, captured)
+            if novelty.get('source'):
+                for code in instruments:
+                    if code in output:
+                        output[code]["edge_family_sources"]["event"].append(novelty['source'])
+            elif novelty.get('rejections'):
+                errors.append({"source_id": "fomc:novelty", "phase": "build", "reason": str(novelty['rejections'])[:160]})
+    except Exception as exc:
+        errors.append({"source_id": "fomc:recent_statements", "phase": "fetch", "reason": str(exc)[:160]})
     for code, entry in output.items():
         evidence = build_edge_family_evidence({**entry, "instrument": code, "captured_ts": captured})
         entry["readiness"] = evidence["families"]
