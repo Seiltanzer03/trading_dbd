@@ -4,10 +4,9 @@
 разделы 1–12. Этот документ сохраняет полный объём исходного плана и не заменяет
 его более узким планом предыдущего выпуска `EDGE_COMPLETION_PLAN.md`.
 
-Последняя полностью подтверждённая production-база: PR #392, main
-`f0c86e6b9ef8c40727892cbb4d961166bc668d2f` (2026-10-04).
-PR #393 установлен как `1b1838744d6014b072365c4988f8070654af34dc`,
-но его functional smoke не прошёл; полный production acceptance ещё не подтверждён.
+Последняя полностью подтверждённая production-база: PR #398, main
+`e574f4622639b09517ce7ee51c8eb536a7ede2cd`, tree
+`73f9496465c78938260322a93db9c55a0415b50a` (2026-10-05).
 Ветка runtime-интеграции `feat/unified-edge-full-integration` объединена.
 Текущая контрольная точка остатка: `docs/unified-edge-residual-audit`.
 
@@ -343,3 +342,51 @@ risk/cost/geometry/proof/sample gates and zero missing-model votes remain.
 Fresh task/whole-feature review, root broad verification, mandatory exact-tree
 CI and same-SHA production acceptance remain required; no release acceptance or
 predictive efficacy is claimed here.
+
+### PR #398 accepted baseline, 2026-10-05
+
+This supersedes the latency release-pending note above. PR #398 passed mandatory
+official CI, merge/deploy, readiness/functional/public/orchestration checks and
+exact-SHA source/math publications; all seven required production contexts were
+green for main `e574f4622639b09517ce7ee51c8eb536a7ede2cd`. Actual AI smoke was the
+accepted authoritative-price-unavailable 503 in 112ms; the positive isolated
+12-action fixture made zero orders, paid calls or real-position mutations.
+Neither deployed trace observations nor causality of the earlier timeout are
+claimed. Source liveness and predictive efficacy remain separate residuals.
+
+### Native FOMC policy-sentence novelty implementation, 2026-10-05
+
+The new native reader selects the newest publication/vintage and its exact frozen
+predecessor, validates both original normalized body hashes and native identities,
+and requires both first HTTP receipt and first local materialization before
+capture. Text is bounded before SQL materialization; current publication,
+not import/fetch time, starts the four-hour freshness window. Invalid newest
+records never fall back to an older pair.
+
+The frozen versioned extension retains each complete original target-rate
+decision sentence, offsets and distinct projection digest. It calculates only
+unsigned token-set Jaccard distance. Adapter/runtime/trainer validation
+recomputes the metric, exact normalized metadata and original release bindings;
+immutable dataset replay uses frozen bytes. Original full-body hashes remain
+lineage verified at the store, rather than being authenticated by a snippet.
+Invalid explicit extensions reject the whole record before any event feature
+is inserted; consensus requirements for surprise and missing-model zero votes
+remain unchanged.
+
+Reaction and novelty share the existing single private 0.25-second capture owner
+and deadline, with independent outcomes/audits and one timely commit. Prior facts
+survive combined byte refusal, cancellation, timeout and late completion.
+Synchronous reaction, risk/cost/geometry, sample/OOS/purge floors, acquisition,
+refresh cadence and provider limits are unchanged. No new source/model pool,
+weight, dependency or network path was added.
+
+Local affected profile: 616 passed with one existing Starlette/httpx deprecation
+warning; RED/GREEN and author self-review are recorded in
+`.superpowers/sdd/2026-10-05-fomc-policy-sentence-novelty/task-1-report.md`.
+Fresh independent task/whole-feature review, root broad checks and mandatory
+official exact-tree CI/production acceptance are still pending for this feature.
+No actual native pair, fresh event coverage or semantic/predictive effect was
+established. Daily offhost generation/hourly polling and bundle validity remain
+timely-source coverage blockers; full-statement semantics, lawful PIT consensus,
+calibrated event action models and sufficient independent observations remain
+residuals. These artificial contract fixtures do not prove profitability.

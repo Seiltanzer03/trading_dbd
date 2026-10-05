@@ -457,7 +457,13 @@ def _private_capture_input(snapshot: dict) -> dict:
 
 
 async def attach_observed_event_reaction_bounded(engine, snapshot: dict) -> None:
-    """Commit only a timely private result; surviving work retains admission."""
+    """One capture owner/deadline for independent reaction and text outcomes."""
+    from .edge_family_event_novelty import novelty_capture_audit
+
+    def refused(reason):
+        snapshot['edge_family_event_reaction_audit'] = _capture_audit(reason)
+        snapshot['edge_family_event_novelty_audit'] = novelty_capture_audit(reason.replace('REACTION_', 'NOVELTY_', 1))
+
     deadline = time.monotonic() + REACTION_CAPTURE_BUDGET_SEC
     with _ADMISSION_CREATION_LOCK:
         admission = getattr(engine, '_event_reaction_capture_lock', None)
@@ -465,7 +471,7 @@ async def attach_observed_event_reaction_bounded(engine, snapshot: dict) -> None
             admission = threading.Lock()
             engine._event_reaction_capture_lock = admission
     if not admission.acquire(blocking=False):
-        snapshot['edge_family_event_reaction_audit'] = _capture_audit('REACTION_CAPTURE_IN_PROGRESS')
+        refused('REACTION_CAPTURE_IN_PROGRESS')
         return
     lifecycle = threading.Lock()
     state = dict(started=False, abandoned=False)
@@ -483,6 +489,8 @@ async def attach_observed_event_reaction_bounded(engine, snapshot: dict) -> None
             state['started'] = True
         try:
             attach_observed_event_reaction(engine, private)
+            from .edge_family_event_novelty import attach_observed_event_novelty
+            attach_observed_event_novelty(engine, private)
             return private
         finally:
             admission.release()
@@ -493,7 +501,7 @@ async def attach_observed_event_reaction_bounded(engine, snapshot: dict) -> None
             private = _private_capture_input(snapshot)
         except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
             abandon()
-            snapshot['edge_family_event_reaction_audit'] = _capture_audit('REACTION_CAPTURE_INPUT_INVALID')
+            refused('REACTION_CAPTURE_INPUT_INVALID')
             return
         from .ai_request_trace import current_trace
         trace = current_trace()
@@ -503,19 +511,22 @@ async def attach_observed_event_reaction_bounded(engine, snapshot: dict) -> None
                                        timeout=max(0., deadline-time.monotonic()))
         # Completion scheduled after the deadline cannot acquire commit rights.
         if time.monotonic() > deadline:
-            snapshot['edge_family_event_reaction_audit'] = _capture_audit('REACTION_CAPTURE_BUDGET_EXCEEDED')
+            refused('REACTION_CAPTURE_BUDGET_EXCEEDED')
             return
         audit = result['edge_family_event_reaction_audit']
-        if audit.get('available') is True and 'edge_family_sources' in result:
+        novelty_audit = result['edge_family_event_novelty_audit']
+        if (audit.get('available') is True or novelty_audit.get('available') is True) and 'edge_family_sources' in result:
             snapshot['edge_family_sources'] = result['edge_family_sources']
         snapshot['edge_family_event_reaction_audit'] = audit
+        snapshot['edge_family_event_novelty_audit'] = novelty_audit
     except (TimeoutError, asyncio.CancelledError) as exc:
         abandon()
         if future is not None:
             future.cancel()
         if isinstance(exc, asyncio.CancelledError):
+            refused('REACTION_CAPTURE_CANCELLED')
             raise
-        snapshot['edge_family_event_reaction_audit'] = _capture_audit('REACTION_CAPTURE_BUDGET_EXCEEDED')
+        refused('REACTION_CAPTURE_BUDGET_EXCEEDED')
     except BaseException:
         # Submission/projection errors also release unstarted admission.
         if future is None:

@@ -264,6 +264,7 @@ def _row_reason(row, trained):
         return "FEATURE_SCHEMA_INVALID_OR_OVER_BOUND"
     history_bindings = {}
     reaction_bindings = {}
+    release_bindings = {}
     for feature, value in features.items():
         meta = provenance.get(feature)
         if (not isinstance(feature, str) or not feature
@@ -281,6 +282,11 @@ def _row_reason(row, trained):
         reason = reaction_provenance_reason(feature, value, meta, captured, horizon, row['instrument'])
         if reason:
             return reason
+        from .edge_family_event_novelty import FEATURE as NOVELTY_FEATURE, novelty_provenance_reason
+        novelty = feature == NOVELTY_FEATURE
+        reason = novelty_provenance_reason(feature, value, meta, captured, horizon, row['instrument'])
+        if reason:
+            return reason
         if reaction:
             for proof in meta['constituent_provenance']:
                 source_id = proof['source_id']
@@ -288,9 +294,21 @@ def _row_reason(row, trained):
                 if source_id in reaction_bindings and reaction_bindings[source_id] != binding:
                     return 'FEATURE_REACTION_PROVENANCE_INVALID'
                 reaction_bindings[source_id] = binding
+        if reaction or novelty:
+            for proof in meta['constituent_provenance']:
+                if proof.get('hash_kind') != 'OFFICIAL_NORMALIZED_DOCUMENT_SHA256':
+                    continue
+                # Reaction availability is HTTP receipt; novelty also retains
+                # local import and a sentence projection. Bind common original
+                # document identity rather than comparing unequal proof schemas.
+                release_id = proof['release_id']
+                binding = tuple(proof[key] for key in ('source_url', 'body_sha256', 'published_at', 'received_ts'))
+                if release_id in release_bindings and release_bindings[release_id] != binding:
+                    return 'FEATURE_EVENT_RELEASE_IDENTITY_CONFLICT'
+                release_bindings[release_id] = binding
         from .edge_family_history import feature_applicability_reason, history_provenance_reason
         reason = (feature_applicability_reason(meta, horizon) or
-                  (None if reaction else history_provenance_reason(feature, meta, captured, horizon, row['instrument'])))
+                  (None if reaction or novelty else history_provenance_reason(feature, meta, captured, horizon, row['instrument'])))
         if reason:
             return reason
         if 'history_contract_version' in meta:
@@ -304,7 +322,7 @@ def _row_reason(row, trained):
                 if source_id in history_bindings and history_bindings[source_id] != binding:
                     return 'FEATURE_HISTORY_PROVENANCE_INVALID'
                 history_bindings[source_id] = binding
-        if row["family_id"] == "event" and not reaction:
+        if row["family_id"] == "event" and not (reaction or novelty):
             consensus = meta.get("consensus_provenance")
             if (not isinstance(consensus, dict)
                     or _feature_reason(consensus, row["instrument"], "macro", captured, allow_global=True)
