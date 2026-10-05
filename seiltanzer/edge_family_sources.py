@@ -407,14 +407,14 @@ def parse_cot_open_interest(body: bytes, *, contract: str, receipt: float, sourc
     category = 'TOTAL_OPEN_INTEREST_FUTURES_ONLY'
     identity = dict(series_id='CFTC' + contract, kind='observed_open_interest',
         unit='contracts', category=category, venue='CFTC', body_sha256=hashlib.sha256(body).hexdigest())
-    return {**_meta(source_id, base['instrument'], current['report_ts'], receipt),
+    return {**_meta(source_id + ':open_interest', base['instrument'], current['report_ts'], receipt),
         'kind': 'observed_open_interest', 'published_at': receipt,
         'report_ts': current['report_ts'], 'net_position': current['net_position'],
         'historical_positions': [previous], 'position_category': category,
         **{key: base[key] for key in ('publication_clock_basis', 'historical_availability_basis',
                                      'market_name', 'dependency_group')},
         'position_history_contract': POSITION_CONTRACT, 'position_series': identity,
-        'position_change_history': [dict(previous, provenance=dict(identity, source_id=source_id,
+        'position_change_history': [dict(previous, provenance=dict(identity, source_id=source_id + ':open_interest',
             received_ts=receipt, published_at=receipt, source_verified=True))]}
 
 
