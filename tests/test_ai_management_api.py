@@ -51,6 +51,21 @@ def test_fallback_returns_structured_management_decision(client):
     assert edge["automatic_execution_allowed"] is False
 
 
+def test_prospective_reaction_unavailability_is_frozen_before_provider_review_identity(client, monkeypatch):
+    from seiltanzer.decision_research import canonical_snapshot
+    seen = []
+    def provider(snapshot):
+        audit = snapshot['edge_family_event_reaction_audit']
+        assert audit['network_calls'] is False and audit['available'] is False
+        assert snapshot['review_id'] == canonical_snapshot(snapshot)['review_id']
+        seen.append(audit)
+        return {'verdict': 'bounded unavailable observed reaction', 'model': 'fixture'}
+    monkeypatch.setattr('seiltanzer.app.request_verdict', provider)
+    response = client.post('/api/ai/verdict')
+    assert response.status_code == 200
+    assert len(seen) == 1 and seen[0]['reason'] == 'RECEIVED_FOMC_STORE_UNAVAILABLE'
+
+
 def test_actual_provider_transport_review_freezes_independent_input_and_response(client, monkeypatch):
     """Exercise the installed provider path, not a replacement request_verdict."""
     from seiltanzer import ai_runtime_report_v20 as report

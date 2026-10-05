@@ -61,6 +61,22 @@ def _spec(date_code):
     )
 
 
+def test_actual_received_reader_preserves_legacy_reconstruction_and_first_fetch():
+    runtime = _Runtime(); store = StrictFOMCDeterministicReleaseStore(runtime)
+    publication = parse_release_timestamp(CURRENT_HTML, date_code='20260429')
+    store.ingest(_spec('20260429'), html=CURRENT_HTML, fetched_at=publication+600)
+    assert store.latest_admissible(publication+300)['available_at'] == publication
+    assert hasattr(store, 'latest_received'), 'actual received release reader missing'
+    assert store.latest_received(publication+300)['status'] == 'UNAVAILABLE'
+    received = store.latest_received(publication+600)
+    assert received['status'] == 'VALID'
+    assert received['received_ts'] == received['available_at'] == received['fetched_at'] == publication+600
+    assert received['historical_reconstruction'] is True
+    assert received['source_vintage_guarantee'] == 'OFFICIAL_DATED_PAGE_NOT_VERSIONED'
+    store.ingest(_spec('20260429'), html=CURRENT_HTML, fetched_at=publication+1000)
+    assert store.latest_received(publication+1200)['received_ts'] == publication+600
+
+
 def test_index_discovers_official_statement_urls_oldest_first():
     specs = parse_fomc_index(INDEX_HTML)
     assert [item.date_code for item in specs] == ["20260318", "20260429"]

@@ -408,6 +408,10 @@ class FOMCDeterministicReleaseStore:
     def latest_admissible(self, captured_ts: float) -> dict[str, Any]:
         return _latest_release(self.runtime, captured_ts)
 
+    def latest_received(self, captured_ts: float) -> dict[str, Any]:
+        """Known-at-capture read; never backdate the first stored actual fetch."""
+        return _latest_release(self.runtime, captured_ts, received_only=True)
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             row = self._conn.execute(
@@ -439,22 +443,24 @@ def _table_exists(runtime: Any, table: str) -> bool:
         return False
 
 
-def _latest_release(runtime: Any, captured_ts: float) -> dict[str, Any]:
+def _latest_release(runtime: Any, captured_ts: float, *, received_only: bool = False) -> dict[str, Any]:
     if not _table_exists(runtime, "macro_fomc_deterministic_releases"):
         return {"status": "UNAVAILABLE", "reason": "NO_FOMC_DETERMINISTIC_TABLE"}
     cutoff = _finite(captured_ts)
     if cutoff is None:
         return {"status": "UNAVAILABLE", "reason": "INVALID_T0"}
+    receipt_filter = 'AND fetched_at>=published_at AND fetched_at<=? ' if received_only else ''
+    parameters = (float(cutoff), float(cutoff)) if received_only else (float(cutoff),)
     with runtime._lock:
         row = runtime._conn.execute(
             "SELECT release_id,date_code,source_url,published_at,fetched_at,body_sha256,"
             "payload_json,previous_release_id,previous_source_url,contract_version "
-            "FROM macro_fomc_deterministic_releases WHERE published_at<=? "
-            "ORDER BY published_at DESC,created_ts DESC LIMIT 1", (float(cutoff),)
+            "FROM macro_fomc_deterministic_releases WHERE published_at<=? " + receipt_filter +
+            "ORDER BY published_at DESC,created_ts DESC LIMIT 1", parameters
         ).fetchone()
     if row is None:
         return {"status": "UNAVAILABLE", "reason": "NO_FOMC_STATEMENT_BEFORE_T0"}
-    return {
+    result = {
         "status": "VALID", "family": FOMC_FAMILY,
         "release_id": str(row[0]), "date_code": str(row[1]),
         "source": "Federal Reserve Board", "source_url": str(row[2]),
@@ -470,6 +476,13 @@ def _latest_release(runtime: Any, captured_ts: float) -> dict[str, Any]:
         "causal_rule": "published_at<=T0",
         "research_only": True, "production_authority": False,
     }
+    if received_only:
+        result.update(available_at=float(row[4]), received_ts=float(row[4]),
+            source_id=str(row[0]), source_verified=True, event_type='fomc',
+            publication_basis='VERIFIED_PUBLICATION_TIMESTAMP',
+            hash_kind='OFFICIAL_NORMALIZED_DOCUMENT_SHA256',
+            causal_rule='published_at<=fetched_at<=T0')
+    return result
 
 
 def feature_records_from_runtime(runtime: Any, *, instrument: str,

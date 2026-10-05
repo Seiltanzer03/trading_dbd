@@ -273,3 +273,44 @@ broad Python on343f53f:2715 passed,4 skipped,known unchanged Python3.12 SQLite/W
 baseline failure;42 frontend checks passed. Full official final-tree Python3.11/
 real WebKit and exact-SHA release are still required. Evidence and decisions:
 `docs/superpowers/reviews/2026-10-04-causal-family-history.md`.
+
+### Causal history accepted baseline, 2026-10-05
+
+PR #396 supersedes the earlier pending-release history note. Accepted main
+`0481fae4f4d6bc5ca5fbd2349babba85869af95c`, tree
+`6e6d196cd4c3f473c744b6890a24915b20cc2798` (local content-equivalent
+`9c8fde4c502949d3f26ac4b2be2eeeb299f4ee19`) passed official Python3.11 CI
+`37227153708` (2757 passed, 4 skipped), real WebKit, staging `37227371138`
+and deploy `37227371140`. Delivery/readiness/functional/public and isolated
+12-action checks passed with zero orders, paid calls or real-position mutations.
+Source `37228433324` and math `37228431773` were published for that exact SHA;
+all seven CI/production contexts succeeded. Source models remain zero across 13
+instruments; inventory `37228476233` reports 65 DATA_READY and 27 insufficient
+independent evidence. Optional EDE v13 run `37230075582` was shut down by the
+runner after computation, before publication, without an assertion failure or
+blind rerun. This does not change mandatory acceptance or prove effectiveness.
+
+### Observed event reaction scoped implementation, 2026-10-05
+
+The prospective producer now reads immutable actual first FOMC receipt and copies
+the existing configured locked feed batch, without new fetching or old snapshot
+enrichment. Its bounded proof preserves actual Binance USDT/Yahoo FX identity and
+the explicit configured-market-context/non-broker role. Consecutive completed
+closes produce observed 1m/5m returns and start delay, with conservative support
+windows and one shared release dependency group. Legacy surprise still requires
+strictly prepublication matching consensus.
+
+New snapshots append the bounded packet before review identity; combined selected
+facts above 8KB leave existing facts unchanged and explicitly refuse attachment.
+Runtime validates at immutable bundle capture, adapter recomputes at review, frozen
+dataset replay stays independent of future paths, and trainer recomputes values,
+support manifests, configured identity, clocks and applicability. No risk, cost,
+geometry, OOS, purge or sample floor was changed. Missing models remain zero vote.
+Saved RED/GREEN and scoped verification are in
+`.superpowers/sdd/2026-10-05-observed-event-reaction/task-1-report.md`; fresh task/
+whole-feature review and root broad/official exact-tree CI/release are still
+required. No genuine qualifying frozen release/target-price pair was established
+by the prior source audit, and these artificial fixtures do not create one.
+Broader mappings/broker equivalence, lawful PIT consensus, calibrated event action
+models, general text novelty, value/carry and sufficient independent observations
+remain explicit residuals; no profitability or causal-effect claim is made.

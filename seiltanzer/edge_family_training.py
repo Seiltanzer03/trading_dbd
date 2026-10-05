@@ -263,6 +263,7 @@ def _row_reason(row, trained):
             or not set(windows).issubset(features)):
         return "FEATURE_SCHEMA_INVALID_OR_OVER_BOUND"
     history_bindings = {}
+    reaction_bindings = {}
     for feature, value in features.items():
         meta = provenance.get(feature)
         if (not isinstance(feature, str) or not feature
@@ -275,9 +276,21 @@ def _row_reason(row, trained):
                                  allow_global=row["family_id"] in {"macro", "event"})
         if reason:
             return reason
+        from .edge_family_event_reaction import REACTION_NAME, reaction_provenance_reason
+        reaction = bool(REACTION_NAME.fullmatch(feature))
+        reason = reaction_provenance_reason(feature, value, meta, captured, horizon, row['instrument'])
+        if reason:
+            return reason
+        if reaction:
+            for proof in meta['constituent_provenance']:
+                source_id = proof['source_id']
+                binding = _canonical(proof)
+                if source_id in reaction_bindings and reaction_bindings[source_id] != binding:
+                    return 'FEATURE_REACTION_PROVENANCE_INVALID'
+                reaction_bindings[source_id] = binding
         from .edge_family_history import feature_applicability_reason, history_provenance_reason
         reason = (feature_applicability_reason(meta, horizon) or
-                  history_provenance_reason(feature, meta, captured, horizon, row['instrument']))
+                  (None if reaction else history_provenance_reason(feature, meta, captured, horizon, row['instrument'])))
         if reason:
             return reason
         if 'history_contract_version' in meta:
@@ -291,7 +304,7 @@ def _row_reason(row, trained):
                 if source_id in history_bindings and history_bindings[source_id] != binding:
                     return 'FEATURE_HISTORY_PROVENANCE_INVALID'
                 history_bindings[source_id] = binding
-        if row["family_id"] == "event":
+        if row["family_id"] == "event" and not reaction:
             consensus = meta.get("consensus_provenance")
             if (not isinstance(consensus, dict)
                     or _feature_reason(consensus, row["instrument"], "macro", captured, allow_global=True)
