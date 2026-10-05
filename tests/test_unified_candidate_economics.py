@@ -1,9 +1,12 @@
 from copy import deepcopy
+from dataclasses import replace
+import json
 
 import numpy as np
 import pytest
 
 from seiltanzer import unified_candidate_economics as economics
+from seiltanzer.ai_policy_base import PolicyInputs, extract_policy_inputs
 from test_extended_policy_evaluation import _snapshot
 
 
@@ -27,6 +30,56 @@ def snapshot(paths=None, weights=None):
 def candidate(policy, identity=None, eligible=True, **params):
     return {"policy": policy, "candidate_id": identity or policy,
             "parameters": params, "eligible": eligible}
+
+
+@pytest.mark.parametrize("current_r,stop_r,take_r", [
+    (.00001, 0., 3.),
+    (.2, .19999, 3.),
+    (2.99999, -1., 3.),
+])
+def test_serialized_policy_preserves_valid_domain_near_execution_barriers(
+        current_r, stop_r, take_r):
+    value = snapshot([[current_r, current_r + .1],
+                      [current_r, current_r - .1]], [.5, .5])
+    value["trade_geometry"]["current"] = 100. + 10. * current_r
+    inputs = PolicyInputs(**value["policy_manager"]["inputs"])
+    inputs = replace(inputs, r0=current_r, max_r=current_r,
+                     stop_r=stop_r, T=take_r)
+    value["policy_manager"]["inputs"] = json.loads(json.dumps(inputs.as_dict()))
+    result = economics.price_unified_candidates(value, [candidate("HOLD")])
+    assert result["available"] is True, result
+    assert result["candidates"]["HOLD"]["available"] is True
+
+
+@pytest.mark.parametrize("stop_r,take_r", [(1., 3.), (-1., 1.)])
+def test_serialized_policy_still_rejects_current_price_on_execution_barrier(
+        stop_r, take_r):
+    value = snapshot()
+    inputs = PolicyInputs(**value["policy_manager"]["inputs"])
+    inputs = replace(inputs, stop_r=stop_r, T=take_r)
+    value["policy_manager"]["inputs"] = json.loads(json.dumps(inputs.as_dict()))
+    result = economics.price_unified_candidates(value, [candidate("HOLD")])
+    assert result["available"] is False
+    assert result["reason"] == "INVALID_POLICY_INPUTS"
+
+
+@pytest.mark.parametrize("current_r,active_stop", [
+    (0., 100.), (.2, 102.), (.2, 103.), (-1.2, 90.),
+])
+def test_extracted_policy_does_not_move_actual_stop_to_create_valid_domain(
+        current_r, active_stop):
+    tick = {"prob": {"r": current_r, "T": 3., "available": True},
+            "market": {"available": True},
+            "trade": {"entry": 100., "stop": 90., "direction": "long",
+                      "position_state": {"original_stop": 90.,
+                                         "active_stop_price": active_stop}}}
+    value = snapshot()
+    value["policy_manager"]["inputs"] = extract_policy_inputs(tick).as_dict()
+    value["trade_geometry"]["current"] = 100. + 10. * current_r
+    assert value["policy_manager"]["inputs"]["stop_r"] >= current_r
+    result = economics.price_unified_candidates(value, [candidate("HOLD")])
+    assert result["available"] is False
+    assert result["reason"] == "INVALID_POLICY_INPUTS"
 
 
 def test_weighted_bank_preserves_measure_and_prices_close_fractions_against_same_hold():
