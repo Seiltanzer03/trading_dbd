@@ -414,3 +414,19 @@ producer/profile is implemented; final review, official exact-tree CI and releas
 acceptance remain pending until evidenced in the new PR. Missing independent
 executing-broker inputs, consensus, applicable mappings and model samples remain
 explicit residuals of the original plan.
+
+### External agent package review, 2026-10-06
+
+See `docs/UNIFIED_EDGE_AGENT_REVIEW_2026-10-06.md` for factual acceptance and
+original eight-stage reconciliation. OI deterministic series identity is
+accepted independently. The event branch is rejected for prefetch receipt
+backdating, unaccounted acquisition and missing native first-receipt persistence;
+its implementation is excluded from this release, not declared complete.
+Readiness audit now includes all configured 13×8 cells, explicit missing
+captures/families, capture freshness, mapping refusals and separate source/model/
+forecast status. Missing sample counts and active runtime votes remain null/
+NOT_REPORTED. Existing terminal audit/UI distinguishes input from forecast.
+The off-host source workflow saves the matrix with input hash and exact code SHA.
+Profile526 and node syntax/render smoke pass; official final-tree CI and new
+production acceptance remain pending until recorded. No new live data/model
+coverage, trained forecasts, executing costs or profit is asserted.
