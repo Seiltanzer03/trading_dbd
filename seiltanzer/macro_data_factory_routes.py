@@ -5,6 +5,7 @@ import os
 import time
 import threading
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -54,6 +55,22 @@ from .treasury_t0_context import (
     install_treasury_ai_context,
     install_treasury_t0_context,
 )
+
+
+def _install_prospective_fomc_lifespan(app: FastAPI, runtime) -> None:
+    """Run the local reader inside the existing app/store lifetime."""
+    original_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def prospective_lifespan(inner_app):
+        async with original_lifespan(inner_app) as state:
+            try:
+                runtime.start()
+                yield state
+            finally:
+                runtime.stop()
+
+    app.router.lifespan_context = prospective_lifespan
 
 
 def install_macro_data_factory_routes(app: FastAPI) -> None:
@@ -122,7 +139,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     prospective_fomc_runtime = ProspectiveFOMCRuntime(fomc_deterministic_store,
         historical_bundle_path.parent / 'fomc_prospective_latest.json')
     app.state.macro_fomc_prospective_runtime = prospective_fomc_runtime
-    app.add_event_handler('shutdown', prospective_fomc_runtime.stop)
+    _install_prospective_fomc_lifespan(app, prospective_fomc_runtime)
     fomc_runtime = FOMCOfficialRuntime(factory)
     treasury_runtime = TreasuryLiveRuntime()
 
@@ -153,7 +170,6 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     historical_bls_runtime.start()
     historical_ism_runtime.start()
     fomc_deterministic_runtime.start()
-    prospective_fomc_runtime.start()
     treasury_runtime.start()
 
     # Several research stores share SQLite with the startup materializer. A
