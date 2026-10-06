@@ -44,6 +44,37 @@ jobs:
             du -xhd1 /opt/seiltanzer/data /opt/seiltanzer/data/backups /root/.cache /var/cache /var/log 2>/dev/null | sort -h | tail -n 30
             find /tmp /opt/seiltanzer/data/backups/local -maxdepth 1 -type f -size +100M -printf '%s %b %p\n' 2>/dev/null
             journalctl --disk-usage
+            echo '=== RUNNER STORAGE (READ ONLY) ==='
+            timeout 30s du -xhd2 /opt/actions-runner 2>/dev/null | sort -h | tail -n 40
+            find /opt/actions-runner -maxdepth 1 -mindepth 1 -type d -printf '%f\n'
+            systemctl list-units --all --type=service 'actions.runner*' --no-pager
+            ps -eo pid,comm | grep -E 'Runner|Worker' || true
+            echo '=== FOMC RECEIPT (READ ONLY) ==='
+            timeout 20s /opt/seiltanzer/.venv/bin/python - <<'FOMC_READ'
+            import json, sqlite3, time, urllib.request
+            from pathlib import Path
+            p=Path('/opt/seiltanzer/data/research/active_edge/fomc_prospective_latest.json')
+            # The publication location is discovered from existing bounded research directories.
+            paths=list(Path('/opt/seiltanzer/data/research').glob('fomc_prospective_latest.json'))
+            paths+=list(Path('/opt/seiltanzer/data/research').glob('*/fomc_prospective_latest.json'))
+            for p in paths[:4]:
+                if p.stat().st_size>950000: continue
+                capture=json.loads(p.read_bytes())
+                print(json.dumps({'capture_path':str(p),'capture_sha256':capture.get('capture_sha256'),'published_for_sha':capture.get('published_for_sha'),'captured_ts':capture.get('captured_ts'),'now':time.time(),'records':[{k:r.get(k) for k in ('spec','published_at','fetched_at','body_sha256')} for r in capture.get('records',[])[:2]]}))
+            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=2)
+            c.execute('PRAGMA query_only=ON')
+            c.execute('PRAGMA busy_timeout=2000')
+            if c.execute("SELECT 1 FROM sqlite_master WHERE name='macro_fomc_deterministic_releases'").fetchone():
+                rows=c.execute('SELECT date_code,source_url,published_at,fetched_at,created_ts,body_sha256,previous_release_id FROM macro_fomc_deterministic_releases ORDER BY published_at DESC,created_ts DESC LIMIT 4').fetchall()
+                print(json.dumps({'native_fomc_rows':rows}))
+            else: print('NATIVE_FOMC_TABLE_NOT_IN_TRADES_DB')
+            c.close()
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/research/macro/fomc-deterministic/latest',timeout=5) as response:
+                raw=response.read(200001)
+            if len(raw)>200000: raise ValueError('FOMC_HTTP_RESPONSE_BOUND')
+            latest=json.loads(raw)
+            print(json.dumps({'native_latest_http':{k:v for k,v in latest.items() if k not in ('body_text','payload_json','html')}}))
+            FOMC_READ
             echo '=== RESOURCE AND WEBSOCKET ERRORS ==='
             free -m
             vmstat 1 3
