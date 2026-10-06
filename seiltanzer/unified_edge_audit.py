@@ -114,6 +114,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             "evidence_family_ids", "direction_score", "score", "horizon_minutes",
             "production_role", "historical_validation_status", "component_id",
             "readiness", "forecast_available", "needs_data", "observed_ts", "max_age_sec",
+            "weight_pool", "standalone_vote",
         ),
     }
     for key, keys in contracts.items():

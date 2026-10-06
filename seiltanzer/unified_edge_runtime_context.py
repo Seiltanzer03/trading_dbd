@@ -74,6 +74,8 @@ def load_unified_edge_context(path, *, expected_document_sha256, expected_sha, s
 
 
 def attach_unified_edge_context(engine, snapshot, *, expected_sha):
+    if isinstance(expected_sha, str) and re.fullmatch(r'[0-9a-f]{40}', expected_sha):
+        snapshot['runtime_code_sha'] = expected_sha
     settings = engine.settings
     context, audit = load_unified_edge_context(
         getattr(settings, "unified_edge_context_path", ""),

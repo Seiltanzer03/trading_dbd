@@ -200,7 +200,15 @@ def run_pipeline(reviews, *, expected_sha, previous_archive=None, trained_at=Non
                    'production_activation_performed': False, 'production_or_database_writes': 0,
                    'network_calls': 0, 'historical_profit_proven': False,
                    'archive_retention': 'bounded restored archive; workflow artifacts expire after 14 days'}
-    return {'archive': archive, 'dataset': dataset, 'diagnostics': diagnostics, 'runtime_context': context}
+    from scripts.audit_readiness_matrix import build_report, enrich_report
+    readiness = build_report({'captured_ts': trained_at, 'instruments': {}}, input_sha256=None)
+    readiness.update(code_sha=expected_sha, input_basis='NO_CURRENT_SOURCE_CAPTURE_PROVIDED')
+    enrich_report(readiness, expected_sha=expected_sha, training=diagnostics, reviews=reviews)
+    readiness['evidence_input_sha256'] = {
+        'training': hashlib.sha256(encode_json(diagnostics, max_bytes=MAX_DATA_BYTES)).hexdigest(),
+        'reviews': hashlib.sha256(encode_json(reviews, max_bytes=MAX_EXPORT_BYTES)).hexdigest()}
+    return {'archive': archive, 'dataset': dataset, 'diagnostics': diagnostics,
+            'runtime_context': context, 'readiness': readiness}
 
 
 def write_outputs(result, output_dir):

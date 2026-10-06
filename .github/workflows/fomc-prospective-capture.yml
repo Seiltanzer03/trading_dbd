@@ -1,0 +1,57 @@
+name: fomc-prospective-capture
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        required: true
+        type: string
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fomc-prospective-capture-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -q -e . paramiko
+      - name: Capture the exact latest official pair with bounded receipt clocks
+        id: capture
+        continue-on-error: true
+        run: >-
+          python -m scripts.build_fomc_prospective_capture --expected-sha "$EXPECTED_SHA"
+          --output fomc_prospective_latest.json
+      - name: Deliver verified capture or explicit acquisition refusal
+        if: always() && steps.capture.outcome != 'skipped'
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: >-
+          python scripts/publish_active_edge_report.py --password "$SSH_PASSWORD"
+          --expected-sha "$EXPECTED_SHA" --input fomc_prospective_latest.json
+          --remote-name fomc_prospective_latest.json --run-id "${{ github.run_id }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fomc-prospective-${{ env.EXPECTED_SHA }}
+          path: fomc_prospective_latest.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Keep acquisition failure visible in GitHub
+        if: steps.capture.outcome == 'failure'
+        run: exit 1

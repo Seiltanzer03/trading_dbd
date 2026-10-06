@@ -118,6 +118,11 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     fomc_deterministic_runtime = FOMCDeterministicBootstrapRuntime(
         fomc_deterministic_store)
     fomc_deterministic_runtime.offhost_historical_bundle_path = historical_bundle_path
+    from .fomc_prospective_capture import ProspectiveFOMCRuntime
+    prospective_fomc_runtime = ProspectiveFOMCRuntime(fomc_deterministic_store,
+        historical_bundle_path.parent / 'fomc_prospective_latest.json')
+    app.state.macro_fomc_prospective_runtime = prospective_fomc_runtime
+    app.add_event_handler('shutdown', prospective_fomc_runtime.stop)
     fomc_runtime = FOMCOfficialRuntime(factory)
     treasury_runtime = TreasuryLiveRuntime()
 
@@ -148,6 +153,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
     historical_bls_runtime.start()
     historical_ism_runtime.start()
     fomc_deterministic_runtime.start()
+    prospective_fomc_runtime.start()
     treasury_runtime.start()
 
     # Several research stores share SQLite with the startup materializer. A

@@ -230,3 +230,7 @@ def test_live_chain_overflow_preserves_decision_and_policy_metrics(base_raises):
         ai_verdict._impl._enforce_snapshot_budget = original_impl
         ai_verdict._BASE_ENFORCE_SNAPSHOT_BUDGET_V18 = original_base
         guard._INSTALLED = False
+def test_strict_compaction_preserves_frozen_runtime_code_generation():
+    snapshot = {'runtime_code_sha': 'a'*40, 'captured_ts': 100, 'policy_manager': {}}
+    guard._strict_authoritative_compaction(snapshot)
+    assert snapshot['runtime_code_sha'] == 'a'*40

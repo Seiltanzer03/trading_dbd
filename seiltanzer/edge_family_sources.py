@@ -71,6 +71,12 @@ class _CalendarTables(HTMLParser):
 
 
 def _allowed_url(url: str) -> bool:
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if (parsed.scheme == 'https' and parsed.netloc == 'www.federalreserve.gov'
+            and not parsed.query and not parsed.fragment
+            and re.fullmatch(r'/newsevents/pressreleases/(?:\d{4}-press-fomc|monetary\d{8}a)\.htm', parsed.path)):
+        return True
     return any(url == base or url.startswith(base + "/") or url.startswith(base + "?")
                for base in (COINBASE, CFTC, NYSE))
 

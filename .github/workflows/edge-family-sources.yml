@@ -76,10 +76,6 @@ jobs:
               print('EDGE_SOURCE_READINESS', code, json.dumps(row['readiness'], sort_keys=True))
           print('EDGE_SOURCE_COLLECTION_PASS', len(report['instruments']), 'models=0')
           PY
-      - name: Audit every configured family from the saved capture
-        run: >-
-          python -m scripts.audit_readiness_matrix --input edge_family_sources_latest.json
-          --json --code-sha "$EXPECTED_SHA" > edge_family_readiness_audit.json
       - name: Publish source facts for exact production SHA only
         if: github.event_name != 'pull_request'
         env:
@@ -88,6 +84,10 @@ jobs:
           python scripts/publish_active_edge_report.py --password "$SSH_PASSWORD"
           --expected-sha "$EXPECTED_SHA" --input edge_family_sources_latest.json
           --remote-name edge_family_sources_latest.json --run-id "${{ github.run_id }}"
+      - name: Audit every configured family from the final source bytes
+        run: >-
+          python -m scripts.audit_readiness_matrix --input edge_family_sources_latest.json
+          --json --code-sha "$EXPECTED_SHA" > edge_family_readiness_audit.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
