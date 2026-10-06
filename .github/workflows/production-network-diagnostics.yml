@@ -6,11 +6,6 @@ on:
     paths:
       - ".github/workflows/production-network-diagnostics.yml"
   workflow_dispatch:
-    inputs:
-      operation:
-        description: "Operation: diagnose (default) or cleanup_runner_2336"
-        required: true
-        default: "diagnose"
 
 permissions:
   contents: read
@@ -32,74 +27,72 @@ jobs:
 
       - name: Inspect VPS listener and firewall read-only
         uses: appleboy/ssh-action@v1
-        env:
-          OPERATION: ${{ github.event.inputs.operation || 'diagnose' }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
           command_timeout: 5m
-          envs: OPERATION
           script: |
             set +e
-            if [ "${OPERATION:-diagnose}" = "cleanup_runner_2336" ]; then
-              echo '=== SAFE PREFLIGHT RUNNER CLEANUP ==='
-              python3 - <<'PY_CLEAN'
-import os, sys, shutil, subprocess
-from pathlib import Path
+            echo '=== SAFE PREFLIGHT RUNNER CLEANUP ==='
+            python3 - <<'PY_CLEAN'
+            import textwrap
+            exec(textwrap.dedent("""
+                import os, sys, shutil, subprocess
+                from pathlib import Path
 
-runner_dir = Path("/opt/actions-runner")
-bin_symlink = runner_dir / "bin"
-ext_symlink = runner_dir / "externals"
-target_bin = runner_dir / "bin.2.336.0"
-target_ext = runner_dir / "externals.2.336.0"
+                runner_dir = Path("/opt/actions-runner")
+                bin_symlink = runner_dir / "bin"
+                ext_symlink = runner_dir / "externals"
+                target_bin = runner_dir / "bin.2.336.0"
+                target_ext = runner_dir / "externals.2.336.0"
 
-assert runner_dir.is_dir(), "Runner dir missing"
-real_bin = bin_symlink.resolve()
-real_ext = ext_symlink.resolve()
-print(f"Active bin target: {real_bin}")
-print(f"Active externals target: {real_ext}")
-assert "2.336.0" not in str(real_bin), f"bin symlink points to 2.336.0: {real_bin}"
-assert "2.336.0" not in str(real_ext), f"externals symlink points to 2.336.0: {real_ext}"
-assert real_bin.exists(), f"Active bin target missing: {real_bin}"
-assert real_ext.exists(), f"Active externals target missing: {real_ext}"
+                assert runner_dir.is_dir(), "Runner dir missing"
+                real_bin = bin_symlink.resolve()
+                real_ext = ext_symlink.resolve()
+                print(f"Active bin target: {real_bin}")
+                print(f"Active externals target: {real_ext}")
+                assert "2.336.0" not in str(real_bin), f"bin symlink points to 2.336.0: {real_bin}"
+                assert "2.336.0" not in str(real_ext), f"externals symlink points to 2.336.0: {real_ext}"
+                assert real_bin.exists(), f"Active bin target missing: {real_bin}"
+                assert real_ext.exists(), f"Active externals target missing: {real_ext}"
 
-try:
-    pids = subprocess.check_output(["pgrep", "-f", "Runner"], text=True).split()
-    for pid in pids:
-        exe = os.path.realpath(f"/proc/{pid}/exe")
-        print(f"PID {pid} exe: {exe}")
-        assert "2.336.0" not in exe, f"PID {pid} using 2.336.0: {exe}"
-except subprocess.CalledProcessError:
-    pass
+                try:
+                    pids = subprocess.check_output(["pgrep", "-f", "Runner"], text=True).split()
+                    for pid in pids:
+                        exe = os.path.realpath(f"/proc/{pid}/exe")
+                        print(f"PID {pid} exe: {exe}")
+                        assert "2.336.0" not in exe, f"PID {pid} using 2.336.0: {exe}"
+                except subprocess.CalledProcessError:
+                    pass
 
-statvfs_before = os.statvfs("/")
-free_before = statvfs_before.f_bavail * statvfs_before.f_frsize
-print(f"Free bytes before: {free_before} ({free_before / 1024**3:.3f} GiB)")
+                statvfs_before = os.statvfs("/")
+                free_before = statvfs_before.f_bavail * statvfs_before.f_frsize
+                print(f"Free bytes before: {free_before} ({free_before / 1024**3:.3f} GiB)")
 
-manifest = {}
-total_reclaimed = 0
-for target in [target_bin, target_ext]:
-    if target.exists():
-        bytes_count = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
-        file_count = sum(1 for _ in target.rglob("*"))
-        manifest[str(target)] = {"bytes": bytes_count, "files": file_count}
-        total_reclaimed += bytes_count
-        print(f"REMOVING: {target} ({bytes_count / 1024**2:.1f} MiB, {file_count} entries)")
-        shutil.rmtree(target)
-        print(f"REMOVED: {target}")
-    else:
-        print(f"ALREADY_ABSENT: {target}")
+                manifest = {}
+                total_reclaimed = 0
+                for target in [target_bin, target_ext]:
+                    if target.exists():
+                        bytes_count = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
+                        file_count = sum(1 for _ in target.rglob("*"))
+                        manifest[str(target)] = {"bytes": bytes_count, "files": file_count}
+                        total_reclaimed += bytes_count
+                        print(f"REMOVING: {target} ({bytes_count / 1024**2:.1f} MiB, {file_count} entries)")
+                        shutil.rmtree(target)
+                        print(f"REMOVED: {target}")
+                    else:
+                        print(f"ALREADY_ABSENT: {target}")
 
-statvfs_after = os.statvfs("/")
-free_after = statvfs_after.f_bavail * statvfs_after.f_frsize
-print(f"Free bytes after: {free_after} ({free_after / 1024**3:.3f} GiB)")
-print(f"Delta: {(free_after - free_before) / 1024**2:.1f} MiB")
-assert free_after >= 1024**3, f"Free space still under 1 GiB: {free_after}"
-print("CLEANUP_SUCCESS")
-PY_CLEAN
-            fi
+                statvfs_after = os.statvfs("/")
+                free_after = statvfs_after.f_bavail * statvfs_after.f_frsize
+                print(f"Free bytes after: {free_after} ({free_after / 1024**3:.3f} GiB)")
+                print(f"Delta: {(free_after - free_before) / 1024**2:.1f} MiB")
+                assert free_after >= 1024**3, f"Free space still under 1 GiB: {free_after}"
+                print("CLEANUP_SUCCESS")
+            """))
+            PY_CLEAN
             echo '=== SERVICE ==='
             systemctl status seiltanzer --no-pager -l
             echo '=== STORAGE CAPACITY (READ ONLY) ==='
