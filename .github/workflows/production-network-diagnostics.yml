@@ -36,6 +36,8 @@ jobs:
           script: |
             set +e
             echo '=== SAFE PREFLIGHT RUNNER CLEANUP ==='
+            systemctl restart 'actions.runner*.service' || true
+            sleep 4
             python3 - <<'PY_CLEAN'
             import textwrap
             exec(textwrap.dedent("""
@@ -47,6 +49,7 @@ jobs:
                 ext_symlink = runner_dir / "externals"
                 target_bin = runner_dir / "bin.2.336.0"
                 target_ext = runner_dir / "externals.2.336.0"
+                target_update = runner_dir / "_work" / "_update"
 
                 assert runner_dir.is_dir(), "Runner dir missing"
                 real_bin = bin_symlink.resolve()
@@ -73,7 +76,7 @@ jobs:
 
                 manifest = {}
                 total_reclaimed = 0
-                for target in [target_bin, target_ext]:
+                for target in [target_bin, target_ext, target_update]:
                     if target.exists():
                         bytes_count = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
                         file_count = sum(1 for _ in target.rglob("*"))
