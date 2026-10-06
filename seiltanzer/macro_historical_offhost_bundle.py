@@ -922,16 +922,20 @@ def _fomc_refresh(runtime: Any) -> dict[str, Any]:
         spec = FOMCStatementSpec(**record["spec"])
         if spec.approximate_published_at > now_ts + 86400.0:
             continue
-        if runtime.store.has_source_url(spec.source_url):
-            skipped += 1
-            continue
         try:
-            stored.append(runtime.store.ingest(
+            # URL presence is not a vintage identity. The immutable store
+            # caches an exact URL/body hash while retaining a changed body as
+            # a separate release with its actual receipt/materialization.
+            result = runtime.store.ingest(
                 spec,
                 html=record["html"],
                 previous_source_url=record.get("previous_source_url"),
                 fetched_at=record["fetched_at"],
-            ))
+            )
+            if result.get('status') == 'CACHED':
+                skipped += 1
+            else:
+                stored.append(result)
         except Exception as exc:
             errors[f"INGEST:FOMC:{spec.date_code}"] = (
                 f"{type(exc).__name__}:{str(exc)[:180]}"

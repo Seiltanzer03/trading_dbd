@@ -430,3 +430,17 @@ The off-host source workflow saves the matrix with input hash and exact code SHA
 Profile526 and node syntax/render smoke pass; official final-tree CI and new
 production acceptance remain pending until recorded. No new live data/model
 coverage, trained forecasts, executing costs or profit is asserted.
+
+### Native FOMC same-URL revision ingestion, 2026-10-06
+
+A verified revised official page at an already-known dated URL was ignored by
+historical off-host ingestion before reaching the immutable native store. The
+regression reads an actual-schema verified file, reparses/hashes all bodies,
+imports two originals, then a changed same-URL body with later actual receipt;
+baseline refused to add the third row. Ingestion now delegates URL/body identity
+to the existing native store, which retains the original immutable receipt and
+materialization, caches exact duplicates, and adds a changed verified vintage.
+The actual bound loader, parser/strict predecessor store and clock guards remain.
+RED1 failed; affected native/offhost/novelty profile110 passed. Independent review
+and official final-tree CI/release still pending. Acquisition cadence/transport
+is unchanged and timely prospective event coverage is not declared complete.

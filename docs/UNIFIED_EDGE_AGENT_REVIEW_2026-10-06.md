@@ -51,3 +51,21 @@ runtime transport. Простой повторный fetch без native persist
 Licensed PIT consensus, validated CFD mappings, independent OOS samples,
 executing broker costs и actual live efficacy остаются отдельными зависимостями.
 104 ячейки audit — покрытие отчёта, а не 104 готовых прогноза.
+
+## Интеграция и запуск выпуска
+
+PR #402 объединён как `0dd04d1a28704896c36514b23338ce22f8e33147`,
+код/tree `2bbce19223e37dfce4e7aadd46644c095303d628`. Официальный PR CI
+`37417126041`: 3048 passed, 4 skipped, одна существующая warning; реальные
+WebKit и все применимые companion workflows успешны. PR #401 закрыт как
+superseded, его OI fix сохранён.
+
+GitHub сформировал squash message из истории checkpoint и перенёс в сообщение
+старый маркер пропуска CI. Поэтому push CI на этом main SHA не запустился,
+и production пока не принят. Следующий PR восстанавливает обычный выпуск и включает отдельно проверенное
+исправление native same-URL revision ingestion; полное timely acquisition
+по-прежнему не объявляется завершённым. Integrator должен при
+merge явно задать чистый commit_message: автоматическое объединение старых
+сообщений недопустимо. Повторный main CI здесь нужен для восстановления
+штатного автоматического deployment trigger, не для дополнительной полировки.
+Новую production acceptance записать только после exact-SHA подтверждения.

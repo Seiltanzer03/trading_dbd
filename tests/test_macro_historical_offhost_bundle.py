@@ -690,3 +690,51 @@ def test_alfred_nfp_payload_uses_one_historical_vintage():
     assert payload["unemployment_change_pp"] == pytest.approx(-0.1)
     assert payload["historical_alfred_vintage"] is True
     assert payload["source_kind"] == ALFRED_SOURCE_KIND
+
+
+def test_fomc_verified_same_url_revision_preserves_first_receipt_and_native_history(monkeypatch, tmp_path):
+    import json
+    bundle = _bundle()
+    clock = [NOW]
+    monkeypatch.setattr(offhost.time, 'time', lambda: clock[0])
+    monkeypatch.setattr(offhost, 'current_repository_sha', lambda: SHA)
+    monkeypatch.delenv(offhost.PATH_ENV, raising=False)
+    runtime = Runtime()
+    wrapper = type('Wrapper', (), {})()
+    wrapper.store = StrictFOMCDeterministicReleaseStore(runtime)
+    wrapper.offhost_historical_bundle_path = tmp_path / 'received.json'
+    path = wrapper.offhost_historical_bundle_path
+    path.write_text(json.dumps(bundle))
+    assert offhost._fomc_refresh(wrapper)['status'] == 'OK'
+    original = runtime._conn.execute(
+        'SELECT release_id,fetched_at,created_ts,body_sha256 FROM macro_fomc_deterministic_releases '
+        'ORDER BY published_at DESC LIMIT 1').fetchone()
+    assert original[1] == NOW - 10
+    assert original[2] == NOW
+
+    clock[0] += 60
+    changed = deepcopy(bundle)
+    revised = changed['fomc_records'][-1]
+    revised['html'] = revised['html'].replace('4 to 4-1/4 percent', '3-3/4 to 4 percent')
+    revised['source_sha256'] = offhost._sha256(revised['html'])
+    revised['fetched_at'] = clock[0] - 5
+    revised['payload'] = deterministic_statement_payload(extract_statement_text(revised['html']),
+        previous_body=extract_statement_text(changed['fomc_records'][0]['html']))
+    revised.pop('record_sha256')
+    changed['fomc_records'][-1] = _record(revised)
+    changed['created_at'] = clock[0]
+    changed['bundle_sha256'] = offhost._sha256(offhost._without(changed, 'bundle_sha256'))
+    path.write_text(json.dumps(changed))
+    result = offhost._fomc_refresh(wrapper)
+    assert result['status'] == 'OK'
+    assert wrapper.store.status()['row_n'] == 3, 'same dated URL must not hide a new verified body'
+    assert runtime._conn.execute(
+        'SELECT release_id,fetched_at,created_ts,body_sha256 FROM macro_fomc_deterministic_releases '
+        'WHERE release_id=?', (original[0],)).fetchone() == original
+    newest = runtime._conn.execute(
+        'SELECT fetched_at,created_ts,body_sha256 FROM macro_fomc_deterministic_releases '
+        'ORDER BY created_ts DESC LIMIT 1').fetchone()
+    assert newest[0] == clock[0] - 5 and newest[1] == clock[0]
+    assert newest[2] != original[3]
+    assert offhost._fomc_refresh(wrapper)['skipped'] == 2
+    assert wrapper.store.status()['row_n'] == 3
