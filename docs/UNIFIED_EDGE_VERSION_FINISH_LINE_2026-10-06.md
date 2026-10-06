@@ -88,5 +88,45 @@ snapshot hash, synthetic export и future cutoff не подтверждают r
 
 Второй блок: 75 профильных тестов passed за 4.47 sec (pipeline, readiness,
 runtime context, compact audit и snapshot byte guard). Полного CI, merge и
-выпуска этого пакета ещё нет. Следующий блок — конечные математический и
-сравнительный отчёты; затем один review и обязательный CI собранного пакета.
+выпуска этого пакета ещё нет.
+
+## Конечные отчёты и граница данных
+
+`UNIFIED_EDGE_FINAL_REPORT_2026-10-06.md` и `.json` содержат конечную сверку:
+13 инструментов × 6 прогнозных голов × 4 горизонта = 312 строк. Взята уже
+принятая mathematical публикация для main `0cefc1ac`, workflow run
+37419822474, artifact 11392766403. SHA-256 ZIP проверен по GitHub artifact
+digest; извлечён только сохранённый JSON, новый поиск не запускался.
+Поиск завершён для всех 13; JPY100 без поддержанного преимущества,
+BTC/ETH/SOL остаются diagnostic из-за неподтверждённой price-series mapping.
+Пригодность, возраст и факт применения в runtime не заменяются поддержкой модели.
+
+Сравнение пересчитано существующим offline comparison на сохранённом read-only
+экспорте: 32 reviews, 0 rejected, 0 paid LLM calls. Сопоставимая историческая
+когорта — четыре разные сделки, а не 32 независимых наблюдения. В ней balanced,
+llm20 и quant100 выбрали HOLD; прирост legacy control +0.0569375R описательный,
+а не доказательство лучшей стратегии. Модельные сценарии, path counterfactuals
+и реальные ACK наблюдения разделены. Нет settled broker-fill portfolio ledger,
+доказанной прибыли либо оптимальности весов.
+
+Сводный отчёт явно сохраняет SHA, времена и hashes исходных файлов. Код
+comparison — 16cd102a; старые frozen reviews не объявлены полученными этой
+версией. `scripts.build_unified_edge_completion_report` только читает готовые
+выходы, не обучает, не симулирует и не обращается к поставщикам.
+Три профильных regression tests генератора passed за 0.36 sec.
+
+Остаются внешние данные и эффективность: lawful pre-release consensus,
+подтверждённые CFD mappings, фактические costs executing account, достаточные
+независимые cohorts и prospective полезность. Эти зависимости остаются открытыми
+в матрице. Они не требуют бесконечно расширять поиск текущей версии.
+Whole-package read-only review выполнен одним независимым reviewer: один Important
+finding. Общий availability pool budget нельзя выдавать за вклад выбранного
+кандидата без preference. Исправлено: applied weight читается только из
+`candidates[selected_candidate_id].component_contributions`; глобальный budget
+показан отдельно, отсутствующий вклад остаётся неизвестным. Regression сначала
+воспроизвёл неверные .15 вместо 0, затем прошёл; readiness + completion profile:
+10 passed за 3.44 sec. Других Important/Critical reviewer не обнаружил.
+Minor: промежуточные формулировки стадий обновлены этим разделом, без нового кода.
+
+Следующая стадия — один обязательный CI финального SHA, PR/merge/deploy и точные
+production-подтверждения. Новых feature blocks до этой стадии не добавляем.

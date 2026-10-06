@@ -147,13 +147,18 @@ def enrich_report(report, *, expected_sha, training=None, reviews=None):
             if isinstance(families, list):
                 families = {row.get('family_id'): row for row in families if isinstance(row, dict)}
             components = {row.get('component_id'): row for row in rows(ensemble.get('components')) if isinstance(row, dict)}
+            selected = [row for row in rows(ensemble.get('candidates')) if isinstance(row, dict)
+                        and row.get('candidate_id') == ensemble.get('selected_candidate_id')]
+            contributions = {row.get('component_id'): row for row in rows(selected[0].get('component_contributions'))
+                             if isinstance(row, dict)} if len(selected) == 1 else {}
             for family in FAMILIES:
                 cell, row = cells[(code, family)], mapping(mapping(families).get(family))
                 if not row:
                     continue
                 forecast = row.get('forecast_available') is True and row.get('readiness') == 'VALIDATED_FORECAST_AVAILABLE'
                 pool = row.get('weight_pool')
-                weight = number(mapping(components.get(pool)).get('effective_weight'))
+                budget = number(mapping(components.get(pool)).get('effective_weight'))
+                weight = number(mapping(contributions.get(pool)).get('effective_weight'))
                 applied = ensemble.get('applied') is True
                 if weight is not None and not 0 <= weight <= 1:
                     weight = None
@@ -164,6 +169,7 @@ def enrich_report(report, *, expected_sha, training=None, reviews=None):
                     runtime_captured_ts=record['captured_ts'], runtime_forecast_available=forecast,
                     runtime_input_available=row.get('available') is True,
                     runtime_weight_pool=pool, applied_pool_weight=weight if applied and forecast else None,
+                    available_pool_budget=budget if budget is not None and 0 <= budget <= 1 else None,
                     standalone_family_weight=None, active_vote_status=status,
                     runtime_reason=row.get('reason'), runtime_missing_fields=rows(row.get('needs_data')))
     report['limitations'].append('Training cohort counts are not additive. Shared pool weight is not an exclusive family weight. Saved runtime evidence is historical, not current live readiness.')

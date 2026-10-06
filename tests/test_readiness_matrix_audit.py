@@ -62,7 +62,10 @@ def sidecars(*, applied=True, sha='a'*40):
              'reason': 'OOS_VALIDATED'}]}}}
     snapshot = {'runtime_code_sha': sha, 'trade_id': 1, 'captured_ts': 90,
         'strategy': {'instrument': 'NAS100'}, 'policy_manager': {'unified_edge_ensemble': {
-            'applied': applied, 'components': [{'component_id': 'active_edge',
+            'applied': applied, 'selected_candidate_id': 'HOLD',
+            'candidates': [{'candidate_id': 'HOLD', 'component_contributions': [
+                {'component_id': 'active_edge', 'effective_weight': .15}]}],
+            'components': [{'component_id': 'active_edge',
                 'available': True, 'effective_weight': .15}],
             'edge_families': [{'family_id': 'event', 'available': True,
                 'forecast_available': True, 'readiness': 'VALIDATED_FORECAST_AVAILABLE',
@@ -105,3 +108,18 @@ def test_wrong_generation_and_corrupt_frozen_review_do_not_promote_models_or_vot
     assert cell['independent_group_count'] is None
     assert cell['active_vote_status'] == 'NOT_REPORTED_IN_SOURCE_BUNDLE'
     assert report['sidecar_rejections']
+
+
+def test_candidate_without_preference_does_not_receive_the_global_pool_budget(tmp_path):
+    import hashlib
+    training, reviews = sidecars()
+    record = reviews['reviews'][0]
+    snapshot = json.loads(record['snapshot_json'])
+    snapshot['policy_manager']['unified_edge_ensemble']['candidates'][0]['component_contributions'][0]['effective_weight'] = 0
+    record['snapshot_json'] = json.dumps(snapshot)
+    record['snapshot_sha256'] = hashlib.sha256(record['snapshot_json'].encode()).hexdigest()
+    report = audit(tmp_path, {'captured_ts': 100}, training=training, reviews=reviews)
+    cell = next(c for c in report['cells'] if c['instrument'] == 'NAS100' and c['family'] == 'event')
+    assert cell['applied_pool_weight'] == 0
+    assert cell['active_vote_status'] == 'ADMITTED_POOL_HAS_ZERO_WEIGHT'
+    assert cell['available_pool_budget'] == .15
