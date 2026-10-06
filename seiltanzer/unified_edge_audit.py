@@ -113,6 +113,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             "status", "reason", "quality", "age_sec", "source_ids",
             "evidence_family_ids", "direction_score", "score", "horizon_minutes",
             "production_role", "historical_validation_status", "component_id",
+            "readiness", "forecast_available", "needs_data", "observed_ts", "max_age_sec",
         ),
     }
     for key, keys in contracts.items():
@@ -222,5 +223,9 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
             f"Expected {_format(row.get('expected_net_r'), 'R')}; CVaR10 {_format(row.get('cvar10_net_r'), 'R')}."
         )
     for row in audit.get("edge_families") or []:
-        lines.append(f"Edge {row.get('family_id') or row.get('edge_family') or row.get('family') or row.get('name') or '—'}: {row.get('status') or row.get('available') or '—'}; {row.get('reason') or 'доступен'}.")
+        lines.append(f"Edge {row.get('family_id') or row.get('edge_family') or row.get('family') or row.get('name') or '—'}: "
+                     f"{row.get('readiness') or row.get('status') or 'UNAVAILABLE'}; "
+                     f"входы: {row.get('available', '—')}; прогноз: {row.get('forecast_available', '—')}; "
+                     f"{row.get('reason') or 'причина не сообщена'}; "
+                     f"нужно: {', '.join(str(item) for item in row.get('needs_data') or []) or '—'}.")
     return lines

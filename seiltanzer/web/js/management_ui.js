@@ -173,9 +173,10 @@ export function mountUnifiedEdgeEnsemble(container, audit) {
     : Object.entries(audit.edge_families || {}).map(([family_id, row]) => ({family_id, ...row}));
   if (edgeFamilies.length) {
     appendTextLine(panel, 'tiny', 'Семейства edge:');
-    appendAuditTable(panel, ['Семейство', 'Статус', 'Причина'], edgeFamilies.map((row) => [
+    appendAuditTable(panel, ['Семейство', 'Входы / прогноз', 'Статус / что требуется'], edgeFamilies.map((row) => [
       row.family_id || row.edge_family || row.family || row.name || '—',
-      row.status ?? row.available ?? '—', row.reason || 'доступен',
+      `${row.available === true ? 'получены' : 'недоступны'} / ${row.forecast_available === true ? 'доступен' : 'недоступен'}`,
+      `${row.readiness || row.status || 'UNAVAILABLE'} · ${row.reason || 'причина не сообщена'}${Array.isArray(row.needs_data) && row.needs_data.length ? ' · нужно: ' + row.needs_data.join(', ') : ''}`,
     ]));
   }
   container.appendChild(panel);

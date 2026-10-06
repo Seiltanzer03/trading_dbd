@@ -6,8 +6,10 @@ on:
     paths:
       - 'seiltanzer/edge_family*.py'
       - 'scripts/build_edge_family_sources.py'
+      - 'scripts/audit_readiness_matrix.py'
       - 'scripts/publish_active_edge_report.py'
       - 'tests/test_edge_family_source*.py'
+      - 'tests/test_readiness_matrix_audit.py'
       - '.github/workflows/edge-family-sources.yml'
   workflow_dispatch:
     inputs:
@@ -43,7 +45,7 @@ jobs:
           cache: pip
       - run: pip install -q -e '.[dev]' paramiko
       - name: Verify bounded causal collectors and local reader
-        run: python -m pytest -q tests/test_edge_family_sources.py tests/test_edge_family_source_runtime.py
+        run: python -m pytest -q tests/test_edge_family_sources.py tests/test_edge_family_source_runtime.py tests/test_readiness_matrix_audit.py
       - name: Collect public source facts off-host, never fabricate models
         run: |
           set -euo pipefail
@@ -74,6 +76,10 @@ jobs:
               print('EDGE_SOURCE_READINESS', code, json.dumps(row['readiness'], sort_keys=True))
           print('EDGE_SOURCE_COLLECTION_PASS', len(report['instruments']), 'models=0')
           PY
+      - name: Audit every configured family from the saved capture
+        run: >-
+          python -m scripts.audit_readiness_matrix --input edge_family_sources_latest.json
+          --json --code-sha "$EXPECTED_SHA" > edge_family_readiness_audit.json
       - name: Publish source facts for exact production SHA only
         if: github.event_name != 'pull_request'
         env:
@@ -86,6 +92,8 @@ jobs:
         if: always()
         with:
           name: edge-family-sources-${{ env.EXPECTED_SHA }}
-          path: edge_family_sources_latest.json
+          path: |
+            edge_family_sources_latest.json
+            edge_family_readiness_audit.json
           if-no-files-found: error
           retention-days: 14

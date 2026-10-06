@@ -126,3 +126,17 @@ def test_core_payload_keeps_list_contributions_and_family_availability():
     assert "Вклад в балл выбранного действия" in text
     assert "Текущий LLM +" in text
     assert "Общий набор сценариев не подтверждён" in text
+
+
+def test_family_audit_distinguishes_observed_input_from_missing_forecast():
+    raw = audit()
+    raw['edge_families'] = {'positioning': dict(available=True,
+        readiness='DATA_AVAILABLE_MODEL_PENDING', forecast_available=False,
+        needs_data=['out-of-sample positioning calibration'],
+        observed_ts=100, max_age_sec=200, reason='MODEL_PENDING')}
+    compact = compact_unified_ensemble(raw)['edge_families'][0]
+    assert compact['forecast_available'] is False
+    assert compact['needs_data'] == ['out-of-sample positioning calibration']
+    text = '\n'.join(render_unified_ensemble_lines(raw))
+    assert 'входы: True; прогноз: False' in text
+    assert 'out-of-sample positioning calibration' in text

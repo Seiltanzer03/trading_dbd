@@ -386,6 +386,38 @@ def parse_cot(body: bytes, *, contract: str, receipt: float, source_id: str) -> 
     return result
 
 
+def parse_cot_open_interest(body: bytes, *, contract: str, receipt: float, source_id: str) -> dict:
+    """Optional latest-pair OI from the same received futures-only COT body."""
+    base = parse_cot(body, contract=contract, receipt=receipt, source_id=source_id)
+    rows = sorted(json.loads(body), key=lambda row: _ts(row['report_date_as_yyyy_mm_dd']))
+    if len(rows) < 2:
+        raise ValueError('COT_OPEN_INTEREST_IMMEDIATE_PREDECESSOR_MISSING')
+    pair = []
+    for row in rows[-2:]:
+        try:
+            count = _number(row['open_interest_all'])
+        except (ValueError, TypeError, KeyError, OverflowError):
+            raise ValueError('COT_OPEN_INTEREST_COUNT_MISSING_OR_INVALID') from None
+        if count < 0 or not count.is_integer():
+            raise ValueError('COT_OPEN_INTEREST_COUNT_INVALID')
+        pair.append(dict(report_ts=_ts(row['report_date_as_yyyy_mm_dd']),
+                         net_position=count, available_at=receipt))
+    previous, current = pair
+    from .edge_family_history import POSITION_CONTRACT
+    category = 'TOTAL_OPEN_INTEREST_FUTURES_ONLY'
+    identity = dict(series_id='CFTC' + contract, kind='observed_open_interest',
+        unit='contracts', category=category, venue='CFTC', body_sha256=hashlib.sha256(body).hexdigest())
+    return {**_meta(source_id + ':open_interest', base['instrument'], current['report_ts'], receipt),
+        'kind': 'observed_open_interest', 'published_at': receipt,
+        'report_ts': current['report_ts'], 'net_position': current['net_position'],
+        'historical_positions': [previous], 'position_category': category,
+        **{key: base[key] for key in ('publication_clock_basis', 'historical_availability_basis',
+                                     'market_name', 'dependency_group')},
+        'position_history_contract': POSITION_CONTRACT, 'position_series': identity,
+        'position_change_history': [dict(previous, provenance=dict(identity, source_id=source_id + ':open_interest',
+            received_ts=receipt, published_at=receipt, source_verified=True))]}
+
+
 def parse_coinbase_closes(body: bytes, *, receipt: float,
                           start_ts: float | None = None,
                           end_ts: float | None = None) -> dict[float, float]:
@@ -624,6 +656,16 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
             record = parse("cftc:" + code, parse_cot, contract=contract)
             if record:
                 output[code]["edge_family_sources"]["positioning"].append(_proxy(record, code))
+                # Optional OI refusal must not change the net-position parse status
+                # or lose its valid original record. No second network request.
+                key = 'cftc:' + code
+                try:
+                    oi = parse_cot_open_interest(bodies[key], contract=contract,
+                        receipt=raw[key]['received_ts'], source_id=raw[key]['source_id'])
+                except (ValueError, TypeError, KeyError, OverflowError) as exc:
+                    errors.append({'source_id': key, 'phase': 'open_interest', 'reason': str(exc)[:160]})
+                else:
+                    output[code]['edge_family_sources']['positioning'].append(_proxy(oi, code))
     calendar = parse("nyse:calendar", parse_nyse_calendar)
     if calendar:
         for code in ("NAS100", "SP500", "US30"):
