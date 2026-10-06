@@ -347,6 +347,11 @@ def attach_observed_event_novelty(engine, snapshot: dict) -> None:
         store = getattr(factory, 'fomc_deterministic_store', None)
         if store is None:
             return
+        from .fomc_prospective_capture import prospective_admission_reason
+        reason = prospective_admission_reason(store, cutoff)
+        if reason:
+            audit['reason'] = reason
+            return
         pair = store.latest_received_text_pair(cutoff, nonblocking=True)
         produced = build_received_event_novelty_source(pair, cutoff)
         if produced['source'] is None:

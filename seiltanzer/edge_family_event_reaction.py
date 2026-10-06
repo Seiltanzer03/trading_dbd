@@ -360,6 +360,11 @@ def attach_observed_event_reaction(engine, snapshot: dict) -> None:
         store = getattr(factory, 'fomc_deterministic_store', None)
         if store is None:
             return
+        from .fomc_prospective_capture import prospective_admission_reason
+        reason = prospective_admission_reason(store, cutoff)
+        if reason:
+            audit['reason'] = reason
+            return
         release = store.latest_received(cutoff, nonblocking=True)
         if release.get('reason') == 'REACTION_RELEASE_STORE_BUSY':
             audit['reason'] = 'REACTION_RELEASE_STORE_BUSY'
