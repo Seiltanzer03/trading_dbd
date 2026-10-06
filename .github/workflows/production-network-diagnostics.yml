@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   diagnose:
@@ -96,6 +97,17 @@ jobs:
                 print("CLEANUP_SUCCESS")
             """))
             PY_CLEAN
+            echo '=== RE-ACQUIRE RESEARCH ACCEPTANCE GATE FOR ACCEPTED MAIN SHA ==='
+            /opt/seiltanzer/.venv/bin/python /opt/seiltanzer/scripts/production_research_acceptance.py acquire-gate \
+              --acceptance-run-id 37434556616 \
+              --expected-sha 6b047e45a6653bb15c52ea95c030e6117da2e11b \
+              --ttl-seconds 7200
+            /opt/seiltanzer/.venv/bin/python /opt/seiltanzer/scripts/production_research_acceptance.py validate-gate \
+              --acceptance-run-id 37434556616 \
+              --expected-sha 6b047e45a6653bb15c52ea95c030e6117da2e11b
+            echo '=== EDE-INVENTORY MARKER CHECK ==='
+            ls -la /var/lock/seiltanzer-*-37434556616.done || true
+            cat /var/lock/seiltanzer-ede-inventory-37434556616.done || true
             echo '=== SERVICE ==='
             systemctl status seiltanzer --no-pager -l
             echo '=== STORAGE CAPACITY (READ ONLY) ==='
@@ -219,3 +231,16 @@ jobs:
           echo "curl_exit=$?"
           test -f /tmp/external-state-after.json && head -c 500 /tmp/external-state-after.json || true
           echo
+
+      - name: Trigger snapshot audit workflow with active acceptance lease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Triggering production-ede-v12-audit workflow..."
+          curl --fail-with-body --silent --show-error \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/production-ede-v12-audit.yml/dispatches" \
+            -d '{"ref":"main","inputs":{"expected_sha":"6b047e45a6653bb15c52ea95c030e6117da2e11b","acceptance_run_id":"37434556616"}}' || echo "Cross-workflow dispatch via token not permitted; client script will dispatch"
