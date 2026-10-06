@@ -49,12 +49,24 @@ jobs:
             find /opt/actions-runner -maxdepth 1 -mindepth 1 -type d -printf '%f\n'
             systemctl list-units --all --type=service 'actions.runner*' --no-pager
             ps -eo pid,comm | grep -E 'Runner|Worker' || true
+            echo '=== RUNNER DETAILED INSPECTION (READ ONLY) ==='
+            ls -ld /opt/actions-runner/bin* /opt/actions-runner/externals* /opt/actions-runner/_work/_update 2>/dev/null || true
+            echo "bin_symlink=$(readlink -f /opt/actions-runner/bin 2>/dev/null || echo NONE)"
+            echo "externals_symlink=$(readlink -f /opt/actions-runner/externals 2>/dev/null || echo NONE)"
+            for pid in $(pgrep -f Runner.Listener); do
+              echo "PID: $pid"
+              ls -l /proc/$pid/exe /proc/$pid/cwd 2>/dev/null || true
+              cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' '; echo
+            done
+            echo '=== UPDATE MARKERS AND PROCESSES ==='
+            ls -la /opt/actions-runner/_work/_update 2>/dev/null || true
+            ps -eo pid,ppid,comm,args | grep -E 'Runner|Worker|update' | grep -v grep || true
+            echo '=== RUNNER WORKSPACE STATUS ==='
+            ls -la /opt/actions-runner/_work/trading_dbd 2>/dev/null || true
             echo '=== FOMC RECEIPT (READ ONLY) ==='
-            timeout 20s /opt/seiltanzer/.venv/bin/python - <<'FOMC_READ'
-            import json, sqlite3, time, urllib.request
+            timeout 45s /opt/seiltanzer/.venv/bin/python - <<'FOMC_READ'
+            import json, sqlite3, time, urllib.request, urllib.error
             from pathlib import Path
-            p=Path('/opt/seiltanzer/data/research/active_edge/fomc_prospective_latest.json')
-            # The publication location is discovered from existing bounded research directories.
             paths=list(Path('/opt/seiltanzer/data/research').glob('fomc_prospective_latest.json'))
             paths+=list(Path('/opt/seiltanzer/data/research').glob('*/fomc_prospective_latest.json'))
             for p in paths[:4]:
@@ -69,11 +81,23 @@ jobs:
                 print(json.dumps({'native_fomc_rows':rows}))
             else: print('NATIVE_FOMC_TABLE_NOT_IN_TRADES_DB')
             c.close()
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/research/macro/fomc-deterministic/latest',timeout=5) as response:
-                raw=response.read(200001)
-            if len(raw)>200000: raise ValueError('FOMC_HTTP_RESPONSE_BOUND')
-            latest=json.loads(raw)
-            print(json.dumps({'native_latest_http':{k:v for k,v in latest.items() if k not in ('body_text','payload_json','html')}}))
+            t0=time.time()
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/research/macro/status',timeout=10) as response:
+                    raw=response.read(200001)
+                st=json.loads(raw)
+                print(json.dumps({'macro_status_http':{'code':200,'elapsed_sec':round(time.time()-t0,3),'fomc_deterministic':st.get('fomc_deterministic'),'official_families':st.get('official_families')}}))
+            except Exception as e:
+                print(json.dumps({'macro_status_http_error':str(e),'elapsed_sec':round(time.time()-t0,3)}))
+            t0=time.time()
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/research/macro/fomc-deterministic/latest',timeout=15) as response:
+                    raw=response.read(200001)
+                if len(raw)>200000: raise ValueError('FOMC_HTTP_RESPONSE_BOUND')
+                latest=json.loads(raw)
+                print(json.dumps({'native_latest_http':{'code':200,'elapsed_sec':round(time.time()-t0,3),**{k:v for k,v in latest.items() if k not in ('body_text','payload_json','html')}}}))
+            except Exception as e:
+                print(json.dumps({'native_latest_http_error':str(e),'elapsed_sec':round(time.time()-t0,3)}))
             FOMC_READ
             echo '=== RESOURCE AND WEBSOCKET ERRORS ==='
             free -m
