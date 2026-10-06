@@ -29,6 +29,7 @@ def test_pinned_registry_is_used_by_working_request_hook(tmp_path):
     engine = SimpleNamespace(settings=SimpleNamespace(unified_edge_context_path=str(path),
                                                        unified_edge_context_sha256=digest))
     attach_unified_edge_context(engine, frozen, expected_sha=SHA)
+    assert frozen['runtime_code_sha'] == SHA
     from seiltanzer.unified_edge_ensemble import build_unified_ensemble
     audit = build_unified_ensemble(frozen)
     assert audit["selected_policy"] == "CLOSE_10"

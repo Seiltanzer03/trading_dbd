@@ -140,3 +140,9 @@ def test_family_audit_distinguishes_observed_input_from_missing_forecast():
     text = '\n'.join(render_unified_ensemble_lines(raw))
     assert 'входы: True; прогноз: False' in text
     assert 'out-of-sample positioning calibration' in text
+def test_compact_audit_preserves_family_pool_identity_for_readiness_join():
+    from seiltanzer.unified_edge_audit import compact_unified_ensemble
+    result = compact_unified_ensemble({'edge_families': {'event': {
+        'forecast_available': True, 'weight_pool': 'active_edge', 'standalone_vote': False}}})
+    assert result['edge_families'][0]['weight_pool'] == 'active_edge'
+    assert result['edge_families'][0]['standalone_vote'] is False

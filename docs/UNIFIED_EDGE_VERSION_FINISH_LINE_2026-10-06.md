@@ -69,6 +69,24 @@ reader, novelty/reaction, macro factory и exact-SHA publication). Ранее 33
 итоговый обязательный CI и не являются live проверкой федерального источника.
 Хеш source audit теперь формируется после publication stamping.
 
-Состояние: пакет в разработке, полного CI, merge и выпуска этого изменения ещё
-нет. Следующий блок — полная фактическая матрица source/model/runtime readiness,
-затем конечные математический и сравнительный отчёты.
+Матрица расширена сохранёнными producer diagnostics и frozen review exports:
+`scripts.audit_readiness_matrix --input SOURCE.json --code-sha SHA
+--training-report diagnostics.json --reviews reviews.json --json`.
+Каждый необязательный вход имеет собственный хеш; чужая generation, неверный
+snapshot hash, synthetic export и future cutoff не подтверждают runtime-вклад.
+Диагностика обучения отражает группы отдельно для action/horizon/geometry cohort;
+их сумма не выдаётся за число независимых наблюдений. Упакованная модель не
+означает рабочий прогноз. Runtime-вес относится к общему pool, а не к отдельному
+семейству, и выводится только для применённого решения с прогнозом.
+
+`run_edge_family_pipeline` теперь сохраняет `readiness.json` рядом с
+`diagnostics.json` при каждом запуске, в том числе при отсутствии моделей.
+Без текущего source capture поля текущей доступности остаются неизвестными/
+недоступными; training и historical runtime evidence выводятся отдельно.
+Новые frozen snapshots сохраняют code SHA, в том числе после byte compaction,
+и weight_pool в компактном audit. У старых snapshots неизвестный SHA не угадывается.
+
+Второй блок: 75 профильных тестов passed за 4.47 sec (pipeline, readiness,
+runtime context, compact audit и snapshot byte guard). Полного CI, merge и
+выпуска этого пакета ещё нет. Следующий блок — конечные математический и
+сравнительный отчёты; затем один review и обязательный CI собранного пакета.

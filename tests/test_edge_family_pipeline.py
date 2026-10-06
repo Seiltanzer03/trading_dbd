@@ -197,6 +197,12 @@ def test_empty_real_export_has_explicit_diagnostics_and_no_active_models(tmp_pat
     pipeline.write_outputs(result, tmp_path)
     assert not path.exists()
     assert json.loads((tmp_path / 'diagnostics.json').read_bytes())['model_matrix'] == {}
+    readiness = json.loads((tmp_path / 'readiness.json').read_bytes())
+    from seiltanzer.config import ALL_INSTRUMENTS
+    from seiltanzer.edge_family_adapters import FAMILIES
+    assert len(readiness['cells']) == len(ALL_INSTRUMENTS) * len(FAMILIES)
+    assert readiness['input_basis'] == 'NO_CURRENT_SOURCE_CAPTURE_PROVIDED'
+    assert all(c['packaged_model_count'] == 0 and not c['forecast_available'] for c in readiness['cells'])
     assert json.loads((tmp_path / 'archive.json').read_bytes())['episodes'] == []
 
 
