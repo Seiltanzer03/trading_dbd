@@ -222,6 +222,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
                 }
         return {
             **detail,
+            "fomc_prospective": prospective_fomc_runtime.status(),
             "numeric_transport": macro_transport_status(),
             "historical_offhost_transport": historical_offhost_transport_status(),
             "llm_cost_guard": cost_guard_status(),

@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   diagnose:
@@ -36,78 +35,6 @@ jobs:
           command_timeout: 5m
           script: |
             set +e
-            echo '=== SAFE PREFLIGHT RUNNER CLEANUP ==='
-            systemctl restart 'actions.runner*.service' || true
-            sleep 4
-            python3 - <<'PY_CLEAN'
-            import textwrap
-            exec(textwrap.dedent("""
-                import os, sys, shutil, subprocess
-                from pathlib import Path
-
-                runner_dir = Path("/opt/actions-runner")
-                bin_symlink = runner_dir / "bin"
-                ext_symlink = runner_dir / "externals"
-                target_bin = runner_dir / "bin.2.336.0"
-                target_ext = runner_dir / "externals.2.336.0"
-                target_update = runner_dir / "_work" / "_update"
-
-                assert runner_dir.is_dir(), "Runner dir missing"
-                real_bin = bin_symlink.resolve()
-                real_ext = ext_symlink.resolve()
-                print(f"Active bin target: {real_bin}")
-                print(f"Active externals target: {real_ext}")
-                assert "2.336.0" not in str(real_bin), f"bin symlink points to 2.336.0: {real_bin}"
-                assert "2.336.0" not in str(real_ext), f"externals symlink points to 2.336.0: {real_ext}"
-                assert real_bin.exists(), f"Active bin target missing: {real_bin}"
-                assert real_ext.exists(), f"Active externals target missing: {real_ext}"
-
-                try:
-                    pids = subprocess.check_output(["pgrep", "-f", "Runner"], text=True).split()
-                    for pid in pids:
-                        exe = os.path.realpath(f"/proc/{pid}/exe")
-                        print(f"PID {pid} exe: {exe}")
-                        assert "2.336.0" not in exe, f"PID {pid} using 2.336.0: {exe}"
-                except subprocess.CalledProcessError:
-                    pass
-
-                statvfs_before = os.statvfs("/")
-                free_before = statvfs_before.f_bavail * statvfs_before.f_frsize
-                print(f"Free bytes before: {free_before} ({free_before / 1024**3:.3f} GiB)")
-
-                manifest = {}
-                total_reclaimed = 0
-                for target in [target_bin, target_ext, target_update]:
-                    if target.exists():
-                        bytes_count = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
-                        file_count = sum(1 for _ in target.rglob("*"))
-                        manifest[str(target)] = {"bytes": bytes_count, "files": file_count}
-                        total_reclaimed += bytes_count
-                        print(f"REMOVING: {target} ({bytes_count / 1024**2:.1f} MiB, {file_count} entries)")
-                        shutil.rmtree(target)
-                        print(f"REMOVED: {target}")
-                    else:
-                        print(f"ALREADY_ABSENT: {target}")
-
-                statvfs_after = os.statvfs("/")
-                free_after = statvfs_after.f_bavail * statvfs_after.f_frsize
-                print(f"Free bytes after: {free_after} ({free_after / 1024**3:.3f} GiB)")
-                print(f"Delta: {(free_after - free_before) / 1024**2:.1f} MiB")
-                assert free_after >= 1024**3, f"Free space still under 1 GiB: {free_after}"
-                print("CLEANUP_SUCCESS")
-            """))
-            PY_CLEAN
-            echo '=== RE-ACQUIRE RESEARCH ACCEPTANCE GATE FOR ACCEPTED MAIN SHA ==='
-            /opt/seiltanzer/.venv/bin/python /opt/seiltanzer/scripts/production_research_acceptance.py acquire-gate \
-              --acceptance-run-id 37434556616 \
-              --expected-sha 6b047e45a6653bb15c52ea95c030e6117da2e11b \
-              --ttl-seconds 7200
-            /opt/seiltanzer/.venv/bin/python /opt/seiltanzer/scripts/production_research_acceptance.py validate-gate \
-              --acceptance-run-id 37434556616 \
-              --expected-sha 6b047e45a6653bb15c52ea95c030e6117da2e11b
-            echo '=== EDE-INVENTORY MARKER CHECK ==='
-            ls -la /var/lock/seiltanzer-*-37434556616.done || true
-            cat /var/lock/seiltanzer-ede-inventory-37434556616.done || true
             echo '=== SERVICE ==='
             systemctl status seiltanzer --no-pager -l
             echo '=== STORAGE CAPACITY (READ ONLY) ==='
@@ -159,7 +86,7 @@ jobs:
                 with urllib.request.urlopen('http://127.0.0.1:8790/api/research/macro/status',timeout=10) as response:
                     raw=response.read(200001)
                 st=json.loads(raw)
-                print(json.dumps({'macro_status_http':{'code':200,'elapsed_sec':round(time.time()-t0,3),'fomc_deterministic':st.get('fomc_deterministic'),'official_families':st.get('official_families')}}))
+                print(json.dumps({'macro_status_http':{'code':200,'elapsed_sec':round(time.time()-t0,3),'fomc_deterministic':st.get('fomc_deterministic'),'fomc_prospective':st.get('fomc_prospective'),'official_families':st.get('official_families')}}))
             except Exception as e:
                 print(json.dumps({'macro_status_http_error':str(e),'elapsed_sec':round(time.time()-t0,3)}))
             t0=time.time()
@@ -231,16 +158,3 @@ jobs:
           echo "curl_exit=$?"
           test -f /tmp/external-state-after.json && head -c 500 /tmp/external-state-after.json || true
           echo
-
-      - name: Trigger snapshot audit workflow with active acceptance lease
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "Triggering production-ede-v12-audit workflow..."
-          curl --fail-with-body --silent --show-error \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/production-ede-v12-audit.yml/dispatches" \
-            -d '{"ref":"main","inputs":{"expected_sha":"6b047e45a6653bb15c52ea95c030e6117da2e11b","acceptance_run_id":"37434556616"}}' || echo "Cross-workflow dispatch via token not permitted; client script will dispatch"

@@ -169,6 +169,10 @@ def ingest_capture(store, capture, *, expected_sha, now):
 def prospective_admission_reason(store, cutoff):
     """Constant-time request guard; never reads a file, acquires DB, or fetches."""
     state = getattr(store, 'prospective_capture_state', None)
+    return _state_admission_reason(state, cutoff)
+
+
+def _state_admission_reason(state, cutoff):
     if state is None:
         return None  # Existing offline readers without prospective configuration.
     if state.get('status') != 'OK':
@@ -205,7 +209,8 @@ class ProspectiveFOMCRuntime:
                     or capture.get('published_for_sha') != sha):
                 raise ValueError('FOMC_CAPTURE_PUBLICATION_SHA_MISMATCH')
             result = ingest_capture(self.store, capture, expected_sha=sha, now=self.clock())
-            result.update(captured_ts=capture['captured_ts'], materialized_at=self.clock())
+            result.update(captured_ts=capture['captured_ts'], materialized_at=self.clock(),
+                          published_for_sha=capture['published_for_sha'])
             self.store.prospective_capture_state = result
             return result
         except Exception as exc:
@@ -215,6 +220,16 @@ class ProspectiveFOMCRuntime:
             return result
         finally:
             self._lock.release()
+
+    def status(self):
+        """Read one in-memory sample; ingestion success is not current admission."""
+        state = dict(self.store.prospective_capture_state)
+        cutoff = self.clock()
+        reason = _state_admission_reason(state, cutoff)
+        return {**state, 'checked_at': cutoff,
+                'admissible_for_new_snapshot': reason is None,
+                'admission_reason': reason, 'sqlite_access': False,
+                'network_calls': False}
 
     def _run(self):
         while not self._stop.is_set():

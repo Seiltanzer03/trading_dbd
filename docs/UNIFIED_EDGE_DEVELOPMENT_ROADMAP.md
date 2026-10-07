@@ -456,3 +456,38 @@ The actual bound loader, parser/strict predecessor store and clock guards remain
 RED1 failed; affected native/offhost/novelty profile110 passed. Independent review
 and official final-tree CI/release still pending. Acquisition cadence/transport
 is unchanged and timely prospective event coverage is not declared complete.
+
+
+### Storage remediation and prospective observability, 2026-10-07
+
+Accepted runtime baseline: main `6b047e45a6653bb15c52ea95c030e6117da2e11b`,
+with exact-SHA deployment/functional smoke run `37434556616`. The finite math
+and comparison reports remain historical evidence at their recorded source
+SHA; no new profitability, crypto mapping or family model is asserted.
+
+External operational cleanup run `37546490117` removed retired runner files,
+raising free space from 372,940,800 to 1,790,099,456 bytes. The logs show a
+runner **restart**, not reload. Run `37547972224` repeated that restart; these
+operations must not remain in a diagnostic workflow triggered on main push.
+PR #407 restores read-only diagnostics and removes hardcoded acceptance leases
+and cross-workflow research dispatch.
+
+Run `37548024889` exported 16,616,505,344 bytes off-host and logged
+`OFFHOST_BACKUP_VERIFIED=1`, object
+`backups/v1/daily-slot-6/snapshot.sqlite3.gz` in the configured private Yandex
+bucket. Export, upload and immutable-input verification succeeded. Overall
+research failed: after an EDE discovery summary, the runner reported exit 143
+and a shutdown signal; publish/handoff did not run. The cause of the runner
+shutdown is not established. A summary log is not a successfully published
+research artifact. Completed backup manifests and discovery outputs are now
+checkpointed before later expensive work; publication still requires the whole
+audit to pass. This repair does not re-export the already verified database.
+
+Ten native deterministic FOMC records and historical bootstrap status do not
+prove current prospective delivery. The existing macro status API now exposes
+`fomc_prospective`: the worker's in-memory capture hash, exact publication SHA,
+receipt/materialization clocks, stored/skipped counts and current admission
+reason. It performs no request-time SQLite, file or network access. Historical
+bootstrap errors remain distinct. Focused profile: 19 tests passed; official
+final-head CI and release acceptance for PR #407 remain pending until evidenced.
+
