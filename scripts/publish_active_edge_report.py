@@ -92,6 +92,14 @@ def main() -> int:
         _verify_sha(client, args.expected_sha)
         _probe_api(client)
         _exec(client, f"mkdir -p {shlex.quote(str(REMOTE_RESEARCH))}")
+        if args.remote_name == 'fomc_prospective_latest.json':
+            from fomc_scheduler_transport import deliver_with_client
+            receipt = deliver_with_client(client, source, sha=args.expected_sha, run_id=args.run_id)
+            _probe_api(client)
+            print(json.dumps(receipt, sort_keys=True))
+            print(f"ACTIVE_EDGE_PUBLISHED={args.remote_name} bytes={size} "
+                  f"published_for_sha={str(args.expected_sha).lower()}")
+            return 0
         remote = str(REMOTE_RESEARCH / args.remote_name)
         temporary = f"{remote}.tmp-{args.run_id}"
         sftp = client.open_sftp()

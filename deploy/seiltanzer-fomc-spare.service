@@ -1,0 +1,24 @@
+[Unit]
+Description=Bounded official FOMC collection on independent host
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=seiltanzer-fomc
+Group=seiltanzer-fomc
+WorkingDirectory=/opt/seiltanzer-fomc
+EnvironmentFile=/etc/seiltanzer-fomc/scheduler.env
+StateDirectory=seiltanzer-fomc
+ExecStart=/opt/seiltanzer-fomc/.venv/bin/python scripts/fomc_scheduler_transport.py send --expected-sha ${EXPECTED_SHA} --host ${PRODUCTION_HOST} --key /etc/seiltanzer-fomc/delivery_key --known-hosts /etc/seiltanzer-fomc/known_hosts --output /var/lib/seiltanzer-fomc/fomc_prospective_latest.json
+TimeoutStartSec=190
+MemoryMax=512M
+CPUQuota=25%
+Nice=15
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+
