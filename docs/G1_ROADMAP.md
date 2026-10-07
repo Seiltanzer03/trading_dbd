@@ -1,5 +1,8 @@
 # G.1 Research Roadmap
 
+Execution scope and remaining package order: [locked global plan](LOCKED_GLOBAL_PLAN_2026-10-07.md).
+This research roadmap keeps its evidence gates and authority boundary.
+
 ## Core principle
 
 Seiltanzer measures edge before increasing decision authority. Every learned

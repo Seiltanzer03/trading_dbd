@@ -25,6 +25,7 @@ CONTRACT = 'fomc-prospective-offhost-capture-v1'
 MAX_BODY_BYTES = 200_000
 MAX_CAPTURE_BYTES = 950_000
 MAX_AGE_SEC = 3600.
+TARGET_CAPTURE_INTERVAL_SEC = 600.
 PUBLICATION_FIELDS = {'publication_contract_version', 'published_for_sha', 'publication_run_id'}
 
 
@@ -189,6 +190,7 @@ class ProspectiveFOMCRuntime:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._thread = None
+        self._last_accepted_capture_ts = None
         self.store.prospective_capture_state = {'status': 'UNAVAILABLE',
             'reason': 'FOMC_PROSPECTIVE_CAPTURE_NOT_LOADED'}
 
@@ -211,6 +213,7 @@ class ProspectiveFOMCRuntime:
             result = ingest_capture(self.store, capture, expected_sha=sha, now=self.clock())
             result.update(captured_ts=capture['captured_ts'], materialized_at=self.clock(),
                           published_for_sha=capture['published_for_sha'])
+            self._last_accepted_capture_ts = capture['captured_ts']
             self.store.prospective_capture_state = result
             return result
         except Exception as exc:
@@ -226,10 +229,17 @@ class ProspectiveFOMCRuntime:
         state = dict(self.store.prospective_capture_state)
         cutoff = self.clock()
         reason = _state_admission_reason(state, cutoff)
+        captured = self._last_accepted_capture_ts
+        age = None if captured is None else cutoff - captured
+        cadence = {'target_interval_sec': TARGET_CAPTURE_INTERVAL_SEC,
+                   'scheduler_guaranteed': False, 'capture_age_sec': age,
+                   'state': ('NOT_OBSERVED' if age is None else
+                             'CLOCK_INVALID' if age < 0 else
+                             'OVERDUE' if age > TARGET_CAPTURE_INTERVAL_SEC else 'WITHIN_TARGET')}
         return {**state, 'checked_at': cutoff,
                 'admissible_for_new_snapshot': reason is None,
                 'admission_reason': reason, 'sqlite_access': False,
-                'network_calls': False}
+                'network_calls': False, 'delivery_cadence': cadence}
 
     def _run(self):
         while not self._stop.is_set():
