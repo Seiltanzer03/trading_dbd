@@ -409,10 +409,10 @@ def _session(snapshot: dict, row: dict, cutoff: float, source: dict | None = Non
              "GER40": "Europe/Berlin", "UK100": "Europe/London", "JPY100": "Asia/Tokyo"}
     zone = venue.get(row["instrument"], "UTC")
     local = datetime.fromtimestamp(cutoff, ZoneInfo(zone))
-    row["session_context"] = {"timezone": zone, "local_time": local.isoformat(),
+    row.setdefault("session_context", {"timezone": zone, "local_time": local.isoformat(),
                               "weekday": local.weekday(), "utc_offset_seconds": local.utcoffset().total_seconds(),
                               "calendar_complete": False, "market_open": None,
-                              "reason": "HOLIDAY_AND_EARLY_CLOSE_CALENDAR_REQUIRED"}
+                              "reason": "HOLIDAY_AND_EARLY_CLOSE_CALENDAR_REQUIRED"})
     if source is None:
         # Clock is context; merely knowing the hour is not a learned edge.
         return
@@ -427,7 +427,9 @@ def _session(snapshot: dict, row: dict, cutoff: float, source: dict | None = Non
             or opening is None or closing is None or opening >= closing):
         row["rejected_sources"].append({"source_id": meta["source_id"], "reason": "SESSION_CALENDAR_INCOMPLETE"})
         return
-    row["session_context"].update({"calendar_complete": True, "calendar_id": source["calendar_id"],
+    previous = row["feature_provenance"].get("session.minutes_from_open")
+    if not previous or previous["observed_ts"] <= meta["observed_ts"]:
+        row["session_context"].update({"calendar_complete": True, "calendar_id": source["calendar_id"],
                                    "session_id": source["session_id"], "market_open": opening <= cutoff < closing,
                                    "reason": "PIT_EXCHANGE_CALENDAR"})
     _add(row, "session.minutes_from_open", (cutoff - opening) / 60., meta)

@@ -632,3 +632,21 @@ P1 is NOT complete: no spare deployment, native materialization confirmation or
 consecutive 600-second delivery receipts. Required next evidence is host access,
 resource/network/time inventory, dedicated key installation and actual observed
 receipts. Release evidence for this code is recorded separately in its PR.
+
+## 2026-10-08 — P2/P3 causal-contract package
+
+P2 family trainer previously counted different trades on one official release
+as independent train/OOS groups. Explicit release dependencies now connect
+trade groups transitively before chronological split and whole-group purge.
+Existing group floors, costs and OOS score requirements remain; generic source
+IDs and unused provenance do not inflate or erase independent groups.
+P3 rejected/older calendars no longer erase or misalign an admitted session
+context with its freshest features. Six regressions red on baseline; unused
+provenance regression red on intermediate code; combined profile685passed.
+
+Fresh inventory37684749072 exactfc657:78120observations/22533resolved,
+macroFOMC3independent releases, numeric4–5perfeature; coverage is not a family
+model. Existing research37687814068 continues off-host without duplicate work.
+New forecasts/trained models/authority are not asserted. Full scope and all
+P1–P6 readiness: P2_P3_CAUSAL_CONTRACT_CHECKPOINT_2026-10-08.md.
+Exact final CI and release evidence belong in the package PR.
