@@ -585,3 +585,26 @@ Fixed bounded eligible projection/shared G1C stats/gates without model fit or
 authority change. Regression4 red before fix; profile19passed. Final CI/release
 evidence remains separate. P6 empirical EVIDENCE-GATED. Detailed scope:
 P6_EXISTING_CALIBRATION_AUDIT_2026-10-07.md / .json.
+
+### P6 release blocker: obsolete health-dispatched recovery, 2026-10-07
+
+PR411 merged1b9dedfa, final treeb7bc5361, CI37625077891:3102passed/4skipped,
+WebKitgreen. MainCI37625593931 and deploy37626130762 accepted delivery/readiness/
+smoke/publicHTTP/all7contexts. Source37628550606, FOMC37628553001,
+post-research37628555744/G1M37628611823 green.
+
+After acceptance, health workflow37626728407's older dispatch (made during
+startup) ran queued recovery37626780640. Its manual-event branch bypassed the
+healthy exact-SHA guard, stopped the serving terminal at13:27Z and refused
+rotation while trades.db remained open. No authoritative deletion/rotation
+occurred; restore_service_on_exit attempted a restart. Math37628547881 completed
+its runner computation but failed publication on localhost connection refused;
+upload artifact was skipped. This run is not reported as a delivered model.
+
+Minimal blocking fix: the existing on-host exactSHA+active+HTTP200 guard applies
+also to workflow_dispatch, preventing a stale health request from stopping an
+already recovered/accepted service. Unhealthy recovery, CI authority, serialized
+execution and all database protection remain. Real bash guard regression failed
+for healthy manual dispatch beforefix;4behavioral+existingworkflow tests19passed.
+No repeat math search or manual production writes were launched to mask the
+failure. New final-revision CI/release evidence remains separate.
