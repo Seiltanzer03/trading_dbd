@@ -17,6 +17,7 @@ from typing import Any
 
 from . import g1_intelligence_nonblocking as _nb
 from . import g1_shadow_runtime as _g1c
+from . import g1_shadow_refinement as _g1c_integrity
 from .g1_q_evidence_runtime import (
     G1B1_STAGE, Q_EVIDENCE_CONTRACT_VERSION, Q_CAPABILITY_CONTRACT_VERSION,
     Q_CAPTURE_ATTEMPT_CONTRACT_VERSION, Q_CAPTURE_POLICY_VERSION,
@@ -135,7 +136,7 @@ def _light_g1c_status(self) -> dict:
     with self._lock:
         eligible_rows = self._conn.execute("""
             SELECT p.forecast_json,p.outcome_json,p.captured_ts,p.target_ts,
-                   p.instrument,g.dependency_group_id
+                   p.instrument,g.dependency_group_id,g.base_cohort_id,g.base_cohort_json
             FROM g1_dataset_membership g JOIN passive_market_observations p USING(observation_id)
             WHERE g.dataset_contract_version=? AND g.q_to_p_eligible=1
               AND g.forecast_eval_eligible=1
@@ -148,6 +149,7 @@ def _light_g1c_status(self) -> dict:
         pred_n = int(self._conn.execute("SELECT COUNT(*) FROM g1c_shadow_predictions").fetchone()[0])
         fit_n = int(self._conn.execute("SELECT COUNT(*) FROM g1c_fit_runs").fetchone()[0])
         error_n = int(self._conn.execute("SELECT COUNT(*) FROM g1c_contract_errors").fetchone()[0])
+        critical_n = _g1c_integrity._critical_error_count(self)
     # Use the same labels, CDF interpolation and dependence clock as G.1C.
     # Read only eligible rows and the small projection needed by its statistics.
     clean_rows = []
@@ -155,6 +157,7 @@ def _light_g1c_status(self) -> dict:
         row = dict(record)
         row["forecast"] = _loads(row.pop("forecast_json"), {})
         row["outcome"] = _loads(row.pop("outcome_json"), {})
+        row["base_cohort"] = _loads(row.pop("base_cohort_json"), {})
         probability = _g1c._g1b._q_up_probability(row)
         direction = _g1c._g1b._future_direction(row)
         if probability is None or direction is None or not math.isfinite(probability):
@@ -162,14 +165,11 @@ def _light_g1c_status(self) -> dict:
         row.update(raw_q=probability, outcome_y=direction)
         clean_rows.append(row)
     stats = _g1c._stats(self, clean_rows)
-    readiness = {
-        "platt": _threshold_status(stats, "PLATT"),
-        "beta": _threshold_status(stats, "BETA"),
-        "isotonic": _threshold_status(stats, "ISOTONIC"),
-        "full_cdf": _threshold_status(stats, "PIT_ISOTONIC_CDF"),
-    }
-    blockers = Counter(code for item in readiness.values() for code in item["blockers"])
-    g1d = _g1c._g1d_status(stats, critical_contract_errors=error_n)
+    readiness = _g1c_integrity._scope_fit_readiness(self, clean_rows)
+    blockers = Counter()
+    for item in readiness.values():
+        blockers.update(item["blockers"])
+    g1d = _g1c._g1d_status(stats, critical_contract_errors=critical_n)
     return {
         "g1_stage": _g1c.G1C_STAGE, "g1c_contract_version": _g1c.G1C_CONTRACT_VERSION,
         "fit_threshold_contract_version": _g1c.G1C_FIT_THRESHOLD_VERSION,
@@ -182,8 +182,12 @@ def _light_g1c_status(self) -> dict:
         "ready_for_g1d": g1d["ready"],
         "g1d_readiness": g1d,
         "top_fit_blockers": dict(blockers.most_common()), "contract_error_n": error_n,
+        "critical_contract_error_n": critical_n,
+        "critical_contract_error_types": sorted(_g1c_integrity._CRITICAL_ERRORS),
+        "q_semantic_pooling": "separated_by_q_relation_and_proxy_transform",
+        "refinement_contract_version": _g1c_integrity.REFINEMENT_VERSION,
         "calibrator_fitted": model_n > 0,
-        "shadow_model_fitting_allowed": readiness["platt"]["ready"] or readiness["beta"]["ready"],
+        "shadow_model_fitting_allowed": any(item["ready"] for item in readiness.values()),
         "production_model_training_allowed": False, "oos_validated": False,
         "edge_claim": False, "physical_probability_published": False,
         "production_authority": False, "production_replacement_allowed": False,
@@ -313,9 +317,9 @@ def _light_intelligence_warm(runtime) -> None:
                        "q_resolved": q["resolved_q_observation_n"],
                        "q_clean_eligible": q["q_to_p_eligible_n"],
                        "q_effective_n": q["effective_q_n"]},
-        "models": {"platt": g1c["fit_readiness"]["platt"],
-                   "beta": g1c["fit_readiness"]["beta"],
-                   "isotonic": g1c["fit_readiness"]["isotonic"],
+        "models": {"platt": runtime._readiness_item(g1c["fit_readiness"]["platt"]),
+                   "beta": runtime._readiness_item(g1c["fit_readiness"]["beta"]),
+                   "isotonic": runtime._readiness_item(g1c["fit_readiness"]["isotonic"]),
                    "frozen_model_n": g1c["frozen_model_n"],
                    "prospective_prediction_n": g1c["prospective_shadow_prediction_n"]},
         "evidence": {"dataset_status": maturity, "baseline_status": maturity,
