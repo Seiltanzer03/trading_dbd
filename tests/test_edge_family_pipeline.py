@@ -23,6 +23,57 @@ def measured_model():
     return artifact
 
 
+@pytest.mark.parametrize('clock', ['overlap', 'before_train', 'null', 'nonfinite', 'bool'])
+def test_packager_rejects_contradictory_explicit_training_label_clock(clock):
+    artifact = measured_model()
+    artifact['train_label_end_ts'] = {
+        'overlap': artifact['validation_start_ts'],
+        'before_train': artifact['train_end_ts']-1,
+        'null': None, 'nonfinite': float('nan'), 'bool': True}[clock]
+    with pytest.raises(ValueError):
+        packaging().package_runtime_context([artifact], expected_sha=SHA,
+            captured_ts=T0, dataset={'rows': []})
+
+
+@pytest.mark.parametrize('change', ['label_overlap', 'label_before_train', 'label_null',
+    'sample_fraction', 'fold_fraction'])
+def test_pinned_runtime_model_rejects_contradictory_validation_evidence(tmp_path, change):
+    frozen = snapshot('macro', source(features={'macro.expected_rate_change': -.2}),
+                      'macro.expected_rate_change')
+    artifact = frozen.pop('edge_family_models')['macro']
+    if change.startswith('label'):
+        artifact['train_label_end_ts'] = {
+            'label_overlap': artifact['validation_start_ts'],
+            'label_before_train': artifact['train_end_ts']-1,
+            'label_null': None}[change]
+    else:
+        artifact['validation']['sample_count' if change == 'sample_fraction' else 'fold_count'] = (
+            20.5 if change == 'sample_fraction' else 2.5)
+    document = {'version': 'unified-edge-runtime-context-v1', 'deployment_sha': SHA,
+                'captured_ts': T0-1, 'instruments': {'NAS100': {'edge_family_models': {'macro': artifact}}}}
+    raw = json.dumps(document).encode()
+    path = tmp_path/'context.json'; path.write_bytes(raw)
+    loaded, audit = load_unified_edge_context(path,
+        expected_document_sha256=hashlib.sha256(raw).hexdigest(), expected_sha=SHA, snapshot=frozen)
+    assert audit['available']
+    frozen.update(loaded)
+    result = build_edge_family_evidence(frozen)
+    assert result['components'] == []
+    assert result['families']['macro']['forecast_available'] is False
+
+
+def test_strictly_preceding_explicit_training_label_clock_remains_admissible():
+    artifact = measured_model()
+    artifact['train_label_end_ts'] = artifact['train_end_ts']+60
+    assert packaging().package_runtime_context([artifact], expected_sha=SHA,
+        captured_ts=T0, dataset={'rows': []})
+    frozen = snapshot('macro', source(features={'macro.expected_rate_change': -.2}),
+                      'macro.expected_rate_change')
+    frozen['edge_family_models']['macro'] = artifact
+    frozen['edge_family_models']['macro'].pop('geometry_sha256')
+    assert build_edge_family_evidence(frozen)['components']
+
+
 @pytest.mark.parametrize('global_claim,expected', [(True, True), (False, False)])
 def test_admitted_source_provenance_preserves_only_validated_global_context(global_claim, expected):
     data = source(features={'macro.expected_rate_change': -.2}, global_context=global_claim)

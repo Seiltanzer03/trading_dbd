@@ -65,6 +65,23 @@ def test_session_context_tracks_the_freshest_admitted_calendar():
     assert rows[0]["feature_provenance"][feature]["source_id"] == fresh["source_id"]
 
 
+def test_fresh_envelope_cannot_reage_stale_book_children():
+    data, feature = family_fixture('order_flow')
+    data['previous_top']['ts'] = T0-3601
+    data['current_top']['ts'] = T0-3600
+    result = build_edge_family_evidence(snapshot('order_flow', data, feature))
+    assert result['families']['order_flow']['features'] == {}
+    assert result['components'] == []
+
+
+def test_book_feature_clock_must_match_the_current_observation():
+    data, feature = family_fixture('order_flow')
+    data['previous_top']['ts'] -= 1
+    data['current_top']['ts'] -= 1
+    result = build_edge_family_evidence(snapshot('order_flow', data, feature))
+    assert result['families']['order_flow']['features'] == {}
+
+
 def test_family_net_action_forecast_must_match_frozen_comparison_horizon():
     data = source(features={"macro.expected_rate_change": -.2})
     frozen = snapshot("macro", data, "macro.expected_rate_change")

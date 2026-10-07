@@ -650,3 +650,18 @@ model. Existing research37687814068 continues off-host without duplicate work.
 New forecasts/trained models/authority are not asserted. Full scope and all
 P1–P6 readiness: P2_P3_CAUSAL_CONTRACT_CHECKPOINT_2026-10-08.md.
 Exact final CI and release evidence belong in the package PR.
+
+## 2026-10-08 — Overnight P2–P6 admission/economics package
+
+Finite user-authorized combined package closes explicit label-clock and integer
+OOS admission (P2), stale book rewrapping (P4), executing carry identity/units
+(P5), and expiry crossing during option prediction writes (P6). Existing gates,
+legacy omitted-context compatibility, source/action set and authority remain.
+Independent review identified SQLite writer-wait boundary: fixed with writer
+reservation before deadline check and real contention/transaction controls.
+Final integrated profile558passed; final revision CI
+and exact-SHA acceptance belong in PR. Fresh existing EDE pass1 discovery:
+8063 eligible rows,3960 hypotheses,119 outer candidates,0 all-gate passes.
+Baseline inventory37696953612:78195observations/22552resolved; macro release
+counts still insufficient. Full evidence/remaining P1–P6 boundaries:
+NIGHT_EDGE_CONTRACT_CHECKPOINT_2026-10-08.md.

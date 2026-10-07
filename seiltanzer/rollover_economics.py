@@ -23,6 +23,53 @@ def _number(value):
         return None
 
 
+def _executing_quote_binding(snapshot, supplied):
+    """Bind declared position context; omitted legacy context is not invented.
+
+    A quote without account context remains an explicitly scoped quote, not
+    proof of this user's executing account. When the frozen snapshot declares
+    a position identity or unit, the quote must match it even when base costs
+    already include rollover.
+    """
+    for key in ('trade_identity', 'strategy', 'trade_geometry', 'position_execution_units'):
+        if snapshot.get(key) is not None and not isinstance(snapshot[key], dict):
+            raise ValueError('BROKER_ROLLOVER_EXECUTING_CONTEXT_INVALID')
+    identity = snapshot.get('trade_identity') or {}
+    strategy = snapshot.get('strategy') or {}
+    geometry = snapshot.get('trade_geometry') or {}
+    units = snapshot.get('position_execution_units') or {}
+    for context, keys in ((snapshot, ('trade_id',)),
+                          (identity, ('broker_id', 'account_id', 'trade_id', 'instrument', 'direction')),
+                          (strategy, ('direction',)), (geometry, ('direction',))):
+        for key in keys:
+            expected = context.get(key)
+            if expected is None:
+                continue
+            actual = supplied.get(key)
+            if key == 'instrument':
+                matched = bool(canonical_instrument_code(expected)) and (
+                    canonical_instrument_code(actual) == canonical_instrument_code(expected))
+            else:
+                matched = (not isinstance(expected, bool) and not isinstance(actual, bool)
+                           and bool(expected) and actual == expected)
+                if key == 'direction':
+                    matched = matched and isinstance(expected, str) and expected in {'long', 'short'}
+            if not matched:
+                raise ValueError('BROKER_ROLLOVER_EXECUTING_IDENTITY_MISMATCH')
+    for key in ('currency', 'quantity_basis', 'quantity_units', 'risk_currency_per_unit'):
+        expected = units.get(key)
+        if expected is None:
+            continue
+        actual = supplied.get(key)
+        if key in {'quantity_units', 'risk_currency_per_unit'}:
+            known, quoted = _number(expected), _number(actual)
+            matched = known is not None and known > 0 and quoted == known
+        else:
+            matched = isinstance(expected, str) and bool(expected) and actual == expected
+        if not matched:
+            raise ValueError('BROKER_ROLLOVER_EXECUTING_UNITS_MISMATCH')
+
+
 def frozen_rollover_schedule(snapshot, horizon_minutes):
     """Return (normalized schedule, audit); reject a malformed declared quote."""
     supplied = snapshot.get("broker_rollover_schedule")
@@ -53,6 +100,7 @@ def frozen_rollover_schedule(snapshot, horizon_minutes):
     if (not supplied.get("currency") or risk is None or risk <= 0
             or supplied.get("charge_basis") != "per_unit_of_remaining_position"):
         raise ValueError("BROKER_ROLLOVER_UNITS_UNAVAILABLE")
+    _executing_quote_binding(snapshot, supplied)
     start = _number(supplied.get("coverage_start_epoch"))
     end = _number(supplied.get("coverage_end_epoch"))
     if start is None or end is None or start > cutoff or end < cutoff + horizon * 60:

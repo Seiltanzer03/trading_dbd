@@ -18,7 +18,8 @@ import re
 import tempfile
 import time
 
-from seiltanzer.edge_family_adapters import FAMILIES, FEATURE_CONTRACT, MODEL_CONTRACT, WEIGHT_POOLS
+from seiltanzer.edge_family_adapters import (FAMILIES, FEATURE_CONTRACT, MODEL_CONTRACT,
+                                            WEIGHT_POOLS, training_label_clock_valid)
 from seiltanzer.unified_edge_runtime_context import MAX_BYTES, VERSION
 
 MAX_DATA_BYTES = 96_000_000
@@ -142,6 +143,7 @@ def package_runtime_context(models, *, expected_sha, captured_ts, dataset):
                 or not re.fullmatch(r'[0-9a-f]{64}', model['geometry_sha256'])
                 or not all(_clock(value) for value in clocks) or not _clock(horizon)
                 or not clocks[0] + horizon * 60 <= clocks[1] < clocks[2] <= clocks[3] <= captured_ts
+                or not training_label_clock_valid(model)
                 or validation.get('status') != 'OOS_VALIDATED'
                 or validation.get('point_in_time') is not True
                 or validation.get('purged_split') is not True

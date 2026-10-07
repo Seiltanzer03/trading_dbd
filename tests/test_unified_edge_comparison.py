@@ -45,6 +45,7 @@ def with_rollover(value, offsets=(50., 120.), same_timestamp_rule='fills_before_
     captured = value['captured_ts']
     value['broker_rollover_schedule'] = {
         'source_verified': True, 'source_id': 'fixture-broker-frozen-quote',
+        'trade_id': value['trade_id'],
         'instrument': 'NAS100', 'observed_ts': captured - 10., 'received_ts': captured - 5.,
         'quality': 1., 'max_age_sec': 60., 'currency': 'USD', 'risk_currency_per_unit': 10.,
         'charge_basis': 'per_unit_of_remaining_position',
@@ -54,6 +55,14 @@ def with_rollover(value, offsets=(50., 120.), same_timestamp_rule='fills_before_
         'events': [{'scheduled_epoch': captured + offset, 'charge_currency_per_unit': 1.}
                    for offset in offsets]}
     return value
+
+
+def test_observed_replay_rejects_rollover_quote_from_another_trade():
+    value = with_rollover(frozen())
+    value['broker_rollover_schedule']['trade_id'] += 1
+    replay = observed_replay(value, record(value), choice('HOLD'))
+    assert replay['available'] is False
+    assert replay['reason'] == 'BROKER_ROLLOVER_EXECUTING_IDENTITY_MISMATCH'
 
 
 def test_actual_snapshot_comparison_is_frozen_and_ledger_absence_is_not_zero():
