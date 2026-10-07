@@ -87,7 +87,9 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-webkit-${{ hashFiles('node_modules/playwright-core/browsers.json') }}
       - name: Install WebKit system dependencies
-        timeout-minutes: 5
+        # Some runner routes stream signed packages at ~100 KB/s. The observed
+        # 87 MB install needs about 15 minutes; retain a finite 20-minute bound.
+        timeout-minutes: 20
         run: bash scripts/install_webkit_dependencies.sh
       - name: Install Playwright WebKit browser
         timeout-minutes: 5
