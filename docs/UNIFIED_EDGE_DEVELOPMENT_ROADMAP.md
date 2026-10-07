@@ -518,7 +518,7 @@ source bundle: 13 инструментов, models_produced=0. FOMC37617814632 �
  d52a314d897dc81e77d688a69d80104a5ce5784f81a51e6d7d247eab44020521,
 materialized_at1791374532.5897613, admissible=true, WITHIN_TARGET. Это одна
 свежая доставка, не доказательство cadence. Пользователь подтвердил отсутствие
-отдельной площадки scheduler; P1 BLOCKED до появления такой площадки.
+отдельной площадки scheduler; на тот момент P1 BLOCKED до появления такой площадки.
 
 Без новой выгрузки использован existing comparison artifact11468461697 из
 run37590901260 (его headf06eb83 имеет тот же code tree). Existing family pipeline
@@ -608,3 +608,27 @@ execution and all database protection remain. Real bash guard regression failed
 for healthy manual dispatch beforefix;4behavioral+existingworkflow tests19passed.
 No repeat math search or manual production writes were launched to mask the
 failure. New final-revision CI/release evidence remains separate.
+
+## 2026-10-07 — P1 independent-host transport preparation
+
+User supplied spare host 212.193.24.125 with an unrelated existing project.
+One bounded SSH attempt returned Network is unreachable before authentication;
+no credential use, host inventory or server modifications occurred. Historical
+absence-of-host blocker above is superseded by an offered but unreachable host.
+
+Prepared dedicated systemd service/timer and bounded forced-command FOMC SSH
+transport. Independent review found delayed-producer overwrite; fixed with one
+shared receiver for GitHub and spare, flock and same-SHA monotonic captured_ts.
+SHA, health, freshness/body/digest, refusal and bounded stdin remain mandatory;
+no shell/SFTP/forwarding privilege is needed on the new key. Other report
+publication paths and evidence/authority gates are unchanged.
+
+Transport/capture/exact-SHA/release-workflow profile: 37 passed. Read-only
+independent re-review found no remaining blocker. Systemd configuration parses;
+local missing target venv prevents an installation claim. Detailed isolated
+activation and rollback: docs/P1_INDEPENDENT_FOMC_SCHEDULER.md.
+
+P1 is NOT complete: no spare deployment, native materialization confirmation or
+consecutive 600-second delivery receipts. Required next evidence is host access,
+resource/network/time inventory, dedicated key installation and actual observed
+receipts. Release evidence for this code is recorded separately in its PR.

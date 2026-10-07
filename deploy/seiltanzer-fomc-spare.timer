@@ -1,0 +1,12 @@
+[Unit]
+Description=Independent FOMC target schedule (measured receipts required)
+
+[Timer]
+OnCalendar=*-*-* *:00/10:00
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=false
+Unit=seiltanzer-fomc-spare.service
+
+[Install]
+WantedBy=timers.target
