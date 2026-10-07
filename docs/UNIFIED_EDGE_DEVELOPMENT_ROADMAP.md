@@ -542,3 +542,33 @@ Runtime код в readiness-аудите не изменялся, DB/production 
 calls pipeline=0. Raw broker/account snapshots не включены в новые отчёты.
 Следующий шаг — отдельная проверка доступных синхронных P3 входов и календаря
 по locked plan; повторить тот же поиск/обучение без новых входов нельзя.
+
+
+### P3/P4: существующий all-13 source capture, 2026-10-07
+
+Следующий finite source audit использует уже опубликованный artifact11480592477
+из run37617811579 exact b41a5a1, capture1791374394.2332888. Межрыночные factual
+features16/target на всех13, forecast0; crypto context не target broker prices.
+NYSE cash calendar packets3 отвергнуты по неподтверждённому CFD mapping,
+session features/forecasts0. P3 EVIDENCE-GATED в этой проверенной базе.
+
+P4: BTC/ETH/SOL имеют один book packet с реальной последовательной top pair
+и один неполный tape page каждый. Интервалы2.296608/3.836987/2.300446s,
+trades437/420/38, window_complete=false. Mapping validated=false; все6packets
+отвергнуты, у остальных10 packets0. P4 заканчивается UNAVAILABLE для broker-CFD
+forecast; sampled top flow не full incremental OFI/CFD book.
+
+P5 preflight: CFTC XAU/XAG/EURUSD fetched/parsed, historical receipt first-seen
+не backdated, mapping unvalidated; carry packets в bundle0. Это не вывод об
+отсутствии executing-broker cost import. Следующая задача: bounded P5 проверка
+сохранённых broker carry/cost provenance, units и отсутствия double counting.
+P6 этим не закрыт. Runtime diff/training/activation/новые LLM и полный CI0.
+Детали и all-13 matrix: P3_P4_EXISTING_SOURCE_AUDIT_2026-10-07.md / .json.
+
+P5 bounded cost inspection дополнен на existing32 reviews: broker rollover
+schedule/execution cost context/position execution units top-level0/32;17
+candidate rollover audits BROKER_QUOTE_UNAVAILABLE,2 context audits
+BROKER_EXECUTION_COST_CONTEXT_UNCONFIGURED. Existing contract требует causal
+quote/units/coverage, included_in_base_costs исключает повторное списание.
+Новый behavioural test не выполнялся, model carry не выдуман. P5 EVIDENCE-GATED
+в выбранных inputs; остальной архив не проверен. Следующий пакет P6.
