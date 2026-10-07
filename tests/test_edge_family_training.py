@@ -477,7 +477,7 @@ def test_only_explicit_verified_macro_global_sources_may_omit_instrument_mapping
     assert train(dataset(rows))["models"] == []
 
 
-def test_verified_global_event_release_is_admitted_with_causal_consensus():
+def test_verified_global_event_releases_are_admitted_with_causal_consensus():
     rows = dataset()["rows"]
     name = "event.cpi.surprise"
     for row in rows:
@@ -485,7 +485,7 @@ def test_verified_global_event_release_is_admitted_with_causal_consensus():
         row["features"] = {name: row["features"][FEATURE]}
         meta = row["feature_provenance"].pop(FEATURE)
         meta.update(source_instrument="", global_context=True,
-            release_id="cpi-release", period="2026-09", unit="pct",
+            release_id="cpi-release-" + str(row["trade_id"]), period="2026-09", unit="pct",
             consensus_source_id="official:consensus", supporting_source_ids=["official:consensus"],
             consensus_received_ts=row["captured_ts"] - 3)
         meta["consensus_provenance"] = {**deepcopy(meta), "source_id": "official:consensus",
@@ -501,6 +501,58 @@ def test_verified_global_event_release_is_admitted_with_causal_consensus():
     rejected = train(dataset(rows))
     assert rejected["models"] == []
     assert rejected["diagnostics"]["rejected_row_count"] == len(rows)
+
+
+@pytest.mark.parametrize("identity", ["release_id", "dependency_group"])
+def test_one_macro_release_cannot_become_sixty_independent_trades(identity):
+    rows = dataset()["rows"]
+    for row in rows:
+        row["feature_provenance"][FEATURE][identity] = (
+            "release:one" if identity == "dependency_group" else "one")
+    result = train(dataset(rows))
+    assert result["models"] == []
+    cohort = result["diagnostics"]["cohorts"][0]
+    assert cohort["group_count"] == 1
+    assert cohort["trade_group_count"] == 60
+
+
+def test_shared_macro_release_purges_the_entire_connected_trade_group():
+    rows = dataset()["rows"]
+    for index in (10, 45):
+        rows[index]["feature_provenance"][FEATURE]["release_id"] = "shared-release"
+    result = train(dataset(rows))
+    assert result["available"]
+    cohort = result["diagnostics"]["cohorts"][0]
+    assert cohort["group_count"] == 59
+    assert cohort["folds"][0]["purged_group_count"] == 1
+    assert cohort["folds"][0]["train_row_count"] == 38
+
+
+def test_release_dependencies_are_transitive_across_features_and_trade_reviews():
+    rows = dataset(count=40)["rows"]
+    # A-B and B-C are one dependency component, even with separate source IDs.
+    for index, releases in enumerate((("A",), ("A", "B"), ("B",))):
+        for ordinal, release in enumerate(releases):
+            name = FEATURE if ordinal == 0 else "macro.second"
+            rows[index]["features"][name] = rows[index]["features"][FEATURE]
+            rows[index]["feature_provenance"][name] = {
+                **rows[index]["feature_provenance"][FEATURE], "release_id": release}
+    # Keep a single cohort's feature schema throughout.
+    for row in rows:
+        row["features"].setdefault("macro.second", row["features"][FEATURE])
+        row["feature_provenance"].setdefault("macro.second", deepcopy(row["feature_provenance"][FEATURE]))
+    result = train(dataset(rows))
+    assert result["models"] == []
+    assert result["diagnostics"]["cohorts"][0]["group_count"] == 38
+
+
+def test_unused_feature_provenance_does_not_change_independent_training_groups():
+    rows = dataset()["rows"]
+    for row in rows:
+        row["feature_provenance"]["unused"] = {"release_id": "unconsumed"}
+    result = train(dataset(rows))
+    assert result["available"]
+    assert result["diagnostics"]["cohorts"][0]["group_count"] == 60
 
 
 @pytest.mark.filterwarnings("error")

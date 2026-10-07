@@ -19,7 +19,7 @@ from .execution_cost_context import COMPONENTS, VERSION as COST_VERSION
 from .rollover_economics import frozen_rollover_schedule
 
 
-VERSION = "edge-family-training-v1"
+VERSION = "edge-family-training-v1.1"
 DATASET_VERSION = "edge-family-dataset-v1"
 MAX_ROWS = 512 * 12 * 8
 MAX_BYTES = 96 * 1024 * 1024
@@ -28,7 +28,8 @@ CONFIG = {"method": "ridge", "ridge_lambda": 1., "intercept_penalized": False,
           "max_features": 32, "minimum_train_groups": 20,
           "validation_blocks": 2, "groups_per_validation_block": 10,
           "scoring_rule": "mean_squared_error", "baseline": "training_only_mean",
-          "fit_policy": "one_frozen_fit_two_untouched_blocks"}
+          "fit_policy": "one_frozen_fit_two_untouched_blocks",
+          "group_policy": "connected_trade_and_explicit_release_dependencies"}
 FEATURE_PREFIXES = {"macro": ("macro.",), "event": ("event.",),
     "order_flow": ("flow.",), "intermarket": ("intermarket.",),
     "positioning": ("positioning.",), "value_carry": ("value.", "carry."),
@@ -365,15 +366,61 @@ def _fit(rows, features):
     return intercept, beta, float(y.mean())
 
 
-def _train_cohort(key, rows, dataset_hash, trained):
-    instrument, family, horizon, geometry, action, features, windows, geometry_contract = key
+def _release_dependencies(row):
+    if row["family_id"] not in {"macro", "event"}:
+        return set()
+    releases = set()
+    for feature in row["features"]:
+        meta = row["feature_provenance"][feature]
+        dependency = meta.get("dependency_group", "")
+        if dependency.startswith("release:") and dependency[8:]:
+            releases.add(dependency[8:])
+        supports = meta.get("constituent_provenance", [])
+        supports = supports if isinstance(supports, list) else []
+        for proof in (meta, *supports):
+            if not isinstance(proof, dict):
+                continue
+            release = proof.get("release_id")
+            if isinstance(release, str) and release:
+                releases.add(release)
+    return releases
+
+
+def _independent_groups(rows):
+    # A trade or official release must never straddle fit/holdout blocks.
+    # Union shared identities transitively, including multi-release features.
+    parents = {str(row["trade_id"]): str(row["trade_id"]) for row in rows}
+
+    def root(group):
+        while parents[group] != group:
+            parents[group] = parents[parents[group]]
+            group = parents[group]
+        return group
+
+    owners = {}
+    for row in rows:
+        group = str(row["trade_id"])
+        for release in sorted(_release_dependencies(row)):
+            if release in owners:
+                first, second = sorted((root(group), root(owners[release])))
+                parents[second] = first
+            else:
+                owners[release] = group
     groups = defaultdict(list)
     for row in rows:
-        groups[str(row["trade_id"])].append(row)
+        groups[root(str(row["trade_id"]))].append(row)
+    return groups
+
+
+def _train_cohort(key, rows, dataset_hash, trained):
+    instrument, family, horizon, geometry, action, features, windows, geometry_contract = key
+    groups = _independent_groups(rows)
     ordered = sorted(groups, key=lambda group: (min(r["captured_ts"] for r in groups[group]), group))
     diagnostic = {"instrument": instrument, "family_id": family, "horizon_minutes": horizon,
                   "geometry_sha256": geometry, "action": action, "row_count": len(rows),
-                  "group_count": len(groups), "folds": [], "available": False}
+                  "group_count": len(groups), "folds": [], "available": False,
+                  "trade_group_count": len({str(row["trade_id"]) for row in rows}),
+                  "group_policy": CONFIG["group_policy"]}
     if len(ordered) < 40:
         diagnostic["reason"] = "INSUFFICIENT_INDEPENDENT_GROUPS"
         return None, diagnostic
@@ -462,6 +509,7 @@ def _train_cohort(key, rows, dataset_hash, trained):
         "validation": {"status": "OOS_VALIDATED", "point_in_time": True,
             "outcomes": "OBSERVED_NET_ACTION_DELTA_VS_HOLD", "purged_split": True,
             "sample_count": len(validation), "group_count": len(validation_groups), "fold_count": 2,
+            "group_policy": CONFIG["group_policy"],
             "proper_score_gain": gain, "model_mse": model_mse, "baseline_mse": baseline_mse,
             "baseline_mean_r": baseline, "costs_included": True,
             "train_row_count": len(train), "train_group_count": len(training_groups),
@@ -485,8 +533,9 @@ def _train_cohort(key, rows, dataset_hash, trained):
 def train_family_models(dataset: dict, *, trained_at: float) -> dict:
     """Return admitted artifacts or explicit diagnostics; never weaken floors.
 
-    The last twenty distinct trades form two ten-group validation blocks.
-    All earlier groups are purged as whole trades against the first holdout.
+    The last twenty independent dependency groups form two ten-group blocks.
+    Earlier groups are purged whole against the first holdout. Macro/event
+    groups connect trades sharing any explicit official release identity.
     Feature/scaling choices and the mean baseline use only those training rows.
     """
     diagnostics = {"input_row_count": 0, "accepted_row_count": 0,

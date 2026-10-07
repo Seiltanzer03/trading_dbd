@@ -39,6 +39,32 @@ def snapshot(family, data, feature):
             "edge_family_models": {family: model(family, feature)}}
 
 
+def test_rejected_calendar_cannot_erase_an_admitted_session_context():
+    admitted, feature = family_fixture("session")
+    rejected = {**admitted, "source_id": "unmapped-calendar", "instrument": "NYSECASH"}
+    rows = [build_edge_family_evidence(snapshot("session", packets, feature))["families"]["session"]
+            for packets in ([admitted, rejected], [rejected, admitted])]
+    assert rows[0]["features"] == rows[1]["features"]
+    assert rows[0]["session_context"] == rows[1]["session_context"]
+    assert rows[0]["session_context"]["calendar_complete"] is True
+    assert rows[0]["session_context"]["calendar_id"] == admitted["calendar_id"]
+    assert rows[0]["rejected_sources"] == rows[1]["rejected_sources"]
+
+
+def test_session_context_tracks_the_freshest_admitted_calendar():
+    fresh, feature = family_fixture("session")
+    old = {**fresh, "source_id": "older-calendar", "observed_ts": T0-30,
+           "received_ts": T0-20, "calendar_id": "older", "session_id": "older-session",
+           "session_open_ts": T0-7200, "session_close_ts": T0-15}
+    rows = [build_edge_family_evidence(snapshot("session", packets, feature))["families"]["session"]
+            for packets in ([fresh, old], [old, fresh])]
+    assert rows[0]["features"] == rows[1]["features"]
+    assert rows[0]["session_context"] == rows[1]["session_context"]
+    assert rows[0]["session_context"]["calendar_id"] == fresh["calendar_id"]
+    assert rows[0]["session_context"]["market_open"] is True
+    assert rows[0]["feature_provenance"][feature]["source_id"] == fresh["source_id"]
+
+
 def test_family_net_action_forecast_must_match_frozen_comparison_horizon():
     data = source(features={"macro.expected_rate_change": -.2})
     frozen = snapshot("macro", data, "macro.expected_rate_change")
