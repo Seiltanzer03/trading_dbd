@@ -1,5 +1,9 @@
 # Project development
 
+Remaining scope and package order are frozen in
+`docs/LOCKED_GLOBAL_PLAN_2026-10-07.md`. Read it before starting a new package.
+Do not add incidental features or weaken G.1 evidence gates to close a package.
+
 For unified-edge work, read `docs/OPENBUILD_SUPERPOWERS_WORKFLOW.md` and
 `docs/UNIFIED_EDGE_DEVELOPMENT_ROADMAP.md`. The user's original specification is
 `docs/TRADING_DBD_UNIFIED_EDGE_PLAN_2026-10-01.md`; preserve its requirements.

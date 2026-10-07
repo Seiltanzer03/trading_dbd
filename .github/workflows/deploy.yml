@@ -560,6 +560,25 @@ jobs:
             -d "$payload"
           echo "EDGE_FAMILY_SOURCE_REFRESH_DISPATCHED expected_sha=$EXPECTED_SHA"
 
+      - name: Start exact-SHA prospective FOMC capture off-host
+        id: fomcrefresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          payload=$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({'ref': 'main', 'inputs': {'expected_sha': os.environ['EXPECTED_SHA']}}))
+          PY
+          )
+          curl --fail-with-body --silent --show-error \
+            --retry 3 --retry-delay 2 --retry-max-time 15 --retry-all-errors \
+            -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/fomc-prospective-capture.yml/dispatches" \
+            -d "$payload"
+          echo "FOMC_PROSPECTIVE_REFRESH_DISPATCHED expected_sha=$EXPECTED_SHA"
+
       - name: Start exact-SHA post-deploy research acceptance
         id: orchestration
         env:
@@ -649,6 +668,7 @@ jobs:
           ORCHESTRATION: ${{ steps.orchestration.outcome }}
           MATHREFRESH: ${{ steps.mathrefresh.outcome }}
           SOURCEREFRESH: ${{ steps.sourcerefresh.outcome }}
+          FOMCREFRESH: ${{ steps.fomcrefresh.outcome }}
         run: |
           set -u
           prod_state=failure
@@ -660,7 +680,7 @@ jobs:
              && [ "$READINESS" = "success" ] \
              && [ "$SMOKE" = "success" ] && [ "$PUBLIC" = "success" ] \
              && [ "$MATHREFRESH" = "success" ] && [ "$SOURCEREFRESH" = "success" ] \
-             && [ "$ORCHESTRATION" = "success" ]; then
+             && [ "$FOMCREFRESH" = "success" ] && [ "$ORCHESTRATION" = "success" ]; then
             prod_state=success
           fi
 
