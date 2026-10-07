@@ -1,0 +1,633 @@
+{
+  "scope": "One existing published source capture plus broker-cost field inspection of the existing frozen32 export. No new fetch, replay, training or activation. Absence applies only to these inputs.",
+  "published_for_sha": "b41a5a1590e84c4146279104ffa67c0a7da7712c",
+  "captured_ts": 1791374394.2332888,
+  "publication_run_id": "37617811579",
+  "artifact_id": 11480592477,
+  "artifact_zip_sha256": "f193c9ea2895167fc758df2f826d2fb38711548dbb09b7dcf1db881d3e0aef5e",
+  "source_bundle_sha256": "623460c09f0e311e96ec5117bb1c32dcd35efa670347216558c5c9a659bd2e0a",
+  "models_produced": 0,
+  "rows": [
+    {
+      "instrument": "BTCUSD",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "order_flow": {
+          "source_packets": 2,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [
+            "INSTRUMENT_OR_PROXY_MAPPING_UNVALIDATED"
+          ],
+          "book_pairs": [
+            {
+              "previous_ts": 1791374390.017965,
+              "current_ts": 1791374392.314573,
+              "venue": "COINBASE_EXCHANGE",
+              "scope": "SAMPLED_TWO_TOP_OBSERVATIONS_NOT_FULL_INCREMENTAL_OFI",
+              "mapping_validated": false
+            }
+          ],
+          "tape_pages": [
+            {
+              "trade_count": 437,
+              "window_complete": false,
+              "coverage": "LATEST_LIMITED_PAGE_NOT_COMPLETE_60S_TAPE"
+            }
+          ]
+        },
+        "positioning": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "ETHUSD",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "order_flow": {
+          "source_packets": 2,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [
+            "INSTRUMENT_OR_PROXY_MAPPING_UNVALIDATED"
+          ],
+          "book_pairs": [
+            {
+              "previous_ts": 1791374389.388487,
+              "current_ts": 1791374393.225474,
+              "venue": "COINBASE_EXCHANGE",
+              "scope": "SAMPLED_TWO_TOP_OBSERVATIONS_NOT_FULL_INCREMENTAL_OFI",
+              "mapping_validated": false
+            }
+          ],
+          "tape_pages": [
+            {
+              "trade_count": 420,
+              "window_complete": false,
+              "coverage": "LATEST_LIMITED_PAGE_NOT_COMPLETE_60S_TAPE"
+            }
+          ]
+        },
+        "positioning": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "EURUSD",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "order_flow": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [],
+          "book_pairs": [],
+          "tape_pages": []
+        },
+        "positioning": {
+          "source_packets": 2,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [
+            "INSTRUMENT_OR_PROXY_MAPPING_UNVALIDATED"
+          ]
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "GER40",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "order_flow": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [],
+          "book_pairs": [],
+          "tape_pages": []
+        },
+        "positioning": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "JPY100",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "order_flow": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [],
+          "book_pairs": [],
+          "tape_pages": []
+        },
+        "positioning": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "NAS100",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 1,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [
+            "INSTRUMENT_OR_PROXY_MAPPING_UNVALIDATED"
+          ]
+        },
+        "order_flow": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [],
+          "book_pairs": [],
+          "tape_pages": []
+        },
+        "positioning": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "SOLUSD",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "order_flow": {
+          "source_packets": 2,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [
+            "INSTRUMENT_OR_PROXY_MAPPING_UNVALIDATED"
+          ],
+          "book_pairs": [
+            {
+              "previous_ts": 1791374390.014299,
+              "current_ts": 1791374392.314745,
+              "venue": "COINBASE_EXCHANGE",
+              "scope": "SAMPLED_TWO_TOP_OBSERVATIONS_NOT_FULL_INCREMENTAL_OFI",
+              "mapping_validated": false
+            }
+          ],
+          "tape_pages": [
+            {
+              "trade_count": 38,
+              "window_complete": false,
+              "coverage": "LATEST_LIMITED_PAGE_NOT_COMPLETE_60S_TAPE"
+            }
+          ]
+        },
+        "positioning": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "SP500",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 1,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [
+            "INSTRUMENT_OR_PROXY_MAPPING_UNVALIDATED"
+          ]
+        },
+        "order_flow": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [],
+          "book_pairs": [],
+          "tape_pages": []
+        },
+        "positioning": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "UK100",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "order_flow": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [],
+          "book_pairs": [],
+          "tape_pages": []
+        },
+        "positioning": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "US30",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 1,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [
+            "INSTRUMENT_OR_PROXY_MAPPING_UNVALIDATED"
+          ]
+        },
+        "order_flow": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [],
+          "book_pairs": [],
+          "tape_pages": []
+        },
+        "positioning": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "USDCAD",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "order_flow": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [],
+          "book_pairs": [],
+          "tape_pages": []
+        },
+        "positioning": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "XAG",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "order_flow": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [],
+          "book_pairs": [],
+          "tape_pages": []
+        },
+        "positioning": {
+          "source_packets": 2,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [
+            "INSTRUMENT_OR_PROXY_MAPPING_UNVALIDATED"
+          ]
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    },
+    {
+      "instrument": "XAU",
+      "families": {
+        "intermarket": {
+          "source_packets": 1,
+          "feature_count": 16,
+          "input_available": true,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "session": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        },
+        "order_flow": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [],
+          "book_pairs": [],
+          "tape_pages": []
+        },
+        "positioning": {
+          "source_packets": 2,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": [
+            "INSTRUMENT_OR_PROXY_MAPPING_UNVALIDATED"
+          ]
+        },
+        "value_carry": {
+          "source_packets": 0,
+          "feature_count": 0,
+          "input_available": false,
+          "forecast_available": false,
+          "source_rejection_reasons": []
+        }
+      }
+    }
+  ],
+  "p5_frozen_cost_audit": {
+    "status": "EVIDENCE_GATED",
+    "review_count": 32,
+    "broker_rollover_schedule_present": 0,
+    "execution_cost_context_present": 0,
+    "position_execution_units_present": 0,
+    "candidate_rollover_audit_reasons": {
+      "BROKER_QUOTE_UNAVAILABLE": 17
+    },
+    "snapshot_execution_context_audit_reasons": {
+      "BROKER_EXECUTION_COST_CONTEXT_UNCONFIGURED": 2
+    },
+    "new_behavioral_tests": 0,
+    "next_package": "P6"
+  }
+}

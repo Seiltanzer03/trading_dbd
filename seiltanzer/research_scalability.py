@@ -127,65 +127,41 @@ def _light_q_status(self) -> dict:
 
 
 def _threshold_status(stats: dict, family: str) -> dict:
-    required = dict(_g1c.FIT_THRESHOLDS[family])
-    blockers = []
-    mapping = {
-        "raw_n": "INSUFFICIENT_RAW_N", "effective_n": "INSUFFICIENT_EFFECTIVE_N",
-        "positive_n": "INSUFFICIENT_POSITIVE_EVENTS",
-        "negative_n": "INSUFFICIENT_NEGATIVE_EVENTS",
-        "unique_q_n": "INSUFFICIENT_Q_VARIATION",
-    }
-    for key, req in required.items():
-        if int(stats.get(key, 0)) < int(req):
-            blockers.append(mapping[key])
-    return {"family": family, "status": "FITTED_UNVALIDATED" if not blockers else "INSUFFICIENT_EVIDENCE",
-            "ready": not blockers, "required": required, "observed": dict(stats),
-            "blockers": blockers}
+    return _g1c._threshold_status(stats, family)
 
 
 def _light_g1c_status(self) -> dict:
     q = _light_q_status(self)
     with self._lock:
         eligible_rows = self._conn.execute("""
-            SELECT p.forecast_json,p.outcome_json
+            SELECT p.forecast_json,p.outcome_json,p.captured_ts,p.target_ts,
+                   p.instrument,g.dependency_group_id
             FROM g1_dataset_membership g JOIN passive_market_observations p USING(observation_id)
             WHERE g.dataset_contract_version=? AND g.q_to_p_eligible=1
-            ORDER BY p.captured_ts
+              AND g.forecast_eval_eligible=1
+              AND NOT EXISTS(SELECT 1 FROM g1_contract_errors e
+                  WHERE e.dataset_contract_version=g.dataset_contract_version
+                    AND e.observation_id=g.observation_id AND e.error_type='SOURCE_MUTATED')
+            ORDER BY p.captured_ts,p.observation_id
         """, (G1_DATASET_CONTRACT_VERSION,)).fetchall()
         model_n = int(self._conn.execute("SELECT COUNT(*) FROM g1c_shadow_models").fetchone()[0])
         pred_n = int(self._conn.execute("SELECT COUNT(*) FROM g1c_shadow_predictions").fetchone()[0])
         fit_n = int(self._conn.execute("SELECT COUNT(*) FROM g1c_fit_runs").fetchone()[0])
         error_n = int(self._conn.execute("SELECT COUNT(*) FROM g1c_contract_errors").fetchone()[0])
-    qs = []
-    positive = negative = 0
-    for row in eligible_rows:
-        forecast = _loads(row["forecast_json"], {})
-        outcome = _loads(row["outcome_json"], {})
-        terminal = outcome.get("terminal") if isinstance(outcome, dict) else {}
-        ret = terminal.get("terminal_log_return") if isinstance(terminal, dict) else None
-        try:
-            ret = float(ret)
-        except (TypeError, ValueError):
+    # Use the same labels, CDF interpolation and dependence clock as G.1C.
+    # Read only eligible rows and the small projection needed by its statistics.
+    clean_rows = []
+    for record in eligible_rows:
+        row = dict(record)
+        row["forecast"] = _loads(row.pop("forecast_json"), {})
+        row["outcome"] = _loads(row.pop("outcome_json"), {})
+        probability = _g1c._g1b._q_up_probability(row)
+        direction = _g1c._g1b._future_direction(row)
+        if probability is None or direction is None or not math.isfinite(probability):
             continue
-        positive += int(ret > 0); negative += int(ret <= 0)
-        cdf = forecast.get("terminal_q_cdf") if isinstance(forecast, dict) else None
-        if isinstance(cdf, dict):
-            support = cdf.get("support") or []
-            values = cdf.get("cdf") or []
-            if support and len(support) == len(values):
-                # Cheap interpolation at zero; exact enough for variation/readiness count.
-                pairs = sorted((float(x), float(y)) for x, y in zip(support, values))
-                f0 = pairs[0][1]
-                for i in range(1, len(pairs)):
-                    if pairs[i][0] >= 0:
-                        x0,y0 = pairs[i-1]; x1,y1 = pairs[i]
-                        f0 = y1 if x1 == x0 else y0 + (y1-y0)*(0-x0)/(x1-x0)
-                        break
-                    f0 = pairs[i][1]
-                qs.append(round(1.0-f0, 10))
-    stats = {"raw_n": len(eligible_rows), "effective_n": int(q["effective_q_n"]),
-             "positive_n": positive, "negative_n": negative,
-             "unique_q_n": len(set(qs))}
+        row.update(raw_q=probability, outcome_y=direction)
+        clean_rows.append(row)
+    stats = _g1c._stats(self, clean_rows)
     readiness = {
         "platt": _threshold_status(stats, "PLATT"),
         "beta": _threshold_status(stats, "BETA"),
@@ -193,25 +169,18 @@ def _light_g1c_status(self) -> dict:
         "full_cdf": _threshold_status(stats, "PIT_ISOTONIC_CDF"),
     }
     blockers = Counter(code for item in readiness.values() for code in item["blockers"])
-    g1d_required = dict(_g1c.G1D_THRESHOLDS)
-    g1d_observed = {"raw_n": stats["raw_n"], "effective_n": stats["effective_n"],
-                    "positive_n": positive, "negative_n": negative,
-                    "temporal_period_n": 0, "expiry_cluster_n": 0}
-    g1d_blockers = [f"INSUFFICIENT_{k.upper()}" for k,v in g1d_required.items()
-                    if int(g1d_observed.get(k, 0)) < int(v)]
+    g1d = _g1c._g1d_status(stats, critical_contract_errors=error_n)
     return {
         "g1_stage": _g1c.G1C_STAGE, "g1c_contract_version": _g1c.G1C_CONTRACT_VERSION,
         "fit_threshold_contract_version": _g1c.G1C_FIT_THRESHOLD_VERSION,
         "generated_ts": time.time(), "q_captured": q["successful_q_capture_n"],
         "q_resolved": q["resolved_q_observation_n"], "q_eligible": stats["raw_n"],
-        "effective_q_n": stats["effective_n"], "positive_n": positive,
-        "negative_n": negative, "unique_q_n": stats["unique_q_n"],
+        "effective_q_n": stats["effective_n"], "positive_n": stats["positive_n"],
+        "negative_n": stats["negative_n"], "unique_q_n": stats["unique_q_n"],
         "fit_readiness": readiness, "fit_run_n": fit_n, "frozen_model_n": model_n,
         "prospective_shadow_prediction_n": pred_n,
-        "ready_for_g1d": not g1d_blockers,
-        "g1d_readiness": {"ready": not g1d_blockers, "required": g1d_required,
-                          "observed": g1d_observed, "blockers": g1d_blockers,
-                          "production_promotion": False},
+        "ready_for_g1d": g1d["ready"],
+        "g1d_readiness": g1d,
         "top_fit_blockers": dict(blockers.most_common()), "contract_error_n": error_n,
         "calibrator_fitted": model_n > 0,
         "shadow_model_fitting_allowed": readiness["platt"]["ready"] or readiness["beta"]["ready"],
