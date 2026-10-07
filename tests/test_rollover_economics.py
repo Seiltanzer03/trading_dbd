@@ -91,3 +91,87 @@ def test_snapshot_is_not_mutated_and_event_order_is_declared():
     value["broker_rollover_schedule"]["same_timestamp_rule"] = "rollover_before_fills"
     second = price_unified_candidates(value, [candidate("HOLD")])
     assert second["candidates"]["HOLD"]["expected_rollover_cost_r"] == pytest.approx(.1)
+
+
+def executing_quote():
+    value = quoted(snapshot([[1, 1, 1]], [1.]))
+    value['trade_id'] = 7
+    value['strategy']['direction'] = 'long'
+    value['trade_identity'] = {'broker_id': 'broker-1', 'account_id': 'account-1',
+                               'trade_id': 7, 'instrument': 'NAS100', 'direction': 'long'}
+    value['position_execution_units'] = {'currency': 'USD', 'quantity_units': 2.,
+        'risk_currency_per_unit': 100., 'quantity_basis': 'current_remaining_position'}
+    value['broker_rollover_schedule'].update(value['trade_identity'])
+    value['broker_rollover_schedule'].update(value['position_execution_units'])
+    return value
+
+
+@pytest.mark.parametrize('field,changed,reason', [
+    ('broker_id', 'broker-2', 'BROKER_ROLLOVER_EXECUTING_IDENTITY_MISMATCH'),
+    ('account_id', 'account-2', 'BROKER_ROLLOVER_EXECUTING_IDENTITY_MISMATCH'),
+    ('trade_id', 8, 'BROKER_ROLLOVER_EXECUTING_IDENTITY_MISMATCH'),
+    ('direction', 'short', 'BROKER_ROLLOVER_EXECUTING_IDENTITY_MISMATCH'),
+    ('currency', 'EUR', 'BROKER_ROLLOVER_EXECUTING_UNITS_MISMATCH'),
+    ('risk_currency_per_unit', 200., 'BROKER_ROLLOVER_EXECUTING_UNITS_MISMATCH'),
+    ('quantity_units', 3., 'BROKER_ROLLOVER_EXECUTING_UNITS_MISMATCH'),
+    ('quantity_basis', 'original_position', 'BROKER_ROLLOVER_EXECUTING_UNITS_MISMATCH'),
+])
+def test_live_common_repricing_rejects_other_executing_position_or_units(field, changed, reason):
+    value = executing_quote()
+    value['broker_rollover_schedule'][field] = changed
+    original = deepcopy(value)
+    result = price_unified_candidates(value, [candidate('HOLD'), candidate('EXIT')])
+    assert result['available'] is False
+    assert result['reason'] == reason
+    assert value == original
+
+
+def test_known_strategy_direction_requires_matching_quote_even_without_account_context():
+    value = quoted(snapshot([[1, 1, 1]], [1.]))
+    value['strategy']['direction'] = 'short'
+    result = price_unified_candidates(value, [candidate('HOLD')])
+    assert result['available'] is False
+    assert result['reason'] == 'BROKER_ROLLOVER_EXECUTING_IDENTITY_MISMATCH'
+
+
+def test_matching_executing_quote_preserves_live_carry_and_already_included_semantics():
+    value = executing_quote()
+    result = price_unified_candidates(value, [candidate('HOLD'), candidate('EXIT')])
+    assert result['available'] is True
+    assert result['candidates']['HOLD']['expected_rollover_cost_r'] == pytest.approx(.2)
+    assert result['candidates']['EXIT']['expected_rollover_cost_r'] == 0.
+    value['broker_rollover_schedule']['included_in_base_costs'] = True
+    result = price_unified_candidates(value, [candidate('HOLD')])
+    assert result['rollover_cost_audit']['reason'] == 'ALREADY_INCLUDED_IN_BASE_COSTS'
+    assert result['candidates']['HOLD']['expected_rollover_cost_r'] == 0.
+    value['broker_rollover_schedule']['direction'] = 'short'
+    result = price_unified_candidates(value, [candidate('HOLD')])
+    assert result['available'] is False
+    assert result['reason'] == 'BROKER_ROLLOVER_EXECUTING_IDENTITY_MISMATCH'
+
+
+@pytest.mark.parametrize('context', ['trade_identity', 'position_execution_units'])
+def test_malformed_executing_context_disables_live_comparison_without_crashing(context):
+    value = executing_quote()
+    value[context] = 'unparsed-position-context'
+    result = price_unified_candidates(value, [candidate('HOLD')])
+    assert result['available'] is False
+    assert result['reason'] == 'BROKER_ROLLOVER_EXECUTING_CONTEXT_INVALID'
+
+
+@pytest.mark.parametrize('field', ['broker_id', 'account_id', 'trade_id', 'direction',
+                                 'currency', 'quantity_units', 'risk_currency_per_unit', 'quantity_basis'])
+def test_known_executing_context_cannot_be_bypassed_by_omitting_quote_binding(field):
+    value = executing_quote()
+    del value['broker_rollover_schedule'][field]
+    assert price_unified_candidates(value, [candidate('HOLD')])['available'] is False
+
+
+def test_matching_malformed_direction_fails_closed_in_live_repricing():
+    value = executing_quote()
+    value['strategy']['direction'] = ['long']
+    value['trade_identity']['direction'] = ['long']
+    value['broker_rollover_schedule']['direction'] = ['long']
+    result = price_unified_candidates(value, [candidate('HOLD')])
+    assert result['available'] is False
+    assert result['reason'] == 'BROKER_ROLLOVER_EXECUTING_IDENTITY_MISMATCH'

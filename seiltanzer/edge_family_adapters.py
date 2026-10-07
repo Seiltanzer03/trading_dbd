@@ -263,7 +263,10 @@ def _order_flow(row: dict, source: dict, meta: dict) -> None:
     fields = ("bid_price", "bid_size", "ask_price", "ask_size")
     p, c = ([_num(record.get(key)) for key in fields] for record in (previous, current))
     pt, ct = _num(previous.get("ts")), _num(current.get("ts"))
-    if (pt is not None and ct is not None and pt < ct <= meta["observed_ts"]
+    if ct is not None and ct != meta["observed_ts"]:
+        row["rejected_sources"].append({"source_id": meta["source_id"],
+                                      "reason": "ORDER_BOOK_OBSERVATION_CLOCK_MISMATCH"})
+    if (pt is not None and ct is not None and pt < ct == meta["observed_ts"]
             and ct - pt <= MAX_AGE_SEC["order_flow"] and all(v is not None for v in p + c)
             and min(p + c) >= 0 and p[0] < p[2] and c[0] < c[2]):
         bid = c[1] if c[0] > p[0] else -p[1] if c[0] < p[0] else c[1] - p[1]
@@ -474,6 +477,17 @@ def _applicable_feature(meta: dict, model_horizon: float, comparison_horizon: fl
                for item in meta.get("applicability_provenance", []))
 
 
+def training_label_clock_valid(artifact: dict) -> bool:
+    # Legacy imports omit the actual label clock. If supplied, it must agree
+    # with the declared purged split; a pinned hash is not chronological proof.
+    if 'train_label_end_ts' not in artifact:
+        return True
+    label_end, train_end, validation_start = (_num(artifact.get(k)) for k in
+        ('train_label_end_ts', 'train_end_ts', 'validation_start_ts'))
+    return (all(v is not None for v in (label_end, train_end, validation_start))
+            and 0 < train_end < label_end < validation_start)
+
+
 def _action_models(row: dict, artifact: dict, cutoff: float, regime: str,
                    regime_contract: str | None = None,
                    comparison_horizon: float | None = None,
@@ -498,13 +512,16 @@ def _action_models(row: dict, artifact: dict, cutoff: float, regime: str,
             or not artifact.get("model_version") or not artifact.get("dataset_sha256")):
         return None, "MODEL_IDENTITY_OR_POOL_INVALID"
     if (any(v is None for v in (trained, train_end, start, end, horizon, scale))
-            or horizon <= 0 or scale <= 0 or not train_end + horizon * 60 <= start < end <= trained <= cutoff):
+            or horizon <= 0 or scale <= 0 or not train_end + horizon * 60 <= start < end <= trained <= cutoff
+            or not training_label_clock_valid(artifact)):
         return None, "MODEL_TIME_SPLIT_OR_HORIZON_INVALID"
     if (validation.get("status") != "OOS_VALIDATED" or validation.get("point_in_time") is not True
             or validation.get("outcomes") != "OBSERVED_NET_ACTION_DELTA_VS_HOLD"
             or validation.get("purged_split") is not True
             or (_num(validation.get("sample_count")) or 0) < 20
+            or type(validation.get("sample_count")) is not int
             or (_num(validation.get("fold_count")) or 0) < 2
+            or type(validation.get("fold_count")) is not int
             or (_num(validation.get("proper_score_gain")) or 0) <= 0
             or validation.get("costs_included") is not True):
         return None, "OOS_NET_ACTION_VALIDATION_REQUIRED"

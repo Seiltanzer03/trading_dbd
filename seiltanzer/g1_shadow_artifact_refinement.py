@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from typing import Any
 
 from . import g1_shadow_refinement as _ref
@@ -141,21 +142,44 @@ def predict_with_artifact_revalidation(self: _ENGINE, observation_id: str) -> di
             "shadow_p": round(float(shadow_p), 12),
         }
         prediction_id = "g1c-pred-" + _g1c._sha(identity)[:24]
-        with self._lock, self._conn:
-            cursor = self._conn.execute(
-                "INSERT OR IGNORE INTO g1c_shadow_predictions("
-                "prediction_id,observation_id,captured_ts,model_id,model_artifact_sha256,training_cut_id,"
-                "training_cutoff,model_family,model_scope_key,raw_q,shadow_calibrated_probability,"
-                "target_contract_version,prediction_contract_version,prediction_status,authority,production_used,created_ts) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    prediction_id, observation_id, captured, model["model_id"], model["artifact_sha256"],
-                    model["training_cut_id"], float(model["training_cutoff"]), model["model_family"],
-                    model["scope_key"], float(observation["raw_q"]), float(shadow_p),
-                    _g1c.G1C_TARGET_CONTRACT_VERSION, _g1c.G1C_PREDICTION_CONTRACT_VERSION,
-                    "PENDING_OUTCOME", "research_only", 0, time.time(),
-                ),
-            )
+        with self._lock:
+            owns_transaction = not self._conn.in_transaction
+            transaction = self._conn if owns_transaction else nullcontext()
+            with transaction:
+                if owns_transaction:
+                    self._conn.execute('BEGIN IMMEDIATE')
+                else:
+                    # Promote a caller-owned deferred transaction to writer
+                    # without changing rows or committing the caller's work.
+                    self._conn.execute(
+                        'UPDATE g1c_shadow_predictions SET created_ts=created_ts WHERE 0')
+                # DB-lock waits and model computation can cross native expiry.
+                # Freeze the actual insertion clock, never a pre-wait timestamp.
+                created_ts = time.time()
+                if created_ts >= target:
+                    return {
+                        "observation_id": observation_id,
+                        "predictions_created": len(created),
+                        "prediction_ids": created,
+                        "status": "PREDICTION_TOO_LATE",
+                        "prediction_admission_contract_version": _ref.REFINEMENT_VERSION,
+                        "artifact_revalidation_contract_version": ARTIFACT_REVALIDATION_VERSION,
+                        "production_used": False,
+                    }
+                cursor = self._conn.execute(
+                    "INSERT OR IGNORE INTO g1c_shadow_predictions("
+                    "prediction_id,observation_id,captured_ts,model_id,model_artifact_sha256,training_cut_id,"
+                    "training_cutoff,model_family,model_scope_key,raw_q,shadow_calibrated_probability,"
+                    "target_contract_version,prediction_contract_version,prediction_status,authority,production_used,created_ts) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        prediction_id, observation_id, captured, model["model_id"], model["artifact_sha256"],
+                        model["training_cut_id"], float(model["training_cutoff"]), model["model_family"],
+                        model["scope_key"], float(observation["raw_q"]), float(shadow_p),
+                        _g1c.G1C_TARGET_CONTRACT_VERSION, _g1c.G1C_PREDICTION_CONTRACT_VERSION,
+                        "PENDING_OUTCOME", "research_only", 0, created_ts,
+                    ),
+                )
         if cursor.rowcount:
             created.append(prediction_id)
 
