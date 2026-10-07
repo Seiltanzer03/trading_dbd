@@ -70,7 +70,8 @@ def render_active_management(rows: list[dict], remaining: float | None = None) -
             return "UNAVAILABLE"
         return f"{value:+.5f}R"
     lines = ["**ПРОВЕРКА АКТИВНОГО МЕНЕДЖМЕНТА** —",
-        "Сравнение каждого кандидата с HOLD на одинаковых путях. Числа на единицу текущего остатка; MC-интервал описывает ошибку симуляции, не уверенность в рынке."]
+        "Независимая консервативная проверка допуска: каждая пара использует свой HOLD и одинаковые случайные драйверы внутри пары. Методы и банки могут различаться между действиями и общим сравнением ансамбля; эти числа не заменяют общую экономику кандидатов.",
+        "Числа на единицу текущего остатка; MC-интервал описывает ошибку симуляции, не уверенность в рынке. Даже положительный Δ общего сравнения не отменяет отказ этой проверки."]
     for row in rows:
         reason = row.get("reason") or "already_armed"
         status = {"blocked": "не допущено", "eligible": "допущено", "already_armed": "уже установлено"}.get(row.get("status"), "UNAVAILABLE")
@@ -86,6 +87,7 @@ def render_active_management(rows: list[dict], remaining: float | None = None) -
         if levels:
             lines.append("Параметры: " + "; ".join(levels) + ".")
         if "expected_delta_vs_hold_r" in row:
+            lines.append(f"Метод независимого допуска: {row.get('method') or 'UNAVAILABLE'}; HOLD ниже относится только к этой проверке.")
             if row.get('mathematical_edge_ranking_bonus_r'):
                 lines.append(f"Мягкая поправка edge к ранжированию {number(row['mathematical_edge_ranking_bonus_r'])}; она не включена в Expected/CVaR и не разрешает заблокированное действие.")
             lines.append(f"Expected net: HOLD {number(row.get('expected_hold_net_r'))} → вариант {number(row.get('expected_variant_net_r'))}; Δ {number(row.get('expected_delta_vs_hold_r'))}. "

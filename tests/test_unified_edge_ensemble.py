@@ -47,6 +47,36 @@ def test_current_llm_changes_authorized_ranking_without_confidence_weights():
     json.dumps(audit, allow_nan=False)
 
 
+@pytest.mark.parametrize("value", [0., .7, -1.])
+def test_flat_llm_scores_do_not_consume_ranking_budget(value):
+    audit = build_unified_ensemble(snapshot(), llm(policy="HOLD", policy_scores={
+        "HOLD": value, "CLOSE_10": value, "CLOSE_25": value}))
+    current = next(c for c in audit["components"] if c["component_id"] == "current_llm")
+    assert current["effective_weight"] == 0.
+    assert current["quality"] == 0.
+    assert current["reason"] == "CURRENT_LLM_NO_RELATIVE_PREFERENCE"
+    assert audit["selected_policy"] == "CLOSE_25"
+
+
+def test_current_llm_quality_describes_contract_acceptance_not_success_probability():
+    audit = build_unified_ensemble(snapshot(), llm(working_action={
+        "status": "NOT_ACTIONABLE", "reason": "LLM_CONFIDENCE_BELOW_MANUAL_ACTION_THRESHOLD"}))
+    current = next(c for c in audit["components"] if c["component_id"] == "current_llm")
+    assert current["quality_basis"] == "STRUCTURED_PREFERENCE_ACCEPTANCE_NOT_CALIBRATED_ACCURACY"
+    assert current["standalone_action_status"] == "NOT_ACTIONABLE"
+    assert current["standalone_action_reason"] == "LLM_CONFIDENCE_BELOW_MANUAL_ACTION_THRESHOLD"
+
+
+def test_sparse_llm_choice_remains_a_valid_preference_without_scores():
+    opinion = llm(policy="HOLD")
+    del opinion["policy_scores"]
+    current = next(c for c in build_unified_ensemble(snapshot(), opinion)["components"]
+                   if c["component_id"] == "current_llm")
+    assert current["available"] is True
+    assert current["scores"] == {"HOLD": 1.}
+    assert current["effective_weight"] > 0.
+
+
 def test_unavailable_returns_budget_to_quant_and_keeps_absence_null():
     audit = build_unified_ensemble(snapshot())
     assert audit["selected_policy"] == "CLOSE_25"

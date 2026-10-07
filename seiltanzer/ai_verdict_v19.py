@@ -165,6 +165,22 @@ def _position_economics_lines(snapshot: dict) -> list[str]:
         lines.append(f"Объём относительно исходной позиции: до {_pct(before)}; закрыть {_pct(before * fraction)}; после {_pct(after)}.")
     selected = decision.get("policy") or (manager.get("recommendation") or {}).get("policy")
     row = (economics.get("policies") or {}).get(selected) or {}
+    unified = manager.get("unified_edge_ensemble") or {}
+    primary = _primary_economics(snapshot)
+    if primary:
+        bank = unified.get("scenario_bank") or {}
+        lines.append(f"Основная экономика: единый сравнительный банк {bank.get('bank_id') or '—'}; источник {bank.get('source') or '—'}. Контрольная bridge-модель и независимый gate показаны отдельно.")
+        realized = _number(economics.get("realized_r_weighted"))
+        expected, cvar = _number(primary.get("expected_net_r")), _number(primary.get("cvar10_net_r"))
+        if before is not None and realized is not None and expected is not None and cvar is not None:
+            delta, gain = _number(primary.get("delta_expected_r")), _number(primary.get("delta_cvar_r"))
+            row = {"expected_total_r": realized + before * expected,
+                   "cvar10_total_r": realized + before * cvar,
+                   "expected_delta_total_r": before * delta if delta is not None else None,
+                   "cvar_gain_total_r": before * gain if gain is not None else None}
+        else:
+            row = {}
+            lines.append(f"Экономика {selected} на единицу текущего остатка: Expected {_r(expected)}; CVaR10 {_r(cvar)}. Результат всей сделки недоступен: отсутствует остаток или фактический зафиксированный результат.")
     if row:
         lines.append(f"Польза {selected} против HOLD для всей сделки: Expected {_r(row.get('expected_delta_total_r'))}; CVaR10 {_r(row.get('cvar_gain_total_r'))}.")
         lines.append(f"Вся сделка при {selected}: Expected {_r(row.get('expected_total_r'))}; CVaR10 {_r(row.get('cvar10_total_r'))}; зафиксировано {_r(economics.get('realized_r_weighted'))}. Исторические издержки исполненных закрытий не учтены; будущие издержки включены в модель.")
@@ -181,6 +197,17 @@ def _position_economics_lines(snapshot: dict) -> list[str]:
     elif repeat_gate.get("allowed"):
         lines.append("Основания нового сокращения после исполнения: " + ", ".join(repeat_gate.get("reasons") or []) + ".")
     return lines
+
+
+def _primary_economics(snapshot: dict) -> dict:
+    manager = snapshot.get("policy_manager") or {}
+    unified = manager.get("unified_edge_ensemble") or {}
+    if not unified.get("applied", unified.get("available")) or not unified.get("shared_scenario_bank"):
+        return {}
+    production = (manager.get("management_decision") or {}).get("policy")
+    identity = unified.get("selected_candidate_id")
+    return next((row for row in unified.get("candidates") or []
+                 if row.get("candidate_id") == identity and row.get("policy") == production), {})
 
 
 def _terminal_cancellation_lines(snapshot: dict) -> list[str] | None:
@@ -594,8 +621,13 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
     lines = [line.replace("Shadow metrics:", "Derived shadow scenario distribution:") for line in lines]
     bounds = _section(lines, "**РАСЧЁТ ПОЛИТИК**")
     if bounds is not None:
-        start, _ = bounds; label = "Base production policy distribution (common execution-MC paths):"
+        start, _ = bounds
+        label = ("Контрольная базовая bridge-модель: общие пути только для HOLD/CLOSE/EXIT. Её Expected отличается от единого сравнительного банка; этот раздел не задаёт итоговую экономику ансамбля."
+                 if manager.get("unified_edge_ensemble") else
+                 "Base production policy distribution (common execution-MC paths):")
         if start + 1 >= len(lines) or lines[start + 1] != label: lines.insert(start + 1, label)
+        if manager.get("unified_edge_ensemble"):
+            lines = [line for line in lines if line != "Base production policy distribution (common execution-MC paths):"]
     if not any(line.startswith("**EDE CAUSAL MARKET CONTEXT**") for line in lines): lines.extend(["", "**EDE CAUSAL MARKET CONTEXT** —", *_ede_context_lines(snapshot)])
     if not any(line.startswith("**FULL METRIC AUDIT**") for line in lines): lines.extend(["", "**FULL METRIC AUDIT** —", *_metric_audit_lines(snapshot)])
     from .mathematical_edge import render_math_edge
@@ -604,6 +636,20 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
         (manager.get('selection_rule') or {}).get('combined_edge_soft_weight'))
     unified = manager.get("unified_edge_ensemble") or {}
     if unified:
+        primary = _primary_economics(snapshot)
+        if primary:
+            _replace_section(lines, "**ПРОВЕРЕННЫЙ ВЫВОД**", [
+                f"Действующий план: {decision.get('policy')}; основная модельная экономика единого сравнения на единицу остатка: Expected {_r(primary.get('expected_net_r'))}; CVaR10 {_r(primary.get('cvar10_net_r'))}.",
+                "Общий сравнительный банк использует опубликованную модель исполнения; он не воспроизводит скрытые bridge-события базового контроля. Исходные ограничения источников, риска и независимого допуска остаются обязательными. Исполнение у брокера требует отдельного подтверждения.",
+            ])
+        risk_bounds = _section(lines, "**ПОЧЕМУ ВЫБРАНО**")
+        if risk_bounds is not None:
+            lines.insert(risk_bounds[0] + 1, "Ниже — проверка базового контроля до ансамбля. Итоговый выбор и его экономика приведены в едином плане и единой таблице кандидатов.")
+        close_bounds = _section(lines, "**ЭКОНОМИЧЕСКАЯ БЛИЗОСТЬ ПОЛИТИК**")
+        if close_bounds is not None:
+            label = "Сравнение базового bridge-контроля, отдельно от основной экономики единого банка."
+            if lines[close_bounds[0] + 1:close_bounds[0] + 2] != [label]:
+                lines.insert(close_bounds[0] + 1, label)
         math_component = next((row for row in unified.get("components") or []
                                if row.get("component_id") == "mathematical_edge"), {})
         math_section = re.sub(

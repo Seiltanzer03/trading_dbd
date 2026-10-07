@@ -123,7 +123,12 @@ def compact_evidence_lineage(evidence):
             result[key] = deepcopy(evidence[key])
     for key in ("adverse_confirmations", "supportive_contradictions", "context_observations"):
         if isinstance(evidence.get(key), list):
-            result[key] = [{field: row[field] for field in ("family", "available") if field in row}
+            result[key] = [{field: row[field] for field in (
+                               "family", "available", "metric", "value", "threshold",
+                               "context_only", "direction", "status", "source", "age_sec")
+                           if field in row and (row[field] is None
+                               or isinstance(row[field], (bool, int, float))
+                               or isinstance(row[field], str) and len(row[field]) <= 256)}
                            for row in evidence[key] if isinstance(row, dict)]
     if _bytes(evidence.get("data_quality")) <= 2000:
         if "data_quality" in evidence:

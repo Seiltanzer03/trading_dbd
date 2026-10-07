@@ -148,6 +148,8 @@ def _economic_body(snapshot: dict[str, Any]) -> list[str] | None:
     hold_e = _policy_metric(hold, "expected_final_r_net", "expected_final_r")
     hold_c = _policy_metric(hold, "cvar10_r_net", "cvar10_r")
     lines = [f"Зона безразличия Expected: {band:+.3f}R."]
+    if manager.get("unified_edge_ensemble"):
+        lines.insert(0, "Контрольная базовая bridge-модель: её собственные HOLD/Δ и зона безразличия. Итоговая экономика ансамбля опубликована в едином сравнительном банке.")
 
     eligible = rule.get("eligible")
     alternatives: list[tuple[float, str, float, float | None]] = []
@@ -298,6 +300,12 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
     llm_role = ("структурированный независимый голос для единого ранжирования"
                 if shadow.get("status") == "ok" and shadow.get("policy_scores")
                 else "недоступный или заблокированный голос; активный вес 0")
+    # This section is built before the final ensemble is attached. Inspect the
+    # fresh validated preference vector, not an audit from a prior decision.
+    scores = [_number(value) for value in (shadow.get("policy_scores") or {}).values()]
+    scores = [value for value in scores if value is not None]
+    if len(scores) > 1 and max(scores) == min(scores):
+        llm_role = "голос не участвует; активный вес 0; причина CURRENT_LLM_NO_RELATIVE_PREFERENCE"
     return (
         "**ВЕСА И РОЛИ РЕШЕНИЯ** —\n"
         "Ниже — базовая диагностика до единого выбора, не итоговые веса компонентов. "

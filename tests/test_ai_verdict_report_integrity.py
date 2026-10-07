@@ -181,3 +181,26 @@ def test_prompt_forbids_missing_equals_zero_and_separates_edge_authority():
     assert "EDE causal/prospective shadow" in normalized
     assert "execution-MC" in normalized
     assert "PRIMARY → FALLBACK_SOURCE → LAST_GOOD_CACHE → MATHEMATICAL_PROXY" in normalized
+
+
+def test_evidence_metric_identity_and_observed_values_survive_compaction():
+    snapshot = _snapshot()
+    snapshot['policy_manager']['evidence']['atr_regime'] = {'workspace': 'x' * 70000}
+    snapshot['policy_manager']['evidence'].update({
+        'adverse_confirmations': [{'metric': 'live_price_momentum', 'family': 'live_tape',
+                                   'value': -0.23, 'threshold': -0.15}],
+        'supportive_contradictions': [{'metric': 'atr_trend', 'family': 'live_tape',
+                                      'value': 0.71, 'threshold': 0.5}],
+        'context_observations': [{'metric': 'gamma_flip_distance', 'family': 'option_distribution',
+                                  'value': 0.2, 'context_only': True}],
+    })
+    ai_verdict._enforce_snapshot_budget_with_report_integrity(snapshot)
+    evidence = snapshot['policy_manager']['evidence']
+    assert evidence['adverse_confirmations'][0]['metric'] == 'live_price_momentum'
+    assert evidence['adverse_confirmations'][0]['value'] == -0.23
+    assert evidence['supportive_contradictions'][0]['metric'] == 'atr_trend'
+    assert evidence['context_observations'][0]['context_only'] is True
+    report = ai_verdict.render_policy_report(snapshot)
+    assert 'live_price_momentum' in report and 'atr_trend' in report
+    assert 'Метрики против удержания: метрика' not in report
+    assert snapshot['snapshot_budget']['final_bytes'] < ai_verdict.SNAPSHOT_LIMIT_BYTES

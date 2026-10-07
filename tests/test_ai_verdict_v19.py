@@ -273,3 +273,38 @@ def test_terminal_exit_replaces_stale_hold_cancellation_text():
     assert "Для EXIT по терминальному событию стратегии FINAL_TAKE_REACHED" in report
     assert "граница отмены не применяется" in report
     assert "Для HOLD границы отмены" not in report
+
+
+def test_primary_position_economics_uses_unified_comparison_not_legacy_control():
+    snapshot = _snapshot()
+    manager = snapshot['policy_manager']
+    manager['position_economics'] = {'realized_r_weighted': 0.1,
+        'realized_price_basis': 'user_supplied_broker_fill',
+        'policies': {'HOLD': {'expected_total_r': 0.195, 'cvar10_total_r': -0.405,
+                             'expected_delta_total_r': 0., 'cvar_gain_total_r': 0.}}}
+    manager['management_decision']['remaining_fraction_before_action'] = 0.5
+    manager['management_decision']['remaining_fraction_after_action'] = 0.5
+    manager['unified_edge_ensemble'] = {'available': True, 'applied': True,
+        'selected_policy': 'HOLD', 'selected_candidate_id': 'HOLD',
+        'shared_scenario_bank': True,
+        'scenario_bank': {'bank_id': 'shared-comparison', 'source': 'frozen_option_driver_comparison'},
+        'candidates': [{'candidate_id': 'HOLD', 'policy': 'HOLD',
+                        'expected_net_r': 0.211, 'cvar10_net_r': -1.01,
+                        'delta_expected_r': 0., 'delta_cvar_r': 0.}]}
+    lines = v19._position_economics_lines(snapshot)
+    assert any('Expected +0.206R' in line for line in lines)
+    assert any('shared-comparison' in line for line in lines)
+    assert not any('Expected +0.195R' in line for line in lines)
+    assert manager['position_economics']['policies']['HOLD']['expected_total_r'] == 0.195
+
+
+def test_common_economics_not_used_when_selected_action_was_not_applied():
+    from seiltanzer.ai_verdict_v19 import _primary_economics
+    value = {'policy_manager': {'management_decision': {'policy': 'HOLD'},
+        'unified_edge_ensemble': {'applied': False, 'available': True,
+            'shared_scenario_bank': True, 'selected_candidate_id': 'hold',
+            'candidates': [{'candidate_id': 'hold', 'policy': 'HOLD', 'expected_net_r': .211}]}}}
+    assert _primary_economics(value) == {}
+    value['policy_manager']['unified_edge_ensemble']['applied'] = True
+    value['policy_manager']['management_decision']['policy'] = 'EXIT'
+    assert _primary_economics(value) == {}

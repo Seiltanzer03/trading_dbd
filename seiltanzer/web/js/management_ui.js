@@ -56,7 +56,8 @@ const COMPONENT_LABELS_RU = {
 const componentLabel = (value) => COMPONENT_LABELS_RU[value] || value || '—';
 const percent = (value) => {
   const number = finiteNumber(value);
-  return number === null ? '—' : `${(number * 100).toFixed(1)}%`;
+  if (number === null) return '—';
+  return `${0 < Math.abs(number) && Math.abs(number) < .001 ? (number * 100).toPrecision(3) : (number * 100).toFixed(1)}%`;
 };
 const signed = (value, unit = '') => {
   const number = finiteNumber(value);
@@ -127,6 +128,8 @@ export function mountUnifiedEdgeEnsemble(container, audit) {
   const bank = audit.scenario_bank || audit.comparison_bank;
   if (bank) appendTextLine(panel, 'tiny dim',
     `Банк ${bank.bank_id || '—'} · источник ${bank.source || '—'} · исходный авторитетный банк: ${bank.exact_authoritative_bank ? 'использован' : 'не использован'} · исполнение ${bank.execution_assumption || '—'}.`);
+  appendTextLine(panel, 'tiny dim',
+    'Δ общего сравнения не заменяет исходные ограничения риска, источников и независимого допуска. Раздел «Независимая консервативная проверка допуска» показывает собственные HOLD/Δ и метод; его отказ сохраняется при большем приросте общей модели.');
   appendTextLine(panel, 'tiny dim',
     'Вес не отменяет hard-risk/CVaR. Исполняется единственный действующий план после обязательных ограничений риска.');
   const components = Array.isArray(audit.components) ? audit.components : [];

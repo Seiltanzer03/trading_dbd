@@ -300,3 +300,10 @@ def test_combined_provider_rejects_future_source_before_http(monkeypatch):
     monkeypatch.setattr(report_v20.httpx, "Client", lambda **kwargs: pytest.fail("future data reached transport"))
     with pytest.raises(ValueError, match="post-capture"):
         report_v20.request_explanation_with_shadow(snapshot)
+
+
+def test_runtime_economic_repair_preserves_control_model_label():
+    snapshot = _report_snapshot()
+    snapshot['policy_manager']['unified_edge_ensemble'] = {'available': True}
+    body = report_v20._economic_body(snapshot)
+    assert 'Контрольная базовая bridge-модель' in '\n'.join(body)
