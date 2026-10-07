@@ -1,0 +1,113 @@
+{
+  "archive_episode_n": 32,
+  "dataset_exclusion_counts": {
+    "EXECUTION_GEOMETRY_INCOMPLETE": 26,
+    "FROZEN_EXECUTION_DIRECTION_OR_RANGE_INVALID": 1,
+    "INDEPENDENT_EXECUTING_POSITION_EVIDENCE_REQUIRED": 4,
+    "RETAINED_OBSERVATION_PRICE_AND_R_MISMATCH": 1
+  },
+  "dataset_row_n": 0,
+  "dataset_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "evaluation_code_sha": "b41a5a1590e84c4146279104ffa67c0a7da7712c",
+  "frozen_sources": {
+    "consensus_available": false,
+    "digest_verified_n": 32,
+    "event_feature_snapshot_n": 0,
+    "feature_groups": {
+      "CPI": {
+        "distinct_feature_n": 6,
+        "snapshots_per_feature": 2
+      },
+      "FOMC": {
+        "distinct_feature_n": 8,
+        "snapshots_per_feature": 2
+      },
+      "ISM_MANUFACTURING": {
+        "distinct_feature_n": 14,
+        "snapshots_per_feature": 2
+      },
+      "ISM_SERVICES": {
+        "distinct_feature_n": 14,
+        "snapshots_per_feature": 2
+      },
+      "NFP": {
+        "distinct_feature_n": 6,
+        "snapshots_per_feature": 2
+      }
+    },
+    "frozen_family_model_snapshot_n": 0,
+    "macro_feature_snapshot_n": 2,
+    "novelty_refusal_counts": {
+      "NOVELTY_CURRENT_PUBLICATION_STALE": 1
+    },
+    "reaction_refusal_counts": {
+      "REACTION_CONFIGURED_DIRECT_CONTEXT_UNSUPPORTED": 2
+    },
+    "retrospective_source_overlay_injected": false,
+    "structurally_valid_snapshot_n": 31,
+    "surprise_computed": false
+  },
+  "historical_profit_proven": false,
+  "input_artifact_id": 11468461697,
+  "input_export_sha256": "92b0d38a7e0764ea87a634b7fd4c74eabfcaea92106bc4639a1d082f25e427f6",
+  "input_exported_ts": 1791360059.223936,
+  "input_workflow_head_sha": "f06eb8360bd786ddd8ee173171a16161a80e71ff",
+  "input_workflow_run_id": 37590901260,
+  "input_zip_sha256": "a7bee626c1d1f54354654dd63e889f47d09d271d440b7c34cc815494849d718d",
+  "limitations": [
+    "32 selected reviews from 271 metadata rows; remainder not evaluated.",
+    "31 structural snapshot validations do not mean admitted action training rows: these are zero.",
+    "Source facts, fitted models, runtime forecasts and votes are distinct.",
+    "Minimum 40 independent trade groups, purge and OOS gates unchanged.",
+    "No raw snapshots, positions, broker fields, trade/review/source identities in this report.",
+    "New source overlay cannot retrofit immutable T0 snapshots.",
+    "No global absence-of-model or absence-of-signal claim."
+  ],
+  "llm_calls": 0,
+  "new_runtime_contribution_n": 0,
+  "new_runtime_forecast_n": 0,
+  "new_validated_model_n": 0,
+  "p1_state": "BLOCKED_EXISTING_SEPARATE_SCHEDULER_UNAVAILABLE_USER_CONFIRMED",
+  "p3_existing_sample_check": {
+    "calendar_reason_counts": {
+      "HOLIDAY_AND_EARLY_CLOSE_CALENDAR_REQUIRED": 31
+    },
+    "clock_context_counts": {
+      "London": 8,
+      "New_York": 8,
+      "UTC": 15
+    },
+    "common_joined_training_row_n": 0,
+    "complete_exchange_calendar_n": 0,
+    "completed_historical_series_n": 3,
+    "derived_session_context_n": 31,
+    "dst_transition_test_performed": false,
+    "executing_broker_mapping_proven": false,
+    "history_adapter_reason": "RECEIVED_HISTORY_FEATURES",
+    "intermarket_distinct_feature_n": 16,
+    "intermarket_feature_snapshot_n": 1,
+    "intermarket_frozen_forecast_n": 0,
+    "intermarket_packet_snapshot_n": 1,
+    "known_market_open_n": 0,
+    "linked_return_record_n": 3,
+    "result": "P3_EXISTING_SAMPLE_EVIDENCE_GATED",
+    "retrospective_overlay_injected": false,
+    "scope": "BOUNDED_EXISTING_SAMPLE_NOT_ALL_INSTRUMENTS_OR_GLOBAL_HISTORY",
+    "session_feature_n": 0,
+    "session_frozen_forecast_n": 0,
+    "session_packet_n": 0
+  },
+  "package_state": "P2_EVIDENCE_GATED_EXISTING_SAMPLE_AUDITED",
+  "pipeline_network_calls": 0,
+  "production_or_database_writes": 0,
+  "recent_metadata_n": 271,
+  "runtime_artifact_created": false,
+  "runtime_model_activation_performed": false,
+  "scope": "BOUNDED_EXISTING_EXPORT_NOT_FULL_HISTORICAL_ARCHIVE_OR_NEW_SIGNAL_SEARCH",
+  "selected_distinct_trade_n": 15,
+  "selected_review_n": 32,
+  "selection": "max32_instrument_round_robin_time_spread_from_latest512_rowids",
+  "source_code_tree": "a4385f5763e916e402bb94ed78562671303963eb",
+  "training_reason": "NO_VALIDATED_MODELS",
+  "version": "p2-bounded-existing-sample-audit-v1"
+}

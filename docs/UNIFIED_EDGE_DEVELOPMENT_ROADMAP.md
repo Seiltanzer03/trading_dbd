@@ -1,7 +1,7 @@
 # Единый edge: путь разработки и критерии завершения
 
-Текущая принятая production-база: PR #407, main
-`c080514c1c0126d3b95ca5140a0295a06c0046e4`, deploy `37575850020`;
+Текущая принятая production-база: PR #410, main
+`b41a5a1590e84c4146279104ffa67c0a7da7712c`, deploy `37615509675`;
 полный CI, readiness и smoke подтверждены. Оставшийся объём и порядок пакетов
 зафиксированы в [общем плане](LOCKED_GLOBAL_PLAN_2026-10-07.md).
 Ниже сохраняется исторический журнал, включая старые pending записи.
@@ -497,3 +497,48 @@ reason. It performs no request-time SQLite, file or network access. Historical
 bootstrap errors remain distinct. Focused profile: 19 tests passed; official
 final-head CI and release acceptance for PR #407 remain pending until evidenced.
 
+
+
+### Выпуск исправления разбора и bounded P2/P3 readiness, 2026-10-07
+
+PR #410: согласованы экономика общего сравнительного банка, отдельный bridge
+контроль и независимая консервативная проверка допуска. Source lineage quant
+показывает реально использованный банк; bounded compaction сохраняет metric
+identity, малые веса не округляются до нуля, flat LLM preference не получает
+голоса. Self-confidence не подменяет calibrated accuracy. Риск/издержки и
+исходный отказ admission не ослаблены. Независимый final review одобрен;
+CI PR run37590901100: 3098 passed /4 skipped, real WebKit green. Main CI
+37615234667 и deploy37615509675 green; readiness/function/public HTTP и все
+семь обязательных production contexts green. Public management_ui.js byte-for-byte
+соответствует выпущенному source. Post-research37617817743/G1M37617852126 green.
+
+Exact-SHA math37617807999 и source37617811579 опубликованы на b41a5a1;
+source bundle: 13 инструментов, models_produced=0. FOMC37617814632 опубликован
+и native materialization принят: capture digest
+ d52a314d897dc81e77d688a69d80104a5ce5784f81a51e6d7d247eab44020521,
+materialized_at1791374532.5897613, admissible=true, WITHIN_TARGET. Это одна
+свежая доставка, не доказательство cadence. Пользователь подтвердил отсутствие
+отдельной площадки scheduler; P1 BLOCKED до появления такой площадки.
+
+Без новой выгрузки использован existing comparison artifact11468461697 из
+run37590901260 (его headf06eb83 имеет тот же code tree). Existing family pipeline
+один раз выполнен off-host: 32episodes/15trades, 0 admitted action rows, 0 models,
+нового runtime artifact нет. Dataset exclusions26 incomplete geometry,4 missing
+independent position evidence,1 invalid range/direction,1 price/R mismatch.
+31 structural snapshot validations не являются31 training rows. Pipeline contracts
+47 passed. Два snapshots содержат официальные macro facts; consensus/reaction/
+novelty имеют отдельные недостатки. P2 EVIDENCE-GATED в этой bounded выборке,
+не global no-signal conclusion. Исторические overlays не подмешивались.
+
+Ограниченный P3 preflight тех же inputs:1 intermarket packet/16features,
+3 completed source histories; session calendar packets0,31 derived contexts
+требуют holiday/early-close calendar. Forecasts/causal training joins0. Coinbase
+source context не доказывает executing-broker equivalence. P3 EVIDENCE-GATED
+для выбранных snapshots; другие инструменты/полный архив этим не проверены.
+Подробные aggregate результаты, scope и digests:
+`P2_EXISTING_SAMPLE_AUDIT_2026-10-07.md` / `.json`.
+
+Runtime код в readiness-аудите не изменялся, DB/production writes и network/LLM
+calls pipeline=0. Raw broker/account snapshots не включены в новые отчёты.
+Следующий шаг — отдельная проверка доступных синхронных P3 входов и календаря
+по locked plan; повторить тот же поиск/обучение без новых входов нельзя.
