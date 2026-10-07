@@ -129,5 +129,37 @@ def test_background_reader_binds_publication_and_blocks_old_native_pair_on_failu
     capture['published_for_sha'] = '2' * 40
     path.write_text(json.dumps(capture))
     assert worker.refresh()['status'] == 'UNAVAILABLE'
+    assert worker.status()['admissible_for_new_snapshot'] is False
+    assert worker.status()['admission_reason'] == 'FOMC_PROSPECTIVE_CAPTURE_REJECTED'
     assert module().prospective_admission_reason(store, NOW+11)
     assert runtime._conn.execute('SELECT COUNT(*) FROM macro_fomc_deterministic_releases').fetchone()[0] == 2
+
+
+def test_worker_status_reports_current_admission_without_io(monkeypatch, tmp_path):
+    runtime = SimpleNamespace(_conn=sqlite3.connect(':memory:'), _lock=threading.RLock())
+    store = StrictFOMCDeterministicReleaseStore(runtime)
+    now = [NOW + 10]
+    path = tmp_path / 'fomc.json'
+    worker = module().ProspectiveFOMCRuntime(store, path, code_sha=lambda: SHA, clock=lambda: now[0])
+    assert worker.status()['admissible_for_new_snapshot'] is False
+    capture, _ = collect()
+    capture.update(publication_contract_version='active-edge-exact-sha-publication-v1', published_for_sha=SHA)
+    path.write_text(json.dumps(capture))
+    monkeypatch.setattr('seiltanzer.macro_fomc_deterministic_bootstrap.time.time', lambda: now[0])
+    assert worker.refresh()['status'] == 'OK'
+    path.unlink()
+    runtime._conn.close()
+    current = worker.status()
+    assert current['published_for_sha'] == SHA
+    assert current['capture_sha256'] == capture['capture_sha256']
+    assert current['captured_ts'] == NOW
+    assert current['materialized_at'] == NOW + 10
+    assert current['stored'] == 2 and current['skipped'] == 0
+    assert current['admissible_for_new_snapshot'] is True
+    assert current['admission_reason'] is None
+    current['status'] = 'ALTERED'
+    now[0] = NOW + 3601
+    stale = worker.status()
+    assert stale['status'] == 'OK'
+    assert stale['admissible_for_new_snapshot'] is False
+    assert stale['admission_reason'] == 'FOMC_PROSPECTIVE_CAPTURE_STALE_OR_AFTER_SNAPSHOT'

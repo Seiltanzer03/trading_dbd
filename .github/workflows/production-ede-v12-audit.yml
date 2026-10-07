@@ -252,6 +252,15 @@ jobs:
             --source-manifest "$SOURCE_DB.manifest.json" \
             --bucket "$BUCKET" --key "$key" \
             --output-manifest "$SOURCE_DB.offhost-manifest.json"
+      - name: Preserve verified off-host backup manifests before research
+        uses: actions/upload-artifact@v4
+        with:
+          name: ede-offhost-backup-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/ede-source/ede-source.sqlite3.manifest.json
+            ${{ runner.temp }}/ede-source/ede-source.sqlite3.offhost-manifest.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Reverify immutable input before research
         env:
           SOURCE_DB: ${{ runner.temp }}/ede-source/ede-source.sqlite3
@@ -305,6 +314,24 @@ jobs:
             --evidence-ledger "$OUTPUT_DIR/ede_frozen_evidence.jsonl" \
             --candidate-registry "$OUTPUT_DIR/ede_v13_candidate_registry.jsonl" \
             --verified-immutable-input
+      - name: Preserve completed discovery before transition audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: ede-v13-discovery-${{ github.run_id }}
+          path: ${{ runner.temp }}/ede-output
+          if-no-files-found: error
+          retention-days: 30
+      - name: Run transition audit off production VPS
+        env:
+          SOURCE_DB: ${{ runner.temp }}/ede-source/ede-source.sqlite3
+          OUTPUT_DIR: ${{ runner.temp }}/ede-output
+          OMP_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          NUMEXPR_NUM_THREADS: "1"
+          VECLIB_MAXIMUM_THREADS: "1"
+        run: |
+          set -euo pipefail
           python scripts/production_ede_transition_audit.py \
             --database "$SOURCE_DB" \
             --output "$OUTPUT_DIR/ede_transition_latest_audit.json" \
