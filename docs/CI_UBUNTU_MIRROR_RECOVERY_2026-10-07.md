@@ -32,3 +32,23 @@ Exact-SHA deploy/readiness/smoke/public HTTP/publication proofs belong in the PR
 after acceptance, without a subsequent documentation-only release.
 
 P1 alternate GitHub polling sessions remain unapproved and unimplemented.
+
+## Follow-up: measured package-download budget
+
+PR416 CI37679858554 succeeded:3133 passed/4 skipped, real WebKit and acceptance
+green. Merged864bb6d2cd287a47cedbc0b41079538be8de57dc. Main37680279827
+browser112994218088 selected Azure fallback after HTTPS SSL timeout. Signed
+indexes downloaded52.1 MB in5s, then the87.1 MB package download progressed at
+roughly100 KB/s (package names/sizes advanced throughout the log). It hit the
+existing five-minute step limit at20:18:10Z before installation completed.
+
+The initial recovery checked reachability, not package throughput. Its PR check
+therefore did not prove the fallback could finish within five minutes on every
+runner route. The follow-up changes only this installation step to a finite
+20-minute bound, covering roughly15 minutes for87 MB at observed throughput.
+The enclosing browser job has a finite30-minute budget so the dependency step
+plus browser download and actual tests can finish. Independent review caught
+the original15-minute job limit conflicting with the new20-minute step limit;
+the budget invariant failed before correction and passed with30 minutes.
+No omitted dependency, disabled browser test or green-status override. Other
+step bounds and product code remain unchanged.
