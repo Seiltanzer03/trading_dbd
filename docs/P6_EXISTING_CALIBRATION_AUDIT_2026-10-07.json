@@ -1,0 +1,76 @@
+{
+  "scope": "Existing exact-SHA mathematical result plus one bounded live-cache calibration GET; no new search, fitting or Q-to-P promotion. Pre-fix materialized counts are reported values, not independently revalidated training data.",
+  "baseline_sha": "b41a5a1590e84c4146279104ffa67c0a7da7712c",
+  "math_artifact_id": 11480028705,
+  "math_run_id": 37617807999,
+  "math_zip_sha256": "128125e69fc3b57d3078a6773d8185c3539048eb69bebae430860e92094b08b5",
+  "math_result_sha256": "9928e06929cf533d9d9694e59021c7fc2dde9d5771202ff9ad61fe52583f983c",
+  "pre_fix_calibration": {
+    "generated_ts": 1791377591.1071465,
+    "q_eligible": 718,
+    "effective_q_n": 718,
+    "positive_n": 400,
+    "negative_n": 318,
+    "fit_run_n": 0,
+    "frozen_model_n": 0,
+    "prospective_shadow_prediction_n": 0,
+    "contract_error_n": 147,
+    "g1d_readiness": {
+      "ready": false,
+      "required": {
+        "raw_n": 200,
+        "effective_n": 100,
+        "positive_n": 30,
+        "negative_n": 30,
+        "temporal_period_n": 3,
+        "expiry_cluster_n": 2
+      },
+      "observed": {
+        "raw_n": 718,
+        "effective_n": 718,
+        "positive_n": 400,
+        "negative_n": 318,
+        "temporal_period_n": 0,
+        "expiry_cluster_n": 0
+      },
+      "blockers": [
+        "INSUFFICIENT_TEMPORAL_PERIOD_N",
+        "INSUFFICIENT_EXPIRY_CLUSTER_N"
+      ],
+      "production_promotion": false
+    },
+    "production_authority": false,
+    "physical_probability_published": false
+  },
+  "identity": {
+    "JPY100": {
+      "status": "NO_SUPPORTED_ADVANTAGE_YET",
+      "management_role": "NO_WEIGHT",
+      "selected_horizon_minutes": 30,
+      "search_completed": true,
+      "net_economic_proof": false
+    },
+    "BTCUSD": {
+      "status": "WORKING_SUPPORTED",
+      "management_role": "DIAGNOSTIC_ONLY_PRICE_SERIES_MAPPING_UNVALIDATED",
+      "selected_horizon_minutes": 120,
+      "search_completed": true,
+      "net_economic_proof": false
+    },
+    "ETHUSD": {
+      "status": "WORKING_SUPPORTED",
+      "management_role": "DIAGNOSTIC_ONLY_PRICE_SERIES_MAPPING_UNVALIDATED",
+      "selected_horizon_minutes": 30,
+      "search_completed": true,
+      "net_economic_proof": false
+    },
+    "SOLUSD": {
+      "status": "WORKING_SUPPORTED",
+      "management_role": "DIAGNOSTIC_ONLY_PRICE_SERIES_MAPPING_UNVALIDATED",
+      "selected_horizon_minutes": 15,
+      "search_completed": true,
+      "net_economic_proof": false
+    }
+  },
+  "status": "EVIDENCE_GATED; materialized-readiness correction pending release"
+}
