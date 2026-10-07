@@ -194,3 +194,45 @@ def test_capture_cadence_is_overdue_before_admission_ttl_expires(monkeypatch, tm
     assert worker.status()['delivery_cadence']['state'] == 'OVERDUE'
     now[0] = NOW + 3601
     assert worker.status()['admissible_for_new_snapshot'] is False
+
+
+def test_accepted_same_capture_refresh_does_not_wait_on_native_sqlite_lock(monkeypatch, tmp_path):
+    runtime = SimpleNamespace(_conn=sqlite3.connect(':memory:', check_same_thread=False),
+                              _lock=threading.RLock())
+    store = StrictFOMCDeterministicReleaseStore(runtime)
+    now = [NOW + 10]
+    path = tmp_path / 'fomc.json'
+    capture, _ = collect()
+    capture.update(publication_contract_version='active-edge-exact-sha-publication-v1', published_for_sha=SHA)
+    path.write_text(json.dumps(capture))
+    worker = module().ProspectiveFOMCRuntime(store, path, code_sha=lambda: SHA, clock=lambda: now[0])
+    monkeypatch.setattr('seiltanzer.macro_fomc_deterministic_bootstrap.time.time', lambda: now[0])
+    accepted = worker.refresh()
+    assert accepted['status'] == 'OK'
+    now[0] += 60
+    finished = threading.Event()
+    result = []
+    def reread():
+        result.append(worker.refresh())
+        finished.set()
+    runtime._lock.acquire()
+    thread = threading.Thread(target=reread, daemon=True)
+    try:
+        thread.start()
+        assert finished.wait(1), 'unchanged accepted capture blocked on the research database lock'
+        assert result[0]['status'] == 'OK'
+        assert result[0]['materialized_at'] == accepted['materialized_at']
+        assert worker.status()['admissible_for_new_snapshot'] is True
+        tampered = deepcopy(capture)
+        tampered['records'][-1]['html'] += 'tampered'
+        path.write_text(json.dumps(tampered))
+        assert worker.refresh()['status'] == 'UNAVAILABLE'
+        path.write_text(json.dumps(capture))
+        assert worker.refresh()['status'] == 'OK'
+        now[0] = NOW + 3601
+        assert worker.refresh()['status'] == 'UNAVAILABLE'
+        assert 'FOMC_CAPTURE_STALE_OR_AFTER_NOW' in worker.status()['detail']
+    finally:
+        runtime._lock.release()
+        thread.join(timeout=2)
+        runtime._conn.close()

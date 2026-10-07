@@ -191,14 +191,13 @@ class ProspectiveFOMCRuntime:
         self._lock = threading.Lock()
         self._thread = None
         self._last_accepted_capture_ts = None
+        self._accepted_capture_state = None
         self.store.prospective_capture_state = {'status': 'UNAVAILABLE',
             'reason': 'FOMC_PROSPECTIVE_CAPTURE_NOT_LOADED'}
 
     def refresh(self):
         if not self._lock.acquire(blocking=False):
             return {'status': 'IN_PROGRESS'}
-        self.store.prospective_capture_state = {'status': 'IN_PROGRESS',
-            'reason': 'FOMC_PROSPECTIVE_CAPTURE_MATERIALIZING'}
         try:
             with self.path.open('rb') as handle:
                 raw = handle.read(MAX_CAPTURE_BYTES+1)
@@ -210,10 +209,23 @@ class ProspectiveFOMCRuntime:
                     or capture.get('publication_contract_version') != 'active-edge-exact-sha-publication-v1'
                     or capture.get('published_for_sha') != sha):
                 raise ValueError('FOMC_CAPTURE_PUBLICATION_SHA_MISMATCH')
+            accepted = self._accepted_capture_state
+            if (accepted is not None and accepted['published_for_sha'] == sha
+                    and accepted['capture_sha256'] == capture.get('capture_sha256')):
+                # Revalidate clocks, digest and contents on every read. A known
+                # immutable capture needs no repeat native DB access and keeps
+                # its original successful materialization clock.
+                validate_capture(capture, expected_sha=sha, now=self.clock())
+                result = dict(accepted)
+                self.store.prospective_capture_state = result
+                return result
+            self.store.prospective_capture_state = {'status': 'IN_PROGRESS',
+                'reason': 'FOMC_PROSPECTIVE_CAPTURE_MATERIALIZING'}
             result = ingest_capture(self.store, capture, expected_sha=sha, now=self.clock())
             result.update(captured_ts=capture['captured_ts'], materialized_at=self.clock(),
                           published_for_sha=capture['published_for_sha'])
             self._last_accepted_capture_ts = capture['captured_ts']
+            self._accepted_capture_state = dict(result)
             self.store.prospective_capture_state = result
             return result
         except Exception as exc:
