@@ -49,6 +49,24 @@ def test_intelligence_model_readiness_explains_missing_evidence(tmp_path):
         engine.close()
 
 
+def test_bounded_materialization_preserves_readiness_explanation(tmp_path):
+    from seiltanzer.research_scalability import _light_intelligence_warm
+    from seiltanzer.g1_intelligence_nonblocking import status_nonblocking
+    engine = Engine(Settings(demo=True, data_dir=str(tmp_path)))
+    try:
+        runtime = IntelligenceRuntime(engine)
+        _light_intelligence_warm(runtime)
+        card = status_nonblocking(runtime)['models']['platt']
+        assert card['ready'] is False
+        assert card['deficits']['raw_n'] == 60
+        assert card['observed']['raw_n'] == 0
+        assert card['semantic_pooling'] is False
+        assert card['semantic_scope_n'] == 1
+        assert any('наблюден' in text.lower() for text in card['explanations'])
+    finally:
+        engine.close()
+
+
 def test_intelligence_snapshot_history_is_immutable(tmp_path):
     settings = Settings(demo=True, data_dir=str(tmp_path))
     engine = Engine(settings)

@@ -24,15 +24,22 @@ base_cohort_id/base_cohort_json. Readiness использует общий
 Общее число ошибок сохраняется отдельно. Metadata scopes и critical types
 возвращается без подмены модели состоянием READY_TO_FIT.
 
+Продолжение: bounded Intelligence cache передавал raw readiness без
+presentation adapter, поэтому карточка теряла deficits и объяснение нехватки
+наблюдений. Теперь используется действующий `runtime._readiness_item`, который
+показывает одну подходящую semantic группу и не объединяет её с другими.
+Регрессия проверяет реальный status_nonblocking consumer после bounded warm,
+а не отдельный полный status, обходящий этот кэш.
+
 Данные, пороги, native expiry, исключение SOURCE_MUTATED membership, модели,
 OOS и production authority не изменены. Обучение/поиск не запускались.
 Это исправление представления действующего контракта, не допуск модели.
 
 ## Проверки и выпуск
 
-Два новых behavioral regression cases failed до исправления.
+Три новых behavioral regression cases failed до исправлений.
 Materialized readiness / semantic integrity / artifact integrity / T0 admission /
-shadow calibration: **19 passed**, один installed Starlette/httpx deprecation
+shadow calibration / Intelligence cockpit: **26 passed**, один installed Starlette/httpx deprecation
 warning. Независимый read-only review: блокирующих замечаний нет.
 
 Сохранённая рабочая ветка: `fix/p6-materialized-semantic-readiness`.
