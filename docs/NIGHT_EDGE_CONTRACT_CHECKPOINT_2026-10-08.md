@@ -22,7 +22,11 @@ warning. Review found that a Python lock does not acquire a SQLite write
 reservation: fixed with BEGIN IMMEDIATE (or no-row writer promotion in a
 caller-owned transaction) before the clock. Real second-connection contention
 and caller rollback regressions failed before fix and now pass. Malformed
-matching direction arrays fail closed without TypeError. Final CI/deploy/publication results belong
+matching direction arrays fail closed without TypeError. Initial full CI found
+four comparison positive-fixture failures: snapshot trade_id was declared but
+its synthetic quote omitted the matching ID. Updated fixture and wrong-trade
+observed replay refusal regression:58passed. No production guard relaxed.
+Final CI/deploy/publication results belong
 in the package PR; local profile results do not assert production acceptance.
 
 ## Fresh evidence inspected without repeating research
