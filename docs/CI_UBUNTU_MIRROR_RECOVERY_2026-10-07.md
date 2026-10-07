@@ -46,5 +46,9 @@ The initial recovery checked reachability, not package throughput. Its PR check
 therefore did not prove the fallback could finish within five minutes on every
 runner route. The follow-up changes only this installation step to a finite
 20-minute bound, covering roughly15 minutes for87 MB at observed throughput.
-No repeat of identical failed work, omitted dependency, disabled browser test
-or green-status override. Other step bounds and product code remain unchanged.
+The enclosing browser job has a finite30-minute budget so the dependency step
+plus browser download and actual tests can finish. Independent review caught
+the original15-minute job limit conflicting with the new20-minute step limit;
+the budget invariant failed before correction and passed with30 minutes.
+No omitted dependency, disabled browser test or green-status override. Other
+step bounds and product code remain unchanged.
