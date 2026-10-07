@@ -18,6 +18,7 @@ from typing import Any
 from . import g1_intelligence_nonblocking as _nb
 from . import g1_shadow_runtime as _g1c
 from . import g1_shadow_refinement as _g1c_integrity
+from . import g1_q_evidence_runtime as _q_evidence
 from .g1_q_evidence_runtime import (
     G1B1_STAGE, Q_EVIDENCE_CONTRACT_VERSION, Q_CAPABILITY_CONTRACT_VERSION,
     Q_CAPTURE_ATTEMPT_CONTRACT_VERSION, Q_CAPTURE_POLICY_VERSION,
@@ -46,12 +47,13 @@ def _light_q_status(self) -> dict:
         aggregate = self._conn.execute("""
             SELECT COUNT(*) attempts,
                    SUM(CASE WHEN observation_created=1 THEN 1 ELSE 0 END) captured,
+                   COUNT(DISTINCT CASE WHEN observation_created=1 THEN created_observation_id END) captured_ids,
                    MAX(attempt_ts) last_attempt,
                    MAX(CASE WHEN observation_created=1 THEN attempt_ts END) last_success
             FROM g1_q_capture_attempts WHERE attempt_origin='background_collector'
         """).fetchone()
         states = self._conn.execute("""
-            SELECT p.resolution_status,COUNT(*) n
+            SELECT p.resolution_status,COUNT(DISTINCT p.observation_id) n
             FROM g1_q_capture_attempts q JOIN passive_market_observations p
               ON p.observation_id=q.created_observation_id
             WHERE q.attempt_origin='background_collector' AND q.observation_created=1
@@ -72,21 +74,25 @@ def _light_q_status(self) -> dict:
             WHERE attempt_origin='background_collector' AND observation_created=1
             GROUP BY COALESCE(provider,'UNKNOWN')
         """).fetchall()
-        eligible = self._conn.execute("""
-            SELECT COUNT(*) raw_n,COUNT(DISTINCT dependency_group_id) effective_n
-            FROM g1_dataset_membership WHERE dataset_contract_version=? AND q_to_p_eligible=1
-        """, (G1_DATASET_CONTRACT_VERSION,)).fetchone()
+        eligible_rows = [dict(row) for row in self._conn.execute("""
+            SELECT p.observation_id,p.captured_ts,p.target_ts,p.instrument,g.dependency_group_id
+            FROM g1_dataset_membership g JOIN passive_market_observations p USING(observation_id)
+            WHERE g.dataset_contract_version=? AND g.q_to_p_eligible=1
+              AND g.forecast_eval_eligible=1
+              AND p.observation_id IN (SELECT created_observation_id FROM g1_q_capture_attempts
+                  WHERE attempt_origin='background_collector' AND observation_created=1)
+              AND NOT EXISTS(SELECT 1 FROM g1_contract_errors e
+                  WHERE e.dataset_contract_version=g.dataset_contract_version
+                    AND e.observation_id=g.observation_id AND e.error_type='SOURCE_MUTATED')
+        """, (G1_DATASET_CONTRACT_VERSION,)).fetchall()]
     state_counts = {str(r["resolution_status"]): int(r["n"]) for r in states}
     attempts = int(aggregate["attempts"] or 0)
     captured = int(aggregate["captured"] or 0)
     resolved = state_counts.get("resolved", 0)
-    effective = int(eligible["effective_n"] or 0)
-    if effective < 30:
-        evidence = "INSUFFICIENT"
-    elif effective < 100:
-        evidence = "EARLY"
-    else:
-        evidence = "PROVISIONAL"
+    effective = int(self._g1_effective_n(eligible_rows, aggregate=True)) if eligible_rows else 0
+    first_ts = min((float(row['captured_ts']) for row in eligible_rows), default=None)
+    last_ts = max((float(row['captured_ts']) for row in eligible_rows), default=None)
+    evidence = _q_evidence._evidence_status(effective, first_ts, last_ts)
     return {
         "g1_stage": G1B1_STAGE,
         "q_evidence_contract_version": Q_EVIDENCE_CONTRACT_VERSION,
@@ -101,11 +107,12 @@ def _light_q_status(self) -> dict:
         "configured_instrument_n": sum(bool(INSTRUMENTS[c].options_proxy) for c in INSTRUMENTS),
         "total_instrument_n": len(INSTRUMENTS),
         "capture_attempt_n": attempts, "successful_q_capture_n": captured,
-        "unresolved_q_capture_n": max(0, captured-resolved),
+        "unresolved_q_capture_n": max(0, int(aggregate['captured_ids'] or 0)-resolved),
         "resolved_q_observation_n": resolved,
-        "q_to_p_eligible_n": int(eligible["raw_n"] or 0),
+        "q_to_p_eligible_n": len(eligible_rows),
         "g1b_q_metrics_eligible_n": 0,
-        "unique_q_anchor_n": effective, "effective_q_n": effective,
+        "unique_q_anchor_n": len({str(row['dependency_group_id']) for row in eligible_rows}),
+        "effective_q_n": effective,
         "relation_counts": {str(r["relation"]): int(r["n"]) for r in relation},
         "provider_counts": {str(r["provider"]): int(r["n"]) for r in provider},
         "top_blockers": {str(r["blocker_code"]): int(r["n"]) for r in blockers},
@@ -116,7 +123,7 @@ def _light_q_status(self) -> dict:
         "provider_available": captured > 0, "runtime_validated": captured > 0,
         "data_available": captured > 0, "prospective_capture_observed": attempts > 0,
         "resolved_evidence_available": resolved > 0,
-        "measurement_ready": int(eligible["raw_n"] or 0) > 0,
+        "measurement_ready": bool(eligible_rows),
         "authority": "research_only", "production_authority": False,
         "calibrator_fitted": False, "calibrator_registry_writes": False,
         "g1_training_allowed": False, "physical_probability_published": False,
