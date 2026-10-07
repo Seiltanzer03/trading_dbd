@@ -94,6 +94,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             "received_ts", "source_lineage_verified",
             "observed_ts", "max_age_sec", "model_version", "score_semantics",
             "available", "reason", "quality", "age_sec", "source_ids",
+            "quality_basis", "standalone_action_status", "standalone_action_reason",
             "evidence_family_ids", "freshness_factor", "duplicate_factor",
             "dedup_factor", "suppression_reasons", "redistributed_weight",
             "freshness_multiplier", "dependence_multiplier", "shared_with_components",
@@ -148,7 +149,9 @@ def _format(value: Any, unit: str = "") -> str:
 
 def _pct(value: Any) -> str:
     number = _num(value)
-    return "—" if number is None else f"{number * 100:.1f}%"
+    if number is None:
+        return "—"
+    return f"{number * 100:.3g}%" if 0 < abs(number) < .001 else f"{number * 100:.1f}%"
 
 
 def render_unified_ensemble_lines(value: Any) -> list[str]:
@@ -164,6 +167,7 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
         "Expected и CVaR ниже — экономика модельных сценариев после издержек. Баллы безразмерные; историческая прибыль и частота лишних вмешательств требуют отдельного воспроизведения истории.",
         ("Кандидаты с оценкой рассчитаны на общих сценариях."
          if audit.get("shared_scenario_bank") else "Общий набор сценариев не подтверждён; расширенные варианты используют парное сравнение с HOLD. " + str(audit.get("economics_scope") or "")),
+        "Δ общего сравнения не заменяет исходные ограничения риска, источников и независимого допуска. Раздел «Независимая консервативная проверка допуска» показывает собственные HOLD/Δ и метод; отказ этой проверки сохраняется, даже если общая модель показывает больший прирост.",
         "Номинальный → фактический вес:",
     ]
     labels = {**COMPONENT_LABELS, **{row.get("component_id"): row.get("label")
@@ -188,6 +192,9 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
             suppression += f"; свежесть ×{freshness:.3f}"
         if dependence is not None and dependence < 1:
             suppression += f"; повторные доказательства ×{dependence:.3f}"
+        if row.get("quality_basis") == "STRUCTURED_PREFERENCE_ACCEPTANCE_NOT_CALIBRATED_ACCURACY":
+            suppression += "; качество — принятие структурированного предпочтения, не калиброванная точность"
+            suppression += f"; отдельный LLM-допуск {row.get('standalone_action_status') or '—'} ({row.get('standalone_action_reason') or '—'})"
         lines.append(
             f"• {labels.get(component, component)}: {_pct(row.get('nominal_weight'))} → {_pct(row.get('effective_weight'))}; "
             f"качество {_pct(row.get('quality'))}; возраст {row.get('age_sec') if row.get('age_sec') is not None else '—'} сек; "

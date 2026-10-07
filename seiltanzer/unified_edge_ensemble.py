@@ -266,17 +266,26 @@ def collect_components(snapshot, candidates, current_llm=None):
         # A single explicit choice is a sparse opinion. Unscored actions are
         # absent, not synthetic votes against those actions.
         scores = {llm["policy"]: 1.}
-    llm_available = llm.get("status") == "ok" and bool(scores)
+    # An explicitly flat vector contains no relative opinion. Preserve legacy
+    # sparse choices and differentiated opinions, regardless of self-confidence.
+    flat_scores = len(scores) > 1 and max(scores.values()) == min(scores.values())
+    llm_available = llm.get("status") == "ok" and bool(scores) and not flat_scores
+    action = llm.get("working_action") or {}
     llm_families, rejected_families = _llm_lineage(snapshot, llm, evidence.get("families"))
     lineage_status = (manager.get("evidence") or {}).get("lineage_budget_status") or {}
     rows.append({"component_id": "current_llm", "available": llm_available,
-                 "quality": 1., "observed_ts": number(llm.get("captured_ts", captured)),
+                 "quality": 1. if llm_available else 0.,
+                 "quality_basis": "STRUCTURED_PREFERENCE_ACCEPTANCE_NOT_CALIBRATED_ACCURACY",
+                 "standalone_action_status": action.get("status"),
+                 "standalone_action_reason": action.get("reason"),
+                 "observed_ts": number(llm.get("captured_ts", captured)),
                  "max_age_sec": 900., "scores": scores,
                  "source_ids": ["current_snapshot_llm_interpretation"],
                  "evidence_family_ids": llm_families,
                  "unverified_claimed_family_ids": rejected_families,
                  "model_version": llm.get("model") or llm.get("contract_version"),
-                 "reason": (("STRUCTURED_LLM_PREFERENCE" if llm_available else "CURRENT_LLM_UNAVAILABLE")
+                 "reason": (("STRUCTURED_LLM_PREFERENCE" if llm_available else
+                             "CURRENT_LLM_NO_RELATIVE_PREFERENCE" if flat_scores else "CURRENT_LLM_UNAVAILABLE")
                             + (";EVIDENCE_LINEAGE_EXCLUDED_BY_SNAPSHOT_BYTE_BUDGET"
                                if lineage_status.get("available") is False else "")),
                  "self_confidence_used_for_weight": False})
@@ -471,6 +480,14 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
                 if (number(priced.get("paired_delta_ci95_lower_r")) or 0.) <= band:
                     row.update(eligible=False, reason="COMMON_SCENARIO_NO_ROBUST_MATERIAL_BENEFIT")
     specs, families = collect_components(snapshot, candidates, current_llm)
+    if economics.get("available"):
+        bank = economics.get("bank") or {}
+        for component in specs:
+            if component.get("component_id") == "quantitative_base":
+                component["source_ids"] = [
+                    str(bank.get("source") or "common_frozen_scenario_comparison")
+                    + ":" + str(bank.get("bank_id") or "unavailable_bank_id")]
+                component["model_version"] = economics.get("version")
     from .expert_registry import resolve_expert_registry
     registered, schemes, registry = resolve_expert_registry(snapshot, SCHEMES, candidates)
     if scheme not in schemes:

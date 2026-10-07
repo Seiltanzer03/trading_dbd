@@ -90,6 +90,14 @@ def test_shadow_hard_guard_allows_published_feasible_policy():
     assert reasons == []
 
 
+def test_standalone_confidence_refusal_does_not_claim_ensemble_preference_is_disabled():
+    report = append_shadow_section("Итог", {"status": "ok", "policy": "HOLD",
+        "confidence": 0., "working_action": {"status": "NOT_ACTIONABLE",
+        "reason": "LLM_CONFIDENCE_BELOW_MANUAL_ACTION_THRESHOLD"}})
+    assert "Он не меняет management_decision" not in report
+    assert "Допуск предпочтений к общему ранжированию показан отдельно" in report
+
+
 def test_shadow_report_is_explicitly_non_authoritative():
     report = append_shadow_section(
         "**ДЕЙСТВИЕ СЕЙЧАС** — HOLD.",
@@ -109,7 +117,8 @@ def test_shadow_report_is_explicitly_non_authoritative():
     assert "LLM SHADOW DECISION · БЕЗ PRODUCTION AUTHORITY" in report
     assert "Quant: HOLD" in report
     assert "Независимый LLM: CLOSE_25" in report
-    assert "не меняет management_decision" in report
+    assert "Допуск предпочтений к общему ранжированию показан отдельно" in report
+    assert "этот вариант не создаёт ордер" in report
 
 
 def test_public_verdict_wrapper_preserves_quant_and_adds_shadow(monkeypatch):

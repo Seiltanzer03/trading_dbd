@@ -25,6 +25,8 @@ const candidates = policies.map((policy) => ({candidate_id:policy,policy,
   component_contributions:[{component_id:'current_llm',contribution:.075}]}));
 const audit = {available:true,scheme:'balanced',instrument:'NAS100',regime:'TREND',
   selected_candidate_id:'TIGHTEN_STOP',selected_policy:'TIGHTEN_STOP',shared_scenario_bank:true,
+  scenario_bank:{bank_id:'comparison-1',source:'frozen_option_driver_comparison',
+    exact_authoritative_bank:false,execution_assumption:'piecewise_linear_barrier_fill_no_slippage'},
   candidates,components:[{component_id:'current_llm',nominal_weight:.15,effective_weight:.075,
     availability:'AVAILABLE',quality:.8,age_sec:45,reason:'MATCHED_WORKING_EDGE',
     freshness_multiplier:.95,dependence_multiplier:.5,source_ids:['chain-1'],evidence_family_ids:['OPTIONS']}],
@@ -44,6 +46,10 @@ assert.match(text,/Expected \+0\.120R/);
 assert.doesNotMatch(text,/\+0\.730R/);
 assert.match(text,/EXCHANGE_FLOW_FEED_UNAVAILABLE/);
 assert.match(text,/историческая прибыль/i);
+assert.match(text,/Δ общего сравнения не заменяет/);
+assert.match(text,/Независимая консервативная проверка допуска/);
+assert.match(text,/frozen_option_driver_comparison/);
+assert.match(text,/исходный авторитетный банк: не использован/);
 for (const scheme of ['balanced','llm20','quant100','legacy_control']) assert.ok(text.includes(scheme));
 const panel = container.children[0];
 const details = panel.children.find((child)=>child.tag==='details');

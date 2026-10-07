@@ -146,3 +146,17 @@ def test_compact_audit_preserves_family_pool_identity_for_readiness_join():
         'forecast_available': True, 'weight_pool': 'active_edge', 'standalone_vote': False}}})
     assert result['edge_families'][0]['weight_pool'] == 'active_edge'
     assert result['edge_families'][0]['standalone_vote'] is False
+
+
+def test_llm_quality_basis_and_small_positive_weights_survive_report():
+    value = audit()
+    value['components'][0].update(
+        effective_weight=.00046,
+        quality_basis='STRUCTURED_PREFERENCE_ACCEPTANCE_NOT_CALIBRATED_ACCURACY',
+        standalone_action_status='BLOCKED', standalone_action_reason='CONFIDENCE_FLOOR',
+    )
+    compact = compact_unified_ensemble(value)
+    assert compact['components'][0]['quality_basis'].startswith('STRUCTURED')
+    rendered = '\n'.join(render_unified_ensemble_lines(value))
+    assert '0.046%' in rendered
+    assert 'не калиброванная точность' in rendered

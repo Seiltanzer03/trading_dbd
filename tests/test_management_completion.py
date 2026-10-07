@@ -183,3 +183,19 @@ def test_delayed_option_wall_cannot_extend_take_even_with_forged_ready_parameter
     row['policy_manager']['inputs']['chain_status'] = 'delayed'
     assert build_working_action(row, {'status': 'ok', 'policy': 'EXTEND_TAKE', 'confidence': .65})['reason'] == 'OPTION_WALL_NOT_A_VERIFIED_EXECUTION_ANCHOR'
     assert evaluate_extended_action(row, _action('EXTEND_TAKE', take_price=140))['reason'] == 'OPTION_WALL_NOT_A_VERIFIED_EXECUTION_ANCHOR'
+
+
+def test_flat_current_llm_is_not_described_as_an_active_voice():
+    report = _decision_weights({'policy_manager': {'unified_edge_ensemble': {
+        'components': [{'component_id': 'current_llm', 'available': False,
+                        'reason': 'CURRENT_LLM_NO_RELATIVE_PREFERENCE'}]}}},
+        {'status': 'ok', 'policy_scores': {'HOLD': 0., 'EXIT': 0.}})
+    assert 'голос не участвует; активный вес 0' in report
+    assert 'CURRENT_LLM_NO_RELATIVE_PREFERENCE' in report
+
+
+def test_flat_llm_before_final_ensemble_is_not_an_active_voice():
+    report = _decision_weights({'policy_manager': {}},
+        {'status': 'ok', 'policy_scores': {'HOLD': 0., 'EXIT': 0.}})
+    assert 'CURRENT_LLM_NO_RELATIVE_PREFERENCE' in report
+    assert 'голос не участвует; активный вес 0' in report

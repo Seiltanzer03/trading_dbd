@@ -580,8 +580,10 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
                      "действует прежний стоп/БУ и лестница.")
     else:
         lines.append(
-            "Вариант не готов к действию: " + str(action.get("reason") or "PARAMETERS_UNAVAILABLE")
-            + ". Он не меняет management_decision и не создаёт ордер."
+            "Самостоятельный вариант LLM не готов к действию: "
+            + str(action.get("reason") or "PARAMETERS_UNAVAILABLE")
+            + ". Допуск предпочтений к общему ранжированию показан отдельно "
+            "в едином выборе действия; этот вариант не создаёт ордер."
         )
     return "\n".join(lines).strip()
 
