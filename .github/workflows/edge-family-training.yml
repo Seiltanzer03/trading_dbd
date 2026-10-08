@@ -56,6 +56,7 @@ jobs:
       - name: Verify causal pipeline and consumer contracts without credentials
         run: >-
           python -m pytest -q tests/test_edge_family_archive.py
+          tests/test_edge_family_private_archive.py
           tests/test_edge_family_dataset.py tests/test_edge_family_training.py
           tests/test_edge_family_pipeline.py tests/test_edge_family_adapters.py
           tests/test_unified_edge_runtime_context.py
