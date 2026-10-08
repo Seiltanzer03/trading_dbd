@@ -673,12 +673,10 @@ class BLSHistoricalReleaseStore:
         }
 
 
-_TABLE_EXISTS_CACHE: dict[tuple[int, str], bool] = {}
-
-
 def _table_exists(runtime: Any, table: str) -> bool:
-    key = (id(runtime), table)
-    if _TABLE_EXISTS_CACHE.get(key) is True:
+    connection = runtime._conn
+    cache = getattr(runtime, "_bls_table_exists_cache", None)
+    if cache is not None and cache[0] is connection and table in cache[1]:
         return True
     lock = getattr(runtime, "_lock", None)
     acquired = False
@@ -695,7 +693,14 @@ def _table_exists(runtime: Any, table: str) -> bool:
         ).fetchone()
         exists = row is not None
         if exists:
-            _TABLE_EXISTS_CACHE[key] = True
+            cache = getattr(runtime, "_bls_table_exists_cache", None)
+            if cache is None or cache[0] is not connection:
+                cache = (connection, set())
+                try:
+                    runtime._bls_table_exists_cache = cache
+                except (AttributeError, TypeError):
+                    pass
+            cache[1].add(table)
         return exists
     except Exception:
         return False

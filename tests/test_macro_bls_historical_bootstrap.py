@@ -421,3 +421,32 @@ def test_macro_inventory_maturity_counts_one_release_not_repeated_t0_rows():
     assert report["features"][0]["status"] == "INSUFFICIENT_DATA"
     assert report["features"][0]["usable_for_ede"] is False
     assert report["summary"]["g1s_insufficient_data"] == 1
+
+
+def test_table_cache_does_not_confuse_recycled_runtime_identity(monkeypatch):
+    from seiltanzer import macro_bls_historical_bootstrap as module
+    monkeypatch.setattr(module, 'id', lambda value: -101, raising=False)
+    first, second = _Runtime(), _Runtime()
+    try:
+        first._conn.execute('CREATE TABLE cache_identity_probe(value)')
+        assert module._table_exists(first, 'cache_identity_probe')
+        assert not module._table_exists(second, 'cache_identity_probe')
+    finally:
+        first._conn.close()
+        second._conn.close()
+
+
+def test_table_cache_is_bound_to_current_connection():
+    from seiltanzer import macro_bls_historical_bootstrap as module
+    runtime = _Runtime()
+    original = runtime._conn
+    try:
+        original.execute('CREATE TABLE cache_connection_probe(value)')
+        assert module._table_exists(runtime, 'cache_connection_probe')
+        runtime._conn = sqlite3.connect(':memory:')
+        assert not module._table_exists(runtime, 'cache_connection_probe')
+        runtime._conn.execute('CREATE TABLE cache_connection_probe(value)')
+        assert module._table_exists(runtime, 'cache_connection_probe')
+    finally:
+        original.close()
+        runtime._conn.close()

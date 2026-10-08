@@ -112,3 +112,59 @@ def test_full_restore_fails_closed_on_compressed_hash_mismatch(tmp_path: Path):
             result_path=tmp_path / "result.json",
             client=Client(key=key, archive=archive, manifest=manifest),
         )
+
+
+def _live_fixture(tmp_path):
+    key, archive, manifest = _fixture(tmp_path)
+    manifest.pop('backup_id')
+    manifest.pop('critical_table_counts')
+    manifest.update(source='LIVE_SQLITE_RSYNC', source_db='/opt/seiltanzer/data/trades.db',
+                    started_ts=100.0, completed_ts=110.0, uploaded_ts=120.0,
+                    production_authority=False)
+    return key, archive, manifest
+
+
+def test_live_seed_preserves_old_epoch_without_full_recovery_claim(tmp_path):
+    key, archive, manifest = _live_fixture(tmp_path)
+    result = MODULE.restore(bucket=manifest['bucket'], key=key,
+        destination=tmp_path/'seed.db', result_path=tmp_path/'seed.json',
+        seed_only=True, client=Client(key=key, archive=archive, manifest=manifest))
+    assert result['restore_contract'] == 'trading-dbd-live-seed-v1'
+    assert result['seed_verified'] is True
+    assert result['full_restore_verified'] is False
+    assert result['storage_manifest'] == manifest
+    assert result['storage_manifest']['git_commit'] == 'a'*40
+    assert result['storage_manifest']['started_ts'] == 100.0
+    assert result['production_authority'] is False
+
+
+@pytest.mark.parametrize('field,value', [('source','OTHER'),('source_db','/tmp/other.db'),
+    ('started_ts',None),('completed_ts',99),('uploaded_ts',109),('git_commit','bad'),
+    ('production_authority',True)])
+def test_live_seed_rejects_unverified_source_epoch(tmp_path,field,value):
+    key, archive, manifest = _live_fixture(tmp_path)
+    manifest[field] = value
+    with pytest.raises(RuntimeError, match='live seed'):
+        MODULE.restore(bucket=manifest['bucket'], key=key,
+            destination=tmp_path/'seed.db', result_path=tmp_path/'seed.json',
+            seed_only=True, client=Client(key=key, archive=archive, manifest=manifest))
+    assert not (tmp_path/'seed.json').exists()
+
+
+def test_live_slot_is_still_refused_for_full_backup_retirement(tmp_path):
+    key, archive, manifest = _live_fixture(tmp_path)
+    with pytest.raises(RuntimeError, match='manifest contract'):
+        MODULE.restore(bucket=manifest['bucket'], key=key,
+            destination=tmp_path/'restore.db', result_path=tmp_path/'restore.json',
+            client=Client(key=key, archive=archive, manifest=manifest))
+
+
+def test_live_seed_corrupt_archive_never_writes_receipt(tmp_path):
+    key, archive, manifest = _live_fixture(tmp_path)
+    manifest['database_sha256'] = '0'*64
+    with pytest.raises(RuntimeError, match='hash or size mismatch'):
+        MODULE.restore(bucket=manifest['bucket'], key=key,
+            destination=tmp_path/'seed.db', result_path=tmp_path/'seed.json',
+            seed_only=True, client=Client(key=key, archive=archive, manifest=manifest))
+    assert not (tmp_path/'seed.db').exists()
+    assert not (tmp_path/'seed.json').exists()

@@ -363,3 +363,40 @@ def test_local_quick_check_uses_immutable_sqlite_mode(tmp_path, monkeypatch):
     assert opened[0].endswith("?mode=ro&immutable=1")
     assert not pathlib.Path(str(database) + "-wal").exists()
     assert not pathlib.Path(str(database) + "-shm").exists()
+
+
+@pytest.mark.parametrize('fails',[False,True])
+def test_seeded_refresh_never_promotes_old_copy_on_failure(monkeypatch,tmp_path,fails):
+    import sys
+    from types import SimpleNamespace
+    output=tmp_path/'snapshot.db'
+    output.write_bytes(b'verified-seed')
+    receipt=tmp_path/'seed.json'
+    receipt.write_text('{}')
+    manifest=pathlib.Path(str(output)+'.manifest.json')
+    selection=pathlib.Path(str(output)+'.selection.json')
+    manifest.write_text('{"started_ts":100}')
+    selection.write_text('{"cutoff_ts":100}')
+    class Client:
+        def close(self): pass
+    def refresh(_client,**kwargs):
+        assert output.read_bytes() == b'verified-seed'
+        assert kwargs['seed_receipt'] == receipt
+        assert not manifest.exists() and not selection.exists()
+        if fails: raise RuntimeError('refresh refused')
+        output.write_bytes(b'current-copy')
+        return dict(started_ts=200.,git_commit='b'*40,database_sha256='c'*64,
+                    database_size_bytes=12,seed=dict(git_commit='a'*40,started_ts=100.))
+    monkeypatch.setitem(sys.modules,'offhost_sqlite_snapshot',SimpleNamespace(replicate_live=refresh))
+    monkeypatch.setattr(MODULE,'_connect',lambda _password: Client())
+    monkeypatch.setattr(MODULE,'_verify_sha',lambda *a,**k: None)
+    args=SimpleNamespace(password='secret',expected_sha='b'*40,acceptance_run_id='',
+        require_acceptance_marker=False,run_id='456',output_db=str(output),seed_receipt=str(receipt))
+    if fails:
+        with pytest.raises(RuntimeError,match='refresh refused'): MODULE.live_snapshot(args)
+        assert output.read_bytes() == b'verified-seed'
+        assert not manifest.exists() and not selection.exists()
+    else:
+        MODULE.live_snapshot(args)
+        assert json.loads(selection.read_text())['cutoff_ts'] == 200.
+        assert json.loads(manifest.read_text())['seed']['started_ts'] == 100.

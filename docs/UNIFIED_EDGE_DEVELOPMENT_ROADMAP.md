@@ -692,3 +692,23 @@ Fresh inventory37734156374 exact54988fc:78615observations/22642resolutions,
 is not trained family edge. Existing frozen audit37736484124 continues without
 duplicate export/research. Factual P1–P6 chain and concrete input boundaries:
 FAMILY_CAUSAL_READINESS_2026-10-08.md. Final review/CI/release evidence in PR.
+# 2026-10-08 — Current research snapshot from a verified historical seed
+
+Support package for the existing mathematical/discovery audit, not a new source
+or model search budget. Accepted parentPR421/main3a7e040; source/mathematical/FOMC
+publications match that SHA. Earlier audit37736484124 exhausted the unchanged
+1GiB filesystem reserve before discovery/transition; WAL alone is not proven
+as the cause.
+
+Restore explicitly verifies an existing live storage slot as a historical seed,
+without full-backup retirement authority. Current SQLite refresh revalidates
+bytes, retains old source clocks/SHA separately, and writes fresh research
+cutoff only on success. Run-owned origin PID/birth/executable cleanup is confirmed
+before fresh manifest; primary abort errors survive cleanup errors. Capacity
+reports filesystem free and WAL growth separately. No live DB/WAL deletion,
+reserve relaxation, new storage resources or duplicate manual research.
+
+Plan/verification boundaries: LIVE_SNAPSHOT_SEED_PLAN_2026-10-08.md. Actual pinned
+copier/protocol/wrapper integration passed locally; native process cleanup is
+required in final CI due sandbox PID/proc mismatch. Actual production adequacy
+and transition recovery remain pending this package's release/automatic chain.

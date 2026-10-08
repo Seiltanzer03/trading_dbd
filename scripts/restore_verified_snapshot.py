@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,25 @@ CONTRACT = "trading-dbd-offhost-backup-v1"
 PREFIX = "backups/v1/daily-slot-"
 READ_SIZE = 4 * 1024 * 1024
 MAX_DATABASE_BYTES = 200 * 1024**3
+LIVE_SEED_CONTRACT = 'trading-dbd-live-seed-v1'
+
+
+def manifest_digest(manifest: dict) -> str:
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':'),
+                                    allow_nan=False).encode()).hexdigest()
+
+
+def validate_live_seed_manifest(manifest: dict) -> None:
+    clocks = [manifest.get(key) for key in ('started_ts', 'completed_ts', 'uploaded_ts')]
+    sha = manifest.get('git_commit')
+    if not all((
+        manifest.get('source') == 'LIVE_SQLITE_RSYNC',
+        manifest.get('source_db') == '/opt/seiltanzer/data/trades.db',
+        manifest.get('production_authority') is False,
+        isinstance(sha, str) and len(sha) == 40 and all(c in '0123456789abcdef' for c in sha),
+        all(type(v) in (int, float) and math.isfinite(v) and v > 0 for v in clocks),
+    )) or not clocks[0] <= clocks[1] <= clocks[2]:
+        raise RuntimeError('live seed source/epoch contract mismatch')
 
 
 def _metadata(value: dict | None) -> dict[str, str]:
@@ -57,7 +77,7 @@ def _latest_manifest(client: Any, *, bucket: str) -> tuple[str, dict[str, Any]]:
 def restore(
     *, bucket: str, destination: Path, result_path: Path,
     key: str | None = None, expected_backup_id: str | None = None,
-    client: Any | None = None,
+    client: Any | None = None, seed_only: bool = False,
 ) -> dict[str, Any]:
     if client is None:
         import boto3
@@ -89,6 +109,10 @@ def restore(
     database_sha = str(manifest.get("database_sha256") or "").lower()
     compressed_sha = str(manifest.get("compressed_sha256") or "").lower()
     backup_id = str(manifest.get("backup_id") or "")
+    if seed_only:
+        if expected_backup_id is not None:
+            raise ValueError('live seed cannot verify a retirement target')
+        validate_live_seed_manifest(manifest)
     if not all((
         manifest.get("backup_contract") == CONTRACT,
         manifest.get("bucket") == bucket,
@@ -100,7 +124,7 @@ def restore(
         0 < compressed_size <= MAX_DATABASE_BYTES,
         len(database_sha) == 64,
         len(compressed_sha) == 64,
-        bool(backup_id),
+        seed_only or bool(backup_id),
     )):
         raise RuntimeError("off-host backup manifest contract mismatch")
     if expected_backup_id is not None and backup_id != expected_backup_id:
@@ -184,14 +208,14 @@ def restore(
     if check != "ok":
         raise RuntimeError(f"restored database quick_check failed: {check}")
     critical = manifest.get("critical_table_counts")
-    if not isinstance(critical, dict) or not critical or not set(critical) <= tables:
+    if not seed_only and (not isinstance(critical, dict) or not critical or not set(critical) <= tables):
         raise RuntimeError("restored database is missing critical manifest tables")
     if any(Path(str(destination) + suffix).exists() for suffix in ("-wal", "-shm")):
         raise RuntimeError("restore verification created mutable SQLite sidecars")
 
     result = {
-        "restore_contract": "trading-dbd-offhost-full-restore-v1",
-        "full_restore_verified": True,
+        "restore_contract": LIVE_SEED_CONTRACT if seed_only else "trading-dbd-offhost-full-restore-v1",
+        "full_restore_verified": not seed_only,
         "bucket": bucket,
         "object_key": key,
         "manifest_key": manifest_key,
@@ -201,11 +225,14 @@ def restore(
         "compressed_sha256": compressed_sha,
         "compressed_size_bytes": compressed_size,
         "sqlite_quick_check": check,
-        "critical_table_count": len(critical),
+        "critical_table_count": len(critical) if isinstance(critical, dict) else 0,
         "immutable_sqlite_read": True,
         "restored_database_retained_on_runner": True,
         "production_authority": False,
     }
+    if seed_only:
+        result.update(seed_verified=True, storage_manifest=manifest,
+                      storage_manifest_sha256=manifest_digest(manifest))
     result_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     return result
 
@@ -217,13 +244,15 @@ def main() -> int:
     parser.add_argument("--expected-backup-id")
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument('--live-seed', action='store_true')
     args = parser.parse_args()
     result = restore(
         bucket=args.bucket, key=args.key,
         expected_backup_id=args.expected_backup_id,
         destination=args.destination, result_path=args.result,
+        seed_only=args.live_seed,
     )
-    print("OFFHOST_FULL_RESTORE_VERIFIED=1")
+    print('OFFHOST_LIVE_SEED_VERIFIED=1' if args.live_seed else "OFFHOST_FULL_RESTORE_VERIFIED=1")
     print("OFFHOST_RESTORE_BACKUP_ID=" + result["backup_id"])
     print("OFFHOST_RESTORE_OBJECT=" + result["object_key"])
     return 0

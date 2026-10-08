@@ -699,6 +699,10 @@ def live_snapshot(args: argparse.Namespace) -> int:
     exact_run = bool(args.require_acceptance_marker)
     if exact_run and not str(args.acceptance_run_id or "").strip():
         raise ValueError("--acceptance-run-id is required with --require-acceptance-marker")
+    seed_receipt = getattr(args,'seed_receipt',None)
+    seed_options = {'seed_receipt':pathlib.Path(seed_receipt)} if seed_receipt else {}
+    for path in (manifest_output,selection_output):
+        path.unlink(missing_ok=True)
     client = _connect(args.password)
     primary_error: BaseException | None = None
     try:
@@ -718,11 +722,12 @@ def live_snapshot(args: argparse.Namespace) -> int:
                 shlex.quote(args.acceptance_run_id), "--expected-sha",
                 shlex.quote(args.expected_sha),
             ]))
-        for path in (output, manifest_output, selection_output):
-            path.unlink(missing_ok=True)
+        if not seed_receipt:
+            output.unlink(missing_ok=True)
         manifest = replicate_live(
             client, password=args.password, expected_sha=args.expected_sha,
             run_id=str(args.run_id), output=output,
+            **seed_options,
         )
         manifest_output.write_text(
             json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
@@ -847,6 +852,7 @@ def parser() -> argparse.ArgumentParser:
     live.add_argument("--require-acceptance-marker", action="store_true")
     live.add_argument("--run-id", required=True)
     live.add_argument("--output-db", required=True)
+    live.add_argument('--seed-receipt')
     live.set_defaults(func=live_snapshot)
 
     install = sub.add_parser("install-historical-bundle")
