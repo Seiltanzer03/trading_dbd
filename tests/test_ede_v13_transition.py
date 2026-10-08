@@ -4,6 +4,8 @@ import json
 import sqlite3
 import threading
 
+import pytest
+
 from seiltanzer.edge_discovery.transition_search import (
     MAX_TRANSITION_CONDITIONS,
     MAX_TRANSITION_TEMPLATES,
@@ -114,3 +116,37 @@ def test_transition_search_space_is_predeclared_and_bounded():
 def test_no_duplicate_wavelet_phase_feature_is_created():
     assert "regime.wavelet_phase_stability" not in TRANSITION_FEATURES
     assert TRANSITION_FEATURES["regime.wavelet_cycle_shift"]["datatype"] == "category"
+
+
+@pytest.mark.parametrize("best,lower", [((0.0,0.3),(-0.1,0.2)),
+                                        ((0.3,0.0),(0.2,-0.1)),
+                                        ((0.0,0.0),(-0.1,-0.1))])
+def test_transition_ranking_preserves_zero_metric_in_horizon_and_combined_lists(monkeypatch,best,lower):
+    from seiltanzer.edge_discovery import transition_search as module
+
+    def candidates(rows, horizon, templates, **kwargs):
+        return {'candidates': [
+            {'candidate_id': f'zero-{horizon}', 'horizon_minutes': horizon,
+             'edge_maturity': 'EARLY_CONTEXT',
+             'global_ret5_comparison': {'brier_delta': best[0], 'logloss_delta': best[1]}},
+            {'candidate_id': f'lower-{horizon}', 'horizon_minutes': horizon,
+             'edge_maturity': 'EARLY_CONTEXT',
+             'global_ret5_comparison': {'brier_delta': lower[0], 'logloss_delta': lower[1]}},
+            {'candidate_id': f'missing-{horizon}', 'horizon_minutes': horizon,
+             'edge_maturity': 'INSUFFICIENT_DATA',
+             'global_ret5_comparison': {'brier_delta': None, 'logloss_delta': 0.3}},
+        ]}
+
+    # Substitute only expensive discovery; real summary and publication ranking run.
+    monkeypatch.setattr(module, 'discover_horizon', candidates)
+    report = module.run_transition_search([], source_set_sha256='a' * 64)
+    for horizon in report['horizons']:
+        summaries = horizon['transition_candidate_summaries']
+        assert summaries[0]['candidate_id'].startswith('zero-')
+        assert summaries[-1]['candidate_id'].startswith('missing-')
+    assert all(row['candidate_id'].startswith('zero-') for row in report['top_20'][:3])
+    assert all(row['candidate_id'].startswith('zero-')
+               for row in report['validated_or_research_signal_candidates'][:3])
+    assert report['production_authority'] is False
+    assert report['auto_promotion'] is False
+    assert all(row['shadow_eligible'] is False for row in report['top_20'])

@@ -712,3 +712,20 @@ Plan/verification boundaries: LIVE_SNAPSHOT_SEED_PLAN_2026-10-08.md. Actual pinn
 copier/protocol/wrapper integration passed locally; native process cleanup is
 required in final CI due sandbox PID/proc mismatch. Actual production adequacy
 and transition recovery remain pending this package's release/automatic chain.
+
+## 2026-10-08 — Verified export and finite discovery/transition result
+
+PR422/main77407e8 passed required release/publication receipts. Automatic
+37753286968 completed actual stored-slot verification, seeded live refresh,
+confirmed origin exit and immutable17117564928-byte input;1GiB reserve retained.
+Discovery3960hypotheses/8126eligible rows/116outer candidates/0allgatepasses;
+transition1392hypotheses/21innerFDRpasses/0stabilitypasses,2EARLY_CONTEXT.
+Full actual receipts and P1–P6 boundaries: EDGE_AUDIT_CHECKPOINT_2026-10-08.md.
+Active-edge37761416181 continues; no duplicate manual search or profit claim.
+
+A deterministic ranking regression reproduces valid zero delta being treated
+as a missing metric in both per-horizon and combined transition lists. The owned
+ranking now distinguishes zero from None, retains missing penalty/ID tie-break
+and unchanged admission/authority. Three regressions RED→GREEN; combined
+transition/loading/discovery/selective/comparison profile115passed1.42s.
+Final review/CI/release belong in the correction PR; not inferred here.

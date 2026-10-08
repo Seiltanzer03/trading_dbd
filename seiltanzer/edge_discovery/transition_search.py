@@ -362,6 +362,13 @@ def _candidate_summary(candidate: dict[str, Any], rows: list[dict[str, Any]]) ->
     }
 
 
+def _summary_rank(item: dict[str, Any]) -> tuple[float, str]:
+    # Zero is a measured improvement; only absent components receive a penalty.
+    score = sum(float(item[key]) if item.get(key) is not None else -1e9
+                for key in ("delta_brier", "delta_logloss"))
+    return -score, str(item.get("candidate_id"))
+
+
 def run_transition_search(rows: list[dict[str, Any]], *, source_set_sha256: str) -> dict[str, Any]:
     available = {
         feature_id for feature_id in TRANSITION_FEATURES
@@ -391,9 +398,7 @@ def run_transition_search(rows: list[dict[str, Any]], *, source_set_sha256: str)
             float(row["captured_ts"]), str(row["instrument"])))
         result = discover_horizon([], horizon, templates, rows_override=horizon_rows)
         summaries = [_candidate_summary(candidate, horizon_rows) for candidate in result.get("candidates") or []]
-        summaries.sort(key=lambda item: (
-            -(float(item.get("delta_brier") or -1e9) + float(item.get("delta_logloss") or -1e9)),
-            str(item.get("candidate_id"))))
+        summaries.sort(key=_summary_rank)
         horizon_reports.append({**result, "transition_candidate_summaries": summaries})
         compact.extend(summaries)
         hypotheses += int(result.get("hypotheses_tested") or 0)
@@ -403,9 +408,7 @@ def run_transition_search(rows: list[dict[str, Any]], *, source_set_sha256: str)
         for candidate in result.get("candidates") or []:
             maturity[str(candidate.get("edge_maturity") or "INSUFFICIENT_DATA")] += 1
 
-    compact.sort(key=lambda item: (
-        -(float(item.get("delta_brier") or -1e9) + float(item.get("delta_logloss") or -1e9)),
-        str(item.get("candidate_id"))))
+    compact.sort(key=_summary_rank)
     primary = [item for item in compact if item.get("edge_maturity") not in (None, "INSUFFICIENT_DATA")]
     verdict = (
         "TRANSITION_RESEARCH_SIGNAL_FOUND_REQUIRES_CANONICAL_PROMOTION_REVIEW"
