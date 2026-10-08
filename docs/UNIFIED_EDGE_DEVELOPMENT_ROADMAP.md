@@ -665,3 +665,16 @@ and exact-SHA acceptance belong in PR. Fresh existing EDE pass1 discovery:
 Baseline inventory37696953612:78195observations/22552resolved; macro release
 counts still insufficient. Full evidence/remaining P1–P6 boundaries:
 NIGHT_EDGE_CONTRACT_CHECKPOINT_2026-10-08.md.
+
+## 2026-10-08 — Immutable transition loading package
+
+Existing overnight audit37705574141 completed discovery, then transition was
+cancelled by runner shutdown at01:17:46Z. Root cause is unproven. Reproduced raw
+JSON amplification is removed: immutable source batches32, requested-ID frozen
+augmentation batches128, and horizon-local15/30/60 inputs retain unresolved
+transform context. Rows, coverage, baseline counters and fingerprint match.
+Mutable/live source extraction remains atomic under lock after independent
+review and an indexed same-connection mutation regression. Profile106passed.
+Synthetic real SQLite augmentation allocation control:17270825 to900475bytes;
+not market evidence or a total-memory guarantee. Exact CI/release evidence belongs
+in the package PR. No new gate passes/models, scheduler, sources or search budget.
