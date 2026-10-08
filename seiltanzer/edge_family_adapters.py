@@ -278,6 +278,11 @@ def _order_flow(row: dict, source: dict, meta: dict) -> None:
     if source.get("kind") not in {"exchange_order_book", "exchange_trade_tape"} or not source.get("venue"):
         row["rejected_sources"].append({"source_id": meta["source_id"], "reason": "NOT_EXCHANGE_BOOK_OR_TAPE"})
         return
+    meta = {**meta, "venue": str(source["venue"]),
+            "measurement_scope": ("SAMPLED_TWO_TOP_OBSERVATIONS_NOT_FULL_INCREMENTAL_OFI"
+                if source["kind"] == "exchange_order_book" else "SAMPLED_AGGREGATE_TRADE_WINDOW")}
+    if source["kind"] == "exchange_trade_tape":
+        meta["trade_window_complete"] = source.get("window_complete") is True
     previous, current = _dict(source.get("previous_top")), _dict(source.get("current_top"))
     fields = ("bid_price", "bid_size", "ask_price", "ask_size")
     p, c = ([_num(record.get(key)) for key in fields] for record in (previous, current))
@@ -285,7 +290,8 @@ def _order_flow(row: dict, source: dict, meta: dict) -> None:
     if ct is not None and ct != meta["observed_ts"]:
         row["rejected_sources"].append({"source_id": meta["source_id"],
                                       "reason": "ORDER_BOOK_OBSERVATION_CLOCK_MISMATCH"})
-    if (pt is not None and ct is not None and pt < ct == meta["observed_ts"]
+    if (source["kind"] == "exchange_order_book"
+            and pt is not None and ct is not None and pt < ct == meta["observed_ts"]
             and ct - pt <= MAX_AGE_SEC["order_flow"] and all(v is not None for v in p + c)
             and min(p + c) >= 0 and p[0] < p[2] and c[0] < c[2]):
         bid = c[1] if c[0] > p[0] else -p[1] if c[0] < p[0] else c[1] - p[1]
@@ -298,7 +304,8 @@ def _order_flow(row: dict, source: dict, meta: dict) -> None:
             _add(row, "flow.ofi_over_depth", (bid + ask) / depth, meta)
     buy, sell = _num(source.get("aggressive_buy_volume")), _num(source.get("aggressive_sell_volume"))
     window_start = _num(source.get("window_start_ts"))
-    if (buy is not None and sell is not None and min(buy, sell) >= 0 and buy + sell > 0
+    if (source["kind"] == "exchange_trade_tape"
+            and buy is not None and sell is not None and min(buy, sell) >= 0 and buy + sell > 0
             and window_start is not None and 0 < meta["observed_ts"] - window_start <= MAX_AGE_SEC["order_flow"]):
         _add(row, "flow.aggressive_imbalance", (buy - sell) / (buy + sell), meta)
     if not row["features"]:

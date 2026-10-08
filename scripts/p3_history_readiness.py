@@ -1,4 +1,4 @@
-"""Safe P3 coverage projection of an already validated private pipeline result.
+"""Safe P3/P4 coverage projection of an already validated private pipeline result.
 
 No fetching, replay, fitting or activation. Counts describe retained history,
 not current source freshness, broker fills, or proven trading benefit.
@@ -14,7 +14,7 @@ def _count(value, maximum):
     return value if type(value) is int and 0 <= value <= maximum else 0
 
 
-def build_p3_readiness(archive, dataset, diagnostics):
+def _build_cells(archive, dataset, diagnostics, families):
     from seiltanzer.edge_family_adapters import build_edge_family_evidence
     from seiltanzer.edge_family_dataset import (_frozen_snapshot, _feature_snapshot,
                                                _verified_costs, family_geometry_sha256)
@@ -28,14 +28,14 @@ def build_p3_readiness(archive, dataset, diagnostics):
         if code not in ALL_INSTRUMENTS:
             continue
         identity = record['review_id']
-        for family in FAMILIES:
+        for family in families:
             counts[code, family]['retained'].add(identity)
         try:
             snapshot, instrument, cutoff, horizon = _frozen_snapshot(record)
             if instrument != code:
                 continue
             family_geometry_sha256(snapshot)
-            for family in FAMILIES:
+            for family in families:
                 counts[code, family]['usable'].add(identity)
             evidence = build_edge_family_evidence(_feature_snapshot(snapshot, horizon, identity, []))
             try:
@@ -43,7 +43,7 @@ def build_p3_readiness(archive, dataset, diagnostics):
                 costs = True
             except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
                 costs = False
-            for family in FAMILIES:
+            for family in families:
                 row = evidence['families'][family]
                 if any(not meta.get('context_only') and meta.get('received_ts') is not None
                        and feature_applicability_reason(meta, horizon) is None
@@ -55,7 +55,7 @@ def build_p3_readiness(archive, dataset, diagnostics):
             continue
     for row in dataset['rows']:
         key = row.get('instrument'), row.get('family_id')
-        if key[0] in ALL_INSTRUMENTS and key[1] in FAMILIES:
+        if key[0] in ALL_INSTRUMENTS and key[1] in families:
             identity = row.get('review_id')
             if identity in counts[key]['retained']:
                 counts[key]['labels'].add(identity)
@@ -63,7 +63,7 @@ def build_p3_readiness(archive, dataset, diagnostics):
     matrix = diagnostics.get('model_matrix', {})
     cells = []
     for code in ALL_INSTRUMENTS:
-        for family in FAMILIES:
+        for family in families:
             selected = [row for row in cohorts if row.get('instrument') == code and row.get('family_id') == family]
             retained, usable, features, costs, labels = (len(counts[code, family][name])
                                                for name in ('retained', 'usable', 'features', 'costs', 'labels'))
@@ -71,7 +71,8 @@ def build_p3_readiness(archive, dataset, diagnostics):
             status = ('HISTORY_MISSING' if not retained else
                       'FROZEN_HISTORY_UNUSABLE' if not usable else
                       'SYNCHRONIZED_RETURNS_OR_MAPPING_REQUIRED' if not features and family == 'intermarket' else
-                      'CALENDAR_OR_MAPPING_REQUIRED' if not features else
+                      'CALENDAR_OR_MAPPING_REQUIRED' if not features and family == 'session' else
+                      'SEQUENTIAL_VENUE_OBSERVATIONS_OR_MAPPING_REQUIRED' if not features else
                       'COST_OR_POSITION_EVIDENCE_REQUIRED' if not costs else
                       'NET_ACTION_LABELS_UNAVAILABLE' if not labels else
                       'MODEL_PACKAGED_NOT_ACTIVE' if models else
@@ -86,6 +87,21 @@ def build_p3_readiness(archive, dataset, diagnostics):
                 max_cohort_independent_group_count=max((_count(row.get('group_count'), 512)
                                                        for row in selected), default=0),
                 packaged_model_count=models, status=status))
-    return dict(contract_version='p3-historical-readiness-v1', production_authority=False,
+    return cells
+
+
+def _projection(cells, package):
+    return dict(contract_version=package + '-historical-readiness-v1', production_authority=False,
                 basis='RETAINED_FROZEN_HISTORY_NOT_CURRENT_LIVE_READINESS',
                 group_count_basis='MAX_SINGLE_COHORT_NOT_ADDITIVE', cells=cells)
+
+
+def build_p3_readiness(archive, dataset, diagnostics):
+    return _projection(_build_cells(archive, dataset, diagnostics, FAMILIES), 'p3')
+
+
+def build_historical_readiness(archive, dataset, diagnostics):
+    # All three families reuse ONE frozen/geometry/source/cost validation pass.
+    cells = _build_cells(archive, dataset, diagnostics, (*FAMILIES, 'order_flow'))
+    return {'p3_readiness': _projection([row for row in cells if row['family'] in FAMILIES], 'p3'),
+            'p4_readiness': _projection([row for row in cells if row['family'] == 'order_flow'], 'p4')}
