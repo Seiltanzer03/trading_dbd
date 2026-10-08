@@ -229,7 +229,8 @@ def test_future_cot_values_excluded_from_percentile():
 
 def test_broker_carry_is_real_outcome_cost_without_extra_vote():
     data = source(kind="broker_carry", charge_currency_per_rollover=4., risk_currency_per_unit=100.,
-                  currency="USD", charge_basis="per_unit_of_remaining_position", next_rollover_ts=T0+100)
+                  currency="USD", charge_basis="per_unit_of_remaining_position", next_rollover_ts=T0+100,
+                  included_in_policy_economics=False)
     result = build_edge_family_evidence(snapshot("value_carry", data, "carry.cost"))
     assert result["components"] == []
     assert result["families"]["value_carry"]["readiness"] == "ECONOMICS_ONLY"
