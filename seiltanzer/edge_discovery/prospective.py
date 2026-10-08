@@ -11,7 +11,7 @@ import time
 import bisect
 from collections import defaultdict
 from dataclasses import replace
-from typing import Any, Callable
+from typing import Any, Iterator, Callable
 
 from seiltanzer.g1_short_horizon_p2e_segmented_persistence import (
     ASSET_FAMILY_BY_INSTRUMENT,
@@ -487,7 +487,7 @@ class ProspectiveFeatureAdapter:
         self._causal_bar_cache[key] = block
         return block
 
-    def _source_rows(self, *, horizon_minutes: int | None = None) -> list[dict[str, Any]]:
+    def _source_rows(self, *, horizon_minutes: int | None = None) -> Iterator[dict[str, Any]]:
         if "g1s_observations" not in self.tables:
             return []
         if horizon_minutes is not None and horizon_minutes not in HORIZONS:
@@ -506,12 +506,37 @@ class ProspectiveFeatureAdapter:
             where = "g.horizon_minutes = ?"
             parameters = (horizon_minutes,)
         with self.runtime._lock:
-            rows = self.runtime._conn.execute(
+            cursor = self.runtime._conn.execute(
                 f"SELECT g.*,{resolution_columns} FROM g1s_observations g {join} "
                 f"WHERE {where} "
                 "ORDER BY g.captured_ts,g.instrument,g.horizon_minutes",
-                parameters).fetchall()
-        return [dict(row) for row in rows]
+                parameters)
+            # A shared live connection can change an active SELECT after a
+            # same-connection writer commits. Preserve atomic extraction there;
+            # bounded streaming is safe only for the explicit immutable reader.
+            if not getattr(self.runtime, "_immutable_snapshot", False):
+                try:
+                    source = cursor.fetchall()
+                finally:
+                    cursor.close()
+            else:
+                source = None
+        if source is not None:
+            for row in source:
+                yield dict(row)
+            return
+        try:
+            while True:
+                with self.runtime._lock:
+                    batch = cursor.fetchmany(32)
+                if not batch:
+                    break
+                for row in batch:
+                    yield dict(row)
+                del batch
+        finally:
+            with self.runtime._lock:
+                cursor.close()
 
     def _feature_values(self, row: dict[str, Any], *, strict: bool) -> tuple[
             dict[str, FeatureValue], list[str], dict[str, dict[str, Any]]]:

@@ -139,55 +139,61 @@ def _quality_ok(block: dict[str, Any], captured_ts: float) -> tuple[bool, dict[s
 
 def augment_rows_from_frozen_v3(runtime: Any, rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Attach transition metrics from each row's original immutable T0 JSON."""
-    observation_ids = {str(row["observation_id"]) for row in rows}
-    if not observation_ids:
-        return _coverage_report(rows)
-    with runtime._lock:
-        source_rows = runtime._conn.execute(
-            "SELECT observation_id,captured_ts,frozen_features_json FROM g1s_observations "
-            "WHERE horizon_minutes IN (15,30,60) ORDER BY observation_id"
-        ).fetchall()
-    frozen_by_id = {
-        str(source["observation_id"]): (float(source["captured_ts"]), _loads(source["frozen_features_json"]))
-        for source in source_rows if str(source["observation_id"]) in observation_ids
-    }
+    rows_by_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        observation_id = str(row["observation_id"])
-        source = frozen_by_id.get(observation_id)
-        if source is None:
-            continue
-        source_t0, frozen = source
-        t0 = float(row["captured_ts"])
-        if abs(source_t0 - t0) > 1e-6:
-            continue
-        v3 = frozen.get("g1s_evidence_v3") if isinstance(frozen, dict) else None
-        v3 = v3 if isinstance(v3, dict) else {}
-        for feature_id, definition in TRANSITION_FEATURES.items():
-            block = v3.get(str(definition["block"]))
-            block = block if isinstance(block, dict) else {}
-            valid, meta = _quality_ok(block, t0)
-            value = _nested(block, tuple(definition["path"])) if valid else None
-            if definition["datatype"] == "float":
-                value = _finite(value)
-            elif value is not None:
-                value = str(value)
-            if value is None:
-                continue
-            row.setdefault("ede_features", {})[feature_id] = value
-            row.setdefault("feature_values", {})[feature_id] = {
-                "feature_id": feature_id,
-                "value": value,
-                "t0": t0,
-                "asof": meta.get("source_ts"),
-                "available": True,
-                "stale": False,
-                "training_eligible": True,
-                "dependency_group": definition["dependency"],
-                "provenance": "FROZEN_T0_V3_EXISTING_FIELD",
-                "future_points_used": False,
-                "source_quality": meta.get("source_quality"),
-            }
+        rows_by_id[str(row["observation_id"])].append(row)
+    observation_ids = sorted(rows_by_id)
+    for offset in range(0, len(observation_ids), 128):
+        requested = observation_ids[offset:offset + 128]
+        placeholders = ','.join('?' for _ in requested)
+        with runtime._lock:
+            cursor = runtime._conn.execute(
+                "SELECT observation_id,captured_ts,frozen_features_json FROM g1s_observations "
+                f"WHERE horizon_minutes IN (15,30,60) AND observation_id IN ({placeholders}) "
+                "ORDER BY observation_id", requested)
+            try:
+                for source in cursor:
+                    # Decode/apply/drop one original document; never retain a
+                    # second table-sized raw or decoded JSON collection.
+                    frozen = _loads(source["frozen_features_json"])
+                    source_t0 = float(source["captured_ts"])
+                    for row in rows_by_id[str(source["observation_id"])]:
+                        if abs(source_t0 - float(row["captured_ts"])) <= 1e-6:
+                            _attach_frozen_transition(row, frozen)
+            finally:
+                cursor.close()
     return _coverage_report(rows)
+
+
+def _attach_frozen_transition(row: dict[str, Any], frozen: dict[str, Any]) -> None:
+    t0 = float(row["captured_ts"])
+    v3 = frozen.get("g1s_evidence_v3") if isinstance(frozen, dict) else None
+    v3 = v3 if isinstance(v3, dict) else {}
+    for feature_id, definition in TRANSITION_FEATURES.items():
+        block = v3.get(str(definition["block"]))
+        block = block if isinstance(block, dict) else {}
+        valid, meta = _quality_ok(block, t0)
+        value = _nested(block, tuple(definition["path"])) if valid else None
+        if definition["datatype"] == "float":
+            value = _finite(value)
+        elif value is not None:
+            value = str(value)
+        if value is None:
+            continue
+        row.setdefault("ede_features", {})[feature_id] = value
+        row.setdefault("feature_values", {})[feature_id] = {
+            "feature_id": feature_id,
+            "value": value,
+            "t0": t0,
+            "asof": meta.get("source_ts"),
+            "available": True,
+            "stale": False,
+            "training_eligible": True,
+            "dependency_group": definition["dependency"],
+            "provenance": "FROZEN_T0_V3_EXISTING_FIELD",
+            "future_points_used": False,
+            "source_quality": meta.get("source_quality"),
+        }
 
 
 def _coverage_report(rows: list[dict[str, Any]]) -> dict[str, Any]:

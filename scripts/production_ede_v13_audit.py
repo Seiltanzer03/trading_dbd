@@ -51,6 +51,7 @@ class ReadOnlyRuntime:
         self._conn.execute("PRAGMA query_only=ON")
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._lock = threading.RLock()
+        self._immutable_snapshot = True
 
     def close(self) -> None:
         self._conn.close()

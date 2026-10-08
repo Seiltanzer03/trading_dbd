@@ -48,6 +48,37 @@ def _transition_available_feature_ids(rows: list[dict[str, Any]]) -> set[str]:
     }
 
 
+def _load_transition_inputs(runtime, adapter):
+    """Keep unresolved context through transforms, retain only eligible rows."""
+    rows, coverage, combined_gate = [], None, None
+    for horizon in TRANSITION_HORIZONS:
+        print(f"EDE_TRANSITION_LOAD_START horizon={horizon}", flush=True)
+        horizon_rows = adapter.rows(resolved_only=False, strict=False,
+                                    horizon_minutes=horizon)
+        current_coverage = augment_rows_from_frozen_v3(runtime, horizon_rows)
+        resolved = [row for row in horizon_rows if row.get("outcome_available")]
+        eligible, gate = baseline_eligible_rows(resolved)
+        if coverage is None:
+            coverage = current_coverage
+        else:
+            coverage["coverage_by_horizon"][str(horizon)] = (
+                current_coverage["coverage_by_horizon"][str(horizon)])
+        if combined_gate is None:
+            combined_gate = gate
+        else:
+            for key in ("input_rows", "eligible_rows", "excluded_rows", "invalid_direction_rows"):
+                combined_gate[key] += gate[key]
+            for feature, count in gate["missing_by_feature"].items():
+                combined_gate["missing_by_feature"][feature] += count
+        rows.extend(eligible)
+        print(f"EDE_TRANSITION_LOAD_DONE horizon={horizon} rows={len(horizon_rows)} "
+              f"resolved={len(resolved)} eligible={len(eligible)}", flush=True)
+        del horizon_rows, resolved, eligible
+    rows.sort(key=lambda row: (float(row["captured_ts"]), str(row["instrument"]),
+                               int(row["horizon_minutes"])))
+    return rows, coverage, combined_gate
+
+
 def audit(database: Path, *, verified_immutable_input: bool = False) -> dict:
     started = time.time()
     temporary = None
@@ -62,25 +93,20 @@ def audit(database: Path, *, verified_immutable_input: bool = False) -> dict:
     runtime = ReadOnlyRuntime(snapshot)
     try:
         adapter = ProspectiveFeatureAdapter(runtime)
-        all_rows = adapter.rows(resolved_only=False, strict=False)
-        transition_coverage = augment_rows_from_frozen_v3(runtime, all_rows)
+        rows, transition_coverage, baseline_gate = _load_transition_inputs(runtime, adapter)
     finally:
         runtime.close()
         if temporary is not None:
             temporary.cleanup()
 
-    resolved_all = [
-        row for row in all_rows
-        if row.get("outcome_available")
-        and int(row["horizon_minutes"]) in TRANSITION_HORIZONS
-    ]
-    rows, baseline_gate = baseline_eligible_rows(resolved_all)
     available_feature_ids = _transition_available_feature_ids(rows)
     source_sha = research_dataset_fingerprint(
         rows,
         eligible_feature_ids=available_feature_ids,
     )
+    print(f"EDE_TRANSITION_SEARCH_START eligible={len(rows)}", flush=True)
     transition = run_transition_search(rows, source_set_sha256=source_sha)
+    print("EDE_TRANSITION_SEARCH_DONE", flush=True)
     # discover_horizon publishes the actual inner search count under
     # inner_hypotheses_tested. Keep the transition summary truthful instead of
     # reporting zero while sample/FDR counters are nonzero.
@@ -95,7 +121,7 @@ def audit(database: Path, *, verified_immutable_input: bool = False) -> dict:
         "dataset_sha256": source_sha,
         "dataset_fingerprint_contract_version": DATASET_FINGERPRINT_CONTRACT_VERSION,
         "available_transition_feature_ids": sorted(available_feature_ids),
-        "resolved_before_baseline_gate": len(resolved_all),
+        "resolved_before_baseline_gate": baseline_gate["input_rows"],
         "resolved_after_baseline_gate": len(rows),
         "baseline_row_gate": baseline_gate,
         "transition_feature_coverage": transition_coverage,
