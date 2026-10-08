@@ -801,3 +801,18 @@ automatic expense application. Quotes without full declared execution context
 remain explicitly quote-only; matching declared fields is not broker-fill proof.
 No new provider, broker access, fitting or G.1/policy admission relaxation.
 Exact release, actual source limitations and test receipts belong in the PR.
+
+### P5 release blocker: interactive macro context contention, 2026-10-08
+
+P5 carry PR #429 merged at `a97c3242a2aa3f05e2136daa27f9e83ef6250171`
+after 3347 passing Python tests. Deploy attempt 2 passed readiness but functional
+smoke timed out on AI: request trace reached `macro_context` after 173 ms and
+never completed that stage within the existing 14-second transport budget.
+The macro stores share the background short-horizon runtime's reentrant lock.
+The interactive API now reserves these locks without waiting and reports
+`MACRO_CONTEXT_STORE_BUSY` with an empty research candidate vector on contention.
+Background T0 capture retains the original causal reads and clocks. No stale
+macro context, synthetic observation, model, risk/cost relaxation or timeout
+increase is introduced. Five regressions failed before the correction; the
+51-test macro/API/orchestration profile passed. Full CI and actual release
+acceptance remain required for this correction; P5 is not declared delivered.

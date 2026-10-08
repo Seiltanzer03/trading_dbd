@@ -29,6 +29,24 @@ def _client(tmp_path, monkeypatch, verdict):
     return app, TestClient(app, raise_server_exceptions=False)
 
 
+def test_ai_request_reads_macro_context_without_waiting_for_research(tmp_path, monkeypatch):
+    from seiltanzer import macro_t0_context
+    seen = []
+    app, client = _client(tmp_path, monkeypatch, lambda _snapshot: {
+        'verdict': 'LLM', 'model': 'test-model', 'captured_ts': 1_700_000_000.0})
+    app.state.engine.passive._macro_data_factory = object()
+    def context(factory, captured_ts, *, nonblocking=False):
+        seen.append(nonblocking)
+        return {'available': False, 'reason': 'MACRO_CONTEXT_STORE_BUSY',
+                'candidate_vector': {}, 'production_authority': False}
+    monkeypatch.setattr(macro_t0_context, 'build_macro_t0_context', context)
+    try:
+        assert client.post('/api/ai/verdict').status_code == 200
+        assert seen == [True]
+    finally:
+        app.state.engine.close()
+
+
 def test_api_boundary_preview_preserves_rich_arbiter_decision():
     seen = {}
 
