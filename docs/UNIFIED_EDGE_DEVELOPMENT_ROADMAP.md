@@ -748,3 +748,26 @@ private. Combined archive/export/dataset/training/runtime profile523passed7.97s.
 This repairs one missing historical-outcome link in P2/P3; it does not create
 missing broker costs, consensus or forecast votes. Final release/actual refresh
 receipts are recorded in the package PR.
+
+## 2026-10-08 — P3 retained-history readiness by configured instrument
+
+The existing private pipeline now emits a bounded intermarket/session matrix
+for all configured instruments. It distinguishes retained and usable frozen
+reviews, admitted causal-feature reviews, verified complete executing-cost
+reviews, net-action label reviews, and training cohorts/models. Actions from
+one review are counted once; independent-group coverage is the maximum of one
+cohort, never a sum across actions, geometries or horizons. Packaged models are
+explicitly not active production models.
+
+This projection reuses already assembled archive/dataset/training artifacts and
+existing frozen snapshot, source/mapping/clock/scope and cost validation. No
+network acquisition, replay or model fitting is repeated. Public output has
+configured instrument/family names, bounded numeric counts and fixed status
+codes only; raw snapshots, trade/review IDs, feature values and provider reasons
+stay private. Historical coverage is explicitly separate from live freshness.
+Unusable frozen geometry is not mislabeled as an unavailable market source.
+
+Profile588passed8.47s; real replay output counts, no-repeat-replay, privacy,
+context/future exclusion and byte-bound controls. Final CI, release and actual
+per-instrument production result belong in the package PR. This describes P3
+input/evidence boundaries; it does not claim new models or net profit.
