@@ -487,3 +487,26 @@ def test_malformed_candidate_input_audit_is_isolated_to_its_episode(level):
     assert result['rows'] == build(archive())['rows']
     assert any(item['review_id'] == 'bad-review' and
                item['reason'] == 'FROZEN_POLICY_GEOMETRY_INVALID' for item in result['exclusions'])
+
+
+def test_dataset_cannot_normalize_postpublication_consensus_into_causal_features():
+    value = snapshot()
+    source = event_source()
+    value['edge_family_sources'] = {'event': [source]}
+    source['consensus'].update(available_at=T0-20., received_ts=T0-5.)
+    result = build(archive(record(value)))
+    assert result['rows'] == []
+    assert result['exclusions']
+
+
+def test_causal_dataset_preserves_dual_consensus_clocks():
+    value = snapshot()
+    source = event_source()
+    source['consensus']['available_at'] = T0-15.
+    value['edge_family_sources'] = {'event': [source]}
+    rows = build(archive(record(value)))['rows']
+    assert rows and all(row['family_id'] == 'event' for row in rows)
+    for row in rows:
+        for meta in row['feature_provenance'].values():
+            assert meta['consensus_provenance']['received_ts'] == T0-20.
+            assert meta['consensus_provenance']['available_at'] == T0-15.

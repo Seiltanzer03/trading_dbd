@@ -752,3 +752,73 @@ def test_history_hash_manifest_source_ids_are_not_scope_declaration_keys():
     value, captured = received_history_dataset(first_source_id='horizon_minutes')
     result = train(value, trained_at=captured + 100000)
     assert result['diagnostics']['accepted_row_count'] == 5
+
+
+@pytest.mark.parametrize('availability', ['future', None, 'bad', True])
+def test_trainer_rechecks_declared_feature_availability(availability):
+    data = dataset()
+    for row in data['rows']:
+        row['feature_provenance'][FEATURE]['available_at'] = (
+            row['captured_ts']+1 if availability == 'future' else availability)
+    result = train(dataset(data['rows']))
+    assert result['models'] == []
+    assert result['diagnostics']['accepted_row_count'] == 0
+    assert {item['reason'] for item in result['diagnostics']['exclusions']} == {'FEATURE_POINT_IN_TIME_CLOCK_INVALID'}
+
+
+@pytest.mark.parametrize('key,value', [
+    ('net_basis', 'per_unit_of_original_position'),
+    ('label_kind', 'UNVERIFIED_SCENARIO_GROSS_OUTCOME'),
+    ('execution_assumption', 'unknown_execution'),
+    ('net_basis', None), ('label_kind', True), ('execution_assumption', []),
+])
+def test_trainer_rejects_explicitly_conflicting_outcome_units_and_origin(key, value):
+    data = dataset()
+    for row in data['rows']:
+        row[key] = value
+    result = train(dataset(data['rows']))
+    assert result['models'] == []
+    assert result['diagnostics']['accepted_row_count'] == 0
+    assert {item['reason'] for item in result['diagnostics']['exclusions']} == {'OUTCOME_SEMANTICS_INVALID'}
+
+
+def test_canonical_outcome_semantics_survive_training_into_validation():
+    data = dataset()
+    for row in data['rows']:
+        row.update(net_basis='per_unit_of_current_remaining_position',
+            label_kind='OBSERVED_PATH_COUNTERFACTUAL_NOT_BROKER_FILL',
+            execution_assumption='piecewise_linear_barrier_fill_no_slippage; no_tick_order_or_price_impact')
+    result = train(dataset(data['rows']))
+    assert len(result['models']) == 1
+    validation = result['models'][0]['validation']
+    assert validation['net_basis'] == data['rows'][0]['net_basis']
+    assert validation['execution_assumption'] == data['rows'][0]['execution_assumption']
+    assert validation['evidence_kind'] == data['rows'][0]['label_kind']
+
+
+@pytest.mark.parametrize('late', [False, True])
+@pytest.mark.parametrize('clock_kind', ['native', 'numeric_string'])
+def test_imported_event_consensus_availability_type_and_publication_are_checked(late, clock_kind):
+    rows = dataset()['rows']
+    name = 'event.cpi.surprise'
+    for row in rows:
+        row['family_id'] = 'event'
+        row['features'] = {name: row['features'][FEATURE]}
+        meta = row['feature_provenance'].pop(FEATURE)
+        meta.update(source_instrument='', global_context=True,
+            release_id='cpi-release-' + str(row['trade_id']), period='2026-09', unit='pct',
+            consensus_source_id='official:consensus', supporting_source_ids=['official:consensus'],
+            consensus_received_ts=row['captured_ts'] - 3)
+        available = row['captured_ts'] - (1 if late else 3)
+        meta['consensus_provenance'] = {**deepcopy(meta), 'source_id': 'official:consensus',
+            'observed_ts': row['captured_ts'] - 4, 'received_ts': row['captured_ts'] - 3,
+            'available_at': str(available) if clock_kind == 'numeric_string' else available,
+            'published_at': None}
+        row['feature_provenance'] = {name: meta}
+    result = train(dataset(rows))
+    if late or clock_kind == 'numeric_string':
+        assert result['models'] == []
+        assert result['diagnostics']['rejected_row_count'] == len(rows)
+        assert {r['reason'] for r in result['diagnostics']['exclusions']} == {'FEATURE_PREPUBLICATION_CONSENSUS_INVALID'}
+    else:
+        assert result['available'] and result['diagnostics']['rejected_row_count'] == 0

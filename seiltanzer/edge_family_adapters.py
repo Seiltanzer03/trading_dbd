@@ -20,6 +20,20 @@ from .canonical_market_context import canonical_instrument_code
 CONTRACT_VERSION = "edge-family-adapters-v1"
 MODEL_CONTRACT = "edge-family-net-action-model-v1"
 FEATURE_CONTRACT = "edge-family-observed-features-v1"
+OUTCOME_SEMANTICS = {
+    "label_kind": "OBSERVED_PATH_COUNTERFACTUAL_NOT_BROKER_FILL",
+    "net_basis": "per_unit_of_current_remaining_position",
+    "execution_assumption": "piecewise_linear_barrier_fill_no_slippage; no_tick_order_or_price_impact",
+}
+
+
+def outcome_semantics_valid(value: dict, *, evidence_key: str = "label_kind") -> bool:
+    """Legacy omissions remain compatible; explicit contrary claims do not."""
+    return all((evidence_key if key == "label_kind" else key) not in value
+               or value[evidence_key if key == "label_kind" else key] == expected
+               for key, expected in OUTCOME_SEMANTICS.items())
+
+
 FAMILIES = ("macro", "event", "order_flow", "intermarket", "positioning",
             "value_carry", "option", "session")
 WEIGHT_POOLS = {"mathematical_edge", "active_edge", "historical_llm"}
@@ -93,13 +107,16 @@ def _meta(source: dict, *, family: str, instrument: str, cutoff: float,
         return None, "SOURCE_UNAVAILABLE_OR_UNVERIFIED"
     source_id = str(source.get("source_id") or "")
     observed = _num(source.get("observed_ts"))
-    received = _num(source.get("available_at", source.get("received_ts")))
+    received = _num(source.get("received_ts", source.get("available_at")))
+    available = _num(source.get("available_at", source.get("received_ts")))
     published = _num(source.get("published_at"))
-    if not source_id or observed is None or received is None:
+    if (not source_id or any(value is None or value <= 0
+                             for value in (observed, received, available))):
         return None, "SOURCE_ID_OR_POINT_IN_TIME_CLOCK_MISSING"
-    if observed > cutoff or received > cutoff or (published is not None and published > cutoff):
+    if max(observed, received, available) > cutoff or (published is not None and published > cutoff):
         return None, "SOURCE_AFTER_SNAPSHOT"
-    if observed > received + 1e-6 or (published is not None and published > received + 1e-6):
+    if (observed > min(received, available) + 1e-6
+            or (published is not None and published > min(received, available) + 1e-6)):
         return None, "SOURCE_CLOCK_ORDER_INVALID"
     age = _num(source.get("max_age_sec")) or MAX_AGE_SEC[family]
     age = min(age, MAX_AGE_SEC[family])
@@ -134,6 +151,7 @@ def _meta(source: dict, *, family: str, instrument: str, cutoff: float,
             "quality": quality, "max_age_sec": age, "dependency_group": dependency,
             "source_instrument": source_instrument, "proxy_mapping": mapping or None,
             "global_context": global_source,
+            **({"available_at": available} if "available_at" in source else {}),
             **{key: source[key] for key in ("context_only", "horizon_minutes") if key in source}}, "OK"
 
 
@@ -232,6 +250,7 @@ def _event(row: dict, source: dict, meta: dict, cutoff: float) -> None:
     expected = _num(consensus.get("value"))
     if (actual is None or published is None or not cmeta or expected is None
             or cmeta["received_ts"] >= published
+            or cmeta.get("available_at", cmeta["received_ts"]) >= published
             or cmeta["observed_ts"] >= published
             or consensus.get("period") != source.get("period")
             or not source.get("period") or not source.get("unit")
@@ -517,6 +536,7 @@ def _action_models(row: dict, artifact: dict, cutoff: float, regime: str,
         return None, "MODEL_TIME_SPLIT_OR_HORIZON_INVALID"
     if (validation.get("status") != "OOS_VALIDATED" or validation.get("point_in_time") is not True
             or validation.get("outcomes") != "OBSERVED_NET_ACTION_DELTA_VS_HOLD"
+            or not outcome_semantics_valid(validation, evidence_key="evidence_kind")
             or validation.get("purged_split") is not True
             or (_num(validation.get("sample_count")) or 0) < 20
             or type(validation.get("sample_count")) is not int

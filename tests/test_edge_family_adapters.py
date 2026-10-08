@@ -421,3 +421,34 @@ def test_official_macro_applicability_ancestors_block_only_affected_votes(root_n
     result = build_edge_family_evidence(frozen)
     assert feature in result['families']['macro']['features']
     assert result['components'] == []
+
+
+@pytest.mark.parametrize('receipt', [T0-5, None, 'bad', True, 0.])
+def test_declared_available_at_cannot_hide_late_or_invalid_consensus_receipt(receipt):
+    data, feature = family_fixture('event')
+    data['consensus'].update(available_at=T0-600, received_ts=receipt)
+    result = build_edge_family_evidence(snapshot('event', data, feature))
+    assert result['families']['event']['features'] == {}
+    assert result['components'] == []
+
+
+def test_dual_consensus_clocks_retain_actual_receipt_and_availability():
+    data, feature = family_fixture('event')
+    data['consensus'].update(available_at=T0-500)
+    row = build_edge_family_evidence(snapshot('event', data, feature))['families']['event']
+    meta = row['feature_provenance'][feature]['consensus_provenance']
+    assert meta['received_ts'] == T0-600
+    assert meta['available_at'] == T0-500
+
+
+def test_late_consensus_availability_is_rejected_even_with_early_receipt():
+    data, feature = family_fixture('event')
+    data['consensus']['available_at'] = T0-5
+    result = build_edge_family_evidence(snapshot('event', data, feature))
+    assert result['families']['event']['features'] == {}
+
+
+def test_legacy_availability_only_consensus_remains_admitted():
+    data, feature = family_fixture('event')
+    data['consensus']['available_at'] = data['consensus'].pop('received_ts')
+    assert build_edge_family_evidence(snapshot('event', data, feature))['components']
