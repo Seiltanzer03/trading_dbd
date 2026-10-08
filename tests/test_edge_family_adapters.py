@@ -452,3 +452,38 @@ def test_legacy_availability_only_consensus_remains_admitted():
     data, feature = family_fixture('event')
     data['consensus']['available_at'] = data['consensus'].pop('received_ts')
     assert build_edge_family_evidence(snapshot('event', data, feature))['components']
+
+
+def test_two_top_feature_provenance_preserves_venue_and_sampled_scope():
+    data, feature = family_fixture('order_flow')
+    data['flow_scope'] = 'FULL_INCREMENTAL_OFI'
+    row = build_edge_family_evidence(snapshot('order_flow', data, feature))['families']['order_flow']
+    meta = row['feature_provenance'][feature]
+    assert meta.get('venue') == 'CME'
+    assert meta.get('measurement_scope') == 'SAMPLED_TWO_TOP_OBSERVATIONS_NOT_FULL_INCREMENTAL_OFI'
+
+
+@pytest.mark.parametrize('complete', [False, True])
+def test_tape_window_feature_keeps_incomplete_measurement_scope(complete):
+    data = source(kind='exchange_trade_tape', venue='COINBASE_EXCHANGE',
+                  aggressive_buy_volume=20., aggressive_sell_volume=10., window_start_ts=T0-30,
+                  window_complete=complete)
+    row = build_edge_family_evidence(snapshot('order_flow', data, 'flow.aggressive_imbalance'))['families']['order_flow']
+    meta = row['feature_provenance']['flow.aggressive_imbalance']
+    assert meta.get('venue') == 'COINBASE_EXCHANGE'
+    assert meta.get('measurement_scope') == 'SAMPLED_AGGREGATE_TRADE_WINDOW'
+    assert meta.get('trade_window_complete') is complete
+
+
+@pytest.mark.parametrize('kind', ['exchange_order_book', 'exchange_trade_tape'])
+def test_order_flow_kind_cannot_mislabel_features_from_conflicting_fields(kind):
+    data, feature = family_fixture('order_flow')
+    data.update(kind=kind, aggressive_buy_volume=20., aggressive_sell_volume=10.,
+                window_start_ts=T0-30, window_complete=False)
+    row = build_edge_family_evidence(snapshot('order_flow', data, feature))['families']['order_flow']
+    if kind == 'exchange_order_book':
+        assert 'flow.ofi_over_depth' in row['features']
+        assert 'flow.aggressive_imbalance' not in row['features']
+    else:
+        assert 'flow.aggressive_imbalance' in row['features']
+        assert 'flow.ofi_over_depth' not in row['features']

@@ -771,3 +771,20 @@ Profile588passed8.47s; real replay output counts, no-repeat-replay, privacy,
 context/future exclusion and byte-bound controls. Final CI, release and actual
 per-instrument production result belong in the package PR. This describes P3
 input/evidence boundaries; it does not claim new models or net profit.
+
+## 2026-10-08 — P4 sampled liquidity measurement and historical chain
+
+Existing two-top observations now preserve venue and canonical sampled scope in
+feature provenance and frozen training rows. Limited tape features preserve
+window completeness; neither packet is full incremental OFI or executing CFD
+book evidence. Source mapping, clocks, 60s age, costs, labels and OOS gates stay.
+
+The existing private pipeline projects P4 order_flow readiness for all13
+configured instruments alongside unchanged P3 contracts in ONE bounded frozen
+validation pass. No duplicate replay/fitting/acquisition. Retained versus usable
+reviews, admitted inputs, complete broker costs, distinct net-label reviews,
+maximum single-cohort groups and packaged models have separate counters; absent
+sequential input/mapping has an explicit status, not a no-signal claim. Public
+output stays fixed names/counts/enums under existing16000-byte bound, with no
+private source/position IDs. Historical coverage is not current live readiness.
+Final release and actual private-run evidence belong in the package PR.
