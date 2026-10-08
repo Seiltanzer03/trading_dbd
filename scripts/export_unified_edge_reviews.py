@@ -10,11 +10,12 @@ import io
 import json
 import math
 import os
+import re
 from pathlib import Path
 import shlex
 import time
 
-from scripts.production_ede_offload import _connect
+from scripts.production_ede_offload import _connect, _verify_sha
 
 
 def select_reviews(metadata, maximum):
@@ -142,18 +143,19 @@ def remote_program(maximum):
               'print(base64.b64encode(gzip.compress(raw)).decode())\n')
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--output', required=True)
-    parser.add_argument('--max-reviews', type=int, default=32, choices=range(1, 33))
-    args = parser.parse_args()
-    password = os.environ.get('SSH_PASSWORD')
+def export_actual(output, *, maximum=32, password=None, expected_sha=None):
+    if type(maximum) is not int or not 1 <= maximum <= 32:
+        raise ValueError('invalid bounded review count')
+    if expected_sha is not None and not re.fullmatch(r'[0-9a-f]{40}', expected_sha):
+        raise ValueError('invalid expected SHA')
     if not password:
         raise ValueError('SSH_PASSWORD environment variable is required')
     client = _connect(password)
     try:
+        if expected_sha is not None:
+            _verify_sha(client, expected_sha)
         _, stdout, stderr = client.exec_command(
-            'python3 -c ' + shlex.quote(remote_program(args.max_reviews)), timeout=40)
+            'python3 -c ' + shlex.quote(remote_program(maximum)), timeout=40)
         payload = stdout.read(32_000_001)
         error = stderr.read(1000).decode('utf8', 'replace')
         if stdout.channel.recv_exit_status() or len(payload) > 32_000_000:
@@ -164,12 +166,26 @@ def main():
         if len(raw) > 96_000_000:
             raise ValueError('export exceeds bound')
         report = json.loads(raw)
-        if report.get('read_only') is not True or len(report.get('reviews', [])) > 32:
+        if (not isinstance(report, dict) or report.get('read_only') is not True
+                or not isinstance(report.get('reviews'), list) or len(report['reviews']) > maximum):
             raise ValueError('invalid review export')
-        Path(args.output).write_bytes(raw)
-        print(json.dumps({'exported_reviews': len(report['reviews']), 'read_only': True}))
+        if expected_sha is not None:
+            _verify_sha(client, expected_sha)
+        Path(output).write_bytes(raw)
+        return report
     finally:
         client.close()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--max-reviews', type=int, default=32, choices=range(1, 33))
+    parser.add_argument('--expected-sha', help='Optional exact deployment SHA checked around export')
+    args = parser.parse_args()
+    report = export_actual(args.output, maximum=args.max_reviews,
+                           password=os.environ.get('SSH_PASSWORD'), expected_sha=args.expected_sha)
+    print(json.dumps({'exported_reviews': len(report['reviews']), 'read_only': True}))
 
 
 if __name__ == '__main__':

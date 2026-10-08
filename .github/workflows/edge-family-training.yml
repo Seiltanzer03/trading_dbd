@@ -7,6 +7,8 @@ on:
       - 'seiltanzer/edge_family*.py'
       - 'seiltanzer/unified_edge_runtime_context.py'
       - 'scripts/run_edge_family_pipeline.py'
+      - 'scripts/run_private_edge_family_pipeline.py'
+      - 'scripts/export_unified_edge_reviews.py'
       - 'tests/test_edge_family*.py'
       - '.github/workflows/edge-family-training.yml'
   workflow_dispatch:
@@ -19,6 +21,12 @@ on:
         description: Optional previous completed run ID to restore an accumulated archive
         required: false
         type: string
+      archive_storage:
+        description: Private retention backend; public artifacts never hold actual reviews
+        required: true
+        default: private-object-storage
+        type: choice
+        options: [private-object-storage, private-github-artifact]
       archive_artifact_name:
         description: Exact previous private-repository archive artifact name; restore before 14-day expiry
         required: false
@@ -29,8 +37,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: edge-family-training-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: edge-family-training-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   synthetic-contracts:
@@ -56,6 +64,8 @@ jobs:
       - name: Verify causal pipeline and consumer contracts without credentials
         run: >-
           python -m pytest -q tests/test_edge_family_archive.py
+          tests/test_edge_family_private_archive.py
+          tests/test_edge_family_private_pipeline.py
           tests/test_edge_family_dataset.py tests/test_edge_family_training.py
           tests/test_edge_family_pipeline.py tests/test_edge_family_adapters.py
           tests/test_unified_edge_runtime_context.py
@@ -69,7 +79,7 @@ jobs:
     # Raw frozen snapshots and broker/account records are private data. Public
     # repository artifacts are not an authorized private-data storage boundary.
     # No SSH export occurs here unless the repository itself is private.
-    if: github.event_name == 'workflow_dispatch' && github.event.repository.private == true
+    if: github.event_name == 'workflow_dispatch' && inputs.archive_storage == 'private-github-artifact' && github.event.repository.private == true
     needs: synthetic-contracts
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -148,8 +158,54 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  actual-private-object-pipeline:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.archive_storage == 'private-object-storage'
+    needs: synthetic-contracts
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    concurrency:
+      group: edge-family-private-object-storage-v1
+      cancel-in-progress: false
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
+      ARCHIVE_ARTIFACT_NAME: ${{ inputs.archive_artifact_name }}
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+    steps:
+      - name: Require trusted current main SHA and unambiguous storage backend
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_SHA" = "$GITHUB_SHA"
+          test -z "$ARCHIVE_RUN_ID"
+          test -z "$ARCHIVE_ARTIFACT_NAME"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - name: Verify exact checkout
+        run: 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -q -e '.[dev]' paramiko boto3
+      - name: Restore private history, export read-only, train off-host and commit verified archive
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,2}$ ]]
+          python -m scripts.run_private_edge_family_pipeline \
+            --expected-sha "$EXPECTED_SHA" --generation "$((GITHUB_RUN_ID * 1000 + GITHUB_RUN_ATTEMPT))" \
+            --workspace "$RUNNER_TEMP/private-edge-family-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      # Raw archive/dataset/diagnostics/runtime outputs remain private runner
+      # files and Object Storage. No upload-artifact step is authorized here.
+
   private-storage-unavailable:
-    if: github.event_name == 'workflow_dispatch' && github.event.repository.private != true
+    if: github.event_name == 'workflow_dispatch' && inputs.archive_storage == 'private-github-artifact' && github.event.repository.private != true
     needs: synthetic-contracts
     runs-on: ubuntu-22.04
     steps:
