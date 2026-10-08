@@ -27,7 +27,7 @@ PATH_KEYS = ("probability", "baseline_probability", "horizon_minutes", "target_s
     "quality_multiplier", "training_age_days", "training_cutoff", "captured_ts", "observed_ts",
     "max_effective_weight_fraction", "test_n", "gain_mbit", "ranking_only",
     "net_economic_proof", "independent_evidence_vote", "intrabar_order_inferred",
-    "generic_barriers_are_trade_stop_take")
+    "generic_barriers_are_trade_stop_take", "evidence_tier")
 PATH_NAMES = ("downside_excursion", "upside_excursion", "upper_before_lower", "early_first_touch")
 FAMILY_ROOTS = ("edge_family_sources", "edge_family_models", "macro_context_v1", "macro_t0_context")
 LINEAGE_KEYS = ("adverse_confirmation_families", "supportive_confirmation_families",
