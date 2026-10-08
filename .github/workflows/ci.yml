@@ -29,6 +29,11 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Run Python tests
         run: pytest -q
+      - name: Verify real pinned SQLite seeded refresh
+        run: |
+          python -c 'import sys; from pathlib import Path; sys.path.insert(0,"scripts"); from offhost_sqlite_snapshot import install_rsync; install_rsync(Path("${{ runner.temp }}/sqlite3_rsync"))'
+          SQLITE_RSYNC_TEST_BINARY="${{ runner.temp }}/sqlite3_rsync" \
+            pytest -q tests/test_offhost_sqlite_snapshot.py -k real_pinned_sqlite
 
   browser:
     runs-on: ubuntu-22.04
