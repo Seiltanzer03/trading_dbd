@@ -50,6 +50,30 @@ def fingerprint(value):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def working_admission(validation_gains, block_gains, test_gain):
+    """Historical manual-use policy; stability changes weight, not profit claims."""
+    valid = (len(validation_gains) == len(block_gains) == 3
+             and all(number(v) is not None for v in [*validation_gains, *block_gains, test_gain]))
+    supported = (valid and float(np.mean(validation_gains)) > 0 and test_gain > 0)
+    stable = (supported and sum(v > 0 for v in validation_gains) >= 2
+              and sum(v > 0 for v in block_gains) >= 2)
+    return {'policy_version': 'historical-manual-v2', 'supported': bool(supported),
+            'stability_supported': bool(stable),
+            'tier': 'STABLE_HISTORICAL' if stable else ('LIMITED_HISTORICAL' if supported else 'UNSUPPORTED'),
+            'weight_multiplier': 1. if stable else (.5 if supported else 0.)}
+
+
+def _admission_weight(row):
+    # Existing hash-bound artifacts retain their original stable admission.
+    admission = row.get('working_admission')
+    if admission is None:
+        return 1., 'STABLE_HISTORICAL'
+    if not isinstance(admission, dict) or admission.get('supported') is not True:
+        return 0., 'UNSUPPORTED'
+    tier = admission.get('tier')
+    return {'STABLE_HISTORICAL': 1., 'LIMITED_HISTORICAL': .5}.get(tier, 0.), tier
+
+
 def price_features(bars, captured_ts):
     """Identical historic/live features; only consecutive completed 5m bars."""
     rows = [b for b in bars if number(b.get('bar_end_ts')) is not None
@@ -220,14 +244,15 @@ def train_path_heads(bars, boundaries, horizons):
         block_gains = [gain(y[ix], predict(head, x[ix]), head['baseline']) if len(ix) >= 3 else None for ix in chunks]
         test_gain = gain(y[test], predict(head, x[test]), head['baseline'])
         positive = sum(value is not None and value > 0 for value in block_gains)
-        supported = (mean_gain > 0 and sum(value > 0 for value in validation) >= 2
-                     and test_gain > 0 and positive >= 2 and all(value is not None for value in block_gains))
+        admission = working_admission(validation, block_gains, test_gain)
+        supported = admission['supported']
         all_observed = np.flatnonzero(observed)
         test_brier = float(np.mean((predict(head, x[test]) - y[test]) ** 2))
         baseline_brier = float(np.mean((head['baseline'] - y[test]) ** 2))
         results[name] = {**base, 'horizon_minutes': horizon,
                          'status': 'WORKING_SUPPORTED' if supported else 'NO_SUPPORTED_ADVANTAGE_YET',
                          'working_supported': supported, 'gain_mbit': round(test_gain, 5),
+                         'working_admission': admission,
                          'block_gains_mbit': block_gains, 'positive_blocks': positive, 'blocks': 3,
                          'validation_gains_mbit': validation, 'validation_mean_gain_mbit': mean_gain,
                          'test_n': len(test), 'test_brier': test_brier, 'baseline_brier': baseline_brier,
@@ -311,15 +336,15 @@ def train_instrument(code, bars, captured_ts, horizons=SEARCH_HORIZONS):
         chunks = [head_indices(ix, y, col) for ix in np.array_split(np.arange(split, len(x)), 3)]
         fold_gain = [gain(y[ix, col], predict(head, x[ix]), head['baseline']) if len(ix) >= 3 else None for ix in chunks]
         test_gain = gain(y[test_ix, col], predict(head, x[test_ix]), head['baseline'])
-        valid_positive = sum(row[col] is not None and row[col] > 0 for row in validation)
         validation_mean = float(np.mean([row[col] for row in validation])) if all(row[col] is not None for row in validation) else None
         positive = sum(g is not None and g > 0 for g in fold_gain)
-        eligible = (test_gain > 0 and validation_mean is not None and validation_mean > 0
-                    and valid_positive >= 2 and positive >= 2 and all(g is not None for g in fold_gain))
+        admission = working_admission([r[col] for r in validation], fold_gain, test_gain)
+        eligible = admission['supported']
         diagnostics[name] = {'gain_mbit': round(test_gain, 5), 'block_gains_mbit': fold_gain,
                              'positive_blocks': positive, 'blocks': len(fold_gain),
                              'validation_gains_mbit': [r[col] for r in validation], 'validation_mean_gain_mbit': validation_mean,
                              'working_supported': eligible,
+                             'working_admission': admission,
                              'test_n': len(test_ix), 'test_brier': float(np.mean((predict(head, x[test_ix]) - y[test_ix, col]) ** 2)),
                              'baseline_brier': float(np.mean((head['baseline'] - y[test_ix, col]) ** 2)),
                              'target_semantics': 'UP_GIVEN_ABS_RETURN_GT_2BP' if col == 0 else 'ABS_RETURN_GT_2BP'}
@@ -426,13 +451,15 @@ def runtime_path_predictions(model, features, captured):
         if not math.isfinite(probability) or not 0 <= probability <= 1:
             continue
         age_days = (captured-cutoff)/86400
-        quality = (min(1., max(0., row['gain_mbit']/20))
+        admission_weight, evidence_tier = _admission_weight(row)
+        quality = (admission_weight * min(1., max(0., row['gain_mbit']/20))
                    * min(1., row['positive_blocks']/max(1, row['blocks']))
                    * min(1., row['test_n']/100) * max(0., 1-age_days/90))
         output[name] = {'probability': probability, 'baseline_probability': row['head']['baseline'],
                         'horizon_minutes': row['horizon_minutes'], 'target_semantics': semantics,
                         'test_n': row['test_n'], 'gain_mbit': row['gain_mbit'],
                         'quality_multiplier': round(quality, 6),
+                        'evidence_tier': evidence_tier,
                         'max_effective_weight_fraction': round(MAX_WEIGHT*quality, 6),
                         'training_age_days': round(age_days, 2), 'ranking_only': True,
                         'net_economic_proof': False, 'independent_evidence_vote': False,
@@ -551,7 +578,8 @@ def runtime_profile(engine, tick, trade):
             diagnostic = ds['movement']; role = 'LOW_MOVEMENT_TIME_MANAGEMENT'
         else:
             return {**base, 'reason': 'NO_SUPPORTED_ADVANTAGE_YET', 'probabilities': ps}
-        quality = max(0., min(1., diagnostic['gain_mbit'] / 20)) * min(1., diagnostic['positive_blocks'] / max(1, diagnostic['blocks']))
+        admission_weight, evidence_tier = _admission_weight(diagnostic)
+        quality = admission_weight * max(0., min(1., diagnostic['gain_mbit'] / 20)) * min(1., diagnostic['positive_blocks'] / max(1, diagnostic['blocks']))
         # A small holdout and old observations earn a smaller working weight.
         # Historical data remain usable; age/sample uncertainty is visible.
         age_days = max(0., (captured - model['training_cutoff']) / 86400)
@@ -567,6 +595,7 @@ def runtime_profile(engine, tick, trade):
                 'runtime_price_feature_source': ('Exact configured Binance USDT completed OHLCV; not broker execution bars'
                     if code in CRYPTO_INSTRUMENTS else 'Yahoo intraday OHLCV; may be mapped to current broker basis; price proxy, not broker execution bars'),
                 'training_age_days': round(age_days, 2), 'quality_multiplier': round(quality, 6),
+                'evidence_tier': evidence_tier,
                 'h2': runtime_gex_diagnostics(engine, code, captured, ps['movement']), 'ranking_only': True,
                 'net_economic_proof': False}
     except (KeyError, TypeError, ValueError, IndexError, ZeroDivisionError):
@@ -610,6 +639,10 @@ def render_math_edge(profile, combined=None, ranking_audit=None):
     chosen_diagnostic = (profile.get('diagnostics') or {}).get('direction' if profile.get('role') == 'PRICE_DIRECTION' else 'movement', {})
     score = number(chosen_diagnostic.get('gain_mbit'))
     gain_text = f'{score:+.3f}' if score is not None else 'UNAVAILABLE'
+    admission_text = {
+        'LIMITED_HISTORICAL': 'ограниченный исторический допуск; устойчивость по блокам не подтверждена, вклад уменьшен вдвое',
+        'STABLE_HISTORICAL': 'устойчивый исторический допуск',
+    }.get(profile.get('evidence_tier'), 'исторический допуск не подтверждён')
     transition = ''
     if audit.get('raw_policy_without_mathematical_edge') and audit.get('raw_policy_with_edge'):
         transition = f"Выбор до gate без mathematical edge: {audit['raw_policy_without_mathematical_edge']}; с ним: {audit['raw_policy_with_edge']}. Финальный план определяется gate и арбитром.\n"
@@ -621,6 +654,7 @@ def render_math_edge(profile, combined=None, ranking_audit=None):
             f"расширенных действий {combined.get('mathematical_extended_component_weight', profile['weight_fraction']):.1%}; общий лимит 40%.\n"
             f"Проверка вне обучения: {gain_text} mbit/event; "
             f"модель {str(profile.get('model_sha256') or '')[:12]}.\n"
+            f"Рабочий режим: {admission_text}.\n"
             + transition +
             'Источник признаков: intraday Yahoo proxy; возможна привязка к текущей шкале брокера. Это не история фактических исполнений.\n'
             'Рабочая историческая модель; proper-score не является доказательством прибыли. '
