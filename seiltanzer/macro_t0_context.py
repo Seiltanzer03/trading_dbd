@@ -7,6 +7,7 @@ the existing evidence gates. No network or LLM call can occur here.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 from typing import Any
 from urllib.parse import urlparse
 
@@ -143,7 +144,37 @@ def _fomc_deterministic_context(factory: MacroDataFactory,
     }
 
 
-def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float) -> dict[str, Any]:
+def build_macro_t0_context(factory: MacroDataFactory, captured_ts: float,
+                           *, nonblocking: bool = False) -> dict[str, Any]:
+    if nonblocking:
+        # Installed stores share the short-horizon runtime's RLock. Reserve
+        # each unique lock before calling the unchanged causal readers; never
+        # queue the interactive AI request behind background research.
+        with ExitStack() as acquired:
+            seen = set()
+            for store in (factory, getattr(factory, 'numeric_release_store', None),
+                          getattr(factory, 'fomc_deterministic_store', None)):
+                if store is None:
+                    continue
+                lock = getattr(store, '_lock', None)
+                reason = 'MACRO_CONTEXT_LOCK_UNAVAILABLE'
+                if lock is not None:
+                    if id(lock) in seen:
+                        continue
+                    if lock.acquire(blocking=False):
+                        seen.add(id(lock))
+                        acquired.callback(lock.release)
+                        continue
+                    reason = 'MACRO_CONTEXT_STORE_BUSY'
+                return {
+                    'contract_version': MACRO_T0_CONTEXT_VERSION,
+                    'available': False, 'reason': reason,
+                    'captured_ts': float(captured_ts), 'candidate_vector': {},
+                    'historical_backfill_allowed': False,
+                    'research_only': True, 'production_authority': False,
+                    'current_ml_feature_vector_reads_macro_context': False,
+                }
+            return build_macro_t0_context(factory, captured_ts)
     captured_ts = float(captured_ts)
     fomc = _fomc_context(factory, captured_ts)
     fomc_deterministic = _fomc_deterministic_context(factory, captured_ts)

@@ -1298,7 +1298,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if macro_factory is not None:
                 from .macro_t0_context import build_macro_t0_context
                 snapshot["macro_context_v1"] = await trace.to_thread(
-                    'macro_context', build_macro_t0_context, macro_factory, float(snapshot["captured_ts"]))
+                    'macro_context', build_macro_t0_context, macro_factory,
+                    float(snapshot["captured_ts"]), nonblocking=True)
             from .edge_family_event_reaction import attach_observed_event_reaction_bounded
             with trace.span('reaction_capture'):
                 await attach_observed_event_reaction_bounded(engine, snapshot)

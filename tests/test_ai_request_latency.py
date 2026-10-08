@@ -206,7 +206,8 @@ def test_materializer_and_api_correlate_preflight_route_and_final_status(tmp_pat
     # Existing helper opens only a test DB trade; no startup/network/provider.
     from seiltanzer import macro_t0_context
     monkeypatch.setattr(app.state.engine.passive, '_macro_data_factory', SimpleNamespace(), raising=False)
-    monkeypatch.setattr(macro_t0_context, 'build_macro_t0_context', lambda *args: {})
+    monkeypatch.setattr(macro_t0_context, 'build_macro_t0_context',
+                        lambda *args, nonblocking=False: {})
     mat = install_ai_snapshot_materializer(app)
     monkeypatch.setattr(mat, '_event_reason', lambda: None)
     monkeypatch.setattr(app_module, 'build_snapshot', mat.builder)
