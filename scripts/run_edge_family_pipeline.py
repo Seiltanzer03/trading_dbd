@@ -19,7 +19,8 @@ import tempfile
 import time
 
 from seiltanzer.edge_family_adapters import (FAMILIES, FEATURE_CONTRACT, MODEL_CONTRACT,
-                                            WEIGHT_POOLS, training_label_clock_valid)
+                                            WEIGHT_POOLS, training_label_clock_valid,
+                                            outcome_semantics_valid)
 from seiltanzer.unified_edge_runtime_context import MAX_BYTES, VERSION
 
 MAX_DATA_BYTES = 96_000_000
@@ -149,6 +150,7 @@ def package_runtime_context(models, *, expected_sha, captured_ts, dataset):
                 or validation.get('purged_split') is not True
                 or validation.get('costs_included') is not True
                 or validation.get('outcomes') != 'OBSERVED_NET_ACTION_DELTA_VS_HOLD'
+                or not outcome_semantics_valid(validation, evidence_key='evidence_kind')
                 or not _clock(validation.get('proper_score_gain'))
                 or not _clock(validation.get('sample_count')) or validation['sample_count'] < 20
                 or not isinstance(validation['sample_count'], int)

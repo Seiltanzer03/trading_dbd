@@ -464,3 +464,41 @@ def test_event_global_context_remains_an_explicit_source_declaration(global_clai
     assert meta['global_context'] is global_claim
     assert meta['consensus_provenance']['global_context'] is global_claim
     assert result['components']
+
+
+@pytest.mark.parametrize('key,value', [
+    ('evidence_kind', 'MODELED_SCENARIO'),
+    ('net_basis', 'per_unit_of_original_position'),
+    ('execution_assumption', 'observed_broker_fill'),
+])
+@pytest.mark.parametrize('boundary', ['packaging', 'runtime'])
+def test_packaging_and_runtime_reject_conflicting_declared_outcome_semantics(key, value, boundary):
+    artifact = measured_model()
+    artifact['validation'][key] = value
+    if boundary == 'packaging':
+        with pytest.raises(ValueError, match='UNVALIDATED_MODEL_NOT_PUBLISHABLE'):
+            packaging().package_runtime_context([artifact], expected_sha=SHA,
+                captured_ts=T0, dataset={'rows': []})
+        return
+    frozen = snapshot('macro', source(features={'macro.expected_rate_change': -.2}),
+                      'macro.expected_rate_change')
+    artifact.pop('geometry_sha256')
+    frozen['edge_family_models']['macro'] = artifact
+    result = build_edge_family_evidence(frozen)
+    assert result['components'] == []
+    assert result['families']['macro']['forecast_rejections'][0]['reason'] == 'OOS_NET_ACTION_VALIDATION_REQUIRED'
+
+
+def test_canonical_declared_outcome_semantics_package_and_vote():
+    artifact = measured_model()
+    artifact['validation'].update(evidence_kind='OBSERVED_PATH_COUNTERFACTUAL_NOT_BROKER_FILL',
+        net_basis='per_unit_of_current_remaining_position',
+        execution_assumption='piecewise_linear_barrier_fill_no_slippage; no_tick_order_or_price_impact')
+    context = packaging().package_runtime_context([artifact], expected_sha=SHA,
+        captured_ts=T0, dataset={'rows': []})
+    assert context['instruments']['NAS100']['edge_family_models']['macro'][0]['validation'] == artifact['validation']
+    frozen = snapshot('macro', source(features={'macro.expected_rate_change': -.2}),
+                      'macro.expected_rate_change')
+    artifact.pop('geometry_sha256')
+    frozen['edge_family_models']['macro'] = artifact
+    assert build_edge_family_evidence(frozen)['components'][0]['scores']['CLOSE_25'] == pytest.approx(.48)

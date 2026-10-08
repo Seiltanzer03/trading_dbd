@@ -14,7 +14,8 @@ import math
 import numpy as np
 
 from .canonical_market_context import canonical_instrument_code
-from .edge_family_adapters import FAMILIES, FEATURE_CONTRACT, MODEL_CONTRACT, MAX_AGE_SEC
+from .edge_family_adapters import (FAMILIES, FEATURE_CONTRACT, MODEL_CONTRACT, MAX_AGE_SEC,
+                                   OUTCOME_SEMANTICS, outcome_semantics_valid)
 from .execution_cost_context import COMPONENTS, VERSION as COST_VERSION
 from .rollover_economics import frozen_rollover_schedule
 
@@ -198,7 +199,10 @@ def _feature_reason(meta, instrument, family, captured, *, allow_global=False):
             or meta.get("context_only") or not isinstance(meta.get("source_id"), str) or not meta["source_id"]):
         return "FEATURE_VALUE_OR_PROVENANCE_INVALID"
     observed, received, published = (_number(meta.get(k)) for k in ("observed_ts", "received_ts", "published_at"))
+    available = _number(meta.get("available_at", meta.get("received_ts")))
     if (observed is None or received is None or not 0 < observed <= received <= captured
+            or available is None or not 0 < observed <= available <= captured
+            or (published is not None and published > available)
             or (meta.get("published_at") is not None and (published is None or not 0 < published <= received))):
         return "FEATURE_POINT_IN_TIME_CLOCK_INVALID"
     age, quality = (_number(meta.get(k)) for k in ("max_age_sec", "quality"))
@@ -228,6 +232,8 @@ def _row_reason(row, trained):
         return "ROW_SCHEMA_INVALID"
     if row.get("synthetic") is not False or _synthetic_evidence(row):
         return "SYNTHETIC_OR_UNDECLARED_ORIGIN"
+    if not outcome_semantics_valid(row):
+        return "OUTCOME_SEMANTICS_INVALID"
     if any(not _identity(row.get(k)) for k in ("trade_id", "review_id")):
         return "ROW_IDENTITY_INVALID"
     captured, end, horizon, target = (_number(row.get(k)) for k in
@@ -330,6 +336,7 @@ def _row_reason(row, trained):
                     or _number(meta.get("published_at")) is None
                     or consensus["observed_ts"] >= meta["published_at"]
                     or consensus["received_ts"] >= meta["published_at"]
+                    or consensus.get("available_at", consensus["received_ts"]) >= meta["published_at"]
                     or consensus["source_id"] != meta.get("consensus_source_id")
                     or consensus["source_id"] not in meta.get("supporting_source_ids", [])
                     or consensus["received_ts"] != meta.get("consensus_received_ts")
@@ -514,7 +521,9 @@ def _train_cohort(key, rows, dataset_hash, trained):
             "baseline_mean_r": baseline, "costs_included": True,
             "train_row_count": len(train), "train_group_count": len(training_groups),
             "folds": diagnostic["folds"], "fit_policy": CONFIG["fit_policy"],
-            "evidence_kind": "OBSERVED_PATH_COUNTERFACTUAL_NOT_BROKER_FILL"},
+            "evidence_kind": OUTCOME_SEMANTICS["label_kind"],
+            "net_basis": OUTCOME_SEMANTICS["net_basis"],
+            "execution_assumption": OUTCOME_SEMANTICS["execution_assumption"]},
         "action_models": {action: {"validated": True, "kind": "linear_net_action",
             "intercept_r": intercept, "coefficients": dict(zip(features, map(float, beta)))}}}
     if geometry_contract:

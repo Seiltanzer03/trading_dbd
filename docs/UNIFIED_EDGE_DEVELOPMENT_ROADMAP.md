@@ -678,3 +678,17 @@ review and an indexed same-connection mutation regression. Profile106passed.
 Synthetic real SQLite augmentation allocation control:17270825 to900475bytes;
 not market evidence or a total-memory guarantee. Exact CI/release evidence belongs
 in the package PR. No new gate passes/models, scheduler, sources or search budget.
+
+## 2026-10-08 — P2/P3 source/outcome/forecast causal-chain package
+
+Three finite tasks preserve actual receipt and declared availability separately,
+reject conflicting explicit imported outcome units/origin/execution assumptions,
+and carry/check their canonical semantics through model packaging and runtime.
+Legacy omissions stay compatible; prepublication consensus and OOS gates remain.
+False surprise, normalized late receipt, wrong-unit/origin fitting and artifact
+votes were reproduced before changes. Combined profile1015passed20.46s.
+Fresh inventory37734156374 exact54988fc:78615observations/22642resolutions,
+65DATA_READY/27insufficient-independent/2G1M-only/2quality-only features; coverage
+is not trained family edge. Existing frozen audit37736484124 continues without
+duplicate export/research. Factual P1–P6 chain and concrete input boundaries:
+FAMILY_CAUSAL_READINESS_2026-10-08.md. Final review/CI/release evidence in PR.
