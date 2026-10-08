@@ -381,18 +381,45 @@ def _positioning(row: dict, source: dict, meta: dict, cutoff: float) -> None:
         _add(row, 'positioning.open_interest_history_n' if open_interest else 'positioning.history_n', len(history), meta)
 
 
-def _value_carry(row: dict, source: dict, meta: dict, economics: list[dict]) -> None:
+def _value_carry(row: dict, source: dict, meta: dict, economics: list[dict], snapshot: dict) -> None:
     if source.get("kind") == "broker_carry":
         charge, risk = _num(source.get("charge_currency_per_rollover")), _num(source.get("risk_currency_per_unit"))
         if (charge is None or risk is None or risk <= 0 or not source.get("currency")
                 or source.get("charge_basis") != "per_unit_of_remaining_position"):
             row["rejected_sources"].append({"source_id": meta["source_id"], "reason": "BROKER_CARRY_UNITS_MISSING"})
             return
-        economics.append({"kind": "broker_carry", "cost_r_per_rollover": charge / risk,
+        from .rollover_economics import _executing_quote_binding
+        try:
+            _executing_quote_binding(snapshot, source)
+        except ValueError as exc:
+            row["rejected_sources"].append({"source_id": meta["source_id"], "reason": str(exc)})
+            return
+        included = source.get("included_in_policy_economics")
+        if type(included) is not bool:
+            row["rejected_sources"].append({"source_id": meta["source_id"],
+                                          "reason": "BROKER_CARRY_DOUBLE_COUNT_STATUS_UNAVAILABLE"})
+            return
+        rollover = _num(source.get("next_rollover_ts"))
+        if rollover is None or rollover <= _num(snapshot.get("captured_ts")):
+            row["rejected_sources"].append({"source_id": meta["source_id"],
+                                          "reason": "BROKER_CARRY_FUTURE_EVENT_UNAVAILABLE"})
+            return
+        identity, units = _dict(snapshot.get("trade_identity")), _dict(snapshot.get("position_execution_units"))
+        matched = (all(identity.get(key) is not None for key in
+                       ("broker_id", "account_id", "trade_id", "instrument", "direction"))
+                   and all(units.get(key) is not None for key in
+                           ("currency", "quantity_basis", "quantity_units", "risk_currency_per_unit")))
+        normalized = _num(charge / risk)
+        if normalized is None:
+            row["rejected_sources"].append({"source_id": meta["source_id"],
+                                          "reason": "BROKER_CARRY_NORMALIZED_COST_NONFINITE"})
+            return
+        economics.append({"kind": "broker_carry", "cost_r_per_rollover": normalized,
                           "source_id": meta["source_id"], "observed_ts": meta["observed_ts"],
-                          "next_rollover_ts": _num(source.get("next_rollover_ts")),
+                          "next_rollover_ts": rollover,
+                          "declared_executing_context_matched": matched,
                           "basis": "per_unit_of_remaining_position",
-                          "included_in_policy_economics": source.get("included_in_policy_economics") is True,
+                          "included_in_policy_economics": included,
                           "voting_weight": 0., "role": "OUTCOME_COST_ONLY"})
         row["broker_carry_available"] = True
     elif source.get("kind") in {"valuation", "factor_carry"}:
@@ -708,7 +735,7 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
             elif family == "positioning":
                 _positioning(row, source, meta, cutoff)
             elif family == "value_carry":
-                _value_carry(row, source, meta, result["economics_adjustments"])
+                _value_carry(row, source, meta, result["economics_adjustments"], snapshot)
             else:
                 _fact_features(row, source, meta)
         _finalize(row)

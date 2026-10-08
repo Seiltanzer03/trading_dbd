@@ -788,3 +788,16 @@ sequential input/mapping has an explicit status, not a no-signal claim. Public
 output stays fixed names/counts/enums under existing16000-byte bound, with no
 private source/position IDs. Historical coverage is not current live readiness.
 Final release and actual private-run evidence belong in the package PR.
+
+## 2026-10-08 — P5 executing carry quote contract
+
+The value/carry source adapter now uses the existing rollover matcher for
+explicitly declared broker/account/trade/direction and position-unit context.
+A conflicting quote cannot be reported available. Cost inclusion is an explicit
+boolean, future rollover time is required and normalized R must be finite.
+Unknown inclusion/date/units stays unavailable. Signed credits remain measured
+credits, already-included costs stay marked, with no extra directional vote or
+automatic expense application. Quotes without full declared execution context
+remain explicitly quote-only; matching declared fields is not broker-fill proof.
+No new provider, broker access, fitting or G.1/policy admission relaxation.
+Exact release, actual source limitations and test receipts belong in the PR.
