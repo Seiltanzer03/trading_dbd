@@ -48,10 +48,25 @@ def select_reviews(metadata, maximum):
     return sorted(result, key=lambda item: (item['captured_ts'], item['review_id']))
 
 
-def export_reviews(connection, maximum=32):
+def validate_refresh_requests(requests):
+    if not isinstance(requests, (list, tuple)) or len(requests) > 512:
+        raise ValueError('INVALID_HISTORY_REFRESH_REQUESTS')
+    seen = set()
+    for item in requests:
+        if (not isinstance(item, dict) or set(item) != {'review_id', 'last_path_ts'}
+                or not isinstance(item['review_id'], str) or not 0 < len(item['review_id']) <= 256
+                or type(item['last_path_ts']) not in (int, float)
+                or not math.isfinite(item['last_path_ts']) or item['review_id'] in seen):
+            raise ValueError('INVALID_HISTORY_REFRESH_REQUESTS')
+        seen.add(item['review_id'])
+    return requests
+
+
+def export_reviews(connection, maximum=32, *, refresh_requests=()):
     """Caller opens a read-only transaction; never load all historical payloads."""
     if not 1 <= maximum <= 32:
         raise ValueError('review limit must be between 1 and 32')
+    validate_refresh_requests(refresh_requests)
     tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if 'decision_snapshots' not in tables:
         return {'read_only': True, 'reviews': [], 'reason': 'DECISION_SNAPSHOTS_UNAVAILABLE'}
@@ -61,8 +76,28 @@ def export_reviews(connection, maximum=32):
                    json_extract(snapshot_json,'$.instrument'),'UNKNOWN') AS instrument
         FROM decision_snapshots WHERE length(snapshot_json)<=2000000
         ORDER BY rowid DESC LIMIT 512''')]
+    refreshed = []
+    if 'decision_path_points' in tables:
+        for request in refresh_requests:
+            if len(refreshed) >= maximum // 2:
+                break
+            # Indexed identity/clock probes only; never load all old snapshots.
+            item = connection.execute('''
+                SELECT review_id,trade_id,captured_ts,
+                  coalesce(json_extract(snapshot_json,'$.strategy.instrument'),
+                           json_extract(snapshot_json,'$.instrument'),'UNKNOWN') AS instrument
+                FROM decision_snapshots s WHERE review_id=? AND length(snapshot_json)<=2000000
+                  AND EXISTS (SELECT 1 FROM decision_path_points p
+                    WHERE p.review_id=s.review_id AND p.ts>?)''',
+                (request['review_id'], request['last_path_ts'])).fetchone()
+            if item is not None:
+                refreshed.append(dict(item))
+    identities = {item['review_id'] for item in refreshed}
+    selected = refreshed + select_reviews(
+        [item for item in metadata if item['review_id'] not in identities], maximum - len(refreshed))
+    selected.sort(key=lambda item: (item['captured_ts'], item['review_id']))
     reviews, acknowledgement_observations = [], []
-    for item in select_reviews(metadata, maximum):
+    for item in selected:
         row = dict(connection.execute('''SELECT review_id,trade_id,captured_ts,
           snapshot_json,snapshot_sha256,production_policy
           FROM decision_snapshots WHERE review_id=?''', (item['review_id'],)).fetchone())
@@ -119,6 +154,7 @@ def export_reviews(connection, maximum=32):
             acknowledgement_observations.extend(acknowledgements[:128])
         reviews.append(row)
     return {'read_only': True, 'reviews': reviews, 'recent_metadata_n': len(metadata),
+            'refreshed_review_count': len(refreshed),
             'exported_ts': time.time(),
             'execution_ack_observations': acknowledgement_observations,
             'execution_ack_scope': 'observed_acknowledgements_for_selected_reviews_max128_each; not_broker_fill_times',
@@ -127,25 +163,28 @@ def export_reviews(connection, maximum=32):
             'outcomes_separate_from_decision_inputs': True}
 
 
-def remote_program(maximum):
+def remote_program(maximum, *, refresh_requests=()):
+    validate_refresh_requests(refresh_requests)
     # Only these stdlib functions run remotely. Training and pricing stay off-host.
     return ('import sqlite3,json,gzip,base64,time,math\n'
-            + inspect.getsource(select_reviews) + '\n' + inspect.getsource(export_reviews)
+            + inspect.getsource(select_reviews) + '\n' + inspect.getsource(validate_refresh_requests)
+            + '\n' + inspect.getsource(export_reviews)
             + "\nc=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=3)\n"
               'c.row_factory=sqlite3.Row\nc.execute("PRAGMA query_only=ON")\n'
               'started=time.monotonic()\n'
               'c.set_progress_handler(lambda: int(time.monotonic()-started>25),10000)\n'
               'c.execute("BEGIN")\n'
-            + f'report=export_reviews(c,{int(maximum)})\n'
+            + f'report=export_reviews(c,{int(maximum)},refresh_requests={refresh_requests!r})\n'
               'c.close()\nreport["exported_ts"]=time.time()\n'
               'raw=json.dumps(report,allow_nan=False).encode()\n'
               'if len(raw)>96000000:raise ValueError("export exceeds bound")\n'
               'print(base64.b64encode(gzip.compress(raw)).decode())\n')
 
 
-def export_actual(output, *, maximum=32, password=None, expected_sha=None):
+def export_actual(output, *, maximum=32, password=None, expected_sha=None, refresh_requests=()):
     if type(maximum) is not int or not 1 <= maximum <= 32:
         raise ValueError('invalid bounded review count')
+    validate_refresh_requests(refresh_requests)
     if expected_sha is not None and not re.fullmatch(r'[0-9a-f]{40}', expected_sha):
         raise ValueError('invalid expected SHA')
     if not password:
@@ -155,7 +194,7 @@ def export_actual(output, *, maximum=32, password=None, expected_sha=None):
         if expected_sha is not None:
             _verify_sha(client, expected_sha)
         _, stdout, stderr = client.exec_command(
-            'python3 -c ' + shlex.quote(remote_program(maximum)), timeout=40)
+            'python3 -c ' + shlex.quote(remote_program(maximum, refresh_requests=refresh_requests)), timeout=40)
         payload = stdout.read(32_000_001)
         error = stderr.read(1000).decode('utf8', 'replace')
         if stdout.channel.recv_exit_status() or len(payload) > 32_000_000:

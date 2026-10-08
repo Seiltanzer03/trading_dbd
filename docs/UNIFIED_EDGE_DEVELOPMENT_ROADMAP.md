@@ -729,3 +729,22 @@ ranking now distinguishes zero from None, retains missing penalty/ID tie-break
 and unchanged admission/authority. Three regressions RED→GREEN; combined
 transition/loading/discovery/selective/comparison profile115passed1.42s.
 Final review/CI/release belong in the correction PR; not inferred here.
+
+## 2026-10-08 — P2 bounded refresh of retained historical outcomes
+
+Private history retention now feeds incomplete frozen-horizon review identities
+back into the existing read-only exporter. Indexed probes admit only reviews
+with newer actual path observations; at most half of the32 export slots refresh
+history, leaving at least half for the existing recent/instrument/time selection.
+Complete, truncated or unusable frozen horizons are not repeatedly requested.
+Snapshots/features/source clocks remain original; actual paths still obey the
+frozen horizon, every-point and first-bracketing-observation contract. Identity
+conflicts remain tombstoned and model/cost/OOS gates are unchanged.
+
+Real SQLite regressions reproduce an old review falling outside the latest512
+metadata window and demonstrate private restore→export→append-only merge. Public
+output adds numeric requested/refreshed counts only; IDs and raw paths remain
+private. Combined archive/export/dataset/training/runtime profile523passed7.97s.
+This repairs one missing historical-outcome link in P2/P3; it does not create
+missing broker costs, consensus or forecast votes. Final release/actual refresh
+receipts are recorded in the package PR.
