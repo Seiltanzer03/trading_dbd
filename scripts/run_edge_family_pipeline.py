@@ -211,7 +211,10 @@ def run_pipeline(reviews, *, expected_sha, previous_archive=None, trained_at=Non
     readiness['evidence_input_sha256'] = {
         'training': hashlib.sha256(encode_json(diagnostics, max_bytes=MAX_DATA_BYTES)).hexdigest(),
         'reviews': hashlib.sha256(encode_json(reviews, max_bytes=MAX_EXPORT_BYTES)).hexdigest()}
+    from scripts.p3_history_readiness import build_p3_readiness
+    p3_readiness = build_p3_readiness(archive, dataset, diagnostics)
     return {'archive': archive, 'dataset': dataset, 'diagnostics': diagnostics,
+            'p3_readiness': p3_readiness,
             'runtime_context': context, 'readiness': readiness}
 
 

@@ -17,7 +17,7 @@ from seiltanzer.edge_family_private_archive import restore, store
 
 PUBLIC_FIELDS = {'version', 'code_sha', 'archive_state', 'archive_generation',
                  'archive_committed', 'archive_episode_count', 'exported_review_count',
-                 'requested_refresh_count', 'refreshed_review_count',
+                 'requested_refresh_count', 'refreshed_review_count', 'p3_readiness',
                  'active_model_count', 'packaged_model_count', 'reason', 'production_activation_performed',
                  'production_or_database_writes'}
 
@@ -92,6 +92,7 @@ def run_job(client, *, expected_sha, generation, workspace, exporter, clock=time
                'exported_review_count': len(reviews['reviews']), 'active_model_count': 0,
                'requested_refresh_count': len(requests),
                'refreshed_review_count': refreshed_count,
+               'p3_readiness': result['p3_readiness'],
                'packaged_model_count': model_count,
                'reason': 'VALIDATED_MODELS_PACKAGED' if model_count else 'NO_VALIDATED_MODEL',
                'production_activation_performed': False, 'production_or_database_writes': 0}
