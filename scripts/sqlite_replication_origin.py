@@ -32,6 +32,14 @@ def targets(binary: Path,state: Path):
         except FileNotFoundError:
             continue
         pid=int(entry.name)
+        # The pinned reader and its pre-exec wrappers retain the exact binary
+        # argument. Scope inspection before accessing protected executable links.
+        try:
+            arguments=Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        except (FileNotFoundError,ProcessLookupError):
+            continue
+        if os.fsencode(binary) not in arguments:
+            continue
         current=identity(pid)
         if current is None:
             continue

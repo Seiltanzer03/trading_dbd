@@ -81,3 +81,36 @@ def test_origin_records_identity_before_exec(tmp_path):
     identity=json.loads(state.read_text())
     assert identity['pid'] > 0
     assert int(identity['start_ticks']) > 0
+
+
+def test_target_scan_ignores_unrelated_protected_executable(monkeypatch, tmp_path):
+    import importlib.util
+    from types import SimpleNamespace
+    spec=importlib.util.spec_from_file_location('origin_control',SCRIPT)
+    module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    binary=tmp_path/'sqlite3_rsync'
+    state=tmp_path/'origin.json'
+    fake=SimpleNamespace(name='904',stat=lambda: SimpleNamespace(st_uid=os.geteuid()))
+    monkeypatch.setattr(module,'Path',lambda path: SimpleNamespace(iterdir=lambda: iter([fake]),read_bytes=lambda: b'/usr/bin/unrelated\0'))
+    def inaccessible(pid):
+        raise PermissionError('protected unrelated executable')
+    monkeypatch.setattr(module,'identity',inaccessible)
+    assert module.targets(binary,state) == []
+
+
+def test_target_scan_refuses_unverifiable_owned_candidate(monkeypatch, tmp_path):
+    import importlib.util
+    from types import SimpleNamespace
+    spec=importlib.util.spec_from_file_location('origin_control',SCRIPT)
+    module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    binary=tmp_path/'sqlite3_rsync'
+    state=tmp_path/'origin.json'
+    fake=SimpleNamespace(name='904',stat=lambda: SimpleNamespace(st_uid=os.geteuid()))
+    monkeypatch.setattr(module,'Path',lambda path: SimpleNamespace(iterdir=lambda: iter([fake]),read_bytes=lambda: str(binary).encode()+b'\0'))
+    def inaccessible(pid):
+        raise PermissionError('cannot verify owned executable')
+    monkeypatch.setattr(module,'identity',inaccessible)
+    with pytest.raises(PermissionError):
+        module.targets(binary,state)

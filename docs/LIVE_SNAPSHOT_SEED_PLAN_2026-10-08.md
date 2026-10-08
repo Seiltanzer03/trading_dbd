@@ -118,3 +118,15 @@ retaining600 unaffected rows and sends fewer pages than the full database.
 Local sandbox PID/proc namespaces differ: actual process-termination tests are
 required on native final CI, and production cleanup refuses namespace mismatch.
 No extra export, model search, LLM call or production mutation was dispatched.
+
+## First CI blocker corrections
+
+The first exact CI (37745950378) failed before the pinned integration step:
+3241 tests passed; native cleanup encountered an unrelated same-UID protected
+executable, and a macro test exposed reused runtime identities in the global
+positive table cache. Restrict origin executable inspection to processes with
+the exact pinned binary argument, retaining refusal for uninspectable owned
+candidates. Bind BLS table cache entries to their runtime and current connection.
+Three new regressions reproduced the failures; the scoped combined profile is
+95 passed with two local native-PID skips. A new exact CI must prove native
+cleanup and the pinned protocol before merge; production adequacy remains open.
