@@ -50,7 +50,7 @@ def test_deploy_has_bounded_progress_visible_prestart_window():
         "DEPLOY_PREFETCH_ORPHAN_PRESTART_TEMPS_REMOVED"
     )
     fetch = workflow.index(
-        "git fetch --no-tags https://github.com/Seiltanzer03/trading_dbd.git main"
+        "git fetch --depth=1 --no-tags https://github.com/Seiltanzer03/trading_dbd.git main"
     )
     headroom_error = workflow.index("Insufficient safe pre-fetch headroom")
     assert workflow.rfind("systemctl stop seiltanzer", 0, prefetch_cleanup) >= 0

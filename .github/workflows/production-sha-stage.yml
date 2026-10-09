@@ -17,7 +17,7 @@ permissions:
 
 concurrency:
   group: production-sha-stage
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_sha }}
@@ -25,6 +25,9 @@ env:
 
 jobs:
   stage:
+    concurrency:
+      group: production-seiltanzer
+      cancel-in-progress: false
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -43,7 +46,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.EXPECTED_SHA }}
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Build exact-SHA Git bundle off-host
         run: |
@@ -57,6 +60,13 @@ jobs:
           git bundle verify "$bundle"
           bundled_sha=$(git bundle list-heads "$bundle" refs/deploy/exact | awk 'NR==1 {print $1}')
           test "$bundled_sha" = "$EXPECTED_SHA"
+          python3 - <<'PY'
+          import base64, os
+          from pathlib import Path
+          payload=base64.b64encode(Path('scripts/compact_deployment_git.py').read_bytes()).decode('ascii')
+          with open(os.environ['GITHUB_ENV'],'a') as out:
+              out.write('COMPACTION_SCRIPT='+payload+'\n')
+          PY
 
       - name: Transfer exact-SHA bundle over deploy channel
         uses: appleboy/scp-action@v1
@@ -73,13 +83,14 @@ jobs:
         env:
           EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
           STAGE_RUN_ID: ${{ env.STAGE_RUN_ID }}
+          COMPACTION_SCRIPT: ${{ env.COMPACTION_SCRIPT }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
           command_timeout: 3m
-          envs: EXPECTED_SHA,STAGE_RUN_ID
+          envs: EXPECTED_SHA,STAGE_RUN_ID,COMPACTION_SCRIPT
           script: |
             set -euo pipefail
             case "$STAGE_RUN_ID" in
@@ -90,10 +101,10 @@ jobs:
             test -f "$bundle"
             cd /opt/seiltanzer
             git config --global --add safe.directory /opt/seiltanzer || true
-            git bundle verify "$bundle"
-            bundled_sha=$(git bundle list-heads "$bundle" refs/deploy/exact | awk 'NR==1 {print $1}')
-            test "$bundled_sha" = "$EXPECTED_SHA"
-            git fetch --no-tags "$bundle" "+refs/deploy/exact:refs/deploy/staged"
+            # The bundle contains one shallow root and its complete code tree.
+            # Register the boundary before import; never reimport Git history.
+            printf '%s' "$COMPACTION_SCRIPT" | base64 -d | /usr/bin/python3 - \
+              --repo /opt/seiltanzer --expected-sha "$EXPECTED_SHA" --stage-bundle "$bundle"
             git cat-file -e "${EXPECTED_SHA}^{commit}"
             test "$(git rev-parse refs/deploy/staged)" = "$EXPECTED_SHA"
             echo "STAGED_EXACT_SHA=$EXPECTED_SHA"
