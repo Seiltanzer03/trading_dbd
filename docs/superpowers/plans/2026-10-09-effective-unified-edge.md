@@ -120,3 +120,35 @@ search/training, deployment retry or test rerun without a changed final tree.
 Цена: новые family forecasts пока отсутствуют, независимый scheduler и
 оптимальные веса не появятся из одного технического выпуска. Эти остатки
 видны и сохраняются в исходном ТЗ; они не блокируют основной ручной механизм.
+
+### Task 4: существующий Yandex Object Storage, 2026-10-09
+
+Пользователь поручил использовать уже настроенное облачное пространство вместо
+добавления VPS-диска. Private storage access подтверждён job113959186284:
+upload/read/HEAD/list/delete одного UUID-scoped disposable probe прошли,
+credentials и содержимое торговой базы не публиковались.
+
+Read-only production diagnostic113927582709: exact main51dea626, внешний HTTP200,
+root29GiB/free207MiB; data17GiB, backups7.1MiB. Исторический cloud snapshot
+уже выгружен штатным off-host путём. Перенос отсутствующих локальных копий
+не освобождает активную базу и не снимает обязательный pre-fetch512MiB gate.
+
+Bounded repair: manual/scheduled cloud restore drill требует legacy local
+backup_id и поэтому отвергает современные LIVE_SQLITE_RSYNC manifests.
+Добавлен opt-in snapshot drill: те же полные gzip/raw hashes, размеры и immutable
+SQLite quick_check; валидные source/SHA/исходные clocks сохраняются. Отдельный
+receipt не разрешает local retirement и не объявляет schema-complete recovery,
+fresh RPO, production acceptance или прибыль. Legacy full restore и live-seed
+контракты остаются отдельными. Восемь RED cases; профиль42passed/1 compiler skip.
+Один scoped review: Critical/Important нет. Deferred minor: неожиданное поле
+backup_id внутри live manifest переносится в drill receipt; retirement всё равно
+запрещён отдельным contract/full_restore_verified=False. Этот minor не входит
+в текущий fix pass. Обязательный final-tree CI и реальное cloud восстановление
+выполняются перед окончательной отметкой результата.
+
+Ruling: облачный byte/SQLite restore proof отделён от legacy retirement proof —
+у live snapshot нет доказанного local backup identity/schema manifest; цена:
+новый proof не может использоваться для удаления рабочей DB или старых строк.
+Physical VPS headroom остаётся отдельной незакрытой зависимостью. Следующее
+уменьшение рабочей базы требует конкретного проверенного archive/readback
+контракта, а не переноса SQLite-файла на S3 mount или удаления истории.
