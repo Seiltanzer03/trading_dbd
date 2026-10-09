@@ -40,6 +40,14 @@ jobs:
             echo '=== STORAGE CAPACITY (READ ONLY) ==='
             git -C /opt/seiltanzer rev-parse HEAD
             df -h /
+            echo '=== OWN PROJECT ALLOCATION (READ ONLY) ==='
+            timeout 20s du -xhd2 /opt/seiltanzer/.venv /opt/seiltanzer/data/research /opt/seiltanzer/.git 2>/dev/null | sort -h | tail -n 45
+            find /opt/seiltanzer -xdev -maxdepth 1 -mindepth 1 -printf '%y %f\n'
+            find /opt/seiltanzer/data/research -xdev -type f -size +10M -printf '%s %b %T@ %p\n' 2>/dev/null | sort -nr | head -n 40
+            find /var/log -xdev -maxdepth 2 -type f -size +10M -printf '%s %b %T@ %p\n' 2>/dev/null | sort -nr | head -n 20
+            for path in /opt/seiltanzer/data/trades.db /opt/seiltanzer/data/trades.db-wal /opt/seiltanzer/data/trades.db-shm; do
+              stat -c 'DATABASE_FILE logical=%s blocks=%b path=%n' "$path" 2>/dev/null || true
+            done
             du -xhd1 /opt /var /root /tmp 2>/dev/null | sort -h | tail -n 35
             du -xhd1 /opt/seiltanzer/data /opt/seiltanzer/data/backups /root/.cache /var/cache /var/log 2>/dev/null | sort -h | tail -n 30
             find /tmp /opt/seiltanzer/data/backups/local -maxdepth 1 -type f -size +100M -printf '%s %b %p\n' 2>/dev/null
