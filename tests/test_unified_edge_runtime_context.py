@@ -59,6 +59,26 @@ def test_invalid_economics_cannot_publish_or_supersede_pending_work():
         _publish_unified_review(None, {}, {}, "review", {}, {"common_economics_invalid": True})
 
 
+def test_operational_extended_choice_ignores_malformed_source_entries(monkeypatch):
+    from seiltanzer import app
+    from seiltanzer.unified_edge_ensemble import build_unified_ensemble
+    frozen = snapshot()
+    parameters = {"stop_price": 19999.}
+    frozen["active_management_candidates"] = [None, {"policy": "TIGHTEN_STOP",
+        "parameters": parameters, "status": "eligible", "production_authority": True,
+        "expected_variant_net_r": .30, "expected_delta_vs_hold_r": .20,
+        "worst_seed_cvar10_net_r": -.1}]
+    audit = build_unified_ensemble(frozen)
+    assert audit["selected_policy"] == "TIGHTEN_STOP"
+    # Isolate the already tested broker/strategy refresh, with no live engine.
+    monkeypatch.setattr(app, "_refresh_management_decision", lambda *_: {"policy": "HOLD"})
+    _, proposal = app._unified_operational_choice(None, frozen, {}, audit)
+    assert proposal["policy"] == "TIGHTEN_STOP"
+    assert proposal["working_action"]["parameters"] == parameters
+    assert proposal["working_action"]["manual_confirmation_required"] is True
+    assert proposal["automatic_execution_allowed"] is False
+
+
 def test_intraday_archive_hook_has_one_existing_refresh_and_one_local_record():
     from seiltanzer.app import _refresh_intraday_archive
     calls = []

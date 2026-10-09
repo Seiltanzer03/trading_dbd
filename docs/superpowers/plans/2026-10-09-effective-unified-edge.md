@@ -30,7 +30,8 @@ P1 scheduler, prepublication consensus, executing account feeds, неподтв�
 
 ## Task 1: A — сохранить identity и запретить выбор повреждённого действия
 
-**Files:** `seiltanzer/unified_edge_ensemble.py`, `tests/test_unified_edge_ensemble.py`.
+**Files:** `seiltanzer/unified_edge_ensemble.py`, `tests/test_unified_edge_ensemble.py`,
+operational consumer `seiltanzer/app.py`, `tests/test_unified_edge_runtime_context.py`.
 **Consumes:** frozen snapshot.active_management_candidates, существующий candidate_id(policy, parameters), готовый общий оценщик.
 **Produces:** collect_candidates(snapshot) сохраняет разные корректные параметры как разные candidates; несериализуемые/не-object параметры не получают eligible/ranking_eligible и не публикуются как новое действие.
 
@@ -88,6 +89,14 @@ RecursionError; normal JSON/API input и обычная вложенность �
 Этот minor не включён в текущий fix pass.
 Final изменённый профиль: **631 passed, 7.15s**, frontend audit smoke PASS.
 Новых family forecasts, provider calls и реальных ордеров0.
+В том же Important fix pass найден downstream consumer: повреждённый entry
+перед корректным победителем падал при создании manual proposal. Regression
+`test_operational_extended_choice_ignores_malformed_source_entries` воспроизвела
+AttributeError RED; consumer теперь пропускает non-dict перед matched action.
+Это завершение одного контракта, не новая задача. Начатый CI старого head
+не является проверкой этого final diff; нужен final exact-head CI.
+Consumer/API/manual execution profile: **31 passed**,37.95s; один известный
+installed Starlette/httpx deprecation warning. Реальные orders/provider calls0.
 
 **Решение по объёму:** заменить старый порядок по явному указанию пользователя,
 сохранить fixed weights и остановить неизменный поиск при пустых causal labels.
