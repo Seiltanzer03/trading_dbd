@@ -120,15 +120,55 @@ def collect_candidates(snapshot):
                      "execution_cost_r": number(raw.get("execution_cost_r")),
                      "source": "authoritative_policy_paths"})
     seen = set(BASE)
-    for raw in snapshot.get("active_management_candidates") or []:
+    active_candidates = snapshot.get("active_management_candidates") or []
+    malformed_collection = not isinstance(active_candidates, (list, tuple))
+    if malformed_collection:
+        active_candidates = []
+    for index, raw in enumerate(active_candidates):
+        if not isinstance(raw, dict):
+            malformed_collection = True
+            continue
         policy = raw.get("policy")
         if policy not in EXTENDED:
             continue
-        parameters = deepcopy(raw.get("parameters") or {})
+        invalid_reason = "INVALID_ACTION_PARAMETERS"
         try:
+            parameters = raw.get("parameters", {})
+            if not isinstance(parameters, dict):
+                raise TypeError("action parameters must be an object")
+            target_key = ("stop_price" if policy in (
+                "MOVE_TO_BE", "TIGHTEN_STOP", "TRAIL_GAMMA_FLIP") else
+                "take_price" if policy in ("REDUCE_TAKE", "EXTEND_TAKE") else
+                "trigger_price" if policy == "SCALE_OUT_ON_SPIKE" else "deadline_ts")
+            target = number(parameters.get(target_key))
+            if target is None or target <= 0:
+                raise ValueError("finite positive action target required")
+            if policy == "SCALE_OUT_ON_SPIKE":
+                fraction = number(parameters.get("close_fraction"))
+                if fraction is None or not 0 < fraction < 1:
+                    raise ValueError("partial close fraction required")
+            if policy == "TIME_STOP":
+                captured = number(snapshot.get("captured_ts"))
+                if captured is None or target <= captured:
+                    raise ValueError("future time stop required")
             identity = candidate_id(policy, parameters)
+            invalid_reason = "INVALID_ACTION_EVALUATION"
+            # The retained evaluator is part of the public audit and eventual
+            # selected action. Do not publish nonfinite raw cost/metric values
+            # even when a normalized top-level field would be null.
+            json.dumps(raw, allow_nan=False)
+            parameters = deepcopy(parameters)
         except (ValueError, TypeError):
-            parameters, identity = {}, policy
+            # A damaged parameterized action is not the parameter-free policy.
+            # Keep a safe diagnostic row without leaking NaN/Inf into the audit
+            # or letting this variant consume a valid variant's dedup identity.
+            rows.append({"candidate_id": f"{policy}:invalid_parameters:{index}",
+                         "policy": policy, "parameters": {}, "eligible": False,
+                         "reason": invalid_reason,
+                         "expected_net_r": None, "cvar10_net_r": None,
+                         "delta_expected_r": None, "delta_cvar_r": None,
+                         "execution_cost_r": None})
+            continue
         if identity in seen:
             continue
         seen.add(identity)
@@ -157,7 +197,8 @@ def collect_candidates(snapshot):
     for policy in EXTENDED:
         if not any(row["policy"] == policy for row in rows):
             rows.append({"candidate_id": policy, "policy": policy, "parameters": {},
-                         "eligible": False, "reason": "ACTION_PARAMETERS_OR_EVALUATION_UNAVAILABLE",
+                         "eligible": False, "reason": ("INVALID_ACTION_CANDIDATE_COLLECTION"
+                             if malformed_collection else "ACTION_PARAMETERS_OR_EVALUATION_UNAVAILABLE"),
                          "expected_net_r": None, "cvar10_net_r": None,
                          "delta_expected_r": None, "delta_cvar_r": None, "execution_cost_r": None})
     price = (((manager.get("input_audit") or {}).get("rows") or {}).get("instrument_price") or {})
