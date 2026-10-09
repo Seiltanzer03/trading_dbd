@@ -274,3 +274,39 @@ Ruling: correct the existing deterministic measurement at read time because
 immutable cached releases are intentionally never re-ingested or rewritten —
 cost: historical measurements are explicitly projections from dated stored texts,
 not first-published versioned documents or newly received market evidence.
+
+### Fixed release boundary after PR436
+
+PR436/main8eb522edcbc36cc1dbca89cced13fd6496bc2bf7 has green full CI,
+but actual deploy37999591631 failed functional smoke: passive/status exhausted
+three HTTP attempts. Delivery/readiness, independent AI, macro and isolated12
+management actions passed; public/orchestration were skipped. This release is
+not accepted. The failing route still waits for the shared SQLite lock, performs
+global aggregate/Q queries and adds a recent-window query without a time index.
+
+One finite correction: materialize that same truthful status before workers
+start, refresh with the existing single-flight last-good cache off HTTP, expose
+its timestamp/error/staleness, and never invent zero counts on query failure.
+Regression criterion: the actual status route returns the retained exact report
+while another thread holds the passive writer lock; failed refresh preserves
+the previous evidence and exposes UNKNOWN telemetry. No timeout increase,
+database pruning, additional models/sources, or weakening of evidence gates.
+
+Finish: focused regressions, one final scoped review, exact-tree mandatory CI,
+merge, actual automatic deploy/readiness/smoke/public and exact-SHA publications.
+Six original blocks and concrete remaining input dependencies are recorded in
+`docs/UNIFIED_EDGE_VERSION_BOUNDARY_2026-10-09.md`.
+After that this technical version is closed; new inputs/model searches are a
+separate version, not another improvement cycle.
+
+Two new regressions observed RED: real HTTP reader timed out while another
+thread held the SQLite writer lock; refresh/error contract was absent. GREEN:
+33 focused tests passed (one existing Starlette deprecation warning), including
+nonzero real-count retention after SQLite failure and STALE/UNKNOWN expiration.
+One final independent read-only review of464fdeb..8e78ba0: no Critical/Important
+or Minor findings; reviewer independently verified33 tests and diff hygiene.
+Accepted exclusions: synchronous fail-closed seed and existing damaged-health/
+to_thread shutdown behavior retain their established contracts; no reproduced
+new blocker. Aggregate optimization/new sources/models are outside this fix.
+No repeated reviewer or unchanged heavy local test run. Mandatory exact-tree
+CI and actual server acceptance follow; production success is not yet claimed.
