@@ -218,3 +218,114 @@ def test_snapshot_drill_accepts_legacy_cloud_backup_under_original_full_contract
     assert result['full_restore_verified'] is True
     assert result['restore_contract'] == 'trading-dbd-offhost-full-restore-v1'
     assert result['backup_id'] == manifest['backup_id']
+
+
+def test_capacity_report_measures_free_pages_and_indexes_without_private_rows(tmp_path):
+    source = tmp_path/'capacity.db'
+    with sqlite3.connect(source) as conn:
+        conn.execute('CREATE TABLE history(value TEXT)')
+        conn.execute('CREATE INDEX history_value ON history(value)')
+        conn.executemany('INSERT INTO history VALUES (?)', [('private-position-'+str(i)+'x'*900,) for i in range(80)])
+        conn.commit()
+        conn.execute('DELETE FROM history WHERE rowid > 5')
+        conn.commit()
+    before = source.read_bytes()
+    conn = sqlite3.connect(source.as_uri()+'?mode=ro&immutable=1', uri=True)
+    try:
+        report = MODULE.collect_capacity(conn)
+    finally:
+        conn.close()
+    assert report['contract_version'] == 'sqlite-offhost-capacity-v1'
+    assert report['status'] == 'COMPLETE'
+    assert report['free_page_bytes'] > 0
+    assert report['logical_database_bytes'] == len(before)
+    assert report['used_page_bytes'] + report['free_page_bytes'] == len(before)
+    rows = {r['name']:r for r in report['largest_objects']}
+    assert rows['history_value']['object_type'] == 'index'
+    assert rows['history_value']['owner_table'] == 'history'
+    assert rows['history']['allocated_bytes'] > 0
+    assert report['allocated_object_bytes'] == report['used_page_bytes']
+    assert 'private-position-' not in json.dumps(report)
+    assert source.read_bytes() == before
+    assert not Path(str(source)+'-wal').exists()
+    assert not Path(str(source)+'-shm').exists()
+
+
+def test_capacity_report_bounds_rows_without_losing_total_allocation(tmp_path):
+    with sqlite3.connect(tmp_path/'many.db') as conn:
+        for i in range(80):
+            conn.execute(f'CREATE TABLE t{i}(v TEXT)')
+        report = MODULE.collect_capacity(conn)
+    assert len(report['largest_objects']) == 64
+    assert report['object_count'] == 81
+    assert report['objects_truncated'] is True
+    assert report['allocated_object_bytes'] == report['used_page_bytes']
+
+
+@pytest.mark.parametrize('auto_vacuum', [0, 1])
+def test_capacity_trigger_name_collision_does_not_double_count_table_pages(tmp_path, auto_vacuum):
+    with sqlite3.connect(tmp_path/'trigger.db') as conn:
+        conn.execute(f'PRAGMA auto_vacuum={auto_vacuum}')
+        conn.execute('CREATE TABLE history(v TEXT)')
+        conn.execute('CREATE TRIGGER history AFTER INSERT ON history BEGIN SELECT 1; END;')
+        expected = conn.execute('SELECT sum(pgsize) FROM dbstat').fetchone()[0]
+        report = MODULE.collect_capacity(conn)
+    assert report['status'] == 'COMPLETE'
+    assert report['allocated_object_bytes'] == expected
+    assert report['unattributed_used_bytes'] == auto_vacuum*report['page_size']
+    rows = {r['name']:r for r in report['largest_objects']}
+    assert rows['history']['allocated_bytes'] == report['page_size']
+    assert rows['history']['object_type'] == 'table'
+
+
+def test_capacity_report_keeps_geometry_when_dbstat_is_unavailable(tmp_path):
+    with sqlite3.connect(tmp_path/'no-stat.db') as actual:
+        actual.execute('CREATE TABLE evidence(v)')
+        class WithoutDbstat:
+            def execute(self, sql):
+                if 'FROM dbstat' in sql:
+                    raise sqlite3.OperationalError('no such table: dbstat')
+                return actual.execute(sql)
+            def set_progress_handler(self, *args):
+                actual.set_progress_handler(*args)
+        report = MODULE.collect_capacity(WithoutDbstat())
+    assert report['status'] == 'DBSTAT_UNAVAILABLE'
+    assert report['logical_database_bytes'] > 0
+    assert report['allocated_object_bytes'] is None
+    assert report['largest_objects'] == []
+
+
+def test_capacity_report_limits_scan_and_clears_progress_handler(tmp_path):
+    with sqlite3.connect(tmp_path/'timeout.db') as conn:
+        for i in range(120):
+            conn.execute(f'CREATE TABLE t{i}(v TEXT)')
+        report = MODULE.collect_capacity(conn, max_seconds=0)
+        assert conn.execute('SELECT 1').fetchone() == (1,)
+    assert report['status'] == 'TABLE_SCAN_TIMED_OUT'
+    assert report['logical_database_bytes'] > 0
+    assert report['largest_objects'] == []
+
+
+def test_snapshot_capacity_is_bound_to_verified_cloud_bytes_without_authority(tmp_path):
+    key, archive, manifest = _live_fixture(tmp_path)
+    result = MODULE.restore(bucket=manifest['bucket'], key=key,
+        destination=tmp_path/'drill.db', result_path=tmp_path/'drill.json',
+        snapshot_drill=True, storage_report=True,
+        client=Client(key=key, archive=archive, manifest=manifest))
+    assert result['capacity_report']['status'] == 'COMPLETE'
+    assert result['capacity_report']['logical_database_bytes'] == manifest['database_size_bytes']
+    assert result['database_sha256'] == manifest['database_sha256']
+    assert result['storage_manifest'] == manifest
+    assert result['production_authority'] is False
+    assert result['full_restore_verified'] is False
+
+
+def test_default_restore_does_not_scan_capacity(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError('default restore must not scan dbstat')
+    monkeypatch.setattr(MODULE, 'collect_capacity', forbidden)
+    key, archive, manifest = _fixture(tmp_path)
+    result = MODULE.restore(bucket=manifest['bucket'], key=key,
+        destination=tmp_path/'drill.db', result_path=tmp_path/'drill.json',
+        client=Client(key=key, archive=archive, manifest=manifest))
+    assert 'capacity_report' not in result

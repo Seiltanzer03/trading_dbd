@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 import zlib
@@ -18,6 +19,60 @@ PREFIX = "backups/v1/daily-slot-"
 READ_SIZE = 4 * 1024 * 1024
 MAX_DATABASE_BYTES = 200 * 1024**3
 LIVE_SEED_CONTRACT = 'trading-dbd-live-seed-v1'
+
+
+def collect_capacity(connection, *, max_seconds: float = 180.0) -> dict:
+    """Measure one immutable worker snapshot; never query private row values."""
+    if not math.isfinite(max_seconds) or not 0 <= max_seconds <= 180:
+        raise ValueError('capacity scan budget must be between 0 and 180 seconds')
+    page_size = int(connection.execute('PRAGMA page_size').fetchone()[0])
+    page_count = int(connection.execute('PRAGMA page_count').fetchone()[0])
+    free_pages = int(connection.execute('PRAGMA freelist_count').fetchone()[0])
+    report = {
+        'contract_version': 'sqlite-offhost-capacity-v1',
+        'status': 'COMPLETE', 'page_size': page_size, 'page_count': page_count,
+        'freelist_count': free_pages, 'logical_database_bytes': page_count*page_size,
+        'free_page_bytes': free_pages*page_size,
+        'used_page_bytes': (page_count-free_pages)*page_size,
+        'allocated_object_bytes': None, 'unattributed_used_bytes': None,
+        'object_count': None, 'objects_truncated': False, 'largest_objects': [],
+        'production_authority': False, 'data_reduction_authorized': False,
+    }
+    deadline = time.monotonic()+max_seconds
+    expired = lambda: time.monotonic() >= deadline
+    connection.set_progress_handler(expired, 1000)
+    try:
+        if expired():
+            raise sqlite3.OperationalError('interrupted')
+        rows = connection.execute('''SELECT d.name, s.type, s.tbl_name,
+            sum(d.pgsize), sum(d.payload), count(*) FROM dbstat AS d
+            LEFT JOIN sqlite_schema AS s ON s.name=d.name AND s.type IN ('table','index')
+            GROUP BY d.name ORDER BY sum(d.pgsize) DESC, d.name''')
+        largest, total, count = [], 0, 0
+        for name, kind, owner, allocated, payload, pages in rows:
+            if expired():
+                raise sqlite3.OperationalError('interrupted')
+            total += int(allocated)
+            count += 1
+            if len(largest) < 64:
+                largest.append({'name': name, 'object_type': kind or 'internal',
+                    'owner_table': owner, 'allocated_bytes': int(allocated),
+                    'payload_bytes': int(payload), 'pages': int(pages)})
+        if total > report['used_page_bytes']:
+            raise RuntimeError('capacity allocation exceeds SQLite used pages')
+        report.update(allocated_object_bytes=total, object_count=count,
+                      unattributed_used_bytes=report['used_page_bytes']-total,
+                      objects_truncated=count > 64, largest_objects=largest)
+    except sqlite3.OperationalError as exc:
+        if str(exc) == 'no such table: dbstat':
+            report['status'] = 'DBSTAT_UNAVAILABLE'
+        elif str(exc) == 'interrupted' and expired():
+            report['status'] = 'TABLE_SCAN_TIMED_OUT'
+        else:
+            raise
+    finally:
+        connection.set_progress_handler(None, 0)
+    return report
 
 
 def manifest_digest(manifest: dict) -> str:
@@ -78,7 +133,7 @@ def restore(
     *, bucket: str, destination: Path, result_path: Path,
     key: str | None = None, expected_backup_id: str | None = None,
     client: Any | None = None, seed_only: bool = False,
-    snapshot_drill: bool = False,
+    snapshot_drill: bool = False, storage_report: bool = False,
 ) -> dict[str, Any]:
     if snapshot_drill and seed_only:
         raise ValueError('snapshot drill and live seed are distinct restore modes')
@@ -201,6 +256,7 @@ def restore(
         destination.resolve().as_uri() + "?mode=ro&immutable=1",
         uri=True, timeout=120.0,
     )
+    capacity = None
     try:
         connection.execute("PRAGMA query_only=ON")
         check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
@@ -209,6 +265,8 @@ def restore(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
+        if check == 'ok' and storage_report:
+            capacity = collect_capacity(connection)
     finally:
         connection.close()
     if check != "ok":
@@ -250,6 +308,8 @@ def restore(
         # backup ID, schema-complete manifest or retirement authority is granted.
         result.update(snapshot_restore_verified=True, storage_manifest=manifest,
                       storage_manifest_sha256=manifest_digest(manifest))
+    if capacity is not None:
+        result['capacity_report'] = capacity
     result_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     return result
 
@@ -261,6 +321,8 @@ def main() -> int:
     parser.add_argument("--expected-backup-id")
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument('--storage-report', action='store_true',
+                       help='measure worker SQLite pages and object sizes; no production mutation')
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--live-seed', action='store_true')
     modes.add_argument('--snapshot-drill', action='store_true',
@@ -271,12 +333,19 @@ def main() -> int:
         expected_backup_id=args.expected_backup_id,
         destination=args.destination, result_path=args.result,
         seed_only=args.live_seed, snapshot_drill=args.snapshot_drill,
+        storage_report=args.storage_report,
     )
     print('OFFHOST_LIVE_SEED_VERIFIED=1' if args.live_seed else
           'OFFHOST_SNAPSHOT_RESTORE_VERIFIED=1' if result.get('snapshot_restore_verified') else
           "OFFHOST_FULL_RESTORE_VERIFIED=1")
     print("OFFHOST_RESTORE_BACKUP_ID=" + result["backup_id"])
     print("OFFHOST_RESTORE_OBJECT=" + result["object_key"])
+    if args.storage_report:
+        print('OFFHOST_CAPACITY_SNAPSHOT_SHA256=' + result['database_sha256'])
+        manifest = result.get('storage_manifest') or {}
+        print('OFFHOST_CAPACITY_SOURCE=' + json.dumps({key: manifest.get(key) for key in
+              ('git_commit', 'source', 'started_ts', 'completed_ts', 'uploaded_ts')}, sort_keys=True))
+        print('OFFHOST_CAPACITY_REPORT=' + json.dumps(result['capacity_report'], sort_keys=True))
     return 0
 
 

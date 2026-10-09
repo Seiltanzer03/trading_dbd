@@ -2,6 +2,11 @@ name: production-offhost-restore-drill
 
 on:
   workflow_dispatch:
+    inputs:
+      capacity_report:
+        description: Measure pages and table sizes on the disposable worker snapshot
+        type: boolean
+        default: false
   schedule:
     - cron: "31 2 * * 0"
   push:
@@ -42,12 +47,14 @@ jobs:
           AWS_DEFAULT_REGION: ru-central1
           AWS_EC2_METADATA_DISABLED: "true"
           EVENT_NAME: ${{ github.event_name }}
+          CAPACITY_REPORT: ${{ github.event_name == 'workflow_dispatch' && inputs.capacity_report && '1' || '0' }}
           RESTORED_DB: ${{ runner.temp }}/offhost-restore/restored.sqlite3
           RESTORE_RESULT: ${{ runner.temp }}/offhost-restore/result.json
         run: |
           set -euo pipefail
           args=(--snapshot-drill --bucket trading-dbd-backups-2026
                 --destination "$RESTORED_DB" --result "$RESTORE_RESULT")
+          if [ "$CAPACITY_REPORT" = "1" ]; then args+=(--storage-report); fi
           python scripts/restore_verified_snapshot.py "${args[@]}"
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'push'
