@@ -37,3 +37,12 @@ def test_scheduled_cloud_drill_accepts_live_snapshots_without_local_db_copy():
     workflow = (root / '.github/workflows/production-offhost-restore-drill.yml').read_text()
     assert 'args=(--snapshot-drill --bucket trading-dbd-backups-2026' in workflow
     assert '${{ runner.temp }}/offhost-restore/restored.sqlite3' in workflow
+
+
+def test_capacity_scan_requires_explicit_manual_opt_in():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / '.github/workflows/production-offhost-restore-drill.yml').read_text()
+    assert 'capacity_report:' in workflow
+    assert "CAPACITY_REPORT: ${{ github.event_name == 'workflow_dispatch' && inputs.capacity_report && '1' || '0' }}" in workflow
+    assert 'if [ "$CAPACITY_REPORT" = "1" ]; then args+=(--storage-report); fi' in workflow
+    assert 'type: boolean\n        default: false' in workflow

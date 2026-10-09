@@ -152,3 +152,33 @@ Ruling: облачный byte/SQLite restore proof отделён от legacy re
 Physical VPS headroom остаётся отдельной незакрытой зависимостью. Следующее
 уменьшение рабочей базы требует конкретного проверенного archive/readback
 контракта, а не переноса SQLite-файла на S3 mount или удаления истории.
+
+### Task 4: off-host capacity checkpoint, 2026-10-09
+
+PR433/main7af2ab9c: actual Yandex restore37972272891 passed byte/hash/SQLite
+verification; main CI37973183721 green. Deploy37973604872 failed before
+fetch/restart:285752KiB <524288KiB. Service remained active on51dea626.
+
+Следующий bounded шаг использует ту же проверенную disposable cloud DB:
+opt-in `--storage-report` измеряет page/freelist geometry и allocated bytes
+таблиц/индексов через dbstat, без чтения private row values. Отчёт содержит
+не более64 объектов, но полные агрегаты; scan180s, timeout/нет dbstat явно
+сохраняют только geometry. Default/schedule не запускают scan: отдельный
+boolean input применяется лишь к workflow_dispatch. Original source clocks,
+SHA и verified raw digest публикуются отдельно; historical snapshot не
+переименовывается в current production measurement. Нет новых ресурсов,
+VPS копий/сканов, повторного fitting, удаления данных или новых authority.
+
+- [x] Шесть capacity regressions RED→GREEN; workflow opt-in RED→GREEN.
+- [x] Профиль49passed/1 existing compiler skip; diff check PASS.
+- [x] Один final review: Important schema-name collision воспроизведён
+  двумя RED cases (с/без auto_vacuum). Join учитывает только table/index;
+  trigger не дублирует allocated pages. Один fix pass; re-review не нужен.
+  Итоговый профиль51passed/1 existing compiler skip, exact-tree CI pending.
+- [ ] Один manual cloud restore с capacity_report=true, прочитать actual
+  geometry и крупнейшие объекты; выбрать следующий безопасный bounded шаг.
+- [ ] Разрешённый merge после CI; actual deploy/readiness receipt.
+
+Ruling: сначала измерить проверенный off-host snapshot — live база не имеет
+места для второй копии и её структура ещё не измерена; цена: dated snapshot
+не доказывает сегодняшние размеры, и capacity report не разрешает pruning.
