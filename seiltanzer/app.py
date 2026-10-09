@@ -186,7 +186,8 @@ def _unified_operational_choice(engine, snapshot: dict, trade: dict,
         audit["operational_guard_reason"] = decision.get("reason")
         return decision, None
     source_row = next((row for row in snapshot.get("active_management_candidates") or []
-                       if row.get("policy") == policy and row.get("parameters") == candidate.get("parameters")), None)
+                       if isinstance(row, dict) and row.get("policy") == policy
+                       and row.get("parameters") == candidate.get("parameters")), None)
     if not source_row or source_row.get("status") != "eligible":
         raise ValueError("unified extended winner lacks quantified frozen action")
     assessment = dict(candidate.get("quant_evaluation") or source_row)

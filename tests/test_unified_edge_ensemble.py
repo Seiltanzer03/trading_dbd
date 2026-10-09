@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from seiltanzer.unified_edge_ensemble import build_unified_ensemble, candidate_id, SCHEMES
+from seiltanzer.unified_edge_ensemble import build_unified_ensemble, candidate_id, SCHEMES, EXTENDED
 
 
 def snapshot():
@@ -180,6 +180,101 @@ def test_extended_candidates_compete_with_closes_and_keep_economics_separate():
     assert row["expected_net_r"] == pytest.approx(.26)
     assert row["raw_expected_variant_net_r"] == .27
     assert audit["historical_profit_proven"] is False
+
+
+@pytest.mark.parametrize("policy", EXTENDED)
+@pytest.mark.parametrize("parameters", [
+    {"stop_price": float("nan")}, {"stop_price": float("inf")},
+    [19999.], "stop=19999",
+])
+def test_invalid_extended_parameters_cannot_win_or_corrupt_audit(policy, parameters):
+    frozen = snapshot()
+    frozen["active_management_candidates"] = [{"policy": policy, "parameters": parameters,
+        "status": "eligible", "expected_variant_net_r": .30,
+        "expected_delta_vs_hold_r": .20, "worst_seed_cvar10_net_r": -.1,
+        "worst_seed_hold_cvar10_net_r": -.2, "execution_cost_r": .01}]
+    before = deepcopy(frozen)
+    audit = build_unified_ensemble(frozen)
+    row = next(c for c in audit["candidates"] if c["policy"] == policy)
+    assert row["eligible"] is False
+    assert row["ranking_eligible"] is False
+    assert row["reason"] == "INVALID_ACTION_PARAMETERS"
+    assert audit["selected_policy"] != policy
+    json.dumps(audit, allow_nan=False)
+    # Compare serialized input so NaN identity/equality does not obscure mutation.
+    assert json.dumps(frozen, sort_keys=True) == json.dumps(before, sort_keys=True)
+
+
+def test_invalid_variant_does_not_hide_valid_parameterized_actions():
+    frozen = snapshot()
+    frozen["active_management_candidates"] = [{"policy": "TIGHTEN_STOP",
+        "parameters": parameters, "status": "eligible", "expected_variant_net_r": .30,
+        "expected_delta_vs_hold_r": .20, "worst_seed_cvar10_net_r": -.1,
+        "worst_seed_hold_cvar10_net_r": -.2, "execution_cost_r": .01}
+        for parameters in ({"stop_price": float("nan")},
+                           {"stop_price": 19999.}, {"stop_price": 20001.})]
+    audit = build_unified_ensemble(frozen)
+    rows = [c for c in audit["candidates"] if c["policy"] == "TIGHTEN_STOP"]
+    assert len(rows) == 3
+    assert rows[0]["eligible"] is False
+    assert {c["candidate_id"] for c in rows[1:]} == {
+        candidate_id("TIGHTEN_STOP", {"stop_price": p}) for p in (19999., 20001.)}
+    assert all(c["eligible"] for c in rows[1:])
+    assert audit["selected_candidate_id"] in {c["candidate_id"] for c in rows[1:]}
+    json.dumps(audit, allow_nan=False)
+
+
+@pytest.mark.parametrize("policy,parameters", [
+    (p, {}) for p in EXTENDED
+] + [("TIGHTEN_STOP", {"stop_price": v}) for v in ([], {}, "banana", True, -1.)]
+  + [("SCALE_OUT_ON_SPIKE", {"trigger_price": 20001., "close_fraction": v})
+     for v in (None, True, 0., 1.)]
+  + [("TIME_STOP", {"deadline_ts": 1790869999.})])
+def test_required_action_values_are_validated_even_without_common_bank(policy, parameters):
+    frozen = snapshot()
+    frozen["active_management_candidates"] = [{"policy": policy, "parameters": parameters,
+        "status": "eligible", "expected_variant_net_r": .30,
+        "expected_delta_vs_hold_r": .20, "worst_seed_cvar10_net_r": -.1}]
+    audit = build_unified_ensemble(frozen)
+    row = next(c for c in audit["candidates"] if c["policy"] == policy)
+    assert row["eligible"] is False
+    assert row["reason"] == "INVALID_ACTION_PARAMETERS"
+    assert audit["selected_policy"] != policy
+
+
+@pytest.mark.parametrize("bad", [None, "bad", 42, []])
+def test_malformed_entry_does_not_abort_valid_action(bad):
+    frozen = snapshot()
+    frozen["active_management_candidates"] = [bad, {"policy": "TIGHTEN_STOP",
+        "parameters": {"stop_price": 19999.}, "status": "eligible",
+        "expected_variant_net_r": .30, "expected_delta_vs_hold_r": .20,
+        "worst_seed_cvar10_net_r": -.1}]
+    audit = build_unified_ensemble(frozen)
+    assert audit["selected_candidate_id"] == candidate_id("TIGHTEN_STOP", {"stop_price": 19999.})
+    json.dumps(audit, allow_nan=False)
+
+
+def test_malformed_candidate_collection_keeps_base_choice_available():
+    frozen = snapshot()
+    frozen["active_management_candidates"] = {"policy": "TIGHTEN_STOP"}
+    audit = build_unified_ensemble(frozen)
+    assert audit["selected_policy"] == "CLOSE_25"
+    assert all(not c["eligible"] for c in audit["candidates"] if c["policy"] in EXTENDED)
+
+
+@pytest.mark.parametrize("field", ["execution_cost_r", "expected_hold_net_r"])
+def test_nonfinite_raw_evaluation_cannot_corrupt_audit(field):
+    frozen = snapshot()
+    raw = {"policy": "TIGHTEN_STOP", "parameters": {"stop_price": 19999.},
+        "status": "eligible", "expected_variant_net_r": .30,
+        "expected_delta_vs_hold_r": .20, "worst_seed_cvar10_net_r": -.1,
+        field: float("nan")}
+    frozen["active_management_candidates"] = [raw]
+    audit = build_unified_ensemble(frozen)
+    json.dumps(audit, allow_nan=False)
+    row = next(c for c in audit["candidates"] if c["policy"] == "TIGHTEN_STOP")
+    assert row["eligible"] is False
+    assert row["reason"] == "INVALID_ACTION_EVALUATION"
 
 
 def test_hard_floor_unavailable_cannot_be_replaced_by_zero_or_expert_vote():
