@@ -116,6 +116,8 @@ jobs:
             # disposable backup copies. Restore the terminal on every exit path,
             # including fail-closed disk/integrity errors, so a failed rotation
             # cannot leave production unavailable.
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 30 9
             restart_needed=1
             restore_service_on_exit() {
               if [ "${restart_needed:-1}" = 1 ]; then

@@ -11,7 +11,7 @@ def test_deploy_recovers_bounded_disk_headroom_before_git_fetch():
         'if git cat-file -e "${EXPECTED_SHA}^{commit}" 2>/dev/null; then'
     )
     fetch = workflow.index(
-        "git fetch --no-tags https://github.com/Seiltanzer03/trading_dbd.git main"
+        "git fetch --depth=1 --no-tags https://github.com/Seiltanzer03/trading_dbd.git main"
     )
 
     assert cleanup < gate < local_exact_sha < fetch

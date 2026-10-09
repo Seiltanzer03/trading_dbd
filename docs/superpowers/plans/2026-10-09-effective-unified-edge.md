@@ -174,11 +174,62 @@ VPS копий/сканов, повторного fitting, удаления да
 - [x] Один final review: Important schema-name collision воспроизведён
   двумя RED cases (с/без auto_vacuum). Join учитывает только table/index;
   trigger не дублирует allocated pages. Один fix pass; re-review не нужен.
-  Итоговый профиль51passed/1 existing compiler skip, exact-tree CI pending.
-- [ ] Один manual cloud restore с capacity_report=true, прочитать actual
+  Итоговый профиль51passed/1 existing compiler skip; PR434 final CI37975077820
+  3424passed/5skipped, real pinned SQLite/WebKit/acceptance green.
+- [x] Один manual cloud restore с capacity_report=true, прочитать actual
   geometry и крупнейшие объекты; выбрать следующий безопасный bounded шаг.
-- [ ] Разрешённый merge после CI; actual deploy/readiness receipt.
+- [x] Разрешённый merge: PR434/main208ed35e67c039939f33e1755e2415fadf7322dd;
+  main CI37975605651 green. Deploy37975874469 failed at pre-fetch headroom;
+  recovery37975945289 delivered exact SHA but could not rebuild a local slot.
+  EXIT recovery restarted service. Diagnostic37977266534 attempt2 proves
+  external/local HTTP200 at19:16UTC; startup completed19:09:14UTC in555s.
+  This is availability, not completed readiness/smoke/publication acceptance.
 
 Ruling: сначала измерить проверенный off-host snapshot — live база не имеет
 места для второй копии и её структура ещё не измерена; цена: dated snapshot
 не доказывает сегодняшние размеры, и capacity report не разрешает pruning.
+
+Actual cloud restore37975291324: raw hash/SQLite verification PASS; source
+snapshot2026-10-08 09:13–09:20UTC, sourceSHA77407e8e, database17117564928B,
+4179093pages ×4096B, freelist19pages (77824B). Capacity status
+TABLE_SCAN_TIMED_OUT at180s: table allocation is unknown. No repeat table scan
+or restore of the same unchanged snapshot is needed.
+
+### Autonomous recovery and return to global development, 2026-10-09
+
+User explicitly asks to resolve the release blocker and continue autonomously.
+Finite queue: (1) recover real deploy headroom; (2) prevent Git-history regrowth;
+(3) complete existing A/C manual-decision release through exact-SHA acceptance;
+(4) retain the finite B input matrix and define the next concrete usable input.
+Do not restart unchanged model searches or redo shipped decision/management code.
+
+Diagnostic37979493253/job113986098599 confirms liveSHA208ed35e, HTTP200,
+free219MiB, .git979MiB, venv211MiB, research361MiB; liveDB17727135744B,
+WAL8726192B. The research registry is retained evidence, not disposable cache.
+Other projects and live SQLite remain outside cleanup scope.
+
+Bounded fix: reconstruct only .git from canonical depth-one roots. Preserve
+every ref, HEAD, original config and clean tracked files; refuse linked metadata,
+dirty files, unpublished refs, concurrent locks or insufficient staging space.
+Validate the complete staged Git repository, exchange metadata atomically,
+validate again, then remove only the verified reconstructible old metadata.
+No service stop, code reset, data deletion or integrity-gate weakening.
+Both network deployment fetch and offline SHA staging retain shallow roots;
+otherwise the existing full-history staging bundle would undo the repair.
+Opt-in manual repair shares the production concurrency group and requires
+current green main SHA. Default diagnostics remain read-only.
+
+Eight actual-Git regressions observed RED→GREEN. One final scoped review found
+two Important: interrupted bundle import rolled back only shallow metadata,
+and incoming deploy could cancel a serialized repair. Two-revision real bundle
+interruption reproduced broken parent links RED; retain imported root boundary,
+use noncanceling production workflows and a shared host lock GREEN. Deferred
+minor: remote symbolic HEAD is rebuilt as a direct ref to the same object;
+running HEAD and every resolved ref/object remain unchanged. No re-review.
+Final-tree CI pending. Production compaction
+and recovered capacity must be measured before claiming this blocker resolved.
+
+Ruling: production Git history is fully reconstructible only after each retained
+ref was fetched and verified from canonical remote; unpublished local commits
+fail closed. Tradeoff: local ancestry queries are shallow; complete code history
+remains in GitHub. All application history, research evidence and risk gates stay.

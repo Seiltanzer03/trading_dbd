@@ -6,12 +6,70 @@ on:
     paths:
       - ".github/workflows/production-network-diagnostics.yml"
   workflow_dispatch:
+    inputs:
+      compact_git:
+        description: Replace only reconstructible Git metadata; leave service and data running
+        type: boolean
+        default: false
+      expected_sha:
+        description: Exact current green main SHA (required only for compact_git)
+        type: string
+        required: false
 
 permissions:
   contents: read
 
 jobs:
+  compact-git:
+    if: github.event_name == 'workflow_dispatch' && inputs.compact_git
+    concurrency:
+      group: production-seiltanzer
+      cancel-in-progress: false
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require current green main before metadata repair
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git ls-remote https://github.com/${{ github.repository }} refs/heads/main | cut -f1)" = "$EXPECTED_SHA"
+          curl -fsS --max-time 8 -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${EXPECTED_SHA}/status" \
+            | python3 -c 'import json,sys; rows=json.load(sys.stdin)["statuses"]; latest={}; [latest.setdefault(r["context"],r["state"]) for r in rows]; assert latest.get("ci/full-webkit")=="success"'
+          python3 - <<'PY'
+          import base64, os
+          from pathlib import Path
+          payload=base64.b64encode(Path('scripts/compact_deployment_git.py').read_bytes()).decode('ascii')
+          with open(os.environ['GITHUB_ENV'],'a') as out:
+              out.write('COMPACTION_SCRIPT='+payload+'\n')
+          PY
+      - name: Compact canonical Git metadata without stopping production
+        uses: appleboy/ssh-action@v1
+        env:
+          COMPACTION_SCRIPT: ${{ env.COMPACTION_SCRIPT }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 12m
+          envs: EXPECTED_SHA,COMPACTION_SCRIPT
+          script: |
+            set -euo pipefail
+            df -h /
+            printf '%s' "$COMPACTION_SCRIPT" | base64 -d | /usr/bin/python3 - \
+              --repo /opt/seiltanzer --expected-sha "$EXPECTED_SHA" --apply
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            systemctl is-active --quiet seiltanzer
+            test "$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/api/state)" = 200
+            df -h /
   diagnose:
+    needs: compact-git
+    if: always() && (needs.compact-git.result == 'skipped' || needs.compact-git.result == 'success')
     runs-on: ubuntu-22.04
     timeout-minutes: 8
     steps:

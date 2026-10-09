@@ -19,7 +19,7 @@ on:
 
 concurrency:
   group: production-seiltanzer
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   actions: write
@@ -100,6 +100,9 @@ jobs:
           script: |
             set -euo pipefail
             cd /opt/seiltanzer
+            # Also serialize surviving SSH processes after an interrupted run.
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 30 9
 
             echo '=== PRE-DEPLOY SERVICE DIAGNOSTICS ==='
             systemctl status seiltanzer --no-pager -l || true
@@ -236,7 +239,7 @@ jobs:
             if git cat-file -e "${EXPECTED_SHA}^{commit}" 2>/dev/null; then
               echo "DEPLOY_EXACT_SHA_ALREADY_LOCAL=$EXPECTED_SHA"
             else
-              git fetch --no-tags https://github.com/Seiltanzer03/trading_dbd.git main
+              git fetch --depth=1 --no-tags https://github.com/Seiltanzer03/trading_dbd.git main
               git cat-file -e "${EXPECTED_SHA}^{commit}"
             fi
             git reset --hard "$EXPECTED_SHA"
