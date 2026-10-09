@@ -168,3 +168,53 @@ def test_live_seed_corrupt_archive_never_writes_receipt(tmp_path):
             seed_only=True, client=Client(key=key, archive=archive, manifest=manifest))
     assert not (tmp_path/'seed.db').exists()
     assert not (tmp_path/'seed.json').exists()
+
+
+def test_snapshot_drill_restores_live_cloud_bytes_without_local_retirement_authority(tmp_path):
+    key, archive, manifest = _live_fixture(tmp_path)
+    result = MODULE.restore(bucket=manifest['bucket'], key=key,
+        destination=tmp_path/'drill.db', result_path=tmp_path/'drill.json',
+        snapshot_drill=True, client=Client(key=key, archive=archive, manifest=manifest))
+    assert result['restore_contract'] == 'trading-dbd-offhost-snapshot-drill-v1'
+    assert result['snapshot_restore_verified'] is True
+    assert result['full_restore_verified'] is False
+    assert result['backup_id'] == ''
+    assert result['production_authority'] is False
+    assert result['storage_manifest'] == manifest
+    assert result['sqlite_quick_check'] == 'ok'
+    assert (tmp_path/'drill.db').read_bytes() == (tmp_path/'source.sqlite3').read_bytes()
+
+
+@pytest.mark.parametrize('mutation', ['source', 'epoch', 'hash'])
+def test_snapshot_drill_rejects_invalid_live_snapshot_without_receipt(tmp_path, mutation):
+    key, archive, manifest = _live_fixture(tmp_path)
+    if mutation == 'source':
+        manifest['source_db'] = '/tmp/other.db'
+    elif mutation == 'epoch':
+        manifest['completed_ts'] = 99
+    else:
+        manifest['database_sha256'] = '0'*64
+    with pytest.raises(RuntimeError):
+        MODULE.restore(bucket=manifest['bucket'], key=key,
+            destination=tmp_path/'drill.db', result_path=tmp_path/'drill.json',
+            snapshot_drill=True, client=Client(key=key, archive=archive, manifest=manifest))
+    assert not (tmp_path/'drill.json').exists()
+
+
+def test_snapshot_drill_cannot_be_used_to_verify_a_local_retirement_target(tmp_path):
+    key, archive, manifest = _live_fixture(tmp_path)
+    with pytest.raises(ValueError, match='retirement'):
+        MODULE.restore(bucket=manifest['bucket'], key=key,
+            expected_backup_id='20260905T180524Z-local-524722',
+            destination=tmp_path/'drill.db', result_path=tmp_path/'drill.json',
+            snapshot_drill=True, client=Client(key=key, archive=archive, manifest=manifest))
+
+
+def test_snapshot_drill_accepts_legacy_cloud_backup_under_original_full_contract(tmp_path):
+    key, archive, manifest = _fixture(tmp_path)
+    result = MODULE.restore(bucket=manifest['bucket'], key=key,
+        destination=tmp_path/'drill.db', result_path=tmp_path/'drill.json',
+        snapshot_drill=True, client=Client(key=key, archive=archive, manifest=manifest))
+    assert result['full_restore_verified'] is True
+    assert result['restore_contract'] == 'trading-dbd-offhost-full-restore-v1'
+    assert result['backup_id'] == manifest['backup_id']

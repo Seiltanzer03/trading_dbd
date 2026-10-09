@@ -78,7 +78,12 @@ def restore(
     *, bucket: str, destination: Path, result_path: Path,
     key: str | None = None, expected_backup_id: str | None = None,
     client: Any | None = None, seed_only: bool = False,
+    snapshot_drill: bool = False,
 ) -> dict[str, Any]:
+    if snapshot_drill and seed_only:
+        raise ValueError('snapshot drill and live seed are distinct restore modes')
+    if snapshot_drill and expected_backup_id is not None:
+        raise ValueError('snapshot drill cannot verify a local retirement target')
     if client is None:
         import boto3
         from botocore.config import Config
@@ -109,7 +114,8 @@ def restore(
     database_sha = str(manifest.get("database_sha256") or "").lower()
     compressed_sha = str(manifest.get("compressed_sha256") or "").lower()
     backup_id = str(manifest.get("backup_id") or "")
-    if seed_only:
+    live_snapshot_drill = snapshot_drill and manifest.get('source') == 'LIVE_SQLITE_RSYNC'
+    if seed_only or live_snapshot_drill:
         if expected_backup_id is not None:
             raise ValueError('live seed cannot verify a retirement target')
         validate_live_seed_manifest(manifest)
@@ -124,7 +130,7 @@ def restore(
         0 < compressed_size <= MAX_DATABASE_BYTES,
         len(database_sha) == 64,
         len(compressed_sha) == 64,
-        seed_only or bool(backup_id),
+        seed_only or live_snapshot_drill or bool(backup_id),
     )):
         raise RuntimeError("off-host backup manifest contract mismatch")
     if expected_backup_id is not None and backup_id != expected_backup_id:
@@ -208,14 +214,20 @@ def restore(
     if check != "ok":
         raise RuntimeError(f"restored database quick_check failed: {check}")
     critical = manifest.get("critical_table_counts")
-    if not seed_only and (not isinstance(critical, dict) or not critical or not set(critical) <= tables):
+    if not seed_only and not live_snapshot_drill and (
+        not isinstance(critical, dict) or not critical or not set(critical) <= tables
+    ):
         raise RuntimeError("restored database is missing critical manifest tables")
     if any(Path(str(destination) + suffix).exists() for suffix in ("-wal", "-shm")):
         raise RuntimeError("restore verification created mutable SQLite sidecars")
 
     result = {
-        "restore_contract": LIVE_SEED_CONTRACT if seed_only else "trading-dbd-offhost-full-restore-v1",
-        "full_restore_verified": not seed_only,
+        "restore_contract": (
+            LIVE_SEED_CONTRACT if seed_only else
+            'trading-dbd-offhost-snapshot-drill-v1' if live_snapshot_drill else
+            'trading-dbd-offhost-full-restore-v1'
+        ),
+        "full_restore_verified": not seed_only and not live_snapshot_drill,
         "bucket": bucket,
         "object_key": key,
         "manifest_key": manifest_key,
@@ -233,6 +245,11 @@ def restore(
     if seed_only:
         result.update(seed_verified=True, storage_manifest=manifest,
                       storage_manifest_sha256=manifest_digest(manifest))
+    if live_snapshot_drill:
+        # The complete bytes and SQLite were verified off-host. No invented local
+        # backup ID, schema-complete manifest or retirement authority is granted.
+        result.update(snapshot_restore_verified=True, storage_manifest=manifest,
+                      storage_manifest_sha256=manifest_digest(manifest))
     result_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     return result
 
@@ -244,15 +261,20 @@ def main() -> int:
     parser.add_argument("--expected-backup-id")
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
-    parser.add_argument('--live-seed', action='store_true')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--live-seed', action='store_true')
+    modes.add_argument('--snapshot-drill', action='store_true',
+                       help='verify live cloud snapshot bytes without local retirement authority')
     args = parser.parse_args()
     result = restore(
         bucket=args.bucket, key=args.key,
         expected_backup_id=args.expected_backup_id,
         destination=args.destination, result_path=args.result,
-        seed_only=args.live_seed,
+        seed_only=args.live_seed, snapshot_drill=args.snapshot_drill,
     )
-    print('OFFHOST_LIVE_SEED_VERIFIED=1' if args.live_seed else "OFFHOST_FULL_RESTORE_VERIFIED=1")
+    print('OFFHOST_LIVE_SEED_VERIFIED=1' if args.live_seed else
+          'OFFHOST_SNAPSHOT_RESTORE_VERIFIED=1' if result.get('snapshot_restore_verified') else
+          "OFFHOST_FULL_RESTORE_VERIFIED=1")
     print("OFFHOST_RESTORE_BACKUP_ID=" + result["backup_id"])
     print("OFFHOST_RESTORE_OBJECT=" + result["object_key"])
     return 0

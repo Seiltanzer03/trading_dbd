@@ -34,7 +34,7 @@ jobs:
           path: ${{ runner.temp }}/offhost-restore
           github-token: ${{ github.token }}
           run-id: 34928308516
-      - name: Fully restore and verify private Object Storage snapshot
+      - name: Restore and verify private Object Storage snapshot off-host
         if: github.event_name != 'push'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
@@ -46,7 +46,7 @@ jobs:
           RESTORE_RESULT: ${{ runner.temp }}/offhost-restore/result.json
         run: |
           set -euo pipefail
-          args=(--bucket trading-dbd-backups-2026
+          args=(--snapshot-drill --bucket trading-dbd-backups-2026
                 --destination "$RESTORED_DB" --result "$RESTORE_RESULT")
           python scripts/restore_verified_snapshot.py "${args[@]}"
       - uses: actions/upload-artifact@v4
