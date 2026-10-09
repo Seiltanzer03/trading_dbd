@@ -226,10 +226,51 @@ interruption reproduced broken parent links RED; retain imported root boundary,
 use noncanceling production workflows and a shared host lock GREEN. Deferred
 minor: remote symbolic HEAD is rebuilt as a direct ref to the same object;
 running HEAD and every resolved ref/object remain unchanged. No re-review.
-Final-tree CI pending. Production compaction
-and recovered capacity must be measured before claiming this blocker resolved.
+Final-tree CI37981463914 green:3432passed/5skipped, pinned SQLite/WebKit/acceptance
+green. Actual repair37981962155 preserved all4 resolved refs and runningHEAD208ed35:
+Git1025622016B→38313984B, freed987308032B; root210MiB→1.2GiB. Post-repair
+diagnostic113994601427: external/local/public HTTP200, NRestarts0. LiveDB and
+application history were untouched. PR435 merged as14b2fe9d3bb79138421854a83e24574c2bc6bd1d.
+
+Actual deploy37982521624 accepted that SHA: delivery/readiness/smoke/public/
+orchestration success, all seven status contexts green. Math37984728775 and
+sources37984731678 published for the same SHA. FOMC37984734727 transport receipt
+does not prove native materialization or continuous600s cadence. Task4/D technical
+release is complete. Durability remains explicitly degraded: no local verified
+full backup; readiness used the previously user-authorized low-disk startup and
+SKIPPED_USER_AUTHORIZED_LOW_DISK restore. No fresh full-backup/RPO claim.
+Management smoke assessed12 actions in isolated temporary fixtures, real orders0;
+this is functional acceptance, not empirical trading profit. Future liveDB growth
+remains a capacity dependency; repeating the same Git repair is not the next task.
 
 Ruling: production Git history is fully reconstructible only after each retained
 ref was fetched and verified from canonical remote; unpublished local commits
 fail closed. Tradeoff: local ancestry queries are shallow; complete code history
 remains in GitHub. All application history, research evidence and risk gates stay.
+
+### Next B input-chain correction: stated FOMC target ranges
+
+One reproducible existing-input defect, not a new source or model: the official
+2026-09-16 policy sentence inserts `by 1/4 percentage point` before the target.
+The parser skipped the stated3.75–4.00 range and immutable cached payloads kept
+null rates. Extend only this exact grammar; do not search unrelated later numeric
+sentences or use the stated change as a substitute for an exact previous range.
+
+Retained releases use a labelled rate-only read projection from at most two
+existing exact bodies (64KiB each), verifying hashes, exact predecessor identity,
+publication ordering and prospective receipt cutoff. Existing non-null values,
+semantic/text measurements, rows, frozen observations and original clocks stay.
+No network acquisition, training, missing consensus/cost fabrication or new votes.
+Source contract remains v1; the measurement parser has a separate version tag.
+Six regressions observed RED due missing target values; relevant macro/source/
+receipt/reaction/novelty/overlay profile229passed2.02s. One final review:
+Critical/Important none; reviewer independently verified204focused tests.
+Deferred minor: flattened frozen EDE feature provenance omits the two parser/
+projection labels, while the full frozen payload and historical feature provenance
+retain them. No repeated review or unrelated changes. Full exact-tree CI follows.
+New correction is not declared production until final CI and actual acceptance.
+
+Ruling: correct the existing deterministic measurement at read time because
+immutable cached releases are intentionally never re-ingested or rewritten —
+cost: historical measurements are explicitly projections from dated stored texts,
+not first-published versioned documents or newly received market evidence.

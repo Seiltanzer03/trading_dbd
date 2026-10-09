@@ -49,6 +49,7 @@ from .fomc_official_source import discover_statement_urls, extract_statement_tex
 
 
 FOMC_DETERMINISTIC_CONTRACT_VERSION = "fomc-deterministic-point-in-time-v1"
+FOMC_RATE_PARSER_VERSION = "fomc-stated-target-range-v2"
 FED_BASE = "https://www.federalreserve.gov"
 FED_HOSTS = frozenset({"www.federalreserve.gov", "federalreserve.gov"})
 INDEX_TEMPLATE = FED_BASE + "/newsevents/pressreleases/{year}-press-fomc.htm"
@@ -69,6 +70,8 @@ _DASH_TRANSLATION = str.maketrans({
 })
 _TARGET_RANGE_RE = re.compile(
     r"target\s+range\s+for\s+the\s+federal\s+funds\s+rate"
+    r"(?:\s+by\s+[0-9]+(?:\s*[- ]\s*[0-9]+/[0-9]+|/[0-9]+|\.[0-9]+)?"
+    r"\s+percentage\s+points?)?"
     r"(?:\s+(?:at|to|of))?\s+"
     r"([0-9]+(?:\s*[- ]\s*[0-9]+/[0-9]+|\.[0-9]+)?|[0-9]+/[0-9]+)"
     r"\s+to\s+"
@@ -277,6 +280,7 @@ def deterministic_statement_payload(body: str, *,
         "target_mid_pct": target_mid,
         "target_width_bp": target_width_bp,
         "target_change_bp": target_change_bp,
+        "rate_parser_version": FOMC_RATE_PARSER_VERSION,
         "dissent_share": dissent_share,
         "statement_change": statement_change,
         "llm_used": False,
@@ -508,6 +512,70 @@ def _table_exists(runtime: Any, table: str) -> bool:
         return False
 
 
+def _project_retained_rates(conn: Any, row: Any, payload: dict[str, Any], *,
+                            cutoff: float, received_only: bool) -> dict[str, Any]:
+    """Fill old missing rate measurements from at most two retained exact bodies.
+
+    This is a labelled read projection, not a new source receipt or a mutation
+    of stored payloads/frozen observations. Existing non-null measurements and
+    all unrelated semantic/text fields retain their original values.
+    """
+    names = ("target_lower_pct", "target_upper_pct", "target_mid_pct",
+             "target_width_bp", "target_change_bp")
+    if payload.get("rate_parser_version") == FOMC_RATE_PARSER_VERSION or all(
+            payload.get(name) is not None for name in names):
+        return payload
+
+    def body(release_id: str, *, source_url: str, before: float | None = None):
+        record = conn.execute(
+            "SELECT CASE WHEN length(CAST(body_text AS BLOB))<=65536 "
+            "THEN body_text ELSE NULL END,body_sha256,published_at,fetched_at "
+            "FROM macro_fomc_deterministic_releases WHERE release_id=? AND source_url=?",
+            (release_id, source_url),
+        ).fetchone()
+        if record is None or not isinstance(record[0], str):
+            return None
+        if _sha(record[0]) != str(record[1]):
+            return None
+        published, fetched = _finite(record[2]), _finite(record[3])
+        if published is None or published > cutoff:
+            return None
+        if before is not None and published >= before:
+            return None
+        if received_only and (fetched is None or not published <= fetched <= cutoff):
+            return None
+        return record[0]
+
+    current_body = body(str(row[0]), source_url=str(row[2]))
+    if current_body is None or _sha(current_body) != str(row[5]):
+        return payload
+    try:
+        target = _target_range(current_body)
+        if target is None:
+            return payload
+        measured = {"target_lower_pct": target[0], "target_upper_pct": target[1],
+                    "target_mid_pct": (target[0]+target[1])/2.0,
+                    "target_width_bp": (target[1]-target[0])*100.0}
+        if any(payload.get(name) is not None and payload[name] != value
+               for name, value in measured.items()):
+            return payload
+        previous_body = (
+            body(str(row[7]), source_url=str(row[8]), before=float(row[3]))
+            if row[7] and row[8] else None)
+        previous = _target_range(previous_body) if previous_body else None
+        measured["target_change_bp"] = (
+            (measured["target_mid_pct"]-(previous[0]+previous[1])/2.0)*100.0
+            if previous else None)
+    except ValueError:
+        return payload
+    additions = {name: value for name, value in measured.items()
+                 if payload.get(name) is None and value is not None}
+    if not additions:
+        return payload
+    return {**payload, **additions, "rate_parser_version": FOMC_RATE_PARSER_VERSION,
+            "rate_projection_applied": True}
+
+
 def _latest_release(runtime: Any, captured_ts: float, *, received_only: bool = False) -> dict[str, Any]:
     if not _table_exists(runtime, "macro_fomc_deterministic_releases"):
         return {"status": "UNAVAILABLE", "reason": "NO_FOMC_DETERMINISTIC_TABLE"}
@@ -523,6 +591,10 @@ def _latest_release(runtime: Any, captured_ts: float, *, received_only: bool = F
             "FROM macro_fomc_deterministic_releases WHERE published_at<=? " + receipt_filter +
             "ORDER BY published_at DESC,created_ts DESC LIMIT 1", parameters
         ).fetchone()
+        payload = (
+            _project_retained_rates(runtime._conn, row, json.loads(str(row[6])),
+                                    cutoff=float(cutoff), received_only=received_only)
+            if row is not None else None)
     if row is None:
         return {"status": "UNAVAILABLE", "reason": "NO_FOMC_STATEMENT_BEFORE_T0"}
     result = {
@@ -531,7 +603,7 @@ def _latest_release(runtime: Any, captured_ts: float, *, received_only: bool = F
         "source": "Federal Reserve Board", "source_url": str(row[2]),
         "published_at": float(row[3]), "available_at": float(row[3]),
         "fetched_at": float(row[4]), "body_sha256": str(row[5]),
-        "payload": json.loads(str(row[6])),
+        "payload": payload,
         "previous_release_id": row[7], "previous_source_url": row[8],
         "contract_version": str(row[9]),
         "official_source_verified": True,
@@ -590,6 +662,8 @@ def feature_records_from_runtime(runtime: Any, *, instrument: str,
             "source_vintage_guarantee": "OFFICIAL_DATED_PAGE_NOT_VERSIONED",
             "llm_used": False, "future_points_used": False,
             "old_t0_row_mutated": False,
+            "rate_parser_version": payload.get("rate_parser_version"),
+            "rate_projection_applied": bool(payload.get("rate_projection_applied")),
         }
     return values, provenance
 
