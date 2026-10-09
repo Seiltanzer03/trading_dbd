@@ -98,6 +98,23 @@ AttributeError RED; consumer теперь пропускает non-dict пере
 Consumer/API/manual execution profile: **31 passed**,37.95s; один известный
 installed Starlette/httpx deprecation warning. Реальные orders/provider calls0.
 
+Release checkpoint 2026-10-09: PR #431 merged as
+`631422234eeb1612c8d4a7ee499129b05bda82ae`, tree
+`71cc7f9b7c5c71eb85b43a0a133733f8a1e3e869`. Final-head CI37907396652:
+3407 passed /5 skipped, WebKit and acceptance green; main CI37908352109 green.
+Actual deploy37908743414 delivered that SHA and passed readiness, but failed
+official macro smoke. The bundle was acquired09:03:24UTC; numeric refresh
+09:26:37UTC exceeded its unchanged20-minute TTL. AI returned200 in6.2s;
+this alone does not prove an accepted complete release. Public/publication
+handoffs were skipped, so Task4 remains pending.
+
+Bounded Task4 repair: move the single existing official bundle acquisition,
+authenticated transfer and exact-SHA installation after cold start, core pause
+and readiness, immediately before unchanged functional smoke. Preserve default
+TTL, source/hash/owner validation, risk and research gates. One regression
+observed RED→GREEN; relevant delivery/macro profile26 passed. No new model
+search/training, deployment retry or test rerun without a changed final tree.
+
 **Решение по объёму:** заменить старый порядок по явному указанию пользователя,
 сохранить fixed weights и остановить неизменный поиск при пустых causal labels.
 Цена: новые family forecasts пока отсутствуют, независимый scheduler и

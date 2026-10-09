@@ -58,6 +58,22 @@ def test_deploy_materializes_exact_sha_offhost_macro_before_unchanged_smoke():
     assert deploy.index(build) < deploy.index(install) < deploy.index(smoke)
 
 
+def test_macro_bundle_freshness_window_excludes_cold_start_and_core_wait():
+    # Real acceptance took >20 minutes before smoke; a bundle acquired before
+    # cold start expired even though delivery and readiness were successful.
+    # Moving the same official acquisition after readiness keeps the existing
+    # runtime TTL effective instead of widening it to fit server startup.
+    deploy = _workflow("deploy.yml")
+    readiness = "/opt/seiltanzer/scripts/production_readiness_check.py"
+    build = "python scripts/build_offhost_macro_bundle.py"
+    transfer = "- name: Transfer verified official macro bundle over deploy channel"
+    install = "/opt/seiltanzer/scripts/install_offhost_macro_bundle.py"
+    smoke = "/opt/seiltanzer/scripts/production_functional_smoke.py"
+    assert deploy.index(readiness) < deploy.index(build) < deploy.index(transfer)
+    assert deploy.index(transfer) < deploy.index(install) < deploy.index(smoke)
+    assert "MACRO_OFFHOST_BUNDLE_MAX_AGE_SEC" not in deploy
+
+
 def test_automatic_downstream_chain_never_uses_workflow_run_head_sha_fallback():
     names = (
         "production-post-research.yml",
