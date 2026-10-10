@@ -198,6 +198,21 @@ def replication_boundary(tmp_path,monkeypatch,*,low_space=False,cleanup_fails=Fa
     return database,receipt,client,commands
 
 
+def test_low_source_space_is_rejected_before_reading_seed_bytes(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / 'scripts'))
+    import production_ede_offload as transport
+    database, receipt, _ = seed_receipt(tmp_path)
+    database.write_bytes(b'bad seed that must not be hashed before admission')
+    monkeypatch.setattr(transport, '_verify_sha', lambda *a, **k: None)
+    monkeypatch.setattr(transport, '_probe_api', lambda *a, **k: None)
+    monkeypatch.setattr(transport, '_exec', lambda *a, **k: json.dumps(
+        dict(size=17803968512, free=973320192, wal_bytes=6406632)))
+    with pytest.raises(RuntimeError, match='Production lacks WAL growth headroom'):
+        module.replicate_live(object(), password='test', expected_sha='b'*40,
+                              run_id='123', output=database, seed_receipt=receipt)
+    assert database.read_bytes().startswith(b'bad seed')
+
+
 def test_seeded_replication_confirms_origin_exit_before_fresh_manifest(tmp_path,monkeypatch):
     database,receipt,client,commands=replication_boundary(tmp_path,monkeypatch)
     result=module.replicate_live(client,password='test',expected_sha='b'*40,

@@ -5,6 +5,8 @@ import hashlib
 import json
 import pathlib
 import sqlite3
+import sys
+import shutil
 
 import pytest
 
@@ -14,6 +16,76 @@ SPEC = importlib.util.spec_from_file_location("production_ede_offload_probe_test
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+@pytest.mark.parametrize('enabled,free,cleaned,after', [
+    (False, 900 * 1024 ** 2, False, 900 * 1024 ** 2),
+    (True, 900 * 1024 ** 2, True, 2 * 1024 ** 3),
+    (True, 2 * 1024 ** 3, False, 2 * 1024 ** 3),
+    (True, 900 * 1024 ** 2, True, 950 * 1024 ** 2),
+])
+def test_live_preflight_is_opt_in_and_rechecks_source(tmp_path, monkeypatch, enabled, free, cleaned, after):
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    monkeypatch.setitem(sys.modules, 'production_ede_offload', MODULE)
+    source = __import__('offhost_sqlite_snapshot')
+    monkeypatch.setattr(source.shutil, 'disk_usage', lambda _p: shutil._ntuple_diskusage(0, 0, 64 * 1024 ** 3))
+    class Client:
+        closed = False
+        def close(self):
+            self.closed = True
+    client = Client()
+    monkeypatch.setattr(MODULE, '_connect', lambda _password: client)
+    monkeypatch.setattr(MODULE, '_verify_sha', lambda *_args: None)
+    monkeypatch.setattr(MODULE, '_probe_api', lambda *_args: None)
+    cleanups = []
+    probes = []
+    def remote(_client, command, timeout=None):
+        if command == source.SOURCE_STAT_COMMAND:
+            probes.append(1)
+            return json.dumps({'size': 1024, 'free': after if cleanups else free,
+                               'wal_bytes': 32})
+        cleanups.append(command)
+        return json.dumps({'status': 'APPLIED', 'removed_files': 3})
+    monkeypatch.setattr(MODULE, '_exec', remote)
+    arguments = ['live-preflight', '--password', 'test-only', '--expected-sha', 'a' * 40,
+                 '--output-db', str(tmp_path / 'replica.db')]
+    if enabled:
+        arguments.append('--reclaim-package-cache')
+    if after < source.MIN_FREE_BYTES:
+        with pytest.raises(RuntimeError, match='Production lacks WAL growth headroom'):
+            MODULE.main(arguments)
+    else:
+        assert MODULE.main(arguments) == 0
+    assert bool(cleanups) is cleaned
+    assert len(probes) == 2
+    assert client.closed
+    assert not (tmp_path / 'replica.db').exists()
+
+
+@pytest.mark.parametrize('preflight_code', [0, 23])
+def test_live_preflight_orders_workflow_before_cloud_download(tmp_path, preflight_code):
+    import os
+    import subprocess
+    import yaml
+    workflow = yaml.safe_load((SCRIPT.parents[1] / '.github/workflows/production-ede-v12-audit.yml').read_text())
+    body = next(s['run'] for s in workflow['jobs']['audit']['steps'] if s.get('id') == 'snapshot_export')
+    calls = tmp_path / 'calls'
+    fake_python = tmp_path / 'python'
+    fake_python.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\n'
+                           'case "$*" in *live-preflight*) exit "$PREFLIGHT_CODE";; esac\n')
+    fake_python.chmod(0o700)
+    result = subprocess.run(['bash', '-c', body], env={**os.environ, 'PATH': str(tmp_path) + ':' + os.environ['PATH'],
+        'CALLS': str(calls), 'SSH_PASSWORD': 'test-only', 'EXPECTED_SHA': 'a' * 40,
+        'PREFLIGHT_CODE': str(preflight_code),
+        'OUTPUT_DB': str(tmp_path / 'replica.db'), 'BUCKET': 'test-only',
+        'ACCEPTANCE_RUN_ID': 'test', 'RUN_ID': '123', 'EXACT_CHAIN': 'false'}, capture_output=True, text=True)
+    assert result.returncode == preflight_code
+    steps = calls.read_text().splitlines()
+    assert len(steps) == (1 if preflight_code else 3)
+    assert 'live-preflight' in steps[0]
+    if not preflight_code:
+        assert 'restore_verified_snapshot.py' in steps[1]
+        assert 'live-snapshot' in steps[2]
 
 
 def test_probe_retries_transient_timeout_without_relaxing_three_second_budget(monkeypatch):

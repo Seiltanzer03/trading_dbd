@@ -38,22 +38,24 @@ green CI. Не создавать новый источник/сервер/пр�
 
 ## Проверяемая линия завершения и текущая квитанция
 
-Последняя полностью принятая база — PR435/main14b2fe9d,
-actual deploy37982521624: delivery/readiness/smoke/public/orchestration и все
-семь status contexts success. Полный свежий backup не заявлен: действует
-ранее разрешённый low-disk/skip-local-restore режим.
+Последняя полностью принятая база — PR437/main9f8eb5a8,
+tree54df65c2, actual deploy38006081410: delivery/readiness/smoke/public/orchestration
+и все семь status contexts success. Passive status HTTP200/5ms. Полный свежий
+backup не заявлен: действует разрешённый low-disk/skip-local-restore режим.
+Exact-SHA math38007453654, source38007455551 и FOMC38007457339 опубликованы;
+финальная проверенная квитанция сохранена в PR437 metadata. A/C/D закрыты.
 
-PR436/main8eb522ed исправил измерение FOMC из уже сохранённых точных текстов.
-CI green и сервер установлен, но actual deploy37999591631 остановился на
-таймауте `/api/research/passive/status`; public/orchestration skipped.
-Это не принятое завершение. Новый пакет устраняет только этот воспроизведённый
-блокер: exact last-good materialization off HTTP, timestamp/error/staleness,
-UNKNOWN при устаревании, без фиктивных нулей и изменения risk/source gates.
+Следующий конечный эксплуатационный пакет: off-host экспорт отказал в
+38009715662 и38033277697 из-за928MiB вместо обязательного1GiB на VPS, но
+только после долгого скачивания cloud seed. Диагностика38035582796 подтверждает
+HTTP200/NRestarts0, Git38MiB и воспроизводимый apt cache113MiB. Ранняя проверка
+и опциональная ограниченная очистка apt indexes/cache под locks должны дать
+экспорт либо точный быстрый отказ. Runner/история/данные/логи сохраняются;
+резерв1GiB, SHA/API, seed/integrity и повторная live-проверка не ослабляются.
 
-Версия закрывается после единственного final scoped review, обязательного
-exact-tree CI, merge и фактического automatic deploy/readiness/smoke/public,
-сверки exact-SHA необходимых публикаций. Финальная квитанция с SHA и run IDs
-фиксируется в PR metadata после выполнения; запись pending не является успехом.
+Этот пакет ещё не принят: нужны exact-tree CI, фактический automatic deploy и
+квитанция следующего экспорта. Результат сохраняется в metadata нового PR.
+Недостаточный cache фиксируется как capacity dependency без нового цикла чисток.
 После этой линии не открывать заново закрытые A/C/D и не запускать новый
 search без новых входов. Дополнительные семейные модели и доказательство
 эффективности относятся к следующей версии с отдельным конечным объёмом.

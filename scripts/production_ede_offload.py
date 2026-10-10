@@ -12,6 +12,7 @@ The CPU-heavy EDE search itself must never run on production.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import pathlib
@@ -688,6 +689,38 @@ def snapshot(args: argparse.Namespace) -> int:
     return 0
 
 
+def live_preflight(args: argparse.Namespace) -> int:
+    """Admit before cloud restore; optional fixed-scope apt cache reclamation."""
+    from offhost_sqlite_snapshot import (
+        MIN_FREE_BYTES, source_stats, source_preflight, worker_preflight,
+    )
+    client = _connect(args.password)
+    try:
+        _verify_sha(client, args.expected_sha)
+        _probe_api(client)
+        stats = source_stats(client)
+        worker_preflight(stats, pathlib.Path(args.output_db))
+        print('LIVE_SQLITE_PREFLIGHT_INITIAL=' + json.dumps(stats, sort_keys=True), flush=True)
+        if args.reclaim_package_cache and stats['free'] < MIN_FREE_BYTES + 256 * 1024 ** 2:
+            # Execute this checked-out, reviewed helper in memory; no temporary
+            # server copy, shell path expansion or user-selected deletion root.
+            helper = pathlib.Path(__file__).with_name('reclaim_apt_cache.py').read_bytes()
+            encoded = base64.b64encode(helper).decode('ascii')
+            code = "import base64; exec(compile(base64.b64decode(" + repr(encoded) + "), '<apt-cache-reclaim>', 'exec'))"
+            report = json.loads(_exec(client, 'python3 -c ' + shlex.quote(code) + ' --apply', timeout=30))
+            if not isinstance(report, dict) or report.get('status') != 'APPLIED':
+                raise RuntimeError('Package cache reclamation receipt invalid')
+            print('LIVE_SQLITE_PACKAGE_CACHE=' + json.dumps(report, sort_keys=True), flush=True)
+        # A cleanup receipt cannot admit replication. Remeasure actual capacity
+        # and identity/API; live-snapshot repeats this after restore, too.
+        final = source_preflight(client, expected_sha=args.expected_sha,
+                                 output=pathlib.Path(args.output_db))
+        print('LIVE_SQLITE_PREFLIGHT_READY=' + json.dumps(final, sort_keys=True), flush=True)
+    finally:
+        client.close()
+    return 0
+
+
 def live_snapshot(args: argparse.Namespace) -> int:
     """Copy a consistent live DB directly to the worker without VPS disk use."""
     from offhost_sqlite_snapshot import replicate_live
@@ -854,6 +887,13 @@ def parser() -> argparse.ArgumentParser:
     live.add_argument("--output-db", required=True)
     live.add_argument('--seed-receipt')
     live.set_defaults(func=live_snapshot)
+
+    preflight = sub.add_parser('live-preflight')
+    preflight.add_argument('--password', required=True)
+    preflight.add_argument('--expected-sha', required=True)
+    preflight.add_argument('--output-db', required=True)
+    preflight.add_argument('--reclaim-package-cache', action='store_true')
+    preflight.set_defaults(func=live_preflight)
 
     install = sub.add_parser("install-historical-bundle")
     install.add_argument("--password", required=True)

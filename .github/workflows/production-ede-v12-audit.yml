@@ -233,6 +233,10 @@ jobs:
           BUCKET: trading-dbd-backups-2026
         run: |
           set -euo pipefail
+          # Refuse known capacity/identity failures before the large seed download.
+          python scripts/production_ede_offload.py live-preflight \
+            --password "$SSH_PASSWORD" --expected-sha "$EXPECTED_SHA" \
+            --output-db "$OUTPUT_DB" --reclaim-package-cache
           # Restore and verify on the worker before acquiring a live DB reader.
           # This receipt is a historical seed, never a fresh research manifest.
           python scripts/restore_verified_snapshot.py --live-seed \
