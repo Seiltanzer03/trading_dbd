@@ -1113,17 +1113,21 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     <div class="modal-actions"><button class="btn" id="ai-close">ЗАКРЫТЬ</button></div>`);
   $('#ai-close').addEventListener('click', closeModal);
   const out = $('#ai-verdict-text');
+  const requestTradeId = S.tick?.trade?.id ?? null;
   const refreshArmed = async () => {
     try {
       const position = await fetchStructured('/api/position');
+      if ($('#ai-verdict-text') !== out) return;
       mountArmedShadowActions(
         $("#ai-armed-actions"), position.shadow_actions, apiPost,
         async () => { await refreshJournalAndSetups(); });
     } catch (_) { /* Keep the verdict and existing controls usable. */ }
   };
   await refreshArmed();
+  if ($('#ai-verdict-text') !== out) return;
   try {
     const body = await fetchStructured('/api/ai/verdict', { method: 'POST' });
+    if ($('#ai-verdict-text') !== out) return;
     const warning = body.degraded
       ? 'LLM НЕДОСТУПЕН · ПОКАЗАН DETERMINISTIC РАЗБОР\nID: '
         + body.request_id + '\n\n'
@@ -1143,6 +1147,46 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     const status = err.status ? ` · HTTP ${err.status}` : '';
     const req = err.requestId ? `\nID: ${err.requestId}` : '';
     out.textContent = `ИИ-РАЗБОР НЕДОСТУПЕН${status}: ${err.message}${req}`;
+    if (err.status === 503 && err.code === 'authoritative_price_unavailable'
+        && requestTradeId !== null && $('#ai-verdict-text') === out) {
+      const errorText = out.textContent;
+      const archive = document.createElement('button');
+      archive.type = 'button';
+      archive.className = 'btn';
+      archive.textContent = 'ОТКРЫТЬ СОХРАНЁННЫЙ РАЗБОР';
+      archive.addEventListener('click', async () => {
+        archive.disabled = true;
+        try {
+          const history = await fetchStructured('/api/ai/history');
+          if ($('#ai-verdict-text') !== out) return;
+          if (S.tick?.trade?.id !== requestTradeId || history.trade_id !== requestTradeId) {
+            out.textContent = errorText + '\n\nСделка изменилась; откройте разбор текущей сделки заново.';
+            return;
+          }
+          const latest = Array.isArray(history.items) ? history.items.at(-1) : null;
+          if (!latest || typeof latest.verdict !== 'string' || !latest.verdict.trim()
+              || typeof latest.ts !== 'number' || !Number.isFinite(latest.ts)
+              || latest.ts <= 0 || latest.ts > Date.now() / 1000 + 1) {
+            out.textContent = errorText + '\n\nДля этой сделки нет пригодного сохранённого разбора.';
+            return;
+          }
+          out.textContent = errorText + '\n\nАРХИВНЫЙ РАЗБОР · НЕ НОВОЕ РЕШЕНИЕ\nСохранён: '
+            + new Date(latest.ts * 1000).toLocaleString('ru-RU')
+            + '\nЦена, веса и рекомендации ниже относятся к сохранённому разбору. '
+            + 'Для текущего решения нужны новые данные. Этот просмотр не регистрирует действий.\n\n'
+            + latest.verdict;
+          for (const id of ['#ai-edge-management', '#ai-management-execution',
+            '#ai-shadow-action', '#ai-armed-actions']) $(id)?.replaceChildren();
+        } catch (_) {
+          if ($('#ai-verdict-text') === out) out.textContent = errorText
+            + '\n\nНе удалось загрузить сохранённый разбор. Попробуйте кнопку «История». '
+            + 'Новый ИИ-запрос не запускался.';
+        } finally {
+          archive.disabled = false;
+        }
+      });
+      $('#ai-close').parentElement.prepend(archive);
+    }
   }
 });
 
