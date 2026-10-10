@@ -114,8 +114,17 @@ export function mountUnifiedEdgeEnsemble(container, audit) {
   const selected = audit.selected_candidate_id;
   const candidates = Array.isArray(audit.candidates) ? audit.candidates : [];
   const chosen = candidates.find((row) => row.candidate_id === selected) || {};
+  const alternatives = candidates.filter((row) => row.policy !== 'HOLD');
+  const admissionKnown = candidates.length > 0 && !audit.candidates_truncated_count
+    && candidates.every((row) => row && row.policy && typeof row.eligible === 'boolean')
+    && candidates.some((row) => row.policy === 'HOLD' && row.eligible === true
+      && (audit.selected_policy !== 'HOLD' || !selected || row.candidate_id === selected));
+  const admitted = alternatives.filter((row) => row.eligible === true).length;
   appendTextLine(panel, 'ai-execution-instruction',
     `${audit.selected_policy || '—'} · ${parameterText(chosen.parameters) || selected || '—'} · схема ${audit.scheme || '—'} · ${audit.instrument || '—'} · режим ${audit.regime || '—'}`);
+  if (admissionKnown) appendTextLine(panel, 'tiny', `Допущено вмешательств: ${admitted}/${alternatives.length}.`);
+  if (admissionKnown && audit.selected_policy === 'HOLD' && admitted === 0) appendTextLine(panel, 'ai-execution-warning',
+    'HOLD — единственное допустимое действие; это не доказательство рыночного преимущества удержания. Другие действия не прошли обязательный допуск; совпадение схем не доказывает устойчивость выбора к весам.');
   appendTextLine(panel, 'tiny',
     `Модельная экономика после издержек: Expected ${signed(chosen.expected_net_r, 'R')} · CVaR10 ${signed(chosen.cvar10_net_r, 'R')} · ΔExpected к HOLD ${signed(chosen.delta_expected_r, 'R')}.`);
   if (audit.regime_context) appendTextLine(panel, 'tiny dim',
@@ -128,6 +137,8 @@ export function mountUnifiedEdgeEnsemble(container, audit) {
   const bank = audit.scenario_bank || audit.comparison_bank;
   if (bank) appendTextLine(panel, 'tiny dim',
     `Банк ${bank.bank_id || '—'} · источник ${bank.source || '—'} · исходный авторитетный банк: ${bank.exact_authoritative_bank ? 'использован' : 'не использован'} · исполнение ${bank.execution_assumption || '—'}.`);
+  if (String(bank?.execution_assumption || '').includes('no_slippage')) appendTextLine(panel, 'ai-execution-warning',
+    'CVaR условен на модель исполнения: гэп и проскальзывание не включены; стоп/БУ не гарантирует этот нижний исход. Число сценариев не доказывает прогностическую точность.');
   appendTextLine(panel, 'tiny dim',
     'Δ общего сравнения не заменяет исходные ограничения риска, источников и независимого допуска. Раздел «Независимая консервативная проверка допуска» показывает собственные HOLD/Δ и метод; его отказ сохраняется при большем приросте общей модели.');
   appendTextLine(panel, 'tiny dim',
@@ -158,7 +169,7 @@ export function mountUnifiedEdgeEnsemble(container, audit) {
   appendAuditTable(detail, ['Действие · параметры', 'Статус / причина', 'Expected net', 'CVaR10 net', 'ΔExpected/HOLD', 'Балл', 'Вклад компонентов'],
     candidates.map((row) => [
       `${row.policy || '—'} · ${parameterText(row.parameters) || row.candidate_id || '—'}`,
-      `${row.candidate_id === selected ? 'выбран' : (row.ranking_eligible ?? row.eligible) ? 'допустим' : 'исключён'}${row.ranking_reason || row.reason ? ' · ' + (row.ranking_reason || row.reason) : ''}`,
+      `${row.candidate_id === selected ? 'выбран' : (row.ranking_eligible ?? row.eligible) ? 'допустим' : 'исключён'}${row.ranking_reason || row.reason ? ' · ' + (row.ranking_reason || row.reason) : ''}${row.admission_reason && row.admission_reason !== (row.ranking_reason || row.reason) ? ' · исходный допуск: ' + row.admission_reason : ''}`,
       signed(row.expected_net_r, 'R'), signed(row.cvar10_net_r, 'R'),
       signed(row.delta_expected_r, 'R'), signed(row.score), contributionText(row.component_contributions, label),
     ]));

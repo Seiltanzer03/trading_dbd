@@ -114,7 +114,9 @@ def _operational_availability(snapshot: dict[str, Any]) -> dict[str, str]:
     audit_detail = isinstance(audit_rows, dict) and bool(audit_rows)
     rule = manager.get("selection_rule") or {}
     indifference_ok = _number(rule.get("indifference_band_r")) is not None
+    from .ai_report_semantics_guard import authoritative_current_price_available
     return {
+        "authoritative_price": "AVAILABLE" if authoritative_current_price_available(snapshot) else "UNAVAILABLE",
         "execution_mc": "AVAILABLE" if execution_mc else "UNAVAILABLE",
         "scenario_geometry": "AVAILABLE" if scenario_ok else "UNAVAILABLE_OR_COMPACTED",
         "detailed_input_audit": "AVAILABLE" if audit_detail else "COMPACTED_OR_UNAVAILABLE",
@@ -129,6 +131,7 @@ def _quality_lines(snapshot: dict) -> list[str]:
             "Покрытие decision metrics:",
             "Контрактное покрытие семейств decision metrics:",
         )
+        lines[0] = lines[0].replace('Input audit:', 'Контрактное наличие групп входов (не торговый допуск):')
     states = _operational_availability(snapshot)
     partial = any(value != "AVAILABLE" for value in states.values())
     operational = "PARTIAL" if partial else "FULL"
@@ -136,6 +139,19 @@ def _quality_lines(snapshot: dict) -> list[str]:
     lines.insert(1, f"Операционная численная доступность: {operational}; {detail}.")
     lines.insert(2, "Покрытие семейств означает наличие контракта и роли; "
                  "НЕ означает численную доступность каждой производной и вероятности.")
+    unified = (snapshot.get('policy_manager') or {}).get('unified_edge_ensemble') or {}
+    if unified:
+        components = unified.get('components') or []
+        active = sum((_number(row.get('effective_weight')) or 0.) > 0. for row in components)
+        families = unified.get('edge_families') or {}
+        families = list(families.values()) if isinstance(families, dict) else families
+        forecasts = sum(row.get('forecast_available') is True for row in families)
+        working = sum(row.get('working_assessment_available') is True for row in families)
+        facts = sum(row.get('available') is True for row in families)
+        lines.insert(3, f'Активные компоненты ансамбля: {active}/{len(components)}. '
+                     f'Обученные прогнозы семейств: {forecasts}/{len(families)}; '
+                     f'рабочие интерпретации: {working}/{len(families)}; входные факты: {facts}/{len(families)}. '
+                     'FULL выше означает вычислимость перечисленного workspace, не готовность всех edge и не точность прогнозов.')
     geometry = snapshot.get("trade_geometry") or {}
     entry = _number(geometry.get("entry"))
     active = _number(geometry.get("active_risk_barrier"))
@@ -313,7 +329,11 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
     scores = [_number(value) for value in (shadow.get("policy_scores") or {}).values()]
     scores = [value for value in scores if value is not None]
     if len(scores) > 1 and max(scores) == min(scores):
-        llm_role = "голос не участвует; активный вес 0; причина CURRENT_LLM_NO_RELATIVE_PREFERENCE"
+        families = shadow.get('family_assessments') or {}
+        has_opinions = isinstance(families, dict) and any(isinstance(row, dict) and row for row in families.values())
+        llm_role = ('общая оценка нейтральна; семейные оценки проходят отдельный допуск; итоговый вес показан в едином выборе'
+                    if shadow.get('status') == 'ok' and has_opinions else
+                    'голос не участвует; активный вес 0; причина CURRENT_LLM_NO_RELATIVE_PREFERENCE')
     return (
         "**ВЕСА И РОЛИ РЕШЕНИЯ** —\n"
         "Ниже — базовая диагностика до единого выбора, не итоговые веса компонентов. "

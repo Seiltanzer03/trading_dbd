@@ -107,7 +107,7 @@ def authoritative_current_price_available(snapshot: dict[str, Any]) -> bool:
     source = str(row.get("source") or "")
     current = _number((snapshot.get("trade_geometry") or {}).get("current"))
     return bool(row.get("available") is True and status != "no_data"
-                and current is not None and not source.startswith("Bybit ")
+                and current is not None and not source.startswith(("Bybit ", "yfinance "))
                 and row.get("production_authority") is not False)
 
 
@@ -297,16 +297,16 @@ def _repair_indicative_price(lines: list[str], snapshot: dict[str, Any]) -> list
     row = (((snapshot.get("policy_manager") or {}).get("input_audit") or {})
            .get("rows") or {}).get("instrument_price") or {}
     source = str(row.get("source") or "")
-    if not source.startswith("Bybit ") and row.get("production_authority") is not False:
+    if not source.startswith(("Bybit ", "yfinance ")) and row.get("production_authority") is not False:
         return lines
     bounds = _section_bounds(lines, "**ДЕЙСТВИЕ СЕЙЧАС**")
     if bounds:
         lines[bounds[0]] = (
             "**ДЕЙСТВИЕ СЕЙЧАС** — ДЕЙСТВУЕТ СТРАТЕГИЯ; "
-            "НОВЫЕ AI-ДЕЙСТВИЯ ПО ОРИЕНТИРОВОЧНОЙ ЦЕНЕ BYBIT ЗАПРЕЩЕНЫ."
+            "НОВЫЕ AI-ДЕЙСТВИЯ ПО НЕАВТОРИТЕТНОЙ ЦЕНЕ ЗАПРЕЩЕНЫ."
         )
     _replace_section_body(lines, "**ДЕЙСТВИЕ СЕЙЧАС**", [
-        "Цена инструмента привязана к Bybit proxy; она не подтверждает брокерский "
+        f"Источник цены: {source or 'не указан'}; он не подтверждает брокерский "
         "стоп и исполнение. Сверьте цену и остаток позиции у брокера.",
         "Численные оценки ниже относятся только к proxy-сценарию и не дают "
         "права выставить новые ордера вне стратегии.",
@@ -416,6 +416,19 @@ def repair_report_semantics(text: str, snapshot: dict[str, Any]) -> str:
     lines = _repair_source_stability(lines, snapshot)
     lines = _repair_missing_current_price(lines, snapshot)
     lines = _repair_indicative_price(lines, snapshot)
+    from .unified_edge_audit import selection_context
+    context = selection_context(manager.get('unified_edge_ensemble'))
+    if context.get('mode') == 'HOLD_ONLY_ADMISSIBLE':
+        for index, line in enumerate(lines):
+            if line.startswith('**ДЕЙСТВИЕ СЕЙЧАС**'):
+                lines[index] = '**ДЕЙСТВИЕ СЕЙЧАС** — HOLD: НЕТ ДОПУЩЕННЫХ АЛЬТЕРНАТИВ.'
+            elif line.startswith('Статус: HOLD подтверждён'):
+                lines[index] = 'Статус: HOLD — единственное допустимое действие, нового внепланового исполнения нет.'
+        _replace_section_body(lines, '**ПОЧЕМУ ВЫБРАНО**', [
+            'HOLD — единственное допустимое действие; это не доказательство рыночного преимущества удержания.',
+            'Другие действия не прошли обязательный допуск. Сохраняется действующий стратегический план; '
+            'совпадение схем весов не подтверждает устойчивость рыночного выбора.',
+        ])
     lines = _repair_breached_stop(lines, snapshot)
 
     authority = (snapshot.get("ede_causal_context") or {}).get("authority") or {}

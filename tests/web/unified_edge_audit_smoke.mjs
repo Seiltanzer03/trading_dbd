@@ -60,6 +60,7 @@ assert.match(text,/Δ общего сравнения не заменяет/);
 assert.match(text,/Независимая консервативная проверка допуска/);
 assert.match(text,/frozen_option_driver_comparison/);
 assert.match(text,/исходный авторитетный банк: не использован/);
+assert.match(text,/гэп и проскальзывание не включены/);
 for (const scheme of ['balanced','llm20','quant100','legacy_control']) assert.ok(text.includes(scheme));
 const panel = container.children[0];
 const details = panel.children.find((child)=>child.tag==='details');
@@ -68,4 +69,20 @@ assert.match(details.textContent,/EXTEND_TAKE[\s\S]*исключён · EXPECTED
 audit.components[0].reason = '<img src=x onerror=alert(1)>';
 mountEdgeManagement(container,{unified_edge_ensemble:audit});
 assert.ok(container.textContent.includes(audit.components[0].reason));
+const blocked = {...audit, selected_policy:'HOLD', selected_candidate_id:'HOLD',
+  candidates:candidates.map((row)=>({...row,eligible:row.policy==='HOLD',ranking_eligible:row.policy==='HOLD',
+    reason:row.policy==='HOLD'?null:'AUTHORITATIVE_PRICE_UNAVAILABLE',ranking_reason:null,
+    admission_reason:row.policy==='MOVE_TO_BE'?'ACTION_PARAMETERS_OR_EVALUATION_UNAVAILABLE':null}))};
+mountEdgeManagement(container,{unified_edge_ensemble:blocked});
+assert.match(container.textContent,/единственное допустимое действие/);
+assert.match(container.textContent,/совпадение схем не доказывает устойчивость/);
+assert.match(container.textContent,/исходный допуск: ACTION_PARAMETERS_OR_EVALUATION_UNAVAILABLE/);
+for (const incomplete of [
+  {...blocked,candidates:blocked.candidates.map((row)=>({...row,eligible:false}))},
+  {...blocked,candidates:blocked.candidates.filter((row)=>row.policy!=='HOLD')},
+  {...blocked,candidates_truncated_count:1},
+]) {
+  mountEdgeManagement(container,{unified_edge_ensemble:incomplete});
+  assert.doesNotMatch(container.textContent,/единственное допустимое действие/);
+}
 console.log('Unified edge audit rendering smoke: PASS');
