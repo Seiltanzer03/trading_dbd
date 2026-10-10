@@ -20,7 +20,7 @@ import { fetchStructured } from './safe_fetch.js';
 import { mountJournalManagement, totalAfterRemainingExit } from './journal_management.js';
 import {
   mountEdgeManagement, mountManagementDecision, mountShadowWorkingAction,
-  mountArmedShadowActions,
+  mountArmedShadowActions, mountArchivedManagement,
 } from './management_ui.js';
 
 initTooltips();
@@ -1083,22 +1083,41 @@ $('#modal-back').addEventListener('click', (e) => {
   if (e.target === $('#modal-back')) closeModal();
 });
 
-$('#btn-ai-history').addEventListener('click', () => {
+$('#btn-ai-history').addEventListener('click', async () => {
   openModal(`
     <h3>ИИ · РАЗБОРЫ ТЕКУЩЕЙ СДЕЛКИ</h3>
     <div id="ai-history-list"></div>
     <div class="modal-actions"><button class="btn" id="ai-history-close">ЗАКРЫТЬ</button></div>`);
   const list = $('#ai-history-list');
-  [...(S.aiHistory || [])].reverse().forEach((item) => {
+  const tradeId = S.tick?.trade?.id ?? null;
+  $('#ai-history-close').addEventListener('click', closeModal);
+  list.textContent = 'ЗАГРУЖАЮ СОХРАНЁННЫЕ РАЗБОРЫ…';
+  let history;
+  try {
+    history = await fetchStructured('/api/ai/history?include_management=true');
+  } catch (_) {
+    if ($('#ai-history-list') === list) list.textContent = 'Не удалось загрузить историю. Попробуйте снова; новый ИИ-запрос не запускался.';
+    return;
+  }
+  if ($('#ai-history-list') !== list) return;
+  if (tradeId === null || S.tick?.trade?.id !== tradeId || history.trade_id !== tradeId) {
+    list.textContent = 'Сделка изменилась; откройте историю текущей сделки заново.';
+    return;
+  }
+  list.replaceChildren();
+  const items = Array.isArray(history.items) ? history.items : [];
+  if (!items.length) list.textContent = 'Для этой сделки нет сохранённых разборов.';
+  [...items].reverse().forEach((item) => {
     const wrap = document.createElement('div'); wrap.className = 'ai-history-item';
     const timeEl = document.createElement('div'); timeEl.className = 'ai-history-time';
     timeEl.textContent = new Date(item.ts * 1000).toLocaleString('ru-RU')
       + (item.model ? ` · ${item.model}` : '');
     const report = document.createElement('pre'); report.className = 'ai-verdict-text';
     report.textContent = item.verdict;
-    wrap.append(timeEl, report); list.appendChild(wrap);
+    const management = document.createElement('div');
+    mountArchivedManagement(management, item.management_archive);
+    wrap.append(timeEl, report, management); list.appendChild(wrap);
   });
-  $('#ai-history-close').addEventListener('click', closeModal);
 });
 
 $('#btn-ai-verdict').addEventListener('click', async () => {
@@ -1157,7 +1176,7 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
       archive.addEventListener('click', async () => {
         archive.disabled = true;
         try {
-          const history = await fetchStructured('/api/ai/history');
+          const history = await fetchStructured('/api/ai/history?include_management=true');
           if ($('#ai-verdict-text') !== out) return;
           if (S.tick?.trade?.id !== requestTradeId || history.trade_id !== requestTradeId) {
             out.textContent = errorText + '\n\nСделка изменилась; откройте разбор текущей сделки заново.';
@@ -1177,6 +1196,7 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
             + latest.verdict;
           for (const id of ['#ai-edge-management', '#ai-management-execution',
             '#ai-shadow-action', '#ai-armed-actions']) $(id)?.replaceChildren();
+          mountArchivedManagement($('#ai-edge-management'), latest.management_archive);
         } catch (_) {
           if ($('#ai-verdict-text') === out) out.textContent = errorText
             + '\n\nНе удалось загрузить сохранённый разбор. Попробуйте кнопку «История». '

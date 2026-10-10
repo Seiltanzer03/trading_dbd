@@ -866,3 +866,21 @@ The one final review found a delayed older-modal position response could restore
 ACK controls beside archive text. A real callback race regression failed first;
 one bounded fix adds modal ownership guards before control rendering and before
 issuing/handling the replaced modal's new live request. No backend gate changed.
+
+## 2026-10-10 — Paired archived management panel
+
+User supplied the saved NAS100 report; its old text precedes PR440 semantics
+and is not rewritten. Existing ai_verdicts rows already retain the exact saved
+snapshot, but history exported only text/date/model. An opt-in history projection
+now reads the SAME row's bounded management decision and unified audit, preserving
+captured time separately from save time. Default state/history remains light.
+No current quote, new snapshot/provider calculation, registration or ACK occurs.
+
+Both normal history and the quote-503 archive shortcut show the saved plan,
+parameters, actual weights, all retained candidates, exclusions and comparisons
+through the existing audit renderer. The panel is explicitly archived and contains
+no execution controls. Missing/corrupt/wrong-trade context stays unavailable;
+saved text remains readable. Existing trade/modal ownership guards are preserved.
+Seven SQL regressions and real callback/renderer tests reproduced the missing
+projection/panel before the fix. Final profile, review, exact-tree CI and actual
+release receipts are recorded in this package PR; no new forecast/profit claimed.

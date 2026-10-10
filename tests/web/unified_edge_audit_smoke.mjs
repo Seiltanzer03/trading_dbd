@@ -14,7 +14,7 @@ class Element {
 globalThis.document = {createElement: (tag) => new Element(tag)};
 const source = fs.readFileSync('seiltanzer/web/js/management_ui.js', 'utf8')
   .replace(/^import .*;\n/gm, '').replace('mountG1SEvidencePanel();', '');
-const {mountEdgeManagement} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const {mountEdgeManagement, mountArchivedManagement} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const policies = ['HOLD','CLOSE_10','CLOSE_25','CLOSE_50','EXIT','MOVE_TO_BE',
   'TIGHTEN_STOP','TRAIL_GAMMA_FLIP','EXTEND_TAKE','REDUCE_TAKE','SCALE_OUT_ON_SPIKE','TIME_STOP'];
 const candidates = policies.map((policy) => ({candidate_id:policy,policy,
@@ -84,5 +84,29 @@ for (const incomplete of [
 ]) {
   mountEdgeManagement(container,{unified_edge_ensemble:incomplete});
   assert.doesNotMatch(container.textContent,/единственное допустимое действие/);
+}
+mountArchivedManagement(container, {available:true,execution_allowed:false,captured_ts:1700000000,
+  decision:{policy:'HOLD',status:'pending',decision_id:'saved-1'},unified_edge_ensemble:blocked});
+assert.match(container.textContent,/АРХИВНЫЙ МЕНЕДЖМЕНТ/);
+assert.match(container.textContent,/Снимок расчётов:/);
+assert.match(container.textContent,/не новое решение/i);
+assert.match(container.textContent,/saved-1/);
+assert.match(container.textContent,/единственное допустимое действие/);
+assert.match(container.textContent,/Expected/);
+assert.doesNotMatch(container.textContent,/Исполняется единственный действующий план/);
+function tags(element) { return [element.tag,...element.children.flatMap(tags)]; }
+assert.ok(!tags(container).some((tag)=>['button','input','form'].includes(tag)), 'archive contains no execution controls');
+mountArchivedManagement(container, {available:false,execution_allowed:false});
+assert.match(container.textContent,/не сохранён/);
+assert.doesNotMatch(container.textContent,/Expected/);
+for (const malformedAudit of [
+  {components:[{component_id:'quant',source_ids:'legacy scalar'}]},
+  {selected_candidate_id:'HOLD',candidates:[{candidate_id:'HOLD',policy:'HOLD',component_contributions:[null]}]},
+]) {
+  mountArchivedManagement(container, {available:true,execution_allowed:false,captured_ts:1700000000,
+    decision:{policy:'HOLD'},unified_edge_ensemble:malformedAudit});
+  assert.match(container.textContent,/Сохранённый план: HOLD/);
+  assert.match(container.textContent,/аудит.*недоступен/i);
+  assert.ok(!tags(container).some((tag)=>['button','input','form'].includes(tag)));
 }
 console.log('Unified edge audit rendering smoke: PASS');
