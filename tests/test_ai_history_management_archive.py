@@ -91,3 +91,38 @@ def test_history_api_reads_saved_management_without_quote_or_provider(tmp_path, 
             assert engine.journal._conn.total_changes == before
     finally:
         engine.close()
+
+
+@pytest.mark.parametrize('policy,status', [('HOLD', 'not_required'), ('CLOSE_25', 'pending_execution')])
+def test_archive_preserves_native_preview_execution_status(journal, tmp_path, policy, status):
+    from seiltanzer.position_state import PositionLedger
+    ledger = PositionLedger(str(tmp_path / 'position.db'))
+    try:
+        trade = journal.open_trade(3, 'NAS100', 'long', 100, 99, 102.5)
+        snapshot = {'trade_id': trade['id'], 'captured_ts': 1700000000,
+                    'policy_manager': {'recommendation': {'policy': policy}}}
+        decision = ledger.preview_decision(snapshot, trade)
+        assert decision['execution_status'] == status
+        snapshot['policy_manager']['management_decision'] = decision
+        journal.record_ai_verdict(trade['id'], snapshot, 'native report')
+        before = journal._conn.total_changes
+        saved = journal.recent_ai_verdicts(trade['id'], include_management=True)[0]['management_archive']
+        assert saved['decision']['execution_status'] == status
+        assert saved['decision']['instruction_ru'] == decision['instruction_ru']
+        assert saved['execution_allowed'] is False
+        assert journal._conn.total_changes == before
+    finally:
+        ledger.close()
+
+
+def test_extended_archived_plan_preserves_bounded_numeric_parameters(journal):
+    trade = journal.open_trade(3, 'NAS100', 'long', 100, 99, 102.5)
+    decision = {'policy': 'TIGHTEN_STOP', 'execution_status': 'pending_execution',
+                'instruction_ru': 'Стоп 100.2.', 'parameters': {'stop_price': 100.2,
+                    'take_price': True, 'deadline_ts': float('nan'), 'private_extra': 'omit'}}
+    journal.record_ai_verdict(trade['id'], {'trade_id': trade['id'], 'captured_ts': 1700000000,
+        'policy_manager': {'management_decision': decision}}, 'extended report')
+    saved = journal.recent_ai_verdicts(trade['id'], include_management=True)[0]['management_archive']
+    assert saved['decision']['parameters'] == {'stop_price': 100.2}
+    assert saved['decision']['execution_status'] == 'pending_execution'
+    assert saved['execution_allowed'] is False

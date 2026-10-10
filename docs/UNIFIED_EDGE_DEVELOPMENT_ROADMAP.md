@@ -884,3 +884,38 @@ saved text remains readable. Existing trade/modal ownership guards are preserved
 Seven SQL regressions and real callback/renderer tests reproduced the missing
 projection/panel before the fix. Final profile, review, exact-tree CI and actual
 release receipts are recorded in this package PR; no new forecast/profit claimed.
+
+## 2026-10-10 — Independent family admission and native archived plan
+
+The latest supplied file is again the saved 14:51 NAS100 report with an archive
+panel; its old zero weights and FULL wording do not measure current code. No
+new provider call, historical search or broker-cost work is needed for this fix.
+Two non-weekend defects were reproduced: one malformed optional family erased
+the entire otherwise valid LLM response; the archive projected `status` while
+native decisions use `execution_status`, and omitted saved instructions/parameters.
+
+Each of the eight optional family opinions now undergoes the unchanged strict
+validation independently. Invalid families cannot vote and retain an explicit
+bounded rejection; valid global/other-family opinions survive both combined and
+standalone transports. Actual feature/provenance/clock, dependency, total budget
+and hard-risk admission remain unchanged. Malformed core scores still fail closed.
+The archive shows native execution status (legacy fallback), saved instruction
+and six allowlisted finite numeric action parameters, with no execution controls.
+
+RED: eight Python regressions and the real archive renderer failed on the
+accepted baseline. GREEN: the source-bound ranking regression also proves that
+a bad event opinion cannot cancel an admitted macro contribution, the budget
+still sums to100%, all12 candidates remain and hard CVaR still blocks the action.
+Native PositionLedger HOLD/CLOSE_25 snapshots verify the archive contract.
+Final independent read-only review found one Important: the standalone response
+omitted captured_ts, so retained family opinions still could not vote. A mocked
+real transport/ranking regression reproduced it; the response now carries the
+same frozen input cutoff supplied to the provider. The regression confirms an
+admitted macro changes CLOSE_25 to CLOSE_10 while the malformed event stays
+excluded, and a hard-CVaR refusal still blocks CLOSE_10. No other findings.
+Final affected profile340passed (one known Starlette warning); three real UI
+smokes, JS syntax and diff check passed. Only the affected transport/ranking
+profile was repeated after the one review fix; full mandatory CI runs remotely.
+Release evidence, final review and exact-SHA acceptance belong to this package PR.
+Finish line: these two verified defects and server acceptance; no new model,
+proxy authority, weight optimization or future-data wait is included.

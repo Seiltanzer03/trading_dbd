@@ -96,6 +96,13 @@ assert.match(container.textContent,/Expected/);
 assert.doesNotMatch(container.textContent,/Исполняется единственный действующий план/);
 function tags(element) { return [element.tag,...element.children.flatMap(tags)]; }
 assert.ok(!tags(container).some((tag)=>['button','input','form'].includes(tag)), 'archive contains no execution controls');
+mountArchivedManagement(container, {available:true,execution_allowed:false,captured_ts:1700000000,
+  decision:{policy:'TIGHTEN_STOP',execution_status:'pending_execution',status:'legacy-status',
+    instruction_ru:'Сохранённая инструкция <script>unsafe</script>',parameters:{stop_price:100.2}}});
+assert.match(container.textContent,/статус на момент снимка: pending_execution/);
+assert.match(container.textContent,/stop_price=100.2/);
+assert.match(container.textContent,/Сохранённая инструкция <script>unsafe<\/script>/);
+assert.ok(!tags(container).some((tag)=>['button','input','form','script'].includes(tag)));
 mountArchivedManagement(container, {available:false,execution_allowed:false});
 assert.match(container.textContent,/не сохранён/);
 assert.doesNotMatch(container.textContent,/Expected/);
