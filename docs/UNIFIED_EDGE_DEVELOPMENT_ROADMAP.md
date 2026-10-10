@@ -845,3 +845,24 @@ cannot be labelled admitted, and truncated candidate sets cannot imply exhaustiv
 rejection. Three regressions and renderer reproduced them; one bounded fix pass
 requires the selected HOLD itself admitted and retains truncation across
 compaction. Missing/incomplete evidence remains unclassified, not a market claim.
+
+## 2026-10-10 — Weekend access to the saved AI review
+
+PR440/main94191340 completed deploy38055884354 and all seven production/CI
+contexts are green. New requests correctly return the explicit quote-authority
+503 when a fresh broker quote is unavailable; that does not prohibit reading
+the previously saved review. The existing AI modal now offers a saved-review
+button for that specific failure and reads the existing /api/ai/history route.
+The original text remains unchanged, with its save date and a prominent archive
+warning. It is not a new calculation or current trading recommendation.
+
+One actual callback regression failed before the bounded UI change. It now
+checks the archive path, no second POST/LLM, missing/malformed history, wrong or
+changed trade, replaced modal, safe text rendering and unrelated errors. Archive
+view clears execution controls; quote/risk gates, journal and provider paths
+remain unchanged. No new provider, model, refit or source switching. Final review,
+exact-tree full CI and actual new production receipts belong in the package PR.
+The one final review found a delayed older-modal position response could restore
+ACK controls beside archive text. A real callback race regression failed first;
+one bounded fix adds modal ownership guards before control rendering and before
+issuing/handling the replaced modal's new live request. No backend gate changed.
