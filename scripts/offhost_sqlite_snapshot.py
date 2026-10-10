@@ -26,6 +26,42 @@ AMALGAMATION_SHA3 = '628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed7628561222
 MIN_FREE_BYTES = 1024 ** 3
 REPLICA_IDLE_SECONDS = 600
 REPLICA_MAX_SECONDS = 2700
+SOURCE_STAT_COMMAND = 'python3 -c ' + shlex.quote(
+    "import json,os; p='/opt/seiltanzer/data/trades.db'; v=os.statvfs(p); "
+    "print(json.dumps({'size':os.stat(p).st_size,'free':v.f_bavail*v.f_frsize,"
+    "'wal_bytes':os.path.getsize(p+'-wal') if os.path.exists(p+'-wal') else 0}))"
+)
+
+
+def source_stats(client) -> dict:
+    from production_ede_offload import _exec
+    stats = json.loads(_exec(client, SOURCE_STAT_COMMAND, timeout=10).strip())
+    if not isinstance(stats, dict) or any(
+        type(stats.get(key)) is not int or stats[key] < 0
+        for key in ('size', 'free', 'wal_bytes')
+    ) or stats['size'] == 0:
+        raise RuntimeError('Invalid production capacity measurement')
+    return stats
+
+
+def source_preflight(client, *, expected_sha: str, output: Path) -> dict:
+    """Read-only admission; actual replication repeats it after seed restore."""
+    from production_ede_offload import _verify_sha, _probe_api
+    _verify_sha(client, expected_sha)
+    _probe_api(client)
+    stats = source_stats(client)
+    if stats['free'] < MIN_FREE_BYTES:
+        raise RuntimeError('Production lacks WAL growth headroom')
+    worker_preflight(stats, output)
+    return stats
+
+
+def worker_preflight(stats: dict, output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # The seeded database is already resident at actual replication. Keep the
+    # original worst-case rewritten WAL/journal reserve after restore as well.
+    if shutil.disk_usage(output.parent).free < stats['size'] + 2 * MIN_FREE_BYTES:
+        raise RuntimeError('Worker lacks space for replica and bounded headroom')
 
 
 def _replica_progress(pid: int, output: Path) -> tuple[int, int, int]:
@@ -153,20 +189,12 @@ def _replicate_live(client, *, password: str, expected_sha: str,
 
     if not run_id.isdigit():
         raise ValueError('run_id must be numeric')
+    stats = source_preflight(client, expected_sha=expected_sha, output=output)
     seed = verify_seed(output,seed_receipt) if seed_receipt is not None else None
     if seed is None and (output.exists() or any(Path(str(output) + suffix).exists() for suffix in ('-wal', '-shm'))):
         raise ValueError('Replica destination must be new')
     output.parent.mkdir(parents=True, exist_ok=True)
-    _verify_sha(client, expected_sha)
-    _probe_api(client)
-    stat_command = (
-        "python3 -c " + shlex.quote(
-            "import json,os; p='/opt/seiltanzer/data/trades.db'; v=os.statvfs(p); "
-            "print(json.dumps({'size':os.stat(p).st_size,'free':v.f_bavail*v.f_frsize,"
-            "'wal_bytes':os.path.getsize(p+'-wal') if os.path.exists(p+'-wal') else 0}))"
-        )
-    )
-    stats = json.loads(_exec(client, stat_command, timeout=10).strip())
+    stat_command = SOURCE_STAT_COMMAND
     initial_wal=stats['wal_bytes']
     initial_free=stats['free']
     def log_capacity(current):
@@ -174,12 +202,6 @@ def _replicate_live(client, *, password: str, expected_sha: str,
               f"free_delta_bytes={current['free']-initial_free} wal_bytes={current['wal_bytes']} "
               f"wal_delta_bytes={current['wal_bytes']-initial_wal}",flush=True)
     log_capacity(stats)
-    # A seeded DB is already resident; this free reserve covers worst-case
-    # rewritten WAL/journal pages, not a second allocation of the seed itself.
-    if shutil.disk_usage(output.parent).free < stats['size'] + 2 * MIN_FREE_BYTES:
-        raise RuntimeError('Worker lacks space for replica and bounded headroom')
-    if stats['free'] < MIN_FREE_BYTES:
-        raise RuntimeError('Production lacks WAL growth headroom')
     remote_dir = f'/tmp/seiltanzer-sqlite-tools-{run_id}'
     remote_binary = remote_dir + '/sqlite3_rsync'
     remote_wrapper = remote_dir + '/origin'
