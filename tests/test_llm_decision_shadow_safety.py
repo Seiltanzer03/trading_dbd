@@ -89,6 +89,10 @@ def test_shadow_provider_default_timeout_is_tightly_bounded(monkeypatch):
                             "reason_ru": "Expected и CVaR допускают HOLD.",
                             "key_evidence": ["HOLD CVaR10=-0.70R"],
                             "counter_evidence": [],
+                            "family_assessments": {
+                                "macro": {"feature_names": ["macro.actual"],
+                                          "policy_scores": {"HOLD": .2}, "reason_ru": "Observed macro."},
+                                "event": {"bad": "format"}},
                         }, ensure_ascii=False)
                     }
                 }],
@@ -117,6 +121,8 @@ def test_shadow_provider_default_timeout_is_tightly_bounded(monkeypatch):
     assert seen["timeout"] == 10.0
     assert result["status"] == "ok"
     assert result["production_authority"] is False
+    assert result['family_assessments']['macro']['policy_scores'] == {'HOLD': .2}
+    assert result['family_assessment_rejections'] == {'event': 'INVALID_WORKING_FAMILY_ASSESSMENT'}
 
 
 def test_shadow_timeout_env_is_capped(monkeypatch):

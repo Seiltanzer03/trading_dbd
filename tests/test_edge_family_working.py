@@ -150,11 +150,14 @@ def test_provider_failure_cannot_leave_family_votes_active(status):
     assert all(not row['working_assessment_available'] for row in result['families'].values())
 
 
-def test_source_bound_family_opinion_changes_ranking_inside_existing_llm_budget():
+@pytest.mark.parametrize('malformed', [False, True])
+def test_source_bound_family_opinion_changes_ranking_inside_existing_llm_budget(malformed):
     from seiltanzer.unified_edge_ensemble import build_unified_ensemble
     frozen = frozen_all()
     llm = assessment(policy_scores={'HOLD': 0., 'CLOSE_10': 0., 'CLOSE_25': 0.},
                      family_assessments={'macro': opinion('macro')})
+    if malformed:
+        llm['family_assessments']['event'] = {'bad': 'format'}
     baseline = build_unified_ensemble(frozen)
     actual = build_unified_ensemble(frozen, llm)
     assert baseline['selected_policy'] == 'CLOSE_25'
@@ -178,7 +181,8 @@ def test_payload_parser_preserves_optional_source_bound_family_opinions():
     assert _validate_model_payload(payload)['family_assessments'] == payload['family_assessments']
 
 
-def test_family_assessments_survive_combined_single_provider_response(monkeypatch):
+@pytest.mark.parametrize('malformed', [False, True])
+def test_family_assessments_survive_combined_single_provider_response(monkeypatch, malformed):
     import seiltanzer.ai_runtime_report_v20 as report
     from seiltanzer.llm_decision_shadow import VALID_POLICIES
     frozen = frozen_all()
@@ -188,6 +192,8 @@ def test_family_assessments_survive_combined_single_provider_response(monkeypatc
         'policy': 'HOLD', 'confidence': .4, 'reason_ru': 'Ограниченная оценка.',
         'policy_scores': {key: float(key == 'HOLD') for key in VALID_POLICIES},
         'family_assessments': {'macro': opinion('macro')}}}
+    if malformed:
+        payload['shadow_decision']['family_assessments']['event'] = opinion('event', {'HOLD': True})
     content = json.dumps(payload, ensure_ascii=False)
     calls = []
 
@@ -218,11 +224,75 @@ def test_family_assessments_survive_combined_single_provider_response(monkeypatc
     monkeypatch.setattr(report.ai_verdict, '_validate_model_report', lambda *args: [])
     result = report.request_explanation_with_shadow(frozen, authoritative_snapshot=frozen)
     assert len(calls) == 1
-    assert result['llm_shadow_decision']['family_assessments'] == payload['shadow_decision']['family_assessments']
+    shadow = result['llm_shadow_decision']
+    assert shadow['family_assessments'] == {'macro': opinion('macro')}
+    assert shadow['status'] == 'ok'
+    if malformed:
+        assert shadow['family_assessment_rejections'] == {'event': 'INVALID_WORKING_FAMILY_ASSESSMENT'}
+        actual = working(frozen, shadow)
+        assert actual['families']['macro']['working_assessment_available'] is True
+        assert actual['families']['event']['working_assessment_available'] is False
+        assert actual['families']['event']['working_assessment_reason'] == 'INVALID_WORKING_FAMILY_ASSESSMENT'
     actual_input = json.loads(calls[0]['messages'][1]['content'].split('\n', 1)[1])
     assert actual_input['edge_family_facts']['macro']['features']['macro.expected_rate_change'] == -.2
     assert 'family_assessments' in calls[0]['messages'][0]['content']
     assert 'management_decision' not in actual_input['policy_manager']
+
+
+@pytest.mark.parametrize('invalid', [[], {'event': {'policy_scores': {'HOLD': True}}}, {'unknown': {}}])
+def test_optional_family_errors_do_not_erase_valid_global_opinion(invalid):
+    from seiltanzer.llm_decision_shadow import _validate_model_payload, VALID_POLICIES
+    payload = {'policy': 'HOLD', 'confidence': .4, 'reason_ru': 'Observed facts.',
+               'policy_scores': {key: float(key == 'HOLD') for key in VALID_POLICIES},
+               'family_assessments': invalid}
+    before = deepcopy(payload)
+    parsed = _validate_model_payload(payload)
+    assert parsed['policy_scores'] == payload['policy_scores']
+    assert parsed['family_assessments'] == {}
+    assert parsed['family_assessment_rejections']
+    assert payload == before
+
+
+def test_raw_malformed_family_cannot_cancel_other_source_bound_opinions():
+    llm = assessment(family_assessments={'macro': opinion('macro'), 'event': {'bad': 'format'}})
+    actual = working(frozen_all(), llm)
+    assert actual['accepted_count'] == 1
+    assert actual['families']['macro']['working_assessment_available'] is True
+    assert actual['families']['event']['working_assessment_reason'] == 'INVALID_WORKING_FAMILY_ASSESSMENT'
+
+
+def test_standalone_opinions_keep_frozen_clock_and_affect_guarded_ranking(monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    import seiltanzer.llm_decision_shadow as transport
+    from seiltanzer.unified_edge_ensemble import build_unified_ensemble
+    frozen = frozen_all()
+    before = deepcopy(frozen)
+    payload = {'policy': 'HOLD', 'confidence': .4, 'reason_ru': 'Observed facts.',
+               'policy_scores': {key: 0. for key in transport.VALID_POLICIES},
+               'family_assessments': {'macro': opinion('macro'), 'event': {'bad': 'format'}}}
+    calls = []
+    def post(*args, **kwargs):
+        calls.append(kwargs['json'])
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {
+            'model': 'test', 'choices': [{'message': {'content': json.dumps(payload)}}]})
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'test')
+    monkeypatch.setattr(transport.httpx, 'Client', lambda **kwargs: nullcontext(SimpleNamespace(post=post)))
+    llm = transport.request_shadow_decision(frozen)
+    assert llm['captured_ts'] == frozen['captured_ts']
+    assert llm['status'] == 'ok'
+    assert len(calls) == 1
+    assert frozen == before
+    baseline = build_unified_ensemble(frozen)
+    actual = build_unified_ensemble(frozen, llm)
+    assert baseline['selected_policy'] == 'CLOSE_25'
+    assert actual['selected_policy'] == 'CLOSE_10'
+    assert actual['edge_families']['macro']['working_assessment_available'] is True
+    assert actual['edge_families']['event']['working_assessment_reason'] == 'INVALID_WORKING_FAMILY_ASSESSMENT'
+    assert sum(row['effective_weight'] for row in actual['components']) == pytest.approx(1.)
+    assert len(actual['candidates']) == 12
+    frozen['policy_manager']['policies']['CLOSE_10']['cvar10_r'] = -.5
+    assert build_unified_ensemble(frozen, llm)['selected_policy'] != 'CLOSE_10'
 
 
 def test_family_contributions_and_ablation_use_the_same_frozen_candidates():

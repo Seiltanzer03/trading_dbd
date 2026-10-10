@@ -492,6 +492,7 @@ def request_explanation_with_shadow(
         "policy_scores": parsed_shadow["policy_scores"],
         "evidence_families": parsed_shadow["evidence_families"],
         "family_assessments": parsed_shadow.get("family_assessments", {}),
+        "family_assessment_rejections": parsed_shadow.get("family_assessment_rejections", {}),
         "invalidation_conditions": parsed_shadow["invalidation_conditions"],
         "selection_masked": True,
         "captured_ts": authority.get("captured_ts"),

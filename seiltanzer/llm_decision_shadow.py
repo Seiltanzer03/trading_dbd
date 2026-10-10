@@ -258,8 +258,9 @@ def _validate_model_payload(payload: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError("shadow_invalid_policy_scores")
         result["policy_scores"] = parsed_scores
     if 'family_assessments' in payload:
-        from .edge_family_working import parse_family_assessments
-        result['family_assessments'] = parse_family_assessments(payload['family_assessments'])
+        from .edge_family_working import isolate_family_assessments
+        result['family_assessments'], result['family_assessment_rejections'] = isolate_family_assessments(
+            payload['family_assessments'])
     return result
 
 
@@ -383,6 +384,8 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
     # tightly bounded so this additive research layer cannot create a gateway
     # timeout on an otherwise successful verdict request.
     timeout = max(5.0, min(timeout, _MAX_SHADOW_TIMEOUT_SEC))
+    independent_input = _shadow_projection(snapshot)
+    input_captured_ts = independent_input.get('captured_ts')
     body = {
         "model": model,
         "temperature": 0.0,
@@ -394,7 +397,7 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "content": (
                     "Текущий bounded snapshot для независимого SHADOW-решения:\n"
                     + json.dumps(
-                        _shadow_projection(snapshot),
+                        independent_input,
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
@@ -443,6 +446,7 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
     result = {
         "version": SHADOW_VERSION,
         "status": "ok" if guard_ok else "blocked",
+        "captured_ts": input_captured_ts,
         "production_authority": False,
         "automatic_execution_allowed": False,
         "model": provider_payload.get("model") or model,
@@ -462,6 +466,9 @@ def request_shadow_decision(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
     if "policy_scores" in parsed:
         result["policy_scores"] = parsed["policy_scores"]
+    for key in ('family_assessments', 'family_assessment_rejections'):
+        if key in parsed:
+            result[key] = parsed[key]
     from .llm_shadow_working_action import build_working_action
     result["working_action"] = build_working_action(snapshot, result)
     finalize_extended_shadow(snapshot, result)

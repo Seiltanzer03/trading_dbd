@@ -49,6 +49,26 @@ def parse_family_assessments(value):
     return result
 
 
+def isolate_family_assessments(value):
+    """Validate each optional opinion independently; rejected rows never vote."""
+    if value is None:
+        return {}, {}
+    if not isinstance(value, dict):
+        return {}, {family: 'INVALID_WORKING_FAMILY_ASSESSMENT' for family in FAMILIES}
+    opinions, rejected = {}, {}
+    for family in FAMILIES:
+        if family not in value:
+            continue
+        try:
+            opinions.update(parse_family_assessments({family: value[family]}))
+        except RuntimeError:
+            rejected[family] = 'INVALID_WORKING_FAMILY_ASSESSMENT'
+    # Do not retain arbitrary provider keys/text in the bounded audit.
+    if not set(value).issubset(FAMILIES):
+        rejected['unknown_family'] = 'UNKNOWN_WORKING_FAMILY_ID'
+    return opinions, rejected
+
+
 def _groups(rows):
     """Connected source families: A, A+B and B cannot count as three votes."""
     groups = []
@@ -81,10 +101,12 @@ def working_family_preferences(families, llm, excluded_family=None):
     families = families if isinstance(families, dict) else {}
     global_scores = {key: float(value) for key, value in (llm.get('policy_scores') or {}).items()
                      if _number(value) is not None and -1 <= value <= 1}
-    try:
-        opinions = parse_family_assessments(llm.get('family_assessments'))
-    except RuntimeError:
-        opinions = {}
+    opinions, rejected = isolate_family_assessments(llm.get('family_assessments'))
+    stored_rejections = llm.get('family_assessment_rejections')
+    if isinstance(stored_rejections, dict):
+        for family in FAMILIES:
+            if stored_rejections.get(family) == 'INVALID_WORKING_FAMILY_ASSESSMENT':
+                rejected[family] = 'INVALID_WORKING_FAMILY_ASSESSMENT'
     cutoff = _number(llm.get('captured_ts'))
     rows, accepted = {}, []
     for family in FAMILIES:
@@ -96,6 +118,9 @@ def working_family_preferences(families, llm, excluded_family=None):
                    working_source_ids=[], working_evidence_family_ids=[],
                    working_historical_profit_proven=False)
         rows[family] = row
+        if family in rejected:
+            row['working_assessment_reason'] = rejected[family]
+            continue
         opinion = opinions.get(family)
         if not opinion:
             continue

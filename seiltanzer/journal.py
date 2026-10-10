@@ -817,9 +817,15 @@ class Journal:
             audit = compact_unified_ensemble(raw_audit)
             raw_decision = manager.get("management_decision")
             decision = ({key: value[:256] for key in (
-                "policy", "status", "decision_id", "authority", "continuity")
+                "policy", "status", "execution_status", "instruction_ru", "decision_id", "authority", "continuity")
                 if isinstance((value := raw_decision.get(key)), str)}
                 if isinstance(raw_decision, dict) else {})
+            parameters = raw_decision.get('parameters') if isinstance(raw_decision, dict) else None
+            if isinstance(parameters, dict):
+                decision['parameters'] = {key: value for key in (
+                    'stop_price', 'take_price', 'trigger_price', 'close_fraction', 'timeout_minutes', 'deadline_ts')
+                    if isinstance((value := parameters.get(key)), (int, float))
+                    and not isinstance(value, bool) and math.isfinite(value)}
             if not decision and not audit:
                 return unavailable
             return {"available": True, "execution_allowed": False,

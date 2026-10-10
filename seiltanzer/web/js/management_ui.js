@@ -223,7 +223,10 @@ export function mountArchivedManagement(container, archive) {
   appendTextLine(panel, 'tiny', 'Снимок расчётов: ' + (ts && ts > 0
     ? new Date(ts * 1000).toLocaleString('ru-RU') : 'время недоступно'));
   const decision = archive.decision || {};
-  appendTextLine(panel, 'tiny', `Сохранённый план: ${decision.policy || '—'} · статус на момент снимка: ${decision.status || '—'} · ID ${decision.decision_id || '—'}.`);
+  appendTextLine(panel, 'tiny', `Сохранённый план: ${decision.policy || '—'} · статус на момент снимка: ${decision.execution_status || decision.status || '—'} · ID ${decision.decision_id || '—'}.`);
+  if (decision.instruction_ru) appendTextLine(panel, 'tiny', `Сохранённая инструкция: ${decision.instruction_ru}`);
+  const parameters = parameterText(decision.parameters);
+  if (parameters) appendTextLine(panel, 'tiny', `Сохранённые параметры: ${parameters}`);
   const audit = document.createElement('div');
   try {
     mountUnifiedEdgeEnsemble(audit, archive.unified_edge_ensemble, {archived:true});
