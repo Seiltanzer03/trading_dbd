@@ -176,11 +176,20 @@ export function mountUnifiedEdgeEnsemble(container, audit) {
     : Object.entries(audit.edge_families || {}).map(([family_id, row]) => ({family_id, ...row}));
   if (edgeFamilies.length) {
     appendTextLine(panel, 'tiny', 'Семейства edge:');
-    appendAuditTable(panel, ['Семейство', 'Входы / прогноз', 'Статус / что требуется'], edgeFamilies.map((row) => [
+    appendTextLine(panel, 'tiny dim', 'Рабочая интерпретация LLM использует текущие факты и часть его общего веса. Историческая модель имеет отдельный допуск.');
+    appendAuditTable(panel, ['Семейство', 'Входы / исторический прогноз', 'Рабочая оценка · доля · вклад', 'Статус / что требуется'], edgeFamilies.map((row) => [
       row.family_id || row.edge_family || row.family || row.name || '—',
       `${row.available === true ? 'получены' : 'недоступны'} / ${row.forecast_available === true ? 'доступен' : 'недоступен'}`,
+      row.working_assessment_available === true
+        ? `рабочая интерпретация LLM · ${signed(row.working_score)} · ${percent(row.working_effective_weight)} · ${signed(row.working_contribution)} · ${row.working_reason_ru || '—'}`
+        : `недоступна · ${row.working_assessment_reason || 'NO_WORKING_FAMILY_ASSESSMENT'}`,
       `${row.readiness || row.status || 'UNAVAILABLE'} · ${row.reason || 'причина не сообщена'}${Array.isArray(row.needs_data) && row.needs_data.length ? ' · нужно: ' + row.needs_data.join(', ') : ''}`,
     ]));
+    const familyCounterfactuals = Array.isArray(audit.family_counterfactuals) ? audit.family_counterfactuals : [];
+    if (familyCounterfactuals.length) appendAuditTable(panel, ['Без рабочей оценки семейства', 'Решение', 'Изменение'],
+      familyCounterfactuals.map((row) => [row.excluded_family_id,
+        `${row.selected_policy || '—'} · ${row.selected_candidate_id || '—'}`,
+        !row.selected_candidate_id ? 'недоступно' : row.selected_candidate_id === selected ? 'не изменилось' : 'изменилось']));
   }
   container.appendChild(panel);
 }

@@ -33,7 +33,12 @@ const audit = {available:true,scheme:'balanced',instrument:'NAS100',regime:'TREN
   counterfactuals:[{excluded_component_id:'current_llm',selected_candidate_id:'HOLD',selected_policy:'HOLD'}],
   scheme_comparisons:['balanced','llm20','quant100','legacy_control'].map((scheme)=>({scheme,
     selected_policy:'HOLD',expected_net_r:.13,cvar10_net_r:-.5})),
-  edge_families:{order_flow:{status:'UNAVAILABLE',reason:'EXCHANGE_FLOW_FEED_UNAVAILABLE'}}};
+  family_counterfactuals:[{excluded_family_id:'macro',selected_candidate_id:'HOLD',selected_policy:'HOLD'}],
+  edge_families:{order_flow:{status:'UNAVAILABLE',reason:'EXCHANGE_FLOW_FEED_UNAVAILABLE'},
+    macro:{available:true,forecast_available:false,working_assessment_available:true,
+      working_assessment_kind:'CURRENT_LLM_SOURCE_INTERPRETATION',working_score:.5,
+      working_effective_weight:.0375,working_contribution:.01875,
+      working_reason_ru:'<img src=x onerror=alert(1)>',working_assessment_reason:'SOURCE_BOUND_MANUAL_INTERPRETATION'}}};
 const container = new Element();
 mountEdgeManagement(container,{available:false,unified_edge_ensemble:audit});
 const text = container.textContent;
@@ -45,6 +50,11 @@ assert.match(text,/ΔExpected к HOLD -0\.010R/);
 assert.match(text,/Expected \+0\.120R/);
 assert.doesNotMatch(text,/\+0\.730R/);
 assert.match(text,/EXCHANGE_FLOW_FEED_UNAVAILABLE/);
+assert.match(text,/рабочая интерпретация LLM/i);
+assert.match(text,/3\.8%/);
+assert.match(text,/\+0\.019/);
+assert.match(text,/Без рабочей оценки семейства/);
+assert.ok(text.includes('<img src=x onerror=alert(1)>'));
 assert.match(text,/историческая прибыль/i);
 assert.match(text,/Δ общего сравнения не заменяет/);
 assert.match(text,/Независимая консервативная проверка допуска/);

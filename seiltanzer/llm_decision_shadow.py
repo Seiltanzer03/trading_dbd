@@ -257,6 +257,9 @@ def _validate_model_payload(payload: dict[str, Any]) -> dict[str, Any]:
                for name, value in parsed_scores.items()):
             raise RuntimeError("shadow_invalid_policy_scores")
         result["policy_scores"] = parsed_scores
+    if 'family_assessments' in payload:
+        from .edge_family_working import parse_family_assessments
+        result['family_assessments'] = parse_family_assessments(payload['family_assessments'])
     return result
 
 
