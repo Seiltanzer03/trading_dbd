@@ -87,6 +87,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             "component_contributions", "component_scores", "intervention_cost_r",
             "ranking_eligible", "ranking_reason", "delta_cvar_r",
             "execution_cost_r", "economics_basis", "source",
+            "working_family_contributions",
         ),
         "components": (
             "component_id", "nominal_weight", "effective_weight", "availability",
@@ -103,6 +104,11 @@ def compact_unified_ensemble(value: Any) -> dict:
             "excluded_component_id", "selected_candidate_id", "selected_policy",
             "selected_parameters", "changed", "expected_net_r", "cvar10_net_r",
         ),
+        "family_counterfactuals": (
+            "excluded_family_id", "scheme", "selected_candidate_id", "selected_policy",
+            "expected_net_r", "cvar10_net_r", "execution_cost_r", "delta_expected_r",
+            "intervention", "evidence_type", "ablation_scope", "risk_and_cost_evaluation_preserved",
+        ),
         "scheme_comparisons": (
             "scheme", "selected_candidate_id", "selected_policy",
             "selected_parameters", "expected_net_r", "cvar10_net_r",
@@ -116,6 +122,10 @@ def compact_unified_ensemble(value: Any) -> dict:
             "production_role", "historical_validation_status", "component_id",
             "readiness", "forecast_available", "needs_data", "observed_ts", "max_age_sec",
             "weight_pool", "standalone_vote",
+            "working_assessment_available", "working_assessment_kind", "working_assessment_reason",
+            "working_reason_ru", "working_score", "working_effective_weight", "working_contribution",
+            "working_policy_scores", "working_feature_names", "working_source_ids",
+            "working_evidence_family_ids", "working_historical_profit_proven",
         ),
     }
     for key, keys in contracts.items():
@@ -236,4 +246,13 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
                      f"входы: {row.get('available', '—')}; прогноз: {row.get('forecast_available', '—')}; "
                      f"{row.get('reason') or 'причина не сообщена'}; "
                      f"нужно: {', '.join(str(item) for item in row.get('needs_data') or []) or '—'}.")
+        if row.get('working_assessment_available') is True:
+            lines.append(f"  Рабочая интерпретация LLM: {row.get('working_reason_ru') or '—'}; "
+                         f"оценка {_format(row.get('working_score'))}; "
+                         f"доля общего бюджета {_pct(row.get('working_effective_weight'))}; "
+                         f"вклад в балл {_format(row.get('working_contribution'))}; "
+                         "историческая модель и её допуск показаны отдельно.")
+    for row in audit.get('family_counterfactuals') or []:
+        lines.append(f"Без рабочей оценки {row.get('excluded_family_id')}: {row.get('selected_policy') or '—'} "
+                     f"({row.get('selected_candidate_id') or '—'}); историческая модель, риск и экономика сохранены.")
     return lines

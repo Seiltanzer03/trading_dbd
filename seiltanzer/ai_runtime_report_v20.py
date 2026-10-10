@@ -32,7 +32,7 @@ from .llm_shadow_working_action import build_working_action
 
 
 REPORT_VERSION = "ai-runtime-report-v20"
-COMBINED_PROVIDER_MAX_TOKENS = 1400
+COMBINED_PROVIDER_MAX_TOKENS = 2400
 INDEPENDENT_INPUT_MAX_BYTES = 60_000
 PROVIDER_RESPONSE_MAX_BYTES = 20_000
 _INSTALLED = False
@@ -54,6 +54,7 @@ Return ONLY one valid JSON object, no markdown:
     "key_evidence": ["3-6 strongest facts"],
     "counter_evidence": ["0-4 facts against your own shadow choice"],
     "evidence_families": ["observed family IDs from shadow_contract.available_evidence_family_ids"],
+    "family_assessments": {"macro": {"feature_names": ["exact name from edge_family_facts.macro.features"], "policy_scores": {"HOLD": 0.2, "CLOSE_25": -0.2}, "reason_ru": "brief interpretation of these observed features"}, "event": {}, "order_flow": {}, "intermarket": {}, "positioning": {}, "value_carry": {}, "option": {}, "session": {}},
     "invalidation_conditions": ["checkable conditions invalidating this preference"]
   }
 }
@@ -70,6 +71,13 @@ Correlated metrics from one family are not independent votes. Hard-CVaR eligibil
 is mandatory. Never widen stops, average down, or add to a losing position.
 Return all 12 policy_scores, each from -1 to 1: relative preferences, not
 probabilities or Expected R. Self-confidence never determines ensemble weight.
+Assess all eight families in family_assessments using ONLY the exact observed
+numeric features supplied in edge_family_facts. Use {} when no facts support an
+interpretation. For an available opinion cite1-4 exact feature_names, give1-3
+policy_scores in[-1,1] and reason_ru of at most240 characters. These are current
+manual LLM preferences sharing your existing budget, not validated historical
+forecasts or additional independent experts. Do not invent missing consensus,
+broker flow/carry, physical option forecasts or causal direction from a sign.
 No quant winner is supplied for comparison. A hard-guarded choice may become an exact
 manual-confirmation action variant. It still has zero automatic-execution authority;
 missing numeric stop/take/time parameters block the variant.
@@ -463,6 +471,7 @@ def request_explanation_with_shadow(
         "counter_evidence": parsed_shadow["counter_evidence"],
         "policy_scores": parsed_shadow["policy_scores"],
         "evidence_families": parsed_shadow["evidence_families"],
+        "family_assessments": parsed_shadow.get("family_assessments", {}),
         "invalidation_conditions": parsed_shadow["invalidation_conditions"],
         "selection_masked": True,
         "captured_ts": authority.get("captured_ts"),

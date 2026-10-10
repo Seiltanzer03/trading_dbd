@@ -258,11 +258,11 @@ def _llm_lineage(snapshot, llm, family_evidence=None):
     return sorted(accepted or {"price_path", "option_distribution"}), sorted(claimed - known)
 
 
-def collect_components(snapshot, candidates, current_llm=None):
+def collect_components(snapshot, candidates, current_llm=None, excluded_working_family=None, *, family_evidence=None):
     manager = snapshot.get("policy_manager") or {}
     captured = number(snapshot.get("captured_ts"))
     from .edge_family_adapters import build_edge_family_evidence
-    evidence = build_edge_family_evidence(snapshot)
+    evidence = family_evidence if family_evidence is not None else build_edge_family_evidence(snapshot)
     rows = [{"component_id": "quantitative_base", "available": True, "quality": 1.,
              "observed_ts": captured, "max_age_sec": 900., "scores": {},
              "source_ids": ["authoritative_execution_paths"],
@@ -307,12 +307,21 @@ def collect_components(snapshot, candidates, current_llm=None):
         # A single explicit choice is a sparse opinion. Unscored actions are
         # absent, not synthetic votes against those actions.
         scores = {llm["policy"]: 1.}
+    from .edge_family_working import working_family_preferences
+    global_flat_scores = len(scores) > 1 and max(scores.values()) == min(scores.values())
+    working = working_family_preferences(evidence.get('families'),
+        {**llm, 'policy_scores': scores}, excluded_family=excluded_working_family)
+    scores = working['scores']
     # An explicitly flat vector contains no relative opinion. Preserve legacy
     # sparse choices and differentiated opinions, regardless of self-confidence.
     flat_scores = len(scores) > 1 and max(scores.values()) == min(scores.values())
     llm_available = llm.get("status") == "ok" and bool(scores) and not flat_scores
     action = llm.get("working_action") or {}
     llm_families, rejected_families = _llm_lineage(snapshot, llm, evidence.get("families"))
+    if global_flat_scores and working['accepted_count']:
+        # A flat global vector has no directional opinion or source to dedup.
+        llm_families = []
+    llm_families = sorted(set(llm_families) | {_lineage(value) for value in working['evidence_family_ids']})
     lineage_status = (manager.get("evidence") or {}).get("lineage_budget_status") or {}
     rows.append({"component_id": "current_llm", "available": llm_available,
                  "quality": 1. if llm_available else 0.,
@@ -321,7 +330,7 @@ def collect_components(snapshot, candidates, current_llm=None):
                  "standalone_action_reason": action.get("reason"),
                  "observed_ts": number(llm.get("captured_ts", captured)),
                  "max_age_sec": 900., "scores": scores,
-                 "source_ids": ["current_snapshot_llm_interpretation"],
+                 "source_ids": ["current_snapshot_llm_interpretation", *working['source_ids']],
                  "evidence_family_ids": llm_families,
                  "unverified_claimed_family_ids": rejected_families,
                  "model_version": llm.get("model") or llm.get("contract_version"),
@@ -329,7 +338,10 @@ def collect_components(snapshot, candidates, current_llm=None):
                              "CURRENT_LLM_NO_RELATIVE_PREFERENCE" if flat_scores else "CURRENT_LLM_UNAVAILABLE")
                             + (";EVIDENCE_LINEAGE_EXCLUDED_BY_SNAPSHOT_BYTE_BUDGET"
                                if lineage_status.get("available") is False else "")),
-                 "self_confidence_used_for_weight": False})
+                 "self_confidence_used_for_weight": False,
+                 "working_family_attributions": working['attributions'],
+                 "working_family_weights": working['attribution_weights'],
+                 "working_family_count": working['accepted_count']})
     # Explicit model assessments can replace a legacy directional heuristic.
     # Family models consume an existing expert budget, never add new percentages.
     for spec in evidence.get("components") or []:
@@ -374,7 +386,13 @@ def collect_components(snapshot, candidates, current_llm=None):
         if spec.get("component_id") in COMPONENTS and spec.get("component_id") != "quantitative_base":
             index = COMPONENTS.index(spec["component_id"])
             rows[index] = {**rows[index], **deepcopy(spec)}
-    return rows, evidence.get("families") or {}
+            if spec.get('component_id') == 'current_llm':
+                for key in ('working_family_attributions', 'working_family_weights', 'working_family_count'):
+                    rows[index].pop(key, None)
+                for family in working['families'].values():
+                    family.update(working_assessment_available=False, working_policy_scores={},
+                                  working_assessment_reason='CURRENT_LLM_COMPONENT_OVERRIDDEN')
+    return rows, working['families']
 
 
 def _prepare_components(specs, snapshot, nominal, excluded=None):
@@ -520,7 +538,9 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
                 band = max(0., band if band is not None else .03)
                 if (number(priced.get("paired_delta_ci95_lower_r")) or 0.) <= band:
                     row.update(eligible=False, reason="COMMON_SCENARIO_NO_ROBUST_MATERIAL_BENEFIT")
-    specs, families = collect_components(snapshot, candidates, current_llm)
+    from .edge_family_adapters import build_edge_family_evidence
+    family_evidence = build_edge_family_evidence(snapshot)
+    specs, families = collect_components(snapshot, candidates, current_llm, family_evidence=family_evidence)
     if economics.get("available"):
         bank = economics.get("bank") or {}
         for component in specs:
@@ -541,6 +561,24 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
         without, _, _ = rank_candidates(candidates, specs, snapshot, schemes[scheme], identity)
         counterfactuals.append({"excluded_component_id": identity, **_comparison("without_" + identity, without),
                                "risk_and_cost_evaluation_preserved": True})
+    family_counterfactuals = []
+    for family, row in families.items():
+        if row.get('working_assessment_available') is not True:
+            continue
+        rebuilt_specs, _ = collect_components(snapshot, candidates, current_llm,
+            excluded_working_family=family, family_evidence=family_evidence)
+        rebuilt_llm = next(component for component in rebuilt_specs
+                           if component['component_id'] == 'current_llm')
+        # Only this interpretation changes; retain finalized bank identities,
+        # overrides and registry components used in the original comparison.
+        without_specs = [rebuilt_llm if component['component_id'] == 'current_llm' else component
+                         for component in specs]
+        without, _, _ = rank_candidates(candidates, without_specs, snapshot, schemes[scheme])
+        family_counterfactuals.append({'excluded_family_id': family,
+            **_comparison('without_working_' + family, without),
+            'ablation_scope': 'CURRENT_LLM_FAMILY_INTERPRETATION_ONLY',
+            'risk_and_cost_evaluation_preserved': True})
+    _attach_working_family_contributions(candidates, components, families, selected)
     comparisons = []
     for name, nominal in schemes.items():
         choice, _, _ = rank_candidates(candidates, specs, snapshot, nominal)
@@ -561,6 +599,7 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
             "reason": "WEIGHTED_AUTHORIZED_CANDIDATES" if selected else "NO_AUTHORIZED_CANDIDATE",
             "candidates": candidates, "components": components, "edge_families": families,
             "counterfactuals": counterfactuals, "scheme_comparisons": comparisons,
+            "family_counterfactuals": family_counterfactuals,
             "hard_risk_override": False, "automatic_execution_allowed": False,
             "score_semantics": "dimensionless_preferences_not_expected_return_or_probability",
             "economics_scope": ("one frozen option-driver comparison bank, piecewise-linear execution; "
@@ -574,3 +613,28 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
             "authoritative_bank_reused": economics.get("authoritative_bank_reused") is True,
             "historical_profit_proven": False,
             "regime_weight_semantics": "validated_applicability_only; unknown regime uses stated priors"}
+
+
+def _attach_working_family_contributions(candidates, components, families, selected):
+    """Attribute the actual per-action LLM weight; absent opinions remain null."""
+    current = next((row for row in components if row['component_id'] == 'current_llm'), {})
+    attributions = current.get('working_family_attributions') or {}
+    weights = current.get('working_family_weights') or {}
+    for candidate in candidates:
+        llm = next((row for row in candidate['component_contributions']
+                    if row['component_id'] == 'current_llm'), {})
+        applied = llm.get('effective_weight') or 0.
+        key = candidate['policy']
+        candidate['working_family_contributions'] = []
+        for family, row in families.items():
+            score = (row.get('working_policy_scores') or {}).get(key)
+            coefficient = (weights.get(key) or {}).get(family)
+            contribution = (attributions.get(key) or {}).get(family)
+            part = {'family_id': family, 'score': score,
+                    'within_llm_weight': coefficient,
+                    'effective_weight': applied * coefficient if coefficient is not None else 0.,
+                    'contribution': applied * contribution if contribution is not None else None}
+            candidate['working_family_contributions'].append(part)
+            if selected and candidate['candidate_id'] == selected['candidate_id']:
+                row.update(working_score=score, working_effective_weight=part['effective_weight'],
+                           working_contribution=part['contribution'])
