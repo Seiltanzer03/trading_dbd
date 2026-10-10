@@ -876,11 +876,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                  for key in ("value", "status", "source", "fallback")}}
 
     @app.get("/api/ai/history")
-    def api_ai_history():
+    def api_ai_history(include_management: bool = False):
         active = engine.journal.active_trade()
         return {
             "trade_id": active["id"] if active else None,
-            "items": (engine.journal.recent_ai_verdicts(active["id"], limit=10)
+            "items": (engine.journal.recent_ai_verdicts(active["id"], limit=10,
+                      **({"include_management": True} if include_management else {}))
                       if active else []),
         }
 

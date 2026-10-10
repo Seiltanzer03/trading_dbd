@@ -773,13 +773,60 @@ class Journal:
             "contract": "reviewed report required; sample count never auto-promotes",
         }
 
-    def recent_ai_verdicts(self, trade_id: int, limit: int = 3) -> list[dict]:
+    def recent_ai_verdicts(self, trade_id: int, limit: int = 3, *,
+                           include_management: bool = False) -> list[dict]:
         """Последние разборы текущей сделки, от старого к новому."""
+        columns = "ts,verdict,model" + (",snapshot_json" if include_management else "")
+        count = max(1, int(limit))
+        if include_management:
+            count = min(count, 10)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT ts,verdict,model FROM ai_verdicts WHERE trade_id=? "
-                "ORDER BY ts DESC LIMIT ?", (trade_id, max(1, int(limit)))).fetchall()
-        return [dict(row) for row in reversed(rows)]
+                f"SELECT {columns} FROM ai_verdicts WHERE trade_id=? "
+                "ORDER BY ts DESC,id DESC LIMIT ?", (trade_id, count)).fetchall()
+        result = []
+        for row in reversed(rows):
+            item = dict(row)
+            if include_management:
+                item["management_archive"] = self._management_archive(
+                    item.pop("snapshot_json"), trade_id)
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _management_archive(payload: str, trade_id: int) -> dict:
+        """Read-only projection of the same saved row, never a live proposal."""
+        unavailable = {"available": False, "execution_allowed": False,
+                       "reason": "SAVED_MANAGEMENT_UNAVAILABLE"}
+        try:
+            snapshot = json.loads(payload or "{}")
+            if not isinstance(snapshot, dict) or snapshot.get("trade_id") != trade_id:
+                return unavailable
+            captured = snapshot.get("captured_ts")
+            if (isinstance(captured, bool) or not isinstance(captured, (int, float))
+                    or not math.isfinite(captured) or captured <= 0):
+                return unavailable
+            manager = snapshot.get("policy_manager")
+            if not isinstance(manager, dict):
+                return unavailable
+            raw_audit = manager.get("unified_edge_ensemble")
+            if isinstance(raw_audit, dict) and "candidates" in raw_audit:
+                if not isinstance(raw_audit["candidates"], list):
+                    return unavailable
+            from .unified_edge_audit import compact_unified_ensemble
+            audit = compact_unified_ensemble(raw_audit)
+            raw_decision = manager.get("management_decision")
+            decision = ({key: value[:256] for key in (
+                "policy", "status", "decision_id", "authority", "continuity")
+                if isinstance((value := raw_decision.get(key)), str)}
+                if isinstance(raw_decision, dict) else {})
+            if not decision and not audit:
+                return unavailable
+            return {"available": True, "execution_allowed": False,
+                    "captured_ts": captured, "decision": decision,
+                    "unified_edge_ensemble": audit}
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            return unavailable
 
     def recent_ai_contexts(self, trade_id: int, limit: int = 3) -> list[dict]:
         """Последние разборы вместе с минимальным машинным контекстом."""

@@ -102,7 +102,7 @@ function appendAuditTable(parent, headers, rows) {
 
 // Presentation only: the backend freezes eligibility, ranking and the single
 // execution plan. A scenario score must never be displayed as historical P&L.
-export function mountUnifiedEdgeEnsemble(container, audit) {
+export function mountUnifiedEdgeEnsemble(container, audit, { archived = false } = {}) {
   container.replaceChildren();
   if (!audit || typeof audit !== 'object') return;
   const definitions = Array.isArray(audit.expert_registry?.definitions) ? audit.expert_registry.definitions : [];
@@ -142,7 +142,9 @@ export function mountUnifiedEdgeEnsemble(container, audit) {
   appendTextLine(panel, 'tiny dim',
     'Δ общего сравнения не заменяет исходные ограничения риска, источников и независимого допуска. Раздел «Независимая консервативная проверка допуска» показывает собственные HOLD/Δ и метод; его отказ сохраняется при большем приросте общей модели.');
   appendTextLine(panel, 'tiny dim',
-    'Вес не отменяет hard-risk/CVaR. Исполняется единственный действующий план после обязательных ограничений риска.');
+    archived
+      ? 'Сохранённые веса и допуск относятся к этому снимку; архив не разрешает исполнение.'
+      : 'Вес не отменяет hard-risk/CVaR. Исполняется единственный действующий план после обязательных ограничений риска.');
   const components = Array.isArray(audit.components) ? audit.components : [];
   appendAuditTable(panel, ['Компонент', 'Номинальный → фактический вес', 'Качество · возраст', 'Доступность / снижение влияния'],
     components.map((row) => [row.label || label(row.component_id),
@@ -202,6 +204,34 @@ export function mountUnifiedEdgeEnsemble(container, audit) {
         `${row.selected_policy || '—'} · ${row.selected_candidate_id || '—'}`,
         !row.selected_candidate_id ? 'недоступно' : row.selected_candidate_id === selected ? 'не изменилось' : 'изменилось']));
   }
+  container.appendChild(panel);
+}
+
+export function mountArchivedManagement(container, archive) {
+  container.replaceChildren();
+  const panel = document.createElement('section');
+  panel.className = 'ai-edge-management';
+  appendTextLine(panel, 'ai-execution-title', 'АРХИВНЫЙ МЕНЕДЖМЕНТ · НЕ НОВОЕ РЕШЕНИЕ');
+  appendTextLine(panel, 'ai-execution-warning',
+    'Только просмотр сохранённых расчётов. Цена, параметры, веса и статусы относятся к моменту снимка; подтвердить или исполнить действие из архива нельзя.');
+  if (!archive || archive.available !== true || archive.execution_allowed !== false) {
+    appendTextLine(panel, 'tiny dim', 'Машинный контекст менеджмента не сохранён или недоступен. Сохранённый текст разбора показан выше.');
+    container.appendChild(panel);
+    return;
+  }
+  const ts = finiteNumber(archive.captured_ts);
+  appendTextLine(panel, 'tiny', 'Снимок расчётов: ' + (ts && ts > 0
+    ? new Date(ts * 1000).toLocaleString('ru-RU') : 'время недоступно'));
+  const decision = archive.decision || {};
+  appendTextLine(panel, 'tiny', `Сохранённый план: ${decision.policy || '—'} · статус на момент снимка: ${decision.status || '—'} · ID ${decision.decision_id || '—'}.`);
+  const audit = document.createElement('div');
+  try {
+    mountUnifiedEdgeEnsemble(audit, archive.unified_edge_ensemble, {archived:true});
+  } catch (_) {
+    audit.replaceChildren();
+    appendTextLine(audit, 'tiny dim', 'Сохранённый аудит менеджмента недоступен: несовместимый формат снимка. Текст разбора и сохранённый план не изменены.');
+  }
+  panel.appendChild(audit);
   container.appendChild(panel);
 }
 
