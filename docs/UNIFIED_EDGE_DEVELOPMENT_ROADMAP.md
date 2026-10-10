@@ -819,3 +819,29 @@ macro context, synthetic observation, model, risk/cost relaxation or timeout
 increase is introduced. Five regressions failed before the correction; the
 51-test macro/API/orchestration profile passed. Full CI and actual release
 acceptance remain required for this correction; P5 is not declared delivered.
+
+## 2026-10-10 — Immediate eight-family views and report truthfulness
+
+PR439/main012bc155 merges a single-call, source-bound working interpretation
+path for all eight family adapters inside the existing current-LLM budget.
+Actual shares/contributions and cached same-bank family ablations are visible;
+historical forecasts keep separate admission. Final tree3b84f4da passed mandatory
+CI38045313391:3495passed/5skipped, pinnedSQLite and real WebKit green. MainCI
+38054225919 green; deploy38054471677 running, server acceptance not yet claimed.
+No new broker collection, source permission, event wait or repeated fitting.
+
+User's external NAS100 review revealed reproducible report defects, not proof
+that every missing model is a broken connection. Bounded correction distinguishes
+sole-admissible HOLD from comparative selection, records prior action-admission
+reasons, separates workspace completeness/price authority/active experts/current
+family interpretations/historical forecasts, fixes Yahoo-labelled-as-Bybit and
+premature zero-LLM wording, and explicitly conditions no-slippage CVaR. It does
+not manufacture live quotes, forecasts, broker costs or profit; gates unchanged.
+Seven tests failed before fixes,373 affected tests and actual renderer pass.
+Final review/new CI/live receipts belong in the correction PR metadata; the
+original specific decision cannot be reconstructed without its report/ID.
+Final review found two Important boundary defects: operational fallback HOLD
+cannot be labelled admitted, and truncated candidate sets cannot imply exhaustive
+rejection. Three regressions and renderer reproduced them; one bounded fix pass
+requires the selected HOLD itself admitted and retains truncation across
+compaction. Missing/incomplete evidence remains unclassified, not a market claim.

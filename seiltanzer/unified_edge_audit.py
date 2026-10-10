@@ -20,6 +20,28 @@ COMPONENT_LABELS = {
 }
 
 
+def selection_context(value: Any) -> dict:
+    """Separate admissibility from ranking; HOLD alone is not market evidence."""
+    rows = value.get('candidates') if isinstance(value, dict) else None
+    if not isinstance(rows, list) or not rows or value.get('candidates_truncated_count'):
+        return {'mode': 'NOT_REPORTED'}
+    if any(not isinstance(row, dict) or not row.get('policy')
+           or not isinstance(row.get('eligible'), bool) for row in rows):
+        return {'mode': 'NOT_REPORTED'}
+    holds = [row for row in rows if row['policy'] == 'HOLD']
+    if value.get('selected_policy') == 'HOLD' and value.get('selected_candidate_id'):
+        holds = [row for row in holds if row.get('candidate_id') == value['selected_candidate_id']]
+    if not holds or not any(row['eligible'] for row in holds):
+        return {'mode': 'NOT_REPORTED'}
+    alternatives = [row for row in rows if row['policy'] != 'HOLD']
+    admitted = sum(row['eligible'] for row in alternatives)
+    rankable = sum(row.get('ranking_eligible', row['eligible']) is True for row in alternatives)
+    only_hold = value.get('selected_policy') == 'HOLD' and admitted == 0
+    return {'mode': 'HOLD_ONLY_ADMISSIBLE' if only_hold else 'COMPARATIVE_SELECTION',
+            'admissible_intervention_count': admitted, 'rankable_intervention_count': rankable,
+            'intervention_candidate_count': len(alternatives)}
+
+
 def _bounded(value: Any, depth: int = 0) -> Any:
     if isinstance(value, str):
         return value[:256]
@@ -83,6 +105,7 @@ def compact_unified_ensemble(value: Any) -> dict:
     contracts = {
         "candidates": (
             "candidate_id", "policy", "parameters", "eligible", "reason",
+            "admission_reason", "operational_block_reason",
             "expected_net_r", "cvar10_net_r", "delta_expected_r", "score",
             "component_contributions", "component_scores", "intervention_cost_r",
             "ranking_eligible", "ranking_reason", "delta_cvar_r",
@@ -139,6 +162,11 @@ def compact_unified_ensemble(value: Any) -> dict:
             out[key] = [_row(row, keys) for row in rows[:limit] if isinstance(row, dict)]
             if len(rows) > limit:
                 out[f"{key}_truncated_count"] = len(rows) - limit
+            prior_truncation = value.get(f"{key}_truncated_count")
+            if isinstance(prior_truncation, int) and not isinstance(prior_truncation, bool) and prior_truncation > 0:
+                out[f"{key}_truncated_count"] = prior_truncation + max(0, len(rows) - limit)
+    out['selection_context'] = ({'mode': 'NOT_REPORTED'} if out.get('candidates_truncated_count')
+                                else selection_context(value))
     return out
 
 
@@ -183,6 +211,16 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
     labels = {**COMPONENT_LABELS, **{row.get("component_id"): row.get("label")
                                   for row in audit.get("components") or [] if row.get("label")}}
     bank = audit.get("scenario_bank") or audit.get("comparison_bank") or {}
+    context = audit['selection_context']
+    if context.get('mode') == 'HOLD_ONLY_ADMISSIBLE':
+        lines.insert(2, 'HOLD — единственное допустимое действие; это не доказательство рыночного преимущества удержания. '
+                     'Другие действия не прошли обязательный допуск; совпадение схем не доказывает устойчивость выбора к весам.')
+    if context.get('admissible_intervention_count') is not None:
+        lines.insert(2, f"Допущено вмешательств: {context['admissible_intervention_count']}/{context['intervention_candidate_count']}; "
+                     f"к ранжированию: {context['rankable_intervention_count']}.")
+    if 'no_slippage' in str(bank.get('execution_assumption') or ''):
+        lines.insert(2, 'CVaR условен на модель исполнения: гэп и проскальзывание не включены; '
+                     'стоп/БУ не гарантирует этот нижний исход. Число сценариев не доказывает прогностическую точность.')
     regime = audit.get("regime_context") or {}
     if regime:
         lines.insert(-1, "Применимость по режиму: " + str(regime.get("reason") or "UNKNOWN")
@@ -215,6 +253,9 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
         eligible = row.get("ranking_eligible", row.get("eligible"))
         marker = "выбран" if row.get("candidate_id") == selected else ("допустим" if eligible else "исключён")
         reason = row.get("ranking_reason") or row.get("reason")
+        prior = row.get('admission_reason')
+        if prior and prior != reason:
+            reason = str(reason or '—') + '; исходный допуск: ' + str(prior)
         parameters = row.get("parameters") or {}
         params = ", ".join(f"{key}={item}" for key, item in parameters.items()) if isinstance(parameters, dict) else str(parameters)
         lines.append(

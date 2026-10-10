@@ -211,7 +211,9 @@ def collect_candidates(snapshot):
         reason = ("MANDATORY_STRATEGY_EVENT" if barrier or terminal else "AUTHORITATIVE_PRICE_UNAVAILABLE")
         for row in rows:
             if row["policy"] != "HOLD":
-                row.update(eligible=False, reason=reason)
+                if row.get('eligible') is False:
+                    row['admission_reason'] = row.get('reason')
+                row.update(eligible=False, reason=reason, operational_block_reason=reason)
     return rows
 
 
