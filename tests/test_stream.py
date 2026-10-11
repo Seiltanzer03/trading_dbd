@@ -82,6 +82,95 @@ def test_parse_yaticker_survives_garbage():
     assert isinstance(parse_yaticker(b"\xff\xff\x01\x02"), dict)
 
 
+def _provider_frame(symbol, price, provider_seconds=None):
+    # Encode with the actual yfinance provider schema: field3 is sint64 ms.
+    from yfinance.pricing_pb2 import PricingData
+    values = {'id': symbol, 'price': price}
+    if provider_seconds is not None:
+        values['time'] = int(provider_seconds * 1000)
+    return PricingData(**values).SerializeToString()
+
+
+def test_yahoo_parser_preserves_actual_provider_millisecond_clock():
+    parsed = parse_yaticker(_provider_frame('QQQ', 512., 1_800_000_000.125))
+    assert parsed['time'] == 1_800_000_000_125
+
+
+def test_yahoo_replayed_old_frame_cannot_become_fresh(monkeypatch):
+    now = 1_800_000_000.
+    monkeypatch.setattr('seiltanzer.data.stream.time.time', lambda: now)
+    hub = StreamHub(['QQQ'])
+    hub._on_message(_provider_frame('QQQ', 512., now-86400))
+    assert hub.fresh('QQQ') is None
+    assert 'QQQ' not in hub.latest or hub.latest['QQQ'][1] == now-86400
+
+
+@pytest.mark.parametrize('price,offset', [(512., None), (512., 60.),
+    (float('nan'), 0.), (float('inf'), 0.), (0., 0.), (-1., 0.)])
+def test_invalid_yahoo_quote_cannot_enter_fresh_cache(monkeypatch, price, offset):
+    now = 1_800_000_000.
+    monkeypatch.setattr('seiltanzer.data.stream.time.time', lambda: now)
+    hub = StreamHub(['QQQ'])
+    hub._on_message(_provider_frame('QQQ', price, None if offset is None else now+offset))
+    assert hub.fresh('QQQ') is None and 'QQQ' not in hub.latest
+
+
+def test_out_of_order_yahoo_frame_cannot_overwrite_newer_quote(monkeypatch):
+    now = 1_800_000_000.
+    monkeypatch.setattr('seiltanzer.data.stream.time.time', lambda: now)
+    hub = StreamHub(['QQQ'])
+    hub._on_message(_provider_frame('QQQ', 512., now-1))
+    hub._on_message(_provider_frame('QQQ', 500., now-7))
+    assert hub.latest['QQQ'] == (512., now-1)
+
+
+def test_future_cached_quote_is_not_fresh(monkeypatch):
+    now = 1_800_000_000.
+    monkeypatch.setattr('seiltanzer.data.stream.time.time', lambda: now)
+    hub = StreamHub(['QQQ'])
+    hub.latest['QQQ'] = (512., now+60)
+    assert hub.fresh('QQQ') is None
+
+
+def test_yahoo_instrument_and_proxy_keep_provider_time_through_feed(tmp_path, monkeypatch):
+    now = 1_800_000_000.
+    monkeypatch.setattr('seiltanzer.data.feeds.time.time', lambda: now)
+    def unavailable(*args):
+        raise RuntimeError('provider unavailable')
+    monkeypatch.setattr('seiltanzer.data.feeds._fetch_tradingview_quote', unavailable)
+    hub = StreamHub(['^NDX', 'QQQ'])
+    hub._on_message(_provider_frame('^NDX', 20000., now-3))
+    hub._on_message(_provider_frame('QQQ', 500., now-2))
+    cache = DiskCache(str(tmp_path/'cache.db'))
+    try:
+        market = MarketData(Settings(data_dir=str(tmp_path)), cache)
+        market.stream = hub
+        market._refresh_primary_price()
+        market.refresh_proxy_price()
+        assert market.price['ts'] == now-3
+        assert market.proxy_price['ts'] == now-2
+        assert market.price['provider_timestamp_verified'] is True
+        assert market.proxy_price['provider_timestamp_verified'] is True
+    finally:
+        cache.close()
+
+
+def test_native_crypto_proxy_never_rejuvenates_source_price(tmp_path, monkeypatch):
+    now = 1_800_000_000.
+    monkeypatch.setattr('seiltanzer.data.feeds.time.time', lambda: now)
+    cache = DiskCache(str(tmp_path/'cache.db'))
+    try:
+        market = MarketData(Settings(data_dir=str(tmp_path)), cache)
+        market.instrument_code = 'BTCUSD'
+        market.price = {'value': 80000., 'status': 'delayed', 'ts': now-600,
+                        'fresh': False, 'provider_timestamp_verified': True}
+        market.refresh_proxy_price()
+        assert market.proxy_price['ts'] == now-600
+        assert market.proxy_price['fresh'] is False
+    finally:
+        cache.close()
+
+
 def test_streamhub_fresh_window():
     hub = StreamHub(["QQQ"])
     assert hub.fresh("QQQ") is None
@@ -119,6 +208,7 @@ def test_binance_combined_stream_uses_exchange_trade_time(monkeypatch):
 class _StubStream:
     def __init__(self, quotes):
         self.quotes = quotes
+        self.latest = {key: (value, time.time()) for key, value in quotes.items()}
 
     def fresh(self, symbol, max_age=8.0):
         return self.quotes.get(symbol)

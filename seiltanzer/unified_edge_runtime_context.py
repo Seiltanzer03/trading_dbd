@@ -8,6 +8,7 @@ import re
 
 from .edge_family_adapters import FAMILIES
 from .expert_registry import resolve_expert_registry
+from .real_input_integrity import simulated_evidence
 
 VERSION = "unified-edge-runtime-context-v1"
 MAX_BYTES = 48_000
@@ -29,6 +30,8 @@ def load_unified_edge_context(path, *, expected_document_sha256, expected_sha, s
         if digest != expected_document_sha256:
             raise ValueError("DOCUMENT_HASH_MISMATCH")
         document = json.loads(raw, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("NONFINITE_CONTEXT")))
+        if simulated_evidence(document, recursive=False):
+            raise ValueError('SIMULATED_RUNTIME_CONTEXT_NOT_ADMISSIBLE')
         if (not isinstance(document, dict) or document.get("version") != VERSION
                 or not isinstance(expected_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", expected_sha)
                 or document.get("deployment_sha") != expected_sha):
@@ -43,9 +46,13 @@ def load_unified_edge_context(path, *, expected_document_sha256, expected_sha, s
         inputs = document.get("instruments")
         if not isinstance(inputs, dict) or len(inputs) > 32:
             raise ValueError("CONTEXT_INSTRUMENT_MATRIX_INVALID")
+        if simulated_evidence(inputs, recursive=False):
+            raise ValueError('SIMULATED_RUNTIME_CONTEXT_NOT_ADMISSIBLE')
         selected = inputs.get(instrument)
         if not isinstance(selected, dict):
             raise ValueError("INSTRUMENT_CONTEXT_UNAVAILABLE")
+        if simulated_evidence(selected, recursive=False):
+            raise ValueError('SIMULATED_RUNTIME_CONTEXT_NOT_ADMISSIBLE')
         output = {}
         registry = selected.get("expert_registry")
         if registry is not None:
@@ -59,15 +66,21 @@ def load_unified_edge_context(path, *, expected_document_sha256, expected_sha, s
                 output["expert_registry"] = registry
         models = selected.get("edge_family_models")
         if models is not None:
-            if (not isinstance(models, dict) or not set(models).issubset(FAMILIES)
+            model_reason = None
+            if simulated_evidence(models, recursive=False):
+                model_reason = 'SIMULATED_MODEL_NOT_ADMISSIBLE'
+            elif (not isinstance(models, dict) or not set(models).issubset(FAMILIES)
                     or any(not isinstance(model, (dict, list)) for model in models.values())):
-                raise ValueError("FAMILY_MODEL_MATRIX_INVALID")
+                model_reason = 'FAMILY_MODEL_MATRIX_INVALID'
             # The existing adapter checks PIT/purged observed net-action
             # validation and actual current feature lineage before any vote.
-            output["edge_family_models"] = models
+            if model_reason:
+                audit['edge_family_models'] = {'available': False, 'reason': model_reason}
+            else:
+                output['edge_family_models'] = models
         audit.update(available=bool(output), reason="PINNED_CONTEXT_LOADED_PENDING_PER_EXPERT_ADMISSION",
                      document_sha256=digest, deployment_sha=expected_sha,
-                     captured_ts=captured, model_families=sorted(models or {}))
+                     captured_ts=captured, model_families=sorted(output.get('edge_family_models') or {}))
         return output, audit
     except (OSError, ValueError, TypeError, OverflowError, RecursionError) as exc:
         return {}, {**audit, "reason": str(exc)[:160]}

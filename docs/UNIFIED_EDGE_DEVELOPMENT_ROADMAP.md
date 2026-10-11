@@ -967,3 +967,29 @@ hard-risk. Новый live-smoke regression отвергает excessive Expecte
 и independent LLM projection (matched bounds/basis) наблюдены RED→GREEN.
 Final owning profile316passed5.56s; Node audit smoke PASS. Новый full CI только
 для изменённого final tree, не повтор неизменного запуска.
+
+### 2026-10-11: реальные входы без имитации готовности
+
+По отдельному указанию пользователя выполнен bounded audit реальной цепочки:
+`REAL_SYSTEM_AUDIT_2026-10-11.md`, план
+`superpowers/plans/2026-10-11-real-input-integrity.md`.
+Два воспроизведённых дефекта: demo metadata могла превратиться в допущенный
+прогноз/экспертный голос; Yahoo quote time заменялось временем получения и
+повторно обновлялось в feed/proxy. Guard действует на source/model/runtime/math/
+expert boundaries; реальные независимые источники сохраняются. Stream декодирует
+фактическое sint64-время провайдера, отклоняет missing/future/invalid quotes и
+out-of-order overwrite. Native crypto proxy сохраняет исходное время.
+
+Owning profile:825passed8.18s, после наблюдённых RED. Проверены actual cached
+production HTTP и текущие опубликованные источники/математические модели.
+Source bundle содержит факты, но0допущенных обученных family forecasts;
+cash/CFD, CFTC и CoinbaseUSD/BinanceUSDT mappings остаются явными ограничениями.
+8k reader budget на фактических выбранных записях проблему не воспроизвёл,
+поэтому не менялся. Расчётный сценарий и источник фактов не объявляются
+прогнозным преимуществом. Final review/CI/server receipts ещё требуются.
+
+Один final read-only review:5Important про stripping макро-контейнеров и
+registry definitions, demo snapshot, родительскую instrument matrix и потерю
+независимого реестра из-за optional model matrix. Все воспроизведены14RED,
+исправлены одним проходом. Final owning profile839passed7.84s; no repeated review.
+Полный final-tree CI и фактические release receipts фиксируются в PR/ledger.

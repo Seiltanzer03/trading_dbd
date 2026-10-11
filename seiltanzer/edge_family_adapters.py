@@ -15,6 +15,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .canonical_market_context import canonical_instrument_code
+from .real_input_integrity import simulated_evidence
 
 
 CONTRACT_VERSION = "edge-family-adapters-v1"
@@ -101,7 +102,7 @@ def _base(family: str, instrument: str) -> dict:
 def _meta(source: dict, *, family: str, instrument: str, cutoff: float,
           allow_global: bool = False) -> tuple[dict | None, str]:
     """Check actual information availability, separately from economic date."""
-    if source.get("synthetic") is True:
+    if simulated_evidence(source):
         return None, "SYNTHETIC_SOURCE_NOT_ADMISSIBLE"
     if source.get("available") is False or source.get("source_verified") is not True:
         return None, "SOURCE_UNAVAILABLE_OR_UNVERIFIED"
@@ -181,10 +182,17 @@ def _fact_features(row: dict, source: dict, meta: dict) -> None:
 def _official_macro(snapshot: dict, row: dict, cutoff: float) -> None:
     root = _dict(snapshot.get("macro_context_v1") or snapshot.get("macro_t0_context"))
     numeric = _dict(root.get("numeric_macro"))
-    if root.get("synthetic") is True:
+    if simulated_evidence(root, recursive=False):
         return
-    vector = {} if numeric.get("synthetic") is True else _dict(numeric.get("candidate_vector"))
-    for family, release in _dict(numeric.get("releases")).items():
+    vector = _dict(numeric.get('candidate_vector'))
+    releases = _dict(numeric.get('releases'))
+    if simulated_evidence(numeric, recursive=False) or simulated_evidence(vector):
+        vector = {}
+        row['rejected_sources'].append({'reason': 'SYNTHETIC_SOURCE_NOT_ADMISSIBLE'})
+    if simulated_evidence(releases, recursive=False):
+        releases = {}
+        row['rejected_sources'].append({'reason': 'SYNTHETIC_SOURCE_NOT_ADMISSIBLE'})
+    for family, release in releases.items():
         release = _dict(release)
         available = _num(release.get("available_at"))
         published = _num(release.get("published_at"))
@@ -432,6 +440,10 @@ def _existing_options(snapshot: dict, row: dict, cutoff: float) -> None:
     evidence = _dict(_dict(snapshot.get("policy_manager")).get("evidence"))
     surface, quality = _dict(evidence.get("iv_surface")), _dict(evidence.get("data_quality"))
     chain = _dict(quality.get("chain"))
+    if simulated_evidence(surface) or simulated_evidence(chain):
+        row['rejected_sources'].append({'source_id': chain.get('source'),
+                                        'reason': 'SYNTHETIC_SOURCE_NOT_ADMISSIBLE'})
+        return
     age = _num(surface.get("snapshot_age_sec", chain.get("age_sec")))
     if not surface.get("available") or age is None or not 0 <= age <= MAX_AGE_SEC["option"]:
         return
@@ -550,7 +562,7 @@ def _action_models(row: dict, artifact: dict, cutoff: float, regime: str,
     Frozen artifacts use held-out actual path outcomes, not modeled scenario
     scores. Admission is separate from the optimizer's mandatory CVaR gates.
     """
-    if artifact.get("synthetic") is True:
+    if simulated_evidence(artifact):
         return None, "SYNTHETIC_MODEL_NOT_ADMISSIBLE"
     validation = _dict(artifact.get("validation"))
     trained, train_end, start, end = (_num(artifact.get(k)) for k in
@@ -706,7 +718,7 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
               "captured_ts": cutoff, "families": families, "components": [],
               "economics_adjustments": [], "risk_overrides": False,
               "network_calls": False, "runtime_fitting": False}
-    if snapshot.get("synthetic") is True:
+    if simulated_evidence(snapshot, recursive=False):
         result["reason"] = "SYNTHETIC_SNAPSHOT_NOT_ADMISSIBLE"
         return result
     if not instrument or cutoff is None or cutoff <= 0:
@@ -716,6 +728,10 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
     _existing_options(snapshot, families["option"], cutoff)
     _session(snapshot, families["session"], cutoff)
     sources = _dict(snapshot.get("edge_family_sources"))
+    if simulated_evidence(sources, recursive=False):
+        for row in families.values():
+            row['rejected_sources'].append({'reason': 'SYNTHETIC_SOURCE_NOT_ADMISSIBLE'})
+        sources = {}
     for family, row in families.items():
         for source in _rows(sources.get(family)):
             if family == "session":
@@ -747,7 +763,13 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
     classifier = _dict(snapshot.get("edge_regime"))
     regime_contract = classifier.get("contract_version") if classifier.get("available") is True else None
     forecasts = []
-    for family, artifacts in _dict(snapshot.get("edge_family_models")).items():
+    models = _dict(snapshot.get('edge_family_models'))
+    if simulated_evidence(models, recursive=False):
+        for family in FAMILIES:
+            if family in models:
+                families[family]['forecast_rejections'].append({'reason': 'SYNTHETIC_MODEL_NOT_ADMISSIBLE'})
+        models = {}
+    for family, artifacts in models.items():
         row = families.get(str(family))
         if row is None:
             continue
