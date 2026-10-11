@@ -420,6 +420,7 @@ def build_bundle(
 def validate_bundle(
     bundle: dict[str, Any], *, expected_sha: str,
     acceptance_run_id: str | None = None, now: float | None = None,
+    require_fresh_transport: bool = True,
 ) -> dict[str, Any]:
     from .macro_bls_historical_bootstrap import (
         BLS_ARCHIVE_INDEXES,
@@ -459,6 +460,9 @@ def validate_bundle(
         parse_release_timestamp,
     )
 
+    if type(require_fresh_transport) is not bool:
+        raise ValueError('HISTORICAL_OFFHOST_TRANSPORT_MODE_INVALID')
+
     if not isinstance(bundle, dict) or bundle.get("contract_version") != CONTRACT_VERSION:
         raise ValueError("HISTORICAL_OFFHOST_CONTRACT_MISMATCH")
     if bundle.get("bundle_sha256") != _sha256(_without(bundle, "bundle_sha256")):
@@ -480,7 +484,10 @@ def validate_bundle(
     stamp = time.time() if now is None else float(now)
     age_limit = max_age_sec()
     created_at = float(bundle.get("created_at") or 0.0)
-    if age_limit <= 0 or created_at > stamp + 120.0 or stamp - created_at > age_limit:
+    # Delivery remains fresh by default. An offline public-vintage reader can
+    # revalidate an immutable old copy without pretending it was delivered now.
+    if (created_at <= 0 or created_at > stamp + 120.0
+            or (require_fresh_transport and (age_limit <= 0 or stamp-created_at > age_limit))):
         raise ValueError("HISTORICAL_OFFHOST_BUNDLE_STALE")
     window = bundle.get("window") or {}
     start_ts = float(window.get("start_ts") or 0.0)

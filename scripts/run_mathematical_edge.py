@@ -98,7 +98,8 @@ def _instrument_matrix(rows, sources, captured_ts):
     return matrix
 
 
-def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, family_history=None):
+def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, family_history=None,
+                 macro_archive=None):
     rows, audited_sources = {}, []
     errors = dict(errors)
     for source in sources:
@@ -128,11 +129,14 @@ def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, fami
         })
     from seiltanzer.mathematical_edge_archive import replay_frozen_fx_rule
     from seiltanzer.edge_family_market import train_market_families
-    family_models = train_market_families(sources, captured_ts, horizons=horizons, feature_history=family_history)
+    family_models = train_market_families(sources, captured_ts, horizons=horizons,
+        feature_history=family_history,macro_archive=macro_archive)
     return {
         'contract_version': CONTRACT, 'created_ts': captured_ts, 'instruments': rows,
         'production_authority': False, 'automatic_execution': False,
         'family_market_models': family_models,
+        'historical_macro_source': ({'available':True,**macro_archive.summary()} if macro_archive is not None
+            else {'available':False,'reason':'OFFICIAL_MACRO_ARCHIVE_NOT_REQUESTED'}),
         'family_market_model_summary': {
             'trained_models': sum(row.get('status') == 'TRAINED' for rows in family_models.values() for row in rows.values()),
             'working_supported_models': sum(any(head.get('working_supported') for head in row.get('heads', {}).values())
@@ -162,6 +166,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sources')
     parser.add_argument('--family-history', help='optional actual captured PIT family feature history; no invented broker cost requirement')
+    parser.add_argument('--historical-macro-bundle', help='existing official public-vintage bundle, validated offline')
+    parser.add_argument('--macro-source-sha', help='original bundle source SHA; distinct from current model publication SHA')
     parser.add_argument('--sources-output', help='save fetched real bars for exact offline reproduction')
     parser.add_argument('--refresh-sources', action='store_true', help='refresh public bars off-host; --sources supplies read-only fallback')
     parser.add_argument('--cache-dir', help='per-provider hash-verified off-host source cache')
@@ -201,7 +207,28 @@ def main():
         family_history = json.loads(history_path.read_text())
         if not isinstance(family_history, dict):
             parser.error('--family-history must be an instrument/family matrix')
-    report = build_report(sources, errors, captured, horizons, family_history=family_history)
+    macro_archive=None;macro_error=None
+    if args.historical_macro_bundle:
+        try:
+            from seiltanzer.edge_family_macro_archive import verified_macro_archive
+            macro_path=Path(args.historical_macro_bundle)
+            if macro_path.stat().st_size>96_000_000:
+                raise ValueError('OFFICIAL_MACRO_ARCHIVE_INPUT_OVER_BOUND')
+            data=json.loads(macro_path.read_text())
+            if (isinstance(data,dict) and data.get('available') is False and data.get('read_only') is True
+                    and data.get('archive_export_error') in ('OFFICIAL_MACRO_ARCHIVE_NOT_FOUND',
+                        'OFFICIAL_MACRO_ARCHIVE_READ_FAILED','OFFICIAL_MACRO_ARCHIVE_INPUT_OVER_BOUND')):
+                raise ValueError(data['archive_export_error'])
+            if not args.macro_source_sha:
+                raise ValueError('OFFICIAL_MACRO_ARCHIVE_SOURCE_SHA_MISSING')
+            macro_archive=verified_macro_archive(data,
+                expected_sha=args.macro_source_sha,captured_ts=captured)
+        except (ValueError,TypeError,OSError) as exc:
+            macro_error=str(exc)[:180]
+    report = build_report(sources, errors, captured, horizons, family_history=family_history,
+                         macro_archive=macro_archive)
+    if macro_error is not None:
+        report['historical_macro_source']={'available':False,'reason':macro_error}
     report['collection_attempts'] = attempts
     report['diagnostic_source_inventory'] = [{k: v for k, v in source.items() if k != 'bars'} | {
         'bar_count': len(source.get('bars', [])), 'runtime_admission': False,

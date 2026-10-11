@@ -6,13 +6,17 @@ on:
     paths:
       - 'seiltanzer/mathematical_edge*.py'
       - 'seiltanzer/edge_family_market.py'
+      - 'seiltanzer/edge_family_macro_archive.py'
+      - 'seiltanzer/macro_historical_offhost_bundle.py'
       - 'seiltanzer/edge_family_native_history.py'
       - 'seiltanzer/native_family_capture_projection.py'
       - 'scripts/*mathematical_edge*.py'
       - 'scripts/export_family_market_history.py'
+      - 'scripts/export_official_macro_archive.py'
       - 'scripts/export_native_family_history.py'
       - 'tests/test_mathematical_edge*.py'
       - 'tests/test_edge_family_market.py'
+      - 'tests/test_edge_family_macro_archive.py'
       - 'tests/test_edge_family_native_history.py'
       - 'tests/test_native_capture_projection.py'
       - 'research_fixtures/mathematical_edge/**'
@@ -51,7 +55,7 @@ jobs:
           cache: pip
       - run: pip install -q -e '.[dev]' paramiko boto3
       - name: Verify historical family training and bounded runtime
-        run: python -m pytest -q tests/test_edge_family_market.py tests/test_edge_family_native_history.py tests/test_native_capture_projection.py
+        run: python -m pytest -q tests/test_edge_family_market.py tests/test_edge_family_macro_archive.py tests/test_macro_historical_offhost_bundle.py tests/test_edge_family_native_history.py tests/test_native_capture_projection.py
       - name: Restore hash-verified per-provider market-bar cache
         id: math-source-cache
         uses: actions/cache/restore@v4
@@ -79,6 +83,10 @@ jobs:
           AWS_DEFAULT_REGION: ru-central1
           AWS_EC2_METADATA_DISABLED: 'true'
         run: python -m scripts.export_family_market_history --native-history "$RUNNER_TEMP/native-family-history.json" --output "$RUNNER_TEMP/private-family-history.json"
+      - name: Read already-installed official historical macro archive without refetching
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: python -m scripts.export_official_macro_archive --password "$SSH_PASSWORD" --output "$RUNNER_TEMP/official-macro-archive.json"
       - name: Refresh actual bars, fit and validate on runner
         id: math-fit
         run: |
@@ -86,10 +94,15 @@ jobs:
           if [[ -f "$RUNNER_TEMP/private-family-history.json" ]]; then
             family_args=(--family-history "$RUNNER_TEMP/private-family-history.json")
           fi
+          macro_args=(--historical-macro-bundle "$RUNNER_TEMP/official-macro-archive.json")
+          macro_source_sha=$(python -c 'import json,os; from pathlib import Path; print(json.loads((Path(os.environ["RUNNER_TEMP"])/"official-macro-archive.json").read_text()).get("expected_sha") or "")')
+          if [[ -n "$macro_source_sha" ]]; then
+            macro_args+=(--macro-source-sha "$macro_source_sha")
+          fi
           python -m scripts.run_mathematical_edge --sources mathematical_sources.json \
             --refresh-sources --sources-output refreshed_sources.json \
             --cache-dir .math-source-cache --source-budget-seconds 180 \
-            --output mathematical_edge_latest.json "${family_args[@]}"
+            --output mathematical_edge_latest.json "${family_args[@]}" "${macro_args[@]}"
       - name: Save per-provider market-bar cache from trusted main only
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.math-fit.outcome == 'success'
         uses: actions/cache/save@v4
