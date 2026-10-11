@@ -542,7 +542,8 @@ def run_selective_search(
     for horizon in SELECTIVE_HORIZONS:
         rows = sorted(
             by_horizon[horizon],
-            key=lambda row: (float(row["captured_ts"]), str(row["instrument"])),
+            key=lambda row: (float(row["captured_ts"]), str(row["instrument"]),
+                             str(row.get("observation_id") or "")),
         )
         report = discover_horizon([], horizon, templates, rows_override=rows)
         enriched = [_enrich_candidate(item, rows) for item in report["candidates"]]
