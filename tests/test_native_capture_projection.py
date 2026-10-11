@@ -120,3 +120,43 @@ def test_bounded_sql_transport_preserves_more_than_180_existing_large_option_cap
     assert len(projected['NAS100']['option'])==260
     assert projected==expected
     assert hashlib.sha256(db.read_bytes()).hexdigest()==before
+
+
+@pytest.mark.parametrize('expiry',['python_deadline','sqlite_interrupt'])
+def test_sql_deadline_retains_verified_history_across_instruments(tmp_path,monkeypatch,expiry):
+    from scripts.export_native_family_history import REMOTE_EXPORT
+    import time
+    db=tmp_path/'deadline.db';c=sqlite3.connect(db)
+    c.execute('CREATE TABLE g1s_observations(source_observation_id TEXT,instrument TEXT,horizon_minutes INT,captured_ts REAL,frozen_features_json TEXT,features_sha256 TEXT,training_eligible INT,option_source TEXT,option_quality REAL)')
+    c.execute('CREATE INDEX capture_idx ON g1s_observations(instrument,horizon_minutes,captured_ts)')
+    c.execute('CREATE TABLE passive_market_observations(observation_id TEXT PRIMARY KEY,instrument TEXT,captured_ts REAL,created_ts REAL,features_json TEXT,evidence_eligible INT)')
+    for code in ('NAS100','SP500'):
+        r=row();raw=r['frozen_features_json'];sha=r['features_sha256']
+        for i in range(260):
+            identity=code+str(i);ts=T0-260*900+i*900
+            c.execute('INSERT INTO g1s_observations VALUES(?,?,?,?,?,?,?,?,?)',(identity,code,15,ts,raw,sha,1,r['option_source'],.5))
+            c.execute('INSERT INTO passive_market_observations VALUES(?,?,?,?,?,?)',(identity,code,ts,ts+6,raw,1))
+    c.commit();c.close();before=hashlib.sha256(db.read_bytes()).hexdigest()
+    processed=[0]
+    def hook(original):
+        def captured(*args):
+            value=original(*args);processed[0]+=1;return value
+        return captured
+    # Expire the external clock after96 real rows; no sleeping or fake records.
+    monkeypatch.setattr(time,'monotonic',lambda:26. if processed[0]>=96 else 0.)
+    program=REMOTE_EXPORT.replace('/opt/seiltanzer/data/trades.db',str(db)).replace(
+        'import sqlite3, time, json, hashlib, gzip, base64',
+        'project_capture=hook(project_capture)\nimport sqlite3, time, json, hashlib, gzip, base64')
+    if expiry=='sqlite_interrupt':
+        # Exercise SQLite's actual interrupt path rather than the early deadline.
+        program=program.replace('>=24','>=260').replace('>25),10000','>25),100')
+    stream=io.StringIO()
+    with contextlib.redirect_stdout(stream):exec(program,{'hook':hook})
+    report=json.loads(gzip.decompress(base64.b64decode(stream.getvalue())))
+    assert report['rows'], 'deadline must not erase already verified history'
+    assert report['reason']=='NATIVE_READ_BUDGET_EXHAUSTED'
+    assert report['history_complete'] is False
+    assert {r['instrument'] for r in report['rows']}=={'NAS100','SP500'}
+    assert all(r['source_verified'] is True for r in report['rows'])
+    assert {'NAS100','SP500'} & set(report['incomplete_instruments'])
+    assert hashlib.sha256(db.read_bytes()).hexdigest()==before

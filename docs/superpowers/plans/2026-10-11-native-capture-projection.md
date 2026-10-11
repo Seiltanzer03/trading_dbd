@@ -32,3 +32,7 @@ Interfaces: project_capture(raw, source_sha256) returns a private projected reco
 - [x] RED: 260real-shaped immutable rows with unrelated40KB payload all survive6MB bound; original and projected extraction are identical; source/projection tampering and synthetic flags reject.
 - [x] Implement projection after original/passive verification, count projected bytes and retain existing limits.
 - [ ] Owning tests, one independent review, final mandatory CI; authorized exact-SHA release and actual new fit counts. Do not claim models from fixture results.
+
+## Actual read-budget correction before release
+
+PR449 first CI3718passed/5skipped and WebKit green; actual math38161735266 exposed NATIVE_READ_FAILED0 after the unchanged25s SQL deadline. No expanded native history reached training. Do not merge this first revision. Existing sequential per-instrument traversal erased every previously verified row on interruption. Use32-row indexed fair passes,24s early stop inside the unchanged25s SQL ceiling, retain verified rows only for known deadline/SQLITE_INTERRUPT, and expose incomplete coverage/examined counters. Other read errors stay fail-closed. Two actual SQLite deadline/interrupt regressions reproduce the former loss RED→GREEN; owning242passed3.78s. Final changed-tree actual fit and mandatory CI remain required.
