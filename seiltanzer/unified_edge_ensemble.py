@@ -266,6 +266,7 @@ def _llm_lineage(snapshot, llm, family_evidence=None):
 
 
 def collect_components(snapshot, candidates, current_llm=None, excluded_working_family=None, *, family_evidence=None):
+    from .real_input_integrity import simulated_evidence
     manager = snapshot.get("policy_manager") or {}
     captured = number(snapshot.get("captured_ts"))
     from .edge_family_adapters import build_edge_family_evidence
@@ -279,6 +280,8 @@ def collect_components(snapshot, candidates, current_llm=None, excluded_working_
                 ("active_edge", manager.get("active_edge_provisional_weight") or {}),
                 ("historical_llm", manager.get("llm_edge_exploratory_weight") or {}))
     for identity, profile in profiles:
+        if simulated_evidence(profile):
+            profile = {'available': False, 'quality': 0., 'reason': 'SIMULATED_EXPERT_NOT_ADMISSIBLE'}
         families = profile.get("evidence_family_ids") or ["price_path"]
         observed = number(profile.get("latest_bar_end_ts", profile.get("observed_ts", captured)))
         quality = profile.get("quality_multiplier", profile.get("quality", 1.))
@@ -308,6 +311,8 @@ def collect_components(snapshot, candidates, current_llm=None, excluded_working_
                 target["available"] = True
                 target["reason"] = "MATCHED_PRICE_AND_PATH_ACTION_MODELS"
     llm = current_llm if isinstance(current_llm, dict) else {}
+    if simulated_evidence(llm) or simulated_evidence(snapshot, recursive=False):
+        llm = {'status': 'unavailable', 'reason': 'SIMULATED_EXPERT_NOT_ADMISSIBLE'}
     scores = {str(k): _score(v) for k, v in (llm.get("policy_scores") or {}).items()}
     scores = {k: v for k, v in scores.items() if v is not None}
     if not scores and llm.get("policy") in set(BASE) | set(EXTENDED):
@@ -390,8 +395,14 @@ def collect_components(snapshot, candidates, current_llm=None, excluded_working_
                                      if number(item.get("max_age_sec")) is not None), default=900.)
     overrides = manager.get("unified_component_assessments") or []
     for spec in overrides:
+        if not isinstance(spec, dict):
+            continue
         if spec.get("component_id") in COMPONENTS and spec.get("component_id") != "quantitative_base":
             index = COMPONENTS.index(spec["component_id"])
+            if simulated_evidence(spec):
+                rows[index].setdefault('rejected_assessments', []).append(
+                    {'reason': 'SIMULATED_EXPERT_NOT_ADMISSIBLE'})
+                continue
             rows[index] = {**rows[index], **deepcopy(spec)}
             if spec.get('component_id') == 'current_llm':
                 for key in ('working_family_attributions', 'working_family_weights', 'working_family_count'):
@@ -403,6 +414,8 @@ def collect_components(snapshot, candidates, current_llm=None, excluded_working_
 
 
 def _prepare_components(specs, snapshot, nominal, excluded=None):
+    from .real_input_integrity import simulated_evidence
+    simulated_snapshot = simulated_evidence(snapshot, recursive=False)
     captured = number(snapshot.get("captured_ts"))
     instrument = (snapshot.get("strategy") or {}).get("instrument") or snapshot.get("instrument")
     regime = regime_label(snapshot)
@@ -417,6 +430,8 @@ def _prepare_components(specs, snapshot, nominal, excluded=None):
         if identity == "quantitative_base" and captured is not None:
             freshness = 1.
         available = row.get("available") is True
+        if simulated_snapshot and identity != 'quantitative_base':
+            available, row['reason'] = False, 'SIMULATED_SNAPSHOT_NOT_ADMISSIBLE'
         if row.get("instrument") and row["instrument"] != instrument:
             available, row["reason"] = False, "INSTRUMENT_MISMATCH"
         supported = row.get("supported_regimes")

@@ -481,8 +481,12 @@ class MarketData:
         """
         if self.instrument.asset_class == "crypto":
             p = self.price.get("value")
-            st = self.price.get("status") or "live"
-            self.proxy_price = _status_dict(p, st, time.time(), source="direct scale (crypto native)")
+            st = self.price.get("status") or "no_data"
+            self.proxy_price = _status_dict(p, st, self.price.get('ts'),
+                                            source="direct scale (crypto native)")
+            for key in ('fresh', 'provider_timestamp_verified', 'timestamp_kind'):
+                if key in self.price:
+                    self.proxy_price[key] = self.price[key]
             return
         proxy = self.instrument.options_proxy
         if proxy is None:
@@ -497,8 +501,11 @@ class MarketData:
         if self.stream is not None:
             sp = self.stream.fresh(proxy, max_age=8.0)
             if sp is not None:
+                tick_ts = (getattr(self.stream, 'latest', {}).get(proxy) or (sp, None))[1]
                 self.proxy_price = _status_dict(
-                    sp, "live", time.time(), source=f"stream {proxy}")
+                    sp, "live" if tick_ts is not None else "delayed", tick_ts,
+                    source=f"stream {proxy}")
+                self.proxy_price['provider_timestamp_verified'] = tick_ts is not None
                 return
             if self.proxy_price.get("status") == "live":
                 self.proxy_price["status"] = "delayed"
@@ -765,12 +772,15 @@ class MarketData:
             sp = self.stream.fresh(self.instrument.yahoo, max_age=8.0)
             if sp is not None:
                 now = time.time()
-                self.price = _status_dict(sp, "live", now,
+                tick_ts = (getattr(self.stream, 'latest', {}).get(self.instrument.yahoo) or (sp, None))[1]
+                self.price = _status_dict(sp, "live" if tick_ts is not None else "delayed", tick_ts,
                                           error=broker_error,
                                           source=(f"stream {self.instrument.yahoo}"
                                                   + (" (broker fallback)"
                                                      if broker_error else "")))
                 self.price["derived"] = False
+                self.price['provider_timestamp_verified'] = tick_ts is not None
+                self.price['timestamp_kind'] = 'provider_quote_time' if tick_ts is not None else 'unavailable'
                 self._annotate_freshness()
                 self.intraday.append((now, sp, 0.0))
                 self.intraday = [x for x in self.intraday if x[0] > now - 8 * 3600]

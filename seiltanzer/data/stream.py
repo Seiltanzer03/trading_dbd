@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import math
 import struct
 import time
 
@@ -42,7 +43,7 @@ def _read_varint(buf: bytes, i: int) -> tuple[int, int]:
 
 def parse_yaticker(buf: bytes) -> dict:
     """Минимальный разбор protobuf `yaticker`: поле 1 = id (строка), поле 2 = price
-    (float32). Остальные поля пропускаются по wire-type. Возвращает {id, price}."""
+    (float32), поле 3 = provider time (sint64, milliseconds)."""
     out: dict = {}
     i = 0
     n = len(buf)
@@ -51,7 +52,9 @@ def parse_yaticker(buf: bytes) -> dict:
             tag, i = _read_varint(buf, i)
             field, wtype = tag >> 3, tag & 7
             if wtype == 0:          # varint
-                _, i = _read_varint(buf, i)
+                value, i = _read_varint(buf, i)
+                if field == 3:
+                    out['time'] = (value >> 1) ^ -(value & 1)
             elif wtype == 1:        # 64-bit
                 i += 8
             elif wtype == 2:        # length-delimited
@@ -93,7 +96,8 @@ class StreamHub:
             v = self.latest.get(ticker.upper())
         if not v:
             v = self.latest.get(ticker.replace("-", "").replace("/", ""))
-        if v and time.time() - v[1] <= max_age:
+        if (v and math.isfinite(v[0]) and v[0] > 0 and math.isfinite(v[1])
+                and -2 <= time.time() - v[1] <= max_age):
             return v[0]
         return None
 
@@ -195,7 +199,16 @@ class StreamHub:
                 buf = raw if isinstance(raw, (bytes, bytearray)) else base64.b64decode(raw)
             tick = parse_yaticker(buf)
             tid, price = tick.get("id"), tick.get("price")
-            if tid and price and price > 0:
-                self.latest[tid] = (float(price), time.time())
+            provider_ms = tick.get('time')
+            if not tid or price is None or provider_ms is None:
+                return
+            provider_ts = provider_ms / 1000.
+            if (not math.isfinite(price) or price <= 0 or provider_ts <= 0
+                    or provider_ts > time.time() + 2):
+                return
+            previous = self.latest.get(tid)
+            if previous and provider_ts < previous[1]:
+                return
+            self.latest[tid] = (float(price), provider_ts)
         except Exception:  # noqa: BLE001
             pass

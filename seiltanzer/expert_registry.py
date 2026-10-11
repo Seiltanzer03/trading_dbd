@@ -62,6 +62,9 @@ def resolve_expert_registry(snapshot, core_schemes, candidates=()):
     if raw is None:
         return [], schemes, audit
     try:
+        from .real_input_integrity import simulated_evidence
+        if simulated_evidence(raw, recursive=False):
+            raise ValueError('SIMULATED_REGISTRY_NOT_ADMISSIBLE')
         payload = json.dumps(raw, allow_nan=False, sort_keys=True, separators=(",", ":"))
         if len(payload.encode()) > MAX_BYTES or not isinstance(raw, dict) or raw.get("contract_version") != CONTRACT:
             raise ValueError("INVALID_REGISTRY_CONTRACT_OR_BYTE_BOUND")
@@ -69,6 +72,7 @@ def resolve_expert_registry(snapshot, core_schemes, candidates=()):
         if not isinstance(definitions, list) or not 1 <= len(definitions) <= MAX_EXPERTS:
             raise ValueError("INVALID_REGISTRY_EXPERT_COUNT")
         frozen, ids, origins = [], set(), set()
+        simulated_definitions = set()
         for spec in definitions:
             if not isinstance(spec, dict):
                 raise ValueError("INVALID_EXPERT_DEFINITION")
@@ -76,6 +80,10 @@ def resolve_expert_registry(snapshot, core_schemes, candidates=()):
             if not isinstance(identity, str) or not _ID.fullmatch(identity) or identity in CORE_IDS or identity in ids:
                 raise ValueError("DUPLICATE_RESERVED_OR_INVALID_EXPERT_ID")
             ids.add(identity)
+            if simulated_evidence(spec):
+                simulated_definitions.add(identity)
+                audit['rejected_experts'].append({'expert_id': identity,
+                                                  'reason': 'SIMULATED_EXPERT_NOT_ADMISSIBLE'})
             instrument, model = spec.get("instrument"), spec.get("model_version")
             label = spec.get("label", identity)
             maximum = _number(spec.get("max_age_sec"))
@@ -155,7 +163,8 @@ def resolve_expert_registry(snapshot, core_schemes, candidates=()):
                 for source in definition.source_ids for receipt in source_receipts[source]))
             raw_scores = item.get("scores")
             scores = {key: _number(value) for key, value in raw_scores.items()} if isinstance(raw_scores, dict) else {}
-            valid = bool(item.get("available") is True and item.get("instrument") == definition.instrument
+            simulated = simulated_evidence(item) or definition.expert_id in simulated_definitions
+            valid = bool(not simulated and item.get("available") is True and item.get("instrument") == definition.instrument
                 and item.get("model_version") == definition.model_version
                 and quality is not None and 0 <= quality <= 1 and observed is not None
                 and received is not None and cutoff is not None and 0 < observed <= received <= cutoff
@@ -174,6 +183,7 @@ def resolve_expert_registry(snapshot, core_schemes, candidates=()):
                 "quality": quality if quality is not None else 0., "available": valid,
                 "scores": scores if valid else {}, "score_semantics": SCORE_SEMANTICS,
                 "reason": ("REGISTERED_FROZEN_ACTION_PREFERENCE" if valid else
+                           "SIMULATED_EXPERT_NOT_ADMISSIBLE" if simulated else
                            "SOURCE_LINEAGE_NOT_BOUND_TO_FROZEN_FACTS" if not sources_bound else
                            "SOURCE_NOT_AVAILABLE_BEFORE_ASSESSMENT" if not sources_causal else
                            "INVALID_OR_MISSING_EXPERT_ASSESSMENT")}

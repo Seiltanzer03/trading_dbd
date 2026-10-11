@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .canonical_market_context import canonical_instrument_code
 from .edge_family_adapters import FAMILIES, _meta, build_edge_family_evidence
+from .real_input_integrity import simulated_evidence
 
 CONTRACT = "edge-family-source-bundle-v1"
 PUBLICATION = "active-edge-exact-sha-publication-v1"
@@ -60,6 +61,8 @@ def load_family_source_context(engine, snapshot, expected_sha):
         if not 0 <= cutoff - stat.st_mtime <= MAX_AGE_SEC:
             raise ValueError("SOURCE_BUNDLE_FILE_STALE_OR_AFTER_SNAPSHOT")
         payload = _read(str(path), stat.st_mtime_ns, stat.st_size)
+        if simulated_evidence(payload, recursive=False):
+            raise ValueError('SYNTHETIC_SOURCE_NOT_ADMISSIBLE')
         if (payload.get("contract_version") != CONTRACT
                 or payload.get("edge_policy") != POLICY
                 or payload.get("production_authority") is not False
@@ -72,7 +75,11 @@ def load_family_source_context(engine, snapshot, expected_sha):
         row = (payload.get("instruments") or {}).get(instrument)
         if not isinstance(row, dict):
             raise ValueError("SOURCE_BUNDLE_INSTRUMENT_UNAVAILABLE")
+        if simulated_evidence(row, recursive=False):
+            raise ValueError('SYNTHETIC_SOURCE_NOT_ADMISSIBLE')
         sources = row.get("edge_family_sources") or {}
+        if simulated_evidence(sources, recursive=False):
+            raise ValueError('SYNTHETIC_SOURCE_NOT_ADMISSIBLE')
         selected = {}
         for family in FAMILIES:
             records = sources.get(family) or []

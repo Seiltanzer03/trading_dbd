@@ -1,4 +1,4 @@
-"""Working Price edge through the actual snapshot, report and position ledger.
+"""Demo admission through the actual snapshot, report and position ledger.
 
 The model is deliberately frozen and local. These are execution-contract tests,
 not claims about the profitability of its synthetic probabilities.
@@ -76,17 +76,17 @@ def economic_metrics(snapshot):
             for name, row in snapshot['policy_manager']['policies'].items()}
 
 
-def test_real_snapshot_and_report_keep_edge_scores_out_of_economic_numbers(frozen_engine):
+def test_demo_snapshot_and_report_do_not_admit_frozen_model(frozen_engine):
     engine, artifact = frozen_engine
     enabled = ai_verdict.build_snapshot(engine)
     manager = enabled['policy_manager']
     profile = manager['mathematical_edge']
-    assert profile['available'] and profile['probabilities']['direction'] == pytest.approx(.2)
-    assert 0 < manager['combined_edge_soft_weight']['mathematical_component_weight'] <= .15
-    assert profile['latest_bar_end_ts'] <= enabled['captured_ts']
+    assert profile['available'] is False
+    assert profile['reason'] == 'SIMULATED_PRICE_INPUT_NOT_ADMISSIBLE'
+    assert not profile.get('probabilities')
+    assert manager['combined_edge_soft_weight']['mathematical_component_weight'] == 0
     assert not profile['hard_risk_modified'] and not profile['independent_evidence_vote']
-    audit = manager['selection_rule']['combined_edge_soft_weight']
-    assert audit['weighted_value_semantics'] == 'RANKING_SCORE_NOT_EXPECTED_RETURN'
+    assert 'combined_edge_soft_weight' not in manager['selection_rule']
     eligible = manager['selection_rule']['eligible']
     metrics = manager['policies']
     assert manager['selection_rule']['best_expected_r'] == max(
@@ -95,28 +95,28 @@ def test_real_snapshot_and_report_keep_edge_scores_out_of_economic_numbers(froze
     artifact.unlink()
     disabled = ai_verdict.build_snapshot(engine)
     assert not disabled['policy_manager']['mathematical_edge']['available']
-    # The head changes ranking, never the common-path economic distributions.
+    # Installing a frozen artifact cannot give demo inputs a real model vote
+    # or alter the common-path economic distributions.
     assert economic_metrics(enabled) == economic_metrics(disabled)
     assert manager['selection_rule']['cvar_floor_r'] == disabled['policy_manager']['selection_rule']['cvar_floor_r']
 
     report = ai_verdict.render_policy_report(enabled)
     assert '**МАТЕМАТИЧЕСКИЙ EDGE**' in report
-    assert 'P(up' in report and '20.0%' in report and 'proper-score' in report
+    assert 'SIMULATED_PRICE_INPUT_NOT_ADMISSIBLE' in report
     for name, row in metrics.items():
         assert f"{name}: Expected net {row['expected_final_r']:+.3f}R" in report
         assert f"CVaR10 net {row['cvar10_r']:+.3f}R" in report
 
 
-def test_real_demo_risk_gate_cannot_be_replaced_by_math_bonus(frozen_engine):
+def test_demo_risk_gate_survives_rejected_math_model(frozen_engine):
     engine, _ = frozen_engine
     snapshot = ai_verdict.build_snapshot(engine)
-    assert snapshot['policy_manager']['mathematical_edge']['available']
+    assert snapshot['policy_manager']['mathematical_edge']['available'] is False
     selected = select_active_management(snapshot)
     rows = snapshot['active_management_candidates']
     assert len(rows) == 7
     for row in rows:
-        if row['status'] == 'blocked':
-            assert row['mathematical_edge_ranking_bonus_r'] == 0
+        assert row['mathematical_edge_ranking_bonus_r'] == 0
     if selected is not None:
         assessment = selected['quant_evaluation']
         assert assessment['status'] == 'eligible'

@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 import numpy as np
 from .g1_short_horizon_runtime import _fit_logistic, _sigmoid
+from .real_input_integrity import simulated_evidence
 
 CONTRACT = 'mathematical-edge-working-v1'
 FEATURE_CONTRACT = 'math-completed-5m-price-v1'
@@ -397,6 +398,8 @@ def load_artifact(path, captured_ts):
         report = json.loads(path.read_text())
         if not isinstance(report, dict) or not isinstance(report.get('instruments'), dict):
             return None
+        if simulated_evidence(report, recursive=False):
+            return None
         age = captured_ts - float(report['created_ts'])
         if report.get('contract_version') != CONTRACT or not 0 <= age <= MAX_ARTIFACT_AGE:
             return None
@@ -517,6 +520,10 @@ def runtime_profile(engine, tick, trade):
     if captured is None or time.time() - captured > MAX_PRICE_AGE or captured > time.time() + 1:
         return {**base, 'reason': 'T0_TIMESTAMP_UNAVAILABLE_OR_STALE'}
     feed = getattr(engine, 'market', None)
+    if getattr(feed, 'demo', False) or simulated_evidence(tick, recursive=False):
+        return {**base, 'reason': 'SIMULATED_PRICE_INPUT_NOT_ADMISSIBLE'}
+    if simulated_evidence(getattr(feed, 'intraday_source_authority', None)):
+        return {**base, 'reason': 'SIMULATED_PRICE_INPUT_NOT_ADMISSIBLE'}
     if getattr(feed, 'instrument_code', None) != code:
         return {**base, 'reason': 'PRICE_FEED_INSTRUMENT_MISMATCH'}
     data_dir = getattr(getattr(engine, 'settings', None), 'data_dir', None)
@@ -526,6 +533,11 @@ def runtime_profile(engine, tick, trade):
     model = (report.get('instruments') or {}).get(code) or {}
     if not isinstance(model, dict):
         return {**base, 'reason': 'WORKING_MODEL_INVALID'}
+    if simulated_evidence(model):
+        return {**base, 'reason': 'SIMULATED_MODEL_NOT_ADMISSIBLE'}
+    if any(simulated_evidence(source) for source in report.get('sources', [])
+           if isinstance(source, dict) and source.get('instrument') == code):
+        return {**base, 'reason': 'SIMULATED_TRAINING_SOURCE_NOT_ADMISSIBLE'}
     base.update({k: model[k] for k in ('status', 'model_sha256', 'horizon_minutes', 'training_cutoff', 'training_n', 'diagnostics') if k in model})
     body = {k: v for k, v in model.items() if k != 'model_sha256'}
     try:
