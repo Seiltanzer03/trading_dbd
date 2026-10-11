@@ -16,12 +16,14 @@ from seiltanzer.edge_discovery.bottleneck import build_bottleneck_power_audit
 from seiltanzer.edge_discovery.candidate_registry import CandidateRegistry
 from seiltanzer.edge_discovery.dataset_fingerprint import (
     DATASET_FINGERPRINT_CONTRACT_VERSION,
+    _row_identity,
     research_dataset_fingerprint,
 )
 from seiltanzer.edge_discovery.evidence_ledger import (
     append_frozen_evidence,
     build_frozen_evidence,
 )
+from seiltanzer.edge_discovery.measurement_identity import research_measurement_identity
 from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.selective import (
     SELECTIVE_CONTRACT_VERSION,
@@ -37,8 +39,11 @@ from seiltanzer.edge_discovery.shadow import (
 from seiltanzer.edge_discovery.stratified import augment_selective_report_with_strata
 
 
+EVALUATION_MEASUREMENT_IDENTITY = research_measurement_identity()
 EVALUATION_MEASUREMENT_CONTRACT = (
-    f"{SELECTIVE_CONTRACT_VERSION}+{DATASET_FINGERPRINT_CONTRACT_VERSION}"
+    f"{SELECTIVE_CONTRACT_VERSION}+{DATASET_FINGERPRINT_CONTRACT_VERSION}+"
+    f"{EVALUATION_MEASUREMENT_IDENTITY['contract_version']}:"
+    f"{EVALUATION_MEASUREMENT_IDENTITY['implementation_sha256']}"
 )
 
 
@@ -150,6 +155,9 @@ def audit(
     # T0 is missing evidence, never zero. Gate before temporal folds so the
     # candidate and its baseline are trained/scored on one identical universe.
     resolved_rows, baseline_row_gate = baseline_eligible_rows(resolved_rows_all)
+    # The input hash is already canonical; refits and measurements must consume
+    # that same order when several immutable observations share a T0.
+    resolved_rows = sorted(resolved_rows, key=_row_identity)
     eligible = {
         str(row["feature_id"]) for row in inventory["features"]
         if bool(row["usable_for_ede"])
@@ -217,6 +225,7 @@ def audit(
         "dataset_sha256": source_sha,
         "dataset_fingerprint_contract_version": DATASET_FINGERPRINT_CONTRACT_VERSION,
         "evaluation_measurement_contract": EVALUATION_MEASUREMENT_CONTRACT,
+        "evaluation_measurement_identity": EVALUATION_MEASUREMENT_IDENTITY,
         "dataset": _dataset_breakdown(resolved_rows),
         "dataset_before_baseline_gate": _dataset_breakdown(resolved_rows_all),
         "baseline_row_gate": baseline_row_gate,

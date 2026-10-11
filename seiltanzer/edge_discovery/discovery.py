@@ -353,7 +353,8 @@ def discover_horizon(sources: list[dict[str, Any]], horizon: int,
     by_id = {template.template_id: template for template in templates}
     rows = (build_discovery_rows(sources, horizon) if rows_override is None
             else sorted(rows_override, key=lambda row: (
-                float(row["captured_ts"]), str(row["instrument"]))))
+                float(row["captured_ts"]), str(row["instrument"]),
+                str(row.get("observation_id") or ""))))
     folds = _historical_folds(rows, horizon)
     aggregated: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
