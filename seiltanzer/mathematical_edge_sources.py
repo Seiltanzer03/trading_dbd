@@ -224,6 +224,76 @@ def retained_crypto_source(code, captured, seed, cached, *, days=60):
     return result
 
 
+def retain_yahoo_history(current, archives, captured):
+    """Retain existing same-series history; no new receipt or gap interpolation."""
+    from .real_input_integrity import simulated_evidence
+    code=current.get('instrument')
+    if code not in ALL_INSTRUMENTS or ALL_INSTRUMENTS[code].asset_class=='crypto':
+        return current
+    def verified(item):
+        if not isinstance(item,dict) or any(item.get(k)!=v for k,v in (
+                ('instrument',code),('provider','Yahoo Finance via yfinance'),
+                ('ticker',ALL_INSTRUMENTS[code].yahoo),('interval','5m'))):
+            raise ValueError('HISTORY_SERIES_IDENTITY_MISMATCH')
+        if simulated_evidence({k:v for k,v in item.items() if k!='bars'}):
+            raise ValueError('HISTORY_SYNTHETIC_SOURCE_REJECTED')
+        rows=item.get('bars')
+        if not isinstance(rows,list) or not 0<len(rows)<=MAX_BARS or item.get('source_sha256')!=fingerprint(rows):
+            raise ValueError('HISTORY_HASH_OR_SIZE_INVALID')
+        semantics=item.get('source_semantics')
+        if (not isinstance(semantics,dict) or semantics.get('synthetic_price_history') is True
+                or semantics.get('bar_timestamp_semantics') not in (
+                'provider interval start +300s',
+                'provider timestamp is interval start; T0 is bar_start+300s')):
+            raise ValueError('HISTORY_TIMESTAMP_SEMANTICS_INVALID')
+        bars={}
+        for row in rows:
+            bar=_bar(row['bar_end_ts']-300,row['open'],row['high'],row['low'],row['close'])
+            if (bar is None or bar['bar_end_ts']>captured or bar['bar_end_ts'] in bars
+                    or ('bar_start_ts' in row and row['bar_start_ts']!=bar['bar_end_ts']-300)
+                    or simulated_evidence(row)):
+                raise ValueError('HISTORY_BAR_INVALID')
+            bars[bar['bar_end_ts']]=bar
+        return bars
+    try:
+        merged=verified(current)
+    except (ValueError,TypeError,KeyError):
+        return current  # Existing owner still rejects an invalid primary source.
+    accepted=[];excluded=[];seen=set()
+    for item in archives:
+        if item is None:continue
+        identity=item.get('source_sha256') if isinstance(item,dict) and isinstance(item.get('source_sha256'),str) else None
+        if identity in seen:continue
+        seen.add(identity)
+        try:
+            clocks=[item.get(key) for key in ('fetched_ts','receipt_observed_ts','captured_ts')
+                    if isinstance(item,dict) and key in item]
+            if not clocks or any(number(t) is None or not 0<number(t)<=captured for t in clocks):
+                raise ValueError('HISTORY_RECEIPT_CLOCK_INVALID')
+            older=verified(item)
+            if any(end in merged and merged[end]!=bar for end,bar in older.items()):
+                raise ValueError('HISTORY_OVERLAP_REVISION_CONFLICT')
+            added={end:bar for end,bar in older.items() if captured-120*86400<end<=captured and end not in merged}
+            merged.update(added)
+            accepted.append({'source_id':item.get('source_id'),'source_sha256':item['source_sha256'],
+                'fetched_ts':item.get('fetched_ts'),'receipt_observed_ts':item.get('receipt_observed_ts'),
+                'added_bars':len(added),'historical_snapshot_history':item.get('historical_snapshot_history')})
+        except (ValueError,TypeError,KeyError) as exc:
+            excluded.append({'source_id':item.get('source_id') if isinstance(item,dict) else None,
+                'reason':str(exc) if isinstance(exc,ValueError) else 'HISTORY_BAR_INVALID'})
+    ends=sorted(end for end in merged if captured-120*86400<end<=captured)
+    capped=len(ends)>MAX_BARS;bars=[merged[end] for end in ends[-MAX_BARS:]]
+    if not bars:return current
+    digest=fingerprint(bars)
+    return {**current,'bars':bars,'source_sha256':digest,
+        'source_id':f'math-real-{code}-{digest[:24]}','coverage':source_coverage(bars),
+        'history_retention':{'contract_version':'verified-yahoo-history-retention-v1',
+            'maximum_days':120,'maximum_bars':MAX_BARS,'row_cap_applied':capped,
+            'accepted_sources':accepted,'excluded_sources':excluded,'gaps_filled':False,
+            'current_source_id':current.get('source_id'),'current_source_sha256':current['source_sha256'],
+            'new_historical_receipts':False}}
+
+
 def _cache_save(directory, source):
     if directory is None:
         return
@@ -394,6 +464,8 @@ def collect_fresh_sources(captured, *, seed_sources=(), cache_dir=None, days=60,
         if source is None and code in seeds:
             source = {**seeds[code], 'collection_fallback': 'READ_ONLY_EXPORTED_SOURCE'}
         if source is not None:
+            if code not in COINBASE_PRODUCTS:
+                source=retain_yahoo_history(source,[seeds.get(code),cached],captured)
             source = {**source, 'fresh_collection_errors': failures}
             if source.get('collection_fallback') in (None, 'PARTIAL_SAME_PROVIDER_COLLECTION'):
                 _cache_save(cache_dir, source)
