@@ -131,6 +131,10 @@ export function mountUnifiedEdgeEnsemble(container, audit, { archived = false } 
     `Применимость по режиму: ${audit.regime_context.reason || 'UNKNOWN'} · качество ${audit.regime_context.quality ?? 0}. Рабочая классификация без дополнительного голоса и динамической смены долей.`);
   appendTextLine(panel, 'tiny dim',
     'Баллы ранжируют допустимые действия; не являются прибылью или вероятностью. Expected/CVaR — модельные сценарии. Историческая прибыль и частота лишних вмешательств оцениваются отдельно.');
+  if (audit.decision_utility) appendTextLine(panel, 'tiny dim',
+    `Защитная польза: ΔExpected + ${audit.decision_utility.tail_weight} × ΔCVaR; положительный вклад риска ограничен зоной безразличия. Оценки экспертов относительно явного HOLD; порог смены решения ${audit.decision_utility.hold_score_margin} балла. Это заданная политика выбора, не доказанный оптимум весов.`);
+  if (chosen.quant_utility) appendTextLine(panel, 'tiny',
+    `Количественная польза: за Expected ${signed(chosen.quant_utility.expected_delta_r, 'R')}; за риск ${signed(chosen.quant_utility.tail_credit_r, 'R')}; полезность ${signed(chosen.quant_utility.utility_delta_r, 'R')} (${chosen.benefit_assessment?.basis || '—'}). Полезность не заменяет Expected.`);
   appendTextLine(panel, 'tiny dim', audit.shared_scenario_bank
     ? 'Кандидаты с оценкой рассчитаны на общих сценариях.'
     : `Общий набор сценариев не подтверждён; расширенные действия используют парное сравнение с HOLD. ${audit.economics_scope || ''}`);

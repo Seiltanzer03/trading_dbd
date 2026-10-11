@@ -79,6 +79,7 @@ def compact_unified_ensemble(value: Any) -> dict:
         "common_economics_invalid", "common_economics_reason",
         "score_semantics", "regime_weight_semantics", "hard_risk_override",
         "automatic_execution_allowed",
+        "decision_utility",
         "ranking_available", "ranking_selected_policy", "ranking_selected_candidate_id",
         "regime_context",
         "operational_guard_reason", "operational_decision_id",
@@ -111,6 +112,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             "ranking_eligible", "ranking_reason", "delta_cvar_r",
             "execution_cost_r", "economics_basis", "source",
             "working_family_contributions",
+            "quant_utility", "benefit_assessment",
         ),
         "components": (
             "component_id", "nominal_weight", "effective_weight", "availability",
@@ -210,6 +212,12 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
     ]
     labels = {**COMPONENT_LABELS, **{row.get("component_id"): row.get("label")
                                   for row in audit.get("components") or [] if row.get("label")}}
+    utility_policy = audit.get('decision_utility') or {}
+    if utility_policy:
+        lines.insert(-1, "Защитная польза учитывается в количественном балле: ΔExpected + "
+                     f"{utility_policy.get('tail_weight')} × ΔCVaR; положительный вклад риска ограничен зоной безразличия. "
+                     f"Оценки экспертов относительно явного HOLD; порог смены решения {utility_policy.get('hold_score_margin')} балла. "
+                     "Это заданная политика выбора, не доказанный оптимум весов и не дополнительная доходность.")
     bank = audit.get("scenario_bank") or audit.get("comparison_bank") or {}
     context = audit['selection_context']
     if context.get('mode') == 'HOLD_ONLY_ADMISSIBLE':
@@ -264,6 +272,14 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
             f"ΔExpected/HOLD {_format(row.get('delta_expected_r'), 'R')}; балл {_format(row.get('score'))}"
             f"{'; ' + str(reason) if reason else ''}."
         )
+        utility = row.get('quant_utility') or {}
+        if row.get('candidate_id') == selected and utility:
+            lines.append("Разложение количественной пользы: за Expected "
+                         + _format(utility.get('expected_delta_r'), 'R') + "; за риск "
+                         + _format(utility.get('tail_credit_r'), 'R') + "; итоговая полезность "
+                         + _format(utility.get('utility_delta_r'), 'R')
+                         + ". Полезность не заменяет Expected. Основание: "
+                         + str((row.get('benefit_assessment') or {}).get('basis') or '—') + ".")
         contributions = row.get("component_contributions") or {}
         if isinstance(contributions, list):
             contributions = {item.get("component_id"): item.get("contribution")

@@ -251,7 +251,12 @@ def verify_management_calculation_audit(body: dict) -> None:
         for row in candidates:
             assert row["status"] in {"blocked", "eligible", "already_armed"}, row
             if row["status"] == "eligible":
-                assert row["paired_delta_ci95_lower_r"] > row["materiality_band_r"], row
+                from seiltanzer.management_benefit import benefit_assessment
+                benefit = benefit_assessment(row.get('policy'), row.get('expected_delta_vs_hold_r'),
+                    row.get('matched_seed_tail_gain_lower_r'), row['materiality_band_r'],
+                    expected_lower_r=row['paired_delta_ci95_lower_r'],
+                    tail_lower_r=row.get('matched_seed_tail_gain_lower_r'))
+                assert benefit['allowed'] is True, row
                 assert row["worst_seed_cvar10_net_r"] >= row["hard_net_floor_r"] - 1e-8, row
                 assert row["automatic_execution_allowed"] is False, row
         print("MANAGEMENT_ALL_ACTIONS_AUDIT success")
@@ -259,7 +264,10 @@ def verify_management_calculation_audit(body: dict) -> None:
 
 def verify_unified_management_contract(body: dict) -> None:
     audit = body.get("unified_edge_ensemble") or {}
-    assert audit.get("contract_version") == "unified-edge-ensemble-v1", audit
+    assert audit.get("contract_version") == "unified-edge-ensemble-v2", audit
+    utility = audit.get('decision_utility') or {}
+    assert utility.get('contract_version') == 'management-benefit-v1', utility
+    assert utility.get('hold_score_margin') == .01, utility
     candidates = audit.get("candidates") or []
     from seiltanzer.llm_decision_shadow import VALID_POLICIES
     assert {row.get("policy") for row in candidates} == set(VALID_POLICIES), audit

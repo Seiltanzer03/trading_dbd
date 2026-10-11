@@ -919,3 +919,51 @@ profile was repeated after the one review fix; full mandatory CI runs remotely.
 Release evidence, final review and exact-SHA acceptance belong to this package PR.
 Finish line: these two verified defects and server acceptance; no new model,
 proxy authority, weight optimization or future-data wait is included.
+
+### 2026-10-11: согласованный выбор прибыли и защитной пользы
+
+По указанию пользователя закрывается конечный пакет существующего decision path:
+исправить две Expected-only проверки расширенных действий, явно учитывать
+снижение хвостового риска и задействовать доступные экспертные оценки в рамках
+исходного бюджета100%. План: `superpowers/plans/2026-10-11-risk-aware-unified-choice.md`.
+
+Один benefit-контракт допускает существенное улучшение Expected либо защиту
+с matched worst-seed ΔCVaR>=0.05R и нижней парной оценкой ΔExpected не хуже
+существующей зоны безразличия. EXTEND_TAKE требует улучшения Expected.
+Независимый источник/геометрия/reliability/hard-risk допуск не заменяется общим
+банком и мнениями. В quant utility добавлена защита с существующим коэффициентом
+0.35; положительный вклад ограничен зоной безразличия. Это предпочтение политики,
+не дополнительная доходность, не вероятность и не доказанный оптимум.
+
+Баллы экспертов относительно явно оценённого HOLD; sparse/null мнения сохраняются.
+Стартовые40/15/15/15/15 и LLM20 не изменены, lineage/freshness/quality действуют.
+Фиксированная quant шкала0.12R не зависит от экстремального постороннего кандидата.
+HOLD сохраняется при улучшении суммарного балла<=0.01; это порог смены решения,
+не новые брокерские расходы. Existing executed-reduction, geometry и ACK guards
+защищают повторные вмешательства. В audit/UI видны критерий допуска и отдельные
+вклады Expected/риска; семейные атрибуции согласованы с HOLD-relative оценкой.
+
+20 новых поведенческих отказов наблюдены RED→GREEN; дополнительные family
+attribution/compact audit и actual Node renderer также RED→GREEN. Owning profile:
+282passed2.98s; no real orders/provider calls. Окончательная отметка выпуска
+только после одного review, полного CI и фактических exact-SHA server receipts.
+Пустые trained family models не объявляются готовыми; рабочие source-bound LLM
+интерпретации сохраняют собственную роль. Нового поиска/сбора costs нет.
+
+Один final read-only review выявил два Important: sole explicit HOLD терял
+голос при нормализации, fallback терял парные bounds и подменял matched tail
+разностью двух независимо худших CVaR. Оба воспроизведены RED, исправлены одним
+проходом: sole-choice сохраняет raw semantics; bounds передаются в ranking,
+защита использует conservative matched tail, неизвестный matched tail не
+получает защитного кредита. Итоговый owning profile284passed2.92s и actual
+Node audit smoke PASS. Critical/Minor нет; повторного review нет.
+
+Первый full CI38122585179:3550passed/5skipped, два отставших consumer checks
+(старый Expected-only reason whitelist и smoke contract-v1) не прошли; WebKit,
+lattice и comparison green. Выпуск не разрешён на этом tree. Consumer checks
+обновлены для contract-v2 и общей protective benefit проверки, без ослабления
+hard-risk. Новый live-smoke regression отвергает excessive Expected loss,
+недостаточный tail и защитную подмену EXTEND_TAKE; positive protective smoke
+и independent LLM projection (matched bounds/basis) наблюдены RED→GREEN.
+Final owning profile316passed5.56s; Node audit smoke PASS. Новый full CI только
+для изменённого final tree, не повтор неизменного запуска.

@@ -11,8 +11,11 @@ import hashlib
 import json
 import math
 from copy import deepcopy
+from .management_benefit import (
+    benefit_assessment, quantitative_utility, QUANT_SCALE_R, HOLD_SCORE_MARGIN, TAIL_WEIGHT,
+)
 
-VERSION = "unified-edge-ensemble-v1"
+VERSION = "unified-edge-ensemble-v2"
 BASE = {"HOLD": 0., "CLOSE_10": .1, "CLOSE_25": .25, "CLOSE_50": .5, "EXIT": 1.}
 EXTENDED = ("MOVE_TO_BE", "TIGHTEN_STOP", "TRAIL_GAMMA_FLIP", "REDUCE_TAKE",
             "EXTEND_TAKE", "SCALE_OUT_ON_SPIKE", "TIME_STOP")
@@ -192,6 +195,8 @@ def collect_candidates(snapshot):
                      "cvar10_net_r": cvar, "delta_expected_r": delta, "delta_cvar_r": cvar_delta,
                      "execution_cost_r": number(raw.get("execution_cost_r")),
                      "quant_evaluation": deepcopy(raw), "source": raw.get("source") or "paired_extended_paths",
+                     "paired_delta_ci95_lower_r": number(raw.get('paired_delta_ci95_lower_r')),
+                     "matched_seed_tail_gain_lower_r": number(raw.get('matched_seed_tail_gain_lower_r')),
                      "economics_basis": "paired_delta_anchored_to_authoritative_hold",
                      "raw_expected_variant_net_r": expected})
     for policy in EXTENDED:
@@ -455,24 +460,42 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
     components = _prepare_components(specs, snapshot, nominal, excluded)
     feasible = [row for row in rows if row["eligible"]]
     hold = next((row for row in rows if row["policy"] == "HOLD"), {})
-    hold_expected = number(hold.get("expected_net_r"))
     values = [row["expected_net_r"] for row in feasible if row["expected_net_r"] is not None]
-    scale = max(.12, max(values) - min(values)) if values else .12
+    scale = QUANT_SCALE_R
     band = number(((snapshot.get("policy_manager") or {}).get("selection_rule") or {}).get("indifference_band_r"))
     band = max(0., band if band is not None else .03)
     best_expected = max(values) if values else None
+    # Common offsets are not expert preferences. Keep sparse opinions sparse;
+    # only an explicitly provided HOLD score acts as the reference.
+    references = {}
+    for component in components:
+        preferences = component.get('scores') or {}
+        comparative = sum(_score(value) is not None for value in preferences.values()) > 1
+        reference = _score(preferences.get(hold.get('candidate_id'), preferences.get('HOLD'))) if comparative else None
+        deviations = [abs(score - reference) for value in preferences.values()
+                      if (score := _score(value)) is not None] if reference is not None else []
+        references[component['component_id']] = (reference, max(1., *deviations) if deviations else 1.)
     for row in rows:
-        quant_score = _score((row["expected_net_r"] - hold_expected) / scale) if row["expected_net_r"] is not None and hold_expected is not None else None
+        matched_tail = number(row.get('matched_seed_tail_gain_lower_r'))
+        tail = (matched_tail if matched_tail is not None else
+                None if row.get('economics_basis') == 'paired_delta_anchored_to_authoritative_hold'
+                else row.get('delta_cvar_r'))
+        utility = quantitative_utility(row.get('delta_expected_r'), tail, band)
+        row['quant_utility'] = utility
+        quant_score = _score(utility['utility_delta_r'] / scale) if utility['utility_delta_r'] is not None else None
         contributions, missing_weight = [], 0.
         for component in components:
             identity = component["component_id"]
             preferences = component.get("scores") or {}
-            score = quant_score if identity == "quantitative_base" else _score(preferences.get(row["candidate_id"], preferences.get(row["policy"])))
+            raw_score = quant_score if identity == "quantitative_base" else _score(preferences.get(row["candidate_id"], preferences.get(row["policy"])))
+            reference, divisor = references[identity] if identity != 'quantitative_base' else (None, 1.)
+            score = ((raw_score - reference) / divisor if reference is not None else raw_score) if raw_score is not None else None
             weight = component["effective_weight"]
             if score is None and identity != "quantitative_base":
                 missing_weight += weight
                 weight = 0.
-            contributions.append({"component_id": identity, "score": score, "effective_weight": weight,
+            contributions.append({"component_id": identity, "score": score, "raw_score": raw_score,
+                                  "hold_reference_score": reference, "normalization_divisor": divisor, "effective_weight": weight,
                                   "contribution": weight * score if score is not None else 0.})
         quant = next(item for item in contributions if item["component_id"] == "quantitative_base")
         if excluded != "quantitative_base" and quant_score is not None:
@@ -484,16 +507,20 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
         # Opinions cannot purchase an unlimited economic sacrifice. A qualified
         # risk overlay may pay a small explicit cost for a material tail gain.
         row["ranking_eligible"] = row["eligible"]
+        benefit = benefit_assessment(row['policy'], row.get('delta_expected_r'), tail, band,
+            expected_lower_r=row.get('paired_delta_ci95_lower_r'),
+            tail_lower_r=row.get('matched_seed_tail_gain_lower_r'))
+        row['benefit_assessment'] = benefit
         if row["eligible"] and row["policy"] != "HOLD" and best_expected is not None:
-            tail_benefit = (number(row.get("delta_cvar_r")) or 0.) >= .05
-            delta = number(row.get("delta_expected_r"))
-            material = delta is not None and (delta > band or (tail_benefit and delta >= -band))
-            if not material:
+            if not benefit['allowed']:
                 row["ranking_eligible"], row["ranking_reason"] = False, "NO_MATERIAL_NET_OR_BOUNDED_TAIL_BENEFIT"
             elif best_expected - row["expected_net_r"] > band + 1e-8:
                 row["ranking_eligible"], row["ranking_reason"] = False, "EXPECTED_SACRIFICE_EXCEEDS_BUDGET"
     allowed = [row for row in rows if row["ranking_eligible"]]
     selected = max(allowed, key=lambda row: (row["score"], row["policy"] == "HOLD", -BASE.get(row["policy"], .05))) if allowed else None
+    hold = next((row for row in allowed if row['policy'] == 'HOLD'), None)
+    if hold and selected and selected['policy'] != 'HOLD' and selected['score'] <= hold['score'] + HOLD_SCORE_MARGIN + 1e-8:
+        selected = hold
     return selected, rows, components
 
 
@@ -535,10 +562,13 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
                 "available", "reason", "original_candidate_eligible")})
             if row["eligible"] and priced.get("hard_risk_pass") is not True:
                 row.update(eligible=False, reason="COMMON_SCENARIO_HARD_CVAR_INFEASIBLE")
-            if row["eligible"] and row["policy"] in EXTENDED:
+            if row["eligible"] and row["policy"] != 'HOLD':
                 band = number(((snapshot.get("policy_manager") or {}).get("selection_rule") or {}).get("indifference_band_r"))
                 band = max(0., band if band is not None else .03)
-                if (number(priced.get("paired_delta_ci95_lower_r")) or 0.) <= band:
+                benefit = benefit_assessment(row['policy'], row.get('delta_expected_r'), row.get('delta_cvar_r'), band,
+                    expected_lower_r=row.get('paired_delta_ci95_lower_r'),
+                    tail_lower_r=row.get('matched_seed_tail_gain_lower_r'))
+                if not benefit['allowed']:
                     row.update(eligible=False, reason="COMMON_SCENARIO_NO_ROBUST_MATERIAL_BENEFIT")
     from .edge_family_adapters import build_edge_family_evidence
     family_evidence = build_edge_family_evidence(snapshot)
@@ -604,6 +634,12 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
             "family_counterfactuals": family_counterfactuals,
             "hard_risk_override": False, "automatic_execution_allowed": False,
             "score_semantics": "dimensionless_preferences_not_expected_return_or_probability",
+            "decision_utility": {'contract_version': 'management-benefit-v1',
+                'tail_weight': TAIL_WEIGHT, 'quant_scale_r': QUANT_SCALE_R,
+                'positive_tail_credit_cap': 'indifference_band_r',
+                'hold_score_margin': HOLD_SCORE_MARGIN,
+                'expert_reference': 'explicit_HOLD_or_sparse_preference',
+                'optimal_weights_proven': False},
             "economics_scope": ("one frozen option-driver comparison bank, piecewise-linear execution; "
                                 "original source/risk/action gates remain mandatory"
                                 if economics.get("available") else
@@ -627,15 +663,22 @@ def _attach_working_family_contributions(candidates, components, families, selec
                     if row['component_id'] == 'current_llm'), {})
         applied = llm.get('effective_weight') or 0.
         key = candidate['policy']
+        reference = llm.get('hold_reference_score')
+        divisor = llm.get('normalization_divisor') or 1.
+        hold = next((row for row in candidates if row['policy'] == 'HOLD'), {})
+        hold_key = hold.get('policy', 'HOLD')
         candidate['working_family_contributions'] = []
         for family, row in families.items():
             score = (row.get('working_policy_scores') or {}).get(key)
             coefficient = (weights.get(key) or {}).get(family)
             contribution = (attributions.get(key) or {}).get(family)
+            reference_part = (attributions.get(hold_key) or {}).get(family) if reference is not None else None
+            relative = ((contribution or 0.) - (reference_part or 0.)) / divisor
             part = {'family_id': family, 'score': score,
                     'within_llm_weight': coefficient,
                     'effective_weight': applied * coefficient if coefficient is not None else 0.,
-                    'contribution': applied * contribution if contribution is not None else None}
+                    'hold_reference_contribution': reference_part,
+                    'contribution': applied * relative if contribution is not None or reference_part is not None else None}
             candidate['working_family_contributions'].append(part)
             if selected and candidate['candidate_id'] == selected['candidate_id']:
                 row.update(working_score=score, working_effective_weight=part['effective_weight'],

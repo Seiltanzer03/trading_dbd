@@ -271,7 +271,8 @@ def test_ai_verdict_rechecks_snapshot_after_post(monkeypatch):
 def test_unified_smoke_rejects_missing_actions_and_ineligible_applied_winner():
     from seiltanzer.llm_decision_shadow import VALID_POLICIES
     smoke = _load_script("production_functional_smoke")
-    audit = {"contract_version": "unified-edge-ensemble-v1", "applied": True,
+    audit = {"contract_version": "unified-edge-ensemble-v2", "applied": True,
+             "decision_utility": {"contract_version": "management-benefit-v1", "hold_score_margin": .01},
              "selected_candidate_id": "HOLD", "components": [{}] * 5,
              "counterfactuals": [{}] * 5, "scheme_comparisons": [{}] * 4,
              "automatic_execution_allowed": False, "hard_risk_override": False,

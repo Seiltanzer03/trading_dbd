@@ -105,7 +105,11 @@ def test_every_extended_action_has_real_parameters_and_counterfactual(policy):
     assert action['status'] == 'READY_FOR_MANUAL_CONFIRMATION'
     result = evaluate_extended_action(row, action)
     # Eligibility depends on economics, never on an unimplemented execution contract.
-    assert result['reason'] in {'NO_MATERIAL_ROBUST_EXPECTED_GAIN', 'ROBUST_EXPECTED_GAIN_AND_CVAR_PASS', 'VARIANT_CVAR_BELOW_HARD_FLOOR'}
+    assert result['reason'] in {'NO_MATERIAL_ROBUST_EXPECTED_GAIN', 'ROBUST_EXPECTED_GAIN_AND_CVAR_PASS', 'VARIANT_CVAR_BELOW_HARD_FLOOR', 'BOUNDED_TAIL_PROTECTION_AND_CVAR_PASS'}
+    if result['reason'] == 'BOUNDED_TAIL_PROTECTION_AND_CVAR_PASS':
+        assert result['benefit_assessment']['basis'] == 'BOUNDED_TAIL_PROTECTION'
+        assert result['paired_delta_ci95_lower_r'] >= -result['materiality_band_r']
+        assert result['matched_seed_tail_gain_lower_r'] >= .05
     assert result['paths'] > 0
     assert result['expected_variant_net_r'] == pytest.approx(result['expected_variant_gross_r'] - .01, abs=1e-5)
     assert result['hard_net_floor_r'] == -1.01

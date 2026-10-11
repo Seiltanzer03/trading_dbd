@@ -34,6 +34,35 @@ def test_isolated_unified_smoke_assesses_all_actions_without_transport(monkeypat
     assert summary["real_profit_proven"] is False
 
 
+@pytest.mark.parametrize('policy,lower,tail,allowed', [
+    ('TIGHTEN_STOP', -.029, .05, True),
+    ('TIGHTEN_STOP', -.04, .05, False),
+    ('TIGHTEN_STOP', -.029, .049, False),
+    ('EXTEND_TAKE', -.029, .05, False),
+])
+def test_live_management_smoke_checks_bounded_protection(policy, lower, tail, allowed):
+    metrics = {'outcomes_include_execution_costs': True,
+               'gross_expected_final_r': .1, 'execution_cost_r': .01,
+               'expected_final_r_net': .09}
+    candidate = {'policy': policy, 'status': 'eligible',
+                 'expected_delta_vs_hold_r': -.025,
+                 'paired_delta_ci95_lower_r': lower,
+                 'matched_seed_tail_gain_lower_r': tail,
+                 'materiality_band_r': .03,
+                 'worst_seed_cvar10_net_r': -.1, 'hard_net_floor_r': -.2,
+                 'automatic_execution_allowed': False}
+    body = {'management_calculation_audit': {
+        'version': 'management-calculation-audit-v1', 'status': 'AVAILABLE',
+        'policies': {policy: dict(metrics) for policy in ('HOLD', 'CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT')},
+        'execution_cost_model': {'immediate_full_close_r': .01}, 'model_current_r': .1},
+        'active_management_candidates': [candidate] + [{'status': 'blocked'}] * 6}
+    if allowed:
+        smoke.verify_management_calculation_audit(body)
+    else:
+        with pytest.raises(AssertionError):
+            smoke.verify_management_calculation_audit(body)
+
+
 def test_live_state_waits_for_price_source_materialization(monkeypatch):
     replies = [(503, {"detail": "live state snapshot is warming"}, 2.0),
                (200, {"feeds": {"price": {"value": 30273.5}}}, 3.0)]

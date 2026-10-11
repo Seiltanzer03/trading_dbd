@@ -40,8 +40,14 @@ const audit = {available:true,scheme:'balanced',instrument:'NAS100',regime:'TREN
       working_effective_weight:.0375,working_contribution:.01875,
       working_reason_ru:'<img src=x onerror=alert(1)>',working_assessment_reason:'SOURCE_BOUND_MANUAL_INTERPRETATION'}}};
 const container = new Element();
+audit.decision_utility = {tail_weight:.35,quant_scale_r:.12,hold_score_margin:.01};
+candidates[6].quant_utility = {expected_delta_r:-.01,tail_credit_r:.03,utility_delta_r:.02};
+candidates[6].benefit_assessment = {basis:'BOUNDED_TAIL_PROTECTION'};
 mountEdgeManagement(container,{available:false,unified_edge_ensemble:audit});
 const text = container.textContent;
+assert.match(text,/Защитная польза/);
+assert.match(text,/порог смены решения/);
+assert.match(text,/за риск \+0\.030R/);
 assert.match(text,/15\.0% → 7\.5%/);
 assert.match(text,/повторные доказательства ×0\.500/);
 assert.match(text,/свежесть ×0\.950/);
