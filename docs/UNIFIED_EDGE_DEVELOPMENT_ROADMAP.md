@@ -957,3 +957,13 @@ attribution/compact audit и actual Node renderer также RED→GREEN. Owning
 защита использует conservative matched tail, неизвестный matched tail не
 получает защитного кредита. Итоговый owning profile284passed2.92s и actual
 Node audit smoke PASS. Critical/Minor нет; повторного review нет.
+
+Первый full CI38122585179:3550passed/5skipped, два отставших consumer checks
+(старый Expected-only reason whitelist и smoke contract-v1) не прошли; WebKit,
+lattice и comparison green. Выпуск не разрешён на этом tree. Consumer checks
+обновлены для contract-v2 и общей protective benefit проверки, без ослабления
+hard-risk. Новый live-smoke regression отвергает excessive Expected loss,
+недостаточный tail и защитную подмену EXTEND_TAKE; positive protective smoke
+и independent LLM projection (matched bounds/basis) наблюдены RED→GREEN.
+Final owning profile316passed5.56s; Node audit smoke PASS. Новый full CI только
+для изменённого final tree, не повтор неизменного запуска.

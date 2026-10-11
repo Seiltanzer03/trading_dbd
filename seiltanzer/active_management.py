@@ -57,6 +57,7 @@ _REASON_RU = {
     "EXECUTION_COST_MODEL_UNAVAILABLE": "нет модели будущих издержек",
     "AUTHORITATIVE_INSTRUMENT_PRICE_UNAVAILABLE": "нет авторитетной текущей цены инструмента",
     "ROBUST_EXPECTED_GAIN_AND_CVAR_PASS": "модельная польза и hard CVaR подтверждены",
+    "BOUNDED_TAIL_PROTECTION_AND_CVAR_PASS": "снижение хвостового риска с ограниченной платой по Expected; hard CVaR подтверждён",
     "VARIANT_CVAR_BELOW_HARD_FLOOR": "вариант нарушает hard CVaR",
 }
 

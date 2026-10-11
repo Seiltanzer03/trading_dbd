@@ -224,3 +224,15 @@ def test_independent_fallback_uses_matched_tail_and_keeps_paired_bounds():
     assert stop['quant_utility']['tail_delta_r'] == pytest.approx(.05)
     assert stop['quant_utility']['utility_delta_r'] == pytest.approx(-.0075)
     assert audit['selected_policy'] == 'HOLD'
+
+
+def test_independent_llm_input_retains_protective_admission_basis():
+    from seiltanzer.ai_runtime_report_v20 import _independent_provider_input
+    value = protective_snapshot()
+    row = value['active_management_candidates'][0]
+    row.update(matched_seed_tail_gain_lower_r=.18,
+               benefit_assessment={'basis': 'BOUNDED_TAIL_PROTECTION', 'allowed': True})
+    projected = _independent_provider_input(value, value)
+    kept = projected['active_management_candidates'][0]
+    assert kept['matched_seed_tail_gain_lower_r'] == .18
+    assert kept['benefit_assessment']['basis'] == 'BOUNDED_TAIL_PROTECTION'

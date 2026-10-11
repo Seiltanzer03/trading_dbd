@@ -382,6 +382,7 @@ def _independent_provider_input(snapshot: dict[str, Any], authority: dict[str, A
         "expected_hold_net_r", "expected_delta_vs_hold_r", "execution_cost_r",
         "worst_seed_cvar10_net_r", "worst_seed_hold_cvar10_net_r",
         "paired_delta_ci95_lower_r", "materiality_band_r", "hard_net_floor_r",
+        "matched_seed_tail_gain_lower_r", "benefit_assessment",
         "production_authority", "automatic_execution_allowed",
     )
     projected["active_management_candidates"] = [
