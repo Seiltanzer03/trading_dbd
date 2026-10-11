@@ -30,8 +30,10 @@ PATH_KEYS = ("probability", "baseline_probability", "horizon_minutes", "target_s
     "generic_barriers_are_trade_stop_take", "evidence_tier")
 PATH_NAMES = ("downside_excursion", "upside_excursion", "upper_before_lower", "early_first_touch")
 FAMILY_ROOTS = ("edge_family_sources", "edge_family_models", "edge_family_market_context", "macro_context_v1", "macro_t0_context")
-MARKET_CONTEXT_MAX_BYTES = 12_000
-FAMILY_INPUT_MAX_BYTES = 20_000
+# Several genuine family models must coexist with their intact hashes/heads.
+# The enclosing review still has its independent, unchanged 60KB ceiling.
+MARKET_CONTEXT_MAX_BYTES = 32_000
+FAMILY_INPUT_MAX_BYTES = 40_000
 LINEAGE_KEYS = ("adverse_confirmation_families", "supportive_confirmation_families",
                 "adverse_confirmations", "supportive_contradictions", "context_observations")
 EXCLUDED_REASON = "EXCLUDED_BY_SNAPSHOT_BYTE_BUDGET"

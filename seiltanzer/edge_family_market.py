@@ -457,6 +457,25 @@ def attach_market_family_context(engine, snapshot):
                 'max_age_sec': 900., 'quality': 1., 'dependency_group': 'price_path'} for name in features}
         else:
             features, proof = facts[family]['features'], facts[family]['feature_provenance']
+            if family == 'option' and any('option.iv' in head.get('feature_names', []) for head in model['heads'].values()):
+                from .edge_family_native_history import option_observation
+                from .passive_learning import PassiveLearningEngine
+                chain = getattr(feed, 'chain', None)
+                option = None
+                if isinstance(chain, dict):
+                    option_received = number(chain.get('ts'))
+                    metrics = chain.get('metrics')
+                    if option_received is not None and option_received <= origin:
+                        try:
+                            option = option_observation(code=code, metrics=metrics,
+                                source_id=chain.get('source'), observed_ts=option_received,
+                                received_ts=option_received, quality=PassiveLearningEngine._quality(chain),
+                                source_sha256=fingerprint(metrics))
+                        except (ValueError, TypeError, OverflowError):
+                            pass  # Invalid optional input cannot remove other experts.
+                if option is None or cutoff-option['captured_ts'] > 1800:
+                    context.setdefault('rejected_models', {})[family] = 'ACTUAL_CONFIGURED_OPTION_INPUT_UNAVAILABLE'; continue
+                features, proof = option['features'], option['feature_provenance']
             if family == 'intermarket':
                 names = [f'intermarket.COINBASE{p}.return_5m_aligned_lag5m' for p in PRODUCTS.values()]
                 if any(name not in features or (proof[name].get('forecast_origin_ts') != origin) for name in names):

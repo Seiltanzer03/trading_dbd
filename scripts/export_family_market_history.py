@@ -10,9 +10,10 @@ from pathlib import Path
 from seiltanzer.edge_family_archive import _loads
 from seiltanzer.edge_family_private_archive import restore
 from seiltanzer.edge_family_market import features_from_archive
+from seiltanzer.edge_family_native_history import merge_histories
 
 
-def export_history(client, output):
+def export_history(client, output, *, native=None):
     history = {}
     audit = {'read_only': True, 'raw_archive_publication': False,
              'feature_observation_count': 0, 'reason': 'PRIVATE_ARCHIVE_RESTORE_FAILED'}
@@ -27,6 +28,8 @@ def export_history(client, output):
         # Archive/provider errors may contain private identifiers. Do not print
         # them, or represent inaccessible storage as a successful empty restore.
         history = {}
+    audit['native_feature_observation_count'] = sum(len(rows) for fs in (native or {}).values() for rows in fs.values())
+    history = merge_histories(history, native)
     audit['family_counts'] = {family: sum(len(rows.get(family, [])) for rows in history.values())
                               for family in ('macro','event','order_flow','intermarket','positioning','value_carry','option','session')}
     audit['feature_observation_count'] = sum(audit['family_counts'].values())
@@ -43,6 +46,7 @@ def export_history(client, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--native-history', type=Path)
     args = parser.parse_args()
     # Print counters only. Dependencies never print archive/account exceptions.
     with open(os.devnull, 'w') as quiet, contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
@@ -50,7 +54,14 @@ def main():
         from botocore.config import Config
         client = boto3.client('s3', endpoint_url='https://storage.yandexcloud.net', region_name='ru-central1',
                              config=Config(connect_timeout=10, read_timeout=60, retries={'max_attempts': 1}))
-        audit = export_history(client, args.output)
+        native = None
+        if args.native_history:
+            if args.native_history.stat().st_size > 96_000_000:
+                raise ValueError('NATIVE_FEATURE_HISTORY_EXCEEDS_BOUND')
+            native = json.loads(args.native_history.read_text())
+            if not isinstance(native, dict):
+                raise ValueError('NATIVE_FEATURE_HISTORY_INVALID')
+        audit = export_history(client, args.output, native=native)
     print('FAMILY_HISTORY_READ', json.dumps(audit, sort_keys=True))
 
 

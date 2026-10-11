@@ -1016,3 +1016,15 @@ Runtime проверяет source/model clocks, exactSHA, hash, window/lag/horiz
 и точное marginal score изменение без семейства; это не аддитивная доля.
 Другие6семейств не подменяются OHLC; выпуск фиксирует actual private-history
 counts. Final review/CI/deploy/publication receipts будут в PR и ledger.
+
+### 2026-10-11 — native history integration
+
+Previous historical family release PR446 + correctionPR447 is accepted production6ca004da:20 genuine fitted session/intermarket models,15 supported combinations in the latest actual publication. No unfitted macro head counts as trained. Native G1S history was not yet consumed by that release.
+
+The new bounded native exporter verifies immutable G1S features against the original passive source bytes and uses the original capture-record timestamp, not later materialization or export time. Existing valid official/family records can feed the same historical trainer; price-derived macro regime is not relabelled as an official macro source. The shared option.iv input is an actual configured proxy's annual IV fraction; historical target labels calibrate its physical response, while the raw Q input stays distinct from a physical probability and target quote. No raw native history is publicly uploaded.
+
+Current review uses the same in-memory configured-chain IV contract, source hash, receipt and quality; stale/demo/wrong-proxy/malformed/after-origin input remains rejected. Joint session/intermarket/option context exceeded the previous12KB ceiling and erased all three. The bounded root32KB / combined40KB limits preserve the three real models; the overall60KB review ceiling remains unchanged.
+
+Owning257-test profile and renderer smoke passed before final review. Actual native export counts, new trained model counts, final CI and exact-SHA delivery remain required; no claim of all eight trained families is made from tests.
+
+Final review reproduced unavailable-chain receipt shadowing and an IV/source-clock mismatch between refreshed and cached snapshots. Fixes retain the market receipt separately and bind the native IV value, configured proxy and timestamp to one immutable V3/V2 block. V2 source_ts is read directly. Five regressions observed RED→GREEN; only the corrected final tree may be released.

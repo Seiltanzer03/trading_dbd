@@ -469,3 +469,80 @@ def test_hash_valid_empty_heads_cannot_become_runtime_trained_model(tmp_path, mo
     market().attach_market_family_context(engine,snapshot)
     assert not snapshot['edge_family_market_context']['families']
     assert snapshot['edge_family_market_context']['rejected_models']['session'] == 'MARKET_MODEL_HEADS_UNTRAINED'
+
+
+def option_runtime(tmp_path,monkeypatch):
+    import json
+    from seiltanzer.edge_family_native_history import option_observation
+    engine,snapshot,report,path = runtime(tmp_path,monkeypatch)
+    history=[]
+    for b in source()['bars']:
+        ts=b['bar_end_ts']
+        metrics={'proxy':'QQQ','demo':False,'implied_move':{'sigma_annual':.3+.1*math.sin(2*math.pi*ts/86400)}}
+        history.append(option_observation(code='NAS100',metrics=metrics,source_id='actual-recorded-option',
+            observed_ts=ts-60,received_ts=ts-17,quality=.72,source_sha256=fingerprint(metrics)))
+    model=market().train_market_families([source()],T0,horizons=(15,),
+        feature_history={'NAS100':{'option':history}})['NAS100']['option']
+    assert model['status']=='TRAINED'
+    report['family_market_models']['NAS100']['option']=model
+    path.write_text(json.dumps(report))
+    engine.market.chain={'metrics':{'proxy':'QQQ','demo':False,'implied_move':{'sigma_annual':.28}},
+                         'ts':T0-60,'status':'delayed','source':'yfinance QQQ options'}
+    return engine,snapshot,report,path
+
+
+def test_native_trained_option_forecast_uses_same_actual_live_feature_and_preserves_session(tmp_path,monkeypatch):
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    engine,snapshot,_,_=option_runtime(tmp_path,monkeypatch)
+    market().attach_market_family_context(engine,snapshot)
+    context=snapshot['edge_family_market_context']['families']
+    assert set(context)=={'option','session'}
+    assert context['option']['features']=={'option.iv':.28}
+    proof=context['option']['feature_provenance']['option.iv']
+    assert proof['observed_ts']==T0-60
+    assert proof['target_quote_authority'] is False
+    families=build_edge_family_evidence(snapshot)['families']
+    assert families['option']['forecast_available']
+    assert all(0<p['probability']<1 for p in families['option']['market_predictions'].values())
+
+
+@pytest.mark.parametrize('case',['demo','wrong_proxy','stale','after_origin','malformed','missing_ts'])
+def test_bad_live_option_input_preserves_other_genuine_experts(tmp_path,monkeypatch,case):
+    engine,snapshot,_,_=option_runtime(tmp_path,monkeypatch)
+    chain=engine.market.chain
+    if case=='demo':chain['metrics']['demo']=True
+    elif case=='wrong_proxy':chain['metrics']['proxy']='SPY'
+    elif case=='stale':chain['ts']=T0-1801
+    elif case=='malformed':chain['metrics']['irrelevant_nan']=float('nan')
+    elif case=='missing_ts':chain['ts']=None
+    else:
+        chain['ts']=T0+15;snapshot['captured_ts']=T0+30
+    market().attach_market_family_context(engine,snapshot)
+    assert 'option' not in snapshot['edge_family_market_context']['families']
+    assert 'session' in snapshot['edge_family_market_context']['families']
+
+
+def test_session_intermarket_and_native_option_survive_same_frozen_snapshot(tmp_path,monkeypatch):
+    import json
+    from test_edge_family_sources import build_bundle,calendar,book,tape,cot,candles,T0 as captured
+    from seiltanzer.operational_edge_compaction import compact_operational_edges
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    engine,snapshot,report,path=option_runtime(tmp_path,monkeypatch)
+    model=market().train_market_families([source()]+[source(code) for code in PRODUCTS_FOR_TEST],
+        T0,horizons=(15,))['NAS100']['intermarket']
+    report['family_market_models']['NAS100']['intermarket']=model
+    path.write_text(json.dumps(report))
+    def fetch(url):
+        return calendar() if 'nyse' in url else cot() if 'cftc' in url else book() if 'book' in url else tape() if 'trades' in url else candles()
+    record=build_bundle(instruments=['NAS100'],fetch=fetch,clock=lambda:captured)['instruments']['NAS100']['edge_family_sources']['intermarket'][0]
+    def shift(value):
+        if isinstance(value,dict):return {k:shift(v) for k,v in value.items()}
+        if isinstance(value,list):return [shift(v) for v in value]
+        return value+T0-captured if isinstance(value,(int,float)) and captured-86400<value<=captured else value
+    snapshot['edge_family_sources']={'intermarket':[shift(record)]}
+    market().attach_market_family_context(engine,snapshot)
+    compact_operational_edges(snapshot)
+    assert set(snapshot['edge_family_market_context']['families'])=={'option','session','intermarket'}
+    evidence=build_edge_family_evidence(snapshot)
+    assert all(evidence['families'][f]['forecast_available'] for f in ('option','session','intermarket'))
+    assert len(json.dumps(snapshot).encode())<60000
