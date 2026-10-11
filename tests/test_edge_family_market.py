@@ -438,3 +438,34 @@ def test_combined_session_intermarket_survives_collector_and_snapshot_budget(tmp
     assert evidence['families']['session']['forecast_available']
     assert evidence['families']['intermarket']['forecast_available']
     assert len(json.dumps(snapshot).encode()) < 60000
+
+
+def test_history_without_trainable_heads_is_not_reported_as_trained_model():
+    m = market()
+    src = source()
+    observed = src['bars'][0]['bar_end_ts']
+    history = [{'captured_ts':bar['bar_end_ts'], 'features':{'macro.recorded_rate':1.},
+        'feature_provenance':{'macro.recorded_rate':{'source_verified':True,'source_id':'same-recorded-release',
+            'source_instrument':'NAS100','observed_ts':observed,'received_ts':observed,
+            'max_age_sec':30*86400.,'quality':1.,'dependency_group':'same-release'}}} for bar in src['bars']]
+    report = m.train_market_families([src],T0,horizons=(15,),feature_history={'NAS100':{'macro':history}})
+    row = report['NAS100']['macro']
+    assert row['status'] == 'HEAD_TRAINING_UNAVAILABLE'
+    assert row['forecast'] is None
+    assert not any('head' in head for head in row['heads'].values())
+    from scripts.run_mathematical_edge import build_report
+    actual = build_report([src],{},T0,horizons=(15,),family_history={'NAS100':{'macro':history}})
+    assert actual['family_market_model_summary']['trained_models'] == 1
+
+
+def test_hash_valid_empty_heads_cannot_become_runtime_trained_model(tmp_path, monkeypatch):
+    import json
+    engine,snapshot,report,path = runtime(tmp_path,monkeypatch)
+    model = report['family_market_models']['NAS100']['session']
+    model['heads'] = {key:{'working_supported':False,'forecast':None,'reason':'HEAD_CLASSES_OR_VALIDATION_UNAVAILABLE'}
+                      for key in ('direction','movement')}
+    model['model_sha256'] = fingerprint({k:v for k,v in model.items() if k != 'model_sha256'})
+    path.write_text(json.dumps(report))
+    market().attach_market_family_context(engine,snapshot)
+    assert not snapshot['edge_family_market_context']['families']
+    assert snapshot['edge_family_market_context']['rejected_models']['session'] == 'MARKET_MODEL_HEADS_UNTRAINED'

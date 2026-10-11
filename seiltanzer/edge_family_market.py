@@ -210,6 +210,9 @@ def _fit_family(code, family, bars, captured, horizons, related, history, source
             'test_block_gains_mbit': blocks, 'test_n': len(test), 'train_n': len(train),
             'fit_end_ts': float(data['ends'][train[-1]]), 'test_start_ts': boundaries[-1],
             'selection_uses_final_test': False, 'feature_names': data['feature_names']}
+    if not any('head' in row for row in heads.values()):
+        return {'status': 'HEAD_TRAINING_UNAVAILABLE', 'reason': 'NO_HEAD_WITH_CAUSAL_VALIDATION',
+                'forecast': None, 'training_n': len(anchor['times']), 'heads': heads}
     # Models retain the pre-test fit: reported OOS describes the delivered fit.
     body = {'contract_version': CONTRACT, 'feature_contract_version': FEATURE_CONTRACT,
         'family_id': family, 'instrument': code, 'status': 'TRAINED', 'target_kind': TARGET,
@@ -359,6 +362,8 @@ def _model_reason(model, code, family, cutoff):
         heads = model.get('heads')
         if not isinstance(heads, dict) or set(heads) != {'direction', 'movement'}:
             return 'MARKET_MODEL_HEADS_INVALID'
+        if not any(isinstance(row, dict) and 'head' in row for row in heads.values()):
+            return 'MARKET_MODEL_HEADS_UNTRAINED'
         for row in heads.values():
             if not isinstance(row, dict):
                 return 'MARKET_MODEL_HEADS_INVALID'
