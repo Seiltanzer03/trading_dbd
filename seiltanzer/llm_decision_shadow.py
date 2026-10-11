@@ -163,7 +163,8 @@ def _shadow_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
     projection["edge_family_facts"] = {family: {
         key: row[key] for key in ("available", "reason", "features", "feature_provenance", "source_ids",
                                   "evidence_family_ids", "observed_ts", "published_ts",
-                                  "received_ts", "needs_data", "budget_excluded_roots")
+                                  "received_ts", "needs_data", "budget_excluded_roots", "market_predictions",
+                                  "forecast_kind", "forecast_origin_ts", "market_model_sha256")
         if key in row} for family, row in observed.items()}
     families = {"option_distribution", "price_path"}
     for row in observed.values():

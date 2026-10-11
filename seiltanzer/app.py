@@ -1296,6 +1296,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             from .runtime_git_identity import runtime_git_sha
             await trace.to_thread('runtime_context', attach_unified_edge_context, engine, snapshot,
                                     expected_sha=runtime_git_sha())
+            from .edge_family_market import attach_market_family_context
+            await trace.to_thread('runtime_context', attach_market_family_context, engine, snapshot)
             macro_factory = getattr(getattr(engine, "passive", None), "_macro_data_factory", None)
             if macro_factory is not None:
                 from .macro_t0_context import build_macro_t0_context

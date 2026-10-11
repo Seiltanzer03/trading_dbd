@@ -626,6 +626,32 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
             'ablation_scope': 'CURRENT_LLM_FAMILY_INTERPRETATION_ONLY',
             'risk_and_cost_evaluation_preserved': True})
     _attach_working_family_contributions(candidates, components, families, selected)
+    market_counterfactuals = []
+    for candidate in candidates:
+        candidate['model_family_contributions'] = []
+    for family, row in families.items():
+        if row.get('market_preference_available') is not True:
+            continue
+        reduced_evidence = {**family_evidence, 'components': [component for component in family_evidence['components']
+            if not (component.get('prediction_measure') == 'OBSERVED_MARKET_DIRECTION_AND_MOVEMENT'
+                    and family in component.get('family_ids', []))]}
+        rebuilt, _ = collect_components(snapshot, candidates, current_llm, family_evidence=reduced_evidence)
+        rebuilt_math = next(component for component in rebuilt if component['component_id'] == 'mathematical_edge')
+        # Preserve finalized quantitative banks, registry and current LLM. Only
+        # the trained market-family opinion is removed in this counterfactual.
+        without_specs = [rebuilt_math if component['component_id'] == 'mathematical_edge' else component for component in specs]
+        without, without_candidates, _ = rank_candidates(candidates, without_specs, snapshot, schemes[scheme])
+        market_counterfactuals.append({'excluded_family_id': family, **_comparison('without_market_' + family, without),
+            'ablation_scope': 'TRAINED_MARKET_RESPONSE_ONLY', 'risk_and_cost_evaluation_preserved': True})
+        for candidate, control in zip(candidates, without_candidates):
+            pool = next((part for part in candidate['component_contributions'] if part['component_id'] == 'mathematical_edge'), {})
+            marginal = candidate['score'] - control['score']
+            part = {'family_id': family, 'pool_effective_weight': pool.get('effective_weight'),
+                'marginal_score_delta': marginal, 'attribution_semantics': 'EXACT_SCORE_CHANGE_ON_FAMILY_ABLATION_NOT_ADDITIVE_SHARE'}
+            candidate['model_family_contributions'].append(part)
+            if selected and candidate['candidate_id'] == selected['candidate_id']:
+                row.update(model_pool_effective_weight=part['pool_effective_weight'], model_marginal_score_delta=marginal,
+                           model_attribution_semantics=part['attribution_semantics'])
     comparisons = []
     for name, nominal in schemes.items():
         choice, _, _ = rank_candidates(candidates, specs, snapshot, nominal)
@@ -645,6 +671,7 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
             "selected_policy": selected.get("policy") if selected else None,
             "reason": "WEIGHTED_AUTHORIZED_CANDIDATES" if selected else "NO_AUTHORIZED_CANDIDATE",
             "candidates": candidates, "components": components, "edge_families": families,
+            'market_family_counterfactuals': market_counterfactuals,
             "counterfactuals": counterfactuals, "scheme_comparisons": comparisons,
             "family_counterfactuals": family_counterfactuals,
             "hard_risk_override": False, "automatic_execution_allowed": False,

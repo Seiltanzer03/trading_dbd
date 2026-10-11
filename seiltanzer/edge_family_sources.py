@@ -656,6 +656,21 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
                     from .edge_family_history import INTERMARKET_CONTRACT
                     record.update(intermarket_history_contract=INTERMARKET_CONTRACT,
                                   historical_series=histories)
+                # Reuse the same received bodies for the historical trainer's
+                # aligned5m/lag5m definition. No additional request or inferred
+                # price; incomplete windows supply no market-model input.
+                origin = math.floor(end / 300) * 300
+                if len(closes) == 3 and all(origin-600 in values and origin-300 in values
+                                           for values in closes.values()):
+                    from .edge_family_market import FEATURE_CONTRACT as MARKET_FEATURE_CONTRACT
+                    record.update(market_return_contract=MARKET_FEATURE_CONTRACT,
+                        market_return_origin_ts=origin,
+                        aligned_related_series=[{'provider': 'Coinbase Exchange', 'symbol': CRYPTO[leader],
+                            'quote_currency': 'USD', 'source_id': raw[f'coinbase:{leader}:candles']['source_id'],
+                            'body_sha256': raw[f'coinbase:{leader}:candles']['body_sha256'],
+                            'available_at': raw[f'coinbase:{leader}:candles']['received_ts'],
+                            'closes': [[origin-600, values[origin-600]], [origin-300, values[origin-300]]]}
+                            for leader, values in closes.items()])
                 output[code]["edge_family_sources"]["intermarket"].append(record)
     for code, contract in COT_MARKETS.items():
         if code in output:

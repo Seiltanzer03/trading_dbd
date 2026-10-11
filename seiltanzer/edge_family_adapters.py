@@ -346,6 +346,12 @@ def _history(row: dict, source: dict, meta: dict, cutoff: float, *, positioning=
 def _intermarket(row: dict, source: dict, meta: dict, cutoff: float) -> None:
     if not _history(row, source, meta, cutoff):
         return
+    from .edge_family_market import aligned_related_features
+    aligned = aligned_related_features(source, cutoff)
+    if aligned is not None:
+        values, proofs = aligned
+        for name, value in values.items():
+            _add(row, name, value, {**meta, **proofs[name], 'source_instrument': row['instrument']})
     for link in _rows(source.get("linked_returns")):
         leader = canonical_instrument_code(link.get("leader"))
         start, end = _num(link.get("start_ts")), _num(link.get("end_ts"))
@@ -816,6 +822,8 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
             else:
                 row["forecast_rejections"].append({"model_version": artifact.get("model_version"), "reason": reason})
     result["components"] = _pool_components(forecasts)
+    from .edge_family_market import market_family_evidence
+    result['components'].extend(market_family_evidence(snapshot, families))
     budget = _dict(snapshot.get("edge_family_budget_status"))
     excluded = [str(key) for key in budget.get("excluded_roots", [])
                 if str(key) not in snapshot]

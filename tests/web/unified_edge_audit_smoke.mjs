@@ -45,6 +45,16 @@ candidates[6].quant_utility = {expected_delta_r:-.01,tail_credit_r:.03,utility_d
 candidates[6].benefit_assessment = {basis:'BOUNDED_TAIL_PROTECTION'};
 mountEdgeManagement(container,{available:false,unified_edge_ensemble:audit});
 const text = container.textContent;
+const trainedContainer = new Element();
+mountEdgeManagement(trainedContainer,{unified_edge_ensemble:{...audit,
+  market_family_counterfactuals:[{excluded_family_id:'session',selected_candidate_id:'HOLD',selected_policy:'HOLD'}],
+  edge_families:{session:{available:true,forecast_available:true,market_predictions:{direction:{probability:.7,
+    horizon_minutes:15,test_gain_mbit:3,test_n:30,evidence_tier:'LIMITED_HISTORICAL'}},
+    model_pool_effective_weight:.04,model_marginal_score_delta:.01}}}});
+assert.match(trainedContainer.textContent,/P\(up \| move >2bp\)/);
+assert.match(trainedContainer.textContent,/70\.0%/);
+assert.match(trainedContainer.textContent,/Без обученного рыночного прогноза/);
+assert.match(trainedContainer.textContent,/пул 4\.0%/);
 assert.match(text,/Защитная польза/);
 assert.match(text,/порог смены решения/);
 assert.match(text,/за риск \+0\.030R/);
