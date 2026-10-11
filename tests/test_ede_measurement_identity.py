@@ -1,6 +1,7 @@
 """Calculation identity must not overwrite immutable historical evidence."""
 import copy
 import importlib
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,13 @@ import pytest
 from seiltanzer.edge_discovery.candidate_registry import CandidateRegistry
 from seiltanzer.edge_discovery.dataset_fingerprint import research_dataset_fingerprint
 from seiltanzer.edge_discovery.selective import run_selective_search
-from scripts.production_ede_v13_audit import _register_evaluations, EVALUATION_MEASUREMENT_CONTRACT
+_SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'production_ede_v13_audit.py'
+_SPEC = importlib.util.spec_from_file_location('production_ede_measurement_test', _SCRIPT)
+assert _SPEC is not None and _SPEC.loader is not None
+_AUDIT = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_AUDIT)
+_register_evaluations = _AUDIT._register_evaluations
+EVALUATION_MEASUREMENT_CONTRACT = _AUDIT.EVALUATION_MEASUREMENT_CONTRACT
 
 
 def candidate():
