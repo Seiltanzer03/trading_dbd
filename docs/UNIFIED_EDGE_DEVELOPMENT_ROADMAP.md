@@ -1028,3 +1028,15 @@ Current review uses the same in-memory configured-chain IV contract, source hash
 Owning257-test profile and renderer smoke passed before final review. Actual native export counts, new trained model counts, final CI and exact-SHA delivery remain required; no claim of all eight trained families is made from tests.
 
 Final review reproduced unavailable-chain receipt shadowing and an IV/source-clock mismatch between refreshed and cached snapshots. Fixes retain the market receipt separately and bind the native IV value, configured proxy and timestamp to one immutable V3/V2 block. V2 source_ts is read directly. Five regressions observed RED→GREEN; only the corrected final tree may be released.
+
+PR448 accepted exactmain6efb898/tree d4dabca6. FinalCI38157348068:3706passed5skipped, pinnedSQLite/frontend/WebKit green. Deploy38158012521 attempt2 passed readiness17:37:25, functional17:39:33 and public17:39:34; isolated12 actions,0 orders/paid calls/position changes. Attempt1 had one worker-status3078.5ms response against unchanged3000ms after18fast responses; subsequent actual health and one bounded retry passed without changing limits.
+
+Math38160568283/source38160570018/FOMC38160571550 published that sameSHA. Actual artifact11710505421:20 fitted models,13 supported combinations, finite beta and matching counters. Native export read999original records, producing999macro+537option inputs; with private archive1561observations. Nine instruments hit6MB raw transport cap. Option target datasets39–72 nonoverlapping samples: no new option models fitted. This measures the bounded export, not absence of data in the full database.
+
+### 2026-10-11 — preserve available history within transport limits
+
+Finite follow-up `superpowers/plans/2026-10-11-native-capture-projection.md`: verify original/passive source bytes before projecting only existing family inputs. Projection has its own digest bound to the original source hash; original source identity, IV/source-clock pairing, proxy, producer/synthetic markers and clocks remain. SQL stays read-only and existing row/byte bounds and model admission stay fixed. No current decision/risk behavior changes.
+
+Regression reproduced148/260existing large records surviving the old6MB cap; verified projection preserves260/260with identical extracted feature/provenance output. Changed owning239tests passed. Final independent review, mandatory CI, actual expanded history fit and exact-SHA delivery remain required.
+
+Final independent review found no Critical/Important issue. Its256KB projection-metadata boundary reproduced256062bytes from a valid256000byte original; fallback to the already-verified full original retains the existing consumer ceiling and feature output. Owning240tests passed. Trusted same-repository PR now reads actual private/native history before merge; forks are excluded, production/cache writes remain main-only and raw inputs stay outside artifacts.

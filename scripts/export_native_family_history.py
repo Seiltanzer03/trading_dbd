@@ -5,6 +5,7 @@ import argparse
 import base64
 import gzip
 import io
+import inspect
 import json
 import shlex
 from pathlib import Path
@@ -12,8 +13,14 @@ from pathlib import Path
 from scripts.production_ede_offload import _connect
 from seiltanzer.config import ALL_INSTRUMENTS
 from seiltanzer.edge_family_native_history import native_history
+from seiltanzer import native_family_capture_projection, real_input_integrity
 
-REMOTE_EXPORT = r"""
+# Embed the exact shared stdlib implementation: no installed server package,
+# model dependencies or duplicate projection/guard rules are required.
+_SUPPORT = inspect.getsource(real_input_integrity) + '\n' + inspect.getsource(
+    native_family_capture_projection).replace('from __future__ import annotations\n','').replace(
+        'from .real_input_integrity import FLAGS, simulated_evidence\n','')
+REMOTE_EXPORT = _SUPPORT + '\n' + r"""
 import sqlite3, time, json, hashlib, gzip, base64
 now=time.time()
 started=time.monotonic()
@@ -42,10 +49,13 @@ if len(tables)==2:
     if (not isinstance(raw,str) or not isinstance(original,str) or len(raw.encode())>256000
         or hashlib.sha256(raw.encode()).hexdigest()!=r['features_sha256']
         or hashlib.sha256(original.encode()).hexdigest()!=r['features_sha256']):continue
-    size+=len(raw.encode())
+    projected=project_capture(raw,r['features_sha256'])
+    if projected is None:continue
+    size+=len(projected['frozen_features_json'].encode())
     if size>6000000:
      limited.append(code);break
     r['source_verified']=True
+    r.update(projected)
     rows.append(r)
    cursor.close()
   reason='NATIVE_OBSERVATIONS_EXPORTED' if rows else 'NATIVE_ELIGIBLE_HISTORY_EMPTY'

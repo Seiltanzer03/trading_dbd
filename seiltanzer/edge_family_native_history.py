@@ -5,8 +5,6 @@ target quote. Only the existing historical target trainer gives it a forecast.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 
 from .config import ALL_INSTRUMENTS
@@ -15,10 +13,9 @@ from .edge_family_adapters import FAMILIES, MAX_AGE_SEC, build_edge_family_evide
 from .edge_family_training import FEATURE_PREFIXES, _feature_reason
 from .mathematical_edge import fingerprint, number
 from .real_input_integrity import FLAGS, simulated_evidence
+from .native_family_capture_projection import ROOTS, verified_capture
 
 MAX_ROWS = 20000
-ROOTS = ('macro_context_v1', 'macro_t0_context', 'event_context', 'event_reaction',
-         'edge_family_sources', 'edge_family_source_bundle')
 
 
 def option_observation(*, code, metrics, source_id, observed_ts, received_ts,
@@ -69,16 +66,12 @@ def native_history(rows, *, captured_ts):
     for row in rows:
         if not isinstance(row, dict) or row.get('source_verified') is not True:
             continue
-        code, raw = row.get('instrument'), row.get('frozen_features_json')
+        code = row.get('instrument')
         captured, recorded = number(row.get('captured_ts')), number(row.get('original_created_ts'))
-        if (code not in ALL_INSTRUMENTS or not isinstance(raw, str) or len(raw.encode()) > 256000
-                or hashlib.sha256(raw.encode()).hexdigest() != row.get('features_sha256')
-                or captured is None or recorded is None or not 0 < captured <= recorded <= cutoff):
+        if (code not in ALL_INSTRUMENTS or captured is None or recorded is None
+                or not 0 < captured <= recorded <= cutoff):
             continue
-        try:
-            frozen = json.loads(raw)
-        except (ValueError, TypeError):
-            continue
+        frozen = verified_capture(row)
         if not isinstance(frozen, dict) or simulated_evidence(frozen, recursive=False):
             continue
         # Generic existing family sources retain their own PIT provenance. Do
