@@ -432,3 +432,19 @@ def test_trade_edit_during_provider_call_rejects_stale_model(client, monkeypatch
     assert response.status_code == 409
     assert response.json()['error']['code'] == 'stale_decision'
     assert engine.position._conn.execute('SELECT COUNT(*) FROM management_decisions').fetchone()[0] == 0
+
+
+def test_market_family_forecast_freezes_current_macro_and_event_inputs(client, monkeypatch):
+    engine = client.app.state.engine
+    monkeypatch.setattr(engine.passive, '_macro_data_factory', object(), raising=False)
+    monkeypatch.setattr('seiltanzer.macro_t0_context.build_macro_t0_context',
+                        lambda *args, **kwargs: {'captured_current_macro': True})
+    observed = []
+    def attach(engine, snapshot):
+        assert snapshot.get('macro_context_v1') == {'captured_current_macro': True}
+        assert 'edge_family_event_reaction_audit' in snapshot
+        observed.append(snapshot['captured_ts'])
+    monkeypatch.setattr('seiltanzer.edge_family_market.attach_market_family_context', attach)
+    response = client.post('/api/ai/verdict')
+    assert response.status_code == 200
+    assert len(observed) == 1
