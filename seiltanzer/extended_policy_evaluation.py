@@ -211,6 +211,7 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
     # Constant unit-volume future close cost is applied equally to both replays.
     # It cancels in the paired delta; assumed costs remain explicitly labelled.
     variant_cvar = min(cvars)
+    matched_tail_gain = min(v - h for v, h in zip(cvars, base_cvars))
     band = _number(rule.get("indifference_band_r"))
     material = max(0.0, band if band is not None else .03)
     evidence = {
@@ -222,6 +223,7 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
         "expected_hold_net_r": round(float(np.mean(base_means)) - deferred_cost, 5),
         "worst_seed_hold_cvar10_net_r": round(min(base_cvars) - deferred_cost, 5),
         "seed_delta_ci95_lower_r": [round(x, 5) for x in seed_lower_bounds],
+        "matched_seed_tail_gain_lower_r": round(matched_tail_gain, 5),
         "worst_seed_cvar10_net_r": round(variant_cvar - deferred_cost, 5),
         "hard_net_floor_r": net_floor,
         "execution_cost_r": deferred_cost,
@@ -238,8 +240,13 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
     }
     if variant_cvar - deferred_cost < net_floor - 1e-8:
         return _blocked("VARIANT_CVAR_BELOW_HARD_FLOOR", **evidence)
-    if lower <= material:
+    from .management_benefit import benefit_assessment
+    benefit = benefit_assessment(policy, gain, matched_tail_gain, material,
+                                 expected_lower_r=lower, tail_lower_r=matched_tail_gain)
+    evidence['benefit_assessment'] = benefit
+    if not benefit['allowed']:
         return _blocked("NO_MATERIAL_ROBUST_EXPECTED_GAIN", **evidence)
-    return {"status": "eligible", "reason": "ROBUST_EXPECTED_GAIN_AND_CVAR_PASS",
+    return {"status": "eligible", "reason": ("BOUNDED_TAIL_PROTECTION_AND_CVAR_PASS"
+            if benefit['basis'] == 'BOUNDED_TAIL_PROTECTION' else "ROBUST_EXPECTED_GAIN_AND_CVAR_PASS"),
             "production_authority": True, "manual_confirmation_required": True,
             "automatic_execution_allowed": False, **evidence}

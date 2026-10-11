@@ -294,7 +294,7 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
         effective_n = bank["effective_path_count"]
         variance = float(np.sum(weights * (paired - delta) ** 2))
         se = math.sqrt(variance / max(effective_n - 1., 1.))
-        group_cvars, group_lowers = [], []
+        group_cvars, group_lowers, group_tail_gains = [], [], []
         for group in np.unique(groups):
             mask = groups == group
             if weights[mask].sum() <= 0:
@@ -306,6 +306,7 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
                                  / max(group_n - 1., 1.))
             group_lowers.append(group_delta - 1.96 * group_se)
             group_cvars.append(_weighted_cvar(net[mask], group_weights))
+            group_tail_gains.append(group_cvars[-1] - _weighted_cvar(hold_net[mask], group_weights))
         worst_cvar = min(group_cvars) if group_cvars else cvar
         result[identity] = {
             "available": True, "reason": "COMMON_FROZEN_SCENARIO_NET_ECONOMICS",
@@ -322,6 +323,7 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
             "paired_delta_ci95_lower_r": min(delta - 1.96 * se, *group_lowers),
             "ci_semantics": "model_monte_carlo_approximation_not_validated_market_edge",
             "worst_seed_cvar10_net_r": worst_cvar,
+            "matched_seed_tail_gain_lower_r": min(group_tail_gains) if group_tail_gains else cvar - hold_c,
             "hard_risk_pass": worst_cvar >= floor - 1e-8 if floor is not None else None,
             "hard_net_floor_r": floor,
             "original_candidate_eligible": row.get("eligible") is True,
