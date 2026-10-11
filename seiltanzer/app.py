@@ -1305,6 +1305,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             from .edge_family_event_reaction import attach_observed_event_reaction_bounded
             with trace.span('reaction_capture'):
                 await attach_observed_event_reaction_bounded(engine, snapshot)
+            from .edge_family_market import attach_market_family_context
+            await trace.to_thread('runtime_context', attach_market_family_context, engine, snapshot)
             from .edge_regime import refine_regime_with_events
             with trace.span('regime_management'):
                 refine_regime_with_events(snapshot)

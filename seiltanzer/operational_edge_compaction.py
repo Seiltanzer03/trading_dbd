@@ -29,7 +29,9 @@ PATH_KEYS = ("probability", "baseline_probability", "horizon_minutes", "target_s
     "net_economic_proof", "independent_evidence_vote", "intrabar_order_inferred",
     "generic_barriers_are_trade_stop_take", "evidence_tier")
 PATH_NAMES = ("downside_excursion", "upside_excursion", "upper_before_lower", "early_first_touch")
-FAMILY_ROOTS = ("edge_family_sources", "edge_family_models", "macro_context_v1", "macro_t0_context")
+FAMILY_ROOTS = ("edge_family_sources", "edge_family_models", "edge_family_market_context", "macro_context_v1", "macro_t0_context")
+MARKET_CONTEXT_MAX_BYTES = 12_000
+FAMILY_INPUT_MAX_BYTES = 20_000
 LINEAGE_KEYS = ("adverse_confirmation_families", "supportive_confirmation_families",
                 "adverse_confirmations", "supportive_contradictions", "context_observations")
 EXCLUDED_REASON = "EXCLUDED_BY_SNAPSHOT_BYTE_BUDGET"
@@ -96,7 +98,8 @@ def compact_operational_edges(snapshot):
         if key not in snapshot:
             continue
         size = _bytes(snapshot[key])
-        if size > 8000 or total+size > 16000:
+        limit = MARKET_CONTEXT_MAX_BYTES if key == "edge_family_market_context" else 8000
+        if size > limit or total+size > FAMILY_INPUT_MAX_BYTES:
             snapshot.pop(key)
             status.setdefault("excluded_roots", []).append(key)
         else:

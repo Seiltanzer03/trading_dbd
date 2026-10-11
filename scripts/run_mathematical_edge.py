@@ -98,7 +98,7 @@ def _instrument_matrix(rows, sources, captured_ts):
     return matrix
 
 
-def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS):
+def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, family_history=None):
     rows, audited_sources = {}, []
     errors = dict(errors)
     for source in sources:
@@ -127,9 +127,18 @@ def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS):
             'candidate_audit': {}, 'net_economic_proof': False,
         })
     from seiltanzer.mathematical_edge_archive import replay_frozen_fx_rule
+    from seiltanzer.edge_family_market import train_market_families
+    family_models = train_market_families(sources, captured_ts, horizons=horizons, feature_history=family_history)
     return {
         'contract_version': CONTRACT, 'created_ts': captured_ts, 'instruments': rows,
         'production_authority': False, 'automatic_execution': False,
+        'family_market_models': family_models,
+        'family_market_model_summary': {
+            'trained_models': sum(row.get('status') == 'TRAINED' for rows in family_models.values() for row in rows.values()),
+            'working_supported_models': sum(any(head.get('working_supported') for head in row.get('heads', {}).values())
+                for rows in family_models.values() for row in rows.values()),
+            'market_forecast_not_net_action_profit': True,
+        },
         'user_policy': 'PERSONAL_WORKING_EVIDENCE_BOUNDED_SOFT_RANKING', 'source_errors': errors,
         'configured_instruments': list(ALL_INSTRUMENTS), 'requested_horizons_minutes': list(horizons),
         'target_contract': dict(TARGET_CONTRACT),
@@ -152,6 +161,7 @@ def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sources')
+    parser.add_argument('--family-history', help='optional actual captured PIT family feature history; no invented broker cost requirement')
     parser.add_argument('--sources-output', help='save fetched real bars for exact offline reproduction')
     parser.add_argument('--refresh-sources', action='store_true', help='refresh public bars off-host; --sources supplies read-only fallback')
     parser.add_argument('--cache-dir', help='per-provider hash-verified off-host source cache')
@@ -183,7 +193,15 @@ def main():
         path.write_text(json.dumps({'sources': sources, 'errors': errors, 'exported_ts': captured,
                                    'diagnostic_sources': diagnostic_sources,
                                    'collection_attempts': attempts}, ensure_ascii=False, allow_nan=False))
-    report = build_report(sources, errors, captured, horizons)
+    family_history = None
+    if args.family_history:
+        history_path = Path(args.family_history)
+        if history_path.stat().st_size > 96_000_000:
+            parser.error('--family-history exceeds bounded input size')
+        family_history = json.loads(history_path.read_text())
+        if not isinstance(family_history, dict):
+            parser.error('--family-history must be an instrument/family matrix')
+    report = build_report(sources, errors, captured, horizons, family_history=family_history)
     report['collection_attempts'] = attempts
     report['diagnostic_source_inventory'] = [{k: v for k, v in source.items() if k != 'bars'} | {
         'bar_count': len(source.get('bars', [])), 'runtime_admission': False,
@@ -191,6 +209,7 @@ def main():
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, ensure_ascii=False, allow_nan=False))
+    print('FAMILY_MARKET_MODELS', json.dumps(report['family_market_model_summary'], sort_keys=True))
     for code, row in report['instruments'].items():
         print(code, row['status'], row.get('horizon_minutes'),
               {k: round(v['gain_mbit'], 3) if v.get('gain_mbit') is not None else None for k, v in row.get('diagnostics', {}).items()})

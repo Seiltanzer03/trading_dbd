@@ -5,8 +5,11 @@ on:
     branches: [main]
     paths:
       - 'seiltanzer/mathematical_edge*.py'
+      - 'seiltanzer/edge_family_market.py'
       - 'scripts/*mathematical_edge*.py'
+      - 'scripts/export_family_market_history.py'
       - 'tests/test_mathematical_edge*.py'
+      - 'tests/test_edge_family_market.py'
       - 'research_fixtures/mathematical_edge/**'
       - '.github/workflows/mathematical-edge.yml'
   workflow_dispatch:
@@ -41,7 +44,9 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - run: pip install -q -e '.[dev]' paramiko
+      - run: pip install -q -e '.[dev]' paramiko boto3
+      - name: Verify historical family training and bounded runtime
+        run: python -m pytest -q tests/test_edge_family_market.py
       - name: Restore hash-verified per-provider market-bar cache
         id: math-source-cache
         uses: actions/cache/restore@v4
@@ -56,13 +61,25 @@ jobs:
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: python -m scripts.export_mathematical_edge_sources --password "$SSH_PASSWORD" --output mathematical_sources.json
+      - name: Read existing private family observations without archive writes
+        if: github.event_name != 'pull_request'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: python -m scripts.export_family_market_history --output "$RUNNER_TEMP/private-family-history.json"
       - name: Refresh actual bars, fit and validate on runner
         id: math-fit
-        run: >-
-          python -m scripts.run_mathematical_edge --sources mathematical_sources.json
-          --refresh-sources --sources-output refreshed_sources.json
-          --cache-dir .math-source-cache --source-budget-seconds 180
-          --output mathematical_edge_latest.json
+        run: |
+          family_args=()
+          if [[ -f "$RUNNER_TEMP/private-family-history.json" ]]; then
+            family_args=(--family-history "$RUNNER_TEMP/private-family-history.json")
+          fi
+          python -m scripts.run_mathematical_edge --sources mathematical_sources.json \
+            --refresh-sources --sources-output refreshed_sources.json \
+            --cache-dir .math-source-cache --source-budget-seconds 180 \
+            --output mathematical_edge_latest.json "${family_args[@]}"
       - name: Save per-provider market-bar cache from trusted main only
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.math-fit.outcome == 'success'
         uses: actions/cache/save@v4

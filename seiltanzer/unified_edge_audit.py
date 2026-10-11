@@ -112,6 +112,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             "ranking_eligible", "ranking_reason", "delta_cvar_r",
             "execution_cost_r", "economics_basis", "source",
             "working_family_contributions",
+            'model_family_contributions',
             "quant_utility", "benefit_assessment",
         ),
         "components": (
@@ -134,6 +135,11 @@ def compact_unified_ensemble(value: Any) -> dict:
             "expected_net_r", "cvar10_net_r", "execution_cost_r", "delta_expected_r",
             "intervention", "evidence_type", "ablation_scope", "risk_and_cost_evaluation_preserved",
         ),
+        'market_family_counterfactuals': (
+            'excluded_family_id', 'scheme', 'selected_candidate_id', 'selected_policy',
+            'expected_net_r', 'cvar10_net_r', 'execution_cost_r', 'delta_expected_r',
+            'ablation_scope', 'risk_and_cost_evaluation_preserved',
+        ),
         "scheme_comparisons": (
             "scheme", "selected_candidate_id", "selected_policy",
             "selected_parameters", "expected_net_r", "cvar10_net_r",
@@ -147,6 +153,9 @@ def compact_unified_ensemble(value: Any) -> dict:
             "production_role", "historical_validation_status", "component_id",
             "readiness", "forecast_available", "needs_data", "observed_ts", "max_age_sec",
             "weight_pool", "standalone_vote",
+            'forecast_kind', 'market_predictions', 'forecast_origin_ts', 'market_model_sha256',
+            'market_preference_available', 'model_pool_effective_weight', 'model_marginal_score_delta',
+            'model_attribution_semantics',
             "working_assessment_available", "working_assessment_kind", "working_assessment_reason",
             "working_reason_ru", "working_score", "working_effective_weight", "working_contribution",
             "working_policy_scores", "working_feature_names", "working_source_ids",
@@ -303,6 +312,15 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
                      f"входы: {row.get('available', '—')}; прогноз: {row.get('forecast_available', '—')}; "
                      f"{row.get('reason') or 'причина не сообщена'}; "
                      f"нужно: {', '.join(str(item) for item in row.get('needs_data') or []) or '—'}.")
+        if row.get('market_predictions'):
+            predictions = row['market_predictions']
+            lines.append('Обученный прогноз рынка: ' + '; '.join(
+                f"{name}: p={_format(head.get('probability'))}, {head.get('horizon_minutes')}m, "
+                f"OOS={_format(head.get('test_gain_mbit'))} mbit, {head.get('evidence_tier')}"
+                for name, head in predictions.items()) +
+                f". Вес общего математического пула {_format(row.get('model_pool_effective_weight'))}; "
+                f"изменение балла при исключении семейства {_format(row.get('model_marginal_score_delta'))}. "
+                'Прогноз движения не является Expected/CVaR или прибылью действия; вклад не аддитивная доля.')
         if row.get('working_assessment_available') is True:
             lines.append(f"  Рабочая интерпретация LLM: {row.get('working_reason_ru') or '—'}; "
                          f"оценка {_format(row.get('working_score'))}; "
@@ -312,4 +330,7 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
     for row in audit.get('family_counterfactuals') or []:
         lines.append(f"Без рабочей оценки {row.get('excluded_family_id')}: {row.get('selected_policy') or '—'} "
                      f"({row.get('selected_candidate_id') or '—'}); историческая модель, риск и экономика сохранены.")
+    for row in audit.get('market_family_counterfactuals') or []:
+        lines.append(f"Без обученного рыночного прогноза {row.get('excluded_family_id')}: {row.get('selected_policy') or '—'}; "
+                     'экономика, риск и текущий LLM сохранены.')
     return lines

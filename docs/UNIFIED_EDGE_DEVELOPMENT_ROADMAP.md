@@ -998,3 +998,21 @@ registry definitions, demo snapshot, родительскую instrument matrix 
 expectations failed. Consumer tests обновлены: demo-модель отвергнута, бонус0,
 экономические распределения и hard-risk сохраняются. Боевой допуск не ослаблен.
 Changed consumer/input profile69passed7.49s; новый CI только на изменённом tree.
+
+### 2026-10-11: исторические family-прогнозы без ожидания новых сделок
+
+По прямому указанию пользователя реализована отдельная рыночная цель:
+`HISTORICAL_FAMILY_FORECASTS_2026-10-11.md`, конечный план
+`superpowers/plans/2026-10-11-historical-family-forecasts.md`.
+На фактических13сериях предыдущей exact-SHA публикации обучены20сессионных/
+межрыночных моделей;14сочетаний имеют пригодную историческую цель. Это не
+net-action прибыль: экономика и риск действий считают существующие сценарии.
+Прежняя зависимость обучения рыночного прогноза от брокерских fills/costs
+устранена отдельным контрактом, а не ослаблением их проверки.
+Публикация использует существующий math workflow; Yandex archive читается
+read-only, raw private history не загружается в публичные artifacts.
+Runtime проверяет source/model clocks, exactSHA, hash, window/lag/horizon и
+делает только локальное предсказание. UI показывает forecast, общий pool weight
+и точное marginal score изменение без семейства; это не аддитивная доля.
+Другие6семейств не подменяются OHLC; выпуск фиксирует actual private-history
+counts. Final review/CI/deploy/publication receipts будут в PR и ledger.

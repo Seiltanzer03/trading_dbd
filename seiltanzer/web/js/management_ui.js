@@ -194,9 +194,13 @@ export function mountUnifiedEdgeEnsemble(container, audit, { archived = false } 
   if (edgeFamilies.length) {
     appendTextLine(panel, 'tiny', 'Семейства edge:');
     appendTextLine(panel, 'tiny dim', 'Рабочая интерпретация LLM использует текущие факты и часть его общего веса. Историческая модель имеет отдельный допуск.');
-    appendAuditTable(panel, ['Семейство', 'Входы / исторический прогноз', 'Рабочая оценка · доля · вклад', 'Статус / что требуется'], edgeFamilies.map((row) => [
+    appendAuditTable(panel, ['Семейство', 'Входы / исторический прогноз', 'Обученный прогноз · влияние', 'Рабочая оценка · доля · вклад', 'Статус / что требуется'], edgeFamilies.map((row) => [
       row.family_id || row.edge_family || row.family || row.name || '—',
       `${row.available === true ? 'получены' : 'недоступны'} / ${row.forecast_available === true ? 'доступен' : 'недоступен'}`,
+      row.market_predictions
+        ? Object.entries(row.market_predictions).map(([name, head]) => `${name === 'direction' ? 'P(up | move >2bp)' : 'P(move >2bp)'} ${percent(head.probability)} · ${head.horizon_minutes}m · OOS ${signed(head.test_gain_mbit)} mbit · ${head.evidence_tier || '—'}`).join('; ')
+          + ` · пул ${percent(row.model_pool_effective_weight)} · Δбалла без семейства ${signed(row.model_marginal_score_delta)} (не аддитивная доля)`
+        : 'недоступен',
       row.working_assessment_available === true
         ? `рабочая интерпретация LLM · ${signed(row.working_score)} · ${percent(row.working_effective_weight)} · ${signed(row.working_contribution)} · ${row.working_reason_ru || '—'}`
         : `недоступна · ${row.working_assessment_reason || 'NO_WORKING_FAMILY_ASSESSMENT'}`,
@@ -205,6 +209,11 @@ export function mountUnifiedEdgeEnsemble(container, audit, { archived = false } 
     const familyCounterfactuals = Array.isArray(audit.family_counterfactuals) ? audit.family_counterfactuals : [];
     if (familyCounterfactuals.length) appendAuditTable(panel, ['Без рабочей оценки семейства', 'Решение', 'Изменение'],
       familyCounterfactuals.map((row) => [row.excluded_family_id,
+        `${row.selected_policy || '—'} · ${row.selected_candidate_id || '—'}`,
+        !row.selected_candidate_id ? 'недоступно' : row.selected_candidate_id === selected ? 'не изменилось' : 'изменилось']));
+    const marketCounterfactuals = Array.isArray(audit.market_family_counterfactuals) ? audit.market_family_counterfactuals : [];
+    if (marketCounterfactuals.length) appendAuditTable(panel, ['Без обученного рыночного прогноза', 'Решение', 'Изменение'],
+      marketCounterfactuals.map((row) => [row.excluded_family_id,
         `${row.selected_policy || '—'} · ${row.selected_candidate_id || '—'}`,
         !row.selected_candidate_id ? 'недоступно' : row.selected_candidate_id === selected ? 'не изменилось' : 'изменилось']));
   }
