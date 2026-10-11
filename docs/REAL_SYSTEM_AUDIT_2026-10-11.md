@@ -29,4 +29,6 @@ Behavioral failures were observed before implementation. One independent final r
 
 Final owning profile: **839passed in7.84s**, including existing real-input contracts, source/runtime/model/ensemble, stream, crypto/Bybit, training/dataset, active-edge and snapshot materialization. This proves these software regressions, not forecast profitability or complete family readiness.
 
+First full CI38129209714:3633passed/5skipped, with2older integration assertions failing because they expected model admission from an explicitly demo Engine. Consumers now assert rejected model, zero ranking bonus, preserved economic distributions and hard-risk gates; no production guard was weakened. Changed consumer/input profile69passed7.49s. A new full CI is required for this changed tree.
+
 Release completion still requires full final-tree CI, then actual exact-SHA deploy/readiness/public smoke and math/source/FOMC publication receipts. Those immutable receipts are recorded in the release PR and progress ledger once available. Until then this document is an implementation audit, not a production completion claim. Remaining family model/data gaps above are deliberately open; this integrity package does not manufacture them.

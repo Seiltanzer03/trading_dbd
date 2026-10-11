@@ -993,3 +993,8 @@ registry definitions, demo snapshot, родительскую instrument matrix 
 независимого реестра из-за optional model matrix. Все воспроизведены14RED,
 исправлены одним проходом. Final owning profile839passed7.84s; no repeated review.
 Полный final-tree CI и фактические release receipts фиксируются в PR/ledger.
+
+Первый full CI38129209714:3633passed/5skipped и2старых demo integration
+expectations failed. Consumer tests обновлены: demo-модель отвергнута, бонус0,
+экономические распределения и hard-risk сохраняются. Боевой допуск не ослаблен.
+Changed consumer/input profile69passed7.49s; новый CI только на изменённом tree.
