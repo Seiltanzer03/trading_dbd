@@ -600,7 +600,7 @@ def _alfred_csv(series_id, release_date, rows):
     ])
 
 
-def test_historical_bundle_accepts_hashed_official_alfred_vintage():
+def _alfred_bundle():
     family, release_date, period = "CPI", "2025-08-12", "2025-07"
     calendar_url = fred_calendar_url(
         family, start_date="2025-04-01", end_date="2025-08-24")
@@ -658,6 +658,11 @@ def test_historical_bundle_accepts_hashed_official_alfred_vintage():
     })
     bundle["bundle_sha256"] = offhost._sha256(
         offhost._without(bundle, "bundle_sha256"))
+    return bundle
+
+
+def test_historical_bundle_accepts_hashed_official_alfred_vintage():
+    bundle=_alfred_bundle()
     assert offhost.validate_bundle(bundle, expected_sha=SHA, now=NOW) is bundle
 
 

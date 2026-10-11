@@ -161,16 +161,19 @@ def _purged(data, train, valid):
     return np.asarray([i for i in train if not forbidden.intersection(data['groups'][i])], dtype=int)
 
 
-def _fit_family(code, family, bars, captured, horizons, related, history, source):
-    datasets = {h: market_dataset(code, family, bars, captured, h, related=related, history=history)
-                for h in horizons}
+def _fit_family(code, family, bars, captured, horizons, related, history, source,
+                *, datasets_override=None, boundaries_override=None, feature_variation_required=False,
+                pretest_selection_only=False):
+    datasets = ({h: market_dataset(code, family, bars, captured, h, related=related, history=history)
+                for h in horizons} if datasets_override is None else datasets_override)
     anchor = datasets[min(horizons)]
     if len(anchor['times']) < 180:
         return {'status': 'INSUFFICIENT_HISTORY', 'reason': 'INSUFFICIENT_NONOVERLAPPING_FAMILY_OBSERVATIONS',
                 'forecast': None, 'training_n': len(anchor['times'])}
     # One calendar grid for all heads/horizons, frozen before any scoring.
     times = anchor['times']
-    boundaries = [float(times[int(len(times)*f)]) for f in (.4, .55, .7, .8)]
+    boundaries = ([float(times[int(len(times)*f)]) for f in (.4, .55, .7, .8)]
+                  if boundaries_override is None else boundaries_override)
     heads = {}
     for column, name in enumerate(('direction', 'movement')):
         candidates = []
@@ -194,11 +197,21 @@ def _fit_family(code, family, bars, captured, horizons, related, history, source
             continue
         _, horizon, validation = max(candidates, key=lambda c: c[0])
         data = datasets[horizon]
+        selection = {'horizon_minutes':horizon, 'validation_gains_mbit':validation,
+            'feature_names':data['feature_names'], 'selection_uses_final_test':False}
         train = _indices(data, np.flatnonzero(data['ends'] < boundaries[-1] - 300), column)
         test = _indices(data, np.flatnonzero(data['times'] >= boundaries[-1]), column)
-        train = _purged(data, train, test)
+        # Archive pretest selection/fit never depends on final movement labels.
+        train = _purged(data, train, np.flatnonzero(data['times'] >= boundaries[-1])
+                        if feature_variation_required else test)
+        if feature_variation_required and (not len(train) or not np.any(np.ptp(data['x'][train],axis=0)>0)):
+            heads[name] = {'working_supported':False,'reason':'NO_TRAINING_FEATURE_VARIATION','forecast':None}
+            continue
+        if pretest_selection_only:
+            heads[name] = selection
+            continue
         if len(train) < 40 or len(test) < 10:
-            heads[name] = {'working_supported': False, 'reason': 'PURGED_FINAL_TEST_UNAVAILABLE', 'forecast': None}
+            heads[name] = {**selection, 'working_supported': False, 'reason': 'PURGED_FINAL_TEST_UNAVAILABLE', 'forecast': None}
             continue
         head = fit_head(data['x'][train], data['y'][train, column])
         test_gain = gain(data['y'][test, column], predict(head, data['x'][test]), head['baseline'])
@@ -210,12 +223,13 @@ def _fit_family(code, family, bars, captured, horizons, related, history, source
             'test_block_gains_mbit': blocks, 'test_n': len(test), 'train_n': len(train),
             'fit_end_ts': float(data['ends'][train[-1]]), 'test_start_ts': boundaries[-1],
             'selection_uses_final_test': False, 'feature_names': data['feature_names']}
-    if not any('head' in row for row in heads.values()):
+    if not any(('validation_gains_mbit' if pretest_selection_only else 'head') in row for row in heads.values()):
         return {'status': 'HEAD_TRAINING_UNAVAILABLE', 'reason': 'NO_HEAD_WITH_CAUSAL_VALIDATION',
                 'forecast': None, 'training_n': len(anchor['times']), 'heads': heads}
     # Models retain the pre-test fit: reported OOS describes the delivered fit.
     body = {'contract_version': CONTRACT, 'feature_contract_version': FEATURE_CONTRACT,
-        'family_id': family, 'instrument': code, 'status': 'TRAINED', 'target_kind': TARGET,
+        'family_id': family, 'instrument': code,
+        'status': 'PRETEST_SELECTED' if pretest_selection_only else 'TRAINED', 'target_kind': TARGET,
         'training_n': len(anchor['times']), 'training_cutoff': float(anchor['ends'][-1]),
         'trained_at': captured, 'heads': heads, 'source': source,
         'dataset_sha256': fingerprint({'x': anchor['x'].tolist(), 'y': anchor['y'].tolist(),
@@ -228,11 +242,16 @@ def _fit_family(code, family, bars, captured, horizons, related, history, source
     return body
 
 
-def train_market_families(sources, captured, *, horizons=SEARCH_HORIZONS, feature_history=None):
+def train_market_families(sources, captured, *, horizons=SEARCH_HORIZONS, feature_history=None,
+                         macro_archive=None):
     if number(captured) is None or captured <= 0 or not horizons or any(h not in SEARCH_HORIZONS for h in horizons):
         raise ValueError('INVALID_CAPTURE_OR_HORIZON')
     if not isinstance(sources, list) or len(sources) > 32:
         raise ValueError('TRAINING_SOURCE_BOUND_INVALID')
+    if macro_archive is not None:
+        from .edge_family_macro_archive import OfficialMacroArchive
+        if not isinstance(macro_archive,OfficialMacroArchive) or macro_archive.captured_ts != captured:
+            raise ValueError('OFFICIAL_MACRO_ARCHIVE_NOT_VALIDATED_FOR_CUTOFF')
     related = related_series(sources, captured)
     history = feature_history if (isinstance(feature_history, dict)
         and not simulated_evidence(feature_history, recursive=False)) else {}
@@ -265,6 +284,15 @@ def train_market_families(sources, captured, *, horizons=SEARCH_HORIZONS, featur
                 code_history = {}
             for family in FAMILIES:
                 observations = code_history.get(family)
+                if family == 'macro' and macro_archive is not None:
+                    existing = (_fit_family(code,family,bars,captured,horizons,related,observations,provenance)
+                                if observations is not None else None)
+                    if existing is not None and existing['status']=='TRAINED':
+                        rows[family]=existing
+                    else:
+                        from .edge_family_macro_archive import fit_archive_macro
+                        rows[family]=fit_archive_macro(code,bars,captured,horizons,macro_archive,provenance)
+                    continue
                 if family not in {'session', 'intermarket'} and observations is None:
                     rows[family] = {'status': 'HISTORICAL_FEATURES_UNAVAILABLE',
                                     'reason': 'CAPTURED_' + family.upper() + '_FEATURE_HISTORY_MISSING', 'forecast': None}
@@ -359,6 +387,10 @@ def _model_reason(model, code, family, cutoff):
         trained, end = number(model.get('trained_at')), number(model.get('training_cutoff'))
         if trained is None or end is None or not 0 < end <= trained <= cutoff or cutoff-end >= 90*86400:
             return 'MARKET_MODEL_CLOCK_OR_AGE_INVALID'
+        if 'official_macro_archive' in model or (family=='macro' and model.get('features_are_captured_receipts') is False):
+            from .edge_family_macro_archive import archive_model_provenance_valid
+            if family!='macro' or not archive_model_provenance_valid(model,trained):
+                return 'MARKET_MACRO_ARCHIVE_PROVENANCE_INVALID'
         heads = model.get('heads')
         if not isinstance(heads, dict) or set(heads) != {'direction', 'movement'}:
             return 'MARKET_MODEL_HEADS_INVALID'
