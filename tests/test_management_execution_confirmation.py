@@ -155,3 +155,55 @@ def test_common_forward_replay_uses_current_quote_not_past_peak(policy,params):
                                     rung_fraction_original=.1,be_after_r=1.5,be_execution_confirmed=False)
     result=_variant(spec,{'policy':policy,'parameters':params},s,inputs)
     assert result.take_r==pytest.approx(1.2) if policy=='REDUCE_TAKE' else result.spike_r==pytest.approx(1.1)
+
+
+def test_pending_be_above_trigger_requires_new_upward_crossing_in_mc_and_replay(tmp_path):
+    from dataclasses import replace
+    from seiltanzer.execution_simulator import ExecutionSpec, replay_execution_path
+    row = trade()
+    ledger = PositionLedger(str(tmp_path / 'position.db'))
+    state = ledger.sync_be(row)
+    tick = dict(trade={**row, 'position_state': state},
+                prob={'r': 1.7, 'T': 3., 'available': True},
+                market={'available': True}, ladder={'max_r': 1.7, 'be_after': 1.5},
+                cone={'sigma_R': .000001, 'drift_R': -2.})
+    inputs = replace(extract_policy_inputs(tick), rungs=(), sigma_R=.000001,
+                     drift_R=-2., be_execution_confirmed=False)
+    sim = simulate_option_paths(inputs, n_paths=20, n_steps=40, seed=42)
+    spec = ExecutionSpec.from_values(current_r=1.7, max_r=1.7, take_r=3.,
+        rungs=(), rung_fraction_original=.1, be_after_r=1.5, stop_r=-1.,
+        be_execution_confirmed=False)
+    descent = replay_execution_path([1.7, 1.6, 1.4, -.3], spec)
+    assert descent.be_armed is False
+    assert descent.outcome_r == pytest.approx(-.3)
+    assert np.mean(sim.strategy_outcome) == pytest.approx(-.3, abs=.0001)
+    recross = replay_execution_path([1.7, 1.4, 1.6, -.3], spec)
+    assert recross.be_armed is True
+    assert recross.outcome_r == pytest.approx(0.)
+    upward = replace(inputs, r0=1.4, drift_R=.3)
+    forward = simulate_option_paths(upward, n_paths=20, n_steps=40, seed=42)
+    assert np.all(np.isfinite(forward.be_arm_time))
+    ledger.close()
+
+
+@pytest.mark.parametrize('option_available', [False, True])
+def test_new_manual_admission_requires_complete_common_economics(option_available):
+    from seiltanzer.unified_edge_ensemble import build_unified_ensemble
+    row = trade()
+    snapshot = frozen(row, {'remaining_position_fraction': 1., 'active_stop_price': 90.}, 110.)
+    snapshot['policy_manager'].update(
+        inputs={'option_available': option_available},
+        policies={p: {'expected_final_r': e, 'cvar10_r': -.2,
+                      'outcomes_include_execution_costs': True}
+                  for p, e in [('HOLD', .1), ('CLOSE_10', .15), ('CLOSE_25', .16),
+                               ('CLOSE_50', .17), ('EXIT', .18)]},
+        risk_constraint={'net_cvar_floor_r': -.4},
+        selection_rule={'eligible': ['HOLD', 'CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT']},
+        gate={'working_action_confirmed': False},
+        management_decision={'automatic_execution_allowed': False})
+    result = build_unified_ensemble(snapshot)
+    assert result['selected_policy'] == 'HOLD'
+    for candidate in result['candidates']:
+        if candidate['policy'] in {'CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT'}:
+            assert candidate['eligible'] is False
+            assert candidate['reason'].startswith('MANUAL_COMPARISON_COMMON_ECONOMICS_REQUIRED:')

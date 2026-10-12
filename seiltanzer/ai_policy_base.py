@@ -358,7 +358,12 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
                     strategy_alive[fully_closed] = False
 
         active = strategy_alive[idx]
-        newly_armed = active & ~be_armed[idx] & (cur >= inputs.be_after - 1e-12)
+        crossed_be = cur >= inputs.be_after - 1e-12
+        if inputs.be_execution_confirmed is False:
+            # A pending historical BE proposal is not an executed stop.
+            # Match replay: only a new upward crossing activates future BE.
+            crossed_be &= prev < inputs.be_after - 1e-12
+        newly_armed = active & ~be_armed[idx] & crossed_be
         if newly_armed.any():
             target = idx[newly_armed]
             be_armed[target] = True

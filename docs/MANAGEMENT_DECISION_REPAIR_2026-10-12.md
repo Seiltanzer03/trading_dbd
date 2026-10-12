@@ -51,3 +51,22 @@ Record live component/candidate reasons before declaring every family active.
 All12 action handlers existing does not imply all12 actions apply to every
 market state;24 fitted market/family groups is not eight universally available
 predictive families.
+
+## Independent final review
+
+Review of feb53bbffc1b226de6d9fd1db272d3baab299f9c found two Important
+source-confirmed cases, addressed in one focused fix pass: explicit unconfirmed
+BE now requires a prospective upward crossing in Monte Carlo, matching replay;
+preflight-only manual admissions require available common economics and its
+per-candidate checks. Legacy independently qualified fallback remains unchanged.
+Three further regressions cover descent/recrossing and both missing-option and
+incomplete-input common-bank failures. Original452 owning checks passed locally;
+new review regressions require full remote CI because the local execution
+transport disconnected. No runtime failure reproduction is claimed for them.
+PR458, final CI/exact-SHA deployment and one fresh production review pending.
+
+First full CI:3853pass/9fail/5skip. Failures identified legacy duck-typed
+cache/risk fixtures, old automatic-BE and fixed-budget assertions, and changed
+fixture balanced selection after proportional budgets. Preserve legacy risk
+input compatibility; update intentional contracts and model-vs-observed fixture
+values, using tolerant float comparison for cost aggregation. Browser green.

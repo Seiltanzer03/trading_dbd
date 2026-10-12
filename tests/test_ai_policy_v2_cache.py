@@ -57,6 +57,7 @@ def _cache_inputs(*, r0=1.2345, stop_r=0.0):
         term_slope=0.0, horizon_minutes=600.0, max_r=r0,
         rungs=(1.0, 1.5, 2.0), rung_fraction=0.1, be_after=1.5,
         option_available=True,
+        be_execution_confirmed=None, initial_be_armed=r0 >= 1.5,
         stop_r=stop_r,
     )
 
@@ -112,7 +113,7 @@ def test_active_stop_change_invalidates_execution_and_clock_banks(monkeypatch):
     assert len(calls) == 3
 
 
-def test_cone_clock_receives_managed_trade_stop_after_be(tmp_path, monkeypatch):
+def test_cone_clock_uses_recorded_stop_until_be_is_confirmed(tmp_path, monkeypatch):
     original_extract = policy_base.extract_policy_inputs
     clock_trades = []
 
@@ -130,9 +131,16 @@ def test_cone_clock_receives_managed_trade_stop_after_be(tmp_path, monkeypatch):
         engine.market.refresh_price()
         engine.journal.update_max_r(trade["id"], 1.6)
         tick = engine.tick_payload()
-        assert tick["trade"]["position_state"]["active_stop_price"] == 21500
+        assert tick["trade"]["position_state"]["active_stop_price"] == 21450
         assert clock_trades
-        assert clock_trades[-1]["position_state"]["active_stop_price"] == 21500
-        assert tick["cone"]["first_touch_clock"]["risk_barrier_r"] == 0.0
+        assert clock_trades[-1]["position_state"]["active_stop_price"] == 21450
+        assert tick["trade"]["position_state"]["be_confirmation_required"] is True
+        assert tick["cone"]["first_touch_clock"]["risk_barrier_r"] == -1.0
+        engine.position._event(trade=trade, event_type="AI_MOVE_TO_BE",
+            source="human_confirmed_ai_extended", before=1., closed=0., after=1.,
+            active_stop=21500., metadata={"broker_confirmed": True})
+        confirmed = engine.tick_payload()
+        assert confirmed["trade"]["position_state"]["active_stop_price"] == 21500.
+        assert confirmed["cone"]["first_touch_clock"]["risk_barrier_r"] == 0.0
     finally:
         engine.close()

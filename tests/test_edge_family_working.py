@@ -164,7 +164,8 @@ def test_source_bound_family_opinion_changes_ranking_inside_existing_llm_budget(
     assert actual['selected_policy'] == 'CLOSE_10'
     assert sum(row['effective_weight'] for row in actual['components']) == pytest.approx(1.)
     current = next(row for row in actual['components'] if row['component_id'] == 'current_llm')
-    assert current['effective_weight'] <= current['nominal_weight']
+    assert current['admitted_weight_before_redistribution'] <= current['nominal_weight']
+    assert current['effective_weight'] == pytest.approx(.15 / (.4 + .15))
     assert len(actual['candidates']) == 12
     assert actual['historical_profit_proven'] is False
     frozen['policy_manager']['policies']['CLOSE_10']['cvar10_r'] = -.5

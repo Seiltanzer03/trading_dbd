@@ -137,6 +137,7 @@ def collect_candidates(snapshot):
         expected = number(raw.get("expected_final_r_net", raw.get("expected_final_r")))
         cvar = number(raw.get("cvar10_r_net", raw.get("cvar10_r")))
         authorized, reason = _base_authorized(manager, policy, snapshot)
+        admission_authority = reason
         eligible = authorized
         if expected is None or cvar is None or hold_e is None or hold_c is None:
             eligible, reason = False, "NET_ECONOMICS_UNAVAILABLE"
@@ -148,6 +149,7 @@ def collect_candidates(snapshot):
             eligible, reason = False, "HARD_CVAR_INFEASIBLE"
         rows.append({"candidate_id": policy, "policy": policy, "parameters": {},
                      "eligible": eligible, "reason": reason,
+                     "admission_authority": admission_authority,
                      "expected_net_r": expected, "cvar10_net_r": cvar,
                      "delta_expected_r": expected - hold_e if expected is not None and hold_e is not None else None,
                      "delta_cvar_r": cvar - hold_c if cvar is not None and hold_c is not None else None,
@@ -600,6 +602,12 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
     if invalid_common:
         for row in candidates:
             row.update(eligible=False, reason="INVALID_COMMON_ECONOMICS:" + str(economics.get("reason")))
+    if not economics.get("available"):
+        for row in candidates:
+            if (row.get("eligible") and
+                    row.get("admission_authority") == "MANUAL_COMPARISON_PREFLIGHT_PASS"):
+                row.update(eligible=False, reason="MANUAL_COMPARISON_COMMON_ECONOMICS_REQUIRED:" +
+                           str(economics.get("reason")))
     if economics.get("available"):
         for row in candidates:
             priced = (economics.get("candidates") or {}).get(row["candidate_id"]) or {}
