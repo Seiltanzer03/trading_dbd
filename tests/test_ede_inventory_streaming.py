@@ -1,9 +1,15 @@
 """Dedicated real read-only transaction; no fake immutable-source provenance."""
 import sqlite3
+import importlib.util
+from pathlib import Path
 
 import pytest
 
-from scripts.production_ede_inventory import _ReadOnlyRuntime
+_SCRIPT=Path(__file__).resolve().parents[1]/'scripts'/'production_ede_inventory.py'
+_SPEC=importlib.util.spec_from_file_location('inventory_streaming_script',_SCRIPT)
+inventory=importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(inventory)
+_ReadOnlyRuntime=inventory._ReadOnlyRuntime
 from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from test_edge_discovery_engine import _ProspectiveRuntime,_prospective_features
 from test_ede_transition_loading import PayloadConnection
