@@ -12,23 +12,90 @@ from scripts.production_ede_offload import _connect
 # Stdlib-only program executes on the existing server, including before deploy.
 # Indexed per-instrument ranges, no database backup, no writes, no training.
 REMOTE_EXPORT = r'''
-import sqlite3,gzip,json,hashlib,time,base64,math,io
+import sqlite3,gzip,json,hashlib,time,base64,math,io,zlib
 codes=__CONFIGURED_INSTRUMENT_CODES__
 crypto_symbols=__CONFIGURED_CRYPTO_SYMBOLS__
 c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=3)
 c.row_factory=sqlite3.Row
 c.execute('PRAGMA query_only=ON')
+evidence_flags=('synthetic','demo','is_demo','synthetic_demo','contract_fixture','synthetic_data_used','synthetic_price_history')
+def simulated(value):
+ pending=[value];remaining=16384
+ while pending:
+  remaining-=1
+  if remaining<0:return True
+  item=pending.pop()
+  if isinstance(item,dict):
+   if any(item.get(flag) for flag in evidence_flags):return True
+   pending.extend(item.values())
+  elif isinstance(item,(list,tuple)):pending.extend(item)
+ return False
 started=time.monotonic()
 c.set_progress_handler(lambda: int(time.monotonic()-started>25),10000)
 sources=[];diagnostic_sources=[];errors={};now=time.time()
+def snapshot_bars(row):
+ if len(row['bars_gzip'])>8000000:raise ValueError('HISTORICAL_SNAPSHOT_BYTES_OVER_BOUND')
+ with gzip.GzipFile(fileobj=io.BytesIO(row['bars_gzip'])) as reader:raw=reader.read(8000001)
+ if len(raw)>8000000 or hashlib.sha256(raw).hexdigest()!=row['source_sha256']:raise ValueError('HISTORICAL_SNAPSHOT_HASH_INVALID')
+ values=json.loads(raw)
+ if not isinstance(values,list) or not 0<len(values)<=20000:raise ValueError('HISTORICAL_SNAPSHOT_ROW_BOUND_INVALID')
+ observed=float(row['created_ts']);fetched=float(row['source_fetched_ts'])
+ if not all(math.isfinite(t) and 0<t<=now for t in (observed,fetched)):raise ValueError('HISTORICAL_SNAPSHOT_CLOCK_INVALID')
+ observed=min(observed,fetched)
+ bars={};partial=0
+ if simulated(json.loads(row['source_semantics_json'])):raise ValueError('HISTORICAL_SNAPSHOT_SIMULATED_SOURCE')
+ for b in values:
+  if simulated(b):raise ValueError('HISTORICAL_SNAPSHOT_SIMULATED_ROW')
+  end=float(b['bar_end_ts']);prices=[float(b[k]) for k in ('open','high','low','close')]
+  if (not all(math.isfinite(v) for v in [end,*prices]) or end<=0 or abs(end%300)>1
+      or min(prices)<=0 or prices[2]>min(prices[0],prices[3]) or prices[1]<max(prices[0],prices[3])
+      or end in bars or ('bar_start_ts' in b and float(b['bar_start_ts'])!=end-300)):
+   raise ValueError('HISTORICAL_SNAPSHOT_BAR_INVALID')
+  if end>observed:partial+=1;continue
+  bars[end]=dict(bar_end_ts=end,open=prices[0],high=prices[1],low=prices[2],close=prices[3])
+ return bars,partial
+has_fetched=any(r['name']=='fetched_ts' for r in c.execute('PRAGMA table_info(g1s_historical_sources)'))
+snapshot_columns='source_id,source_sha256,bars_gzip,ticker,provider,interval,source_semantics_json,created_ts,'+('coalesce(fetched_ts,created_ts)' if has_fetched else 'created_ts')+' AS source_fetched_ts'
 for code in codes:
- row=c.execute('SELECT source_id,source_sha256,bars_gzip,ticker,provider,interval,source_semantics_json FROM g1s_historical_sources WHERE instrument=? AND contract_version=? ORDER BY created_ts DESC LIMIT 1',(code,'g1s-historical-wf-real-bars-v1')).fetchone()
- bars=[]
+ cursor=c.execute('SELECT '+snapshot_columns+' FROM g1s_historical_sources WHERE instrument=? AND contract_version=? ORDER BY created_ts DESC,source_id ASC LIMIT 8',(code,'g1s-historical-wf-real-bars-v1'))
+ row=cursor.fetchone();bars=[]
+ snapshot_history=dict(accepted_sources=[],excluded_sources=[],snapshots_examined=0,
+  maximum_snapshots=8,maximum_days=120,maximum_bars=20000,history_complete=True,
+  reason=None,gaps_filled=False,partial_rows_excluded=0)
  if row:
-  with gzip.GzipFile(fileobj=io.BytesIO(row['bars_gzip'])) as reader:raw=reader.read(8000001)
-  if len(raw)>8000000 or hashlib.sha256(raw).hexdigest()!=row['source_sha256']:raise ValueError('invalid historical source')
-  bars=json.loads(raw)
-  if len(bars)>20000:raise ValueError('source exceeds bound')
+  merged,partial=snapshot_bars(row)
+  snapshot_history['partial_rows_excluded']+=partial
+  snapshot_history['snapshots_examined']=1
+  snapshot_history['accepted_sources'].append(dict(source_id=row['source_id'],source_sha256=row['source_sha256'],created_ts=row['created_ts'],fetched_ts=row['source_fetched_ts'] if has_fetched else None,added_bars=len(merged)))
+  original_semantics=json.loads(row['source_semantics_json'])
+  if code not in crypto_symbols:
+   while True:
+    if time.monotonic()-started>=8:
+     snapshot_history.update(history_complete=False,reason='HISTORICAL_SNAPSHOT_READ_BUDGET');break
+    try:older=cursor.fetchone()
+    except sqlite3.OperationalError:
+     snapshot_history.update(history_complete=False,reason='HISTORICAL_SNAPSHOT_READ_BUDGET');break
+    if older is None:break
+    snapshot_history['snapshots_examined']+=1
+    try:
+     if any(older[k]!=row[k] for k in ('ticker','provider','interval')) or json.loads(older['source_semantics_json'])!=original_semantics:
+      raise ValueError('HISTORICAL_SNAPSHOT_SERIES_MISMATCH')
+     old,partial=snapshot_bars(older)
+     if any(end in merged and merged[end]!=b for end,b in old.items()):raise ValueError('HISTORICAL_SNAPSHOT_OVERLAP_REVISION_CONFLICT')
+     additions={end:b for end,b in old.items() if now-120*86400<end<=now and end not in merged}
+     merged.update(additions);snapshot_history['partial_rows_excluded']+=partial
+     snapshot_history['accepted_sources'].append(dict(source_id=older['source_id'],source_sha256=older['source_sha256'],created_ts=older['created_ts'],fetched_ts=older['source_fetched_ts'] if has_fetched else None,added_bars=len(additions)))
+    except (ValueError,TypeError,KeyError,OverflowError,EOFError,OSError,zlib.error) as exc:
+     snapshot_history['history_complete']=False
+     snapshot_history['excluded_sources'].append(dict(source_id=older['source_id'],reason=str(exc) if isinstance(exc,ValueError) else 'HISTORICAL_SNAPSHOT_INVALID'))
+   if snapshot_history['snapshots_examined']==8 and snapshot_history['history_complete']:
+    snapshot_history.update(history_complete=False,reason='HISTORICAL_SNAPSHOT_READ_BOUND')
+  else:
+   snapshot_history.update(history_complete=False,reason='CRYPTO_HISTORY_NOT_MERGED')
+  ends=sorted(end for end in merged if now-120*86400<end<=now)
+  snapshot_history['row_cap_applied']=len(ends)>20000
+  bars=[merged[end] for end in ends[-20000:]]
+
  recent=c.execute('SELECT bar_start_ts,bar_end_ts,open,high,low,close,source,kind,created_ts FROM passive_market_bars WHERE instrument=? AND bar_start_ts>=? ORDER BY bar_start_ts DESC LIMIT 6000',(code,now-14*86400)).fetchall()
  groups={};kinds={};providers={};excluded_derived=0;excluded_partial=0
  for r in recent:
@@ -67,7 +134,7 @@ for code in codes:
  if not bars:errors[code]='SOURCE_BARS_UNAVAILABLE';continue
  bars=sorted(bars,key=lambda x:x['bar_end_ts'])
  digest=hashlib.sha256(json.dumps(bars,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
- sources.append(dict(instrument=code,bars=bars,source_id='math-export-'+code+'-'+digest[:24],source_sha256=digest,cached_source_id=row['source_id'] if row else None,cached_sha256=row['source_sha256'] if row else None,recent_completed_5m_n=sum(len(v) for v in retained.values()),retained_provider_completed_counts={p:len(v) for p,v in retained.items()},source_kind=selected_kind,provider=selected_provider,ticker=selected_ticker,interval='5m',source_semantics=semantics,mixed_provider_splicing=False,recent_kind_counts=kinds,recent_provider_counts=providers,excluded_derived_minute_n=excluded_derived,excluded_partial_minute_n=excluded_partial,cached_ticker=row['ticker'] if row else None,cached_provider=row['provider'] if row else None,cached_interval=row['interval'] if row else None,cached_semantics=json.loads(row['source_semantics_json']) if row else None,not_broker_execution_bars=True,receipt_observed_ts=now))
+ sources.append(dict(instrument=code,bars=bars,source_id='math-export-'+code+'-'+digest[:24],source_sha256=digest,cached_source_id=row['source_id'] if row else None,cached_sha256=row['source_sha256'] if row else None,recent_completed_5m_n=sum(len(v) for v in retained.values()),retained_provider_completed_counts={p:len(v) for p,v in retained.items()},source_kind=selected_kind,provider=selected_provider,ticker=selected_ticker,interval='5m',source_semantics=semantics,mixed_provider_splicing=False,historical_snapshot_history=snapshot_history,recent_kind_counts=kinds,recent_provider_counts=providers,excluded_derived_minute_n=excluded_derived,excluded_partial_minute_n=excluded_partial,cached_ticker=row['ticker'] if row else None,cached_provider=row['provider'] if row else None,cached_interval=row['interval'] if row else None,cached_semantics=json.loads(row['source_semantics_json']) if row else None,not_broker_execution_bars=True,receipt_observed_ts=now))
 c.close()
 raw=json.dumps(dict(sources=sources,diagnostic_sources=diagnostic_sources,errors=errors,exported_ts=now,read_only=True),allow_nan=False).encode()
 if len(raw)>64000000:raise ValueError('export exceeds bound')
