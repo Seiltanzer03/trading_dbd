@@ -135,7 +135,9 @@ def _make_source(code, provider, ticker, bars, captured, metadata):
                 'provider_quote_currency': ('USDT' if exact_crypto else 'USD') if is_crypto else None,
                 'configured_quote_currency': 'USDT' if is_crypto else None,
                 'currency_basis_mismatch': is_crypto and not exact_crypto, 'gaps_filled': False,
-                'provider_documentation': PROVIDER_DOCS.get(provider)},
+                'provider_documentation': PROVIDER_DOCS.get(provider),
+                **({'auto_adjust':False,'actions':False,'repair':False}
+                   if provider=='Yahoo Finance via yfinance' else {})},
             'coverage': source_coverage(bars), 'collection': metadata}
 
 
@@ -230,7 +232,16 @@ def retain_yahoo_history(current, archives, captured):
     code=current.get('instrument')
     if code not in ALL_INSTRUMENTS or ALL_INSTRUMENTS[code].asset_class=='crypto':
         return current
-    def verified(item):
+    def signature(item):
+        semantics=item.get('source_semantics')
+        if not isinstance(semantics,dict):raise ValueError('HISTORY_SEMANTICS_INVALID')
+        expected={'provider':item['provider'],'ticker':item['ticker'],'interval':'5m',
+            'auto_adjust':False,'actions':False,'repair':False,
+            'completed_bars_only_for_features':True,'gaps_filled':False,'currency_basis_mismatch':False}
+        if any(semantics.get(k,v)!=v for k,v in expected.items()):
+            raise ValueError('HISTORY_SEMANTICS_MISMATCH')
+        return tuple(semantics.get(k) for k in ('provider_quote_currency','configured_quote_currency'))
+    def verified(item, original_cutoff=None):
         if not isinstance(item,dict) or any(item.get(k)!=v for k,v in (
                 ('instrument',code),('provider','Yahoo Finance via yfinance'),
                 ('ticker',ALL_INSTRUMENTS[code].yahoo),('interval','5m'))):
@@ -246,6 +257,9 @@ def retain_yahoo_history(current, archives, captured):
                 'provider interval start +300s',
                 'provider timestamp is interval start; T0 is bar_start+300s')):
             raise ValueError('HISTORY_TIMESTAMP_SEMANTICS_INVALID')
+        item_signature=signature(item)
+        if original_cutoff is not None and item_signature!=current_signature:
+            raise ValueError('HISTORY_SEMANTICS_MISMATCH')
         bars={}
         for row in rows:
             bar=_bar(row['bar_end_ts']-300,row['open'],row['high'],row['low'],row['close'])
@@ -253,13 +267,48 @@ def retain_yahoo_history(current, archives, captured):
                     or ('bar_start_ts' in row and row['bar_start_ts']!=bar['bar_end_ts']-300)
                     or simulated_evidence(row)):
                 raise ValueError('HISTORY_BAR_INVALID')
+            if original_cutoff is not None and bar['bar_end_ts']>original_cutoff:
+                raise ValueError('HISTORY_BAR_AFTER_ORIGINAL_OBSERVATION')
             bars[bar['bar_end_ts']]=bar
         return bars
     try:
+        current_signature=signature(current)
         merged=verified(current)
     except (ValueError,TypeError,KeyError):
         return current  # Existing owner still rejects an invalid primary source.
-    accepted=[];excluded=[];seen=set()
+    def original_manifest(item):
+        keys=('source_id','source_sha256','fetched_ts','receipt_observed_ts',
+              'captured_ts','created_ts','first_bar_end_ts','last_bar_end_ts')
+        proof=item.get('history_retention') or {}
+        inherited=proof.get('original_sources',proof.get('accepted_sources',[]))
+        snapshots=(item.get('historical_snapshot_history') or {}).get('accepted_sources',[])
+        if not isinstance(inherited,list) or not isinstance(snapshots,list) or len(inherited)+len(snapshots)>128:
+            raise ValueError('HISTORY_ORIGINAL_MANIFEST_OVER_BOUND')
+        original={k:item.get(k) for k in keys if item.get(k) is not None}
+        ends=[b['bar_end_ts'] for b in item['bars']]
+        original.update(first_bar_end_ts=min(ends),last_bar_end_ts=max(ends))
+        return [original,*[{k:parent[k] for k in keys if k in parent and parent[k] is not None} for parent in inherited+snapshots]]
+    accepted=[];excluded=[];seen=set();originals={}
+    def add_originals(parents, *, fresh_primary=False):
+        additions={}
+        for parent in parents:
+            digest=parent.get('source_sha256')
+            if not isinstance(digest,str) or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
+                raise ValueError('HISTORY_ORIGINAL_MANIFEST_INVALID')
+            if not isinstance(parent.get('source_id'),str) or not parent['source_id']:
+                raise ValueError('HISTORY_ORIGINAL_MANIFEST_INVALID')
+            clocks=[parent[k] for k in ('fetched_ts','receipt_observed_ts','captured_ts','created_ts') if k in parent]
+            limit=(max(captured,time.time())
+                if fresh_primary and parent is parents[0] else captured)
+            if not clocks or any(number(t) is None or not 0<number(t)<=limit for t in clocks):
+                raise ValueError('HISTORY_ORIGINAL_MANIFEST_CLOCK_INVALID')
+            if 'last_bar_end_ts' in parent and parent['last_bar_end_ts']>min(clocks):
+                raise ValueError('HISTORY_BAR_AFTER_ORIGINAL_OBSERVATION')
+            additions.setdefault(digest,parent)
+        if len(originals.keys()|additions.keys())>128:raise ValueError('HISTORY_ORIGINAL_MANIFEST_OVER_BOUND')
+        return additions
+    try:originals.update(add_originals(original_manifest(current),fresh_primary=True))
+    except (ValueError,TypeError,KeyError,AttributeError):return current
     for item in archives:
         if item is None:continue
         identity=item.get('source_sha256') if isinstance(item,dict) and isinstance(item.get('source_sha256'),str) else None
@@ -270,15 +319,16 @@ def retain_yahoo_history(current, archives, captured):
                     if isinstance(item,dict) and key in item]
             if not clocks or any(number(t) is None or not 0<number(t)<=captured for t in clocks):
                 raise ValueError('HISTORY_RECEIPT_CLOCK_INVALID')
-            older=verified(item)
+            older=verified(item,min(float(t) for t in clocks))
+            parents=add_originals(original_manifest(item))
             if any(end in merged and merged[end]!=bar for end,bar in older.items()):
                 raise ValueError('HISTORY_OVERLAP_REVISION_CONFLICT')
             added={end:bar for end,bar in older.items() if captured-120*86400<end<=captured and end not in merged}
-            merged.update(added)
+            merged.update(added);originals.update(parents)
             accepted.append({'source_id':item.get('source_id'),'source_sha256':item['source_sha256'],
                 'fetched_ts':item.get('fetched_ts'),'receipt_observed_ts':item.get('receipt_observed_ts'),
                 'added_bars':len(added),'historical_snapshot_history':item.get('historical_snapshot_history')})
-        except (ValueError,TypeError,KeyError) as exc:
+        except (ValueError,TypeError,KeyError,AttributeError) as exc:
             excluded.append({'source_id':item.get('source_id') if isinstance(item,dict) else None,
                 'reason':str(exc) if isinstance(exc,ValueError) else 'HISTORY_BAR_INVALID'})
     ends=sorted(end for end in merged if captured-120*86400<end<=captured)
@@ -290,6 +340,7 @@ def retain_yahoo_history(current, archives, captured):
         'history_retention':{'contract_version':'verified-yahoo-history-retention-v1',
             'maximum_days':120,'maximum_bars':MAX_BARS,'row_cap_applied':capped,
             'accepted_sources':accepted,'excluded_sources':excluded,'gaps_filled':False,
+            'original_sources':list(originals.values()),'maximum_original_sources':128,
             'current_source_id':current.get('source_id'),'current_source_sha256':current['source_sha256'],
             'new_historical_receipts':False}}
 

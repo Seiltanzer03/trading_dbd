@@ -12,12 +12,24 @@ from scripts.production_ede_offload import _connect
 # Stdlib-only program executes on the existing server, including before deploy.
 # Indexed per-instrument ranges, no database backup, no writes, no training.
 REMOTE_EXPORT = r'''
-import sqlite3,gzip,json,hashlib,time,base64,math,io
+import sqlite3,gzip,json,hashlib,time,base64,math,io,zlib
 codes=__CONFIGURED_INSTRUMENT_CODES__
 crypto_symbols=__CONFIGURED_CRYPTO_SYMBOLS__
 c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=3)
 c.row_factory=sqlite3.Row
 c.execute('PRAGMA query_only=ON')
+evidence_flags=('synthetic','demo','is_demo','synthetic_demo','contract_fixture','synthetic_data_used','synthetic_price_history')
+def simulated(value):
+ pending=[value];remaining=16384
+ while pending:
+  remaining-=1
+  if remaining<0:return True
+  item=pending.pop()
+  if isinstance(item,dict):
+   if any(item.get(flag) for flag in evidence_flags):return True
+   pending.extend(item.values())
+  elif isinstance(item,(list,tuple)):pending.extend(item)
+ return False
 started=time.monotonic()
 c.set_progress_handler(lambda: int(time.monotonic()-started>25),10000)
 sources=[];diagnostic_sources=[];errors={};now=time.time()
@@ -27,10 +39,13 @@ def snapshot_bars(row):
  if len(raw)>8000000 or hashlib.sha256(raw).hexdigest()!=row['source_sha256']:raise ValueError('HISTORICAL_SNAPSHOT_HASH_INVALID')
  values=json.loads(raw)
  if not isinstance(values,list) or not 0<len(values)<=20000:raise ValueError('HISTORICAL_SNAPSHOT_ROW_BOUND_INVALID')
- observed=float(row['created_ts'])
- if not math.isfinite(observed) or not 0<observed<=now:raise ValueError('HISTORICAL_SNAPSHOT_CLOCK_INVALID')
+ observed=float(row['created_ts']);fetched=float(row['source_fetched_ts'])
+ if not all(math.isfinite(t) and 0<t<=now for t in (observed,fetched)):raise ValueError('HISTORICAL_SNAPSHOT_CLOCK_INVALID')
+ observed=min(observed,fetched)
  bars={};partial=0
+ if simulated(json.loads(row['source_semantics_json'])):raise ValueError('HISTORICAL_SNAPSHOT_SIMULATED_SOURCE')
  for b in values:
+  if simulated(b):raise ValueError('HISTORICAL_SNAPSHOT_SIMULATED_ROW')
   end=float(b['bar_end_ts']);prices=[float(b[k]) for k in ('open','high','low','close')]
   if (not all(math.isfinite(v) for v in [end,*prices]) or end<=0 or abs(end%300)>1
       or min(prices)<=0 or prices[2]>min(prices[0],prices[3]) or prices[1]<max(prices[0],prices[3])
@@ -39,8 +54,10 @@ def snapshot_bars(row):
   if end>observed:partial+=1;continue
   bars[end]=dict(bar_end_ts=end,open=prices[0],high=prices[1],low=prices[2],close=prices[3])
  return bars,partial
+has_fetched=any(r['name']=='fetched_ts' for r in c.execute('PRAGMA table_info(g1s_historical_sources)'))
+snapshot_columns='source_id,source_sha256,bars_gzip,ticker,provider,interval,source_semantics_json,created_ts,'+('coalesce(fetched_ts,created_ts)' if has_fetched else 'created_ts')+' AS source_fetched_ts'
 for code in codes:
- cursor=c.execute('SELECT source_id,source_sha256,bars_gzip,ticker,provider,interval,source_semantics_json,created_ts FROM g1s_historical_sources WHERE instrument=? AND contract_version=? ORDER BY created_ts DESC,source_id ASC LIMIT 8',(code,'g1s-historical-wf-real-bars-v1'))
+ cursor=c.execute('SELECT '+snapshot_columns+' FROM g1s_historical_sources WHERE instrument=? AND contract_version=? ORDER BY created_ts DESC,source_id ASC LIMIT 8',(code,'g1s-historical-wf-real-bars-v1'))
  row=cursor.fetchone();bars=[]
  snapshot_history=dict(accepted_sources=[],excluded_sources=[],snapshots_examined=0,
   maximum_snapshots=8,maximum_days=120,maximum_bars=20000,history_complete=True,
@@ -49,7 +66,7 @@ for code in codes:
   merged,partial=snapshot_bars(row)
   snapshot_history['partial_rows_excluded']+=partial
   snapshot_history['snapshots_examined']=1
-  snapshot_history['accepted_sources'].append(dict(source_id=row['source_id'],source_sha256=row['source_sha256'],created_ts=row['created_ts'],added_bars=len(merged)))
+  snapshot_history['accepted_sources'].append(dict(source_id=row['source_id'],source_sha256=row['source_sha256'],created_ts=row['created_ts'],fetched_ts=row['source_fetched_ts'] if has_fetched else None,added_bars=len(merged)))
   original_semantics=json.loads(row['source_semantics_json'])
   if code not in crypto_symbols:
    while True:
@@ -67,8 +84,9 @@ for code in codes:
      if any(end in merged and merged[end]!=b for end,b in old.items()):raise ValueError('HISTORICAL_SNAPSHOT_OVERLAP_REVISION_CONFLICT')
      additions={end:b for end,b in old.items() if now-120*86400<end<=now and end not in merged}
      merged.update(additions);snapshot_history['partial_rows_excluded']+=partial
-     snapshot_history['accepted_sources'].append(dict(source_id=older['source_id'],source_sha256=older['source_sha256'],created_ts=older['created_ts'],added_bars=len(additions)))
-    except (ValueError,TypeError,KeyError,OverflowError,EOFError,OSError) as exc:
+     snapshot_history['accepted_sources'].append(dict(source_id=older['source_id'],source_sha256=older['source_sha256'],created_ts=older['created_ts'],fetched_ts=older['source_fetched_ts'] if has_fetched else None,added_bars=len(additions)))
+    except (ValueError,TypeError,KeyError,OverflowError,EOFError,OSError,zlib.error) as exc:
+     snapshot_history['history_complete']=False
      snapshot_history['excluded_sources'].append(dict(source_id=older['source_id'],reason=str(exc) if isinstance(exc,ValueError) else 'HISTORICAL_SNAPSHOT_INVALID'))
    if snapshot_history['snapshots_examined']==8 and snapshot_history['history_complete']:
     snapshot_history.update(history_complete=False,reason='HISTORICAL_SNAPSHOT_READ_BOUND')

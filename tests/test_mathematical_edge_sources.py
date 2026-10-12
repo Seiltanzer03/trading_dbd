@@ -428,3 +428,95 @@ def test_partial_row_in_old_snapshot_is_excluded_after_original_hash_verificatio
     assert len(row['bars'])==4
     assert max(b['bar_end_ts'] for b in row['bars'])<end+300
     assert row['historical_snapshot_history']['partial_rows_excluded']==1
+
+
+@pytest.mark.parametrize('field,value',[('provider','DifferentProvider'),('ticker','QQQ'),
+    ('interval','1h'),('auto_adjust',True),('provider_quote_currency','EUR'),
+    ('completed_bars_only_for_features',False)])
+def test_yahoo_history_rejects_conflicting_semantic_declarations(monkeypatch,field,value):
+    captured=1791763200.;monkeypatch.setattr(source.time,'time',lambda:captured)
+    current=yahoo_history(captured,[captured-300,captured])
+    older=yahoo_history(captured,[captured-86400])
+    older['source_semantics'][field]=value
+    result=source.retain_yahoo_history(current,[older],captured)
+    assert result['bars']==current['bars']
+    assert result['history_retention']['excluded_sources']
+
+
+def test_yahoo_archive_bars_must_be_completed_at_original_observation(monkeypatch):
+    captured=1791763200.;monkeypatch.setattr(source.time,'time',lambda:captured)
+    current=yahoo_history(captured,[captured-300,captured])
+    older=yahoo_history(captured,[captured-86400])
+    for key in ('captured_ts','fetched_ts','receipt_observed_ts'):older[key]=captured-2*86400
+    result=source.retain_yahoo_history(current,[older],captured)
+    assert result['bars']==current['bars']
+    assert result['history_retention']['excluded_sources'][0]['reason']=='HISTORY_BAR_AFTER_ORIGINAL_OBSERVATION'
+
+
+def test_second_yahoo_refresh_preserves_bounded_original_receipt_manifest(monkeypatch):
+    captured=1791763200.;monkeypatch.setattr(source.time,'time',lambda:captured)
+    older=yahoo_history(captured,[captured-86400]);older['source_id']='original-seed-receipt'
+    first=source.retain_yahoo_history(yahoo_history(captured,[captured-300]),[older],captured)
+    second=source.retain_yahoo_history(yahoo_history(captured,[captured]),[first],captured)
+    assert len(second['bars'])==3
+    assert 'original-seed-receipt' in json.dumps(second)
+    manifest=second['history_retention']['original_sources']
+    original=next(p for p in manifest if p['source_id']=='original-seed-receipt')
+    assert original['source_sha256']==older['source_sha256']
+    assert original['receipt_observed_ts']==older['receipt_observed_ts']
+    assert len({p['source_sha256'] for p in manifest})==len(manifest)
+    assert len(manifest)<=128
+
+
+@pytest.mark.parametrize('corruption',['gzip','synthetic'])
+def test_optional_snapshot_rejects_deflate_corruption_and_original_synthetic_markers(tmp_path,capsys,corruption):
+    import sqlite3,gzip,hashlib
+    db,end=snapshot_database(tmp_path)
+    with sqlite3.connect(db) as c:
+        raw=json.loads(gzip.decompress(c.execute("SELECT bars_gzip FROM g1s_historical_sources WHERE source_id='snapshot-1'").fetchone()[0]))
+        if corruption=='synthetic':raw[0]['synthetic']=True
+        text=json.dumps(raw,sort_keys=True,separators=(',',':')).encode()
+        compressed=gzip.compress(text) if corruption=='synthetic' else bytes.fromhex('1f8b0800000000000003ff')+b'\x00'*8
+        c.execute("UPDATE g1s_historical_sources SET bars_gzip=?,source_sha256=? WHERE source_id='snapshot-1'",
+            (compressed,hashlib.sha256(text).hexdigest()))
+    row=run_snapshot_export(db,capsys)
+    assert len(row['bars'])==3
+    assert row['historical_snapshot_history']['excluded_sources']
+    assert len(row['historical_snapshot_history']['accepted_sources'])==1
+
+
+def test_known_g1s_and_current_yahoo_timestamp_contracts_remain_compatible(monkeypatch):
+    captured=1791763200.;monkeypatch.setattr(source.time,'time',lambda:captured)
+    current=yahoo_history(captured,[captured])
+    older=yahoo_history(captured,[captured-86400])
+    older['source_semantics']={'provider':older['provider'],'ticker':older['ticker'],'interval':'5m',
+        'bar_timestamp_semantics':'provider timestamp is interval start; T0 is bar_start+300s',
+        'completed_bars_only_for_features':True,'historical_price_is_yahoo_series':True}
+    result=source.retain_yahoo_history(current,[older],captured)
+    assert len(result['bars'])==2
+    assert not result['history_retention']['excluded_sources']
+
+
+def test_export_uses_original_fetch_cutoff_when_present(tmp_path,capsys):
+    import sqlite3
+    db,end=snapshot_database(tmp_path)
+    with sqlite3.connect(db) as c:
+        c.execute('ALTER TABLE g1s_historical_sources ADD COLUMN fetched_ts REAL')
+        c.execute("UPDATE g1s_historical_sources SET fetched_ts=? WHERE source_id='snapshot-1'",(end-700,))
+    row=run_snapshot_export(db,capsys)
+    assert len(row['bars'])==4
+    assert row['historical_snapshot_history']['partial_rows_excluded']==2
+    old=next(p for p in row['historical_snapshot_history']['accepted_sources'] if p['source_id']=='snapshot-1')
+    assert old['fetched_ts']==end-700
+
+
+def test_fresh_yahoo_receipt_after_training_cutoff_preserves_actual_clock(monkeypatch):
+    captured=1791763200.;monkeypatch.setattr(source.time,'time',lambda:captured)
+    older=yahoo_history(captured,[captured-86400])
+    current=yahoo_history(captured,[captured])
+    current['fetched_ts']=captured+.1;current['receipt_observed_ts']=captured+.2
+    monkeypatch.setattr(source.time,'time',lambda:captured+.3)
+    result=source.retain_yahoo_history(current,[older],captured)
+    assert len(result['bars'])==2
+    assert result['receipt_observed_ts']==captured+.2
+    assert result['captured_ts']==captured
