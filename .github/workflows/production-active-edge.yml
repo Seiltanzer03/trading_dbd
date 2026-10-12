@@ -81,11 +81,11 @@ jobs:
             --horizons "$HORIZON" \
             --output "active_structured_${HORIZON}m_latest.json"
       - uses: actions/upload-artifact@v4
-        if: success()
+        if: ${{ !cancelled() }}
         with:
           name: active-structured-${{ matrix.horizon }}m-${{ needs.resolve.outputs.expected_sha }}
           path: active_structured_${{ matrix.horizon }}m_latest.json
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 30
 
   ml:
@@ -112,11 +112,11 @@ jobs:
         run: |
           python scripts/run_ml_challenger_audit.py --output active_ml_latest.json
       - uses: actions/upload-artifact@v4
-        if: success()
+        if: ${{ !cancelled() }}
         with:
           name: active-ml-${{ needs.resolve.outputs.expected_sha }}
           path: active_ml_latest.json
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 30
 
   # Re-run only this job after a delivery failure; the saved calculation stays fixed.

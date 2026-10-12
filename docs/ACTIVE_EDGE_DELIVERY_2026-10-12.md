@@ -48,8 +48,12 @@ contains those graph/actual-shell-command checks plus exact-SHA publisher and
 bounded probe regressions. These isolated tests make no provider or order calls.
 The local workspace was restored as a targeted exact-baseline connector export
 after the previous checkout disappeared; a complete repository CI is therefore
-mandatory before merge. Independent final review and exact-revision full CI are
-pending; the new workflow is not yet released or demonstrated on production.
+mandatory before merge. Independent final review found no issues. Initial full CI found one existing
+artifact-preservation regression (3847 passed, one failed); the prior upload
+condition and optional-file preservation behavior were restored. Missing named
+artifacts still fail the publication download. All 36 owning checks then passed.
+Corrected exact-revision full CI remains mandatory; the new workflow is not yet
+released or demonstrated on production.
 
 Stop after the final review, mandatory green CI and exact-SHA deployment. Record
 the first actual split-job publication receipt separately; configuration and

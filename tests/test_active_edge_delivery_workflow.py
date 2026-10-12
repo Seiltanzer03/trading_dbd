@@ -35,7 +35,8 @@ def test_failed_delivery_can_retry_without_research_or_source_acquisition(kind):
                   if s.get("uses") == "actions/upload-artifact@v4")
     download = next(s for s in publication["steps"]
                     if s.get("uses") == "actions/download-artifact@v4")
-    assert upload["with"]["if-no-files-found"] == "error"
+    assert upload["if"] == "${{ !cancelled() }}"
+    assert upload["with"]["if-no-files-found"] == "ignore"
     assert upload["with"]["name"] == download["with"]["name"]
     assert "needs.resolve.outputs.expected_sha" in upload["with"]["name"]
     # No external run/token: download is confined to this exact workflow run.
