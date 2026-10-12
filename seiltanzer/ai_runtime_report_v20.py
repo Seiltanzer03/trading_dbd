@@ -139,6 +139,15 @@ def _quality_lines(snapshot: dict) -> list[str]:
     lines.insert(1, f"Операционная численная доступность: {operational}; {detail}.")
     lines.insert(2, "Покрытие семейств означает наличие контракта и роли; "
                  "НЕ означает численную доступность каждой производной и вероятности.")
+    failures = []
+    for key, label in (("edge_family_source_bundle_audit", "локальные факты"),
+                       ("edge_family_market_context", "рыночные модели"),
+                       ("edge_family_budget_status", "бюджет снимка")):
+        row = snapshot.get(key) or {}
+        if row.get("available") is False or row.get("excluded_roots"):
+            failures.append(f'{label}: {str(row.get("reason") or "UNAVAILABLE")[:160]}')
+    if failures:
+        lines.append("Причины недоступности входов edge: " + "; ".join(failures) + ".")
     unified = (snapshot.get('policy_manager') or {}).get('unified_edge_ensemble') or {}
     if unified:
         components = unified.get('components') or []

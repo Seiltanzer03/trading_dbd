@@ -30,6 +30,8 @@ PATH_KEYS = ("probability", "baseline_probability", "horizon_minutes", "target_s
     "generic_barriers_are_trade_stop_take", "evidence_tier")
 PATH_NAMES = ("downside_excursion", "upside_excursion", "upper_before_lower", "early_first_touch")
 FAMILY_ROOTS = ("edge_family_sources", "edge_family_models", "edge_family_market_context", "macro_context_v1", "macro_t0_context")
+FAMILY_AUDITS = ("edge_family_source_bundle_audit", "edge_family_event_reaction_audit",
+                 "edge_family_event_novelty_audit")
 # Several genuine family models must coexist with their intact hashes/heads.
 # The enclosing review still has its independent, unchanged 60KB ceiling.
 MARKET_CONTEXT_MAX_BYTES = 32_000
@@ -79,6 +81,11 @@ def compact_operational_profile(value):
 def compact_operational_edges(snapshot):
     """Project profiles; preserve bounded exact family inputs or name exclusion."""
     manager = snapshot.get("policy_manager")
+    for key in FAMILY_AUDITS:
+        if isinstance(snapshot.get(key), dict) and _bytes(snapshot[key]) > 4000:
+            snapshot[key] = {field: deepcopy(snapshot[key][field]) for field in (
+                "contract_version", "available", "reason", "network_calls", "source_record_n",
+                "models_loaded", "authority_role", "source_id") if field in snapshot[key]}
     if "edge_regime" in snapshot and _bytes(snapshot["edge_regime"]) > 4000:
         snapshot["edge_regime"] = {"regime": "UNKNOWN", "available": False,
                                    "reason": EXCLUDED_REASON}

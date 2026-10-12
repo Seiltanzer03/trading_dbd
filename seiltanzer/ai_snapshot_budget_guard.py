@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 from .unified_edge_audit import compact_unified_ensemble
-from .operational_edge_compaction import compact_operational_edges, compact_evidence_lineage, FAMILY_ROOTS
+from .operational_edge_compaction import compact_operational_edges, compact_evidence_lineage, FAMILY_ROOTS, FAMILY_AUDITS
 
 _INSTALLED = False
 
@@ -137,8 +137,8 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
         "execution_cost_context_audit",
         "validation", "data_quality", "market_state", "hard_risk",
         "risk_constraints", "metric_coverage", "policy_manager", "snapshot_budget",
-        "market_regime", "regime", "edge_regime", "edge_family_budget_status",
-    ) + FAMILY_ROOTS
+        "market_regime", "regime", "edge_regime", "edge_family_budget_status", "frozen_expert_inputs",
+    ) + FAMILY_ROOTS + FAMILY_AUDITS
     compact_root = {
         key: snapshot[key] for key in root_keep
         if key in snapshot and key != "policy_manager"
