@@ -104,18 +104,34 @@ def _materialize_windows_fail_closed(self: ManagementLocalRuntime,
                                      limit: int = 500) -> int:
     """Freeze only true trading-time targets; never substitute wall-clock time."""
     _ensure_local_error_table(self)
-    with self._lock:
-        rows = self._conn.execute("""
+    def pending(after):
+        cursor_clause = '' if after is None else (
+            ' AND (g.captured_ts>? OR (g.captured_ts=? AND g.observation_id>?))')
+        params = [*LOCAL_HORIZONS, len(LOCAL_HORIZONS)]
+        if after is not None:
+            params.extend((after[0], after[0], after[1]))
+        params.append(max(1, min(int(limit), 5000)))
+        return self._conn.execute(f"""
             SELECT g.observation_id,g.review_id,g.trade_id,g.captured_ts,g.origin,
                    g.policy_edge_eligible,c.instrument
             FROM g1m_management_observations g
             JOIN g1m_observation_context c USING(observation_id)
+            WHERE (SELECT COUNT(*) FROM g1m_local_windows w
+                   WHERE w.observation_id=g.observation_id
+                     AND w.horizon_minutes IN ({','.join('?' for _ in LOCAL_HORIZONS)}))<?
+              {cursor_clause}
             ORDER BY g.captured_ts,g.observation_id LIMIT ?
-        """, (max(1, min(int(limit), 5000)),)).fetchall()
+        """, params).fetchall()
+    with self._lock:
+        rows = pending(self._window_scan_after)
+        if not rows and self._window_scan_after is not None:
+            self._window_scan_after = None
+            rows = pending(None)
     created = 0
     for row in rows:
         instrument = str(row["instrument"] or "")
         if not instrument:
+            self._window_scan_after = (float(row['captured_ts']), str(row['observation_id']))
             continue
         source_was_prospective = bool(int(row["policy_edge_eligible"] or 0))
         live_after_activation = float(row["captured_ts"]) >= self.activation_ts - 1e-9
@@ -164,6 +180,7 @@ def _materialize_windows_fail_closed(self: ManagementLocalRuntime,
                      time.time()),
                 )
                 created += int(cur.rowcount > 0)
+        self._window_scan_after = (float(row['captured_ts']), str(row['observation_id']))
     return created
 
 
