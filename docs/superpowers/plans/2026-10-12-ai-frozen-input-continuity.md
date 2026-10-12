@@ -1,0 +1,8 @@
+# AI frozen input continuity
+
+Goal: fix observed cache/data handoff defects without relaxing quote, risk or causal gates.
+Base994a739/treee263f15 equals acceptedmain040f913/PR454. New uploadedreport10-12 shows liveOANDA7.6s but allfamiliesmissing, completedpricefeaturesunavailable. Some missingYahooindexbars beforecashsession and delayedoption anchors are validlimitations, not grounds to fabricate bars/forecasts.
+Task1: reproduce a missing-authority snapshot whose quote becomes available during slowbuild; completionavailability currently overwrites frozenavailability so laterrequests stay503 despite livequote. Preserve frozenquoteavailability/source as invalidation baseline; keepcompletionprice forreviewtrigger only. Rebuild onauthority-sourcechange even ifpriceunchanged. Existing slowbuildtest must only claimready if its frozeninputaudit is actuallyavailable.
+Task2: freeze bounded source/model/macro inputs while buildingcachedsnapshot; requestpathmustnotoverwrite thosefrozeninputs with a newerfile/feed and then reject them asfuture-relative-to-oldT0. Keepstandaloneunmaterializedroutebehavior. Preserveoriginalcaptureclocks, modelhashes/coefficients, runtimeSHA/sourceaudit and explicitfailure reasons throughbytecompaction. No network/fitting/paidcalls infreezehelper.
+Task3: scopedRED→GREEN, onefinalindependentreview/fixpass, mandatoryCI+exactSHAserveracceptance. No newproviders, brokercosts, riskrelaxation or inventedcurrentbarhistory. EDEauditfailuresremainseparatelydiagnosed, nothidden.
+Reviewfocus: quotedatachangeswhilebuilding; sameprice butfallback→direct; frozenfacts remaincausalafterlaterproviderupdate; budgetexclusion cannot masquerade asmissingcollecteddata; noauthority inventedbyrequesttime refresh.

@@ -123,6 +123,9 @@ class AISnapshotMaterializer:
         self._baseline_r: float | None = None
         self._boundaries_r: tuple[float, ...] = ()
         self._baseline_quote_available: bool | None = None
+        self._baseline_quote_authority: tuple | None = None
+        self._baseline_publication: tuple | None = None
+        self._baseline_completed_bar: tuple | None = None
         self._baseline_instrument: str | None = None
         self._budget_degraded_build_n = 0
         self._strict_compaction_build_n = 0
@@ -150,6 +153,22 @@ class AISnapshotMaterializer:
         row = ((tick.get("feeds") or {}).get("price") or {})
         available = price_quote_available(row)
         return instrument, available, _finite(row.get("value")) if available else None
+
+    @staticmethod
+    def _quote_authority(row: Any) -> tuple | None:
+        if not isinstance(row, dict) or not row.get('source'):
+            return None
+        return (str(row['source']), row.get('production_authority') is not False)
+
+    def _current_quote_authority(self) -> tuple | None:
+        canonical_tick = getattr(self.engine, 'canonical_tick_payload', None)
+        if not callable(canonical_tick):
+            return None
+        try:
+            tick = canonical_tick(copy_payload=False)
+            return self._quote_authority((tick.get('feeds') or {}).get('price'))
+        except Exception:
+            return None
 
     def _current_price(self, trade: dict[str, Any] | None) -> float | None:
         if not trade:
@@ -261,6 +280,9 @@ class AISnapshotMaterializer:
             boundaries = self._boundaries_r
             chain_marker = self._chain_marker
             baseline_quote_available = self._baseline_quote_available
+            baseline_quote_authority = self._baseline_quote_authority
+            baseline_publication = self._baseline_publication
+            baseline_completed_bar = self._baseline_completed_bar
             baseline_instrument = self._baseline_instrument
             invalidated = self._invalidated_reason
         if invalidated:
@@ -271,6 +293,13 @@ class AISnapshotMaterializer:
             return "INITIAL_BUILD"
         if snapshot_trade != current_trade:
             return "TRADE_CHANGED"
+        from .ai_frozen_expert_inputs import publication_marker
+        if baseline_publication is not None and publication_marker(self.engine) != baseline_publication:
+            return "EXPERT_PUBLICATION_CHANGED"
+        from .ai_frozen_expert_inputs import completed_bar_marker
+        live_completed_bar = completed_bar_marker(self.engine)
+        if live_completed_bar is not None and live_completed_bar != baseline_completed_bar:
+            return "COMPLETED_MARKET_BAR_CHANGED"
         live_instrument, live_quote_available, _ = self._current_quote()
         if (
             baseline_instrument is not None
@@ -284,6 +313,10 @@ class AISnapshotMaterializer:
             and live_quote_available != baseline_quote_available
         ):
             return "PRICE_AVAILABILITY_CHANGED"
+        live_quote_authority = self._current_quote_authority()
+        if (baseline_quote_authority is not None and live_quote_authority is not None
+                and live_quote_authority != baseline_quote_authority):
+            return 'PRICE_AUTHORITY_CHANGED'
         live_r = self._current_r(trade)
         if baseline_r is not None and live_r is not None:
             if abs(live_r - baseline_r) >= self.review_delta_r - 1e-9:
@@ -331,6 +364,9 @@ class AISnapshotMaterializer:
                     self._boundaries_r = ()
                     self._chain_marker = None
                     self._baseline_quote_available = None
+                    self._baseline_quote_authority = None
+                    self._baseline_publication = None
+                    self._baseline_completed_bar = None
                     self._baseline_instrument = None
                     self._invalidated_reason = None
             self._wake.wait(self.watch_interval_sec)
@@ -350,6 +386,9 @@ class AISnapshotMaterializer:
                 self._boundaries_r = ()
                 self._chain_marker = None
                 self._baseline_quote_available = None
+                self._baseline_quote_authority = None
+                self._baseline_publication = None
+                self._baseline_completed_bar = None
                 self._baseline_instrument = None
                 self._invalidated_reason = None
             return
@@ -361,6 +400,12 @@ class AISnapshotMaterializer:
             self._building = True
             self._build_started_at = started_wall
         try:
+            from .ai_frozen_expert_inputs import freeze_expert_inputs, publication_marker, completed_bar_marker, capture_market_inputs
+            # A publication arriving during the heavy builder must trigger a
+            # new review, not be mistaken for the inputs that builder consumed.
+            baseline_publication = publication_marker(self.engine)
+            baseline_completed_bar = completed_bar_marker(self.engine)
+            market_inputs = capture_market_inputs(self.engine)
             snapshot = self.builder(self.engine)
             snapshot_trade = (
                 str(snapshot.get("trade_id"))
@@ -373,6 +418,7 @@ class AISnapshotMaterializer:
                 or not isinstance(snapshot.get("policy_manager"), dict)
             ):
                 raise RuntimeError("BUILT_SNAPSHOT_TRADE_MISMATCH_OR_UNAVAILABLE")
+            freeze_expert_inputs(self.engine, snapshot, market_inputs=market_inputs)
             final_trade = self.current_trade() or current_trade_row or {}
             completion_instrument, completion_quote_available, _ = self._current_quote()
             completion_r = self._current_r(final_trade)
@@ -399,9 +445,13 @@ class AISnapshotMaterializer:
             audit_price = (((snapshot.get("policy_manager") or {})
                             .get("input_audit") or {}).get("rows") or {}).get(
                                 "instrument_price") or {}
-            baseline_quote_available = completion_quote_available
-            if baseline_quote_available is None:
+            # Quote recovery during a slow build does not retroactively repair
+            # the frozen input. Anchor authority to the snapshot, not completion.
+            if 'available' in audit_price:
                 baseline_quote_available = bool(audit_price.get("available") is True)
+            else:
+                baseline_quote_available = completion_quote_available
+            baseline_quote_authority = self._quote_authority(audit_price)
             baseline_instrument = completion_instrument or canonical_instrument_code(
                 ((snapshot.get("strategy") or {}).get("instrument")
                  or (final_trade or {}).get("instrument"))) or None
@@ -429,6 +479,9 @@ class AISnapshotMaterializer:
                 self._boundaries_r = boundaries
                 self._chain_marker = chain_marker
                 self._baseline_quote_available = baseline_quote_available
+                self._baseline_quote_authority = baseline_quote_authority
+                self._baseline_publication = baseline_publication
+                self._baseline_completed_bar = baseline_completed_bar
                 self._baseline_instrument = baseline_instrument
                 self._last_budget_status = budget_status
                 if budget_status["degraded"]:

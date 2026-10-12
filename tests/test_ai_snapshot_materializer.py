@@ -186,7 +186,7 @@ def test_slow_build_anchors_next_review_to_completion_market_state():
         row = snapshot(current_r=0.10)
         row["strategy"] = {"instrument": "NAS100"}
         row["policy_manager"]["input_audit"] = {
-            "rows": {"instrument_price": {"available": False}},
+            "rows": {"instrument_price": {"available": True}},
         }
         return row
 

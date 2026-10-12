@@ -277,6 +277,9 @@ def _publish_unified_review(engine, snapshot: dict, result: dict, review_id: str
 
 def _attach_family_source_bundle(engine, snapshot: dict) -> None:
     """Merge bounded local source facts without replacing existing T0 records."""
+    from .ai_frozen_expert_inputs import expert_inputs_frozen
+    if expert_inputs_frozen(snapshot):
+        return
     from .edge_family_source_runtime import load_family_source_context
     from .runtime_git_identity import runtime_git_sha
     loaded = load_family_source_context(engine, snapshot, expected_sha=runtime_git_sha())
@@ -1297,16 +1300,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await trace.to_thread('runtime_context', attach_unified_edge_context, engine, snapshot,
                                     expected_sha=runtime_git_sha())
             macro_factory = getattr(getattr(engine, "passive", None), "_macro_data_factory", None)
-            if macro_factory is not None:
+            from .ai_frozen_expert_inputs import expert_inputs_frozen
+            inputs_frozen = expert_inputs_frozen(snapshot)
+            if macro_factory is not None and not inputs_frozen:
                 from .macro_t0_context import build_macro_t0_context
                 snapshot["macro_context_v1"] = await trace.to_thread(
                     'macro_context', build_macro_t0_context, macro_factory,
                     float(snapshot["captured_ts"]), nonblocking=True)
             from .edge_family_event_reaction import attach_observed_event_reaction_bounded
             with trace.span('reaction_capture'):
-                await attach_observed_event_reaction_bounded(engine, snapshot)
+                if not inputs_frozen:
+                    await attach_observed_event_reaction_bounded(engine, snapshot)
             from .edge_family_market import attach_market_family_context
-            await trace.to_thread('runtime_context', attach_market_family_context, engine, snapshot)
+            if not inputs_frozen:
+                await trace.to_thread('runtime_context', attach_market_family_context, engine, snapshot)
             from .edge_regime import refine_regime_with_events
             with trace.span('regime_management'):
                 refine_regime_with_events(snapshot)
