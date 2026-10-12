@@ -61,6 +61,8 @@ class ManagementLocalRuntime:
         self.activation_ts = self._activation_ts()
         self._last_error: str | None = None
         self._last_step_ts: float | None = None
+        self._window_scan_after: tuple[float, str] | None = None
+        self._outcome_scan_after: tuple[float, str] | None = None
 
     def _ensure_tables(self) -> None:
         with self._lock, self._conn:
@@ -211,15 +213,29 @@ class ManagementLocalRuntime:
 
     def resolve_due(self, *, now: float | None = None, limit: int = 500) -> int:
         now = float(now or time.time())
-        with self._lock:
-            windows = self._conn.execute("""
+        def pending(after):
+            cursor_clause = '' if after is None else (
+                ' AND (w.target_ts>? OR (w.target_ts=? AND w.window_id>?))')
+            params = [now]
+            if after is not None:
+                params.extend((after[0], after[0], after[1]))
+            params.append(max(1, min(int(limit), 5000)))
+            return self._conn.execute(f"""
                 SELECT w.* FROM g1m_local_windows w
                 LEFT JOIN g1m_local_outcomes o USING(window_id)
-                WHERE o.window_id IS NULL AND w.target_ts<=?
-                ORDER BY w.target_ts LIMIT ?
-            """, (now, max(1, min(int(limit), 5000)))).fetchall()
+                WHERE o.window_id IS NULL AND w.target_ts<=? {cursor_clause}
+                ORDER BY w.target_ts,w.window_id LIMIT ?
+            """, params).fetchall()
+        with self._lock:
+            windows = pending(self._outcome_scan_after)
+            if not windows and self._outcome_scan_after is not None:
+                self._outcome_scan_after = None
+                windows = pending(None)
         resolved = 0
         for window in windows:
+            # This records an attempted scan, never a resolved outcome. Missing
+            # paths remain pending and are revisited after one complete sweep.
+            self._outcome_scan_after = (float(window['target_ts']), str(window['window_id']))
             with self._lock:
                 source = self._conn.execute(
                     "SELECT snapshot_json,snapshot_sha256 FROM decision_snapshots WHERE review_id=?",
