@@ -83,7 +83,29 @@ def _manual_candidate_preflight(snapshot):
         return False
     price = (((snapshot.get("policy_manager") or {}).get("input_audit") or {}).get("rows") or {}).get("instrument_price") or {}
     if price.get("production_authority") is not True:
-        return False
+        # Native feed audit rows predate the optional authority flag. Resolve
+        # their exact configured source and provider clock; absence is not an
+        # explicit rejection and must not veto the canonical price guard above.
+        if price.get("production_authority") is not None:
+            return False
+        from .config import ALL_INSTRUMENTS
+        code = (snapshot.get("strategy") or {}).get("instrument") or snapshot.get("instrument")
+        configured = ALL_INSTRUMENTS.get(code)
+        sources = set()
+        if configured is not None:
+            if configured.tradingview_symbol:
+                sources.update({f"TradingView stream {configured.tradingview_symbol}",
+                                f"TradingView snapshot {configured.tradingview_symbol}"})
+            if configured.swissquote_pair:
+                sources.add(f"Swissquote OTC {configured.swissquote_pair} bid/ask")
+            if configured.binance_symbol:
+                sources.update({f"Binance WS {configured.binance_symbol}",
+                                f"Binance REST trade {configured.binance_symbol}"})
+        stamp, cutoff = number(price.get("timestamp")), number(snapshot.get("captured_ts"))
+        if (price.get("status") != "live" or price.get("source") not in sources
+                or price.get("derived") is True or stamp is None or cutoff is None
+                or not -5 <= cutoff - stamp <= 30):
+            return False
     state = snapshot.get("position_state") or {}
     remaining = number(state.get("remaining_position_fraction"))
     geometry = snapshot.get("trade_geometry") or {}
