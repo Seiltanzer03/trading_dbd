@@ -740,6 +740,18 @@ class MarketData:
                 return
             except Exception as e:  # Yahoo cash остаётся честным fallback
                 broker_error = str(e)[:200]
+                # A failed refresh does not erase a verified observation still
+                # inside the same 30-second broker timestamp window. Preserve
+                # its original timestamp/value; never renew it or promote a proxy.
+                source = str(self.price.get("source") or "")
+                if (self.price.get("status") == "live"
+                        and self.price.get("derived") is False
+                        and self.price.get("instrument_type") == "broker_cfd"
+                        and source in {f"TradingView stream {broker_symbol}",
+                                       f"TradingView snapshot {broker_symbol}"}
+                        and fresh_quote(self.price, time.time(), 30)):
+                    self.price["error"] = broker_error
+                    return
         # Для OTC/spot инструментов нельзя показывать Yahoo futures: у XAU их
         # basis меняется с экспирацией и сейчас достигает десятков долларов.
         pair = self.instrument.swissquote_pair
