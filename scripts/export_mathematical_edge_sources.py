@@ -13,6 +13,7 @@ from scripts.production_ede_offload import _connect
 # Indexed per-instrument ranges, no database backup, no writes, no training.
 REMOTE_EXPORT = r'''
 import sqlite3,gzip,json,hashlib,time,base64,math,io,zlib
+from pathlib import Path
 codes=__CONFIGURED_INSTRUMENT_CODES__
 crypto_symbols=__CONFIGURED_CRYPTO_SYMBOLS__
 c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=3)
@@ -136,7 +137,21 @@ for code in codes:
  digest=hashlib.sha256(json.dumps(bars,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
  sources.append(dict(instrument=code,bars=bars,source_id='math-export-'+code+'-'+digest[:24],source_sha256=digest,cached_source_id=row['source_id'] if row else None,cached_sha256=row['source_sha256'] if row else None,recent_completed_5m_n=sum(len(v) for v in retained.values()),retained_provider_completed_counts={p:len(v) for p,v in retained.items()},source_kind=selected_kind,provider=selected_provider,ticker=selected_ticker,interval='5m',source_semantics=semantics,mixed_provider_splicing=False,historical_snapshot_history=snapshot_history,recent_kind_counts=kinds,recent_provider_counts=providers,excluded_derived_minute_n=excluded_derived,excluded_partial_minute_n=excluded_partial,cached_ticker=row['ticker'] if row else None,cached_provider=row['provider'] if row else None,cached_interval=row['interval'] if row else None,cached_semantics=json.loads(row['source_semantics_json']) if row else None,not_broker_execution_bars=True,receipt_observed_ts=now))
 c.close()
-raw=json.dumps(dict(sources=sources,diagnostic_sources=diagnostic_sources,errors=errors,exported_ts=now,read_only=True),allow_nan=False).encode()
+previous_model=None;previous_model_reason=None
+try:
+ path=Path('/opt/seiltanzer/data/research/mathematical_edge_latest.json')
+ if path.stat().st_size>8000000:raise ValueError('PREVIOUS_MODEL_PUBLICATION_OVER_BOUND')
+ with path.open('rb') as reader:previous_raw=reader.read(8000001)
+ if len(previous_raw)>8000000:raise ValueError('PREVIOUS_MODEL_PUBLICATION_OVER_BOUND')
+ def invalid_constant(value):raise ValueError('PREVIOUS_MODEL_PUBLICATION_INVALID')
+ previous=json.loads(previous_raw,parse_constant=invalid_constant)
+ if not isinstance(previous,dict) or any(previous.get(flag) for flag in evidence_flags):raise ValueError('PREVIOUS_MODEL_PUBLICATION_INVALID')
+ keys=('contract_version','created_ts','production_authority','automatic_execution','family_market_models','published_for_sha','publication_contract_version','publication_run_id')
+ previous_model={k:previous[k] for k in keys if k in previous}
+except FileNotFoundError:previous_model_reason='PREVIOUS_MODEL_PUBLICATION_NOT_FOUND'
+except (ValueError,TypeError,OSError,RecursionError):previous_model_reason='PREVIOUS_MODEL_PUBLICATION_INVALID'
+raw=json.dumps(dict(sources=sources,diagnostic_sources=diagnostic_sources,errors=errors,exported_ts=now,read_only=True,
+ previous_family_model_report=previous_model,previous_family_model_reason=previous_model_reason),allow_nan=False).encode()
 if len(raw)>64000000:raise ValueError('export exceeds bound')
 print(base64.b64encode(gzip.compress(raw)).decode())
 '''.replace('__CONFIGURED_INSTRUMENT_CODES__', repr(tuple(ALL_INSTRUMENTS))).replace(

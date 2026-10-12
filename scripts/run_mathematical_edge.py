@@ -99,7 +99,7 @@ def _instrument_matrix(rows, sources, captured_ts):
 
 
 def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, family_history=None,
-                 macro_archive=None):
+                 macro_archive=None,previous_family_reports=None):
     rows, audited_sources = {}, []
     errors = dict(errors)
     for source in sources:
@@ -131,13 +131,18 @@ def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, fami
     from seiltanzer.edge_family_market import train_market_families
     family_models = train_market_families(sources, captured_ts, horizons=horizons,
         feature_history=family_history,macro_archive=macro_archive)
+    from seiltanzer.edge_family_model_retention import retain_fitted_families
+    family_models,model_continuity=retain_fitted_families(family_models,previous_family_reports or [],captured_ts)
     return {
         'contract_version': CONTRACT, 'created_ts': captured_ts, 'instruments': rows,
         'production_authority': False, 'automatic_execution': False,
         'family_market_models': family_models,
+        'family_model_continuity':model_continuity,
         'historical_macro_source': ({'available':True,**macro_archive.summary()} if macro_archive is not None
             else {'available':False,'reason':'OFFICIAL_MACRO_ARCHIVE_NOT_REQUESTED'}),
         'family_market_model_summary': {
+            'current_run_fitted_models':model_continuity['current_run_fitted'],
+            'retained_fitted_models':model_continuity['retained_fitted'],
             'trained_models': sum(row.get('status') == 'TRAINED' for rows in family_models.values() for row in rows.values()),
             'working_supported_models': sum(any(head.get('working_supported') for head in row.get('heads', {}).values())
                 for rows in family_models.values() for row in rows.values()),
@@ -170,6 +175,7 @@ def main():
     parser.add_argument('--macro-source-sha', help='original bundle source SHA; distinct from current model publication SHA')
     parser.add_argument('--sources-output', help='save fetched real bars for exact offline reproduction')
     parser.add_argument('--refresh-sources', action='store_true', help='refresh public bars off-host; --sources supplies read-only fallback')
+    parser.add_argument('--model-cache-dir',help='Bounded local frozen family-model cache')
     parser.add_argument('--cache-dir', help='per-provider hash-verified off-host source cache')
     parser.add_argument('--source-days', type=int, default=60)
     parser.add_argument('--source-budget-seconds', type=float, default=360.)
@@ -182,11 +188,13 @@ def main():
     if not horizons or any(h not in SEARCH_HORIZONS for h in horizons):
         parser.error('--horizons must be a subset of 15,30,60,120')
     sources, errors, attempts = [], {}, {}
-    diagnostic_sources = []
+    diagnostic_sources = [];previous_family_reports=[]
     if args.sources:
         data = json.loads(Path(args.sources).read_text())
         sources, errors = data['sources'], data.get('errors', {})
         diagnostic_sources = data.get('diagnostic_sources', [])
+        if isinstance(data.get('previous_family_model_report'),dict):
+            previous_family_reports.append(data['previous_family_model_report'])
     if args.refresh_sources or not args.sources:
         from seiltanzer.mathematical_edge_sources import collect_fresh_sources
         sources, errors, attempts = collect_fresh_sources(
@@ -199,6 +207,10 @@ def main():
         path.write_text(json.dumps({'sources': sources, 'errors': errors, 'exported_ts': captured,
                                    'diagnostic_sources': diagnostic_sources,
                                    'collection_attempts': attempts}, ensure_ascii=False, allow_nan=False))
+    from seiltanzer.edge_family_model_retention import read_fitted_cache,write_fitted_cache
+    if args.model_cache_dir:
+        previous=read_fitted_cache(Path(args.model_cache_dir)/'latest.json')
+        if previous is not None:previous_family_reports.append(previous)
     family_history = None
     if args.family_history:
         history_path = Path(args.family_history)
@@ -226,7 +238,7 @@ def main():
         except (ValueError,TypeError,OSError) as exc:
             macro_error=str(exc)[:180]
     report = build_report(sources, errors, captured, horizons, family_history=family_history,
-                         macro_archive=macro_archive)
+                         macro_archive=macro_archive,previous_family_reports=previous_family_reports)
     if macro_error is not None:
         report['historical_macro_source']={'available':False,'reason':macro_error}
     report['collection_attempts'] = attempts
@@ -236,6 +248,11 @@ def main():
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, ensure_ascii=False, allow_nan=False))
+    if args.model_cache_dir:
+        try:write_fitted_cache(report,Path(args.model_cache_dir)/'latest.json')
+        except (OSError,ValueError,TypeError):
+            print('FAMILY_MODEL_CACHE_WRITE_UNAVAILABLE; fresh report preserved')
+    print('FAMILY_MODEL_CONTINUITY',json.dumps(report['family_model_continuity'],sort_keys=True))
     print('FAMILY_MARKET_MODELS', json.dumps(report['family_market_model_summary'], sort_keys=True))
     for code, row in report['instruments'].items():
         print(code, row['status'], row.get('horizon_minutes'),
