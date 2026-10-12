@@ -377,18 +377,40 @@ class ShortHorizonRuntime:
             return "PREEXISTING_PROSPECTIVE", False, "TARGET_PRICE_LOW_QUALITY"
         return "PREEXISTING_PROSPECTIVE", True, None
 
-    def materialize_new(self, limit: int = 2000) -> int:
+    def materialize_new(self, limit: int = 2000, *,
+                        max_payload_bytes: int = 16 * 1024 * 1024,
+                        time_budget_sec: float | None = None) -> int:
         watermark = self._watermark()
         started = time.time()
+        monotonic_started = time.monotonic()
         with self._lock:
             rows = self._conn.execute(
-                "SELECT rowid AS source_rowid,* FROM passive_market_observations "
+                "SELECT rowid AS source_rowid,"
+                "length(CAST(features_json AS BLOB))+length(CAST(forecast_json AS BLOB)) AS payload_bytes "
+                "FROM passive_market_observations "
                 "WHERE rowid>? ORDER BY rowid LIMIT ?",
                 (watermark, max(1, min(int(limit), 10000))),
             ).fetchall()
         processed = 0
         last_rowid = watermark
-        for row in rows:
+        payload_used = 0
+        for metadata in rows:
+            # A single indivisible source row may exceed the soft byte/time
+            # budget. Always attempt it so the durable watermark can progress.
+            if last_rowid > watermark and (
+                payload_used + int(metadata['payload_bytes'] or 0) > max_payload_bytes
+                or (time_budget_sec is not None
+                    and time.monotonic() - monotonic_started >= time_budget_sec)
+            ):
+                break
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT rowid AS source_rowid,* FROM passive_market_observations WHERE rowid=?",
+                    (metadata['source_rowid'],),
+                ).fetchone()
+            if row is None:
+                break  # Never advance past missing immutable source evidence.
+            payload_used += int(metadata['payload_bytes'] or 0)
             last_rowid = max(last_rowid, int(row["source_rowid"]))
             forecast_raw = str(row["forecast_json"])
             features_raw = str(row["features_json"])
@@ -473,7 +495,10 @@ class ShortHorizonRuntime:
     def resolve_new(self, limit: int = 2000) -> int:
         with self._lock:
             rows = self._conn.execute("""
-                SELECT g.*,p.resolved_ts AS source_resolved_ts,p.outcome_json
+                SELECT g.observation_id,g.source_observation_id,g.source_rowid,
+                       g.instrument,g.captured_ts,g.target_ts,g.market_price,
+                       g.features_sha256,g.forecast_sha256,
+                       p.resolved_ts AS source_resolved_ts,p.outcome_json
                 FROM g1s_observations g
                 JOIN passive_market_observations p
                   ON p.observation_id=g.source_observation_id

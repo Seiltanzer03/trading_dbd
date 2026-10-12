@@ -28,6 +28,7 @@ RESEARCH_INTERVAL_SEC = 30.0
 RESEARCH_STARTUP_GRACE_SEC = 5 * 60.0
 G1S_BATCH = 500
 G1M_LOCAL_BATCH = 100
+G1S_MATERIALIZE_TIME_BUDGET_SEC = 60.0
 STATUS_REFRESH_BATCH = 1000
 TRADE_LINK_BATCH = 50
 AUX_BATCH = 500
@@ -36,6 +37,7 @@ EVIDENCE_INTERVAL_SEC = 5 * 60.0
 HISTORICAL_WF_INTERVAL_SEC = 15 * 60.0
 MAINTENANCE_PHASES = (
     "status_refresh",
+    "champion_progress",
     "trade_links",
     "barriers",
     "path_metrics",
@@ -46,18 +48,32 @@ MAINTENANCE_PHASES = (
 )
 
 
-def _run_g1s_core(runtime) -> dict:
+def _core_stage(state: dict | None, name: str) -> None:
+    if state is not None:
+        state['core_stage'] = name
+        state['core_stage_started_ts'] = time.time()
+
+
+def _run_g1s_core(runtime, *, state: dict | None = None) -> dict:
     """Only bounded source materialization/resolution required for worker health."""
+    _core_stage(state, 'g1s:materialize')
+    materialized = runtime.materialize_new(limit=G1S_BATCH,
+        time_budget_sec=G1S_MATERIALIZE_TIME_BUDGET_SEC)
+    _core_stage(state, 'g1s:resolve')
+    resolved = runtime.resolve_new(limit=G1S_BATCH, refresh_progress=False)
     return {
-        "materialized": runtime.materialize_new(limit=G1S_BATCH),
-        "resolved": runtime.resolve_new(limit=G1S_BATCH),
+        "materialized": materialized,
+        "resolved": resolved,
         "batch_limit": G1S_BATCH,
     }
 
 
-def _run_g1m_local_core(runtime) -> dict:
+def _run_g1m_local_core(runtime, *, state: dict | None = None) -> dict:
+    _core_stage(state, 'g1m_local:materialize')
+    created = runtime.materialize_windows(limit=G1M_LOCAL_BATCH)
+    _core_stage(state, 'g1m_local:resolve')
     return {
-        "windows_created": runtime.materialize_windows(limit=G1M_LOCAL_BATCH),
+        "windows_created": created,
         "outcomes_resolved": runtime.resolve_due(limit=G1M_LOCAL_BATCH),
         "batch_limit": G1M_LOCAL_BATCH,
     }
@@ -89,7 +105,7 @@ def _cadence_due(runtime, attr: str, interval_sec: float, now: float) -> bool:
 def _run_maintenance_phase(runtime, engine, phase: str) -> dict:
     """Run exactly one optional phase; heavy phases never belong to core health."""
     now = time.time()
-    if phase in {"ede_shadow", "evidence_reports", "historical_walk_forward", "fit_models"}:
+    if phase in {"champion_progress", "ede_shadow", "evidence_reports", "historical_walk_forward", "fit_models"}:
         pressure = memory_pressure_state()
         if pressure.get("pause_background"):
             trim_memory_for_pressure()
@@ -101,6 +117,10 @@ def _run_maintenance_phase(runtime, engine, phase: str) -> dict:
             }
 
     try:
+        if phase == 'champion_progress':
+            from .g1_short_horizon_champion_runtime import _refresh_progress
+            _refresh_progress(runtime)
+            return {'phase': phase, 'refreshed': True}
         if phase == "status_refresh":
             return {
                 "phase": phase,
@@ -196,6 +216,8 @@ def install_research_worker(app) -> None:
         "last_result": None,
         "last_error": None,
         "current_phase": "startup_grace",
+        "core_stage": None,
+        "core_stage_started_ts": None,
         "maintenance_running": False,
         "maintenance_phase": None,
         "last_maintenance_started_ts": None,
@@ -264,16 +286,17 @@ def install_research_worker(app) -> None:
                 state["current_phase"] = "core"
                 state["last_started_ts"] = started
                 try:
-                    g1s_result = await asyncio.to_thread(_run_g1s_core, engine.short_horizon)
+                    g1s_result = await asyncio.to_thread(_run_g1s_core, engine.short_horizon, state=state)
                     await asyncio.sleep(0)
                     g1m_result = await asyncio.to_thread(
-                        _run_g1m_local_core, engine.management_local
+                        _run_g1m_local_core, engine.management_local, state=state
                     )
                     state["last_result"] = {
                         "g1s": g1s_result,
                         "g1m_local": g1m_result,
                     }
                     state["last_error"] = None
+                    state['core_stage'] = None
                 except Exception as exc:
                     state["last_error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
                 finally:

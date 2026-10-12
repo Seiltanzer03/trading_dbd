@@ -73,8 +73,8 @@ def test_current_deploy_lease_expedites_core_without_skipping_it(monkeypatch):
         {'active': True, 'pause': kw['last_finished_ts'] is not None,
          'reason': 'test', 'acceptance_run_id': '1', 'expected_sha': 'sha', 'expires_at': None})
     monkeypatch.setattr(worker, '_apply_memory_pressure', lambda s: False)
-    monkeypatch.setattr(worker, '_run_g1s_core', lambda r: calls.append('g1s') or {'batch_limit': 500})
-    monkeypatch.setattr(worker, '_run_g1m_local_core', lambda r: calls.append('g1m') or {'batch_limit': 100})
+    monkeypatch.setattr(worker, '_run_g1s_core', lambda r, **kw: calls.append('g1s') or {'batch_limit': 500})
+    monkeypatch.setattr(worker, '_run_g1m_local_core', lambda r, **kw: calls.append('g1m') or {'batch_limit': 100})
     worker.install_research_worker(app)
     async def exercise():
         async with app.router.lifespan_context(app):
@@ -85,3 +85,4 @@ def test_current_deploy_lease_expedites_core_without_skipping_it(monkeypatch):
     asyncio.run(exercise())
     assert calls == ['g1s', 'g1m']
     assert app.state.g1_research_worker['last_finished_ts'] is not None
+    assert app.state.g1_research_worker['last_error'] is None
