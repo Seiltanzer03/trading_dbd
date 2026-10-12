@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 import json
 import logging
 import time
@@ -27,6 +27,7 @@ class AIRequestTrace:
     def __init__(self):
         self.request_id = request_id()
         self.started = time.monotonic()
+        self.executor = None
 
     def _emit(self, stage, event, *, since=None, exc=None, status_code=None):
         # Only code-owned stage/event names and numeric diagnostics reach logs.
@@ -88,7 +89,11 @@ class AIRequestTrace:
         return measured_worker
 
     async def to_thread(self, stage, function, *args, **kwargs):
-        return await asyncio.to_thread(self.submitted_worker(stage, function, *args, **kwargs))
+        worker = self.submitted_worker(stage, function, *args, **kwargs)
+        if self.executor is None:
+            return await asyncio.to_thread(worker)
+        context = copy_context()
+        return await asyncio.get_running_loop().run_in_executor(self.executor, context.run, worker)
 
     def finish(self, status_code):
         self._emit('response', 'finish', status_code=status_code)

@@ -1123,7 +1123,7 @@ $('#btn-ai-history').addEventListener('click', async () => {
 $('#btn-ai-verdict').addEventListener('click', async () => {
   openModal(`
     <h3>ИИ · ДИНАМИЧЕСКИЙ РАЗБОР СДЕЛКИ</h3>
-    <div class="tiny dim">Снимок всех расчётных метрик фиксируется сервером в момент нажатия.</div>
+    <div class="tiny dim">Разбор использует серверный снимок расчётов; время снимка указано в отчёте.</div>
     <pre id="ai-verdict-text" class="ai-verdict-text">АНАЛИЗИРУЮ ТЕКУЩЕЕ СОСТОЯНИЕ…</pre>
     <div id="ai-edge-management"></div>
     <div id="ai-management-execution"></div>
