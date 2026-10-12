@@ -207,3 +207,49 @@ def test_new_manual_admission_requires_complete_common_economics(option_availabl
         if candidate['policy'] in {'CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT'}:
             assert candidate['eligible'] is False
             assert candidate['reason'].startswith('MANUAL_COMPARISON_COMMON_ECONOMICS_REQUIRED:')
+
+
+def test_native_producer_without_redundant_authority_flag_admits_manual_comparison():
+    from seiltanzer.unified_edge_ensemble import _manual_candidate_preflight
+    row = trade()
+    s = frozen(row, {'remaining_position_fraction': 1., 'active_stop_price': 90.}, 110.)
+    price = s['policy_manager']['input_audit']['rows']['instrument_price']
+    del price['production_authority']
+    price.update(timestamp=1999., age_sec=1.)
+    s['policy_manager']['management_decision'] = {'automatic_execution_allowed': False}
+    assert _manual_candidate_preflight(s) is True
+
+
+@pytest.mark.parametrize('changes', [
+    {'source': 'unverified vendor'}, {'source': 'TradingView stream OANDA:SPX500USD'},
+    {'timestamp': 1900., 'age_sec': 100.}, {'timestamp': 2006.},
+    {'production_authority': False}, {'status': 'delayed'},
+])
+def test_missing_authority_flag_never_promotes_wrong_stale_or_rejected_source(changes):
+    from seiltanzer.unified_edge_ensemble import _manual_candidate_preflight
+    row = trade()
+    s = frozen(row, {'remaining_position_fraction': 1., 'active_stop_price': 90.}, 110.)
+    price = s['policy_manager']['input_audit']['rows']['instrument_price']
+    del price['production_authority']
+    price.update({"timestamp": 1999., "age_sec": 1., **changes})
+    s['policy_manager']['management_decision'] = {'automatic_execution_allowed': False}
+    assert _manual_candidate_preflight(s) is False
+
+
+def test_complete_manual_stop_comparison_uses_measured_benefit_without_old_adverse_vote_gate(monkeypatch):
+    from seiltanzer import extended_policy_evaluation as evaluation
+    from test_extended_policy_evaluation import _snapshot, _action
+    from types import SimpleNamespace
+    s = _snapshot()
+    s.update(captured_ts=2000., strategy={'instrument': 'NAS100'},
+             position_state={'remaining_position_fraction': 1., 'active_stop_price': 90.})
+    s['policy_manager']['management_decision'] = {'automatic_execution_allowed': False}
+    s['policy_manager']['input_audit']['rows']['instrument_price'].update(
+        source='TradingView stream OANDA:NAS100USD', timestamp=1999.)
+    s['policy_manager']['evidence']['data_quality']['reliability']['level'] = 'низкая'
+    monkeypatch.setattr(evaluation, 'simulate_option_paths', lambda inputs, **kw:
+        SimpleNamespace(strategy_outcome=np.full(1200, .10 if inputs.stop_r < 0 else .18)))
+    result = evaluation.evaluate_extended_action(s, _action())
+    assert result['status'] == 'eligible'
+    assert result['automatic_execution_allowed'] is False
+    assert result['data_reliability'] == 'низкая'

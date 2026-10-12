@@ -90,9 +90,14 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
     if reliability in {"низкая", "low"}:
         overlay = (manager.get("gate") or {}).get("degraded_authority_overlay") or {}
         evidence = overlay.get("evidence") or {}
-        if not (len(evidence.get("adverse_families") or []) >= 2
+        independent_support = (len(evidence.get("adverse_families") or []) >= 2
                 and len(evidence.get("live_adverse_families") or []) >= 1
-                and int(evidence.get("observed_adverse_item_count") or 0) >= 2):
+                and int(evidence.get("observed_adverse_item_count") or 0) >= 2)
+        from .unified_edge_ensemble import _manual_candidate_preflight
+        # Manual model comparison does not require the legacy directional
+        # vote to win first. All geometry/source, hard CVaR and paired-benefit
+        # checks below still apply; missing inputs and automatic execution do not.
+        if not independent_support and not _manual_candidate_preflight(snapshot):
             return _blocked("LOW_DATA_RELIABILITY_FOR_EXTENDED_OVERRIDE")
     rule = manager.get("selection_rule") or {}
     if "HOLD" not in (rule.get("eligible") or []):
