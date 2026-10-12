@@ -34,7 +34,8 @@ def _conditional_outcomes(inputs, params, policy, captured, seed):
         inputs.r0 + np.cumsum(inputs.drift_R / steps + noise * np.sqrt(variance), axis=1)))
     base = ExecutionSpec.from_values(current_r=inputs.r0, max_r=inputs.max_r,
         take_r=inputs.T, rungs=inputs.rungs, rung_fraction_original=inputs.rung_fraction,
-        be_after_r=inputs.be_after, stop_r=inputs.stop_r)
+        be_after_r=inputs.be_after, stop_r=inputs.stop_r,
+        be_execution_confirmed=inputs.be_execution_confirmed)
     if policy == "TIME_STOP":
         fraction = (float(params["deadline_ts"]) - captured) / (60 * inputs.horizon_minutes)
         variant = replace(base, time_stop_fraction=fraction)
@@ -137,7 +138,7 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
             if trigger is None or fraction is None or not 0 < fraction < 1:
                 return _blocked("INVALID_SPIKE_PARAMETERS")
             target_r = sign * (trigger - entry) / risk
-            if not max(inputs.r0, inputs.max_r) < target_r < inputs.T:
+            if not inputs.r0 < target_r < inputs.T:
                 return _blocked("SPIKE_TRIGGER_ALREADY_CROSSED_OR_OUTSIDE_TAKE")
             if any(abs(target_r - rung) < .05 for rung in inputs.rungs):
                 return _blocked("SPIKE_DUPLICATES_STRATEGY_RUNG")
@@ -159,8 +160,6 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
             return _blocked("TAKE_NOT_EXTENDED")
         if policy == "REDUCE_TAKE" and target_r >= inputs.T - 1e-8:
             return _blocked("TAKE_NOT_REDUCED")
-        if policy == "REDUCE_TAKE" and target_r <= inputs.max_r + 1e-8:
-            return _blocked("TAKE_ALREADY_CROSSED_DURING_TRADE")
         alternate = replace(inputs, T=target_r)
 
     costs = (manager.get("execution_cost_model") or rule.get("execution_cost_model") or {})

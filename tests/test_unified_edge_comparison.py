@@ -452,7 +452,7 @@ def test_overlapping_review_episodes_never_form_portfolio_drawdown():
     risk = report['summary']['balanced']['observed_path_replay']
     assert risk.get('portfolio_max_drawdown_r', 'missing') is None
     assert risk['portfolio_drawdown_available'] is False
-    assert risk['descriptive_worst_episode_net_r_on_remaining'] == pytest.approx(-.36)
+    assert risk['descriptive_worst_episode_net_r_on_remaining'] == pytest.approx(-.63)
     assert risk['paired_review_n'] == 2 and risk['paired_distinct_trade_n'] == 1
 
 
@@ -532,7 +532,7 @@ def test_malformed_review_identity_is_rejected_without_losing_tied_valid_review(
 def test_cost_breakdown_distinguishes_frozen_total_from_unknown_components():
     report = run_comparison({'read_only': True, 'reviews': [record()]})
     costs = report['summary']['balanced'].get('cost_breakdown', {})
-    assert costs.get('frozen_execution_total', {}).get('mean_r') == .01
+    assert costs.get('frozen_execution_total', {}).get('mean_r') == pytest.approx(.01)
     assert costs['frozen_execution_total']['available_review_n'] == 1
     for component in ('commission', 'spread', 'slippage', 'manual_latency', 'broker_rollover'):
         assert costs[component]['mean_r'] is None
@@ -607,9 +607,9 @@ def test_model_expected_gain_is_separate_from_observed_episode_gain():
     summary = run_comparison({'read_only': True, 'reviews': [record()]})['summary']
     for scheme in ('balanced', 'legacy_control'):
         model = summary[scheme]['model_scenarios']
-        assert model.get('mean_selected_delta_expected_vs_hold_r') == pytest.approx(.06)
+        assert model.get('mean_selected_delta_expected_vs_hold_r') == pytest.approx(.05 if scheme == 'balanced' else .06)
         assert model['delta_expected_vs_hold_available_review_n'] == 1
-        assert summary[scheme]['observed_path_replay']['mean_paired_delta_vs_hold_r'] == pytest.approx(.45)
+        assert summary[scheme]['observed_path_replay']['mean_paired_delta_vs_hold_r'] == pytest.approx(.18 if scheme == 'balanced' else .45)
 
 
 def test_unsupported_production_policy_is_not_counted_as_a_selected_action():

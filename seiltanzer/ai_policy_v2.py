@@ -39,7 +39,7 @@ def baseline_strategy_outcomes(sim: _base.PathSimulation,
         closed = _base.np.zeros_like(sim.terminal)
     remaining = _base.np.maximum(0.0, 1.0 - closed)
     exit_r = sim.terminal.copy()
-    be_armed = ((inputs.max_r >= inputs.be_after - 1e-12)
+    be_armed = ((inputs.initial_be_armed)
                 | (sim.max_r >= inputs.be_after - 1e-12))
     exit_r = _base.np.where(be_armed & (exit_r < 0.0), 0.0, exit_r)
     return realized + remaining * exit_r
@@ -481,8 +481,10 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
         }[selected],
         "remaining_fraction": round(1.0 - POLICY_FRACTIONS[selected], 2),
         "remaining_management": (
+            "порог БУ достигнут, но перенос не подтверждён: расчёт от записанного стопа"
+            if inputs.be_execution_confirmed is False and inputs.max_r >= inputs.be_after else
             "остаток вести по исходному стопу; БУ/trailing запрещены до 1.5R"
-            if inputs.max_r < inputs.be_after else
+            if not inputs.initial_be_armed else
             "порог 1.5R достигнут: остаток вести по действующим правилам БУ/trailing"),
         "next_rung_r": _base._rnd(next_rung, 3),
         "raw_optimizer_policy": raw_choice,

@@ -101,7 +101,8 @@ def observed_replay(snapshot, record, candidate):
     values = np.interp(times, [p[0] for p in points], [p[1] for p in points])
     base = ExecutionSpec.from_values(current_r=inputs.r0, max_r=inputs.max_r,
         take_r=inputs.T, rungs=inputs.rungs, rung_fraction_original=inputs.rung_fraction,
-        be_after_r=inputs.be_after, stop_r=inputs.stop_r)
+        be_after_r=inputs.be_after, stop_r=inputs.stop_r,
+        be_execution_confirmed=inputs.be_execution_confirmed)
     # PolicyInputs serializes r0 to four decimals; retain the measured initial
     # R for observed execution instead of changing the stored path observation.
     base = replace(base, current_r=points[0][1])

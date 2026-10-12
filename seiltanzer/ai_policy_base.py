@@ -149,6 +149,18 @@ class PolicyInputs:
     source: str | None
     # Active execution barrier in the immutable original-R coordinate system.
     stop_r: float = -1.0
+    # None retains legacy research semantics; live ledgers provide actual status.
+    be_execution_confirmed: bool | None = None
+
+    def __post_init__(self):
+        if self.be_execution_confirmed is not None and not isinstance(self.be_execution_confirmed, bool):
+            raise ValueError("INVALID_BE_EXECUTION_CONFIRMATION")
+
+    @property
+    def initial_be_armed(self) -> bool:
+        if self.be_execution_confirmed is not None:
+            return self.be_execution_confirmed is True
+        return self.max_r >= self.be_after - 1e-12
 
     def as_dict(self) -> dict:
         return {
@@ -164,6 +176,8 @@ class PolicyInputs:
             "chain_age_sec": _rnd(self.chain_age_sec, 1),
             "chain_status": self.chain_status, "proxy_quality": self.proxy_quality,
             "source": self.source, "stop_r": _num(self.stop_r),
+            **({"be_execution_confirmed": self.be_execution_confirmed}
+               if self.be_execution_confirmed is not None else {}),
         }
 
 
@@ -250,6 +264,7 @@ def extract_policy_inputs(tick: dict) -> PolicyInputs:
         chain_age_sec=_num(market.get("chain_age_sec")) or _num(chain.get("age_sec")),
         chain_status=chain.get("status"), proxy_quality=market.get("quality"),
         source=market.get("source") or prob.get("source"), stop_r=stop_r,
+        be_execution_confirmed=position.get("be_execution_confirmed"),
     )
 
 
@@ -290,7 +305,7 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
     strategy_exit_r = np.full(n_paths, np.nan)
     strategy_exit_time = np.full(n_paths, np.nan)
     strategy_exit_reason = np.full(n_paths, "", dtype="<U10")
-    be_armed = np.full(n_paths, inputs.max_r >= inputs.be_after - 1e-12,
+    be_armed = np.full(n_paths, inputs.initial_be_armed,
                        dtype=bool)
     be_arm_time = np.full(n_paths, 0.0 if bool(be_armed[0]) else np.nan)
     # Separate bridge stream prevents added execution bookkeeping from changing
@@ -343,7 +358,12 @@ def simulate_option_paths(inputs: PolicyInputs, *, n_paths: int = 6000,
                     strategy_alive[fully_closed] = False
 
         active = strategy_alive[idx]
-        newly_armed = active & ~be_armed[idx] & (cur >= inputs.be_after - 1e-12)
+        crossed_be = cur >= inputs.be_after - 1e-12
+        if inputs.be_execution_confirmed is False:
+            # A pending historical BE proposal is not an executed stop.
+            # Match replay: only a new upward crossing activates future BE.
+            crossed_be &= prev < inputs.be_after - 1e-12
+        newly_armed = active & ~be_armed[idx] & crossed_be
         if newly_armed.any():
             target = idx[newly_armed]
             be_armed[target] = True
@@ -515,7 +535,7 @@ def first_touch_clock(sim: PathSimulation, inputs: PolicyInputs) -> dict:
         "step_count": int(sim.step_count or 0),
         "risk_barrier_r": (
             max(inputs.stop_r, 0.0)
-            if inputs.max_r >= inputs.be_after - 1e-12 else inputs.stop_r
+            if inputs.initial_be_armed else inputs.stop_r
         ),
         "authority": "measurement_only",
         "changes_distribution": False,
@@ -609,7 +629,7 @@ def baseline_strategy_outcomes(sim: PathSimulation, inputs: PolicyInputs) -> np.
         closed = np.zeros_like(sim.terminal)
     remaining = np.maximum(0.0, 1.0 - closed)
     exit_r = sim.terminal.copy()
-    be_armed = (inputs.max_r >= inputs.be_after - 1e-12) | (
+    be_armed = (inputs.initial_be_armed) | (
         sim.max_r >= inputs.be_after - 1e-12)
     exit_r = np.where(be_armed & (exit_r < 0.0), 0.0, exit_r)
     return realized + remaining * exit_r
@@ -1475,8 +1495,10 @@ def analyze_policies(engine, tick: dict, ridge: dict, trade: dict,
         }[selected],
         "remaining_fraction": round(1.0 - POLICY_FRACTIONS[selected], 2),
         "remaining_management": (
+            "порог БУ достигнут, но перенос не подтверждён: расчёт от записанного стопа"
+            if inputs.be_execution_confirmed is False and inputs.max_r >= inputs.be_after else
             "остаток вести по исходному стопу; БУ/trailing запрещены до 1.5R"
-            if inputs.max_r < inputs.be_after else
+            if not inputs.initial_be_armed else
             "порог 1.5R уже достигнут: остаток вести по действующим правилам БУ/trailing"
         ),
         "next_rung_r": _rnd(next_rung, 3),

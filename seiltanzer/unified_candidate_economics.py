@@ -176,7 +176,7 @@ def _variant(base, row, snapshot, inputs):
         if target is None:
             raise ValueError("EXACT_TAKE_PRICE_UNAVAILABLE")
         target_r = sign * (target - entry) / risk
-        if target_r <= max(inputs.r0, inputs.max_r) + 1e-8:
+        if target_r <= inputs.r0 + 1e-8:
             raise ValueError("TAKE_ALREADY_CROSSED")
         if policy == "EXTEND_TAKE" and target_r <= inputs.T + 1e-8:
             raise ValueError("TAKE_NOT_EXTENDED")
@@ -188,7 +188,7 @@ def _variant(base, row, snapshot, inputs):
         if trigger is None or fraction is None or not 0 < fraction < 1:
             raise ValueError("INVALID_SPIKE_PARAMETERS")
         target_r = sign * (trigger - entry) / risk
-        if not max(inputs.r0, inputs.max_r) < target_r < inputs.T:
+        if not inputs.r0 < target_r < inputs.T:
             raise ValueError("SPIKE_TRIGGER_ALREADY_CROSSED_OR_OUTSIDE_TAKE")
         if any(abs(target_r - rung) < .05 for rung in inputs.rungs):
             raise ValueError("SPIKE_DUPLICATES_STRATEGY_RUNG")
@@ -245,7 +245,8 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
         return _unavailable(str(exc))
     base = ExecutionSpec.from_values(current_r=inputs.r0, max_r=inputs.max_r,
         take_r=inputs.T, rungs=inputs.rungs, rung_fraction_original=inputs.rung_fraction,
-        be_after_r=inputs.be_after, stop_r=inputs.stop_r)
+        be_after_r=inputs.be_after, stop_r=inputs.stop_r,
+        be_execution_confirmed=inputs.be_execution_confirmed)
     # Identical execution geometry is replayed once even if several policies
     # express it (for example MOVE_TO_BE and TIGHTEN_STOP at the same price).
     cached = {}

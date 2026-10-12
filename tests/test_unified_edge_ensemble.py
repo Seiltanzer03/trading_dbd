@@ -38,7 +38,8 @@ def test_current_llm_changes_authorized_ranking_without_confidence_weights():
     assert audit["selected_policy"] == "CLOSE_10"
     assert next(c for c in audit["counterfactuals"] if c["excluded_component_id"] == "current_llm")["selected_policy"] == "CLOSE_25"
     current = next(c for c in audit["components"] if c["component_id"] == "current_llm")
-    assert current["effective_weight"] == pytest.approx(.15)
+    assert current["nominal_weight"] == pytest.approx(.15)
+    assert current["effective_weight"] == pytest.approx(.15 / (.4 + .15))
     assert current["self_confidence_used_for_weight"] is False
     assert frozen == control
     assert len(audit["candidates"]) == 12
@@ -122,7 +123,8 @@ def test_duplicate_origin_reduces_additional_weight_without_double_counting():
     audit = build_unified_ensemble(frozen, llm(evidence_families=["same_news"]))
     for identity in ("active_edge", "current_llm"):
         row = next(c for c in audit["components"] if c["component_id"] == identity)
-        assert row["effective_weight"] == pytest.approx(.075)
+        assert row["admitted_weight_before_redistribution"] == pytest.approx(.075)
+        assert row["effective_weight"] == pytest.approx(.075 / (.4 + .075 + .075))
         assert row["dependence_multiplier"] == .5
     assert sum(c["effective_weight"] for c in audit["components"]) == pytest.approx(1.)
 

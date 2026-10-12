@@ -31,12 +31,18 @@ class ExecutionSpec:
     spike_r: float | None = None
     spike_fraction: float = 0.0
     time_stop_fraction: float | None = None
+    be_execution_confirmed: bool | None = None
+
+    def __post_init__(self):
+        if self.be_execution_confirmed is not None and not isinstance(self.be_execution_confirmed, bool):
+            raise ValueError("INVALID_BE_EXECUTION_CONFIRMATION")
 
     @classmethod
     def from_values(
         cls, *, current_r: float, max_r: float, take_r: float,
         rungs: Iterable[float], rung_fraction_original: float,
         be_after_r: float, stop_r: float = -1.0,
+        be_execution_confirmed: bool | None = None,
     ) -> "ExecutionSpec":
         return cls(
             current_r=float(current_r), max_r=float(max_r),
@@ -44,6 +50,7 @@ class ExecutionSpec:
             rungs=tuple(sorted({float(value) for value in rungs})),
             rung_fraction_original=float(rung_fraction_original),
             be_after_r=float(be_after_r), stop_r=float(stop_r),
+            be_execution_confirmed=be_execution_confirmed,
         )
 
     @property
@@ -131,7 +138,8 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
     filled: list[float] = []
     event_timeline: list[dict] = []
     pending = list(spec.future_rungs)
-    be_armed = spec.max_r >= spec.be_after_r - EPSILON
+    be_armed = (spec.be_execution_confirmed is True if spec.be_execution_confirmed is not None
+                else spec.max_r >= spec.be_after_r - EPSILON)
     be_step: int | None = 0 if be_armed else None
     spike_pending = spec.spike_r is not None and spec.spike_r > spec.current_r + EPSILON
 

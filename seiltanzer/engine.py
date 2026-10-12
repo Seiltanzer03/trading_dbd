@@ -156,7 +156,7 @@ class Engine:
             tuple(round(float(x), 4) for x in inputs.rungs),
             round(float(inputs.rung_fraction), 6), round(float(inputs.be_after), 4),
             bool(inputs.option_available),
-            bool(inputs.max_r >= inputs.be_after - 1e-12),
+            inputs.initial_be_armed,
             round(float(inputs.stop_r), 4),
         )
         live_key = (
@@ -714,7 +714,8 @@ class Engine:
             "fraction": LADDER_FRACTION,
             "crossed": crossed,
             "be_after": BREAKEVEN_AFTER,
-            "be_armed": max_r >= BREAKEVEN_AFTER,
+            "be_armed": bool((trade.get("position_state") or {}).get("be_armed")) if trade.get("position_state") else max_r >= BREAKEVEN_AFTER,
+            "be_confirmation_required": bool((trade.get("position_state") or {}).get("be_confirmation_required")),
             "max_r": max_r,
         }
         # АСИММЕТРИЯ по скью (risk-reversal): сторона страха (падение цены) шире —
@@ -946,7 +947,7 @@ class Engine:
                 "horizon_minutes": clock_inputs.horizon_minutes,
                 "path_count": 0, "step_count": 0,
                 "risk_barrier_r": (
-                    0.0 if clock_inputs.max_r >= clock_inputs.be_after - 1e-12 else -1.0),
+                    max(0., clock_inputs.stop_r) if clock_inputs.initial_be_armed else clock_inputs.stop_r),
                 "authority": "measurement_only", "changes_distribution": False,
                 "reason": "option_distribution_unavailable",
                 "median_status": "unavailable",
@@ -1071,6 +1072,7 @@ class Engine:
             "median_years": (market or {}).get("median_years"),
             "label": verdict.get("label"), "tone": verdict.get("tone"),
             "be_armed": ladder.get("be_armed"),
+            "be_confirmation_required": ladder.get("be_confirmation_required", False),
             "headline": self._state_headline(r, prob, verdict, ladder),
         }
 
@@ -1086,6 +1088,8 @@ class Engine:
             "НЕ ВХОДИТЬ": "фильтр стратегии блокирует — пропустите",
             "НЕТ OPTION EDGE": "сценарный монитор без вероятности — ждите option anchor",
         }.get(verdict.get("label"), "оцените по факторам вердикта")
+        if ladder.get("be_confirmation_required"):
+            return "условие БУ достигнуто; перенос стопа у брокера не подтверждён; " + base
         if ladder.get("be_armed"):
             return "стоп в БУ — снимайте по лестнице, остаток тралом; " + base
         if r >= 1.0:

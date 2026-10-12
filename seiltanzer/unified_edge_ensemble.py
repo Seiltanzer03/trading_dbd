@@ -73,7 +73,36 @@ def _lineage(value):
     return aliases.get(value, value)
 
 
-def _base_authorized(manager, policy):
+def _manual_candidate_preflight(snapshot):
+    """Admission to a manual comparison is separate from the legacy winner gate."""
+    from .ai_report_semantics_guard import authoritative_current_price_available, execution_barrier_reached
+    if not isinstance(snapshot, dict) or not authoritative_current_price_available(snapshot):
+        return False
+    from .real_input_integrity import simulated_evidence
+    if simulated_evidence(snapshot, recursive=False):
+        return False
+    price = (((snapshot.get("policy_manager") or {}).get("input_audit") or {}).get("rows") or {}).get("instrument_price") or {}
+    if price.get("production_authority") is not True:
+        return False
+    state = snapshot.get("position_state") or {}
+    remaining = number(state.get("remaining_position_fraction"))
+    geometry = snapshot.get("trade_geometry") or {}
+    coordinates = [number(geometry.get(key)) for key in (
+        "entry", "original_stop", "active_risk_barrier", "final_take", "current")]
+    if (remaining is None or not 0 < remaining <= 1
+            or any(value is None or value <= 0 for value in coordinates)):
+        return False
+    entry, original, active, take, current = coordinates
+    sign = 1. if original < entry else -1.
+    if entry == original or sign * (take - active) <= 0:
+        return False
+    if execution_barrier_reached(snapshot) is not None:
+        return False
+    decision = (snapshot.get("policy_manager") or {}).get("management_decision") or {}
+    return decision.get("automatic_execution_allowed") is False
+
+
+def _base_authorized(manager, policy, snapshot=None):
     if policy == "HOLD":
         return True, "HOLD_FEASIBLE"
     gate = manager.get("gate") or {}
@@ -87,6 +116,8 @@ def _base_authorized(manager, policy):
     if chosen == policy and (gate.get("working_action_confirmed") is True
                              or gate.get("automatic_execution_allowed") is True):
         return True, "FROZEN_SELECTED_CONFIRMATION_PASS"
+    if _manual_candidate_preflight(snapshot):
+        return True, "MANUAL_COMPARISON_PREFLIGHT_PASS"
     return False, "ACTION_CONFIRMATION_NOT_PASSED"
 
 
@@ -105,7 +136,8 @@ def collect_candidates(snapshot):
         raw = policies.get(policy) or {}
         expected = number(raw.get("expected_final_r_net", raw.get("expected_final_r")))
         cvar = number(raw.get("cvar10_r_net", raw.get("cvar10_r")))
-        authorized, reason = _base_authorized(manager, policy)
+        authorized, reason = _base_authorized(manager, policy, snapshot)
+        admission_authority = reason
         eligible = authorized
         if expected is None or cvar is None or hold_e is None or hold_c is None:
             eligible, reason = False, "NET_ECONOMICS_UNAVAILABLE"
@@ -117,6 +149,7 @@ def collect_candidates(snapshot):
             eligible, reason = False, "HARD_CVAR_INFEASIBLE"
         rows.append({"candidate_id": policy, "policy": policy, "parameters": {},
                      "eligible": eligible, "reason": reason,
+                     "admission_authority": admission_authority,
                      "expected_net_r": expected, "cvar10_net_r": cvar,
                      "delta_expected_r": expected - hold_e if expected is not None and hold_e is not None else None,
                      "delta_cvar_r": cvar - hold_c if cvar is not None and hold_c is not None else None,
@@ -464,9 +497,13 @@ def _prepare_components(specs, snapshot, nominal, excluded=None):
     for row in rows:
         row["effective_weight"] = (row["nominal_weight"] * row["quality"] * row["freshness_multiplier"]
                                    * row["dependence_multiplier"] if row["available"] and not row["excluded"] else 0.)
-    quant = next(row for row in rows if row["component_id"] == "quantitative_base")
-    if quant["available"] and not quant["excluded"]:
-        quant["effective_weight"] += max(0., 1. - sum(row["effective_weight"] for row in rows))
+    # Missing budgets are shared proportionally by real admitted opinions.
+    # Mandatory risk calculations run outside this preference budget.
+    mass = sum(row["effective_weight"] for row in rows)
+    for row in rows:
+        row["admitted_weight_before_redistribution"] = row["effective_weight"]
+        row["effective_weight"] = row["effective_weight"] / mass if mass > 0 else 0.
+        row["budget_redistribution"] = "PROPORTIONAL_AVAILABLE_EXPERTS"
     return rows
 
 
@@ -498,7 +535,7 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
         utility = quantitative_utility(row.get('delta_expected_r'), tail, band)
         row['quant_utility'] = utility
         quant_score = _score(utility['utility_delta_r'] / scale) if utility['utility_delta_r'] is not None else None
-        contributions, missing_weight = [], 0.
+        contributions = []
         for component in components:
             identity = component["component_id"]
             preferences = component.get("scores") or {}
@@ -507,15 +544,16 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
             score = ((raw_score - reference) / divisor if reference is not None else raw_score) if raw_score is not None else None
             weight = component["effective_weight"]
             if score is None and identity != "quantitative_base":
-                missing_weight += weight
                 weight = 0.
             contributions.append({"component_id": identity, "score": score, "raw_score": raw_score,
                                   "hold_reference_score": reference, "normalization_divisor": divisor, "effective_weight": weight,
                                   "contribution": weight * score if score is not None else 0.})
-        quant = next(item for item in contributions if item["component_id"] == "quantitative_base")
-        if excluded != "quantitative_base" and quant_score is not None:
-            quant["effective_weight"] += missing_weight
-            quant["contribution"] = quant_score * quant["effective_weight"]
+        # Sparse opinions abstain for this action; they are not synthetic zeros.
+        mass = sum(item["effective_weight"] for item in contributions if item["score"] is not None)
+        for item in contributions:
+            item["effective_weight"] = item["effective_weight"] / mass if mass > 0 else 0.
+            item["contribution"] = (item["score"] * item["effective_weight"]
+                                    if item["score"] is not None else 0.)
         row["component_contributions"] = contributions
         row["score"] = round(sum(item["contribution"] for item in contributions), 8)
         row["score_scale_r"] = scale
@@ -564,6 +602,12 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
     if invalid_common:
         for row in candidates:
             row.update(eligible=False, reason="INVALID_COMMON_ECONOMICS:" + str(economics.get("reason")))
+    if not economics.get("available"):
+        for row in candidates:
+            if (row.get("eligible") and
+                    row.get("admission_authority") == "MANUAL_COMPARISON_PREFLIGHT_PASS"):
+                row.update(eligible=False, reason="MANUAL_COMPARISON_COMMON_ECONOMICS_REQUIRED:" +
+                           str(economics.get("reason")))
     if economics.get("available"):
         for row in candidates:
             priced = (economics.get("candidates") or {}).get(row["candidate_id"]) or {}
