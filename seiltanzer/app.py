@@ -1183,11 +1183,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/ai/verdict")
     async def api_ai_verdict(request: Request = None):
         from .ai_request_trace import AIRequestTrace
+        from .ai_review_worker import review_executor, AIReviewWorkerBusy
         inherited = getattr(request.state, 'ai_request_trace', None) if request is not None else None
         trace = inherited or AIRequestTrace()
+        trace.executor = review_executor()
         try:
             with trace.activate(), trace.span('route'):
                 response = await _ai_verdict_impl(trace, engine)
+        except AIReviewWorkerBusy:
+            response = JSONResponse(status_code=429, content=ai_error_body(
+                "ai_request_in_progress", "ИИ завершает предыдущий расчёт",
+                trace.request_id, retriable=True))
         except BaseException as exc:
             if inherited is None:
                 trace.finish(499 if isinstance(exc, asyncio.CancelledError) else 500)
@@ -1198,8 +1204,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     async def _ai_verdict_impl(trace, engine):
         nonlocal ai_last_call
+        from .ai_review_worker import AIReviewWorkerBusy
         req_id = trace.request_id
-        if ai_lock.locked():
+        from .ai_review_worker import review_executor
+        if ai_lock.locked() or review_executor().busy:
             return JSONResponse(
                 status_code=429,
                 content=ai_error_body(
@@ -1340,6 +1348,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 result = await trace.to_thread('provider', request_verdict, snapshot)
                 if not isinstance(result, dict) or not isinstance(result.get("verdict"), str):
                     raise RuntimeError("provider_invalid_payload")
+            except AIReviewWorkerBusy:
+                raise
             except RuntimeError as exc:
                 provider_failure = normalize_provider_error(exc)
                 if "invalid_payload" in str(exc).lower():
@@ -1371,6 +1381,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 decision = await trace.to_thread(
                     'publication', _publish_unified_review, engine, snapshot, result, review_id,
                     active_trade, audit)
+            except AIReviewWorkerBusy:
+                raise
             except StaleDecisionError as exc:
                 trace.error("stale_decision", exc)
                 return JSONResponse(
