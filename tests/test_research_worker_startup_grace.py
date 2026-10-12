@@ -57,6 +57,8 @@ def test_worker_status_route_is_lock_free_and_bounded(monkeypatch):
             "last_started_ts": 10.0,
             "last_finished_ts": 12.0,
             "last_error": None,
+            "core_stage": "g1s:resolve",
+            "core_stage_started_ts": 11.0,
             "last_result": {
                 "g1s": {"batch_limit": 500, "large_payload": list(range(1000))},
                 "g1m_local": {"batch_limit": 100},
@@ -76,5 +78,7 @@ def test_worker_status_route_is_lock_free_and_bounded(monkeypatch):
     body = asyncio.run(endpoint())
     assert body["sqlite_access"] is False
     assert body["production_authority"] is False
+    assert body['worker']['core_stage'] == 'g1s:resolve'
+    assert body['worker']['core_stage_started_ts'] == 11.0
     assert body["last_result"] == {
         "g1s": {"batch_limit": 500}, "g1m_local": {"batch_limit": 100}}

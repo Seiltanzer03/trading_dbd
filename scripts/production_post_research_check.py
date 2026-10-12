@@ -96,6 +96,8 @@ def verify(expected_sha: str, acceptance_run_id: str) -> None:
         print("worker cycle", attempt, {
             "first_cycle_not_before_ts": worker.get("first_cycle_not_before_ts"),
             "current_phase": worker.get("current_phase"),
+            "core_stage": worker.get("core_stage"),
+            "core_stage_started_ts": worker.get("core_stage_started_ts"),
             "last_started_ts": worker.get("last_started_ts"),
             "last_finished_ts": worker.get("last_finished_ts"),
             "last_duration_ms": worker.get("last_duration_ms"),

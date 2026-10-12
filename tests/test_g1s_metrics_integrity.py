@@ -95,10 +95,11 @@ class _WorkerRuntime:
     def __init__(self):
         self.calls = []
 
-    def materialize_new(self, limit):
+    def materialize_new(self, limit, *, time_budget_sec):
         self.calls.append(("materialize", limit)); return 1
 
-    def resolve_new(self, limit):
+    def resolve_new(self, limit, *, refresh_progress):
+        assert refresh_progress is False
         self.calls.append(("resolve", limit)); return 2
 
 

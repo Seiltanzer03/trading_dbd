@@ -238,6 +238,7 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
             "startup_grace_sec", "first_cycle_not_before_ts", "last_started_ts",
             "last_finished_ts", "last_duration_ms", "last_error",
             "current_phase", "maintenance_running", "maintenance_phase",
+            "core_stage", "core_stage_started_ts",
             "last_maintenance_started_ts", "last_maintenance_finished_ts",
             "last_maintenance_duration_ms", "last_maintenance_error",
             "acceptance_gate_active", "acceptance_pause_active",

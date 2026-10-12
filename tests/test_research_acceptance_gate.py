@@ -107,12 +107,12 @@ def test_worker_runs_bounded_core_once_and_skips_all_maintenance_under_gate(monk
     monkeypatch.setattr(
         research_worker,
         "_run_g1s_core",
-        lambda _runtime: calls.append("g1s-core") or {"batch_limit": 500},
+        lambda _runtime, **_kwargs: calls.append("g1s-core") or {"batch_limit": 500},
     )
     monkeypatch.setattr(
         research_worker,
         "_run_g1m_local_core",
-        lambda _runtime: calls.append("g1m-core") or {"batch_limit": 100},
+        lambda _runtime, **_kwargs: calls.append("g1m-core") or {"batch_limit": 100},
     )
     monkeypatch.setattr(
         research_worker,
@@ -154,8 +154,8 @@ def test_worker_without_gate_eventually_schedules_optional_maintenance(monkeypat
     monkeypatch.setattr(research_worker, "RESEARCH_STARTUP_GRACE_SEC", 0.001)
     monkeypatch.setattr(research_worker, "RESEARCH_INTERVAL_SEC", 0.001)
     monkeypatch.setattr(research_worker, "worker_acceptance_gate_state", lambda **_kw: no_gate)
-    monkeypatch.setattr(research_worker, "_run_g1s_core", lambda _r: {"batch_limit": 500})
-    monkeypatch.setattr(research_worker, "_run_g1m_local_core", lambda _r: {"batch_limit": 100})
+    monkeypatch.setattr(research_worker, "_run_g1s_core", lambda _r, **_kw: {"batch_limit": 500})
+    monkeypatch.setattr(research_worker, "_run_g1m_local_core", lambda _r, **_kw: {"batch_limit": 100})
     monkeypatch.setattr(
         research_worker,
         "_run_maintenance_phase",

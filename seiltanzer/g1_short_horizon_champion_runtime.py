@@ -593,9 +593,9 @@ def install_g1_short_horizon_champion_runtime() -> None:
         created += _write_champion_predictions(self, observation_id, captured_ts, horizon)
         return created
 
-    def resolve_new(self, limit: int = 2000):
+    def resolve_new(self, limit: int = 2000, *, refresh_progress: bool = True):
         resolved = int(previous_resolve(self, limit=limit) or 0)
-        if resolved:
+        if resolved and refresh_progress:
             _refresh_progress(self)
         return resolved
 
