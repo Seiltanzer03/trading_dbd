@@ -210,29 +210,20 @@ class PositionLedger:
         unpriced_fills = sum(
             1 for row in rows if float(row.get("fraction_closed") or 0) > 0
             and row.get("execution_r") is None)
+        # BE_ARM is a strategy trigger, not a broker-confirmed stop amendment.
         stop_event = next((row for row in reversed(rows) if row["event_type"] in {
-            "BE_ARM", "AI_MOVE_TO_BE", "AI_TIGHTEN_STOP",
+            "AI_MOVE_TO_BE", "AI_TIGHTEN_STOP",
         }), None)
-        inferred_be = bool(
-            trade.get("max_r") is not None and float(trade["max_r"]) >= 1.5 - 1e-12)
-        be_armed = bool(
-            inferred_be or (stop_event and stop_event["event_type"] in {
-                "BE_ARM", "AI_MOVE_TO_BE",
-            })
-        )
-        if stop_event is not None:
-            active_stop = float(stop_event["active_stop"])
-        else:
-            active_stop = float(trade["entry"] if inferred_be else trade["stop"])
+        strategy_be_armed = bool(
+            trade.get("max_r") is not None and float(trade["max_r"]) >= 1.5 - 1e-12
+            or any(row["event_type"] == "BE_ARM" for row in rows))
+        active_stop = float(stop_event["active_stop"] if stop_event else trade["stop"])
         entry = float(trade["entry"])
         direction = _direction(trade)
-        if inferred_be and (
-            (direction == "long" and active_stop < entry)
-            or (direction == "short" and active_stop > entry)
-        ):
-            # The deterministic strategy BE rule remains authoritative even if
-            # a previously confirmed shadow stop was less protective.
-            active_stop = entry
+        be_armed = bool((direction == "long" and active_stop >= entry)
+                        or (direction == "short" and active_stop <= entry))
+        strategy_stop = (max(active_stop, entry) if direction == "long"
+                         else min(active_stop, entry)) if strategy_be_armed else active_stop
         active_stop_type = (
             "BREAK_EVEN" if be_armed and abs(active_stop-float(trade["entry"])) <= 1e-12
             else "TIGHTENED" if abs(active_stop-float(trade["stop"])) > 1e-12
@@ -279,7 +270,13 @@ class PositionLedger:
             "active_stop_type": active_stop_type,
             "active_stop_price": active_stop,
             "original_take": float(trade["take"]), "take": active_take,
-            "be_armed": be_armed, "event_count": len(rows),
+            "be_armed": be_armed,
+            "be_execution_confirmed": be_armed,
+            "strategy_be_armed": strategy_be_armed,
+            "strategy_stop_price": strategy_stop,
+            "be_confirmation_required": strategy_be_armed and not be_armed,
+            "active_stop_confirmation": "manual_confirmed" if stop_event else "user_recorded_initial",
+            "event_count": len(rows),
             "armed_conditional_actions": conditional,
             "state_version": int(latest["id"]),
         }

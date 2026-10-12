@@ -264,7 +264,7 @@ def test_not_executed_records_decision_without_changing_state(tmp_path):
     ledger.close()
 
 
-def test_strategy_break_even_supersedes_a_less_protective_manual_stop(tmp_path):
+def test_strategy_break_even_plans_upgrade_of_less_protective_manual_stop(tmp_path):
     ledger = PositionLedger(str(tmp_path / "trades.db"))
     trade = _trade()
     action = _register(
@@ -277,7 +277,9 @@ def test_strategy_break_even_supersedes_a_less_protective_manual_stop(tmp_path):
     )
     trade["max_r"] = 1.5
     state = ledger.sync_be(trade)
-    assert state["active_stop_price"] == 100.0
-    assert state["active_stop_type"] == "BREAK_EVEN"
+    assert state["active_stop_price"] == 95.0
+    assert state["strategy_stop_price"] == 100.0
+    assert state["be_confirmation_required"] is True
+    assert state["active_stop_type"] == "TIGHTENED"
     assert ledger.events(trade["id"])[-1]["event_type"] == "BE_ARM"
     ledger.close()

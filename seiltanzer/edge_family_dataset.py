@@ -20,7 +20,7 @@ MAX_ARCHIVE_BYTES = 96 * 1024 * 1024
 INPUT_KEYS = {'r0', 'T', 'sigma_R', 'drift_R', 'skew_R', 'term_slope',
               'horizon_minutes', 'max_r', 'rungs', 'rung_fraction', 'be_after',
               'option_available', 'chain_age_sec', 'chain_status', 'proxy_quality',
-              'source', 'stop_r'}
+              'source', 'stop_r', 'be_execution_confirmed'}
 EXECUTION_KEYS = ('r0', 'T', 'horizon_minutes', 'max_r', 'rung_fraction', 'be_after', 'stop_r')
 GEOMETRY_KEYS = {'current', 'entry', 'original_stop', 'active_risk_barrier',
     'active_risk_barrier_type', 'final_take', 'current_r', 'r_to_active_stop',
@@ -166,6 +166,11 @@ def _execution_geometry(snapshot: dict) -> dict:
             or prices['entry'] == prices['original_stop']
             or execution['horizon_minutes'] <= 0):
         raise ValueError('EXECUTION_GEOMETRY_INCOMPLETE')
+    confirmation = inputs.get('be_execution_confirmed')
+    if confirmation is not None:
+        if not isinstance(confirmation, bool):
+            raise ValueError('INVALID_BE_EXECUTION_CONFIRMATION')
+        execution['be_execution_confirmed'] = confirmation
     if position.get('armed_conditional_actions'):
         raise ValueError('EXISTING_CONDITIONAL_EXECUTION_NOT_REPLAY_SUPPORTED')
     if (position.get('strategy_terminal_event') or position.get('terminal_event')
@@ -223,7 +228,7 @@ def _execution_geometry(snapshot: dict) -> dict:
     matrix.sort(key=lambda row: _canonical(row))
     exposure = {key: position[key] for key in ('remaining_position_fraction',
         'realized_position_fraction', 'realized_r_weighted', 'active_stop_price',
-        'active_stop_type', 'be_armed', 'original_stop', 'original_take', 'take') if key in position}
+        'active_stop_type', 'be_armed', 'be_execution_confirmed', 'original_stop', 'original_take', 'take') if key in position}
     return {'version': GEOMETRY_VERSION,
         'instrument': canonical_instrument_code(_dict(snapshot.get('strategy')).get('instrument')
                                                 or snapshot.get('instrument')),

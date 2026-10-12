@@ -98,8 +98,11 @@ def risk_constraint(inputs: PolicyInputs, tick: dict, trade: dict) -> dict:
         ("risk", "effective_stop_r"), ("ladder", "effective_stop_r"),
         ("ladder", "stop_r"), ("prob", "stop_r"),
     ))
-    if stop is None:
-        be_armed = inputs.max_r >= inputs.be_after - 1e-12
+    if stop is None and inputs.be_execution_confirmed is not None:
+        stop = inputs.stop_r
+        stop_source = "recorded execution stop; strategy trigger is not broker confirmation"
+    elif stop is None:
+        be_armed = inputs.initial_be_armed
         stop = 0.0 if be_armed else -1.0
         stop_source = (
             f"strategy BE floor 0R: max_r {inputs.max_r:.3f}R >= {inputs.be_after:.3f}R"

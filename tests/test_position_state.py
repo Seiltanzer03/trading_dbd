@@ -68,7 +68,9 @@ def test_original_stop_and_break_even_are_distinct(tmp_path):
     ledger, row = PositionLedger(str(tmp_path/"trades.db")), trade(max_r=1.5)
     state = ledger.sync_be(row)
     assert state["original_stop"] == 90
-    assert state["active_stop_price"] == 100
-    assert state["active_stop_type"] == "BREAK_EVEN"
+    assert state["active_stop_price"] == 90
+    assert state["active_stop_type"] == "ORIGINAL_STOP"
+    assert state["strategy_stop_price"] == 100
+    assert state["be_confirmation_required"] is True
     assert any(e["event_type"] == "BE_ARM" for e in ledger.events(row["id"]))
     ledger.close()

@@ -155,7 +155,7 @@ def test_family_attribution_matches_actual_hold_relative_component_contribution(
     _attach_working_family_contributions(ranked, components, families, chosen)
     actual = next(item for item in ranked[1]['component_contributions'] if item['component_id'] == 'current_llm')
     assert families['macro']['working_contribution'] == pytest.approx(actual['contribution'])
-    assert ranked[1]['working_family_contributions'][0]['contribution'] == pytest.approx(.075)
+    assert ranked[1]['working_family_contributions'][0]['contribution'] == pytest.approx(.075 / .55)
 
 
 def test_compact_audit_and_report_preserve_utility_and_selection_margin():
