@@ -514,7 +514,9 @@ class ProspectiveFeatureAdapter:
             # A shared live connection can change an active SELECT after a
             # same-connection writer commits. Preserve atomic extraction there;
             # bounded streaming is safe only for the explicit immutable reader.
-            if not getattr(self.runtime, "_immutable_snapshot", False):
+            stable_read = (getattr(self.runtime, "_consistent_read_snapshot", False)
+                           and self.runtime._conn.in_transaction)
+            if not (getattr(self.runtime, "_immutable_snapshot", False) or stable_read):
                 try:
                     source = cursor.fetchall()
                 finally:

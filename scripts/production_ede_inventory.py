@@ -44,6 +44,11 @@ class _ReadOnlyRuntime:
         self._conn.execute("PRAGMA query_only=ON")
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._lock = threading.RLock()
+        # This dedicated connection has no same-connection writer. An explicit
+        # read transaction pins a consistent view across counts and horizons,
+        # while other WAL connections can continue recording real observations.
+        self._conn.execute("BEGIN")
+        self._consistent_read_snapshot = True
 
     def close(self) -> None:
         self._conn.close()
