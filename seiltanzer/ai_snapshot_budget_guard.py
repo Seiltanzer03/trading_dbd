@@ -58,7 +58,7 @@ def _compact_input_audit(value: Any) -> dict[str, Any]:
     row_keys = (
         "available", "status", "source", "role", "age_sec", "symbol",
         "reason", "value", "quality", "proxy_quality", "is_proxy",
-        "fallback_tier", "production_authority",
+        "fallback_tier", "production_authority", "timestamp", "derived",
     )
     rows: dict[str, Any] = {}
     for name, row in (audit.get("rows") or {}).items():
@@ -67,7 +67,7 @@ def _compact_input_audit(value: Any) -> dict[str, Any]:
         rows[str(name)] = {key: row[key] for key in row_keys if key in row}
     result = {"rows": rows}
     for key in (
-        "snapshot_utc", "all_required_available", "missing_required",
+        "snapshot_ts", "snapshot_utc", "all_required_available", "missing_required",
         "degraded_inputs", "required_count", "available_count", "total_count",
     ):
         if key in audit:

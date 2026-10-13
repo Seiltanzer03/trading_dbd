@@ -345,3 +345,20 @@ def test_profile_regime_and_freshness_limits_are_applied():
     frozen["policy_manager"]["active_edge_provisional_weight"]["regime_contract_version"] = "edge-regime-working-v1"
     audit = build_unified_ensemble(frozen)
     assert next(row for row in audit["components"] if row["component_id"] == "active_edge")["effective_weight"] > 0
+
+
+def test_family_pool_preserves_absolute_expiry_when_observation_ages_differ(monkeypatch):
+    from seiltanzer.unified_edge_ensemble import collect_components
+    s = snapshot(); now = s['captured_ts']
+    s['policy_manager']['mathematical_edge'] = {
+        'available': True, 'direction_score': .5, 'observed_ts': now-100.,
+        'max_age_sec': 200., 'evidence_family_ids': ['price_path']}
+    monkeypatch.setattr('seiltanzer.edge_family_adapters.build_edge_family_evidence', lambda _: {
+        'families': {}, 'components': [{'component_id': 'mathematical_edge', 'available': True,
+            'quality': 1., 'scores': {'HOLD': 0., 'CLOSE_25': 1.},
+            'observed_ts': now-10000., 'max_age_sec': 11000.,
+            'source_ids': ['older-source'], 'evidence_family_ids': ['macro']}]})
+    rows, _ = collect_components(s, [], None)
+    math_row = next(r for r in rows if r['component_id'] == 'mathematical_edge')
+    assert math_row['observed_ts'] == now-10000.
+    assert math_row['observed_ts']+math_row['max_age_sec'] == pytest.approx(now+100.)

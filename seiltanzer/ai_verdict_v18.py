@@ -92,7 +92,7 @@ def _compact_input_audit(audit: Any) -> dict[str, Any]:
         compact = _small_row(row, (
             "available", "status", "source", "role", "age_sec", "symbol",
             "reason", "value", "quality", "proxy_quality", "is_proxy",
-            "fallback_tier", "production_authority",
+            "fallback_tier", "production_authority", "timestamp", "derived",
         ))
         if isinstance(row, dict) and isinstance(row.get("items"), list):
             compact["items"] = [
@@ -105,7 +105,7 @@ def _compact_input_audit(audit: Any) -> dict[str, Any]:
     return {
         "rows": compact_rows,
         **{key: audit.get(key) for key in (
-            "snapshot_utc", "all_required_available", "missing_required",
+            "snapshot_ts", "snapshot_utc", "all_required_available", "missing_required",
             "degraded_inputs", "required_count", "available_count", "total_count",
         ) if key in audit},
     }
