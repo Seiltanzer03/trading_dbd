@@ -517,10 +517,14 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
         for kind, suffix in (("book", "book?level=1"), ("tape", "trades?limit=1000"),
                              ("candles", "candles?" + candle_query)):
             jobs[f"coinbase:{code}:{kind}"] = f"{COINBASE}/products/{product}/{suffix}"
+    revision_archives = {}
     for code, contract in COT_MARKETS.items():
         if code in instruments:
             params = {"$where": f"cftc_contract_market_code='{contract}'",
-                      "$order": "report_date_as_yyyy_mm_dd DESC", "$limit": 128}
+                      "$order": "report_date_as_yyyy_mm_dd DESC", "$limit": 128,
+                      "$select": ':id,:created_at,:updated_at,report_date_as_yyyy_mm_dd,'
+                          'cftc_contract_market_code,market_and_exchange_names,'
+                          'noncomm_positions_long_all,noncomm_positions_short_all,open_interest_all'}
             jobs["cftc:" + code] = CFTC + "?" + urlencode(params)
     raw, bodies, errors = {}, {}, []
 
@@ -676,6 +680,16 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
         if code in output:
             record = parse("cftc:" + code, parse_cot, contract=contract)
             if record:
+                from .cftc_revision_history import capture_versions
+                key = 'cftc:' + code
+                try:
+                    revision_archives[code] = capture_versions(bodies[key],
+                        contract=contract, received_ts=raw[key]['received_ts'],
+                        source_id=raw[key]['source_id'])
+                except ValueError as exc:
+                    revision_archives[code] = {'status': 'UNAVAILABLE', 'reason': str(exc),
+                        'publication_verified': False, 'historical_forecast_admission': False,
+                        'production_authority': False}
                 output[code]["edge_family_sources"]["positioning"].append(_proxy(record, code))
                 # Optional OI refusal must not change the net-position parse status
                 # or lose its valid original record. No second network request.
@@ -697,7 +711,7 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
         evidence = build_edge_family_evidence({**entry, "instrument": code, "captured_ts": captured})
         entry["readiness"] = evidence["families"]
         entry["unresolved"] = {family: row["needs_data"] for family, row in evidence["families"].items()}
-    return {"contract_version": CONTRACT, "captured_ts": captured,
+    report = {"contract_version": CONTRACT, "captured_ts": captured,
             "production_authority": False, "edge_policy": EDGE_POLICY,
             "instruments": output, "raw_sources": raw, "errors": errors,
             "collection_limits": {"requests": budget.requests, "source_attempts": len(raw),
@@ -708,3 +722,15 @@ def build_bundle(*, instruments=DEFAULT_INSTRUMENTS, fetch: Callable = fetch_pub
                 "order_flow_max_age_sec": 60, "order_flow_continuous_freshness_guaranteed": False,
                 "binance_rest_collection": "DISABLED_AFTER_OBSERVED_GEOGRAPHIC_DENIAL_NO_BYPASS"},
             "models_produced": 0, "exact_publication_times_inferred": False}
+    # Historical raw bodies stay outside per-instrument live scoring inputs.
+    # Preserve the unchanged 1MB transport ceiling, including publication metadata.
+    if revision_archives:
+        report['cftc_revision_archives'] = {}
+        for code, packet in revision_archives.items():
+            report['cftc_revision_archives'][code] = packet
+            if len(json.dumps(report, separators=(',', ':'), allow_nan=False).encode()) > 950_000:
+                report['cftc_revision_archives'][code] = {'status': 'UNAVAILABLE',
+                    'reason': 'CFTC_REVISION_SOURCE_BUNDLE_BYTE_BOUND',
+                    'publication_verified': False, 'historical_forecast_admission': False,
+                    'production_authority': False}
+    return report
