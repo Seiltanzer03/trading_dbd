@@ -1,0 +1,1170 @@
+{
+  "version": "unified-edge-actual-review-comparison-v1",
+  "expected_sha": "940d30eb82e7a446b2f82d8229ff073fc4145c24",
+  "created_ts": 1791880868.6878498,
+  "source_exported_ts": 1791844891.6791632,
+  "source_workflow_run_id": 38318020123,
+  "source_artifact_id": 11777077887,
+  "source_document_sha256": "b405f86daadd0907173e92c2071ac41ea51269b667a318c734291dd4fae23dfb",
+  "paid_llm_calls": 0,
+  "production_or_database_writes": 0,
+  "historical_profit_proven": false,
+  "review_n": 32,
+  "instrument_coverage": [
+    "NAS100",
+    "UK100",
+    "USDCAD",
+    "XAU"
+  ],
+  "summary": {
+    "balanced": {
+      "selected_action_distribution": {
+        "counts": {
+          "HOLD": 14,
+          "CLOSE_10": 1,
+          "CLOSE_25": 0,
+          "CLOSE_50": 0,
+          "EXIT": 0,
+          "MOVE_TO_BE": 0,
+          "TIGHTEN_STOP": 0,
+          "TRAIL_GAMMA_FLIP": 0,
+          "REDUCE_TAKE": 0,
+          "EXTEND_TAKE": 0,
+          "SCALE_OUT_ON_SPIKE": 0,
+          "TIME_STOP": 0
+        },
+        "frequencies": {
+          "HOLD": 0.9333333333333333,
+          "CLOSE_10": 0.06666666666666667,
+          "CLOSE_25": 0.0,
+          "CLOSE_50": 0.0,
+          "EXIT": 0.0,
+          "MOVE_TO_BE": 0.0,
+          "TIGHTEN_STOP": 0.0,
+          "TRAIL_GAMMA_FLIP": 0.0,
+          "REDUCE_TAKE": 0.0,
+          "EXTEND_TAKE": 0.0,
+          "SCALE_OUT_ON_SPIKE": 0.0,
+          "TIME_STOP": 0.0
+        },
+        "selected_review_n": 15,
+        "unavailable_review_n": 17,
+        "denominator": "reviews_with_selected_action; HOLD_is_an_action"
+      },
+      "cost_breakdown": {
+        "frozen_execution_total": {
+          "mean_r": 0.01,
+          "available_review_n": 4,
+          "unavailable_review_n": 0
+        },
+        "frozen_execution_plus_rollover_total": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "broker_rollover": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "commission": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "spread": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "slippage": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "manual_latency": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "settled_actual_total_r": null,
+        "scope": "paired_path_counterfactual_frozen_costs; components_unavailable_unless_explicit; not_actual_fills"
+      },
+      "model_scenarios": {
+        "review_n": 32,
+        "missing_scheme_review_n": 0,
+        "expected_net_r_available_review_n": 15,
+        "cvar10_net_r_available_review_n": 15,
+        "delta_expected_vs_hold_available_review_n": 15,
+        "mean_selected_expected_net_r": 0.03952970637799873,
+        "mean_selected_delta_expected_vs_hold_r": 1.3333333333331865e-05,
+        "mean_selected_cvar10_net_r": -0.9207733333333327,
+        "intervention_frequency": 0.06666666666666667,
+        "intervention_flag_available_review_n": 15,
+        "evidence_type": "MODEL_SCENARIOS_NOT_HISTORICAL_PROFIT"
+      },
+      "observed_path_replay": {
+        "available": true,
+        "paired_review_n": 4,
+        "input_review_n": 32,
+        "core_paired_review_n": 4,
+        "excluded_review_n": 28,
+        "scheme_path_available_review_n": 4,
+        "cohort_definition": "complete_core_schemes_and_HOLD; ablations_also_require_own_replay",
+        "paired_distinct_trade_n": 4,
+        "paired_verified_broker_rollover_quote_n": 0,
+        "paired_broker_rollover_quote_unavailable_n": 4,
+        "net_cost_scope": "frozen_execution_cost_estimates; broker_rollover_only_where_verified; not_settled_all_cost_ledger_net",
+        "mean_net_r_on_remaining": -0.01798999999999995,
+        "descriptive_worst_episode_net_r_on_remaining": -1.01,
+        "portfolio_drawdown_available": false,
+        "portfolio_max_drawdown_r": null,
+        "portfolio_drawdown_unavailable_reason": "NO_COHERENT_SETTLED_PORTFOLIO_LEDGER; reviews_may_overlap",
+        "descriptive_cvar10_net_r_on_remaining": -1.01,
+        "mean_paired_delta_vs_quant100_r": 0.0,
+        "mean_paired_delta_vs_hold_r": 0.0,
+        "intervention_n": 0,
+        "unhelpful_intervention_frequency_vs_quant100": null,
+        "no_net_gain_intervention_frequency_vs_hold": null,
+        "materiality_threshold_r": 0.03,
+        "economically_immaterial_intervention_n_vs_hold": 0,
+        "economically_immaterial_intervention_frequency_vs_hold": null,
+        "mean_additional_frozen_execution_cost_vs_hold_r": null,
+        "additional_cost_available_intervention_n": 0,
+        "mean_additional_broker_rollover_cost_vs_hold_r": null,
+        "additional_rollover_cost_available_intervention_n": 0,
+        "mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r": null,
+        "additional_combined_cost_available_intervention_n": 0,
+        "intervention_usefulness_scope": "net_episode_gain_only; risk_reduction_not_equivalent_to_useless",
+        "inference": "bounded_review_sample; overlapping_trades; no_independent_statistical_or_causal_profit_claim"
+      },
+      "historical_economic_completeness": {
+        "available": false,
+        "reason": "SETTLED_EXECUTION_LEDGER_FEES_SLIPPAGE_AND_COUNTERFACTUAL_CONTINUATION_NOT_EXPORTED",
+        "ledger_profit_net_r": null
+      }
+    },
+    "legacy_control": {
+      "selected_action_distribution": {
+        "counts": {
+          "HOLD": 24,
+          "CLOSE_10": 5,
+          "CLOSE_25": 0,
+          "CLOSE_50": 1,
+          "EXIT": 2,
+          "MOVE_TO_BE": 0,
+          "TIGHTEN_STOP": 0,
+          "TRAIL_GAMMA_FLIP": 0,
+          "REDUCE_TAKE": 0,
+          "EXTEND_TAKE": 0,
+          "SCALE_OUT_ON_SPIKE": 0,
+          "TIME_STOP": 0
+        },
+        "frequencies": {
+          "HOLD": 0.75,
+          "CLOSE_10": 0.15625,
+          "CLOSE_25": 0.0,
+          "CLOSE_50": 0.03125,
+          "EXIT": 0.0625,
+          "MOVE_TO_BE": 0.0,
+          "TIGHTEN_STOP": 0.0,
+          "TRAIL_GAMMA_FLIP": 0.0,
+          "REDUCE_TAKE": 0.0,
+          "EXTEND_TAKE": 0.0,
+          "SCALE_OUT_ON_SPIKE": 0.0,
+          "TIME_STOP": 0.0
+        },
+        "selected_review_n": 32,
+        "unavailable_review_n": 0,
+        "denominator": "reviews_with_selected_action; HOLD_is_an_action"
+      },
+      "cost_breakdown": {
+        "frozen_execution_total": {
+          "mean_r": 0.01,
+          "available_review_n": 4,
+          "unavailable_review_n": 0
+        },
+        "frozen_execution_plus_rollover_total": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "broker_rollover": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "commission": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "spread": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "slippage": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "manual_latency": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "settled_actual_total_r": null,
+        "scope": "paired_path_counterfactual_frozen_costs; components_unavailable_unless_explicit; not_actual_fills"
+      },
+      "model_scenarios": {
+        "review_n": 32,
+        "missing_scheme_review_n": 0,
+        "expected_net_r_available_review_n": 32,
+        "cvar10_net_r_available_review_n": 32,
+        "delta_expected_vs_hold_available_review_n": 32,
+        "mean_selected_expected_net_r": 0.5066147147758104,
+        "mean_selected_delta_expected_vs_hold_r": 0.0506800976426367,
+        "mean_selected_cvar10_net_r": -0.3690524999999997,
+        "intervention_frequency": 0.25,
+        "intervention_flag_available_review_n": 32,
+        "evidence_type": "MODEL_SCENARIOS_NOT_HISTORICAL_PROFIT"
+      },
+      "observed_path_replay": {
+        "available": true,
+        "paired_review_n": 4,
+        "input_review_n": 32,
+        "core_paired_review_n": 4,
+        "excluded_review_n": 28,
+        "scheme_path_available_review_n": 11,
+        "cohort_definition": "complete_core_schemes_and_HOLD; ablations_also_require_own_replay",
+        "paired_distinct_trade_n": 4,
+        "paired_verified_broker_rollover_quote_n": 0,
+        "paired_broker_rollover_quote_unavailable_n": 4,
+        "net_cost_scope": "frozen_execution_cost_estimates; broker_rollover_only_where_verified; not_settled_all_cost_ledger_net",
+        "mean_net_r_on_remaining": -0.01798999999999995,
+        "descriptive_worst_episode_net_r_on_remaining": -1.01,
+        "portfolio_drawdown_available": false,
+        "portfolio_max_drawdown_r": null,
+        "portfolio_drawdown_unavailable_reason": "NO_COHERENT_SETTLED_PORTFOLIO_LEDGER; reviews_may_overlap",
+        "descriptive_cvar10_net_r_on_remaining": -1.01,
+        "mean_paired_delta_vs_quant100_r": 0.0,
+        "mean_paired_delta_vs_hold_r": 0.0,
+        "intervention_n": 0,
+        "unhelpful_intervention_frequency_vs_quant100": null,
+        "no_net_gain_intervention_frequency_vs_hold": null,
+        "materiality_threshold_r": 0.03,
+        "economically_immaterial_intervention_n_vs_hold": 0,
+        "economically_immaterial_intervention_frequency_vs_hold": null,
+        "mean_additional_frozen_execution_cost_vs_hold_r": null,
+        "additional_cost_available_intervention_n": 0,
+        "mean_additional_broker_rollover_cost_vs_hold_r": null,
+        "additional_rollover_cost_available_intervention_n": 0,
+        "mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r": null,
+        "additional_combined_cost_available_intervention_n": 0,
+        "intervention_usefulness_scope": "net_episode_gain_only; risk_reduction_not_equivalent_to_useless",
+        "inference": "bounded_review_sample; overlapping_trades; no_independent_statistical_or_causal_profit_claim"
+      },
+      "historical_economic_completeness": {
+        "available": false,
+        "reason": "SETTLED_EXECUTION_LEDGER_FEES_SLIPPAGE_AND_COUNTERFACTUAL_CONTINUATION_NOT_EXPORTED",
+        "ledger_profit_net_r": null
+      }
+    },
+    "llm20": {
+      "selected_action_distribution": {
+        "counts": {
+          "HOLD": 14,
+          "CLOSE_10": 1,
+          "CLOSE_25": 0,
+          "CLOSE_50": 0,
+          "EXIT": 0,
+          "MOVE_TO_BE": 0,
+          "TIGHTEN_STOP": 0,
+          "TRAIL_GAMMA_FLIP": 0,
+          "REDUCE_TAKE": 0,
+          "EXTEND_TAKE": 0,
+          "SCALE_OUT_ON_SPIKE": 0,
+          "TIME_STOP": 0
+        },
+        "frequencies": {
+          "HOLD": 0.9333333333333333,
+          "CLOSE_10": 0.06666666666666667,
+          "CLOSE_25": 0.0,
+          "CLOSE_50": 0.0,
+          "EXIT": 0.0,
+          "MOVE_TO_BE": 0.0,
+          "TIGHTEN_STOP": 0.0,
+          "TRAIL_GAMMA_FLIP": 0.0,
+          "REDUCE_TAKE": 0.0,
+          "EXTEND_TAKE": 0.0,
+          "SCALE_OUT_ON_SPIKE": 0.0,
+          "TIME_STOP": 0.0
+        },
+        "selected_review_n": 15,
+        "unavailable_review_n": 17,
+        "denominator": "reviews_with_selected_action; HOLD_is_an_action"
+      },
+      "cost_breakdown": {
+        "frozen_execution_total": {
+          "mean_r": 0.01,
+          "available_review_n": 4,
+          "unavailable_review_n": 0
+        },
+        "frozen_execution_plus_rollover_total": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "broker_rollover": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "commission": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "spread": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "slippage": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "manual_latency": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "settled_actual_total_r": null,
+        "scope": "paired_path_counterfactual_frozen_costs; components_unavailable_unless_explicit; not_actual_fills"
+      },
+      "model_scenarios": {
+        "review_n": 32,
+        "missing_scheme_review_n": 0,
+        "expected_net_r_available_review_n": 15,
+        "cvar10_net_r_available_review_n": 15,
+        "delta_expected_vs_hold_available_review_n": 15,
+        "mean_selected_expected_net_r": 0.03952970637799873,
+        "mean_selected_delta_expected_vs_hold_r": 1.3333333333331865e-05,
+        "mean_selected_cvar10_net_r": -0.9207733333333327,
+        "intervention_frequency": 0.06666666666666667,
+        "intervention_flag_available_review_n": 15,
+        "evidence_type": "MODEL_SCENARIOS_NOT_HISTORICAL_PROFIT"
+      },
+      "observed_path_replay": {
+        "available": true,
+        "paired_review_n": 4,
+        "input_review_n": 32,
+        "core_paired_review_n": 4,
+        "excluded_review_n": 28,
+        "scheme_path_available_review_n": 4,
+        "cohort_definition": "complete_core_schemes_and_HOLD; ablations_also_require_own_replay",
+        "paired_distinct_trade_n": 4,
+        "paired_verified_broker_rollover_quote_n": 0,
+        "paired_broker_rollover_quote_unavailable_n": 4,
+        "net_cost_scope": "frozen_execution_cost_estimates; broker_rollover_only_where_verified; not_settled_all_cost_ledger_net",
+        "mean_net_r_on_remaining": -0.01798999999999995,
+        "descriptive_worst_episode_net_r_on_remaining": -1.01,
+        "portfolio_drawdown_available": false,
+        "portfolio_max_drawdown_r": null,
+        "portfolio_drawdown_unavailable_reason": "NO_COHERENT_SETTLED_PORTFOLIO_LEDGER; reviews_may_overlap",
+        "descriptive_cvar10_net_r_on_remaining": -1.01,
+        "mean_paired_delta_vs_quant100_r": 0.0,
+        "mean_paired_delta_vs_hold_r": 0.0,
+        "intervention_n": 0,
+        "unhelpful_intervention_frequency_vs_quant100": null,
+        "no_net_gain_intervention_frequency_vs_hold": null,
+        "materiality_threshold_r": 0.03,
+        "economically_immaterial_intervention_n_vs_hold": 0,
+        "economically_immaterial_intervention_frequency_vs_hold": null,
+        "mean_additional_frozen_execution_cost_vs_hold_r": null,
+        "additional_cost_available_intervention_n": 0,
+        "mean_additional_broker_rollover_cost_vs_hold_r": null,
+        "additional_rollover_cost_available_intervention_n": 0,
+        "mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r": null,
+        "additional_combined_cost_available_intervention_n": 0,
+        "intervention_usefulness_scope": "net_episode_gain_only; risk_reduction_not_equivalent_to_useless",
+        "inference": "bounded_review_sample; overlapping_trades; no_independent_statistical_or_causal_profit_claim"
+      },
+      "historical_economic_completeness": {
+        "available": false,
+        "reason": "SETTLED_EXECUTION_LEDGER_FEES_SLIPPAGE_AND_COUNTERFACTUAL_CONTINUATION_NOT_EXPORTED",
+        "ledger_profit_net_r": null
+      }
+    },
+    "quant100": {
+      "selected_action_distribution": {
+        "counts": {
+          "HOLD": 14,
+          "CLOSE_10": 1,
+          "CLOSE_25": 0,
+          "CLOSE_50": 0,
+          "EXIT": 0,
+          "MOVE_TO_BE": 0,
+          "TIGHTEN_STOP": 0,
+          "TRAIL_GAMMA_FLIP": 0,
+          "REDUCE_TAKE": 0,
+          "EXTEND_TAKE": 0,
+          "SCALE_OUT_ON_SPIKE": 0,
+          "TIME_STOP": 0
+        },
+        "frequencies": {
+          "HOLD": 0.9333333333333333,
+          "CLOSE_10": 0.06666666666666667,
+          "CLOSE_25": 0.0,
+          "CLOSE_50": 0.0,
+          "EXIT": 0.0,
+          "MOVE_TO_BE": 0.0,
+          "TIGHTEN_STOP": 0.0,
+          "TRAIL_GAMMA_FLIP": 0.0,
+          "REDUCE_TAKE": 0.0,
+          "EXTEND_TAKE": 0.0,
+          "SCALE_OUT_ON_SPIKE": 0.0,
+          "TIME_STOP": 0.0
+        },
+        "selected_review_n": 15,
+        "unavailable_review_n": 17,
+        "denominator": "reviews_with_selected_action; HOLD_is_an_action"
+      },
+      "cost_breakdown": {
+        "frozen_execution_total": {
+          "mean_r": 0.01,
+          "available_review_n": 4,
+          "unavailable_review_n": 0
+        },
+        "frozen_execution_plus_rollover_total": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "broker_rollover": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "commission": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "spread": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "slippage": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "manual_latency": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "settled_actual_total_r": null,
+        "scope": "paired_path_counterfactual_frozen_costs; components_unavailable_unless_explicit; not_actual_fills"
+      },
+      "model_scenarios": {
+        "review_n": 32,
+        "missing_scheme_review_n": 0,
+        "expected_net_r_available_review_n": 15,
+        "cvar10_net_r_available_review_n": 15,
+        "delta_expected_vs_hold_available_review_n": 15,
+        "mean_selected_expected_net_r": 0.03952970637799873,
+        "mean_selected_delta_expected_vs_hold_r": 1.3333333333331865e-05,
+        "mean_selected_cvar10_net_r": -0.9207733333333327,
+        "intervention_frequency": 0.06666666666666667,
+        "intervention_flag_available_review_n": 15,
+        "evidence_type": "MODEL_SCENARIOS_NOT_HISTORICAL_PROFIT"
+      },
+      "observed_path_replay": {
+        "available": true,
+        "paired_review_n": 4,
+        "input_review_n": 32,
+        "core_paired_review_n": 4,
+        "excluded_review_n": 28,
+        "scheme_path_available_review_n": 4,
+        "cohort_definition": "complete_core_schemes_and_HOLD; ablations_also_require_own_replay",
+        "paired_distinct_trade_n": 4,
+        "paired_verified_broker_rollover_quote_n": 0,
+        "paired_broker_rollover_quote_unavailable_n": 4,
+        "net_cost_scope": "frozen_execution_cost_estimates; broker_rollover_only_where_verified; not_settled_all_cost_ledger_net",
+        "mean_net_r_on_remaining": -0.01798999999999995,
+        "descriptive_worst_episode_net_r_on_remaining": -1.01,
+        "portfolio_drawdown_available": false,
+        "portfolio_max_drawdown_r": null,
+        "portfolio_drawdown_unavailable_reason": "NO_COHERENT_SETTLED_PORTFOLIO_LEDGER; reviews_may_overlap",
+        "descriptive_cvar10_net_r_on_remaining": -1.01,
+        "mean_paired_delta_vs_quant100_r": 0.0,
+        "mean_paired_delta_vs_hold_r": 0.0,
+        "intervention_n": 0,
+        "unhelpful_intervention_frequency_vs_quant100": null,
+        "no_net_gain_intervention_frequency_vs_hold": null,
+        "materiality_threshold_r": 0.03,
+        "economically_immaterial_intervention_n_vs_hold": 0,
+        "economically_immaterial_intervention_frequency_vs_hold": null,
+        "mean_additional_frozen_execution_cost_vs_hold_r": null,
+        "additional_cost_available_intervention_n": 0,
+        "mean_additional_broker_rollover_cost_vs_hold_r": null,
+        "additional_rollover_cost_available_intervention_n": 0,
+        "mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r": null,
+        "additional_combined_cost_available_intervention_n": 0,
+        "intervention_usefulness_scope": "net_episode_gain_only; risk_reduction_not_equivalent_to_useless",
+        "inference": "bounded_review_sample; overlapping_trades; no_independent_statistical_or_causal_profit_claim"
+      },
+      "historical_economic_completeness": {
+        "available": false,
+        "reason": "SETTLED_EXECUTION_LEDGER_FEES_SLIPPAGE_AND_COUNTERFACTUAL_CONTINUATION_NOT_EXPORTED",
+        "ledger_profit_net_r": null
+      }
+    },
+    "without_active_edge": {
+      "selected_action_distribution": {
+        "counts": {
+          "HOLD": 14,
+          "CLOSE_10": 1,
+          "CLOSE_25": 0,
+          "CLOSE_50": 0,
+          "EXIT": 0,
+          "MOVE_TO_BE": 0,
+          "TIGHTEN_STOP": 0,
+          "TRAIL_GAMMA_FLIP": 0,
+          "REDUCE_TAKE": 0,
+          "EXTEND_TAKE": 0,
+          "SCALE_OUT_ON_SPIKE": 0,
+          "TIME_STOP": 0
+        },
+        "frequencies": {
+          "HOLD": 0.9333333333333333,
+          "CLOSE_10": 0.06666666666666667,
+          "CLOSE_25": 0.0,
+          "CLOSE_50": 0.0,
+          "EXIT": 0.0,
+          "MOVE_TO_BE": 0.0,
+          "TIGHTEN_STOP": 0.0,
+          "TRAIL_GAMMA_FLIP": 0.0,
+          "REDUCE_TAKE": 0.0,
+          "EXTEND_TAKE": 0.0,
+          "SCALE_OUT_ON_SPIKE": 0.0,
+          "TIME_STOP": 0.0
+        },
+        "selected_review_n": 15,
+        "unavailable_review_n": 17,
+        "denominator": "reviews_with_selected_action; HOLD_is_an_action"
+      },
+      "cost_breakdown": {
+        "frozen_execution_total": {
+          "mean_r": 0.01,
+          "available_review_n": 4,
+          "unavailable_review_n": 0
+        },
+        "frozen_execution_plus_rollover_total": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "broker_rollover": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "commission": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "spread": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "slippage": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "manual_latency": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "settled_actual_total_r": null,
+        "scope": "paired_path_counterfactual_frozen_costs; components_unavailable_unless_explicit; not_actual_fills"
+      },
+      "model_scenarios": {
+        "review_n": 32,
+        "missing_scheme_review_n": 0,
+        "expected_net_r_available_review_n": 15,
+        "cvar10_net_r_available_review_n": 15,
+        "delta_expected_vs_hold_available_review_n": 15,
+        "mean_selected_expected_net_r": 0.03952970637799873,
+        "mean_selected_delta_expected_vs_hold_r": 1.3333333333331865e-05,
+        "mean_selected_cvar10_net_r": -0.9207733333333327,
+        "intervention_frequency": 0.06666666666666667,
+        "intervention_flag_available_review_n": 15,
+        "evidence_type": "MODEL_SCENARIOS_NOT_HISTORICAL_PROFIT"
+      },
+      "observed_path_replay": {
+        "available": true,
+        "paired_review_n": 4,
+        "input_review_n": 32,
+        "core_paired_review_n": 4,
+        "excluded_review_n": 28,
+        "scheme_path_available_review_n": 4,
+        "cohort_definition": "complete_core_schemes_and_HOLD; ablations_also_require_own_replay",
+        "paired_distinct_trade_n": 4,
+        "paired_verified_broker_rollover_quote_n": 0,
+        "paired_broker_rollover_quote_unavailable_n": 4,
+        "net_cost_scope": "frozen_execution_cost_estimates; broker_rollover_only_where_verified; not_settled_all_cost_ledger_net",
+        "mean_net_r_on_remaining": -0.01798999999999995,
+        "descriptive_worst_episode_net_r_on_remaining": -1.01,
+        "portfolio_drawdown_available": false,
+        "portfolio_max_drawdown_r": null,
+        "portfolio_drawdown_unavailable_reason": "NO_COHERENT_SETTLED_PORTFOLIO_LEDGER; reviews_may_overlap",
+        "descriptive_cvar10_net_r_on_remaining": -1.01,
+        "mean_paired_delta_vs_quant100_r": 0.0,
+        "mean_paired_delta_vs_hold_r": 0.0,
+        "intervention_n": 0,
+        "unhelpful_intervention_frequency_vs_quant100": null,
+        "no_net_gain_intervention_frequency_vs_hold": null,
+        "materiality_threshold_r": 0.03,
+        "economically_immaterial_intervention_n_vs_hold": 0,
+        "economically_immaterial_intervention_frequency_vs_hold": null,
+        "mean_additional_frozen_execution_cost_vs_hold_r": null,
+        "additional_cost_available_intervention_n": 0,
+        "mean_additional_broker_rollover_cost_vs_hold_r": null,
+        "additional_rollover_cost_available_intervention_n": 0,
+        "mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r": null,
+        "additional_combined_cost_available_intervention_n": 0,
+        "intervention_usefulness_scope": "net_episode_gain_only; risk_reduction_not_equivalent_to_useless",
+        "inference": "bounded_review_sample; overlapping_trades; no_independent_statistical_or_causal_profit_claim"
+      },
+      "historical_economic_completeness": {
+        "available": false,
+        "reason": "SETTLED_EXECUTION_LEDGER_FEES_SLIPPAGE_AND_COUNTERFACTUAL_CONTINUATION_NOT_EXPORTED",
+        "ledger_profit_net_r": null
+      }
+    },
+    "without_current_llm": {
+      "selected_action_distribution": {
+        "counts": {
+          "HOLD": 14,
+          "CLOSE_10": 1,
+          "CLOSE_25": 0,
+          "CLOSE_50": 0,
+          "EXIT": 0,
+          "MOVE_TO_BE": 0,
+          "TIGHTEN_STOP": 0,
+          "TRAIL_GAMMA_FLIP": 0,
+          "REDUCE_TAKE": 0,
+          "EXTEND_TAKE": 0,
+          "SCALE_OUT_ON_SPIKE": 0,
+          "TIME_STOP": 0
+        },
+        "frequencies": {
+          "HOLD": 0.9333333333333333,
+          "CLOSE_10": 0.06666666666666667,
+          "CLOSE_25": 0.0,
+          "CLOSE_50": 0.0,
+          "EXIT": 0.0,
+          "MOVE_TO_BE": 0.0,
+          "TIGHTEN_STOP": 0.0,
+          "TRAIL_GAMMA_FLIP": 0.0,
+          "REDUCE_TAKE": 0.0,
+          "EXTEND_TAKE": 0.0,
+          "SCALE_OUT_ON_SPIKE": 0.0,
+          "TIME_STOP": 0.0
+        },
+        "selected_review_n": 15,
+        "unavailable_review_n": 17,
+        "denominator": "reviews_with_selected_action; HOLD_is_an_action"
+      },
+      "cost_breakdown": {
+        "frozen_execution_total": {
+          "mean_r": 0.01,
+          "available_review_n": 4,
+          "unavailable_review_n": 0
+        },
+        "frozen_execution_plus_rollover_total": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "broker_rollover": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "commission": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "spread": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "slippage": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "manual_latency": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "settled_actual_total_r": null,
+        "scope": "paired_path_counterfactual_frozen_costs; components_unavailable_unless_explicit; not_actual_fills"
+      },
+      "model_scenarios": {
+        "review_n": 32,
+        "missing_scheme_review_n": 0,
+        "expected_net_r_available_review_n": 15,
+        "cvar10_net_r_available_review_n": 15,
+        "delta_expected_vs_hold_available_review_n": 15,
+        "mean_selected_expected_net_r": 0.03952970637799873,
+        "mean_selected_delta_expected_vs_hold_r": 1.3333333333331865e-05,
+        "mean_selected_cvar10_net_r": -0.9207733333333327,
+        "intervention_frequency": 0.06666666666666667,
+        "intervention_flag_available_review_n": 15,
+        "evidence_type": "MODEL_SCENARIOS_NOT_HISTORICAL_PROFIT"
+      },
+      "observed_path_replay": {
+        "available": true,
+        "paired_review_n": 4,
+        "input_review_n": 32,
+        "core_paired_review_n": 4,
+        "excluded_review_n": 28,
+        "scheme_path_available_review_n": 4,
+        "cohort_definition": "complete_core_schemes_and_HOLD; ablations_also_require_own_replay",
+        "paired_distinct_trade_n": 4,
+        "paired_verified_broker_rollover_quote_n": 0,
+        "paired_broker_rollover_quote_unavailable_n": 4,
+        "net_cost_scope": "frozen_execution_cost_estimates; broker_rollover_only_where_verified; not_settled_all_cost_ledger_net",
+        "mean_net_r_on_remaining": -0.01798999999999995,
+        "descriptive_worst_episode_net_r_on_remaining": -1.01,
+        "portfolio_drawdown_available": false,
+        "portfolio_max_drawdown_r": null,
+        "portfolio_drawdown_unavailable_reason": "NO_COHERENT_SETTLED_PORTFOLIO_LEDGER; reviews_may_overlap",
+        "descriptive_cvar10_net_r_on_remaining": -1.01,
+        "mean_paired_delta_vs_quant100_r": 0.0,
+        "mean_paired_delta_vs_hold_r": 0.0,
+        "intervention_n": 0,
+        "unhelpful_intervention_frequency_vs_quant100": null,
+        "no_net_gain_intervention_frequency_vs_hold": null,
+        "materiality_threshold_r": 0.03,
+        "economically_immaterial_intervention_n_vs_hold": 0,
+        "economically_immaterial_intervention_frequency_vs_hold": null,
+        "mean_additional_frozen_execution_cost_vs_hold_r": null,
+        "additional_cost_available_intervention_n": 0,
+        "mean_additional_broker_rollover_cost_vs_hold_r": null,
+        "additional_rollover_cost_available_intervention_n": 0,
+        "mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r": null,
+        "additional_combined_cost_available_intervention_n": 0,
+        "intervention_usefulness_scope": "net_episode_gain_only; risk_reduction_not_equivalent_to_useless",
+        "inference": "bounded_review_sample; overlapping_trades; no_independent_statistical_or_causal_profit_claim"
+      },
+      "historical_economic_completeness": {
+        "available": false,
+        "reason": "SETTLED_EXECUTION_LEDGER_FEES_SLIPPAGE_AND_COUNTERFACTUAL_CONTINUATION_NOT_EXPORTED",
+        "ledger_profit_net_r": null
+      }
+    },
+    "without_historical_llm": {
+      "selected_action_distribution": {
+        "counts": {
+          "HOLD": 14,
+          "CLOSE_10": 1,
+          "CLOSE_25": 0,
+          "CLOSE_50": 0,
+          "EXIT": 0,
+          "MOVE_TO_BE": 0,
+          "TIGHTEN_STOP": 0,
+          "TRAIL_GAMMA_FLIP": 0,
+          "REDUCE_TAKE": 0,
+          "EXTEND_TAKE": 0,
+          "SCALE_OUT_ON_SPIKE": 0,
+          "TIME_STOP": 0
+        },
+        "frequencies": {
+          "HOLD": 0.9333333333333333,
+          "CLOSE_10": 0.06666666666666667,
+          "CLOSE_25": 0.0,
+          "CLOSE_50": 0.0,
+          "EXIT": 0.0,
+          "MOVE_TO_BE": 0.0,
+          "TIGHTEN_STOP": 0.0,
+          "TRAIL_GAMMA_FLIP": 0.0,
+          "REDUCE_TAKE": 0.0,
+          "EXTEND_TAKE": 0.0,
+          "SCALE_OUT_ON_SPIKE": 0.0,
+          "TIME_STOP": 0.0
+        },
+        "selected_review_n": 15,
+        "unavailable_review_n": 17,
+        "denominator": "reviews_with_selected_action; HOLD_is_an_action"
+      },
+      "cost_breakdown": {
+        "frozen_execution_total": {
+          "mean_r": 0.01,
+          "available_review_n": 4,
+          "unavailable_review_n": 0
+        },
+        "frozen_execution_plus_rollover_total": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "broker_rollover": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "commission": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "spread": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "slippage": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "manual_latency": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "settled_actual_total_r": null,
+        "scope": "paired_path_counterfactual_frozen_costs; components_unavailable_unless_explicit; not_actual_fills"
+      },
+      "model_scenarios": {
+        "review_n": 32,
+        "missing_scheme_review_n": 0,
+        "expected_net_r_available_review_n": 15,
+        "cvar10_net_r_available_review_n": 15,
+        "delta_expected_vs_hold_available_review_n": 15,
+        "mean_selected_expected_net_r": 0.03952970637799873,
+        "mean_selected_delta_expected_vs_hold_r": 1.3333333333331865e-05,
+        "mean_selected_cvar10_net_r": -0.9207733333333327,
+        "intervention_frequency": 0.06666666666666667,
+        "intervention_flag_available_review_n": 15,
+        "evidence_type": "MODEL_SCENARIOS_NOT_HISTORICAL_PROFIT"
+      },
+      "observed_path_replay": {
+        "available": true,
+        "paired_review_n": 4,
+        "input_review_n": 32,
+        "core_paired_review_n": 4,
+        "excluded_review_n": 28,
+        "scheme_path_available_review_n": 4,
+        "cohort_definition": "complete_core_schemes_and_HOLD; ablations_also_require_own_replay",
+        "paired_distinct_trade_n": 4,
+        "paired_verified_broker_rollover_quote_n": 0,
+        "paired_broker_rollover_quote_unavailable_n": 4,
+        "net_cost_scope": "frozen_execution_cost_estimates; broker_rollover_only_where_verified; not_settled_all_cost_ledger_net",
+        "mean_net_r_on_remaining": -0.01798999999999995,
+        "descriptive_worst_episode_net_r_on_remaining": -1.01,
+        "portfolio_drawdown_available": false,
+        "portfolio_max_drawdown_r": null,
+        "portfolio_drawdown_unavailable_reason": "NO_COHERENT_SETTLED_PORTFOLIO_LEDGER; reviews_may_overlap",
+        "descriptive_cvar10_net_r_on_remaining": -1.01,
+        "mean_paired_delta_vs_quant100_r": 0.0,
+        "mean_paired_delta_vs_hold_r": 0.0,
+        "intervention_n": 0,
+        "unhelpful_intervention_frequency_vs_quant100": null,
+        "no_net_gain_intervention_frequency_vs_hold": null,
+        "materiality_threshold_r": 0.03,
+        "economically_immaterial_intervention_n_vs_hold": 0,
+        "economically_immaterial_intervention_frequency_vs_hold": null,
+        "mean_additional_frozen_execution_cost_vs_hold_r": null,
+        "additional_cost_available_intervention_n": 0,
+        "mean_additional_broker_rollover_cost_vs_hold_r": null,
+        "additional_rollover_cost_available_intervention_n": 0,
+        "mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r": null,
+        "additional_combined_cost_available_intervention_n": 0,
+        "intervention_usefulness_scope": "net_episode_gain_only; risk_reduction_not_equivalent_to_useless",
+        "inference": "bounded_review_sample; overlapping_trades; no_independent_statistical_or_causal_profit_claim"
+      },
+      "historical_economic_completeness": {
+        "available": false,
+        "reason": "SETTLED_EXECUTION_LEDGER_FEES_SLIPPAGE_AND_COUNTERFACTUAL_CONTINUATION_NOT_EXPORTED",
+        "ledger_profit_net_r": null
+      }
+    },
+    "without_mathematical_edge": {
+      "selected_action_distribution": {
+        "counts": {
+          "HOLD": 14,
+          "CLOSE_10": 1,
+          "CLOSE_25": 0,
+          "CLOSE_50": 0,
+          "EXIT": 0,
+          "MOVE_TO_BE": 0,
+          "TIGHTEN_STOP": 0,
+          "TRAIL_GAMMA_FLIP": 0,
+          "REDUCE_TAKE": 0,
+          "EXTEND_TAKE": 0,
+          "SCALE_OUT_ON_SPIKE": 0,
+          "TIME_STOP": 0
+        },
+        "frequencies": {
+          "HOLD": 0.9333333333333333,
+          "CLOSE_10": 0.06666666666666667,
+          "CLOSE_25": 0.0,
+          "CLOSE_50": 0.0,
+          "EXIT": 0.0,
+          "MOVE_TO_BE": 0.0,
+          "TIGHTEN_STOP": 0.0,
+          "TRAIL_GAMMA_FLIP": 0.0,
+          "REDUCE_TAKE": 0.0,
+          "EXTEND_TAKE": 0.0,
+          "SCALE_OUT_ON_SPIKE": 0.0,
+          "TIME_STOP": 0.0
+        },
+        "selected_review_n": 15,
+        "unavailable_review_n": 17,
+        "denominator": "reviews_with_selected_action; HOLD_is_an_action"
+      },
+      "cost_breakdown": {
+        "frozen_execution_total": {
+          "mean_r": 0.01,
+          "available_review_n": 4,
+          "unavailable_review_n": 0
+        },
+        "frozen_execution_plus_rollover_total": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "broker_rollover": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "commission": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "spread": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "slippage": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "manual_latency": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "settled_actual_total_r": null,
+        "scope": "paired_path_counterfactual_frozen_costs; components_unavailable_unless_explicit; not_actual_fills"
+      },
+      "model_scenarios": {
+        "review_n": 32,
+        "missing_scheme_review_n": 0,
+        "expected_net_r_available_review_n": 15,
+        "cvar10_net_r_available_review_n": 15,
+        "delta_expected_vs_hold_available_review_n": 15,
+        "mean_selected_expected_net_r": 0.03952970637799873,
+        "mean_selected_delta_expected_vs_hold_r": 1.3333333333331865e-05,
+        "mean_selected_cvar10_net_r": -0.9207733333333327,
+        "intervention_frequency": 0.06666666666666667,
+        "intervention_flag_available_review_n": 15,
+        "evidence_type": "MODEL_SCENARIOS_NOT_HISTORICAL_PROFIT"
+      },
+      "observed_path_replay": {
+        "available": true,
+        "paired_review_n": 4,
+        "input_review_n": 32,
+        "core_paired_review_n": 4,
+        "excluded_review_n": 28,
+        "scheme_path_available_review_n": 4,
+        "cohort_definition": "complete_core_schemes_and_HOLD; ablations_also_require_own_replay",
+        "paired_distinct_trade_n": 4,
+        "paired_verified_broker_rollover_quote_n": 0,
+        "paired_broker_rollover_quote_unavailable_n": 4,
+        "net_cost_scope": "frozen_execution_cost_estimates; broker_rollover_only_where_verified; not_settled_all_cost_ledger_net",
+        "mean_net_r_on_remaining": -0.01798999999999995,
+        "descriptive_worst_episode_net_r_on_remaining": -1.01,
+        "portfolio_drawdown_available": false,
+        "portfolio_max_drawdown_r": null,
+        "portfolio_drawdown_unavailable_reason": "NO_COHERENT_SETTLED_PORTFOLIO_LEDGER; reviews_may_overlap",
+        "descriptive_cvar10_net_r_on_remaining": -1.01,
+        "mean_paired_delta_vs_quant100_r": 0.0,
+        "mean_paired_delta_vs_hold_r": 0.0,
+        "intervention_n": 0,
+        "unhelpful_intervention_frequency_vs_quant100": null,
+        "no_net_gain_intervention_frequency_vs_hold": null,
+        "materiality_threshold_r": 0.03,
+        "economically_immaterial_intervention_n_vs_hold": 0,
+        "economically_immaterial_intervention_frequency_vs_hold": null,
+        "mean_additional_frozen_execution_cost_vs_hold_r": null,
+        "additional_cost_available_intervention_n": 0,
+        "mean_additional_broker_rollover_cost_vs_hold_r": null,
+        "additional_rollover_cost_available_intervention_n": 0,
+        "mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r": null,
+        "additional_combined_cost_available_intervention_n": 0,
+        "intervention_usefulness_scope": "net_episode_gain_only; risk_reduction_not_equivalent_to_useless",
+        "inference": "bounded_review_sample; overlapping_trades; no_independent_statistical_or_causal_profit_claim"
+      },
+      "historical_economic_completeness": {
+        "available": false,
+        "reason": "SETTLED_EXECUTION_LEDGER_FEES_SLIPPAGE_AND_COUNTERFACTUAL_CONTINUATION_NOT_EXPORTED",
+        "ledger_profit_net_r": null
+      }
+    },
+    "without_quantitative_base": {
+      "selected_action_distribution": {
+        "counts": {
+          "HOLD": 15,
+          "CLOSE_10": 0,
+          "CLOSE_25": 0,
+          "CLOSE_50": 0,
+          "EXIT": 0,
+          "MOVE_TO_BE": 0,
+          "TIGHTEN_STOP": 0,
+          "TRAIL_GAMMA_FLIP": 0,
+          "REDUCE_TAKE": 0,
+          "EXTEND_TAKE": 0,
+          "SCALE_OUT_ON_SPIKE": 0,
+          "TIME_STOP": 0
+        },
+        "frequencies": {
+          "HOLD": 1.0,
+          "CLOSE_10": 0.0,
+          "CLOSE_25": 0.0,
+          "CLOSE_50": 0.0,
+          "EXIT": 0.0,
+          "MOVE_TO_BE": 0.0,
+          "TIGHTEN_STOP": 0.0,
+          "TRAIL_GAMMA_FLIP": 0.0,
+          "REDUCE_TAKE": 0.0,
+          "EXTEND_TAKE": 0.0,
+          "SCALE_OUT_ON_SPIKE": 0.0,
+          "TIME_STOP": 0.0
+        },
+        "selected_review_n": 15,
+        "unavailable_review_n": 17,
+        "denominator": "reviews_with_selected_action; HOLD_is_an_action"
+      },
+      "cost_breakdown": {
+        "frozen_execution_total": {
+          "mean_r": 0.01,
+          "available_review_n": 4,
+          "unavailable_review_n": 0
+        },
+        "frozen_execution_plus_rollover_total": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "broker_rollover": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "commission": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "spread": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "slippage": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "manual_latency": {
+          "mean_r": null,
+          "available_review_n": 0,
+          "unavailable_review_n": 4
+        },
+        "settled_actual_total_r": null,
+        "scope": "paired_path_counterfactual_frozen_costs; components_unavailable_unless_explicit; not_actual_fills"
+      },
+      "model_scenarios": {
+        "review_n": 32,
+        "missing_scheme_review_n": 0,
+        "expected_net_r_available_review_n": 15,
+        "cvar10_net_r_available_review_n": 15,
+        "delta_expected_vs_hold_available_review_n": 15,
+        "mean_selected_expected_net_r": 0.0395163730446654,
+        "mean_selected_delta_expected_vs_hold_r": 0.0,
+        "mean_selected_cvar10_net_r": -0.9331933333333325,
+        "intervention_frequency": 0.0,
+        "intervention_flag_available_review_n": 15,
+        "evidence_type": "MODEL_SCENARIOS_NOT_HISTORICAL_PROFIT"
+      },
+      "observed_path_replay": {
+        "available": true,
+        "paired_review_n": 4,
+        "input_review_n": 32,
+        "core_paired_review_n": 4,
+        "excluded_review_n": 28,
+        "scheme_path_available_review_n": 4,
+        "cohort_definition": "complete_core_schemes_and_HOLD; ablations_also_require_own_replay",
+        "paired_distinct_trade_n": 4,
+        "paired_verified_broker_rollover_quote_n": 0,
+        "paired_broker_rollover_quote_unavailable_n": 4,
+        "net_cost_scope": "frozen_execution_cost_estimates; broker_rollover_only_where_verified; not_settled_all_cost_ledger_net",
+        "mean_net_r_on_remaining": -0.01798999999999995,
+        "descriptive_worst_episode_net_r_on_remaining": -1.01,
+        "portfolio_drawdown_available": false,
+        "portfolio_max_drawdown_r": null,
+        "portfolio_drawdown_unavailable_reason": "NO_COHERENT_SETTLED_PORTFOLIO_LEDGER; reviews_may_overlap",
+        "descriptive_cvar10_net_r_on_remaining": -1.01,
+        "mean_paired_delta_vs_quant100_r": 0.0,
+        "mean_paired_delta_vs_hold_r": 0.0,
+        "intervention_n": 0,
+        "unhelpful_intervention_frequency_vs_quant100": null,
+        "no_net_gain_intervention_frequency_vs_hold": null,
+        "materiality_threshold_r": 0.03,
+        "economically_immaterial_intervention_n_vs_hold": 0,
+        "economically_immaterial_intervention_frequency_vs_hold": null,
+        "mean_additional_frozen_execution_cost_vs_hold_r": null,
+        "additional_cost_available_intervention_n": 0,
+        "mean_additional_broker_rollover_cost_vs_hold_r": null,
+        "additional_rollover_cost_available_intervention_n": 0,
+        "mean_additional_frozen_execution_plus_rollover_cost_vs_hold_r": null,
+        "additional_combined_cost_available_intervention_n": 0,
+        "intervention_usefulness_scope": "net_episode_gain_only; risk_reduction_not_equivalent_to_useless",
+        "inference": "bounded_review_sample; overlapping_trades; no_independent_statistical_or_causal_profit_claim"
+      },
+      "historical_economic_completeness": {
+        "available": false,
+        "reason": "SETTLED_EXECUTION_LEDGER_FEES_SLIPPAGE_AND_COUNTERFACTUAL_CONTINUATION_NOT_EXPORTED",
+        "ledger_profit_net_r": null
+      }
+    }
+  },
+  "limitations": [
+    "saved32immutable reviews; original missing timestamps are not backfilled",
+    "models/scenario outcomes separately from4paired observed distinct trades",
+    "no actual settled all-cost broker ledger; fixed schemes are not proven optimal",
+    "no current active position/provider influence observation"
+  ]
+}
