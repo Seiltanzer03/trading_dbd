@@ -409,8 +409,18 @@ class FOMCDeterministicReleaseStore:
             "previous_release_id": (previous or {}).get("release_id"),
         }
 
-    def latest_admissible(self, captured_ts: float) -> dict[str, Any]:
-        return _latest_release(self.runtime, captured_ts)
+    def latest_admissible(self, captured_ts: float, *,
+                          nonblocking: bool = False) -> dict[str, Any]:
+        if not nonblocking:
+            return _latest_release(self.runtime, captured_ts)
+        # HTTP admission covers table discovery, selection and rate projection.
+        # Historical readers retain the original blocking, causal contract.
+        if not self._lock.acquire(blocking=False):
+            return {"status": "UNAVAILABLE", "reason": "FOMC_RELEASE_STORE_BUSY"}
+        try:
+            return _latest_release(self.runtime, captured_ts)
+        finally:
+            self._lock.release()
 
     def latest_received(self, captured_ts: float, *, nonblocking: bool = False) -> dict[str, Any]:
         """Known-at-capture read; never backdate the first stored actual fetch."""

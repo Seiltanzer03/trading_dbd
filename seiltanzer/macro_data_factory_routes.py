@@ -351,7 +351,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
 
     def latest_fomc_deterministic(captured_ts: float | None = None):
         cutoff = time.time() if captured_ts is None else float(captured_ts)
-        return fomc_deterministic_store.latest_admissible(cutoff)
+        return fomc_deterministic_store.latest_admissible(cutoff, nonblocking=True)
 
     app.add_api_route(
         "/api/research/macro/fomc-deterministic/latest",
