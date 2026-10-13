@@ -1,0 +1,73 @@
+{
+  "archived_by_sha": "9d29d4c5f33243402e3b19ea12af678976c638f5",
+  "errors": [],
+  "models_produced": 0,
+  "production_writes": false,
+  "publication_verified": false,
+  "receipts": [
+    {
+      "archive": {
+        "archived_by_sha": "9d29d4c5f33243402e3b19ea12af678976c638f5",
+        "bucket": "trading-dbd-backups-2026",
+        "compressed_sha256": "8c252496421cd5507ade186a7c1105353df26f0519a46868532888c4526a6a2b",
+        "compressed_size_bytes": 10913,
+        "contract": "ede-lossless-ledger-archive-v1",
+        "object_key": "research/ede-ledger-archives/v1/cftc-public-row-versions-088691.json/926698adcafb0cdfd04b8781659082d03f43e25d7d7af39a7f497ac6b9a672c6.gz",
+        "production_authority": false,
+        "source_name": "cftc-public-row-versions-088691.json",
+        "source_sha256": "926698adcafb0cdfd04b8781659082d03f43e25d7d7af39a7f497ac6b9a672c6",
+        "source_size_bytes": 78046,
+        "verified_full_get": true
+      },
+      "first_report_ts": 1714435200,
+      "instrument": "XAU",
+      "latest_report_ts": 1791244800,
+      "received_ts": 1791912727.902482,
+      "row_n": 128,
+      "source_body_sha256": "22d24360744e4d2627ae25f5ea41cc7b5d8bdbfd3b6cc7a606c9d75fcb29d194"
+    },
+    {
+      "archive": {
+        "archived_by_sha": "9d29d4c5f33243402e3b19ea12af678976c638f5",
+        "bucket": "trading-dbd-backups-2026",
+        "compressed_sha256": "245091318c8af25aea34921c13de9461493fa862374049d6d1c1dd56c200a942",
+        "compressed_size_bytes": 10713,
+        "contract": "ede-lossless-ledger-archive-v1",
+        "object_key": "research/ede-ledger-archives/v1/cftc-public-row-versions-084691.json/60db1aa0bd39b510639bffcb2c9a3cd5457765a6258263d06d9952e72fe25e61.gz",
+        "production_authority": false,
+        "source_name": "cftc-public-row-versions-084691.json",
+        "source_sha256": "60db1aa0bd39b510639bffcb2c9a3cd5457765a6258263d06d9952e72fe25e61",
+        "source_size_bytes": 78033,
+        "verified_full_get": true
+      },
+      "first_report_ts": 1714435200,
+      "instrument": "XAG",
+      "latest_report_ts": 1791244800,
+      "received_ts": 1791912730.4981124,
+      "row_n": 128,
+      "source_body_sha256": "e0603e3b463df87d6a9f0b4f1309111387d8d9719e41bbaaf86a7bfd8a584186"
+    },
+    {
+      "archive": {
+        "archived_by_sha": "9d29d4c5f33243402e3b19ea12af678976c638f5",
+        "bucket": "trading-dbd-backups-2026",
+        "compressed_sha256": "454be06c27ad389a8d07689ff9680b30b7abce57de72a619d12661cdf57f61ce",
+        "compressed_size_bytes": 10977,
+        "contract": "ede-lossless-ledger-archive-v1",
+        "object_key": "research/ede-ledger-archives/v1/cftc-public-row-versions-099741.json/6b2b9535e09edc9dc6e54fbe1f89a45292c0fb4a0dc11526824b4c01bf9b4d38.gz",
+        "production_authority": false,
+        "source_name": "cftc-public-row-versions-099741.json",
+        "source_sha256": "6b2b9535e09edc9dc6e54fbe1f89a45292c0fb4a0dc11526824b4c01bf9b4d38",
+        "source_size_bytes": 79007,
+        "verified_full_get": true
+      },
+      "first_report_ts": 1714435200,
+      "instrument": "EURUSD",
+      "latest_report_ts": 1791244800,
+      "received_ts": 1791912732.611051,
+      "row_n": 128,
+      "source_body_sha256": "8ee6266db074a465e1a340a77d03c3181ed61a74b745311554152e34e1e3f7b8"
+    }
+  ],
+  "status": "OK"
+}
