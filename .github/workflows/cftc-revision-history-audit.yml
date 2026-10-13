@@ -1,0 +1,44 @@
+name: cftc-revision-history-audit
+
+on:
+  push:
+    branches: [ops/cftc-revision-history-20261013]
+    paths: [.github/workflows/cftc-revision-history-audit.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cftc-public-source-version-archive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q -e '.[dev]' boto3 paramiko
+      - name: Verify source clock and private archive contracts
+        run: python -m pytest -q tests/test_cftc_revision_history.py tests/test_cftc_open_interest.py
+      - name: Preserve actual public versions in existing Yandex storage
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          python -m scripts.archive_cftc_revisions \
+            --expected-sha "${{ github.sha }}" \
+            --output "$RUNNER_TEMP/cftc-archive-receipts.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cftc-version-receipts-${{ github.run_id }}
+          path: ${{ runner.temp }}/cftc-archive-receipts.json
+          if-no-files-found: warn
+          retention-days: 30
