@@ -21,7 +21,7 @@ jobs:
   archive:
     if: github.actor == github.repository_owner
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,6 +30,31 @@ jobs:
       - run: pip install -q boto3 paramiko
       - name: Verify archive preservation tests without production access
         run: pip install -q pytest PyYAML && python -m pytest -q tests/test_ede_ledger_archive.py
+      - name: Wait for the exact compatible deployed code before registry migration
+        if: inputs.stage == 'ledger'
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          python - <<'PY'
+          import os, time
+          from scripts.production_ede_offload import _connect
+          expected = os.environ['EXPECTED_SHA']
+          for attempt in range(80):
+              client = _connect(os.environ['SSH_PASSWORD'])
+              try:
+                  _, output, error = client.exec_command('git -C /opt/seiltanzer rev-parse HEAD && test -f /opt/seiltanzer/scripts/ede_ledger_archive.py', timeout=15)
+                  actual = output.read(1024).decode().strip()
+                  status = output.channel.recv_exit_status()
+                  if status == 0 and actual == expected:
+                      print('EXACT_COMPATIBLE_ARCHIVE_CODE_INSTALLED=1')
+                      break
+              finally:
+                  client.close()
+              time.sleep(15)
+          else:
+              raise RuntimeError('Compatible exact-SHA installation not observed; no ledger touched')
+          PY
       - name: Archive fixed original files in private Yandex Storage and verify complete restore
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
