@@ -110,6 +110,9 @@ jobs:
             du -xhd1 /opt/seiltanzer/data /opt/seiltanzer/data/backups /root/.cache /var/cache /var/log 2>/dev/null | sort -h | tail -n 30
             find /tmp /opt/seiltanzer/data/backups/local -maxdepth 1 -type f -size +100M -printf '%s %b %p\n' 2>/dev/null
             journalctl --disk-usage
+            echo '=== REPRODUCIBLE STORAGE CANDIDATES (READ ONLY) ==='
+            timeout 25s du -xhd2 /root /usr/local /var/lib /opt/seiltanzer-backups 2>/dev/null | sort -h | tail -n 45
+            find /root /opt -maxdepth 2 -type f -size +30M -printf '%s %b %p\n' 2>/dev/null | sort -nr | head -n 25
             echo '=== RUNNER STORAGE (READ ONLY) ==='
             timeout 30s du -xhd2 /opt/actions-runner 2>/dev/null | sort -h | tail -n 40
             find /opt/actions-runner -maxdepth 1 -mindepth 1 -type d -printf '%f\n'
