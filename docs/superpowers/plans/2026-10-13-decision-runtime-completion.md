@@ -17,25 +17,25 @@ Baseline: main26c9e437385cd1d59909e26a892dd58b5cf44297.
 
 ## A: input clocks and independent LLM
 Files: ai_verdict_v18.py, unified_edge_ensemble.py, ai_verdict.py, corresponding behavioral tests.
-- [ ] RED: compressed native quote retains provider time/derived and tick cutoff;210s build latency does not reject a quote fresh at input. Stale input/wrong source/future input/mismatched price remain rejected.
-- [ ] GREEN: preserve audit clocks/provenance; validate native quote against audit.snapshot_ts (<=captured_ts), with legacy captured_ts fallback only when numeric input clock absent.
-- [ ] RED: primary deterministic fallback and primary provider failure cannot suppress a valid independent opinion; programming failures remain visible.
-- [ ] GREEN: attempt existing structured provider independently, retain normalized primary failure and genuine provider identity, never invent scores.
-- [ ] Run owning clock/geometry/ensemble/provider/API tests. Commit and preserve results here.
+- [x] RED: compressed native quote retains provider time/derived and tick cutoff;210s build latency does not reject a quote fresh at input. Stale input/wrong source/future input/mismatched price remain rejected.
+- [x] GREEN: preserve audit clocks/provenance; validate native quote against audit.snapshot_ts (<=captured_ts), with legacy captured_ts fallback only when numeric input clock absent.
+- [x] RED: primary deterministic fallback and primary provider failure cannot suppress a valid independent opinion; programming failures remain visible.
+- [x] GREEN: attempt existing structured provider independently, retain normalized primary failure and genuine provider identity, never invent scores.
+- [x] Run owning clock/geometry/ensemble/provider/API tests. Commit and preserve results here.
 
 ## B: existing model continuity and eight families
-- [ ] Read publication/model status and current registry once; inspect model hashes, matching and feature freeze/compaction. Reuse actual fitted artifacts rather than rerun search.
-- [ ] Reproduce and fix only actual repairable runtime blockers; run owning tests.
-- [ ] Produce instrument×family matrix from available genuine receipts, separating source/fitted/runtime/contribution and concrete missing histories.
+- [x] Read publication/model status and current registry once; inspect model hashes, matching and feature freeze/compaction. Reuse actual fitted artifacts rather than rerun search.
+- [x] Reproduce and fix only actual repairable runtime blockers; run owning tests.
+- [x] Produce instrument×family matrix from available genuine receipts, separating source/fitted/runtime/contribution and concrete missing histories.
 
 ## C: audit and finite comparison
-- [ ] Check existing100% budget, candidate abstention, lineage and frozen ablations; use one saved matched comparison, no new paid calls per scheme.
-- [ ] Verify management UI reads structured decisions independently of prose and saved reports. Fix reproduced barriers only.
+- [x] Check existing100% budget, candidate abstention, lineage and frozen ablations; use one saved matched comparison, no new paid calls per scheme.
+- [x] Verify management UI reads structured decisions independently of prose and saved reports. Fix reproduced barriers only.
 
 ## D: final verification and release
-- [ ] One final reviewer of whole branch, one bounded Important/Critical fix pass.
-- [ ] Owning regression and frontend checks; one mandatory final-tree CI; merge only after required green checks.
-- [ ] Automatic deploy/readiness/functional/public checks and exact-SHA publication receipts. Report actual installed revision and unsatisfied acceptance limits.
+- [x] One final reviewer of whole branch, one bounded Important/Critical fix pass.
+- [x] Owning regression and frontend checks; one mandatory final-tree CI; merge only after required green checks.
+- [x] Automatic deploy/readiness/functional/public checks and exact-SHA publication receipts. Report actual installed revision and unsatisfied acceptance limits.
 
 Review focus: compaction preserving negative provenance; input cutoff later than final capture; price/geometry mismatch; real independent provider under prose rejection; absent histories remaining null.
 
@@ -51,3 +51,39 @@ Final fix profile173passed7.36s and frontend3smokes green. Exact code treeeb61d3
 
 Release correction: PR461 merged5895c817/treec8ac5f64, but mainCI38371803141 rejected a boundary case:54017bytes versus54000target in test_snapshot_contains_quant_policy_and_all_recent_metric_families (3912others passed). No deploy started. The late-enrichment bridge measured size before inserting its compaction marker and converging final_bytes, then accepted only the60000hard limit. A deterministic near-target regression reproduced54023bytes. Small fix measures final metadata first and tests the unchanged soft target; decision/quote/evidence fields are preserved. New exact-tree CI/release required, no blind retry.
 Byte-bound owning profile55passed1.95s; unified audit/archive frontend smokes PASS. Original source clocks and hard60000limit/soft54000target unchanged. This is a reproduced final-CI fix verified by RED→GREEN, not a new package or repeat research.
+
+
+## Accepted core boundary — 2026-10-13, user course reaffirmed
+
+The implementation/test/release tasks above are completed, not a pending backlog
+for repeated implementation. PR461/462 core and correction are accepted; current
+production b96cca445056297f43fd8978d2f4751d6cbff44c/tree8dbc01df also includes
+verified Yandex ledger transport (PR463). MainCI3932/pinnedSQLite/WebKit and
+seven release contexts green. Deployed isolated12-action contract selected one
+TIME_STOP, manual-only, no orders/provider calls/real position mutation.
+
+Fresh accepted publication38400999540/artifact11815970416 was read once;
+all25trained models pass current runtime contract/hash validation. Actual14
+supported family combinations replace the earlier17 count for this generation.
+No repeated training, provider call or simulation. New104-cell matrix and exact
+acceptance mapping are in docs/UNIFIED_EDGE_ACCEPTED_MATRIX_2026-10-13.json and
+docs/UNIFIED_EDGE_CORE_ACCEPTANCE_2026-10-13.md on this checkpoint branch.
+Old published matrices/32-review comparison retain their source generations.
+
+Remaining acceptance dependencies are explicit, not completed checkboxes:
+1. Actual forecast/data readiness for five missing-history families; their
+specific source/history/causal-model reasons remain visible. Do not fabricate
+scores or rerun the same search without new inputs.
+2. Real current provider/component participation on a real active position;
+read13:34UTC contained no trade_id/position_state. Do not create production
+fixtures or broker confirmations to prove influence.
+3. EDE38404251655 immutable cloud/live export and later research/publication are
+still in progress. Former headroom blocker is passed:free1438126080bytes,
+reserve1GiB unchanged. Continue existing generation, no duplicate/deploy invalidation.
+4. Existing reviewed/green PR464 may ship after current research; no further
+ancillary improvements. Core closure has priority over additional polish.
+
+The user13.10.2026 16:39Moscow reaffirmed original manager/decision/weights scope:
+stop adding incidental features and stop an endless improvement cycle. New code
+is justified only by a reproduced core acceptance blocker. Preserve this ruling
+and the frozen A→B→C→D scope in subsequent continuation.
