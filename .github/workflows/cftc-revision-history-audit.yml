@@ -42,3 +42,5 @@ jobs:
           path: ${{ runner.temp }}/cftc-archive-receipts.json
           if-no-files-found: warn
           retention-days: 30
+
+# One authorized source-preservation pass, 2026-10-13; no production mutations.
