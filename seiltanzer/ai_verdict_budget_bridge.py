@@ -102,16 +102,21 @@ def _fit_post_enrichment_target(
     already_compacted: bool = False,
 ) -> bool:
     """Compact only duplicated/verbose presentation fields after a successful pass."""
-    size = _snapshot_size(ai_verdict, snapshot)
     target = _target_bytes(ai_verdict)
     limit = _limit_bytes(ai_verdict)
     compacted = bool(already_compacted)
+    if compacted:
+        snapshot.setdefault("snapshot_budget", {})["late_enrichment_compacted"] = True
+    # Metadata is part of the serialized payload, including final_bytes itself.
+    # Measuring before adding it can accept a snapshot a few bytes over target.
+    size = _sync_final_bytes(ai_verdict, snapshot)
     if size is None:
         if compacted:
             snapshot.setdefault("snapshot_budget", {})["late_enrichment_compacted"] = True
         return True
 
     if target is not None and size > target:
+        snapshot.setdefault("snapshot_budget", {})["late_enrichment_compacted"] = True
         _compact_active_edge_context(snapshot)
         _drop_duplicate_integrity_views(snapshot)
         compacted = True
@@ -124,7 +129,8 @@ def _fit_post_enrichment_target(
     if compacted:
         snapshot.setdefault("snapshot_budget", {})["late_enrichment_compacted"] = True
     size = _sync_final_bytes(ai_verdict, snapshot)
-    return size is None or limit is None or size < limit
+    return size is None or ((limit is None or size < limit)
+                            and (target is None or size <= target))
 
 
 def enforce_public_snapshot_budget(snapshot: dict[str, Any]) -> None:

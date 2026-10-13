@@ -91,3 +91,22 @@ def test_late_enrichment_last_resort_preserves_decision_snapshot(monkeypatch):
     assert snapshot["policy_manager"]["management_decision"]["policy"] == "HOLD"
     assert snapshot["snapshot_budget"]["report_integrity_degraded"] is True
     assert snapshot["snapshot_budget"]["degrade_reason"] == "LATE_ENRICHMENT_BYTE_BUDGET"
+
+
+def test_compaction_marker_is_measured_before_near_target_fit():
+    from types import SimpleNamespace
+    from seiltanzer import ai_verdict_v18
+    from seiltanzer.ai_verdict_budget_bridge import _fit_post_enrichment_target
+    snapshot = {'policy_manager': {'stability': {'explanation': 'x'*300},
+                 'input_audit': {'snapshot_ts': 2000., 'rows': {'instrument_price': {
+                     'timestamp': 1999., 'derived': False, 'source': 'TradingView stream OANDA:NAS100USD'}}}},
+                'report_integrity': {'stability': {'explanation': 'x'*300}},
+                'snapshot_budget': {'final_bytes': 53990}, 'padding': ''}
+    snapshot['padding'] = 'x'*(53990-ai_verdict_v18._snapshot_bytes(snapshot))
+    original_audit = dict(snapshot['policy_manager']['input_audit'])
+    assert _fit_post_enrichment_target(SimpleNamespace(_impl=ai_verdict_v18), snapshot,
+                                       already_compacted=True) is True
+    size = ai_verdict_v18._snapshot_bytes(snapshot)
+    assert size <= 54000
+    assert snapshot['snapshot_budget']['final_bytes'] == size
+    assert snapshot['policy_manager']['input_audit'] == original_audit
