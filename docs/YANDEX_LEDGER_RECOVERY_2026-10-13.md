@@ -45,3 +45,35 @@ Minor deferred: filesystem mtimes are not preserved; embedded source/event
 timestamps remain exact bytes. This metadata is not used to invent forecast age.
 Owning local profile and exact final CI/release/operations receipts must be
 recorded before claiming production recovery. No repeated fitting/provider calls.
+
+## Actual acceptance and continuation receipts — 2026-10-13
+
+PR463 final22d8da7b/tree8dbc01df matched mergecandidate7db3e4e; PR CI38397415904
+and mainCI38398238486 passed3932tests, pinnedSQLite/frontend/WebKit. Accepted
+production b96cca445056297f43fd8978d2f4751d6cbff44c, deploy38398804577:
+delivery/readiness/functional/public/orchestration success, all7contexts green.
+
+Capacity operation38397489166 preserved303435330original bytes in private
+Yandex Storage. Registry migration38399091768 preserved377496272bytes;
+SHA256 d1503e1f438a9e186306255af9ae11412932dd220106267073f4e8ef18290b15.
+Every object was fully restored/verified before retiring its local original.
+Combined680931602bytes preserved. Measured free1468628992bytes after migration.
+DB/WAL/active logs and embedded source/event timestamps were untouched.
+
+Exact-SHA math38400999540 published385800bytes:25fitted models (21current and
+4retained unchanged option fits),14historically supported family combinations.
+Native export1957rows/1053option; EURUSD/USDCAD/XAG/XAU remain explicitly
+read-budget-incomplete. Sources38401003724 published550529bytes for13instruments,
+models_produced=0. FOMC38401007534 published270507bytes; this is one delivery,
+not proof of continuous600s cadence or newly trained event models.
+
+Inventory38401107320 succeeded:83956observations/23725resolutions,96features,
+65DATA_READY/27insufficient independent evidence/2G1M-only/2quality-only. This is
+coverage, not forecast performance. Automatically continued EDE38404251655;
+its snapshot/research/publication remains in progress at this checkpoint.
+
+Read-only diagnostic38404485915 confirms exact installedSHA, service running,
+NRestarts0 and no new OOM since deploy. Runner/local/public-self api/state200;
+localhost0.004763s. Separate FOMC latest timed out15s while macro/status0.079s:
+recorded for targeted investigation, not a claimed fix or terminal outage.
+No full-eight-family, live-LLM, empirical profit or new complete-backup claim.
