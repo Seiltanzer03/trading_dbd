@@ -4,11 +4,30 @@ import io
 import json
 import tempfile
 import unittest
+import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.ede_ledger_archive import prepare, upload, restore, compress_closed, retire_plain, retire_installer, retire_closed_archive, require_capacity
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_script(name):
+    spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / (name + '.py'))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+ARCHIVE = load_script('ede_ledger_archive')
+OFFLOAD = load_script('production_ede_offload')
+OFFLOAD.ede_ledger_archive = ARCHIVE
+prepare, upload, restore = ARCHIVE.prepare, ARCHIVE.upload, ARCHIVE.restore
+compress_closed, retire_plain = ARCHIVE.compress_closed, ARCHIVE.retire_plain
+retire_installer, retire_closed_archive = ARCHIVE.retire_installer, ARCHIVE.retire_closed_archive
+require_capacity = ARCHIVE.require_capacity
 
 
 class ObjectStore:
@@ -159,7 +178,7 @@ class LedgerArchiveTests(unittest.TestCase):
         self.assertGreater(retire_installer(installer, manifest)['retired_bytes'], 0)
 
     def test_staging_reserve_refuses_without_writing(self):
-        with patch('scripts.ede_ledger_archive.shutil.disk_usage', return_value=SimpleNamespace(free=1024**3+10)):
+        with patch.object(ARCHIVE.shutil, 'disk_usage', return_value=SimpleNamespace(free=1024**3+10)):
             with self.assertRaises(ValueError):
                 require_capacity(self.root, 20)
 
@@ -176,7 +195,7 @@ class LedgerArchiveTests(unittest.TestCase):
 
 class LedgerTransportTests(unittest.TestCase):
     def test_newer_live_generation_cannot_be_hidden_by_stale_archive(self):
-        from scripts import production_ede_offload as offload
+        offload = OFFLOAD
         with tempfile.TemporaryDirectory() as temporary:
             raw = Path(temporary) / 'old'
             raw.write_bytes(b'old event\n')
@@ -193,7 +212,7 @@ class LedgerTransportTests(unittest.TestCase):
         self.assertNotIn('concurrency', workflow['jobs']['audit'])
 
     def test_fetch_uses_verified_gzip_and_preserves_legacy_plaintext(self):
-        from scripts import production_ede_offload as offload
+        offload = OFFLOAD
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             remote = root / 'remote'
@@ -223,18 +242,18 @@ class LedgerTransportTests(unittest.TestCase):
             store = ObjectStore()
             upload(store, archive, {**manifest, 'verified_full_get': False})
             archive.write_bytes(b'interrupted cache')
-            with patch.object(offload, '_connect', return_value=client), patch.object(offload, '_verify_sha'), patch.object(offload, '_remote_ledger_identity', return_value={'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}), patch('scripts.ede_ledger_archive.s3_client', return_value=store):
+            with patch.object(offload, '_connect', return_value=client), patch.object(offload, '_verify_sha'), patch.object(offload, '_remote_ledger_identity', return_value={'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}), patch.object(ARCHIVE, 's3_client', return_value=store):
                 offload.fetch_ledgers(args)
             self.assertEqual((out / source.name).read_bytes(), raw)
 
     def test_cloud_failure_cannot_publish_or_retire_production_registry(self):
-        from scripts import production_ede_offload as offload
+        offload = OFFLOAD
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for name in offload.OUTPUT_NAMES:
                 (root / name).write_bytes(b'{}\n')
             args = SimpleNamespace(password='unused', expected_sha='a' * 40, output_dir=str(root), run_id='123')
-            with patch('scripts.ede_ledger_archive.s3_client', side_effect=RuntimeError('storage unavailable')), patch.object(offload, '_connect') as connect:
+            with patch.object(ARCHIVE, 's3_client', side_effect=RuntimeError('storage unavailable')), patch.object(offload, '_connect') as connect:
                 with self.assertRaises(Exception):
                     offload.publish(args)
                 connect.assert_not_called()
