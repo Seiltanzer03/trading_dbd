@@ -8,6 +8,7 @@ from __future__ import annotations
 from copy import deepcopy
 from functools import lru_cache
 import json
+import os
 import math
 from pathlib import Path
 
@@ -23,10 +24,18 @@ MAX_SELECTED_BYTES = 8_000
 MAX_AGE_SEC = 8 * 60 * 60
 
 
+def _file_identity(stat):
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
 @lru_cache(maxsize=4)
-def _read(path, modified_ns, size):
+def _read(path, identity):
     with Path(path).open("rb") as handle:
+        if _file_identity(os.fstat(handle.fileno())) != identity:
+            raise ValueError('SOURCE_BUNDLE_CHANGED_DURING_READ')
         raw = handle.read(MAX_BYTES + 1)
+        if _file_identity(os.fstat(handle.fileno())) != identity:
+            raise ValueError('SOURCE_BUNDLE_CHANGED_DURING_READ')
     if not raw or len(raw) > MAX_BYTES:
         raise ValueError("SOURCE_BUNDLE_EXCEEDS_BOUND")
     payload = json.loads(raw)
@@ -58,9 +67,11 @@ def load_family_source_context(engine, snapshot, expected_sha):
         stat = path.stat()
         if not 0 < stat.st_size <= MAX_BYTES:
             raise ValueError("SOURCE_BUNDLE_EXCEEDS_BOUND")
-        if not 0 <= cutoff - stat.st_mtime <= MAX_AGE_SEC:
+        # Copy tools can preserve source mtime. The latest local inode change
+        # must also predate the quote; neither clock is a historical release.
+        if not 0 <= cutoff - max(stat.st_mtime, stat.st_ctime) <= MAX_AGE_SEC:
             raise ValueError("SOURCE_BUNDLE_FILE_STALE_OR_AFTER_SNAPSHOT")
-        payload = _read(str(path), stat.st_mtime_ns, stat.st_size)
+        payload = _read(str(path), _file_identity(stat))
         if simulated_evidence(payload, recursive=False):
             raise ValueError('SYNTHETIC_SOURCE_NOT_ADMISSIBLE')
         if (payload.get("contract_version") != CONTRACT

@@ -492,6 +492,8 @@ def _validation_report_from_score(score: dict, policy_shadow: dict) -> dict:
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or settings_from_env()
     engine = Engine(settings)
+    from .edge_family_passive_capture import install_family_source_capture
+    install_family_source_capture(engine)
     clients: set[WebSocket] = set()
     ai_last_call = 0.0
     ai_lock = asyncio.Lock()
