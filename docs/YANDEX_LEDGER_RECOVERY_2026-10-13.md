@@ -77,3 +77,30 @@ NRestarts0 and no new OOM since deploy. Runner/local/public-self api/state200;
 localhost0.004763s. Separate FOMC latest timed out15s while macro/status0.079s:
 recorded for targeted investigation, not a claimed fix or terminal outage.
 No full-eight-family, live-LLM, empirical profit or new complete-backup claim.
+
+## Next bounded correction and resumption boundary — 13:35 UTC
+
+EDE38404251655/job115323136063 passed the former storage blocker:
+LIVE_SQLITE_PREFLIGHT_READY free1438126080bytes,size18261766144bytes,
+wal9331832bytes. Export/restored-cloud-seed step is running; no completed research,
+new full-backup or archive-fetch/publication receipt is claimed yet. Do not launch
+a duplicate audit or deploy and do not weaken reserve/evidence gates.
+
+FOMC latest lock regression is corrected in isolated PR464:
+head10f1b4310587ef5334b7fd86a1ef5a34da2d8ab6, mergecandidate
+ dd6661808ad2e7a9c0e570b6c18c10eb3b7cd9e7, verified tree
+690ab8f47d6ff4a44a06f7e561a5e6227334ecf5.221owning checks passed;
+one final independent reviewer found no findings and passed23targeted tests.
+CI38405641575:3936passed/5skipped/13subtests, pinnedSQLite1passed,
+frontend/realWebKit and ci/full-webkit on mergecandidate green. Lattice38405641813
+green. It is draft/unmerged, not deployed. Existing independent provider identity,
+source/fetch/publication clocks and authority unchanged; only FOMC latest HTTP
+lock admission is bounded. Historical default readers remain blocking.
+
+Next: observe EDE38404251655 once its export/research progresses, handle only a
+concrete failure, and preserve its expected b96cca4 through final publication.
+Then use already-green exact-tree PR464 for authorized merge/automatic deploy,
+server busy/unlocked route check and same-SHA publications. Do not repeat review
+or unchanged fitting/full CI; a new diff requires only its owning verification
+and mandatory final CI. Production position read13:34UTC had no trade_id or
+position_state; no real current LLM-participation proof was obtained.
