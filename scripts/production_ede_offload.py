@@ -22,6 +22,11 @@ import sqlite3
 import time
 from typing import Any
 
+try:
+    from scripts import ede_ledger_archive
+except ModuleNotFoundError:
+    import ede_ledger_archive
+
 HOST = "94.241.171.182"
 REMOTE_ROOT = pathlib.PurePosixPath("/opt/seiltanzer")
 REMOTE_RESEARCH = REMOTE_ROOT / "data/research"
@@ -809,6 +814,40 @@ def fetch_ledgers(args: argparse.Namespace) -> int:
             for name in LEDGER_NAMES:
                 remote = str(REMOTE_RESEARCH / name)
                 local = output / name
+                if name == 'ede_v13_candidate_registry.jsonl':
+                    receipt_path = output / (name + '.archive.json')
+                    try:
+                        receipt_stat = sftp.stat(remote + '.archive.json')
+                    except FileNotFoundError:
+                        receipt_stat = None
+                    if receipt_stat is not None:
+                        if receipt_stat.st_size > 65536:
+                            raise RuntimeError('EDE archive receipt exceeds limit')
+                        sftp.get(remote + '.archive.json', str(receipt_path))
+                        manifest = json.loads(receipt_path.read_text())
+                        ede_ledger_archive.validate(manifest)
+                        if manifest.get('source_name') != name:
+                            raise ValueError('EDE archive belongs to a different ledger')
+                        try:
+                            packed_stat = sftp.stat(remote + '.gz')
+                        except FileNotFoundError:
+                            packed_stat = None
+                        if packed_stat is None:
+                            ede_ledger_archive.restore(ede_ledger_archive.s3_client(), manifest, local)
+                        else:
+                            packed = output / (name + '.gz')
+                            try:
+                                if packed_stat.st_size != manifest['compressed_size_bytes']:
+                                    raise ValueError('EDE compressed ledger size mismatch')
+                                sftp.get(remote + '.gz', str(packed))
+                                ede_ledger_archive.restore_local(packed, manifest, local)
+                            except (ValueError, OSError, EOFError):
+                                # Interrupted two-file publication never destroys the
+                                # immutable object named by the authoritative receipt.
+                                ede_ledger_archive.restore(ede_ledger_archive.s3_client(), manifest, local)
+                        _assert_remote_ledger_prefix(client, local)
+                        print(f'restored exact archived ledger {name} bytes={local.stat().st_size}')
+                        continue
                 try:
                     sftp.stat(remote)
                 except OSError:
@@ -823,12 +862,64 @@ def fetch_ledgers(args: argparse.Namespace) -> int:
     return 0
 
 
+def _remote_ledger_identity(client):
+    name = str(REMOTE_RESEARCH / 'ede_v13_candidate_registry.jsonl')
+    code = 'import json,hashlib; from pathlib import Path\n' + \
+        'p=Path(' + repr(name) + ')\n' + \
+        'if p.exists():\n' + \
+        ' h=hashlib.sha256()\n' + \
+        ' with p.open("rb") as f:\n' + \
+        '  for b in iter(lambda:f.read(1048576),b""): h.update(b)\n' + \
+        ' result={"size":p.stat().st_size,"sha256":h.hexdigest()}\n' + \
+        'else:\n' + \
+        ' r=Path(str(p)+".archive.json")\n' + \
+        ' if r.exists():\n' + \
+        '  if r.stat().st_size>65536: raise ValueError("archive receipt too large")\n' + \
+        '  v=json.loads(r.read_text());result={"size":v["source_size_bytes"],"sha256":v["source_sha256"]}\n' + \
+        ' else: result={"size":0,"sha256":hashlib.sha256(b"").hexdigest()}\n' + \
+        'print(json.dumps(result))'
+    return json.loads(_exec(client, 'python3 -c ' + shlex.quote(code), timeout=120))
+
+
+def _assert_remote_ledger_prefix(client, local):
+    before = _remote_ledger_identity(client)
+    if type(before.get('size')) is not int or not 0 <= before['size'] <= ede_ledger_archive.MAX_BYTES:
+        raise ValueError('Invalid installed ledger identity')
+    h = hashlib.sha256()
+    remaining = before['size']
+    with pathlib.Path(local).open('rb') as f:
+        while remaining:
+            chunk = f.read(min(1048576, remaining))
+            if not chunk:
+                raise ValueError('Installed ledger is newer than archive generation')
+            h.update(chunk)
+            remaining -= len(chunk)
+    if h.hexdigest() != before.get('sha256'):
+        raise ValueError('Installed ledger byte prefix changed; preserve both histories')
+    return before
+
+
+def _require_remote_archive_capacity(client, size):
+    code = 'import os;v=os.statvfs("/opt/seiltanzer/data/research");' + \
+           'assert v.f_bavail*v.f_frsize>=' + str(ede_ledger_archive.MIN_FREE_BYTES + size)
+    _exec(client, 'python3 -c ' + shlex.quote(code), timeout=10)
+
+
 def publish(args: argparse.Namespace) -> int:
     output = pathlib.Path(args.output_dir)
     for name in OUTPUT_NAMES:
         path = output / name
         if not path.is_file():
             raise RuntimeError(f"missing EDE output {name}")
+
+    name = 'ede_v13_candidate_registry.jsonl'
+    packed = output / (name + '.gz')
+    packed.unlink(missing_ok=True)
+    manifest = ede_ledger_archive.prepare(output / name, packed, expected_sha=args.expected_sha)
+    # Cloud failure happens before the first production publication or retirement.
+    manifest = ede_ledger_archive.upload(ede_ledger_archive.s3_client(), packed, manifest)
+    receipt = output / (name + '.archive.json')
+    receipt.write_text(json.dumps(manifest, sort_keys=True) + '\n')
 
     client = _connect(args.password)
     try:
@@ -838,24 +929,32 @@ def publish(args: argparse.Namespace) -> int:
 
         sftp = client.open_sftp()
         try:
-            for name in OUTPUT_NAMES:
-                local = output / name
-                remote = str(REMOTE_RESEARCH / name)
+            before = _assert_remote_ledger_prefix(client, output / name)
+            publish_names = tuple(n for n in OUTPUT_NAMES if n != name) + (name + '.gz', name + '.archive.json')
+            _require_remote_archive_capacity(client, sum((output / n).stat().st_size for n in publish_names))
+            for output_name in publish_names:
+                if output_name == name + '.archive.json' and _remote_ledger_identity(client) != before:
+                    raise ValueError('Installed ledger changed during publication')
+                local = output / output_name
+                remote = str(REMOTE_RESEARCH / output_name)
                 temporary = f"{remote}.tmp-{args.run_id}"
-                sftp.put(str(local), temporary)
                 try:
+                    sftp.put(str(local), temporary)
                     sftp.posix_rename(temporary, remote)
-                except OSError:
-                    # OpenSSH normally supports posix-rename. Retain a bounded
-                    # compatibility fallback without executing research remotely.
+                finally:
                     try:
-                        sftp.remove(remote)
-                    except OSError:
+                        sftp.remove(temporary)
+                    except FileNotFoundError:
                         pass
-                    sftp.rename(temporary, remote)
-                print(f"published {name} bytes={local.stat().st_size}")
+                print(f"published {output_name} bytes={local.stat().st_size}")
         finally:
             sftp.close()
+
+        helper = pathlib.Path(ede_ledger_archive.__file__).read_text()
+        command = 'python3 -c ' + shlex.quote(helper + '\n' +
+            'print(json.dumps(retire_plain(' + repr(str(REMOTE_RESEARCH / name)) + ',' +
+            repr(str(REMOTE_RESEARCH / (name + '.gz'))) + ',' + repr(manifest) + ')))')
+        print('EDE_LEDGER_CLOUD_ARCHIVE=' + _exec(client, command, timeout=120).strip())
 
         _probe_api(client)
         print("EDE_OFFLOAD_PUBLISH_OK=1")
