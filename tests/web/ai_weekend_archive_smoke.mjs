@@ -15,7 +15,7 @@ class Element {
   click() { return this.listeners.click(); }
 }
 async function fixture({code = 'authoritative_price_unavailable', history, historyError, beforeHistory,
-  reopenDuringFirstPosition = false} = {}) {
+  reopenDuringFirstPosition = false, review} = {}) {
   const nodes = new Map([['#btn-ai-verdict', new Element()]]);
   const state = {tick: {trade: {id: 7}}};
   const calls = [];
@@ -35,6 +35,7 @@ async function fixture({code = 'authoritative_price_unavailable', history, histo
       }
       return {shadow_actions: []};
     }
+    if (url === '/api/ai/verdict' && review) return review;
     if (url === '/api/ai/verdict') throw Object.assign(new Error('Нет авторитетной цены'),
       {status: 503, code, requestId: 'ai-weekend'});
     assert.equal(url, '/api/ai/history?include_management=true');
@@ -46,7 +47,7 @@ async function fixture({code = 'authoritative_price_unavailable', history, histo
         management_archive: {available: true, execution_allowed: false, captured_ts: 1_700_000_000,
           decision: {policy: 'HOLD'}, unified_edge_ensemble: {selected_policy: 'HOLD'}}}]};
   };
-  const noDecision = () => { throw new Error('archive cannot mount execution controls'); };
+  const noDecision = () => { if (!review) throw new Error('archive cannot mount execution controls'); };
   new Function('$','openModal','closeModal','fetchStructured','mountArmedShadowActions',
     'mountEdgeManagement','mountManagementDecision','mountShadowWorkingAction','apiPost',
     'refreshJournalAndSetups','refreshAiHistory','S','document','mountArchivedManagement',callback)(
@@ -77,6 +78,14 @@ assert.equal(available.calls.filter((call) => call.method === 'POST').length, 1)
 assert.deepEqual(available.calls.at(-1), {url: '/api/ai/history?include_management=true', method: 'GET'});
 assert.equal(available.archives.length, 1);
 assert.equal(available.archives[0].decision.policy, 'HOLD');
+
+const structuredOnly = await fixture({history: {trade_id: 7, items: [{ts: 1_700_000_100,
+  management_archive: {available: true, execution_allowed: false, decision: {policy: 'CLOSE_25'}}}]}});
+await structuredOnly.button.click();
+assert.match(structuredOnly.out.textContent, /АРХИВНЫЙ РАЗБОР/);
+assert.equal(structuredOnly.archives.length, 1);
+assert.equal(structuredOnly.archives[0].decision.policy, 'CLOSE_25');
+assert.equal(structuredOnly.calls.filter((call) => call.method === 'POST').length, 1);
 
 for (const options of [
   {history: {trade_id: 8, items: [{ts: 1_700_000_100, verdict: 'other trade'}]}},
@@ -130,3 +139,8 @@ for(const opts of [{wrongTrade:true},{replaced:true}]) {
   assert.equal(invalid.archives.length,0);
 }
 console.log('Weekend archive modal smoke: PASS');
+
+const proseFallback = await fixture({review: {degraded: true, request_id: 'ai-structured',
+  verdict: 'LOCAL REPORT', llm_shadow_decision: {status: 'ok', model: 'structured-provider'}}});
+assert.match(proseFallback.out.textContent, /СТРУКТУРИРОВАННЫЙ LLM ДОСТУПЕН/);
+assert.doesNotMatch(proseFallback.out.textContent, /LLM НЕДОСТУПЕН/);

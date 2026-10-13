@@ -101,10 +101,18 @@ def _manual_candidate_preflight(snapshot):
             if configured.binance_symbol:
                 sources.update({f"Binance WS {configured.binance_symbol}",
                                 f"Binance REST trade {configured.binance_symbol}"})
-        stamp, cutoff = number(price.get("timestamp")), number(snapshot.get("captured_ts"))
+        # captured_ts is the final causal boundary after deterministic writes.
+        # Quote freshness belongs to the original market observation, whose
+        # geometry and common pricing stay frozen throughout the slow build.
+        from .snapshot_clock import market_observation_cutoff
+        cutoff = market_observation_cutoff(snapshot)
+        stamp = number(price.get("timestamp"))
+        quote_value = number(price.get("value"))
+        current = number((snapshot.get("trade_geometry") or {}).get("current"))
         if (price.get("status") != "live" or price.get("source") not in sources
                 or price.get("derived") is True or stamp is None or cutoff is None
-                or not -5 <= cutoff - stamp <= 30):
+                or not -5 <= cutoff - stamp <= 30
+                or (quote_value is not None and quote_value != current)):
             return False
     state = snapshot.get("position_state") or {}
     remaining = number(state.get("remaining_position_fraction"))
@@ -438,6 +446,11 @@ def collect_components(snapshot, candidates, current_llm=None, excluded_working_
                     samples.append(sum(values) / len(values))
             if samples:
                 scores[key] = sum(samples) / len(samples)
+        # Compute deadlines before mutating target: opinions may contain target
+        # itself, whose original observation clock must not be overwritten first.
+        expiries = [number(item.get('observed_ts'))+number(item.get('max_age_sec'))
+                    for item in opinions if number(item.get('observed_ts')) is not None
+                    and number(item.get('max_age_sec')) is not None]
         target["scores"] = scores
         target["available"] = bool(scores)
         target["reason"] = "VALIDATED_FAMILY_MODELS_WITHIN_EXISTING_COMPONENT_BUDGET"
@@ -446,8 +459,8 @@ def collect_components(snapshot, candidates, current_llm=None, excluded_working_
         target["evidence_family_ids"] = sorted({str(family) for opinion in opinions for family in opinion.get("evidence_family_ids", [])})
         target["observed_ts"] = min((number(item.get("observed_ts")) for item in opinions
                                      if number(item.get("observed_ts")) is not None), default=None)
-        target["max_age_sec"] = min((number(item.get("max_age_sec")) for item in opinions
-                                     if number(item.get("max_age_sec")) is not None), default=900.)
+        target['max_age_sec'] = (min(expiries)-target['observed_ts']
+                                 if expiries and target['observed_ts'] is not None else 900.)
     overrides = manager.get("unified_component_assessments") or []
     for spec in overrides:
         if not isinstance(spec, dict):

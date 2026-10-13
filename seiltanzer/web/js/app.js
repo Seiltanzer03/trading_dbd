@@ -1148,10 +1148,13 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     const body = await fetchStructured('/api/ai/verdict', { method: 'POST' });
     if ($('#ai-verdict-text') !== out) return;
     const warning = body.degraded
-      ? 'LLM НЕДОСТУПЕН · ПОКАЗАН DETERMINISTIC РАЗБОР\nID: '
+      ? (body.llm_shadow_decision?.status === 'ok'
+        ? 'ТЕКСТОВЫЙ ОТЧЁТ ЛОКАЛЬНЫЙ · СТРУКТУРИРОВАННЫЙ LLM ДОСТУПЕН\nID: '
+        : 'LLM НЕДОСТУПЕН · ПОКАЗАН DETERMINISTIC РАЗБОР\nID: ')
         + body.request_id + '\n\n'
       : '';
-    out.textContent = warning + body.verdict;
+    out.textContent = warning + (typeof body.verdict === 'string' ? body.verdict
+      : 'Текст отсутствует; структурированный план показан ниже.');
     mountEdgeManagement($("#ai-edge-management"), body.edge_management);
     mountManagementDecision(
       $("#ai-management-execution"), body.management_decision, apiPost,
@@ -1183,7 +1186,10 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
             return;
           }
           const latest = Array.isArray(history.items) ? history.items.at(-1) : null;
-          if (!latest || typeof latest.verdict !== 'string' || !latest.verdict.trim()
+          const hasReport = typeof latest?.verdict === 'string' && latest.verdict.trim();
+          const hasManagement = latest?.management_archive?.available === true
+            && latest.management_archive.execution_allowed === false;
+          if (!latest || (!hasReport && !hasManagement)
               || typeof latest.ts !== 'number' || !Number.isFinite(latest.ts)
               || latest.ts <= 0 || latest.ts > Date.now() / 1000 + 1) {
             out.textContent = errorText + '\n\nДля этой сделки нет пригодного сохранённого разбора.';
@@ -1193,7 +1199,7 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
             + new Date(latest.ts * 1000).toLocaleString('ru-RU')
             + '\nЦена, веса и рекомендации ниже относятся к сохранённому разбору. '
             + 'Для текущего решения нужны новые данные. Этот просмотр не регистрирует действий.\n\n'
-            + latest.verdict;
+            + (hasReport ? latest.verdict : 'Текст отсутствует; сохранённый структурированный план показан ниже.');
           for (const id of ['#ai-edge-management', '#ai-management-execution',
             '#ai-shadow-action', '#ai-armed-actions']) $(id)?.replaceChildren();
           mountArchivedManagement($('#ai-edge-management'), latest.management_archive);

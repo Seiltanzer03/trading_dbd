@@ -562,19 +562,24 @@ def _shadow_contract_active(snapshot: dict) -> bool:
 
 
 def request_verdict(snapshot: dict) -> dict:
-    result = _BASE_REQUEST_VERDICT_WITHOUT_SHADOW(snapshot)
+    try:
+        result = _BASE_REQUEST_VERDICT_WITHOUT_SHADOW(snapshot)
+    except RuntimeError as exc:
+        if not _shadow_contract_active(snapshot):
+            raise
+        from .ai_api import deterministic_result, provider_error
+        result = deterministic_result(snapshot, render_policy_report)
+        result["provider_failure"] = provider_error(exc)
     if not isinstance(result, dict) or not _shadow_contract_active(snapshot):
         return result
     result = dict(result)
-    if result.get("model") == "deterministic-policy-fallback":
-        shadow = _unavailable_llm_shadow(snapshot, "PRIMARY_LLM_REPORT_FALLBACK")
-    else:
-        try:
-            shadow = _request_llm_shadow_decision(snapshot)
-        except RuntimeError as exc:
-            # Shadow failures never downgrade or replace the established verdict.
-            code = str(exc).strip() or "SHADOW_PROVIDER_FAILURE"
-            shadow = _unavailable_llm_shadow(snapshot, code)
+    # Prose validation/failure says nothing about an independent structured
+    # preference. Keep this existing bounded call available in both cases.
+    try:
+        shadow = _request_llm_shadow_decision(snapshot)
+    except RuntimeError as exc:
+        code = str(exc).strip() or "SHADOW_PROVIDER_FAILURE"
+        shadow = _unavailable_llm_shadow(snapshot, code)
     result["llm_shadow_decision"] = shadow
     verdict = result.get("verdict")
     if isinstance(verdict, str):

@@ -181,24 +181,40 @@ def test_shadow_failure_never_breaks_primary_verdict(monkeypatch):
     assert "shadow_provider_connection_failed" in result["verdict"]
 
 
-def test_primary_deterministic_fallback_does_not_make_second_provider_call(monkeypatch):
-    monkeypatch.setattr(
-        ai_verdict,
-        "_BASE_REQUEST_VERDICT_WITHOUT_SHADOW",
-        lambda _snapshot: {
-            "verdict": "DETERMINISTIC REPORT",
-            "model": "deterministic-policy-fallback",
-            "captured_ts": 123.0,
-        },
-    )
-
-    def must_not_call(_snapshot):
-        raise AssertionError("shadow provider should not be called after primary fallback")
-
-    monkeypatch.setattr(ai_verdict, "_request_llm_shadow_decision", must_not_call)
+def test_primary_deterministic_fallback_preserves_independent_structured_opinion(monkeypatch):
+    monkeypatch.setattr(ai_verdict, "_BASE_REQUEST_VERDICT_WITHOUT_SHADOW", lambda _: {
+        "verdict": "DETERMINISTIC REPORT", "model": "deterministic-policy-fallback",
+        "captured_ts": 123.})
+    monkeypatch.setattr(ai_verdict, "_request_llm_shadow_decision", lambda _: {
+        "status": "ok", "policy": "CLOSE_25", "model": "real-structured-provider",
+        "policy_scores": {"HOLD": -1., "CLOSE_25": 1.}})
     result = ai_verdict.request_verdict(_snapshot())
-    assert result["llm_shadow_decision"]["status"] == "unavailable"
-    assert result["llm_shadow_decision"]["reason_code"] == "PRIMARY_LLM_REPORT_FALLBACK"
+    assert result["model"] == "deterministic-policy-fallback"
+    assert result["llm_shadow_decision"]["status"] == "ok"
+    assert result["llm_shadow_decision"]["policy_scores"]["CLOSE_25"] == 1.
+    assert result["verdict"].startswith("DETERMINISTIC REPORT")
+
+
+def test_primary_provider_error_preserves_independent_opinion_and_safe_failure(monkeypatch):
+    def failed(_):
+        raise RuntimeError("OpenRouter HTTP 429")
+    monkeypatch.setattr(ai_verdict, "_BASE_REQUEST_VERDICT_WITHOUT_SHADOW", failed)
+    monkeypatch.setattr(ai_verdict, "render_policy_report", lambda _: "LOCAL REPORT")
+    monkeypatch.setattr(ai_verdict, "_request_llm_shadow_decision", lambda _: {
+        "status": "ok", "policy": "HOLD", "model": "real-structured-provider"})
+    result = ai_verdict.request_verdict(_snapshot())
+    assert result["llm_shadow_decision"]["status"] == "ok"
+    assert result["provider_failure"] == {"code": "provider_rate_limit", "retriable": True}
+    assert result["model"] == "deterministic-policy-fallback"
+
+
+def test_primary_programming_error_is_not_hidden_as_provider_failure(monkeypatch):
+    import pytest
+    def failed(_):
+        raise ValueError("programming error")
+    monkeypatch.setattr(ai_verdict, "_BASE_REQUEST_VERDICT_WITHOUT_SHADOW", failed)
+    with pytest.raises(ValueError, match="programming error"):
+        ai_verdict.request_verdict(_snapshot())
 
 
 def test_success_body_exposes_shadow_without_replacing_management_decision():

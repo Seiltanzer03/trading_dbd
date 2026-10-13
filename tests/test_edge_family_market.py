@@ -219,7 +219,7 @@ def test_runtime_invalid_evidence_is_isolated_and_cannot_vote(tmp_path, monkeypa
     if case == 'stale': snapshot['captured_ts'] += 1200
     if case == 'demo': engine.market.demo = True
     if case == 'authority': engine.market.intraday_source_authority['source_symbol'] = 'QQQ'
-    if case == 'horizon': snapshot['policy_manager']['inputs']['horizon_minutes'] = 30
+    if case == 'horizon': snapshot['policy_manager']['inputs']['horizon_minutes'] = 5
     path.write_text(json.dumps(report))
     market().attach_market_family_context(engine, snapshot)
     evidence = build_edge_family_evidence(snapshot)
@@ -546,3 +546,70 @@ def test_session_intermarket_and_native_option_survive_same_frozen_snapshot(tmp_
     evidence=build_edge_family_evidence(snapshot)
     assert all(evidence['families'][f]['forecast_available'] for f in ('option','session','intermarket'))
     assert len(json.dumps(snapshot).encode())<60000
+
+
+def test_slow_build_does_not_shift_frozen_family_forecast_origin(tmp_path, monkeypatch):
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    engine, snapshot, _, _ = runtime(tmp_path, monkeypatch)
+    snapshot['captured_ts'] = T0 + 310.
+    snapshot['policy_manager']['input_audit'] = {'snapshot_ts': T0}
+    market().attach_market_family_context(engine, snapshot)
+    assert snapshot['edge_family_market_context']['available'] is True
+    evidence = build_edge_family_evidence(snapshot)
+    session = evidence['families']['session']
+    assert session['forecast_available'] is True
+    assert session['forecast_origin_ts'] == T0
+    assert any(c['family_ids'] == ['session'] for c in evidence['components'])
+
+
+@pytest.mark.parametrize('input_clock', [T0+1, None, True, float('nan')])
+def test_invalid_declared_family_input_clock_cannot_admit_a_forecast(tmp_path, monkeypatch, input_clock):
+    engine, snapshot, _, _ = runtime(tmp_path, monkeypatch)
+    snapshot['policy_manager']['input_audit'] = {'snapshot_ts': input_clock}
+    market().attach_market_family_context(engine, snapshot)
+    assert snapshot['edge_family_market_context']['available'] is False
+
+
+def test_short_family_forecast_keeps_its_horizon_inside_longer_economic_comparison(tmp_path, monkeypatch):
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    engine, snapshot, _, _ = runtime(tmp_path, monkeypatch)
+    snapshot['policy_manager']['inputs']['horizon_minutes'] = 7200.
+    market().attach_market_family_context(engine, snapshot)
+    evidence = build_edge_family_evidence(snapshot)
+    row = evidence['families']['session']
+    assert row['forecast_available'] is True
+    assert row['market_predictions']['direction']['horizon_minutes'] == 15.
+    assert row['market_predictions']['direction']['economic_comparison_horizon_minutes'] == 7200.
+    assert row['market_predictions']['direction']['horizon_role'] == 'SHORT_HORIZON_MANUAL_PREFERENCE'
+    assert evidence['components']
+    assert all(c['net_economic_proof'] is False for c in evidence['components'])
+
+
+@pytest.mark.parametrize('horizon', [None, True, -1., float('nan')])
+def test_invalid_economic_horizon_never_admits_family_preference(tmp_path, monkeypatch, horizon):
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    engine, snapshot, _, _ = runtime(tmp_path, monkeypatch)
+    snapshot['policy_manager']['inputs']['horizon_minutes'] = horizon
+    market().attach_market_family_context(engine, snapshot)
+    assert not build_edge_family_evidence(snapshot)['components']
+
+
+def test_expired_short_forecast_does_not_inherit_long_source_ttl():
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    m = market()
+    history = [dict(captured_ts=b['bar_end_ts'],
+        features={'macro.observed_rate': math.sin(2*math.pi*b['bar_end_ts']/86400)},
+        feature_provenance={'macro.observed_rate': dict(source_verified=True,
+            source_id=f"recorded-release:{b['bar_end_ts']}", source_instrument='NAS100',
+            observed_ts=b['bar_end_ts']-60, received_ts=b['bar_end_ts']-1,
+            max_age_sec=86400., quality=1., dependency_group='recorded_macro')}) for b in source()['bars']]
+    model = m.train_market_families([source()], T0, horizons=(15,),
+        feature_history={'NAS100': {'macro': history}})['NAS100']['macro']
+    value = dict(captured_ts=T0, strategy={'instrument': 'NAS100', 'direction': 'long'},
+        policy_manager={'inputs': {'horizon_minutes': 7200.}, 'input_audit': {'snapshot_ts': T0}},
+        edge_family_market_context={'contract_version': m.CONTRACT, 'families': {'macro': {
+            'model': model, 'features': history[-1]['features'],
+            'feature_provenance': history[-1]['feature_provenance'], 'forecast_origin_ts': T0}}})
+    assert build_edge_family_evidence(value)['components']
+    value['captured_ts'] = T0 + 1200.
+    assert not build_edge_family_evidence(value)['components']

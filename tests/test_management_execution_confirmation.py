@@ -253,3 +253,56 @@ def test_complete_manual_stop_comparison_uses_measured_benefit_without_old_adver
     assert result['status'] == 'eligible'
     assert result['automatic_execution_allowed'] is False
     assert result['data_reliability'] == 'низкая'
+
+
+def _slow_native_snapshot():
+    from seiltanzer.ai_verdict_v18 import _compact_input_audit
+    s = frozen(trade(), {'remaining_position_fraction': 1., 'active_stop_price': 90.}, 110.)
+    s['captured_ts'] = 2210.
+    audit = s['policy_manager']['input_audit']
+    audit['snapshot_ts'] = 2000.
+    price = audit['rows']['instrument_price']
+    del price['production_authority']
+    price.update(timestamp=1982.3, age_sec=17.7, value=110., derived=False)
+    s['policy_manager']['input_audit'] = _compact_input_audit(audit)
+    s['policy_manager']['management_decision'] = {'automatic_execution_allowed': False}
+    return s
+
+
+@pytest.mark.parametrize('tier', ['normal', 'strict'])
+def test_compacted_native_quote_survives_slow_snapshot_without_retimestamping(tier):
+    from seiltanzer.unified_edge_ensemble import _manual_candidate_preflight
+    s = _slow_native_snapshot()
+    if tier == 'strict':
+        from seiltanzer.ai_snapshot_budget_guard import _compact_input_audit
+        s['policy_manager']['input_audit'] = _compact_input_audit(s['policy_manager']['input_audit'])
+    audit = s['policy_manager']['input_audit']
+    assert audit.get('snapshot_ts') == 2000.
+    assert audit['rows']['instrument_price'].get('timestamp') == 1982.3
+    assert _manual_candidate_preflight(s) is True
+    assert s['captured_ts'] == 2210.
+
+
+@pytest.mark.parametrize('changes', [
+    {'timestamp': 1969.}, {'timestamp': 2006.}, {'derived': True},
+    {'source': 'TradingView stream OANDA:SPX500USD'}, {'production_authority': False},
+    {'value': 111.},
+])
+def test_compacted_slow_snapshot_never_repairs_bad_original_quote(changes):
+    from seiltanzer.ai_verdict_v18 import _compact_input_audit
+    from seiltanzer.unified_edge_ensemble import _manual_candidate_preflight
+    s = _slow_native_snapshot()
+    audit = s['policy_manager']['input_audit']
+    # Supply original metadata before another genuine compaction pass.
+    audit['snapshot_ts'] = 2000.
+    audit['rows']['instrument_price'].update({'timestamp': 1982.3, 'value': 110., **changes})
+    s['policy_manager']['input_audit'] = _compact_input_audit(audit)
+    assert _manual_candidate_preflight(s) is False
+
+
+def test_input_observation_clock_after_final_capture_is_rejected():
+    from seiltanzer.unified_edge_ensemble import _manual_candidate_preflight
+    s = _slow_native_snapshot()
+    s['policy_manager']['input_audit']['snapshot_ts'] = 2211.
+    s['policy_manager']['input_audit']['rows']['instrument_price']['timestamp'] = 2209.
+    assert _manual_candidate_preflight(s) is False

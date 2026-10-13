@@ -441,7 +441,9 @@ def attach_market_family_context(engine, snapshot):
     context = {'contract_version': CONTRACT, 'families': {}, 'available': False,
                'reason': 'LOCAL_MARKET_MODELS_UNAVAILABLE', 'network_calls': False, 'runtime_fitting': False}
     snapshot['edge_family_market_context'] = context
-    cutoff = number(snapshot.get('captured_ts'))
+    from .snapshot_clock import market_observation_cutoff
+    cutoff = market_observation_cutoff(snapshot)
+    context['market_observation_ts'] = cutoff
     code = (snapshot.get('strategy') or {}).get('instrument') or snapshot.get('instrument')
     feed = getattr(engine, 'market', None)
     if cutoff is None or code not in ALL_INSTRUMENTS or getattr(feed, 'instrument_code', None) != code:
@@ -529,14 +531,24 @@ def market_family_evidence(snapshot, families):
     if (not isinstance(context, dict) or context.get('contract_version') != CONTRACT
             or simulated_evidence(context, recursive=False)):
         return []
-    cutoff = number(snapshot.get('captured_ts'))
+    from .snapshot_clock import market_observation_cutoff
+    cutoff = market_observation_cutoff(snapshot)
+    # A fresh quote reprice does not retimestamp an earlier expert forecast.
+    if 'market_observation_ts' in context:
+        raw_origin = context['market_observation_ts']
+        cutoff = None if isinstance(raw_origin, bool) else number(raw_origin)
+        final_capture = number(snapshot.get('captured_ts'))
+        if cutoff is None or final_capture is None or not 0 < cutoff <= final_capture:
+            return []
     code = (snapshot.get('strategy') or {}).get('instrument') or snapshot.get('instrument')
-    horizon = number(((snapshot.get('policy_manager') or {}).get('inputs') or {}).get('horizon_minutes'))
+    raw_horizon = ((snapshot.get('policy_manager') or {}).get('inputs') or {}).get('horizon_minutes')
+    horizon = None if isinstance(raw_horizon, bool) else number(raw_horizon)
     direction = str((snapshot.get('strategy') or {}).get('direction') or '').lower()
     sign = 1. if direction in {'long', 'buy'} else -1. if direction in {'short', 'sell'} else None
     components = []
     records = context.get('families')
-    if not isinstance(records, dict) or simulated_evidence(records, recursive=False) or cutoff is None:
+    if (not isinstance(records, dict) or simulated_evidence(records, recursive=False)
+            or cutoff is None or horizon is None or horizon <= 0):
         return []
     for family in FAMILIES:
         item = records.get(family)
@@ -561,18 +573,25 @@ def market_family_evidence(snapshot, families):
                 or proof[name].get('observed_ts') != origin-300 for name in features):
             row['forecast_rejections'].append({'reason': 'MARKET_RELATED_WINDOW_OR_LAG_MISMATCH'}); continue
         predictions, supported = {}, {}
+        final_capture = number(snapshot.get('captured_ts'))
         for name, head in model['heads'].items():
-            if 'head' not in head or head['horizon_minutes'] != horizon:
+            if 'head' not in head or head['horizon_minutes'] > horizon:
                 continue
             names = head['feature_names']
             if any(n not in features for n in names):
                 continue
             probability = float(predict(head['head'], [features[n] for n in names]))
             predictions[name] = {'probability': probability, 'baseline_probability': head['head']['baseline'],
-                'horizon_minutes': horizon, 'working_supported': head['working_supported'],
+                'horizon_minutes': head['horizon_minutes'],
+                'economic_comparison_horizon_minutes': horizon,
+                'horizon_role': ('MATCHED_HORIZON_MANUAL_PREFERENCE' if head['horizon_minutes'] == horizon
+                                 else 'SHORT_HORIZON_MANUAL_PREFERENCE'),
+                'working_supported': head['working_supported'],
                 'test_gain_mbit': head['test_gain_mbit'], 'test_n': head['test_n'],
                 'evidence_tier': head['working_admission']['tier']}
-            if head['working_supported']:
+            forecast_unexpired = final_capture is not None and final_capture < origin + 60.*head['horizon_minutes']
+            predictions[name]['forecast_expired'] = not forecast_unexpired
+            if head['working_supported'] and forecast_unexpired:
                 age = max(0., (cutoff-model['training_cutoff'])/86400)
                 quality = head['working_admission']['weight_multiplier'] * min(1.,head['test_n']/100) \
                     * min(1., max(0., head['test_gain_mbit']/20)) * max(0., 1-age/90)
@@ -596,7 +615,12 @@ def market_family_evidence(snapshot, families):
             scores = {'HOLD': 0., **{policy: -fraction*affinity for policy,fraction in
                        {'CLOSE_10':.1,'CLOSE_25':.25,'CLOSE_50':.5,'EXIT':1.}.items()}}
             qualities.append(quality)
-        if 'movement' in supported:
+        # A shorter direction head is a bounded current stance, never a
+        # replacement forecast of the terminal economic return. A movement
+        # head cannot prescribe a longer time/target change without matching
+        # its outcome window, so keep that original action restriction.
+        if ('movement' in supported
+                and predictions['movement']['horizon_minutes'] == horizon):
             p, quality = supported['movement']
             baseline = predictions['movement']['baseline_probability']
             low_move = max(0., (baseline-p)/max(baseline,.01))
@@ -605,12 +629,16 @@ def market_family_evidence(snapshot, families):
         row['market_preference_available'] = bool(scores)
         if not scores:
             continue
+        observed = min(m['observed_ts'] for m in metas)
+        score_heads = [name for name in supported if name == 'direction'
+                       or name == 'movement' and predictions[name]['horizon_minutes'] == horizon]
+        expiry = min(origin+60.*predictions[name]['horizon_minutes'] for name in score_heads)
         components.append({'component_id':'mathematical_edge', 'instrument':code, 'available':True,
             'scores':scores, 'quality':min(qualities), 'family_ids':[family],
             'model_version':model['model_sha256'], 'source_ids':sorted({m['source_id'] for m in metas}),
             'evidence_family_ids':sorted({m['dependency_group'] for m in metas}),
-            'observed_ts':min(m['observed_ts'] for m in metas),
-            'max_age_sec':min(m['observed_ts']+m['max_age_sec'] for m in metas)-min(m['observed_ts'] for m in metas),
+            'observed_ts':observed,
+            'max_age_sec':min(expiry, *(m['observed_ts']+m['max_age_sec'] for m in metas))-observed,
             'reason':'HISTORICAL_MARKET_RESPONSE_BOUNDED_MANUAL_PREFERENCE',
             'prediction_measure':TARGET, 'score_semantics':'affinity_not_expected_return', 'net_economic_proof':False})
     return components

@@ -180,3 +180,18 @@ def test_journal_failure_and_rate_limit_are_structured(tmp_path, monkeypatch):
         assert second.json()["error"]["code"] == "ai_rate_limited"
     finally:
         app.state.engine.close()
+
+
+def test_prose_fallback_keeps_api_mode_honest_with_valid_independent_opinion(tmp_path, monkeypatch):
+    app, client = _client(tmp_path, monkeypatch, lambda _: {
+        'verdict': 'LOCAL REPORT', 'model': 'deterministic-policy-fallback',
+        'provider_failure': {'code': 'provider_rate_limit', 'retriable': True},
+        'llm_shadow_decision': {'status': 'ok', 'policy': 'HOLD', 'model': 'structured-provider'}})
+    try:
+        body = client.post('/api/ai/verdict').json()
+        assert body['mode'] == 'deterministic_fallback'
+        assert body['degraded'] is True
+        assert body['provider_error']['code'] == 'provider_rate_limit'
+        assert body['llm_shadow_decision']['status'] == 'ok'
+    finally:
+        app.state.engine.close()

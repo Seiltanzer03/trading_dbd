@@ -219,6 +219,10 @@ def _publish_unified_review(engine, snapshot: dict, result: dict, review_id: str
         current_version = engine.position._geometry_version(active, engine.position.state(active))
         if frozen.get("geometry_version") != current_version:
             raise StaleDecisionError("position geometry changed before unified publication")
+        from .ai_snapshot_market_refresh import assert_live_review_compatible
+        winner = next((row for row in audit.get('candidates') or []
+                       if row.get('candidate_id') == audit.get('selected_candidate_id')), None)
+        assert_live_review_compatible(engine, snapshot, candidate=winner, components=audit.get('components'))
         decision, proposal = _unified_operational_choice(engine, snapshot, active, audit)
         engine.position.register_decision(snapshot, review_id, active)
         if proposal:
@@ -1302,6 +1306,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         req_id, retriable=True))
             # Evaluate every extended action alongside the base policies. The
             # independent provider sees quantified candidates, not a picked winner.
+            from .ai_snapshot_market_refresh import refresh_frozen_comparison
+            try:
+                snapshot = await trace.to_thread('market_refresh', refresh_frozen_comparison, engine, snapshot)
+            except StaleDecisionError as exc:
+                materializer = getattr(app.state, 'ai_snapshot_materializer', None)
+                if materializer is not None:
+                    materializer.request_refresh('LIVE_COMPARISON_CHANGED')
+                return JSONResponse(status_code=409, content=ai_error_body(
+                    'stale_decision', str(exc), req_id, retriable=True))
             await trace.to_thread('family_bundle', _attach_family_source_bundle, engine, snapshot)
             from .unified_edge_runtime_context import attach_unified_edge_context
             from .runtime_git_identity import runtime_git_sha
@@ -1348,6 +1361,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 result = await trace.to_thread('provider', request_verdict, snapshot)
                 if not isinstance(result, dict) or not isinstance(result.get("verdict"), str):
                     raise RuntimeError("provider_invalid_payload")
+                degraded = result.get("model") == "deterministic-policy-fallback"
+                provider_failure = result.get("provider_failure")
             except AIReviewWorkerBusy:
                 raise
             except RuntimeError as exc:
@@ -1385,6 +1400,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise
             except StaleDecisionError as exc:
                 trace.error("stale_decision", exc)
+                materializer = getattr(app.state, 'ai_snapshot_materializer', None)
+                if materializer is not None:
+                    materializer.request_refresh('LIVE_COMPARISON_CHANGED')
                 return JSONResponse(
                     status_code=409,
                     content=ai_error_body(
