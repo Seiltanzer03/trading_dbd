@@ -90,6 +90,12 @@ Owning profile48 passed/6 subtests in2.25s. One independent scoped final review
 found no Critical/Important/Minor issues and independently verified all5 new
 regression cases. No repeat runtime CI, model fitting or AI call is required.
 
+Run38612040474 passed48 tests and preserved the exact prior btmp.1.gz2329658
+bytes plus one newly closed8388608-byte journal in verified Yandex objects.
+Native logrotate exited1; capture_output hid its stderr. No successful rotation
+or retirement of the active btmp is asserted. A read-only --debug diagnostic
+retrieves the actual native reason and path sizes before any additional rotation.
+
 If actual recovered space cannot meet the existing reserve, further heavy
 research remains blocked; neither repeat training nor a smaller guard substitutes
 for real capacity. Protected backups and active runner components are preserved.

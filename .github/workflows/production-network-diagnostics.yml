@@ -42,7 +42,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ru-central1
           AWS_EC2_METADATA_DISABLED: "true"
-        run: python scripts/ops_yandex_closed_logs.py --expected-sha "$EXPECTED_SHA" --apply --rotate-btmp
+        run: python scripts/ops_yandex_closed_logs.py --expected-sha "$EXPECTED_SHA" --apply
       - name: Verify capacity and compact only reconstructible Git metadata if needed
         uses: appleboy/ssh-action@v1
         env:
@@ -67,3 +67,18 @@ jobs:
             curl -fsS --max-time 8 http://127.0.0.1:8790/api/state -o /dev/null
             df -B1 /
             python3 -c 'import json,os;v=os.statvfs("/opt/seiltanzer");n=v.f_bavail*v.f_frsize;print("CAPACITY_RESULT="+json.dumps({"free_bytes":n,"research_reserve_bytes":1073741824,"reserve_available":n>=1073741824,"runtime_sha":os.environ["EXPECTED_SHA"]}))'
+            python3 - <<'PY'
+            import json,stat,subprocess,tempfile
+            from pathlib import Path
+            for name in ('btmp','btmp.1','btmp.1.gz'):
+                p=Path('/var/log')/name
+                print('BTMP_PATH='+json.dumps({'path':str(p),'exists':p.exists(),'symlink':p.is_symlink(),'size':p.stat().st_size if p.is_file() else None}))
+            p=Path('/var/log/btmp')
+            mode=format(stat.S_IMODE(p.stat().st_mode),'04o')
+            with tempfile.TemporaryDirectory(prefix='btmp-readonly-debug-') as tmp:
+                config=Path(tmp)/'config'
+                config.write_text('/var/log/btmp {\nrotate -1\ncreate '+mode+' root utmp\nnocompress\nmissingok\nnotifempty\n}\n')
+                config.chmod(0o600)
+                r=subprocess.run(['/usr/sbin/logrotate','--debug','--force','--state',str(Path(tmp)/'state'),str(config)],capture_output=True,text=True,timeout=30)
+                print('BTMP_LOGROTATE_READONLY_DEBUG='+json.dumps({'returncode':r.returncode,'stderr':r.stderr[-6000:]}))
+            PY
