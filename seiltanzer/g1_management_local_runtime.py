@@ -270,6 +270,11 @@ class ManagementLocalRuntime:
             realized_before = float(obs["realized_before_r"])
             remaining = float(obs["remaining_before"])
             production = str(obs["production_policy"])
+            # Capture retains extended actions with an explicit upstream
+            # exclusion. Their geometry cannot be replayed as a fixed close
+            # policy; leave those immutable windows without invented outcomes.
+            if production not in POLICY_FRACTIONS:
+                continue
             values = {name: float(standard[name]["net_realized_r"])
                       for name in POLICY_FRACTIONS}
             values["ORIGINAL_PLAN"] = realized_before + remaining * float(original_future)
