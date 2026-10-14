@@ -53,6 +53,34 @@ def test_exact_sha_local_admission_and_immutable_cached_copy(tmp_path):
     assert load(tmp_path)["edge_family_sources"]["intermarket"][0]["source_id"] == "actual-related-returns"
 
 
+def test_local_publication_change_between_stat_and_open_cannot_enter_earlier_quote(tmp_path,monkeypatch):
+    from seiltanzer import edge_family_source_runtime as runtime
+    write_bundle(tmp_path,bundle())
+    original=runtime._read
+    def replace_before_open(path,*identity):
+        payload=bundle()
+        payload['instruments']['BTCUSD']['edge_family_sources']['intermarket'][0]['source_id']='later-local-publication'
+        write_bundle(tmp_path,payload,mtime=T0+1)
+        return original(path,*identity)
+    monkeypatch.setattr(runtime,'_read',replace_before_open)
+    result=load(tmp_path)
+    assert result['edge_family_sources']=={}
+    assert result['edge_family_source_bundle_audit']['reason']=='SOURCE_BUNDLE_CHANGED_DURING_READ'
+
+
+def test_preserved_file_mtime_does_not_backdate_local_source_availability(tmp_path):
+    import time
+    cutoff=time.time()-20
+    payload=bundle();payload['captured_ts']=cutoff-3
+    source=payload['instruments']['BTCUSD']['edge_family_sources']['intermarket'][0]
+    source.update(observed_ts=cutoff-5,received_ts=cutoff-4)
+    source['linked_returns'][0].update(start_ts=cutoff-305,end_ts=cutoff-5)
+    write_bundle(tmp_path,payload,mtime=cutoff-2)
+    result=load(tmp_path,captured_ts=cutoff)
+    assert result['edge_family_sources']=={}
+    assert result['edge_family_source_bundle_audit']['reason']=='SOURCE_BUNDLE_FILE_STALE_OR_AFTER_SNAPSHOT'
+
+
 @pytest.mark.parametrize("field,value", [("published_for_sha", "b" * 40),
     ("production_authority", True), ("contract_version", "unknown"),
     ("edge_policy", "unknown"), ("publication_contract_version", "unknown"),

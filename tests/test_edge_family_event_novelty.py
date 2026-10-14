@@ -253,6 +253,20 @@ def test_renamed_metadata_with_removed_contract_cannot_fall_back_to_consensus(mo
 def test_runtime_validates_novelty_at_bundle_capture_and_preserves_unrelated(monkeypatch, tmp_path):
     from test_edge_family_source_runtime import bundle, write_bundle, load
     source, cutoff = packet(monkeypatch)
+    # This test fixes a real dated FOMC identity. Simulate that historical
+    # local publication in this reader only; real ctime/race guards have their
+    # own filesystem regressions and must not be bypassed in production.
+    import os
+    from seiltanzer import edge_family_source_runtime as runtime
+    def historical_stat(stat):
+        fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime', 'st_mtime_ns')
+        return SimpleNamespace(**{key: getattr(stat, key) for key in fields},
+                               st_ctime=cutoff, st_ctime_ns=int(cutoff*1e9))
+    class HistoricalPublicationPath(type(tmp_path)):
+        def stat(self, *args, **kwargs):
+            return historical_stat(super().stat(*args, **kwargs))
+    monkeypatch.setattr(runtime, 'Path', HistoricalPublicationPath)
+    monkeypatch.setattr(runtime, 'os', SimpleNamespace(fstat=lambda fd: historical_stat(os.fstat(fd))))
     payload = bundle(); payload['captured_ts'] = cutoff-15
     payload['instruments']['BTCUSD']['edge_family_sources'] = {'event': [source]}
     write_bundle(tmp_path, payload, mtime=cutoff-1)

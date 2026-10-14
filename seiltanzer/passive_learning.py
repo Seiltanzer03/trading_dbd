@@ -458,6 +458,10 @@ class PassiveLearningEngine:
             raise ValueError("unsupported instrument")
         if not math.isfinite(captured_ts) or not math.isfinite(market_price):
             raise ValueError("capture time and price must be finite")
+        context = getattr(self, '_family_source_capture', None)
+        if context is not None:
+            from .edge_family_passive_capture import enrich_capture
+            features = enrich_capture(context, instrument, captured_ts, features)
         for path, ts in _walk_timestamps(features):
             if ts > captured_ts + 1e-6:
                 raise ValueError(f"post-capture feature timestamp: {path}")

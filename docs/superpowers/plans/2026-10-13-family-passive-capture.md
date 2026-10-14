@@ -1,0 +1,28 @@
+# Family facts at regular market T0
+
+Execute inline; one fresh final review of the whole package. Baseline787a25df/tree0239894 equals accepted main4ddbe96. Original unified-edge plan §7 requires source→immutable history→model→forecast, without an active trade prerequisite.
+
+Observed gap: app attaches the local source bundle only at POST AI verdict. PassiveLearningEngine.capture_observation stores regular quote features and the macro wrapper, but not generic published family facts. Native historical exporter already knows how to validate these roots. Do not reconstruct absent old facts or change original capture clocks.
+
+Design: one per-engine binding and one optional enrichment at the base capture/write boundary, after existing macro/V2/V3 hooks. Read only the existing bounded/cached local source reader at quote captured_ts, using the immutable process installation SHA. Preserve existing family keys, macro hooks and caller input; optional failure never loses native observations. Source facts remain within8KB, audit within2KB, whole frozen record within the existing256KB native-reader ceiling; never copy raw CFTC packets, forecasts or model votes. Demo observations keep existing behavior. No network calls, extra cadence, fitting, past-row rewrites, price-source switch, broker/cost/position mutation.
+
+Task1: real SQLite RED→GREEN showing admitted facts persisted without a trade and readable by native_history; future/stale/wrong-generation/missing bundles leave native capture valid; caller immutability and existing family preservation; macro-hook composition and idempotent engine binding. Install before regular app collection; no source-authority promotion.
+
+Task2: observed cancelled delivery invoked recovery before its SHA existed. Execute workflow guard under stub host commands: wrong/missing installed SHA must refuse before any service stop. Keep healthy exact-SHA no-op and genuine delivered/unhealthy recovery. Do not add retry loops, rotation, broaden deletion, lower reserve or bypass verification. This change is bundled with Task1, not another standalone deployment.
+
+Verification: owning passive/source/native-history/macro capture and recovery profiles, one final fresh reviewer; critical/important findings get one tested fix pass, minor polish deferred. Exact-tree CI once after final code. Hold integration while current exact-SHA4dd research publication is active; consolidate the next release rather than invalidate it.
+
+Review focus: engine isolation and macro/V2/V3 ordering; original quote cutoff versus later receipt; optional file errors/corrupt payload; memory/byte bounds; local publication replacement and preserved mtime; existing roots/dedup and source-clock immutability; demo/evidence flags; recovery guard precedes stop and does not declare production accepted.
+
+Ruling: enrich at the base capture boundary instead of a global wrapper — a real regression showed optional facts made a previously exportable record exceed256KB after existing hooks; source identity/quote clocks remain unchanged and optional facts must yield to native history. Cost if wrong: fewer captured family observations, never dropped quote history.
+Ruling: local admission requires max(mtime,ctime)<=quote cutoff plus stable dev/inode/size/mtime/ctime before and after read — mtime-preserving copy and concurrent replacement both reproduced admission of later local bytes. These are local availability guards, not historical publication receipts. Cost if wrong: conservative optional-source rejection after a metadata change.
+
+Progress: current4dd release38441784468 attempt2 accepted, CI3955passed/pinnedSQLite/frontend/WebKit and all7production checks. Previously failed auxiliary recovery38441795560 now verified healthy exact-SHA no-op and success, no rotation/redeploy. CFTC3private Yandex objects/384weekly rows fully GET verified remain a separate completed milestone. Eight-family readiness is still partial.
+
+Final fresh whole-package review: one Important, no Critical/Minor; reviewer independently passed106 checks. Source admission accepts optional `timestamp`/`as_of` aliases that passive capture rejects when after T0, so enrichment could lose the native row. Both cases reproduced RED. One fix pass reuses the exact passive timestamp walker before returning enrichment and yields to original features; invalid original timestamps still raise normally. No second review or incidental polish pass.
+
+Ruling: optional facts must satisfy the consuming passive clock contract as well as source admission. Cost if wrong: discard optional enrichment conservatively, preserve original quote history and ordinary native validation. Combined consumer/owner run:207 passed and one old fixed-date file fixture rejected by the strengthened real ctime guard. The fixture now moves all synthetic clocks together prospectively, retaining minute alignment and detached serialized values; the production admission guard was not relaxed. Final passive/history profile and exact-tree CI remain the acceptance evidence.
+
+Final passive/history check after that fix:79 passed in0.69s; git diff --check clean. Earlier owner profile108 passed. Full Python3.11, pinnedSQLite and realWebKit CI will run once on the final uploaded tree.
+
+Observed current4dd mathematical publication38444635928/artifact11838330445:21 new fits+4 retained=25 total,14 supported models; same five missing source/history/causal-model chains, crypto target series remains unavailable. No fabricated promotion. Exact4dd EDE38447965142 is still exporting its verified snapshot; do not merge until its final publication completes.

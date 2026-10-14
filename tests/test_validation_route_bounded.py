@@ -56,6 +56,9 @@ def test_validation_route_computes_q_calibration_once(monkeypatch):
 
     engine = FakeEngine()
     monkeypatch.setattr(app_module, "Engine", lambda _settings: engine)
+    # Isolate this route-only fake from real passive collector installation.
+    monkeypatch.setattr("seiltanzer.edge_family_passive_capture.install_family_source_capture",
+                        lambda _engine: None)
     app = app_module.create_app(settings=object())  # type: ignore[arg-type]
     endpoint = next(
         route.endpoint for route in app.routes

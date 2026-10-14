@@ -26,3 +26,21 @@ def test_queued_recovery_rechecks_current_service_before_stopping(tmp_path,event
         assert result.stdout.strip()=='RECOVERY_NOT_REQUIRED_EXACT_SHA_HEALTHY=1'
     else:
         assert result.stdout.strip()=='RECOVERY_REQUESTED'
+
+
+@pytest.mark.parametrize('current_sha',['older-accepted-sha',''])
+def test_undelivered_sha_refuses_recovery_before_service_stop(tmp_path,current_sha):
+    workflow=yaml.safe_load(Path('.github/workflows/production-single-slot-backup-recovery.yml').read_text())
+    script=workflow['jobs']['recover']['steps'][0]['with']['script']
+    guard=script.split('# Recovery deliberately stops')[0]
+    for name,body in {'git':'echo "$CURRENT_SHA"',
+                      'systemctl':'echo "$*" >> "$COMMAND_TRACE"; exit 0',
+                      'curl':'echo 200'}.items():
+        p=tmp_path/name;p.write_text('#!/bin/sh\n'+body+'\n');p.chmod(0o755)
+    trace=tmp_path/'commands'
+    env={**os.environ,'PATH':str(tmp_path)+':'+os.environ['PATH'],
+         'EXPECTED_SHA':'requested-new-sha','CURRENT_SHA':current_sha,'COMMAND_TRACE':str(trace)}
+    # If admission falls through, the actual next operation would stop serving.
+    result=subprocess.run(['bash','-c',guard+'\nsystemctl stop seiltanzer\n'],env=env,text=True,capture_output=True)
+    assert result.returncode!=0,'an undelivered release entered backup recovery'
+    assert not trace.exists() or 'stop seiltanzer' not in trace.read_text()

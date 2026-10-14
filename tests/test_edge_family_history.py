@@ -217,6 +217,8 @@ def test_bundle_capture_is_binding_to_each_history_receipt(tmp_path):
 
 
 def test_real_collector_history_passes_unchanged_consumer_budget_and_dataset(tmp_path):
+    import math
+    import time
     from test_edge_family_sources import build_bundle, candles, cot, calendar, book, tape, T0 as COLLECT_T0
     from test_edge_family_source_runtime import SHA, write_bundle
     from test_edge_family_dataset import snapshot, record, archive, build, T0 as DATASET_T0
@@ -230,6 +232,26 @@ def test_real_collector_history_passes_unchanged_consumer_budget_and_dataset(tmp
     payload = build_bundle(instruments=('NAS100', 'XAU', 'BTCUSD'), fetch=fetch, clock=lambda: COLLECT_T0)
     assert len(calls) == 12
     payload.update(publication_contract_version=PUBLICATION, published_for_sha=SHA)
+    payload = json.loads(json.dumps(payload))  # Same detached values as file serialization.
+    # The local file is created now, not at the old fixed collector fixture
+    # date. Move synthetic clocks together before testing current admission.
+    shift = max(0, math.ceil((time.time() + 60 - COLLECT_T0) / 60) * 60)
+    def rebase(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if (key.endswith('_ts') or key.endswith('_at')) and isinstance(item, (int, float)):
+                    value[key] = item + shift
+                else: rebase(item)
+        elif isinstance(value, list):
+            for item in value: rebase(item)
+    rebase(payload)
+    for instrument in payload['instruments'].values():
+        for records in instrument['edge_family_sources'].values():
+            for source in records:
+                for series in source.get('historical_series', []):
+                    for bar in series['bars']:
+                        bar[0] += shift; bar[2] += shift
+    COLLECT_T0 += shift
     write_bundle(tmp_path, payload, mtime=COLLECT_T0)
     runtime_snapshot = dict(instrument='NAS100', captured_ts=COLLECT_T0)
     loaded = load_family_source_context(SimpleNamespace(settings=SimpleNamespace(data_dir=tmp_path)), runtime_snapshot, SHA)
@@ -240,14 +262,6 @@ def test_real_collector_history_passes_unchanged_consumer_budget_and_dataset(tmp
     # Rebase received fixture clocks prospectively onto the dataset review.
     source = deepcopy(loaded['edge_family_sources']['intermarket'][0])
     shift = DATASET_T0 - COLLECT_T0
-    def rebase(value):
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if (key.endswith('_ts') or key.endswith('_at')) and isinstance(item, (int, float)):
-                    value[key] = item + shift
-                else: rebase(item)
-        elif isinstance(value, list):
-            for item in value: rebase(item)
     rebase(source)
     for series in source['historical_series']:
         for bar in series['bars']:
