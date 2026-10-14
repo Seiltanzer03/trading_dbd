@@ -1,6 +1,8 @@
 name: production-ede-v13-audit
 
 on:
+  push:
+    branches: ["ops/ede-research-resume-fdffdbd-20261014"]
   workflow_dispatch:
     inputs:
       expected_sha:
@@ -38,6 +40,7 @@ jobs:
           DISPATCH_ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
           SCHEDULE_SHA: ${{ github.sha }}
           SCHEDULE_RUN_ID: ${{ github.run_id }}
+          PUSH_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
@@ -48,6 +51,12 @@ jobs:
             echo "expected_sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
             echo "acceptance_run_id=$DISPATCH_ACCEPTANCE_RUN_ID" >> "$GITHUB_OUTPUT"
             echo "exact_chain=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            test "$PUSH_REF" = "refs/heads/ops/ede-research-resume-fdffdbd-20261014"
+            # Resume the original research with the accepted runtime and this real run owner.
+            echo "expected_sha=fdffdbde030164bf4cd00fba24ef8f6d0d133121" >> "$GITHUB_OUTPUT"
+            echo "acceptance_run_id=$SCHEDULE_RUN_ID" >> "$GITHUB_OUTPUT"
+            echo "exact_chain=false" >> "$GITHUB_OUTPUT"
           else
             test "$EVENT_NAME" = "schedule"
             echo "expected_sha=$SCHEDULE_SHA" >> "$GITHUB_OUTPUT"
