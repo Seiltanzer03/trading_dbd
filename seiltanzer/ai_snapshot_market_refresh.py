@@ -119,6 +119,9 @@ def refresh_frozen_comparison(engine, snapshot):
         'plus_0_15_r': {'r': geometry['current_r']+.15, 'price': geometry['current']+.15*risk_unit},
         'chain_refresh': {**_chain_refresh(engine, tick), 'basis': 'current_quote_refresh'},
     }
+    # Match the native v18 snapshot contract: a future polling appointment is
+    # not an observed source timestamp. Keep its display strings/countdown.
+    manager['recalculation_triggers']['chain_refresh'].pop('next_attempt_ts', None)
     # These event probabilities/geometry belong to the old heavy bridge build,
     # not the freshly priced comparison. Missing current statistics stay null.
     for key in ('take_first', 'stop_or_be_first', 'no_touch', 'p50_resolution_minutes'):

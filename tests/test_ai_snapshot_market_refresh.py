@@ -64,6 +64,28 @@ def test_refresh_updates_recalculation_coordinates_and_best_expected(monkeypatch
     assert triggers['chain_refresh']['basis']=='current_quote_refresh'
 
 
+def test_future_poll_schedule_after_refresh_does_not_become_future_market_input(monkeypatch):
+    from seiltanzer.ai_snapshot_market_refresh import refresh_frozen_comparison
+    from seiltanzer.decision_research import canonical_snapshot
+    from seiltanzer import ai_snapshot_market_refresh as refresh
+    now=1791979100.
+    engine,s,tick=fixture(monkeypatch)
+    s['captured_ts']=now-100.
+    tick['ts']=now
+    tick['feeds']['price']['ts']=now-1.
+    tick['feeds']['chain']={'ts':now-100.,'status':'delayed','source':'configured option source'}
+    monkeypatch.setattr(refresh.time,'time',lambda:now)
+    out=refresh_frozen_comparison(engine,s)
+    assert canonical_snapshot(out)['review_id']
+    chain=out['policy_manager']['recalculation_triggers']['chain_refresh']
+    assert 'next_attempt_ts' not in chain
+    assert chain['seconds_until_attempt']==500.
+    assert chain['next_attempt_local'] and chain['next_attempt_utc']
+    out['feeds']={'price':{'ts':now+2.,'value':111.}}
+    with pytest.raises(ValueError,match='post-capture timestamps'):
+        canonical_snapshot(out)
+
+
 @pytest.mark.parametrize('instrument',['UK100','NAS100','XAU','EURUSD'])
 def test_native_manual_decision_contract_can_refresh_a_fresh_configured_quote(monkeypatch,instrument):
     from seiltanzer.ai_policy import resolve_management_sequence
