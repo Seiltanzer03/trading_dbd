@@ -129,7 +129,12 @@ def _manual_candidate_preflight(snapshot):
     if execution_barrier_reached(snapshot) is not None:
         return False
     decision = (snapshot.get("policy_manager") or {}).get("management_decision") or {}
-    return decision.get("automatic_execution_allowed") is False
+    # Native sequential decisions use automatic_broker_execution; newer
+    # consumers use automatic_execution_allowed. Both declare manual-only
+    # operation. Never let one False mask a conflicting or malformed flag.
+    flags = [decision[key] for key in ("automatic_execution_allowed", "automatic_broker_execution")
+             if key in decision]
+    return bool(flags) and all(flag is False for flag in flags)
 
 
 def _base_authorized(manager, policy, snapshot=None):
