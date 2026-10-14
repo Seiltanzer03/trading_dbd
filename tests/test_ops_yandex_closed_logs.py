@@ -1,0 +1,175 @@
+from pathlib import Path
+import shutil
+import sys
+import shlex
+import subprocess
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+import ops_yandex_closed_logs as ops
+
+
+@pytest.fixture
+def log_source(tmp_path, monkeypatch):
+    root = tmp_path / 'log'
+    journal_root = root / 'journal'
+    diag_root = tmp_path / 'runner' / '_diag'
+    monkeypatch.setattr(ops, 'LOG_ROOT', root)
+    monkeypatch.setattr(ops, 'JOURNAL_ROOT', journal_root)
+    monkeypatch.setattr(ops, 'DIAG_ROOT', diag_root)
+    parent = journal_root / ('a' * 32)
+    parent.mkdir(parents=True)
+    source = parent / 'system@1234-5678-abcd.journal'
+    source.write_bytes(b'closed forensic log\x00' * 10)
+    return source
+
+
+def receipt(source, workspace):
+    original = workspace / ops.transport_name(source)
+    original.write_bytes(source.read_bytes())
+    value = ops.archive.prepare(original, original.with_suffix('.gz'), expected_sha='f' * 40)
+    return {**value, 'original_path': str(source), 'verified_full_get': True}
+
+
+def test_retirement_requires_preserved_exact_bytes_and_rejects_active_journal(log_source, tmp_path):
+    value = receipt(log_source, tmp_path)
+    calls = []
+    proof = ops.retire(log_source, value, is_closed=lambda p: calls.append(p) or True)
+    assert len(calls) == 2
+    assert proof['all_bytes_preserved_in_cloud'] is True
+    assert proof['retired_bytes'] == value['source_size_bytes']
+    assert not log_source.exists()
+    active = log_source.with_name('system.journal')
+    active.write_bytes(b'active')
+    with pytest.raises(ValueError, match='Only closed'):
+        ops.check_scope(active)
+    assert active.exists()
+
+
+@pytest.mark.parametrize('change', ['open', 'opens_later', 'wrong_hash', 'changed', 'unverified', 'wrong_path'])
+def test_incomplete_or_changed_cloud_proof_preserves_source(log_source, tmp_path, change):
+    value = receipt(log_source, tmp_path)
+    closed = lambda p: True
+    if change == 'open':
+        closed = lambda p: False
+    elif change == 'opens_later':
+        answers = iter([True, False])
+        closed = lambda p: next(answers)
+    elif change == 'wrong_hash':
+        value['source_sha256'] = '0' * 64
+    elif change == 'changed':
+        log_source.write_bytes(log_source.read_bytes() + b'new')
+    elif change == 'unverified':
+        value['verified_full_get'] = False
+    elif change == 'wrong_path':
+        value['original_path'] = '/var/log/btmp.1'
+    with pytest.raises(ValueError):
+        ops.retire(log_source, value, is_closed=closed)
+    assert log_source.exists()
+
+
+def test_symlink_and_database_paths_are_outside_scope(log_source, tmp_path):
+    linked = log_source.with_name('system@dead-beef.journal')
+    linked.symlink_to(log_source)
+    with pytest.raises(ValueError, match='Symlinked'):
+        ops.check_scope(linked)
+    db = tmp_path / 'trades.db'
+    db.write_bytes(b'preserve')
+    with pytest.raises(ValueError, match='Only closed'):
+        ops.check_scope(db)
+    assert db.read_bytes() == b'preserve'
+
+
+def test_failed_cloud_full_get_never_requests_remote_retirement(log_source, tmp_path, monkeypatch):
+    calls = []
+    def remote(client, expression):
+        calls.append(expression)
+        assert len(calls) == 1
+        return {'signature': list(ops.archive.signature(log_source)),
+                'sha256': ops.archive.digest(log_source)}
+    class Sftp:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def get(self, source, destination): shutil.copyfile(source, destination)
+    class Client:
+        def open_sftp(self): return Sftp()
+    monkeypatch.setattr(ops, 'remote', remote)
+    monkeypatch.setattr(ops.archive, 's3_client', lambda: object())
+    def failed(*args, **kwargs): raise RuntimeError('cloud full GET failed')
+    monkeypatch.setattr(ops.archive, 'upload', failed)
+    with pytest.raises(RuntimeError, match='cloud full GET failed'):
+        ops.archive_one(Client(), str(log_source), 'f' * 40, tmp_path)
+    assert len(calls) == 1
+    assert log_source.exists()
+
+
+@pytest.mark.parametrize('mode', [0o600, 0o660])
+def test_btmp_rotation_preserves_inode_bytes_and_creates_new_active_file(log_source, monkeypatch, mode):
+    source = ops.LOG_ROOT / 'btmp'
+    source.write_bytes(b'failed logins')
+    source.chmod(mode)
+    before = source.stat()
+    monkeypatch.setattr(ops, 'utmp_gid', lambda: before.st_gid)
+    def rotate(path):
+        path.rename(path.with_name('btmp.1'))
+        path.write_bytes(b'new logins')
+        path.chmod(mode)
+    rotated = ops.rotate_btmp(source, rotate=rotate, is_closed=lambda p: True)
+    assert rotated.read_bytes() == b'failed logins'
+    assert rotated.stat().st_ino == before.st_ino
+    assert source.read_bytes() == b'new logins'
+
+
+def test_btmp_rotation_refuses_existing_rotated_file_before_mutation(log_source, monkeypatch):
+    source = ops.LOG_ROOT / 'btmp'
+    source.write_bytes(b'active')
+    source.chmod(0o600)
+    (ops.LOG_ROOT / 'btmp.1').write_bytes(b'prior archive')
+    monkeypatch.setattr(ops, 'utmp_gid', lambda: source.stat().st_gid)
+    with pytest.raises(ValueError, match='Existing rotated'):
+        ops.rotate_btmp(source, rotate=lambda p: pytest.fail('must not rotate'), is_closed=lambda p: True)
+    assert source.read_bytes() == b'active'
+
+
+def test_btmp_rotation_refuses_symlink(log_source):
+    source = ops.LOG_ROOT / 'btmp'
+    source.symlink_to(log_source)
+    with pytest.raises(ValueError, match='Unsafe active'):
+        ops.rotate_btmp(source, rotate=lambda p: pytest.fail('must not rotate'), is_closed=lambda p: True)
+    assert log_source.exists()
+
+
+def test_actual_constructed_remote_retirement_payload(log_source, tmp_path, monkeypatch):
+    value = receipt(log_source, tmp_path)
+    def execute(client, command, timeout):
+        argv = shlex.split(command)
+        code = argv[2].replace('LOG_ROOT=Path("/var/log")', f'LOG_ROOT=Path({str(ops.LOG_ROOT)!r})')
+        result = subprocess.run([sys.executable, '-c', code],capture_output=True,text=True)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+    monkeypatch.setattr(ops, '_exec', execute)
+    proof = ops.remote(None, 'def is_closed(p): return True\nmanifest=' + repr(value) +
+                       '\nwrite_receipt(' + repr(str(log_source)) + ',manifest)\n' +
+                       'print(json.dumps(retire(' + repr(str(log_source)) + ',manifest,is_closed=is_closed)))')
+    assert proof['all_bytes_preserved_in_cloud'] is True
+    assert not log_source.exists()
+    assert Path(str(log_source)+'.cloud-'+value['source_sha256']+'.archive.json').is_file()
+
+
+@pytest.mark.parametrize('symlink', [False, True])
+def test_receipt_cannot_overwrite_other_file(log_source, tmp_path, symlink):
+    value = receipt(log_source, tmp_path)
+    destination = Path(str(log_source)+'.cloud-'+value['source_sha256']+'.archive.json')
+    protected = tmp_path / 'trades.db'
+    protected.write_bytes(b'protected data')
+    if symlink:
+        destination.symlink_to(protected)
+    else:
+        destination.write_bytes(b'prior receipt')
+    with pytest.raises(FileExistsError):
+        ops.write_receipt(log_source, value)
+    assert protected.read_bytes() == b'protected data'
+    assert log_source.exists()
+    if not symlink:
+        assert destination.read_bytes() == b'prior receipt'
