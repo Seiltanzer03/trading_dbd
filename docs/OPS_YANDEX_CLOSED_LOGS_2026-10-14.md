@@ -44,6 +44,13 @@ standard0660 btmp mode is preserved as well as0600, rather than changing its
 permissions. Final owning profile:42 passed,6 subtests in1.80s.
 Full runtime CI is not repeated.
 
+Hosted run38605871707 stopped at pre-operation tests; no live archive, rotation
+or metadata compaction ran. Its nonroot runner exposed three fixture ownership
+assumptions, and an existing workflow test required PyYAML. The test fixture now
+models root metadata only for its temporary btmp paths, with a separate nonroot
+rejection regression; the production ownership guard is unchanged. The workflow
+installs its missing test dependency before any operation.
+
 If actual recovered space cannot meet the existing reserve, further heavy
 research remains blocked; neither repeat training nor a smaller guard substitutes
 for real capacity. Protected backups and active runner components are preserved.

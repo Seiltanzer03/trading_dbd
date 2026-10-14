@@ -3,6 +3,7 @@ import shutil
 import sys
 import shlex
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +24,23 @@ def log_source(tmp_path, monkeypatch):
     source = parent / 'system@1234-5678-abcd.journal'
     source.write_bytes(b'closed forensic log\x00' * 10)
     return source
+
+
+@pytest.fixture
+def btmp_owner(log_source, monkeypatch):
+    # Model production root ownership without requiring a root test runner.
+    original_stat = Path.stat
+    owner = {'uid': 0}
+    paths = {ops.LOG_ROOT / 'btmp', ops.LOG_ROOT / 'btmp.1'}
+    def production_stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path not in paths:
+            return result
+        fields = {name: getattr(result, name) for name in dir(result) if name.startswith('st_')}
+        fields['st_uid'] = owner['uid']
+        return SimpleNamespace(**fields)
+    monkeypatch.setattr(Path, 'stat', production_stat)
+    return owner
 
 
 def receipt(source, workspace):
@@ -105,7 +123,7 @@ def test_failed_cloud_full_get_never_requests_remote_retirement(log_source, tmp_
 
 
 @pytest.mark.parametrize('mode', [0o600, 0o660])
-def test_btmp_rotation_preserves_inode_bytes_and_creates_new_active_file(log_source, monkeypatch, mode):
+def test_btmp_rotation_preserves_inode_bytes_and_creates_new_active_file(log_source, monkeypatch, btmp_owner, mode):
     source = ops.LOG_ROOT / 'btmp'
     source.write_bytes(b'failed logins')
     source.chmod(mode)
@@ -121,13 +139,24 @@ def test_btmp_rotation_preserves_inode_bytes_and_creates_new_active_file(log_sou
     assert source.read_bytes() == b'new logins'
 
 
-def test_btmp_rotation_refuses_existing_rotated_file_before_mutation(log_source, monkeypatch):
+def test_btmp_rotation_refuses_existing_rotated_file_before_mutation(log_source, monkeypatch, btmp_owner):
     source = ops.LOG_ROOT / 'btmp'
     source.write_bytes(b'active')
     source.chmod(0o600)
     (ops.LOG_ROOT / 'btmp.1').write_bytes(b'prior archive')
     monkeypatch.setattr(ops, 'utmp_gid', lambda: source.stat().st_gid)
     with pytest.raises(ValueError, match='Existing rotated'):
+        ops.rotate_btmp(source, rotate=lambda p: pytest.fail('must not rotate'), is_closed=lambda p: True)
+    assert source.read_bytes() == b'active'
+
+
+def test_btmp_rotation_refuses_nonroot_owner_before_mutation(log_source, monkeypatch, btmp_owner):
+    source = ops.LOG_ROOT / 'btmp'
+    source.write_bytes(b'active')
+    source.chmod(0o600)
+    btmp_owner['uid'] = 1001
+    monkeypatch.setattr(ops, 'utmp_gid', lambda: source.stat().st_gid)
+    with pytest.raises(ValueError, match='Unexpected btmp ownership'):
         ops.rotate_btmp(source, rotate=lambda p: pytest.fail('must not rotate'), is_closed=lambda p: True)
     assert source.read_bytes() == b'active'
 

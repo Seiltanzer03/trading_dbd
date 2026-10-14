@@ -25,7 +25,7 @@ jobs:
           python-version: "3.11"
       - name: Check archive safety and existing metadata repair
         run: |
-          python -m pip install --quiet pytest paramiko boto3
+          python -m pip install --quiet pytest paramiko boto3 PyYAML
           python -m pytest -q tests/test_ops_yandex_closed_logs.py tests/test_ede_ledger_archive.py tests/test_compact_deployment_git.py
       - name: Require existing green exact-SHA CI
         env:
