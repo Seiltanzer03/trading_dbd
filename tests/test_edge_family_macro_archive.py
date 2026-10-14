@@ -77,6 +77,234 @@ def test_archived_ism_pmi_uses_same_canonical_name_as_current_facts():
     assert state['fetched_at']==record['fetched_at']
 
 
+def _reseal_fomc_fixture(bundle):
+    for record in bundle['fomc_records']:
+        record['record_sha256']=bundle_contract._sha256(bundle_contract._without(record,'record_sha256'))
+    bundle['bundle_sha256']=bundle_contract._sha256(bundle_contract._without(bundle,'bundle_sha256'))
+    return bundle
+
+
+def test_fomc_rate_state_uses_actual_header_units_and_declared_vintage_limit():
+    from seiltanzer.macro_fomc_deterministic_bootstrap import parse_release_timestamp
+    bundle=_bundle();record=bundle['fomc_records'][-1]
+    published=parse_release_timestamp(record['html'],date_code=record['spec']['date_code'])
+    value=archive(bundle);name='macro.fomc.target_mid_pct'
+    previous=bundle['fomc_records'][0]
+    prior_ts=parse_release_timestamp(previous['html'],date_code=previous['spec']['date_code'])
+    assert value.state(name,prior_ts-1) is None
+    prior=value.state(name,published-1)
+    assert prior is not None and prior['value']==4.375
+    state=value.state(name,published)
+    assert state is not None, 'validated FOMC archive is ignored by the macro feature reader'
+    assert state['value']==4.125
+    assert state['published_at']==state['available_at']==published
+    assert state['fetched_at']==record['fetched_at']>published
+    assert state['source_sha256']==record['source_sha256']
+    assert state['source_kind']=='OFFICIAL_FED_DATED_STATEMENT_PAGE'
+    assert state['source_vintage_guarantee']=='OFFICIAL_DATED_PAGE_NOT_VERSIONED'
+    assert state['publication_vintage_guaranteed'] is False
+    assert state['prospective_observation'] is False and 'received_ts' not in state
+    summary=value.summary()
+    assert summary['feature_release_counts'][name]==2
+    assert summary['feature_release_counts']['macro.fomc.target_change_bp']==1
+    assert summary['feature_vintage_guarantees'][name]==['OFFICIAL_DATED_PAGE_NOT_VERSIONED']
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    current=dict(instrument='NAS100',captured_ts=NOW,macro_context_v1={
+        'fomc_deterministic':{'available':True,'official_source_verified':True,
+            'release_id':'current-official-statement','published_at':published,
+            'available_at':record['fetched_at'],'payload':record['payload']}})
+    facts=build_edge_family_evidence(current)['families']['macro']['features']
+    assert facts[name]==state['value'], 'archive and actual runtime must use the same feature name'
+    assert facts['macro.fomc.target_change_bp']==value.state('macro.fomc.target_change_bp',published)['value']
+
+
+def test_fomc_model_provenance_cannot_claim_versioned_vintage_or_live_receipts():
+    from copy import deepcopy
+    from seiltanzer.edge_family_macro_archive import archive_model_provenance_valid,FOMC_AVAILABILITY
+    model=dict(official_macro_archive=archive().summary(),features_are_captured_receipts=False,
+        heads={'direction':{'feature_names':['macro.fomc.target_mid_pct']}},
+        historical_feature_availability=FOMC_AVAILABILITY)
+    assert archive_model_provenance_valid(model,NOW) is True
+    strong=deepcopy(model)
+    strong['historical_feature_availability']='VERIFIED_PUBLIC_VINTAGE_BEFORE_T0_ACTUAL_RETRIEVAL_RETAINED'
+    assert archive_model_provenance_valid(strong,NOW) is False
+    receipts=deepcopy(model);receipts['features_are_captured_receipts']=True
+    assert archive_model_provenance_valid(receipts,NOW) is False
+    missing=deepcopy(model);missing['official_macro_archive']['feature_vintage_guarantees']={}
+    assert archive_model_provenance_valid(missing,NOW) is False
+
+
+def test_fomc_change_preserves_predecessor_proof_and_never_fills_missing_change():
+    from seiltanzer.macro_fomc_deterministic_bootstrap import parse_release_timestamp
+    bundle=_bundle();previous,current=bundle['fomc_records'];value=archive(bundle)
+    prior_ts=parse_release_timestamp(previous['html'],date_code=previous['spec']['date_code'])
+    current_ts=parse_release_timestamp(current['html'],date_code=current['spec']['date_code'])
+    name='macro.fomc.target_change_bp'
+    assert value.state(name,prior_ts) is None
+    state=value.state(name,current_ts)
+    assert state is not None, 'actual parsed rate change never reaches historical macro state'
+    assert state['value']==-25.
+    support=state['supporting_provenance'][0]
+    assert support['source_sha256']==previous['source_sha256']
+    assert support['published_at']==prior_ts
+    assert support['fetched_at']==previous['fetched_at']
+    assert 'release:'+support['source_id']==state['dependency_groups'][1]
+    assert len(state['dependency_groups'])==2
+    state['supporting_provenance'][0]['source_sha256']='b'*64
+    assert value.state(name,current_ts)['supporting_provenance'][0]['source_sha256']==previous['source_sha256']
+
+
+def test_fomc_archive_refuses_fetch_before_actual_publication():
+    from seiltanzer.macro_fomc_deterministic_bootstrap import parse_release_timestamp
+    bundle=_bundle();record=bundle['fomc_records'][-1]
+    published=parse_release_timestamp(record['html'],date_code=record['spec']['date_code'])
+    record['fetched_at']=published-1
+    with pytest.raises(ValueError,match='OFFICIAL_MACRO_ARCHIVE_CLOCK_INVALID'):
+        archive(_reseal_fomc_fixture(bundle))
+
+
+def test_fomc_state_does_not_substitute_the_approximate_schedule_hour():
+    from seiltanzer.macro_fomc_deterministic_bootstrap import (
+        deterministic_statement_payload,extract_statement_text,parse_release_timestamp,FOMCStatementSpec)
+    bundle=_bundle();previous,current=bundle['fomc_records']
+    current['html']=current['html'].replace('2:00 p.m. EDT','1:00 p.m. EDT')
+    current['source_sha256']=bundle_contract._sha256(current['html'])
+    current['payload']=deterministic_statement_payload(extract_statement_text(current['html']),
+        previous_body=extract_statement_text(previous['html']))
+    published=parse_release_timestamp(current['html'],date_code=current['spec']['date_code'])
+    assert FOMCStatementSpec(**current['spec']).approximate_published_at==published+3600
+    state=archive(_reseal_fomc_fixture(bundle)).state('macro.fomc.target_mid_pct',published)
+    assert state is not None and state['published_at']==published
+
+
+def test_missing_fomc_predecessor_keeps_level_but_does_not_invent_zero_change():
+    from seiltanzer.macro_fomc_deterministic_bootstrap import (
+        deterministic_statement_payload,extract_statement_text,parse_release_timestamp)
+    bundle=_bundle();current=bundle['fomc_records'][-1]
+    bundle['fomc_records']=[current]
+    current['payload']=deterministic_statement_payload(extract_statement_text(current['html']))
+    value=archive(_reseal_fomc_fixture(bundle))
+    published=parse_release_timestamp(current['html'],date_code=current['spec']['date_code'])
+    state=value.state('macro.fomc.target_mid_pct',published)
+    assert state is not None and state['value']==4.125
+    assert value.state('macro.fomc.target_change_bp',published) is None
+
+
+def test_fomc_historical_dataset_is_publication_bound_not_late_retrieval_bound():
+    from seiltanzer.macro_fomc_deterministic_bootstrap import parse_release_timestamp
+    from seiltanzer.edge_family_macro_archive import archive_market_dataset
+    bundle=_bundle();record=bundle['fomc_records'][-1]
+    published=parse_release_timestamp(record['html'],date_code=record['spec']['date_code'])
+    bars=[{'bar_end_ts':published-1800+i*300,'close':100.*math.exp(.0001*i)} for i in range(30)]
+    out=archive_market_dataset('NAS100','macro.fomc.target_change_bp',bars,NOW,15,archive(bundle))
+    assert len(out['times'])>0, 'existing trainer receives no FOMC historical inputs'
+    assert min(out['times'])==published
+    assert all(value==-25. for value in out['x'][:,0])
+    assert all(len(group)==2 for group in out['groups'])
+    assert all(a>=b for a,b in zip(out['times'][1:],out['ends'][:-1]))
+
+
+def _three_statement_fomc_bundle():
+    from copy import deepcopy
+    from seiltanzer.macro_fomc_deterministic_bootstrap import (
+        deterministic_statement_payload,extract_statement_text)
+    bundle=_bundle();june,july=bundle['fomc_records']
+    may=deepcopy(june)
+    may['spec']={'date_code':'20250507',
+        'source_url':'https://www.federalreserve.gov/newsevents/pressreleases/monetary20250507a.htm'}
+    manifest=bundle['fomc_schedules']['2025']
+    manifest['content']+=f'<a href="{may["spec"]["source_url"]}">May statement</a>'
+    manifest['source_sha256']=bundle_contract._sha256(manifest['content'])
+    manifest['record_sha256']=bundle_contract._sha256(bundle_contract._without(manifest,'record_sha256'))
+    june['previous_source_url']=may['spec']['source_url']
+    june['payload']=deterministic_statement_payload(extract_statement_text(june['html']),
+        previous_body=extract_statement_text(may['html']))
+    bundle['fomc_records']=[may,june,july]
+    return _reseal_fomc_fixture(bundle)
+
+
+def test_fomc_distinct_release_changes_purge_the_shared_predecessor():
+    # Removing predecessor groups from archive_market_dataset must fail this
+    # regression: different current statements still share one causal source.
+    import numpy as np
+    from seiltanzer.edge_family_macro_archive import archive_market_dataset
+    from seiltanzer.edge_family_market import _purged
+    from seiltanzer.macro_fomc_deterministic_bootstrap import parse_release_timestamp
+    bundle=_three_statement_fomc_bundle();_,june,july=bundle['fomc_records']
+    value=archive(_reseal_fomc_fixture(bundle))
+    june_ts=parse_release_timestamp(june['html'],date_code=june['spec']['date_code'])
+    july_ts=parse_release_timestamp(july['html'],date_code=july['spec']['date_code'])
+    bars=[{'bar_end_ts':start+i*300,'close':100.*math.exp(.0001*i)}
+        for start in (june_ts,july_ts) for i in range(12)]
+    data=archive_market_dataset('NAS100','macro.fomc.target_change_bp',bars,NOW,15,value)
+    train=np.flatnonzero(data['times']<july_ts)
+    valid=np.flatnonzero(data['times']>=july_ts)
+    assert len(train)>0 and len(valid)>0
+    assert set(data['x'][train,0])=={0.} and set(data['x'][valid,0])=={-25.}
+    assert data['groups'][train[0]][0]!=data['groups'][valid[0]][0]
+    assert len(_purged(data,train,valid))==0
+
+
+def test_fomc_duplicate_url_cannot_substitute_another_document_hash():
+    from copy import deepcopy
+    from seiltanzer.macro_fomc_deterministic_bootstrap import (
+        deterministic_statement_payload,extract_statement_text)
+    bundle=_bundle();previous,current=bundle['fomc_records']
+    duplicate=deepcopy(current)
+    duplicate['html']=duplicate['html'].replace('lower the target range for the\nfederal funds rate at 4 to 4-1/4 percent.',
+        'maintain its published policy framework.')
+    duplicate['source_sha256']=bundle_contract._sha256(duplicate['html'])
+    duplicate['payload']=deterministic_statement_payload(extract_statement_text(duplicate['html']),
+        previous_body=extract_statement_text(previous['html']))
+    assert duplicate['payload']['target_mid_pct'] is None
+    bundle['fomc_records'].append(duplicate)
+    with pytest.raises(ValueError,match='OFFICIAL_MACRO_ARCHIVE_AMBIGUOUS_RELEASE'):
+        archive(_reseal_fomc_fixture(bundle))
+
+
+def test_fomc_change_cannot_skip_the_immediate_scheduled_predecessor():
+    from seiltanzer.macro_fomc_deterministic_bootstrap import (
+        deterministic_statement_payload,extract_statement_text)
+    bundle=_three_statement_fomc_bundle();may,june,july=bundle['fomc_records']
+    may['html']=may['html'].replace('4-1/4 to 4-1/2','4-1/2 to 4-3/4')
+    may['source_sha256']=bundle_contract._sha256(may['html'])
+    may['payload']=deterministic_statement_payload(extract_statement_text(may['html']))
+    june['payload']=deterministic_statement_payload(extract_statement_text(june['html']),
+        previous_body=extract_statement_text(may['html']))
+    july['previous_source_url']=may['spec']['source_url']
+    july['payload']=deterministic_statement_payload(extract_statement_text(july['html']),
+        previous_body=extract_statement_text(may['html']))
+    assert july['payload']['target_change_bp']==-50.
+    with pytest.raises(ValueError,match='OFFICIAL_MACRO_ARCHIVE_FOMC_PREDECESSOR_INVALID'):
+        archive(_reseal_fomc_fixture(bundle))
+
+
+@pytest.mark.parametrize('bad',['list','string','integer','feature_integer','vintage_list'])
+def test_fomc_malformed_model_metadata_is_rejected_without_breaking_retention(bad):
+    from seiltanzer.edge_family_market import train_market_families,_model_reason
+    from seiltanzer.edge_family_model_retention import retain_fitted_families
+    from seiltanzer.mathematical_edge import CONTRACT
+    from seiltanzer.edge_family_macro_archive import FOMC_AVAILABILITY
+    value,source=historical_source()
+    model=train_market_families([source],NOW,horizons=(15,),macro_archive=value)['NAS100']['macro']
+    if bad in ('list','string','integer'):
+        model['heads']={'list':['invalid'],'string':'invalid','integer':1}[bad]
+    elif bad=='feature_integer':
+        model['heads']['direction']['feature_names']=1
+    else:
+        model['heads']['direction']['feature_names']=['macro.fomc.target_mid_pct']
+        model['historical_feature_availability']=FOMC_AVAILABILITY
+        model['official_macro_archive']['feature_vintage_guarantees']=['invalid']
+    model['model_sha256']=fingerprint({k:v for k,v in model.items() if k!='model_sha256'})
+    assert _model_reason(model,'NAS100','macro',NOW+1) is not None
+    unavailable={'status':'HEAD_TRAINING_UNAVAILABLE','reason':'NO_HEAD_WITH_CAUSAL_VALIDATION','forecast':None}
+    prior={'contract_version':CONTRACT,'created_ts':NOW,'production_authority':False,
+        'automatic_execution':False,'family_market_models':{'NAS100':{'macro':model}}}
+    matrix,audit=retain_fitted_families({'NAS100':{'macro':unavailable}},[prior],NOW+1)
+    assert matrix['NAS100']['macro']==unavailable
+    assert audit['retained_fitted']==0 and audit['rejected_prior_models']
+
+
 def test_archive_dataset_uses_only_known_publications_and_nonoverlapping_future_labels():
     module=importlib.import_module('seiltanzer.edge_family_macro_archive')
     assert hasattr(module,'archive_market_dataset'), 'archive-to-market dataset missing'

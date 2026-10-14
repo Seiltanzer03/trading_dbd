@@ -40,6 +40,61 @@ def test_fast_refresh_reprices_exit_at_actual_new_quote_and_keeps_provider_clock
     assert s == original
 
 
+@pytest.mark.parametrize('instrument',['UK100','NAS100','XAU','EURUSD'])
+def test_native_manual_decision_contract_can_refresh_a_fresh_configured_quote(monkeypatch,instrument):
+    from seiltanzer.ai_policy import resolve_management_sequence
+    from seiltanzer.config import ALL_INSTRUMENTS
+    from seiltanzer.ai_snapshot_market_refresh import refresh_frozen_comparison,assert_live_review_compatible
+    engine,s,tick=fixture(monkeypatch)
+    s['strategy']['instrument']=instrument
+    tick['instrument']=tick['trade']['instrument']=instrument
+    configured=ALL_INSTRUMENTS[instrument]
+    tick['feeds']['price']['source']=('TradingView stream '+configured.tradingview_symbol
+        if configured.tradingview_symbol else 'Swissquote OTC '+configured.swissquote_pair+' bid/ask')
+    manager=s['policy_manager']
+    manager['management_arbiter']={'effective_policy':'HOLD','winner':'STRATEGY'}
+    manager['management_decision']=resolve_management_sequence(manager,None,trade_id=1,captured_ts=s['captured_ts'])
+    assert manager['management_decision']['automatic_broker_execution'] is False
+    assert 'automatic_execution_allowed' not in manager['management_decision']
+    original=deepcopy(s)
+    out=refresh_frozen_comparison(engine,s)
+    assert out['trade_geometry']['current']==111.
+    assert out['market_refresh']['actual_provider_timestamp']==1099.
+    assert out['policy_manager']['policies']['EXIT']['expected_final_r_net']==pytest.approx(1.06)
+    assert_live_review_compatible(engine,out)
+    assert s==original
+
+
+@pytest.mark.parametrize('decision',[
+    {'automatic_execution_allowed':False,'automatic_broker_execution':True},
+    {'automatic_execution_allowed':True,'automatic_broker_execution':False},
+    {'automatic_execution_allowed':None,'automatic_broker_execution':False},
+    {'automatic_execution_allowed':0,'automatic_broker_execution':False},
+    {'automatic_broker_execution':0},
+    {'automatic_broker_execution':'false'},
+    {},
+])
+def test_manual_refresh_rejects_contradictory_or_missing_execution_authority(monkeypatch,decision):
+    from seiltanzer.ai_snapshot_market_refresh import refresh_frozen_comparison
+    engine,s,_=fixture(monkeypatch)
+    s['policy_manager']['management_decision']=decision
+    with pytest.raises(StaleDecisionError,match='fresh authoritative'):
+        refresh_frozen_comparison(engine,s)
+
+
+@pytest.mark.parametrize('quote_changes',[
+    {'ts':1069.}, {'production_authority':False}, {'derived':True},
+    {'source':'TradingView stream OANDA:OTHER'},
+])
+def test_native_manual_flag_does_not_bypass_quote_admission(monkeypatch,quote_changes):
+    from seiltanzer.ai_snapshot_market_refresh import refresh_frozen_comparison
+    engine,s,tick=fixture(monkeypatch)
+    s['policy_manager']['management_decision']={'automatic_broker_execution':False}
+    tick['feeds']['price'].update(quote_changes)
+    with pytest.raises(StaleDecisionError):
+        refresh_frozen_comparison(engine,s)
+
+
 @pytest.mark.parametrize('bad', [89., 131.])
 def test_live_barrier_crossing_never_returns_repriced_action(monkeypatch, bad):
     from seiltanzer.ai_snapshot_market_refresh import refresh_frozen_comparison

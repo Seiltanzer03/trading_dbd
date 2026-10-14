@@ -14,13 +14,18 @@ from .mathematical_edge import fingerprint, number
 from .macro_historical_offhost_bundle import validate_bundle
 from .macro_numeric_data import _candidate_vector
 from .macro_bls_alfred_vintage import SOURCE_KIND as ALFRED_SOURCE_KIND
+from .macro_fomc_deterministic_bootstrap import parse_release_timestamp,parse_fomc_index
 
 CONTRACT = 'official-macro-family-archive-v1'
 # Fixed minimal states, with the same units/names as current official facts.
 FEATURES = ('macro.cpi_headline_mom_pct', 'macro.cpi_core_mom_pct',
     'macro.cpi_core_yoy_pct', 'macro.nfp_payroll_change_k',
     'macro.nfp_unemployment_rate_pct', 'macro.nfp_wage_mom_pct',
-    'macro.ism_manufacturing_pmi', 'macro.ism_services_pmi')
+    'macro.ism_manufacturing_pmi', 'macro.ism_services_pmi',
+    'macro.fomc.target_mid_pct', 'macro.fomc.target_change_bp')
+FOMC_FEATURES = frozenset(FEATURES[-2:])
+FOMC_VINTAGE = 'OFFICIAL_DATED_PAGE_NOT_VERSIONED'
+FOMC_AVAILABILITY = 'DATED_FOMC_PUBLICATION_NOT_VERSIONED_ACTUAL_RETRIEVAL_RETAINED'
 _VALIDATED = object()
 
 
@@ -33,6 +38,9 @@ class _Point:
     source_id: str
     published_at: float | None
     availability_rule: str
+    source_kind: str | None = None
+    source_vintage_guarantee: str | None = None
+    supporting_provenance: tuple = ()
 
 
 @dataclass(frozen=True, init=False)
@@ -68,13 +76,23 @@ class OfficialMacroArchive:
         point = self._points[name][index]
         if stamp-point.available_at > MAX_AGE_SEC['macro']:
             return None
-        return {'value':point.value, 'available_at':point.available_at,
+        result = {'value':point.value, 'available_at':point.available_at,
             'published_at':point.published_at, 'fetched_at':point.fetched_at,
             'availability_rule':point.availability_rule,
             'source_sha256':point.source_sha256, 'source_id':point.source_id,
             'dependency_group':'release:'+point.source_id,
             'evidence_kind':'OFFICIAL_PUBLICATION_ARCHIVE',
             'prospective_observation':False}
+        if point.source_kind:
+            result.update(source_kind=point.source_kind,
+                source_vintage_guarantee=point.source_vintage_guarantee,
+                publication_vintage_guaranteed=False,
+                supporting_provenance=[dict(source_id=sid,source_sha256=digest,
+                    published_at=published,fetched_at=fetched)
+                    for sid,digest,published,fetched in point.supporting_provenance],
+                dependency_groups=[result['dependency_group'],
+                    *('release:'+row[0] for row in point.supporting_provenance)])
+        return result
 
     def summary(self):
         return {'contract_version':CONTRACT, 'bundle_sha256':self.bundle_sha256,
@@ -82,6 +100,9 @@ class OfficialMacroArchive:
             'source_code_sha':self.source_code_sha,'source_window_end':self.source_window_end,
             'source_created_at':self.source_created_at,'offline_copy_revalidation':True,
             'feature_release_counts':{name:len(rows) for name,rows in self._points.items()},
+            'feature_vintage_guarantees':{name:sorted({row.source_vintage_guarantee
+                for row in rows if row.source_vintage_guarantee})
+                for name,rows in self._points.items() if any(row.source_vintage_guarantee for row in rows)},
             'retrieval_clock_backdated':False, 'prospective_observation':False,
             'production_authority':False}
 
@@ -123,6 +144,43 @@ def verified_macro_archive(bundle, *, expected_sha, captured_ts, acceptance_run_
                 points[name].append(_Point(published,fetched,value,record['source_sha256'],identity,
                     None if alfred else published,
                     'CONSERVATIVE_ALFRED_NEXT_DAY' if alfred else 'OFFICIAL_PUBLICATION_TIME'))
+    # These are already canonically validated dated statements, not recorded
+    # contemporaneous receipts or guaranteed original document vintages.
+    scheduled={spec.source_url:spec for manifest in verified['fomc_schedules'].values()
+        for spec in parse_fomc_index(manifest['content'])}
+    ordered=sorted(scheduled.values(),key=lambda spec:spec.date_code)
+    predecessors={spec.source_url:ordered[i-1].source_url if i else None
+        for i,spec in enumerate(ordered)}
+    publications = {}
+    for record in verified['fomc_records']:
+        url=record['spec']['source_url']
+        if url in publications:
+            raise ValueError('OFFICIAL_MACRO_ARCHIVE_AMBIGUOUS_RELEASE')
+        published=parse_release_timestamp(record['html'],date_code=record['spec']['date_code'])
+        fetched=float(record['fetched_at'])
+        if not 0 < published <= fetched <= stamp:
+            raise ValueError('OFFICIAL_MACRO_ARCHIVE_CLOCK_INVALID')
+        identity='official-macro-archive:'+fingerprint({'family':'FOMC_STATEMENT',
+            'available_at':published,'source_sha256':record['source_sha256']})
+        publications[url] = (identity,record['source_sha256'],published,fetched)
+    for record in verified['fomc_records']:
+        identity,digest,published,fetched=publications[record['spec']['source_url']]
+        payload=record['payload']
+        for key in ('target_mid_pct','target_change_bp'):
+            value=number(payload.get(key))
+            if value is None:
+                continue  # Absent rate/previous release is not a zero change.
+            support=()
+            if key=='target_change_bp':
+                previous_url=record.get('previous_source_url')
+                prior=publications.get(previous_url)
+                if (previous_url!=predecessors[record['spec']['source_url']]
+                        or prior is None or prior[2]>=published):
+                    raise ValueError('OFFICIAL_MACRO_ARCHIVE_FOMC_PREDECESSOR_INVALID')
+                support=(prior,)
+            points['macro.fomc.'+key].append(_Point(published,fetched,value,digest,identity,
+                published,'DATED_FOMC_STATEMENT_PUBLICATION_NOT_VERSIONED',
+                'OFFICIAL_FED_DATED_STATEMENT_PAGE',payload['source_vintage_guarantee'],support))
     for name,rows in points.items():
         unique={}
         for row in rows:
@@ -147,7 +205,8 @@ def archive_market_dataset(code, name, bars, captured, horizon, archive):
         state=archive.state(name,float(t0))
         if state is None:
             continue
-        indices.append(i);values.append([state['value']]);groups.append((state['dependency_group'],))
+        indices.append(i);values.append([state['value']])
+        groups.append(tuple(state.get('dependency_groups',(state['dependency_group'],))))
     return {'x':np.asarray(values,dtype=float).reshape((-1,1)),
         'y':base['y'][indices], 'times':base['times'][indices],
         'ends':base['ends'][indices], 'groups':groups, 'feature_names':[name]}
@@ -203,7 +262,9 @@ def fit_archive_macro(code,bars,captured,horizons,archive,source):
         training_n=max(m['training_n'] for _,m in candidates),
         training_cutoff=max(m['training_cutoff'] for _,m in candidates),
         dataset_sha256=fingerprint({name:v['dataset_sha256'] for name,v in audit.items()}),
-        historical_feature_availability='VERIFIED_PUBLIC_VINTAGE_BEFORE_T0_ACTUAL_RETRIEVAL_RETAINED')
+        historical_feature_availability=(FOMC_AVAILABILITY if any(
+            name in FOMC_FEATURES for head in selected.values() for name in head.get('feature_names',[]))
+            else 'VERIFIED_PUBLIC_VINTAGE_BEFORE_T0_ACTUAL_RETRIEVAL_RETAINED'))
     result['model_sha256']=fingerprint(result)
     return result
 
@@ -211,6 +272,22 @@ def fit_archive_macro(code,bars,captured,horizons,archive,source):
 def archive_model_provenance_valid(model,trained):
     proof=model.get('official_macro_archive')
     if not isinstance(proof,dict) or model.get('features_are_captured_receipts') is not False:
+        return False
+    heads=model.get('heads')
+    if not isinstance(heads,dict):
+        return False
+    selected=set()
+    for head in heads.values():
+        if not isinstance(head,dict):
+            return False
+        names=head.get('feature_names',[])
+        if not isinstance(names,list) or any(not isinstance(name,str) for name in names):
+            return False
+        selected.update(set(names) & FOMC_FEATURES)
+    guarantees=proof.get('feature_vintage_guarantees')
+    if selected and (model.get('historical_feature_availability')!=FOMC_AVAILABILITY
+            or not isinstance(guarantees,dict)
+            or any(guarantees.get(name)!=[FOMC_VINTAGE] for name in selected)):
         return False
     clocks=[number(proof.get(key)) for key in ('validated_at','source_created_at','source_window_end')]
     return (proof.get('contract_version')==CONTRACT and clocks[0]==trained
