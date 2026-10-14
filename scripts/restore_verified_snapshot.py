@@ -142,14 +142,16 @@ def restore(
     if client is None:
         import boto3
         from botocore.config import Config
+        from managed_verified_seed import ManagedRestoreClient
 
-        client = boto3.client(
+        sdk_client = boto3.client(
             "s3", endpoint_url=ENDPOINT, region_name="ru-central1",
             config=Config(
                 connect_timeout=10, read_timeout=120,
                 retries={"max_attempts": 3},
             ),
         )
+        client = ManagedRestoreClient(sdk_client, temp_dir=destination.parent)
     if destination.exists() or any(
         Path(str(destination) + suffix).exists() for suffix in ("-wal", "-shm")
     ):

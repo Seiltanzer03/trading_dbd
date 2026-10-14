@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "httpx>=0.27"]
+dev = ["pytest>=8", "httpx>=0.27", "boto3>=1.36,<2"]
 research = ["scikit-learn>=1.5,<2"]
 
 [project.scripts]
