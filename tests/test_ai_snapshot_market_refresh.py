@@ -40,6 +40,30 @@ def test_fast_refresh_reprices_exit_at_actual_new_quote_and_keeps_provider_clock
     assert s == original
 
 
+@pytest.mark.parametrize('short', [False, True])
+def test_refresh_updates_recalculation_coordinates_and_best_expected(monkeypatch, short):
+    from seiltanzer.ai_snapshot_market_refresh import refresh_frozen_comparison
+    engine,s,tick=fixture(monkeypatch, 111. if not short else 89.)
+    s['policy_manager']['selection_rule']['best_expected_r']=-999.
+    s['policy_manager']['recalculation_triggers']={'chain_refresh':{'seconds_until_attempt':999.},
+        'minus_0_15_r':{'r':-99.,'price':1.}, 'plus_0_15_r':{'r':99.,'price':999.}}
+    if short:
+        tick['trade'].update(direction='short',stop=110.,take=70.)
+        tick['prob'].update(r=1.1,T=3.)
+        s['strategy']['direction']='short'
+        s['trade_geometry'].update(original_stop=110.,active_risk_barrier=110.,final_take=70.)
+    out=refresh_frozen_comparison(engine,s)
+    p=out['policy_manager'];triggers=p['recalculation_triggers']
+    assert triggers['current_r']==pytest.approx(1.1)
+    assert triggers['minus_0_15_r']['r']==pytest.approx(.95)
+    assert triggers['plus_0_15_r']['r']==pytest.approx(1.25)
+    assert triggers['minus_0_15_r']['price']==pytest.approx(90.5 if short else 109.5)
+    assert triggers['plus_0_15_r']['price']==pytest.approx(87.5 if short else 112.5)
+    assert p['selection_rule']['best_expected_r']==max(p['policies'][k]['expected_final_r_net']
+                                                     for k in p['selection_rule']['eligible'])
+    assert triggers['chain_refresh']['basis']=='current_quote_refresh'
+
+
 @pytest.mark.parametrize('instrument',['UK100','NAS100','XAU','EURUSD'])
 def test_native_manual_decision_contract_can_refresh_a_fresh_configured_quote(monkeypatch,instrument):
     from seiltanzer.ai_policy import resolve_management_sequence

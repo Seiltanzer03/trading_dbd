@@ -180,6 +180,13 @@ def _unified_operational_choice(engine, snapshot: dict, trade: dict,
     if policy not in EXTENDED_POLICIES:
         if decision.get("policy") != policy:
             audit["operational_guard_reason"] = decision.get("reason") or "OPERATIONAL_GUARD_CHANGED_POLICY"
+        elif policy != "HOLD" and previous.get("policy") != policy:
+            predecessor = previous.get("previous") or previous
+            decision["continuity"] = (
+                "unified_action_replaces_previous_plan"
+                if predecessor.get("execution_status") == "pending_execution" else
+                "new_unified_action")
+            manager["management_decision"] = decision
         return decision, None
     if (decision.get("risk_barrier_execution_unverified")
             or decision.get("indicative_fallback_price")):

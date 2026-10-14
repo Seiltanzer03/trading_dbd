@@ -169,7 +169,7 @@ def _position_economics_lines(snapshot: dict) -> list[str]:
     primary = _primary_economics(snapshot)
     if primary:
         bank = unified.get("scenario_bank") or {}
-        lines.append(f"Основная экономика: единый сравнительный банк {bank.get('bank_id') or '—'}; источник {bank.get('source') or '—'}. Контрольная bridge-модель и независимый gate показаны отдельно.")
+        lines.append(f"Основная экономика: единый сравнительный банк {bank.get('bank_id') or '—'}; источник {bank.get('source') or '—'}. Диагностика базового контроля и независимый gate показаны отдельно.")
         realized = _number(economics.get("realized_r_weighted"))
         expected, cvar = _number(primary.get("expected_net_r")), _number(primary.get("cvar10_net_r"))
         if before is not None and realized is not None and expected is not None and cvar is not None:
@@ -470,7 +470,12 @@ def _risk_lines(snapshot: dict) -> list[str]:
         work_action = "не менять позицию по этому отчёту"
     else:
         work_action = "UNAVAILABLE; fail-safe — не менять позицию по этому отчёту"
-    lines.append(f"Итог gate: {_text(gate.get('status'))}. Рабочее действие: {work_action}.")
+    if manager.get('unified_edge_ensemble'):
+        work_action = (f"{decision.get('policy')}: {decision.get('instruction_ru') or 'проверить параметры ручного решения'}"
+                       if manual_pending else 'нового внепланового исполнения нет; исполненное действие не повторять')
+        lines.append(f"Gate базового контроля: {_text(gate.get('status'))}. Единственное действующее решение: {work_action}.")
+    else:
+        lines.append(f"Итог gate: {_text(gate.get('status'))}. Рабочее действие: {work_action}.")
     return lines
 
 
@@ -625,6 +630,8 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
         label = ("Контрольная базовая bridge-модель: общие пути только для HOLD/CLOSE/EXIT. Её Expected отличается от единого сравнительного банка; этот раздел не задаёт итоговую экономику ансамбля."
                  if manager.get("unified_edge_ensemble") else
                  "Base production policy distribution (common execution-MC paths):")
+        if (snapshot.get('market_refresh') or {}).get('available'):
+            label = 'Базовые HOLD/CLOSE/EXIT пересчитаны в общем сравнительном банке по текущей котировке; это не прежняя bridge-модель.'
         if start + 1 >= len(lines) or lines[start + 1] != label: lines.insert(start + 1, label)
         if manager.get("unified_edge_ensemble"):
             lines = [line for line in lines if line != "Base production policy distribution (common execution-MC paths):"]
@@ -636,6 +643,7 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
         (manager.get('selection_rule') or {}).get('combined_edge_soft_weight'))
     unified = manager.get("unified_edge_ensemble") or {}
     if unified:
+        lines = _unified_command_sections(lines, snapshot)
         primary = _primary_economics(snapshot)
         if primary:
             _replace_section(lines, "**ПРОВЕРЕННЫЙ ВЫВОД**", [
@@ -665,6 +673,61 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
         if not any(line.startswith("**ЕДИНЫЙ ВЫБОР ДЕЙСТВИЯ**") for line in lines):
             lines.extend(["", *unified_lines])
     return "\n".join(lines).strip()
+
+
+def _unified_command_sections(lines: list[str], snapshot: dict) -> list[str]:
+    """Render commands only after the final operational decision is published."""
+    manager = snapshot.get('policy_manager') or {}
+    decision = manager.get('management_decision') or {}
+    policy = decision.get('policy')
+    if not policy:
+        return lines
+    pending = (decision.get('execution_status') == 'pending_execution'
+               and decision.get('manual_execution_required') is True and policy != 'HOLD')
+    instruction = decision.get('instruction_ru') or ('Сопровождать фактический остаток по текущему стопу/БУ и лестнице.'
+                                                    if not pending else 'Проверить параметры действующего ручного решения.')
+    if not pending and policy != 'HOLD':
+        instruction = 'Новое исполнение по этому отчёту не требуется; уже исполненное действие не повторять.'
+    top = [f'**ДЕЙСТВИЕ СЕЙЧАС** — {policy}: {instruction}',
+           f"Авторитет: {decision.get('authority') or '—'}; статус {decision.get('execution_status') or '—'}; decision_id={decision.get('decision_id') or '—'}."]
+    from .ai_verdict_v9 import _previous_text
+    top.append(_previous_text(decision))
+    if pending:
+        top.append('Это единственная действующая ручная команда. Автоматическое исполнение запрещено.')
+        after = ['Подтвердите решение только после фактического исполнения у брокера; повторное подтверждение того же decision_id не создаёт дополнительное закрытие.']
+        if decision.get('continuity') == 'continue_same_pending_decision':
+            top.append('Это прежнее действующее решение, а не дополнительное закрытие позиции.')
+        after.append('После полного EXIT сопровождение сделки прекращается.' if policy == 'EXIT' else
+                     'После действия сопровождать фактический остаток по обновлённому стопу/БУ и лестнице.')
+    else:
+        top.append('Нового внепланового исполнения нет. Уже исполненное действие повторять нельзя.')
+        after = ['Не повторять исполненное действие; сопровождать фактический остаток по текущему стопу/БУ и лестнице.']
+    start = next((i for i,l in enumerate(lines) if l.startswith(('**ДЕЙСТВИЕ СЕЙЧАС**','**ДЕЙСТВУЮЩЕЕ РЕШЕНИЕ ИИ**'))), None)
+    if start is None:
+        lines = top + [''] + lines
+    else:
+        end = next((i for i in range(start+1,len(lines)) if lines[i].startswith('**')),len(lines))
+        lines[start:end] = top + ['']
+    _replace_section(lines,'**ПОСЛЕ ИСПОЛНЕНИЯ**',after)
+    bounds = _section(lines,'**ВЕСА И РОЛИ РЕШЕНИЯ**')
+    if bounds:
+        for i in range(bounds[0]+1,bounds[1]):
+            if lines[i].startswith('Арбитр:'):
+                lines[i] = f"Действующий арбитр: {decision.get('authority') or '—'} → {policy}. Gate базового контроля: {(manager.get('gate') or {}).get('status') or '—'}; его отдельный результат не заменяет итоговую команду."
+    bounds = _section(lines,'**LLM SHADOW DECISION')
+    if bounds:
+        for i in range(bounds[0]+1,bounds[1]):
+            if lines[i].startswith('Quant:'):
+                lines[i] = lines[i].replace('Quant:', 'Базовый quant до ансамбля:', 1)
+    from .ai_verdict_v6 import _trigger_lines
+    if manager.get('recalculation_triggers'):
+        _replace_section(lines,'**СЛЕДУЮЩИЙ ПЕРЕСЧЁТ**',_trigger_lines(manager))
+    if (snapshot.get('market_refresh') or {}).get('available'):
+        lines = [line for line in lines if not line.startswith('Контрольная базовая bridge-модель:')]
+        bounds = _section(lines,'**ПОЧЕМУ ВЫБРАНО**')
+        if bounds:
+            lines.insert(bounds[0]+1,'Expected/CVaR базовых политик обновлены по текущей котировке. Stress/source diagnostics относятся к исходному серверному снимку и не подтверждают новый выбор ансамбля.')
+    return lines
 
 
 def normalize_final_report(text: str, snapshot: dict) -> str:
