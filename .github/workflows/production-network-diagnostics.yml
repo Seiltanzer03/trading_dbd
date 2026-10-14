@@ -42,7 +42,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ru-central1
           AWS_EC2_METADATA_DISABLED: "true"
-        run: python scripts/ops_yandex_closed_logs.py --expected-sha "$EXPECTED_SHA" --apply
+        run: python scripts/ops_yandex_closed_logs.py --expected-sha "$EXPECTED_SHA" --apply --rotate-btmp
       - name: Verify capacity and compact only reconstructible Git metadata if needed
         uses: appleboy/ssh-action@v1
         env:
@@ -77,7 +77,7 @@ jobs:
             mode=format(stat.S_IMODE(p.stat().st_mode),'04o')
             with tempfile.TemporaryDirectory(prefix='btmp-readonly-debug-') as tmp:
                 config=Path(tmp)/'config'
-                config.write_text('/var/log/btmp {\nrotate -1\ncreate '+mode+' root utmp\nnocompress\nmissingok\nnotifempty\n}\n')
+                config.write_text('/var/log/btmp {\nsu root utmp\nrotate -1\ncreate '+mode+' root utmp\nnocompress\nmissingok\nnotifempty\n}\n')
                 config.chmod(0o600)
                 r=subprocess.run(['/usr/sbin/logrotate','--debug','--force','--state',str(Path(tmp)/'state'),str(config)],capture_output=True,text=True,timeout=30)
                 print('BTMP_LOGROTATE_READONLY_DEBUG='+json.dumps({'returncode':r.returncode,'stderr':r.stderr[-6000:]}))

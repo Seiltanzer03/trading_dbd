@@ -191,9 +191,13 @@ def rotate(path):
     with tempfile.TemporaryDirectory(prefix='verified-btmp-rotation-') as tmp:
         config=Path(tmp)/'config'
         mode=format(stat.S_IMODE(path.stat().st_mode),'04o')
-        config.write_text('/var/log/btmp {\\nrotate -1\\ncreate '+mode+' root utmp\\nnocompress\\nmissingok\\nnotifempty\\n}\\n')
+        config.write_text('/var/log/btmp {\\nsu root utmp\\nrotate -1\\ncreate '+mode+' root utmp\\nnocompress\\nmissingok\\nnotifempty\\n}\\n')
         config.chmod(0o600)
-        subprocess.run(['/usr/sbin/logrotate','--force','--state',str(Path(tmp)/'state'),str(config)],check=True,capture_output=True,timeout=30)
+        command=['/usr/sbin/logrotate','--force','--state',str(Path(tmp)/'state'),str(config)]
+        for argv in ([command[0],'--debug',*command[1:]],command):
+            result=subprocess.run(argv,capture_output=True,text=True,timeout=30)
+            if result.returncode:
+                raise RuntimeError('btmp logrotate failed: '+result.stderr[-6000:])
 print(json.dumps(str(rotate_btmp(LOG_ROOT/'btmp',rotate=rotate,is_closed=is_closed))))
 ''')
                     proof = archive_one(client, source, args.expected_sha, Path(tmp))

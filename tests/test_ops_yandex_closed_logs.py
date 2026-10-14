@@ -4,6 +4,10 @@ import sys
 import shlex
 import subprocess
 import gzip
+import ast
+import inspect
+import stat
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -239,3 +243,46 @@ def test_other_compressed_btmp_names_are_outside_scope(log_source, name):
     with pytest.raises(ValueError, match='Only closed'):
         ops.check_scope(source)
     assert source.read_bytes() == b'preserved'
+
+
+@pytest.mark.parametrize('debug_failure', [False, True])
+def test_actual_rotation_callback_preflights_before_mutation_and_reports_native_failure(log_source, monkeypatch, btmp_owner, debug_failure):
+    source = ops.LOG_ROOT / 'btmp'
+    source.write_bytes(b'original forensic bytes')
+    source.chmod(0o660)
+    monkeypatch.setattr(ops, 'utmp_gid', lambda: source.stat().st_gid)
+    expression = next(node.value for node in ast.walk(ast.parse(inspect.getsource(ops.main)))
+                      if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                      and '\ndef rotate(path):' in node.value)
+    callback = next(node for node in ast.parse(expression).body
+                    if isinstance(node, ast.FunctionDef) and node.name == 'rotate')
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        config = Path(argv[-1]).read_text()
+        assert '\nsu root utmp\n' in config
+        assert '\ncreate 0660 root utmp\n' in config
+        if len(calls) == 1:
+            assert '--debug' in argv
+            assert source.read_bytes() == b'original forensic bytes'
+            return SimpleNamespace(returncode=int(debug_failure), stderr='native directory permission failure')
+        assert '--debug' not in argv
+        source.rename(source.with_name('btmp.1'))
+        source.write_bytes(b'new active bytes')
+        source.chmod(0o660)
+        return SimpleNamespace(returncode=0, stderr='')
+    namespace = {'Path': Path, 'stat': stat, 'tempfile': tempfile,
+                 'subprocess': SimpleNamespace(run=run)}
+    exec(compile(ast.Module(body=[callback], type_ignores=[]), '<actual-rotation-callback>', 'exec'), namespace)
+    rotate = lambda p: ops.rotate_btmp(p, rotate=namespace['rotate'], is_closed=lambda p: True)
+    if debug_failure:
+        with pytest.raises(RuntimeError, match='native directory permission failure'):
+            rotate(source)
+        assert len(calls) == 1
+        assert source.read_bytes() == b'original forensic bytes'
+        assert not source.with_name('btmp.1').exists()
+    else:
+        rotated = rotate(source)
+        assert len(calls) == 2
+        assert rotated.read_bytes() == b'original forensic bytes'
+        assert source.read_bytes() == b'new active bytes'

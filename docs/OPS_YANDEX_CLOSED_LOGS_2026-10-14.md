@@ -96,6 +96,18 @@ Native logrotate exited1; capture_output hid its stderr. No successful rotation
 or retirement of the active btmp is asserted. A read-only --debug diagnostic
 retrieves the actual native reason and path sizes before any additional rotation.
 
+Read-only debug38612710560 reproduced native RED: logrotate rejected the parent
+directory permissions without an explicit su directive. It confirms active
+btmp64129536 bytes, absent btmp.1/btmp.1.gz, no successful partial rotation,
+runtime/SHA/API intact and1117790208 available bytes. The private config now
+states su root utmp, matching the already mandatory owner/group and create
+identity. The exact same private config first passes native --debug before a
+real rotation is attempted; nonzero results expose bounded stderr. No parent
+permissions are changed and no source/ownership/open-file guard is relaxed.
+Actual constructed-callback regressions verify debug-before-mutation, preserved
+0660 ownership/inode bytes, and native diagnostic failure leaving the source
+untouched. Final owning profile50 passed/6 subtests in1.89s.
+
 If actual recovered space cannot meet the existing reserve, further heavy
 research remains blocked; neither repeat training nor a smaller guard substitutes
 for real capacity. Protected backups and active runner components are preserved.
