@@ -23,7 +23,9 @@ withholds the receipt and may leave the disposable worker database.
 Manifest, HEAD metadata, compressed and raw hashes/sizes, gzip EOF, SQLite
 quick_check, critical table counts, source epochs and restore authority remain
 under the existing canonical verifier. Explicit injected clients remain unchanged.
-Dev dependencies include boto3 so mandatory CI executes the real SDK retry test.
+The CI test installation includes boto3 so mandatory CI executes the real SDK
+retry test. The shared dev extra stays unchanged to avoid triggering unrelated
+ML research for a transport dependency change.
 
 ## Verification
 
