@@ -3,6 +3,7 @@ import shutil
 import sys
 import shlex
 import subprocess
+import gzip
 from types import SimpleNamespace
 
 import pytest
@@ -202,3 +203,39 @@ def test_receipt_cannot_overwrite_other_file(log_source, tmp_path, symlink):
     assert log_source.exists()
     if not symlink:
         assert destination.read_bytes() == b'prior receipt'
+
+
+def test_existing_compressed_btmp_is_preserved_as_exact_opaque_bytes(log_source, tmp_path):
+    source = ops.LOG_ROOT / 'btmp.1.gz'
+    original = gzip.compress(b'original rotated forensic log\x00' * 20, mtime=0)
+    source.write_bytes(original)
+    value = receipt(source, tmp_path)
+    proof = ops.retire(source, value, is_closed=lambda p: True)
+    assert proof['retired_bytes'] == len(original)
+    packed = tmp_path / ops.transport_name(source)
+    assert packed.read_bytes() == original
+    assert gzip.decompress(packed.read_bytes()) == b'original rotated forensic log\x00' * 20
+    assert not source.exists()
+
+
+def test_actual_candidate_payload_includes_existing_compressed_btmp(log_source, monkeypatch):
+    source = ops.LOG_ROOT / 'btmp.1.gz'
+    source.write_bytes(gzip.compress(b'forensic bytes', mtime=0))
+    def execute(client, command, timeout):
+        code = shlex.split(command)[2]
+        code = code.replace('LOG_ROOT=Path("/var/log")', f'LOG_ROOT=Path({str(ops.LOG_ROOT)!r})')
+        code = code.replace('\nimport time\npaths=', '\ndef is_closed(p): return True\nimport time\npaths=')
+        result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+    monkeypatch.setattr(ops, '_exec', execute)
+    assert {'path': str(source), 'size': source.stat().st_size} in ops.candidates(None)
+
+
+@pytest.mark.parametrize('name', ['btmp.2.gz', 'btmp.gz', 'btmp.1.gz.link'])
+def test_other_compressed_btmp_names_are_outside_scope(log_source, name):
+    source = ops.LOG_ROOT / name
+    source.write_bytes(b'preserved')
+    with pytest.raises(ValueError, match='Only closed'):
+        ops.check_scope(source)
+    assert source.read_bytes() == b'preserved'

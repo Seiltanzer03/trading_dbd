@@ -42,7 +42,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ru-central1
           AWS_EC2_METADATA_DISABLED: "true"
-        run: python scripts/ops_yandex_closed_logs.py --expected-sha "$EXPECTED_SHA" --apply
+        run: python scripts/ops_yandex_closed_logs.py --expected-sha "$EXPECTED_SHA" --apply --rotate-btmp
       - name: Verify capacity and compact only reconstructible Git metadata if needed
         uses: appleboy/ssh-action@v1
         env:

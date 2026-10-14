@@ -33,9 +33,9 @@ def check_scope(source):
                and re.fullmatch(r'(system|user-\d+)@[0-9a-f-]+\.journal', source.name))
     diagnostic = (source.parent == DIAG_ROOT and re.fullmatch(
         r'(Runner|Worker)_\d{8}-\d{6}-utc\.log', source.name))
-    rotated = source == LOG_ROOT / 'btmp.1'
+    rotated = source in (LOG_ROOT / 'btmp.1', LOG_ROOT / 'btmp.1.gz')
     if not (journal or diagnostic or rotated) or not source.is_file():
-        raise ValueError('Only closed journal/runner logs and btmp.1 are allowed')
+        raise ValueError('Only closed journal/runner logs and btmp.1[.gz] are allowed')
     if not 0 < source.stat().st_size <= MAX_FILE_BYTES:
         raise ValueError('Log outside bounded file budget')
     return source
@@ -131,6 +131,7 @@ def candidates(client):
 import time
 paths=list(JOURNAL_ROOT.glob('*/*@*.journal'))+list(DIAG_ROOT.glob('*.log'))
 paths.append(LOG_ROOT/'btmp.1')
+paths.append(LOG_ROOT/'btmp.1.gz')
 selected=[]
 for p in sorted(paths):
     try: check_scope(p)

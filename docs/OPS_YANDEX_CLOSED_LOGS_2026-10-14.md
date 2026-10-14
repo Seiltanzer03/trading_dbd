@@ -71,6 +71,25 @@ omits optional rotation and retains that guard unchanged. No existing rotated
 archive or active btmp is removed or overwritten. It finishes SHA/API/service
 checks and the already tested canonical Git metadata compaction if needed.
 
+Capacity check38611252971 succeeded at17:59UTC: canonical Git metadata
+102031360→38608896 bytes, all4 refs and runtime SHA preserved, app/database
+unchanged, service active and API HTTP success. Available space1116364800 bytes
+exceeds the original1GiB reserve by42622976 bytes, less than even the existing
+43067286-byte ledger gzip before other publication files or WAL growth. A heavy
+audit is not relaunched into that known insufficient publication margin.
+
+The narrowly scoped continuation preserves the exact existing btmp.1.gz through
+the same full-cloud-GET/decompression/hash pipeline before retiring that closed
+local source. It treats gzip as opaque original bytes; it does not rewrite or
+interpret its history. Only that exact additional rotated filename is allowed;
+other compressed names and symlinks remain outside scope. The unchanged rotation
+guard then permits normal rename/create only when both prior rotated paths have
+actually been preserved and removed. Two new regressions first failed on omitted
+scope/candidate enumeration; no active file, source clock or DB guard is weakened.
+Owning profile48 passed/6 subtests in2.25s. One independent scoped final review
+found no Critical/Important/Minor issues and independently verified all5 new
+regression cases. No repeat runtime CI, model fitting or AI call is required.
+
 If actual recovered space cannot meet the existing reserve, further heavy
 research remains blocked; neither repeat training nor a smaller guard substitutes
 for real capacity. Protected backups and active runner components are preserved.
