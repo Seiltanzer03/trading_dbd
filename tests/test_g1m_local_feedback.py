@@ -8,6 +8,7 @@ import pytest
 
 from seiltanzer.g1_management_runtime import ManagementEdgeRuntime, _json, _sha_text
 from seiltanzer.g1_management_local_runtime import ManagementLocalRuntime
+from seiltanzer.position_state import EXTENDED_POLICIES
 
 
 class _Passive:
@@ -120,7 +121,7 @@ def _insert_source(engine, management, *, trade_id, captured_ts, policy="CLOSE_2
         "take_price,executed_ts,execution_price,execution_r,payload_json) "
         "VALUES(?,?,?,?,?,'pending_execution',?,1,1,'geometry-test',100,90,120,NULL,NULL,NULL,'{}')",
         (decision_id, review_id, trade_id, captured_ts, policy,
-         {"HOLD":0.0,"CLOSE_10":0.1,"CLOSE_25":0.25,"CLOSE_50":0.5,"EXIT":1.0}[policy]),
+         {"HOLD":0.0,"CLOSE_10":0.1,"CLOSE_25":0.25,"CLOSE_50":0.5,"EXIT":1.0}.get(policy, 0.0)),
     )
     conn.execute(
         "INSERT INTO trades VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -204,6 +205,57 @@ def test_local_h15_resolves_on_truncated_real_path_without_waiting_trade_termina
         "LOCAL_DECISION_QUALITY_NOT_TERMINAL_MANAGEMENT_EDGE"
     assert local.status()["eligible_resolved"] == 1
     assert local.edge()["production_authority"] is False
+
+
+@pytest.mark.parametrize("policy", sorted(EXTENDED_POLICIES))
+def test_extended_local_window_does_not_crash_or_starve_fixed_policy_outcome(tmp_path, policy):
+    from seiltanzer.passive_learning import _advance_trading_time
+
+    engine, management = _make_runtime(tmp_path)
+    local = ManagementLocalRuntime(engine)
+    base = _advance_trading_time("NAS100", local.activation_ts + 1, 1) + 60
+    extended_review, _ = _insert_source(
+        engine, management, trade_id=1, captured_ts=base, policy=policy)
+    fixed_review, _ = _insert_source(
+        engine, management, trade_id=2, captured_ts=base + 61, policy="CLOSE_25")
+    assert local.materialize_windows() == 8
+    conn = engine.passive._conn
+    observation = conn.execute(
+        "SELECT * FROM g1m_management_observations WHERE trade_id=1").fetchone()
+    assert observation["production_policy"] == policy
+    assert observation["policy_edge_eligible"] == 0
+    assert observation["exclusion_reason"] == "EXTENDED_POLICY_NOT_IN_FIXED_ACTION_SET"
+    frozen_windows = [tuple(row) for row in conn.execute(
+        "SELECT * FROM g1m_local_windows ORDER BY window_id")]
+    targets = {}
+    for trade_id, review, captured in ((1, extended_review, base), (2, fixed_review, base + 61)):
+        target = conn.execute(
+            "SELECT target_ts FROM g1m_local_windows WHERE trade_id=? AND horizon_minutes=15",
+            (trade_id,)).fetchone()[0]
+        targets[trade_id] = target
+        conn.executemany("INSERT INTO decision_path_points VALUES(?,?,?,?)", [
+            (review, captured, 102.0, 0.2), (review, target, 108.0, 0.8)])
+    conn.commit()
+
+    # Exercise bounded cursor progress across an unsupported observed action,
+    # including legacy pending windows already frozen on the production server.
+    assert local.resolve_due(now=targets[2] + 1, limit=1) == 0
+    assert local.resolve_due(now=targets[2] + 1, limit=1) == 1
+    outcome = local.outcomes()["items"][0]
+    assert outcome["production_policy"] == "CLOSE_25"
+    assert outcome["production_local_r"] == pytest.approx(0.65)
+    assert outcome["hold_local_r"] == pytest.approx(0.8)
+    assert outcome["production_mva_vs_hold_r"] == pytest.approx(-0.15)
+    assert local.status()["eligible_resolved"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM g1m_local_policy_outcomes WHERE window_id IN "
+        "(SELECT window_id FROM g1m_local_windows WHERE trade_id=1)").fetchone()[0] == 0
+    assert [tuple(row) for row in conn.execute(
+        "SELECT * FROM g1m_local_windows ORDER BY window_id")] == frozen_windows
+    assert tuple(conn.execute(
+        "SELECT * FROM g1m_management_observations WHERE trade_id=1").fetchone()) == tuple(observation)
+    assert local.eligibility_diagnostics()["upstream_exclusion_reasons"][
+        "EXTENDED_POLICY_NOT_IN_FIXED_ACTION_SET"] == 1
 
 
 def test_local_window_and_outcome_are_immutable(tmp_path):
