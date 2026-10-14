@@ -109,7 +109,24 @@ def refresh_frozen_comparison(engine, snapshot):
     if isinstance(integrity, dict):
         integrity['policies'] = deepcopy(policies)
         integrity['trade_geometry'] = deepcopy(out['trade_geometry'])
-    manager['selection_rule'] = {**(manager.get('selection_rule') or {}), 'eligible': eligible}
+    manager['selection_rule'] = {**(manager.get('selection_rule') or {}), 'eligible': eligible,
+        'best_expected_r': max((policies[k]['expected_final_r_net'] for k in eligible), default=None)}
+    from .ai_policy_v6 import _chain_refresh
+    manager['recalculation_triggers'] = {
+        **(manager.get('recalculation_triggers') or {}),
+        'current_r': geometry['current_r'],
+        'minus_0_15_r': {'r': geometry['current_r']-.15, 'price': geometry['current']-.15*risk_unit},
+        'plus_0_15_r': {'r': geometry['current_r']+.15, 'price': geometry['current']+.15*risk_unit},
+        'chain_refresh': {**_chain_refresh(engine, tick), 'basis': 'current_quote_refresh'},
+    }
+    # These event probabilities/geometry belong to the old heavy bridge build,
+    # not the freshly priced comparison. Missing current statistics stay null.
+    for key in ('take_first', 'stop_or_be_first', 'no_touch', 'p50_resolution_minutes'):
+        geometry[key] = None
+    manager['scenario_geometry'] = {}
+    if isinstance(integrity, dict):
+        integrity['scenario_geometry'] = {}
+        integrity['trade_geometry'] = deepcopy(geometry)
     out['market_refresh'] = dict(version='cached-comparison-market-refresh-v1',
         available=True, original_snapshot_ts=snapshot['captured_ts'],
         heavy_policy_recomputed=False,

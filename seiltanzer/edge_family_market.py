@@ -456,11 +456,21 @@ def attach_market_family_context(engine, snapshot):
     expected = ALL_INSTRUMENTS[code]
     provider, ticker = ('Binance', expected.binance_symbol) if code in CRYPTO_INSTRUMENTS else ('Yahoo', expected.yahoo)
     observed, received = number(authority.get('observed_ts')), number(authority.get('available_at'))
-    if (authority.get('provider') != provider or authority.get('source_symbol') != ticker
-            or authority.get('target_instrument') != code or authority.get('source_verified') is not True
-            or observed is None or received is None or not 0 < observed <= received <= cutoff
-            or cutoff-observed >= 900
-            or (code in CRYPTO_INSTRUMENTS and authority.get('derived') is not False)):
+    checks = {
+        'provider': authority.get('provider') == provider,
+        'source_symbol': authority.get('source_symbol') == ticker,
+        'target_instrument': authority.get('target_instrument') == code,
+        'source_verified': authority.get('source_verified') is True,
+        'observation_clock': observed is not None and observed > 0,
+        'receipt_clock': received is not None and received > 0,
+        'observed_after_receipt': observed is None or received is None or observed <= received,
+        'received_after_cutoff': received is None or received <= cutoff,
+        'stale_observation': observed is None or cutoff-observed < 900,
+        'crypto_derived': code not in CRYPTO_INSTRUMENTS or authority.get('derived') is False,
+    }
+    failed = [name for name,passed in checks.items() if not passed]
+    if failed:
+        context['failed_source_checks'] = failed
         context['reason'] = 'MARKET_SOURCE_IDENTITY_OR_CLOCK_INVALID'; return
     completed = completed_live_bars(getattr(feed, 'intraday_ohlcv', []), cutoff)
     origin = math.floor(cutoff/300)*300

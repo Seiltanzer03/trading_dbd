@@ -260,9 +260,12 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
         if row.get("quality_basis") == "STRUCTURED_PREFERENCE_ACCEPTANCE_NOT_CALIBRATED_ACCURACY":
             suppression += "; качество — принятие структурированного предпочтения, не калиброванная точность"
             suppression += f"; отдельный LLM-допуск {row.get('standalone_action_status') or '—'} ({row.get('standalone_action_reason') or '—'})"
+        quality_label = 'численная доступность' if component == 'quantitative_base' else 'качество'
+        if component == 'quantitative_base':
+            suppression += '; это не оценка надёжности источников; надёжность данных указана отдельно'
         lines.append(
             f"• {labels.get(component, component)}: {_pct(row.get('nominal_weight'))} → {_pct(row.get('effective_weight'))}; "
-            f"качество {_pct(row.get('quality'))}; возраст {row.get('age_sec') if row.get('age_sec') is not None else '—'} сек; "
+            f"{quality_label} {_pct(row.get('quality'))}; возраст {row.get('age_sec') if row.get('age_sec') is not None else '—'} сек; "
             f"статус {row.get('availability', row.get('available', '—'))}; {row.get('reason') or 'доступен'}; семьи {provenance}{suppression}."
         )
     lines.append("Все кандидаты (сравнение с HOLD):")

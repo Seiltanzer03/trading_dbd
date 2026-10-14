@@ -12,6 +12,27 @@ from seiltanzer.mathematical_edge import fingerprint
 T0 = 1791504000.
 
 
+@pytest.mark.parametrize('patch,failed', [
+    ({},'provider'),
+    ({'provider':'Yahoo','source_symbol':'WRONG'},'source_symbol'),
+    ({'provider':'Yahoo','source_symbol':'^NDX','target_instrument':'NAS100',
+      'source_verified':True,'observed_ts':T0,'available_at':T0+1},'received_after_cutoff'),
+    ({'provider':'Yahoo','source_symbol':'^NDX','target_instrument':'NAS100',
+      'source_verified':True,'observed_ts':T0-901,'available_at':T0-1},'stale_observation'),
+])
+def test_source_rejection_reports_actual_failed_checks_without_admitting_models(patch,failed):
+    from types import SimpleNamespace
+    from seiltanzer.edge_family_market import attach_market_family_context
+    s={'captured_ts':T0,'strategy':{'instrument':'NAS100'}}
+    engine=SimpleNamespace(market=SimpleNamespace(instrument_code='NAS100',demo=False,
+        intraday_source_authority=patch,intraday_ohlcv=[]))
+    attach_market_family_context(engine,s)
+    c=s['edge_family_market_context']
+    assert c['reason']=='MARKET_SOURCE_IDENTITY_OR_CLOCK_INVALID'
+    assert failed in c['failed_source_checks']
+    assert c['available'] is False and c['families']=={}
+
+
 def market():
     assert importlib.util.find_spec('seiltanzer.edge_family_market') is not None, 'historical market-family trainer missing'
     return importlib.import_module('seiltanzer.edge_family_market')

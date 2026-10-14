@@ -146,6 +146,8 @@ def _quality_lines(snapshot: dict) -> list[str]:
         row = snapshot.get(key) or {}
         if row.get("available") is False or row.get("excluded_roots"):
             failures.append(f'{label}: {str(row.get("reason") or "UNAVAILABLE")[:160]}')
+            if row.get('failed_source_checks'):
+                failures.append('не пройдены проверки: ' + ', '.join(row['failed_source_checks']))
     if failures:
         lines.append("Причины недоступности входов edge: " + "; ".join(failures) + ".")
     unified = (snapshot.get('policy_manager') or {}).get('unified_edge_ensemble') or {}
@@ -183,6 +185,8 @@ def _economic_body(snapshot: dict[str, Any]) -> list[str] | None:
     lines = [f"Зона безразличия Expected: {band:+.3f}R."]
     if manager.get("unified_edge_ensemble"):
         lines.insert(0, "Контрольная базовая bridge-модель: её собственные HOLD/Δ и зона безразличия. Итоговая экономика ансамбля опубликована в едином сравнительном банке.")
+        if (snapshot.get('market_refresh') or {}).get('available'):
+            lines[0] = 'Базовые политики пересчитаны по текущей котировке в общем сравнительном банке; прежние bridge-результаты не используются в этой таблице.'
 
     eligible = rule.get("eligible")
     alternatives: list[tuple[float, str, float, float | None]] = []
