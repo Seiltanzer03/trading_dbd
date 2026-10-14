@@ -264,6 +264,10 @@ def test_extended_shadow_action_is_registered_and_manually_acknowledged(
     assert next(row for row in body['unified_edge_ensemble']['scheme_comparisons']
                 if row['scheme'] == 'legacy_control')['selected_policy'] == 'CLOSE_25'
     assert len(body['unified_edge_ensemble']['candidates']) == 12
+    assert 'selected_management_action' in body, {
+        'policy':body['unified_edge_ensemble']['selected_policy'],
+        'candidates':[{k:row.get(k) for k in ('policy','eligible','reason','score','expected_net_r','cvar10_net_r')}
+            for row in body['unified_edge_ensemble']['candidates']]}
     action = body["selected_management_action"]["working_action"]
     assert body["selected_management_action"]["production_authority"] is True
     assert action["action_id"].startswith("management-action-")
@@ -385,9 +389,18 @@ def _install_adverse_frozen_candidates(monkeypatch, explicit_common_bank=False):
                 'captured_ts': snapshot['captured_ts'],
                 'horizon_minutes': manager['inputs']['horizon_minutes'],
                 'state_space': 'R_multiple_of_initial_risk',
-                'r_paths': [[start, (start + stop) / 2, stop - .1],
-                            [start, (start + stop) / 2 - .05, stop - .1]],
-                'weights': [.5, .5], 'source': 'controlled_paired_execution_fixture',
+                # Retain upside on one path and an adverse tail on the other:
+                # a tighter stop can beat both HOLD and the now-admitted EXIT.
+                # Two uniformly falling paths correctly select EXIT instead;
+                # that is not a fixture for extended-action registration.
+                # Enough varied model paths for the real paired uncertainty
+                # check; two paths alone correctly fail its benefit bound.
+                # These are test scenarios, not observed independent trades.
+                'r_paths': [[start, start + .6 + .005*i, start + .6 + .005*i]
+                            for i in range(16)] +
+                           [[start, (start + stop) / 2 - .05 - .003*i, stop - .1 - .002*i]
+                            for i in range(16)],
+                'weights': [1/32]*32, 'source': 'controlled_paired_execution_fixture',
                 'measure': 'explicit_test_measure', 'distribution_kind': 'supplied_weighted_paths'}
         return select_active_management(snapshot)
     monkeypatch.setattr('seiltanzer.active_management.select_active_management', quantify)
