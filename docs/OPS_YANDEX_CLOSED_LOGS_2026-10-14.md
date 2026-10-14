@@ -62,6 +62,15 @@ uses the same unchanged helper and workflow: already retired sources are absent
 from its fresh candidate inventory, so only the remaining closed files continue.
 This is completion of interrupted transport, not repeated training or runtime CI.
 
+Continuation38610601373 verified and retired all11 remaining original journals
+(92274688 bytes). Across both runs all205 original sources/161538781 bytes are
+preserved in verified private-cloud objects. The optional btmp rotation then
+refused a pre-existing rotated path, correctly preserving it and the active
+file; final capacity verification was skipped. The final capacity operation
+omits optional rotation and retains that guard unchanged. No existing rotated
+archive or active btmp is removed or overwritten. It finishes SHA/API/service
+checks and the already tested canonical Git metadata compaction if needed.
+
 If actual recovered space cannot meet the existing reserve, further heavy
 research remains blocked; neither repeat training nor a smaller guard substitutes
 for real capacity. Protected backups and active runner components are preserved.
