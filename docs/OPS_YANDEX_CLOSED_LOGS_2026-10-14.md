@@ -51,6 +51,17 @@ models root metadata only for its temporary btmp paths, with a separate nonroot
 rejection regression; the production ownership guard is unchanged. The workflow
 installs its missing test dependency before any operation.
 
+Hosted run38606770935 passed43 tests/6 subtests, the existing exact-SHA CI
+check, then reached the25-minute job limit. Its logs prove194 exact closed
+sources (69264093 bytes) were full-GET/decompression/hash verified in the existing
+private Yandex bucket and retired only after that proof. Of the original205
+sources/161538781 bytes,11 closed journals/92274688 bytes remain. The btmp
+rotation and final Git/capacity/service verification steps did not run. No final
+free-space or completed reserve recovery is asserted. A controlled continuation
+uses the same unchanged helper and workflow: already retired sources are absent
+from its fresh candidate inventory, so only the remaining closed files continue.
+This is completion of interrupted transport, not repeated training or runtime CI.
+
 If actual recovered space cannot meet the existing reserve, further heavy
 research remains blocked; neither repeat training nor a smaller guard substitutes
 for real capacity. Protected backups and active runner components are preserved.
