@@ -1,0 +1,11 @@
+# Quote refresh schedule clock: production acceptance repair
+
+Baseline: main58bdbe363d2e741cb30e1413ba326d47948cb51d/tree138a591b4ab5f8fc09c256627dfdf1eaf520d013; PR468. CI4021passed, browser green; deploy38558367505 delivered exact SHA and passed readiness but failed real AI route with500/snapshot_error before provider. It is not an accepted release. Isolated12-action assessment passed; no orders/paid calls/user-position mutations there. Production verdict failure occurred before provider/publication.
+
+Cause reproduced locally using actual epoch timestamps and a recently received chain: refresh reintroduced policy_manager.recalculation_triggers.chain_refresh.next_attempt_ts. This is a planned future appointment. Native v18 deliberately removes it before immutable snapshot validation. The new refresh ran after that removal, so no-lookahead correctly rejected the snapshot. Prior tests used low relative timestamps and no future polling appointment and missed the integration defect; one fresh final review also missed it.
+
+One bounded acceptance fix: remove only that planned numeric field after refreshing the countdown, preserving next_attempt_local/UTC, seconds_until_attempt and genuine provider/source timestamps. No validator exception, shifted source clock, risk/source/cost gate change or repeated unchanged deployment. Regression first observed RED with the exact post-capture path, then GREEN; an actual future instrument quote must still be rejected. Changed tree gets mandatory CI and a new exact-SHA release.
+
+Ruling: follow the existing scheduler-display/observed-feature contract, rather than weakening causal validation. Cost: no numeric appointment in the immutable feature document; human time strings/countdown remain visible. This is the one concrete production-finding fix pass for the reviewed report package; no unrelated polish or repeated review.
+
+Verification: exact epoch/future-schedule regression observed RED at the same next_attempt_ts path, then GREEN after removal. Fifty refresh/report/canonical-snapshot tests passed. Initial secondary guard assertion used the display-audit `timestamp` field, which the existing canonical scanner does not inspect; corrected the test to an actual quote packet `feeds.price.ts`, and it is rejected. No scanner or authority change was made. GitHub CI and actual release remain required.
