@@ -3,6 +3,8 @@ name: production-functional-smoke
 # Manual diagnostic only. Automatic functional acceptance is executed inside
 # deploy.yml with the same immutable EXPECTED_SHA as delivery/readiness.
 on:
+  push:
+    branches: ["ops/ai-functional-verify-93c97d5-20261014"]
   workflow_dispatch:
     inputs:
       expected_sha:
@@ -21,7 +23,7 @@ jobs:
       - name: Exercise bounded production routes and AI Verdict over SSH
         uses: appleboy/ssh-action@v1
         env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_SHA: ${{ github.event_name == 'push' && '93c97d5c446e2dfb8f9efdbe787d675bc3de667a' || inputs.expected_sha }}
         with:
           host: 94.241.171.182
           username: root
