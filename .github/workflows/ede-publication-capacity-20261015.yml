@@ -1,0 +1,76 @@
+name: ede-publication-capacity-20261015
+on:
+  push:
+    branches: ['ops/ede-publication-capacity-20261015']
+    paths: ['.github/workflows/ede-publication-capacity-20261015.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 724ce141e8ab7f0813d48c487d896e64fc249255
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -q boto3
+      - uses: actions/download-artifact@v4
+        with:
+          name: ede-v13-research-38682439464
+          run-id: 38682439464
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/ede-output
+      - name: Read verified Yandex receipt and measure incoming bytes
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+          OUTPUT_DIR: ${{ runner.temp }}/ede-output
+        run: |
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          from scripts import ede_ledger_archive as archive
+          from scripts.production_ede_offload import OUTPUT_NAMES
+          root=Path(os.environ['OUTPUT_DIR'])
+          name='ede_v13_candidate_registry.jsonl'
+          raw=root/name
+          sha=archive.digest(raw)
+          client=archive.s3_client()
+          key=archive.PREFIX+name+'/'+sha+'.gz.manifest.json'
+          with client.get_object(Bucket=archive.BUCKET,Key=key)['Body'] as body:
+              receipt_bytes=body.read(65537)
+          assert len(receipt_bytes)<=65536
+          receipt=json.loads(receipt_bytes)
+          archive.validate(receipt)
+          assert receipt['source_sha256']==sha and receipt['source_size_bytes']==raw.stat().st_size
+          sizes={n:(root/n).stat().st_size for n in OUTPUT_NAMES if n!=name}
+          sizes[name+'.gz']=receipt['compressed_size_bytes']
+          sizes[name+'.archive.json']=len((json.dumps(receipt,sort_keys=True)+'\n').encode())
+          print('PUBLICATION_BYTES='+json.dumps({'files':sizes,'incoming_bytes':sum(sizes.values()),'minimum_free_required':archive.MIN_FREE_BYTES+sum(sizes.values()),'cloud_full_restore_verified':receipt['verified_full_get']},sort_keys=True))
+          PY
+      - name: Read production space and package-index cache
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 45s
+          script: |
+            set +e
+            date -u +%FT%TZ
+            printf 'CURRENT_HEAD='
+            timeout 3s git -C /opt/seiltanzer rev-parse HEAD
+            df -B1 /
+            du -x -B1 --max-depth=1 /var/lib/apt/lists /var/cache/apt /root/.cache /opt/seiltanzer/data/research 2>/dev/null
+            find /opt/seiltanzer/data/research -maxdepth 1 -type f -printf '%s %f\n' | sort -n | tail -n 18
+            pgrep -x 'apt|apt-get|dpkg|unattended-upgr'
+            lsof /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend 2>/dev/null
+            printf 'READ_ONLY_CAPACITY_FINISHED\n'
