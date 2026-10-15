@@ -208,6 +208,39 @@ def retire_plain(source, archive, manifest):
             'all_bytes_preserved': True}
 
 
+def retire_cached_ledger(archive, manifest, *, is_closed):
+    """Release only the optional gzip cache, retaining its verified cloud receipt."""
+    validate(manifest)
+    archive = Path(archive)
+    name = 'ede_v13_candidate_registry.jsonl'
+    if manifest['source_name'] != name or archive.name != name + '.gz':
+        raise ValueError('Only the archived candidate-ledger cache may be released')
+    source, receipt = archive.with_name(name), archive.with_name(name + '.archive.json')
+    receipt_before = signature(receipt)
+    if receipt_before[2] > 65536 or json.loads(receipt.read_bytes()) != manifest:
+        raise ValueError('Installed archive receipt changed or exceeds bound')
+    receipt_hash = digest(receipt)
+    if source.exists() or source.is_symlink():
+        raise ValueError('Plaintext ledger remains authoritative; preserve its cache')
+    if not archive.exists() and not archive.is_symlink():
+        return {'retired_cache_bytes': 0, 'all_bytes_preserved_in_cloud': True}
+    before = signature(archive)
+    if (before[2] != manifest['compressed_size_bytes']
+            or digest(archive) != manifest['compressed_sha256'] or not is_closed(archive)):
+        raise ValueError('Cached ledger changed or is open')
+    if (not is_closed(archive) or source.exists() or source.is_symlink()
+            or signature(archive) != before or digest(archive) != manifest['compressed_sha256']
+            or signature(receipt) != receipt_before or digest(receipt) != receipt_hash):
+        raise ValueError('Cached ledger or its authority changed during verification')
+    archive.unlink()
+    fd = os.open(archive.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return {'retired_cache_bytes': before[2], 'all_bytes_preserved_in_cloud': True}
+
+
 def retire_installer(source, manifest):
     validate(manifest)
     source = Path(source)
