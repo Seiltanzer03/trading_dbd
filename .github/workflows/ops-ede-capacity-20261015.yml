@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Finalize only the confirmed failed export with stuck cleanup
+      - name: Force-finish only the already-failed export cleanup
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -20,15 +20,74 @@ jobs:
           curl -fsS --max-time 10 -H "Authorization: Bearer $GH_TOKEN" "$api/jobs" > "$RUNNER_TEMP/jobs.json"
           python - <<'PY'
           import json,os,pathlib
-          jobs=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'jobs.json').read_text())['jobs']
-          audit=next(j for j in jobs if j['name']=='audit')
+          audit=next(j for j in json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'jobs.json').read_text())['jobs'] if j['name']=='audit')
           assert audit['id']==116651229993
           assert any(s['name']=='Export a current consistent live snapshot without VPS disk use' and s['conclusion']=='failure' for s in audit['steps'])
-          assert not any(s['name']=='Run EDE v1.3 research off production VPS' and s['status']!='queued' and s.get('conclusion') not in (None,'skipped') for s in audit['steps'])
+          research=next(s for s in audit['steps'] if s['name']=='Run EDE v1.3 research off production VPS')
+          assert research['status'] in ('queued','pending') or research.get('conclusion')=='skipped'
           PY
-          curl -fsS --max-time 20 -X POST -H "Authorization: Bearer $GH_TOKEN" "$api/cancel"
-          echo CONFIRMED_FAILED_EXPORT_CLEANUP_CANCEL_REQUESTED=38778692434
-      - name: Probe public state with a fixed network deadline
+          curl -fsS --max-time 20 -X POST -H "Authorization: Bearer $GH_TOKEN" "$api/force-cancel"
+          echo CONFIRMED_FAILED_EXPORT_FORCE_CANCEL_REQUESTED=38778692434
+  native-local-health:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 3
+    steps:
+      - name: Verify exact host and stop only this failed replica reader
+        shell: bash
         run: |
-          code=$(curl -sS --connect-timeout 3 --max-time 6 -o /dev/null -w '%{http_code}' http://94.241.171.182:8790/api/state || true)
-          echo "PUBLIC_API_HTTP=$code"
+          set -euo pipefail
+          cd /
+          python3 - <<'PY'
+          import json,pathlib,subprocess,sys,urllib.request,time
+          addresses=json.loads(subprocess.check_output(['ip','-j','-4','address','show'],timeout=5))
+          ips={v['local'] for a in addresses for v in a.get('addr_info',[])}
+          assert '94.241.171.182' in ips,'Wrong host; no process or data changes'
+          root=pathlib.Path('/opt/seiltanzer')
+          sha=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True,timeout=5).strip()
+          assert sha=='588edd8d9093717848530ece5f9bbcea5bed08ed','Wrong runtime; no changes'
+          print('EXACT_LOCAL_RUNTIME='+sha,flush=True)
+          mem={k:v.strip() for k,v in (s.split(':',1) for s in pathlib.Path('/proc/meminfo').read_text().splitlines()) if k in ('MemTotal','MemAvailable','SwapTotal','SwapFree')}
+          print('MEMORY='+json.dumps(mem),flush=True)
+          print(subprocess.check_output(['df','-B1','/'],text=True,timeout=5),flush=True)
+          origin=pathlib.Path('/tmp/seiltanzer-sqlite-tools-38778692434')
+          if origin.is_dir() and not origin.is_symlink():
+              sys.path.insert(0,str(root/'scripts'))
+              from sqlite_replication_origin import cleanup
+              cleanup(origin/'sqlite3_rsync',origin/'origin.json')
+              print('FAILED_ORIGIN_CLEANUP_COMPLETE=38778692434',flush=True)
+          else:print('FAILED_ORIGIN_DIRECTORY_ABSENT=38778692434',flush=True)
+          print(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','NRestarts','-p','MemoryCurrent'],text=True,timeout=5),flush=True)
+          kernel=subprocess.run(['journalctl','-k','--since','2026-10-15 20:22:00 UTC','-n','100','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5)
+          for line in kernel.stdout.splitlines():
+              if any(w in line.lower() for w in ('out of memory','oom','killed process')):
+                  print('KERNEL_MEMORY='+line[:500],flush=True)
+          started=time.monotonic()
+          try:
+              with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4) as r:
+                  r.read(1000001);print('LOCAL_API='+json.dumps({'status':r.status,'ms':round((time.monotonic()-started)*1000)}),flush=True)
+          except Exception as exc:print('LOCAL_API='+json.dumps({'error_class':type(exc).__name__}),flush=True)
+          PY
+  bound-unused-local-check:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Cancel this one-off attempt if no existing local runner accepts it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWN_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          sleep 55
+          api="https://api.github.com/repos/${{ github.repository }}/actions/runs/$OWN_RUN_ID"
+          curl -fsS --max-time 10 -H "Authorization: Bearer $GH_TOKEN" "$api/jobs" > "$RUNNER_TEMP/jobs.json"
+          queued=$(python - <<'PY'
+          import json,os,pathlib
+          jobs=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'jobs.json').read_text())['jobs']
+          row=next(j for j in jobs if j['name']=='native-local-health')
+          print('true' if row['status']=='queued' else 'false')
+          PY
+          )
+          if [ "$queued" = true ]; then
+            echo EXISTING_LOCAL_RUNNER_UNAVAILABLE=true
+            curl -fsS --max-time 15 -X POST -H "Authorization: Bearer $GH_TOKEN" "$api/cancel"
+          fi
