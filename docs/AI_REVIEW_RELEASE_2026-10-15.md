@@ -43,9 +43,33 @@ Final588edd8 main CI38770801853 SUCCESS; canonical deploy38771372036 SUCCESS:
 delivery, readiness, functional smoke, public HTTP and orchestration passed.
 Real AI POST200/8871ms against unchanged12000ms; aggregate Q200/2164ms against
 unchanged3000ms. Public terminal200 on first probe. Normal exact-SHA model
-38774581366 and source38774585773 publications SUCCESS; final reader inspection
-pending. FOMC38774590563, post-research38774595184 and G1M38774640385 SUCCESS.
+38774581366 and source38774585773 publications SUCCESS. FOMC38774590563,
+post-research38774595184 and G1M38774640385 SUCCESS.
 All seven principal CI/production contexts are green on exact588edd8.
+
+Final read-only inspection38775158523/job116560782465 SUCCESS:
+
+- Exact running SHA588edd8; state200/357.1ms, worker200/22.2ms.
+- Source reader accepts `EXACT_SHA_LOCAL_SOURCE_FACTS`; NAS100 has one
+  intermarket observation, requiring a separately validated action model.
+- Mathematical artifact reader accepts exact588edd8,405709bytes,13instruments,
+  25TRAINED family heads. Other statuses remain10HEAD_TRAINING_UNAVAILABLE,
+  41HISTORICAL_FEATURES_UNAVAILABLE,4INSUFFICIENT_HISTORY,24SOURCE_UNAVAILABLE.
+  These are heads across instruments, not eight fully accepted trading families.
+- Source artifact786165bytes names exact588edd8. No stale artifact was relabeled.
+- Latest saved review391 used deterministic fallback; unavailable LLM reason
+  `provider_timeout` and safe provider status are correctly frozen. Its snapshot
+  predates the17:07/17:09 source/model deliveries, so its original generation
+  refusals correctly remain in that immutable historical review. Current readers
+  now accept both files. No extra paid verdict was issued after publication.
+- Earlier real review390 had successful structured LLM and15.789%effective
+  weight. Last upstream request still exceeded the preserved6second guard;
+  availability of the external provider is not guaranteed by this code fix.
+
+Report corrections and latency follow-up are released and accepted. Remaining
+source/model/forecast evidence gates are explicit. EDE inventory/research is a
+separate existing background chain; this addendum does not claim its scientific
+completion or production promotion. No broker order, fill or ACK was issued.
 Source/model dispatch is not delivery. Final read-only artifact-loader and
 saved-smoke-review evidence pending. Slow cold startup was measured672.989s,
 mostly mandatory SQLite/schema verification; preserved, deferred separately.
