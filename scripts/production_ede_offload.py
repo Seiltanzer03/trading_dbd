@@ -19,6 +19,7 @@ import pathlib
 import shlex
 import socket
 import sqlite3
+import tempfile
 import time
 from typing import Any
 
@@ -905,6 +906,55 @@ def _require_remote_archive_capacity(client, size):
     _exec(client, 'python3 -c ' + shlex.quote(code), timeout=10)
 
 
+def _remote_ledger_archive_state(client):
+    helper = pathlib.Path(ede_ledger_archive.__file__).read_text()
+    code = helper + '\n' + 'p=Path(' + repr(str(REMOTE_RESEARCH / 'ede_v13_candidate_registry.jsonl')) + ')\n' + '''
+plain=p.exists() or p.is_symlink()
+result={'plaintext':plain}
+if not plain:
+    cache=Path(str(p)+'.gz');receipt=Path(str(p)+'.archive.json')
+    manifest=None
+    if receipt.exists() or receipt.is_symlink():
+        if signature(receipt)[2]>65536: raise ValueError('Archive receipt exceeds bound')
+        manifest=json.loads(receipt.read_bytes())
+    result.update(cache=cache.exists() or cache.is_symlink(),manifest=manifest)
+print(json.dumps(result))
+'''
+    return json.loads(_exec(client, 'python3 -c ' + shlex.quote(code), timeout=30))
+
+
+def _cloud_only_ledger(client, store, *, before):
+    """Drop only an optional verified cache; legacy plaintext migration stays intact."""
+    state = _remote_ledger_archive_state(client)
+    if state.get('plaintext') is True:
+        return False
+    if state.get('plaintext') is not False or type(state.get('cache')) is not bool:
+        raise ValueError('Invalid installed archive layout')
+    manifest = state.get('manifest')
+    if manifest is None:
+        if state['cache'] or before != {'size': 0, 'sha256': hashlib.sha256(b'').hexdigest()}:
+            raise ValueError('Installed ledger cache has no authoritative receipt')
+        return True
+    ede_ledger_archive.validate(manifest)
+    if (manifest['source_name'] != 'ede_v13_candidate_registry.jsonl'
+            or before != {'size': manifest['source_size_bytes'], 'sha256': manifest['source_sha256']}):
+        raise ValueError('Archive receipt does not match installed ledger identity')
+    if not state['cache']:
+        return True
+    with tempfile.TemporaryDirectory(prefix='ede-cache-readback-') as temporary:
+        ede_ledger_archive.restore(store, manifest, pathlib.Path(temporary) / manifest['source_name'])
+    helper = pathlib.Path(ede_ledger_archive.__file__).read_text()
+    code = helper + '\n' + '''
+import subprocess
+def closed(path):
+    result=subprocess.run(['lsof','--',str(path)],capture_output=True,timeout=10)
+    if result.returncode not in (0,1): raise ValueError('Cache closed-file proof unavailable')
+    return result.returncode==1
+''' + '\nprint(json.dumps(retire_cached_ledger(' + repr(str(REMOTE_RESEARCH / 'ede_v13_candidate_registry.jsonl.gz')) + ',' + repr(manifest) + ',is_closed=closed)))'
+    print('EDE_LEDGER_CACHE_RELEASE=' + _exec(client, 'python3 -c ' + shlex.quote(code), timeout=120).strip())
+    return True
+
+
 def publish(args: argparse.Namespace) -> int:
     output = pathlib.Path(args.output_dir)
     for name in OUTPUT_NAMES:
@@ -917,7 +967,8 @@ def publish(args: argparse.Namespace) -> int:
     packed.unlink(missing_ok=True)
     manifest = ede_ledger_archive.prepare(output / name, packed, expected_sha=args.expected_sha)
     # Cloud failure happens before the first production publication or retirement.
-    manifest = ede_ledger_archive.upload(ede_ledger_archive.s3_client(), packed, manifest)
+    store = ede_ledger_archive.s3_client()
+    manifest = ede_ledger_archive.upload(store, packed, manifest)
     receipt = output / (name + '.archive.json')
     receipt.write_text(json.dumps(manifest, sort_keys=True) + '\n')
 
@@ -930,7 +981,9 @@ def publish(args: argparse.Namespace) -> int:
         sftp = client.open_sftp()
         try:
             before = _assert_remote_ledger_prefix(client, output / name)
-            publish_names = tuple(n for n in OUTPUT_NAMES if n != name) + (name + '.gz', name + '.archive.json')
+            cloud_only = _cloud_only_ledger(client, store, before=before)
+            publish_names = (tuple(n for n in OUTPUT_NAMES if n != name)
+                + (() if cloud_only else (name + '.gz',)) + (name + '.archive.json',))
             _require_remote_archive_capacity(client, sum((output / n).stat().st_size for n in publish_names))
             for output_name in publish_names:
                 if output_name == name + '.archive.json' and _remote_ledger_identity(client) != before:
@@ -950,11 +1003,15 @@ def publish(args: argparse.Namespace) -> int:
         finally:
             sftp.close()
 
-        helper = pathlib.Path(ede_ledger_archive.__file__).read_text()
-        command = 'python3 -c ' + shlex.quote(helper + '\n' +
-            'print(json.dumps(retire_plain(' + repr(str(REMOTE_RESEARCH / name)) + ',' +
-            repr(str(REMOTE_RESEARCH / (name + '.gz'))) + ',' + repr(manifest) + ')))')
-        print('EDE_LEDGER_CLOUD_ARCHIVE=' + _exec(client, command, timeout=120).strip())
+        if not cloud_only:
+            helper = pathlib.Path(ede_ledger_archive.__file__).read_text()
+            command = 'python3 -c ' + shlex.quote(helper + '\n' +
+                'print(json.dumps(retire_plain(' + repr(str(REMOTE_RESEARCH / name)) + ',' +
+                repr(str(REMOTE_RESEARCH / (name + '.gz'))) + ',' + repr(manifest) + ')))')
+            print('EDE_LEDGER_CLOUD_ARCHIVE=' + _exec(client, command, timeout=120).strip())
+        else:
+            print('EDE_LEDGER_CLOUD_ARCHIVE=' + json.dumps({'storage_layout': 'CLOUD_ONLY',
+                'all_bytes_preserved_in_cloud': True, 'retired_bytes': 0}))
 
         _probe_api(client)
         print("EDE_OFFLOAD_PUBLISH_OK=1")
