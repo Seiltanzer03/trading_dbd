@@ -1,0 +1,85 @@
+name: ops-ai-report-diagnostics-20261015
+on:
+  push:
+    branches: [ops/ai-report-diagnostics-20261015]
+    paths: [.github/workflows/ai-report-diagnostics-20261015.yml]
+permissions:
+  contents: read
+jobs:
+  read-only-diagnostics:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 2m
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 54a16250acd218b524f86e548d5c56871e588e68
+            PYTHONDONTWRITEBYTECODE=1 /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import json, pathlib, re, sqlite3, subprocess, time, urllib.request
+            root = pathlib.Path('/opt/seiltanzer')
+            conn = sqlite3.connect((root/'data/trades.db').as_uri()+'?mode=ro', uri=True, timeout=3)
+            conn.execute('PRAGMA query_only=ON')
+            deadline = time.monotonic()+8
+            conn.set_progress_handler(lambda: int(time.monotonic()>deadline), 2000)
+            found = None
+            for row in conn.execute('SELECT id,model,snapshot_json FROM ai_verdicts ORDER BY id DESC LIMIT 80'):
+                if len(row[2])>1_000_000:
+                    continue
+                snapshot = json.loads(row[2])
+                manager = snapshot.get('policy_manager') or {}
+                decision = manager.get('management_decision') or {}
+                if decision.get('decision_id') != 'decision-b91c4fe28247268c86b95a8a2791':
+                    continue
+                shadow = snapshot.get('llm_shadow_decision') or {}
+                code = str(shadow.get('reason_code') or '')
+                if not re.fullmatch(r'[A-Za-z0-9_.:-]{0,96}', code):
+                    code = 'NON_CODE_REASON_REDACTED'
+                evidence = manager.get('evidence_gate') or manager.get('evidence') or {}
+                found = {'review_row_id':row[0], 'model':row[1],
+                    'captured_ts':snapshot.get('captured_ts'),
+                    'shadow':{**{k:shadow.get(k) for k in ('status','model','captured_ts','blocked_by_hard_guard','selection_masked')},'reason_code':code},
+                    'provider_failure': snapshot.get('provider_failure'),
+                    'snapshot_budget':snapshot.get('snapshot_budget'),
+                    'gate_status':(manager.get('gate') or {}).get('status'),
+                    'evidence_keys':list(evidence),
+                    'evidence_independence':evidence.get('confirmation_independence'),
+                    'evidence_counts':{k:len(v) for k,v in evidence.items() if isinstance(v,list)},
+                    'source_bundle_audit':snapshot.get('edge_family_source_bundle_audit'),
+                    'market_context':{k:(snapshot.get('edge_family_market_context') or {}).get(k) for k in ('reason','failed_source_checks','market_observation_ts')},
+                    'integrity_keys':list(snapshot.get('report_integrity') or {}),
+                    'manager_keys':list(manager),
+                    'snapshot_keys':list(snapshot)}
+                break
+            conn.close()
+            print('REPORTED_REVIEW='+json.dumps(found or {'found':False}, sort_keys=True))
+            for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json'):
+                path=root/'data/research'/name
+                if not path.is_file() or path.stat().st_size>8_000_000:
+                    print('ARTIFACT='+json.dumps({'name':name,'bounded_available':False}));continue
+                data=json.loads(path.read_bytes())
+                print('ARTIFACT='+json.dumps({'name':name,'bytes':path.stat().st_size,
+                    **{k:data.get(k) for k in ('contract_version','published_for_sha','created_ts','captured_ts','publication_contract_version')},
+                    'instrument_n':len(data.get('instruments') or {}),
+                    'market_model_instrument_n':len(data.get('family_market_models') or {})},sort_keys=True))
+            logs=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-10-15 07:45:00 UTC','--until','2026-10-15 08:05:00 UTC','--grep','ai-944fd92fac764c5f97af','-n','80','-o','cat','--no-pager'],capture_output=True,text=True,timeout=8)
+            for line in logs.stdout.splitlines():
+                start=line.find('{')
+                if start<0:continue
+                try: item=json.loads(line[start:])
+                except ValueError:continue
+                print('TRACE='+json.dumps({k:item[k] for k in ('request_id','stage','event','elapsed_ms','duration_ms','exception_class','status_code') if k in item},sort_keys=True))
+            for attempt in range(3):
+                started=time.monotonic()
+                try:
+                    with urllib.request.urlopen('http://127.0.0.1:8790/api/research/g1/q/audit?limit=5000',timeout=8) as response:
+                        data=response.read(4_000_001)
+                        assert len(data)<=4_000_000
+                        print('Q_AUDIT_TIMING='+json.dumps({'attempt':attempt+1,'http':response.status,'elapsed_ms':round((time.monotonic()-started)*1000,1),'bytes':len(data)}))
+                except Exception as exc:
+                    print('Q_AUDIT_TIMING='+json.dumps({'attempt':attempt+1,'error_class':type(exc).__name__,'elapsed_ms':round((time.monotonic()-started)*1000,1)}))
+            PY
