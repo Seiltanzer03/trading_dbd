@@ -32,6 +32,14 @@ jobs:
             now = time.time()
             sha = runtime_git_sha(root)
             print('EXACT_RELEASE='+str(sha))
+            trace_log=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-10-15 16:14:00 UTC','--until','2026-10-15 16:15:10 UTC','-n','120','-o','cat','--no-pager'],capture_output=True,text=True,timeout=5)
+            for line in trace_log.stdout.splitlines():
+                start=line.find('{')
+                if start<0:continue
+                try:item=json.loads(line[start:])
+                except ValueError:continue
+                if str(item.get('request_id','')).startswith('ai-'):
+                    print('SMOKE_TRACE='+json.dumps({k:item[k] for k in ('request_id','stage','event','elapsed_ms','duration_ms','exception_class','status_code') if k in item},sort_keys=True))
             journal=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-10-15 15:57:00 UTC','-n','180','-o','cat','--no-pager'],capture_output=True,text=True,timeout=5)
             for line in journal.stdout.splitlines():
                 if re.match(r'^(STARTUP_PHASE |Timeout \(|Thread |Current thread|  File ")',line):
