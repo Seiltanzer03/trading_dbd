@@ -1,0 +1,74 @@
+name: ops-ai-review-release-diagnostics-20261015
+on:
+  push:
+    branches: [ops/ai-review-release-diagnostics-20261015]
+    paths: [.github/workflows/ai-review-release-diagnostics-20261015.yml]
+permissions:
+  contents: read
+jobs:
+  read-only-final-acceptance:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 2m
+          script: |
+            set -euo pipefail
+            cd /opt/seiltanzer
+            test "$(git rev-parse HEAD)" = 588edd8d9093717848530ece5f9bbcea5bed08ed
+            systemctl show seiltanzer -p ActiveState -p SubState -p NRestarts
+            PYTHONDONTWRITEBYTECODE=1 .venv/bin/python - <<'PY'
+            import json, pathlib, re, sqlite3, time, urllib.request
+            from types import SimpleNamespace
+            from seiltanzer.edge_family_source_runtime import load_family_source_context
+            from seiltanzer.mathematical_edge import load_artifact
+            from seiltanzer.runtime_git_identity import runtime_git_sha
+            root=pathlib.Path('/opt/seiltanzer'); now=time.time(); sha=runtime_git_sha(root)
+            print('EXACT_RELEASE='+str(sha))
+            for route in ('/api/state','/api/research/runtime/worker-status'):
+                started=time.monotonic()
+                with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=5) as response:
+                    raw=response.read(1_000_001)
+                    assert len(raw)<=1_000_000
+                    worker=json.loads(raw).get('worker') or {}
+                    print('HTTP_FINAL='+json.dumps({'route':route,'http':response.status,'elapsed_ms':round((time.monotonic()-started)*1000,1),
+                        'worker':{k:worker.get(k) for k in ('current_phase','core_stage','acceptance_pause_active')}},sort_keys=True))
+            engine=SimpleNamespace(settings=SimpleNamespace(data_dir=root/'data'))
+            source=load_family_source_context(engine,{'captured_ts':now,'strategy':{'instrument':'NAS100'}},sha)
+            print('CURRENT_SOURCE_READER='+json.dumps(source['edge_family_source_bundle_audit'],sort_keys=True))
+            model=load_artifact(root/'data/research/mathematical_edge_latest.json',now)
+            print('CURRENT_MODEL_READER='+json.dumps({'accepted':model is not None,'published_for_sha':(model or {}).get('published_for_sha')},sort_keys=True))
+            for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json'):
+                path=root/'data/research'/name
+                assert path.is_file() and 0<path.stat().st_size<=8_000_000
+                data=json.loads(path.read_bytes()); statuses={}
+                for families in (data.get('family_market_models') or {}).values():
+                    for row in families.values():
+                        status=row.get('status','UNKNOWN');statuses[status]=statuses.get(status,0)+1
+                print('ARTIFACT_FINAL='+json.dumps({'name':name,'bytes':path.stat().st_size,
+                    **{k:data.get(k) for k in ('contract_version','published_for_sha','created_ts','captured_ts')},
+                    'instrument_n':len(data.get('instruments') or {}),'family_model_statuses':statuses},sort_keys=True))
+            conn=sqlite3.connect((root/'data/trades.db').as_uri()+'?mode=ro',uri=True,timeout=3)
+            conn.execute('PRAGMA query_only=ON')
+            deadline=time.monotonic()+8
+            conn.set_progress_handler(lambda:int(time.monotonic()>deadline),2000)
+            def code(value):
+                return value if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_.:-]{0,96}',value) else None
+            for row in conn.execute('SELECT id,ts,model,snapshot_json FROM ai_verdicts ORDER BY id DESC LIMIT 3'):
+                if len(row[3])>1_000_000:continue
+                snapshot=json.loads(row[3]);manager=snapshot.get('policy_manager') or {}
+                shadow=snapshot.get('llm_shadow_decision') or {};unified=manager.get('unified_edge_ensemble') or {}
+                market=snapshot.get('edge_family_market_context') or {}
+                print('SAVED_REVIEW_FINAL='+json.dumps({'row_id':row[0],'ts':row[1],'model':row[2],
+                    'captured_ts':snapshot.get('captured_ts'),'provider_status':snapshot.get('ai_provider_status'),
+                    'llm_status':shadow.get('status'),'llm_reason':code(shadow.get('reason_code')),
+                    'ensemble_applied':unified.get('applied'),
+                    'components':[{k:c.get(k) for k in ('component_id','available','effective_weight','reason')} for c in unified.get('components',[])],
+                    'source_audit':snapshot.get('edge_family_source_bundle_audit'),
+                    'market_context':{k:market.get(k) for k in ('available','reason','failed_source_checks','market_observation_ts')}},sort_keys=True))
+            conn.close()
+            PY
