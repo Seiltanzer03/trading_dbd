@@ -36,7 +36,33 @@ execution authority, weight admission or mathematical search was added.
 - PR head: dd751197d8fe685324923aad556703f31213fb19.
 - Authorized merge: 55fe3f784604ce8007e98e074a73ff33fc672466, same tree.
 - Main CI 38812874530: full CI success, including ci/full-webkit.
-- Automatic deploy 38813363531: in progress; acceptance is not yet claimed.
+- Automatic deploy 38813363531: SUCCESS. Exact-SHA delivery, research pause,
+  readiness, official macro bundle, functional smoke and public HTTP passed.
+  NRestarts=0 at 22:06:25 UTC; cgroup MemoryCurrent=1,289,728,000 bytes,
+  MemoryPeak=1,413,136,384 bytes (includes cache, not process RSS).
+- Production smoke AI POST: structured HTTP 400 in 17 ms, within the unchanged
+  12-second gate. This is not a new successful LLM generation. Isolated fixture
+  covered all 12 actions, with zero orders/provider calls/real position changes.
+- Aggregate Q audit: HTTP 200, 1,068 ms, unchanged 3-second gate.
+- Exact-SHA math 38815534340, family source 38815536856, FOMC 38815539968,
+  post-research 38815543012 and SHA staging 38813363575: SUCCESS.
+- G1M 38815574662 attempt 1 failed: local-edge read 4,014.4 ms exceeded the
+  unchanged 3,000 ms gate, and its trap released the original owner. Bounded
+  read-only diagnostic 38815955762 reacquired that same owner and waited for
+  the active worker core to finish. Three paused reads took 729.8/381.9/555.2 ms,
+  with the complete report and unchanged authority. This does not establish
+  the complete cause of the earlier isolated slow request.
+- Only that failed G1M job was continued once under the retained pause, without
+  deployment, new CI or a paid AI retry. Attempt 2 job 116701175724 passed:
+  842.3 ms, unchanged 3,000 ms gate, exact owner/SHA marker written. Dataset:
+  303 observations, 23 distinct trades, 1,001 resolved windows, 383 prospective
+  evidence windows. Verdict remains INSUFFICIENT_MANAGEMENT_DATA.
+- All eight exact-SHA commit statuses are SUCCESS: ci/full-webkit plus the
+  seven existing production/readiness/functional contexts.
+- The normal next-stage inventory 38816180567 is in progress. No new inventory,
+  scientific search result or additional family admission is claimed here.
+  Its workflow owns the retained acceptance lease and normal downstream
+  handoff/failure cleanup; this checkpoint does not restart that computation.
 
 ## Prior incident and remaining limits
 
