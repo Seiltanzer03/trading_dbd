@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from .baseline_rows import baseline_eligible_rows
@@ -27,6 +30,8 @@ from .shadow_cache import write_shadow_summary_cache
 
 SHADOW_RUNTIME_VERSION = "g1s-ede-shadow-runtime-v1.3.2"
 SHADOW_RUNTIME_INTERVAL_SEC = 60.0
+_SHADOW_READ_BUDGET_SEC = 30.0
+_SHADOW_READ_RESERVE_BYTES = 1024 ** 3
 AUDIT_CONTRACT_VERSIONS = {
     "g1s-ede-production-audit-v1.3",
     "g1s-ede-production-audit-v1.3.1",
@@ -75,6 +80,72 @@ def _run_llm_edge_lifecycle(engine: Any, current: float) -> dict[str, Any]:
         }
 
 
+def _shadow_read_has_headroom(database: Path) -> bool:
+    capacity = os.statvfs(database)
+    return capacity.f_bavail * capacity.f_frsize >= _SHADOW_READ_RESERVE_BYTES
+
+
+def _shadow_feature_rows(runtime: Any, *, available_asof: float) -> list[dict[str, Any]]:
+    """Stream raw payloads from an owned WAL snapshot, never the live writer.
+
+    The adapter deliberately fetches atomically on shared live connections.
+    An explicit read-only transaction enables its existing 32-row streaming
+    path without weakening consistency or truncating the derived cohort.
+    """
+    with runtime._lock:
+        database = next((row[2] for row in runtime._conn.execute(
+            "PRAGMA database_list").fetchall() if row[1] == "main"), "")
+    if not database:
+        # In-memory/demo runtimes cannot be reopened by filename; retain their
+        # established atomic extraction instead of creating a different DB.
+        return ProspectiveFeatureAdapter(runtime, available_asof=available_asof).rows(
+            resolved_only=False, strict=False)
+
+    database = Path(database)
+    deadline = time.monotonic() + _SHADOW_READ_BUDGET_SEC
+    refusal = None
+    last_capacity_check = -float("inf")
+
+    def interrupted() -> int:
+        nonlocal refusal, last_capacity_check
+        now = time.monotonic()
+        if now >= deadline:
+            refusal = "SHADOW_READ_TIME_BUDGET_EXCEEDED"
+        elif now - last_capacity_check >= 0.25:
+            last_capacity_check = now
+            if not _shadow_read_has_headroom(database):
+                refusal = "SHADOW_READ_DISK_BUDGET_EXCEEDED"
+        return int(refusal is not None)
+
+    if interrupted():
+        raise RuntimeError(refusal)
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro",
+                                 uri=True, timeout=0.5)
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA cache_size=-2048")
+        connection.set_progress_handler(interrupted, 1000)
+        connection.execute("BEGIN")
+        reader = SimpleNamespace(_conn=connection, _lock=threading.RLock(),
+                                 _consistent_read_snapshot=True)
+        rows = ProspectiveFeatureAdapter(reader, available_asof=available_asof).rows(
+            resolved_only=False, strict=False)
+        # Also check Python-side work before any shadow ledger/cache publication.
+        last_capacity_check = -float("inf")
+        if interrupted():
+            raise RuntimeError(refusal)
+        return rows
+    except sqlite3.OperationalError as exc:
+        if refusal is not None:
+            raise RuntimeError(refusal) from exc
+        raise
+    finally:
+        # Includes failed decoding, interrupted SQL and downstream exceptions.
+        # The live runtime connection and all observations remain untouched.
+        connection.close()
+
+
 def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict[str, Any]:
     """One bounded shadow pass; safe to call from the low-priority worker."""
     current = float(now or time.time())
@@ -108,8 +179,7 @@ def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict
             "llm_edge_lifecycle": llm_edge_lifecycle,
         }
 
-    adapter = ProspectiveFeatureAdapter(runtime)
-    rows = adapter.rows(resolved_only=False, strict=False)
+    rows = _shadow_feature_rows(runtime, available_asof=current)
     resolved_rows_all = [
         row for row in rows
         if row.get("outcome_available")
