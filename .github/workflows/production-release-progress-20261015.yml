@@ -31,3 +31,26 @@ jobs:
             find /opt/seiltanzer/data/backups/local -maxdepth 1 -type f -name '.*.tmp.sqlite3' -printf 'PRESTART_TEMP_BYTES=%s\n' 2>/dev/null
             curl -sS --connect-timeout 1 --max-time 3 -o /dev/null -w 'STATE_HTTP=%{http_code} SECONDS=%{time_total}\n' http://127.0.0.1:8790/api/state
             printf 'READ_ONLY_PROGRESS_DIAGNOSTIC_FINISHED\n'
+      - name: Measure local-edge latency and worker phase read-only
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 45s
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 724ce141e8ab7f0813d48c487d896e64fc249255
+            /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import json,time,urllib.request
+            base='http://127.0.0.1:8790'
+            with urllib.request.urlopen(base+'/api/research/runtime/worker-status',timeout=5) as r:
+                w=json.load(r).get('worker') or {}
+                print('WORKER_PHASE='+json.dumps({k:w.get(k) for k in ('current_phase','core_stage','maintenance_running','maintenance_phase','acceptance_gate_active','acceptance_pause_active')}))
+            for attempt in range(3):
+                started=time.monotonic()
+                with urllib.request.urlopen(base+'/api/research/g1/management/local-edge',timeout=6) as r:
+                    body=json.load(r)
+                    print('LOCAL_EDGE_READ='+json.dumps({'attempt':attempt+1,'http':r.status,'elapsed_ms':round((time.monotonic()-started)*1000,1),'production_authority':body.get('production_authority'),'auto_promotion':body.get('auto_promotion'),'dataset':body.get('dataset')}))
+            PY
