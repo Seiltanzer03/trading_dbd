@@ -5,36 +5,45 @@ on:
     paths: [.github/workflows/ops-ede-capacity-20261015.yml]
 permissions:
   contents: read
-  actions: write
 jobs:
-  finalize-bounded-diagnostics:
+  resumed-host-diagnostics:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
-      - name: Finalize only our unused local-runner diagnostics
+      - uses: actions/checkout@v4
+        with:
+          ref: 588edd8d9093717848530ece5f9bbcea5bed08ed
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --quiet paramiko
+      - name: Read exact restart cause and release only our failed acceptance owner
         env:
-          GH_TOKEN: ${{ github.token }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           python - <<'PY'
-          import json,os,urllib.request,urllib.error
-          base='https://api.github.com/repos/${{ github.repository }}/actions/runs/'
-          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'}
-          def request(path,method='GET'):
-              r=urllib.request.urlopen(urllib.request.Request(base+path,headers=headers,method=method),timeout=15)
-              body=r.read()
-              return json.loads(body) if body else {}
-          for rid in ('38803679910','38803965683'):
-              run=request(rid)
-              assert run['head_branch']=='ops/ede-capacity-20261015'
-              print('LOCAL_DIAGNOSTIC_RUN='+json.dumps({'id':rid,'status':run['status'],'conclusion':run['conclusion']}),flush=True)
-              if run['status']!='completed':
-                  try:
-                      request(rid+'/force-cancel','POST')
-                      print('UNUSED_LOCAL_CHECK_FORCE_CANCEL='+rid,flush=True)
-                  except urllib.error.HTTPError as e:
-                      if e.code!=409:raise
+          import os,sys,shlex
+          sys.path.insert(0,'scripts')
+          from production_ede_offload import _connect,_exec,_verify_sha
+          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
+          try:
+              _verify_sha(client,'588edd8d9093717848530ece5f9bbcea5bed08ed')
+              code="""
+          import json,pathlib,subprocess
+          mem={k:v.strip() for k,v in (s.split(':',1) for s in pathlib.Path('/proc/meminfo').read_text().splitlines()) if k in ('MemTotal','MemAvailable','SwapTotal','SwapFree')}
+          print('MEMORY='+json.dumps(mem),flush=True)
+          for command in (['uptime','-s'],['df','-B1','/'],['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','NRestarts','-p','MainPID','-p','ExecMainStartTimestamp','-p','MemoryCurrent','-p','MemoryPeak','-p','Result']):
+              print(subprocess.check_output(command,text=True,timeout=5),flush=True)
+          print(subprocess.check_output(['ps','-eo','pid,comm,rss,pcpu','--sort=-rss'],text=True,timeout=5).splitlines()[:10],flush=True)
+          for unit in ('kernel','application'):
+              command=['journalctl','--since','2026-10-15 20:22:00 UTC','-n','250','--no-pager','-o','cat']
+              command+=['-k'] if unit=='kernel' else ['-u','seiltanzer']
+              result=subprocess.run(command,capture_output=True,text=True,timeout=8)
+              for line in result.stdout.splitlines():
+                  if (unit=='kernel' and any(w in line.lower() for w in ('out of memory','oom','killed process'))) or (unit=='application' and (line.startswith(('STARTUP_PHASE ','INFO:     Started server','INFO:     Waiting for application','INFO:     Application startup','INFO:     Uvicorn')) or any(w in line.lower() for w in ('main process exited','oom-kill','failed with result','scheduled restart','starting seiltanzer')))):
+                      print(unit.upper()+'='+line[:900],flush=True)
+          """
+              print(_exec(client,'python3 -c '+shlex.quote(code),timeout=35),flush=True)
+              print(_exec(client,'/opt/seiltanzer/.venv/bin/python /opt/seiltanzer/scripts/production_research_acceptance.py release-gate --acceptance-run-id 38771372036 --expected-sha 588edd8d9093717848530ece5f9bbcea5bed08ed',timeout=30),flush=True)
+          finally:client.close()
           PY
-      - name: Record final bounded public reachability
-        run: |
-          code=$(curl -sS --connect-timeout 3 --max-time 6 -o /dev/null -w '%{http_code}' http://94.241.171.182:8790/api/state || true)
-          echo "FINAL_PUBLIC_API_HTTP=$code"
