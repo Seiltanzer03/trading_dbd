@@ -1,0 +1,161 @@
+name: ops-ede-yandex-headroom-20261015
+on:
+  push:
+    branches: [ops/ede-yandex-headroom-588edd8-20261015]
+    paths: [.github/workflows/ops-ede-headroom-20261015.yml]
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: production-seiltanzer
+  cancel-in-progress: false
+jobs:
+  restore-headroom:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: 588edd8d9093717848530ece5f9bbcea5bed08ed
+      ACCEPTANCE_RUN_ID: "38771372036"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify the unchanged archive and metadata safety helpers
+        run: |
+          python -m pip install --quiet pytest paramiko boto3 PyYAML
+          python -m pytest -q tests/test_ops_yandex_closed_logs.py tests/test_ede_ledger_archive.py tests/test_compact_deployment_git.py tests/test_reclaim_apt_cache.py
+      - name: Require accepted runtime CI and a terminal EDE producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 20 -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/$EXPECTED_SHA/status" \
+            | python -c 'import json,sys; d=json.load(sys.stdin); assert any(r["context"]=="ci/full-webkit" and r["state"]=="success" for r in d["statuses"])'
+          curl -fsS --max-time 20 -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/production-ede-v12-audit.yml/runs?per_page=20" \
+            | python -c 'import json,sys; d=json.load(sys.stdin); assert all(r["status"]=="completed" for r in d["workflow_runs"]), "EDE producer is not terminal"'
+      - name: Preserve closed journals and existing rotated files in Yandex
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          set -euo pipefail
+          python scripts/ops_yandex_closed_logs.py --expected-sha "$EXPECTED_SHA" --apply --rotate-btmp
+          python scripts/ops_yandex_archive_recovery.py --expected-sha "$EXPECTED_SHA" --stage capacity
+      - name: Rotate only the two inspected system text logs without truncation
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 2m
+          envs: EXPECTED_SHA
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            python3 - <<'PY'
+            import fcntl,grp,json,os,pathlib,pwd,stat,subprocess,tempfile,time
+            paths=[pathlib.Path('/var/log/auth.log'),pathlib.Path('/var/log/syslog')]
+            def safe(path):
+                if any(p.is_symlink() for p in (path,*path.parents)):
+                    raise RuntimeError('Symlinked log path')
+                info=path.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
+                    raise RuntimeError('Unexpected log type or link count')
+                if (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode))!=(pwd.getpwnam('syslog').pw_uid,grp.getgrnam('adm').gr_gid,0o640):
+                    raise RuntimeError('Unexpected log owner or mode')
+                return info
+            with open('/opt/seiltanzer/.deployment-git-maintenance.lock','a') as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                before={}
+                for path in paths:
+                    info=safe(path)
+                    if not 0<info.st_size<=80*1024**2:
+                        raise RuntimeError('Text log exceeds inspected budget')
+                    for suffix in ('.1','.1.gz'):
+                        old=pathlib.Path(str(path)+suffix)
+                        if old.exists() or old.is_symlink():
+                            raise RuntimeError('Existing archive must first be preserved')
+                    before[path]=info
+                config='/var/log/auth.log /var/log/syslog {\nsu root adm\nrotate -1\ncreate 0640 syslog adm\nnocompress\nnotifempty\nsharedscripts\npostrotate\n/usr/lib/rsyslog/rsyslog-rotate\nendscript\n}\n'
+                with tempfile.TemporaryDirectory(prefix='verified-text-log-rotation-') as tmp:
+                    root=pathlib.Path(tmp);cfg=root/'config';cfg.write_text(config);cfg.chmod(0o600)
+                    command=['/usr/sbin/logrotate','--force','--state',str(root/'state'),str(cfg)]
+                    subprocess.run([command[0],'--debug',*command[1:]],check=True,timeout=20)
+                    subprocess.run(command,check=True,timeout=20)
+                for path,info in before.items():
+                    old=pathlib.Path(str(path)+'.1');rotated=safe(old);active=safe(path)
+                    if (rotated.st_dev,rotated.st_ino)!=(info.st_dev,info.st_ino) or rotated.st_size<info.st_size or active.st_ino==info.st_ino:
+                        raise RuntimeError('Rotation inode preservation failed')
+                    for attempt in range(10):
+                        result=subprocess.run(['lsof','--',str(old)],capture_output=True,timeout=5)
+                        if result.returncode==1:break
+                        if result.returncode!=0:raise RuntimeError('Closed-file proof unavailable')
+                        time.sleep(0.5)
+                    else:raise RuntimeError('Rotated file still open; preserved on disk')
+                    print('TEXT_LOG_ROTATED='+json.dumps({'path':str(old),'bytes':rotated.st_size,'closed':True}))
+            PY
+      - name: Archive the newly closed text logs and verify actual source headroom
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          set -euo pipefail
+          python scripts/ops_yandex_archive_recovery.py --expected-sha "$EXPECTED_SHA" --stage capacity
+          python scripts/production_ede_offload.py live-preflight \
+            --password "$SSH_PASSWORD" --expected-sha "$EXPECTED_SHA" \
+            --output-db "${{ runner.temp }}/preflight/source.sqlite3"
+      - name: Reacquire the original acceptance owner for the failed export
+        id: gate
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 2m
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            systemctl is-active seiltanzer
+            curl -fsS --max-time 4 http://127.0.0.1:8790/api/state -o /dev/null
+            /opt/seiltanzer/.venv/bin/python /opt/seiltanzer/scripts/production_research_acceptance.py \
+              acquire-gate --acceptance-run-id "$ACCEPTANCE_RUN_ID" --expected-sha "$EXPECTED_SHA"
+      - name: Resume only the failed job and its skipped dependents once
+        id: resume
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 30 -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/38778692434/rerun-failed-jobs"
+          echo 'EDE_FAILED_EXPORT_RESUME_REQUESTED=38778692434'
+      - name: Release the gate if the handoff failed
+        if: always() && steps.gate.outcome == 'success' && steps.resume.outcome != 'success'
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
+          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 2m
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
+          script: |
+            /opt/seiltanzer/.venv/bin/python /opt/seiltanzer/scripts/production_research_acceptance.py \
+              release-gate --acceptance-run-id "$ACCEPTANCE_RUN_ID" --expected-sha "$EXPECTED_SHA"
