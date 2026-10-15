@@ -24,7 +24,6 @@ jobs:
       OPERATOR_SHA: 7669de3dcd839ba268f5f102b06fcae0d5b57a0c
       SOURCE_RUN_ID: '38689302428'
       FINAL_CI_RUN_ID: '38697030484'
-      OUTPUT_DIR: ${{ runner.temp }}/ede-output
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,6 +87,7 @@ jobs:
       - name: Publish exact completed artifact through reviewed cloud-only path
         if: steps.contract.outputs.publish_required == 'true'
         env:
+          OUTPUT_DIR: ${{ runner.temp }}/ede-output
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
           AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
@@ -100,6 +100,7 @@ jobs:
       - name: Verify unchanged installed identity and cloud-only receipt
         if: steps.contract.outputs.publish_required == 'true'
         env:
+          OUTPUT_DIR: ${{ runner.temp }}/ede-output
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           python - <<'PY'
