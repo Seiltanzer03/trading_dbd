@@ -16,7 +16,7 @@ import { selectIVSurface, updateBybitContext } from './bybit_context.js';
 import { initCorrelation, updateCorrelation } from './correlation.js';
 import { initRegimePhase, updateLiveRegimePhase } from './regime_phase.js';
 import { initWavelet } from './wavelet.js';
-import { fetchStructured } from './safe_fetch.js';
+import { fetchStructured, aiProviderWarning } from './safe_fetch.js';
 import { mountJournalManagement, totalAfterRemainingExit } from './journal_management.js';
 import {
   mountEdgeManagement, mountManagementDecision, mountShadowWorkingAction,
@@ -1147,12 +1147,7 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
   try {
     const body = await fetchStructured('/api/ai/verdict', { method: 'POST' });
     if ($('#ai-verdict-text') !== out) return;
-    const warning = body.degraded
-      ? (body.llm_shadow_decision?.status === 'ok'
-        ? 'ТЕКСТОВЫЙ ОТЧЁТ ЛОКАЛЬНЫЙ · СТРУКТУРИРОВАННЫЙ LLM ДОСТУПЕН\nID: '
-        : 'LLM НЕДОСТУПЕН · ПОКАЗАН DETERMINISTIC РАЗБОР\nID: ')
-        + body.request_id + '\n\n'
-      : '';
+    const warning = aiProviderWarning(body);
     out.textContent = warning + (typeof body.verdict === 'string' ? body.verdict
       : 'Текст отсутствует; структурированный план показан ниже.');
     mountEdgeManagement($("#ai-edge-management"), body.edge_management);

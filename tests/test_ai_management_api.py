@@ -51,6 +51,28 @@ def test_fallback_returns_structured_management_decision(client):
     assert edge["automatic_execution_allowed"] is False
 
 
+def test_provider_timeout_is_retained_in_frozen_review_without_claiming_llm_opinion(client, monkeypatch):
+    def timeout(_snapshot):
+        raise RuntimeError('provider_timeout_after_6.0s')
+    monkeypatch.setattr('seiltanzer.app.request_verdict', timeout)
+    response = client.post('/api/ai/verdict')
+    assert response.status_code == 200
+    body = response.json()
+    assert body['provider_error']['code'] == 'provider_timeout'
+    assert body['llm_shadow_decision']['status'] == 'unavailable'
+    assert body['llm_shadow_decision']['reason_code'] == 'provider_timeout'
+    raw = client.app.state.engine.journal._conn.execute(
+        'SELECT snapshot_json FROM ai_verdicts ORDER BY id DESC LIMIT 1').fetchone()[0]
+    frozen = json.loads(raw)
+    assert frozen['ai_provider_status'] == {
+        'mode': 'deterministic_fallback', 'code': 'provider_timeout', 'retriable': True}
+    assert frozen['llm_shadow_decision']['status'] == 'unavailable'
+    current = next(row for row in body['unified_edge_ensemble']['components']
+                   if row['component_id'] == 'current_llm')
+    assert current['effective_weight'] == 0
+    assert body['management_decision']['automatic_execution_allowed'] is False
+
+
 def test_prospective_reaction_unavailability_is_frozen_before_provider_review_identity(client, monkeypatch):
     from seiltanzer.decision_research import canonical_snapshot
     seen = []
@@ -66,7 +88,10 @@ def test_prospective_reaction_unavailability_is_frozen_before_provider_review_id
     assert len(seen) == 1 and seen[0]['reason'] == 'RECEIVED_FOMC_STORE_UNAVAILABLE'
 
 
-def test_actual_provider_transport_review_freezes_independent_input_and_response(client, monkeypatch):
+@pytest.mark.parametrize('commentary', [
+    'Данные ограничивают вывод; следующий пересчёт при обновлении снимка.',
+    '', 'Сейчас нужно закрыть позицию.'])
+def test_actual_provider_transport_review_freezes_independent_input_and_response(client, monkeypatch, commentary):
     """Exercise the installed provider path, not a replacement request_verdict."""
     from seiltanzer import ai_runtime_report_v20 as report
     from seiltanzer import ai_provider_guard as guard
@@ -76,7 +101,7 @@ def test_actual_provider_transport_review_freezes_independent_input_and_response
 
     calls = []
     reply = json.dumps({
-        "explanation_ru": "Данные ограничивают вывод; следующий пересчёт при обновлении снимка.",
+        "explanation_ru": commentary,
         "shadow_decision": {"policy": "HOLD", "confidence": .7,
             "policy_scores": {name: float(name == "HOLD") for name in VALID_POLICIES},
             "reason_ru": "Оценка всех доступных действий с сохранением риска.",

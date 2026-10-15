@@ -1,6 +1,26 @@
 // Defensive response parsing for endpoints that must remain useful through
 // proxy errors, text/plain 5xx pages and malformed upstream JSON.
 
+export function aiProviderWarning(body = {}) {
+  if (!body.degraded) return '';
+  const structured = body.llm_shadow_decision?.status === 'ok';
+  const title = structured
+    ? 'ТЕКСТОВЫЙ ОТЧЁТ ЛОКАЛЬНЫЙ · СТРУКТУРИРОВАННЫЙ LLM ДОСТУПЕН'
+    : 'LLM НЕДОСТУПЕН · ПОКАЗАН DETERMINISTIC РАЗБОР';
+  const reasons = {
+    provider_timeout: 'истекло время ожидания ответа провайдера',
+    provider_auth: 'провайдер отклонил доступ или ключ не настроен',
+    provider_rate_limit: 'достигнут лимит запросов провайдера',
+    provider_bad_response: 'провайдер вернул некорректный ответ',
+    provider_invalid_payload: 'ответ провайдера не прошёл проверку',
+    provider_unavailable: 'провайдер временно недоступен',
+  };
+  const code = body.provider_error?.code;
+  const reason = !structured && Object.hasOwn(reasons, code)
+    ? `\nПричина: ${reasons[code]} (${code}).` : '';
+  return `${title}${reason}\nID: ${body.request_id || '—'}\n\n`;
+}
+
 function compactText(value, limit = 180) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
 }

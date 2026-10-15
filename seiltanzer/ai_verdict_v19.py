@@ -219,8 +219,12 @@ def _terminal_cancellation_lines(snapshot: dict) -> list[str] | None:
     if not event and policy != "HOLD" and decision.get("execution_status") == "pending_execution":
         boundary = manager.get("cancellation_boundary") or {}
         switch = boundary.get("hold_switch") or {}
+        switch_r = _number(switch.get('r'))
+        authority = decision.get('authority') or 'не опубликован'
         return [
-            f"Граница базового net-оптимизатора: r={_r(switch.get('r'))} → HOLD. Это не граница отмены итогового {policy} от risk-overlay.",
+            (f"Граница базового net-оптимизатора: r={_r(switch_r)} → HOLD. "
+             if switch_r is not None else "Численная граница базового net-оптимизатора не рассчитана. ")
+            + f"Это не граница отмены итогового {policy}; авторитет: {authority}.",
             "Итоговую команду подтверждает или заменяет новый арбитражный пересчёт с актуальными evidence/CVaR/stress проверками. Изменение остатка, стопа или тейка делает старое исполнение недопустимым; нужен новый разбор.",
         ]
     if not event or policy == "HOLD":
@@ -618,6 +622,14 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
     lines = _repair_degraded_manual_summary(lines, snapshot)
     lines = [line.replace("AI priority bonus", "диагностический бонус (не определяет выбор)") for line in lines]
     decision = manager.get("management_decision") or {}
+    unified = manager.get('unified_edge_ensemble') or {}
+    if decision.get('authority') == 'UNIFIED_EDGE_ENSEMBLE' and unified.get('applied', unified.get('available')):
+        _replace_section(lines, '**ЧТО ДОЛЖНО ИЗМЕНИТЬ РЕШЕНИЕ**', [
+            'Итоговый авторитет — UNIFIED_EDGE_ENSEMBLE: новый снимок может изменить экономику, допустимость кандидатов и фактические вклады экспертов.',
+            'Правила degraded-authority/risk-overlay и gate базового контроля — отдельная диагностика прежнего контроля, не условия отмены или допуска итогового ансамбля.',
+            'Для смены итогового действия нужны повторный общий расчёт и обязательные проверки текущей цены, геометрии, издержек и hard-risk/CVaR. Сам по себе больший балл не отменяет исходный запрет независимого допуска.',
+            'Неизвестные или устаревшие входы не становятся подтверждениями. Изменение позиции, стопа, тейка или недопустимость выбранного действия требует нового разбора до исполнения.',
+        ])
     if decision.get("execution_status") == "pending_execution" and decision.get("policy") in {"CLOSE_10", "CLOSE_25", "CLOSE_50"}:
         _replace_section(lines, "**ПОСЛЕ ИСПОЛНЕНИЯ**", [
             "Подтвердите действие только после исполнения у брокера: терминал уменьшит остаток и учтёт зафиксированный результат. Повторное подтверждение того же decision_id не уменьшает позицию второй раз.",
