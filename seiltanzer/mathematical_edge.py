@@ -158,7 +158,9 @@ def fit_head(x, y):
 def predict(head, x):
     mean, scale, beta = (np.asarray(head[k]) for k in ('mean', 'scale', 'beta'))
     z = np.clip((np.asarray(x) - mean) / scale, -8, 8)
-    return _sigmoid(beta[0] + z @ beta[1:])
+    from .forecast_variants import variant_predictions
+    return variant_predictions(_sigmoid(beta[0] + z @ beta[1:]), head['baseline'],
+                               head.get('probability_transform', 'DIRECT'))
 
 
 def gain(y, p, baseline):

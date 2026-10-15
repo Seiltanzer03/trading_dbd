@@ -145,8 +145,15 @@ def working_family_preferences(families, llm, excluded_family=None):
                 for key in ('observed_ts', 'received_ts', 'max_age_sec'))
             clocks_valid = clocks_valid and all(value is not None for value in (observed_ts, received_ts, age))
             if clocks_valid:
+                maximum = (900. if meta.get('measurement_kind') == 'BAR_PRESSURE_PROXY_NOT_ORDER_BOOK'
+                           and meta.get('context_only') is True and meta.get('dependency_group') == 'price_path'
+                           else MAX_AGE_SEC[family])
+                if (meta.get('measurement_kind') == 'PREVIOUS_RELEASE_REFERENCE_NOT_MARKET_CONSENSUS'
+                        and meta.get('source_clock_kind') == 'OFFICIAL_FIRST_AVAILABILITY_NOT_EVENT_PUBLICATION'
+                        and meta.get('context_only') is True and meta.get('manual_preliminary') is True):
+                    maximum = MAX_AGE_SEC['macro']
                 clocks_valid = (0 < observed_ts <= received_ts <= cutoff
-                    and 0 < age <= MAX_AGE_SEC[family] and cutoff - observed_ts <= age
+                    and 0 < age <= maximum and cutoff - observed_ts <= age
                     and meta.get('source_verified') is True and bool(meta.get('source_id'))
                     and bool(meta.get('dependency_group')))
         if not clocks_valid:
@@ -167,6 +174,10 @@ def working_family_preferences(families, llm, excluded_family=None):
                    working_observed_ts=min(meta['observed_ts'] for meta in metas),
                    working_max_age_sec=min(meta['observed_ts'] + meta['max_age_sec'] for meta in metas)
                        - min(meta['observed_ts'] for meta in metas))
+        preliminary = any(meta.get('manual_preliminary') is True for meta in metas)
+        row['working_preliminary_weight_factor'] = .25 if preliminary else 1.
+        if preliminary:
+            row['working_assessment_reason'] = 'LABELLED_PRELIMINARY_PROXY_OR_SCENARIO_INTERPRETATION'
         accepted.append(row)
     # A flat global vector has no relative opinion, regardless of its level.
     # When families supply the opinion, absent actions must remain absent.
@@ -177,7 +188,7 @@ def working_family_preferences(families, llm, excluded_family=None):
         contributors = [row for row in accepted if policy in row['working_policy_scores']]
         groups = _groups(contributors)
         family_share = .5 if policy in global_scores else 1.
-        factors = {row['family_id']: family_share / len(groups) / len(group)
+        factors = {row['family_id']: family_share / len(groups) / len(group) * row['working_preliminary_weight_factor']
                    for group in groups for row in group}
         values = {row['family_id']: factors[row['family_id']] * row['working_policy_scores'][policy]
                   for row in contributors}

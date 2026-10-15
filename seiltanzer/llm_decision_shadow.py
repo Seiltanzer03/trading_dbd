@@ -151,6 +151,10 @@ def _shadow_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
     projection["policy_manager"] = {
         key: manager[key] for key in manager_keys if key in manager
     }
+    from .research_working_context import prompt_research_context
+    preliminary = prompt_research_context(snapshot)
+    if preliminary:
+        projection['research_working_context'] = preliminary
     projection["shadow_contract"] = {
         "version": SHADOW_VERSION,
         "production_authority": False,

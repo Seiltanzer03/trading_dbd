@@ -18,6 +18,7 @@ from .edge_family_training import FEATURE_PREFIXES, _feature_reason
 from .mathematical_edge import (fingerprint, number, fit_head, predict, gain,
                                working_admission, SEARCH_HORIZONS)
 from .real_input_integrity import simulated_evidence
+from .forecast_variants import VARIANTS, variant_predictions
 
 CONTRACT = 'edge-family-market-response-v1'
 FEATURE_CONTRACT = 'edge-family-market-features-v1'
@@ -180,7 +181,7 @@ def _fit_family(code, family, bars, captured, horizons, related, history, source
         for horizon, data in datasets.items():
             if len(data['times']) < 180:
                 continue
-            gains = []
+            gains = {variant: [] for variant in VARIANTS}
             for left, right in zip(boundaries[:-1], boundaries[1:]):
                 train = _indices(data, np.flatnonzero(data['ends'] < left - 300), column)
                 valid = _indices(data, np.flatnonzero((data['times'] >= left) &
@@ -189,16 +190,21 @@ def _fit_family(code, family, bars, captured, horizons, related, history, source
                 if len(train) < 40 or len(valid) < 10 or len(set(data['y'][train, column])) < 2:
                     break
                 head = fit_head(data['x'][train], data['y'][train, column])
-                gains.append(gain(data['y'][valid, column], predict(head, data['x'][valid]), head['baseline']))
-            if len(gains) == 3:
-                candidates.append((float(np.mean(gains)), horizon, gains))
+                prediction = predict(head, data['x'][valid])
+                for variant in VARIANTS:
+                    gains[variant].append(gain(data['y'][valid, column],
+                        variant_predictions(prediction, head['baseline'], variant), head['baseline']))
+            for variant, values in gains.items():
+                if len(values) == 3:
+                    candidates.append((float(np.mean(values)), horizon, values, variant))
         if not candidates:
             heads[name] = {'working_supported': False, 'reason': 'HEAD_CLASSES_OR_VALIDATION_UNAVAILABLE', 'forecast': None}
             continue
-        _, horizon, validation = max(candidates, key=lambda c: c[0])
+        _, horizon, validation, variant = max(candidates, key=lambda c: c[0])
         data = datasets[horizon]
         selection = {'horizon_minutes':horizon, 'validation_gains_mbit':validation,
-            'feature_names':data['feature_names'], 'selection_uses_final_test':False}
+            'feature_names':data['feature_names'], 'selection_uses_final_test':False,
+            'probability_variant': variant, 'probability_variant_candidates': list(VARIANTS)}
         train = _indices(data, np.flatnonzero(data['ends'] < boundaries[-1] - 300), column)
         test = _indices(data, np.flatnonzero(data['times'] >= boundaries[-1]), column)
         # Archive pretest selection/fit never depends on final movement labels.
@@ -214,11 +220,12 @@ def _fit_family(code, family, bars, captured, horizons, related, history, source
             heads[name] = {**selection, 'working_supported': False, 'reason': 'PURGED_FINAL_TEST_UNAVAILABLE', 'forecast': None}
             continue
         head = fit_head(data['x'][train], data['y'][train, column])
+        head['probability_transform'] = variant
         test_gain = gain(data['y'][test, column], predict(head, data['x'][test]), head['baseline'])
         blocks = [gain(data['y'][ix, column], predict(head, data['x'][ix]), head['baseline'])
                   if len(ix) >= 3 else None for ix in np.array_split(test, 3)]
         admission = working_admission(validation, blocks, test_gain)
-        heads[name] = {'head': head, 'horizon_minutes': horizon, 'working_supported': admission['supported'],
+        heads[name] = {**selection, 'head': head, 'horizon_minutes': horizon, 'working_supported': admission['supported'],
             'working_admission': admission, 'validation_gains_mbit': validation, 'test_gain_mbit': test_gain,
             'test_block_gains_mbit': blocks, 'test_n': len(test), 'train_n': len(train),
             'fit_end_ts': float(data['ends'][train[-1]]), 'test_start_ts': boundaries[-1],
@@ -237,7 +244,9 @@ def _fit_family(code, family, bars, captured, horizons, related, history, source
         'validation_time_boundaries': boundaries, 'requested_horizons_minutes': list(horizons),
         'features_are_captured_receipts': family not in {'session', 'intermarket'},
         'historical_bar_availability': 'COMPLETED_PROVIDER_BAR_WITH_5M_DRIVER_LAG_NOT_RECORDED_RECEIPT',
-        'calendar_market_open_asserted': False, 'net_economic_proof': False, 'automatic_execution': False}
+        'calendar_market_open_asserted': False, 'net_economic_proof': False, 'automatic_execution': False,
+        'probability_variant_search': {'variants': list(VARIANTS), 'selection_data': 'EARLY_PURGED_VALIDATION_ONLY',
+                                     'prospective_confirmation': False}}
     body['model_sha256'] = fingerprint(body)
     return body
 
@@ -323,7 +332,8 @@ def features_from_archive(archive):
         families = build_edge_family_evidence(snapshot)['families']
         for family, row in families.items():
             features = {name:value for name,value in row['features'].items()
-                        if name.startswith(FEATURE_PREFIXES[family])}
+                        if name.startswith(FEATURE_PREFIXES[family])
+                        and not row['feature_provenance'].get(name, {}).get('context_only')}
             names = sorted(features)[:16]
             if not names:
                 continue
@@ -404,6 +414,11 @@ def _model_reason(model, code, family, cutoff):
             names = row['feature_names']; head = row['head']
             if not isinstance(head, dict):
                 return 'MARKET_MODEL_VALIDATION_OR_HEAD_INVALID'
+            variant = head.get('probability_transform', 'DIRECT')
+            if (variant not in VARIANTS or row.get('probability_variant', 'DIRECT') != variant
+                    or ('probability_variant_candidates' in row
+                        and row['probability_variant_candidates'] != list(VARIANTS))):
+                return 'MARKET_MODEL_PROBABILITY_TRANSFORM_INVALID'
             admission = working_admission(row['validation_gains_mbit'], row['test_block_gains_mbit'], row['test_gain_mbit'])
             if (not isinstance(names, list) or not 1 <= len(names) <= 16 or len(set(names)) != len(names)
                     or any(not isinstance(n, str) or not n.startswith(FEATURE_PREFIXES[family]) for n in names)
@@ -592,6 +607,7 @@ def market_family_evidence(snapshot, families):
                 continue
             probability = float(predict(head['head'], [features[n] for n in names]))
             predictions[name] = {'probability': probability, 'baseline_probability': head['head']['baseline'],
+                'probability_variant': head.get('probability_variant', 'DIRECT'),
                 'horizon_minutes': head['horizon_minutes'],
                 'economic_comparison_horizon_minutes': horizon,
                 'horizon_role': ('MATCHED_HORIZON_MANUAL_PREFERENCE' if head['horizon_minutes'] == horizon

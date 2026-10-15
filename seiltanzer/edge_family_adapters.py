@@ -738,6 +738,8 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
         for row in families.values():
             row['rejected_sources'].append({'reason': 'SYNTHETIC_SOURCE_NOT_ADMISSIBLE'})
         sources = {}
+    from .research_working_context import preliminary_family_features
+    preliminary = preliminary_family_features(snapshot)
     for family, row in families.items():
         for source in _rows(sources.get(family)):
             if family == "session":
@@ -760,7 +762,14 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
                 _value_carry(row, source, meta, result["economics_adjustments"], snapshot)
             else:
                 _fact_features(row, source, meta)
+        if not row['features'] and not row.get('broker_carry_available'):
+            for name, (value, meta) in preliminary.get(family, {}).items():
+                _add(row, name, value, meta)
         _finalize(row)
+        if row['feature_provenance'] and all(meta.get('manual_preliminary') is True
+                for meta in row['feature_provenance'].values()):
+            row.update(readiness='PRELIMINARY_CONTEXT_ONLY',
+                       reason='LABELLED_PROXY_OR_ASSUMPTION_NOT_OBSERVED_MISSING_INPUT')
     regime = (_dict(snapshot.get("policy_manager")).get("market_regime")
               or snapshot.get("market_regime") or snapshot.get("regime"))
     if isinstance(regime, dict):
