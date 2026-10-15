@@ -22,11 +22,8 @@ jobs:
             test "$(git rev-parse HEAD)" = 588edd8d9093717848530ece5f9bbcea5bed08ed
             git rev-parse HEAD
             df -B1 /
-            cat /etc/logrotate.d/rsyslog
-            stat -c "%U %G %a %n" /var/log/auth.log /var/log/syslog
-            test -e /var/log/auth.log.1 && stat -c "%s %n" /var/log/auth.log.1 || true
-            test -e /var/log/syslog.1 && stat -c "%s %n" /var/log/syslog.1 || true
-            command -v logrotate
+            stat -c 'SOURCE_FILE size=%s blocks=%b path=%n' /opt/seiltanzer/data/trades.db /opt/seiltanzer/data/trades.db-wal
+            find /tmp -maxdepth 1 -type d -name 'seiltanzer-sqlite-*' -printf 'REPLICATION_DIRECTORY %f\n'
             systemctl show seiltanzer -p ActiveState -p SubState -p NRestarts
             python3 - <<'PY'
             import json,urllib.request,time
