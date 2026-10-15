@@ -1,0 +1,37 @@
+name: production-local-acceptance-retry-20261015
+on:
+  push:
+    branches: ['ops/research-release-progress-20261015']
+    paths: ['.github/workflows/production-local-acceptance-retry-20261015.yml']
+permissions:
+  contents: read
+jobs:
+  resume:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-22.04
+    timeout-minutes: 17
+    steps:
+      - name: Re-establish original exact-SHA research pause for one failed-job retry
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 15m
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 724ce141e8ab7f0813d48c487d896e64fc249255
+            df -B1 /
+            du -x -B1 --max-depth=2 /opt/seiltanzer /var/log /root/.cache /tmp 2>/dev/null | sort -n | tail -n 35 || true
+            PY=/opt/seiltanzer/.venv/bin/python
+            ORCH=/opt/seiltanzer/scripts/production_research_acceptance.py
+            keep_gate=0
+            cleanup() { if [ "$keep_gate" -ne 1 ]; then "$PY" "$ORCH" release-gate --acceptance-run-id 38677722474 --expected-sha 724ce141e8ab7f0813d48c487d896e64fc249255 || true; fi; }
+            trap cleanup EXIT
+            "$PY" "$ORCH" acquire-gate --acceptance-run-id 38677722474 --expected-sha 724ce141e8ab7f0813d48c487d896e64fc249255 --ttl-seconds 7200
+            "$PY" /opt/seiltanzer/scripts/production_post_research_check.py --acceptance-run-id 38677722474 --expected-sha 724ce141e8ab7f0813d48c487d896e64fc249255
+            "$PY" "$ORCH" validate-gate --acceptance-run-id 38677722474 --expected-sha 724ce141e8ab7f0813d48c487d896e64fc249255
+            keep_gate=1
+            trap - EXIT
+            printf 'LOCAL_ACCEPTANCE_RETRY_GATE_READY expected_sha=724ce141e8ab7f0813d48c487d896e64fc249255 acceptance_run_id=38677722474\n'
