@@ -5,46 +5,30 @@ on:
     paths: [.github/workflows/ops-ede-capacity-20261015.yml]
 permissions:
   contents: read
+  actions: write
 jobs:
-  capacity:
+  finalize-failed-attempt:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: 588edd8d9093717848530ece5f9bbcea5bed08ed
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: python -m pip install --quiet paramiko
-      - name: Bounded public and authenticated read-only checks
+      - name: Finalize only the confirmed failed export with stuck cleanup
         env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${{ github.repository }}/actions/runs/38778692434"
+          curl -fsS --max-time 10 -H "Authorization: Bearer $GH_TOKEN" "$api/jobs" > "$RUNNER_TEMP/jobs.json"
           python - <<'PY'
-          import json,os,sys,time,urllib.request
-          sys.path.insert(0,'scripts')
-          from production_ede_offload import _connect,_exec,_verify_sha
-          started=time.monotonic()
-          try:
-              with urllib.request.urlopen('http://94.241.171.182:8790/api/state',timeout=5) as r:
-                  r.read(1000001)
-                  print('PUBLIC_API='+json.dumps({'status':r.status,'ms':round((time.monotonic()-started)*1000)}),flush=True)
-          except Exception as e:
-              print('PUBLIC_API='+json.dumps({'error_class':type(e).__name__}),flush=True)
-          client=None
-          phase='ssh_connect'
-          try:
-              client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
-              phase='source_metadata'
-              _verify_sha(client,'588edd8d9093717848530ece5f9bbcea5bed08ed')
-              print(_exec(client,"df -B1 /; stat -c 'SOURCE_FILE size=%s blocks=%b path=%n' /opt/seiltanzer/data/trades.db /opt/seiltanzer/data/trades.db-wal; find /tmp -maxdepth 1 -type d -name 'seiltanzer-sqlite-*' -printf 'REPLICATION_DIRECTORY %f\\n'; systemctl show seiltanzer -p ActiveState -p SubState -p NRestarts",timeout=15),flush=True)
-              phase='local_api'
-              command="python3 -c 'import urllib.request,time,json; t=time.monotonic(); r=urllib.request.urlopen(\"http://127.0.0.1:8790/api/state\",timeout=4); r.read(1000001); print(\"LOCAL_API=\"+json.dumps({\"status\":r.status,\"ms\":round((time.monotonic()-t)*1000)}))'"
-              print(_exec(client,command,timeout=10),flush=True)
-          except Exception as e:
-              print('RUNTIME_PROBE_ERROR='+json.dumps({'phase':phase,'error_class':type(e).__name__}),flush=True)
-              raise SystemExit(1)
-          finally:
-              if client is not None:client.close()
+          import json,os,pathlib
+          jobs=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'jobs.json').read_text())['jobs']
+          audit=next(j for j in jobs if j['name']=='audit')
+          assert audit['id']==116651229993
+          assert any(s['name']=='Export a current consistent live snapshot without VPS disk use' and s['conclusion']=='failure' for s in audit['steps'])
+          assert not any(s['name']=='Run EDE v1.3 research off production VPS' and s['status']!='queued' and s.get('conclusion') not in (None,'skipped') for s in audit['steps'])
           PY
+          curl -fsS --max-time 20 -X POST -H "Authorization: Bearer $GH_TOKEN" "$api/cancel"
+          echo CONFIRMED_FAILED_EXPORT_CLEANUP_CANCEL_REQUESTED=38778692434
+      - name: Probe public state with a fixed network deadline
+        run: |
+          code=$(curl -sS --connect-timeout 3 --max-time 6 -o /dev/null -w '%{http_code}' http://94.241.171.182:8790/api/state || true)
+          echo "PUBLIC_API_HTTP=$code"
