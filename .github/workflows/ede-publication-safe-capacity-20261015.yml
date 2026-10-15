@@ -1,0 +1,28 @@
+name: ede-publication-safe-capacity-20261015
+on:
+  push:
+    branches: ['ops/ede-publication-capacity-20261015']
+    paths: ['.github/workflows/ede-publication-safe-capacity-20261015.yml']
+permissions:
+  contents: read
+jobs:
+  recover:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 724ce141e8ab7f0813d48c487d896e64fc249255
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -q paramiko boto3
+      - name: Reuse reviewed archive recovery for fixed closed logs only
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: python scripts/ops_yandex_archive_recovery.py --expected-sha 724ce141e8ab7f0813d48c487d896e64fc249255 --stage capacity
