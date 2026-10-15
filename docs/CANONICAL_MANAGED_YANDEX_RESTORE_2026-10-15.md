@@ -58,4 +58,3 @@ Full PR CI, merge, deployment and exact-SHA acceptance of the permanent wiring
 are separate pending release checks. Complete the old-SHA ActiveEdge handoff
 before changing the installed version. No extra research run is required merely
 to repeat the completed download.
-

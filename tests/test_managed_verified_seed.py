@@ -135,4 +135,3 @@ def test_real_sdk_retries_broken_body_with_same_identity_and_verifies_seed(tmp_p
     raw.close()
     assert result['seed_verified'] is True and result['storage_manifest'] == manifest
     assert (tmp_path/'seed.db').read_bytes() == (tmp_path/'source.sqlite3').read_bytes()
-

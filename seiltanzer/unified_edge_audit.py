@@ -63,6 +63,30 @@ def _row(value: Any, keys: tuple[str, ...]) -> dict:
     return {key: _bounded(value[key]) for key in keys if key in value} if isinstance(value, dict) else {}
 
 
+def _compact_research_context(value):
+    if not isinstance(value, dict):
+        return {}
+    out = _row(value, ('contract_version','available','instrument','reason','captured_ts',
+        'market_observation_ts','observed_ts','historical_profit_proven','automatic_execution_allowed',
+        'context_sha256','source_ids','evidence_family_ids'))
+    out['rules'] = [_row(row, ('rule_id','affinity','observations','scope','reference'))
+                    for row in (value.get('rules') or [])[:3]]
+    alternatives = value.get('alternatives') or {}
+    out['alternatives'] = {name: _row(alternatives.get(name), (
+        'available','measurement_kind','broker_order_book_observed','pressure_proxy',
+        'market_consensus_observed','prepublication_expectation_reconstructed','actual',
+        'previous_reference','actual_minus_previous_reference','unit','period','previous_vintage',
+        'source_clock_kind', 'previous_reference_method',
+        'broker_cost_verified','applied_to_net_economics','assumptions_are_not_broker_limits',
+        'basis','includes_spread_commission_or_actual_rollover_schedule'))
+        for name in ('order_book','consensus','broker_swap')}
+    swap = alternatives.get('broker_swap') or {}
+    out['alternatives']['broker_swap']['scenarios'] = [
+        _row(row, ('annual_rate_percent_assumption','charged_days_assumption','cost_r_assumption'))
+        for row in (swap.get('scenarios') or [])[:6]]
+    return out
+
+
 def compact_unified_ensemble(value: Any) -> dict:
     """Preserve every action and bounded registered expert, never scenario paths."""
     if not isinstance(value, dict) or not value:
@@ -82,9 +106,12 @@ def compact_unified_ensemble(value: Any) -> dict:
         "decision_utility",
         "ranking_available", "ranking_selected_policy", "ranking_selected_candidate_id",
         "regime_context",
+        'research_working_context',
         "operational_guard_reason", "operational_decision_id",
         "authoritative_bank_reused", "execution_assumption", "bridge_events_reproduced",
     ))
+    if value.get('research_working_context'):
+        out['research_working_context'] = _compact_research_context(value['research_working_context'])
     registry = value.get("expert_registry")
     if isinstance(registry, dict):
         out["expert_registry"] = _row(registry, (
@@ -122,6 +149,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             "observed_ts", "max_age_sec", "model_version", "score_semantics",
             "available", "reason", "quality", "age_sec", "source_ids",
             "quality_basis", "standalone_action_status", "standalone_action_reason",
+            'assessment_kind', 'historical_profit_proven',
             "evidence_family_ids", "freshness_factor", "duplicate_factor",
             "dedup_factor", "suppression_reasons", "redistributed_weight",
             "freshness_multiplier", "dependence_multiplier", "shared_with_components",
@@ -158,6 +186,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             'model_attribution_semantics',
             "working_assessment_available", "working_assessment_kind", "working_assessment_reason",
             "working_reason_ru", "working_score", "working_effective_weight", "working_contribution",
+            'working_preliminary_weight_factor',
             "working_policy_scores", "working_feature_names", "working_source_ids",
             "working_evidence_family_ids", "working_historical_profit_proven",
         ),
@@ -268,6 +297,8 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
             f"{quality_label} {_pct(row.get('quality'))}; возраст {row.get('age_sec') if row.get('age_sec') is not None else '—'} сек; "
             f"статус {row.get('availability', row.get('available', '—'))}; {row.get('reason') or 'доступен'}; семьи {provenance}{suppression}."
         )
+    from .research_working_context import research_working_lines
+    lines.extend(research_working_lines(audit.get('research_working_context')))
     lines.append("Все кандидаты (сравнение с HOLD):")
     for row in audit.get("candidates") or []:
         eligible = row.get("ranking_eligible", row.get("eligible"))

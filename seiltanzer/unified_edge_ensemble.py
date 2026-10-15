@@ -466,6 +466,13 @@ def collect_components(snapshot, candidates, current_llm=None, excluded_working_
                                      if number(item.get("observed_ts")) is not None), default=None)
         target['max_age_sec'] = (min(expiries)-target['observed_ts']
                                  if expiries and target['observed_ts'] is not None else 900.)
+    # A source-bound manual fallback never displaces a real trained opinion.
+    mathematical = next(row for row in rows if row['component_id'] == 'mathematical_edge')
+    if mathematical.get('available') is not True:
+        from .research_working_context import research_working_component
+        preliminary = research_working_component(snapshot)
+        if preliminary is not None:
+            mathematical.update(preliminary)
     overrides = manager.get("unified_component_assessments") or []
     for spec in overrides:
         if not isinstance(spec, dict):
@@ -743,6 +750,7 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
     legacy = ((snapshot.get("policy_manager") or {}).get("management_decision") or {}).get("policy")
     legacy_row = next((row for row in candidates if row["policy"] == legacy), None)
     comparisons.append(_comparison("legacy_control", legacy_row))
+    from .research_working_context import research_context_audit
     return {"contract_version": VERSION, "available": selected is not None,
             "instrument": (snapshot.get("strategy") or {}).get("instrument") or snapshot.get("instrument"),
             "regime": regime_label(snapshot),
@@ -755,6 +763,7 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
             "selected_policy": selected.get("policy") if selected else None,
             "reason": "WEIGHTED_AUTHORIZED_CANDIDATES" if selected else "NO_AUTHORIZED_CANDIDATE",
             "candidates": candidates, "components": components, "edge_families": families,
+            'research_working_context': deepcopy(research_context_audit(snapshot)) if 'research_working_context' in snapshot else {},
             'market_family_counterfactuals': market_counterfactuals,
             "counterfactuals": counterfactuals, "scheme_comparisons": comparisons,
             "family_counterfactuals": family_counterfactuals,

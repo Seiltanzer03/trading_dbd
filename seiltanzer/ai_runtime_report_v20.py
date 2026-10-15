@@ -71,13 +71,21 @@ Correlated metrics from one family are not independent votes. Hard-CVaR eligibil
 is mandatory. Never widen stops, average down, or add to a losing position.
 Return all 12 policy_scores, each from -1 to 1: relative preferences, not
 probabilities or Expected R. Self-confidence never determines ensemble weight.
-Assess all eight families in family_assessments using ONLY the exact observed
-numeric features supplied in edge_family_facts. Use {} when no facts support an
+Assess all eight families in family_assessments using ONLY the exact numeric
+features supplied in edge_family_facts, preserving observed versus explicitly
+labelled preliminary proxy/scenario roles. Use {} when no inputs support an
 interpretation. For an available opinion cite1-4 exact feature_names, give1-3
 policy_scores in[-1,1] and reason_ru of at most240 characters. These are current
 manual LLM preferences sharing your existing budget, not validated historical
 forecasts or additional independent experts. Do not invent missing consensus,
 broker flow/carry, physical option forecasts or causal direction from a sign.
+Labelled manual_preliminary/context_only features are permitted as preliminary
+preferences with reduced attribution. BAR_PRESSURE_PROXY is price information,
+not a reconstructed book/OFI; previous-release reference is not pre-news market
+consensus; financing sensitivity uses stated assumptions, not verified swaps.
+research_working_context contains observations and hypotheses, not calibrated
+accuracy, profitability or another expert's chosen action. Preserve these roles
+in explanations; never turn assumed costs into common Expected/CVaR or a risk pass.
 No quant winner is supplied for comparison. A hard-guarded choice may become an exact
 manual-confirmation action variant. It still has zero automatic-execution authority;
 missing numeric stop/take/time parameters block the variant.
@@ -403,7 +411,7 @@ def _independent_provider_input(snapshot: dict[str, Any], authority: dict[str, A
         for row in authoritative.get("active_management_candidates") or []
         if isinstance(row, dict)
     ][:7]
-    for key in ("edge_family_facts", "shadow_contract", "edge_regime", "market_regime"):
+    for key in ("edge_family_facts", "shadow_contract", "edge_regime", "market_regime", "research_working_context"):
         if key in authoritative:
             projected[key] = authoritative[key]
     from .ai_provider_guard import _bounded

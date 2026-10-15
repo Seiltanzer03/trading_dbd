@@ -29,7 +29,7 @@ PATH_KEYS = ("probability", "baseline_probability", "horizon_minutes", "target_s
     "net_economic_proof", "independent_evidence_vote", "intrabar_order_inferred",
     "generic_barriers_are_trade_stop_take", "evidence_tier")
 PATH_NAMES = ("downside_excursion", "upside_excursion", "upper_before_lower", "early_first_touch")
-FAMILY_ROOTS = ("edge_family_sources", "edge_family_models", "edge_family_market_context", "macro_context_v1", "macro_t0_context")
+FAMILY_ROOTS = ("edge_family_sources", "edge_family_models", "edge_family_market_context", "macro_context_v1", "macro_t0_context", "research_working_context")
 FAMILY_AUDITS = ("edge_family_source_bundle_audit", "edge_family_event_reaction_audit",
                  "edge_family_event_novelty_audit")
 # Several genuine family models must coexist with their intact hashes/heads.

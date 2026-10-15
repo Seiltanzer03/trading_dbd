@@ -142,6 +142,8 @@ def freeze_expert_inputs(engine, snapshot: dict, *, market_inputs=None) -> None:
     finally:
         loop.close()
     attach_market_family_context(market_inputs, snapshot)
+    from .research_working_context import attach_research_working_context
+    attach_research_working_context(market_inputs, snapshot)
     reason = getattr(market_inputs.market, "freeze_reason", None)
     if reason:
         snapshot["edge_family_market_context"].update(available=False, reason=reason)

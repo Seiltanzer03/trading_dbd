@@ -1344,6 +1344,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             from .edge_family_market import attach_market_family_context
             if not inputs_frozen:
                 await trace.to_thread('runtime_context', attach_market_family_context, engine, snapshot)
+                from .research_working_context import attach_research_working_context
+                await trace.to_thread('runtime_context', attach_research_working_context, engine, snapshot)
             from .edge_regime import refine_regime_with_events
             with trace.span('regime_management'):
                 refine_regime_with_events(snapshot)
