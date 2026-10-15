@@ -22,7 +22,7 @@ jobs:
             test "$(git rev-parse HEAD)" = 588edd8d9093717848530ece5f9bbcea5bed08ed
             git rev-parse HEAD
             df -B1 /
-            find /var/log/journal -maxdepth 2 -type f -printf '%s %p\n' | sort -nr | head -20
+            find /var/log/journal -maxdepth 2 -type f -printf '%s %p\n' | sort -nr | sed -n '1,20p'
             python3 - <<'PY'
             import sqlite3,json,pathlib
             p=pathlib.Path("/opt/seiltanzer/data/trades.db")
