@@ -8,28 +8,43 @@ permissions:
 jobs:
   capacity:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 4
     steps:
-      - uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
         with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 3m
-          script: |
-            set -euo pipefail
-            cd /opt/seiltanzer
-            test "$(git rev-parse HEAD)" = 588edd8d9093717848530ece5f9bbcea5bed08ed
-            git rev-parse HEAD
-            df -B1 /
-            stat -c 'SOURCE_FILE size=%s blocks=%b path=%n' /opt/seiltanzer/data/trades.db /opt/seiltanzer/data/trades.db-wal
-            find /tmp -maxdepth 1 -type d -name 'seiltanzer-sqlite-*' -printf 'REPLICATION_DIRECTORY %f\n'
-            systemctl show seiltanzer -p ActiveState -p SubState -p NRestarts
-            python3 - <<'PY'
-            import json,urllib.request,time
-            for route in ('/api/state','/api/research/runtime/worker-status'):
-                t=time.monotonic()
-                with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=4) as r:
-                    r.read(1000001)
-                    print(json.dumps({'route':route,'status':r.status,'ms':round((time.monotonic()-t)*1000)}))
-            PY
+          ref: 588edd8d9093717848530ece5f9bbcea5bed08ed
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --quiet paramiko
+      - name: Bounded public and authenticated read-only checks
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          python - <<'PY'
+          import json,os,sys,time,urllib.request
+          sys.path.insert(0,'scripts')
+          from production_ede_offload import _connect,_exec,_verify_sha
+          started=time.monotonic()
+          try:
+              with urllib.request.urlopen('http://94.241.171.182:8790/api/state',timeout=5) as r:
+                  r.read(1000001)
+                  print('PUBLIC_API='+json.dumps({'status':r.status,'ms':round((time.monotonic()-started)*1000)}),flush=True)
+          except Exception as e:
+              print('PUBLIC_API='+json.dumps({'error_class':type(e).__name__}),flush=True)
+          client=None
+          phase='ssh_connect'
+          try:
+              client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
+              phase='source_metadata'
+              _verify_sha(client,'588edd8d9093717848530ece5f9bbcea5bed08ed')
+              print(_exec(client,"df -B1 /; stat -c 'SOURCE_FILE size=%s blocks=%b path=%n' /opt/seiltanzer/data/trades.db /opt/seiltanzer/data/trades.db-wal; find /tmp -maxdepth 1 -type d -name 'seiltanzer-sqlite-*' -printf 'REPLICATION_DIRECTORY %f\\n'; systemctl show seiltanzer -p ActiveState -p SubState -p NRestarts",timeout=15),flush=True)
+              phase='local_api'
+              command="python3 -c 'import urllib.request,time,json; t=time.monotonic(); r=urllib.request.urlopen(\"http://127.0.0.1:8790/api/state\",timeout=4); r.read(1000001); print(\"LOCAL_API=\"+json.dumps({\"status\":r.status,\"ms\":round((time.monotonic()-t)*1000)}))'"
+              print(_exec(client,command,timeout=10),flush=True)
+          except Exception as e:
+              print('RUNTIME_PROBE_ERROR='+json.dumps({'phase':phase,'error_class':type(e).__name__}),flush=True)
+              raise SystemExit(1)
+          finally:
+              if client is not None:client.close()
+          PY
