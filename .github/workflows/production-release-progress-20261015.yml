@@ -1,0 +1,33 @@
+name: production-release-progress-20261015
+on:
+  push:
+    branches: ['ops/research-release-progress-20261015']
+    paths: ['.github/workflows/production-release-progress-20261015.yml']
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Inspect delivery progress without mutation
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          command_timeout: 45s
+          script: |
+            set +e
+            date -u +%FT%TZ
+            printf 'CURRENT_HEAD='
+            timeout 3s git -C /opt/seiltanzer rev-parse HEAD
+            systemctl show seiltanzer -p ActiveState -p SubState -p MainPID -p ExecMainStatus -p Result -p StateChangeTimestamp
+            df -B1 /
+            ps -eo pid,ppid,etime,comm,wchan:26 --sort=pid | tail -n 75
+            ss -ltnp 'sport = :8790'
+            find /opt/seiltanzer/data/backups/local -maxdepth 1 -type f -name '.*.tmp.sqlite3' -printf 'PRESTART_TEMP_BYTES=%s\n' 2>/dev/null
+            curl -sS --connect-timeout 1 --max-time 3 -o /dev/null -w 'STATE_HTTP=%{http_code} SECONDS=%{time_total}\n' http://127.0.0.1:8790/api/state
+            printf 'READ_ONLY_PROGRESS_DIAGNOSTIC_FINISHED\n'
