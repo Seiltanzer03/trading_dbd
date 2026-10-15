@@ -19,6 +19,8 @@ jobs:
           script: |
             set -euo pipefail
             cd /opt/seiltanzer
+            git rev-parse HEAD
+            systemctl show seiltanzer -p ActiveState -p SubState -p MainPID -p NRestarts -p ExecMainStartTimestamp -p MemoryCurrent
             test "$(git rev-parse HEAD)" = 2319da521ea2341c6a1991dd8f6f9ea66d81e59b
             PYTHONDONTWRITEBYTECODE=1 .venv/bin/python - <<'PY'
             import json, pathlib, re, sqlite3, time
