@@ -6,55 +6,59 @@ on:
 permissions:
   contents: read
 jobs:
-  recovered-storage-acceptance:
+  g1m-latency-diagnostics:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 588edd8d9093717848530ece5f9bbcea5bed08ed
+          ref: 55fe3f784604ce8007e98e074a73ff33fc672466
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
       - run: python -m pip install --quiet paramiko
-      - name: Checkpoint committed WAL and recheck unchanged source admission
+      - name: Measure bounded G1M reads under the original acceptance owner
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           python - <<'PY'
-          import os,sys,shlex,pathlib,json
+          import os,sys,shlex
           sys.path.insert(0,'scripts')
-          from production_ede_offload import _connect,_exec,_verify_sha,_probe_api
-          from offhost_sqlite_snapshot import source_preflight
+          from production_ede_offload import _connect,_exec,_verify_sha
           client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
+          sha='55fe3f784604ce8007e98e074a73ff33fc672466'
+          owner='38813363531'
+          py='/opt/seiltanzer/.venv/bin/python'
+          orch=py+' /opt/seiltanzer/scripts/production_research_acceptance.py'
+          keep=False
           try:
-              sha='588edd8d9093717848530ece5f9bbcea5bed08ed'
-              _verify_sha(client,sha);_probe_api(client)
+              _verify_sha(client,sha)
+              print(_exec(client,orch+' acquire-gate --acceptance-run-id '+owner+' --expected-sha '+sha+' --ttl-seconds 1800',timeout=30),flush=True)
+              print(_exec(client,py+' /opt/seiltanzer/scripts/production_post_research_check.py --expected-sha '+sha+' --acceptance-run-id '+owner,timeout=1200),flush=True)
               code="""
-          import json,pathlib,sqlite3,os,time,urllib.request,subprocess
-          path=pathlib.Path('/opt/seiltanzer/data/trades.db')
-          assert path.is_file() and not path.is_symlink()
-          def measure():
-              v=os.statvfs(path)
-              wal=pathlib.Path(str(path)+'-wal')
-              return {'free_bytes':v.f_bavail*v.f_frsize,'database_bytes':path.stat().st_size,'wal_bytes':wal.stat().st_size if wal.exists() else 0}
-          before=measure()
-          with sqlite3.connect(path,timeout=0.5,isolation_level=None) as conn:
-              conn.execute('PRAGMA busy_timeout=500')
-              assert conn.execute('PRAGMA journal_mode').fetchone()[0]=='wal'
-              result=conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
-          print('NATIVE_SQLITE_CHECKPOINT='+json.dumps({'before':before,'result':result,'after':measure(),'observations_deleted':False}),flush=True)
-          for route in ('/api/state','/api/research/runtime/worker-status'):
+          import json,time,urllib.request,subprocess,pathlib,os
+          samples=[]
+          for index in range(3):
               started=time.monotonic()
-              with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=4) as response:
-                  raw=response.read(1000001)
-                  body=json.loads(raw) if len(raw)<=1000000 else {}
-                  worker=body.get('worker') or {}
-                  print('RECOVERED_HTTP='+json.dumps({'route':route,'http':response.status,'ms':round((time.monotonic()-started)*1000),'worker':{k:worker.get(k) for k in ('current_phase','core_stage','last_finished_ts','last_error','acceptance_pause_active')}}),flush=True)
-          print(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','NRestarts','-p','MemoryCurrent'],text=True,timeout=5),flush=True)
+              with urllib.request.urlopen('http://127.0.0.1:8790/api/research/g1/management/local-edge',timeout=6) as response:
+                  raw=response.read(8388609)
+                  assert len(raw)<=8388608, 'G1M report payload exceeds diagnostic budget'
+                  payload=json.loads(raw)
+                  assert response.status==200
+              elapsed=(time.monotonic()-started)*1000
+              samples.append(elapsed)
+              print('G1M_LATENCY_SAMPLE='+json.dumps({'sample':index+1,'ms':round(elapsed,1),'bytes':len(raw),'dataset':payload.get('dataset'),'production_authority':payload.get('production_authority'),'attribution_version':(payload.get('active_edge_decision_attribution') or {}).get('contract_version')}),flush=True)
+              assert payload.get('production_authority') is False
+          print(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','NRestarts','-p','MemoryCurrent','-p','MemoryPeak'],text=True,timeout=5),flush=True)
+          print('G1M_DIAGNOSTIC_RESULT='+json.dumps({'all_below_3000_ms':all(t<3000 for t in samples),'max_ms':round(max(samples),1),'threshold_changed':False}),flush=True)
+          assert all(t<3000 for t in samples), 'G1M latency reproduced under acceptance pause'
           """
-              print(_exec(client,'python3 -c '+shlex.quote(code),timeout=40),flush=True)
-              report=source_preflight(client,expected_sha=sha,output=pathlib.Path(os.environ['RUNNER_TEMP'])/'final-preflight/source.sqlite3')
-              print('FINAL_SOURCE_ADMISSION='+json.dumps(report,sort_keys=True),flush=True)
-          finally:client.close()
+              print(_exec(client,py+' -c '+shlex.quote(code),timeout=35),flush=True)
+              keep=True
+              print('ORIGINAL_ACCEPTANCE_OWNER_RETAINED_FOR_SINGLE_G1M_CONTINUATION',flush=True)
+          finally:
+              if not keep:
+                  try:print(_exec(client,orch+' release-gate --acceptance-run-id '+owner+' --expected-sha '+sha,timeout=30),flush=True)
+                  except Exception as exc:print('RELEASE_UNCONFIRMED='+type(exc).__name__,flush=True)
+              client.close()
           PY
