@@ -121,7 +121,7 @@ def test_movement_only_runtime_weight_reaches_extended_selector_and_api(
         lambda snapshot, proposal: {'policy': proposal['policy']})
     # These are already quantified/gated counterfactual assessments. The test
     # isolates ranking, never grants a blocked candidate fresh authority.
-    def assessment(snapshot, action):
+    def assessment(snapshot, action, **_kwargs):
         policy = action['policy']
         if policy not in {'TIME_STOP', 'TIGHTEN_STOP'}:
             return {'status': 'blocked', 'reason': 'NO_MATERIAL_ROBUST_EXPECTED_GAIN'}

@@ -16,7 +16,7 @@ import math
 import numpy as np
 
 from .ai_policy_base import PolicyInputs, _centered_skew_noise
-from .execution_simulator import ExecutionSpec, replay_execution_path
+from .execution_simulator import ExecutionSpec, replay_execution_paths
 from .rollover_economics import frozen_rollover_schedule, replay_rollover_cost
 
 
@@ -252,7 +252,7 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
     cached = {}
     def replay(spec):
         if spec not in cached:
-            outcomes = [replay_execution_path(path, spec) for path in paths]
+            outcomes = replay_execution_paths(paths, spec)
             times = np.linspace(snapshot.get("captured_ts") or 0.,
                                 (snapshot.get("captured_ts") or 0.) + 60. * inputs.horizon_minutes,
                                 paths.shape[1]).tolist()

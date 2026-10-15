@@ -23,7 +23,7 @@ CONDITIONAL_POLICIES = {"SCALE_OUT_ON_SPIKE", "TIME_STOP"}
 def _conditional_outcomes(inputs, params, policy, captured, seed):
     """Shared option-driver paths; explicit piecewise-linear event assumption."""
     from .ai_policy_base import _centered_skew_noise
-    from .execution_simulator import ExecutionSpec, replay_execution_path
+    from .execution_simulator import ExecutionSpec, replay_execution_paths
     steps, count = 160, 600
     rng = np.random.default_rng(seed)
     shape = np.exp(np.clip(inputs.term_slope, -.8, .8) *
@@ -42,8 +42,8 @@ def _conditional_outcomes(inputs, params, policy, captured, seed):
     else:
         variant = replace(base, spike_r=float(params["target_r"]),
                           spike_fraction=float(params["close_fraction"]))
-    return (np.array([replay_execution_path(path, base).outcome_r for path in paths]),
-            np.array([replay_execution_path(path, variant).outcome_r for path in paths]))
+    return (np.array([result.outcome_r for result in replay_execution_paths(paths, base)]),
+            np.array([result.outcome_r for result in replay_execution_paths(paths, variant)]))
 
 
 def _number(value: Any) -> float | None:
@@ -64,7 +64,7 @@ def _cvar(values: np.ndarray) -> float:
     return float(np.mean(np.partition(values, n - 1)[:n]))
 
 
-def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
+def evaluate_extended_action(snapshot: dict, action: dict, *, _hold_cache=None) -> dict[str, Any]:
     """Require source authority, hard CVaR and material paired-path benefit."""
     manager = snapshot.get("policy_manager") or {}
     policy = str(action.get("policy") or "")
@@ -190,8 +190,17 @@ def evaluate_extended_action(snapshot: dict, action: dict) -> dict[str, Any]:
             means.append(float(np.mean(variant_out)))
             cvars.append(_cvar(variant_out))
             continue
-        base = simulate_option_paths(inputs, n_paths=1200, n_steps=160, seed=seed,
-                                     paired_stable_stream=True)
+        # One selection compares several actions against exactly the same
+        # HOLD drivers. The caller owns this short-lived cache; it is never
+        # persisted or reused across requests. Every admission gate above
+        # still runs before consulting it. All model inputs and seed form the key.
+        key = (inputs, seed)
+        base = _hold_cache.get(key) if _hold_cache is not None else None
+        if base is None:
+            base = simulate_option_paths(inputs, n_paths=1200, n_steps=160, seed=seed,
+                                         paired_stable_stream=True)
+            if _hold_cache is not None:
+                _hold_cache[key] = base
         variant = simulate_option_paths(alternate, n_paths=1200, n_steps=160, seed=seed,
                                         paired_stable_stream=True)
         if base.strategy_outcome is None or variant.strategy_outcome is None:

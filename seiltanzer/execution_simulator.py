@@ -110,6 +110,27 @@ def _crossing_fraction(previous: float, current: float, level: float) -> float:
     return min(max((level - previous) / delta, 0.0), 1.0)
 
 
+def _event_segment_mask(values: np.ndarray, spec: ExecutionSpec) -> np.ndarray:
+    """Keep every possible crossing; stateful ordering still owns all fills.
+
+    Levels are a superset: BE may not yet be armed and a rung may already be
+    filled. Including those segments is harmless. Omit only segments that
+    cannot change execution state, using the same epsilon comparisons below.
+    """
+    previous, current = values[..., :-1], values[..., 1:]
+    upward = current >= previous
+    relevant = np.zeros(previous.shape, dtype=bool)
+    levels = (*spec.future_rungs, spec.be_after_r, spec.take_r)
+    if spec.spike_r is not None:
+        levels = (*levels, spec.spike_r)
+    for level in levels:
+        relevant |= upward & (previous < level - EPSILON) & (level - EPSILON <= current + EPSILON)
+    downward = ~upward
+    for stop in (spec.stop_r, max(0.0, spec.stop_r)):
+        relevant |= downward & (current <= stop + EPSILON) & (stop + EPSILON < previous)
+    return relevant
+
+
 def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> ExecutionResult:
     """Replay one piecewise-linear R path using explicit event ordering.
 
@@ -132,6 +153,35 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
         values = np.concatenate((values[:index + 1], [endpoint]))
     if not 0 <= spec.spike_fraction <= 1:
         raise ValueError("invalid spike close fraction")
+
+    segments = np.flatnonzero(_event_segment_mask(values, spec)) + 1
+    return _replay_execution_values(values, spec, segments)
+
+
+def replay_execution_paths(paths: Sequence[Sequence[float]], spec: ExecutionSpec) -> list[ExecutionResult]:
+    """Replay every path with the scalar event contract and bounded batch masks."""
+    values = np.asarray(paths, dtype=float)
+    if (values.ndim != 2 or not values.shape[0] or not values.shape[1]
+            or not np.all(np.isfinite(values))):
+        raise ValueError("paths must be a non-empty finite two-dimensional sequence")
+    if np.any(np.abs(values[:, 0] - spec.current_r) > 1e-7):
+        raise ValueError("path must start at ExecutionSpec.current_r")
+    if not 0 <= spec.spike_fraction <= 1:
+        raise ValueError("invalid spike close fraction")
+    if spec.time_stop_fraction is not None:
+        # Retain the exact scalar np.interp rounding and fractional deadline.
+        return [replay_execution_path(path, spec) for path in values]
+    results = []
+    for start in range(0, len(values), 256):
+        chunk = values[start:start + 256]
+        masks = _event_segment_mask(chunk, spec)
+        results.extend(_replay_execution_values(path, spec, np.flatnonzero(mask) + 1)
+                       for path, mask in zip(chunk, masks))
+    return results
+
+
+def _replay_execution_values(values: np.ndarray, spec: ExecutionSpec,
+                             segments: np.ndarray) -> ExecutionResult:
 
     remaining = 1.0
     realized = 0.0
@@ -160,8 +210,9 @@ def replay_execution_path(path: Sequence[float], spec: ExecutionSpec) -> Executi
     if values.size == 1:
         return finish(float(values[0]), "horizon", 0, 0.0)
 
-    for step, (previous, current) in enumerate(zip(values[:-1], values[1:]), 1):
-        previous, current = float(previous), float(current)
+    for segment in segments:
+        step = int(segment)
+        previous, current = float(values[step - 1]), float(values[step])
         if current >= previous:
             events: list[tuple[float, int, str, float]] = []
             if spike_pending and previous < spec.spike_r - EPSILON <= current + EPSILON:
