@@ -10,6 +10,7 @@ POLICIES = ("MOVE_TO_BE", "TIGHTEN_STOP", "TRAIL_GAMMA_FLIP", "REDUCE_TAKE",
 def select_active_management(snapshot):
     """Select only quantified improvements; no candidate is also a valid result."""
     rows, candidates = [], []
+    hold_cache = {}
     manager = snapshot.get('policy_manager') or {}
     mathematical = manager.get('mathematical_edge') or {}
     combined = manager.get('combined_edge_soft_weight') or {}
@@ -24,7 +25,7 @@ def select_active_management(snapshot):
             "confidence_semantics": "legacy_manual_registration_threshold_not_probability",
             "source": "deterministic_active_management", "automatic_execution_allowed": False}
         proposal["working_action"] = build_working_action(snapshot, proposal)
-        assessment = evaluate_extended_action(snapshot, proposal["working_action"])
+        assessment = evaluate_extended_action(snapshot, proposal["working_action"], _hold_cache=hold_cache)
         proposal["quant_evaluation"] = assessment
         bonus = extended_ranking_bonus(policy, mathematical, effective) if assessment['status'] == 'eligible' else 0.
         assessment['mathematical_edge_ranking_bonus_r'] = bonus

@@ -176,7 +176,7 @@ def test_math_preserves_hold_in_indifference_and_never_buys_material_expected_lo
 def test_extended_edge_bonus_never_resurrects_blocked_candidates(monkeypatch):
     from seiltanzer import active_management as active
     monkeypatch.setattr(active,'build_working_action',lambda s,p:dict(policy=p['policy']))
-    monkeypatch.setattr(active,'evaluate_extended_action',lambda s,a:dict(status='blocked',reason='NO_MATERIAL_ROBUST_EXPECTED_GAIN'))
+    monkeypatch.setattr(active,'evaluate_extended_action',lambda s,a,**kw:dict(status='blocked',reason='NO_MATERIAL_ROBUST_EXPECTED_GAIN'))
     profile=dict(available=True,weight_fraction=.15,direction_score=-1)
     snapshot={'policy_manager':{'mathematical_edge':profile}}
     assert active.select_active_management(snapshot) is None

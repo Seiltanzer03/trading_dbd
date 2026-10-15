@@ -49,6 +49,29 @@ def test_extended_stop_gets_real_counterfactual_and_gross_cvar_gate(monkeypatch)
     assert row["automatic_execution_allowed"] is False
 
 
+def test_one_selection_can_reuse_exact_hold_draws_without_changing_admission(monkeypatch):
+    snapshot = _snapshot()
+    actions = [_action(), _action('TIGHTEN_STOP', stop_price=105.)]
+    reference = [evaluation.evaluate_extended_action(snapshot, action) for action in actions]
+    original = evaluation.simulate_option_paths
+    calls = []
+
+    def observed(inputs, **kwargs):
+        calls.append((inputs, kwargs['seed']))
+        return original(inputs, **kwargs)
+
+    monkeypatch.setattr(evaluation, 'simulate_option_paths', observed)
+    cache = {}
+    actual = [evaluation.evaluate_extended_action(snapshot, action, _hold_cache=cache)
+              for action in actions]
+    assert actual == reference
+    assert sum(inputs.stop_r == -1. for inputs, seed in calls) == 2
+    # A different driver must not consume the previous HOLD result.
+    snapshot['policy_manager']['inputs']['drift_R'] = .2
+    evaluation.evaluate_extended_action(snapshot, actions[0], _hold_cache=cache)
+    assert sum(inputs.stop_r == -1. for inputs, seed in calls) == 4
+
+
 def test_extended_action_rejects_low_reliability_and_missing_geometry():
     snapshot = _snapshot()
     snapshot["policy_manager"]["evidence"]["data_quality"]["reliability"]["level"] = "низкая"
