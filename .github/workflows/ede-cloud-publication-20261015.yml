@@ -1,0 +1,124 @@
+name: ops-ede-cloud-publication-20261015
+
+on:
+  push:
+    branches: [ops/ede-cloud-publication-20261015]
+    paths: [.github/workflows/ede-cloud-publication-20261015.yml]
+
+permissions:
+  contents: read
+  actions: read
+
+# Preserve the canonical producer's ownership until it is terminal. This job
+# only republishes its completed artifact; it never takes another snapshot/fit.
+concurrency:
+  group: ede-v13-heavy-research
+  cancel-in-progress: false
+
+jobs:
+  publish-completed-artifact:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: 724ce141e8ab7f0813d48c487d896e64fc249255
+      OPERATOR_SHA: 7669de3dcd839ba268f5f102b06fcae0d5b57a0c
+      SOURCE_RUN_ID: '38689302428'
+      FINAL_CI_RUN_ID: '38697030484'
+      OUTPUT_DIR: ${{ runner.temp }}/ede-output
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7669de3dcd839ba268f5f102b06fcae0d5b57a0c
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify green reviewed operator and terminal latest source contract
+        id: contract
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          repository = os.environ['GITHUB_REPOSITORY']
+          def get(path):
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/' + repository + path,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          ci = get('/actions/runs/' + os.environ['FINAL_CI_RUN_ID'])
+          assert ci['head_sha'] == os.environ['OPERATOR_SHA']
+          assert ci['path'] == '.github/workflows/ci.yml'
+          assert ci['status'] == 'completed' and ci['conclusion'] == 'success'
+          assert get('/commits/' + os.environ['OPERATOR_SHA'])['commit']['tree']['sha'] == '3e4c2f2b06a5d1460ca5166c02cbf5f4e77d19ae'
+          source = get('/actions/runs/' + os.environ['SOURCE_RUN_ID'])
+          assert source['head_sha'] == os.environ['EXPECTED_SHA']
+          assert source['path'] == '.github/workflows/production-ede-v12-audit.yml'
+          assert source['event'] == 'schedule' and source['run_attempt'] == 1
+          assert source['status'] == 'completed'
+          jobs = {item['name']: item for item in get('/actions/runs/' + os.environ['SOURCE_RUN_ID'] + '/jobs?per_page=100')['jobs']}
+          assert jobs['audit']['conclusion'] == 'success'
+          publication = jobs['publish']
+          assert publication['status'] == 'completed'
+          required = publication['conclusion'] != 'success'
+          if required:
+              assert publication['conclusion'] == 'failure'
+          artifacts = get('/actions/runs/' + os.environ['SOURCE_RUN_ID'] + '/artifacts')['artifacts']
+          matching = [item for item in artifacts if item['name'] == 'ede-v13-research-' + os.environ['SOURCE_RUN_ID'] and not item['expired']]
+          assert len(matching) == 1 and matching[0]['size_in_bytes'] > 0
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('publish_required=' + str(required).lower() + '\n')
+          print(json.dumps({'source_run_id': source['id'], 'source_sha': source['head_sha'],
+              'operator_sha': os.environ['OPERATOR_SHA'], 'green_ci_run_id': ci['id'],
+              'artifact_id': matching[0]['id'], 'artifact_digest': matching[0].get('digest'),
+              'publication_required': required, 'recompute': False}, sort_keys=True))
+          PY
+      - name: Install existing transport only
+        if: steps.contract.outputs.publish_required == 'true'
+        run: pip install paramiko boto3
+      - uses: actions/download-artifact@v4
+        if: steps.contract.outputs.publish_required == 'true'
+        with:
+          github-token: ${{ github.token }}
+          run-id: '38689302428'
+          name: ede-v13-research-38689302428
+          path: ${{ runner.temp }}/ede-output
+      - name: Publish exact completed artifact through reviewed cloud-only path
+        if: steps.contract.outputs.publish_required == 'true'
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          python scripts/production_ede_offload.py publish \
+            --password "$SSH_PASSWORD" --expected-sha "$EXPECTED_SHA" \
+            --output-dir "$OUTPUT_DIR" --run-id "cloud-replay-${SOURCE_RUN_ID}-${{ github.run_id }}"
+      - name: Verify unchanged installed identity and cloud-only receipt
+        if: steps.contract.outputs.publish_required == 'true'
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, 'scripts')
+          import production_ede_offload as offload
+          client = offload._connect(os.environ['SSH_PASSWORD'])
+          try:
+              offload._verify_sha(client, os.environ['EXPECTED_SHA'])
+              state = offload._remote_ledger_archive_state(client)
+              assert state['plaintext'] is False and state['cache'] is False
+              offload.ede_ledger_archive.validate(state['manifest'])
+              assert state['manifest']['archived_by_sha'] == os.environ['EXPECTED_SHA']
+              local = offload.pathlib.Path(os.environ['OUTPUT_DIR']) / 'ede_v13_candidate_registry.jsonl'
+              assert offload._remote_ledger_identity(client) == {
+                  'size': local.stat().st_size, 'sha256': offload.ede_ledger_archive.digest(local)}
+              print('EDE_CLOUD_ONLY_RECEIPT=' + json.dumps(state['manifest'], sort_keys=True))
+              print('EDE_CAPACITY=' + offload._exec(client, "python3 -c 'import json,os;v=os.statvfs(\"/opt/seiltanzer/data/research\");print(json.dumps({\"free_bytes\":v.f_bavail*v.f_frsize}))'", timeout=10).strip())
+              offload._probe_api(client)
+          finally:
+              client.close()
+          PY
