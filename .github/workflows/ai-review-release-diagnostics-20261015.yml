@@ -94,4 +94,25 @@ jobs:
                     'source_audit':snapshot.get('edge_family_source_bundle_audit'),
                     'market_context':{k:market.get(k) for k in ('available','reason','failed_source_checks','market_observation_ts')}},sort_keys=True))
             conn.close()
+            # One pure recalculation of the already-frozen smoke snapshot.
+            # No engine/journal/provider is passed; never publish this replay.
+            import cProfile, pstats
+            from seiltanzer.active_management import select_active_management
+            from seiltanzer.unified_edge_ensemble import build_unified_ensemble
+            if row[0]==390:
+                raise AssertionError('expected three historical rows, not a replay of the loop variable')
+            profile_conn=sqlite3.connect((root/'data/trades.db').as_uri()+'?mode=ro',uri=True,timeout=3)
+            profile_conn.execute('PRAGMA query_only=ON')
+            profile_row=profile_conn.execute('SELECT snapshot_json FROM ai_verdicts WHERE id=390').fetchone()
+            profile_conn.close()
+            assert profile_row and len(profile_row[0])<=1_000_000
+            replay=json.loads(profile_row[0])
+            profiler=cProfile.Profile()
+            profiler.enable()
+            select_active_management(replay)
+            build_unified_ensemble(replay,replay.get('llm_shadow_decision'))
+            profiler.disable()
+            stats=pstats.Stats(profiler)
+            for (filename,line,function),value in sorted(stats.stats.items(),key=lambda item:item[1][3],reverse=True)[:28]:
+                print('PURE_REPLAY_PROFILE='+json.dumps({'file':str(filename),'line':line,'function':function,'primitive_calls':value[0],'total_calls':value[1],'own_sec':round(value[2],4),'cumulative_sec':round(value[3],4)},sort_keys=True))
             PY
