@@ -1,0 +1,35 @@
+name: ops-ede-capacity-20261015
+on:
+  push:
+    branches: [ops/ede-capacity-20261015]
+    paths: [.github/workflows/ops-ede-capacity-20261015.yml]
+permissions:
+  contents: read
+jobs:
+  capacity:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 3m
+          script: |
+            set -euo pipefail
+            cd /opt/seiltanzer
+            test "$(git rev-parse HEAD)" = 588edd8d9093717848530ece5f9bbcea5bed08ed
+            git rev-parse HEAD
+            df -B1 /
+            du -x -B1 --max-depth=1 /var/log /var/cache /opt/seiltanzer/data /opt/actions-runner 2>/dev/null | sort -nr | head -45
+            find /var/log /var/cache/apt/archives /opt/seiltanzer/data/research /opt/actions-runner/_diag -maxdepth 2 -type f -size +5M -printf '%s %T@ %p\n' 2>/dev/null | sort -nr | head -65
+            systemctl show seiltanzer -p ActiveState -p SubState -p NRestarts
+            python3 - <<'PY'
+            import json,urllib.request,time
+            for route in ('/api/state','/api/research/runtime/worker-status'):
+                t=time.monotonic()
+                with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=4) as r:
+                    r.read(1000001)
+                    print(json.dumps({'route':route,'status':r.status,'ms':round((time.monotonic()-t)*1000)}))
+            PY
