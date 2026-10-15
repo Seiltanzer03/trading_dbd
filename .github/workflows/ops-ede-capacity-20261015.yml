@@ -7,59 +7,34 @@ permissions:
   contents: read
   actions: write
 jobs:
-  native-local-health:
-    runs-on: [self-hosted, Linux, X64]
+  finalize-bounded-diagnostics:
+    runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Inspect exact host and local API without application changes
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd /
-          python3 - <<'PY'
-          import json,pathlib,subprocess,sys,urllib.request,time
-          addresses=json.loads(subprocess.check_output(['ip','-j','-4','address','show'],timeout=5))
-          ips={v['local'] for a in addresses for v in a.get('addr_info',[])}
-          assert '94.241.171.182' in ips,'Wrong host; no process or data changes'
-          root=pathlib.Path('/opt/seiltanzer')
-          sha=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True,timeout=5).strip()
-          assert sha=='588edd8d9093717848530ece5f9bbcea5bed08ed','Wrong runtime; no changes'
-          print('EXACT_LOCAL_RUNTIME='+sha,flush=True)
-          mem={k:v.strip() for k,v in (s.split(':',1) for s in pathlib.Path('/proc/meminfo').read_text().splitlines()) if k in ('MemTotal','MemAvailable','SwapTotal','SwapFree')}
-          print('MEMORY='+json.dumps(mem),flush=True)
-          print(subprocess.check_output(['df','-B1','/'],text=True,timeout=5),flush=True)
-          print(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','NRestarts','-p','MemoryCurrent'],text=True,timeout=5),flush=True)
-          kernel=subprocess.run(['journalctl','-k','--since','2026-10-15 20:22:00 UTC','-n','100','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5)
-          for line in kernel.stdout.splitlines():
-              if any(w in line.lower() for w in ('out of memory','oom','killed process')):
-                  print('KERNEL_MEMORY='+line[:500],flush=True)
-          started=time.monotonic()
-          try:
-              with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4) as r:
-                  r.read(1000001);print('LOCAL_API='+json.dumps({'status':r.status,'ms':round((time.monotonic()-started)*1000)}),flush=True)
-          except Exception as exc:print('LOCAL_API='+json.dumps({'error_class':type(exc).__name__}),flush=True)
-          PY
-  bound-unused-local-check:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 4
-    steps:
-      - name: Cancel this one-off attempt if no existing local runner accepts it
+      - name: Finalize only our unused local-runner diagnostics
         env:
           GH_TOKEN: ${{ github.token }}
-          OWN_RUN_ID: ${{ github.run_id }}
         run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do sleep 55; done
-          api="https://api.github.com/repos/${{ github.repository }}/actions/runs/$OWN_RUN_ID"
-          curl -fsS --max-time 10 -H "Authorization: Bearer $GH_TOKEN" "$api/jobs" > "$RUNNER_TEMP/jobs.json"
-          queued=$(python - <<'PY'
-          import json,os,pathlib
-          jobs=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'jobs.json').read_text())['jobs']
-          row=next(j for j in jobs if j['name']=='native-local-health')
-          print('true' if row['status']=='queued' else 'false')
+          python - <<'PY'
+          import json,os,urllib.request,urllib.error
+          base='https://api.github.com/repos/${{ github.repository }}/actions/runs/'
+          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'}
+          def request(path,method='GET'):
+              r=urllib.request.urlopen(urllib.request.Request(base+path,headers=headers,method=method),timeout=15)
+              body=r.read()
+              return json.loads(body) if body else {}
+          for rid in ('38803679910','38803965683'):
+              run=request(rid)
+              assert run['head_branch']=='ops/ede-capacity-20261015'
+              print('LOCAL_DIAGNOSTIC_RUN='+json.dumps({'id':rid,'status':run['status'],'conclusion':run['conclusion']}),flush=True)
+              if run['status']!='completed':
+                  try:
+                      request(rid+'/force-cancel','POST')
+                      print('UNUSED_LOCAL_CHECK_FORCE_CANCEL='+rid,flush=True)
+                  except urllib.error.HTTPError as e:
+                      if e.code!=409:raise
           PY
-          )
-          if [ "$queued" = true ]; then
-            echo EXISTING_LOCAL_RUNNER_UNAVAILABLE=true
-            curl -fsS --max-time 15 -X POST -H "Authorization: Bearer $GH_TOKEN" "$api/cancel"
-          fi
+      - name: Record final bounded public reachability
+        run: |
+          code=$(curl -sS --connect-timeout 3 --max-time 6 -o /dev/null -w '%{http_code}' http://94.241.171.182:8790/api/state || true)
+          echo "FINAL_PUBLIC_API_HTTP=$code"
