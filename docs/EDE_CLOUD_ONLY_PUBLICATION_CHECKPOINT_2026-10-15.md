@@ -53,3 +53,15 @@ NO MATERIAL SELECTIVE EDGE FOUND. This is not eight accepted profitable families
   temp path to step env made that regression GREEN. Eight control-contract
   scenarios and all embedded Python/shell syntax checks passed; only the second
   operator38697604152 executed production publication.
+
+## Permanent-release handoff
+
+Main CI38698211442 passed4084tests/5skips/13subtests plus pinnedSQLite and
+realWebKit. Automatic deploy38698698305/job116301334841 remains in progress
+at Deliver exact SHA over SSH; stage38698698429 waits on the same production
+lock. No deployment failure has been observed. No additional manual research
+or repeated CI was requested. The assistant's read-only polling was stopped;
+the actual GitHub deployment continues independently. Next: inspect this exact
+deployment's terminal readiness/smoke/public HTTP and seven commit statuses,
+record its automatic source/model handoffs, and close only on real evidence.
+Do not dispatch a second deploy or recompute research merely while it is active.
