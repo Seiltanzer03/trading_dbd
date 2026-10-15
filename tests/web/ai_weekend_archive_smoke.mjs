@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
+import {aiProviderWarning} from '../../seiltanzer/web/js/safe_fetch.js';
 
 // Exercise the actual modal callback, including its request and trade guards.
 const source = fs.readFileSync('seiltanzer/web/js/app.js', 'utf8');
@@ -50,7 +51,7 @@ async function fixture({code = 'authoritative_price_unavailable', history, histo
   const noDecision = () => { if (!review) throw new Error('archive cannot mount execution controls'); };
   new Function('$','openModal','closeModal','fetchStructured','mountArmedShadowActions',
     'mountEdgeManagement','mountManagementDecision','mountShadowWorkingAction','apiPost',
-    'refreshJournalAndSetups','refreshAiHistory','S','document','mountArchivedManagement',callback)(
+    'refreshJournalAndSetups','refreshAiHistory','S','document','mountArchivedManagement','aiProviderWarning',callback)(
     (id) => nodes.get(id), openModal, () => {}, fetchStructured,
     (container, actions) => {
       for (const action of actions || []) {
@@ -58,7 +59,7 @@ async function fixture({code = 'authoritative_price_unavailable', history, histo
         container.appendChild(control);
       }
     }, noDecision, noDecision, noDecision, noDecision, noDecision, noDecision,
-    state, {createElement: () => new Element()}, (container, archive) => { archives.push(archive); });
+    state, {createElement: () => new Element()}, (container, archive) => { archives.push(archive); }, aiProviderWarning);
   await nodes.get('#btn-ai-verdict').click();
   return {nodes, state, calls, archives, out: nodes.get('#ai-verdict-text'),
     button: nodes.get('#ai-close').parentElement.children.find((node) => node !== nodes.get('#ai-close'))};

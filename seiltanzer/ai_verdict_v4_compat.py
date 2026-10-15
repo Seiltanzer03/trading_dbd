@@ -152,13 +152,17 @@ def render_policy_report(snapshot: dict) -> str:
     if not any(line.startswith("Независимые семьи подтверждений:") for line in lines):
         independence = evidence.get("confirmation_independence") or {}
         families = evidence.get("adverse_confirmation_families") or []
+        items = independence.get('adverse_items')
+        if items is None:
+            observed = evidence.get('adverse_confirmations')
+            items = sum(isinstance(row, dict) for row in observed) if isinstance(observed, list) else '—'
         _insert_after(
             lines,
             ("Против удержания:", "Однонаправленные семьи против удержания:"),
             f"Независимые семьи подтверждений: "
             f"{independence.get('adverse_families', len(families))} — "
             f"{', '.join(families) if families else 'нет'}. "
-            f"Отдельных строк метрик: {independence.get('adverse_items', 0)}; "
+            f"Отдельных строк метрик: {items}; "
             "смешанные семьи не дают голоса против удержания.",
         )
 

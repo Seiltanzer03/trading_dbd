@@ -1,5 +1,19 @@
 import assert from 'node:assert/strict';
-import { fetchStructured, readResponseSafely, structuredErrorMessage } from '../../seiltanzer/web/js/safe_fetch.js';
+import { fetchStructured, readResponseSafely, structuredErrorMessage, aiProviderWarning } from '../../seiltanzer/web/js/safe_fetch.js';
+
+assert.equal(aiProviderWarning({ degraded: false }), '');
+const timeoutWarning = aiProviderWarning({ degraded: true, request_id: 'ai-timeout',
+  provider_error: { code: 'provider_timeout' } });
+assert.match(timeoutWarning, /LLM НЕДОСТУПЕН/);
+assert.match(timeoutWarning, /provider_timeout/);
+assert.match(timeoutWarning, /время ожидания/);
+assert.match(timeoutWarning, /ai-timeout/);
+assert.doesNotMatch(aiProviderWarning({ degraded: true,
+  provider_error: { code: '<secret-provider-body>' } }), /secret-provider-body/);
+assert.match(aiProviderWarning({ degraded: true, llm_shadow_decision: { status: 'ok' },
+  provider_error: { code: 'provider_timeout' } }), /СТРУКТУРИРОВАННЫЙ LLM ДОСТУПЕН/);
+assert.doesNotMatch(aiProviderWarning({ degraded: true,
+  llm_shadow_decision: { status: 'ok' } }), /LLM НЕДОСТУПЕН/);
 
 function response(status, contentType, body) {
   return {

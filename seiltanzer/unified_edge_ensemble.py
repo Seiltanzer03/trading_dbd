@@ -233,9 +233,19 @@ def collect_candidates(snapshot):
             # A damaged parameterized action is not the parameter-free policy.
             # Keep a safe diagnostic row without leaking NaN/Inf into the audit
             # or letting this variant consume a valid variant's dedup identity.
-            rows.append({"candidate_id": f"{policy}:invalid_parameters:{index}",
+            # A source guard deliberately omits parameters when no executable
+            # anchor exists. Keep that original refusal rather than presenting
+            # a normal unavailable anchor as a corrupted action. It remains
+            # excluded, with no economics or execution authority.
+            blocked_reason = raw.get('reason')
+            source_blocked = (raw.get('status') == 'blocked'
+                and isinstance(raw.get('parameters', {}), dict) and not raw.get('parameters', {})
+                and isinstance(blocked_reason, str) and 0 < len(blocked_reason) <= 120
+                and blocked_reason.replace('_', '').isalnum() and blocked_reason == blocked_reason.upper())
+            diagnostic = 'unavailable' if source_blocked else 'invalid_parameters'
+            rows.append({"candidate_id": f"{policy}:{diagnostic}:{index}",
                          "policy": policy, "parameters": {}, "eligible": False,
-                         "reason": invalid_reason,
+                         "reason": blocked_reason if source_blocked else invalid_reason,
                          "expected_net_r": None, "cvar10_net_r": None,
                          "delta_expected_r": None, "delta_cvar_r": None,
                          "execution_cost_r": None})

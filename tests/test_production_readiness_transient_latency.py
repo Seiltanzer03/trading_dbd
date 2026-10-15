@@ -67,5 +67,7 @@ def test_q_audit_latency_gate_is_centralized_in_retrying_readiness():
     readiness_source = _MODULE_PATH.read_text(encoding="utf-8")
     deploy_source = _DEPLOY_PATH.read_text(encoding="utf-8")
 
-    assert '("/api/research/g1/q/audit?limit=5000", 3000)' in readiness_source
+    assert readiness.Q_AUDIT_READINESS_PATH == '/api/research/g1/q/audit?limit=5000&include_items=false'
+    assert '(Q_AUDIT_READINESS_PATH, 3000)' in readiness_source
+    assert 'q = bodies[Q_AUDIT_READINESS_PATH]' in readiness_source
     assert "Q_AUDIT_3000MS_GATE" not in deploy_source

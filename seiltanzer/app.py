@@ -1393,6 +1393,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "ai_internal_error", "Не удалось сформировать ИИ-разбор",
                         req_id, retriable=False),
                 )
+            if provider_failure:
+                from .llm_decision_shadow import unavailable_shadow
+                if not isinstance(result.get('llm_shadow_decision'), dict):
+                    result['llm_shadow_decision'] = unavailable_shadow(snapshot, provider_failure['code'])
+                # Freeze only normalized code-owned diagnostics, never raw
+                # provider bodies/credentials. A later audit must distinguish
+                # timeout/auth/validation from an absent opinion contract.
+                snapshot['ai_provider_status'] = {
+                    'mode': 'deterministic_fallback' if degraded else 'llm',
+                    'code': provider_failure['code'],
+                    'retriable': provider_failure.get('retriable') is True,
+                }
             try:
                 from .unified_edge_ensemble import build_unified_ensemble
                 audit = await trace.to_thread(

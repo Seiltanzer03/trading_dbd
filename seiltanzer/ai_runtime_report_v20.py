@@ -59,6 +59,12 @@ Return ONLY one valid JSON object, no markdown:
   }
 }
 
+Keep the response concise: explanation_ru is optional and may be empty (the
+server writes the displayed report). Do not repeat the same rationale in prose
+and shadow fields. Keep reason_ru under160 characters, each evidence item under
+120 characters, use2-3 key facts and at most2 counter-facts/invalidations.
+Omit unavailable family entries rather than emitting eight empty objects.
+
 For shadow_decision independently synthesize trade geometry, Expected/median/CVaR,
 execution-MC/scenario geometry when actually available, option distribution and
 IV/RV/VRP/skew/term/GEX/barrier/hazard derivatives, live tape/order-flow,
@@ -273,8 +279,9 @@ def _metric_audit_lines(snapshot: dict) -> list[str]:
 
     displayed_names: set[str] = set()
     for line in base[1:]:
-        if ":" in line:
-            displayed_names.add(line.split(":", 1)[0].strip())
+        name = line.split(":", 1)[0].strip()
+        if name in metrics:
+            displayed_names.add(name)
 
     effective_boundary = boundary & displayed_names if displayed_names else boundary
     effective_low_confidence = low_confidence & displayed_names if displayed_names else low_confidence
@@ -384,7 +391,13 @@ def _provider_payload(content: str) -> tuple[str, dict[str, Any]]:
     if not isinstance(content, str) or len(content.encode("utf-8")) > PROVIDER_RESPONSE_MAX_BYTES:
         raise RuntimeError("combined_provider_invalid_response_budget")
     payload = _extract_json_object(content)
-    explanation = _provider._sanitize_explanation(payload.get("explanation_ru"))
+    # Commentary is never displayed as authority; the server renders the
+    # report. Its absence/invalid imperative must not erase a valid independent
+    # preference vector from the same response.
+    try:
+        explanation = _provider._sanitize_explanation(payload.get("explanation_ru"))
+    except RuntimeError:
+        explanation = ""
     shadow_raw = payload.get("shadow_decision")
     if not isinstance(shadow_raw, dict):
         raise RuntimeError("combined_provider_missing_shadow")

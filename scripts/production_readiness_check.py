@@ -12,6 +12,9 @@ import urllib.request
 
 BASE = "http://127.0.0.1:8790"
 FAST_TIMEOUT = 5.0
+# Same5000-attempt cohort and maturity rules; omit diagnostic decorations and
+# per-item predecessor lookups which readiness never consumes.
+Q_AUDIT_READINESS_PATH = '/api/research/g1/q/audit?limit=5000&include_items=false'
 TRANSIENT_ATTEMPTS = 3
 TRANSIENT_RETRY_DELAY_SEC = 1.0
 POST_RESTORE_STABLE_SAMPLES = 3
@@ -274,7 +277,7 @@ def verify(expected_sha: str, *, skip_restore_drill: bool = False) -> None:
         ("/api/research/g1s/ablation", 3000), ("/api/research/g1s/trade-relevance", 3000),
         ("/api/research/g1s/evidence-materialization", 3000),
         ("/api/research/g1s/final-report", 3000),
-        ("/api/research/g1/q/audit?limit=5000", 3000),
+        (Q_AUDIT_READINESS_PATH, 3000),
         ("/api/research/g1/intelligence/status", None),
         ("/api/research/g1/management/status", 3000),
         ("/api/research/g1/management/local-status", 3000),
@@ -293,7 +296,7 @@ def verify(expected_sha: str, *, skip_restore_drill: bool = False) -> None:
     db_auth = bodies["/api/system/database-authority"]
     runtime = bodies["/api/research/runtime/status"]
     historical = bodies["/api/research/g1s/historical-wf"]
-    q = bodies["/api/research/g1/q/audit?limit=5000"]
+    q = bodies[Q_AUDIT_READINESS_PATH]
     intel = bodies["/api/research/g1/intelligence/status"]
     g1m = bodies["/api/research/g1/management/status"]
     g1ml = bodies["/api/research/g1/management/local-status"]

@@ -387,3 +387,40 @@ def test_terminal_candidate_queries_use_direct_partial_indexes(tmp_path):
     finally:
         passive.close()
         cache.close()
+
+
+def test_readiness_http_summary_keeps_same_cohort_and_maturity_without_items(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    runtime, passive, cache = _runtime(tmp_path)
+    now = 1_800_000_000.
+    try:
+        for index, (status, target) in enumerate((
+                ('resolved', now-1000), ('pending', now+1000),
+                ('pending', now-1000), ('contract_rejected', now-2000))):
+            identity = 'summary-observation-' + str(index)
+            _insert_observation(passive, observation_id=identity, instrument='XAU',
+                                target_ts=target, status=status)
+            _insert_attempt(passive, attempt_id='summary-attempt-'+str(index),
+                            attempt_ts=now-index, instrument='XAU',
+                            observation_id=identity, target_ts=target)
+        _insert_attempt(passive, attempt_id='summary-blocked', attempt_ts=now-10,
+                        instrument='XAU', observation_id=None, target_ts=None,
+                        blocker_code='SOURCE_UNAVAILABLE')
+        passive._conn.commit()
+        app = FastAPI()
+        app.add_api_route('/api/research/g1/q/audit', runtime.q_audit, methods=['GET'])
+        with TestClient(app) as client:
+            full = client.get('/api/research/g1/q/audit', params={'now':now, 'limit':5000}).json()
+            summary = client.get('/api/research/g1/q/audit', params={
+                'now':now, 'limit':5000, 'include_items':'false'}).json()
+        assert len(full['items']) == full['attempt_n'] == 5
+        assert summary['items'] == []
+        assert summary['items_included'] is False
+        assert summary['item_count_total'] == full['attempt_n']
+        for key, value in full.items():
+            if key != 'items':
+                assert summary[key] == value, key
+    finally:
+        passive.close()
+        cache.close()
