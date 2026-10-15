@@ -22,8 +22,8 @@ jobs:
             test "$(git rev-parse HEAD)" = 588edd8d9093717848530ece5f9bbcea5bed08ed
             git rev-parse HEAD
             df -B1 /
-            du -x -B1 --max-depth=1 /var/log /var/cache /opt/seiltanzer/data /opt/actions-runner 2>/dev/null | sort -nr | head -45
-            find /var/log /var/cache/apt/archives /opt/seiltanzer/data/research /opt/actions-runner/_diag -maxdepth 2 -type f -size +5M -printf '%s %T@ %p\n' 2>/dev/null | sort -nr | head -65
+            du -x -B1 --max-depth=2 /root /var/lib /var/cache /usr/local /tmp /var/tmp /opt 2>/dev/null | sort -nr | head -65
+            find /root/.cache /tmp /var/tmp /opt -maxdepth 3 -type f -size +50M -printf '%s %T@ %p\n' 2>/dev/null | sort -nr | head -30
             systemctl show seiltanzer -p ActiveState -p SubState -p NRestarts
             python3 - <<'PY'
             import json,urllib.request,time
