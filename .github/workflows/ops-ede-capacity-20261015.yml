@@ -6,59 +6,92 @@ on:
 permissions:
   contents: read
 jobs:
-  g1m-latency-diagnostics:
+  yandex-immutable-capacity:
     runs-on: ubuntu-22.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 11e4a09bc39aa5c23d90c6d6b6f53e95c96f6a94
+          ref: 46d6da8ee3507df2c04bece5713c6780988f0c14
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --quiet paramiko
-      - name: Measure bounded G1M reads under the original acceptance owner
+      - run: python -m pip install --quiet boto3
+      - name: Measure existing verified Yandex snapshot off-host without VPS access
         env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+          TASK_DIRECTORY: ${{ runner.temp }}/yandex-capacity-stream-20261016
         run: |
           python - <<'PY'
-          import os,sys,shlex
+          import json,os,shutil,sys
+          from pathlib import Path
+          import boto3
+          from botocore.config import Config
           sys.path.insert(0,'scripts')
-          from production_ede_offload import _connect,_exec,_verify_sha
-          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
-          sha='11e4a09bc39aa5c23d90c6d6b6f53e95c96f6a94'
-          owner='38866349515'
-          py='/opt/seiltanzer/.venv/bin/python'
-          orch=py+' /opt/seiltanzer/scripts/production_research_acceptance.py'
-          keep=False
-          try:
-              _verify_sha(client,sha)
-              print(_exec(client,orch+' acquire-gate --acceptance-run-id '+owner+' --expected-sha '+sha+' --ttl-seconds 1800',timeout=30),flush=True)
-              print(_exec(client,py+' /opt/seiltanzer/scripts/production_post_research_check.py --expected-sha '+sha+' --acceptance-run-id '+owner,timeout=1200),flush=True)
-              code="""
-          import json,time,urllib.request,subprocess,pathlib,os
-          samples=[]
-          for index in range(3):
-              started=time.monotonic()
-              with urllib.request.urlopen('http://127.0.0.1:8790/api/research/g1/management/local-edge',timeout=6) as response:
-                  raw=response.read(8388609)
-                  assert len(raw)<=8388608, 'G1M report payload exceeds diagnostic budget'
-                  payload=json.loads(raw)
-                  assert response.status==200
-              elapsed=(time.monotonic()-started)*1000
-              samples.append(elapsed)
-              print('G1M_LATENCY_SAMPLE='+json.dumps({'sample':index+1,'ms':round(elapsed,1),'bytes':len(raw),'dataset':payload.get('dataset'),'production_authority':payload.get('production_authority'),'attribution_version':(payload.get('active_edge_decision_attribution') or {}).get('contract_version')}),flush=True)
-              assert payload.get('production_authority') is False
-          print(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','NRestarts','-p','MemoryCurrent','-p','MemoryPeak'],text=True,timeout=5),flush=True)
-          print('G1M_DIAGNOSTIC_RESULT='+json.dumps({'all_below_3000_ms':all(t<3000 for t in samples),'max_ms':round(max(samples),1),'threshold_changed':False}),flush=True)
-          assert all(t<3000 for t in samples), 'G1M latency reproduced under acceptance pause'
-          """
-              print(_exec(client,py+' -c '+shlex.quote(code),timeout=35),flush=True)
-              keep=True
-              print('ORIGINAL_ACCEPTANCE_OWNER_RETAINED_FOR_SINGLE_G1M_CONTINUATION',flush=True)
-          finally:
-              if not keep:
-                  try:print(_exec(client,orch+' release-gate --acceptance-run-id '+owner+' --expected-sha '+sha,timeout=30),flush=True)
-                  except Exception as exc:print('RELEASE_UNCONFIRMED='+type(exc).__name__,flush=True)
-              client.close()
+          from restore_verified_snapshot import _latest_manifest,restore,ENDPOINT
+          directory=Path(os.environ['TASK_DIRECTORY']);directory.mkdir(exist_ok=False)
+          client=boto3.client('s3',endpoint_url=ENDPOINT,region_name='ru-central1',
+              config=Config(connect_timeout=10,read_timeout=120,retries={'max_attempts':3}))
+          bucket='trading-dbd-backups-2026'
+          manifest_key,manifest=_latest_manifest(client,bucket=bucket)
+          size=int(manifest.get('database_size_bytes') or 0)
+          available=shutil.disk_usage(directory).free
+          if not 0<size<=25*1024**3 or available<2*size+1024**3:
+              raise RuntimeError('Disposable worker lacks conservative restore capacity')
+          print('CAPACITY_RESTORE_PREFLIGHT='+json.dumps({'database_bytes':size,
+              'worker_free_bytes':available,'manifest_key':manifest_key,
+              'new_question':'per-table allocation for dependency-closed hot/cold design',
+              'production_connection':False}),flush=True)
+          result=restore(bucket=bucket,key=manifest['object_key'],
+              destination=directory/'snapshot.sqlite3',result_path=directory/'result.json',
+              snapshot_drill=True,storage_report=True)
+          print('OFFHOST_CAPACITY_REPORT='+json.dumps(result['capacity_report'],sort_keys=True),flush=True)
+          print('OFFHOST_CAPACITY_IDENTITY='+json.dumps({k:result.get(k) for k in
+              ('database_sha256','database_size_bytes','object_key','immutable_sqlite_read',
+               'snapshot_restore_verified','production_authority')},sort_keys=True),flush=True)
+          import sqlite3,time
+          conn=sqlite3.connect((directory/'snapshot.sqlite3').resolve().as_uri()+'?mode=ro&immutable=1',uri=True)
+          schema={name:dict(sql=sql,columns=[r[1] for r in conn.execute('PRAGMA table_info("'+name.replace('"','""')+'")')]) for name,sql in conn.execute("SELECT name,sql FROM sqlite_schema WHERE type='table' LIMIT 4096")}
+          (directory/'schema.json').write_text(json.dumps(schema,sort_keys=True))
+          summaries={}
+          deadline=time.monotonic()+120
+          conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+          for row in result['capacity_report']['largest_objects']:
+              if row['object_type']!='table' or row['name'] not in schema:continue
+              name=row['name'];quoted='"'+name.replace('"','""')+'"';columns=schema[name]['columns']
+              try:
+                  summary={'count':conn.execute('SELECT COUNT(*) FROM '+quoted).fetchone()[0]}
+                  if 'resolution_status' in columns:
+                      summary['resolution_counts']=dict(conn.execute('SELECT resolution_status,COUNT(*) FROM '+quoted+' GROUP BY resolution_status'))
+                  summaries[name]=summary
+                  if len(summaries)>=12:break
+              except sqlite3.OperationalError as exc:
+                  summaries[name]={'unavailable':str(exc)};break
+          conn.set_progress_handler(None,0);conn.close()
+          (directory/'cohorts.json').write_text(json.dumps(summaries,sort_keys=True))
+          print('OFFHOST_COHORT_SUMMARY='+json.dumps(summaries,sort_keys=True),flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yandex-capacity-stream-20261016-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/yandex-capacity-stream-20261016/result.json
+            ${{ runner.temp }}/yandex-capacity-stream-20261016/schema.json
+            ${{ runner.temp }}/yandex-capacity-stream-20261016/cohorts.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove only this disposable worker database
+        if: always()
+        env:
+          TASK_DIRECTORY: ${{ runner.temp }}/yandex-capacity-stream-20261016
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          directory=Path(os.environ['TASK_DIRECTORY'])
+          for name in ('snapshot.sqlite3','snapshot.sqlite3-wal','snapshot.sqlite3-shm'):
+              (directory/name).unlink(missing_ok=True)
           PY
