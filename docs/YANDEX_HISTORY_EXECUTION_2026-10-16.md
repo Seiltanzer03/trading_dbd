@@ -1,5 +1,9 @@
 # Yandex history completion — execution checkpoint, 16.10.2026
 
+Latest continuation: VERIFIED_HISTORY_UNION_2026-10-16.md records the completed
+64-row private SQL-union proof and remaining full-cohort/cutover gates. Earlier
+sections below are chronological checkpoints, not current completion claims.
+
 Continuation of the approved terminal plan, not a replacement for the original
 specification or handoff. Existing private bucket, credentials, workflows and
 source/risk/resource limits remain unchanged. No production rows retired.

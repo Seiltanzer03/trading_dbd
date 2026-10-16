@@ -1,0 +1,33 @@
+{
+  "actual_payloads_in_github_artifact": false,
+  "checked_out_code_sha": "68aafcd1ee73433d143278c08b48a5426ae41e89",
+  "cloud_writes": false,
+  "code_sha": "2dabbb02814c782efaf43ebf27dc5092970f1a97",
+  "data_retirement_authorized": false,
+  "exact_typed_rows_equal": true,
+  "full_production_reader_equivalence_proven": false,
+  "history_union_verified": true,
+  "hot_source_unchanged": true,
+  "production_authority": false,
+  "production_connection": false,
+  "rows_verified": 64,
+  "run_id": 38898501123,
+  "scope": "PARTIAL_TEST_FIXTURE_ONLY",
+  "sql_group_results_equal": true,
+  "tables": {
+    "g1s_observations": {
+      "nonempty_sql_groups": 20,
+      "row_count": 32,
+      "typed_sha256": "227980c0070876988dd8d726c98b239c714bf119be3f0ffac4bb5fef4c373c4b"
+    },
+    "passive_market_observations": {
+      "nonempty_sql_groups": 32,
+      "row_count": 32,
+      "typed_sha256": "1fc42756123694b260732afa54cc348bbc92a09db591bff1e548316f994b9184"
+    }
+  },
+  "whole_snapshot_restored": false,
+  "artifact_id": 12044384589,
+  "artifact_zip_sha256": "17c5e62e5b7b0be1ec24817c0388e2e0f0d19cd3bcdbcff29fad017ab6a7aa35",
+  "completed_at": "2026-10-16T12:09:06Z"
+}
