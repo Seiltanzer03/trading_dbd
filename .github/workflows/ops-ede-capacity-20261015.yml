@@ -33,6 +33,19 @@ jobs:
           root=pathlib.Path('/opt/seiltanzer')
           v=os.statvfs(root)
           print('CAPACITY='+json.dumps({'free_bytes':v.f_bavail*v.f_frsize,'required_bytes':1024**3}),flush=True)
+          for base in (root,pathlib.Path('/opt/actions-runner'),pathlib.Path('/root/wheels')):
+              if not base.is_dir() or base.is_symlink():continue
+              for child in sorted(base.iterdir()):
+                  if child.is_symlink():continue
+                  if base==root and child.name in ('data','.venv','.git'):continue
+                  if child.is_dir():
+                      try:
+                          result=subprocess.run(['du','-sx','-B1',str(child)],text=True,capture_output=True,timeout=5)
+                          size=int(result.stdout.split()[0]) if result.returncode==0 else None
+                      except (subprocess.TimeoutExpired,ValueError,IndexError):size=None
+                  elif child.is_file():size=child.stat().st_blocks*512
+                  else:continue
+                  if size is None or size>1024**2:print('ROOT_CHILD='+json.dumps({'path':str(child),'allocated':size}),flush=True)
           for directory in ('data/research','data/backups','data','venv','.venv','.git'):
               base=root/directory
               if not base.is_dir() or base.is_symlink():continue
