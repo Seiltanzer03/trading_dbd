@@ -8,9 +8,8 @@ Historical receipt: mathematical workflow38815534340/job116699138319,
 noncrypto instruments, with XAU/XAG/EURUSD/USDCAD explicitly bounded-incomplete;
 crypto source_rows0. Private combined family inputs4710. The workflow reports
 25 newly fitted models,19 historically supported instrument/family combinations.
-The aggregate log does not enumerate each supported pair; it must not be
-expanded into invented per-instrument admissions. Per-pair artifacts remain
-the authority for that detail.
+The per-pair artifact was subsequently retrieved and verified; its historical
+matrix is appended below, separately from current applicability.
 
 Current-report receipt: NAS100 snapshot2026-10-16T06:40:16Z,
 decision66926fd5c761e5261ebc1b7a4488, supplied by the user. All eight family
@@ -45,3 +44,46 @@ returns. Do not retrain identical data or turn failed validation into anti-signa
 without a separate predeclared, untuned out-of-sample test. Reliable FOMC cadence,
 prospective maturity and empirically effective weights remain explicit open
 measurements.
+
+## Verified per-instrument historical model matrix
+
+Reused the3,437,068-byte artifact12010343604 from the accepted workflow; ZIP
+SHA2568a51f72717df6c1b25769f790b1fb9ff7931102f10fbbd076f88a22715aad150
+verified before reading. No training or production database export repeated.
+Recalculated directly from family_market_models:25 TRAINED pairs,19 with at
+least one historically working-supported head, matching the published summary.
+
+S/N = trained with at least one supported head / training rows;
+T/N = trained but no supported head / training rows;
+I = configured-series identity mismatch; H = captured feature history missing;
+N = insufficient nonoverlapping history; V = no head with causal validation.
+S may describe movement rather than direction and supplies no proof of net
+action profitability. This table is historical readiness, not current weights.
+
+| Instrument | macro | event | order_flow | intermarket | positioning | value_carry | option | session |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| BTCUSD | I | I | I | I | I | I | I | I |
+| ETHUSD | I | I | I | I | I | I | I | I |
+| EURUSD | V | H | H | S/4162 | H | H | S/231 | S/5670 |
+| GER40 | V | H | H | T/1452 | H | H | N | S/1980 |
+| JPY100 | V | H | H | T/839 | H | H | H | S/1258 |
+| NAS100 | V | H | H | S/1075 | H | H | S/218 | T/1500 |
+| SOLUSD | I | I | I | I | I | I | I | I |
+| SP500 | V | H | H | S/1075 | H | H | N | S/1499 |
+| UK100 | V | H | H | T/1419 | H | H | N | S/1980 |
+| US30 | V | H | H | T/1075 | H | H | N | S/1500 |
+| USDCAD | V | H | H | S/4154 | H | H | S/229 | S/5658 |
+| XAG | V | H | H | S/3881 | H | H | S/239 | S/4497 |
+| XAU | V | H | H | S/3886 | H | H | T/243 | S/4500 |
+
+Intermarket/session models can derive completed lagged bars/calendar features;
+the captured-family-input count above is not their whole training dataset.
+Historical provider bars with5m driver lag are not recorded original receipts.
+Macro on the ten noncrypto instruments had no causally validated trained head;
+NAS100 macro trials included FOMC1424, ISM manufacturing790 and services740
+training rows, while CPI/NFP feature trials had0 usable rows. Negative or absent
+validation remains an explicit result. Crypto family rows are blocked by
+TARGET_CONFIGURED_SERIES_MISMATCH. All other exact per-pair reasons, sample
+counts, supported head names and model digests are retained in the accompanying
+EDGE_FAMILY_HISTORICAL_MATRIX_2026-10-16.json, with current snapshot contribution
+0 only for NAS100; the other12 current states are NOT_MEASURED, not invented.
