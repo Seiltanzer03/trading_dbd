@@ -24,6 +24,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.compact_git
     concurrency:
       group: production-seiltanzer
+      queue: max
       cancel-in-progress: false
     runs-on: ubuntu-22.04
     timeout-minutes: 15
