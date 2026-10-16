@@ -15,6 +15,8 @@ import datetime as dt
 import hashlib
 import json
 import math
+from pathlib import Path
+import shutil
 import sqlite3
 import statistics
 import threading
@@ -1163,7 +1165,78 @@ class PassiveLearningEngine:
                         "SET resolution_status=?,resolved_ts=? "
                         "WHERE observation_id=?", (status, now,
                                                    row["observation_id"]))
+                    # A missing parent path cannot later produce a valid virtual
+                    # label. Keep both transitions atomic and the outcome NULL.
+                    self._conn.execute(
+                        "UPDATE virtual_position_observations "
+                        "SET resolution_status=?,resolved_ts=? "
+                        "WHERE passive_observation_id=? AND resolution_status='pending' "
+                        "AND outcome_json IS NULL", (status, now, row['observation_id']))
+        self.reconcile_terminal_virtuals(now=now, limit=limit)
         return dict(counts)
+
+    def reconcile_terminal_virtuals(self, *, now: float, limit: int = 100) -> dict:
+        """Advance through at most100 legacy rows, never invent an outcome.
+
+        Persisted rowid progress avoids repeated full pending-table scans. New
+        parent failures are handled atomically above, including behind cursor.
+        This maintenance is optional when source WAL reserve is unavailable.
+        """
+        if isinstance(now,bool) or _finite(now) is None or float(now)<=0:
+            raise ValueError('Virtual reconciliation requires a finite actual clock')
+        now = float(now)
+        batch = max(0, min(100, int(limit)))
+        result = dict(scanned_rows=0, marked_unavailable=0, scan_complete=False,
+                      production_authority=False)
+        if not batch:
+            return {**result, 'reason': 'BATCH_BUDGET_ZERO'}
+        with self._lock:
+            db = next((r[2] for r in self._conn.execute('PRAGMA database_list') if r[1]=='main'), '')
+        directory = Path(db).parent if db else Path(self.settings.data_dir)
+        try:
+            if shutil.disk_usage(directory).free < 1024**3 + 32*1024**2:
+                return {**result, 'reason': 'WAL_HEADROOM_UNAVAILABLE'}
+        except OSError:
+            return {**result, 'reason': 'WAL_HEADROOM_UNAVAILABLE'}
+        key = 'virtual_terminal_reconciliation_v1'
+        with self._lock, self._conn:
+            stored = self._conn.execute('SELECT substr(value_json,1,1025) FROM passive_collector_state WHERE key=?',(key,)).fetchone()
+            cursor = None
+            if stored:
+                if len(stored[0])>1024:
+                    raise ValueError('Excessive virtual reconciliation state')
+                state = json.loads(stored[0])
+                cursor = state.get('last_rowid') if isinstance(state,dict) else None
+                if type(cursor) is not int or not -2**63 <= cursor < 2**63:
+                    raise ValueError('Invalid virtual reconciliation rowid state')
+            where,params = ('',[]) if cursor is None else (' WHERE rowid>?',[cursor])
+            rows = self._conn.execute(
+                'SELECT rowid FROM virtual_position_observations'+where+
+                ' ORDER BY rowid LIMIT ?',(*params,batch)).fetchall()
+            if rows:
+                ids = [row['rowid'] for row in rows]
+                placeholders = ','.join('?' for _ in ids)
+                # Bound legacy record sizes before rewriting any payload pages.
+                text_columns = ('virtual_id','passive_observation_id','instrument','direction',
+                                'position_origin','policy_contract_version','features_json','resolution_status')
+                size = '+'.join('COALESCE(length(CAST('+c+' AS BLOB)),0)' for c in text_columns)
+                changed = self._conn.execute(
+                    'UPDATE virtual_position_observations SET resolution_status=('
+                    'SELECT p.resolution_status FROM passive_market_observations p '
+                    'WHERE p.observation_id=virtual_position_observations.passive_observation_id),resolved_ts=? '
+                    'WHERE rowid IN ('+placeholders+") AND resolution_status='pending' AND outcome_json IS NULL "
+                    'AND ('+size+')<=65536 AND EXISTS(SELECT 1 FROM passive_market_observations p '
+                    'WHERE p.observation_id=virtual_position_observations.passive_observation_id '
+                    "AND p.resolution_status NOT IN ('pending','resolved'))",(now,*ids)).rowcount
+                cursor = rows[-1]['rowid']
+                self._conn.execute(
+                    'INSERT INTO passive_collector_state(key,value_json,updated_ts) VALUES(?,?,?) '
+                    'ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_ts=excluded.updated_ts',
+                    (key,_json({'last_rowid':cursor}),now))
+                result.update(scanned_rows=len(rows),marked_unavailable=changed)
+            result.update(next_rowid=cursor,scan_complete=len(rows)<batch,
+                          reason='BOUNDED_TERMINAL_PARENT_RECONCILIATION')
+        return result
 
     def observations(self, *, limit: int = 100, instrument: str | None = None) -> dict:
         where, args = "", []

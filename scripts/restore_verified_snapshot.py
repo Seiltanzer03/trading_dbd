@@ -6,7 +6,9 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import sqlite3
+import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -19,10 +21,24 @@ PREFIX = "backups/v1/daily-slot-"
 READ_SIZE = 4 * 1024 * 1024
 MAX_DATABASE_BYTES = 200 * 1024**3
 LIVE_SEED_CONTRACT = 'trading-dbd-live-seed-v1'
+MAX_CAPACITY_OBJECTS = 4096
+
+
+def _local_file_identity(path, *, info=None):
+    info = path.lstat() if info is None else info
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise RuntimeError('restored database changed file kind or links')
+    return {'path': str(path.resolve()), 'device': info.st_dev,
+            'inode': info.st_ino, 'size': info.st_size,
+            'mtime_ns': info.st_mtime_ns, 'ctime_ns': info.st_ctime_ns}
 
 
 def collect_capacity(connection, *, max_seconds: float = 180.0) -> dict:
-    """Measure one immutable worker snapshot; never query private row values."""
+    """Stream page accounting; interrupted measurements remain lower bounds.
+
+    No GROUP BY or disk-sized sort: every completed page can be retained within
+    the same deadline. Exact totals are published only after cursor exhaustion.
+    """
     if not math.isfinite(max_seconds) or not 0 <= max_seconds <= 180:
         raise ValueError('capacity scan budget must be between 0 and 180 seconds')
     page_size = int(connection.execute('PRAGMA page_size').fetchone()[0])
@@ -36,33 +52,42 @@ def collect_capacity(connection, *, max_seconds: float = 180.0) -> dict:
         'used_page_bytes': (page_count-free_pages)*page_size,
         'allocated_object_bytes': None, 'unattributed_used_bytes': None,
         'object_count': None, 'objects_truncated': False, 'largest_objects': [],
+        'scan_method': 'streaming_btree_pages',
+        'observed_allocated_bytes': 0, 'observed_object_count': 0,
+        'largest_objects_are_lower_bounds': True,
         'production_authority': False, 'data_reduction_authorized': False,
     }
     deadline = time.monotonic()+max_seconds
     expired = lambda: time.monotonic() >= deadline
     connection.set_progress_handler(expired, 1000)
+    objects, total = {}, 0
     try:
         if expired():
             raise sqlite3.OperationalError('interrupted')
-        rows = connection.execute('''SELECT d.name, s.type, s.tbl_name,
-            sum(d.pgsize), sum(d.payload), count(*) FROM dbstat AS d
-            LEFT JOIN sqlite_schema AS s ON s.name=d.name AND s.type IN ('table','index')
-            GROUP BY d.name ORDER BY sum(d.pgsize) DESC, d.name''')
-        largest, total, count = [], 0, 0
-        for name, kind, owner, allocated, payload, pages in rows:
+        metadata = {name: (kind, owner) for name, kind, owner in connection.execute(
+            "SELECT name,type,tbl_name FROM sqlite_schema "
+            "WHERE type IN ('table','index') AND rootpage>0 "
+            f"LIMIT {MAX_CAPACITY_OBJECTS + 1}")}
+        rows = connection.execute('SELECT name,pgsize,payload FROM dbstat')
+        for name, allocated, payload in rows:
             if expired():
                 raise sqlite3.OperationalError('interrupted')
+            if name not in objects:
+                if len(objects) >= MAX_CAPACITY_OBJECTS:
+                    report['status'] = 'OBJECT_LIMIT_REACHED'
+                    break
+                kind, owner = metadata.get(name, (
+                    'internal' if name == 'sqlite_schema' else 'unknown', None))
+                objects[name] = {'name': name, 'object_type': kind,
+                    'owner_table': owner, 'allocated_bytes': 0,
+                    'payload_bytes': 0, 'pages': 0}
+            row = objects[name]
+            row['allocated_bytes'] += int(allocated)
+            row['payload_bytes'] += int(payload)
+            row['pages'] += 1
             total += int(allocated)
-            count += 1
-            if len(largest) < 64:
-                largest.append({'name': name, 'object_type': kind or 'internal',
-                    'owner_table': owner, 'allocated_bytes': int(allocated),
-                    'payload_bytes': int(payload), 'pages': int(pages)})
-        if total > report['used_page_bytes']:
-            raise RuntimeError('capacity allocation exceeds SQLite used pages')
-        report.update(allocated_object_bytes=total, object_count=count,
-                      unattributed_used_bytes=report['used_page_bytes']-total,
-                      objects_truncated=count > 64, largest_objects=largest)
+            if total > report['used_page_bytes']:
+                raise RuntimeError('capacity allocation exceeds SQLite used pages')
     except sqlite3.OperationalError as exc:
         if str(exc) == 'no such table: dbstat':
             report['status'] = 'DBSTAT_UNAVAILABLE'
@@ -72,6 +97,15 @@ def collect_capacity(connection, *, max_seconds: float = 180.0) -> dict:
             raise
     finally:
         connection.set_progress_handler(None, 0)
+    complete = report['status'] == 'COMPLETE'
+    report.update(observed_allocated_bytes=total, observed_object_count=len(objects),
+                  largest_objects_are_lower_bounds=not complete,
+                  objects_truncated=len(objects) > 64 or report['status'] == 'OBJECT_LIMIT_REACHED',
+                  largest_objects=sorted(objects.values(),
+                      key=lambda row: (-row['allocated_bytes'], row['name']))[:64])
+    if complete:
+        report.update(allocated_object_bytes=total, object_count=len(objects),
+                      unattributed_used_bytes=report['used_page_bytes']-total)
     return report
 
 
@@ -237,6 +271,10 @@ def restore(
                     raise RuntimeError("restored database exceeds declared size")
                 database_digest.update(restored)
                 output.write(restored)
+            output.flush()
+            # Bind the streamed digest to the file descriptor we actually wrote,
+            # before any later quick_check/capacity callback can change the file.
+            verified_local_file = _local_file_identity(destination, info=os.fstat(output.fileno()))
     except BaseException:
         destination.unlink(missing_ok=True)
         raise
@@ -254,6 +292,8 @@ def restore(
         destination.unlink(missing_ok=True)
         raise RuntimeError("full off-host restore hash or size mismatch")
 
+    if _local_file_identity(destination) != verified_local_file:
+        raise RuntimeError('restored database changed after verified write')
     connection = sqlite3.connect(
         destination.resolve().as_uri() + "?mode=ro&immutable=1",
         uri=True, timeout=120.0,
@@ -312,6 +352,12 @@ def restore(
                       storage_manifest_sha256=manifest_digest(manifest))
     if capacity is not None:
         result['capacity_report'] = capacity
+    # Local continuation token, not portable cloud identity or retirement power.
+    # Subsequent bounded partition work can bind to this same verified file
+    # without hashing the entire nineteen-gigabyte input once per chunk.
+    if _local_file_identity(destination) != verified_local_file:
+        raise RuntimeError('restored database changed during verification')
+    result['verified_local_file'] = verified_local_file
     result_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     return result
 

@@ -306,6 +306,78 @@ def test_capacity_report_limits_scan_and_clears_progress_handler(tmp_path):
     assert report['largest_objects'] == []
 
 
+@pytest.mark.parametrize('interrupt', [False, True])
+def test_capacity_timeout_retains_measured_lower_bounds_not_exact_totals(tmp_path, monkeypatch, interrupt):
+    source = tmp_path/'partial-capacity.db'
+    with sqlite3.connect(source) as actual:
+        actual.execute('CREATE TABLE history(value TEXT)')
+        actual.executemany('INSERT INTO history VALUES (?)', [('private-'+'x'*3000,)]*20)
+        actual.commit()
+        before = source.read_bytes()
+        clock = [0.0]
+        monkeypatch.setattr(MODULE.time, 'monotonic', lambda: clock[0])
+
+        class InterruptedScan:
+            def execute(self, sql, *args):
+                cursor = actual.execute(sql, *args)
+                if 'FROM dbstat' not in sql:
+                    return cursor
+
+                def pages():
+                    yield next(iter(cursor))
+                    clock[0] = 181.0
+                    if interrupt:
+                        raise sqlite3.OperationalError('interrupted')
+                    yield next(cursor)
+                return pages()
+
+            def set_progress_handler(self, *args):
+                actual.set_progress_handler(*args)
+
+        report = MODULE.collect_capacity(InterruptedScan())
+        assert actual.execute('SELECT 1').fetchone() == (1,)
+        assert source.read_bytes() == before
+    assert report['status'] == 'TABLE_SCAN_TIMED_OUT'
+    assert report['allocated_object_bytes'] is None
+    assert report['unattributed_used_bytes'] is None
+    assert report['object_count'] is None
+    assert 0 < report['observed_allocated_bytes'] <= report['used_page_bytes']
+    assert report['observed_object_count'] > 0
+    assert report['largest_objects']
+    assert report['largest_objects_are_lower_bounds'] is True
+    assert sum(row['allocated_bytes'] for row in report['largest_objects']) == report['observed_allocated_bytes']
+    assert 'private-' not in json.dumps(report)
+
+
+def test_capacity_complete_stream_matches_independent_per_table_aggregate(tmp_path):
+    with sqlite3.connect(tmp_path/'complete-capacity.db') as conn:
+        conn.execute('CREATE TABLE history(value TEXT)')
+        conn.execute('CREATE INDEX history_value ON history(value)')
+        conn.executemany('INSERT INTO history VALUES (?)', [('x'*2000+str(i),) for i in range(40)])
+        expected = {name: (size, payload, pages) for name, size, payload, pages in
+                    conn.execute('SELECT name,pgsize,payload,pageno FROM dbstat WHERE aggregate=TRUE')}
+        report = MODULE.collect_capacity(conn)
+    assert report['status'] == 'COMPLETE'
+    assert report['largest_objects_are_lower_bounds'] is False
+    assert report['observed_allocated_bytes'] == report['allocated_object_bytes']
+    assert report['observed_object_count'] == report['object_count']
+    assert {r['name']: (r['allocated_bytes'], r['payload_bytes'], r['pages'])
+            for r in report['largest_objects']} == expected
+
+
+def test_capacity_object_budget_preserves_only_measured_lower_bounds(tmp_path, monkeypatch):
+    monkeypatch.setattr(MODULE, 'MAX_CAPACITY_OBJECTS', 2, raising=False)
+    with sqlite3.connect(tmp_path/'object-budget.db') as conn:
+        for name in ('first', 'second', 'third'):
+            conn.execute(f'CREATE TABLE {name}(v)')
+        report = MODULE.collect_capacity(conn)
+    assert report['status'] == 'OBJECT_LIMIT_REACHED'
+    assert report['observed_object_count'] == 2
+    assert len(report['largest_objects']) == 2
+    assert report['allocated_object_bytes'] is None
+    assert report['largest_objects_are_lower_bounds'] is True
+
+
 def test_snapshot_capacity_is_bound_to_verified_cloud_bytes_without_authority(tmp_path):
     key, archive, manifest = _live_fixture(tmp_path)
     result = MODULE.restore(bucket=manifest['bucket'], key=key,
