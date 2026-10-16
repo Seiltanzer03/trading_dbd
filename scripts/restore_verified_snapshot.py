@@ -6,7 +6,9 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import sqlite3
+import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,15 @@ READ_SIZE = 4 * 1024 * 1024
 MAX_DATABASE_BYTES = 200 * 1024**3
 LIVE_SEED_CONTRACT = 'trading-dbd-live-seed-v1'
 MAX_CAPACITY_OBJECTS = 4096
+
+
+def _local_file_identity(path, *, info=None):
+    info = path.lstat() if info is None else info
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise RuntimeError('restored database changed file kind or links')
+    return {'path': str(path.resolve()), 'device': info.st_dev,
+            'inode': info.st_ino, 'size': info.st_size,
+            'mtime_ns': info.st_mtime_ns, 'ctime_ns': info.st_ctime_ns}
 
 
 def collect_capacity(connection, *, max_seconds: float = 180.0) -> dict:
@@ -260,6 +271,10 @@ def restore(
                     raise RuntimeError("restored database exceeds declared size")
                 database_digest.update(restored)
                 output.write(restored)
+            output.flush()
+            # Bind the streamed digest to the file descriptor we actually wrote,
+            # before any later quick_check/capacity callback can change the file.
+            verified_local_file = _local_file_identity(destination, info=os.fstat(output.fileno()))
     except BaseException:
         destination.unlink(missing_ok=True)
         raise
@@ -277,6 +292,8 @@ def restore(
         destination.unlink(missing_ok=True)
         raise RuntimeError("full off-host restore hash or size mismatch")
 
+    if _local_file_identity(destination) != verified_local_file:
+        raise RuntimeError('restored database changed after verified write')
     connection = sqlite3.connect(
         destination.resolve().as_uri() + "?mode=ro&immutable=1",
         uri=True, timeout=120.0,
@@ -335,6 +352,12 @@ def restore(
                       storage_manifest_sha256=manifest_digest(manifest))
     if capacity is not None:
         result['capacity_report'] = capacity
+    # Local continuation token, not portable cloud identity or retirement power.
+    # Subsequent bounded partition work can bind to this same verified file
+    # without hashing the entire nineteen-gigabyte input once per chunk.
+    if _local_file_identity(destination) != verified_local_file:
+        raise RuntimeError('restored database changed during verification')
+    result['verified_local_file'] = verified_local_file
     result_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     return result
 
