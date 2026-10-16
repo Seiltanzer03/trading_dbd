@@ -150,20 +150,5 @@ def test_http_uses_preencoded_body_without_dict_renderer():
     assert response.headers['cache-control']=='no-store'
 
 
-@pytest.mark.parametrize('state,cached,error,expected',[
-    ('READY',True,None,'Возраст снимка'),
-    ('BUILDING',True,None,'обновляется'),
-    ('BUILDING',False,None,'ещё не построен'),
-    ('BUILDING',True,'ValueError','ошибкой')])
-def test_ui_distinguishes_cached_building_and_unavailable_history(state,cached,error,expected):
-    import subprocess
-    from seiltanzer.g1_intelligence_page_refinement import _TWO_SPEED_SCRIPT
-    start=_TWO_SPEED_SCRIPT.index(' function renderLocal(')
-    end=_TWO_SPEED_SCRIPT.index(' async function refreshTwoSpeed',start)
-    body={'report_materialization':dict(presentation_state=state,cached_snapshot=cached,
-                                      snapshot_age_sec=5,last_error_class=error)}
-    script=('const host={};const document={querySelector:()=>host};'
-            'const fmt=n=>n==null?"—":String(n);'+_TWO_SPEED_SCRIPT[start:end]
-            +'renderLocal({},'+json.dumps(body)+');console.log(host.innerHTML);')
-    result=subprocess.run(['node','-e',script],capture_output=True,text=True,check=True,timeout=5)
-    assert expected in result.stdout
+# The same four UI renderer cases run in tests/web/g1m_local_edge_cache_smoke.mjs,
+# alongside existing Node/browser checks, not four Python-spawned Node processes.

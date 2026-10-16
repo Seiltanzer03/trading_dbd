@@ -73,6 +73,7 @@ jobs:
           node tests/web/bybit_context_smoke.mjs
           node tests/web/trade_delete_ui_guard_smoke.mjs
           node tests/web/g1s_evidence_smoke.mjs
+          node tests/web/g1m_local_edge_cache_smoke.mjs
           node tests/web/fan_cone_touch_consistency_smoke.mjs
           node tests/web/cone_interaction_smoke.mjs
           node tests/web/lattice_scale_smoke.mjs
