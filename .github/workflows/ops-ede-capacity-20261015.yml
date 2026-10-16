@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  foreign-key-dependencies-readonly:
+  ack-parent-provenance-readonly:
     runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
@@ -16,19 +16,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --quiet paramiko
-      - name: Read bounded foreign key metadata without restoring or mutating history
+      - run: python -m pip install --quiet paramiko boto3
+      - name: Inspect missing ACK parent timeline and existing cloud backup manifests read-only
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
         run: |
           python - <<'PY'
           import os,sys,shlex,ast
           sys.path.insert(0,'scripts')
           from production_ede_offload import _connect,_exec
-          code="import json,sqlite3,subprocess,time,os\nos.nice(10)\nsha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()\nif sha not in {'011b363d6cf985b0a00a35964d74a81331558bb4','a2a48108cd0fd924e5fcf684be16af5043e48388'}:raise ValueError('Unexpected source generation')\nconn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=0.5)\nstarted=time.monotonic();overall=started+20;deadline=overall\nconn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')\nconn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)\ndef quoted(value):return '\"'+value.replace('\"','\"\"')+'\"'\ntry:\n    tables=[r[0] for r in conn.execute(\"SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 513\")]\n    if len(tables)>512:raise ValueError('Schema inventory exceeds bound')\n    names=set(tables);items=[]\n    for table in tables:\n        deadline=min(overall,time.monotonic()+0.5)\n        keys=conn.execute('PRAGMA foreign_key_list('+quoted(table)+')').fetchall()\n        if keys:items.append({'table':table,'references':[{'id':r[0],'parent':r[2],'parent_exists':r[2] in names,'from_column':r[3],'to_column':r[4]} for r in keys]})\n    checks=[]\n    for item in items[:8]:\n        deadline=min(overall,time.monotonic()+2)\n        if time.monotonic()>=deadline:break\n        current={'table':item['table']}\n        try:\n            row=conn.execute('PRAGMA foreign_key_check('+quoted(item['table'])+')').fetchone()\n            current.update({'status':'VIOLATION_FOUND' if row is not None else 'CHECK_PASSED','first_violation':None if row is None else {'table':row[0],'parent':row[2],'foreign_key_id':row[3]}})\n        except sqlite3.Error as exc:current.update({'status':'UNAVAILABLE','error_type':type(exc).__name__})\n        checks.append(current)\n    print('LIVE_FK_DEPENDENCIES='+json.dumps({'code_sha':sha,'table_count':len(tables),'tables_with_declared_fks':items,'bounded_checks':checks,'all_foreign_keys_verified':len(checks)==len(items) and all(c['status']=='CHECK_PASSED' for c in checks),'scope':'CURRENT_LIVE_DATABASE_NOT_ARCHIVE_EPOCH','archive_failure_cause_proven':False,'elapsed_ms':round((time.monotonic()-started)*1000,1),'database_mutations':0,'service_mutations':0,'provider_calls':0,'production_authority':False,'data_retirement_authorized':False}),flush=True)\nfinally:conn.close()\n"
+          code="import json,sqlite3,subprocess,time,os\nos.nice(10)\nsha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()\nif sha not in {'011b363d6cf985b0a00a35964d74a81331558bb4','a2a48108cd0fd924e5fcf684be16af5043e48388'}:raise ValueError('Unexpected source generation')\nconn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=0.5)\ndeadline=time.monotonic()+2\ntry:\n conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')\n conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)\n rows=conn.execute('SELECT a.trade_id,COUNT(*),MIN(a.ts),MAX(a.ts) FROM ai_decision_acks a LEFT JOIN trades t ON t.id=a.trade_id WHERE t.id IS NULL GROUP BY a.trade_id LIMIT 17').fetchall()\n if len(rows)>16:raise ValueError('Orphan provenance exceeds bound')\n print('ACK_PARENT_PROVENANCE='+json.dumps({'code_sha':sha,'missing_parents':[{'trade_id':r[0],'ack_count':r[1],'first_ack_ts':r[2],'last_ack_ts':r[3]} for r in rows],'database_mutations':0,'service_mutations':0,'fills_created':0,'origin_of_missing_parent_proven':False}),flush=True)\nfinally:conn.close()\n"
           ast.parse(code)
           client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
           try:
               print(_exec(client,'python3 -c '+shlex.quote(code),timeout=30),flush=True)
           finally:client.close()
+          import json,boto3
+          from botocore.config import Config
+          client=boto3.client('s3',endpoint_url='https://storage.yandexcloud.net',region_name='ru-central1',config=Config(connect_timeout=5,read_timeout=5,retries={'max_attempts':0}))
+          bucket='trading-dbd-backups-2026'
+          result=client.list_objects_v2(Bucket=bucket,Prefix='backups/v1/daily-slot-',MaxKeys=100)
+          if result.get('IsTruncated'):raise ValueError('Backup manifest listing exceeds bound')
+          keys=sorted(x['Key'] for x in result.get('Contents',[]) if x['Key'].endswith('/snapshot.sqlite3.gz.manifest.json'))
+          if not 0<len(keys)<=7:raise ValueError('Expected one to seven existing slot manifests')
+          manifests=[]
+          for key in keys:
+              response=client.get_object(Bucket=bucket,Key=key)
+              with response['Body'] as stream:raw=stream.read(1024**2+1)
+              if len(raw)>1024**2:raise ValueError('Backup manifest exceeds bound')
+              value=json.loads(raw);storage=value.get('storage_manifest') or {}
+              counts=storage.get('critical_table_counts') or value.get('critical_table_counts') or {}
+              manifests.append({'manifest_key':key,'uploaded_ts':value.get('uploaded_ts'),'created_ts':value.get('created_ts'),'database_sha256':value.get('database_sha256'),'database_size_bytes':value.get('database_size_bytes'),'code_sha':storage.get('git_commit') or value.get('git_commit'),'trades_count':counts.get('trades')})
+          print('EXISTING_BACKUP_TIMELINE='+json.dumps({'bucket':bucket,'manifests':manifests,'large_backup_objects_downloaded':0,'cloud_writes':0,'parent_presence_verified':False,'production_authority':False}),flush=True)
           PY
