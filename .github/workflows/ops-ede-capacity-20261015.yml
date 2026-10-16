@@ -6,106 +6,109 @@ on:
 permissions:
   contents: read
 jobs:
-  yandex-private-partition-drill:
+  yandex-partial-cohort-sql-union:
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 9e78fbb74845483c25cf1dbbc60e386b27f575d1
+          ref: 68aafcd1ee73433d143278c08b48a5426ae41e89
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - run: python -m pip install --quiet boto3
-      - name: Real private Yandex row partition full GET and typed restore without VPS access
+      - name: Read existing private 64-row fixture and compare SQL before and after hydration
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ru-central1
           AWS_EC2_METADATA_DISABLED: 'true'
-          TASK_DIRECTORY: ${{ runner.temp }}/yandex-history-partition-20261016
+          TASK_DIRECTORY: ${{ runner.temp }}/yandex-history-union-20261016
         run: |
           python - <<'PY'
-          import json,os,shutil,sqlite3,sys,time
+          import hashlib,json,os,sqlite3,tempfile
           from pathlib import Path
           import boto3
           from botocore.config import Config
-          sys.path.insert(0,'scripts')
-          from restore_verified_snapshot import _latest_manifest,restore,ENDPOINT
-          from managed_verified_seed import ManagedRestoreClient
-          from sqlite_history_partition import export_partition,upload_partition,restore_from_cloud
-          directory=Path(os.environ['TASK_DIRECTORY']);directory.mkdir(mode=0o700,exist_ok=False)
+          from scripts import sqlite_history_partition as archive
+          from scripts.sqlite_history_union import hydrate_snapshot
+          from scripts.restore_verified_snapshot import manifest_digest,ENDPOINT
           client=boto3.client('s3',endpoint_url=ENDPOINT,region_name='ru-central1',
-              config=Config(connect_timeout=10,read_timeout=120,retries={'max_attempts':3}))
-          bucket='trading-dbd-backups-2026'
-          manifest_key,manifest=_latest_manifest(client,bucket=bucket)
-          size=int(manifest.get('database_size_bytes') or 0)
-          if not 0<size<=25*1024**3 or shutil.disk_usage(directory).free<2*size+1024**3:
-              raise RuntimeError('Disposable worker lacks conservative restore capacity')
-          print('PRIVATE_PARTITION_PREFLIGHT='+json.dumps({'database_bytes':size,
-              'manifest_key':manifest_key,'production_connection':False,
-              'new_question':'exact typed row archival/full cloud restore and terminal-parent closure',
-              'actual_payloads_in_github_artifact':False}),flush=True)
-          source=directory/'snapshot.sqlite3'
-          result=restore(bucket=bucket,key=manifest['object_key'],destination=source,
-              result_path=directory/'private-source-receipt.json',snapshot_drill=True,
-              client=ManagedRestoreClient(client,temp_dir=directory))
-          conn=sqlite3.connect(source.resolve().as_uri()+'?mode=ro&immutable=1',uri=True)
-          reports=[]
-          for table in ('passive_market_observations','g1s_observations'):
-              where=" WHERE resolution_status='insufficient_future_data'" if table=='passive_market_observations' else ''
-              selected=[r[0] for r in conn.execute('SELECT rowid FROM '+table+where+' ORDER BY rowid LIMIT 32')]
-              if not selected:raise RuntimeError('No actual rows for partition drill: '+table)
-              partition=directory/(table+'.partition.sqlite3')
-              receipt=export_partition(source,partition,table=table,rowids=selected,source_receipt=result)
-              cloud=upload_partition(client,partition,receipt=receipt)
-              verified=restore_from_cloud(client,cloud,directory/(table+'.restored.sqlite3'))
-              proof={'table':table,'row_count':receipt['row_count'],
-                  'partition_size_bytes':receipt['partition_size_bytes'],
-                  'partition_sha256':receipt['partition_sha256'],
-                  'logical_sha256':receipt['logical_sha256'],'object_key':cloud['object_key'],
-                  'compressed_size_bytes':cloud['compressed_size_bytes'],
-                  'verified_full_get':cloud['verified_full_get'],**verified,
-                  'dependency_closure_verified':False,'data_retirement_authorized':False}
-              reports.append(proof)
-              print('PRIVATE_PARTITION_VERIFIED='+json.dumps(proof,sort_keys=True),flush=True)
-          deadline=time.monotonic()+120
-          conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-          lifecycle={}
-          try:
-              lifecycle['pending_virtuals_with_terminal_failed_parent']=conn.execute("SELECT COUNT(*) FROM virtual_position_observations v JOIN passive_market_observations p ON p.observation_id=v.passive_observation_id WHERE v.resolution_status='pending' AND v.outcome_json IS NULL AND p.resolution_status NOT IN ('pending','resolved')").fetchone()[0]
-              lifecycle['pending_virtuals_with_resolved_parent']=conn.execute("SELECT COUNT(*) FROM virtual_position_observations v JOIN passive_market_observations p ON p.observation_id=v.passive_observation_id WHERE v.resolution_status='pending' AND p.resolution_status='resolved'").fetchone()[0]
-          except sqlite3.OperationalError as exc:
-              lifecycle['unavailable']=str(exc)
-          finally:
-              conn.set_progress_handler(None,0);conn.close()
-          public={'run_id':int(os.environ['GITHUB_RUN_ID']),
-              'source_database_sha256':result['database_sha256'],
-              'source_database_size_bytes':result['database_size_bytes'],
-              'partitions':reports,'lifecycle':lifecycle,'production_authority':False,
-              'data_retirement_authorized':False,'actual_payloads_in_github_artifact':False}
-          (directory/'public-proof.json').write_text(json.dumps(public,sort_keys=True,indent=2)+'\n')
-          print('SOURCE_LIFECYCLE_COUNTS='+json.dumps(lifecycle,sort_keys=True),flush=True)
+              config=Config(connect_timeout=10,read_timeout=30,retries={'max_attempts':2}))
+          expected=json.loads(Path('docs/YANDEX_PARTITION_ACTUAL_PROOF_2026-10-16.json').read_text())
+          root=Path(os.environ['TASK_DIRECTORY']);root.mkdir(mode=0o700,exist_ok=False)
+          # This is an explicitly PARTIAL test fixture, NOT a production restore/catalog.
+          # Existing private objects only; no whole19GiB restore and no cloud writes.
+          with tempfile.TemporaryDirectory(prefix='partial-fixture-',dir=root) as directory:
+              directory=Path(directory);full=directory/'partial-full.sqlite3'
+              receipts=[]
+              for number,entry in enumerate(expected['partitions']):
+                  body=client.get_object(Bucket=archive.BUCKET,Key=entry['object_key']+'.manifest.json')['Body']
+                  try:raw=body.read(128*1024+1)
+                  finally:body.close()
+                  if len(raw)>128*1024:raise ValueError('Fixture receipt exceeds budget')
+                  receipt=json.loads(raw)
+                  if (receipt['object_key']!=entry['object_key'] or receipt['partition']['logical_sha256']!=entry['logical_sha256']
+                          or receipt['partition']['partition_sha256']!=entry['partition_sha256']):
+                      raise ValueError('Fixture does not match previously verified private object')
+                  restored=full if number==0 else directory/'other-table.sqlite3'
+                  archive.restore_from_cloud(client,receipt,restored)
+                  if number:
+                      piece=receipt['partition'];q=archive._quote;table=piece['table']
+                      names=','.join(q(c) for c in piece['columns']);alias=q(piece['source_rowid_alias'])
+                      with sqlite3.connect(full,uri=True) as conn:
+                          conn.execute('ATTACH DATABASE ? AS part',(restored.resolve().as_uri()+'?mode=ro&immutable=1',))
+                          conn.execute(piece['source_schema_sql'])
+                          conn.execute('INSERT INTO '+q(table)+'('+alias+','+names+') SELECT '+alias+','+names+' FROM part.'+q(table))
+                  receipts.append(receipt)
+              def signatures(path):
+                  result={}
+                  with sqlite3.connect(path.resolve().as_uri()+'?mode=ro&immutable=1',uri=True) as conn:
+                      for receipt in receipts:
+                          piece=receipt['partition'];table=piece['table'];q=archive._quote
+                          result[table]={'typed_sha256':archive._logical_hash(conn,q(table),piece['columns'],piece['source_rowid_alias']),
+                              'grouped_rows':conn.execute('SELECT instrument,horizon_minutes,COUNT(*),MIN(captured_ts),MAX(captured_ts) FROM '+q(table)+' GROUP BY instrument,horizon_minutes ORDER BY instrument,horizon_minutes').fetchall(),
+                              'row_count':conn.execute('SELECT COUNT(*) FROM '+q(table)).fetchone()[0]}
+                  return result
+              before=signatures(full);hot=directory/'partial-hot.sqlite3'
+              source=sqlite3.connect(full);target=sqlite3.connect(hot)
+              try:source.backup(target)
+              finally:target.close();source.close()
+              with sqlite3.connect(hot) as conn:
+                  for receipt in receipts:
+                      piece=receipt['partition'];ids=piece['rowids'][::2]
+                      conn.execute('DELETE FROM '+archive._quote(piece['table'])+' WHERE '+archive._quote(piece['source_rowid_alias'])+' IN ('+','.join('?' for _ in ids)+')',ids)
+              catalog={'contract':'sqlite-history-catalog-v1','partitions':receipts,
+                  'expected_table_counts':{table:data['row_count'] for table,data in before.items()},
+                  'maximum_hydrated_bytes':16*1024**2}
+              raw=json.dumps(catalog,sort_keys=True).encode();hot_hash=archive._digest(hot)
+              # Local verified fixture receipt: never published as a production backup.
+              manifest={'database_sha256':hot_hash,'database_size_bytes':hot.stat().st_size,
+                  'cold_history_catalog_sha256':hashlib.sha256(raw).hexdigest(),'scope':'PARTIAL_TEST_FIXTURE_ONLY'}
+              proof={'snapshot_restore_verified':True,'immutable_sqlite_read':True,
+                  'verified_local_file':archive._identity(hot),'database_sha256':hot_hash,
+                  'database_size_bytes':hot.stat().st_size,'storage_manifest':manifest,
+                  'storage_manifest_sha256':manifest_digest(manifest)}
+              output=directory/'partial-union.sqlite3'
+              result=hydrate_snapshot(hot,output,source_receipt=proof,catalog_bytes=raw,client=client)
+              after=signatures(output)
+              if before!=after or archive._digest(hot)!=hot_hash:raise ValueError('Partial SQL cohort equivalence failed')
+              public={'run_id':int(os.environ['GITHUB_RUN_ID']),'code_sha':os.environ['GITHUB_SHA'],
+                  'checked_out_code_sha':'68aafcd1ee73433d143278c08b48a5426ae41e89','scope':'PARTIAL_TEST_FIXTURE_ONLY',
+                  'production_connection':False,'whole_snapshot_restored':False,'cloud_writes':False,
+                  'rows_verified':sum(data['row_count'] for data in before.values()),
+                  'tables':{table:{'row_count':data['row_count'],'typed_sha256':data['typed_sha256'],
+                      'nonempty_sql_groups':len(data['grouped_rows'])} for table,data in before.items()},
+                  'sql_group_results_equal':True,'exact_typed_rows_equal':True,'hot_source_unchanged':True,
+                  'history_union_verified':result['history_union_verified'],
+                  'production_authority':False,'data_retirement_authorized':False,
+                  'full_production_reader_equivalence_proven':False,'actual_payloads_in_github_artifact':False}
+              (root/'public-proof.json').write_text(json.dumps(public,sort_keys=True,indent=2)+'\n')
+              print('PARTIAL_HISTORY_UNION_PROOF='+json.dumps(public,sort_keys=True),flush=True)
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: yandex-private-partition-proof-${{ github.run_id }}
-          path: ${{ runner.temp }}/yandex-history-partition-20261016/public-proof.json
+          name: yandex-partial-history-union-proof-${{ github.run_id }}
+          path: ${{ runner.temp }}/yandex-history-union-20261016/public-proof.json
           if-no-files-found: error
           retention-days: 30
-      - name: Remove only this worker's disposable databases and private receipt
-        if: always()
-        env:
-          TASK_DIRECTORY: ${{ runner.temp }}/yandex-history-partition-20261016
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          directory=Path(os.environ['TASK_DIRECTORY'])
-          names=['snapshot.sqlite3','private-source-receipt.json']
-          for table in ('passive_market_observations','g1s_observations'):
-              names.extend([table+'.partition.sqlite3',table+'.restored.sqlite3'])
-          for name in names:
-              for suffix in ('','-wal','-shm','-journal'):
-                  (directory/(name+suffix)).unlink(missing_ok=True)
-          PY
