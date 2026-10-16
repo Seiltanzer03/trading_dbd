@@ -1,0 +1,40 @@
+{
+  "actual_payloads_in_github_artifact": false,
+  "catalog_sha256": "7b78d25d13f249f1ab967828675419a6656fe6b69787e5b78644076a54411a63",
+  "checked_out_code_sha": "011b363d6cf985b0a00a35964d74a81331558bb4",
+  "cloud_compressed_bytes": 2338808320,
+  "cloud_writes": 0,
+  "data_retirement_authorized": false,
+  "database_sha256": "8d9025567abc9ebe274013afca0cff7b1b5b760e2df867840c4ec222464d6734",
+  "database_size_bytes": 12722651136,
+  "elapsed_seconds": 665.6,
+  "full_database_integrity_verified": false,
+  "full_production_reader_equivalence_proven": false,
+  "full_selected_tables_verified": true,
+  "live_disk_bytes_reclaimed": 0,
+  "original_selected_typed_roots_equal": true,
+  "partition_count": 439,
+  "production_authority": false,
+  "production_connection": false,
+  "reader_results_equal_to_saved_source_baseline": false,
+  "run_id": 38981061168,
+  "scope": "SELECTED_HISTORY_TABLES_ONLY",
+  "selected_reader_groups": {
+    "g1s_observations": 50,
+    "passive_market_observations": 9729
+  },
+  "selected_reader_join_groups": 50,
+  "selected_reader_signature_sha256": "888eece944176a13f0c41e5782f3a8109de2854e4fe86fd4ba5b274df9b4047b",
+  "source_database_restored": false,
+  "source_database_sha256": "d6e8c423f21585f68cd28b0d837eb08c944d2b273bbba59ad963927e33434535",
+  "tables": {
+    "g1s_observations": {
+      "logical_sha256": "203f62163902f1070cc1419c01e6be525cb25c3fa2b160c8aa64e8c559e7132c",
+      "row_count": 86100
+    },
+    "passive_market_observations": {
+      "logical_sha256": "3873edc7d11a6d2b8a46754439aac755b93b10eaf5470bf8cbd267ba3e4d83c2",
+      "row_count": 132923
+    }
+  }
+}
