@@ -1,3 +1,4 @@
+import time
 import pytest
 from test_ai_snapshot_materializer import FakeEngine, snapshot
 from seiltanzer.ai_snapshot_materializer import AISnapshotMaterializer, SnapshotNotReady
@@ -35,6 +36,41 @@ def test_same_price_new_authoritative_source_invalidates_fallback_snapshot():
     quote.update(source='TradingView stream OANDA:NAS100USD',production_authority=True)
     assert mat._event_reason()=='PRICE_AUTHORITY_CHANGED'
     with pytest.raises(SnapshotNotReady):mat.cached_build_snapshot(engine)
+
+
+@pytest.mark.parametrize('authority',[False,True])
+@pytest.mark.parametrize('compact',[False,True])
+def test_real_input_audit_preserves_authority_and_unchanged_quote_does_not_rebuild(authority,compact):
+    from copy import deepcopy
+    from seiltanzer.ai_policy_v6 import _input_audit
+    from seiltanzer.ai_policy_v7 import _enrich_input_audit
+    quote={'value':101.,'status':'live','fresh':True,'source':'Bybit NAS100',
+           'production_authority':authority,'derived':False,'is_proxy':True,'ts':time.time()}
+    original=deepcopy(quote);engine=canonical_engine(quote)
+    def builder(_):
+        row=snapshot();row['strategy']={'instrument':'NAS100'}
+        tick=engine.canonical_tick_payload()
+        row['policy_manager']['input_audit']=_input_audit(tick,{})
+        _enrich_input_audit(row['policy_manager'],tick,{})
+        if compact:
+            from seiltanzer.ai_snapshot_budget_guard import _strict_authoritative_compaction
+            _strict_authoritative_compaction(row)
+        return row
+    mat=AISnapshotMaterializer(engine,builder);mat._build_once()
+    assert mat._event_reason() is None
+    frozen=mat.cached_build_snapshot(engine)
+    price=frozen['policy_manager']['input_audit']['rows']['instrument_price']
+    assert {k:price[k] for k in ('production_authority','derived','is_proxy')}=={
+        'production_authority':authority,'derived':False,'is_proxy':True}
+    assert quote==original
+    quote['production_authority']=not authority
+    assert mat._event_reason()=='PRICE_AUTHORITY_CHANGED'
+
+
+def test_audit_does_not_invent_optional_price_provenance():
+    from seiltanzer.ai_policy_v6 import _input_audit
+    price=_input_audit({'feeds':{'price':{'value':101.,'status':'live','source':'legacy'}}},{})['rows']['instrument_price']
+    assert not {'production_authority','derived','is_proxy'} & price.keys()
 
 
 def test_family_inputs_freeze_with_cached_snapshot_and_request_cannot_replace_them(tmp_path, monkeypatch):
