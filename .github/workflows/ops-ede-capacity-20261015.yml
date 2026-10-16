@@ -6,104 +6,59 @@ on:
 permissions:
   contents: read
 jobs:
-  yandex-full-selected-history:
+  legacy-runtime-capacity-readonly:
     runs-on: ubuntu-22.04
-    timeout-minutes: 100
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 74acae1494cb7bd7119ed8b2a945292128050be1
+          ref: a1e9ebdbe6e405e51a2397ebc23c82168c023b4b
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --quiet boto3
-      - name: Verify complete selected-table cloud catalog without production access
+      - run: python -m pip install --quiet paramiko
+      - name: Read legacy terminal directory ownership without modifying files
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ru-central1
-          AWS_EC2_METADATA_DISABLED: 'true'
-          TASK_DIRECTORY: ${{ runner.temp }}/yandex-full-history-20261016
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           python - <<'PY'
-          import hashlib,json,os,shutil,sqlite3,sys,time
-          from contextlib import closing
-          from pathlib import Path
-          import boto3
-          from botocore.config import Config
+          import os,sys,shlex
           sys.path.insert(0,'scripts')
-          from restore_verified_snapshot import _latest_manifest,restore,ENDPOINT,manifest_digest
-          from managed_verified_seed import ManagedRestoreClient
-          from scripts import sqlite_history_partition as archive
-          from scripts.sqlite_history_catalog import publish_full_catalog
-          from scripts.sqlite_history_union import hydrate_snapshot
-          root=Path(os.environ['TASK_DIRECTORY']);root.mkdir(mode=0o700,exist_ok=False)
-          client=boto3.client('s3',endpoint_url=ENDPOINT,region_name='ru-central1',
-              config=Config(connect_timeout=10,read_timeout=120,retries={'max_attempts':2}))
-          key,manifest=_latest_manifest(client,bucket=archive.BUCKET)
-          size=int(manifest.get('database_size_bytes') or 0)
-          maximum=((size+1024**3+4095)//4096)*4096
-          # Source, union output, conservative union preflight and staging reserve.
-          needed=size+2*maximum+archive.RESERVE_BYTES+4*archive.MAX_BYTES
-          if not 0<size<=24*1024**3 or shutil.disk_usage(root).free<needed:
-              raise RuntimeError('Full selected-copy worker lacks conservative unchanged reserve')
-          print('FULL_HISTORY_PREFLIGHT='+json.dumps({'manifest_key':key,'source_bytes':size,
-              'needed_worker_free_bytes':needed,'production_connection':False}),flush=True)
-          source=root/'source.sqlite3'
-          proof=restore(bucket=archive.BUCKET,key=manifest['object_key'],destination=source,
-              result_path=root/'private-source-receipt.json',snapshot_drill=True,
-              client=ManagedRestoreClient(client,temp_dir=root))
-          def sql_signatures(path):
-              deadline=time.monotonic()+180
-              with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro&immutable=1',uri=True)) as conn:
-                  conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')
-                  conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-                  groups={table:conn.execute('SELECT instrument,horizon_minutes,COUNT(*),MIN(captured_ts),MAX(captured_ts) FROM '+archive._quote(table)+' GROUP BY instrument,horizon_minutes ORDER BY instrument,horizon_minutes').fetchall() for table in sorted(archive.TABLES)}
-                  joins=conn.execute('SELECT g.instrument,g.horizon_minutes,COUNT(*) FROM g1s_observations g JOIN passive_market_observations p ON p.observation_id=g.source_observation_id GROUP BY g.instrument,g.horizon_minutes ORDER BY g.instrument,g.horizon_minutes').fetchall()
-                  return dict(groups=groups,joins=joins)
-          before=sql_signatures(source)
-          report=publish_full_catalog(source,root/'private-catalog.json',source_receipt=proof,
-              client=client,maximum_hydrated_bytes=maximum)
-          print('FULL_HISTORY_CATALOG='+json.dumps(report,sort_keys=True),flush=True)
-          raw=(root/'private-catalog.json').read_bytes();catalog=json.loads(raw)
-          # Explicit local off-host drill envelope around an ACTUALLY verified full
-          # source. Not uploaded into production backup slots, not a pruning proof.
-          envelope=dict(database_sha256=proof['database_sha256'],database_size_bytes=proof['database_size_bytes'],
-              cold_history_catalog_sha256=report['catalog_sha256'],scope='COMPLETE_SELECTED_TABLE_OFFHOST_DRILL_ONLY')
-          local_proof=dict(proof,storage_manifest=envelope,storage_manifest_sha256=manifest_digest(envelope))
-          result=hydrate_snapshot(source,root/'union.sqlite3',source_receipt=local_proof,catalog_bytes=raw,client=client)
-          after=sql_signatures(root/'union.sqlite3')
-          if before!=after:raise ValueError('Complete selected-table SQL group/join results changed')
-          # Full overlap exercises cloud restore and exact equality of ALL selected
-          # rows. Missing-row INSERT behavior is covered separately by union tests.
-          public=dict(run_id=int(os.environ['GITHUB_RUN_ID']),checked_out_code_sha=os.popen('git rev-parse HEAD').read().strip(),
-              scope='COMPLETE_SELECTED_TABLE_OFFHOST_DRILL_ONLY',source_database_sha256=proof['database_sha256'],
-              source_database_size_bytes=size,whole_snapshot_restored=True,production_connection=False,
-              catalog=report,tables={t:{'row_count':p['row_count'],'logical_sha256':p['logical_sha256']} for t,p in catalog['full_table_proofs'].items()},
-              sql_group_results_equal=True,selected_table_join_results_equal=True,
-              full_selected_tables_verified=result['full_selected_tables_verified'],
-              cloud_compressed_bytes=sum(p['compressed_size_bytes'] for p in catalog['partitions']),
-              full_production_reader_equivalence_proven=False,live_disk_bytes_reclaimed=0,
-              production_authority=False,data_retirement_authorized=False,actual_payloads_in_github_artifact=False)
-          (root/'public-proof.json').write_text(json.dumps(public,sort_keys=True,indent=2)+'\n')
-          print('FULL_HISTORY_PROOF='+json.dumps(public,sort_keys=True),flush=True)
-          PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: yandex-full-selected-history-proof-${{ github.run_id }}
-          path: ${{ runner.temp }}/yandex-full-history-20261016/public-proof.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: Remove only owned disposable source and output
-        if: always()
-        env:
-          TASK_DIRECTORY: ${{ runner.temp }}/yandex-full-history-20261016
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          root=Path(os.environ['TASK_DIRECTORY'])
-          for name in ['source.sqlite3','union.sqlite3','private-source-receipt.json','private-catalog.json']:
-              for suffix in ('','-wal','-shm','-journal'):
-                  (root/(name+suffix)).unlink(missing_ok=True)
+          from production_ede_offload import _connect,_exec,_verify_sha
+          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
+          try:
+              _verify_sha(client,'a1e9ebdbe6e405e51a2397ebc23c82168c023b4b')
+              code=r'''
+          import pathlib,subprocess,json,os,time,shutil
+          root=pathlib.Path('/root/seiltanzer_bot')
+          print('SPACE='+json.dumps({'free_bytes':shutil.disk_usage('/opt/seiltanzer').free}),flush=True)
+          print(subprocess.check_output(['du','-x','--max-depth=2','-B1',str(root)],text=True,timeout=20),flush=True)
+          deadline=time.monotonic()+15;refs=[];incomplete=False
+          for p in pathlib.Path('/proc').iterdir():
+              if time.monotonic()>deadline:incomplete=True;break
+              if not p.name.isdigit():continue
+              try:
+                  matches=[]
+                  for field in ('cwd','exe'):
+                      try:
+                          if str(root) in os.readlink(p/field):matches.append(field)
+                      except OSError:pass
+                  if str(root).encode() in (p/'cmdline').read_bytes():matches.append('cmdline')
+                  for fd in (p/'fd').iterdir():
+                      if time.monotonic()>deadline:incomplete=True;break
+                      try:
+                          if str(root) in os.readlink(fd):matches.append('fd');break
+                      except OSError:pass
+                  if matches:refs.append({'pid':p.name,'refs':matches})
+              except (OSError,PermissionError):pass
+          units=[]
+          for base in ('/etc/systemd/system','/lib/systemd/system'):
+              for p in pathlib.Path(base).glob('*.service'):
+                  try:
+                      if p.stat().st_size<=1024**2 and str(root) in p.read_text(errors='replace'):units.append(p.name)
+                  except OSError:pass
+          print('LEGACY_REFERENCES='+json.dumps({'process_references':refs,'service_unit_references':sorted(set(units)),'scan_incomplete':incomplete}),flush=True)
+          '''
+              print(_exec(client,'python3 -c '+shlex.quote(code),timeout=40),flush=True)
+          finally:client.close()
           PY
