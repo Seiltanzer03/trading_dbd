@@ -6,9 +6,9 @@ on:
 permissions:
   contents: read
 jobs:
-  selected-history-cloud-only:
+  ai-model-readiness-readonly:
     runs-on: ubuntu-22.04
-    timeout-minutes: 40
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
         with:
@@ -16,82 +16,56 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --quiet boto3
-      - name: Restore existing catalog without source database or cloud writes
+      - run: python -m pip install --quiet paramiko
+      - name: Read actual AI build and model publication state without generation
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ru-central1
-          AWS_EC2_METADATA_DISABLED: 'true'
-          TASK_DIRECTORY: ${{ runner.temp }}/selected-history-20261017
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           python - <<'PY'
-          import hashlib,json,os,sqlite3,subprocess,time
-          from contextlib import closing
-          from pathlib import Path
-          import boto3
-          from botocore.config import Config
-          from scripts import sqlite_history_partition as archive
-          from scripts.sqlite_history_selected_restore import restore_catalog_tables
-          from scripts.sqlite_history_union import MAX_CATALOG_BYTES
-          root=Path(os.environ['TASK_DIRECTORY']);root.mkdir(mode=0o700,exist_ok=False)
-          epoch='d6e8c423f21585f68cd28b0d837eb08c944d2b273bbba59ad963927e33434535'
-          pin='7b78d25d13f249f1ab967828675419a6656fe6b69787e5b78644076a54411a63'
-          key=archive.PREFIX+epoch+'/catalogs/'+pin+'.json'
-          client=boto3.client('s3',endpoint_url='https://storage.yandexcloud.net',region_name='ru-central1',
-              config=Config(connect_timeout=10,read_timeout=120,retries={'max_attempts':2}))
-          with client.get_object(Bucket=archive.BUCKET,Key=key)['Body'] as body:
-              raw=body.read(MAX_CATALOG_BYTES+1)
-          started=time.monotonic()
-          class ReadOnly:
-              def __init__(self):self.gets=0
-              def head_object(self,**kwargs):return client.head_object(**kwargs)
-              def get_object(self,**kwargs):
-                  result=client.get_object(**kwargs);self.gets+=1
-                  if self.gets%25==0:print('RESTORE_PROGRESS='+json.dumps({'parts_requested':self.gets,'elapsed_seconds':round(time.monotonic()-started,1)}),flush=True)
-                  return result
-          reader=ReadOnly()
-          result=restore_catalog_tables(reader,root/'selected.sqlite3',catalog_bytes=raw,expected_catalog_sha256=pin)
-          catalog=json.loads(raw)
-          if catalog['source_database_sha256']!=epoch or len(catalog['partitions'])!=439 or catalog['expected_table_counts']!={'passive_market_observations':132923,'g1s_observations':86100}:
-              raise ValueError('Unexpected pinned complete history epoch')
-          deadline=time.monotonic()+180
-          with closing(sqlite3.connect((root/'selected.sqlite3').resolve().as_uri()+'?mode=ro&immutable=1',uri=True)) as conn:
-              conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')
-              conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-              groups={t:conn.execute('SELECT instrument,horizon_minutes,COUNT(*),MIN(captured_ts),MAX(captured_ts) FROM '+archive._quote(t)+' GROUP BY instrument,horizon_minutes ORDER BY instrument,horizon_minutes').fetchall() for t in sorted(archive.TABLES)}
-              joins=conn.execute('SELECT g.instrument,g.horizon_minutes,COUNT(*) FROM g1s_observations g JOIN passive_market_observations p ON p.observation_id=g.source_observation_id GROUP BY g.instrument,g.horizon_minutes ORDER BY g.instrument,g.horizon_minutes').fetchall()
-          signatures=json.dumps(dict(groups=groups,joins=joins),sort_keys=True,separators=(',',':')).encode()
-          public=dict(run_id=int(os.environ['GITHUB_RUN_ID']),checked_out_code_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
-              scope=result['scope'],source_database_sha256=epoch,catalog_sha256=pin,partition_count=result['partition_count'],
-              tables={t:{'row_count':p['row_count'],'logical_sha256':p['logical_sha256']} for t,p in catalog['full_table_proofs'].items()},
-              full_selected_tables_verified=result['full_selected_tables_verified'],full_database_integrity_verified=False,
-              selected_reader_groups={t:len(v) for t,v in groups.items()},selected_reader_join_groups=len(joins),
-              selected_reader_signature_sha256=hashlib.sha256(signatures).hexdigest(),
-              reader_results_equal_to_saved_source_baseline=False,original_selected_typed_roots_equal=True,
-              database_size_bytes=result['database_size_bytes'],database_sha256=result['database_sha256'],
-              cloud_compressed_bytes=sum(p['compressed_size_bytes'] for p in catalog['partitions']),
-              elapsed_seconds=round(time.monotonic()-started,1),source_database_restored=False,production_connection=False,
-              cloud_writes=0,live_disk_bytes_reclaimed=0,full_production_reader_equivalence_proven=False,
-              production_authority=False,data_retirement_authorized=False,actual_payloads_in_github_artifact=False)
-          (root/'public-proof.json').write_text(json.dumps(public,sort_keys=True,indent=2)+'\n')
-          print('SELECTED_HISTORY_PROOF='+json.dumps(public,sort_keys=True),flush=True)
-          PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: selected-history-cloud-only-proof-${{ github.run_id }}
-          path: ${{ runner.temp }}/selected-history-20261017/public-proof.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: Remove only owned disposable output
-        if: always()
-        env:
-          TASK_DIRECTORY: ${{ runner.temp }}/selected-history-20261017
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          root=Path(os.environ['TASK_DIRECTORY'])
-          for suffix in ('','-wal','-shm','-journal'):
-              (root/('selected.sqlite3'+suffix)).unlink(missing_ok=True)
+          import os,sys,shlex
+          sys.path.insert(0,'scripts')
+          from production_ede_offload import _connect,_exec
+          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
+          try:
+              code=r'''
+          import hashlib,json,pathlib,sqlite3,subprocess,time,urllib.request
+          sha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
+          if sha not in {'9bf0e5dfd7e32406a3c5f3aeeca3a3e8836e65f0','011b363d6cf985b0a00a35964d74a81331558bb4'}:raise ValueError('Unreviewed production revision')
+          now=time.time()
+          def read(path):
+              started=time.monotonic()
+              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:
+                  raw=response.read(1024**2+1)
+                  if len(raw)>1024**2:raise ValueError('Status response exceeds bound')
+              return json.loads(raw),round((time.monotonic()-started)*1000,1)
+          ai,ai_ms=read('/api/ai/snapshot/status');math,math_ms=read('/api/research/mathematical-edge')
+          model_path=pathlib.Path('/opt/seiltanzer/data/research/mathematical_edge_latest.json')
+          old={};file_state={'present':model_path.exists()}
+          if model_path.exists():
+              if model_path.stat().st_size>500000:raise ValueError('Model exceeds existing runtime bound')
+              with model_path.open('rb') as body:raw=body.read(500001)
+              if len(raw)>500000:raise ValueError('Model exceeds existing runtime bound')
+              old=json.loads(raw)
+              file_state.update(bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),published_for_sha=old.get('published_for_sha'),
+                  created_ts=old.get('created_ts'),age_seconds=now-old['created_ts'] if type(old.get('created_ts')) in (int,float) else None,
+                  family_summary=old.get('family_market_model_summary'))
+          observations=[];conn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
+          try:
+              conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')
+              deadline=time.monotonic()+3;conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+              for instrument,model in (old.get('instruments') or {}).items():
+                  cutoff=model.get('training_cutoff')
+                  row=conn.execute("SELECT bar_end_ts,kind,created_ts FROM passive_market_bars WHERE instrument=? ORDER BY bar_start_ts DESC LIMIT 1",(instrument,)).fetchone()
+                  if row and type(cutoff) in (int,float):
+                      observations.append({'instrument':instrument,'training_cutoff':cutoff,'latest_retained_bar_end':row[0],
+                          'direct_completed_new_bar':row[1]=='direct' and row[2]>=row[0] and cutoff<row[0]<=now})
+          finally:conn.close()
+          print('AI_MODEL_READINESS='+json.dumps({'code_sha':sha,'snapshot':{k:ai.get(k) for k in ('ready','building','age_sec','invalidated_reason','build_ms','build_started_at','build_n','canonical_quote_available')},
+              'build_age_seconds':now-ai['build_started_at'] if ai.get('building') and ai.get('build_started_at') else None,
+              'ai_error_type':str(ai.get('last_error') or '').split(':')[0] or None,'ai_status_ms':ai_ms,
+              'math_runtime_state':math.get('state'),'math_status_ms':math_ms,'model_file':file_state,
+              'new_retained_observations':observations,'llm_requests':0,'fits':0,'database_mutations':0,'production_authority':False}),flush=True)
+          '''
+              _exec(client,'python3 -c '+shlex.quote(code),timeout=25)
+          finally:client.close()
           PY
