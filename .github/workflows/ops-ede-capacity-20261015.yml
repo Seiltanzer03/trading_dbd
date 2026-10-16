@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  cloud-history-progress-readonly:
+  actual-disk-admission-readonly:
     runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
@@ -16,48 +16,41 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --quiet boto3
-      - name: Read bounded cloud progress only; no DB restore and no writes
+      - run: python -m pip install --quiet paramiko
+      - name: Verify actual optional-write pause without orders or provider calls
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ru-central1
-          AWS_EC2_METADATA_DISABLED: 'true'
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           python - <<'PY'
-          import json,sys,hashlib
-          import boto3
-          from botocore.config import Config
+          import os,sys,shlex
           sys.path.insert(0,'scripts')
-          from restore_verified_snapshot import _latest_manifest,ENDPOINT
-          from scripts import sqlite_history_partition as archive
-          from scripts.sqlite_history_catalog import validate_full_catalog,MAX_CATALOG_BYTES
-          client=boto3.client('s3',endpoint_url=ENDPOINT,region_name='ru-central1',
-              config=Config(connect_timeout=10,read_timeout=30,retries={'max_attempts':1}))
-          manifest_key,manifest=_latest_manifest(client,bucket=archive.BUCKET)
-          source_hash=manifest['database_sha256'];prefix=archive.PREFIX+source_hash+'/'
-          objects=[];token=None
-          for _ in range(3):
-              args=dict(Bucket=archive.BUCKET,Prefix=prefix,MaxKeys=1000)
-              if token:args['ContinuationToken']=token
-              response=client.list_objects_v2(**args);objects.extend(response.get('Contents',[]))
-              if not response.get('IsTruncated'):break
-              token=response['NextContinuationToken']
-          else:raise ValueError('Progress listing exceeds bounded pages')
-          catalog_reports=[]
-          for entry in objects:
-              key=entry['Key']
-              if '/catalogs/' not in key or not key.endswith('.json'):continue
-              if len(catalog_reports)>=8:raise ValueError('Too many source epoch catalogs')
-              with client.get_object(Bucket=archive.BUCKET,Key=key)['Body'] as body:raw=body.read(MAX_CATALOG_BYTES+1)
-              if len(raw)>MAX_CATALOG_BYTES or key.rsplit('/',1)[-1]!=hashlib.sha256(raw).hexdigest()+'.json':
-                  raise ValueError('Cloud catalog identity mismatch')
-              catalog=json.loads(raw);validate_full_catalog(catalog)
-              catalog_reports.append(dict(catalog_sha256=hashlib.sha256(raw).hexdigest(),
-                  row_counts=catalog['expected_table_counts'],partition_count=len(catalog['partitions'])))
-          chunks=[p for p in objects if p['Key'].endswith('.sqlite3.gz')]
-          print('CLOUD_HISTORY_PROGRESS='+json.dumps(dict(source_database_sha256=source_hash,
-              private_chunk_objects=len(chunks),compressed_chunk_bytes=sum(p['Size'] for p in chunks),
-              catalogs=catalog_reports,includes_previous_small_fixture=True,
-              full_hydration_verified=False,cloud_writes=False,production_connection=False)),flush=True)
+          from production_ede_offload import _connect,_exec,_verify_sha
+          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
+          try:
+              _verify_sha(client,'9bf0e5dfd7e32406a3c5f3aeeca3a3e8836e65f0')
+              code=r'''
+          import json,urllib.request,time
+          from types import SimpleNamespace
+          from seiltanzer.background_disk_admission import disk_state,REASON
+          pressure=disk_state(SimpleNamespace(settings=SimpleNamespace(demo=False,data_dir='/opt/seiltanzer/data')))
+          def read(path):
+              started=time.monotonic()
+              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:
+                  raw=response.read(1024**2+1)
+                  if len(raw)>1024**2:raise ValueError('Read-only response exceeds bound')
+                  return json.loads(raw),round((time.monotonic()-started)*1000,1)
+          worker,worker_ms=read('/api/research/runtime/worker-status')
+          passive,passive_ms=read('/api/research/passive/status')
+          ai,ai_ms=read('/api/ai/snapshot/status')
+          if pressure['pause_background'] and passive.get('last_skip_reason')!=REASON:
+              raise ValueError('Low disk did not expose actual passive pause')
+          state=worker.get('worker') or {}
+          print('ACTUAL_DISK_ADMISSION='+json.dumps({'checked_out_code_sha':'9bf0e5dfd7e32406a3c5f3aeeca3a3e8836e65f0',
+              'pressure':pressure,'passive':{'collector_status':passive.get('collector_status'),'last_skip_reason':passive.get('last_skip_reason'),'latest_error':passive.get('latest_error'),'elapsed_ms':passive_ms},
+              'worker':{k:state.get(k) for k in ('current_phase','disk_pause_active','disk_pressure','memory_pause_active','last_error')},
+              'worker_elapsed_ms':worker_ms,'ai':{'ready':ai.get('ready'),'building':ai.get('building'),'canonical_quote_available':ai.get('canonical_quote_available'),'elapsed_ms':ai_ms},
+              'orders_sent':0,'provider_calls':0,'database_mutations':0,'production_authority':False}),flush=True)
+          '''
+              print(_exec(client,'cd /opt/seiltanzer && /opt/seiltanzer/.venv/bin/python -c '+shlex.quote(code),timeout=25),flush=True)
+          finally:client.close()
           PY
