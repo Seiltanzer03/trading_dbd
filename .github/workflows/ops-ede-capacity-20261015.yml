@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  startup-owner-trace-readonly:
+  foreign-key-dependencies-readonly:
     runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --quiet paramiko
-      - name: Read existing startup phase markers and watchdog frames without attaching a profiler
+      - name: Read bounded foreign key metadata without restoring or mutating history
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
@@ -25,10 +25,10 @@ jobs:
           import os,sys,shlex,ast
           sys.path.insert(0,'scripts')
           from production_ede_offload import _connect,_exec
-          code="import json,re,subprocess,pathlib\nsha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()\nif sha not in {'011b363d6cf985b0a00a35964d74a81331558bb4','4a62a1c03519f7611121148eb542d4443b9c3ba1'}:raise ValueError('Unexpected source generation')\npid=subprocess.check_output(['systemctl','show','seiltanzer','--property=MainPID','--value'],text=True,timeout=3).strip()\nif not pid.isdigit() or int(pid)<=1:raise ValueError('No active application PID')\nargs=['journalctl','--no-pager','-o','cat','--since=-25min','-n','600','_SYSTEMD_UNIT=seiltanzer.service','_PID='+pid]\nprocess=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)\ntry:\n    raw=process.stdout.read(2097153)\n    if len(raw)>2097152:raise ValueError('Startup journal exceeds bound')\n    process.wait(timeout=3)\nfinally:\n    if process.poll() is None:process.kill();process.wait(timeout=3)\nlines=raw.decode('utf8','replace').splitlines()\nselected=[line for line in lines if line.startswith('STARTUP_PHASE phase=') or re.match(r'^\\s*File \"[^\"\\r\\n]+\", line [0-9]+ in [A-Za-z0-9_<>.]+$',line) or line.startswith('Timeout (') or re.match(r'^Thread 0x[0-9a-f]+',line)]\nprint('STARTUP_TRACE_CONTEXT='+json.dumps({'code_sha':sha,'pid':pid,'frame_and_phase_lines':len(selected),'no_local_variables':True,'database_reads':0,'service_mutations':0}),flush=True)\nfor line in selected[-160:]:print(line,flush=True)\nprint('STARTUP_WCHAN='+json.dumps({'wait_channel':pathlib.Path('/proc/'+pid+'/wchan').read_text().strip()}),flush=True)"
+          code="import json,sqlite3,subprocess,time,os\nos.nice(10)\nsha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()\nif sha not in {'011b363d6cf985b0a00a35964d74a81331558bb4','a2a48108cd0fd924e5fcf684be16af5043e48388'}:raise ValueError('Unexpected source generation')\nconn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=0.5)\nstarted=time.monotonic();overall=started+20;deadline=overall\nconn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')\nconn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)\ndef quoted(value):return '\"'+value.replace('\"','\"\"')+'\"'\ntry:\n    tables=[r[0] for r in conn.execute(\"SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 513\")]\n    if len(tables)>512:raise ValueError('Schema inventory exceeds bound')\n    names=set(tables);items=[]\n    for table in tables:\n        deadline=min(overall,time.monotonic()+0.5)\n        keys=conn.execute('PRAGMA foreign_key_list('+quoted(table)+')').fetchall()\n        if keys:items.append({'table':table,'references':[{'id':r[0],'parent':r[2],'parent_exists':r[2] in names,'from_column':r[3],'to_column':r[4]} for r in keys]})\n    checks=[]\n    for item in items[:8]:\n        deadline=min(overall,time.monotonic()+2)\n        if time.monotonic()>=deadline:break\n        current={'table':item['table']}\n        try:\n            row=conn.execute('PRAGMA foreign_key_check('+quoted(item['table'])+')').fetchone()\n            current.update({'status':'VIOLATION_FOUND' if row is not None else 'CHECK_PASSED','first_violation':None if row is None else {'table':row[0],'parent':row[2],'foreign_key_id':row[3]}})\n        except sqlite3.Error as exc:current.update({'status':'UNAVAILABLE','error_type':type(exc).__name__})\n        checks.append(current)\n    print('LIVE_FK_DEPENDENCIES='+json.dumps({'code_sha':sha,'table_count':len(tables),'tables_with_declared_fks':items,'bounded_checks':checks,'all_foreign_keys_verified':len(checks)==len(items) and all(c['status']=='CHECK_PASSED' for c in checks),'scope':'CURRENT_LIVE_DATABASE_NOT_ARCHIVE_EPOCH','archive_failure_cause_proven':False,'elapsed_ms':round((time.monotonic()-started)*1000,1),'database_mutations':0,'service_mutations':0,'provider_calls':0,'production_authority':False,'data_retirement_authorized':False}),flush=True)\nfinally:conn.close()\n"
           ast.parse(code)
           client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
           try:
-              _exec(client,'python3 -c '+shlex.quote(code),timeout=25)
+              print(_exec(client,'python3 -c '+shlex.quote(code),timeout=30),flush=True)
           finally:client.close()
           PY
