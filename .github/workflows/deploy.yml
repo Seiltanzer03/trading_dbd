@@ -19,6 +19,7 @@ on:
 
 concurrency:
   group: production-seiltanzer
+  queue: max
   cancel-in-progress: false
 
 permissions:
@@ -83,6 +84,11 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+
+      - name: Reject superseded main before production mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/require_current_main.sh
 
       - name: Deliver exact SHA over SSH
         id: delivery

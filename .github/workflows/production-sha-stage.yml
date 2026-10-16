@@ -17,6 +17,7 @@ permissions:
 
 concurrency:
   group: production-sha-stage
+  queue: max
   cancel-in-progress: false
 
 env:
@@ -27,6 +28,7 @@ jobs:
   stage:
     concurrency:
       group: production-seiltanzer
+      queue: max
       cancel-in-progress: false
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -47,6 +49,11 @@ jobs:
         with:
           ref: ${{ env.EXPECTED_SHA }}
           fetch-depth: 1
+
+      - name: Reject superseded main before staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/require_current_main.sh
 
       - name: Build exact-SHA Git bundle off-host
         run: |

@@ -81,6 +81,7 @@ jobs:
     if: needs.gate.outputs.needs_recovery == 'true'
     concurrency:
       group: production-seiltanzer
+      queue: max
       cancel-in-progress: false
     runs-on: ubuntu-22.04
     timeout-minutes: 20
