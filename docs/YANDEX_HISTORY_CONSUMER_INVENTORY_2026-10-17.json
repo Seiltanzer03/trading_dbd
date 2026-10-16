@@ -1,0 +1,1438 @@
+{
+  "contract": "selected-history-literal-consumer-inventory-v1",
+  "code_tree": "42b549d58b49fe370b027497ef94c501601aeb40",
+  "scope": "tracked_python_literal_references_only",
+  "indirect_dynamic_dependencies_verified": false,
+  "reader_equivalence_verified": false,
+  "writer_closure_verified": false,
+  "production_authority": false,
+  "data_retirement_authorized": false,
+  "references": [
+    {
+      "path": "scripts/export_native_family_history.py",
+      "line": 23,
+      "owner": "<module>",
+      "tables": [
+        "passive_market_observations",
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "scripts/production_ede_inventory.py",
+      "line": 373,
+      "owner": "inventory",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "scripts/production_ede_inventory.py",
+      "line": 374,
+      "owner": "inventory",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "scripts/production_ede_inventory.py",
+      "line": 342,
+      "owner": "inventory",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "scripts/production_ede_inventory.py",
+      "line": 343,
+      "owner": "inventory",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "scripts/production_ede_inventory.py",
+      "line": 345,
+      "owner": "inventory",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "scripts/production_ede_inventory.py",
+      "line": 349,
+      "owner": "inventory",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "scripts/production_readiness_check.py",
+      "line": 28,
+      "owner": "<module>",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "scripts/production_readiness_check.py",
+      "line": 30,
+      "owner": "<module>",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "scripts/sqlite_history_partition.py",
+      "line": 22,
+      "owner": "<module>",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "scripts/sqlite_history_partition.py",
+      "line": 22,
+      "owner": "<module>",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/edge_discovery/ai_context.py",
+      "line": 77,
+      "owner": "_latest_frozen_context",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/edge_discovery/historical.py",
+      "line": 248,
+      "owner": "option_t0_coverage",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/edge_discovery/historical.py",
+      "line": 252,
+      "owner": "option_t0_coverage",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/edge_discovery/historical.py",
+      "line": 255,
+      "owner": "option_t0_coverage",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/edge_discovery/prospective.py",
+      "line": 491,
+      "owner": "_source_rows",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/edge_discovery/prospective.py",
+      "line": 510,
+      "owner": "_source_rows",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/edge_discovery/transition_search.py",
+      "line": 151,
+      "owner": "augment_rows_from_frozen_v3",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/edge_discovery/universal_outcome_adapter.py",
+      "line": 107,
+      "owner": "_resolution_context",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_baseline_runtime.py",
+      "line": 588,
+      "owner": "_load_rows",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_champion_progress_scalability.py",
+      "line": 58,
+      "owner": "_aggregate_sql",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_dataset_refinement.py",
+      "line": 105,
+      "owner": "status_refined",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_dataset_runtime.py",
+      "line": 840,
+      "owner": "create_g1_dataset_cut",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_dataset_runtime.py",
+      "line": 467,
+      "owner": "_sync_membership",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_dataset_runtime.py",
+      "line": 519,
+      "owner": "_detect_source_mutations",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_dataset_runtime.py",
+      "line": 649,
+      "owner": "g1_dataset_status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_dataset_runtime.py",
+      "line": 652,
+      "owner": "g1_dataset_status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_dataset_runtime.py",
+      "line": 655,
+      "owner": "g1_dataset_status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_dataset_runtime.py",
+      "line": 772,
+      "owner": "g1_dataset_exclusions",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_dataset_runtime.py",
+      "line": 779,
+      "owner": "g1_dataset_exclusions",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_dataset_runtime.py",
+      "line": 558,
+      "owner": "_eligible_rows",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_fast_learning_integrity_refinement.py",
+      "line": 216,
+      "owner": "_q_audit_refined",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_historical_analog.py",
+      "line": 140,
+      "owner": "historical_analogs",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_historical_analog.py",
+      "line": 170,
+      "owner": "historical_analogs",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_intelligence_runtime.py",
+      "line": 257,
+      "owner": "_q_observation_rows",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_operational_integrity.py",
+      "line": 375,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_operational_integrity.py",
+      "line": 355,
+      "owner": "step",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_operational_status_passthrough.py",
+      "line": 77,
+      "owner": "_health_payload",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_q_audit_scalability.py",
+      "line": 262,
+      "owner": "q_audit_bounded",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_q_collector.py",
+      "line": 247,
+      "owner": "_insert_native_q_only",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/g1_q_collector.py",
+      "line": 235,
+      "owner": "_insert_native_q_only",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_q_evidence_refinement.py",
+      "line": 123,
+      "owner": "_load_native_forecast",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_q_evidence_runtime.py",
+      "line": 283,
+      "owner": "_validate_created_q",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_q_evidence_runtime.py",
+      "line": 476,
+      "owner": "_q_membership_rows",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_q_evidence_runtime.py",
+      "line": 530,
+      "owner": "g1_q_status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_q_evidence_runtime.py",
+      "line": 625,
+      "owner": "g1_q_instruments",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_shadow_refinement.py",
+      "line": 226,
+      "owner": "_t0_blocker",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_shadow_runtime.py",
+      "line": 823,
+      "owner": "_pending_q_observation",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_shadow_runtime.py",
+      "line": 578,
+      "owner": "_revalidate_cut",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_shadow_runtime.py",
+      "line": 999,
+      "owner": "g1c_predictions",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_calibration.py",
+      "line": 139,
+      "owner": "_safe_raw_rows",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_calibration.py",
+      "line": 332,
+      "owner": "_safe_calibrated_rows",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_champion_runtime.py",
+      "line": 430,
+      "owner": "_refresh_progress",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_champion_runtime.py",
+      "line": 443,
+      "owner": "_refresh_progress",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_champion_runtime.py",
+      "line": 393,
+      "owner": "_write_champion_predictions",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_continuous_learning.py",
+      "line": 135,
+      "owner": "_rows",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_continuous_learning.py",
+      "line": 335,
+      "owner": "_write_return_predictions",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_continuous_learning.py",
+      "line": 390,
+      "owner": "_safe_prediction_rows",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_continuous_v2.py",
+      "line": 119,
+      "owner": "_write_v2_return_predictions",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_cut_refinement.py",
+      "line": 53,
+      "owner": "_manifest",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_evidence_completion.py",
+      "line": 253,
+      "owner": "_safe_eval_rows",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_evidence_materialization.py",
+      "line": 27,
+      "owner": "<module>",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_feature_contract_v2.py",
+      "line": 546,
+      "owner": "_predict_v2",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_feature_contract_v2.py",
+      "line": 650,
+      "owner": "status",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_gbt_refinement.py",
+      "line": 162,
+      "owner": "prospective_predictions",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_integration.py",
+      "line": 23,
+      "owner": "<module>",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_metrics_integrity.py",
+      "line": 52,
+      "owner": "_model_eval_rows",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_metrics_refinement.py",
+      "line": 200,
+      "owner": "_finalize_dependency_group",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_metrics_refinement.py",
+      "line": 226,
+      "owner": "_materialize_path_metrics",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_metrics_refinement.py",
+      "line": 321,
+      "owner": "_effectiveness",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_metrics_refinement.py",
+      "line": 519,
+      "owner": "path_metrics",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_metrics_refinement.py",
+      "line": 446,
+      "owner": "horizon_report",
+      "tables": [
+        "passive_market_observations",
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_metrics_refinement.py",
+      "line": 452,
+      "owner": "horizon_report",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_metrics_refinement.py",
+      "line": 495,
+      "owner": "status",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_metrics_refinement.py",
+      "line": 501,
+      "owner": "status",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_refinement.py",
+      "line": 172,
+      "owner": "_materialize_barriers",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_refinement.py",
+      "line": 256,
+      "owner": "barriers",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_routes.py",
+      "line": 99,
+      "owner": "install_g1_short_horizon_routes",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 184,
+      "owner": "_ensure_tables",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 217,
+      "owner": "_ensure_tables",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 220,
+      "owner": "_ensure_tables",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 223,
+      "owner": "_ensure_tables",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 318,
+      "owner": "_ensure_tables",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 443,
+      "owner": "materialize_new",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 388,
+      "owner": "materialize_new",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 497,
+      "owner": "resolve_new",
+      "tables": [
+        "passive_market_observations",
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 733,
+      "owner": "_create_prospective_predictions",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 970,
+      "owner": "q_audit",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 408,
+      "owner": "materialize_new",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 514,
+      "owner": "resolve_new",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 579,
+      "owner": "_resolved_eligible",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 884,
+      "owner": "observations",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 791,
+      "owner": "materialize_trade_links",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 842,
+      "owner": "horizon_report",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_runtime.py",
+      "line": 854,
+      "owner": "status",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_status_integrity.py",
+      "line": 33,
+      "owner": "_status_thread_safe",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_status_materialization.py",
+      "line": 108,
+      "owner": "_refresh",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_status_materialization.py",
+      "line": 112,
+      "owner": "_refresh",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_short_horizon_status_materialization.py",
+      "line": 294,
+      "owner": "_status",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_trade_link_catchup.py",
+      "line": 23,
+      "owner": "materialize_trade_links_bounded",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/g1_trade_link_catchup.py",
+      "line": 59,
+      "owner": "materialize_trade_links_bounded",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/llm_edge_pr_c.py",
+      "line": 195,
+      "owner": "_resolved_evidence_since_cursor",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/llm_edge_pr_c.py",
+      "line": 126,
+      "owner": "_ensure_storage",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/llm_edge_pr_c.py",
+      "line": 186,
+      "owner": "_resolved_evidence_since_cursor",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/llm_edge_prospective_journal.py",
+      "line": 175,
+      "owner": "_new_observations",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/llm_edge_prospective_journal.py",
+      "line": 149,
+      "owner": "_latest",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/llm_edge_prospective_journal.py",
+      "line": 459,
+      "owner": "collect_outcomes",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/llm_edge_researcher.py",
+      "line": 244,
+      "owner": "_load_observation",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/llm_edge_researcher.py",
+      "line": 248,
+      "owner": "_load_observation",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/macro_bls_historical_bootstrap.py",
+      "line": 905,
+      "owner": "observation_span",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/macro_bls_historical_bootstrap.py",
+      "line": 922,
+      "owner": "observation_span",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/macro_bls_historical_bootstrap.py",
+      "line": 925,
+      "owner": "observation_span",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/macro_bls_historical_ede_refinement.py",
+      "line": 1,
+      "owner": "<module>",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/macro_fomc_deterministic_bootstrap.py",
+      "line": 1,
+      "owner": "<module>",
+      "tables": [
+        "g1s_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/measurement_path_refinement.py",
+      "line": 100,
+      "owner": "resolve_with_event_scope",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/measurement_path_refinement.py",
+      "line": 50,
+      "owner": "resolve_with_event_scope",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/measurement_path_runtime.py",
+      "line": 281,
+      "owner": "resolve_one_f32a",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/measurement_path_runtime.py",
+      "line": 412,
+      "owner": "status_f32a",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/measurement_path_runtime.py",
+      "line": 299,
+      "owner": "resolved_rows_f32a",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/measurement_path_runtime.py",
+      "line": 324,
+      "owner": "_runtime_counters",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 197,
+      "owner": "__init__",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 230,
+      "owner": "__init__",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 233,
+      "owner": "__init__",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 299,
+      "owner": "__init__",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1011,
+      "owner": "_resolve_one",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 226,
+      "owner": "__init__",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 513,
+      "owner": "capture_observation",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 587,
+      "owner": "capture_observation",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 718,
+      "owner": "_collect_instrument",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1164,
+      "owner": "resolve_due",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1437,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 482,
+      "owner": "capture_observation",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1228,
+      "owner": "reconcile_terminal_virtuals",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1247,
+      "owner": "observations",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1390,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1394,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1398,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1402,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1406,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1411,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1416,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1420,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1424,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1428,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1432,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1441,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1117,
+      "owner": "virtual_management_report",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1154,
+      "owner": "resolve_due",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1331,
+      "owner": "_resolved_rows",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1384,
+      "owner": "status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/passive_learning.py",
+      "line": 1224,
+      "owner": "reconcile_terminal_virtuals",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "write"
+    },
+    {
+      "path": "seiltanzer/research_scalability.py",
+      "line": 55,
+      "owner": "_light_q_status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/research_scalability.py",
+      "line": 144,
+      "owner": "_light_g1c_status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/research_scalability.py",
+      "line": 210,
+      "owner": "_light_passive_status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/research_scalability.py",
+      "line": 218,
+      "owner": "_light_passive_status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/research_scalability.py",
+      "line": 77,
+      "owner": "_light_q_status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/research_scalability.py",
+      "line": 215,
+      "owner": "_light_passive_status",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "read"
+    },
+    {
+      "path": "seiltanzer/storage_refinement.py",
+      "line": 27,
+      "owner": "<module>",
+      "tables": [
+        "passive_market_observations"
+      ],
+      "kind": "identity_or_dynamic"
+    }
+  ],
+  "code_sha": "a2a48108cd0fd924e5fcf684be16af5043e48388"
+}

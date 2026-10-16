@@ -1,0 +1,219 @@
+{
+  "code_sha": "011b363d6cf985b0a00a35964d74a81331558bb4",
+  "table_count": 105,
+  "tables_with_declared_fks": [
+    {
+      "table": "ai_decision_acks",
+      "references": [
+        {
+          "id": 0,
+          "parent": "trades",
+          "parent_exists": true,
+          "from_column": "trade_id",
+          "to_column": "id"
+        }
+      ]
+    },
+    {
+      "table": "ai_verdicts",
+      "references": [
+        {
+          "id": 0,
+          "parent": "trades",
+          "parent_exists": true,
+          "from_column": "trade_id",
+          "to_column": "id"
+        }
+      ]
+    },
+    {
+      "table": "decision_path_points",
+      "references": [
+        {
+          "id": 0,
+          "parent": "decision_snapshots",
+          "parent_exists": true,
+          "from_column": "review_id",
+          "to_column": "review_id"
+        }
+      ]
+    },
+    {
+      "table": "decision_replays",
+      "references": [
+        {
+          "id": 0,
+          "parent": "trades",
+          "parent_exists": true,
+          "from_column": "trade_id",
+          "to_column": "id"
+        },
+        {
+          "id": 1,
+          "parent": "decision_snapshots",
+          "parent_exists": true,
+          "from_column": "review_id",
+          "to_column": "review_id"
+        }
+      ]
+    },
+    {
+      "table": "decision_snapshots",
+      "references": [
+        {
+          "id": 0,
+          "parent": "trades",
+          "parent_exists": true,
+          "from_column": "trade_id",
+          "to_column": "id"
+        }
+      ]
+    },
+    {
+      "table": "g1_dataset_cut_members",
+      "references": [
+        {
+          "id": 0,
+          "parent": "g1_dataset_cuts",
+          "parent_exists": true,
+          "from_column": "cut_id",
+          "to_column": "cut_id"
+        }
+      ]
+    },
+    {
+      "table": "g1c_shadow_models",
+      "references": [
+        {
+          "id": 0,
+          "parent": "g1c_fit_runs",
+          "parent_exists": true,
+          "from_column": "fit_run_id",
+          "to_column": "fit_run_id"
+        }
+      ]
+    },
+    {
+      "table": "g1c_shadow_predictions",
+      "references": [
+        {
+          "id": 0,
+          "parent": "g1c_shadow_models",
+          "parent_exists": true,
+          "from_column": "model_id",
+          "to_column": "model_id"
+        }
+      ]
+    },
+    {
+      "table": "human_decisions",
+      "references": [
+        {
+          "id": 0,
+          "parent": "trades",
+          "parent_exists": true,
+          "from_column": "trade_id",
+          "to_column": "id"
+        },
+        {
+          "id": 1,
+          "parent": "decision_snapshots",
+          "parent_exists": true,
+          "from_column": "review_id",
+          "to_column": "review_id"
+        }
+      ]
+    },
+    {
+      "table": "option_forecasts",
+      "references": [
+        {
+          "id": 0,
+          "parent": "trades",
+          "parent_exists": true,
+          "from_column": "trade_id",
+          "to_column": "id"
+        }
+      ]
+    },
+    {
+      "table": "policy_shadow_reviews",
+      "references": [
+        {
+          "id": 0,
+          "parent": "trades",
+          "parent_exists": true,
+          "from_column": "trade_id",
+          "to_column": "id"
+        }
+      ]
+    },
+    {
+      "table": "trade_market_path",
+      "references": [
+        {
+          "id": 0,
+          "parent": "trades",
+          "parent_exists": true,
+          "from_column": "trade_id",
+          "to_column": "id"
+        }
+      ]
+    }
+  ],
+  "bounded_checks": [
+    {
+      "table": "ai_decision_acks",
+      "status": "VIOLATION_FOUND",
+      "first_violation": {
+        "table": "ai_decision_acks",
+        "parent": "trades",
+        "foreign_key_id": 0
+      }
+    },
+    {
+      "table": "ai_verdicts",
+      "status": "CHECK_PASSED",
+      "first_violation": null
+    },
+    {
+      "table": "decision_path_points",
+      "status": "UNAVAILABLE",
+      "error_type": "OperationalError"
+    },
+    {
+      "table": "decision_replays",
+      "status": "CHECK_PASSED",
+      "first_violation": null
+    },
+    {
+      "table": "decision_snapshots",
+      "status": "CHECK_PASSED",
+      "first_violation": null
+    },
+    {
+      "table": "g1_dataset_cut_members",
+      "status": "CHECK_PASSED",
+      "first_violation": null
+    },
+    {
+      "table": "g1c_shadow_models",
+      "status": "CHECK_PASSED",
+      "first_violation": null
+    },
+    {
+      "table": "g1c_shadow_predictions",
+      "status": "CHECK_PASSED",
+      "first_violation": null
+    }
+  ],
+  "all_foreign_keys_verified": false,
+  "scope": "CURRENT_LIVE_DATABASE_NOT_ARCHIVE_EPOCH",
+  "archive_failure_cause_proven": false,
+  "elapsed_ms": 2055.1,
+  "database_mutations": 0,
+  "service_mutations": 0,
+  "provider_calls": 0,
+  "production_authority": false,
+  "data_retirement_authorized": false
+}
