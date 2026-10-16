@@ -153,7 +153,7 @@ export function mountUnifiedEdgeEnsemble(container, audit, { archived = false } 
   appendAuditTable(panel, ['Компонент', 'Номинальный → фактический вес', 'Качество · возраст', 'Доступность / снижение влияния'],
     components.map((row) => [row.label || label(row.component_id),
       `${percent(row.nominal_weight)} → ${percent(row.effective_weight)}`,
-      `${row.component_id === 'quantitative_base' ? 'Численная доступность (не надёжность источников): ' : ''}${percent(row.quality)} · ${row.age_sec === null || row.age_sec === undefined ? '—' : row.age_sec} сек`,
+      `${row.component_id === 'quantitative_base' ? 'Численная доступность (не надёжность источников): ' : ''}${percent(row.available === false || row.availability === 'UNAVAILABLE' ? null : row.quality)} · ${row.age_sec === null || row.age_sec === undefined ? '—' : row.age_sec} сек`,
       `${row.availability ?? row.available ?? '—'} · ${row.reason || 'доступен'}${Array.isArray(row.suppression_reasons) && row.suppression_reasons.length ? ' · ' + row.suppression_reasons.join(', ') : ''}`]));
   for (const row of components) {
     const source = (row.source_ids || []).join(', ') || '—';

@@ -100,6 +100,11 @@ def refresh_frozen_comparison(engine, snapshot):
         policies[policy] = dict(expected_final_r=row['expected_net_r'],
             expected_final_r_net=row['expected_net_r'], cvar10_r=row['cvar10_net_r'],
             cvar10_r_net=row['cvar10_net_r'], gross_expected_final_r=row['expected_gross_r'],
+            median_final_r=row['median_net_r'], median_final_r_net=row['median_net_r'],
+            p_final_profit=row['p_final_profit'], p_final_loss=row['p_final_loss'],
+            p_giveback_0_25_from_now=row['p_giveback_0_25_from_now'],
+            p_giveback_0_50_from_now=row['p_giveback_0_50_from_now'],
+            statistics_basis=row['statistics_basis'],
             execution_cost_r=row['execution_cost_r'], outcomes_include_execution_costs=True,
             economics_basis=row['economics_basis'])
         if row.get('hard_risk_pass'):
@@ -132,6 +137,7 @@ def refresh_frozen_comparison(engine, snapshot):
         integrity['trade_geometry'] = deepcopy(geometry)
     out['market_refresh'] = dict(version='cached-comparison-market-refresh-v1',
         available=True, original_snapshot_ts=snapshot['captured_ts'],
+        comparison_statistics_basis=policies['HOLD']['statistics_basis'],
         heavy_policy_recomputed=False,
         actual_provider_timestamp=manager['input_audit']['rows']['instrument_price'].get('timestamp'),
         legacy_diagnostics_basis='original_cached_snapshot',

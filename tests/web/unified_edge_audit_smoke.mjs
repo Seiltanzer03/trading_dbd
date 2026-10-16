@@ -132,4 +132,11 @@ for (const malformedAudit of [
   assert.match(container.textContent,/аудит.*недоступен/i);
   assert.ok(!tags(container).some((tag)=>['button','input','form'].includes(tag)));
 }
+const unavailableQuality = new Element();
+mountEdgeManagement(unavailableQuality, {unified_edge_ensemble:{...audit,
+  components:[{component_id:'mathematical_edge',available:false,availability:'UNAVAILABLE',
+    nominal_weight:.15,effective_weight:0,quality:1,age_sec:0,
+    reason:'COMPLETED_CAUSAL_5M_PRICE_FEATURES_UNAVAILABLE'}]}});
+assert.doesNotMatch(unavailableQuality.textContent,/100\.0%/,
+  'an unavailable expert has no current quality estimate');
 console.log('Unified edge audit rendering smoke: PASS');

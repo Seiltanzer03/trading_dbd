@@ -645,7 +645,12 @@ def combine_math_profile(profile, mathematical):
 def render_math_edge(profile, combined=None, ranking_audit=None):
     combined = combined or {}
     if not profile.get('probabilities'):
-        return '\n\n**МАТЕМАТИЧЕСКИЙ EDGE** —\nВес 0; причина: ' + str(profile.get('reason') or 'UNAVAILABLE') + '. Расчёт продолжается без этого веса.'
+        reason = str(profile.get('reason') or 'UNAVAILABLE')
+        detail = (' Нужны 13 последовательных завершённых 5-минутных свечей '
+                  'без пропусков и с актуальным временем. Текущая котировка не заменяет '
+                  'эту историю.' if reason == 'COMPLETED_CAUSAL_5M_PRICE_FEATURES_UNAVAILABLE' else '')
+        return ('\n\n**МАТЕМАТИЧЕСКИЙ EDGE** —\nВес 0; причина: ' + reason + '.'
+                + detail + ' Расчёт продолжается без этого веса.')
     ps = profile.get('probabilities') or {}
     def probability(value):
         return f'{value:.1%}' if number(value) is not None else 'UNAVAILABLE'
