@@ -6,59 +6,58 @@ on:
 permissions:
   contents: read
 jobs:
-  legacy-runtime-capacity-readonly:
+  cloud-history-progress-readonly:
     runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: a1e9ebdbe6e405e51a2397ebc23c82168c023b4b
+          ref: 9bf0e5dfd7e32406a3c5f3aeeca3a3e8836e65f0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --quiet paramiko
-      - name: Read legacy terminal directory ownership without modifying files
+      - run: python -m pip install --quiet boto3
+      - name: Read bounded cloud progress only; no DB restore and no writes
         env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
         run: |
           python - <<'PY'
-          import os,sys,shlex
+          import json,sys,hashlib
+          import boto3
+          from botocore.config import Config
           sys.path.insert(0,'scripts')
-          from production_ede_offload import _connect,_exec,_verify_sha
-          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
-          try:
-              _verify_sha(client,'a1e9ebdbe6e405e51a2397ebc23c82168c023b4b')
-              code=r'''
-          import pathlib,subprocess,json,os,time,shutil
-          root=pathlib.Path('/root/seiltanzer_bot')
-          print('SPACE='+json.dumps({'free_bytes':shutil.disk_usage('/opt/seiltanzer').free}),flush=True)
-          print(subprocess.check_output(['du','-x','--max-depth=2','-B1',str(root)],text=True,timeout=20),flush=True)
-          deadline=time.monotonic()+15;refs=[];incomplete=False
-          for p in pathlib.Path('/proc').iterdir():
-              if time.monotonic()>deadline:incomplete=True;break
-              if not p.name.isdigit():continue
-              try:
-                  matches=[]
-                  for field in ('cwd','exe'):
-                      try:
-                          if str(root) in os.readlink(p/field):matches.append(field)
-                      except OSError:pass
-                  if str(root).encode() in (p/'cmdline').read_bytes():matches.append('cmdline')
-                  for fd in (p/'fd').iterdir():
-                      if time.monotonic()>deadline:incomplete=True;break
-                      try:
-                          if str(root) in os.readlink(fd):matches.append('fd');break
-                      except OSError:pass
-                  if matches:refs.append({'pid':p.name,'refs':matches})
-              except (OSError,PermissionError):pass
-          units=[]
-          for base in ('/etc/systemd/system','/lib/systemd/system'):
-              for p in pathlib.Path(base).glob('*.service'):
-                  try:
-                      if p.stat().st_size<=1024**2 and str(root) in p.read_text(errors='replace'):units.append(p.name)
-                  except OSError:pass
-          print('LEGACY_REFERENCES='+json.dumps({'process_references':refs,'service_unit_references':sorted(set(units)),'scan_incomplete':incomplete}),flush=True)
-          '''
-              print(_exec(client,'python3 -c '+shlex.quote(code),timeout=40),flush=True)
-          finally:client.close()
+          from restore_verified_snapshot import _latest_manifest,ENDPOINT
+          from scripts import sqlite_history_partition as archive
+          from scripts.sqlite_history_catalog import validate_full_catalog,MAX_CATALOG_BYTES
+          client=boto3.client('s3',endpoint_url=ENDPOINT,region_name='ru-central1',
+              config=Config(connect_timeout=10,read_timeout=30,retries={'max_attempts':1}))
+          manifest_key,manifest=_latest_manifest(client,bucket=archive.BUCKET)
+          source_hash=manifest['database_sha256'];prefix=archive.PREFIX+source_hash+'/'
+          objects=[];token=None
+          for _ in range(3):
+              args=dict(Bucket=archive.BUCKET,Prefix=prefix,MaxKeys=1000)
+              if token:args['ContinuationToken']=token
+              response=client.list_objects_v2(**args);objects.extend(response.get('Contents',[]))
+              if not response.get('IsTruncated'):break
+              token=response['NextContinuationToken']
+          else:raise ValueError('Progress listing exceeds bounded pages')
+          catalog_reports=[]
+          for entry in objects:
+              key=entry['Key']
+              if '/catalogs/' not in key or not key.endswith('.json'):continue
+              if len(catalog_reports)>=8:raise ValueError('Too many source epoch catalogs')
+              with client.get_object(Bucket=archive.BUCKET,Key=key)['Body'] as body:raw=body.read(MAX_CATALOG_BYTES+1)
+              if len(raw)>MAX_CATALOG_BYTES or key.rsplit('/',1)[-1]!=hashlib.sha256(raw).hexdigest()+'.json':
+                  raise ValueError('Cloud catalog identity mismatch')
+              catalog=json.loads(raw);validate_full_catalog(catalog)
+              catalog_reports.append(dict(catalog_sha256=hashlib.sha256(raw).hexdigest(),
+                  row_counts=catalog['expected_table_counts'],partition_count=len(catalog['partitions'])))
+          chunks=[p for p in objects if p['Key'].endswith('.sqlite3.gz')]
+          print('CLOUD_HISTORY_PROGRESS='+json.dumps(dict(source_database_sha256=source_hash,
+              private_chunk_objects=len(chunks),compressed_chunk_bytes=sum(p['Size'] for p in chunks),
+              catalogs=catalog_reports,includes_previous_small_fixture=True,
+              full_hydration_verified=False,cloud_writes=False,production_connection=False)),flush=True)
           PY
