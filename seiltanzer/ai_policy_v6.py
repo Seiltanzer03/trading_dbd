@@ -265,6 +265,11 @@ def _input_audit(tick: dict, ridge: dict) -> dict:
     )
     rows = {
         "instrument_price": {
+            # Keep explicit rejection/provenance from the consumed quote. The
+            # materializer compares this frozen authority with the live feed;
+            # dropping False would turn an unchanged fallback into a new event.
+            **{key: price[key] for key in ("production_authority", "derived", "is_proxy")
+               if key in price},
             "available": price_available,
             "status": price.get("status"),
             "source": price.get("source"),
