@@ -182,6 +182,30 @@ def test_verifier_never_mints_token_for_mutation_during_capacity_scan(tmp_path,m
     assert not (tmp_path/'result.json').exists()
 
 
+@pytest.mark.parametrize('writer',['sqlite','raw'])
+def test_verifier_detects_changed_bytes_even_with_coarse_file_timestamps(tmp_path,monkeypatch,writer):
+    from test_restore_verified_snapshot import _live_fixture,Client
+    key,packed,manifest=_live_fixture(tmp_path);out=tmp_path/'verified.sqlite3'
+    original_identity=verifier._local_file_identity
+    def coarse_identity(path,**kwargs):
+        return {**original_identity(path,**kwargs),'mtime_ns':0,'ctime_ns':0}
+    def mutate(_connection):
+        if writer=='sqlite':
+            with sqlite3.connect(out) as connection:connection.execute("UPDATE evidence SET value='tampered'")
+        else:
+            raw=out.read_bytes();changed=raw.replace(b'verified',b'tampered',1)
+            assert changed!=raw and len(changed)==len(raw)
+            out.write_bytes(changed)
+        return {'status':'TEST_MUTATION_ONLY'}
+    monkeypatch.setattr(verifier,'_local_file_identity',coarse_identity)
+    monkeypatch.setattr(verifier,'collect_capacity',mutate)
+    with pytest.raises(RuntimeError,match='changed'):
+        verifier.restore(bucket=manifest['bucket'],key=key,destination=out,
+            result_path=tmp_path/'result.json',snapshot_drill=True,storage_report=True,
+            client=Client(key=key,archive=packed,manifest=manifest))
+    assert not (tmp_path/'result.json').exists()
+
+
 def test_restored_mtime_does_not_hide_source_mutation(tmp_path):
     import os
     source,proof=fixture(tmp_path);mod=archive_module();before=source.stat()

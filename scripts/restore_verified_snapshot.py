@@ -357,6 +357,22 @@ def restore(
     # without hashing the entire nineteen-gigabyte input once per chunk.
     if _local_file_identity(destination) != verified_local_file:
         raise RuntimeError('restored database changed during verification')
+    # Timestamps can share one filesystem clock tick even across a real write.
+    # A continuation token must bind to the bytes remaining AFTER verification,
+    # not merely the earlier download stream. One bounded off-host read here
+    # avoids rehashing the complete source separately for every history chunk.
+    final_digest, final_size = hashlib.sha256(), 0
+    with destination.open('rb') as verified_input:
+        if _local_file_identity(destination, info=os.fstat(verified_input.fileno())) != verified_local_file:
+            raise RuntimeError('restored database changed before final byte verification')
+        while chunk := verified_input.read(READ_SIZE):
+            final_size += len(chunk)
+            if final_size > database_size:
+                raise RuntimeError('restored database changed size during final byte verification')
+            final_digest.update(chunk)
+    if (final_size != database_size or final_digest.hexdigest() != database_sha
+            or _local_file_identity(destination) != verified_local_file):
+        raise RuntimeError('restored database changed during final byte verification')
     result['verified_local_file'] = verified_local_file
     result_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     return result

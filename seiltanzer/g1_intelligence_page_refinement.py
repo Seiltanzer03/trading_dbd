@@ -37,7 +37,10 @@ _TWO_SPEED_SCRIPT = r'''
  }
  function renderLocal(s,e){
    const host=document.querySelector('#g1m-local'); if(!host)return; const rows=(e.items||[]).map(x=>`H${x.horizon_minutes}: resolved ${fmt(x.raw_n)} · trades ${fmt(x.unique_trades)} · mean ΔR vs HOLD ${x.mean_mva_vs_hold_r==null?'—':Number(x.mean_mva_vs_hold_r).toFixed(3)}`).join(' &nbsp; | &nbsp; ');
-   host.innerHTML=`Windows <b>${fmt(s.windows)}</b> · resolved <b>${fmt(s.resolved)}</b> · evidence-eligible resolved <b>${fmt(s.eligible_resolved)}</b>.<br>${rows||'Первые live G.1-M.1 windows ещё созревают.'}<br><span class="small">LOCAL_DECISION_QUALITY не заменяет terminal management edge.</span>`;
+   const m=e.report_materialization;
+   const notice=!m?'':m.cached_snapshot!==true?'Отчёт ещё не построен; статистика не подставляется.':`${m.last_error_class?'Обновление завершилось ошибкой; показан предыдущий снимок.':m.cache_dirty||m.presentation_state==='BUILDING'?'Отчёт обновляется; показан предыдущий снимок.':'Готовый фоновый отчёт.'} Возраст снимка: ${fmt(m.snapshot_age_sec)} сек.`;
+   const empty=m&&m.cached_snapshot!==true?'': 'Первые live G.1-M.1 windows ещё созревают.';
+   host.innerHTML=`Windows <b>${fmt(s.windows)}</b> · resolved <b>${fmt(s.resolved)}</b> · evidence-eligible resolved <b>${fmt(s.eligible_resolved)}</b>.<br>${notice}<br>${rows||empty}<br><span class="small">LOCAL_DECISION_QUALITY не заменяет terminal management edge.</span>`;
  }
  async function refreshTwoSpeed(){
    try{const [s,q,ls,le]=await Promise.all([get('/api/research/g1s/status'),get('/api/research/g1/q/audit?limit=2000'),get('/api/research/g1/management/local-status'),get('/api/research/g1/management/local-edge')]);renderFast(s);renderQ(q);renderLocal(ls,le)}catch(e){for(const id of ['#g1s-summary','#q-maturity','#g1m-local']){const n=document.querySelector(id);if(n)n.textContent='Research API unavailable: '+e.message}}
