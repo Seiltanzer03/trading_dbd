@@ -251,6 +251,7 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
             "acceptance_gate_active", "acceptance_pause_active",
             "acceptance_gate_reason", "acceptance_gate_run_id",
             "acceptance_gate_expected_sha", "acceptance_gate_expires_at",
+            "disk_pressure", "disk_pause_active",
             "evidence_reports_request_time_scan",
             "historical_walkforward_runs_on_research_worker",
             "historical_walkforward_request_time_network_fetch",
