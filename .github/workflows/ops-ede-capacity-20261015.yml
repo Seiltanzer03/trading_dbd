@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  exact-startup-state-readonly:
+  startup-owner-trace-readonly:
     runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --quiet paramiko
-      - name: Observe exact startup and quote authority without generation or restart
+      - name: Read existing startup phase markers and watchdog frames without attaching a profiler
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
@@ -25,7 +25,13 @@ jobs:
           import os,sys,shlex,ast
           sys.path.insert(0,'scripts')
           from production_ede_offload import _connect,_exec
-          code="import json,shutil,subprocess,time,urllib.request\nsha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()\nallowed={'9bf0e5dfd7e32406a3c5f3aeeca3a3e8836e65f0','011b363d6cf985b0a00a35964d74a81331558bb4','4a62a1c03519f7611121148eb542d4443b9c3ba1'}\nif sha not in allowed:raise ValueError('Unreviewed production SHA')\nservice=subprocess.check_output(['systemctl','show','seiltanzer','--property=ActiveState,SubState,ExecMainStatus,NRestarts,MainPID,MemoryCurrent'],text=True,timeout=3)\nprint('STARTUP_SERVICE='+json.dumps({'code_sha':sha,'properties':dict(line.split('=',1) for line in service.splitlines() if '=' in line),'free_bytes':shutil.disk_usage('/opt/seiltanzer').free}),flush=True)\nfor label,path in [('state','/api/state'),('ai','/api/ai/snapshot/status'),('worker','/api/research/runtime/worker-status')]:\n    start=time.monotonic()\n    try:\n        with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=3) as response:\n            raw=response.read(1048577)\n        if len(raw)>1048576:raise ValueError('Status exceeds bound')\n        value=json.loads(raw)\n        if label=='ai':\n            data={k:value.get(k) for k in ('ready','building','build_n','build_ms','build_started_at','invalidated_reason','canonical_quote_available')}\n            data['error_type']=str(value.get('last_error') or '').split(':')[0] or None\n        elif label=='worker':\n            value=value.get('worker') or {}\n            data={k:value.get(k) for k in ('current_phase','disk_pause_active','memory_pause_active','first_core_completed_ts','last_core_completed_ts')}\n        else:\n            feeds=value.get('feeds') or (value.get('tick') or {}).get('feeds') or {}\n            quote=feeds.get('price') or {}\n            data={'quote':{k:quote.get(k) for k in ('source','status','fresh','production_authority','derived','is_proxy')}}\n        print('STARTUP_HTTP='+json.dumps({'route':label,'available':True,'elapsed_ms':round((time.monotonic()-start)*1000,1),'data':data}),flush=True)\n    except Exception as exc:\n        print('STARTUP_HTTP='+json.dumps({'route':label,'available':False,'elapsed_ms':round((time.monotonic()-start)*1000,1),'error_type':type(exc).__name__}),flush=True)\nprint('READONLY_SCOPE='+json.dumps({'provider_calls':0,'llm_requests':0,'database_reads':0,'database_mutations':0,'service_mutations':0}),flush=True)"
+          code="import json,re,subprocess,pathlib\nsha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()\nif sha not in {'011b363d6cf985b0a00a35964d74a81331558bb4','4a62a1c03519f7611121148eb542d4443b9c3ba1'}:raise ValueError('Unexpected source generation')\npid=subprocess.check_output(['systemctl','show','seiltanzer','--property=MainPID','--value'],text=True,timeout=3).strip()\nif not pid.isdigit() or int(pid)<=1:raise ValueError('No active application PID')\nargs=['journalctl','--no-pager','-o','cat','--since=-25min','-n','600','_SYSTEMD_UNIT=seiltanzer.service','_PID='+pid]\nprocess=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)\ntry:\n    raw=process.stdout.read(2097153)\n    if len(raw)>2097152:raise ValueError('Startup journal exceeds bound')\n    process.wait(timeout=3)\nfinally:\n    if process.poll() is None:process.kill();process.wait(timeout=3)\nlines=raw.decode('utf8','replace').splitlines()\nselected=[line for line in lines if line.startswith('STARTUP_PHASE phase=') or re.match(r'^\\s*File \"[^\"\\r\\n]+\", line [0-9]+ in [A-Za-z0-9_<>.]+          ast.parse(code)
+          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
+          try:
+              _exec(client,'python3 -c '+shlex.quote(code),timeout=25)
+          finally:client.close()
+          PY
+,line) or line.startswith('Timeout (') or re.match(r'^Thread 0x[0-9a-f]+',line)]\nprint('STARTUP_TRACE_CONTEXT='+json.dumps({'code_sha':sha,'pid':pid,'frame_and_phase_lines':len(selected),'no_local_variables':True,'database_reads':0,'service_mutations':0}),flush=True)\nfor line in selected[-160:]:print(line,flush=True)\nprint('STARTUP_WCHAN='+json.dumps({'wait_channel':pathlib.Path('/proc/'+pid+'/wchan').read_text().strip()}),flush=True)"
           ast.parse(code)
           client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
           try:
