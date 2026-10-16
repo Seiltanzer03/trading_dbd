@@ -6,9 +6,9 @@ on:
 permissions:
   contents: read
 jobs:
-  current-capacity-readonly:
+  runner-and-runtime-readonly:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --quiet paramiko
-      - name: Read bounded capacity metadata and current API status
+      - name: Verify runner identity and actual AI readiness without generation
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
@@ -29,64 +29,23 @@ jobs:
           try:
               _verify_sha(client,'55fe3f784604ce8007e98e074a73ff33fc672466')
               code="""
-          import os,pathlib,time,json,subprocess,stat,urllib.request
-          root=pathlib.Path('/opt/seiltanzer')
-          v=os.statvfs(root)
-          print('CAPACITY='+json.dumps({'free_bytes':v.f_bavail*v.f_frsize,'required_bytes':1024**3}),flush=True)
-          for base in (root,pathlib.Path('/opt/actions-runner'),pathlib.Path('/root/wheels')):
-              if not base.is_dir() or base.is_symlink():continue
-              for child in sorted(base.iterdir()):
-                  if child.is_symlink():continue
-                  if base==root and child.name in ('data','.venv','.git'):continue
-                  if child.is_dir():
-                      try:
-                          result=subprocess.run(['du','-sx','-B1',str(child)],text=True,capture_output=True,timeout=5)
-                          size=int(result.stdout.split()[0]) if result.returncode==0 else None
-                      except (subprocess.TimeoutExpired,ValueError,IndexError):size=None
-                  elif child.is_file():size=child.stat().st_blocks*512
-                  else:continue
-                  if size is None or size>1024**2:print('ROOT_CHILD='+json.dumps({'path':str(child),'allocated':size}),flush=True)
-          for directory in ('data/research','data/backups','data','venv','.venv','.git'):
-              base=root/directory
-              if not base.is_dir() or base.is_symlink():continue
-              started=time.monotonic(); entries=[]; total=0; limited=False; seen=0
-              for current,dirs,files in os.walk(base,followlinks=False):
-                  dirs[:]=[d for d in dirs if not pathlib.Path(current,d).is_symlink()]
-                  for name in files:
-                      seen+=1
-                      if seen>12000 or time.monotonic()-started>6:limited=True;break
-                      path=pathlib.Path(current,name)
-                      try:s=path.lstat()
-                      except OSError:continue
-                      if not stat.S_ISREG(s.st_mode):continue
-                      allocated=s.st_blocks*512;total+=allocated
-                      entries.append({'path':str(path),'bytes':s.st_size,'allocated':allocated,'mtime':int(s.st_mtime),'links':s.st_nlink})
-                  if limited:break
-              print('FILES='+json.dumps({'root':str(base),'allocated_seen':total,'limited':limited,'largest':sorted(entries,key=lambda e:e['allocated'],reverse=True)[:12]}),flush=True)
-          for directory in ('/var/log','/root/.cache','/tmp','/opt/actions-runner/_diag'):
-              base=pathlib.Path(directory);entries=[];start=time.monotonic();seen=0
-              if not base.is_dir() or base.is_symlink():continue
-              for current,dirs,files in os.walk(base,followlinks=False):
-                  dirs[:]=[d for d in dirs if not pathlib.Path(current,d).is_symlink()]
-                  for name in files:
-                      seen+=1
-                      if seen>6000 or time.monotonic()-start>4:break
-                      p=pathlib.Path(current,name)
-                      try:s=p.lstat()
-                      except OSError:continue
-                      if stat.S_ISREG(s.st_mode):entries.append({'path':str(p),'bytes':s.st_size,'allocated':s.st_blocks*512})
-                  if seen>6000 or time.monotonic()-start>4:break
-              print('SYSTEM_FILES='+json.dumps({'root':directory,'largest':sorted(entries,key=lambda e:e['allocated'],reverse=True)[:10]}),flush=True)
-          print(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','NRestarts','-p','MemoryCurrent','-p','MemoryPeak'],text=True,timeout=5),flush=True)
-          for route in ('/api/state','/api/research/runtime/worker-status','/api/ai/snapshot/status'):
-              started=time.monotonic()
-              with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=5) as response:
-                  raw=response.read(2000001);body=json.loads(raw) if len(raw)<=2000000 else {}
-                  worker=body.get('worker') or {}
-                  summary={k:worker.get(k) for k in ('current_phase','core_stage','last_error','acceptance_pause_active','acceptance_gate_run_id')}
-                  if route.endswith('/snapshot/status'):summary={k:body.get(k) for k in ('ready','status','running','last_error','reason','has_active_trade')}
-                  print('API='+json.dumps({'route':route,'http':response.status,'ms':round((time.monotonic()-started)*1000,1),'status':summary}),flush=True)
+          import pathlib,json,subprocess,time,urllib.request,os
+          for name in ('bin','externals'):
+              p=pathlib.Path('/opt/actions-runner')/name
+              print('RUNNER_LINK='+json.dumps({'path':str(p),'symlink':p.is_symlink(),'target':str(p.resolve()),'exists':p.exists()}),flush=True)
+          print(subprocess.check_output(['ps','-eo','pid,comm,rss','--sort=-rss'],text=True,timeout=5).splitlines()[:8],flush=True)
+          memory={k:v.strip() for k,v in (line.split(':',1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines()) if k in ('MemAvailable','MemTotal','SwapFree','SwapTotal')}
+          print('MEMORY='+json.dumps(memory),flush=True)
+          for p in pathlib.Path('/proc').iterdir():
+              if not p.name.isdigit():continue
+              try:exe=os.readlink(p/'exe')
+              except OSError:continue
+              if exe.startswith('/opt/actions-runner/'):
+                  print('RUNNER_PROCESS='+json.dumps({'pid':p.name,'exe':exe}),flush=True)
+          with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=5) as response:
+              body=json.loads(response.read(1000000))
+              print('AI_STATUS='+json.dumps({'http':response.status,'ready':body.get('ready'),'building':body.get('building'),'active_trade_present':body.get('current_trade_id') is not None,'snapshot_present':body.get('snapshot_trade_id') is not None,'invalidated_reason':body.get('invalidated_reason'),'build_n':body.get('build_n'),'error_present':body.get('last_error') is not None}),flush=True)
           """
-              print(_exec(client,'python3 -c '+shlex.quote(code),timeout=75),flush=True)
+              print(_exec(client,'python3 -c '+shlex.quote(code),timeout=25),flush=True)
           finally:client.close()
           PY
