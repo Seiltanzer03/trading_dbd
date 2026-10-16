@@ -70,3 +70,18 @@ historical readers/writers and physical rowid-preserving cutover/rollback remain
 unproven. No source row deletion or disk-space recovery is claimed. EDE is not
 restarted before actual source/WAL reserve returns. Current observed family
 forecasts/LLM contribution cannot be inferred from these infrastructure tests.
+
+## Post-merge CI harness correction
+
+PR479 merged as1a16ca4 after green exact-candidate4201tests/WebKit/SQLite. Its
+automatic mainCI38941262963 subsequently failed one UI case because spawning
+Node from Python exceeded the test's5s process-startup watchdog.4200other Python
+tests passed; the byte-mutation defect did not recur. Deployment remained gated.
+
+The four unchanged renderer-state cases move to the existing Node/browser lane
+as `tests/web/g1m_local_edge_cache_smoke.mjs`, with VM execution deadlines and
+the same assertions (plus an explicit missing-cohort label check). They are not
+skipped or deleted; Python no longer starts four external Node processes merely
+to test embedded JavaScript. Product code, full CI requirement, real WebKit,
+pinnedSQLite and production3000ms/AI12000ms limits remain unchanged. A Node
+startup watchdog was never a measurement of real HTTP or renderer latency.
