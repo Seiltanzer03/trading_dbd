@@ -203,7 +203,14 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
         "/api/research/g1/management/local-outcomes",
         lambda limit=200: local.outcomes(limit=int(limit)),
         methods=["GET"], name="g1m_local_outcomes")
-    app.add_api_route("/api/research/g1/management/local-edge", local.edge,
+    async def local_edge():
+        renderer = getattr(local, 'materialized_edge_json', None)
+        if not callable(renderer):
+            return local.edge()  # Compatibility for reduced/non-production runtimes.
+        return Response(content=renderer(), media_type='application/json',
+                        headers={'Cache-Control':'no-store'})
+
+    app.add_api_route("/api/research/g1/management/local-edge", local_edge,
                       methods=["GET"], name="g1m_local_edge")
     app.add_api_route("/api/research/g1/management/local-status", local.status,
                       methods=["GET"], name="g1m_local_status")

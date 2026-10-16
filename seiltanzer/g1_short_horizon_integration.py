@@ -13,6 +13,7 @@ from .g1_management_local_diagnostics import install_g1_management_local_diagnos
 from .g1_management_status_nonblocking import (
     install_g1_management_local_status_nonblocking,
 )
+from .g1_management_local_edge_nonblocking import install_local_edge_nonblocking
 from . import storage_runtime as _storage
 
 
@@ -53,6 +54,7 @@ def install_g1_short_horizon_integration() -> None:
         self.short_horizon = ShortHorizonRuntime(self)
         self.management_local = ManagementLocalRuntime(self)
         install_g1_management_local_status_nonblocking(self.management_local)
+        install_local_edge_nonblocking(self.management_local)
         self.passive._g1s_runtime = self.short_horizon
         self.passive._g1m_local_runtime = self.management_local
 
