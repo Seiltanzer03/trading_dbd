@@ -6,9 +6,9 @@ on:
 permissions:
   contents: read
 jobs:
-  yandex-immutable-capacity:
+  runner-and-runtime-readonly:
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
         with:
@@ -16,58 +16,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --quiet boto3
-      - name: Measure existing verified Yandex snapshot off-host without VPS access
+      - run: python -m pip install --quiet paramiko
+      - name: Read deployment startup state without API or database access
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ru-central1
-          AWS_EC2_METADATA_DISABLED: 'true'
-          TASK_DIRECTORY: ${{ runner.temp }}/yandex-capacity-20261016
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
-          python - <<'PY'
-          import json,os,shutil,sys
-          from pathlib import Path
-          import boto3
-          from botocore.config import Config
+          python - <<'PYREMOTE'
+          import os,sys,shlex
           sys.path.insert(0,'scripts')
-          from restore_verified_snapshot import _latest_manifest,restore,ENDPOINT
-          directory=Path(os.environ['TASK_DIRECTORY']);directory.mkdir(exist_ok=False)
-          client=boto3.client('s3',endpoint_url=ENDPOINT,region_name='ru-central1',
-              config=Config(connect_timeout=10,read_timeout=120,retries={'max_attempts':3}))
-          bucket='trading-dbd-backups-2026'
-          manifest_key,manifest=_latest_manifest(client,bucket=bucket)
-          size=int(manifest.get('database_size_bytes') or 0)
-          available=shutil.disk_usage(directory).free
-          if not 0<size<=25*1024**3 or available<2*size+1024**3:
-              raise RuntimeError('Disposable worker lacks conservative restore capacity')
-          print('CAPACITY_RESTORE_PREFLIGHT='+json.dumps({'database_bytes':size,
-              'worker_free_bytes':available,'manifest_key':manifest_key,
-              'new_question':'per-table allocation for dependency-closed hot/cold design',
-              'production_connection':False}),flush=True)
-          result=restore(bucket=bucket,key=manifest['object_key'],
-              destination=directory/'snapshot.sqlite3',result_path=directory/'result.json',
-              snapshot_drill=True,storage_report=True)
-          print('OFFHOST_CAPACITY_REPORT='+json.dumps(result['capacity_report'],sort_keys=True),flush=True)
-          print('OFFHOST_CAPACITY_IDENTITY='+json.dumps({k:result.get(k) for k in
-              ('database_sha256','database_size_bytes','object_key','immutable_sqlite_read',
-               'snapshot_restore_verified','production_authority')},sort_keys=True),flush=True)
-          PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: yandex-capacity-20261016-${{ github.run_id }}
-          path: ${{ runner.temp }}/yandex-capacity-20261016/result.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: Remove only this disposable worker database
-        if: always()
-        env:
-          TASK_DIRECTORY: ${{ runner.temp }}/yandex-capacity-20261016
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          directory=Path(os.environ['TASK_DIRECTORY'])
-          for name in ('snapshot.sqlite3','snapshot.sqlite3-wal','snapshot.sqlite3-shm'):
-              (directory/name).unlink(missing_ok=True)
-          PY
+          from production_ede_offload import _connect,_exec
+          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
+          try:
+              code="""
+          import pathlib,json,subprocess
+          print('INSTALLED_SHA='+subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=5).strip(),flush=True)
+          print(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','ActiveEnterTimestamp'],text=True,timeout=5),flush=True)
+          memory={k:v.strip() for k,v in (line.split(':',1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines()) if k in ('MemAvailable','MemTotal','SwapFree','SwapTotal')}
+          print('MEMORY='+json.dumps(memory),flush=True)
+          print(subprocess.check_output(['ps','-eo','pid,comm,rss,etime','--sort=-rss'],text=True,timeout=5).splitlines()[:6],flush=True)
+          print(subprocess.check_output(['journalctl','-u','seiltanzer','--since','-20 minutes','--no-pager','-n','35'],text=True,timeout=5),flush=True)
+          """
+              print(_exec(client,'python3 -c '+shlex.quote(code),timeout=25),flush=True)
+          finally:client.close()
+          PYREMOTE
