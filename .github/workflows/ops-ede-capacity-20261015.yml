@@ -6,92 +6,106 @@ on:
 permissions:
   contents: read
 jobs:
-  yandex-immutable-capacity:
+  yandex-private-partition-drill:
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 46d6da8ee3507df2c04bece5713c6780988f0c14
+          ref: 9e78fbb74845483c25cf1dbbc60e386b27f575d1
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - run: python -m pip install --quiet boto3
-      - name: Measure existing verified Yandex snapshot off-host without VPS access
+      - name: Real private Yandex row partition full GET and typed restore without VPS access
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ru-central1
           AWS_EC2_METADATA_DISABLED: 'true'
-          TASK_DIRECTORY: ${{ runner.temp }}/yandex-capacity-stream-20261016
+          TASK_DIRECTORY: ${{ runner.temp }}/yandex-history-partition-20261016
         run: |
           python - <<'PY'
-          import json,os,shutil,sys
+          import json,os,shutil,sqlite3,sys,time
           from pathlib import Path
           import boto3
           from botocore.config import Config
           sys.path.insert(0,'scripts')
           from restore_verified_snapshot import _latest_manifest,restore,ENDPOINT
-          directory=Path(os.environ['TASK_DIRECTORY']);directory.mkdir(exist_ok=False)
+          from managed_verified_seed import ManagedRestoreClient
+          from sqlite_history_partition import export_partition,upload_partition,restore_from_cloud
+          directory=Path(os.environ['TASK_DIRECTORY']);directory.mkdir(mode=0o700,exist_ok=False)
           client=boto3.client('s3',endpoint_url=ENDPOINT,region_name='ru-central1',
               config=Config(connect_timeout=10,read_timeout=120,retries={'max_attempts':3}))
           bucket='trading-dbd-backups-2026'
           manifest_key,manifest=_latest_manifest(client,bucket=bucket)
           size=int(manifest.get('database_size_bytes') or 0)
-          available=shutil.disk_usage(directory).free
-          if not 0<size<=25*1024**3 or available<2*size+1024**3:
+          if not 0<size<=25*1024**3 or shutil.disk_usage(directory).free<2*size+1024**3:
               raise RuntimeError('Disposable worker lacks conservative restore capacity')
-          print('CAPACITY_RESTORE_PREFLIGHT='+json.dumps({'database_bytes':size,
-              'worker_free_bytes':available,'manifest_key':manifest_key,
-              'new_question':'per-table allocation for dependency-closed hot/cold design',
-              'production_connection':False}),flush=True)
-          result=restore(bucket=bucket,key=manifest['object_key'],
-              destination=directory/'snapshot.sqlite3',result_path=directory/'result.json',
-              snapshot_drill=True,storage_report=True)
-          print('OFFHOST_CAPACITY_REPORT='+json.dumps(result['capacity_report'],sort_keys=True),flush=True)
-          print('OFFHOST_CAPACITY_IDENTITY='+json.dumps({k:result.get(k) for k in
-              ('database_sha256','database_size_bytes','object_key','immutable_sqlite_read',
-               'snapshot_restore_verified','production_authority')},sort_keys=True),flush=True)
-          import sqlite3,time
-          conn=sqlite3.connect((directory/'snapshot.sqlite3').resolve().as_uri()+'?mode=ro&immutable=1',uri=True)
-          schema={name:dict(sql=sql,columns=[r[1] for r in conn.execute('PRAGMA table_info("'+name.replace('"','""')+'")')]) for name,sql in conn.execute("SELECT name,sql FROM sqlite_schema WHERE type='table' LIMIT 4096")}
-          (directory/'schema.json').write_text(json.dumps(schema,sort_keys=True))
-          summaries={}
+          print('PRIVATE_PARTITION_PREFLIGHT='+json.dumps({'database_bytes':size,
+              'manifest_key':manifest_key,'production_connection':False,
+              'new_question':'exact typed row archival/full cloud restore and terminal-parent closure',
+              'actual_payloads_in_github_artifact':False}),flush=True)
+          source=directory/'snapshot.sqlite3'
+          result=restore(bucket=bucket,key=manifest['object_key'],destination=source,
+              result_path=directory/'private-source-receipt.json',snapshot_drill=True,
+              client=ManagedRestoreClient(client,temp_dir=directory))
+          conn=sqlite3.connect(source.resolve().as_uri()+'?mode=ro&immutable=1',uri=True)
+          reports=[]
+          for table in ('passive_market_observations','g1s_observations'):
+              where=" WHERE resolution_status='insufficient_future_data'" if table=='passive_market_observations' else ''
+              selected=[r[0] for r in conn.execute('SELECT rowid FROM '+table+where+' ORDER BY rowid LIMIT 32')]
+              if not selected:raise RuntimeError('No actual rows for partition drill: '+table)
+              partition=directory/(table+'.partition.sqlite3')
+              receipt=export_partition(source,partition,table=table,rowids=selected,source_receipt=result)
+              cloud=upload_partition(client,partition,receipt=receipt)
+              verified=restore_from_cloud(client,cloud,directory/(table+'.restored.sqlite3'))
+              proof={'table':table,'row_count':receipt['row_count'],
+                  'partition_size_bytes':receipt['partition_size_bytes'],
+                  'partition_sha256':receipt['partition_sha256'],
+                  'logical_sha256':receipt['logical_sha256'],'object_key':cloud['object_key'],
+                  'compressed_size_bytes':cloud['compressed_size_bytes'],
+                  'verified_full_get':cloud['verified_full_get'],**verified,
+                  'dependency_closure_verified':False,'data_retirement_authorized':False}
+              reports.append(proof)
+              print('PRIVATE_PARTITION_VERIFIED='+json.dumps(proof,sort_keys=True),flush=True)
           deadline=time.monotonic()+120
           conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-          for row in result['capacity_report']['largest_objects']:
-              if row['object_type']!='table' or row['name'] not in schema:continue
-              name=row['name'];quoted='"'+name.replace('"','""')+'"';columns=schema[name]['columns']
-              try:
-                  summary={'count':conn.execute('SELECT COUNT(*) FROM '+quoted).fetchone()[0]}
-                  if 'resolution_status' in columns:
-                      summary['resolution_counts']=dict(conn.execute('SELECT resolution_status,COUNT(*) FROM '+quoted+' GROUP BY resolution_status'))
-                  summaries[name]=summary
-                  if len(summaries)>=12:break
-              except sqlite3.OperationalError as exc:
-                  summaries[name]={'unavailable':str(exc)};break
-          conn.set_progress_handler(None,0);conn.close()
-          (directory/'cohorts.json').write_text(json.dumps(summaries,sort_keys=True))
-          print('OFFHOST_COHORT_SUMMARY='+json.dumps(summaries,sort_keys=True),flush=True)
+          lifecycle={}
+          try:
+              lifecycle['pending_virtuals_with_terminal_failed_parent']=conn.execute("SELECT COUNT(*) FROM virtual_position_observations v JOIN passive_market_observations p ON p.observation_id=v.passive_observation_id WHERE v.resolution_status='pending' AND v.outcome_json IS NULL AND p.resolution_status NOT IN ('pending','resolved')").fetchone()[0]
+              lifecycle['pending_virtuals_with_resolved_parent']=conn.execute("SELECT COUNT(*) FROM virtual_position_observations v JOIN passive_market_observations p ON p.observation_id=v.passive_observation_id WHERE v.resolution_status='pending' AND p.resolution_status='resolved'").fetchone()[0]
+          except sqlite3.OperationalError as exc:
+              lifecycle['unavailable']=str(exc)
+          finally:
+              conn.set_progress_handler(None,0);conn.close()
+          public={'run_id':int(os.environ['GITHUB_RUN_ID']),
+              'source_database_sha256':result['database_sha256'],
+              'source_database_size_bytes':result['database_size_bytes'],
+              'partitions':reports,'lifecycle':lifecycle,'production_authority':False,
+              'data_retirement_authorized':False,'actual_payloads_in_github_artifact':False}
+          (directory/'public-proof.json').write_text(json.dumps(public,sort_keys=True,indent=2)+'\n')
+          print('SOURCE_LIFECYCLE_COUNTS='+json.dumps(lifecycle,sort_keys=True),flush=True)
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: yandex-capacity-stream-20261016-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/yandex-capacity-stream-20261016/result.json
-            ${{ runner.temp }}/yandex-capacity-stream-20261016/schema.json
-            ${{ runner.temp }}/yandex-capacity-stream-20261016/cohorts.json
+          name: yandex-private-partition-proof-${{ github.run_id }}
+          path: ${{ runner.temp }}/yandex-history-partition-20261016/public-proof.json
           if-no-files-found: error
           retention-days: 30
-      - name: Remove only this disposable worker database
+      - name: Remove only this worker's disposable databases and private receipt
         if: always()
         env:
-          TASK_DIRECTORY: ${{ runner.temp }}/yandex-capacity-stream-20261016
+          TASK_DIRECTORY: ${{ runner.temp }}/yandex-history-partition-20261016
         run: |
           python - <<'PY'
           import os
           from pathlib import Path
           directory=Path(os.environ['TASK_DIRECTORY'])
-          for name in ('snapshot.sqlite3','snapshot.sqlite3-wal','snapshot.sqlite3-shm'):
-              (directory/name).unlink(missing_ok=True)
+          names=['snapshot.sqlite3','private-source-receipt.json']
+          for table in ('passive_market_observations','g1s_observations'):
+              names.extend([table+'.partition.sqlite3',table+'.restored.sqlite3'])
+          for name in names:
+              for suffix in ('','-wal','-shm','-journal'):
+                  (directory/(name+suffix)).unlink(missing_ok=True)
           PY
