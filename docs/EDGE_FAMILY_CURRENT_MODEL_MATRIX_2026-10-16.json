@@ -1,0 +1,1194 @@
+{
+  "accepted_sha": "11e4a09bc39aa5c23d90c6d6b6f53e95c96f6a94",
+  "artifact_id": 12031659001,
+  "production_authority": false,
+  "rows": [
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "BTCUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "BTCUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "BTCUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "BTCUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "BTCUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "BTCUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "BTCUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "BTCUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "ETHUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "ETHUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "ETHUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "ETHUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "ETHUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "ETHUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "ETHUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "ETHUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "EURUSD",
+      "model_sha256": null,
+      "reason": "NO_HEAD_WITH_CAUSAL_VALIDATION",
+      "status": "HEAD_TRAINING_UNAVAILABLE",
+      "training_n": 6377,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "EURUSD",
+      "model_sha256": null,
+      "reason": "CAPTURED_EVENT_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "EURUSD",
+      "model_sha256": null,
+      "reason": "CAPTURED_ORDER_FLOW_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "EURUSD",
+      "model_sha256": "03af3ef5d4b51342462a11866a403cb0a1833b46c8102a78d24df556a60b6957",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 4165,
+      "working_supported_heads": [
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "EURUSD",
+      "model_sha256": null,
+      "reason": "CAPTURED_POSITIONING_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "EURUSD",
+      "model_sha256": null,
+      "reason": "CAPTURED_VALUE_CARRY_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "EURUSD",
+      "model_sha256": "7f8d569178264e6a4bd31ea8c9af68462c6c9518e028da5860ca348f6ab0c077",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 226,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "EURUSD",
+      "model_sha256": "bd41b67a9ae39f2b28293c1550a21a1fdde577d6e98bffca507646c09274961c",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 6651,
+      "working_supported_heads": [
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "GER40",
+      "model_sha256": null,
+      "reason": "NO_HEAD_WITH_CAUSAL_VALIDATION",
+      "status": "HEAD_TRAINING_UNAVAILABLE",
+      "training_n": 1848,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "GER40",
+      "model_sha256": null,
+      "reason": "CAPTURED_EVENT_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "GER40",
+      "model_sha256": null,
+      "reason": "CAPTURED_ORDER_FLOW_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "GER40",
+      "model_sha256": "f3f824a257b7a72cf782dcf4449893a3e160e2ea37b87b3e4aca7012d3702314",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 1450,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "GER40",
+      "model_sha256": null,
+      "reason": "CAPTURED_POSITIONING_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "GER40",
+      "model_sha256": null,
+      "reason": "CAPTURED_VALUE_CARRY_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "GER40",
+      "model_sha256": null,
+      "reason": "INSUFFICIENT_NONOVERLAPPING_FAMILY_OBSERVATIONS",
+      "status": "INSUFFICIENT_HISTORY",
+      "training_n": 99,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "GER40",
+      "model_sha256": "ff90da01b09bc61396c02c2c985dd0ec72fee2d89aae412a52cae8be7c457265",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 1948,
+      "working_supported_heads": [
+        "direction",
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "JPY100",
+      "model_sha256": null,
+      "reason": "NO_HEAD_WITH_CAUSAL_VALIDATION",
+      "status": "HEAD_TRAINING_UNAVAILABLE",
+      "training_n": 1189,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "JPY100",
+      "model_sha256": null,
+      "reason": "CAPTURED_EVENT_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "JPY100",
+      "model_sha256": null,
+      "reason": "CAPTURED_ORDER_FLOW_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "JPY100",
+      "model_sha256": "b14725787932b9899f064be0117ad0185fddc8bcae53cf49b5be6b7fb0f7b912",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 839,
+      "working_supported_heads": [
+        "direction"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "JPY100",
+      "model_sha256": null,
+      "reason": "CAPTURED_POSITIONING_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "JPY100",
+      "model_sha256": null,
+      "reason": "CAPTURED_VALUE_CARRY_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "JPY100",
+      "model_sha256": null,
+      "reason": "CAPTURED_OPTION_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "JPY100",
+      "model_sha256": "6d9b08397e85f363b68a2f07aba5bcbdd742f80ee105bc641a8e7ecc994f1455",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 1253,
+      "working_supported_heads": [
+        "direction"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "NAS100",
+      "model_sha256": null,
+      "reason": "NO_HEAD_WITH_CAUSAL_VALIDATION",
+      "status": "HEAD_TRAINING_UNAVAILABLE",
+      "training_n": 2007,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "NAS100",
+      "model_sha256": null,
+      "reason": "CAPTURED_EVENT_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "NAS100",
+      "model_sha256": null,
+      "reason": "CAPTURED_ORDER_FLOW_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "NAS100",
+      "model_sha256": "1371f1dc9df8472dd0724257e2c9c2e6460c875e57ac77cebedc28e4c2d0d282",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 1075,
+      "working_supported_heads": [
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "NAS100",
+      "model_sha256": null,
+      "reason": "CAPTURED_POSITIONING_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "NAS100",
+      "model_sha256": null,
+      "reason": "CAPTURED_VALUE_CARRY_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "NAS100",
+      "model_sha256": "728868bf52ab0aef475567708289b876526a61069e82f0880d3d65bb283628f9",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 228,
+      "working_supported_heads": [
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "NAS100",
+      "model_sha256": "f42a01bf7f242911fa429997ab945ff078936631c52a929d6b8d6b7bdb86f8ec",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 2075,
+      "working_supported_heads": [
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "SOLUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "SOLUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "SOLUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "SOLUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "SOLUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "SOLUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "SOLUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "SOLUSD",
+      "model_sha256": null,
+      "reason": "TARGET_CONFIGURED_SERIES_MISMATCH",
+      "status": "SOURCE_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "SP500",
+      "model_sha256": null,
+      "reason": "NO_HEAD_WITH_CAUSAL_VALIDATION",
+      "status": "HEAD_TRAINING_UNAVAILABLE",
+      "training_n": 2006,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "SP500",
+      "model_sha256": null,
+      "reason": "CAPTURED_EVENT_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "SP500",
+      "model_sha256": null,
+      "reason": "CAPTURED_ORDER_FLOW_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "SP500",
+      "model_sha256": "202c7082b31ff849dbc9f5a3e9973128455b15473e2ea9b22aa1b9ffdb7c1779",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 1075,
+      "working_supported_heads": [
+        "direction",
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "SP500",
+      "model_sha256": null,
+      "reason": "CAPTURED_POSITIONING_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "SP500",
+      "model_sha256": null,
+      "reason": "CAPTURED_VALUE_CARRY_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "SP500",
+      "model_sha256": null,
+      "reason": "INSUFFICIENT_NONOVERLAPPING_FAMILY_OBSERVATIONS",
+      "status": "INSUFFICIENT_HISTORY",
+      "training_n": 104,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "SP500",
+      "model_sha256": "77e96df2debf755c5558ac6a33720e585f1aae93c46e767ec16810726e6a21c6",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 2074,
+      "working_supported_heads": [
+        "direction",
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "UK100",
+      "model_sha256": null,
+      "reason": "NO_HEAD_WITH_CAUSAL_VALIDATION",
+      "status": "HEAD_TRAINING_UNAVAILABLE",
+      "training_n": 1848,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "UK100",
+      "model_sha256": null,
+      "reason": "CAPTURED_EVENT_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "UK100",
+      "model_sha256": null,
+      "reason": "CAPTURED_ORDER_FLOW_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "UK100",
+      "model_sha256": "209dd5048b7759e04b5f204fa90b79ca5bd5b6720984409755b94c6468043d8e",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 1417,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "UK100",
+      "model_sha256": null,
+      "reason": "CAPTURED_POSITIONING_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "UK100",
+      "model_sha256": null,
+      "reason": "CAPTURED_VALUE_CARRY_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "UK100",
+      "model_sha256": null,
+      "reason": "INSUFFICIENT_NONOVERLAPPING_FAMILY_OBSERVATIONS",
+      "status": "INSUFFICIENT_HISTORY",
+      "training_n": 134,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "UK100",
+      "model_sha256": "c1e676f3c1b0cba11f02f732d3a6e95ea97430075806e09a5baedf8d5c23a633",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 1948,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "US30",
+      "model_sha256": null,
+      "reason": "NO_HEAD_WITH_CAUSAL_VALIDATION",
+      "status": "HEAD_TRAINING_UNAVAILABLE",
+      "training_n": 2007,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "US30",
+      "model_sha256": null,
+      "reason": "CAPTURED_EVENT_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "US30",
+      "model_sha256": null,
+      "reason": "CAPTURED_ORDER_FLOW_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "US30",
+      "model_sha256": "15e2ae6254981af2552fec0f774e9e0a6655366f172fa290a97da852adf7f55a",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 1075,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "US30",
+      "model_sha256": null,
+      "reason": "CAPTURED_POSITIONING_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "US30",
+      "model_sha256": null,
+      "reason": "CAPTURED_VALUE_CARRY_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "US30",
+      "model_sha256": null,
+      "reason": "INSUFFICIENT_NONOVERLAPPING_FAMILY_OBSERVATIONS",
+      "status": "INSUFFICIENT_HISTORY",
+      "training_n": 95,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "US30",
+      "model_sha256": "9289852fce0331825a0df0f994f2acab0ec956b3e04d661035a587b5e2c1ff00",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 2075,
+      "working_supported_heads": [
+        "direction",
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "USDCAD",
+      "model_sha256": null,
+      "reason": "NO_HEAD_WITH_CAUSAL_VALIDATION",
+      "status": "HEAD_TRAINING_UNAVAILABLE",
+      "training_n": 5334,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "USDCAD",
+      "model_sha256": null,
+      "reason": "CAPTURED_EVENT_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "USDCAD",
+      "model_sha256": null,
+      "reason": "CAPTURED_ORDER_FLOW_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "USDCAD",
+      "model_sha256": "b7be28fef51221439e0b4ee5d1c72eff3b2e6a7ec4f8a000417c0f9e0615a4aa",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 4156,
+      "working_supported_heads": [
+        "direction"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "USDCAD",
+      "model_sha256": null,
+      "reason": "CAPTURED_POSITIONING_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "USDCAD",
+      "model_sha256": null,
+      "reason": "CAPTURED_VALUE_CARRY_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "USDCAD",
+      "model_sha256": "060f197981f8cdf56ccd6b219884c7daf4c5c411ccac53bdb20bebe7b1237556",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 223,
+      "working_supported_heads": [
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "USDCAD",
+      "model_sha256": "63e97f95b2c9a9487e0c274f76c20e01541e1f63ed9215dd414299661ac97794",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 5608,
+      "working_supported_heads": [
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "XAG",
+      "model_sha256": null,
+      "reason": "NO_HEAD_WITH_CAUSAL_VALIDATION",
+      "status": "HEAD_TRAINING_UNAVAILABLE",
+      "training_n": 4157,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "XAG",
+      "model_sha256": null,
+      "reason": "CAPTURED_EVENT_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "XAG",
+      "model_sha256": null,
+      "reason": "CAPTURED_ORDER_FLOW_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "XAG",
+      "model_sha256": "290fd81d18c1f14abdf8ce4b5a1424d3fe9b99f329ad720f8be4b94764c63abf",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 3864,
+      "working_supported_heads": [
+        "movement"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "XAG",
+      "model_sha256": null,
+      "reason": "CAPTURED_POSITIONING_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "XAG",
+      "model_sha256": null,
+      "reason": "CAPTURED_VALUE_CARRY_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "XAG",
+      "model_sha256": "57af6d83730ee439bea163466fa279732b866263fd89d59078c28c3a497e4a51",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 238,
+      "working_supported_heads": [
+        "direction"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "XAG",
+      "model_sha256": "ecde2a7dbaa593bc08396d4565877133b996870b01575f731c003400663a0235",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 4425,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "macro",
+      "instrument": "XAU",
+      "model_sha256": null,
+      "reason": "NO_HEAD_WITH_CAUSAL_VALIDATION",
+      "status": "HEAD_TRAINING_UNAVAILABLE",
+      "training_n": 4169,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "event",
+      "instrument": "XAU",
+      "model_sha256": null,
+      "reason": "CAPTURED_EVENT_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "order_flow",
+      "instrument": "XAU",
+      "model_sha256": null,
+      "reason": "CAPTURED_ORDER_FLOW_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "intermarket",
+      "instrument": "XAU",
+      "model_sha256": "3085854871bd49aaac6b2e8046f46063d4621c5ce2a38b3b3dd5959fcb1d5771",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 3875,
+      "working_supported_heads": [
+        "direction"
+      ]
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "positioning",
+      "instrument": "XAU",
+      "model_sha256": null,
+      "reason": "CAPTURED_POSITIONING_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "value_carry",
+      "instrument": "XAU",
+      "model_sha256": null,
+      "reason": "CAPTURED_VALUE_CARRY_FEATURE_HISTORY_MISSING",
+      "status": "HISTORICAL_FEATURES_UNAVAILABLE",
+      "training_n": null,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "option",
+      "instrument": "XAU",
+      "model_sha256": "977f05792b8141f20584cbb3063f0a90b8ca338731c6b2e20b354f8f5715aa54",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 241,
+      "working_supported_heads": []
+    },
+    {
+      "actual_trade_contribution": null,
+      "current_runtime_forecast": "NOT_MEASURED_BY_OFFHOST_TRAINING",
+      "family": "session",
+      "instrument": "XAU",
+      "model_sha256": "a3eeb2104ae3e72c70d0a42903fe0aecf2fddcb19790f9f1b1ed07cb7d457725",
+      "reason": null,
+      "status": "TRAINED",
+      "training_n": 4437,
+      "working_supported_heads": [
+        "movement"
+      ]
+    }
+  ],
+  "trained_pairs": 25,
+  "workflow_run": 38868549966,
+  "working_supported_pairs": 18
+}

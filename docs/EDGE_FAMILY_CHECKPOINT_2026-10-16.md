@@ -87,3 +87,39 @@ TARGET_CONFIGURED_SERIES_MISMATCH. All other exact per-pair reasons, sample
 counts, supported head names and model digests are retained in the accompanying
 EDGE_FAMILY_HISTORICAL_MATRIX_2026-10-16.json, with current snapshot contribution
 0 only for NAS100; the other12 current states are NOT_MEASURED, not invented.
+
+## Superseding model publication for accepted11e4a09
+
+Exact-SHA math38868549966/job116866950696 published07:41:23Z. Verified
+artifact12031659001 digest
+e836be10e8f481bf7a5ce0bd9a25a017a3659fce2cea22fba141c4e959d6fdd3.
+New actual result25 fitted/18 supported pairs; preceding25/19 describes55fe3f7
+only. Source rows3043, combined inputs4734 (macro3047, option1686, intermarket1).
+The automatic required refresh supplied this result; no manual duplicate fit.
+This is still historical support, not current live prediction/action profit.
+
+| Instrument | macro | event | order_flow | intermarket | positioning | value_carry | option | session |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| BTCUSD | I | I | I | I | I | I | I | I |
+| ETHUSD | I | I | I | I | I | I | I | I |
+| EURUSD | V | H | H | S/4165 | H | H | T/226 | S/6651 |
+| GER40 | V | H | H | T/1450 | H | H | N | S/1948 |
+| JPY100 | V | H | H | S/839 | H | H | H | S/1253 |
+| NAS100 | V | H | H | S/1075 | H | H | S/228 | S/2075 |
+| SOLUSD | I | I | I | I | I | I | I | I |
+| SP500 | V | H | H | S/1075 | H | H | N | S/2074 |
+| UK100 | V | H | H | T/1417 | H | H | N | T/1948 |
+| US30 | V | H | H | T/1075 | H | H | N | S/2075 |
+| USDCAD | V | H | H | S/4156 | H | H | S/223 | S/5608 |
+| XAG | V | H | H | S/3864 | H | H | S/238 | T/4425 |
+| XAU | V | H | H | S/3875 | H | H | T/241 | S/4437 |
+
+Supported pairs removed: [('EURUSD', 'option'), ('UK100', 'session'), ('XAG', 'session')]. Added: [('JPY100', 'intermarket'), ('NAS100', 'session')].
+No threshold was changed to preserve the old count. All104 current model cells
+are retained in EDGE_FAMILY_CURRENT_MODEL_MATRIX_2026-10-16.json. Current live
+forecast/contribution is explicitly not measured by an off-host training run.
+
+Source38868552495 published exact-SHA bundle07:39:52Z for all13 configured
+instruments; collection reports HTTP403 for nyse:calendar. This source refusal
+is explicit and its calendar data is not fabricated. FOMC38868555085 delivered
+for the same SHA; one delivery does not establish reliable600s cadence.

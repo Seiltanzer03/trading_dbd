@@ -116,3 +116,27 @@ input: retained off-host per-table allocation report and a closed-cohort map.
 The dominant correctness risk is reader/dependency closure and rowid-preserving
 cutover, not compression or obtaining Yandex credentials. Full migration is a
 separate architecture package; this AI report fix does not claim it complete.
+
+## Actual one-shot off-host measurement
+
+Run38866044976/job116858999599 succeeded2026-10-16T07:29:47Z. Used only
+existing Yandex credentials; no VPS connection, live SQLite reader or production
+mutation. Full compressed/raw SHA256 verification and immutable SQLite check
+passed for snapshot18,784,505,856B, database digest
+d6e8c423f21585f68cd28b0d837eb08c944d2b273bbba59ad963927e33434535,
+object backups/v1/daily-slot-0/snapshot.sqlite3.gz. This historical snapshot is
+not the current live19.07GB database or a retirement receipt.
+
+Existing180s collect_capacity query ended TABLE_SCAN_TIMED_OUT: page_size4096,
+page_count4,586,061, freelist83 pages/339,968B, used18,784,165,888B.
+The allocation/grouping query returned no completed table distribution;
+allocated_object_bytes and reclaimable eligible bytes remain unknown. Workflow
+success means restore/measurement completed honestly, not that the allocation
+report is complete. Result artifact retained, worker-only DB removed.
+
+Next bounded task: prove a cheaper/incremental allocation query on disposable
+fixtures, preserving exact accounting and partial-result semantics, before any
+new large restore. Do not raise the source reserve or180s scan limit, infer
+large eligible tables from total size, or retire production data from this
+partial report. Existing source refusal38858020173 at05:58:50Z again measured
+free944,291,840B below1GiB with zero cache candidates, before live export.
