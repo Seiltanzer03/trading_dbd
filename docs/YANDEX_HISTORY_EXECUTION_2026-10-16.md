@@ -82,3 +82,27 @@ broker tariffs and mapped historical flow remain explicit inputs, not zeros.
 
 No statement here claims that the migration, EDE audit, all eight current
 forecasts, sustained capacity or a new production release is complete.
+
+## Actual private row archive proof,11:35UTC
+
+Run38893965916/code9e78fbb completed successfully.32 actual rows from each of
+the two measured tables were copied without reserializing JSON or changing
+SQLite types/rowids, compressed, uploaded into existing private Yandex storage,
+fully read back and restored twice. Both typed hashes matched. Only hash/count
+proof is in the GitHub artifact; actual payloads remain private. See
+YANDEX_PARTITION_ACTUAL_PROOF_2026-10-16.json. These small samples do not estimate
+whole-history compression, eligible bytes or production space recovery.
+
+The same read-only source copy confirmed205504 pending virtual children with
+terminal failed parents, and3 pending children of resolved parents. Existing
+resolve_due never completed virtual states when parent resolution failed.
+New failure propagation is atomic and leaves outcome_json null; bounded legacy
+reconciliation scans at most100 rowids with durable progress and source WAL
+reserve. It preserves valid/pending parents, existing outcomes, T0 payloads and
+clocks. No historical profit, label, fill or policy promotion is manufactured.
+Initial failure cases were reproduced; final integrated profile including HTTP/
+WebSocket isolation117tests plus6subtests passed in7.69s (one existing dependency
+deprecation warning). Independent lifecycle review found no blocking findings;
+the query plan uses rowid probes and indexed parent lookups, not a pending-table
+scan. Real source repair and production release are not yet
+claimed. Low source reserve explicitly defers optional legacy writes.
