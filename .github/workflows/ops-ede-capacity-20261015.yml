@@ -1,4 +1,4 @@
-name: ops-ede-capacity-20261015
+name: ops-ede-capacity-20261015 # current-state recheck 2026-10-16T23:12Z
 on:
   push:
     branches: [ops/ede-capacity-20261015]
@@ -29,7 +29,7 @@ jobs:
           try:
               _verify_sha(client,'9bf0e5dfd7e32406a3c5f3aeeca3a3e8836e65f0')
               code=r'''
-          import json,urllib.request,time
+          import json,urllib.request,time,sqlite3
           from types import SimpleNamespace
           from seiltanzer.background_disk_admission import disk_state,REASON
           pressure=disk_state(SimpleNamespace(settings=SimpleNamespace(demo=False,data_dir='/opt/seiltanzer/data')))
@@ -42,14 +42,23 @@ jobs:
           worker,worker_ms=read('/api/research/runtime/worker-status')
           passive,passive_ms=read('/api/research/passive/status')
           ai,ai_ms=read('/api/ai/snapshot/status')
-          if pressure['pause_background'] and passive.get('last_skip_reason')!=REASON:
-              raise ValueError('Low disk did not expose actual passive pause')
           state=worker.get('worker') or {}
           print('ACTUAL_DISK_ADMISSION='+json.dumps({'checked_out_code_sha':'9bf0e5dfd7e32406a3c5f3aeeca3a3e8836e65f0',
               'pressure':pressure,'passive':{'collector_status':passive.get('collector_status'),'last_skip_reason':passive.get('last_skip_reason'),'latest_error':passive.get('latest_error'),'elapsed_ms':passive_ms},
               'worker':{k:state.get(k) for k in ('current_phase','disk_pause_active','disk_pressure','memory_pause_active','last_error')},
               'worker_elapsed_ms':worker_ms,'ai':{'ready':ai.get('ready'),'building':ai.get('building'),'canonical_quote_available':ai.get('canonical_quote_available'),'elapsed_ms':ai_ms},
               'orders_sent':0,'provider_calls':0,'database_mutations':0,'production_authority':False}),flush=True)
+          if pressure['pause_background'] and passive.get('last_skip_reason')!=REASON:
+              raise ValueError('Low disk did not expose actual passive pause')
+          deadline=time.monotonic()+8
+          conn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
+          try:
+              conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')
+              conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+              rows=conn.execute('PRAGMA main.foreign_key_check').fetchmany(16)
+              print('LIVE_FK_METADATA='+json.dumps({'sample_limit':16,'violations':[{'table':r[0],'parent':r[2],'foreign_key_id':r[3]} for r in rows],'scope':'CURRENT_LIVE_DATABASE_NOT_ARCHIVE_EPOCH','mutation':False}),flush=True)
+          except sqlite3.Error as exc:print('LIVE_FK_METADATA='+json.dumps({'unavailable':type(exc).__name__,'scope':'CURRENT_LIVE_DATABASE_NOT_ARCHIVE_EPOCH','mutation':False}),flush=True)
+          finally:conn.close()
           '''
               print(_exec(client,'cd /opt/seiltanzer && /opt/seiltanzer/.venv/bin/python -c '+shlex.quote(code),timeout=25),flush=True)
           finally:client.close()
