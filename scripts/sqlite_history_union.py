@@ -62,7 +62,8 @@ def _catalog(raw, proof, before):
         raise ValueError('Unsupported history catalog')
     parts, counts = value.get('partitions'), value.get('expected_table_counts')
     maximum = value.get('maximum_hydrated_bytes')
-    if (not isinstance(parts, list) or not 0 < len(parts) <= MAX_PARTITIONS
+    if (not isinstance(parts, list) or not 0 <= len(parts) <= MAX_PARTITIONS
+            or (not parts and 'full_table_proofs' not in value)
             or not isinstance(counts, dict) or not counts
             or type(maximum) is not int or not before['size'] <= maximum <= MAX_OUTPUT_BYTES):
         raise ValueError('Invalid catalog bounds')
@@ -74,7 +75,10 @@ def _catalog(raw, proof, before):
             raise ValueError('Duplicate catalog partition')
         keys.add(key)
         tables.add(receipt['partition']['table'])
-    if (set(counts) != tables
+    if 'full_table_proofs' in value:
+        from scripts.sqlite_history_catalog import validate_full_catalog
+        validate_full_catalog(value)
+    elif (set(counts) != tables
             or any(type(n) is not int or not 0 < n < 2**63 for n in counts.values())):
         raise ValueError('Catalog must declare exact affected table counts')
     return value, digest
@@ -190,6 +194,10 @@ def hydrate_snapshot(source, destination, *, source_receipt, catalog_bytes, clie
             counts[table] = conn.execute('SELECT COUNT(*) FROM '+archive._quote(table)).fetchone()[0]
             if counts[table] != expected:
                 raise ValueError('Hydrated table count differs from complete catalog')
+        full_tables_verified = 'full_table_proofs' in catalog
+        if full_tables_verified:
+            from scripts.sqlite_history_catalog import verify_full_tables
+            verify_full_tables(conn, catalog)
         if conn.execute('PRAGMA quick_check').fetchone() != ('ok',):
             raise ValueError('Hydrated SQLite quick_check failed')
         if conn.execute('PRAGMA foreign_key_check').fetchone() is not None:
@@ -214,6 +222,7 @@ def hydrate_snapshot(source, destination, *, source_receipt, catalog_bytes, clie
                     database_sha256=digest.hexdigest(), database_size_bytes=size,
                     hot_database_sha256=source_receipt['database_sha256'], catalog_sha256=catalog_sha,
                     expected_table_counts=counts, typed_values_verified=True,
+                    full_selected_tables_verified=full_tables_verified,
                     verified_local_file=archive._identity(destination),
                     production_authority=False, data_retirement_authorized=False)
     finally:
