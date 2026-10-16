@@ -292,9 +292,11 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
         quality_label = 'численная доступность' if component == 'quantitative_base' else 'качество'
         if component == 'quantitative_base':
             suppression += '; это не оценка надёжности источников; надёжность данных указана отдельно'
+        quality = (None if row.get('available') is False or row.get('availability') == 'UNAVAILABLE'
+                   else row.get('quality'))
         lines.append(
             f"• {labels.get(component, component)}: {_pct(row.get('nominal_weight'))} → {_pct(row.get('effective_weight'))}; "
-            f"{quality_label} {_pct(row.get('quality'))}; возраст {row.get('age_sec') if row.get('age_sec') is not None else '—'} сек; "
+            f"{quality_label} {_pct(quality)}; возраст {row.get('age_sec') if row.get('age_sec') is not None else '—'} сек; "
             f"статус {row.get('availability', row.get('available', '—'))}; {row.get('reason') or 'доступен'}; семьи {provenance}{suppression}."
         )
     from .research_working_context import research_working_lines

@@ -644,6 +644,10 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
                  "Base production policy distribution (common execution-MC paths):")
         if (snapshot.get('market_refresh') or {}).get('available'):
             label = 'Базовые HOLD/CLOSE/EXIT пересчитаны в общем сравнительном банке по текущей котировке; это не прежняя bridge-модель.'
+            if (snapshot.get('market_refresh') or {}).get('comparison_statistics_basis') == 'COMMON_BANK_NET_OUTCOMES_NOT_CALIBRATED_PHYSICAL_P':
+                label += (' Медиана и вероятности ниже рассчитаны по NET-исходам этого банка '
+                          'на единицу текущего остатка, с учётом издержек. Вероятности — '
+                          'модельные частоты, не калиброванные physical P и не вероятность FINAL TAKE vs STOP.')
         if start + 1 >= len(lines) or lines[start + 1] != label: lines.insert(start + 1, label)
         if manager.get("unified_edge_ensemble"):
             lines = [line for line in lines if line != "Base production policy distribution (common execution-MC paths):"]

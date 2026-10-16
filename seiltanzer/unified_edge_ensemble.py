@@ -600,7 +600,7 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
             reference, divisor = references[identity] if identity != 'quantitative_base' else (None, 1.)
             score = ((raw_score - reference) / divisor if reference is not None else raw_score) if raw_score is not None else None
             weight = component["effective_weight"]
-            if score is None and identity != "quantitative_base":
+            if score is None:
                 weight = 0.
             contributions.append({"component_id": identity, "score": score, "raw_score": raw_score,
                                   "hold_reference_score": reference, "normalization_divisor": divisor, "effective_weight": weight,

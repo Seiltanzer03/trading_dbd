@@ -174,8 +174,9 @@ def _quality_lines(snapshot: dict) -> list[str]:
         working = sum(row.get('working_assessment_available') is True for row in families)
         facts = sum(row.get('available') is True for row in families)
         lines.insert(3, f'Активные компоненты ансамбля: {active}/{len(components)}. '
-                     f'Обученные прогнозы семейств: {forecasts}/{len(families)}; '
+                     f'Доступные сейчас обученные прогнозы семейств: {forecasts}/{len(families)}; '
                      f'рабочие интерпретации: {working}/{len(families)}; входные факты: {facts}/{len(families)}. '
+                     'Это не число обученных моделей в опубликованном архиве. '
                      'FULL выше означает вычислимость перечисленного workspace, не готовность всех edge и не точность прогнозов.')
     geometry = snapshot.get("trade_geometry") or {}
     entry = _number(geometry.get("entry"))

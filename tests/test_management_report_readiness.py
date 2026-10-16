@@ -83,7 +83,7 @@ def test_workspace_fullness_does_not_claim_ensemble_readiness(monkeypatch):
     assert 'Операционная численная доступность: PARTIAL' in text
     assert 'authoritative_price=UNAVAILABLE' in text
     assert 'Активные компоненты ансамбля:' in text
-    assert 'Обученные прогнозы семейств: 0/8' in text
+    assert 'Доступные сейчас обученные прогнозы семейств: 0/8' in text
     assert 'Контрактное наличие групп входов (не торговый допуск): 10/10' in text
 
 

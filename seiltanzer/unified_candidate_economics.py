@@ -28,6 +28,7 @@ TAKE_POLICIES = {"REDUCE_TAKE", "EXTEND_TAKE"}
 SEEDS = (0xA17E, 0xB17E)
 PATHS_PER_SEED = 600
 STEPS = 160
+STATISTICS_BASIS = "COMMON_BANK_NET_OUTCOMES_NOT_CALIBRATED_PHYSICAL_P"
 
 
 def _number(value):
@@ -143,6 +144,31 @@ def _weighted_cvar(values, weights, alpha=.10):
     w = weights[order]
     mass = np.minimum(w, np.maximum(alpha - (np.cumsum(w) - w), 0.))
     return float(np.sum(values[order] * mass) / alpha)
+
+
+def _net_statistics(values, weights, current_r):
+    """Discrete weighted-CDF median and frequencies on the same net outcomes.
+
+    Zero-mass paths cannot define the median. At exactly half the mass use the
+    lower inverse CDF, without interpolating unobserved scenario outcomes.
+    These describe the comparison model, never calibrated market probabilities.
+    """
+    order = np.argsort(values, kind="stable")
+    order = order[weights[order] > 0]
+    cumulative = np.cumsum(weights[order])
+    index = min(int(np.searchsorted(cumulative, .5 * weights.sum())), len(order) - 1)
+
+    def frequency(mask):
+        return min(1., float(np.sum(weights[mask])))
+
+    return {
+        "median_net_r": float(values[order[index]]),
+        "p_final_profit": frequency(values > 0.),
+        "p_final_loss": frequency(values < 0.),
+        "p_giveback_0_25_from_now": frequency(values <= current_r - .25),
+        "p_giveback_0_50_from_now": frequency(values <= current_r - .50),
+        "statistics_basis": STATISTICS_BASIS,
+    }
 
 
 def _variant(base, row, snapshot, inputs):
@@ -311,6 +337,7 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
         worst_cvar = min(group_cvars) if group_cvars else cvar
         result[identity] = {
             "available": True, "reason": "COMMON_FROZEN_SCENARIO_NET_ECONOMICS",
+            **_net_statistics(net, weights, inputs.r0),
             "expected_net_r": expected, "cvar10_net_r": cvar,
             "expected_gross_r": float(np.sum(weights * gross)),
             "delta_expected_r": delta, "delta_cvar_r": cvar - hold_c,
