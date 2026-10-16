@@ -1,4 +1,4 @@
-name: ops-ede-capacity-20261015 # current-state recheck 2026-10-16T23:12Z
+name: ops-ede-capacity-20261015
 on:
   push:
     branches: [ops/ede-capacity-20261015]
@@ -6,60 +6,92 @@ on:
 permissions:
   contents: read
 jobs:
-  actual-disk-admission-readonly:
+  selected-history-cloud-only:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 9bf0e5dfd7e32406a3c5f3aeeca3a3e8836e65f0
+          ref: 011b363d6cf985b0a00a35964d74a81331558bb4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --quiet paramiko
-      - name: Verify actual optional-write pause without orders or provider calls
+      - run: python -m pip install --quiet boto3
+      - name: Restore existing catalog without source database or cloud writes
         env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+          TASK_DIRECTORY: ${{ runner.temp }}/selected-history-20261017
         run: |
           python - <<'PY'
-          import os,sys,shlex
-          sys.path.insert(0,'scripts')
-          from production_ede_offload import _connect,_exec,_verify_sha
-          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
-          try:
-              _verify_sha(client,'9bf0e5dfd7e32406a3c5f3aeeca3a3e8836e65f0')
-              code=r'''
-          import json,urllib.request,time,sqlite3
-          from types import SimpleNamespace
-          from seiltanzer.background_disk_admission import disk_state,REASON
-          pressure=disk_state(SimpleNamespace(settings=SimpleNamespace(demo=False,data_dir='/opt/seiltanzer/data')))
-          def read(path):
-              started=time.monotonic()
-              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:
-                  raw=response.read(1024**2+1)
-                  if len(raw)>1024**2:raise ValueError('Read-only response exceeds bound')
-                  return json.loads(raw),round((time.monotonic()-started)*1000,1)
-          worker,worker_ms=read('/api/research/runtime/worker-status')
-          passive,passive_ms=read('/api/research/passive/status')
-          ai,ai_ms=read('/api/ai/snapshot/status')
-          state=worker.get('worker') or {}
-          print('ACTUAL_DISK_ADMISSION='+json.dumps({'checked_out_code_sha':'9bf0e5dfd7e32406a3c5f3aeeca3a3e8836e65f0',
-              'pressure':pressure,'passive':{'collector_status':passive.get('collector_status'),'last_skip_reason':passive.get('last_skip_reason'),'latest_error':passive.get('latest_error'),'elapsed_ms':passive_ms},
-              'worker':{k:state.get(k) for k in ('current_phase','disk_pause_active','disk_pressure','memory_pause_active','last_error')},
-              'worker_elapsed_ms':worker_ms,'ai':{'ready':ai.get('ready'),'building':ai.get('building'),'canonical_quote_available':ai.get('canonical_quote_available'),'elapsed_ms':ai_ms},
-              'orders_sent':0,'provider_calls':0,'database_mutations':0,'production_authority':False}),flush=True)
-          if pressure['pause_background'] and passive.get('last_skip_reason')!=REASON:
-              raise ValueError('Low disk did not expose actual passive pause')
-          deadline=time.monotonic()+8
-          conn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
-          try:
-              conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')
+          import hashlib,json,os,sqlite3,subprocess,time
+          from contextlib import closing
+          from pathlib import Path
+          import boto3
+          from botocore.config import Config
+          from scripts import sqlite_history_partition as archive
+          from scripts.sqlite_history_selected_restore import restore_catalog_tables
+          from scripts.sqlite_history_union import MAX_CATALOG_BYTES
+          root=Path(os.environ['TASK_DIRECTORY']);root.mkdir(mode=0o700,exist_ok=False)
+          epoch='d6e8c423f21585f68cd28b0d837eb08c944d2b273bbba59ad963927e33434535'
+          pin='7b78d25d13f249f1ab967828675419a6656fe6b69787e5b78644076a54411a63'
+          key=archive.PREFIX+epoch+'/catalogs/'+pin+'.json'
+          client=boto3.client('s3',endpoint_url='https://storage.yandexcloud.net',region_name='ru-central1',
+              config=Config(connect_timeout=10,read_timeout=120,retries={'max_attempts':2}))
+          with client.get_object(Bucket=archive.BUCKET,Key=key)['Body'] as body:
+              raw=body.read(MAX_CATALOG_BYTES+1)
+          started=time.monotonic()
+          class ReadOnly:
+              def __init__(self):self.gets=0
+              def head_object(self,**kwargs):return client.head_object(**kwargs)
+              def get_object(self,**kwargs):
+                  result=client.get_object(**kwargs);self.gets+=1
+                  if self.gets%25==0:print('RESTORE_PROGRESS='+json.dumps({'parts_requested':self.gets,'elapsed_seconds':round(time.monotonic()-started,1)}),flush=True)
+                  return result
+          reader=ReadOnly()
+          result=restore_catalog_tables(reader,root/'selected.sqlite3',catalog_bytes=raw,expected_catalog_sha256=pin)
+          catalog=json.loads(raw)
+          if catalog['source_database_sha256']!=epoch or len(catalog['partitions'])!=439 or catalog['expected_table_counts']!={'passive_market_observations':132923,'g1s_observations':86100}:
+              raise ValueError('Unexpected pinned complete history epoch')
+          deadline=time.monotonic()+180
+          with closing(sqlite3.connect((root/'selected.sqlite3').resolve().as_uri()+'?mode=ro&immutable=1',uri=True)) as conn:
+              conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')
               conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-              rows=conn.execute('PRAGMA main.foreign_key_check').fetchmany(16)
-              print('LIVE_FK_METADATA='+json.dumps({'sample_limit':16,'violations':[{'table':r[0],'parent':r[2],'foreign_key_id':r[3]} for r in rows],'scope':'CURRENT_LIVE_DATABASE_NOT_ARCHIVE_EPOCH','mutation':False}),flush=True)
-          except sqlite3.Error as exc:print('LIVE_FK_METADATA='+json.dumps({'unavailable':type(exc).__name__,'scope':'CURRENT_LIVE_DATABASE_NOT_ARCHIVE_EPOCH','mutation':False}),flush=True)
-          finally:conn.close()
-          '''
-              print(_exec(client,'cd /opt/seiltanzer && /opt/seiltanzer/.venv/bin/python -c '+shlex.quote(code),timeout=25),flush=True)
-          finally:client.close()
+              groups={t:conn.execute('SELECT instrument,horizon_minutes,COUNT(*),MIN(captured_ts),MAX(captured_ts) FROM '+archive._quote(t)+' GROUP BY instrument,horizon_minutes ORDER BY instrument,horizon_minutes').fetchall() for t in sorted(archive.TABLES)}
+              joins=conn.execute('SELECT g.instrument,g.horizon_minutes,COUNT(*) FROM g1s_observations g JOIN passive_market_observations p ON p.observation_id=g.source_observation_id GROUP BY g.instrument,g.horizon_minutes ORDER BY g.instrument,g.horizon_minutes').fetchall()
+          signatures=json.dumps(dict(groups=groups,joins=joins),sort_keys=True,separators=(',',':')).encode()
+          public=dict(run_id=int(os.environ['GITHUB_RUN_ID']),checked_out_code_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+              scope=result['scope'],source_database_sha256=epoch,catalog_sha256=pin,partition_count=result['partition_count'],
+              tables={t:{'row_count':p['row_count'],'logical_sha256':p['logical_sha256']} for t,p in catalog['full_table_proofs'].items()},
+              full_selected_tables_verified=result['full_selected_tables_verified'],full_database_integrity_verified=False,
+              selected_reader_groups={t:len(v) for t,v in groups.items()},selected_reader_join_groups=len(joins),
+              selected_reader_signature_sha256=hashlib.sha256(signatures).hexdigest(),
+              reader_results_equal_to_saved_source_baseline=False,original_selected_typed_roots_equal=True,
+              database_size_bytes=result['database_size_bytes'],database_sha256=result['database_sha256'],
+              cloud_compressed_bytes=sum(p['compressed_size_bytes'] for p in catalog['partitions']),
+              elapsed_seconds=round(time.monotonic()-started,1),source_database_restored=False,production_connection=False,
+              cloud_writes=0,live_disk_bytes_reclaimed=0,full_production_reader_equivalence_proven=False,
+              production_authority=False,data_retirement_authorized=False,actual_payloads_in_github_artifact=False)
+          (root/'public-proof.json').write_text(json.dumps(public,sort_keys=True,indent=2)+'\n')
+          print('SELECTED_HISTORY_PROOF='+json.dumps(public,sort_keys=True),flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: selected-history-cloud-only-proof-${{ github.run_id }}
+          path: ${{ runner.temp }}/selected-history-20261017/public-proof.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove only owned disposable output
+        if: always()
+        env:
+          TASK_DIRECTORY: ${{ runner.temp }}/selected-history-20261017
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          root=Path(os.environ['TASK_DIRECTORY'])
+          for suffix in ('','-wal','-shm','-journal'):
+              (root/('selected.sqlite3'+suffix)).unlink(missing_ok=True)
           PY
