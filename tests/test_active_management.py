@@ -66,7 +66,8 @@ def test_current_deploy_lease_expedites_core_without_skipping_it(monkeypatch):
     async def life(app):
         yield
     app = SimpleNamespace(state=SimpleNamespace(engine=SimpleNamespace(
-        short_horizon=object(), management_local=object())),
+        short_horizon=object(), management_local=object(),
+        settings=SimpleNamespace(demo=True))),
         router=SimpleNamespace(lifespan_context=life))
     calls = []
     monkeypatch.setattr(worker, 'worker_acceptance_gate_state', lambda **kw:
