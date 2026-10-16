@@ -80,7 +80,8 @@ def test_worker_runs_bounded_core_once_and_skips_all_maintenance_under_gate(monk
 
     app = SimpleNamespace(
         state=SimpleNamespace(
-            engine=SimpleNamespace(short_horizon=object(), management_local=object())
+            engine=SimpleNamespace(short_horizon=object(), management_local=object(),
+                                   settings=SimpleNamespace(demo=True))
         ),
         router=SimpleNamespace(lifespan_context=original_lifespan),
     )
@@ -142,7 +143,8 @@ def test_worker_without_gate_eventually_schedules_optional_maintenance(monkeypat
 
     app = SimpleNamespace(
         state=SimpleNamespace(
-            engine=SimpleNamespace(short_horizon=object(), management_local=object())
+            engine=SimpleNamespace(short_horizon=object(), management_local=object(),
+                                   settings=SimpleNamespace(demo=True))
         ),
         router=SimpleNamespace(lifespan_context=original_lifespan),
     )

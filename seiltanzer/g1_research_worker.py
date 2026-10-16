@@ -13,6 +13,7 @@ import contextlib
 import time
 
 from .production_resource_guard import memory_pressure_state, trim_memory_for_pressure
+from .background_disk_admission import apply_research_pause
 from .research_acceptance_gate import worker_acceptance_gate_state
 
 
@@ -281,6 +282,9 @@ def install_research_worker(app) -> None:
                 if _apply_memory_pressure(state):
                     await asyncio.sleep(RESEARCH_INTERVAL_SEC)
                     continue
+                if apply_research_pause(state, engine):
+                    await asyncio.sleep(RESEARCH_INTERVAL_SEC)
+                    continue
 
                 started = time.time()
                 state["current_phase"] = "core"
@@ -288,6 +292,9 @@ def install_research_worker(app) -> None:
                 try:
                     g1s_result = await asyncio.to_thread(_run_g1s_core, engine.short_horizon, state=state)
                     await asyncio.sleep(0)
+                    if apply_research_pause(state, engine):
+                        state['last_error'] = 'DISK_HEADROOM_UNAVAILABLE'
+                        continue
                     g1m_result = await asyncio.to_thread(
                         _run_g1m_local_core, engine.management_local, state=state
                     )
@@ -315,6 +322,9 @@ def install_research_worker(app) -> None:
                     await asyncio.sleep(RESEARCH_INTERVAL_SEC)
                     continue
                 if _apply_memory_pressure(state):
+                    await asyncio.sleep(RESEARCH_INTERVAL_SEC)
+                    continue
+                if apply_research_pause(state, engine):
                     await asyncio.sleep(RESEARCH_INTERVAL_SEC)
                     continue
 

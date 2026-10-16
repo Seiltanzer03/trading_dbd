@@ -841,8 +841,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.gather(*pending, return_exceptions=True)
 
     async def passive_loop():
+        from .background_disk_admission import passive_step
         while True:
-            await asyncio.to_thread(engine.passive.step)
+            await asyncio.to_thread(passive_step, engine)
             await asyncio.sleep(2.0 if settings.demo else 10.0)
 
     @contextlib.asynccontextmanager
