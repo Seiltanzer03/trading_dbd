@@ -102,8 +102,8 @@ def _build_cutover_fixture(tmp_path, *, include_post_catalog=False):
         conn.execute(
             """
             CREATE TABLE virtual_position_observations (
-                vp_id TEXT PRIMARY KEY,
-                observation_id TEXT NOT NULL,
+                virtual_id TEXT PRIMARY KEY,
+                passive_observation_id TEXT NOT NULL,
                 resolution_status TEXT NOT NULL
             )
             """

@@ -29,7 +29,7 @@ Cold history is anchored to the verified Yandex Object Storage complete selected
    - Referenced by `g1_q_capture_attempts.created_observation_id`
    - Referenced by `g1_dataset_cut_members.observation_id`
    - Referenced by `g1c_shadow_predictions.observation_id`
-   - Referenced by `virtual_position_observations.observation_id` where `resolution_status = 'pending'`
+   - Referenced by `virtual_position_observations.passive_observation_id` (or `observation_id`) where `resolution_status = 'pending'`
    - Referenced by `g1_dataset_membership.observation_id` where `forecast_eval_eligible = 1 OR q_to_p_eligible = 1`
 
 ### 3.2 What Is Retired from Hot Storage to Cold Storage

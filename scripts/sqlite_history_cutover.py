@@ -56,12 +56,12 @@ TARGET_TABLE = 'passive_market_observations'
 RETIRED_STATUS = 'insufficient_future_data'
 MAX_SECONDS = 1800
 
-DEPENDENCY_EXCLUSION_SPECS: tuple[tuple[str, str, str], ...] = (
-    ('g1_q_capture_attempts', 'created_observation_id', 'created_observation_id IS NOT NULL'),
-    ('g1_dataset_cut_members', 'observation_id', 'observation_id IS NOT NULL'),
-    ('g1c_shadow_predictions', 'observation_id', 'observation_id IS NOT NULL'),
-    ('virtual_position_observations', 'observation_id', "observation_id IS NOT NULL AND resolution_status = 'pending'"),
-    ('g1_dataset_membership', 'observation_id', 'observation_id IS NOT NULL AND (forecast_eval_eligible = 1 OR q_to_p_eligible = 1)'),
+DEPENDENCY_EXCLUSION_SPECS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ('g1_q_capture_attempts', ('created_observation_id',), ' IS NOT NULL'),
+    ('g1_dataset_cut_members', ('observation_id',), ' IS NOT NULL'),
+    ('g1c_shadow_predictions', ('observation_id',), ' IS NOT NULL'),
+    ('virtual_position_observations', ('passive_observation_id', 'observation_id'), " IS NOT NULL AND resolution_status = 'pending'"),
+    ('g1_dataset_membership', ('observation_id',), ' IS NOT NULL AND (forecast_eval_eligible = 1 OR q_to_p_eligible = 1)'),
 )
 
 
@@ -113,14 +113,21 @@ def _populate_protected_observation_ids(conn: sqlite3.Connection, schema_name: s
     conn.execute(
         'CREATE TEMP TABLE _cutover_protected_obs (observation_id TEXT PRIMARY KEY)'
     )
-    for table, column, predicate in DEPENDENCY_EXCLUSION_SPECS:
+    for table, candidate_columns, predicate_suffix in DEPENDENCY_EXCLUSION_SPECS:
         if table not in existing:
             continue
         qtable = archive._quote(table)
-        qcol = archive._quote(column)
+        actual_cols = {
+            r[1]
+            for r in conn.execute(f'PRAGMA {qschema}.table_xinfo({qtable})').fetchall()
+        }
+        chosen_col = next((c for c in candidate_columns if c in actual_cols), None)
+        if chosen_col is None:
+            continue
+        qcol = archive._quote(chosen_col)
         conn.execute(
             f'INSERT OR IGNORE INTO temp._cutover_protected_obs(observation_id) '
-            f'SELECT {qcol} FROM {qschema}.{qtable} WHERE {predicate}'
+            f'SELECT {qcol} FROM {qschema}.{qtable} WHERE {qcol}{predicate_suffix}'
         )
     return int(
         conn.execute('SELECT COUNT(*) FROM temp._cutover_protected_obs').fetchone()[0]
