@@ -275,6 +275,10 @@ class MarketData:
         self._primary_price = _status_dict()
         self.instrument_code: str = "NAS100"
 
+        self._price_refresh_state = threading.local()
+        self._price_refresh_lock = threading.Lock()
+        self._price_revision = 0
+
         self.price = _status_dict()
         self.proxy_price = _status_dict()
         self._price_prev_val: float | None = None   # для детекта «нет тиков» (закрыт рынок)
@@ -308,6 +312,22 @@ class MarketData:
     # -------------------------------------------------------------- helpers
 
     @property
+    def price(self) -> dict:
+        """Readers see one completed quote while its owner stages a refresh."""
+        state = getattr(self, "_price_refresh_state", None)
+        if state is not None and hasattr(state, "candidate"):
+            return state.candidate
+        return self._published_price
+
+    @price.setter
+    def price(self, value: dict) -> None:
+        state = getattr(self, "_price_refresh_state", None)
+        if state is not None and hasattr(state, "candidate"):
+            state.candidate = value
+        else:
+            self._published_price = value
+
+    @property
     def instrument(self) -> Instrument:
         return ALL_INSTRUMENTS[self.instrument_code]
 
@@ -326,6 +346,7 @@ class MarketData:
         if code not in ALL_INSTRUMENTS:
             raise ValueError(f"неизвестный инструмент: {code}")
         if code != self.instrument_code:
+            self._price_revision += 1
             self.instrument_code = code
             self.bybit_quote = missing("instrument changed")
             self.bybit_options = missing("instrument changed")
@@ -333,7 +354,7 @@ class MarketData:
             self._bybit_options_attempt = 0.0
             self._bybit_anchor_attempt = 0.0
             self._primary_price = _status_dict()
-            self.price = _status_dict()
+            self._published_price = _status_dict()
             self.proxy_price = _status_dict()
             self._price_prev_val = None
             self._price_change_ts = None
@@ -606,10 +627,32 @@ class MarketData:
         return anchor if isinstance(anchor, dict) and anchor.get("instrument") == code else None
 
     def refresh_price(self) -> None:
-        if self.price.get("fallback"):
-            self.price = dict(self._primary_price)
-        self._refresh_primary_price()
-        self._primary_price = dict(self.price)
+        # A network refresh may take seconds. Never expose its temporary primary
+        # (or partial failure) to the canonical UI/AI tick while selecting a
+        # fallback. The current quote stays readable without a network lock.
+        if not self._price_refresh_lock.acquire(blocking=False):
+            return
+        try:
+            with self._intraday_lock:
+                revision = self._price_revision
+                self._price_refresh_state.candidate = dict(self.price)
+            try:
+                if self.price.get("fallback"):
+                    self.price = dict(self._primary_price)
+                self._refresh_primary_price()
+                with self._intraday_lock:
+                    if revision != self._price_revision:
+                        return
+                    primary = dict(self.price)
+                    self._apply_bybit_price_fallback()
+                    self._primary_price = primary
+                    self._published_price = self.price
+            finally:
+                del self._price_refresh_state.candidate
+        finally:
+            self._price_refresh_lock.release()
+
+    def _apply_bybit_price_fallback(self) -> None:
         if self.demo or os.environ.get("BYBIT_PUBLIC_ENABLED", "1") == "0":
             return
         now = time.time()
