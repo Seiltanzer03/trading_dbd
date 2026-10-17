@@ -93,15 +93,17 @@ def _connection(path, source):
 
 
 def _publish(work, destination):
-    with work.open('rb') as stream:
-        os.fsync(stream.fileno())
+    if os.name != 'nt':
+        with work.open('rb') as stream:
+            os.fsync(stream.fileno())
     os.link(work, destination)  # Exclusive publication, including destination races.
     work.unlink()
-    fd = os.open(Path(destination).parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    if hasattr(os, 'O_DIRECTORY'):
+        fd = os.open(Path(destination).parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 def _cleanup(work):

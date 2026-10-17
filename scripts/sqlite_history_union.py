@@ -176,6 +176,25 @@ def hydrate_snapshot(source, destination, *, source_receipt, catalog_bytes, clie
         conn.execute('PRAGMA max_page_count='+str(maximum//page_size))
         conn.execute('PRAGMA temp_store=FILE')
         conn.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
+        full_tables_verified = 'full_table_proofs' in catalog
+        post_catalog_proofs = {}
+        if full_tables_verified:
+            from scripts.sqlite_history_catalog import catalog_max_rowids, verify_full_tables
+            max_rowids = catalog_max_rowids(catalog)
+            for table, proof in catalog['full_table_proofs'].items():
+                qtable = archive._quote(table)
+                alias = proof['source_rowid_alias']
+                qalias = archive._quote(alias)
+                max_rowid = max_rowids[table]
+                suffix_where, suffix_params = ('', ()) if max_rowid is None else (' WHERE '+qalias+'>?', (max_rowid,))
+                post_count = conn.execute('SELECT COUNT(*) FROM '+qtable+suffix_where, suffix_params).fetchone()[0]
+                if post_count > 0:
+                    post_catalog_proofs[table] = dict(
+                        row_count=post_count,
+                        logical_sha256=archive._logical_hash(
+                            conn, qtable, proof['columns'], alias, suffix_where, suffix_params
+                        ),
+                    )
         for receipt in catalog['partitions']:
             _check(deadline, destination.parent)
             with tempfile.TemporaryDirectory(prefix='.history-union-cold-', dir=destination.parent) as directory:
@@ -192,12 +211,11 @@ def hydrate_snapshot(source, destination, *, source_receipt, catalog_bytes, clie
         counts = {}
         for table, expected in catalog['expected_table_counts'].items():
             counts[table] = conn.execute('SELECT COUNT(*) FROM '+archive._quote(table)).fetchone()[0]
-            if counts[table] != expected:
+            expected_total = expected + post_catalog_proofs.get(table, {}).get('row_count', 0)
+            if counts[table] != expected_total:
                 raise ValueError('Hydrated table count differs from complete catalog')
-        full_tables_verified = 'full_table_proofs' in catalog
         if full_tables_verified:
-            from scripts.sqlite_history_catalog import verify_full_tables
-            verify_full_tables(conn, catalog)
+            verify_full_tables(conn, catalog, post_catalog_proofs=post_catalog_proofs)
         if conn.execute('PRAGMA quick_check').fetchone() != ('ok',):
             raise ValueError('Hydrated SQLite quick_check failed')
         if conn.execute('PRAGMA foreign_key_check').fetchone() is not None:
