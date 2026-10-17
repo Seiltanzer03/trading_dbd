@@ -32,7 +32,24 @@ from scripts.sqlite_history_union import (
     MAX_OUTPUT_BYTES,
     MAX_PARTITIONS,
 )
-from seiltanzer.ai_decision_state import ensure_connection_schema
+
+
+def _load_ensure_connection_schema():
+    try:
+        from seiltanzer.ai_decision_state import ensure_connection_schema
+        return ensure_connection_schema
+    except ModuleNotFoundError:
+        import importlib.util
+        module_path = Path(__file__).resolve().parent.parent / 'seiltanzer' / 'ai_decision_state.py'
+        spec = importlib.util.spec_from_file_location('_ai_decision_state_standalone', module_path)
+        if spec is None or spec.loader is None:
+            raise
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.ensure_connection_schema
+
+
+ensure_connection_schema = _load_ensure_connection_schema()
 
 CONTRACT = 'sqlite-history-cutover-v1'
 TARGET_TABLE = 'passive_market_observations'
