@@ -6,26 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  oldest-ack-parent-origin:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 25
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        ref: 5fe2e56d6a5d1f8da20c9a918fe3592d3e6eb5d4
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    - run: python -m pip install --quiet boto3
-    - name: Verify original missing-parent provenance in one pinned older Yandex snapshot
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
-        AWS_DEFAULT_REGION: ru-central1
-        AWS_EC2_METADATA_DISABLED: 'true'
-        TASK_DIRECTORY: ${{ runner.temp }}/ack-parent-origin-${{ github.run_id }}
-      run: "python - <<'PY'\nimport base64,hashlib,json,os,shutil,sqlite3,struct,sys,time\nfrom pathlib import Path\nimport boto3\nfrom botocore.config import Config\nfrom botocore.exceptions import ClientError\nsys.path.insert(0,'scripts')\nfrom restore_verified_snapshot import restore,ENDPOINT\nfrom sqlite_history_partition import _logical_hash,_quote\nbucket='trading-dbd-backups-2026'\nkey='backups/v1/daily-slot-1/snapshot.sqlite3.gz'\nexpected_sha='61a0d9449dcd9f8f1be7a538dffc2a636a2450e174d0408dbfc648285411ad4a'\nexpected_size=17745444864\nids=(77,96)\nexpected_ack_ts={77:1785951076.6243782,96:1785994440.2296243}\ndef extract(conn,table,key_column):\n    schema=conn.execute(\"SELECT sql FROM sqlite_schema WHERE type='table' AND name=?\",(table,)).fetchone()\n    if not schema:raise ValueError('Expected original audit table is missing')\n    columns=[r[1] for r in conn.execute('PRAGMA table_info('+_quote(table)+')')]\n    if not 0<len(columns)<=128 or len(schema[0])>65536:raise ValueError('Audit schema exceeds bound')\n    alias=next((a for a in ('rowid','_rowid_','oid') if a not in {c.lower() for c in columns}),None)\n    if alias is None:raise ValueError('No original SQLite rowid alias')\n    where=' WHERE '+_quote(key_column)+' IN (?,?)'\n    sizes='+'.join('COALESCE(length(CAST('+_quote(c)+' AS BLOB)),0)' for c in columns)\n    count,total=conn.execute('SELECT COUNT(*),SUM('+sizes+') FROM '+_quote(table)+where,ids).fetchone()\n    if count>32 or int(total or 0)>2*1024**2:raise ValueError('Audit capsule input exceeds bound')\n    expressions=[_quote(alias)]\n    for c in columns:\n        q=_quote(c);expressions.extend(['typeof('+q+')',\"CASE WHEN typeof(\"+q+\")='text' THEN CAST(\"+q+\" AS BLOB) ELSE \"+q+\" END\"])\n    encoded=[]\n    for row in conn.execute('SELECT '+','.join(expressions)+' FROM '+_quote(table)+where+' ORDER BY '+_quote(alias),ids):\n        cells=[]\n        for kind,value in zip(row[1::2],row[2::2]):\n            raw=(None if kind=='null' else str(value) if kind=='integer' else struct.pack('>d',value).hex() if kind=='real' else base64.b64encode(value).decode('ascii') if kind in ('text','blob') and isinstance(value,bytes) else None)\n            if kind not in ('null','integer','real','text','blob') or (raw is None and kind!='null'):raise ValueError('Unsupported native SQLite storage class')\n            cells.append({'kind':kind,'encoded':raw})\n        encoded.append({'source_rowid':row[0],'cells':cells})\n    return {'table':table,'source_schema_sql':schema[0],'columns':columns,'source_rowid_alias':alias,'row_count':count,'rows':encoded,'logical_sha256':_logical_hash(conn,_quote(table),columns,alias,where,ids)}\nclient=boto3.client('s3',endpoint_url=ENDPOINT,region_name='ru-central1',config=Config(connect_timeout=10,read_timeout=120,retries={'max_attempts':2}))\ndirectory=Path(os.environ['TASK_DIRECTORY'])\ndirectory.mkdir(exist_ok=False)\nreceipt=None\ntry:\n    response=client.get_object(Bucket=bucket,Key=key+'.manifest.json')\n    with response['Body'] as stream:raw=stream.read(1024**2+1)\n    if len(raw)>1024**2:raise ValueError('Manifest exceeds bound')\n    manifest=json.loads(raw)\n    if manifest.get('database_sha256')!=expected_sha or manifest.get('database_size_bytes')!=expected_size:raise ValueError('Pinned older backup has rotated')\n    free=shutil.disk_usage(directory).free\n    if free<2*expected_size+1024**3:raise ValueError('Worker lacks unchanged conservative restore reserve')\n    print('ACK_PARENT_RESTORE_PREFLIGHT='+json.dumps({'source_database_sha256':expected_sha,'database_bytes':expected_size,'worker_free_bytes':free,'question':'Do the two missing ACK parents exist in the oldest available authenticated daily snapshot?','vps_connection':False}),flush=True)\n    started=time.monotonic()\n    proof=restore(bucket=bucket,key=key,destination=directory/'source.sqlite3',result_path=directory/'restore.json',snapshot_drill=True,client=client)\n    if proof.get('database_sha256')!=expected_sha or proof.get('immutable_sqlite_read') is not True:raise ValueError('Restored source identity changed')\n    conn=sqlite3.connect((directory/'source.sqlite3').resolve().as_uri()+'?mode=ro&immutable=1',uri=True)\n    try:\n        conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')\n        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,8*1024**2)\n        deadline=time.monotonic()+30;conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)\n        parents={r[0] for r in conn.execute('SELECT id FROM trades WHERE id IN (?,?)',ids)}\n        acknowledgements={i:[r[0] for r in conn.execute('SELECT ts FROM ai_decision_acks WHERE trade_id=? LIMIT 33',(i,))] for i in ids}\n        if any(len(v)>32 for v in acknowledgements.values()):raise ValueError('Audit acknowledgements exceed bound')\n        capsule_key=None;capsule_sha=None;capsule_bytes=0;written=False;roots={}\n        if parents:\n            tables=[extract(conn,'trades','id'),extract(conn,'ai_decision_acks','trade_id')]\n            document={'contract':'authentic-missing-trade-parent-candidate-v1','source_database_sha256':expected_sha,'source_object_key':key,'source_full_byte_hash_verified':True,'source_sqlite_quick_check':proof['sqlite_quick_check'],'tables':tables,'production_authority':False,'repair_applied':False,'data_retirement_authorized':False,'full_foreign_key_integrity_verified':False}\n            payload=json.dumps(document,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode('utf8')\n            if len(payload)>4*1024**2:raise ValueError('Candidate capsule exceeds bound')\n            capsule_sha=hashlib.sha256(payload).hexdigest()\n            capsule_key='research/sqlite-repair-evidence/v1/'+expected_sha+'/trade-parents/'+capsule_sha+'.json'\n            try:client.head_object(Bucket=bucket,Key=capsule_key)\n            except ClientError as exc:\n                if str(exc.response.get('Error',{}).get('Code')) not in ('404','NoSuchKey','NotFound'):raise\n                client.put_object(Bucket=bucket,Key=capsule_key,Body=payload,ContentType='application/json',Metadata={'capsule-sha256':capsule_sha,'source-sha256':expected_sha})\n                written=True\n            response=client.get_object(Bucket=bucket,Key=capsule_key)\n            with response['Body'] as stream:checked=stream.read(len(payload)+1)\n            if checked!=payload:raise ValueError('Private candidate capsule full readback differs')\n            capsule_bytes=len(payload);roots={t['table']:t['logical_sha256'] for t in tables}\n        receipt={'contract':'missing-ack-parent-origin-probe-v1','source_database_sha256':expected_sha,'source_database_size_bytes':expected_size,'source_object_key':key,'source_full_hash_verified':True,'source_sqlite_quick_check':proof['sqlite_quick_check'],'parents_found':{str(i):i in parents for i in ids},'same_ack_timestamp_present':{str(i):expected_ack_ts[i] in acknowledgements[i] for i in ids},'private_candidate_capsule_key':capsule_key,'private_candidate_capsule_sha256':capsule_sha,'private_candidate_capsule_bytes':capsule_bytes,'private_candidate_capsule_full_get_verified':bool(capsule_key),'candidate_typed_table_roots':roots,'cloud_writes':int(written),'elapsed_seconds':round(time.monotonic()-started,1),'large_snapshot_restores':1,'question':'oldest available daily snapshot, original ACK parent provenance','vps_connection':False,'database_mutations':0,'orders_sent':0,'acks_changed':0,'production_authority':False,'repair_applied':False,'data_retirement_authorized':False,'full_foreign_key_integrity_verified':False}\n    finally:conn.close()\nfinally:\n    shutil.rmtree(directory)\nif receipt is None:raise ValueError('No completed origin proof')\nreceipt['restored_database_retained_on_runner']=False\nprint('ACK_PARENT_ORIGIN_PROOF='+json.dumps(receipt,sort_keys=True),flush=True)\nPY\n"
-  price-source-sequence-readonly:
+  stage1-complete-fk-and-catalog-delta-readonly:
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
@@ -35,8 +16,184 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-    - run: python -m pip install --quiet paramiko
-    - name: Observe current atomic price publication and AI stability without refreshes
+    - run: python -m pip install --quiet paramiko boto3
+    - name: Read complete 12-table FK status, orphan provenance, S3 prefixes, and hot/cold watermark delta
       env:
         SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-      run: "python - <<'PY'\nimport os,sys,shlex,ast\nsys.path.insert(0,'scripts')\nfrom production_ede_offload import _connect,_exec\ncode=\"import json,urllib.request,subprocess,time\\nexpected='5fe2e56d6a5d1f8da20c9a918fe3592d3e6eb5d4'\\nsha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()\\nif sha!=expected:raise ValueError('Unexpected source generation')\\ndef read(path,limit):\\n with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as r:raw=r.read(limit+1)\\n if len(raw)>limit:raise ValueError('Read-only response exceeds bound')\\n return json.loads(raw)\\nsamples=[]\\nfor index in range(8):\\n state=read('/api/state',1024**2);tick=state.get('tick') or {}\\n row=(tick.get('feeds') or {}).get('price') or {}\\n direct=read('/api/market/bybit',512*1024).get('active_price') or {}\\n ai=read('/api/ai/snapshot/status',64*1024)\\n samples.append({'observed_ts':time.time(),'published_tick_ts':tick.get('ts'),'canonical_published_price':{k:row.get(k) for k in ('value','status','source','fresh','production_authority','derived','is_proxy','ts','timestamp')},'direct_active_price':{k:direct.get(k) for k in ('status','source','fresh','production_authority','derived','is_proxy','ts','timestamp')},'ai':{k:ai.get(k) for k in ('ready','building','invalidated_reason','build_n','age_sec','canonical_quote_available')}})\\n if index<7:time.sleep(10)\\nif subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()!=expected:raise ValueError('Source generation changed during observation')\\nprint('LIVE_AI_PRICE_SOURCE_SEQUENCE='+json.dumps({'expected_sha':expected,'samples':samples,'database_mutations':0,'provider_refreshes_requested':0,'paid_llm_calls':0,'orders_sent':0,'baseline_private_snapshot_not_inspected':True}),flush=True)\\n\"\nast.parse(code)\nclient=_connect(os.environ['SSH_PASSWORD'],attempts=1)\ntry:\n    print(_exec(client,'python3 -c '+shlex.quote(code),timeout=195),flush=True)\nfinally:client.close()\nPY\n"
+        AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: ru-central1
+        AWS_EC2_METADATA_DISABLED: 'true'
+      run: |
+        python - <<'PY'
+        import ast, json, os, shlex, sys, textwrap
+        import boto3
+        from botocore.config import Config
+        sys.path.insert(0, 'scripts')
+        from production_ede_offload import _connect, _exec
+        from restore_verified_snapshot import ENDPOINT
+
+        s3 = boto3.client(
+            's3',
+            endpoint_url=ENDPOINT,
+            region_name='ru-central1',
+            config=Config(connect_timeout=10, read_timeout=30, retries={'max_attempts': 2}),
+        )
+        bucket = 'trading-dbd-backups-2026'
+        non_history_objects = []
+        paginator = s3.get_paginator('list_objects_v2')
+        for page in paginator.paginate(Bucket=bucket):
+            for obj in page.get('Contents') or []:
+                key = obj['Key']
+                if not key.startswith('research/sqlite-history/v1/'):
+                    non_history_objects.append({
+                        'key': key,
+                        'size': obj['Size'],
+                        'last_modified': obj['LastModified'].isoformat(),
+                    })
+        print('YANDEX_NON_HISTORY_OBJECTS=' + json.dumps(non_history_objects, sort_keys=True), flush=True)
+
+        remote_code = """
+        import json, os, sqlite3, subprocess, time, urllib.request
+        os.nice(10)
+        sha = subprocess.check_output(['git', '-C', '/opt/seiltanzer', 'rev-parse', 'HEAD'], text=True, timeout=3).strip()
+        with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status', timeout=5) as r:
+            ai_status = json.loads(r.read(65536))
+
+        local_backups = []
+        bdir = '/opt/seiltanzer/data/backups/local'
+        if os.path.isdir(bdir):
+            for name in sorted(os.listdir(bdir)):
+                p = os.path.join(bdir, name)
+                if os.path.isfile(p):
+                    local_backups.append({'name': name, 'size': os.path.getsize(p), 'mtime': os.path.getmtime(p)})
+
+        conn = sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro', uri=True, timeout=2.0)
+        started = time.monotonic()
+        overall = started + 90.0
+        deadline = overall
+        conn.execute('PRAGMA query_only=ON')
+        conn.execute('PRAGMA trusted_schema=OFF')
+        conn.execute('PRAGMA cache_size=-16384')
+        conn.set_progress_handler(lambda: time.monotonic() >= deadline, 5000)
+        def q(v):
+            return '"' + v.replace('"', '""') + '"'
+        try:
+            tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+            names = set(tables)
+            fk_tables = []
+            for t in tables:
+                deadline = min(overall, time.monotonic() + 2.0)
+                keys = conn.execute('PRAGMA foreign_key_list(' + q(t) + ')').fetchall()
+                if keys:
+                    fk_tables.append({
+                        'table': t,
+                        'references': [{'id': r[0], 'parent': r[2], 'parent_exists': r[2] in names, 'from_column': r[3], 'to_column': r[4]} for r in keys]
+                    })
+
+            fk_results = []
+            for item in fk_tables:
+                t = item['table']
+                t0 = time.monotonic()
+                entry = {'table': t, 'join_orphans': [], 'pragma_status': None}
+                for ref in item['references']:
+                    parent = ref['parent']
+                    fcol = ref['from_column']
+                    tcol = ref['to_column']
+                    deadline = min(overall, time.monotonic() + 10.0)
+                    if t == 'decision_path_points' and fcol == 'review_id':
+                        sql = f'''
+                        WITH RECURSIVE distinct_keys(k) AS (
+                            SELECT MIN({q(fcol)}) FROM {q(t)}
+                            UNION ALL
+                            SELECT (SELECT MIN({q(fcol)}) FROM {q(t)} WHERE {q(fcol)} > distinct_keys.k)
+                            FROM distinct_keys WHERE k IS NOT NULL
+                        )
+                        SELECT k FROM distinct_keys
+                        WHERE k IS NOT NULL AND NOT EXISTS (
+                            SELECT 1 FROM {q(parent)} p WHERE p.{q(tcol)} = distinct_keys.k
+                        )
+                        '''
+                        orphans = [r[0] for r in conn.execute(sql).fetchall()]
+                        distinct_cnt = conn.execute(f'''
+                        WITH RECURSIVE distinct_keys(k) AS (
+                            SELECT MIN({q(fcol)}) FROM {q(t)}
+                            UNION ALL
+                            SELECT (SELECT MIN({q(fcol)}) FROM {q(t)} WHERE {q(fcol)} > distinct_keys.k)
+                            FROM distinct_keys WHERE k IS NOT NULL
+                        )
+                        SELECT COUNT(*) FROM distinct_keys WHERE k IS NOT NULL
+                        ''').fetchone()[0]
+                        entry['distinct_review_ids'] = distinct_cnt
+                    else:
+                        sql = f'''
+                        SELECT DISTINCT c.{q(fcol)}
+                        FROM {q(t)} c
+                        LEFT JOIN {q(parent)} p ON p.{q(tcol)} = c.{q(fcol)}
+                        WHERE c.{q(fcol)} IS NOT NULL AND p.{q(tcol)} IS NULL
+                        LIMIT 50
+                        '''
+                        orphans = [r[0] for r in conn.execute(sql).fetchall()]
+                    entry['join_orphans'].append({'parent': parent, 'from': fcol, 'to': tcol, 'missing_keys': orphans})
+                try:
+                    deadline = min(overall, time.monotonic() + (35.0 if t == 'decision_path_points' else 5.0))
+                    row = conn.execute('PRAGMA foreign_key_check(' + q(t) + ')').fetchone()
+                    entry['pragma_status'] = 'VIOLATION_FOUND' if row is not None else 'CHECK_PASSED'
+                    entry['first_violation'] = None if row is None else {'table': row[0], 'rowid': row[1], 'parent': row[2], 'fkid': row[3]}
+                except sqlite3.Error as exc:
+                    entry['pragma_status'] = 'UNAVAILABLE:' + type(exc).__name__
+                entry['elapsed_ms'] = round((time.monotonic() - t0) * 1000, 1)
+                fk_results.append(entry)
+
+            deadline = min(overall, time.monotonic() + 10.0)
+            ack_rows = [dict(zip(['id','trade_id','decision_id','policy','status','ts','note_len'], r))
+                        for r in conn.execute('SELECT id, trade_id, decision_id, policy, status, ts, length(COALESCE(note, \"\")) FROM ai_decision_acks WHERE trade_id IN (77, 96) ORDER BY id')]
+            neighbor_trades = [dict(zip(['id','opened_at','closed_at','setup','instrument','direction','status','deleted_at'], r))
+                               for r in conn.execute('SELECT id, opened_at, closed_at, setup, instrument, direction, status, deleted_at FROM trades WHERE id BETWEEN 70 AND 105 ORDER BY id')]
+            first_deleted_trade = conn.execute('SELECT MIN(id), MIN(deleted_at), COUNT(*) FROM trades WHERE deleted_at IS NOT NULL').fetchone()
+
+            tables_with_77_96 = {}
+            for t in tables:
+                if t in ('passive_market_observations', 'g1s_observations', 'decision_path_points'):
+                    continue
+                cols = [r[1] for r in conn.execute('PRAGMA table_info(' + q(t) + ')')]
+                if 'trade_id' in cols:
+                    deadline = min(overall, time.monotonic() + 2.0)
+                    found = [r[0] for r in conn.execute(f'SELECT DISTINCT trade_id FROM {q(t)} WHERE trade_id IN (77, 96)')]
+                    if found:
+                        tables_with_77_96[t] = found
+
+            deadline = min(overall, time.monotonic() + 10.0)
+            pmo_stats = conn.execute('SELECT COUNT(*), MIN(rowid), MAX(rowid) FROM passive_market_observations').fetchone()
+            pmo_res = dict(conn.execute('SELECT COALESCE(resolution_status, \"NULL\"), COUNT(*) FROM passive_market_observations GROUP BY resolution_status').fetchall())
+            g1s_stats = conn.execute('SELECT COUNT(*), MIN(rowid), MAX(rowid) FROM g1s_observations').fetchone()
+            seq = dict(conn.execute('SELECT name, seq FROM sqlite_sequence').fetchall()) if 'sqlite_sequence' in [r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")] else {}
+
+            print('STAGE1_COMPLETE_AUDIT=' + json.dumps({
+                'code_sha': sha,
+                'ai_status': {k: ai_status.get(k) for k in ('ready', 'building', 'invalidated_reason', 'build_n', 'age_sec', 'canonical_quote_available')},
+                'local_backups': local_backups,
+                'fk_results': fk_results,
+                'ack_rows_77_96': ack_rows,
+                'neighbor_trades_70_105': neighbor_trades,
+                'tombstone_summary': {'min_id': first_deleted_trade[0], 'min_deleted_at': first_deleted_trade[1], 'count': first_deleted_trade[2]},
+                'tables_referencing_77_96': tables_with_77_96,
+                'hot_table_watermarks': {
+                    'passive_market_observations': {'count': pmo_stats[0], 'min_rowid': pmo_stats[1], 'max_rowid': pmo_stats[2], 'by_status': pmo_res},
+                    'g1s_observations': {'count': g1s_stats[0], 'min_rowid': g1s_stats[1], 'max_rowid': g1s_stats[2]},
+                    'sqlite_sequence': seq,
+                },
+                'elapsed_ms': round((time.monotonic() - started) * 1000, 1),
+                'database_mutations': 0,
+            }, sort_keys=True), flush=True)
+        finally:
+            conn.close()
+        """
+        remote_code = textwrap.dedent(remote_code).strip()
+        ast.parse(remote_code)
+        client = _connect(os.environ['SSH_PASSWORD'], attempts=1)
+        try:
+            print(_exec(client, 'python3 -c ' + shlex.quote(remote_code), timeout=110), flush=True)
+        finally:
+            client.close()
+        PY
