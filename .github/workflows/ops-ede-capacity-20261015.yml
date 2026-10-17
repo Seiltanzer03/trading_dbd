@@ -16,7 +16,7 @@ jobs:
           df -h /
       - uses: actions/checkout@v4
         with:
-          ref: 660dfaf9a9bd6e53304d08dc422a854c598cf2c7
+          ref: 58d6dc9e5c753059992084bce5b64cd21692232f
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -138,10 +138,13 @@ jobs:
           with closing(sqlite3.connect(hot)) as conn:
               conn.execute('PRAGMA foreign_keys=ON')
               conn.execute('PRAGMA journal_mode=DELETE')
+              cols = [r[1] for r in conn.execute('PRAGMA table_xinfo("passive_market_observations")').fetchall() if not r[6]]
+              non_pk_cols = [c for c in cols if c != 'observation_id']
+              q_non_pk = ','.join('"' + c + '"' for c in non_pk_cols)
               conn.execute(
-                  "INSERT INTO passive_market_observations("
-                  "observation_id, instrument, horizon_minutes, captured_ts, target_ts, resolution_status"
-                  ") VALUES ('stage2-drill-post-write', 'BTCUSDT', 15, 1787100000.0, 1787100900.0, 'pending')"
+                  f'INSERT INTO passive_market_observations("observation_id", {q_non_pk}) '
+                  f"SELECT 'stage2-drill-post-write', {q_non_pk} FROM passive_market_observations WHERE rowid=?",
+                  (max_pmo_rowid,),
               )
               inserted_rowid = conn.execute(
                   "SELECT rowid FROM passive_market_observations WHERE observation_id='stage2-drill-post-write'"
@@ -153,7 +156,7 @@ jobs:
           public_proof = {
               'contract': 'stage2-offhost-cutover-and-union-proof-v1',
               'run_id': int(os.environ['GITHUB_RUN_ID']),
-              'checked_out_code_sha': '660dfaf9a9bd6e53304d08dc422a854c598cf2c7',
+              'checked_out_code_sha': '58d6dc9e5c753059992084bce5b64cd21692232f',
               'source_database_sha256': SOURCE_SHA,
               'catalog_sha256': CATALOG_SHA,
               'source_database_size_bytes': cutover_report['source_database_size_bytes'],
@@ -163,6 +166,8 @@ jobs:
               'source_target_row_count': cutover_report['source_target_row_count'],
               'retired_row_count': cutover_report['retired_row_count'],
               'hot_target_row_count': cutover_report['hot_target_row_count'],
+              'protected_observation_count': cutover_report['protected_observation_count'],
+              'protected_observation_breakdown': cutover_report['protected_observation_breakdown'],
               'hot_status_counts': cutover_report['hot_status_counts'],
               'source_max_rowid': cutover_report['source_max_rowid'],
               'hot_max_rowid': cutover_report['hot_max_rowid'],
