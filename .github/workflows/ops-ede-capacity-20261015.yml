@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  ack-parent-provenance-readonly:
+  post-delivery-ai-observation:
     runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
@@ -16,40 +16,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --quiet paramiko boto3
-      - name: Inspect missing ACK parent timeline and existing cloud backup manifests read-only
+      - run: python -m pip install --quiet paramiko
+      - name: Observe delivered AI snapshot stability without paid LLM or provider refresh
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ru-central1
-          AWS_EC2_METADATA_DISABLED: 'true'
         run: |
           python - <<'PY'
           import os,sys,shlex,ast
           sys.path.insert(0,'scripts')
           from production_ede_offload import _connect,_exec
-          code="import json,sqlite3,subprocess,time,os\nos.nice(10)\nsha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()\nif sha not in {'011b363d6cf985b0a00a35964d74a81331558bb4','a2a48108cd0fd924e5fcf684be16af5043e48388'}:raise ValueError('Unexpected source generation')\nconn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=0.5)\ndeadline=time.monotonic()+2\ntry:\n conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')\n conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)\n rows=conn.execute('SELECT a.trade_id,COUNT(*),MIN(a.ts),MAX(a.ts) FROM ai_decision_acks a LEFT JOIN trades t ON t.id=a.trade_id WHERE t.id IS NULL GROUP BY a.trade_id LIMIT 17').fetchall()\n if len(rows)>16:raise ValueError('Orphan provenance exceeds bound')\n print('ACK_PARENT_PROVENANCE='+json.dumps({'code_sha':sha,'missing_parents':[{'trade_id':r[0],'ack_count':r[1],'first_ack_ts':r[2],'last_ack_ts':r[3]} for r in rows],'database_mutations':0,'service_mutations':0,'fills_created':0,'origin_of_missing_parent_proven':False}),flush=True)\nfinally:conn.close()\n"
+          code="import json,urllib.request,subprocess,time\nexpected='a2a48108cd0fd924e5fcf684be16af5043e48388'\ndef code_sha():return subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()\nif code_sha()!=expected:raise ValueError('Unexpected source generation')\ndef read(path,limit=1024**2):\n started=time.monotonic()\n with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:\n  raw=response.read(limit+1);status=response.status\n if len(raw)>limit:raise ValueError('Read-only response exceeds bound')\n return json.loads(raw),{'http_status':status,'elapsed_ms':round((time.monotonic()-started)*1000,1),'response_bytes':len(raw)}\nstate,state_http=read('/api/state',8*1024**2)\nworker,worker_http=read('/api/research/runtime/worker-status')\nsamples=[]\nfor index in range(3):\n value,http=read('/api/ai/snapshot/status')\n sample={k:value.get(k) for k in ('ready','building','age_sec','canonical_quote_available','invalidated_reason','build_ms','build_n','baseline_r','live_r','request_path_heavy_build','periodic_heavy_recompute')}\n sample['last_error_present']=value.get('last_error') is not None\n sample['http']=http;sample['observed_ts']=time.time();samples.append(sample)\n if index<2:time.sleep(5)\nif code_sha()!=expected:raise ValueError('Source generation changed during observation')\nservice=subprocess.check_output(['systemctl','show','seiltanzer','--property=MainPID,NRestarts,ActiveState,SubState'],text=True,timeout=3).strip().splitlines()\nw=worker.get('worker') or {}\nprint('ACTUAL_AI_QUOTE_FIX_OBSERVATION='+json.dumps({'expected_sha':expected,'state_http':state_http,'worker_http':worker_http,'worker':{k:w.get(k) for k in ('current_phase','disk_pause_active','disk_pressure','last_error')},'samples':samples,'service':service,'false_authority_change_observed':any(s['invalidated_reason']=='PRICE_AUTHORITY_CHANGED' for s in samples),'scope':'BOUNDED_READ_ONLY_POST_DELIVERY_OBSERVATION_NOT_FULL_PRODUCTION_ACCEPTANCE','paid_llm_calls':0,'provider_refreshes_requested':0,'orders_sent':0,'database_mutations':0}),flush=True)\n"
           ast.parse(code)
           client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
           try:
-              print(_exec(client,'python3 -c '+shlex.quote(code),timeout=30),flush=True)
+              print(_exec(client,'python3 -c '+shlex.quote(code),timeout=45),flush=True)
           finally:client.close()
-          import json,boto3
-          from botocore.config import Config
-          client=boto3.client('s3',endpoint_url='https://storage.yandexcloud.net',region_name='ru-central1',config=Config(connect_timeout=5,read_timeout=5,retries={'max_attempts':0}))
-          bucket='trading-dbd-backups-2026'
-          result=client.list_objects_v2(Bucket=bucket,Prefix='backups/v1/daily-slot-',MaxKeys=100)
-          if result.get('IsTruncated'):raise ValueError('Backup manifest listing exceeds bound')
-          keys=sorted(x['Key'] for x in result.get('Contents',[]) if x['Key'].endswith('/snapshot.sqlite3.gz.manifest.json'))
-          if not 0<len(keys)<=7:raise ValueError('Expected one to seven existing slot manifests')
-          manifests=[]
-          for key in keys:
-              response=client.get_object(Bucket=bucket,Key=key)
-              with response['Body'] as stream:raw=stream.read(1024**2+1)
-              if len(raw)>1024**2:raise ValueError('Backup manifest exceeds bound')
-              value=json.loads(raw);storage=value.get('storage_manifest') or {}
-              counts=storage.get('critical_table_counts') or value.get('critical_table_counts') or {}
-              manifests.append({'manifest_key':key,'uploaded_ts':value.get('uploaded_ts'),'created_ts':value.get('created_ts'),'database_sha256':value.get('database_sha256'),'database_size_bytes':value.get('database_size_bytes'),'code_sha':storage.get('git_commit') or value.get('git_commit'),'trades_count':counts.get('trades')})
-          print('EXISTING_BACKUP_TIMELINE='+json.dumps({'bucket':bucket,'manifests':manifests,'large_backup_objects_downloaded':0,'cloud_writes':0,'parent_presence_verified':False,'production_authority':False}),flush=True)
           PY
