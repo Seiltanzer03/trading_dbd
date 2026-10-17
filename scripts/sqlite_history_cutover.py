@@ -105,21 +105,26 @@ def _existing_tables(conn: sqlite3.Connection, schema_name: str = 'main') -> set
     }
 
 
-def _dependency_exclusion_clause(conn: sqlite3.Connection, schema_name: str = 'src') -> str:
+def _populate_protected_observation_ids(conn: sqlite3.Connection, schema_name: str = 'src') -> int:
+    """Materialize an indexed temp table of dependency-referenced observation_ids."""
     existing = _existing_tables(conn, schema_name)
     qschema = archive._quote(schema_name)
-    clauses: list[str] = []
+    conn.execute('DROP TABLE IF EXISTS temp._cutover_protected_obs')
+    conn.execute(
+        'CREATE TEMP TABLE _cutover_protected_obs (observation_id TEXT PRIMARY KEY)'
+    )
     for table, column, predicate in DEPENDENCY_EXCLUSION_SPECS:
         if table not in existing:
             continue
         qtable = archive._quote(table)
         qcol = archive._quote(column)
-        clauses.append(
-            f'p."observation_id" NOT IN (SELECT {qcol} FROM {qschema}.{qtable} WHERE {predicate})'
+        conn.execute(
+            f'INSERT OR IGNORE INTO temp._cutover_protected_obs(observation_id) '
+            f'SELECT {qcol} FROM {qschema}.{qtable} WHERE {predicate}'
         )
-    if not clauses:
-        return '1=1'
-    return ' AND '.join(clauses)
+    return int(
+        conn.execute('SELECT COUNT(*) FROM temp._cutover_protected_obs').fetchone()[0]
+    )
 
 
 def _rowid_alias(conn: sqlite3.Connection, schema_name: str, table: str) -> tuple[str | None, list[str]]:
@@ -148,19 +153,21 @@ def build_hot_cutover_snapshot(
     catalog_bytes: bytes,
     expected_catalog_sha256: str | None = None,
     source_receipt: dict | None = None,
+    verify_source_catalog_roots: bool = True,
 ) -> dict:
     """Build a physically compacted, rowid-preserving hot SQLite snapshot.
 
     1. Verifies `source` is an immutable regular SQLite file with no sidecars.
-    2. Verifies `catalog_bytes` is a complete selected-table catalog and that
-       `source`'s catalog prefix (`rowid <= catalog_max_rowid`) matches the
-       pinned catalog's exact row counts and typed `logical_sha256` roots.
-    3. Stages a working copy, applies `ensure_connection_schema` to close the
-       pre-tombstone `ai_decision_acks` FK references (`trade_id IN (77, 96)`),
-       and rebuilds into a fresh zero-freelist SQLite file while retiring only
-       dependency-unreferenced cataloged `insufficient_future_data` rows from
-       `passive_market_observations` (`rowid <= catalog_max_rowid` and
-       `rowid < MAX(rowid)`).
+    2. Verifies `catalog_bytes` is a complete selected-table catalog and (when
+       `verify_source_catalog_roots=True`) that `source`'s catalog prefix
+       (`rowid <= catalog_max_rowid`) matches the pinned catalog's exact row
+       counts and typed `logical_sha256` roots.
+    3. Rebuilds directly from `source` (attached immutable read-only) into a
+       fresh zero-freelist SQLite file while retiring only dependency-unreferenced
+       cataloged `insufficient_future_data` rows from `passive_market_observations`
+       (`rowid < catalog_max_rowid` and `rowid < MAX(rowid)`), then applies
+       `ensure_connection_schema` to close the pre-tombstone `ai_decision_acks`
+       FK references (`trade_id IN (77, 96)`).
     4. Preserves all `rowid` values across all tables, verifies `PRAGMA quick_check`
        and `PRAGMA foreign_key_check == []`, and returns a signed cutover receipt
        plus `hot_restore_proof` ready for `sqlite_history_union.hydrate_snapshot`.
@@ -192,15 +199,15 @@ def build_hot_cutover_snapshot(
         if shutil.disk_usage(destination.parent).free < needed:
             raise ValueError('Hot/cold cutover lacks required worker disk reserve')
 
-    check(needed=archive.RESERVE_BYTES + 2 * before['size'])
+    check(needed=archive.RESERVE_BYTES + before['size'])
 
     # Step 1: Verify source database's catalog prefix matches the pinned catalog roots
     # and measure post-catalog suffix before any modifications.
     post_catalog_proofs: dict[str, dict] = {}
     with sqlite3.connect(source.resolve().as_uri() + '?mode=ro&immutable=1', uri=True) as ro_conn:
         ro_conn.execute('PRAGMA trusted_schema=OFF')
-        ro_conn.execute('PRAGMA cache_size=-2048')
-        ro_conn.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
+        ro_conn.execute('PRAGMA cache_size=-16384')
+        ro_conn.set_progress_handler(lambda: time.monotonic() >= deadline, 5000)
         for table, proof in catalog['full_table_proofs'].items():
             qtable = archive._quote(table)
             alias = proof['source_rowid_alias']
@@ -215,52 +222,31 @@ def build_hot_cutover_snapshot(
                         ro_conn, qtable, proof['columns'], alias, suffix_where, suffix_params
                     ),
                 )
-        verify_full_tables(ro_conn, catalog, post_catalog_proofs=post_catalog_proofs)
+        if verify_source_catalog_roots:
+            verify_full_tables(ro_conn, catalog, post_catalog_proofs=post_catalog_proofs)
 
-    check(needed=archive.RESERVE_BYTES + 2 * before['size'])
+    check(needed=archive.RESERVE_BYTES + before['size'])
 
-    # Step 2: Create a temporary staging copy for schema migration (Stage 1 FK closure),
-    # then compact into `work` preserving every rowid and eliminating all free pages.
-    fd_stage, stage_name = tempfile.mkstemp(prefix='.cutover-stage-', suffix='.sqlite3', dir=destination.parent)
-    os.close(fd_stage)
-    stage_path = Path(stage_name)
-
+    # Step 2: Build fresh compacted SQLite database (`work_path`) directly from
+    # immutable `source` preserving exact rowids and retiring only eligible cold rows.
     fd_work, work_name = tempfile.mkstemp(prefix='.cutover-work-', suffix='.sqlite3', dir=destination.parent)
     os.close(fd_work)
     work_path = Path(work_name)
 
-    src_conn = stage_conn = work_conn = None
+    work_conn = None
     try:
-        src_conn = sqlite3.connect(source.resolve().as_uri() + '?mode=ro&immutable=1', uri=True)
-        src_conn.execute('PRAGMA trusted_schema=OFF')
-        src_conn.execute('PRAGMA cache_size=-2048')
-        stage_conn = sqlite3.connect(stage_path)
-        stage_conn.execute('PRAGMA cache_size=-2048')
-        src_conn.backup(stage_conn, pages=512, progress=lambda *_: check(needed=archive.RESERVE_BYTES))
-        src_conn.close()
-        src_conn = None
-
-        stage_conn.execute('PRAGMA journal_mode=DELETE')
-        # Apply Stage 1 pre-tombstone FK closure if `trades` and `ai_decision_acks` exist.
-        stage_tables = _existing_tables(stage_conn, 'main')
-        if 'trades' in stage_tables and 'ai_decision_acks' in stage_tables:
-            ensure_connection_schema(stage_conn)
-        stage_conn.commit()
-        stage_conn.close()
-        stage_conn = None
-
-        check(needed=archive.RESERVE_BYTES + before['size'])
-
-        # Step 3: Build fresh compacted SQLite database (`work_path`) from `stage_path`
-        # preserving exact rowids and retiring only eligible cold rows.
-        work_conn = sqlite3.connect(work_path)
-        work_conn.execute('PRAGMA cache_size=-4096')
+        work_conn = sqlite3.connect(work_path, uri=True)
+        work_conn.execute('PRAGMA cache_size=-32768')
         work_conn.execute('PRAGMA journal_mode=DELETE')
+        work_conn.execute('PRAGMA synchronous=OFF')
         work_conn.execute('PRAGMA foreign_keys=OFF')
-        work_conn.execute('PRAGMA temp_store=FILE')
-        work_conn.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
+        work_conn.execute('PRAGMA temp_store=MEMORY')
+        work_conn.set_progress_handler(lambda: time.monotonic() >= deadline, 5000)
 
-        work_conn.execute('ATTACH DATABASE ? AS src', (str(stage_path.resolve()),))
+        work_conn.execute(
+            'ATTACH DATABASE ? AS src',
+            (source.resolve().as_uri() + '?mode=ro&immutable=1',),
+        )
         page_size = work_conn.execute('PRAGMA src.page_size').fetchone()[0]
         user_version = work_conn.execute('PRAGMA src.user_version').fetchone()[0]
         application_id = work_conn.execute('PRAGMA src.application_id').fetchone()[0]
@@ -268,20 +254,26 @@ def build_hot_cutover_snapshot(
         work_conn.execute(f'PRAGMA user_version={int(user_version)}')
         work_conn.execute(f'PRAGMA application_id={int(application_id)}')
 
-        # Gather schema objects from `src.sqlite_schema`.
-        table_rows = work_conn.execute(
+        # Gather schema objects from `src.sqlite_schema`, putting `trades` and
+        # `ai_decision_acks` first so `ensure_connection_schema` runs before
+        # bulk table loads and leaves `freelist_count == 0`.
+        raw_table_rows = work_conn.execute(
             "SELECT name, sql FROM src.sqlite_schema "
             "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY rootpage, rowid"
         ).fetchall()
+        priority_order = {'trades': 0, 'trade_lifecycle_identities': 1, 'ai_decision_acks': 2}
+        table_rows = sorted(
+            raw_table_rows,
+            key=lambda item: (priority_order.get(item[0], 10),),
+        )
         other_rows = work_conn.execute(
             "SELECT type, name, tbl_name, sql FROM src.sqlite_schema "
             "WHERE type IN ('index', 'trigger', 'view') "
             "AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid"
         ).fetchall()
 
-        for name, ddl in table_rows:
-            check()
-            work_conn.execute(ddl)
+        # Materialize indexed temp table of protected observation_ids for O(1) lookup.
+        protected_obs_count = _populate_protected_observation_ids(work_conn, 'src')
 
         # Compute retirement boundary for `passive_market_observations`.
         source_max_rowid = work_conn.execute(
@@ -290,21 +282,28 @@ def build_hot_cutover_snapshot(
         source_total_target_rows = work_conn.execute(
             f'SELECT COUNT(*) FROM src.{archive._quote(TARGET_TABLE)}'
         ).fetchone()[0]
-        dep_clause = _dependency_exclusion_clause(work_conn, 'src')
+        retire_cutoff_rowid = min(int(target_max_catalog_rowid), int(source_max_rowid or 0))
         retire_predicate = (
-            f'p.rowid < ? AND p.rowid < ? '
-            f'AND p."resolution_status" = ? '
-            f'AND ({dep_clause})'
+            'p.rowid < ? '
+            'AND p."resolution_status" = ? '
+            'AND NOT EXISTS ('
+            'SELECT 1 FROM temp._cutover_protected_obs x '
+            'WHERE x.observation_id = p."observation_id"'
+            ')'
         )
-        retire_params = (int(target_max_catalog_rowid), int(source_max_rowid or 0), RETIRED_STATUS)
-        retired_count = work_conn.execute(
-            f'SELECT COUNT(*) FROM src.{archive._quote(TARGET_TABLE)} p WHERE {retire_predicate}',
-            retire_params,
-        ).fetchone()[0]
+        retire_params = (retire_cutoff_rowid, RETIRED_STATUS)
 
+        src_table_names = {name for name, _ in table_rows}
+        fk_migrated = False
         table_row_counts: dict[str, int] = {}
-        for name, _ in table_rows:
+        for name, ddl in table_rows:
             check()
+            if name == 'trade_lifecycle_identities' and fk_migrated:
+                table_row_counts[name] = work_conn.execute(
+                    'SELECT COUNT(*) FROM main."trade_lifecycle_identities"'
+                ).fetchone()[0]
+                continue
+            work_conn.execute(ddl)
             qname = archive._quote(name)
             alias, columns = _rowid_alias(work_conn, 'src', name)
             qcols = ','.join(archive._quote(c) for c in columns)
@@ -331,6 +330,12 @@ def build_hot_cutover_snapshot(
                     f'INSERT INTO main.{qname}({qcols}) SELECT {qcols} FROM src.{qname}'
                 )
             table_row_counts[name] = work_conn.execute(f'SELECT COUNT(*) FROM main.{qname}').fetchone()[0]
+            if name == 'ai_decision_acks' and 'trades' in src_table_names:
+                ensure_connection_schema(work_conn)
+                fk_migrated = True
+
+        hot_target_count = table_row_counts[TARGET_TABLE]
+        retired_count = source_total_target_rows - hot_target_count
 
         # Copy sqlite_sequence if present so AUTOINCREMENT sequences never regress.
         has_src_seq = work_conn.execute(
@@ -344,18 +349,23 @@ def build_hot_cutover_snapshot(
             work_conn.execute('INSERT INTO main.sqlite_sequence(name, seq) SELECT name, seq FROM src.sqlite_sequence')
 
         # Recreate indexes, triggers, and views after bulk table loads.
+        existing_main_objects = {
+            r[0]
+            for r in work_conn.execute(
+                "SELECT name FROM main.sqlite_schema WHERE type IN ('index', 'trigger', 'view')"
+            ).fetchall()
+        }
         for obj_type, name, tbl_name, ddl in other_rows:
             check()
+            if name in existing_main_objects:
+                continue
             work_conn.execute(ddl)
 
+        work_conn.execute('DROP TABLE IF EXISTS temp._cutover_protected_obs')
         work_conn.commit()
         work_conn.execute('DETACH DATABASE src')
 
-        # Verify stage file can now be removed to free temporary space immediately.
-        archive._cleanup(stage_path)
-
         # Verify compacted hot invariants.
-        hot_target_count = table_row_counts[TARGET_TABLE]
         if hot_target_count + retired_count != source_total_target_rows:
             raise ValueError('Hot + retired row count does not equal source row count')
         hot_max_rowid = work_conn.execute(
@@ -422,6 +432,7 @@ def build_hot_cutover_snapshot(
             source_target_row_count=source_total_target_rows,
             retired_row_count=retired_count,
             hot_target_row_count=hot_target_count,
+            protected_observation_count=protected_obs_count,
             hot_status_counts=hot_status_counts,
             post_catalog_row_counts={t: p['row_count'] for t, p in post_catalog_proofs.items()},
             freelist_count=freelist_count,
@@ -431,11 +442,6 @@ def build_hot_cutover_snapshot(
             hot_restore_proof=hot_restore_proof,
         )
     finally:
-        if src_conn is not None:
-            src_conn.close()
-        if stage_conn is not None:
-            stage_conn.close()
         if work_conn is not None:
             work_conn.close()
-        archive._cleanup(stage_path)
         archive._cleanup(work_path)
