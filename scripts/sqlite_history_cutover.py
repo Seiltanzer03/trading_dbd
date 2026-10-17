@@ -105,7 +105,7 @@ def _existing_tables(conn: sqlite3.Connection, schema_name: str = 'main') -> set
     }
 
 
-def _populate_protected_observation_ids(conn: sqlite3.Connection, schema_name: str = 'src') -> int:
+def _populate_protected_observation_ids(conn: sqlite3.Connection, schema_name: str = 'src') -> tuple[int, dict[str, int]]:
     """Materialize an indexed temp table of dependency-referenced observation_ids."""
     existing = _existing_tables(conn, schema_name)
     qschema = archive._quote(schema_name)
@@ -113,6 +113,7 @@ def _populate_protected_observation_ids(conn: sqlite3.Connection, schema_name: s
     conn.execute(
         'CREATE TEMP TABLE _cutover_protected_obs (observation_id TEXT PRIMARY KEY)'
     )
+    breakdown: dict[str, int] = {}
     for table, candidate_columns, predicate_suffix in DEPENDENCY_EXCLUSION_SPECS:
         if table not in existing:
             continue
@@ -125,13 +126,20 @@ def _populate_protected_observation_ids(conn: sqlite3.Connection, schema_name: s
         if chosen_col is None:
             continue
         qcol = archive._quote(chosen_col)
+        table_cnt = int(
+            conn.execute(
+                f'SELECT COUNT(DISTINCT {qcol}) FROM {qschema}.{qtable} WHERE {qcol}{predicate_suffix}'
+            ).fetchone()[0]
+        )
+        breakdown[table] = table_cnt
         conn.execute(
             f'INSERT OR IGNORE INTO temp._cutover_protected_obs(observation_id) '
             f'SELECT {qcol} FROM {qschema}.{qtable} WHERE {qcol}{predicate_suffix}'
         )
-    return int(
+    total = int(
         conn.execute('SELECT COUNT(*) FROM temp._cutover_protected_obs').fetchone()[0]
     )
+    return total, breakdown
 
 
 def _rowid_alias(conn: sqlite3.Connection, schema_name: str, table: str) -> tuple[str | None, list[str]]:
@@ -280,7 +288,7 @@ def build_hot_cutover_snapshot(
         ).fetchall()
 
         # Materialize indexed temp table of protected observation_ids for O(1) lookup.
-        protected_obs_count = _populate_protected_observation_ids(work_conn, 'src')
+        protected_obs_count, protected_breakdown = _populate_protected_observation_ids(work_conn, 'src')
 
         # Compute retirement boundary for `passive_market_observations`.
         source_max_rowid = work_conn.execute(
@@ -440,6 +448,7 @@ def build_hot_cutover_snapshot(
             retired_row_count=retired_count,
             hot_target_row_count=hot_target_count,
             protected_observation_count=protected_obs_count,
+            protected_observation_breakdown=protected_breakdown,
             hot_status_counts=hot_status_counts,
             post_catalog_row_counts={t: p['row_count'] for t, p in post_catalog_proofs.items()},
             freelist_count=freelist_count,
