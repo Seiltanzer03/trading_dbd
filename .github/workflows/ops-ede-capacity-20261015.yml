@@ -6,194 +6,193 @@ on:
 permissions:
   contents: read
 jobs:
-  stage1-complete-fk-and-catalog-delta-readonly:
+  stage2-offhost-cutover-and-union-proof:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 60
     steps:
-    - uses: actions/checkout@v4
-      with:
-        ref: 5fe2e56d6a5d1f8da20c9a918fe3592d3e6eb5d4
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    - run: python -m pip install --quiet paramiko boto3
-    - name: Read complete 12-table FK status, orphan provenance, S3 prefixes, and hot/cold watermark delta
-      env:
-        SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-        AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
-        AWS_DEFAULT_REGION: ru-central1
-        AWS_EC2_METADATA_DISABLED: 'true'
-      run: |
-        python - <<'PY'
-        import ast, json, os, shlex, sys, textwrap
-        import boto3
-        from botocore.config import Config
-        sys.path.insert(0, 'scripts')
-        from production_ede_offload import _connect, _exec
-        from restore_verified_snapshot import ENDPOINT
+      - name: Free runner disk space for 20GB disposable SQLite proof
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+      - uses: actions/checkout@v4
+        with:
+          ref: c0cca1b406c8e8c491f7d87e50643a0c328d6526
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --quiet boto3
+      - name: Verify rowid-preserving hot compaction, FK closure, post-cutover writes, and full cold hydration off-host
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+          TASK_DIRECTORY: ${{ runner.temp }}/stage2-cutover-proof-20261018
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, shutil, sqlite3, sys, time
+          from contextlib import closing
+          from pathlib import Path
+          import boto3
+          from botocore.config import Config
+          sys.path.insert(0, '.')
+          sys.path.insert(0, 'scripts')
+          from restore_verified_snapshot import restore, ENDPOINT, manifest_digest
+          from managed_verified_seed import ManagedRestoreClient
+          from scripts import sqlite_history_partition as archive
+          from scripts.sqlite_history_catalog import verify_full_tables
+          from scripts.sqlite_history_cutover import build_hot_cutover_snapshot
+          from scripts.sqlite_history_union import hydrate_snapshot
 
-        s3 = boto3.client(
-            's3',
-            endpoint_url=ENDPOINT,
-            region_name='ru-central1',
-            config=Config(connect_timeout=10, read_timeout=30, retries={'max_attempts': 2}),
-        )
-        bucket = 'trading-dbd-backups-2026'
-        non_history_objects = []
-        paginator = s3.get_paginator('list_objects_v2')
-        for page in paginator.paginate(Bucket=bucket):
-            for obj in page.get('Contents') or []:
-                key = obj['Key']
-                if not key.startswith('research/sqlite-history/v1/'):
-                    non_history_objects.append({
-                        'key': key,
-                        'size': obj['Size'],
-                        'last_modified': obj['LastModified'].isoformat(),
-                    })
-        print('YANDEX_NON_HISTORY_OBJECTS=' + json.dumps(non_history_objects, sort_keys=True), flush=True)
+          SOURCE_SHA = 'd6e8c423f21585f68cd28b0d837eb08c944d2b273bbba59ad963927e33434535'
+          CATALOG_SHA = '7b78d25d13f249f1ab967828675419a6656fe6b69787e5b78644076a54411a63'
+          CATALOG_KEY = f'research/sqlite-history/v1/{SOURCE_SHA}/catalogs/{CATALOG_SHA}.json'
+          SNAPSHOT_KEY = 'backups/v1/daily-slot-0/snapshot.sqlite3.gz'
 
-        remote_code = """
-        import json, os, sqlite3, subprocess, time, urllib.request
-        os.nice(10)
-        sha = subprocess.check_output(['git', '-C', '/opt/seiltanzer', 'rev-parse', 'HEAD'], text=True, timeout=3).strip()
-        with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status', timeout=5) as r:
-            ai_status = json.loads(r.read(65536))
+          root = Path(os.environ['TASK_DIRECTORY'])
+          root.mkdir(mode=0o700, exist_ok=False)
+          client = boto3.client(
+              's3',
+              endpoint_url=ENDPOINT,
+              region_name='ru-central1',
+              config=Config(connect_timeout=10, read_timeout=120, retries={'max_attempts': 3}),
+          )
 
-        local_backups = []
-        bdir = '/opt/seiltanzer/data/backups/local'
-        if os.path.isdir(bdir):
-            for name in sorted(os.listdir(bdir)):
-                p = os.path.join(bdir, name)
-                if os.path.isfile(p):
-                    local_backups.append({'name': name, 'size': os.path.getsize(p), 'mtime': os.path.getmtime(p)})
+          print('STAGE2_STEP=1_download_catalog', flush=True)
+          with client.get_object(Bucket=archive.BUCKET, Key=CATALOG_KEY)['Body'] as body:
+              catalog_bytes = body.read(8 * 1024**2 + 1)
+          if hashlib.sha256(catalog_bytes).hexdigest() != CATALOG_SHA:
+              raise ValueError('Downloaded catalog SHA256 mismatch')
+          catalog = json.loads(catalog_bytes)
 
-        conn = sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro', uri=True, timeout=2.0)
-        started = time.monotonic()
-        overall = started + 90.0
-        deadline = overall
-        conn.execute('PRAGMA query_only=ON')
-        conn.execute('PRAGMA trusted_schema=OFF')
-        conn.execute('PRAGMA cache_size=-16384')
-        conn.set_progress_handler(lambda: time.monotonic() >= deadline, 5000)
-        def q(v):
-            return '"' + v.replace('"', '""') + '"'
-        try:
-            tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
-            names = set(tables)
-            fk_tables = []
-            for t in tables:
-                deadline = min(overall, time.monotonic() + 2.0)
-                keys = conn.execute('PRAGMA foreign_key_list(' + q(t) + ')').fetchall()
-                if keys:
-                    fk_tables.append({
-                        'table': t,
-                        'references': [{'id': r[0], 'parent': r[2], 'parent_exists': r[2] in names, 'from_column': r[3], 'to_column': r[4]} for r in keys]
-                    })
+          print('STAGE2_STEP=2_restore_disposable_source', flush=True)
+          source = root / 'source.sqlite3'
+          proof = restore(
+              bucket=archive.BUCKET,
+              key=SNAPSHOT_KEY,
+              destination=source,
+              result_path=root / 'private-source-receipt.json',
+              snapshot_drill=True,
+              client=ManagedRestoreClient(client, temp_dir=root),
+          )
+          if proof['database_sha256'] != SOURCE_SHA:
+              raise ValueError(f"Restored snapshot SHA {proof['database_sha256']} != {SOURCE_SHA}")
+          print('STAGE2_SOURCE_RESTORED=' + json.dumps({
+              'database_sha256': proof['database_sha256'],
+              'database_size_bytes': proof['database_size_bytes'],
+              'free_bytes_after_restore': shutil.disk_usage(root).free,
+          }, sort_keys=True), flush=True)
 
-            fk_results = []
-            for item in fk_tables:
-                t = item['table']
-                t0 = time.monotonic()
-                entry = {'table': t, 'join_orphans': [], 'pragma_status': None}
-                for ref in item['references']:
-                    parent = ref['parent']
-                    fcol = ref['from_column']
-                    tcol = ref['to_column']
-                    deadline = min(overall, time.monotonic() + 10.0)
-                    if t == 'decision_path_points' and fcol == 'review_id':
-                        sql = f'''
-                        WITH RECURSIVE distinct_keys(k) AS (
-                            SELECT MIN({q(fcol)}) FROM {q(t)}
-                            UNION ALL
-                            SELECT (SELECT MIN({q(fcol)}) FROM {q(t)} WHERE {q(fcol)} > distinct_keys.k)
-                            FROM distinct_keys WHERE k IS NOT NULL
-                        )
-                        SELECT k FROM distinct_keys
-                        WHERE k IS NOT NULL AND NOT EXISTS (
-                            SELECT 1 FROM {q(parent)} p WHERE p.{q(tcol)} = distinct_keys.k
-                        )
-                        '''
-                        orphans = [r[0] for r in conn.execute(sql).fetchall()]
-                        distinct_cnt = conn.execute(f'''
-                        WITH RECURSIVE distinct_keys(k) AS (
-                            SELECT MIN({q(fcol)}) FROM {q(t)}
-                            UNION ALL
-                            SELECT (SELECT MIN({q(fcol)}) FROM {q(t)} WHERE {q(fcol)} > distinct_keys.k)
-                            FROM distinct_keys WHERE k IS NOT NULL
-                        )
-                        SELECT COUNT(*) FROM distinct_keys WHERE k IS NOT NULL
-                        ''').fetchone()[0]
-                        entry['distinct_review_ids'] = distinct_cnt
-                    else:
-                        sql = f'''
-                        SELECT DISTINCT c.{q(fcol)}
-                        FROM {q(t)} c
-                        LEFT JOIN {q(parent)} p ON p.{q(tcol)} = c.{q(fcol)}
-                        WHERE c.{q(fcol)} IS NOT NULL AND p.{q(tcol)} IS NULL
-                        LIMIT 50
-                        '''
-                        orphans = [r[0] for r in conn.execute(sql).fetchall()]
-                    entry['join_orphans'].append({'parent': parent, 'from': fcol, 'to': tcol, 'missing_keys': orphans})
-                try:
-                    deadline = min(overall, time.monotonic() + (35.0 if t == 'decision_path_points' else 5.0))
-                    row = conn.execute('PRAGMA foreign_key_check(' + q(t) + ')').fetchone()
-                    entry['pragma_status'] = 'VIOLATION_FOUND' if row is not None else 'CHECK_PASSED'
-                    entry['first_violation'] = None if row is None else {'table': row[0], 'rowid': row[1], 'parent': row[2], 'fkid': row[3]}
-                except sqlite3.Error as exc:
-                    entry['pragma_status'] = 'UNAVAILABLE:' + type(exc).__name__
-                entry['elapsed_ms'] = round((time.monotonic() - t0) * 1000, 1)
-                fk_results.append(entry)
+          print('STAGE2_STEP=3_build_hot_cutover_snapshot', flush=True)
+          t0 = time.monotonic()
+          hot = root / 'hot.sqlite3'
+          cutover_report = build_hot_cutover_snapshot(
+              source,
+              hot,
+              catalog_bytes=catalog_bytes,
+              expected_catalog_sha256=CATALOG_SHA,
+              source_receipt=proof,
+          )
+          cutover_elapsed_sec = round(time.monotonic() - t0, 2)
+          print('STAGE2_CUTOVER_REPORT=' + json.dumps({
+              k: v for k, v in cutover_report.items() if k != 'hot_restore_proof'
+          }, sort_keys=True), flush=True)
 
-            deadline = min(overall, time.monotonic() + 10.0)
-            ack_rows = [dict(zip(['id','trade_id','decision_id','policy','status','ts','note_len'], r))
-                        for r in conn.execute('SELECT id, trade_id, decision_id, policy, status, ts, length(COALESCE(note, \"\")) FROM ai_decision_acks WHERE trade_id IN (77, 96) ORDER BY id')]
-            neighbor_trades = [dict(zip(['id','opened_at','closed_at','setup','instrument','direction','status','deleted_at'], r))
-                               for r in conn.execute('SELECT id, opened_at, closed_at, setup, instrument, direction, status, deleted_at FROM trades WHERE id BETWEEN 70 AND 105 ORDER BY id')]
-            first_deleted_trade = conn.execute('SELECT MIN(id), MIN(deleted_at), COUNT(*) FROM trades WHERE deleted_at IS NOT NULL').fetchone()
+          # Delete original 19.28 GB source now that cutover is built so we have plenty of room for hydration
+          for suffix in ('', '-wal', '-shm', '-journal'):
+              (root / ('source.sqlite3' + suffix)).unlink(missing_ok=True)
 
-            tables_with_77_96 = {}
-            for t in tables:
-                if t in ('passive_market_observations', 'g1s_observations', 'decision_path_points'):
-                    continue
-                cols = [r[1] for r in conn.execute('PRAGMA table_info(' + q(t) + ')')]
-                if 'trade_id' in cols:
-                    deadline = min(overall, time.monotonic() + 2.0)
-                    found = [r[0] for r in conn.execute(f'SELECT DISTINCT trade_id FROM {q(t)} WHERE trade_id IN (77, 96)')]
-                    if found:
-                        tables_with_77_96[t] = found
+          print('STAGE2_STEP=4_verify_hot_watermarks_and_fk', flush=True)
+          with closing(sqlite3.connect(hot.resolve().as_uri() + '?mode=ro&immutable=1', uri=True)) as conn:
+              conn.execute('PRAGMA trusted_schema=OFF')
+              fk_errors = conn.execute('PRAGMA foreign_key_check').fetchall()
+              if fk_errors:
+                  raise ValueError(f'Hot DB FK check failed: {fk_errors}')
+              acks = conn.execute('SELECT id, trade_id, status FROM ai_decision_acks ORDER BY id').fetchall()
+              identities = conn.execute(
+                  "SELECT trade_id, lifecycle_origin FROM trade_lifecycle_identities WHERE trade_id IN (77, 96) ORDER BY trade_id"
+              ).fetchall()
+              g1s_wm = conn.execute('SELECT source_watermark FROM g1s_materialization_state').fetchall()
+              g1s_status_wm = conn.execute('SELECT observation_rowid_watermark FROM g1s_status_materialization_state').fetchall()
+              max_pmo_rowid = conn.execute('SELECT MAX(rowid) FROM passive_market_observations').fetchone()[0]
+              max_g1s_rowid = conn.execute('SELECT MAX(rowid) FROM g1s_observations').fetchone()[0]
 
-            deadline = min(overall, time.monotonic() + 10.0)
-            pmo_stats = conn.execute('SELECT COUNT(*), MIN(rowid), MAX(rowid) FROM passive_market_observations').fetchone()
-            pmo_res = dict(conn.execute('SELECT COALESCE(resolution_status, \"NULL\"), COUNT(*) FROM passive_market_observations GROUP BY resolution_status').fetchall())
-            g1s_stats = conn.execute('SELECT COUNT(*), MIN(rowid), MAX(rowid) FROM g1s_observations').fetchone()
-            seq = dict(conn.execute('SELECT name, seq FROM sqlite_sequence').fetchall()) if 'sqlite_sequence' in [r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")] else {}
+          print('STAGE2_STEP=5_hydrate_hot_with_cold_catalog', flush=True)
+          t1 = time.monotonic()
+          union_path = root / 'union.sqlite3'
+          union_report = hydrate_snapshot(
+              hot,
+              union_path,
+              source_receipt=cutover_report['hot_restore_proof'],
+              catalog_bytes=catalog_bytes,
+              client=client,
+          )
+          hydrate_elapsed_sec = round(time.monotonic() - t1, 2)
+          with closing(sqlite3.connect(union_path.resolve().as_uri() + '?mode=ro&immutable=1', uri=True)) as conn:
+              conn.execute('PRAGMA trusted_schema=OFF')
+              verify_full_tables(conn, catalog)
+          for suffix in ('', '-wal', '-shm', '-journal'):
+              (root / ('union.sqlite3' + suffix)).unlink(missing_ok=True)
 
-            print('STAGE1_COMPLETE_AUDIT=' + json.dumps({
-                'code_sha': sha,
-                'ai_status': {k: ai_status.get(k) for k in ('ready', 'building', 'invalidated_reason', 'build_n', 'age_sec', 'canonical_quote_available')},
-                'local_backups': local_backups,
-                'fk_results': fk_results,
-                'ack_rows_77_96': ack_rows,
-                'neighbor_trades_70_105': neighbor_trades,
-                'tombstone_summary': {'min_id': first_deleted_trade[0], 'min_deleted_at': first_deleted_trade[1], 'count': first_deleted_trade[2]},
-                'tables_referencing_77_96': tables_with_77_96,
-                'hot_table_watermarks': {
-                    'passive_market_observations': {'count': pmo_stats[0], 'min_rowid': pmo_stats[1], 'max_rowid': pmo_stats[2], 'by_status': pmo_res},
-                    'g1s_observations': {'count': g1s_stats[0], 'min_rowid': g1s_stats[1], 'max_rowid': g1s_stats[2]},
-                    'sqlite_sequence': seq,
-                },
-                'elapsed_ms': round((time.monotonic() - started) * 1000, 1),
-                'database_mutations': 0,
-            }, sort_keys=True), flush=True)
-        finally:
-            conn.close()
-        """
-        remote_code = textwrap.dedent(remote_code).strip()
-        ast.parse(remote_code)
-        client = _connect(os.environ['SSH_PASSWORD'], attempts=1)
-        try:
-            print(_exec(client, 'python3 -c ' + shlex.quote(remote_code), timeout=110), flush=True)
-        finally:
-            client.close()
-        PY
+          print('STAGE2_STEP=6_verify_post_cutover_write_continuity', flush=True)
+          with closing(sqlite3.connect(hot)) as conn:
+              conn.execute('PRAGMA foreign_keys=ON')
+              conn.execute('PRAGMA journal_mode=DELETE')
+              conn.execute(
+                  "INSERT INTO passive_market_observations("
+                  "observation_id, instrument, horizon_minutes, captured_ts, target_ts, resolution_status"
+                  ") VALUES ('stage2-drill-post-write', 'BTCUSDT', 15, 1787100000.0, 1787100900.0, 'pending')"
+              )
+              inserted_rowid = conn.execute(
+                  "SELECT rowid FROM passive_market_observations WHERE observation_id='stage2-drill-post-write'"
+              ).fetchone()[0]
+              if inserted_rowid <= max_pmo_rowid:
+                  raise ValueError(f'Post-cutover insert rowid {inserted_rowid} <= {max_pmo_rowid}')
+              conn.commit()
+
+          public_proof = {
+              'contract': 'stage2-offhost-cutover-and-union-proof-v1',
+              'run_id': int(os.environ['GITHUB_RUN_ID']),
+              'checked_out_code_sha': 'c0cca1b406c8e8c491f7d87e50643a0c328d6526',
+              'source_database_sha256': SOURCE_SHA,
+              'catalog_sha256': CATALOG_SHA,
+              'source_database_size_bytes': cutover_report['source_database_size_bytes'],
+              'hot_database_size_bytes': cutover_report['hot_database_size_bytes'],
+              'reclaimed_bytes': cutover_report['reclaimed_bytes'],
+              'reclaimed_gib': round(cutover_report['reclaimed_bytes'] / (1024**3), 3),
+              'source_target_row_count': cutover_report['source_target_row_count'],
+              'retired_row_count': cutover_report['retired_row_count'],
+              'hot_target_row_count': cutover_report['hot_target_row_count'],
+              'hot_status_counts': cutover_report['hot_status_counts'],
+              'source_max_rowid': cutover_report['source_max_rowid'],
+              'hot_max_rowid': cutover_report['hot_max_rowid'],
+              'post_cutover_inserted_rowid': inserted_rowid,
+              'g1s_max_rowid': max_g1s_rowid,
+              'g1s_materialization_watermarks': [r[0] for r in g1s_wm],
+              'g1s_status_watermarks': [r[0] for r in g1s_status_wm],
+              'ai_decision_acks_count': len(acks),
+              'pre_tombstone_identities_77_96': identities,
+              'freelist_count': cutover_report['freelist_count'],
+              'quick_check': cutover_report['quick_check'],
+              'foreign_key_violations': cutover_report['foreign_key_violations'],
+              'cutover_elapsed_sec': cutover_elapsed_sec,
+              'hydrate_elapsed_sec': hydrate_elapsed_sec,
+              'history_union_verified': union_report['history_union_verified'],
+              'full_selected_tables_verified': union_report['full_selected_tables_verified'],
+              'typed_values_verified': union_report['typed_values_verified'],
+              'production_connection': False,
+          }
+          (root / 'public-proof.json').write_text(json.dumps(public_proof, sort_keys=True, indent=2) + '\n')
+          print('STAGE2_COMPLETE_PROOF=' + json.dumps(public_proof, sort_keys=True), flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage2-offhost-cutover-proof-${{ github.run_id }}
+          path: ${{ runner.temp }}/stage2-cutover-proof-20261018/public-proof.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Cleanup disposable files
+        if: always()
+        env:
+          TASK_DIRECTORY: ${{ runner.temp }}/stage2-cutover-proof-20261018
+        run: rm -rf "$TASK_DIRECTORY"
