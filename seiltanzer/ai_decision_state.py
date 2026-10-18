@@ -13,6 +13,15 @@ _VALID_STATUSES = {"executed", "not_executed"}
 PRE_TOMBSTONE_DELETE_CUTOFF_TS = 1786995197.0
 PRE_TOMBSTONE_MAX_TRADE_ID = 97
 
+_ACK_UPDATE_TRIGGER_SQL = """
+CREATE TRIGGER trg_ai_decision_acks_require_live_trade_update
+BEFORE UPDATE ON ai_decision_acks
+WHEN NOT EXISTS (SELECT 1 FROM trades WHERE id = NEW.trade_id)
+BEGIN
+    SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed: ai_decision_acks.trade_id requires trades.id');
+END
+""".strip()
+
 
 def ensure_connection_schema(conn: sqlite3.Connection) -> None:
     """Create or migrate the acknowledgement schema and lifecycle identity table."""
@@ -33,7 +42,12 @@ def ensure_connection_schema(conn: sqlite3.Connection) -> None:
             "))"
         ).fetchone()[0]
     )
-    if ready_count == 7 and "trade_lifecycle_identities" in ack_sql:
+    update_guard = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' "
+        "AND name='trg_ai_decision_acks_require_live_trade_update'"
+    ).fetchone()
+    if (ready_count == 7 and "trade_lifecycle_identities" in ack_sql
+            and update_guard and update_guard[0].strip() == _ACK_UPDATE_TRIGGER_SQL):
         return
 
     conn.execute(
@@ -216,16 +230,10 @@ def ensure_connection_schema(conn: sqlite3.Connection) -> None:
         END
         """
     )
-    conn.execute(
-        """
-        CREATE TRIGGER IF NOT EXISTS trg_ai_decision_acks_require_live_trade_update
-        BEFORE UPDATE OF trade_id ON ai_decision_acks
-        WHEN NOT EXISTS (SELECT 1 FROM trades WHERE id = NEW.trade_id)
-        BEGIN
-            SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed: ai_decision_acks.trade_id requires trades.id');
-        END
-        """
-    )
+    # Upgrade the earlier trade_id-only guard too: retained orphan ACK bytes
+    # must not be rewritten through status, timestamps, notes, or policy.
+    conn.execute('DROP TRIGGER IF EXISTS trg_ai_decision_acks_require_live_trade_update')
+    conn.execute(_ACK_UPDATE_TRIGGER_SQL)
 
 
 def ensure_schema(journal) -> None:

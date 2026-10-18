@@ -4,6 +4,11 @@
 
 This contract governs the physical hot/cold cutover of the live SQLite database (`/opt/seiltanzer/data/trades.db`) and its off-host disposable proof (Package B of `docs/superpowers/plans/2026-10-16-terminal-completion-and-ai-review.md`).
 
+**Review status: OFF-HOST PROTOTYPE; PRODUCTION CUTOVER BLOCKED.** The successful
+historical-copy drill does not prove current mutable-prefix hydration, complete
+production-reader equivalence, or a crash-recoverable live replacement protocol.
+See `HOT_COLD_HISTORY_REVIEW_2026-10-18.md` before integration or operations.
+
 The cutover solves the chronic disk exhaustion on the 25 GB production root filesystem (`/`), where `trades.db` grew to `19.28 GB` (`passive_market_observations` = `7.80 GB`, `g1s_observations` = `4.94 GB`) and left only `~0.70 GB` free (`< 1.03 GiB` required by `seiltanzer/background_disk_admission.py`).
 
 ## 2. Pinned Cold History Authority
@@ -15,10 +20,10 @@ Cold history is anchored to the verified Yandex Object Storage complete selected
 - **Catalog SHA-256:** `7b78d25d13f249f1ab967828675419a6656fe6b69787e5b78644076a54411a63`
 - **Catalog Object Key:** `research/sqlite-history/v1/d6e8c423f21585f68cd28b0d837eb08c944d2b273bbba59ad963927e33434535/catalogs/7b78d25d13f249f1ab967828675419a6656fe6b69787e5b78644076a54411a63.json`
 - **Catalog Coverage:**
-  - `passive_market_observations`: `132,923` rows (`rowid 1..132,923`) across 266 verified cloud partitions (`logical_sha256 = 29050ca2bf04bb86ef2a3548321ba0f889f749c4b0030b81db5214d9ba7b89c8`).
-  - `g1s_observations`: `86,100` rows (`rowid 1..86,100`) across 173 verified cloud partitions (`logical_sha256 = 95a7e83d1db8a63c48bd32dd19d80025a3494649c0020ca6e91a311e25e49fa2`).
+  - `passive_market_observations`: `132,923` rows (`rowid 1..132,923`) across 266 verified cloud partitions (`logical_sha256 = 3873edc7d11a6d2b8a46754439aac755b93b10eaf5470bf8cbd267ba3e4d83c2`).
+  - `g1s_observations`: `86,100` rows (`rowid 1..86,100`) across 173 verified cloud partitions (`logical_sha256 = 203f62163902f1070cc1419c01e6be525cb25c3fa2b160c8aa64e8c559e7132c`).
 
-## 3. Dependency-Closed Hot/Cold Partition Rules
+## 3. Proposed Hot/Cold Partition Rules (Reader Closure Not Established)
 
 ### 3.1 What Remains 100% in the Hot Database (`trades.db`)
 1. **All tables outside `passive_market_observations`** (`g1s_observations`, `trades`, `ede_v13_decision_ledger`, `g1_dataset_membership`, `g1_dataset_cuts`, `g1_dataset_cut_members`, `g1_q_capture_attempts`, `g1c_shadow_predictions`, `virtual_position_observations`, `ai_decision_acks`, `trade_lifecycle_identities`, etc.) remain 100% intact in the hot database.
@@ -40,7 +45,10 @@ Only rows in `passive_market_observations` that satisfy **all** of the following
 4. The source database's catalog prefix (`rowid <= catalog_max_rowid`) is verified against the catalog's exact `row_count` and typed `logical_sha256` root before compaction.
 5. The row's `observation_id` is not in the dependency exclusion set (§3.1 item 5).
 
-This retires `~91,000+` terminal dead-end `insufficient_future_data` rows (`~5.25 GB` physical pages), shrinking `trades.db` from `19.28 GB` to `~14.03 GB` and restoring `~5.95 GB` (`~5.54 GiB`) of free root disk space on the VPS (`> 5x` the `1.03 GiB` admission reserve).
+Actual historical-copy run `39079437415` retired `62,183` rows and reduced the
+copy from `18,784,505,856` to `14,978,297,856` bytes, a saving of
+`3,806,208,000` bytes (`3.545 GiB`). It did not connect to production or reclaim
+VPS disk space. Counts and savings for a current source have not been measured.
 
 ## 4. Rowid-Preserving Physical Compaction Invariant
 
@@ -50,7 +58,7 @@ This retires `~91,000+` terminal dead-end `insufficient_future_data` rows (`~5.2
    - Cold catalog partition `rowid` mapping (`sqlite_history_catalog.py` / `sqlite_history_union.py`).
 2. Physical compaction in `scripts/sqlite_history_cutover.py` builds a fresh SQLite database file (`journal_mode=DELETE`, `freelist_count=0`) by:
    - Applying `seiltanzer.ai_decision_state.ensure_connection_schema` so pre-tombstone `ai_decision_acks` rows (`trade_id IN (77, 96)`) are bound to `trade_lifecycle_identities` and pass `PRAGMA foreign_key_check`.
-   - Recreating all tables, indexes, triggers, views, `PRAGMA user_version`, and `sqlite_sequence` entries in exact schema order.
+   - Recreating tables with trades/lifecycle/ACK tables prioritized, followed by other original tables and indexes/triggers/views; preserving `PRAGMA user_version` and `sqlite_sequence`. Schema order is not identical, and ACK constraints intentionally migrate.
    - Copying every row of every `rowid` table with explicit `INSERT INTO main."table"(rowid, col1, ...) SELECT rowid, col1, ... FROM src."table"`, preserving every surviving row's exact `rowid`.
    - Verifying `PRAGMA quick_check == ('ok',)` and `PRAGMA foreign_key_check == []` before atomic publication.
 
@@ -63,3 +71,9 @@ When `sqlite_history_union.hydrate_snapshot` hydrates a compacted hot database t
    - The catalog prefix (`WHERE rowid <= catalog_max_rowid`) has exact row count `== proof['row_count']` and exact typed `_logical_hash == proof['logical_sha256']`.
    - The post-catalog suffix (`WHERE rowid > catalog_max_rowid`) is unchanged in both count and typed `_logical_hash`.
    - Global `PRAGMA quick_check == ('ok',)` and `PRAGMA foreign_key_check == []`.
+
+This supports an unchanged catalog prefix plus appended rows. It does **not**
+support a retained catalog-prefix row changing from `pending` to `resolved`:
+the current merge rejects its differing typed values. Root verification must
+not be disabled to bypass this. A versioned hot-state reconciliation contract
+and actual consumer comparisons are required before production cutover.

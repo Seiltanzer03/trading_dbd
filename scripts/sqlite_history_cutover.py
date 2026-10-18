@@ -124,7 +124,7 @@ def _populate_protected_observation_ids(conn: sqlite3.Connection, schema_name: s
         }
         chosen_col = next((c for c in candidate_columns if c in actual_cols), None)
         if chosen_col is None:
-            continue
+            raise ValueError(f'Unsupported dependency schema for {table}')
         qcol = archive._quote(chosen_col)
         table_cnt = int(
             conn.execute(
@@ -173,8 +173,8 @@ def build_hot_cutover_snapshot(
     """Build a physically compacted, rowid-preserving hot SQLite snapshot.
 
     1. Verifies `source` is an immutable regular SQLite file with no sidecars.
-    2. Verifies `catalog_bytes` is a complete selected-table catalog and (when
-       `verify_source_catalog_roots=True`) that `source`'s catalog prefix
+    2. Requires a verified source receipt and catalog SHA-256 pin. Verifies
+       `catalog_bytes` is a complete selected-table catalog and that its prefix
        (`rowid <= catalog_max_rowid`) matches the pinned catalog's exact row
        counts and typed `logical_sha256` roots.
     3. Rebuilds directly from `source` (attached immutable read-only) into a
@@ -183,23 +183,27 @@ def build_hot_cutover_snapshot(
        (`rowid < catalog_max_rowid` and `rowid < MAX(rowid)`), then applies
        `ensure_connection_schema` to close the pre-tombstone `ai_decision_acks`
        FK references (`trade_id IN (77, 96)`).
-    4. Preserves all `rowid` values across all tables, verifies `PRAGMA quick_check`
-       and `PRAGMA foreign_key_check == []`, and returns a signed cutover receipt
-       plus `hot_restore_proof` ready for `sqlite_history_union.hydrate_snapshot`.
+    4. Copies explicit `rowid` values, verifies `PRAGMA quick_check` and
+       `PRAGMA foreign_key_check == []`, and returns an unsigned physical-copy
+       receipt plus `hot_restore_proof`. This does not authorize live retirement
+       or establish production-reader equivalence.
     """
     source, destination = Path(source), Path(destination)
     if os.path.lexists(destination):
         raise FileExistsError(destination)
+    if verify_source_catalog_roots is not True:
+        raise ValueError('Source catalog root verification is mandatory')
+    if not re.fullmatch('[0-9a-f]{64}', str(expected_catalog_sha256 or '')):
+        raise ValueError('A catalog SHA-256 pin is required')
     before = archive._identity(source)
-    if source_receipt is not None:
-        if (not isinstance(source_receipt, dict)
-                or source_receipt.get('immutable_sqlite_read') is not True
-                or not (source_receipt.get('snapshot_restore_verified') is True
-                        or source_receipt.get('full_restore_verified') is True)
-                or source_receipt.get('verified_local_file') != before
-                or source_receipt.get('database_size_bytes') != before['size']
-                or not re.fullmatch('[0-9a-f]{64}', str(source_receipt.get('database_sha256') or ''))):
-            raise ValueError('Source lacks matching verified local restore proof')
+    if (not isinstance(source_receipt, dict)
+            or source_receipt.get('immutable_sqlite_read') is not True
+            or not (source_receipt.get('snapshot_restore_verified') is True
+                    or source_receipt.get('full_restore_verified') is True)
+            or source_receipt.get('verified_local_file') != before
+            or source_receipt.get('database_size_bytes') != before['size']
+            or not re.fullmatch('[0-9a-f]{64}', str(source_receipt.get('database_sha256') or ''))):
+        raise ValueError('Source lacks matching verified local restore proof')
     catalog, catalog_sha = _parse_catalog(catalog_bytes, expected_catalog_sha256)
     max_rowids = catalog_max_rowids(catalog)
     target_max_catalog_rowid = max_rowids.get(TARGET_TABLE)
@@ -237,8 +241,7 @@ def build_hot_cutover_snapshot(
                         ro_conn, qtable, proof['columns'], alias, suffix_where, suffix_params
                     ),
                 )
-        if verify_source_catalog_roots:
-            verify_full_tables(ro_conn, catalog, post_catalog_proofs=post_catalog_proofs)
+        verify_full_tables(ro_conn, catalog, post_catalog_proofs=post_catalog_proofs)
 
     check(needed=archive.RESERVE_BYTES + before['size'])
 
@@ -434,6 +437,12 @@ def build_hot_cutover_snapshot(
         return dict(
             contract=CONTRACT,
             cutover_verified=True,
+            scope='OFF_HOST_PHYSICAL_COMPACTION_ONLY',
+            production_authority=False,
+            data_retirement_authorized=False,
+            full_production_reader_equivalence_proven=False,
+            source_catalog_prefix_verified=True,
+            source_database_sha256=source_receipt['database_sha256'],
             source_database_size_bytes=before['size'],
             hot_database_size_bytes=size,
             reclaimed_bytes=before['size'] - size,
