@@ -1,0 +1,36 @@
+{
+  "contract": "history-fence-release-observation-v1",
+  "observed_date": "2026-10-18",
+  "repository": "Seiltanzer03/trading_dbd",
+  "main_sha": "62a5438027c589a9bc0348e6125c60c7b3d83482",
+  "pull_request": 488,
+  "pr_ci": {
+    "run_id": 39112455792,
+    "conclusion": "success",
+    "passed": 4390,
+    "skipped": 5
+  },
+  "main_ci": {
+    "run_id": 39112852626,
+    "conclusion": "success"
+  },
+  "deploy": {
+    "run_id": 39113175109,
+    "job_id": 117633543679,
+    "delivery": "success",
+    "http_startup_observed": true,
+    "start_guard_installed": true,
+    "uvicorn_startup_seconds": 706.745,
+    "research_acceptance": "failure",
+    "worker_phase": "disk_pressure_pause",
+    "worker_core_started": false,
+    "worker_last_error": null,
+    "cooperative_lease_released": true,
+    "downstream_readiness_and_smoke": "skipped",
+    "overall_conclusion": "failure"
+  },
+  "full_release_accepted": false,
+  "production_history_cutover_performed": false,
+  "production_disk_reclaimed_by_this_package": false,
+  "interpretation": "Code delivery and HTTP startup succeeded; required research acceptance failed on unchanged disk admission. Do not treat delivery as full production acceptance or rerun unchanged fitting to conceal the block."
+}

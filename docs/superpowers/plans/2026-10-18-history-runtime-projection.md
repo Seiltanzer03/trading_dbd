@@ -47,3 +47,15 @@ admitted outcome. `passive_history_statistics.py` owns the previous literal
 LIKE/count predicates; legacy status now uses the same aggregate, with unchanged
 NULL/JSON-whitespace semantics. RED3 then focused GREEN49 in2.07s. Rollup
 persistence and reader wiring are not yet complete.
+
+## Recovery checkpoint after local reader integration
+
+The final local integration passed a 222-test profile and a separate 50-test
+acceptance/orchestration/disk profile before the execution environment went
+offline. These changes are not yet committed/pushed or finally reviewed; the
+unchecked integration/release tasks above remain open in this remote plan.
+See `docs/HISTORY_RUNTIME_RECOVERY_CHECKPOINT_2026-10-18.md` for the exact local
+HEAD, owned file list and recovery sequence. PR488 delivery/HTTP succeeded, but
+production research acceptance failed on unchanged disk admission; see
+`docs/HISTORY_FENCE_RELEASE_OBSERVATION_2026-10-18.json`. No live history
+retirement or reclaimed production capacity is claimed.
