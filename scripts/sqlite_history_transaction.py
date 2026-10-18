@@ -263,6 +263,17 @@ def execute_cutover(root, plan, *, transport, control):
     """Run or resume a finite disposable transaction; never authorized production."""
     root = Path(root)
     raw_plan = _plan_bytes(plan)
+    with _owned_lock(root):
+        return _execute_validated_transfer(root, raw_plan, transport=transport, control=control)
+
+
+def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit=None):
+    """Private core: caller owns its lock and already validated canonical plan.
+
+    The public disposable entry point above keeps its production-root refusal.
+    Production ownership needs its own strict root/plan/fence validator.
+    """
+    root = Path(root)
     plan = json.loads(raw_plan)  # Freeze the validated epoch against caller/adapter mutation.
     pin = hashlib.sha256(raw_plan).hexdigest()
     epoch = dict(contract=CONTRACT, run_id=plan['run_id'], plan_sha256=pin)
@@ -357,43 +368,45 @@ def execute_cutover(root, plan, *, transport, control):
                     service_started=current['service_started'], production_authority=False,
                     data_retirement_authorized=False, disposable_proof=True)
 
-    with _owned_lock(root):
-        current = _read(journal)
-        if current is not None:
-            if (set(current) != set(epoch).union(('phase', 'service_started'))
-                    or any(current.get(key) != value for key, value in epoch.items())
-                    or current.get('phase') not in PHASES
-                    or type(current.get('service_started')) is not bool
-                    or (current['service_started'] and current['phase'] not in ('COMMITTED', 'ORIGINAL_RESTORED'))):
-                raise CutoverError('JOURNAL_PLAN_OR_PHASE_MISMATCH')
-            if current['phase'] in ('COMMITTED', 'ORIGINAL_RESTORED'):
-                return finish(current)
-            if current['phase'] == 'FENCE_LOST_GUARDED':
-                raise FencingError('FENCE_LOST_REQUIRES_DATA_RECONCILIATION')
-            try:
-                check_guard()
-            except FencingError:
-                state('FENCE_LOST_GUARDED')
-                raise
-            return finish(recover())
-        existing = _read(guard)
-        if existing is not None and existing != epoch:
-            raise CutoverError('ACTIVE_GUARD_OWNERSHIP_LOST')
-        if existing is None:
-            _write(guard, epoch)
-        fence()
-        _verify_database(database, plan['original'], deadline)
-        state('PREPARED')
+    current = _read(journal)
+    if current is not None:
+        if (set(current) != set(epoch).union(('phase', 'service_started'))
+                or any(current.get(key) != value for key, value in epoch.items())
+                or current.get('phase') not in PHASES
+                or type(current.get('service_started')) is not bool
+                or (current['service_started'] and current['phase'] not in ('COMMITTED', 'ORIGINAL_RESTORED'))):
+            raise CutoverError('JOURNAL_PLAN_OR_PHASE_MISMATCH')
+        if current['phase'] in ('COMMITTED', 'ORIGINAL_RESTORED'):
+            return finish(current)
+        if current['phase'] == 'FENCE_LOST_GUARDED':
+            raise FencingError('FENCE_LOST_REQUIRES_DATA_RECONCILIATION')
         try:
-            fence()
-            state('APPLYING_HOT')
-            transfer('hot')
-            state('HOT_VERIFIED')
-            fence()
-            current = state('COMMITTED')
+            check_guard()
         except FencingError:
             state('FENCE_LOST_GUARDED')
             raise
-        except Exception:
-            current = recover()
-        return finish(current)
+        return finish(recover())
+    existing = _read(guard)
+    if existing is not None and existing != epoch:
+        raise CutoverError('ACTIVE_GUARD_OWNERSHIP_LOST')
+    if existing is None:
+        _write(guard, epoch)
+    fence()
+    _verify_database(database, plan['original'], deadline)
+    state('PREPARED')
+    try:
+        fence()
+        state('APPLYING_HOT')
+        transfer('hot')
+        state('HOT_VERIFIED')
+        fence()
+        if precommit is not None and precommit() is not True:
+            raise CutoverError('HOT_RESOURCE_ADMISSION_REFUSED')
+        fence()
+        current = state('COMMITTED')
+    except FencingError:
+        state('FENCE_LOST_GUARDED')
+        raise
+    except Exception:
+        current = recover()
+    return finish(current)
