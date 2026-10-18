@@ -101,3 +101,25 @@ actual SQLite. A scan-budget regression was RED on two full integrity scans;
 the phase now performs one integrity/hash pass per invocation (and no extra
 repeat on same-invocation abort). This is an internal phase, not the native
 systemd owner/driver. No production freeze, source capture or transfer occurred.
+
+Task2 reader inventory found direct SQLite openers outside the maintenance
+flock. The shared stdlib history_live_read_guard now holds a real shared lock
+for direct production readers, refusing active/pending/ambiguous epochs before
+opening SQLite. Embedded native export releases it after SQLite close, before
+compression/SSH output. Production EDE inventory retains it through its actual
+read transaction and releases it even if initialization fails. That constructor
+failure was reproduced RED with a real SQLite BEGIN error, then GREEN. Initial
+guard RED10; integrated reader/freeze/plan/core/image profile:174passed in4.60s.
+Remaining direct read paths still require closure before any production
+invocation; this is not a claim of complete process exclusion.
+
+Explicit remaining source-open inventory: export_mathematical_edge_sources,
+export_unified_edge_reviews, production_ede_transition_audit, v12/v13 snapshot
+source helpers, historical_conditional_audit, run_universal_outcome_audit,
+standalone origin rsync and embedded network/management diagnostics. Audit or
+guard each actual live-source path; immutable worker-only paths keep their role.
+Do not enable the native production entry while this inventory remains open.
+
+Latest observed public health: run39131157759/job117686432279 at13:21:11UTC,
+expected main4467853, first /api/state probe returnedHTTP200. This is distinct
+from the disk-blocked full research acceptance. No extra deploy was triggered.

@@ -8,12 +8,14 @@ import io
 import inspect
 import json
 import shlex
+import textwrap
 from pathlib import Path
 
 from scripts.production_ede_offload import _connect
 from seiltanzer.config import ALL_INSTRUMENTS
 from seiltanzer.edge_family_native_history import native_history
 from seiltanzer import native_family_capture_projection, real_input_integrity
+from seiltanzer import history_live_read_guard
 
 # Embed the exact shared stdlib implementation: no installed server package,
 # model dependencies or duplicate projection/guard rules are required.
@@ -97,6 +99,16 @@ raw=json.dumps(report,allow_nan=False,separators=(',',':')).encode()
 if len(raw)>96000000:raise ValueError('private native export exceeds bound')
 print(base64.b64encode(gzip.compress(raw)).decode())
 """.replace('__CODES__',repr(tuple(ALL_INSTRUMENTS)))
+
+# Guard only the SQLite lifetime, releasing before report compression/SSH I/O.
+_read_start = REMOTE_EXPORT.index("c=sqlite3.connect(")
+_read_end = REMOTE_EXPORT.index('c.close()\n',_read_start)+len('c.close()\n')
+_connect, _read_body = REMOTE_EXPORT[_read_start:_read_end].split('\n',1)
+_read_body = _read_body.removesuffix('c.close()\n')
+REMOTE_EXPORT = (REMOTE_EXPORT[:_read_start]+'\n'+inspect.getsource(history_live_read_guard)+
+    "\nwith guarded_live_read(Path('/opt/seiltanzer/data/trades.db')):\n"+
+    textwrap.indent(_connect+'\ntry:\n'+textwrap.indent(_read_body,'    ')+
+                    'finally:\n    c.close()\n','    ')+REMOTE_EXPORT[_read_end:])
 
 
 def main():

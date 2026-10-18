@@ -7,6 +7,7 @@ import json
 import math
 import sqlite3
 import threading
+from contextlib import ExitStack
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 from seiltanzer.edge_discovery.maturity import data_maturity as canonical_data_maturity
 from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.registry import FEATURES
+from seiltanzer.history_live_read_guard import guarded_live_read
 
 
 INVENTORY_CONTRACT_VERSION = "g1s-ede-production-inventory-v1.5.0"
@@ -38,20 +40,26 @@ KNOWN_DATA_MATURITY = frozenset({
 
 class _ReadOnlyRuntime:
     def __init__(self, database: Path):
+        self._source_lifetime = ExitStack()
+        self._source_lifetime.enter_context(guarded_live_read(database))
         uri = f"file:{database.resolve()}?mode=ro"
-        self._conn = sqlite3.connect(uri, uri=True, timeout=30.0)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA query_only=ON")
-        self._conn.execute("PRAGMA busy_timeout=30000")
-        self._lock = threading.RLock()
-        # This dedicated connection has no same-connection writer. An explicit
-        # read transaction pins a consistent view across counts and horizons,
-        # while other WAL connections can continue recording real observations.
-        self._conn.execute("BEGIN")
-        self._consistent_read_snapshot = True
+        try:
+            self._conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+            self._source_lifetime.callback(self._conn.close)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA query_only=ON")
+            self._conn.execute("PRAGMA busy_timeout=30000")
+            self._lock = threading.RLock()
+            # Pin the consistent read while retaining the maintenance reader
+            # lock, including cleanup if a later constructor step fails.
+            self._conn.execute("BEGIN")
+            self._consistent_read_snapshot = True
+        except BaseException:
+            self._source_lifetime.close()
+            raise
 
     def close(self) -> None:
-        self._conn.close()
+        self._source_lifetime.close()
 
 
 def _history_strategy(definition: Any) -> str:
