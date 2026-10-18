@@ -278,13 +278,27 @@ jobs:
             ${{ runner.temp }}/ede-source/ede-source.sqlite3.seed.json
           if-no-files-found: error
           retention-days: 30
-      - name: Reverify immutable input before research
+      - name: Prepare complete verified history input before research
+        id: research_input
         env:
           SOURCE_DB: ${{ runner.temp }}/ede-source/ede-source.sqlite3
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
         run: |
-          python scripts/verify_immutable_snapshot.py \
+          python scripts/prepare_research_history.py \
             --database "$SOURCE_DB" \
-            --manifest "$SOURCE_DB.manifest.json"
+            --manifest "$SOURCE_DB.manifest.json" \
+            --destination "${{ runner.temp }}/ede-source/ede-research-full.sqlite3" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Preserve verified research input provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: ede-research-input-${{ github.run_id }}
+          path: ${{ steps.research_input.outputs.manifest }}
+          if-no-files-found: error
+          retention-days: 30
       - name: Release gate if verified export failed before normal release
         if: always() && needs.resolve.outputs.exact_chain == 'true' && steps.snapshot_export.outcome != 'success'
         uses: appleboy/ssh-action@v1
@@ -319,7 +333,7 @@ jobs:
             --output-dir "$OUTPUT_DIR"
       - name: Run EDE v1.3 research off production VPS
         env:
-          SOURCE_DB: ${{ runner.temp }}/ede-source/ede-source.sqlite3
+          SOURCE_DB: ${{ steps.research_input.outputs.database }}
           OUTPUT_DIR: ${{ runner.temp }}/ede-output
           OMP_NUM_THREADS: "1"
           OPENBLAS_NUM_THREADS: "1"
@@ -344,7 +358,7 @@ jobs:
           retention-days: 30
       - name: Run transition audit off production VPS
         env:
-          SOURCE_DB: ${{ runner.temp }}/ede-source/ede-source.sqlite3
+          SOURCE_DB: ${{ steps.research_input.outputs.database }}
           OUTPUT_DIR: ${{ runner.temp }}/ede-output
           OMP_NUM_THREADS: "1"
           OPENBLAS_NUM_THREADS: "1"

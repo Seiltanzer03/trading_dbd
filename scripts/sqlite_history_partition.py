@@ -93,15 +93,17 @@ def _connection(path, source):
 
 
 def _publish(work, destination):
-    with work.open('rb') as stream:
-        os.fsync(stream.fileno())
+    if os.name != 'nt':
+        with work.open('rb') as stream:
+            os.fsync(stream.fileno())
     os.link(work, destination)  # Exclusive publication, including destination races.
     work.unlink()
-    fd = os.open(Path(destination).parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    if hasattr(os, 'O_DIRECTORY'):
+        fd = os.open(Path(destination).parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 def _cleanup(work):
@@ -119,13 +121,15 @@ def _size_expression(columns):
     return '+'.join('COALESCE(length(CAST('+_quote(c)+' AS BLOB)),0)' for c in columns)
 
 
-def _logical_hash(conn, table, columns, rowid, where='', parameters=()):
+def _logical_hash(conn, table, columns, rowid, where='', parameters=(), *, digest=None):
     expressions = [_quote(rowid)]
     for col in columns:
         q = _quote(col)
         expressions += [f'typeof({q})', f"CASE WHEN typeof({q})='text' THEN CAST({q} AS BLOB) ELSE {q} END"]
     query = 'SELECT '+','.join(expressions)+' FROM '+table+where+' ORDER BY '+_quote(rowid)
-    h = hashlib.sha256()
+    # A supplied digest permits ordered verified partitions to reproduce the
+    # independently measured full-table root without retaining another DB.
+    h = hashlib.sha256() if digest is None else digest
     for row in conn.execute(query, parameters):
         h.update(struct.pack('>q', row[0]))
         for kind, value in zip(row[1::2], row[2::2]):

@@ -42,6 +42,13 @@ def install_trade_delete_lifecycle() -> None:
             }
             if "deleted_at" not in cols:
                 self._conn.execute("ALTER TABLE trades ADD COLUMN deleted_at REAL")
+            has_acks = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_decision_acks'"
+            ).fetchone()
+            if has_acks is not None:
+                from .ai_decision_state import ensure_connection_schema
+
+                ensure_connection_schema(self._conn)
 
     def get_trade(self: Journal, trade_id: int) -> dict:
         with self._lock:

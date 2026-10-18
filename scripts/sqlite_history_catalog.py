@@ -68,16 +68,52 @@ def validate_full_catalog(catalog):
         raise ValueError('Incomplete catalog table coverage')
 
 
-def verify_full_tables(conn, catalog):
-    """Compare restored tables to independently measured original typed roots."""
+def catalog_max_rowids(catalog):
+    """Return the highest cataloged rowid per table (or None when empty)."""
     validate_full_catalog(catalog)
+    max_rowids = {table: None for table in catalog['full_table_proofs']}
+    for receipt in catalog['partitions']:
+        part = receipt['partition']
+        max_rowids[part['table']] = part['rowids'][-1]
+    return max_rowids
+
+
+def verify_full_tables(conn, catalog, *, post_catalog_proofs=None):
+    """Compare restored tables to independently measured original typed roots."""
+    max_rowids = catalog_max_rowids(catalog)
     for table, proof in catalog['full_table_proofs'].items():
         actual = _schema(conn, table)
-        count = conn.execute('SELECT COUNT(*) FROM '+archive._quote(table)).fetchone()[0]
-        if any(actual[k] != proof[k] for k in actual) or count != proof['row_count']:
+        if any(actual[k] != proof[k] for k in actual):
             raise ValueError('Restored complete table schema or count differs')
-        if archive._logical_hash(conn, archive._quote(table), proof['columns'], proof['source_rowid_alias']) != proof['logical_sha256']:
-            raise ValueError('Restored complete typed table root differs')
+        qtable = archive._quote(table)
+        alias = proof['source_rowid_alias']
+        qalias = archive._quote(alias)
+        max_rowid = max_rowids[table]
+        post_proof = (post_catalog_proofs or {}).get(table)
+        if post_proof and post_proof.get('row_count', 0) > 0:
+            if max_rowid is None:
+                prefix_where, prefix_params = ' WHERE 1=0', ()
+                suffix_where, suffix_params = '', ()
+            else:
+                prefix_where, prefix_params = ' WHERE '+qalias+'<=?', (max_rowid,)
+                suffix_where, suffix_params = ' WHERE '+qalias+'>?', (max_rowid,)
+            prefix_count = conn.execute('SELECT COUNT(*) FROM '+qtable+prefix_where, prefix_params).fetchone()[0]
+            suffix_count = conn.execute('SELECT COUNT(*) FROM '+qtable+suffix_where, suffix_params).fetchone()[0]
+            total_count = conn.execute('SELECT COUNT(*) FROM '+qtable).fetchone()[0]
+            if (prefix_count != proof['row_count']
+                    or suffix_count != post_proof['row_count']
+                    or total_count != proof['row_count'] + post_proof['row_count']):
+                raise ValueError('Restored complete table schema or count differs')
+            if archive._logical_hash(conn, qtable, proof['columns'], alias, prefix_where, prefix_params) != proof['logical_sha256']:
+                raise ValueError('Restored complete typed table root differs')
+            if archive._logical_hash(conn, qtable, proof['columns'], alias, suffix_where, suffix_params) != post_proof['logical_sha256']:
+                raise ValueError('Restored post-catalog typed table suffix differs')
+        else:
+            count = conn.execute('SELECT COUNT(*) FROM '+qtable).fetchone()[0]
+            if count != proof['row_count']:
+                raise ValueError('Restored complete table schema or count differs')
+            if archive._logical_hash(conn, qtable, proof['columns'], alias) != proof['logical_sha256']:
+                raise ValueError('Restored complete typed table root differs')
 
 
 def publish_full_catalog(source, destination, *, source_receipt, client, maximum_hydrated_bytes):

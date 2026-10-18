@@ -150,6 +150,8 @@ def _compact_snapshot_plan(source: Path) -> dict[str, int]:
     conn = sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=30)
     try:
         conn.execute("PRAGMA busy_timeout=30000")
+        if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='hot_history_storage_state'").fetchone():
+            raise OSError(errno.ENOSPC, 'A marked hot database requires a rowid-preserving backup')
         quick_rows = [str(row[0]) for row in conn.execute("PRAGMA quick_check").fetchall()]
         if quick_rows != ["ok"]:
             raise RuntimeError(
@@ -236,6 +238,8 @@ def _create_compact_backup(
     src = sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
     try:
         src.execute("PRAGMA busy_timeout=30000")
+        if src.execute("SELECT 1 FROM sqlite_schema WHERE name='hot_history_storage_state'").fetchone():
+            raise OSError(errno.ENOSPC, 'A marked hot database requires a rowid-preserving backup')
         src.execute("VACUUM INTO ?", (str(temp_db),))
     finally:
         src.close()
