@@ -202,10 +202,19 @@ def prepare_disposable_plan(original, hot, *, run_id, hot_manifest, transport):
     receipts = {}
     manifest = {key: hot_manifest[key] for key in _IDENTITY_FIELDS.union(history_state.PIN_FIELDS)}
     for kind, path in (('original', Path(original)), ('hot', Path(hot))):
+        _check_deadline(deadline)
         before = archive._identity(path)
         if not 4096 <= before['size'] <= MAX_IMAGE_BYTES:
             raise CutoverError('INVALID_IMAGE_IDENTITY')
-        identity = dict(database_sha256=archive._digest(path), database_size_bytes=before['size'])
+        digest = hashlib.sha256()
+        with path.open('rb') as stream:
+            while True:
+                _check_deadline(deadline)
+                chunk = stream.read(CHUNK_BYTES)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        identity = dict(database_sha256=digest.hexdigest(), database_size_bytes=before['size'])
         _verify_database(path, identity, deadline, manifest=hot_manifest if kind == 'hot' else None)
         with transport.open_image(kind) as stream:
             _consume(stream, identity, deadline)

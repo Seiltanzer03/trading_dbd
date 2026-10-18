@@ -73,7 +73,7 @@ existing deployment filesystem lock and finite systemd task patterns.
 
 - [x] Inventory every production writer/start/restore path; reuse shared
   `production-seiltanzer` queue and deployment filesystem flock.
-- [ ] Implement canonical active guard plus persistent service-start condition;
+- [x] Implement canonical active guard plus persistent service-start condition;
   ensure queued recovery/deploy refuses it before any mutation. Prove service
   refusal with a disposable actual systemd unit; do not stop production for a test.
 - [ ] Integrate finite local owner independently of SSH runner, exact closed
@@ -117,6 +117,17 @@ The existing360attempt limit remains. A final bounded service+realHTTP probe
 now runs before rejection; inactive service or HTTP503 still fails. RED1 then
 GREEN25 in the deploy/guard/startup profile. This does not claim faster integrity
 checks or waive the separate exact-SHA readiness/smoke/research gates.
+
+Actual runner systemd proof39111796844/job117629313412 passes all five cases
+in551.3ms: plain and verified-original-restored launch both prestart/application;
+regular and dangling guards and a pending journal launch neither. The real
+ExecCondition returned1 with UNFINISHED_CUTOVER_JOURNAL before prestart; the
+regular path condition prevented even the checker from running. Owned unit and
+temporary files were removed; production was not accessed. Pinned evidence:
+`docs/HISTORY_SYSTEMD_FENCE_PROOF_2026-10-18.json`. This short real-systemd drill
+is now part of mandatory CI. Combined final development profile:97passed2.68s.
+Preparation whole-file hashing also checks its deadline between bounded chunks;
+an expired-budget regression was RED before that correction.
 
 ## Task3 — authenticated current image and final physical acceptance
 

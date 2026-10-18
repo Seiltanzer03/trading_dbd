@@ -408,3 +408,16 @@ def test_commit_publication_error_never_starts_original_restore(setup_transactio
     monkeypatch.setattr(transaction, '_write', actual_write)
     transaction.execute_cutover(root, plan, transport=transport, control=control)
     assert control.starts == 1
+
+
+def test_preparation_deadline_precedes_full_image_hash_or_stream_access(setup_transaction, monkeypatch):
+    root, plan, transport, _, _, _ = setup_transaction
+    monkeypatch.setattr(transaction, 'MAX_SECONDS', 0)
+    def unbounded_hash(_):
+        pytest.fail('expired preparation entered unbounded whole-file hash')
+    monkeypatch.setattr(transaction.archive, '_digest', unbounded_hash)
+    with pytest.raises(transaction.CutoverError, match='DEADLINE'):
+        transaction.prepare_disposable_plan(
+            root/'trades.db', root.parent/'hot.sqlite3', run_id='expired',
+            hot_manifest=plan['hot_manifest'], transport=transport)
+    assert transport.calls == []
