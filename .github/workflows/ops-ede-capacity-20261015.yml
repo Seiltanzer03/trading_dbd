@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 54ba77f41cead31fbd9103b687fa357b25440f69
+          ref: 98ded14f43d56013e6da2d58971e99c20af416c2
       - name: Prove real systemd refuses guarded prestart without production access
         run: sudo /usr/bin/python3 scripts/history_service_fence_drill.py --output /tmp/history-systemd-proof.json
       - name: Preserve bounded disposable proof
