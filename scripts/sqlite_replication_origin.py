@@ -6,6 +6,11 @@ import json
 import os
 from pathlib import Path
 import signal
+import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from seiltanzer.history_live_read_guard import guarded_live_read, PRODUCTION_DATABASE
 import time
 
 
@@ -54,6 +59,13 @@ def targets(binary: Path,state: Path):
 
 
 def run(binary: Path,state: Path,args: list[str]):
+    if any(arg == str(PRODUCTION_DATABASE) for arg in args):
+        with guarded_live_read(PRODUCTION_DATABASE):
+            return _run(binary,state,args,keep_parent=True)
+    return _run(binary,state,args,keep_parent=False)
+
+
+def _run(binary, state, args, *, keep_parent):
     stop=state.with_name('origin.stop')
     if '--version' not in args:
         if stop.exists():
@@ -63,7 +75,12 @@ def run(binary: Path,state: Path,args: list[str]):
             json.dump(dict(pid=os.getpid(),start_ticks=birth),stream)
         if stop.exists():
             raise RuntimeError('origin stopped before exec')
-    os.execvp('nice',['nice','-n','19','ionice','-c','3',str(binary),*args])
+    command = ['nice','-n','19','ionice','-c','3',str(binary),*args]
+    if keep_parent:
+        # The parent retains SH exclusion; CLOEXEC must not release it while
+        # sqlite3_rsync is still reading the production source.
+        raise SystemExit(subprocess.call(command))
+    os.execvp('nice',command)
 
 
 def cleanup(binary: Path,state: Path):

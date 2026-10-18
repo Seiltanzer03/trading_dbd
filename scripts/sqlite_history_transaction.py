@@ -164,6 +164,7 @@ def _verify_database(path, identity, deadline, *, manifest=None):
     _check_deadline(deadline)
     if archive._identity(path) != before:
         raise CutoverError('IMAGE_CHANGED_DURING_VERIFICATION')
+    return before
 
 
 def _plan_bytes(plan):
@@ -267,7 +268,7 @@ def execute_cutover(root, plan, *, transport, control):
         return _execute_validated_transfer(root, raw_plan, transport=transport, control=control)
 
 
-def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit=None):
+def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit=None, hard_deadline=None):
     """Private core: caller owns its lock and already validated canonical plan.
 
     The public disposable entry point above keeps its production-root refusal.
@@ -283,6 +284,10 @@ def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit
     started = time.monotonic()
     deadline = started+MAX_SECONDS
     overall_deadline = started+2*MAX_SECONDS
+    verified_image = None
+    if hard_deadline is not None:
+        overall_deadline = min(overall_deadline,hard_deadline)
+        deadline = min(deadline,overall_deadline)
 
     def check_guard():
         _check_deadline(deadline)
@@ -308,6 +313,7 @@ def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit
         return value
 
     def transfer(kind):
+        nonlocal verified_image
         fence()
         with transport.open_image(kind) as source:
             # Opening and reading transport can block while writer exclusion
@@ -322,8 +328,8 @@ def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit
                 target.flush()
                 os.fsync(target.fileno())
         _fsync_directory(root)
-        _verify_database(database, plan[kind], deadline,
-                         manifest=plan['hot_manifest'] if kind == 'hot' else None)
+        verified_image = (kind,_verify_database(database, plan[kind], deadline,
+                          manifest=plan['hot_manifest'] if kind == 'hot' else None))
 
     def recover():
         nonlocal deadline
@@ -349,8 +355,12 @@ def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit
         if os.path.lexists(guard):
             fence()
             kind = 'hot' if current['phase'] == 'COMMITTED' else 'original'
-            _verify_database(database, plan[kind], deadline,
-                             manifest=plan['hot_manifest'] if kind == 'hot' else None)
+            # Reuse only this invocation's full verification while the exact
+            # inode/size/mtime/ctime proof and continuous fence still match.
+            # A restarted owner has no cache and performs full verification.
+            if verified_image != (kind,archive._identity(database)):
+                _verify_database(database, plan[kind], deadline,
+                                 manifest=plan['hot_manifest'] if kind == 'hot' else None)
             fence()
             guard.unlink()
             _fsync_directory(root)
@@ -366,7 +376,8 @@ def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit
         return dict(contract=CONTRACT, run_id=plan['run_id'], phase=current['phase'],
                     cutover_committed=current['phase'] == 'COMMITTED',
                     service_started=current['service_started'], production_authority=False,
-                    data_retirement_authorized=False, disposable_proof=True)
+                    data_retirement_authorized=plan['mode'] == 'FENCED_PRODUCTION_ONLY',
+                    disposable_proof=plan['mode'] == 'DISPOSABLE_ONLY')
 
     current = _read(journal)
     if current is not None:

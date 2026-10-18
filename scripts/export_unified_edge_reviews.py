@@ -164,9 +164,10 @@ def export_reviews(connection, maximum=32, *, refresh_requests=()):
 
 
 def remote_program(maximum, *, refresh_requests=()):
+    from scripts.history_embedded_read_guard import guard_program
     validate_refresh_requests(refresh_requests)
     # Only these stdlib functions run remotely. Training and pricing stay off-host.
-    return ('import sqlite3,json,gzip,base64,time,math\n'
+    program = ('import sqlite3,json,gzip,base64,time,math\n'
             + inspect.getsource(select_reviews) + '\n' + inspect.getsource(validate_refresh_requests)
             + '\n' + inspect.getsource(export_reviews)
             + "\nc=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=3)\n"
@@ -179,6 +180,8 @@ def remote_program(maximum, *, refresh_requests=()):
               'raw=json.dumps(report,allow_nan=False).encode()\n'
               'if len(raw)>96000000:raise ValueError("export exceeds bound")\n'
               'print(base64.b64encode(gzip.compress(raw)).decode())\n')
+
+    return guard_program(program)
 
 
 def export_actual(output, *, maximum=32, password=None, expected_sha=None, refresh_requests=()):

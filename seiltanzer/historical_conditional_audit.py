@@ -228,6 +228,12 @@ def replay_rules(snapshot: dict, points: list[dict]) -> dict[str, dict]:
 
 
 def audit_database(database: str) -> dict:
+    from .history_live_read_guard import guarded_live_read
+    with guarded_live_read(database):
+        return _audit_database(database)
+
+
+def _audit_database(database: str) -> dict:
     """Read existing resolved reviews; never modify the trading database."""
     db = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row

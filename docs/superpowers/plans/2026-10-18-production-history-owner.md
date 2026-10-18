@@ -123,3 +123,35 @@ Do not enable the native production entry while this inventory remains open.
 Latest observed public health: run39131157759/job117686432279 at13:21:11UTC,
 expected main4467853, first /api/state probe returnedHTTP200. This is distinct
 from the disk-blocked full research acceptance. No extra deploy was triggered.
+
+Reader closure checkpoint: v12/v13 runtime and source snapshots, universal and conditional audits, mathematical/review exports now hold the maintenance SH lock throughout SQLite lifetime. Standalone origin retains a guarded parent across the reader child; remote control embeds the same stdlib implementation. Network/management SSH diagnostics hold SH plus installed epoch check. Focused129passed/3skipped in4.25s; native /proc cases remain mandatory CI, not locally claimed. Existing emergency/recovery writers already hold EX and check guard/journal. Production migration still not invoked.
+
+Integrated owner/driver checkpoint (2026-10-18): finite native owner, canonical
+production EX/systemd control, frozen SFTP capture, existing current v2 builder,
+content-addressed original/hot publication, private handoff, bounded recovery,
+post-cutover off-host full union and explicit same-epoch resume are implemented.
+The manual workflow uses the existing production queue/secrets/Yandex bucket;
+no recurring job/provider/resource was introduced. An actual-SQLite integration
+runs the complete driver/owner/catalog/gzip/union path with injected SSH/S3
+endpoints. Focused256passed/4skipped in9.80s. Skips are native /proc/pinned SQLite
+proofs that remain mandatory CI. Real systemd owner/disconnected-driver and safe
+preparation-expiry drill is wired into CI; it has not run locally and is not yet
+claimed. Final review/full CI/release and actual production transfer are pending.
+
+Performance regression: verified hot bytes are not scanned a second time before
+same-invocation guard release if inode/size/mtime/ctime and the continuous fence
+still match. A restarted process has no such cache and verifies again. This was
+RED on the extra scan, then GREEN. Native idle polls never scan the19GB source.
+
+The earlier source-open inventory is now covered by the shared runtime guard,
+embedded guard or diagnostic shell SH lifetime. Existing recovery writers use
+EX plus persistent guard/journal checks. Native production control checks the
+installed external guard and loaded ExecCondition/KillMode before stopping;
+actual cgroup/descriptor checks supplement the continuously held host EX/fence.
+This is an implementation checkpoint, not live process-inventory evidence.
+
+Ruling: a manual same-epoch recovery may use the already deployed green SHA even
+if remote main has advanced — the frozen epoch/app SHA, immutable plan and
+original deadlines remain binding; an initial cutover still requires current
+green main. A resume without an existing epoch refuses. Cost if wrong: recovery
+remains guarded/refused rather than silently upgrading or overwriting records.

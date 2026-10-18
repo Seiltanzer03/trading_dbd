@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import sqlite3
@@ -11,6 +12,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+
+from seiltanzer.history_live_read_guard import guarded_live_read
 
 from seiltanzer.edge_discovery.ablation import family_ablation
 from seiltanzer.edge_discovery.discovery import run_discovery
@@ -26,29 +29,37 @@ from seiltanzer.macro_bls_historical_ede_refinement import (
 
 class ReadOnlyRuntime:
     def __init__(self, database: Path):
-        self._conn = sqlite3.connect(
-            f"file:{database.resolve()}?mode=ro", uri=True,
-            check_same_thread=False, timeout=30.0)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA query_only=ON")
-        self._conn.execute("PRAGMA busy_timeout=30000")
-        self._lock = threading.RLock()
+        self._source_lifetime = ExitStack()
+        try:
+            self._source_lifetime.enter_context(guarded_live_read(database))
+            self._conn = sqlite3.connect(
+                f"file:{database.resolve()}?mode=ro", uri=True,
+                check_same_thread=False, timeout=30.0)
+            self._source_lifetime.callback(self._conn.close)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA query_only=ON")
+            self._conn.execute("PRAGMA busy_timeout=30000")
+            self._lock = threading.RLock()
+        except BaseException:
+            self._source_lifetime.close()
+            raise
 
     def close(self) -> None:
-        self._conn.close()
+        self._source_lifetime.close()
 
 
 def immutable_snapshot(source: Path, destination: Path) -> None:
-    src = sqlite3.connect(
-        f"file:{source.resolve()}?mode=ro", uri=True, timeout=30.0)
-    src.execute("PRAGMA query_only=ON")
-    src.execute("PRAGMA busy_timeout=30000")
-    dst = sqlite3.connect(destination)
-    try:
-        src.backup(dst, pages=1000, sleep=0.05)
-        dst.commit()
-    finally:
-        dst.close(); src.close()
+    with guarded_live_read(source):
+        src = sqlite3.connect(
+            f"file:{source.resolve()}?mode=ro", uri=True, timeout=30.0)
+        src.execute("PRAGMA query_only=ON")
+        src.execute("PRAGMA busy_timeout=30000")
+        dst = sqlite3.connect(destination)
+        try:
+            src.backup(dst, pages=1000, sleep=0.05)
+            dst.commit()
+        finally:
+            dst.close(); src.close()
     check = sqlite3.connect(
         f"file:{destination.resolve()}?mode=ro", uri=True, timeout=30.0)
     try:

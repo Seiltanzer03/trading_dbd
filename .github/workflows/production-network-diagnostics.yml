@@ -130,6 +130,12 @@ jobs:
             ps -eo pid,ppid,comm,args | grep -E 'Runner|Worker|update' | grep -v grep || true
             echo '=== RUNNER WORKSPACE STATUS ==='
             ls -la /opt/actions-runner/_work/trading_dbd 2>/dev/null || true
+            exec 8</opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -sn 8 || { echo HISTORY_SOURCE_READ_FENCED; exit 1; }
+            if [ -e /opt/seiltanzer/data/cutover.active ] || [ -L /opt/seiltanzer/data/cutover.active ]; then
+              echo HISTORY_SOURCE_READ_FENCED; exit 1
+            fi
+            /usr/bin/python3 /usr/local/lib/seiltanzer-history-start-guard.py --database /opt/seiltanzer/data/trades.db --application-root /opt/seiltanzer
             echo '=== FOMC RECEIPT (READ ONLY) ==='
             timeout 45s /opt/seiltanzer/.venv/bin/python - <<'FOMC_READ'
             import json, sqlite3, time, urllib.request, urllib.error

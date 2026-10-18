@@ -111,3 +111,68 @@ def test_actual_embedded_native_export_refuses_active_epoch(guarded_source):
     program = program.replace('/opt/seiltanzer/data/trades.db',str(database))
     with pytest.raises(ValueError,match='HISTORY_SOURCE_READ_FENCED'):exec(program,{})
     assert database.read_bytes() == before
+
+
+@pytest.mark.parametrize('module_name',[
+    'scripts.production_ede_v12_audit','scripts.production_ede_v13_audit',
+    'scripts.run_universal_outcome_audit'])
+def test_other_runtime_readers_hold_lock_until_close(guarded_source,module_name):
+    _,_,database,lock = guarded_source
+    module = importlib.import_module(module_name)
+    runtime = module.ReadOnlyRuntime(database)
+    try:
+        assert runtime._conn.execute('SELECT id FROM source').fetchone()[0] == 73
+        with lock.open('rb') as exclusive:
+            with pytest.raises(BlockingIOError):fcntl.flock(exclusive,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    finally:runtime.close()
+    with lock.open('rb') as exclusive:fcntl.flock(exclusive,fcntl.LOCK_EX|fcntl.LOCK_NB)
+
+
+@pytest.mark.parametrize('module_name',[
+    'scripts.production_ede_v12_audit','scripts.production_ede_v13_audit'])
+def test_snapshot_source_cannot_open_during_cutover(guarded_source,tmp_path,module_name):
+    _,_,database,lock = guarded_source
+    module = importlib.import_module(module_name)
+    destination = tmp_path/'copy.sqlite3'
+    with lock.open('rb') as exclusive:
+        fcntl.flock(exclusive,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        with pytest.raises(ValueError,match='HISTORY_SOURCE_READ_FENCED'):
+            module.immutable_snapshot(database,destination)
+    assert not destination.exists()
+
+
+def test_conditional_audit_is_fenced_before_querying_live_source(guarded_source):
+    from seiltanzer.historical_conditional_audit import audit_database
+    _,_,database,lock = guarded_source
+    with lock.open('rb') as exclusive:
+        fcntl.flock(exclusive,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        with pytest.raises(ValueError,match='HISTORY_SOURCE_READ_FENCED'):
+            audit_database(str(database))
+
+
+@pytest.mark.parametrize('kind',['math','reviews'])
+def test_embedded_readers_refuse_before_sqlite_under_active_epoch(guarded_source,kind):
+    _,root,database,_ = guarded_source
+    (root/'data/cutover.active').write_text('owned epoch')
+    if kind == 'math':
+        from scripts.export_mathematical_edge_sources import REMOTE_EXPORT
+        program = REMOTE_EXPORT
+    else:
+        from scripts.export_unified_edge_reviews import remote_program
+        program = remote_program(1)
+    program = program.replace("PRODUCTION_ROOT = Path('/opt')/'seiltanzer'",
+                              'PRODUCTION_ROOT = Path('+repr(str(root))+')')
+    program = program.replace('/opt/seiltanzer/data/trades.db',str(database))
+    with pytest.raises(ValueError,match='HISTORY_SOURCE_READ_FENCED'):exec(program,{})
+
+
+def test_standalone_replication_origin_refuses_active_epoch_before_process(guarded_source,tmp_path,monkeypatch):
+    from scripts import sqlite_replication_origin as origin
+    _,root,database,_ = guarded_source
+    (root/'data/cutover.active').write_text('owned epoch')
+    monkeypatch.setattr(origin,'PRODUCTION_DATABASE',database)
+    monkeypatch.setattr(os,'execvp',lambda *args:pytest.fail('Unfenced origin reached exec'))
+    with pytest.raises(ValueError,match='HISTORY_SOURCE_READ_FENCED'):
+        origin.run(tmp_path/'sqlite3_rsync',tmp_path/'origin.json',
+                   ['--origin',str(database)])
+    assert not (tmp_path/'origin.json').exists()
