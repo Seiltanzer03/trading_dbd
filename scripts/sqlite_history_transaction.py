@@ -275,7 +275,11 @@ def execute_cutover(root, plan, *, transport, control):
 
     def check_guard():
         _check_deadline(deadline)
-        if _read(guard) != epoch:
+        try:
+            owned = _read(guard) == epoch
+        except (OSError, ValueError):
+            owned = False
+        if not owned:
             raise FencingError('ACTIVE_GUARD_FENCE_OWNERSHIP_LOST')
 
     def fence():
@@ -295,11 +299,13 @@ def execute_cutover(root, plan, *, transport, control):
     def transfer(kind):
         fence()
         with transport.open_image(kind) as source:
-            check_guard()
+            # Opening and reading transport can block while writer exclusion
+            # changes. Guard ownership alone does not prove closed writers.
+            fence()
             fd = os.open(database, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
-            with os.fdopen(fd, 'wb') as target:
+            with os.fdopen(fd, 'wb', buffering=0) as target:
                 def write(data):
-                    check_guard()
+                    fence()
                     target.write(data)
                 _consume(source, plan[kind], deadline, write=write)
                 target.flush()
@@ -364,7 +370,11 @@ def execute_cutover(root, plan, *, transport, control):
                 return finish(current)
             if current['phase'] == 'FENCE_LOST_GUARDED':
                 raise FencingError('FENCE_LOST_REQUIRES_DATA_RECONCILIATION')
-            check_guard()
+            try:
+                check_guard()
+            except FencingError:
+                state('FENCE_LOST_GUARDED')
+                raise
             return finish(recover())
         existing = _read(guard)
         if existing is not None and existing != epoch:

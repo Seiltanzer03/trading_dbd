@@ -129,6 +129,18 @@ is now part of mandatory CI. Combined final development profile:97passed2.68s.
 Preparation whole-file hashing also checks its deadline between bounded chunks;
 an expired-budget regression was RED before that correction.
 
+Final independent review of663d604 reproduced two loss-of-fence holes in the
+disposable controller: a writer returning while transport opened could be
+overwritten before detection, and a missing guard on precommit restart left a
+retryable journal. Four new real-SQLite cases were RED before correction
+(stream-open/read writer return and missing/malformed restart guard). Complete
+fencing is now rechecked immediately before truncation and each unbuffered
+write; restart guard loss durably records FENCE_LOST_GUARDED, including invalid
+guard files. Replacing the guard cannot authorize automatic original restore.
+The control adapter must maintain writer exclusion continuously; repeated checks
+do not authorize a production adapter based only on transient process samples.
+Focused guard/controller/workflow profile:100passed in2.90s. No live cutover.
+
 ## Task3 — authenticated current image and final physical acceptance
 
 **Owners:** existing immutable snapshot/cloud upload/restore/cutover tools.

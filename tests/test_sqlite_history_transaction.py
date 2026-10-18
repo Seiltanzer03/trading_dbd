@@ -256,6 +256,76 @@ def test_lost_writer_fence_blocks_all_automatic_rollback_even_after_restart(setu
     assert (root/'trades.db').read_bytes() == hot
 
 
+@pytest.mark.parametrize('writer_returns_at', ['stream_open', 'stream_read'])
+def test_writer_return_during_transport_preserves_new_trade(setup_transaction, monkeypatch, writer_returns_at):
+    root, plan, transport, control, original, _ = setup_transaction
+    actual_open = transport.open_image
+    changed = []
+
+    def return_writer():
+        control.closed = False
+        # The read case simulates a writer replacing the truncated disposable
+        # image. No transfer may subsequently overwrite its committed record.
+        if writer_returns_at == 'stream_read':
+            (root/'trades.db').write_bytes(original)
+        with sqlite3.connect(root/'trades.db') as conn:
+            conn.execute("INSERT INTO trades(symbol) VALUES('RETURNED_WRITER')")
+        changed.append((root/'trades.db').read_bytes())
+
+    @contextmanager
+    def late_writer(kind):
+        assert kind == 'hot', 'fence loss must never trigger original restoration'
+        with actual_open(kind) as source:
+            if writer_returns_at == 'stream_open':
+                return_writer()
+                yield source
+            else:
+                class LateRead:
+                    def read(self, size):
+                        if not changed:
+                            return_writer()
+                        return source.read(size)
+                yield LateRead()
+
+    monkeypatch.setattr(transport, 'open_image', late_writer)
+    with pytest.raises(transaction.FencingError):
+        transaction.execute_cutover(root, plan, transport=transport, control=control)
+    assert (root/'trades.db').read_bytes() == changed[0]
+    with sqlite3.connect(root/'trades.db') as conn:
+        assert conn.execute("SELECT count(*) FROM trades WHERE symbol='RETURNED_WRITER'").fetchone() == (1,)
+    assert json.loads((root/'cutover.journal.json').read_text())['phase'] == 'FENCE_LOST_GUARDED'
+    assert control.starts == 0
+
+
+@pytest.mark.parametrize('lost_guard', ['missing', 'malformed'])
+def test_restart_guard_loss_cannot_be_repaired_into_automatic_rollback(setup_transaction, monkeypatch, lost_guard):
+    root, plan, transport, control, _, _ = setup_transaction
+    transport.failures['hot'] = ProcessDeath()
+    with pytest.raises(ProcessDeath):
+        transaction.execute_cutover(root, plan, transport=transport, control=control)
+    guard = root/'cutover.active'
+    owned_guard = guard.read_bytes()
+    if lost_guard == 'missing':
+        guard.unlink()
+    else:
+        guard.write_bytes(b'not-the-owned-guard')
+    with sqlite3.connect(root/'trades.db') as conn:
+        conn.execute("INSERT INTO trades(symbol) VALUES('AFTER_GUARD_LOSS')")
+    changed = (root/'trades.db').read_bytes()
+    transport.failures.clear()
+    transport.calls.clear()
+    with pytest.raises(transaction.FencingError):
+        transaction.execute_cutover(root, plan, transport=transport, control=control)
+    assert json.loads((root/'cutover.journal.json').read_text())['phase'] == 'FENCE_LOST_GUARDED'
+    guard.write_bytes(owned_guard)
+    guard.chmod(0o600)
+    with pytest.raises(transaction.FencingError, match='REQUIRES_DATA_RECONCILIATION'):
+        transaction.execute_cutover(root, plan, transport=transport, control=control)
+    assert (root/'trades.db').read_bytes() == changed
+    assert transport.calls == []
+    assert control.starts == 0
+
+
 @pytest.mark.parametrize('corruption', ['manifest_pin', 'numeric_verified_flag', 'numeric_authority_flag'])
 def test_corrupted_preparation_receipt_fails_before_guard_or_transfer(setup_transaction, corruption):
     root, plan, transport, control, original, _ = setup_transaction
