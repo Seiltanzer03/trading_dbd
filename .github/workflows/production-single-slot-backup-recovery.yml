@@ -103,6 +103,13 @@ jobs:
           capture_stdout: true
           script: |
             set -euo pipefail
+            if [ -e /opt/seiltanzer/data/cutover.active ] || [ -L /opt/seiltanzer/data/cutover.active ] || {
+              { [ -e /opt/seiltanzer/data/cutover.journal.json ] || [ -L /opt/seiltanzer/data/cutover.journal.json ]; } &&
+              ! /usr/bin/python3 /usr/local/lib/seiltanzer-history-start-guard.py --database /opt/seiltanzer/data/trades.db --application-root /opt/seiltanzer >/dev/null;
+            }; then
+              echo "::error::HISTORY_CUTOVER_ACTIVE_MUTATION_REFUSED"
+              exit 1
+            fi
             # A deploy may fail only in a post-release functional check after
             # the exact SHA is already active and serving. Recheck on the host
             # for every invocation: health-check dispatches can wait behind a
@@ -126,6 +133,13 @@ jobs:
             # cannot leave production unavailable.
             exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
             flock -w 30 9
+            if [ -e /opt/seiltanzer/data/cutover.active ] || [ -L /opt/seiltanzer/data/cutover.active ] || {
+              { [ -e /opt/seiltanzer/data/cutover.journal.json ] || [ -L /opt/seiltanzer/data/cutover.journal.json ]; } &&
+              ! /usr/bin/python3 /usr/local/lib/seiltanzer-history-start-guard.py --database /opt/seiltanzer/data/trades.db --application-root /opt/seiltanzer >/dev/null;
+            }; then
+              echo "::error::HISTORY_CUTOVER_ACTIVE_MUTATION_REFUSED"
+              exit 1
+            fi
             restart_needed=1
             restore_service_on_exit() {
               if [ "${restart_needed:-1}" = 1 ]; then
