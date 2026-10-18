@@ -28,7 +28,7 @@ def _proof(source, proof, pin):
 
 def test_current_compaction_keeps_updated_outcome_and_only_retires_exact_cold_rows(tmp_path):
     source, proof, raw, pin, client = _build_cutover_fixture(
-        tmp_path, include_post_catalog=True, include_mutable_outcome=True)
+        tmp_path, include_post_catalog=True, include_mutable_outcome=True, include_runtime_metadata=True)
     with closing(sqlite3.connect(source)) as conn:
         with conn:
             conn.execute("UPDATE passive_market_observations SET resolution_status='resolved' WHERE rowid=110")
@@ -39,17 +39,20 @@ def test_current_compaction_keeps_updated_outcome_and_only_retires_exact_cold_ro
     result = cutover.build_current_hot_cutover_snapshot(
         source, hot, source_receipt=proof, catalog_bytes=raw,
         expected_catalog_sha256=pin, client=client)
-    assert result['retired_row_count'] == 3
+    assert result['retired_row_count'] == 2
+    assert result['runtime_reference_rows_preserved'] is True
     assert result['source_catalog_verification'] == 'CURRENT_CAPTURE_AND_EXACT_RETIREMENT'
     assert result['data_retirement_authorized'] is False
     with closing(sqlite3.connect(hot)) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM g1s_observations g '
+                            'JOIN passive_market_observations p ON p.observation_id=g.source_observation_id').fetchone() == (3,)
         assert conn.execute('SELECT resolution_status FROM passive_market_observations WHERE rowid=110').fetchone() == ('resolved',)
         assert conn.execute('SELECT resolved_ts FROM passive_market_observations WHERE rowid=20').fetchone() == (123.0,)
     full = tmp_path/'reconstituted.sqlite3'
     union.hydrate_current_snapshot(hot, full, source_receipt=result['hot_restore_proof'],
                                    catalog_bytes=raw, client=client)
     with closing(sqlite3.connect(full)) as conn:
-        assert conn.execute('SELECT COUNT(*) FROM passive_market_observations').fetchone() == (14,)
+        assert conn.execute('SELECT COUNT(*) FROM passive_market_observations').fetchone() == (1014,)
         assert conn.execute('SELECT resolution_status FROM passive_market_observations WHERE rowid=110').fetchone() == ('resolved',)
     assert hashlib.sha256(source.read_bytes()).hexdigest() == proof['database_sha256']
 

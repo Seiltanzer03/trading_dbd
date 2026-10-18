@@ -20,7 +20,8 @@ from test_ede_ledger_archive import ObjectStore
 from test_sqlite_history_partition import identity
 
 
-def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_mutable_outcome=False):
+def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_mutable_outcome=False,
+                           include_runtime_metadata=False):
     from contextlib import closing
     source = tmp_path / 'source.sqlite3'
     with closing(sqlite3.connect(source)) as conn:
@@ -168,6 +169,15 @@ def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_muta
         with closing(sqlite3.connect(source)) as conn:
             with conn:
                 conn.execute('ALTER TABLE passive_market_observations ADD COLUMN resolved_ts REAL')
+    if include_runtime_metadata:
+        with closing(sqlite3.connect(source)) as conn:
+            with conn:
+                conn.execute("ALTER TABLE passive_market_observations ADD COLUMN instrument TEXT DEFAULT 'BTCUSDT'")
+                conn.execute('ALTER TABLE passive_market_observations ADD COLUMN captured_ts REAL DEFAULT 1')
+                conn.execute('ALTER TABLE passive_market_observations ADD COLUMN horizon_minutes INTEGER DEFAULT 15')
+                conn.execute('ALTER TABLE passive_market_observations ADD COLUMN evidence_eligible INTEGER DEFAULT 0')
+                conn.execute('ALTER TABLE g1s_observations ADD COLUMN source_observation_id TEXT')
+                conn.execute('UPDATE g1s_observations SET source_observation_id=observation_id')
     source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
     source_receipt = dict(
         immutable_sqlite_read=True,
@@ -202,6 +212,11 @@ def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_muta
                 'INSERT INTO g1s_observations(rowid, observation_id, symbol, payload) VALUES (?, ?, ?, ?)',
                 (35, 'obs-post-130', 'BTCUSDT', 'g1s-post-130'),
             )
+            if include_runtime_metadata:
+                conn.executemany('INSERT INTO passive_market_observations('
+                    'rowid,observation_id,symbol,resolution_status,payload,captured_ts) '
+                    'VALUES(?,?,?,?,?,?)', [(1000+n,f'recent-{n}','BTCUSDT','pending','recent',1000+n)
+                                           for n in range(1000)])
             conn.commit()
         source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
         source_receipt = dict(
