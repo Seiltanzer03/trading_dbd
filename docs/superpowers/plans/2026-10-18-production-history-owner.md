@@ -155,3 +155,5 @@ if remote main has advanced — the frozen epoch/app SHA, immutable plan and
 original deadlines remain binding; an initial cutover still requires current
 green main. A resume without an existing epoch refuses. Cost if wrong: recovery
 remains guarded/refused rather than silently upgrading or overwriting records.
+
+Final independent review/fix evidence: docs/HISTORY_PRODUCTION_OWNER_FINAL_REVIEW_2026-10-18.md. All9reported Important findings addressed in one consolidated regression pass; focused274passed/4skipped9.71s. Existing full-union/live resource gates unchanged. Safe terminal originals can now retire owned epoch metadata under EX before a fresh attempt; unresolved/committed epochs cannot renew clocks. Mandatory final CI and actual Yandex/VPS operation remain pending.

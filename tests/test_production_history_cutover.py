@@ -72,13 +72,56 @@ def test_manual_cutover_workflow_shares_production_queue_and_hides_credentials()
     assert set(triggers)=={'workflow_dispatch'}
     assert workflow['concurrency']['group']=='production-seiltanzer'
     assert workflow['concurrency']['cancel-in-progress'] is False
-    assert workflow['permissions']=={'contents':'read'}
+    assert workflow['permissions']=={'contents':'read','statuses':'read'}
     steps=workflow['jobs']['cutover']['steps']
     execute=next(item for item in steps if 'scripts.production_history_cutover' in item.get('run',''))
     assert 'SSH_PASSWORD' in execute['env']
     assert 'AWS_ACCESS_KEY_ID' in execute['env']
     assert '--password' not in execute['run']
     assert 'PRIVATE' not in execute['run']
+
+
+def test_union_capacity_is_checked_before_handoff_at_production_scale(tmp_path,monkeypatch):
+    from scripts import production_history_cutover as driver
+    from scripts import sqlite_history_partition as archive
+    gib=1024**3;maximum=25*gib
+    required=archive.RESERVE_BYTES+2*maximum+3*archive.MAX_BYTES
+    monkeypatch.setattr(driver.shutil,'disk_usage',lambda _:SimpleNamespace(free=25*gib))
+    with pytest.raises(ValueError,match='UNION_WORKER_CAPACITY'):
+        driver.require_union_capacity(tmp_path,{'maximum_hydrated_bytes':maximum})
+    monkeypatch.setattr(driver.shutil,'disk_usage',lambda _:SimpleNamespace(free=required))
+    assert driver.require_union_capacity(tmp_path,{'maximum_hydrated_bytes':maximum})==required
+
+
+def test_only_exact_owned_capture_is_unlinked_after_verified_publication(frozen_source,tmp_path):
+    from scripts import production_history_cutover as driver
+    source,raw,identity=frozen_source
+    output=tmp_path/'capture.sqlite3'
+    proof=driver.capture_frozen(LocalSFTP(source),identity,output,deadline=time.monotonic()+10)
+    output.write_bytes(raw+b'changed')
+    with pytest.raises(ValueError):driver.release_owned_capture(output,proof)
+    assert output.exists()
+
+
+def test_unloaded_same_epoch_unit_is_recreated_with_original_pins(monkeypatch):
+    from scripts import production_history_cutover as driver
+    calls=[]
+    def execute(client,command,**kwargs):
+        calls.append(command)
+        return 'LoadState=not-found\nActiveState=inactive\nResult=success\n'
+    monkeypatch.setattr(driver,'_exec',execute)
+    driver.ensure_owner_running(object(),run_id='run-001',expected_sha='a'*40)
+    assert len(calls)==2
+    assert '/usr/bin/systemd-run' in calls[1]
+    assert 'run-001' in calls[1] and 'a'*40 in calls[1]
+
+
+def test_rejected_owner_is_reported_without_waiting_for_preparation(monkeypatch):
+    from scripts import production_history_cutover as driver
+    monkeypatch.setattr(driver,'_exec',lambda *args,**kwargs:
+        'LoadState=loaded\nActiveState=failed\nResult=exit-code\n')
+    with pytest.raises(ValueError,match='NATIVE_OWNER_NOT_RUNNING'):
+        driver.assert_owner_running(object(),'run-001')
 
 
 def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,monkeypatch):
@@ -138,6 +181,8 @@ def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,m
         guard=data/'absent',journal=data/'absent')['reason']=='VERIFIED_HOT_RUNTIME_CAPABILITY'
     real_sleep=time.sleep
     def launch(*args,**kwargs):
+        if 'systemctl show' in args[1]:
+            return 'LoadState=loaded\nActiveState=active\nResult=success\n'
         def local_owner():
             try:
                 with core._owned_lock(data):
@@ -169,6 +214,13 @@ def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,m
         with sqlite3.connect(tmp_path/'worker/reconstituted.sqlite3') as full:
             assert full.execute('SELECT COUNT(*) FROM passive_market_observations').fetchone()[0]==source_count
         assert 'PRIVATE-PROVIDER-SECRET' not in json.dumps(report)
+        monkeypatch.setattr(driver,'_exec',lambda *args,**kwargs:
+            pytest.fail('Completed epoch tried restarting a vanished unit'))
+        monkeypatch.setattr(driver,'SignedImageTransport',lambda private,**kwargs:
+            SignedImageTransport(private,opener=cloud.opener,**kwargs))
+        resumed=driver.run(expected_sha='a'*40,run_id='run-001',directory=tmp_path/'resumed-worker',resume=True)
+        assert resumed['owner']['phase']=='COMMITTED'
+        assert resumed['worker_full_union_verified'] is True
     finally:
         for thread in threads:thread.join(timeout=2)
     assert not errors

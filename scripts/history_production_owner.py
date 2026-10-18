@@ -42,6 +42,8 @@ def _run_owned_epoch(root, *, run_id, application_sha, control,
                      transport_factory=SignedImageTransport, wait=time.sleep):
     """Run one frozen epoch without renewing time or hashing on idle polls."""
     root = Path(root)
+    from scripts.history_epoch_retirement import begin_epoch
+    begin_epoch(root,run_id=run_id,application_sha=application_sha)
     state = prep._load(root/'cutover.preparation.json',run_id,application_sha)
     accepted = core._read(root/'cutover.plan.json')
     journal = core._read(root/'cutover.journal.json')
@@ -65,6 +67,12 @@ def _run_owned_epoch(root, *, run_id, application_sha, control,
                 prep._lost(root,state)
             if time.monotonic() >= end:
                 return _abort(root,state,control,'PREPARATION_EXPIRED')
+            abort=core._read(root/'cutover.abort.json')
+            if abort is not None:
+                if abort!=dict(contract='sqlite-history-preparation-abort-v1',run_id=run_id,
+                               application_sha=application_sha,epoch=state['epoch']):
+                    raise core.CutoverError('ABORT_REQUEST_EPOCH_MISMATCH')
+                return _abort(root,state,control,'WORKER_REQUESTED_SAFE_ABORT')
             if (os.path.lexists(root/'cutover.request.json')
                     and os.path.lexists(root/'cutover.transport.json')):
                 try:
@@ -104,9 +112,6 @@ def _run_owned_epoch(root, *, run_id, application_sha, control,
         core._check_deadline(hard_end)
         if state['phase'] != 'FROZEN':
             raise core.FencingError('FROZEN_SOURCE_PHASE_REQUIRED')
-        private = core._read(root/'cutover.transport.json')
-        _bound_transport(private,accepted)
-        transport = transport_factory(private,deadline=hard_end)
         epoch = dict(contract=core.CONTRACT,run_id=run_id,
                      plan_sha256=hashlib.sha256(raw).hexdigest())
         guard = core._read(root/'cutover.active')
@@ -114,10 +119,23 @@ def _run_owned_epoch(root, *, run_id, application_sha, control,
             if guard not in (state['epoch'],epoch):
                 prep._lost(root,state)
             if (_identity(root/'trades.db') != state['source']['file_identity']
-                    or control.assert_fenced() is not True
-                    or control.prepare_transfer() is not True):
+                    or control.assert_fenced() is not True):
                 prep._lost(root,state)
+        # A fresh control defaults to frozen-capture mode. Recovery is a
+        # destructive transfer too: every pending entry requires zero readers.
+        if control.prepare_transfer() is not True:
+            raise core.FencingError('TRANSFER_READERS_NOT_CLOSED')
+        if journal is None:
+            if not pins.capacity_before_transfer(root/'trades.db',
+                    accepted['hot']['database_size_bytes'])['admitted']:
+                # No journal means no destructive write. Either pre-journal
+                # guard is ours and the unchanged original can safely launch.
+                core._write(root/'cutover.active',state['epoch'])
+                return _abort(root,state,control,'PREDICTED_RESERVE_REFUSED')
             core._write(root/'cutover.active',epoch)
+        private = core._read(root/'cutover.transport.json')
+        _bound_transport(private,accepted)
+        transport = transport_factory(private,deadline=hard_end)
 
     def precommit():
         capacity=pins.capacity_after_transfer(root/'trades.db')

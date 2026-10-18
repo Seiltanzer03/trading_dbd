@@ -25,10 +25,26 @@ from scripts.production_ede_offload import _connect,_exec,_verify_sha,_probe_api
 from scripts.publish_history_image import publish_image,yandex_image_client
 from scripts.restore_verified_snapshot import manifest_digest
 from scripts.sqlite_history_cutover import build_current_hot_cutover_snapshot
+from scripts.sqlite_history_cutover import _parse_catalog
+from scripts import sqlite_history_partition as archive
 from scripts.sqlite_history_partition import _identity
 from scripts.sqlite_history_union import MAX_CATALOG_BYTES,hydrate_current_snapshot
 
 REMOTE_DATA='/opt/seiltanzer/data/'
+
+
+def require_union_capacity(directory,catalog):
+    required=archive.RESERVE_BYTES+2*catalog['maximum_hydrated_bytes']+3*archive.MAX_BYTES
+    if shutil.disk_usage(directory).free<required:
+        raise core.CutoverError('UNION_WORKER_CAPACITY_REFUSED')
+    return required
+
+
+def release_owned_capture(path,proof):
+    path=Path(path)
+    if _identity(path)!=proof['verified_local_file']:
+        raise core.CutoverError('OWNED_CAPTURE_CHANGED_BEFORE_RELEASE')
+    path.unlink()
 
 
 def capture_frozen(sftp,identity,output,*,deadline):
@@ -103,11 +119,39 @@ def _private_transport(client,plan):
 def _completed_result(sftp,run_id,previous):
     result=_remote_read(sftp,'cutover.result.json')
     if result is None:return None
-    if result.get('run_id')!=run_id:raise core.CutoverError('NATIVE_RESULT_EPOCH_MISMATCH')
+    if result.get('run_id')!=run_id:
+        if result==previous:return None
+        raise core.CutoverError('NATIVE_RESULT_EPOCH_MISMATCH')
     if result.get('phase')=='OWNER_RUNNING':return None
     if result==previous and not (result.get('phase')=='COMMITTED' and result.get('service_started') is True):
         return None
     return result
+
+
+def _owner_properties(client,run_id):
+    _validate_epoch(run_id,'a'*40)
+    unit='seiltanzer-history-'+run_id+'.service'
+    output=_exec(client,shlex.join(['systemctl','show',unit,'-p','LoadState',
+                                  '-p','ActiveState','-p','Result']),timeout=15)
+    props=dict(line.split('=',1) for line in output.splitlines() if '=' in line)
+    if set(props)!={'LoadState','ActiveState','Result'}:
+        raise core.CutoverError('NATIVE_OWNER_STATUS_UNAVAILABLE')
+    return props
+
+
+def assert_owner_running(client,run_id):
+    props=_owner_properties(client,run_id)
+    if props['LoadState']=='not-found' or props['ActiveState'] not in ('active','activating'):
+        raise core.CutoverError('NATIVE_OWNER_NOT_RUNNING_CHECK_DURABLE_STATE')
+
+
+def ensure_owner_running(client,*,run_id,expected_sha):
+    props=_owner_properties(client,run_id)
+    unit='seiltanzer-history-'+run_id+'.service'
+    if props['LoadState']=='not-found':
+        _exec(client,shlex.join(launch_command(run_id=run_id,application_sha=expected_sha)),timeout=20)
+    elif props['ActiveState'] not in ('active','activating'):
+        _exec(client,shlex.join(['systemctl','start','--no-block',unit]),timeout=20)
 
 
 def _catalog_bytes(s3):
@@ -119,7 +163,8 @@ def _catalog_bytes(s3):
     return catalog
 
 
-def _assert_remote_frozen(sftp,state):
+def _assert_remote_frozen(sftp,state,client):
+    assert_owner_running(client,state['run_id'])
     current=_remote_read(sftp,'cutover.preparation.json')
     guard=_remote_read(sftp,'cutover.active')
     if current!=state or guard!=state['epoch'] or current.get('phase')!='FROZEN':
@@ -160,6 +205,8 @@ def run(*,expected_sha,run_id,directory,resume=False):
     s3=yandex_image_client()
     try:
         _verify_sha(client,expected_sha)
+        catalog=_catalog_bytes(s3)
+        catalog_value,_=_parse_catalog(catalog,pins.CATALOG_SHA256)
         sftp=client.open_sftp();sftp.get_channel().settimeout(30)
         try:
             previous=_remote_read(sftp,'cutover.result.json')
@@ -168,13 +215,27 @@ def run(*,expected_sha,run_id,directory,resume=False):
                 raise core.CutoverError('RESUME_REQUIRES_EXISTING_NATIVE_EPOCH')
             if existing is not None and (existing.get('run_id')!=run_id
                     or existing.get('application_sha')!=expected_sha):
-                raise core.CutoverError('EXISTING_NATIVE_EPOCH_REQUIRES_SAME_RUN')
+                journal=_remote_read(sftp,'cutover.journal.json')
+                terminal=((journal is None and existing.get('phase')=='ABORTED_ORIGINAL'
+                           and existing.get('service_started') is True)
+                          or (journal is not None and journal.get('run_id')==existing.get('run_id')
+                              and journal.get('phase')=='ORIGINAL_RESTORED'
+                              and journal.get('service_started') is True))
+                if resume or not terminal or _remote_read(sftp,'cutover.active') is not None:
+                    raise core.CutoverError('EXISTING_NATIVE_EPOCH_REQUIRES_SAME_RUN')
+                # Only a fresh workflow may request a new clock after a safely
+                # terminal original. The native EX owner validates and archives
+                # old metadata before creating that new epoch.
+                existing=None
+            if previous is not None and previous.get('run_id')==run_id and previous.get('phase')=='COMMITTED' and previous.get('service_started') is True:
+                return _resume_proof(s3,_remote_read(sftp,'cutover.plan.json'),previous,directory)
             if existing is None:
                 _probe_api(client)
                 size=sftp.stat(REMOTE_DATA+'trades.db').st_size
                 # Covers original + compacted image + full-union proof or one
                 # worst-case gzip. Refuse before stopping the VPS service.
-                if shutil.disk_usage(directory).free < 3*size+2*1024**3:
+                union_required=archive.RESERVE_BYTES+2*catalog_value['maximum_hydrated_bytes']+3*archive.MAX_BYTES
+                if shutil.disk_usage(directory).free < max(3*size+2*1024**3,union_required+4096):
                     raise core.CutoverError('CUTOVER_WORKER_CAPACITY_REFUSED')
                 _exec(client,shlex.join(launch_command(run_id=run_id,application_sha=expected_sha)),timeout=20)
             else:
@@ -183,10 +244,7 @@ def run(*,expected_sha,run_id,directory,resume=False):
                     _remote_write(sftp,'cutover.transport.json',_private_transport(s3,accepted),replace=True)
                 # Restart only the same finite local owner, never the trading
                 # service or a new epoch. Its durable clocks/pins stay binding.
-                unit='seiltanzer-history-'+run_id+'.service'
-                status=_exec(client,shlex.join(['systemctl','show',unit,'-p','ActiveState','--value']),timeout=15)
-                if status.strip()!='active':
-                    _exec(client,shlex.join(['systemctl','start','--no-block',unit]),timeout=20)
+                ensure_owner_running(client,run_id=run_id,expected_sha=expected_sha)
 
             end=time.monotonic()+10800
             frozen=None
@@ -195,7 +253,9 @@ def run(*,expected_sha,run_id,directory,resume=False):
                 if result is not None:
                     return _resume_proof(s3,_remote_read(sftp,'cutover.plan.json'),result,directory)
                 frozen=_remote_read(sftp,'cutover.preparation.json')
-                if frozen is not None and frozen.get('phase')=='FROZEN':break
+                if (frozen is not None and frozen.get('phase')=='FROZEN'
+                        and frozen.get('run_id')==run_id):break
+                assert_owner_running(client,run_id)
                 time.sleep(5)
             else:raise core.CutoverError('NATIVE_PREPARATION_NOT_OBSERVED')
             if (frozen.get('run_id')!=run_id or frozen.get('application_sha')!=expected_sha
@@ -208,19 +268,19 @@ def run(*,expected_sha,run_id,directory,resume=False):
                     result=_completed_result(sftp,run_id,previous)
                     if result is not None:
                         return _resume_proof(s3,_remote_read(sftp,'cutover.plan.json'),result,directory)
+                    assert_owner_running(client,run_id)
                     time.sleep(5)
                 raise core.CutoverError('NATIVE_RESULT_TIMEOUT')
 
             original=directory/'original.sqlite3';hot=directory/'hot.sqlite3'
             proof=capture_frozen(sftp,frozen['source']['identity'],original,deadline=time.monotonic()+1800)
-            _assert_remote_frozen(sftp,frozen)
+            _assert_remote_frozen(sftp,frozen,client)
             # The original catalog is pinned, reused and fully verified by the
             # existing current-source builder; no new catalog/export sweep.
-            catalog=_catalog_bytes(s3)
             built=build_current_hot_cutover_snapshot(original,hot,source_receipt=proof,
                 catalog_bytes=catalog,expected_catalog_sha256=pins.CATALOG_SHA256,client=s3)
             core._write(directory/'hot-build-proof.json',built)
-            _assert_remote_frozen(sftp,frozen)
+            _assert_remote_frozen(sftp,frozen,client)
             publish_end=time.monotonic()+3600
             identities=dict(original=frozen['source']['identity'],hot={
                 'database_sha256':built['hot_database_sha256'],
@@ -228,13 +288,18 @@ def run(*,expected_sha,run_id,directory,resume=False):
             receipts={kind:publish_image(path,identities[kind],run_id=run_id,kind=kind,
                                          client=s3,deadline=publish_end)
                       for kind,path in [('original',original),('hot',hot)]}
+            # Both exact images now have complete cloud readback receipts.
+            # Retire only our worker copy; the untouched VPS original and its
+            # pinned rollback object remain available. Keep hydrate's gate.
+            release_owned_capture(original,proof)
+            require_union_capacity(directory,catalog_value)
             manifest=built['hot_restore_proof']['storage_manifest']
             plan=dict(contract=pins.CONTRACT,mode='FENCED_PRODUCTION_ONLY',run_id=run_id,
                 application_sha=expected_sha,**identities,hot_manifest=manifest,artifact_receipts=receipts)
             pins.validate_plan(plan,run_id=run_id,application_sha=expected_sha,
                                frozen_identity=frozen['source']['identity'])
             core._write(directory/'cutover-plan.json',plan)
-            _assert_remote_frozen(sftp,frozen)
+            _assert_remote_frozen(sftp,frozen,client)
             # Transport first, immutable public request last. Neither file can
             # cause a partial JSON read or expose URLs through workflow output.
             _remote_write(sftp,'cutover.transport.json',_private_transport(s3,plan),replace=True)
@@ -242,6 +307,7 @@ def run(*,expected_sha,run_id,directory,resume=False):
             while time.monotonic()<end:
                 result=_completed_result(sftp,run_id,previous)
                 if result is not None:break
+                assert_owner_running(client,run_id)
                 time.sleep(5)
             else:raise core.CutoverError('NATIVE_RESULT_TIMEOUT')
             report=dict(owner=result,worker_full_union_verified=False,images=receipts,
@@ -256,6 +322,20 @@ def run(*,expected_sha,run_id,directory,resume=False):
                 report['worker_full_union_verified']=True
                 core._write(directory/'full-union-proof.json',hydrated)
             return report
+        except Exception:
+            # Prompt ordinary preparation failures to restore the verified
+            # original; runner death still has the independent native timeout.
+            try:
+                state=_remote_read(sftp,'cutover.preparation.json')
+                if (state is not None and state.get('run_id')==run_id
+                        and state.get('application_sha')==expected_sha and state.get('phase')=='FROZEN'
+                        and _remote_read(sftp,'cutover.active')==state.get('epoch')
+                        and _remote_read(sftp,'cutover.request.json') is None
+                        and _remote_read(sftp,'cutover.plan.json') is None):
+                    _remote_write(sftp,'cutover.abort.json',dict(contract='sqlite-history-preparation-abort-v1',
+                        run_id=run_id,application_sha=expected_sha,epoch=state['epoch']))
+            except Exception:pass
+            raise
         finally:sftp.close()
     finally:client.close()
 

@@ -176,3 +176,54 @@ def test_standalone_replication_origin_refuses_active_epoch_before_process(guard
         origin.run(tmp_path/'sqlite3_rsync',tmp_path/'origin.json',
                    ['--origin',str(database)])
     assert not (tmp_path/'origin.json').exists()
+
+
+@pytest.mark.parametrize('module_name',['scripts.production_ede_v12_audit','scripts.production_ede_v13_audit'])
+def test_snapshot_destination_failure_closes_source_before_unlock(guarded_source,tmp_path,monkeypatch,module_name):
+    import gc
+    module=importlib.import_module(module_name)
+    _,_,database,lock=guarded_source
+    real=sqlite3.connect;connections=[]
+    def connect(*args,**kwargs):
+        conn=real(*args,**kwargs);connections.append(conn);return conn
+    monkeypatch.setattr(sqlite3,'connect',connect)
+    gc.disable()
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            module.immutable_snapshot(database,tmp_path/'missing-parent/copy.sqlite3')
+        assert len(connections)==1
+        with pytest.raises(sqlite3.ProgrammingError):connections[0].execute('SELECT 1')
+        with lock.open('rb') as exclusive:fcntl.flock(exclusive,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    finally:
+        for conn in connections:conn.close()
+        gc.enable()
+
+
+def test_origin_child_keeps_shared_lock_after_parent_death(guarded_source,tmp_path):
+    import subprocess,sys,time
+    _,root,database,lock=guarded_source
+    ready=tmp_path/'child-ready';release=tmp_path/'child-release'
+    binary=tmp_path/'sqlite3_rsync'
+    binary.write_text('#!'+sys.executable+'\nfrom pathlib import Path\nimport time\n'
+        +'Path('+repr(str(ready))+').touch()\nend=time.monotonic()+8\n'
+        +'while not Path('+repr(str(release))+').exists() and time.monotonic()<end:time.sleep(.02)\n')
+    binary.chmod(0o700)
+    program='from pathlib import Path\nfrom scripts import sqlite_replication_origin as origin\nfrom seiltanzer import history_live_read_guard as guard\n'+f'guard.PRODUCTION_ROOT=Path({str(root)!r})\nguard.PRODUCTION_DATABASE=Path({str(database)!r})\norigin.PRODUCTION_DATABASE=guard.PRODUCTION_DATABASE\norigin.run(Path({str(binary)!r}),Path({str(tmp_path/"origin.json")!r}),[{str(database)!r}])\n'
+    parent=subprocess.Popen([sys.executable,'-c',program],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    try:
+        end=time.monotonic()+4
+        while not ready.exists() and time.monotonic()<end:time.sleep(.02)
+        assert ready.exists(),'Guarded origin child did not start'
+        parent.kill();parent.wait(timeout=2)
+        with lock.open('rb') as exclusive:
+            with pytest.raises(BlockingIOError):fcntl.flock(exclusive,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        release.touch()
+        while time.monotonic()<end:
+            try:
+                with lock.open('rb') as exclusive:fcntl.flock(exclusive,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                break
+            except BlockingIOError:time.sleep(.02)
+        else:pytest.fail('Reader child did not release its inherited lock')
+    finally:
+        release.touch()
+        if parent.poll() is None:parent.kill();parent.wait(timeout=2)

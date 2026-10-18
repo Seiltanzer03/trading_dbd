@@ -9,6 +9,133 @@ from test_sqlite_history_transaction import setup_transaction
 from test_history_production_plan import production_plan
 
 
+class OwnerDeath(BaseException):pass
+
+
+def interrupt_owner(monkeypatch,setup,path_name):
+    owner=importlib.import_module('scripts.history_production_owner')
+    root=setup[0]
+    plan,transport,control=owner_inputs(monkeypatch,setup)
+    real=core._write
+    def write(path,value):
+        real(path,value)
+        if (path.name==path_name and (path_name!='cutover.journal.json'
+                or value.get('phase')=='APPLYING_HOT')):
+            raise OwnerDeath()
+    monkeypatch.setattr(core,'_write',write)
+    with core._owned_lock(root),pytest.raises(OwnerDeath):
+        owner._run_owned_epoch(root,run_id='run-001',application_sha='a'*40,
+            control=control,transport_factory=lambda *args,**kwargs:transport)
+    monkeypatch.setattr(core,'_write',real)
+    transport.calls.clear()
+    return owner,plan,transport,control
+
+
+def test_recovering_owner_requires_closed_readers_before_any_truncation(setup_transaction,monkeypatch):
+    root,_,_,_,original,_=setup_transaction
+    owner,_,transport,control=interrupt_owner(monkeypatch,setup_transaction,'cutover.journal.json')
+    with (root/'trades.db').open('rb') as reader:
+        control.transfer=False
+        def strict():
+            control.transfer=True
+            return reader.closed
+        control.prepare_transfer=strict
+        control.assert_writers_closed=lambda:reader.closed or not control.transfer
+        with core._owned_lock(root),pytest.raises(core.FencingError):
+            owner._run_owned_epoch(root,run_id='run-001',application_sha='a'*40,
+                control=control,transport_factory=lambda *args,**kwargs:transport)
+    assert (root/'trades.db').read_bytes()==original
+    assert transport.calls==[]
+
+
+def test_accepted_prejournal_resume_rechecks_actual_capacity(setup_transaction,monkeypatch):
+    from scripts import history_production_plan as pins
+    root,_,_,_,original,_=setup_transaction
+    owner,_,transport,control=interrupt_owner(monkeypatch,setup_transaction,'cutover.plan.json')
+    monkeypatch.setattr(pins,'capacity_before_transfer',lambda *args:dict(admitted=False))
+    with core._owned_lock(root):
+        result=owner._run_owned_epoch(root,run_id='run-001',application_sha='a'*40,
+            control=control,transport_factory=lambda *args,**kwargs:transport)
+    assert result['phase']=='ABORTED_ORIGINAL'
+    assert (root/'trades.db').read_bytes()==original
+    assert transport.calls==[]
+
+
+def test_new_epoch_after_safe_abort_preserves_legitimate_new_original_writes(setup_transaction,monkeypatch):
+    from scripts import history_frozen_preparation as prep
+    owner=importlib.import_module('scripts.history_production_owner')
+    root,_,_,control,_,_=setup_transaction
+    control.stop_writers=lambda:True
+    with core._owned_lock(root):
+        first=prep.prepare_epoch(root,run_id='run-001',application_sha='a'*40,control=control)
+        state=prep._load(root/'cutover.preparation.json','run-001','a'*40)
+        owner._abort(root,state,control,'TEST_SAFE_ABORT')
+    with sqlite3.connect(root/'trades.db') as conn:
+        conn.execute('CREATE TABLE legitimate_new_writes(id INTEGER PRIMARY KEY)')
+        conn.execute('INSERT INTO legitimate_new_writes VALUES(170)')
+    actual=(root/'trades.db').read_bytes()
+    def stop(_):raise OwnerDeath()
+    with core._owned_lock(root),pytest.raises(OwnerDeath):
+        owner._run_owned_epoch(root,run_id='run-002',application_sha='a'*40,control=control,wait=stop)
+    fresh=core._read(root/'cutover.preparation.json')
+    assert fresh['run_id']=='run-002' and fresh['nonce']!=first['nonce']
+    assert fresh['source']['identity']['database_sha256']==hashlib.sha256(actual).hexdigest()
+    assert (root/'trades.db').read_bytes()==actual
+    archived=core._read(root/'cutover-attempts/run-001/cutover.preparation.json')
+    assert archived['phase']=='ABORTED_ORIGINAL'
+
+
+def test_pending_epoch_cannot_be_reset_to_renew_its_deadline(setup_transaction):
+    from scripts import history_frozen_preparation as prep
+    owner=importlib.import_module('scripts.history_production_owner')
+    root,_,_,control,original,_=setup_transaction
+    control.stop_writers=lambda:True
+    with core._owned_lock(root):
+        prep.prepare_epoch(root,run_id='run-001',application_sha='a'*40,control=control)
+        before=core._read(root/'cutover.preparation.json')
+        with pytest.raises(ValueError):
+            owner._run_owned_epoch(root,run_id='run-002',application_sha='a'*40,control=control)
+    assert core._read(root/'cutover.preparation.json')==before
+    assert (root/'trades.db').read_bytes()==original
+
+
+def test_terminal_metadata_retirement_resumes_after_actual_rename_death(setup_transaction,monkeypatch):
+    import os
+    from scripts import history_frozen_preparation as prep
+    from scripts.history_epoch_retirement import begin_epoch
+    owner=importlib.import_module('scripts.history_production_owner')
+    root,_,_,control,original,_=setup_transaction;control.stop_writers=lambda:True
+    with core._owned_lock(root):
+        prep.prepare_epoch(root,run_id='run-001',application_sha='a'*40,control=control)
+        owner._abort(root,prep._load(root/'cutover.preparation.json','run-001','a'*40),control,'TEST')
+        real=os.replace
+        def move(a,b):
+            real(a,b)
+            if str(b).endswith('run-001/cutover.preparation.json'):raise OwnerDeath()
+        monkeypatch.setattr(os,'replace',move)
+        with pytest.raises(OwnerDeath):begin_epoch(root,run_id='run-002',application_sha='a'*40)
+        monkeypatch.setattr(os,'replace',real)
+        begin_epoch(root,run_id='run-002',application_sha='a'*40)
+    assert not (root/'cutover.preparation.json').exists()
+    assert not (root/'cutover.reset.json').exists()
+    assert (root/'cutover-attempts/run-001/retirement.json').exists()
+    assert (root/'trades.db').read_bytes()==original
+
+
+def test_worker_abort_request_releases_verified_original_without_waiting_5400s(setup_transaction):
+    from scripts import history_frozen_preparation as prep
+    owner=importlib.import_module('scripts.history_production_owner')
+    root,_,_,control,original,_=setup_transaction;control.stop_writers=lambda:True
+    with core._owned_lock(root):
+        first=prep.prepare_epoch(root,run_id='run-001',application_sha='a'*40,control=control)
+        core._write(root/'cutover.abort.json',dict(contract='sqlite-history-preparation-abort-v1',
+            run_id='run-001',application_sha='a'*40,epoch=first['epoch']))
+        result=owner._run_owned_epoch(root,run_id='run-001',application_sha='a'*40,control=control,
+            wait=lambda _:pytest.fail('Abort request entered long idle wait'))
+    assert result['phase']=='ABORTED_ORIGINAL'
+    assert (root/'trades.db').read_bytes()==original
+
+
 def owner_inputs(monkeypatch,setup):
     from scripts import history_production_plan as pins
     root,old,transport,control,_,_ = setup

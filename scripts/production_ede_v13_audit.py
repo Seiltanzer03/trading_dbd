@@ -73,17 +73,16 @@ class ReadOnlyRuntime:
 
 
 def immutable_snapshot(source: Path, destination: Path) -> None:
-    with guarded_live_read(source):
+    with guarded_live_read(source), ExitStack() as lifetime:
         src = sqlite3.connect(
             f"file:{source.resolve()}?mode=ro", uri=True, timeout=30.0)
+        lifetime.callback(src.close)
         src.execute("PRAGMA query_only=ON")
         src.execute("PRAGMA busy_timeout=30000")
         dst = sqlite3.connect(destination)
-        try:
-            src.backup(dst, pages=1000, sleep=0.05)
-            dst.commit()
-        finally:
-            dst.close(); src.close()
+        lifetime.callback(dst.close)
+        src.backup(dst, pages=1000, sleep=0.05)
+        dst.commit()
     check = sqlite3.connect(
         f"file:{destination.resolve()}?mode=ro", uri=True, timeout=30.0)
     try:

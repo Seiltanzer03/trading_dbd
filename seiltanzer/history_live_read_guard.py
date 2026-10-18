@@ -68,6 +68,6 @@ def guarded_live_read(database):
         source = database.lstat()
         if not stat.S_ISREG(source.st_mode) or source.st_nlink != 1:
             raise ValueError('INVALID_DIRECT_HISTORY_SOURCE')
-        yield
+        yield fd
     finally:
         os.close(fd)

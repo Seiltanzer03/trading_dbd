@@ -17,6 +17,26 @@ ROOT = Path('/opt/seiltanzer')
 DATABASE = ROOT/'data/trades.db'
 SERVICE = 'seiltanzer.service'
 EXTERNAL_GUARD = Path('/usr/local/lib/seiltanzer-history-start-guard.py')
+OWNER_UID = 0
+STATE_FILES = ('cutover.active','cutover.preparation.json','cutover.plan.json',
+               'cutover.request.json','cutover.transport.json','cutover.journal.json',
+               'cutover.result.json','cutover.capacity.json','cutover.reset.json','cutover.abort.json')
+
+
+def validate_owned_data(data):
+    """Production-only ownership boundary, repeated before fenced operations."""
+    data=Path(data)
+    info=data.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=OWNER_UID
+            or stat.S_IMODE(info.st_mode)!=0o700):
+        raise core.FencingError('UNSAFE_PRODUCTION_DATA_DIRECTORY')
+    for name in ('trades.db','trades.db-wal','trades.db-shm','trades.db-journal',*STATE_FILES):
+        path=data/name
+        if not os.path.lexists(path):continue
+        info=core._regular(path)
+        mask=0o077 if name in STATE_FILES else 0o022
+        if info.st_uid!=OWNER_UID or info.st_mode & mask:
+            raise core.FencingError('PRODUCTION_INPUT_OWNER_OR_MODE_CHANGED')
 
 
 def _run(*args,timeout=15):
@@ -83,6 +103,7 @@ class ProductionControl:
         self._verify_installation()
 
     def _verify_installation(self):
+        validate_owned_data(ROOT/'data')
         if _run('git','-C',str(ROOT),'rev-parse','HEAD') != self.application_sha:
             raise core.CutoverError('PRODUCTION_APPLICATION_SHA_MISMATCH')
         for path in (ROOT/'scripts/history_service_fence.py',EXTERNAL_GUARD):
@@ -102,6 +123,7 @@ class ProductionControl:
                 ('ActiveState=inactive','ActiveState=failed')) and self.assert_fenced())
 
     def assert_fenced(self):
+        validate_owned_data(ROOT/'data')
         info=os.fstat(self.lock_fd)
         current=(ROOT/'.deployment-git-maintenance.lock').lstat()
         if ((info.st_ino,info.st_dev)!=(current.st_ino,current.st_dev)
@@ -169,6 +191,9 @@ def production_control(root,*,application_sha):
             raise core.CutoverError('UNSAFE_PRODUCTION_MAINTENANCE_LOCK')
         try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:raise core.CutoverError('PRODUCTION_MAINTENANCE_ALREADY_OWNED') from None
+        # Narrow only the already root-owned directory, under the host lock.
+        # Application runs as root; no file/data is replaced or discarded.
+        os.chmod(ROOT/'data',0o700)
         yield ProductionControl(fd,application_sha)
     finally:os.close(fd)
 
@@ -183,6 +208,8 @@ def main():
     _validate_epoch(args.run_id,args.application_sha)
     try:
         with production_control(ROOT,application_sha=args.application_sha) as control:
+            from scripts.history_epoch_retirement import begin_epoch
+            begin_epoch(ROOT/'data',run_id=args.run_id,application_sha=args.application_sha)
             attempt=secrets.token_hex(16)
             core._write(ROOT/'data/cutover.result.json',dict(
                 contract='sqlite-history-native-owner-attempt-v1',run_id=args.run_id,
