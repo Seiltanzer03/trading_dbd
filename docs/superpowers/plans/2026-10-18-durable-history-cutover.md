@@ -71,7 +71,7 @@ extra full cloud restore was used.
 `production-health-recovery.yml`, `emergency-production-disk-recovery.yml`,
 existing deployment filesystem lock and finite systemd task patterns.
 
-- [ ] Inventory every production writer/start/restore path; reuse shared
+- [x] Inventory every production writer/start/restore path; reuse shared
   `production-seiltanzer` queue and deployment filesystem flock.
 - [ ] Implement canonical active guard plus persistent service-start condition;
   ensure queued recovery/deploy refuses it before any mutation. Prove service
@@ -79,6 +79,30 @@ existing deployment filesystem lock and finite systemd task patterns.
 - [ ] Integrate finite local owner independently of SSH runner, exact closed
   writer verification and bounded private transport. Retain guard on every
   failure. No live invocation until Task3 and runtime-reader acceptance pass.
+
+Runtime-start fence implemented as a stdlib-only external ExecCondition plus a
+negated active-path condition. It executes before existing ExecStartPre backup
+hooks (systemd249 service contract), rejects unfinished journals even without
+the active file, and refuses marked data when the checkout lacks the future
+runtime-reader capability. The capability is deliberately not declared yet.
+The actual hot state/retained identity is checked without importing the app.
+
+Deploy and single-slot recovery refuse guarded mutations after the shared host
+lock; recovery also checks before its read-only healthy shortcut. Emergency
+cleanup now uses the same queue/lock and is manual-only, so releasing its guard
+cannot itself stop the service. Health diagnostics suppress recovery dispatch
+for a guarded epoch. Real Bash preambles are exercised with active and pending
+journals, including the actual read-only checker. Latest combined guard/core/
+existing recovery profile:92passed in2.26s. Actual systemd runner proof remains
+pending before this stage can be considered operationally verified.
+
+PR487 is merged at919d524; full CI4316passed and pinned SQLite/WebKit passed.
+Deploy39085864690 timed out before acceptance: pre-engine integrity429.267s,
+post-schema backup/integrity253.199s and total startup732.713s. The app became
+available at01:29:49UTC; exact-SHA recovery39086708682 observed it healthy and
+did not stop/redeploy it. Public health39098609566 later returned200. Full
+release acceptance is not claimed. Scheduled EDE39102091467 again refused the
+unchanged WAL headroom gate with644,825,088free bytes; no full restore/refit ran.
 
 ## Task3 — authenticated current image and final physical acceptance
 

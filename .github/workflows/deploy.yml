@@ -109,6 +109,13 @@ jobs:
             # Also serialize surviving SSH processes after an interrupted run.
             exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
             flock -w 30 9
+            if [ -e /opt/seiltanzer/data/cutover.active ] || [ -L /opt/seiltanzer/data/cutover.active ] || {
+              { [ -e /opt/seiltanzer/data/cutover.journal.json ] || [ -L /opt/seiltanzer/data/cutover.journal.json ]; } &&
+              ! /usr/bin/python3 /usr/local/lib/seiltanzer-history-start-guard.py --database /opt/seiltanzer/data/trades.db --application-root /opt/seiltanzer >/dev/null;
+            }; then
+              echo "::error::HISTORY_CUTOVER_ACTIVE_MUTATION_REFUSED"
+              exit 1
+            fi
 
             echo '=== PRE-DEPLOY SERVICE DIAGNOSTICS ==='
             systemctl status seiltanzer --no-pager -l || true
@@ -264,6 +271,8 @@ jobs:
             df -h / /opt/seiltanzer || true
 
             mkdir -p /etc/systemd/system/seiltanzer.service.d
+            install -m 0644 scripts/history_service_fence.py /usr/local/lib/seiltanzer-history-start-guard.py
+            install -m 0644 deploy/history-start-fence.conf /etc/systemd/system/seiltanzer.service.d/30-history-cutover.conf
             cat >/etc/systemd/system/seiltanzer.service.d/20-memory-budget.conf <<'EOF'
             [Service]
             Environment=MALLOC_ARENA_MAX=2

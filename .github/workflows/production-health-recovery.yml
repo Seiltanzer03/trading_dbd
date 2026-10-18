@@ -59,6 +59,7 @@ jobs:
           fi
 
       - name: Capture server diagnostics before recovery
+        id: diagnostics
         if: steps.public.outputs.unhealthy == 'true'
         uses: appleboy/ssh-action@v1
         with:
@@ -67,8 +68,16 @@ jobs:
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
           command_timeout: 2m
+          capture_stdout: true
           script: |
             set +e
+            if [ -e /opt/seiltanzer/data/cutover.active ] || [ -L /opt/seiltanzer/data/cutover.active ] || {
+              { [ -e /opt/seiltanzer/data/cutover.journal.json ] || [ -L /opt/seiltanzer/data/cutover.journal.json ]; } &&
+              ! /usr/bin/python3 /usr/local/lib/seiltanzer-history-start-guard.py --database /opt/seiltanzer/data/trades.db --application-root /opt/seiltanzer >/dev/null;
+            }; then
+              echo "HISTORY_CUTOVER_GUARDED=1"
+              exit 0
+            fi
             echo '=== HEALTH WATCH LOCAL API ==='
             curl -sS -o /tmp/health-watch-state.json --connect-timeout 1 --max-time 5 \
               -w 'local_http=%{http_code} seconds=%{time_total}\n' \
@@ -87,7 +96,7 @@ jobs:
               | grep -Ei 'out of memory|oom|killed process|memory cgroup' || true
 
       - name: Dispatch fail-closed single-slot recovery
-        if: steps.public.outputs.unhealthy == 'true'
+        if: steps.public.outputs.unhealthy == 'true' && !contains(steps.diagnostics.outputs.stdout, 'HISTORY_CUTOVER_GUARDED=1')
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ steps.authority.outputs.expected_sha }}

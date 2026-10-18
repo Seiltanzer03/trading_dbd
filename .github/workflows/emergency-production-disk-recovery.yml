@@ -1,10 +1,12 @@
 name: emergency-production-disk-recovery
 
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/emergency-production-disk-recovery.yml]
   workflow_dispatch:
+
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -25,6 +27,15 @@ jobs:
           command_timeout: 12m
           script: |
             set -euo pipefail
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 30 9
+            if [ -e /opt/seiltanzer/data/cutover.active ] || [ -L /opt/seiltanzer/data/cutover.active ] || {
+              { [ -e /opt/seiltanzer/data/cutover.journal.json ] || [ -L /opt/seiltanzer/data/cutover.journal.json ]; } &&
+              ! /usr/bin/python3 /usr/local/lib/seiltanzer-history-start-guard.py --database /opt/seiltanzer/data/trades.db --application-root /opt/seiltanzer >/dev/null;
+            }; then
+              echo "::error::HISTORY_CUTOVER_ACTIVE_MUTATION_REFUSED"
+              exit 1
+            fi
             echo "DISK_BEFORE"
             df -h /
             du -sh /opt/seiltanzer/data/backups/local 2>/dev/null || true
