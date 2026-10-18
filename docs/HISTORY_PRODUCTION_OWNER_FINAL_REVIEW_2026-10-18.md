@@ -62,3 +62,20 @@ production cutover have not yet been performed for this fix tree.
   durable reset intent resumes metadata moves after process death; it never
   renews an unfinished epoch. Cost if predicates fail: guarded refusal, no data
   overwrite or original-clock reset.
+
+## First mandatory CI result and bounded follow-up
+
+Run39169360314 on remote701ef1a2:4558passed/5skipped/13subtests and2failed
+in221.17s. Failures were test-environment privilege mismatches: real /proc
+inventory was invoked as the unprivileged runner although production requires
+root; the injected VPS SFTP endpoint reported the runner UID instead of root.
+The native inventory test now uses sudo on CI (without weakening production
+refusal), and the injected remote metadata explicitly represents the root-owned
+VPS. These paths passed in the targeted58passed/1skipped profile.
+
+Separate math run39169360272 reproduced a real CLI defect: native export's
+assembly variable overwrote the imported SSH _connect function with text.
+The assembly variable was renamed, and a CLI transport regression failed on
+that exact TypeError before passing. WebKit/browser succeeded in the first CI.
+A final exact-tree mandatory CI is necessary after this concrete correction;
+no unchanged successful run is being repeated as speculative polishing.

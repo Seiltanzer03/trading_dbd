@@ -164,7 +164,11 @@ def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,m
             assert path.startswith(driver.REMOTE_DATA)
             return data/path.removeprefix(driver.REMOTE_DATA)
         def stat(self,path):return self.path(path).stat()
-        def lstat(self,path):return self.path(path).lstat()
+        def lstat(self,path):
+            info=self.path(path).lstat()
+            # This injected remote endpoint represents the root-owned VPS,
+            # regardless of the hosted runner user's local UID.
+            return SimpleNamespace(st_mode=info.st_mode,st_size=info.st_size,st_uid=0)
         def open(self,path,mode):return self.path(path).open('xb' if mode=='wx' else mode)
         def chmod(self,path,mode):self.path(path).chmod(mode)
         def posix_rename(self,a,b):os.replace(self.path(a),self.path(b))

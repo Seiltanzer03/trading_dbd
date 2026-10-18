@@ -2,6 +2,9 @@
 import fcntl
 import importlib
 import os
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -21,14 +24,21 @@ def test_live_descriptor_inventory_detects_readers_and_writers(tmp_path):
     from test_sqlite_replication_origin import require_native_proc
     require_native_proc()
     source=tmp_path/'trades.db';source.write_bytes(b'actual-source')
+    def inventory():
+        if os.geteuid()==0:return module.database_handles(source,exclude_pid=None)
+        # Production inventory runs as root and deliberately refuses unreadable
+        # /proc entries. Exercise those same privileges on the hosted runner.
+        program=('import json,sys;from scripts.history_production_control import database_handles;'
+                 'print(json.dumps(database_handles(sys.argv[1],exclude_pid=None)))')
+        return json.loads(subprocess.check_output(['sudo','-n',sys.executable,'-c',program,str(source)],text=True))
     with source.open('rb') as reader:
-        result=module.database_handles(source,exclude_pid=None)
+        result=inventory()
         assert any(item['pid']==os.getpid() and item['fd']==reader.fileno()
                    and not item['writable'] for item in result)
     with source.open('r+b') as writer:
         assert any(item['pid']==os.getpid() and item['fd']==writer.fileno()
-                   and item['writable'] for item in module.database_handles(source,exclude_pid=None))
-    assert module.database_handles(source,exclude_pid=None) == []
+                   and item['writable'] for item in inventory())
+    assert inventory() == []
 
 
 def test_native_launch_command_has_finite_independent_systemd_lifetime():
