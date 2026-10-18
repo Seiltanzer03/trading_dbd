@@ -162,7 +162,134 @@ def _rowid_alias(conn: sqlite3.Connection, schema_name: str, table: str) -> tupl
     return alias, columns
 
 
-def build_hot_cutover_snapshot(
+def _source_materialization_watermark(conn):
+    if 'g1s_materialization_state' not in _existing_tables(conn, 'src'):
+        return 0
+    columns = {r[1] for r in conn.execute('PRAGMA src.table_xinfo("g1s_materialization_state")')}
+    if not {'materializer', 'source_watermark'} <= columns:
+        raise ValueError('Unsupported G1S source materialization schema')
+    rows = conn.execute("SELECT source_watermark FROM src.g1s_materialization_state "
+                        "WHERE materializer='fixed_horizon_t0' LIMIT 2").fetchall()
+    if not rows:
+        return 0
+    if len(rows) != 1 or type(rows[0][0]) is not int or not 0 <= rows[0][0] < 2**63:
+        raise ValueError('Invalid G1S source materialization watermark')
+    return rows[0][0]
+
+
+def _verify_current_cold_rows(source, *, source_receipt, catalog_bytes, client, directory, deadline):
+    """Read-only complete catalog proof; return only byte-identical cold IFD ids.
+
+    No full DB clone is needed. Current outcome differences remain in source;
+    they are never relabelled as the old complete typed root.
+    """
+    from scripts.sqlite_history_union import _catalog, _check, MUTABLE_OUTCOME_COLUMNS, MERGE_SECONDS
+    before = archive._identity(source)
+    catalog, _ = _catalog(catalog_bytes, source_receipt, before, allow_verified_snapshot=True)
+    validate_full_catalog(catalog)
+    _check(deadline, directory, needed=archive.RESERVE_BYTES + 3*archive.MAX_BYTES)
+    digest = hashlib.sha256()
+    with source.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024**2), b''):
+            _check(deadline, directory)
+            digest.update(chunk)
+    if digest.hexdigest() != source_receipt['database_sha256']:
+        raise ValueError('Current retirement source SHA-256 differs')
+    exact = []
+    roots = {table: hashlib.sha256() for table in catalog['full_table_proofs']}
+    conn = sqlite3.connect(source.resolve().as_uri()+'?mode=ro&immutable=1', uri=True)
+    try:
+        conn.execute('PRAGMA trusted_schema=OFF')
+        conn.execute('PRAGMA cache_size=-2048')
+        conn.execute('PRAGMA query_only=ON')
+        if history_state.read_history_state(conn) is not None:
+            raise ValueError('Hydrate the existing hot history epoch before recompaction')
+        boundaries = catalog_max_rowids(catalog)
+        for table, proof in catalog['full_table_proofs'].items():
+            if any(_schema(conn, table)[key] != proof[key] for key in (
+                    'source_schema_sql', 'columns', 'source_rowid_alias')):
+                raise ValueError('Current capture schema differs from pinned catalog')
+            alias = archive._quote(proof['source_rowid_alias'])
+            boundary = boundaries[table]
+            where, args = (' WHERE 1=0', ()) if boundary is None else (' WHERE '+alias+'<=?', (boundary,))
+            if conn.execute('SELECT COUNT(*) FROM '+archive._quote(table)+where, args).fetchone()[0] != proof['row_count']:
+                raise ValueError('Current source catalog prefix coverage differs')
+        for entry in catalog['partitions']:
+            _check(deadline, directory)
+            with tempfile.TemporaryDirectory(prefix='.retirement-proof-', dir=directory) as part_dir:
+                restored = Path(part_dir)/'cold.sqlite3'
+                archive.restore_from_cloud(client, entry, restored)
+                limit = min(deadline, time.monotonic()+MERGE_SECONDS)
+                conn.set_progress_handler(lambda: time.monotonic() >= limit, 1000)
+                part = entry['partition']
+                table, columns, alias = part['table'], part['columns'], part['source_rowid_alias']
+                qt, qa = archive._quote(table), archive._quote(alias)
+                ids = archive._rowids(part['rowids'])
+                where = ' WHERE '+qa+' IN ('+','.join('?' for _ in ids)+')'
+                conn.execute('ATTACH DATABASE ? AS cold', (restored.resolve().as_uri()+'?mode=ro&immutable=1',))
+                try:
+                    if conn.execute('SELECT COUNT(*) FROM main.'+qt+where, ids).fetchone()[0] != len(ids):
+                        raise ValueError('Current source lacks original cold rowid coverage')
+                    immutable = [c for c in columns if table != TARGET_TABLE or c not in MUTABLE_OUTCOME_COLUMNS]
+                    if (archive._logical_hash(conn, 'main.'+qt, immutable, alias, where, ids)
+                            != archive._logical_hash(conn, 'cold.'+qt, immutable, alias, where, ids)):
+                        raise ValueError('Current source changed immutable capture fields')
+                    archive._logical_hash(conn, 'cold.'+qt, columns, alias, where, ids, digest=roots[table])
+                    if table == TARGET_TABLE:
+                        candidates = [r[0] for r in conn.execute(
+                            'SELECT '+qa+' FROM main.'+qt+where+' AND resolution_status=? ORDER BY '+qa,
+                            (*ids, RETIRED_STATUS))]
+                        for rowid in candidates:
+                            _check(limit, directory)
+                            one = ' WHERE '+qa+'=?'
+                            if (archive._logical_hash(conn, 'main.'+qt, columns, alias, one, (rowid,))
+                                    == archive._logical_hash(conn, 'cold.'+qt, columns, alias, one, (rowid,))):
+                                exact.append(rowid)
+                                if len(exact) > history_state.MAX_RETIRED_ROWS:
+                                    raise ValueError('Current cold retirement exceeds bounded coverage')
+                finally:
+                    conn.execute('DETACH DATABASE cold')
+            _check(deadline, directory)
+        for table, proof in catalog['full_table_proofs'].items():
+            if roots[table].hexdigest() != proof['logical_sha256']:
+                raise ValueError('Current retirement original cold typed table root differs')
+        if archive._identity(source) != before:
+            raise ValueError('Current retirement source changed during verification')
+        return exact
+    finally:
+        conn.close()
+
+
+def build_current_hot_cutover_snapshot(source, destination, *, catalog_bytes,
+                                       expected_catalog_sha256, source_receipt, client):
+    """Off-host image from a current source and fully verified original cold rows."""
+    source, destination = Path(source), Path(destination)
+    if os.path.lexists(destination):
+        raise FileExistsError(destination)
+    if not isinstance(expected_catalog_sha256, str) or not re.fullmatch('[0-9a-f]{64}', expected_catalog_sha256):
+        raise ValueError('A catalog SHA-256 pin is required')
+    _parse_catalog(catalog_bytes, expected_catalog_sha256)
+    deadline = time.monotonic()+MAX_SECONDS
+    exact = _verify_current_cold_rows(source, source_receipt=source_receipt,
+                                     catalog_bytes=catalog_bytes, client=client,
+                                     directory=destination.parent, deadline=deadline)
+    return _build_hot_cutover_snapshot(
+        source, destination, catalog_bytes=catalog_bytes,
+        expected_catalog_sha256=expected_catalog_sha256, source_receipt=source_receipt,
+        current_exact_rows=exact, deadline=deadline)
+
+
+def build_hot_cutover_snapshot(source, destination, *, catalog_bytes,
+                               expected_catalog_sha256=None, source_receipt=None,
+                               verify_source_catalog_roots=True):
+    """Strict historical entry point: its complete typed source roots must match."""
+    return _build_hot_cutover_snapshot(
+        source, destination, catalog_bytes=catalog_bytes,
+        expected_catalog_sha256=expected_catalog_sha256, source_receipt=source_receipt,
+        verify_source_catalog_roots=verify_source_catalog_roots)
+
+
+def _build_hot_cutover_snapshot(
     source: str | Path,
     destination: str | Path,
     *,
@@ -170,6 +297,8 @@ def build_hot_cutover_snapshot(
     expected_catalog_sha256: str | None = None,
     source_receipt: dict | None = None,
     verify_source_catalog_roots: bool = True,
+    current_exact_rows: list[int] | None = None,
+    deadline: float | None = None,
 ) -> dict:
     """Build a physically compacted, rowid-preserving hot SQLite snapshot.
 
@@ -200,7 +329,8 @@ def build_hot_cutover_snapshot(
     if (not isinstance(source_receipt, dict)
             or source_receipt.get('immutable_sqlite_read') is not True
             or not (source_receipt.get('snapshot_restore_verified') is True
-                    or source_receipt.get('full_restore_verified') is True)
+                    or source_receipt.get('full_restore_verified') is True
+                    or (current_exact_rows is not None and source_receipt.get('immutable_snapshot_verified') is True))
             or source_receipt.get('verified_local_file') != before
             or source_receipt.get('database_size_bytes') != before['size']
             or not re.fullmatch('[0-9a-f]{64}', str(source_receipt.get('database_sha256') or ''))):
@@ -211,7 +341,7 @@ def build_hot_cutover_snapshot(
     if target_max_catalog_rowid is None or target_max_catalog_rowid <= 0:
         raise ValueError('Catalog has no rows for passive_market_observations')
 
-    deadline = time.monotonic() + MAX_SECONDS
+    deadline = min(deadline, time.monotonic()+MAX_SECONDS) if deadline is not None else time.monotonic()+MAX_SECONDS
 
     def check(*, needed: int = archive.RESERVE_BYTES) -> None:
         if time.monotonic() >= deadline:
@@ -244,7 +374,8 @@ def build_hot_cutover_snapshot(
                         ro_conn, qtable, proof['columns'], alias, suffix_where, suffix_params
                     ),
                 )
-        verify_full_tables(ro_conn, catalog, post_catalog_proofs=post_catalog_proofs)
+        if current_exact_rows is None:
+            verify_full_tables(ro_conn, catalog, post_catalog_proofs=post_catalog_proofs)
 
     check(needed=archive.RESERVE_BYTES + before['size'])
 
@@ -304,15 +435,24 @@ def build_hot_cutover_snapshot(
             f'SELECT COUNT(*) FROM src.{archive._quote(TARGET_TABLE)}'
         ).fetchone()[0]
         retire_cutoff_rowid = min(int(target_max_catalog_rowid), int(source_max_rowid or 0))
+        source_watermark = _source_materialization_watermark(work_conn)
+        if source_watermark > int(source_max_rowid or 0):
+            raise ValueError('G1S source watermark exceeds the retained source identity')
         retire_predicate = (
             'p.rowid < ? '
+            'AND p.rowid <= ? '
             'AND p."resolution_status" = ? '
             'AND NOT EXISTS ('
             'SELECT 1 FROM temp._cutover_protected_obs x '
             'WHERE x.observation_id = p."observation_id"'
             ')'
         )
-        retire_params = (retire_cutoff_rowid, RETIRED_STATUS)
+        retire_params = (retire_cutoff_rowid, source_watermark, RETIRED_STATUS)
+        if current_exact_rows is not None:
+            work_conn.execute('CREATE TEMP TABLE _cutover_cold_exact(rowid INTEGER PRIMARY KEY)')
+            work_conn.executemany('INSERT INTO temp._cutover_cold_exact VALUES(?)',
+                                  ((rowid,) for rowid in current_exact_rows))
+            retire_predicate += ' AND p.rowid IN (SELECT rowid FROM temp._cutover_cold_exact)'
         retired_rowids = [r[0] for r in work_conn.execute(
             f'SELECT p.rowid FROM src.{archive._quote(TARGET_TABLE)} p '
             f'WHERE {retire_predicate} ORDER BY p.rowid', retire_params)]
@@ -396,6 +536,7 @@ def build_hot_cutover_snapshot(
                 catalog_sha256=catalog_sha,
                 catalog_object_key=history_state.catalog_key(catalog['source_database_sha256'], catalog_sha),
                 cutover_source_database_sha256=source_receipt['database_sha256'],
+                source_materialization_watermark=source_watermark,
                 retired_rowids={TARGET_TABLE: retired_rowids},
                 retained_identity={table: history_state.identity_proof(work_conn, table, boundary)
                                    for table, boundary in max_rowids.items()},
@@ -476,9 +617,12 @@ def build_hot_cutover_snapshot(
             target_table=TARGET_TABLE,
             target_max_catalog_rowid=target_max_catalog_rowid,
             source_max_rowid=source_max_rowid,
+            source_materialization_watermark=source_watermark,
             hot_max_rowid=hot_max_rowid,
             source_target_row_count=source_total_target_rows,
             retired_row_count=retired_count,
+            source_catalog_verification=('ORIGINAL_FULL_TYPED_ROOTS' if current_exact_rows is None
+                                         else 'CURRENT_CAPTURE_AND_EXACT_RETIREMENT'),
             hot_target_row_count=hot_target_count,
             protected_observation_count=protected_obs_count,
             protected_observation_breakdown=protected_breakdown,

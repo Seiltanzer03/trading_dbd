@@ -70,6 +70,31 @@ def test_cutover_with_no_eligible_retirement_does_not_publish_a_larger_database(
     assert not destination.exists()
 
 
+@pytest.mark.parametrize('cursor', [30, None])
+def test_cutover_never_retires_source_rows_a_materializer_has_not_seen(tmp_path, cursor):
+    source, proof, raw, pin, _ = _build_cutover_fixture(tmp_path)
+    with closing(sqlite3.connect(source)) as conn:
+        with conn:
+            if cursor is None:
+                conn.execute('DELETE FROM g1s_materialization_state')
+            else:
+                conn.execute('UPDATE g1s_materialization_state SET source_watermark=?', (cursor,))
+    proof = dict(proof, verified_local_file=identity(source),
+                 database_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                 database_size_bytes=source.stat().st_size)
+    destination = tmp_path/'unprocessed.sqlite3'
+    if cursor is None:
+        with pytest.raises(ValueError, match='No eligible cold retirement'):
+            cutover.build_hot_cutover_snapshot(source, destination, source_receipt=proof,
+                                               catalog_bytes=raw, expected_catalog_sha256=pin)
+        assert not destination.exists()
+    else:
+        cutover.build_hot_cutover_snapshot(source, destination, source_receipt=proof,
+                                           catalog_bytes=raw, expected_catalog_sha256=pin)
+        with closing(sqlite3.connect(destination)) as conn:
+            assert conn.execute('SELECT observation_id FROM passive_market_observations WHERE rowid=40').fetchone() == ('obs-retire-40',)
+
+
 @pytest.mark.parametrize('column,value', [
     ('status', 'not_executed'), ('policy', 'EXIT'), ('note', 'replacement'),
     ('decision_id', 'replacement'), ('ts', 1792280000.0),

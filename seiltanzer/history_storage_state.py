@@ -19,7 +19,7 @@ PIN_FIELDS = ('cold_history_catalog_sha256', 'cold_history_catalog_bucket',
               'cold_history_catalog_object_key', 'sqlite_history_state_sha256')
 _FIELDS = {'contract', 'bucket', 'catalog_source_database_sha256', 'catalog_sha256',
            'catalog_object_key', 'cutover_source_database_sha256', 'retired_rowids',
-           'retained_identity', 'production_authority'}
+           'retained_identity', 'source_materialization_watermark', 'production_authority'}
 
 
 def identity_proof(conn, table, max_rowid):
@@ -95,6 +95,11 @@ def canonical_state(state):
                 or any(not isinstance(proof[key], str) or not re.fullmatch('[0-9a-f]{64}', proof[key])
                        for key in ('schema_sha256', 'logical_sha256'))):
             raise ValueError('Invalid retained history identity proof')
+    watermark = state['source_materialization_watermark']
+    boundary = identities['passive_market_observations']['max_rowid']
+    if (type(watermark) is not int or not 0 <= watermark < 2**63
+            or boundary is None or ids[-1] > watermark or ids[-1] >= boundary):
+        raise ValueError('Retired history exceeds the processed source watermark')
     raw = json.dumps(state, sort_keys=True, separators=(',', ':'),
                      ensure_ascii=False, allow_nan=False).encode('utf8')
     if len(raw) > MAX_BYTES:

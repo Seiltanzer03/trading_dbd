@@ -44,6 +44,26 @@ Only rows in `passive_market_observations` that satisfy **all** of the following
 3. `resolution_status = 'insufficient_future_data'`.
 4. The source database's catalog prefix (`rowid <= catalog_max_rowid`) is verified against the catalog's exact `row_count` and typed `logical_sha256` root before compaction.
 5. The row's `observation_id` is not in the dependency exclusion set (§3.1 item 5).
+6. `rowid <= source_materialization_watermark` for the persisted
+   `g1s_materialization_state.materializer='fixed_horizon_t0'`. Missing state
+   means zero processed rows and therefore no retirement. The cursor and
+   retained rowid/capture-id proofs are embedded in the output storage state.
+
+For a **current**, unpruned source the separate
+`build_current_hot_cutover_snapshot` uses a stronger per-retired-row contract:
+all original cold typed table roots are independently reproduced from verified
+partitions; every cataloged row still exists at its original source rowid;
+capture fields match (all G1S fields are immutable); only passive rows whose
+entire typed current record equals cold enter the guarded retirement set.
+Current outcome changes stay hot. It does not claim that a changed current
+prefix equals the original historical root. Its source SHA is measured before
+comparison; source identity, catalog pin, bounded partition transport, the
+single 1800-second deadline and the existing output reserve remain mandatory.
+
+These are off-host image rules. The five named dependencies plus the source
+cursor still do **not** prove runtime reader closure: latest capture inputs,
+unevaluated membership, mutation diagnostics and historical UI counters need
+their own acceptance before a live cutover can be authorized.
 
 Actual historical-copy run `39079437415` retired `62,183` rows and reduced the
 copy from `18,784,505,856` to `14,978,297,856` bytes, a saving of
@@ -77,3 +97,12 @@ support a retained catalog-prefix row changing from `pending` to `resolved`:
 the current merge rejects its differing typed values. Root verification must
 not be disabled to bypass this. A versioned hot-state reconciliation contract
 and actual consumer comparisons are required before production cutover.
+
+The separate `hydrate_current_snapshot` implements that reconciliation for
+research copies. It preserves every current hot typed row, permits only six
+named passive outcome columns to differ, verifies every original cold table
+root and requires all missing prefix rows to equal the embedded retired set.
+Stock EDE preparation uses this mode from the pinned backup manifest; strict
+`hydrate_snapshot` keeps the historical semantics above. Backup/replica/restore
+carry and validate the immutable state pins. This implementation does not
+remove the physical switching and runtime-reader blockers.

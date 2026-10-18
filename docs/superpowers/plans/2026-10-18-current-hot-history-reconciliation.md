@@ -99,3 +99,35 @@ The full production cutover remains blocked. A fresh live prefix cannot be
 silently treated as the old full typed root. Next prove either a new verified
 epoch or exact cold-identical retirement evidence, then finish runtime reader
 coverage and a durable failure/recovery protocol before any destructive action.
+
+## Current-source retirement proof
+
+Use the existing immutable catalog without declaring changed current outcomes
+equal to its historical root. A separate current-source builder first verifies
+all cloud partitions and streams their original full typed roots. Every catalog
+row must still exist in the unpruned current source at its original rowid with
+the same immutable capture fields; G1S is entirely immutable. Only passive rows
+whose **entire typed record** still equals cold may enter the retirement set.
+The existing status/dependency/boundary guards then intersect this set. Source
+SHA/identity and catalog pin remain mandatory. This read-only proof needs one
+bounded partition at a time, not a second complete 19 GB research copy.
+
+Retirement additionally stops at the persisted fixed-horizon materialization
+cursor. A missing active cursor means zero processed rows, never unlimited
+permission. The embedded state records the cursor and rejects retired ids past
+it. Neither proof nor an off-host image authorizes destructive live cutover.
+
+Current-source proof RED:5 missing-behavior cases. GREEN includes current
+pending→resolved, a still-IFD row with changed outcome timestamp remaining hot,
+immutable capture/G1S mutations, missing rowid coverage, a wrong source SHA,
+bad/missing explicit catalog pins and an incorrect full cold typed root. The
+result reconstitutes through the real current union with its current outcome
+intact. Latest six-file changed profile:55passed in2.36s. No cloud restore,
+production write or model refit was used for this check.
+
+Read-only production covering-index probe39084049794 completed in964.7ms:
+91,376 old-prefix IFD rows,62,460 with a G1S source link,28,916 without one
+before other exclusions. This is not a retirement eligibility count. Source
+free bytes657,477,632 remain below the unchanged live snapshot reserve. The
+bounded first probe timed out and produced no counts; no timeout was raised
+to obtain the successful covering-index result.

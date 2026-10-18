@@ -16,7 +16,7 @@ from test_ede_ledger_archive import ObjectStore
 from test_sqlite_history_partition import identity
 
 
-def _build_cutover_fixture(tmp_path, *, include_post_catalog=False):
+def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_mutable_outcome=False):
     from contextlib import closing
     source = tmp_path / 'source.sqlite3'
     with closing(sqlite3.connect(source)) as conn:
@@ -83,6 +83,9 @@ def _build_cutover_fixture(tmp_path, *, include_post_catalog=False):
             )
             """
         )
+        conn.execute('CREATE TABLE g1s_materialization_state '
+                     '(materializer TEXT PRIMARY KEY,source_watermark INTEGER NOT NULL)')
+        conn.execute("INSERT INTO g1s_materialization_state VALUES('fixed_horizon_t0',120)")
         conn.execute(
             """
             CREATE TABLE g1_dataset_cut_members (
@@ -157,6 +160,10 @@ def _build_cutover_fixture(tmp_path, *, include_post_catalog=False):
         conn.execute("INSERT INTO g1_dataset_membership VALUES ('obs-eligible-90', 1, 0)")
         conn.commit()
 
+    if include_mutable_outcome:
+        with closing(sqlite3.connect(source)) as conn:
+            with conn:
+                conn.execute('ALTER TABLE passive_market_observations ADD COLUMN resolved_ts REAL')
     source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
     source_receipt = dict(
         immutable_sqlite_read=True,
