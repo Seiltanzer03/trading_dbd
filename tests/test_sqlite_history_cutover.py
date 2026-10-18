@@ -4,8 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import sys
+from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import sqlite_history_catalog as catalog_mod
 from scripts import sqlite_history_cutover as cutover_mod

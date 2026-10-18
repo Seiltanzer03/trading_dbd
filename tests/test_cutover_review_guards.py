@@ -1,9 +1,15 @@
 """Review regressions: source proof, immutable ACKs, and current union limits."""
 import hashlib
 import sqlite3
+import sys
 from contextlib import closing
+from pathlib import Path
 
 import pytest
+
+# Match the installed-package pytest entry point used by CI, which does not
+# put the repository root on sys.path as `python -m pytest` does.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import sqlite_history_cutover as cutover
 from scripts import sqlite_history_union as union

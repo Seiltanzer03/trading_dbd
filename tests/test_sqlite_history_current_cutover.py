@@ -2,9 +2,13 @@
 import hashlib
 import json
 import sqlite3
+import sys
 from contextlib import closing
+from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import sqlite_history_cutover as cutover
 from scripts import sqlite_history_union as union
