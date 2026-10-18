@@ -128,6 +128,19 @@ def test_schema_upgrade_replaces_the_earlier_trade_id_only_update_guard(tmp_path
             conn.execute("UPDATE ai_decision_acks SET note='rewrite' WHERE trade_id=77")
 
 
+def test_retained_orphan_ack_cannot_be_reassigned_to_a_live_trade(tmp_path):
+    source, _, _, _, _ = _build_cutover_fixture(tmp_path)
+    with closing(sqlite3.connect(source)) as conn:
+        with conn:
+            ensure_connection_schema(conn)
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA trusted_schema=OFF')
+        before = conn.execute('SELECT * FROM ai_decision_acks WHERE trade_id=77').fetchone()
+        with pytest.raises(sqlite3.IntegrityError, match='requires trades.id'):
+            conn.execute("UPDATE ai_decision_acks SET trade_id=100,status='not_executed',ts=9999999999 WHERE id=?", (before[0],))
+        assert conn.execute('SELECT * FROM ai_decision_acks WHERE id=?', (before[0],)).fetchone() == before
+
+
 def test_current_union_refuses_a_retained_pending_row_that_later_resolved(tmp_path):
     """This safe refusal records an unresolved production-cutover blocker."""
     source, proof, raw, pin, client = _build_cutover_fixture(tmp_path)

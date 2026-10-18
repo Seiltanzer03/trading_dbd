@@ -131,3 +131,10 @@ before other exclusions. This is not a retirement eligibility count. Source
 free bytes657,477,632 remain below the unchanged live snapshot reserve. The
 bounded first probe timed out and produced no counts; no timeout was raised
 to obtain the successful covering-index result.
+
+Final independent read-only review of dd6f65e found one Important historical ACK
+reassignment bypass: checking only NEW.trade_id allowed an orphan ACK to move
+to an existing genuine trade while changing status/time. Reproduced RED with
+real SQLite and fixed the owner trigger to require both OLD and NEW live trade
+parents for UPDATE. Idempotent schema upgrade replaces the earlier guard. No
+additional blocking findings in that review; physical/runtime blocks remain.

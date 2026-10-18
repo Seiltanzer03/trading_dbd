@@ -16,7 +16,8 @@ PRE_TOMBSTONE_MAX_TRADE_ID = 97
 _ACK_UPDATE_TRIGGER_SQL = """
 CREATE TRIGGER trg_ai_decision_acks_require_live_trade_update
 BEFORE UPDATE ON ai_decision_acks
-WHEN NOT EXISTS (SELECT 1 FROM trades WHERE id = NEW.trade_id)
+WHEN NOT EXISTS (SELECT 1 FROM trades WHERE id = OLD.trade_id)
+  OR NOT EXISTS (SELECT 1 FROM trades WHERE id = NEW.trade_id)
 BEGIN
     SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed: ai_decision_acks.trade_id requires trades.id');
 END
