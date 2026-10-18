@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import sqlite3
 import tempfile
@@ -10,6 +11,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+
+from seiltanzer.history_live_read_guard import guarded_live_read
 
 from seiltanzer.edge_discovery.baseline_rows import baseline_eligible_rows
 from seiltanzer.edge_discovery.bottleneck import build_bottleneck_power_audit
@@ -49,30 +52,37 @@ EVALUATION_MEASUREMENT_CONTRACT = (
 
 class ReadOnlyRuntime:
     def __init__(self, database: Path):
-        self._conn = sqlite3.connect(
-            database.resolve().as_uri() + "?mode=ro&immutable=1", uri=True,
-            check_same_thread=False, timeout=30.0)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA query_only=ON")
-        self._conn.execute("PRAGMA busy_timeout=30000")
-        self._lock = threading.RLock()
-        self._immutable_snapshot = True
+        self._source_lifetime = ExitStack()
+        try:
+            self._source_lifetime.enter_context(guarded_live_read(database))
+            self._conn = sqlite3.connect(
+                database.resolve().as_uri() + "?mode=ro&immutable=1", uri=True,
+                check_same_thread=False, timeout=30.0)
+            self._source_lifetime.callback(self._conn.close)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA query_only=ON")
+            self._conn.execute("PRAGMA busy_timeout=30000")
+            self._lock = threading.RLock()
+            self._immutable_snapshot = True
+        except BaseException:
+            self._source_lifetime.close()
+            raise
 
     def close(self) -> None:
-        self._conn.close()
+        self._source_lifetime.close()
 
 
 def immutable_snapshot(source: Path, destination: Path) -> None:
-    src = sqlite3.connect(
-        f"file:{source.resolve()}?mode=ro", uri=True, timeout=30.0)
-    src.execute("PRAGMA query_only=ON")
-    src.execute("PRAGMA busy_timeout=30000")
-    dst = sqlite3.connect(destination)
-    try:
+    with guarded_live_read(source), ExitStack() as lifetime:
+        src = sqlite3.connect(
+            f"file:{source.resolve()}?mode=ro", uri=True, timeout=30.0)
+        lifetime.callback(src.close)
+        src.execute("PRAGMA query_only=ON")
+        src.execute("PRAGMA busy_timeout=30000")
+        dst = sqlite3.connect(destination)
+        lifetime.callback(dst.close)
         src.backup(dst, pages=1000, sleep=0.05)
         dst.commit()
-    finally:
-        dst.close(); src.close()
     check = sqlite3.connect(
         f"file:{destination.resolve()}?mode=ro", uri=True, timeout=30.0)
     try:

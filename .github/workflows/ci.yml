@@ -31,6 +31,8 @@ jobs:
         run: pytest -q
       - name: Verify real systemd history startup fence
         run: sudo /usr/bin/python3 scripts/history_service_fence_drill.py
+      - name: Verify finite native history owner survives driver death
+        run: sudo /usr/bin/python3 scripts/history_production_owner_drill.py
       - name: Verify real pinned SQLite seeded refresh
         run: |
           python -c 'import sys; from pathlib import Path; sys.path.insert(0,"scripts"); from offhost_sqlite_snapshot import install_rsync; install_rsync(Path("${{ runner.temp }}/sqlite3_rsync"))'

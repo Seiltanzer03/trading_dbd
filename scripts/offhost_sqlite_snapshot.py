@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -213,7 +214,10 @@ def _replicate_live(client, *, password: str, expected_sha: str,
     remote_wrapper = remote_dir + '/origin'
     remote_control = remote_dir + '/control.py'
     remote_state = remote_dir + '/origin.json'
-    control_source=Path(__file__).with_name('sqlite_replication_origin.py').read_text()
+    from seiltanzer import history_live_read_guard
+    control_source=Path(__file__).with_name('sqlite_replication_origin.py').read_text().replace(
+        'from seiltanzer.history_live_read_guard import guarded_live_read, PRODUCTION_DATABASE',
+        inspect.getsource(history_live_read_guard))
     process = None
     created_remote = False
     primary_error = None

@@ -7,11 +7,35 @@ import importlib
 import io
 import json
 import sqlite3
+import sys
+from types import SimpleNamespace
 
 import pytest
 
 from test_edge_family_native_history import row, T0
 from seiltanzer.edge_family_native_history import native_history
+
+
+def test_cli_native_export_keeps_ssh_transport_callable(tmp_path,monkeypatch):
+    from scripts import production_ede_offload as ssh
+    from scripts import export_native_family_history as exporter
+    report=dict(contract_version='native-family-capture-export-v1',read_only=True,
+        rows=[],exported_ts=T0,reason='NATIVE_ELIGIBLE_HISTORY_EMPTY',limited_instruments=[],
+        history_complete=True,incomplete_instruments=[],source_rows_examined={})
+    stdout=io.BytesIO(base64.b64encode(gzip.compress(json.dumps(report).encode())))
+    stdout.channel=SimpleNamespace(recv_exit_status=lambda:0)
+    calls=[]
+    client=SimpleNamespace(exec_command=lambda *args,**kwargs:(None,stdout,None),close=lambda:calls.append('closed'))
+    output=tmp_path/'native.json'
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(ssh,'_connect',lambda password:client)
+            patch.setattr(sys,'argv',['export','--password','test-only','--output',str(output)])
+            importlib.reload(exporter)
+            exporter.main()
+    finally:importlib.reload(exporter)
+    assert output.exists() and output.stat().st_mode & 0o077==0
+    assert calls==['closed']
 
 
 def projection(r):

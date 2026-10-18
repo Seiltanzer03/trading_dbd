@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
+
+from seiltanzer.history_live_read_guard import guarded_live_read
 
 from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.universal_outcome_adapter import (
@@ -20,16 +23,23 @@ from seiltanzer.edge_discovery.universal_outcome_audit import (
 
 class ReadOnlyRuntime:
     def __init__(self, database: Path):
-        self._conn = sqlite3.connect(
-            f"file:{database.resolve()}?mode=ro", uri=True,
-            check_same_thread=False, timeout=30.0)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA query_only=ON")
-        self._conn.execute("PRAGMA busy_timeout=30000")
-        self._lock = threading.RLock()
+        self._source_lifetime = ExitStack()
+        try:
+            self._source_lifetime.enter_context(guarded_live_read(database))
+            self._conn = sqlite3.connect(
+                f"file:{database.resolve()}?mode=ro", uri=True,
+                check_same_thread=False, timeout=30.0)
+            self._source_lifetime.callback(self._conn.close)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA query_only=ON")
+            self._conn.execute("PRAGMA busy_timeout=30000")
+            self._lock = threading.RLock()
+        except BaseException:
+            self._source_lifetime.close()
+            raise
 
     def close(self) -> None:
-        self._conn.close()
+        self._source_lifetime.close()
 
 
 def audit(database: Path) -> dict[str, Any]:

@@ -8,6 +8,7 @@ import shlex
 from pathlib import Path
 from seiltanzer.config import ALL_INSTRUMENTS
 from scripts.production_ede_offload import _connect
+from scripts.history_embedded_read_guard import guard_program
 
 # Stdlib-only program executes on the existing server, including before deploy.
 # Indexed per-instrument ranges, no database backup, no writes, no training.
@@ -156,6 +157,8 @@ if len(raw)>64000000:raise ValueError('export exceeds bound')
 print(base64.b64encode(gzip.compress(raw)).decode())
 '''.replace('__CONFIGURED_INSTRUMENT_CODES__', repr(tuple(ALL_INSTRUMENTS))).replace(
     '__CONFIGURED_CRYPTO_SYMBOLS__', repr({code: item.binance_symbol for code, item in ALL_INSTRUMENTS.items() if item.asset_class == 'crypto'}))
+
+REMOTE_EXPORT = guard_program(REMOTE_EXPORT)
 
 
 def main():
