@@ -8,6 +8,10 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.history_storage_loader import history_state
 
 
 def verify(database: Path, manifest_path: Path) -> dict:
@@ -32,6 +36,7 @@ def verify(database: Path, manifest_path: Path) -> dict:
         conn.execute('PRAGMA query_only=ON')
         if conn.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise RuntimeError('snapshot quick_check failed')
+        history_state.validate_manifest_history(conn, manifest)
     database.chmod(0o444)
     return manifest
 

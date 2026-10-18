@@ -17,6 +17,7 @@ import time
 
 from scripts import sqlite_history_partition as archive
 from scripts.restore_verified_snapshot import manifest_digest
+from scripts.history_storage_loader import history_state
 
 CONTRACT = 'sqlite-history-union-v1'
 CATALOG_CONTRACT = 'sqlite-history-catalog-v1'
@@ -26,9 +27,14 @@ MAX_OUTPUT_BYTES = 25 * 1024**3
 COPY_SECONDS = 300
 MERGE_SECONDS = 30
 MAX_SECONDS = 1800
+CURRENT_CONTRACT = 'sqlite-history-current-union-v1'
+MUTABLE_OUTCOME_COLUMNS = frozenset((
+    'resolution_status', 'resolved_ts', 'outcome_json', 'calendar_elapsed',
+    'trading_elapsed', 'market_open_fraction',
+))
 
 
-def _catalog(raw, proof, before):
+def _catalog(raw, proof, before, *, allow_verified_snapshot=False):
     if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_CATALOG_BYTES:
         raise ValueError('Invalid or excessive catalog bytes')
     if not isinstance(proof, dict):
@@ -36,7 +42,9 @@ def _catalog(raw, proof, before):
     manifest = proof.get('storage_manifest')
     digest = hashlib.sha256(raw).hexdigest()
     if (proof.get('immutable_sqlite_read') is not True
-            or not (proof.get('snapshot_restore_verified') is True or proof.get('full_restore_verified') is True)
+            or not (proof.get('snapshot_restore_verified') is True
+                    or proof.get('full_restore_verified') is True
+                    or (allow_verified_snapshot and proof.get('immutable_snapshot_verified') is True))
             or proof.get('verified_local_file') != before
             or proof.get('database_size_bytes') != before['size']
             or not re.fullmatch('[0-9a-f]{64}', str(proof.get('database_sha256') or ''))
@@ -91,7 +99,7 @@ def _check(deadline, directory, *, needed=archive.RESERVE_BYTES):
         raise ValueError('History union lacks unchanged 1GiB worker reserve')
 
 
-def _merge(conn, restored, receipt):
+def _merge(conn, restored, receipt, *, mutable_columns=None, retired_rowids=None, cold_digest=None):
     table, columns, alias = receipt['table'], receipt['columns'], receipt['source_rowid_alias']
     quote = archive._quote
     ddl = conn.execute("SELECT sql FROM main.sqlite_schema WHERE type='table' AND name=?", (table,)).fetchone()
@@ -106,11 +114,21 @@ def _merge(conn, restored, receipt):
     conn.execute('ATTACH DATABASE ? AS cold', (Path(restored).resolve().as_uri()+'?mode=ro&immutable=1',))
     try:
         overlap = [r[0] for r in conn.execute('SELECT '+quote(alias)+' FROM '+target_table+where, ids)]
+        missing = sorted(set(ids) - set(overlap))
+        compared_columns = columns if mutable_columns is None else [
+            name for name in columns if name not in mutable_columns]
+        if mutable_columns is not None:
+            if 'observation_id' not in compared_columns:
+                raise ValueError('Current history requires immutable observation identity')
+            if set(missing) != set(ids).intersection(retired_rowids or ()):
+                raise ValueError('Hot snapshot differs from its exact recorded retired rowids')
+        if cold_digest is not None:
+            archive._logical_hash(conn, source_table, columns, alias, where, ids, digest=cold_digest)
         if overlap:
             overlap.sort()
             shared = ' WHERE '+quote(alias)+' IN ('+','.join('?' for _ in overlap)+')'
-            if (archive._logical_hash(conn, target_table, columns, alias, shared, overlap)
-                    != archive._logical_hash(conn, source_table, columns, alias, shared, overlap)):
+            if (archive._logical_hash(conn, target_table, compared_columns, alias, shared, overlap)
+                    != archive._logical_hash(conn, source_table, compared_columns, alias, shared, overlap)):
                 raise ValueError('Conflicting hot/cold history rowid')
         names = ','.join(quote(c) for c in columns)
         # Plain INSERT deliberately refuses PK/UNIQUE conflicts: no replace/ignore.
@@ -134,9 +152,20 @@ def _merge(conn, restored, receipt):
             raise
         finally:
             conn.set_authorizer(None)
-        if archive._logical_hash(conn, target_table, columns, alias, where, ids) != receipt['logical_sha256']:
-            raise ValueError('History merge changed typed row values')
+        if mutable_columns is None:
+            if archive._logical_hash(conn, target_table, columns, alias, where, ids) != receipt['logical_sha256']:
+                raise ValueError('History merge changed typed row values')
+        else:
+            if (archive._logical_hash(conn, target_table, compared_columns, alias, where, ids)
+                    != archive._logical_hash(conn, source_table, compared_columns, alias, where, ids)):
+                raise ValueError('Current history merge changed immutable capture values')
+            if missing:
+                inserted = ' WHERE '+quote(alias)+' IN ('+','.join('?' for _ in missing)+')'
+                if (archive._logical_hash(conn, target_table, columns, alias, inserted, missing)
+                        != archive._logical_hash(conn, source_table, columns, alias, inserted, missing)):
+                    raise ValueError('Current history merge changed retired typed rows')
         conn.commit()
+        return len(missing)
     finally:
         conn.rollback()
         conn.execute('DETACH DATABASE cold')
@@ -144,11 +173,25 @@ def _merge(conn, restored, receipt):
 
 def hydrate_snapshot(source, destination, *, source_receipt, catalog_bytes, client):
     """Publish a complete verified union, or leave source/destination untouched."""
+    return _hydrate(source, destination, source_receipt=source_receipt,
+                    catalog_bytes=catalog_bytes, client=client, current=False)
+
+
+def hydrate_current_snapshot(source, destination, *, source_receipt, catalog_bytes, client):
+    """Retain verified current hot outcomes; cold capture fields stay immutable."""
+    return _hydrate(source, destination, source_receipt=source_receipt,
+                    catalog_bytes=catalog_bytes, client=client, current=True)
+
+
+def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, current):
     source, destination = Path(source), Path(destination)
     if os.path.lexists(destination):
         raise FileExistsError(destination)
     before = archive._identity(source)
-    catalog, catalog_sha = _catalog(catalog_bytes, source_receipt, before)
+    catalog, catalog_sha = _catalog(catalog_bytes, source_receipt, before,
+                                   allow_verified_snapshot=current)
+    if current and 'full_table_proofs' not in catalog:
+        raise ValueError('Current history requires complete original cold table proofs')
     maximum = catalog['maximum_hydrated_bytes']
     deadline = time.monotonic() + MAX_SECONDS
     _check(deadline, destination.parent,
@@ -177,6 +220,24 @@ def hydrate_snapshot(source, destination, *, source_receipt, catalog_bytes, clie
         conn.execute('PRAGMA temp_store=FILE')
         conn.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
         full_tables_verified = 'full_table_proofs' in catalog
+        retired = {}
+        restored_retired = 0
+        hot_roots = {}
+        cold_roots = {}
+        if current:
+            state = history_state.read_history_state(conn)
+            history_state.validate_manifest_history(conn, source_receipt['storage_manifest'])
+            if state is not None:
+                if (state['catalog_sha256'] != catalog_sha
+                        or state['catalog_source_database_sha256'] != catalog['source_database_sha256']):
+                    raise ValueError('Embedded history epoch differs from complete catalog')
+                retired = {name: set(ids) for name, ids in state['retired_rowids'].items()}
+            conn.execute('ATTACH DATABASE ? AS verified_hot',
+                         (source.resolve().as_uri()+'?mode=ro&immutable=1',))
+            for table, proof in catalog['full_table_proofs'].items():
+                hot_roots[table] = archive._logical_hash(
+                    conn, 'verified_hot.'+archive._quote(table), proof['columns'], proof['source_rowid_alias'])
+                cold_roots[table] = hashlib.sha256()
         post_catalog_proofs = {}
         if full_tables_verified:
             from scripts.sqlite_history_catalog import catalog_max_rowids, verify_full_tables
@@ -204,7 +265,14 @@ def hydrate_snapshot(source, destination, *, source_receipt, catalog_bytes, clie
                 merge_deadline = min(deadline, time.monotonic()+MERGE_SECONDS)
                 _check(merge_deadline, destination.parent)
                 conn.set_progress_handler(lambda: time.monotonic() >= merge_deadline, 1000)
-                _merge(conn, restored, receipt['partition'])
+                part = receipt['partition']
+                if current:
+                    mutable = MUTABLE_OUTCOME_COLUMNS if part['table'] == 'passive_market_observations' else frozenset()
+                    restored_retired += _merge(
+                        conn, restored, part, mutable_columns=mutable,
+                        retired_rowids=retired.get(part['table'], set()), cold_digest=cold_roots[part['table']])
+                else:
+                    _merge(conn, restored, part)
                 _check(merge_deadline, destination.parent)
                 conn.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
             _check(deadline, destination.parent)
@@ -214,8 +282,21 @@ def hydrate_snapshot(source, destination, *, source_receipt, catalog_bytes, clie
             expected_total = expected + post_catalog_proofs.get(table, {}).get('row_count', 0)
             if counts[table] != expected_total:
                 raise ValueError('Hydrated table count differs from complete catalog')
-        if full_tables_verified:
+        if current:
+            if restored_retired != sum(len(ids) for ids in retired.values()):
+                raise ValueError('Recorded retired rowids are absent from the pinned catalog')
+            for table, proof in catalog['full_table_proofs'].items():
+                if cold_roots[table].hexdigest() != proof['logical_sha256']:
+                    raise ValueError('Complete original cold typed table root differs')
+                quote = archive._quote
+                where = ' WHERE '+quote(proof['source_rowid_alias'])+' IN (SELECT '+quote(proof['source_rowid_alias'])+' FROM verified_hot.'+quote(table)+')'
+                if archive._logical_hash(conn, quote(table), proof['columns'], proof['source_rowid_alias'], where) != hot_roots[table]:
+                    raise ValueError('Current verified hot typed rows changed during hydration')
+            conn.execute('DETACH DATABASE verified_hot')
+        elif full_tables_verified:
             verify_full_tables(conn, catalog, post_catalog_proofs=post_catalog_proofs)
+        history_state.consume_history_state(conn)
+        conn.commit()
         if conn.execute('PRAGMA quick_check').fetchone() != ('ok',):
             raise ValueError('Hydrated SQLite quick_check failed')
         if conn.execute('PRAGMA foreign_key_check').fetchone() is not None:
@@ -236,11 +317,13 @@ def hydrate_snapshot(source, destination, *, source_receipt, catalog_bytes, clie
             raise ValueError('Verified hot source changed before publication')
         archive._identity(work)  # No mutable output sidecars may be published.
         archive._publish(work, destination)
-        return dict(contract=CONTRACT, history_union_verified=True,
+        return dict(contract=CURRENT_CONTRACT if current else CONTRACT, history_union_verified=True,
                     database_sha256=digest.hexdigest(), database_size_bytes=size,
                     hot_database_sha256=source_receipt['database_sha256'], catalog_sha256=catalog_sha,
                     expected_table_counts=counts, typed_values_verified=True,
                     full_selected_tables_verified=full_tables_verified,
+                    current_hot_rows_preserved=current,
+                    original_cold_table_roots_verified=current,
                     verified_local_file=archive._identity(destination),
                     production_authority=False, data_retirement_authorized=False)
     finally:

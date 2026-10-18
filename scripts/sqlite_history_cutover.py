@@ -20,6 +20,7 @@ import time
 
 from scripts import sqlite_history_partition as archive
 from scripts.restore_verified_snapshot import manifest_digest
+from scripts.history_storage_loader import history_state
 from scripts.sqlite_history_catalog import (
     _schema,
     catalog_max_rowids,
@@ -227,6 +228,8 @@ def build_hot_cutover_snapshot(
         ro_conn.execute('PRAGMA trusted_schema=OFF')
         ro_conn.execute('PRAGMA cache_size=-16384')
         ro_conn.set_progress_handler(lambda: time.monotonic() >= deadline, 5000)
+        if history_state.read_history_state(ro_conn) is not None:
+            raise ValueError('Hydrate the existing hot history epoch before recompaction')
         for table, proof in catalog['full_table_proofs'].items():
             qtable = archive._quote(table)
             alias = proof['source_rowid_alias']
@@ -310,6 +313,13 @@ def build_hot_cutover_snapshot(
             ')'
         )
         retire_params = (retire_cutoff_rowid, RETIRED_STATUS)
+        retired_rowids = [r[0] for r in work_conn.execute(
+            f'SELECT p.rowid FROM src.{archive._quote(TARGET_TABLE)} p '
+            f'WHERE {retire_predicate} ORDER BY p.rowid', retire_params)]
+        if not retired_rowids:
+            raise ValueError('No eligible cold retirement; preserve the existing database')
+        if len(retired_rowids) > history_state.MAX_RETIRED_ROWS:
+            raise ValueError('History retirement exceeds bounded state coverage')
 
         src_table_names = {name for name, _ in table_rows}
         fk_migrated = False
@@ -379,6 +389,19 @@ def build_hot_cutover_snapshot(
                 continue
             work_conn.execute(ddl)
 
+        if retired_rowids:
+            history_state.write_history_state(work_conn, dict(
+                contract=history_state.CONTRACT, bucket=history_state.BUCKET,
+                catalog_source_database_sha256=catalog['source_database_sha256'],
+                catalog_sha256=catalog_sha,
+                catalog_object_key=history_state.catalog_key(catalog['source_database_sha256'], catalog_sha),
+                cutover_source_database_sha256=source_receipt['database_sha256'],
+                retired_rowids={TARGET_TABLE: retired_rowids},
+                retained_identity={table: history_state.identity_proof(work_conn, table, boundary)
+                                   for table, boundary in max_rowids.items()},
+                production_authority=False))
+        manifest_history_fields = history_state.history_manifest_fields(work_conn)
+
         work_conn.execute('DROP TABLE IF EXISTS temp._cutover_protected_obs')
         work_conn.commit()
         work_conn.execute('DETACH DATABASE src')
@@ -425,6 +448,7 @@ def build_hot_cutover_snapshot(
             database_size_bytes=size,
             cold_history_catalog_sha256=catalog_sha,
         )
+        storage_manifest.update(manifest_history_fields)
         hot_restore_proof = dict(
             immutable_sqlite_read=True,
             snapshot_restore_verified=True,

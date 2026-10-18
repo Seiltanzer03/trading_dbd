@@ -15,10 +15,14 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
 import zipfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.history_storage_loader import history_state
 
 SQLITE_VERSION = '3530400'
 SOURCE_SHA3 = 'b834d474b9b393d85a9e3ee4cc11f1329e007e9376a424ee740796f5c4bda3a8'
@@ -122,11 +126,13 @@ def verify_replica(path: Path) -> dict:
             raise RuntimeError('Replica checkpoint is busy')
         if conn.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise RuntimeError('Replica integrity check failed')
+        history_fields = history_state.history_manifest_fields(conn)
     digest = hashlib.sha256()
     with path.open('rb') as stream:
         for chunk in iter(lambda: stream.read(1024 ** 2), b''):
             digest.update(chunk)
-    return {'database_sha256': digest.hexdigest(), 'database_size_bytes': path.stat().st_size}
+    return {'database_sha256': digest.hexdigest(), 'database_size_bytes': path.stat().st_size,
+            **history_fields}
 
 
 def verify_seed(path: Path, receipt_path: Path) -> dict:

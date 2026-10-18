@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from . import storage_runtime as _s
+from .history_storage_state import snapshot_history_manifest
 
 
 REFINEMENT_VERSION = "seiltanzer-storage-refinement-v4"
@@ -143,6 +144,7 @@ def create_backup_honest_encryption(self, *, kind: str = "local", reason: str = 
     manifest["previous_backup_id"] = previous[0].get("backup_id") if previous else None
     manifest["sqlite_user_version"] = user_version
     manifest["schema_sha256"] = schema_sha
+    manifest.update(snapshot_history_manifest(database_path))
 
     if kind == "offhost":
         encrypted = _truthy_env("SEILTANZER_OFFHOST_ENCRYPTION_VERIFIED")
@@ -171,6 +173,7 @@ def restore_verified_backup_refined(*, backup_db, manifest_path, destination_db,
     expected_manifest_sha = str(manifest.get("manifest_payload_sha256") or "")
     if not expected_manifest_sha or _manifest_hash(manifest) != expected_manifest_sha:
         raise ValueError("backup manifest SHA256 mismatch")
+    snapshot_history_manifest(Path(backup_db), manifest)
     result = _ORIGINAL_RESTORE(
         backup_db=backup_db,
         manifest_path=manifest_path,

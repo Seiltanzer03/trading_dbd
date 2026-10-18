@@ -7,9 +7,13 @@ import base64
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 import time
 import zlib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.history_storage_loader import history_state
 
 # Yandex validates the SigV4 timestamp after receiving an UploadPart request.
 # A 64 MiB part took more than twenty minutes on the observed runner route and
@@ -48,6 +52,7 @@ def upload(database: Path, source_manifest: Path, *, bucket: str, key: str) -> d
     digest = str(manifest.get('database_sha256') or '')
     if database.stat().st_size != size or len(digest) != 64:
         raise RuntimeError('source snapshot manifest does not match database metadata')
+    history_state.snapshot_history_manifest(database, manifest)
     client = boto3.client('s3', endpoint_url='https://storage.yandexcloud.net',
                           region_name='ru-central1',
                           config=Config(connect_timeout=10, read_timeout=120,

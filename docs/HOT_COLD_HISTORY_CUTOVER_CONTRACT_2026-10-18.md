@@ -52,7 +52,7 @@ VPS disk space. Counts and savings for a current source have not been measured.
 
 ## 4. Rowid-Preserving Physical Compaction Invariant
 
-1. **Standard SQLite `VACUUM` is forbidden** on `passive_market_observations` and `g1s_observations` after row retirement because both tables declare `observation_id TEXT PRIMARY KEY` (without `INTEGER PRIMARY KEY`). A standard `VACUUM` renumbers implicit `rowid` values sequentially from `1..N`, which would corrupt:
+1. **Standard SQLite `VACUUM` is forbidden** on the marked hot database after row retirement. Both selected tables declare `observation_id TEXT PRIMARY KEY` (without `INTEGER PRIMARY KEY`). Implicit rowid preservation must be proven rather than inferred from VACUUM: some versions preserve these indexed rows, but a renumbered result would corrupt:
    - `g1s_materialization_state.source_watermark`
    - `g1s_status_materialization_state.observation_rowid_watermark`
    - Cold catalog partition `rowid` mapping (`sqlite_history_catalog.py` / `sqlite_history_union.py`).

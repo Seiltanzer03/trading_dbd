@@ -9,10 +9,14 @@ import math
 import os
 import sqlite3
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import Any
 import zlib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.history_storage_loader import history_state
 
 
 ENDPOINT = "https://storage.yandexcloud.net"
@@ -302,6 +306,7 @@ def restore(
     try:
         connection.execute("PRAGMA query_only=ON")
         check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+        history_fields = history_state.validate_manifest_history(connection, manifest)
         tables = {
             str(row[0]) for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -344,6 +349,9 @@ def restore(
     }
     if seed_only:
         result.update(seed_verified=True, storage_manifest=manifest,
+                      storage_manifest_sha256=manifest_digest(manifest))
+    if history_fields:
+        result.update(history_fields, storage_manifest=manifest,
                       storage_manifest_sha256=manifest_digest(manifest))
     if live_snapshot_drill:
         # The complete bytes and SQLite were verified off-host. No invented local
