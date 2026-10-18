@@ -224,9 +224,10 @@ def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, curr
         restored_retired = 0
         hot_roots = {}
         cold_roots = {}
-        if current:
-            state = history_state.read_history_state(conn)
+        state = history_state.read_history_state(conn)
+        if current or (state is not None and state['contract'] == history_state.RUNTIME_CONTRACT):
             history_state.validate_manifest_history(conn, source_receipt['storage_manifest'])
+        if current:
             if state is not None:
                 if (state['catalog_sha256'] != catalog_sha
                         or state['catalog_source_database_sha256'] != catalog['source_database_sha256']):
@@ -238,6 +239,7 @@ def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, curr
                 hot_roots[table] = archive._logical_hash(
                     conn, 'verified_hot.'+archive._quote(table), proof['columns'], proof['source_rowid_alias'])
                 cold_roots[table] = hashlib.sha256()
+        history_state.begin_full_history_hydration(conn)
         post_catalog_proofs = {}
         if full_tables_verified:
             from scripts.sqlite_history_catalog import catalog_max_rowids, verify_full_tables

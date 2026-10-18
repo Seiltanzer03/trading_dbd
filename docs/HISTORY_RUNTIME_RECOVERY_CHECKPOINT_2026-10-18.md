@@ -130,3 +130,8 @@ Existing resources only: VPS94.241.171.182, local SQLite
 trading-dbd-backups-2026 at https://storage.yandexcloud.net.
 Never expose secret values or signed URLs. Keep source/risk/OOS/resource gates,
 full source history, trade/ACK integrity and the frozen global scope intact.
+
+## Workspace recovery
+
+Execution access returned on 2026-10-18. The original local HEAD and all listed
+owned changes were observed intact; the integrator resumed final verification.

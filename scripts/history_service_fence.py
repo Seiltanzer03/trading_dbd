@@ -80,6 +80,17 @@ def _has_runtime_capability(app_root):
         return False
 
 
+def _literal_reader_contract(app_root, module, name):
+    path = app_root/'seiltanzer'/module
+    _regular(path, MAX_MODULE_BYTES)
+    values = [ast.literal_eval(node.value) for node in ast.parse(path.read_bytes()).body
+              if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name
+                                                      for target in node.targets)]
+    if len(values) != 1 or not isinstance(values[0], str) or not 0 < len(values[0]) <= 128:
+        raise ValueError('Missing or ambiguous reader contract')
+    return values[0]
+
+
 def check_start(database, application_root, *, guard=None, journal=None):
     """Return a bounded safe startup decision, without importing the application."""
     database, app_root = Path(database), Path(application_root)
@@ -123,9 +134,23 @@ def check_start(database, application_root, *, guard=None, journal=None):
             # This trusted stdlib-only owner is loaded directly; never execute
             # application __init__, provider refresh, model or background work.
             exec(compile(path.read_bytes(), str(path), 'exec'), namespace)
+            storage_state = namespace['read_history_state'](conn)
+            if storage_state['contract'] != namespace['RUNTIME_CONTRACT']:
+                return result(False, 'HOT_HISTORY_RUNTIME_PROJECTION_REQUIRED', marked=True)
             fields = namespace['history_manifest_fields'](conn)
             if not fields:
                 raise ValueError('Missing hot state')
+            codec = namespace['_runtime_projection']()
+            payload = codec.read_runtime_rollups(conn,
+                expected_sha256=storage_state['runtime_projection']['rollups']['payload_sha256'])
+            contracts = (
+                ('source_contract_version','passive_learning.py','PASSIVE_SCHEMA_VERSION'),
+                ('dataset_contract_version','g1_dataset_runtime.py','G1_DATASET_CONTRACT_VERSION'),
+                ('measurement_contract_version','measurement_q_runtime.py','MEASUREMENT_RUNTIME_VERSION'),
+            )
+            if any(payload[key] != _literal_reader_contract(app_root, module, name)
+                   for key, module, name in contracts):
+                return result(False, 'HOT_HISTORY_READER_CONTRACT_MISMATCH', marked=True)
         except Exception:
             return result(False, 'HOT_HISTORY_STATE_INVALID', marked=True)
         if time.monotonic() >= deadline:

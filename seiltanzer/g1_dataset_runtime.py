@@ -496,6 +496,15 @@ def _detect_source_mutations(self: _ENGINE, limit: int = 5000) -> int:
                 expected_sha256=expected, actual_sha256=actual,
                 detail="resolved source record changed after G1A admission",
             )
+    from .history_runtime_views import archived_membership_rows
+    with self._lock:
+        archived = archived_membership_rows(self._conn, limit=limit, verify_hash=False)
+    for row in archived:
+        if row['source_record_sha256'] != row['expected_source_sha256']:
+            mismatches += 1
+            _record_error(self, "SOURCE_MUTATED", observation_id=row['observation_id'],
+                expected_sha256=row['expected_source_sha256'], actual_sha256=row['source_record_sha256'],
+                detail="verified archived source hash differs from immutable G1 membership")
     return mismatches
 
 
@@ -608,16 +617,11 @@ def g1_dataset_status(self: _ENGINE) -> dict:
     _sync_membership(self, limit=1000)
     rows = _eligible_rows(self)
     with self._lock:
-        raw_source_n = int(self._conn.execute(
-            "SELECT COUNT(*) FROM passive_market_observations"
-        ).fetchone()[0])
-        resolved_source_n = int(self._conn.execute(
-            "SELECT COUNT(*) FROM passive_market_observations WHERE resolution_status='resolved'"
-        ).fetchone()[0])
-        current_source_n = int(self._conn.execute(
-            "SELECT COUNT(*) FROM passive_market_observations WHERE feature_contract_version=?",
-            (_pl.PASSIVE_SCHEMA_VERSION,),
-        ).fetchone()[0])
+        from .history_runtime_views import historical_source_totals
+        totals = historical_source_totals(self._conn)
+        raw_source_n = totals['raw_n']
+        resolved_source_n = totals['resolution_counts'].get('resolved', 0)
+        current_source_n = totals['feature_version_counts'].get(_pl.PASSIVE_SCHEMA_VERSION, 0)
         membership_n = int(self._conn.execute(
             "SELECT COUNT(*) FROM g1_dataset_membership WHERE dataset_contract_version=?",
             (G1_DATASET_CONTRACT_VERSION,),
@@ -738,6 +742,8 @@ def g1_dataset_exclusions(self: _ENGINE) -> dict:
             "ON p.observation_id=g.observation_id WHERE g.dataset_contract_version=?",
             (G1_DATASET_CONTRACT_VERSION,),
         ).fetchall()]
+        from .history_runtime_views import archived_membership_rows
+        rows.extend(archived_membership_rows(self._conn))
         pending_n = int(self._conn.execute(
             "SELECT COUNT(*) FROM passive_market_observations WHERE resolution_status='pending'"
         ).fetchone()[0])

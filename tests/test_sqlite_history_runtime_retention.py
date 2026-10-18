@@ -14,13 +14,13 @@ def runtime_source():
     conn = sqlite3.connect(':memory:')
     conn.execute('CREATE TABLE passive_market_observations('
                  'observation_id TEXT PRIMARY KEY,instrument TEXT,captured_ts REAL,'
-                 'horizon_minutes INTEGER,evidence_eligible INTEGER)')
+                 'horizon_minutes INTEGER,evidence_eligible INTEGER,created_ts REAL DEFAULT 1)')
     conn.execute('CREATE TABLE g1s_observations(source_observation_id TEXT)')
     conn.execute('CREATE TABLE g1_dataset_membership(observation_id TEXT)')
     conn.execute('CREATE TABLE virtual_position_observations(passive_observation_id TEXT)')
     conn.execute('CREATE TEMP TABLE _cutover_protected_obs(observation_id TEXT PRIMARY KEY)')
     for code in ('A', 'B'):
-        conn.executemany('INSERT INTO passive_market_observations VALUES(?,?,?,?,?)',
+        conn.executemany('INSERT INTO passive_market_observations(observation_id,instrument,captured_ts,horizon_minutes,evidence_eligible) VALUES(?,?,?,?,?)',
                          [(f'{code}-{n}', code, float(n), 60, 0) for n in range(1, 1003)])
     yield conn
     conn.close()
@@ -42,7 +42,7 @@ def test_retains_all_reader_parents_including_rejected_and_completed(runtime_sou
 
 def test_retains_actual_endpoint_limit_per_instrument_and_all_boundary_ties(runtime_source):
     conn = runtime_source
-    conn.execute("INSERT INTO passive_market_observations VALUES('A-tie','A',3,60,0)")
+    conn.execute("INSERT INTO passive_market_observations(observation_id,instrument,captured_ts,horizon_minutes,evidence_eligible) VALUES('A-tie','A',3,60,0)")
     cutover._populate_runtime_protected_observation_ids(conn, 'main')
     ids = protected(conn)
     assert all(f'{code}-{n}' in ids for code in ('A', 'B') for n in range(3, 1003))
@@ -78,3 +78,11 @@ def test_expired_reference_budget_preserves_existing_protection(runtime_source):
     with pytest.raises(ValueError, match='deadline'):
         cutover._populate_runtime_protected_observation_ids(runtime_source, 'main', deadline=0)
     assert protected(runtime_source) == set()
+
+
+def test_retains_recent_creation_budget_even_with_an_old_capture_clock(runtime_source):
+    import time
+    conn = runtime_source
+    conn.execute("UPDATE passive_market_observations SET created_ts=? WHERE observation_id='B-1'", (time.time(),))
+    cutover._populate_runtime_protected_observation_ids(conn, 'main')
+    assert 'B-1' in protected(conn)

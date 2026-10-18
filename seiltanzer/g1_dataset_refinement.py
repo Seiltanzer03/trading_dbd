@@ -107,6 +107,8 @@ def status_refined(self: _ENGINE) -> dict:
             "ON p.observation_id=g.observation_id WHERE g.dataset_contract_version=?",
             (_g1.G1_DATASET_CONTRACT_VERSION,),
         ).fetchall()]
+        from .history_runtime_views import archived_membership_rows
+        joined.extend(archived_membership_rows(self._conn))
     measurement_valid_n = sum(1 for row in joined if _measurement_valid(row))
     current_runtime_evaluated_n = sum(
         1 for row in joined

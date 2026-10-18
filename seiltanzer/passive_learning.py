@@ -1381,6 +1381,8 @@ class PassiveLearningEngine:
         with self._lock:
             from .passive_history_statistics import passive_history_statistics
             statistics = passive_history_statistics(self._conn, current_feature_version=PASSIVE_SCHEMA_VERSION)
+            from .history_runtime_views import with_retired_statistics
+            statistics = with_retired_statistics(self._conn, statistics)
             counts = statistics["resolution_counts"]
             total = statistics["raw_n"]
             legacy_f2_n = statistics["legacy_f2_n"]

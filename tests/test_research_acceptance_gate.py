@@ -320,3 +320,20 @@ def test_post_research_requires_exact_acceptance_owner():
     assert check._acceptance_owner_matches(
         worker, expected_sha="sha-exact", acceptance_run_id="run-wrong"
     ) is False
+
+
+def test_post_research_fails_immediately_on_observed_disk_admission_pause(monkeypatch):
+    import pytest
+    check = _load_script('production_post_research_check')
+    monkeypatch.setattr(check, 'sh', lambda *args: 'active' if args[0]=='systemctl' else 'exact')
+    calls = []
+    def status(path):
+        calls.append(path)
+        return {'sqlite_access':False,'worker':{'current_phase':'disk_pressure_pause','disk_pause_active':True}}
+    monkeypatch.setattr(check, 'assert_route', status)
+    def must_not_wait(_):
+        pytest.fail('known disk refusal entered the 12-minute polling loop')
+    monkeypatch.setattr(check.time, 'sleep', must_not_wait)
+    with pytest.raises(AssertionError, match='RESEARCH_DISK_ADMISSION_BLOCKED'):
+        check.verify('exact','owner')
+    assert calls == ['/api/research/runtime/worker-status']

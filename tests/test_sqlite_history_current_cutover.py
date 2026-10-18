@@ -107,3 +107,26 @@ def test_current_compaction_rejects_bad_explicit_pin_before_cloud_access(tmp_pat
         cutover.build_current_hot_cutover_snapshot(
             source, tmp_path/'bad-pin.sqlite3', source_receipt=_proof(source, proof, actual_pin),
             catalog_bytes=raw, expected_catalog_sha256=pin, client=NoCloud())
+
+
+@pytest.mark.parametrize('hazard', ['unprocessed','changed_membership_hash','eligible','completed_virtual'])
+def test_current_builder_keeps_every_unproved_or_referenced_ifd_source(tmp_path, hazard):
+    source, proof, raw, pin, client = _build_cutover_fixture(tmp_path,
+        include_post_catalog=True,include_mutable_outcome=True,include_runtime_metadata=True)
+    with closing(sqlite3.connect(source)) as conn:
+        with conn:
+            if hazard == 'unprocessed':
+                conn.execute("DELETE FROM g1_dataset_membership WHERE observation_id='obs-retire-30'")
+            elif hazard == 'changed_membership_hash':
+                conn.execute("UPDATE g1_dataset_membership SET source_record_sha256=? WHERE observation_id='obs-retire-30'", ('f'*64,))
+            elif hazard == 'eligible':
+                conn.execute("UPDATE g1_dataset_membership SET forecast_eval_eligible=1 WHERE observation_id='obs-retire-30'")
+            else:
+                conn.execute("INSERT INTO virtual_position_observations VALUES('completed','obs-retire-30','resolved')")
+    hot = tmp_path/'retained.sqlite3'
+    result = cutover.build_current_hot_cutover_snapshot(source,hot,source_receipt=_proof(source,proof,pin),
+        catalog_bytes=raw,expected_catalog_sha256=pin,client=client)
+    with closing(sqlite3.connect(hot)) as conn:
+        assert conn.execute("SELECT observation_id FROM passive_market_observations WHERE rowid=30").fetchone() == ('obs-retire-30',)
+        assert conn.execute("SELECT count(*) FROM archived_passive_rejections WHERE source_rowid=30").fetchone() == (0,)
+    assert result['retired_row_count'] == 2

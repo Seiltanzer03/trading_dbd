@@ -7,13 +7,13 @@ One integrator, one final read-only reviewer; user-authorized autonomous work.
    bounded covering indexes. Preserve all parents/recent/trigger/health rows in
    the current off-host builder; strict historical physical proof stays distinct.
    Initial conservative retention intentionally refuses a zero-candidate image.
-2. [ ] Replace blanket rejected-member retention with a verified immutable
+2. [x] Replace blanket rejected-member retention with a verified immutable
    metadata projection for already-evaluated, hash-matching IFD rows only.
    Keep every unprocessed/mutated/eligible row and all other reference guards.
-3. [ ] Extract the streaming measurement-counter owner and persist exact retired
+3. [x] Extract the streaming measurement-counter owner and persist exact retired
    diagnostic rollups. Bind index/rollups in backward-compatible versioned state;
    verify/consume them through backup, restore and the full current union.
-4. [ ] Wire actual G1 and passive status/exclusion/mutation readers. Prove causal
+4. [x] Wire actual G1 and passive status/exclusion/mutation readers. Prove causal
    before/after equivalence with actual engines and negative corruption cases.
    Declare the runtime startup capability only after these checks pass.
 5. [ ] Independent review, mandatory full CI and exact-SHA release. No live
@@ -48,14 +48,32 @@ LIKE/count predicates; legacy status now uses the same aggregate, with unchanged
 NULL/JSON-whitespace semantics. RED3 then focused GREEN49 in2.07s. Rollup
 persistence and reader wiring are not yet complete.
 
-## Recovery checkpoint after local reader integration
+Task3 storage binding: v2 hot state now pins both the immutable rejected index
+and exact bounded rollup payload; v1 remains strictly compatible. Backup/start
+validation checks exact retired coverage, retained-source non-overlap, matching
+ineligible membership, rollup hashes/counts and resurrection guards. Full union
+removes only these two storage guards in its verified unpublished worker copy;
+the existing trigger-origin denial remains for every other trigger. A real
+current-union test restores full actual engine rows and consumes the projection,
+preventing double counting. Focused combined profile:124passed in4.02s. The
+current builder still uses conservative reference retention; projection creation
+and actual runtime readers are not yet wired, so startup capability stays absent.
 
-The final local integration passed a 222-test profile and a separate 50-test
-acceptance/orchestration/disk profile before the execution environment went
-offline. These changes are not yet committed/pushed or finally reviewed; the
-unchecked integration/release tasks above remain open in this remote plan.
-See `docs/HISTORY_RUNTIME_RECOVERY_CHECKPOINT_2026-10-18.md` for the exact local
-HEAD, owned file list and recovery sequence. PR488 delivery/HTTP succeeded, but
-production research acceptance failed on unchanged disk admission; see
-`docs/HISTORY_FENCE_RELEASE_OBSERVATION_2026-10-18.json`. No live history
-retirement or reclaimed production capacity is claimed.
+Tasks2–4 integrated checkpoint: the current builder now verifies rejected
+membership/source hashes and writes actual v2 projections. Legacy/light passive,
+G1/refinement/exclusion/mutation and measurement readers consume exact retired
+metadata/counters. Real full-versus-hot engines preserve eligible IDs and a
+nonempty frozen cut manifest. Full union restores source rows and consumes only
+the owned derived objects. The external stdlib guard now checks actual v2 roots
+and literal calculation-owner versions before allowing the declared capability.
+Unprocessed, mutated, eligible, recent and dependency parents remain full hot.
+The strict historical v1 manifest compatibility remains unchanged.
+
+After an execution-environment interruption, local HEAD and the owned diff were
+recovered intact. The targeted recovery profile passed153tests in4.73s. Earlier
+integrated profiles recorded222 history/runtime passes and50 acceptance passes;
+these are not final CI. The observed disk-pressure acceptance failure now has a
+tested immediate explicit refusal instead of twelve minutes of futile polling;
+no resource or completion gate is weakened. See the recovery checkpoint and
+release observation documents. Task5 remains pending final independent review,
+mandatory full CI and exact-SHA release. No production compaction occurred.
