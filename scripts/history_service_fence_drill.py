@@ -22,13 +22,25 @@ def run_drill():
     name = 'seiltanzer-history-fence-proof-'+uuid.uuid4().hex+'.service'
     unit = Path('/run/systemd/system')/name
     report = dict(contract='sqlite-history-systemd-proof-v1', verified=False,
-                  production_touched=False, provider_calls=0, orders_sent=0, cases=[])
+                  production_touched=False, provider_calls=0, orders_sent=0,
+                  volatile_unit_metadata_not_authority=True, cases=[])
     with tempfile.TemporaryDirectory(prefix='history-fence-proof-', dir='/tmp') as directory:
         root = Path(directory)
         data = root/'data'; data.mkdir()
         app = root/'application'; app.mkdir()
         script = root/'history-start-guard.py'
         shutil.copyfile(Path(__file__).with_name('history_service_fence.py'), script)
+        observation = root/'condition-observation.json'
+        runner = root/'observe-condition.py'
+        runner.write_text('''import json,subprocess,sys
+from pathlib import Path
+result=subprocess.run([sys.executable,*sys.argv[2:]],capture_output=True,text=True,timeout=8)
+value=json.loads(result.stdout)
+assert value.get('contract')=='sqlite-history-service-fence-v1'
+assert result.returncode in (0,1)
+Path(sys.argv[1]).write_text(json.dumps(dict(returncode=result.returncode,guard_result=value)))
+raise SystemExit(result.returncode)
+''')
         database = data/'trades.db'
         with sqlite3.connect(database) as conn:
             conn.execute('CREATE TABLE trades(id INTEGER PRIMARY KEY)')
@@ -36,7 +48,7 @@ def run_drill():
         guard, journal = data/'cutover.active', data/'cutover.journal.json'
         content = (f'[Unit]\nDescription=Disposable history fence proof\n'
                    f'ConditionPathExists=!{guard}\n[Service]\nType=oneshot\nTimeoutStartSec=10\n'
-                   f'ExecCondition=/usr/bin/python3 {script} --database {database} --application-root {app}\n'
+                   f'ExecCondition=/usr/bin/python3 {runner} {observation} {script} --database {database} --application-root {app}\n'
                    f'ExecStartPre=/usr/bin/touch {prestart}\nExecStart=/usr/bin/touch {launch}\n')
         # UUID-owned exclusive file; no existing unit or production definition.
         with unit.open('x') as stream:
@@ -46,7 +58,7 @@ def run_drill():
             for case in ('plain', 'active_guard', 'dangling_guard', 'pending_journal', 'original_restored'):
                 _run('systemctl', 'stop', name, check=False)
                 _run('systemctl', 'reset-failed', name, check=False)
-                for path in (prestart, launch, guard, journal):
+                for path in (prestart, launch, guard, journal, observation):
                     path.unlink(missing_ok=True)
                 if case == 'active_guard':
                     guard.write_text('active')
@@ -61,18 +73,27 @@ def run_drill():
                 command = _run('systemctl', 'start', name, check=False)
                 status = _run('systemctl', 'show', name, '-p', 'ConditionResult', '-p', 'Result')
                 props = dict(line.split('=', 1) for line in status.stdout.splitlines() if '=' in line)
+                # Inactive oneshots may be garbage-collected and reloaded by
+                # `show`, resetting volatile Result/ConditionResult. Observe the
+                # real ExecCondition invocation before it exits instead.
+                observed = json.loads(observation.read_text()) if observation.exists() else None
                 actual = dict(case=case, start_returncode=command.returncode,
                               condition_result=props.get('ConditionResult'), result=props.get('Result'),
-                              prestart_executed=prestart.exists(), application_executed=launch.exists())
+                              prestart_executed=prestart.exists(), application_executed=launch.exists(),
+                              exec_condition_observed=observed is not None,
+                              exec_condition_status=observed['returncode'] if observed else None,
+                              guard_reason=observed['guard_result']['reason'] if observed else None)
                 report['cases'].append(actual)
                 should_start = case in ('plain', 'original_restored')
                 if prestart.exists() != should_start or launch.exists() != should_start:
                     raise RuntimeError('PRESTART_OR_APPLICATION_FENCE_FAILED')
-                if should_start and (command.returncode != 0 or props.get('Result') != 'success'):
+                if should_start and (command.returncode != 0 or observed is None
+                                     or observed['returncode'] != 0):
                     raise RuntimeError('VALID_ORIGINAL_START_FAILED')
-                if case == 'active_guard' and props.get('ConditionResult') != 'no':
+                if case == 'active_guard' and observed is not None:
                     raise RuntimeError('SYSTEMD_PATH_CONDITION_NOT_OBSERVED')
-                if case == 'pending_journal' and props.get('Result') != 'exec-condition':
+                if case == 'pending_journal' and (observed is None or observed['returncode'] != 1
+                        or observed['guard_result']['reason'] != 'UNFINISHED_CUTOVER_JOURNAL'):
                     raise RuntimeError('EXEC_CONDITION_ORDER_NOT_OBSERVED')
             report.update(verified=True, elapsed_ms=round((time.monotonic()-started)*1000, 1))
             return report

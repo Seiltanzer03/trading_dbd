@@ -379,6 +379,19 @@ jobs:
               fi
               sleep 2
             done
+            # The service can bind during the final delay; observe that state
+            # before declaring failure, retaining both real service/HTTP gates.
+            if [ "$ready" != "1" ]; then
+              active=$(systemctl is-active seiltanzer 2>/dev/null || true)
+              result=$(curl -sS -o /tmp/seiltanzer-deploy-state.json \
+                --connect-timeout 1 --max-time 3 -w '%{http_code} %{time_total}' \
+                http://127.0.0.1:8790/api/state 2>/dev/null || true)
+              code=${result%% *}
+              echo "post-restart final-probe active=${active:-unknown} http=${code:-000}"
+              if [ "$active" = "active" ] && [ "$code" = "200" ]; then
+                ready=1
+              fi
+            fi
             if [ "$ready" != "1" ]; then
               echo '::error::seiltanzer failed real HTTP readiness after restart'
               systemctl status seiltanzer --no-pager -l || true

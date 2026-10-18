@@ -104,6 +104,20 @@ did not stop/redeploy it. Public health39098609566 later returned200. Full
 release acceptance is not claimed. Scheduled EDE39102091467 again refused the
 unchanged WAL headroom gate with644,825,088free bytes; no full restore/refit ran.
 
+Actual systemd probe39111604587 blocked both prestart and application commands
+for active/dangling guards and a pending journal. It did not pass the complete
+proof because inactive oneshot metadata was garbage-collected/reloaded before
+`systemctl show`, reporting default Result/ConditionResult. The next probe
+records the actual checker invocation/result inside its disposable ExecCondition
+wrapper; volatile unit metadata remains diagnostic, never acceptance authority.
+
+The failed deploy also exposed a reproduced final-delay race: the last sleep
+could make HTTP ready, then the loop declared failure without observing it.
+The existing360attempt limit remains. A final bounded service+realHTTP probe
+now runs before rejection; inactive service or HTTP503 still fails. RED1 then
+GREEN25 in the deploy/guard/startup profile. This does not claim faster integrity
+checks or waive the separate exact-SHA readiness/smoke/research gates.
+
 ## Task3 — authenticated current image and final physical acceptance
 
 **Owners:** existing immutable snapshot/cloud upload/restore/cutover tools.
