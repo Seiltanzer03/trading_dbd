@@ -1,45 +1,25 @@
 name: ops-ede-capacity-20261015
 'on':
   push:
-    branches:
-    - ops/ede-capacity-20261015
-    paths:
-    - .github/workflows/ops-ede-capacity-20261015.yml
+    branches: [ops/ede-capacity-20261015]
+    paths: [.github/workflows/ops-ede-capacity-20261015.yml]
 permissions:
   contents: read
 jobs:
-  g1-source-dependency-readonly:
+  disposable-systemd-history-fence:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 3
     steps:
-    - uses: actions/checkout@v4
-      with:
-        ref: 5fe2e56d6a5d1f8da20c9a918fe3592d3e6eb5d4
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    - run: python -m pip install --quiet paramiko
-    - name: Read only confirmed covering indexes without payload pages
-      env:
-        SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-      run: 'python - <<''PY''
-
-        import os,sys,shlex,ast
-
-        sys.path.insert(0,''scripts'')
-
-        from production_ede_offload import _connect,_exec
-
-        code="import json,os,resource,sqlite3,subprocess,time\nEXPECTED=''5fe2e56d6a5d1f8da20c9a918fe3592d3e6eb5d4''\nresource.setrlimit(resource.RLIMIT_AS,(192*1024**2,192*1024**2))\nsha=subprocess.check_output([''git'',''-C'',''/opt/seiltanzer'',''rev-parse'',''HEAD''],text=True,timeout=3).strip()\nif sha!=EXPECTED:raise ValueError(''Unexpected source generation'')\nstarted=time.monotonic();overall=started+25;deadline=overall\nc=sqlite3.connect(''file:/opt/seiltanzer/data/trades.db?mode=ro'',uri=True,timeout=1)\nc.execute(''PRAGMA query_only=ON'');c.execute(''PRAGMA trusted_schema=OFF'');c.execute(''PRAGMA cache_size=-2048'')\nc.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,65536)\nc.set_progress_handler(lambda:time.monotonic()>=deadline,1000)\ndef q(value):return ''\"''+value.replace(''\"'',''\"\"'')+''\"''\ndef index(table,column):\n for r in c.execute(''PRAGMA index_list(''+q(table)+'')''):\n  columns=[x[2] for x in c.execute(''PRAGMA index_info(''+q(r[1])+'')'')]\n  if columns and columns[0]==column:return r[1]\n raise ValueError(''Required covering index unavailable'')\ndef rows(sql,maximum):\n global deadline\n deadline=min(overall,time.monotonic()+5)\n for n,row in enumerate(c.execute(sql+'' LIMIT ''+str(maximum+1)),1):\n  if n>maximum or time.monotonic()>=deadline:raise ValueError(''Bounded covering-index read incomplete'')\n  yield row\ntry:\n pindex=index(''passive_market_observations'',''observation_id'')\n status_index=index(''passive_market_observations'',''resolution_status'')\n gindex=index(''g1s_observations'',''source_observation_id'')\n ifd_sql=''SELECT rowid FROM passive_market_observations INDEXED BY ''+q(status_index)+\" WHERE resolution_status=''insufficient_future_data'' AND rowid<132923\"\n gsql=''SELECT source_observation_id FROM g1s_observations INDEXED BY ''+q(gindex)\n psql=''SELECT rowid,observation_id FROM passive_market_observations INDEXED BY ''+q(pindex)+'' WHERE rowid<132923''\n plans=[r[3] for sql in (ifd_sql,gsql,psql) for r in c.execute(''EXPLAIN QUERY PLAN ''+sql)]\n if not all(''COVERING INDEX'' in p for p in plans):raise ValueError(''Query would read payload pages'')\n ifd={r[0] for r in rows(ifd_sql,100000)}\n gs={r[0] for r in rows(gsql,100000)}\n if any(not isinstance(x,str) or len(x)>4096 for x in gs):raise ValueError(''Invalid capture identity'')\n seen=0;with_g1=0\n for rowid,obs in rows(psql,200000):\n  if rowid in ifd:\n   seen+=1;with_g1+=obs in gs\n if seen!=len(ifd):raise ValueError(''Capture index coverage changed during probe'')\n stat=os.statvfs(''/opt/seiltanzer/data'')\n print(''G1_SOURCE_COVERING_INDEX_PROOF=''+json.dumps({''source_sha'':sha,''catalog_boundary'':132923,''catalog_ifd_rows'':seen,''ifd_with_g1s_source_link'':with_g1,''ifd_without_g1s_link_upper_bound_before_other_exclusions'':seen-with_g1,''g1s_source_id_count'':len(gs),''query_plans'':plans,''scope'':''COVERING_INDEX_METADATA_ONLY_NOT_RETIREMENT_ELIGIBILITY'',''source_free_bytes'':stat.f_bavail*stat.f_frsize,''elapsed_ms'':round((time.monotonic()-started)*1000,1),''database_mutations'':0,''provider_refreshes_requested'':0,''paid_llm_calls'':0,''orders_sent'':0},sort_keys=True),flush=True)\nfinally:c.close()\n"
-
-        ast.parse(code)
-
-        client=_connect(os.environ[''SSH_PASSWORD''],attempts=1)
-
-        try:print(_exec(client,''python3 -c ''+shlex.quote(code),timeout=40),flush=True)
-
-        finally:client.close()
-
-        PY
-
-        '
+      - uses: actions/checkout@v4
+        with:
+          ref: 54ba77f41cead31fbd9103b687fa357b25440f69
+      - name: Prove real systemd refuses guarded prestart without production access
+        run: sudo /usr/bin/python3 scripts/history_service_fence_drill.py --output /tmp/history-systemd-proof.json
+      - name: Preserve bounded disposable proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: disposable-systemd-history-fence-proof
+          path: /tmp/history-systemd-proof.json
+          if-no-files-found: warn
+          retention-days: 7
