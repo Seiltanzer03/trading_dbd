@@ -93,6 +93,8 @@ def verify(expected_sha: str, acceptance_run_id: str) -> None:
         assert lifecycle.get("sqlite_access") is False, lifecycle
         worker = lifecycle.get("worker") or {}
         result = lifecycle.get("last_result")
+        if worker.get('disk_pause_active') is True or worker.get('current_phase') == 'disk_pressure_pause':
+            raise AssertionError('RESEARCH_DISK_ADMISSION_BLOCKED: required worker core cannot run; restore headroom first')
         print("worker cycle", attempt, {
             "first_cycle_not_before_ts": worker.get("first_cycle_not_before_ts"),
             "current_phase": worker.get("current_phase"),

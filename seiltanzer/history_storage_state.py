@@ -4,6 +4,7 @@ Stdlib only: off-host tools load this file without importing the application.
 The marker records storage coverage, never trading or model authority.
 """
 import hashlib
+import importlib.util
 import json
 import re
 import sqlite3
@@ -12,6 +13,7 @@ from pathlib import Path
 
 TABLE = 'hot_history_storage_state'
 CONTRACT = 'sqlite-history-hot-state-v1'
+RUNTIME_CONTRACT = 'sqlite-history-hot-state-v2'
 BUCKET = 'trading-dbd-backups-2026'
 MAX_BYTES = 8 * 1024**2
 MAX_RETIRED_ROWS = 1_000_000
@@ -20,6 +22,16 @@ PIN_FIELDS = ('cold_history_catalog_sha256', 'cold_history_catalog_bucket',
 _FIELDS = {'contract', 'bucket', 'catalog_source_database_sha256', 'catalog_sha256',
            'catalog_object_key', 'cutover_source_database_sha256', 'retired_rowids',
            'retained_identity', 'source_materialization_watermark', 'production_authority'}
+
+
+def _runtime_projection():
+    path = Path(__file__).resolve().with_name('history_runtime_projection.py')
+    spec = importlib.util.spec_from_file_location('_history_runtime_projection', path)
+    if spec is None or spec.loader is None:
+        raise ValueError('Runtime history projection codec unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def identity_proof(conn, table, max_rowid):
@@ -61,8 +73,10 @@ def catalog_key(source_sha, catalog_sha):
 
 
 def canonical_state(state):
-    if (not isinstance(state, dict) or set(state) != _FIELDS
-            or state['contract'] != CONTRACT or state['bucket'] != BUCKET
+    runtime = isinstance(state, dict) and state.get('contract') == RUNTIME_CONTRACT
+    fields = _FIELDS.union(('runtime_projection',)) if runtime else _FIELDS
+    if (not isinstance(state, dict) or set(state) != fields
+            or state['contract'] not in (CONTRACT, RUNTIME_CONTRACT) or state['bucket'] != BUCKET
             or state['production_authority'] is not False):
         raise ValueError('Unsupported hot history state')
     key = catalog_key(state['catalog_source_database_sha256'], state['catalog_sha256'])
@@ -81,6 +95,8 @@ def canonical_state(state):
         if type(value) is not int or not previous < value < 2**63:
             raise ValueError('Invalid or unordered history retired rowids')
         previous = value
+    if runtime:
+        _runtime_projection().validate_projection_fields(state['runtime_projection'], len(ids))
     identities = state['retained_identity']
     if not isinstance(identities, dict) or set(identities) != {'passive_market_observations', 'g1s_observations'}:
         raise ValueError('Invalid retained history identity tables')
@@ -150,6 +166,9 @@ def history_manifest_fields(conn):
     for table, proof in state['retained_identity'].items():
         if identity_proof(conn, table, proof['max_rowid']) != proof:
             raise ValueError('Conflicting hot/cold history rowid: retained identity or retired rowid coverage changed')
+    if state['contract'] == RUNTIME_CONTRACT:
+        _runtime_projection().validate_runtime_projection(conn, state['runtime_projection'],
+            retired_rowids=state['retired_rowids']['passive_market_observations'])
     return dict(cold_history_catalog_sha256=state['catalog_sha256'],
                 cold_history_catalog_bucket=state['bucket'],
                 cold_history_catalog_object_key=state['catalog_object_key'],
@@ -183,6 +202,9 @@ def write_history_state(conn, state):
     raw = canonical_state(state)
     if conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?', (TABLE,)).fetchone():
         raise ValueError('Cannot overwrite an existing hot history epoch')
+    if state['contract'] == RUNTIME_CONTRACT:
+        _runtime_projection().validate_runtime_projection(conn, state['runtime_projection'],
+            retired_rowids=state['retired_rowids']['passive_market_observations'])
     conn.execute(f'CREATE TABLE "{TABLE}" (id INTEGER PRIMARY KEY CHECK(id=1),'
                  'payload_json TEXT NOT NULL,payload_sha256 TEXT NOT NULL)')
     conn.execute(f'INSERT INTO "{TABLE}" VALUES(1,?,?)',
@@ -193,7 +215,17 @@ def write_history_state(conn, state):
                      "BEGIN SELECT RAISE(ABORT,'Hot history state is immutable'); END")
 
 
+def begin_full_history_hydration(conn):
+    """On a verified disposable worker copy, prepare our storage-only guards."""
+    state = read_history_state(conn)
+    if state is not None and state['contract'] == RUNTIME_CONTRACT:
+        _runtime_projection().begin_full_hydration(conn)
+
+
 def consume_history_state(conn):
     """Remove storage-only state from a disposable, fully hydrated output."""
-    if read_history_state(conn) is not None:
+    state = read_history_state(conn)
+    if state is not None:
+        if state['contract'] == RUNTIME_CONTRACT:
+            _runtime_projection().consume_runtime_projection(conn)
         conn.execute(f'DROP TABLE "{TABLE}"')

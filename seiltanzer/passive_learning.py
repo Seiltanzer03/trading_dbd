@@ -1379,69 +1379,30 @@ class PassiveLearningEngine:
 
     def status(self) -> dict:
         with self._lock:
-            counts = {row["resolution_status"]: row["n"] for row in
-                      self._conn.execute(
-                          "SELECT resolution_status,COUNT(*) n "
-                          "FROM passive_market_observations "
-                          "GROUP BY resolution_status").fetchall()}
-            total = sum(counts.values())
-
-            legacy_f2_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE feature_contract_version LIKE '%f2%'").fetchone()[0]
-
-            legacy_f3_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE feature_contract_version='passive-observation-f3-v1'").fetchone()[0]
-
-            legacy_f31_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE feature_contract_version='passive-observation-f31-v1'").fetchone()[0]
-
-            current_f32_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE feature_contract_version=?", (PASSIVE_SCHEMA_VERSION,)).fetchone()[0]
-
-            fixed_horizon_raw_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE feature_contract_version=? AND forecast_json LIKE '%\"horizon_kind\":\"fixed_trading_time\"%'",
-                (PASSIVE_SCHEMA_VERSION,)).fetchone()[0]
-
-            option_native_raw_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE feature_contract_version=? AND forecast_json LIKE '%\"horizon_kind\":\"option_native_expiry\"%'",
-                (PASSIVE_SCHEMA_VERSION,)).fetchone()[0]
-
-            terminal_q_eligible_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE forecast_json LIKE '%\"probability_measure\":\"risk_neutral_Q_terminal\"%'").fetchone()[0]
-
-            terminal_q_resolved_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE resolution_status='resolved' AND forecast_json LIKE '%\"probability_measure\":\"risk_neutral_Q_terminal\"%'").fetchone()[0]
-
-            first_touch_clean_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE outcome_json LIKE '%\"clean_label\":true%'").fetchone()[0]
-
-            first_touch_ambiguous_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE outcome_json LIKE '%\"ambiguous_first_touch\":true%'").fetchone()[0]
-
-            first_touch_point_only_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE outcome_json LIKE '%\"path_granularity\":\"point_only\"%'").fetchone()[0]
+            from .passive_history_statistics import passive_history_statistics
+            statistics = passive_history_statistics(self._conn, current_feature_version=PASSIVE_SCHEMA_VERSION)
+            from .history_runtime_views import with_retired_statistics
+            statistics = with_retired_statistics(self._conn, statistics)
+            counts = statistics["resolution_counts"]
+            total = statistics["raw_n"]
+            legacy_f2_n = statistics["legacy_f2_n"]
+            legacy_f3_n = statistics["legacy_f3_n"]
+            legacy_f31_n = statistics["legacy_f31_n"]
+            current_f32_n = statistics["current_f32_n"]
+            fixed_horizon_raw_n = statistics["fixed_horizon_raw_n"]
+            option_native_raw_n = statistics["option_native_raw_n"]
+            terminal_q_eligible_n = statistics["terminal_q_eligible_n"]
+            terminal_q_resolved_n = statistics["terminal_q_resolved_n"]
+            first_touch_clean_n = statistics["first_touch_clean_n"]
+            first_touch_ambiguous_n = statistics["first_touch_ambiguous_n"]
+            first_touch_point_only_n = statistics["first_touch_point_only_n"]
+            sigma_valid_n = statistics["sigma_valid_n"]
+            sigma_missing_n = statistics["sigma_missing_n"]
 
             latest = {row["instrument"]: row["captured_ts"] for row in
                       self._conn.execute(
                           "SELECT instrument,MAX(captured_ts) captured_ts "
                           "FROM passive_market_observations GROUP BY instrument")}
-
-            sigma_valid_n = self._conn.execute(
-                "SELECT COUNT(*) FROM passive_market_observations "
-                "WHERE forecast_json LIKE '%\"sigma_h_return\":%' AND forecast_json NOT LIKE '%\"sigma_h_return\":null%'").fetchone()[0]
-
-            sigma_missing_n = total - sigma_valid_n
 
             page_count = self._conn.execute("PRAGMA page_count").fetchone()[0]
             page_size = self._conn.execute("PRAGMA page_size").fetchone()[0]

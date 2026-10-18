@@ -20,7 +20,8 @@ from test_ede_ledger_archive import ObjectStore
 from test_sqlite_history_partition import identity
 
 
-def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_mutable_outcome=False):
+def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_mutable_outcome=False,
+                           include_runtime_metadata=False):
     from contextlib import closing
     source = tmp_path / 'source.sqlite3'
     with closing(sqlite3.connect(source)) as conn:
@@ -126,7 +127,7 @@ def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_muta
         )
         # Populate passive_market_observations with explicit non-contiguous rowids
         # and large payloads so physical compaction measurably shrinks the file.
-        blob_text = 'X' * 16384
+        blob_text = 'X' * (131072 if include_runtime_metadata else 16384)
         passive_rows = [
             # Unreferenced insufficient_future_data rows (should be retired)
             (10, 'obs-retire-10', 'BTCUSDT', 'insufficient_future_data', blob_text + '-10'),
@@ -168,6 +169,31 @@ def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_muta
         with closing(sqlite3.connect(source)) as conn:
             with conn:
                 conn.execute('ALTER TABLE passive_market_observations ADD COLUMN resolved_ts REAL')
+    if include_runtime_metadata:
+        with closing(sqlite3.connect(source)) as conn:
+            with conn:
+                conn.execute("ALTER TABLE passive_market_observations ADD COLUMN instrument TEXT DEFAULT 'BTCUSDT'")
+                conn.execute('ALTER TABLE passive_market_observations ADD COLUMN captured_ts REAL DEFAULT 1')
+                conn.execute('ALTER TABLE passive_market_observations ADD COLUMN horizon_minutes INTEGER DEFAULT 15')
+                conn.execute('ALTER TABLE passive_market_observations ADD COLUMN evidence_eligible INTEGER DEFAULT 0')
+                conn.execute('ALTER TABLE passive_market_observations ADD COLUMN created_ts REAL DEFAULT 1')
+                conn.execute('ALTER TABLE passive_market_observations ADD COLUMN target_ts REAL DEFAULT 2')
+                conn.execute("ALTER TABLE passive_market_observations ADD COLUMN feature_contract_version TEXT DEFAULT 'passive-observation-f32-v1'")
+                conn.execute("ALTER TABLE passive_market_observations ADD COLUMN forecast_json TEXT DEFAULT '{}'")
+                conn.execute("ALTER TABLE passive_market_observations ADD COLUMN outcome_json TEXT DEFAULT 'null'")
+                conn.execute("ALTER TABLE passive_market_observations ADD COLUMN observation_origin TEXT DEFAULT 'background_collector'")
+                conn.execute("ALTER TABLE passive_market_observations ADD COLUMN price_kind TEXT DEFAULT 'direct'")
+                conn.execute('ALTER TABLE g1s_observations ADD COLUMN source_observation_id TEXT')
+                conn.execute('UPDATE g1s_observations SET source_observation_id=observation_id')
+                conn.execute("ALTER TABLE g1_dataset_membership ADD COLUMN dataset_contract_version TEXT DEFAULT 'g1-prospective-dataset-v1'")
+                conn.execute('ALTER TABLE g1_dataset_membership ADD COLUMN source_record_sha256 TEXT')
+                from seiltanzer.g1_source_record import source_record_sha256
+                cursor = conn.execute('SELECT * FROM passive_market_observations WHERE rowid IN (10,20,30,40)')
+                names = [c[0] for c in cursor.description]
+                rows = [dict(zip(names, row)) for row in cursor]
+                for row in rows:
+                    conn.execute('INSERT INTO g1_dataset_membership(observation_id,source_record_sha256) VALUES(?,?)',
+                                 (row['observation_id'],source_record_sha256(row)))
     source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
     source_receipt = dict(
         immutable_sqlite_read=True,
@@ -202,6 +228,11 @@ def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_muta
                 'INSERT INTO g1s_observations(rowid, observation_id, symbol, payload) VALUES (?, ?, ?, ?)',
                 (35, 'obs-post-130', 'BTCUSDT', 'g1s-post-130'),
             )
+            if include_runtime_metadata:
+                conn.executemany('INSERT INTO passive_market_observations('
+                    'rowid,observation_id,symbol,resolution_status,payload,captured_ts) '
+                    'VALUES(?,?,?,?,?,?)', [(1000+n,f'recent-{n}','BTCUSDT','pending','recent',1000+n)
+                                           for n in range(1000)])
             conn.commit()
         source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
         source_receipt = dict(

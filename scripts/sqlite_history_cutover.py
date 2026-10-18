@@ -162,6 +162,91 @@ def _rowid_alias(conn: sqlite3.Connection, schema_name: str, table: str) -> tupl
     return alias, columns
 
 
+def _populate_runtime_protected_observation_ids(conn, schema_name='src', *, deadline=None, candidate_rowids=None):
+    """Retain real rows used by runtime joins, recent UI, triggers and health.
+
+    This preserves reference rows, not complete-history counts or future
+    membership sync equivalence. No reduced feature/forecast stubs are used.
+    """
+    deadline = min(deadline, time.monotonic()+MAX_SECONDS) if deadline is not None else time.monotonic()+MAX_SECONDS
+
+    def check():
+        if time.monotonic() >= deadline:
+            raise ValueError('Runtime reference retention deadline exhausted')
+
+    check()
+    qs = archive._quote(schema_name)
+    required = {
+        TARGET_TABLE: {'observation_id', 'instrument', 'captured_ts', 'created_ts', 'horizon_minutes', 'evidence_eligible'},
+        'g1s_observations': {'source_observation_id'},
+        'g1_dataset_membership': {'observation_id'},
+        'virtual_position_observations': {'passive_observation_id'},
+    }
+    for table, columns in required.items():
+        actual = {r[1] for r in conn.execute(f'PRAGMA {qs}.table_xinfo({archive._quote(table)})')}
+        if not columns <= actual:
+            raise ValueError('Unsupported runtime dependency schema: '+table)
+    reasons = {}
+
+    def protect(name, sql, args=()):
+        check()
+        before = conn.total_changes
+        conn.execute('INSERT OR IGNORE INTO temp._cutover_protected_obs(observation_id) '+sql, args)
+        reasons[name] = reasons.get(name, 0)+conn.total_changes-before
+
+    for table, column in (('g1s_observations', 'source_observation_id'),
+                          ('virtual_position_observations', 'passive_observation_id')):
+        qc = archive._quote(column)
+        protect(table, f'SELECT {qc} FROM {qs}.{archive._quote(table)} WHERE {qc} IS NOT NULL')
+    table = qs+'.'+archive._quote(TARGET_TABLE)
+    # Preserve every input of the actual 24h health query, including bursts
+    # larger than the recent endpoint limit. Older eligible maxima stay too.
+    cutoff = time.time()-48*3600
+    protect('recent_health', f'SELECT observation_id FROM {table} WHERE captured_ts>=? OR created_ts>=?',
+            (cutoff, cutoff))
+    instruments = conn.execute(f'SELECT DISTINCT instrument FROM {table} LIMIT 129').fetchall()
+    if len(instruments) > 128:
+        raise ValueError('Runtime reference instrument bound exceeded')
+    for (instrument,) in instruments:
+        check()
+        if not isinstance(instrument, str) or not 0 < len(instrument) <= 128:
+            raise ValueError('Invalid runtime source instrument')
+        recent = conn.execute(f'SELECT captured_ts FROM {table} WHERE instrument=? '
+                              'ORDER BY captured_ts DESC LIMIT 1000', (instrument,)).fetchall()
+        if any(type(r[0]) not in (int, float) or not float('-inf') < r[0] < float('inf') for r in recent):
+            raise ValueError('Invalid runtime source timestamp')
+        if recent:
+            protect('recent_endpoint', f'SELECT observation_id FROM {table} '
+                    'WHERE instrument=? AND captured_ts>=?', (instrument, recent[-1][0]))
+        for reason, predicate in (('trigger_anchor', 'horizon_minutes=15'),
+                                   ('eligible_health_anchor', 'evidence_eligible=1')):
+            protect(reason, f'SELECT observation_id FROM {table} WHERE instrument=? '
+                    f'AND {predicate} AND captured_ts=(SELECT MAX(captured_ts) FROM {table} '
+                    f'WHERE instrument=? AND {predicate})', (instrument, instrument))
+    if candidate_rowids is None:
+        # Standalone reference inventory remains conservative. Actual current
+        # compaction may omit only already-verified rejected source records.
+        protect('g1_dataset_membership', f'SELECT observation_id FROM {qs}.g1_dataset_membership')
+    else:
+        from seiltanzer import history_runtime_projection as projection
+        from seiltanzer.g1_dataset_runtime import G1_DATASET_CONTRACT_VERSION
+        conn.execute('CREATE TEMP TABLE _runtime_candidates(source_rowid INTEGER PRIMARY KEY)')
+        conn.executemany('INSERT INTO temp._runtime_candidates VALUES(?)', ((x,) for x in candidate_rowids))
+        candidates = conn.execute(f'SELECT p.rowid,p.observation_id FROM {table} p '
+            'JOIN temp._runtime_candidates c ON c.source_rowid=p.rowid '
+            'WHERE NOT EXISTS(SELECT 1 FROM temp._cutover_protected_obs x WHERE x.observation_id=p.observation_id)').fetchall()
+        hasher = projection._source_hasher()
+        for rowid, observation_id in candidates:
+            check()
+            try:
+                projection.rejected_source_record(conn,rowid,dataset_contract_version=G1_DATASET_CONTRACT_VERSION,
+                    source_hasher=hasher,source_schema=schema_name)
+            except ValueError:
+                protect('rejection_not_proven','SELECT ?', (observation_id,))
+        conn.execute('DROP TABLE temp._runtime_candidates')
+    return reasons
+
+
 def _source_materialization_watermark(conn):
     if 'g1s_materialization_state' not in _existing_tables(conn, 'src'):
         return 0
@@ -276,7 +361,7 @@ def build_current_hot_cutover_snapshot(source, destination, *, catalog_bytes,
     return _build_hot_cutover_snapshot(
         source, destination, catalog_bytes=catalog_bytes,
         expected_catalog_sha256=expected_catalog_sha256, source_receipt=source_receipt,
-        current_exact_rows=exact, deadline=deadline)
+        current_exact_rows=exact, deadline=deadline, runtime_reader_dependencies=True)
 
 
 def build_hot_cutover_snapshot(source, destination, *, catalog_bytes,
@@ -299,6 +384,7 @@ def _build_hot_cutover_snapshot(
     verify_source_catalog_roots: bool = True,
     current_exact_rows: list[int] | None = None,
     deadline: float | None = None,
+    runtime_reader_dependencies: bool = False,
 ) -> dict:
     """Build a physically compacted, rowid-preserving hot SQLite snapshot.
 
@@ -426,6 +512,11 @@ def _build_hot_cutover_snapshot(
 
         # Materialize indexed temp table of protected observation_ids for O(1) lookup.
         protected_obs_count, protected_breakdown = _populate_protected_observation_ids(work_conn, 'src')
+        if runtime_reader_dependencies:
+            extra = _populate_runtime_protected_observation_ids(work_conn, 'src', deadline=deadline,
+                                                               candidate_rowids=current_exact_rows)
+            protected_breakdown.update({'runtime_'+key: value for key, value in extra.items()})
+            protected_obs_count = work_conn.execute('SELECT COUNT(*) FROM temp._cutover_protected_obs').fetchone()[0]
 
         # Compute retirement boundary for `passive_market_observations`.
         source_max_rowid = work_conn.execute(
@@ -530,8 +621,9 @@ def _build_hot_cutover_snapshot(
             work_conn.execute(ddl)
 
         if retired_rowids:
-            history_state.write_history_state(work_conn, dict(
-                contract=history_state.CONTRACT, bucket=history_state.BUCKET,
+            state = dict(
+                contract=history_state.RUNTIME_CONTRACT if runtime_reader_dependencies else history_state.CONTRACT,
+                bucket=history_state.BUCKET,
                 catalog_source_database_sha256=catalog['source_database_sha256'],
                 catalog_sha256=catalog_sha,
                 catalog_object_key=history_state.catalog_key(catalog['source_database_sha256'], catalog_sha),
@@ -540,7 +632,11 @@ def _build_hot_cutover_snapshot(
                 retired_rowids={TARGET_TABLE: retired_rowids},
                 retained_identity={table: history_state.identity_proof(work_conn, table, boundary)
                                    for table, boundary in max_rowids.items()},
-                production_authority=False))
+                production_authority=False)
+            if runtime_reader_dependencies:
+                from scripts.build_history_runtime_projection import build_runtime_projection
+                state['runtime_projection'] = build_runtime_projection(work_conn, retired_rowids, deadline=deadline)
+            history_state.write_history_state(work_conn, state)
         manifest_history_fields = history_state.history_manifest_fields(work_conn)
 
         work_conn.execute('DROP TABLE IF EXISTS temp._cutover_protected_obs')
@@ -606,6 +702,7 @@ def _build_hot_cutover_snapshot(
             production_authority=False,
             data_retirement_authorized=False,
             full_production_reader_equivalence_proven=False,
+            runtime_reference_rows_preserved=runtime_reader_dependencies,
             source_catalog_prefix_verified=True,
             source_database_sha256=source_receipt['database_sha256'],
             source_database_size_bytes=before['size'],

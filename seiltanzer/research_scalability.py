@@ -19,6 +19,7 @@ from . import g1_intelligence_nonblocking as _nb
 from . import g1_shadow_runtime as _g1c
 from . import g1_shadow_refinement as _g1c_integrity
 from . import g1_q_evidence_runtime as _q_evidence
+from . import passive_learning as _pl
 from .g1_q_evidence_runtime import (
     G1B1_STAGE, Q_EVIDENCE_CONTRACT_VERSION, Q_CAPABILITY_CONTRACT_VERSION,
     Q_CAPTURE_ATTEMPT_CONTRACT_VERSION, Q_CAPTURE_POLICY_VERSION,
@@ -206,14 +207,11 @@ def _light_g1c_status(self) -> dict:
 
 def _light_passive_status(self) -> dict:
     with self._lock:
-        rows = self._conn.execute(
-            "SELECT resolution_status,COUNT(*) n FROM passive_market_observations GROUP BY resolution_status"
-        ).fetchall()
-        counts = {str(r["resolution_status"]): int(r["n"]) for r in rows}
-        total = sum(counts.values())
-        current = int(self._conn.execute(
-            "SELECT COUNT(*) FROM passive_market_observations WHERE feature_contract_version=?",
-            (_pl.PASSIVE_SCHEMA_VERSION,)).fetchone()[0])
+        from .history_runtime_views import historical_source_totals
+        totals = historical_source_totals(self._conn)
+        counts = totals['resolution_counts']
+        total = totals['raw_n']
+        current = totals['feature_version_counts'].get(_pl.PASSIVE_SCHEMA_VERSION, 0)
         latest = {str(r["instrument"]): float(r["ts"] or 0) for r in self._conn.execute(
             "SELECT instrument,MAX(captured_ts) ts FROM passive_market_observations GROUP BY instrument")}
         page_count = int(self._conn.execute("PRAGMA page_count").fetchone()[0])

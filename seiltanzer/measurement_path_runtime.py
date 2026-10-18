@@ -326,6 +326,18 @@ def _runtime_counters(self: _ENGINE) -> dict:
             "FROM passive_market_observations WHERE feature_contract_version=?",
             (_pl.PASSIVE_SCHEMA_VERSION,),
         ).fetchall()]
+    counters = runtime_counters_for_rows(rows)
+    from .history_runtime_views import with_retired_measurement
+    with self._lock:
+        return with_retired_measurement(self._conn, counters)
+
+
+def runtime_counters_for_rows(rows) -> dict:
+    """Same telemetry formula for a bounded streaming off-host projection.
+
+    These are diagnostics, including invalid/IFD inputs, not admission labels.
+    Runtime collection and its existing locking remain unchanged.
+    """
     c = {name: 0 for name in (
         "horizon_contract_error_n", "q_semantic_contract_error_n",
         "proxy_mapping_error_n", "path_contract_error_n", "time_contract_error_n",
@@ -416,6 +428,8 @@ def status_f32a(self: _ENGINE) -> dict:
             (_pl.PASSIVE_SCHEMA_VERSION,
              f'%\"measurement_runtime_contract\":\"{MEASUREMENT_RUNTIME_VERSION}\"%'),
         ).fetchone()[0]
+        from .history_runtime_views import retired_evidence_count
+        evidence_n += retired_evidence_count(self._conn)
     errors = dict(result.get("error_counters") or {})
     for name in (
         "horizon_contract_error_n", "q_semantic_contract_error_n",

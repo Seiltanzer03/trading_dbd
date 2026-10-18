@@ -92,47 +92,10 @@ def _loads(value: Any, default: Any) -> Any:
         return default
 
 
-def _source_record_payload(row: dict) -> dict:
-    """Canonical post-resolution research record used for mutation detection."""
-    return {
-        "observation_id": row.get("observation_id"),
-        "anchor_group_id": row.get("anchor_group_id"),
-        "captured_ts": finite(row.get("captured_ts")),
-        "target_ts": finite(row.get("target_ts")),
-        "resolved_ts": finite(row.get("resolved_ts")),
-        "instrument": row.get("instrument"),
-        "horizon_minutes": row.get("horizon_minutes"),
-        "trigger_reason": row.get("trigger_reason"),
-        "market_price": finite(row.get("market_price")),
-        "price_source": row.get("price_source"),
-        "price_age_sec": finite(row.get("price_age_sec")),
-        "price_quality": finite(row.get("price_quality")),
-        "price_kind": row.get("price_kind"),
-        "option_source": row.get("option_source"),
-        "option_age_sec": finite(row.get("option_age_sec")),
-        "option_quality": finite(row.get("option_quality")),
-        "option_kind": row.get("option_kind"),
-        "market_regime": row.get("market_regime"),
-        "session": row.get("session"),
-        "feature_contract_version": row.get("feature_contract_version"),
-        "forecast_model_version": row.get("forecast_model_version"),
-        "calibrator_version": row.get("calibrator_version"),
-        "scenario_version": row.get("scenario_version"),
-        "features": _loads(row.get("features_json"), {}),
-        "forecast": _loads(row.get("forecast_json"), {}),
-        "evidence_eligible": int(row.get("evidence_eligible") or 0),
-        "resolution_status": row.get("resolution_status"),
-        "outcome": _loads(row.get("outcome_json"), None),
-        "calendar_elapsed": finite(row.get("calendar_elapsed")),
-        "trading_elapsed": finite(row.get("trading_elapsed")),
-        "market_open_fraction": finite(row.get("market_open_fraction")),
-        "retrospective_replay": int(row.get("retrospective_replay") or 0),
-        "observation_origin": row.get("observation_origin"),
-    }
-
-
-def _source_record_sha256(row: dict) -> str:
-    return _sha256(_source_record_payload(row))
+from .g1_source_record import (
+    source_record_payload as _source_record_payload,
+    source_record_sha256 as _source_record_sha256,
+)
 
 
 def _horizon_bucket(row: dict, forecast: dict) -> str:
@@ -533,6 +496,15 @@ def _detect_source_mutations(self: _ENGINE, limit: int = 5000) -> int:
                 expected_sha256=expected, actual_sha256=actual,
                 detail="resolved source record changed after G1A admission",
             )
+    from .history_runtime_views import archived_membership_rows
+    with self._lock:
+        archived = archived_membership_rows(self._conn, limit=limit, verify_hash=False)
+    for row in archived:
+        if row['source_record_sha256'] != row['expected_source_sha256']:
+            mismatches += 1
+            _record_error(self, "SOURCE_MUTATED", observation_id=row['observation_id'],
+                expected_sha256=row['expected_source_sha256'], actual_sha256=row['source_record_sha256'],
+                detail="verified archived source hash differs from immutable G1 membership")
     return mismatches
 
 
@@ -645,16 +617,11 @@ def g1_dataset_status(self: _ENGINE) -> dict:
     _sync_membership(self, limit=1000)
     rows = _eligible_rows(self)
     with self._lock:
-        raw_source_n = int(self._conn.execute(
-            "SELECT COUNT(*) FROM passive_market_observations"
-        ).fetchone()[0])
-        resolved_source_n = int(self._conn.execute(
-            "SELECT COUNT(*) FROM passive_market_observations WHERE resolution_status='resolved'"
-        ).fetchone()[0])
-        current_source_n = int(self._conn.execute(
-            "SELECT COUNT(*) FROM passive_market_observations WHERE feature_contract_version=?",
-            (_pl.PASSIVE_SCHEMA_VERSION,),
-        ).fetchone()[0])
+        from .history_runtime_views import historical_source_totals
+        totals = historical_source_totals(self._conn)
+        raw_source_n = totals['raw_n']
+        resolved_source_n = totals['resolution_counts'].get('resolved', 0)
+        current_source_n = totals['feature_version_counts'].get(_pl.PASSIVE_SCHEMA_VERSION, 0)
         membership_n = int(self._conn.execute(
             "SELECT COUNT(*) FROM g1_dataset_membership WHERE dataset_contract_version=?",
             (G1_DATASET_CONTRACT_VERSION,),
@@ -775,6 +742,8 @@ def g1_dataset_exclusions(self: _ENGINE) -> dict:
             "ON p.observation_id=g.observation_id WHERE g.dataset_contract_version=?",
             (G1_DATASET_CONTRACT_VERSION,),
         ).fetchall()]
+        from .history_runtime_views import archived_membership_rows
+        rows.extend(archived_membership_rows(self._conn))
         pending_n = int(self._conn.execute(
             "SELECT COUNT(*) FROM passive_market_observations WHERE resolution_status='pending'"
         ).fetchone()[0])
