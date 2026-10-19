@@ -34,6 +34,16 @@ eight admitted families, external LLM availability, or profitability.
   retirement authority false. It neither edits a cloud manifest nor relaxes a
   verification gate. A second full-scale invocation is needed to reach the
   builder; no production action follows from this first result.
+- Corrected cloud-only39240101525/job118018568884 **succeeded**11:24:45UTC:
+  all439 partitions; hot17,293,832,192bytes;24,001 retired rows on the pinned
+  historical source. Actual reduction1,490,673,664bytes, not5.25GB. Whole
+ 2085.837s includes restore; unchanged1800s builder and30s partition budgets.
+  No production/cloud writes/full-union proof. Current production failure
+  was **not** reproduced; current-source retirement/headroom are unproven.
+- Fresh read-only production39206973385 attempt5/job11802660470211:09:19UTC:
+  HTTP200, ABORTED_ORIGINAL/service_startedtrue,593,723,392bytes free. Current
+  exact failed capture is absent from all seven daily backup manifests
+  (inventory39240925407/job118021241975); no extra database was downloaded.
 
 ## AI/input and delivery observations
 
