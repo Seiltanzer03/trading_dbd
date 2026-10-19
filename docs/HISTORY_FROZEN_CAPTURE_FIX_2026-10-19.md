@@ -33,7 +33,7 @@ using the already pinned file size. No whole-file read-ahead allocation. Exact
 wire size/SHA, actual EOF, SQLite integrity, private file ownership, original
 1800s capture limit and finite native-owner clocks remain unchanged. Real SFTP
 capture crosses multiple windows and preserves exact bytes with bounded parallel
-requests. A development dependency ensures that protocol proof runs in fullCI.
+requests. The mandatory CI test job explicitly installs the protocol proof dependency.
 
 Public stage/byte progress and a redacted failure artifact replace the previous
 opaque worker failure. Raw provider exception messages and signed URLs are never
@@ -64,3 +64,10 @@ Deferred minors (no extra polishing pass):
 
 Review limited to local Paramiko5.1.0; mandatory CI covers the final tree and
 native proofs. Actual production throughput/retirement remains unverified.
+
+CI scope correction: adding the optional SSH library to global dev dependencies
+triggered an unrelated fresh ML audit through pyproject's path filter. Keep
+pyproject unchanged and install Paramiko explicitly in the mandatory test job;
+local runs without this operational dependency explicitly skip the real-SFTP
+module. CI installs it and must exercise the protocol proof. No research gate
+or runtime dependency was changed. The superseded CI tree is not release evidence.

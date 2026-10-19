@@ -6,7 +6,8 @@ import socket
 import threading
 import time
 
-import paramiko
+import pytest
+paramiko=pytest.importorskip('paramiko',reason='real SFTP proof dependency installed by mandatory CI')
 from paramiko.sftp import CMD_READ
 from test_production_history_cutover import frozen_source
 
