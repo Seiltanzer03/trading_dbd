@@ -105,6 +105,7 @@ def compact_unified_ensemble(value: Any) -> dict:
         "automatic_execution_allowed",
         "decision_utility",
         "selection_diagnostics",
+        "null_working_family_rows_omitted",
         "ranking_available", "ranking_selected_policy", "ranking_selected_candidate_id",
         "regime_context",
         'research_working_context',
@@ -209,6 +210,26 @@ def compact_unified_ensemble(value: Any) -> dict:
             prior_truncation = value.get(f"{key}_truncated_count")
             if isinstance(prior_truncation, int) and not isinstance(prior_truncation, bool) and prior_truncation > 0:
                 out[f"{key}_truncated_count"] = prior_truncation + max(0, len(rows) - limit)
+    # Family readiness is retained once in edge_families. Empty per-action
+    # opinion placeholders add no evidence and can consume the snapshot budget.
+    # A genuine zero opinion or any extra diagnostic remains distinguishable.
+    opinion_fields = ('score', 'within_llm_weight', 'hold_reference_contribution', 'contribution')
+    placeholder_keys = {'family_id', 'effective_weight', *opinion_fields}
+    omitted = 0
+    for candidate in out.get('candidates', []):
+        parts = candidate.get('working_family_contributions')
+        if not isinstance(parts, list):
+            continue
+        kept = [part for part in parts if not (
+            isinstance(part, dict) and set(part) <= placeholder_keys
+            and all(part.get(key) is None for key in opinion_fields)
+            and _num(part.get('effective_weight')) == 0.)]
+        omitted += len(parts) - len(kept)
+        candidate['working_family_contributions'] = kept
+    if omitted:
+        previous = value.get('null_working_family_rows_omitted')
+        previous = previous if isinstance(previous, int) and not isinstance(previous, bool) and previous > 0 else 0
+        out['null_working_family_rows_omitted'] = previous + omitted
     out['selection_context'] = ({'mode': 'NOT_REPORTED'} if out.get('candidates_truncated_count')
                                 else selection_context(value))
     return out

@@ -220,7 +220,7 @@ def test_materializer_and_api_correlate_preflight_route_and_final_status(tmp_pat
         stages = {row['stage'] for row in rows}
         assert {'preflight', 'route', 'cached_snapshot', 'position_finalization', 'family_bundle',
                 'runtime_context', 'macro_context', 'reaction_capture', 'regime_management', 'review_identity',
-                'provider', 'ensemble', 'publication', 'response'} <= stages
+                'market_refresh', 'provider', 'ensemble', 'publication', 'response'} <= stages
         assert rows[-1]['status_code'] == 200
         assert 'secret-' not in caplog.text
     finally:

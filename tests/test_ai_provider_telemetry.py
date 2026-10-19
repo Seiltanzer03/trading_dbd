@@ -2,6 +2,7 @@ import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 
 import pytest
 
@@ -12,7 +13,7 @@ from seiltanzer.llm_decision_shadow import VALID_POLICIES
 from test_ai_provider_explanation import _snapshot
 
 
-def transport(monkeypatch, *, entered=None, release=None, completed=None):
+def transport(monkeypatch, *, entered=None, release=None, completed=None, commentary=None):
     calls = []
     content = json.dumps({'shadow_decision': {
         'policy': 'HOLD', 'confidence': .7,
@@ -20,6 +21,10 @@ def transport(monkeypatch, *, entered=None, release=None, completed=None):
         'reason_ru': 'private model rationale must not enter telemetry',
         'key_evidence': [], 'counter_evidence': [], 'evidence_families': [],
         'invalidation_conditions': [], 'family_assessments': {}}})
+    if commentary is not None:
+        legacy = json.loads(content)
+        legacy['explanation_ru'] = commentary
+        content = json.dumps(legacy)
     payload = {'model': 'private-model-id',
         'choices': [{'message': {'content': content}, 'finish_reason': 'stop'}],
         'usage': {'prompt_tokens': 321, 'completion_tokens': 123, 'total_tokens': 444}}
@@ -93,6 +98,25 @@ def test_actual_provider_phases_and_exact_byte_counts_have_no_private_payload(mo
     for private in ('private-test-credential', 'private-model-id', 'private model rationale',
                     'private deterministic report', 'openrouter', 'Authorization'):
         assert private not in logged
+
+
+@pytest.mark.parametrize('commentary', [None, 'Legacy commentary is accepted but never displayed.'])
+def test_actual_request_omits_discarded_commentary_without_changing_structured_facts(monkeypatch, commentary):
+    calls, _, _ = transport(monkeypatch, commentary=commentary)
+    snapshot = _snapshot()
+    original = deepcopy(snapshot)
+    expected_input = report._independent_provider_input(snapshot, snapshot)
+    result = report.request_explanation_with_shadow(snapshot, authoritative_snapshot=snapshot)
+    body = calls[0]
+    assert 'explanation_ru' not in body['messages'][0]['content']
+    assert body['max_tokens'] == 2400
+    shadow = result['llm_shadow_decision']
+    assert set(shadow['policy_scores']) == set(VALID_POLICIES)
+    assert shadow['family_assessments'] == {}
+    assert json.loads(shadow['input_contract']['frozen_input_json']) == expected_input
+    assert snapshot == original
+    if commentary is not None:
+        assert commentary not in result['verdict']
 
 
 def test_timeout_retains_http_start_and_request_size_with_the_original_request_id(monkeypatch, caplog):

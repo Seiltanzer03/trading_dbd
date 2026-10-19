@@ -13,7 +13,7 @@ from .ai_api import request_id
 LOGGER = logging.getLogger('seiltanzer.ai_request_trace')
 _CURRENT = ContextVar('ai_request_trace', default=None)
 _STAGES = frozenset(('runtime_guard', 'preflight', 'route', 'cached_snapshot', 'position_finalization',
-    'family_bundle', 'runtime_context', 'macro_context', 'reaction_capture',
+    'family_bundle', 'runtime_context', 'macro_context', 'reaction_capture', 'market_refresh',
     'regime_management', 'review_identity', 'provider', 'ensemble', 'publication',
     'response', 'snapshot_error', 'provider_fallback', 'internal_error',
     'stale_decision', 'journal_error', 'provider_render', 'provider_prepare',

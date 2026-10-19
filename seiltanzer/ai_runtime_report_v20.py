@@ -39,14 +39,13 @@ PROVIDER_RESPONSE_MAX_BYTES = 20_000
 _INSTALLED = False
 
 _COMBINED_PROMPT = """
-INDEPENDENT SHADOW + BOUNDED COMMENTARY MODE.
+INDEPENDENT SHADOW MODE.
 The server owns the production management_decision and every deterministic number.
 The selected quant policy and all server winner outputs are deliberately withheld.
 You MUST NOT change, execute, or present the shadow policy as the production action.
 
 Return ONLY one valid JSON object, no markdown:
 {
-  "explanation_ru": "Brief Russian commentary on the available facts, limitations, data quality, and next recalculation trigger; do not infer the hidden server action or issue a trading instruction here",
   "shadow_decision": {
     "policy": "HOLD|CLOSE_10|CLOSE_25|CLOSE_50|EXIT|MOVE_TO_BE|TRAIL_GAMMA_FLIP|TIGHTEN_STOP|EXTEND_TAKE|REDUCE_TAKE|SCALE_OUT_ON_SPIKE|TIME_STOP",
     "confidence": 0.0,
@@ -60,9 +59,8 @@ Return ONLY one valid JSON object, no markdown:
   }
 }
 
-Keep the response concise: explanation_ru is optional and may be empty (the
-server writes the displayed report). Do not repeat the same rationale in prose
-and shadow fields. Keep reason_ru under160 characters, each evidence item under
+Keep the response concise; the server writes the displayed report.
+Keep reason_ru under160 characters, each evidence item under
 120 characters, use2-3 key facts and at most2 counter-facts/invalidations.
 Omit unavailable family entries rather than emitting eight empty objects.
 
