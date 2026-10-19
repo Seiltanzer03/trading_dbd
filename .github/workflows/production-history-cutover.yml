@@ -60,7 +60,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install existing image and SSH transports
-        run: pip install -e . 'boto3>=1.36,<2' paramiko
+        run: pip install -e . 'boto3>=1.36,<2' 'paramiko>=3.3,<6'
       - name: Run finite native owner and off-host Yandex cutover
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -88,3 +88,4 @@ jobs:
             ${{ runner.temp }}/history-cutover-${{ github.run_id }}/hot-build-proof.json
             ${{ runner.temp }}/history-cutover-${{ github.run_id }}/full-union-proof.json
             ${{ runner.temp }}/history-cutover-${{ github.run_id }}/result.json
+            ${{ runner.temp }}/history-cutover-${{ github.run_id }}/failure.json
