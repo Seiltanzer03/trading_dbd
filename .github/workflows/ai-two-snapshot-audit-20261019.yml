@@ -1,0 +1,92 @@
+name: read-only-two-ai-snapshot-audit
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-two-snapshot-audit-20261019.yml]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - name: Read saved comparison and acknowledgement evidence only
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 2m
+          script: |
+            set -euo pipefail
+            exec 8</opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -sn 8 || { echo HISTORY_SOURCE_READ_FENCED; exit 1; }
+            if [ -e /opt/seiltanzer/data/cutover.active ] || [ -L /opt/seiltanzer/data/cutover.active ]; then
+              echo HISTORY_SOURCE_READ_FENCED; exit 1
+            fi
+            /usr/bin/python3 /usr/local/lib/seiltanzer-history-start-guard.py --database /opt/seiltanzer/data/trades.db --application-root /opt/seiltanzer
+            PYTHONDONTWRITEBYTECODE=1 /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import datetime,json,math,re,sqlite3,subprocess,time
+            from pathlib import Path
+            targets=[datetime.datetime.fromisoformat(s).timestamp() for s in
+                ('2026-10-19T14:16:38+00:00','2026-10-19T14:42:11+00:00')]
+            def safe(value,depth=0):
+                if depth>14:return None
+                if value is None or isinstance(value,bool):return value
+                if type(value) in (int,float):return value if math.isfinite(value) else None
+                if isinstance(value,str):return '[OMITTED_URL]' if '://' in value else value[:256]
+                if isinstance(value,list):return [safe(v,depth+1) for v in value[:64]]
+                if isinstance(value,dict):return {k:safe(v,depth+1) for k,v in list(value.items())[:96]
+                    if isinstance(k,str) and not k.endswith('_ru') and k not in
+                    {'url','prompt','verdict','explanation','explanation_ru','raw','provider_request_json','frozen_input_json'}}
+                return None
+            conn=sqlite3.connect(Path('/opt/seiltanzer/data/trades.db').as_uri()+'?mode=ro',uri=True,timeout=5)
+            conn.row_factory=sqlite3.Row
+            conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA busy_timeout=5000')
+            end=time.monotonic()+30
+            conn.set_progress_handler(lambda:time.monotonic()>end,1000)
+            found=[];trades=set()
+            for row in conn.execute('SELECT id,trade_id,ts,model,snapshot_json FROM ai_verdicts WHERE length(snapshot_json)<=300000 ORDER BY id DESC LIMIT 200'):
+                snapshot=json.loads(row['snapshot_json']);captured=snapshot.get('captured_ts')
+                if type(captured) not in (int,float) or not any(abs(captured-t)<1 for t in targets):continue
+                manager=snapshot.get('policy_manager') or {};trades.add(row['trade_id'])
+                keys=('captured_ts','trade_id','position_state','trade_geometry','market_refresh','frozen_expert_inputs',
+                    'snapshot_budget','edge_family_budget_status','edge_family_market_context','mathematical_edge',
+                    'edge_family_source_bundle_audit','active_management_candidates','ai_provider_status')
+                summary={k:snapshot[k] for k in keys if k in snapshot}
+                summary['policy_manager']={k:manager[k] for k in ('inputs','selection_rule','policies',
+                    'management_decision','management_arbiter','gate','unified_edge_ensemble') if k in manager}
+                summary['quote_audit']=(manager.get('input_audit') or {}).get('rows',{}).get('instrument_price')
+                found.append(safe(dict(review_row_id=row['id'],stored_ts=row['ts'],stored_model=row['model'],snapshot=summary)))
+            tables={r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
+            histories=[]
+            specs={
+                'management_decisions':['decision_id','review_id','trade_id','created_ts','policy','status','executed_ts','execution_price','execution_r'],
+                'llm_shadow_manual_actions':['action_id','review_id','trade_id','created_ts','policy','status','acknowledged_ts','execution_price','execution_r','parameters_json'],
+                'position_management_events':['id','trade_id','timestamp','event_type','source','review_id','decision_id','execution_price','active_stop','take','metadata_json'],
+                'execution_ack_observations':['decision_id','trade_id','stage','decision_created_ts','acknowledged_ts','execution_price_source','execution_price','actual_broker_fill_ts','payload_json'],
+                'trades':['id','entry','stop','take','max_r','status']}
+            for trade in sorted(trades):
+                evidence={'trade_id':trade}
+                for table,requested in specs.items():
+                    if table not in tables:continue
+                    available={r[1] for r in conn.execute('PRAGMA table_info("'+table+'")')}
+                    columns=[k for k in requested if k in available]
+                    key='id' if table=='trades' else 'trade_id'
+                    if key not in available:continue
+                    rows=[]
+                    for record in conn.execute('SELECT '+','.join('"'+k+'"' for k in columns)+' FROM "'+table+'" WHERE "'+key+'"=? ORDER BY rowid DESC LIMIT 40',(trade,)):
+                        item=dict(record)
+                        for k in list(item):
+                            if k.endswith('_json'):
+                                try:item[k[:-5]]=json.loads(item.pop(k))
+                                except (ValueError,TypeError):item.pop(k,None)
+                        rows.append(safe(item))
+                    evidence[table]=rows
+                histories.append(evidence)
+            conn.close()
+            sha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
+            print(json.dumps(dict(contract='readonly-two-ai-snapshot-audit-v1',application_sha=sha,
+                requested_utc=['14:16:38','14:42:11'],matched=len(found),snapshots=found,histories=histories,
+                llm_called=False,production_mutation=False),sort_keys=True,allow_nan=False))
+            PY

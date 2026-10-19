@@ -1,9 +1,0 @@
-# Local OpenBuild design state
-TZ.md
-
-# Local validation scratch
-.tmp/
-
-# Python validation artifacts
-__pycache__/
-*.py[cod]
