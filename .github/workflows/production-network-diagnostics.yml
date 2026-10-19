@@ -55,5 +55,22 @@ jobs:
                             'bytes':offset,'elapsed_sec':round(elapsed,3),
                             'mib_per_sec':round(offset/1048576/elapsed,3)}),flush=True)
               finally:sftp.close()
+              for window in (2*1048576,16*1048576):
+                  started=time.monotonic();offset=0
+                  channel=client.get_transport().open_session(window_size=window)
+                  channel.settimeout(20)
+                  try:
+                      channel.exec_command('/bin/cat -- /usr/bin/python3')
+                      with channel.makefile('rb') as source:
+                          while True:
+                              chunk=source.read(1048576)
+                              if not chunk:break
+                              offset+=len(chunk)
+                      assert channel.recv_exit_status()==0 and offset==size
+                  finally:channel.close()
+                  elapsed=time.monotonic()-started
+                  print(json.dumps({'scope':'public_python_binary_ssh_stream','window_bytes':window,
+                        'bytes':offset,'elapsed_sec':round(elapsed,3),
+                        'mib_per_sec':round(offset/1048576/elapsed,3)}),flush=True)
           finally:client.close()
           PYTHON
