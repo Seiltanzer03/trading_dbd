@@ -30,6 +30,20 @@ def test_bounded_provider_call_returns_fast_result():
     assert result == {"verdict": "ok"}
 
 
+def test_provider_worker_preserves_request_trace_without_leaking_to_next_call():
+    from seiltanzer.ai_request_trace import AIRequestTrace, current_trace
+    trace = AIRequestTrace()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        def worker(_snapshot):
+            active = current_trace()
+            return active.request_id if active is not None else None
+        with trace.activate():
+            correlated = ai_provider_guard.bounded_provider_call(worker, {}, executor=executor)
+        uncorrelated = ai_provider_guard.bounded_provider_call(worker, {}, executor=executor)
+    assert correlated == trace.request_id
+    assert uncorrelated is None
+
+
 def test_bounded_provider_call_times_out_without_waiting_for_provider():
     executor = ThreadPoolExecutor(max_workers=1)
     started = time.monotonic()

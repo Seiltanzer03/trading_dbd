@@ -342,12 +342,44 @@ class PositionLedger:
         decision_id = "decision-" + hashlib.sha256(raw.encode()).hexdigest()[:28]
         manual = incremental > 0.0
         with self._lock:
+            # Read the actual latest lifecycle status, including extended ACKs.
+            # An extended action shares its review timestamp with the inactive
+            # baseline HOLD row and therefore wins a same-review tie.
+            prior = []
+            for table, key, clock in (
+                ("management_decisions", "decision_id", "executed_ts"),
+                ("llm_shadow_manual_actions", "action_id", "acknowledged_ts"),
+            ):
+                item = self._conn.execute(
+                    f"SELECT {key} AS decision_id,review_id,policy,status,created_ts,"
+                    f"{clock} AS acknowledged_ts,payload_json FROM {table} "
+                    "WHERE trade_id=? AND created_ts>=? AND created_ts<? "
+                    "AND status<>'publication_failed' "
+                    "ORDER BY created_ts DESC,rowid DESC LIMIT 1",
+                    (int(trade["id"]), _finite(trade.get("opened_at")) or 0., captured)).fetchone()
+                if item:
+                    prior.append(item)
+            previous = max(reversed(prior), key=lambda item: item["created_ts"], default=None)
             last_executed = self._conn.execute(
                 "SELECT decision_id,policy,remaining_before,remaining_after,execution_r,payload_json "
                 "FROM management_decisions WHERE trade_id=? AND status='executed' "
                 "ORDER BY executed_ts DESC,rowid DESC LIMIT 1",
                 (int(trade["id"]),)).fetchone()
         previous_reduction = dict(last_executed) if last_executed else None
+        previous_summary = None
+        if previous:
+            payload = json.loads(previous["payload_json"] or "{}")
+            previous_summary = {
+                "decision_id": previous["decision_id"],
+                "review_id": previous["review_id"],
+                "policy": previous["policy"],
+                "authority": payload.get("authority"),
+                "execution_status": previous["status"],
+                "issued_at": previous["created_ts"],
+                "acknowledged_at": previous["acknowledged_ts"],
+                "executed_at": (previous["acknowledged_ts"]
+                                if previous["status"] == "executed" else None),
+            }
         if previous_reduction:
             payload = json.loads(previous_reduction.pop("payload_json") or "{}")
             previous_reduction["economic_review_basis"] = payload.get("economic_review_basis")
@@ -367,6 +399,7 @@ class PositionLedger:
             "closed_fraction_of_initial_position": round(before * incremental, 12),
             "position_state_version": state.get("state_version"),
             "previous_executed_reduction": previous_reduction,
+            "previous": previous_summary,
             "economic_review_basis": intervention_basis(snapshot, policy),
             "repeat_reduction": bool(manual and last_executed
                                      and last_executed["policy"] == policy),

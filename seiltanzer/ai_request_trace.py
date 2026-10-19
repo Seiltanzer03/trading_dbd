@@ -16,7 +16,12 @@ _STAGES = frozenset(('runtime_guard', 'preflight', 'route', 'cached_snapshot', '
     'family_bundle', 'runtime_context', 'macro_context', 'reaction_capture',
     'regime_management', 'review_identity', 'provider', 'ensemble', 'publication',
     'response', 'snapshot_error', 'provider_fallback', 'internal_error',
-    'stale_decision', 'journal_error'))
+    'stale_decision', 'journal_error', 'provider_render', 'provider_prepare',
+    'provider_http', 'provider_decode', 'provider_validate', 'provider_transport'))
+_PROVIDER_COUNTS = frozenset(('input_bytes', 'request_bytes', 'response_bytes',
+    'output_bytes', 'max_output_tokens', 'prompt_tokens', 'completion_tokens', 'total_tokens'))
+_FINISH_REASONS = frozenset(('stop', 'length', 'content_filter', 'tool_calls',
+    'function_call', 'error'))
 
 
 def current_trace():
@@ -29,7 +34,7 @@ class AIRequestTrace:
         self.started = time.monotonic()
         self.executor = None
 
-    def _emit(self, stage, event, *, since=None, exc=None, status_code=None):
+    def _emit(self, stage, event, *, since=None, exc=None, status_code=None, metrics=None):
         # Only code-owned stage/event names and numeric diagnostics reach logs.
         try:
             if stage not in _STAGES:
@@ -43,6 +48,14 @@ class AIRequestTrace:
                 row['exception_class'] = type(exc).__name__[:80]
             if status_code is not None:
                 row['status_code'] = int(status_code)
+            if stage == 'provider_transport' and isinstance(metrics, dict):
+                for key in _PROVIDER_COUNTS:
+                    value = metrics.get(key)
+                    if type(value) is int and 0 <= value <= 1_000_000_000:
+                        row[key] = value
+                if 'finish_reason' in metrics:
+                    reason = metrics['finish_reason']
+                    row['finish_reason'] = reason if isinstance(reason, str) and reason in _FINISH_REASONS else 'unknown'
             LOGGER.warning(json.dumps(row, separators=(',', ':'), ensure_ascii=True))
         except Exception:
             # An unavailable handler cannot break successful work or hide errors.
@@ -70,6 +83,10 @@ class AIRequestTrace:
 
     def error(self, stage, exc):
         self._emit(stage, 'error', exc=exc)
+
+    def provider_metrics(self, **metrics):
+        """Emit only bounded counters and a normalized provider completion enum."""
+        self._emit('provider_transport', 'metrics', metrics=metrics)
 
     def submitted_worker(self, stage, function, *args, **kwargs):
         submitted = time.monotonic()

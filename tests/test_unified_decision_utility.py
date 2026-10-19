@@ -236,3 +236,63 @@ def test_independent_llm_input_retains_protective_admission_basis():
     kept = projected['active_management_candidates'][0]
     assert kept['matched_seed_tail_gain_lower_r'] == .18
     assert kept['benefit_assessment']['basis'] == 'BOUNDED_TAIL_PROTECTION'
+
+
+def test_saturated_extended_tie_uses_declared_policy_order_in_both_input_orders():
+    # Both utilities exceed the fixed score cap. Preserve the existing policy
+    # priority rather than letting input order create a different decision.
+    candidates = rows(.18, .30, 'MOVE_TO_BE') + [rows(.20, .35)[1]]
+    for ordered in ([candidates[0], candidates[2], candidates[1]], candidates):
+        chosen, ranked, _ = rank_candidates(ordered, opinions(), context(), SCHEMES['quant100'])
+        assert chosen['policy'] == 'MOVE_TO_BE'
+        assert all(row['score'] == 1. for row in ranked if row['policy'] != 'HOLD')
+        assert chosen['quant_utility']['score_clipped'] is True
+        assert chosen['selection_diagnostics']['basis'] == 'DECLARED_POLICY_ORDER_AND_CANDIDATE_ID'
+
+
+def test_same_policy_tie_is_stable_by_candidate_identity():
+    candidates = rows(.18, .30)
+    candidates[1]['candidate_id'] = 'TIGHTEN_STOP:b'
+    other = {**candidates[1], 'candidate_id': 'TIGHTEN_STOP:a'}
+    for ordered in (candidates + [other], [candidates[0], other, candidates[1]]):
+        chosen, _, _ = rank_candidates(ordered, opinions(), context(), SCHEMES['quant100'])
+        assert chosen['candidate_id'] == 'TIGHTEN_STOP:a'
+
+
+def test_sacrifice_diagnostic_names_best_candidate_reference_instead_of_hold():
+    candidates = rows(.11, .10, 'TIGHTEN_STOP') + [rows(.053, .10, 'CLOSE_50')[1]]
+    _, ranked, _ = rank_candidates(candidates, opinions(), context(), SCHEMES['quant100'])
+    close = ranked[2]
+    assert close['ranking_reason'] == 'EXPECTED_SACRIFICE_EXCEEDS_BUDGET'
+    assert close['delta_expected_r'] > 0.
+    check = close['expected_sacrifice_check']
+    assert check['reference_candidate_id'] == 'TIGHTEN_STOP'
+    assert check['reference_expected_net_r'] == pytest.approx(.881)
+    assert check['candidate_expected_net_r'] == pytest.approx(.824)
+    assert check['sacrifice_r'] == pytest.approx(.057)
+    assert check['budget_r'] == .03
+    assert check['pass'] is False
+
+
+def test_compact_report_keeps_distinct_independent_and_common_admission_values():
+    from seiltanzer.unified_edge_audit import compact_unified_ensemble, render_unified_ensemble_lines
+    value = protective_snapshot()
+    independent = value['active_management_candidates'][0]
+    independent.update(expected_delta_vs_hold_r=.08632, paired_delta_ci95_lower_r=.04497,
+                       reason='ROBUST_EXPECTED_GAIN_AND_CVAR_PASS',
+                       method='two_seed_stable_path_id_paired_counterfactual_execution_paths')
+    audit = build_unified_ensemble(value, scheme='quant100')
+    compact = compact_unified_ensemble(audit)
+    stop = next(row for row in compact['candidates'] if row['policy'] == 'TIGHTEN_STOP')
+    assert stop['independent_evaluation']['expected_delta_vs_hold_r'] == .08632
+    assert stop['independent_evaluation']['paired_delta_ci95_lower_r'] == .04497
+    assert stop['independent_evaluation']['method'] == independent['method']
+    benefit = stop['benefit_assessment']
+    assert benefit['expected_test_value_r'] == pytest.approx(stop['paired_delta_ci95_lower_r'])
+    assert benefit['expected_test_value_r'] < benefit['indifference_band_r']
+    assert benefit['basis'] == 'BOUNDED_TAIL_PROTECTION'
+    text = '\n'.join(render_unified_ensemble_lines(audit))
+    assert 'Независимый допуск' in text
+    assert '+0.086R' in text
+    assert 'различные модели' in text
+    assert 'проверяемое ΔExpected' in text

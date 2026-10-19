@@ -135,6 +135,10 @@ export function mountUnifiedEdgeEnsemble(container, audit, { archived = false } 
     `Защитная польза: ΔExpected + ${audit.decision_utility.tail_weight} × ΔCVaR; положительный вклад риска ограничен зоной безразличия. Оценки экспертов относительно явного HOLD; порог смены решения ${audit.decision_utility.hold_score_margin} балла. Это заданная политика выбора, не доказанный оптимум весов.`);
   if (chosen.quant_utility) appendTextLine(panel, 'tiny',
     `Количественная польза: за Expected ${signed(chosen.quant_utility.expected_delta_r, 'R')}; за риск ${signed(chosen.quant_utility.tail_credit_r, 'R')}; полезность ${signed(chosen.quant_utility.utility_delta_r, 'R')} (${chosen.benefit_assessment?.basis || '—'}). Полезность не заменяет Expected.`);
+  if (audit.selection_diagnostics) appendTextLine(panel, 'tiny dim',
+    `Основание выбора: ${audit.selection_diagnostics.basis || '—'}; равный балл: ${(audit.selection_diagnostics.equal_score_candidate_ids || []).join(', ') || '—'}. При равном балле: HOLD, меньшее сокращение, порядок действий, ID.`);
+  if (chosen.quant_utility?.score_clipped) appendTextLine(panel, 'tiny dim',
+    `Количественный балл ограничен [-1, 1]; до ограничения ${signed(chosen.quant_utility.score_unclipped)}. Полезность сверх ограничения балла не решает ничью.`);
   appendTextLine(panel, 'tiny dim', audit.shared_scenario_bank
     ? 'Кандидаты с оценкой рассчитаны на общих сценариях.'
     : `Общий набор сценариев не подтверждён; расширенные действия используют парное сравнение с HOLD. ${audit.economics_scope || ''}`);
@@ -179,6 +183,17 @@ export function mountUnifiedEdgeEnsemble(container, audit, { archived = false } 
       signed(row.expected_net_r, 'R'), signed(row.cvar10_net_r, 'R'),
       signed(row.delta_expected_r, 'R'), signed(row.score), contributionText(row.component_contributions, label),
     ]));
+  for (const row of candidates) {
+    const check = row.expected_sacrifice_check;
+    if (row.ranking_reason === 'EXPECTED_SACRIFICE_EXCEEDS_BUDGET' && check) appendTextLine(detail, 'tiny',
+      `${row.policy}: Экономическая плата относительно ${check.reference_candidate_id || '—'} (Expected ${signed(check.reference_expected_net_r, 'R')}): ${signed(check.sacrifice_r, 'R')}; бюджет ${signed(check.budget_r, 'R')}.`);
+    const benefit = row.benefit_assessment;
+    if (row.policy !== 'HOLD' && finiteNumber(benefit?.expected_test_value_r) !== null) appendTextLine(detail, 'tiny',
+      `${row.policy}: Допуск ранжирования: проверяемое ΔExpected ${signed(benefit.expected_test_value_r, 'R')}; порог прибыли > ${signed(benefit.indifference_band_r, 'R')}; защитная плата Expected ≥ ${signed(-benefit.indifference_band_r, 'R')}; прирост хвоста ${signed(benefit.tail_test_value_r, 'R')}; минимум ${signed(benefit.minimum_tail_gain_r, 'R')}; ${benefit.basis || '—'}.`);
+    const independent = row.independent_evaluation;
+    if (independent) appendTextLine(detail, 'tiny dim',
+      `${row.policy}: Независимый допуск: ${independent.status || '—'}; ${independent.reason || '—'}; HOLD ${signed(independent.expected_hold_net_r, 'R')}; ΔExpected/HOLD ${signed(independent.expected_delta_vs_hold_r, 'R')}; нижняя граница ${signed(independent.paired_delta_ci95_lower_r, 'R')}; метод ${independent.method || '—'}. Независимая проверка и общий банк — различные модели; их Δ не взаимозаменяемы.`);
+  }
   panel.appendChild(detail);
   const counterfactuals = Array.isArray(audit.counterfactuals) ? audit.counterfactuals : [];
   appendAuditTable(panel, ['Решение без компонента', 'Действие', 'Изменение'],
