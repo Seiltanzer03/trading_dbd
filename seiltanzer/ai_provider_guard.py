@@ -15,6 +15,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from contextvars import copy_context
 from typing import Any, Callable
 
 
@@ -445,7 +446,10 @@ def bounded_provider_call(
         if remaining > 0:
             raise RuntimeError(f"provider_circuit_open_{remaining:.1f}s")
     pool = executor or _EXECUTOR
-    future = pool.submit(fn, snapshot)
+    # Keep the originating request's diagnostic context inside this separate
+    # worker, including late completion after the caller's wall-clock timeout.
+    context = copy_context()
+    future = pool.submit(context.run, fn, snapshot)
     try:
         result = future.result(timeout=max(0.001, timeout))
         if production_pool:

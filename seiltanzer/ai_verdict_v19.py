@@ -334,6 +334,8 @@ def _risk_lines(snapshot: dict) -> list[str]:
     rec = manager.get("recommendation") or {}
     policies = manager.get("policies") or {}
     raw = rec.get("raw_optimizer_policy") or (manager.get("gate") or {}).get("raw_policy") or rec.get("policy") or "—"
+    refresh = snapshot.get('market_refresh') or {}
+    cached_selection = refresh.get('available') is True and refresh.get('heavy_policy_recomputed') is False
     gross = _number(risk.get("gross_cvar_floor_r")); gross = _number(risk.get("cvar_floor_r")) if gross is None else gross
     deferred = _number(risk.get("unavoidable_deferred_cost_r")); deferred = _number((manager.get("execution_cost_model") or {}).get("deferred_full_close_r")) if deferred is None else deferred
     net = _number(rule.get("cvar_floor_r")); chosen_cvar = _number((policies.get(raw) or {}).get("cvar10_r"))
@@ -342,7 +344,10 @@ def _risk_lines(snapshot: dict) -> list[str]:
     arithmetic_ok = bool(chosen_cvar is not None and net is not None and chosen_cvar >= net - 1e-12)
     eligible_text = "UNAVAILABLE" if eligible is None else (", ".join(eligible) if eligible else "нет")
     lines = [
-        (f"Базовый quant-выбор: {raw}. Допустимы по NET CVaR в базовом расчёте: {eligible_text}."
+        (f"ORIGINAL_CACHED_SELECTION: {raw}; original_snapshot_ts={refresh.get('original_snapshot_ts') if refresh.get('original_snapshot_ts') is not None else 'UNAVAILABLE'}. "
+         f"Исходный базовый выбор сохранён без пересчёта; допустимы по NET CVaR текущего сравнения: {eligible_text}."
+         if cached_selection else
+         f"Базовый quant-выбор: {raw}. Допустимы по NET CVaR в базовом расчёте: {eligible_text}."
          if manager.get('unified_edge_ensemble') else f"Расчётный выбор: {raw}. Допустимы по NET CVaR: {eligible_text}."),
         f"Gross strategy CVaR floor: {_r(gross)}.",
         f"Unavoidable deferred close cost: {_r(deferred)}.",
@@ -361,7 +366,11 @@ def _risk_lines(snapshot: dict) -> list[str]:
     if indifference is not None and best_expected is not None and raw_expected is not None:
         gap = max(0.0, best_expected - raw_expected)
         soft = rule.get('combined_edge_soft_weight') or {}
-        if soft.get('applied'):
+        if cached_selection:
+            lines.append(
+                f"Лучший Expected текущего сравнения {_r(best_expected)}; сохранённый {raw} отстаёт на {_r(gap)}. "
+                "Эти числа не объясняют выбор исходного снимка: базовый оптимизатор не пересчитывался.")
+        elif soft.get('applied'):
             lines.append(
                 f"Лучший исходный Expected {_r(best_expected)}; Expected {raw} {_r(raw_expected)}; разрыв {_r(gap)}. "
                 f"Выбор использует мягкое ранжирование edge с зоной безразличия {_r(indifference)}. "

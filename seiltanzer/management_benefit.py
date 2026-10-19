@@ -46,6 +46,8 @@ def benefit_assessment(policy, delta_expected_r, delta_cvar_r, band_r,
         allowed, basis = False, 'NO_MATERIAL_NET_OR_BOUNDED_TAIL_BENEFIT'
     return {'contract_version': VERSION, 'allowed': allowed, 'basis': basis,
             'indifference_band_r': band, 'minimum_tail_gain_r': MIN_TAIL_GAIN_R,
+            'delta_expected_r': delta, 'delta_cvar_r': tail,
+            'expected_test_value_r': expected, 'tail_test_value_r': protective_tail,
             'expected_lower_r': lower, 'tail_lower_r': tail_lower,
             'sensitivity_basis': ('PAIRED_MODEL_BOUND' if lower is not None else
                                   'QUALIFIED_POINT_ECONOMICS'),

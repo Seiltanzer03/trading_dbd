@@ -110,6 +110,31 @@ def test_numerical_base_availability_is_not_reported_as_source_quality():
     assert 'не оценка надёжности источников' in text
 
 
+@pytest.mark.parametrize('original_ts', [1792419000., None])
+def test_quote_refresh_labels_cached_base_selection_without_fresh_tie_causality(original_ts):
+    # The saved second report retained CLOSE_50 from the heavy cached build,
+    # alongside fresh common-bank values whose best/least intervention is HOLD.
+    s = selected_snapshot('TIGHTEN_STOP')
+    s['market_refresh'] = {'available': True, 'heavy_policy_recomputed': False,
+                           'original_snapshot_ts': original_ts}
+    p = s['policy_manager']
+    p['recommendation']['raw_optimizer_policy'] = 'CLOSE_50'
+    p['policies'] = {'HOLD': {'expected_final_r': .6474991859991861, 'cvar10_r': -.01},
+                     'CLOSE_50': {'expected_final_r': .6319364061864061, 'cvar10_r': .3031868131868128}}
+    p['selection_rule'].update(eligible=['HOLD', 'CLOSE_50'], best_expected_r=.6474991859991861,
+                               cvar_floor_r=-.01, indifference_band_r=.03)
+    before = deepcopy(s)
+    text = '\n'.join(report._risk_lines(s))
+    assert 'ORIGINAL_CACHED_SELECTION: CLOSE_50' in text
+    assert f'original_snapshot_ts={original_ts if original_ts is not None else "UNAVAILABLE"}' in text
+    assert 'текущего сравнения +0.647R' in text
+    assert 'отстаёт на +0.016R' in text
+    assert 'базовый оптимизатор не пересчитывался' in text
+    assert 'Базовый quant-выбор: CLOSE_50' not in text
+    assert 'При разрыве не больше зоны выбирается' not in text
+    assert s == before
+
+
 def test_unified_replacement_does_not_keep_cancellation_continuity(monkeypatch):
     from seiltanzer.app import _unified_operational_choice
     s=selected_snapshot('HOLD','not_required')

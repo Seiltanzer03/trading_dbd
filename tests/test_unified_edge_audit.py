@@ -1,4 +1,7 @@
 from copy import deepcopy
+import json
+
+import pytest
 
 from seiltanzer import ai_verdict, ai_verdict_v19
 from seiltanzer.ai_snapshot_budget_guard import _strict_authoritative_compaction
@@ -62,6 +65,50 @@ def test_audit_keeps_all_actions_and_exclusions_without_expensive_paths():
     assert compact["candidates"][6]["parameters"] == {"new_stop": 105}
     assert all("paths" not in row for row in compact["candidates"])
     assert "verbose_workspace" not in compact["components"][0]
+
+
+def null_working_family_row(family):
+    return {'family_id': family, 'score': None, 'within_llm_weight': None,
+            'effective_weight': 0., 'hold_reference_contribution': None, 'contribution': None}
+
+
+def test_compact_omits_96_null_opinion_placeholders_without_losing_actions_or_family_readiness():
+    raw = audit()
+    families = [f'family_{index}' for index in range(8)]
+    raw['edge_families'] = {family: {'available': False, 'readiness': 'UNAVAILABLE',
+                                   'reason': 'NO_CURRENT_OPINION'} for family in families}
+    for candidate in raw['candidates']:
+        candidate['working_family_contributions'] = [null_working_family_row(family) for family in families]
+    before = deepcopy(raw)
+    compact = compact_unified_ensemble(raw)
+    assert all(candidate['working_family_contributions'] == [] for candidate in compact['candidates'])
+    assert compact['null_working_family_rows_omitted'] == 96
+    assert len(compact['candidates']) == 12
+    assert {row['family_id'] for row in compact['edge_families']} == set(families)
+    assert all(row['readiness'] == 'UNAVAILABLE' for row in compact['edge_families'])
+    assert [(row['candidate_id'], row['expected_net_r'], row['score']) for row in compact['candidates']] == [
+        (row['candidate_id'], row['expected_net_r'], row['score']) for row in raw['candidates']]
+    assert compact_unified_ensemble(compact) == compact
+    assert raw == before
+    # Match the measured 12×8 redundant-row payload without storing any source history.
+    redundant = deepcopy(compact)
+    for row in redundant['candidates']:
+        row['working_family_contributions'] = [null_working_family_row(family) for family in families]
+    byte_size = lambda value: len(json.dumps(value, separators=(',', ':')).encode())
+    assert byte_size(redundant) - byte_size(compact) > 12_000
+
+
+@pytest.mark.parametrize('actual', [
+    {'score': 0.}, {'within_llm_weight': 0.}, {'hold_reference_contribution': 0.},
+    {'contribution': 0.}, {'effective_weight': .01}, {'reason': 'AVAILABLE_BUT_ABSTAINING'},
+])
+def test_compact_preserves_zero_opinions_nonzero_effects_and_additional_diagnostics(actual):
+    raw = audit()
+    opinion = {**null_working_family_row('macro'), **actual}
+    raw['candidates'][0]['working_family_contributions'] = [opinion]
+    compact = compact_unified_ensemble(raw)
+    assert compact['candidates'][0]['working_family_contributions'] == [opinion]
+    assert compact.get('null_working_family_rows_omitted', 0) == 0
 
 
 def test_report_exposes_economic_tradeoff_without_turning_score_into_profit():

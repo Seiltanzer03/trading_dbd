@@ -140,6 +140,8 @@ def _extended_manual_decision(base: dict, action: dict) -> dict:
         "remaining_fraction_before_action": base["remaining_fraction_before_action"],
         "remaining_fraction_after_action": base["remaining_fraction_before_action"],
         "quant_baseline_policy": "HOLD",
+        "previous": base.get("previous"),
+        "continuity": base.get("continuity"),
         "manual_execution_required": True,
         "automatic_execution_allowed": False,
     }

@@ -42,7 +42,17 @@ const audit = {available:true,scheme:'balanced',instrument:'NAS100',regime:'TREN
 const container = new Element();
 audit.decision_utility = {tail_weight:.35,quant_scale_r:.12,hold_score_margin:.01};
 candidates[6].quant_utility = {expected_delta_r:-.01,tail_credit_r:.03,utility_delta_r:.02};
-candidates[6].benefit_assessment = {basis:'BOUNDED_TAIL_PROTECTION'};
+candidates[6].quant_utility.score_clipped = true;
+candidates[6].quant_utility.score_unclipped = 1.23;
+candidates[6].benefit_assessment = {basis:'BOUNDED_TAIL_PROTECTION',expected_test_value_r:-.02215,
+  indifference_band_r:.03,tail_test_value_r:.10,minimum_tail_gain_r:.05};
+candidates[6].independent_evaluation = {status:'eligible',reason:'ROBUST_EXPECTED_GAIN_AND_CVAR_PASS',
+  expected_hold_net_r:.4,expected_delta_vs_hold_r:.08632,paired_delta_ci95_lower_r:.04497,
+  method:'two_seed_stable_path_id_paired_counterfactual_execution_paths'};
+candidates[8].expected_sacrifice_check = {reference_candidate_id:'TIGHTEN_STOP',
+  reference_expected_net_r:.598,sacrifice_r:.068,budget_r:.03,pass:false};
+audit.selection_diagnostics = {basis:'DECLARED_POLICY_ORDER_AND_CANDIDATE_ID',
+  equal_score_candidate_ids:['MOVE_TO_BE','TIGHTEN_STOP']};
 mountEdgeManagement(container,{available:false,unified_edge_ensemble:audit});
 const text = container.textContent;
 const trainedContainer = new Element();
@@ -58,6 +68,13 @@ assert.match(trainedContainer.textContent,/пул 4\.0%/);
 assert.match(text,/Защитная польза/);
 assert.match(text,/порог смены решения/);
 assert.match(text,/за риск \+0\.030R/);
+assert.match(text,/Основание выбора: DECLARED_POLICY_ORDER_AND_CANDIDATE_ID/);
+assert.match(text,/балл.*ограничен.*1\.230/i);
+assert.match(text,/проверяемое ΔExpected -0\.022R/);
+assert.match(text,/защитная плата Expected ≥ -0\.030R/);
+assert.match(text,/Независимый допуск.*ΔExpected\/HOLD \+0\.086R/);
+assert.match(text,/различные модели/);
+assert.match(text,/Экономическая плата относительно TIGHTEN_STOP.*\+0\.598R.*\+0\.068R.*\+0\.030R/);
 assert.match(text,/15\.0% → 7\.5%/);
 assert.match(text,/повторные доказательства ×0\.500/);
 assert.match(text,/свежесть ×0\.950/);

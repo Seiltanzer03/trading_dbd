@@ -273,6 +273,11 @@ def collect_candidates(snapshot):
                      "cvar10_net_r": cvar, "delta_expected_r": delta, "delta_cvar_r": cvar_delta,
                      "execution_cost_r": number(raw.get("execution_cost_r")),
                      "quant_evaluation": deepcopy(raw), "source": raw.get("source") or "paired_extended_paths",
+                     "independent_evaluation": {key: raw[key] for key in (
+                         "status", "reason", "method", "expected_variant_net_r", "expected_hold_net_r",
+                         "expected_delta_vs_hold_r", "paired_delta_ci95_lower_r",
+                         "worst_seed_cvar10_net_r", "worst_seed_hold_cvar10_net_r",
+                         "matched_seed_tail_gain_lower_r", "materiality_band_r", "hard_net_floor_r") if key in raw},
                      "paired_delta_ci95_lower_r": number(raw.get('paired_delta_ci95_lower_r')),
                      "matched_seed_tail_gain_lower_r": number(raw.get('matched_seed_tail_gain_lower_r')),
                      "economics_basis": "paired_delta_anchored_to_authoritative_hold",
@@ -574,6 +579,8 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
     band = number(((snapshot.get("policy_manager") or {}).get("selection_rule") or {}).get("indifference_band_r"))
     band = max(0., band if band is not None else .03)
     best_expected = max(values) if values else None
+    best_reference = min((row for row in feasible if row['expected_net_r'] == best_expected),
+                         key=lambda row: row['candidate_id'], default=None)
     # Common offsets are not expert preferences. Keep sparse opinions sparse;
     # only an explicitly provided HOLD score acts as the reference.
     references = {}
@@ -591,7 +598,10 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
                 else row.get('delta_cvar_r'))
         utility = quantitative_utility(row.get('delta_expected_r'), tail, band)
         row['quant_utility'] = utility
-        quant_score = _score(utility['utility_delta_r'] / scale) if utility['utility_delta_r'] is not None else None
+        unclipped = utility['utility_delta_r'] / scale if utility['utility_delta_r'] is not None else None
+        quant_score = _score(unclipped)
+        utility.update(score_unclipped=unclipped,
+                       score_clipped=abs(unclipped) > 1. if unclipped is not None else None)
         contributions = []
         for component in components:
             identity = component["component_id"]
@@ -621,16 +631,45 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
             expected_lower_r=row.get('paired_delta_ci95_lower_r'),
             tail_lower_r=row.get('matched_seed_tail_gain_lower_r'))
         row['benefit_assessment'] = benefit
+        sacrifice = (best_expected - row['expected_net_r'] if best_expected is not None
+                     and row.get('expected_net_r') is not None else None)
         if row["eligible"] and row["policy"] != "HOLD" and best_expected is not None:
+            row['expected_sacrifice_check'] = {
+                'reference_candidate_id': best_reference['candidate_id'] if best_reference else None,
+                'reference_expected_net_r': best_expected,
+                'candidate_expected_net_r': row.get('expected_net_r'),
+                'sacrifice_r': sacrifice, 'budget_r': band,
+                'pass': sacrifice <= band + 1e-8 if sacrifice is not None else None,
+                'reference_scope': 'BEST_ELIGIBLE_EXPECTED_BEFORE_RANKING_FILTER',
+            }
             if not benefit['allowed']:
                 row["ranking_eligible"], row["ranking_reason"] = False, "NO_MATERIAL_NET_OR_BOUNDED_TAIL_BENEFIT"
             elif best_expected - row["expected_net_r"] > band + 1e-8:
                 row["ranking_eligible"], row["ranking_reason"] = False, "EXPECTED_SACRIFICE_EXCEEDS_BUDGET"
     allowed = [row for row in rows if row["ranking_eligible"]]
-    selected = max(allowed, key=lambda row: (row["score"], row["policy"] == "HOLD", -BASE.get(row["policy"], .05))) if allowed else None
+    # Preserve HOLD/smaller-base-intervention priority. Remaining exact score
+    # ties use the existing declared policy order and identity, never the input
+    # list order or an unbounded utility that would bypass the fixed score cap.
+    policy_order = {policy: index for index, policy in enumerate((*BASE, *EXTENDED))}
+    selected = min(allowed, key=lambda row: (-row['score'], row['policy'] != 'HOLD',
+        BASE.get(row['policy'], .05), policy_order.get(row['policy'], len(policy_order)),
+        row['candidate_id'])) if allowed else None
     hold = next((row for row in allowed if row['policy'] == 'HOLD'), None)
+    margin_retained = False
     if hold and selected and selected['policy'] != 'HOLD' and selected['score'] <= hold['score'] + HOLD_SCORE_MARGIN + 1e-8:
         selected = hold
+        margin_retained = True
+    if selected:
+        tied = [row for row in allowed if row['score'] == selected['score']]
+        basis = ('HOLD_STABILITY_MARGIN' if margin_retained else
+                 'WEIGHTED_SCORE' if len(tied) == 1 else
+                 'HOLD_TIE_PRIORITY' if selected['policy'] == 'HOLD' else
+                 'SMALLER_BASE_INTERVENTION' if len({BASE.get(row['policy'], .05) for row in tied}) > 1 else
+                 'DECLARED_POLICY_ORDER_AND_CANDIDATE_ID')
+        selected['selection_diagnostics'] = {'basis': basis, 'weighted_score': selected['score'],
+            'equal_score_candidate_ids': sorted(row['candidate_id'] for row in tied),
+            'hold_score_margin': HOLD_SCORE_MARGIN,
+            'unclipped_utility_used_for_tie_break': False}
     return selected, rows, components
 
 
@@ -772,6 +811,7 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
             "nominal_weights": {identity: schemes[scheme].get(identity, 0.) for identity in component_ids},
             "selected_policy": selected.get("policy") if selected else None,
             "reason": "WEIGHTED_AUTHORIZED_CANDIDATES" if selected else "NO_AUTHORIZED_CANDIDATE",
+            "selection_diagnostics": selected.get('selection_diagnostics') if selected else None,
             "candidates": candidates, "components": components, "edge_families": families,
             'research_working_context': deepcopy(research_context_audit(snapshot)) if 'research_working_context' in snapshot else {},
             'market_family_counterfactuals': market_counterfactuals,

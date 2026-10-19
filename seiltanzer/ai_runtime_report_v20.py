@@ -5,6 +5,7 @@ management_decision, execution authority or research authority.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import json
 import math
@@ -38,14 +39,13 @@ PROVIDER_RESPONSE_MAX_BYTES = 20_000
 _INSTALLED = False
 
 _COMBINED_PROMPT = """
-INDEPENDENT SHADOW + BOUNDED COMMENTARY MODE.
+INDEPENDENT SHADOW MODE.
 The server owns the production management_decision and every deterministic number.
 The selected quant policy and all server winner outputs are deliberately withheld.
 You MUST NOT change, execute, or present the shadow policy as the production action.
 
 Return ONLY one valid JSON object, no markdown:
 {
-  "explanation_ru": "Brief Russian commentary on the available facts, limitations, data quality, and next recalculation trigger; do not infer the hidden server action or issue a trading instruction here",
   "shadow_decision": {
     "policy": "HOLD|CLOSE_10|CLOSE_25|CLOSE_50|EXIT|MOVE_TO_BE|TRAIL_GAMMA_FLIP|TIGHTEN_STOP|EXTEND_TAKE|REDUCE_TAKE|SCALE_OUT_ON_SPIKE|TIME_STOP",
     "confidence": 0.0,
@@ -59,9 +59,8 @@ Return ONLY one valid JSON object, no markdown:
   }
 }
 
-Keep the response concise: explanation_ru is optional and may be empty (the
-server writes the displayed report). Do not repeat the same rationale in prose
-and shadow fields. Keep reason_ru under160 characters, each evidence item under
+Keep the response concise; the server writes the displayed report.
+Keep reason_ru under160 characters, each evidence item under
 120 characters, use2-3 key facts and at most2 counter-facts/invalidations.
 Omit unavailable family entries rather than emitting eight empty objects.
 
@@ -459,41 +458,52 @@ def request_explanation_with_shadow(
     if not authoritative_current_price_available(authority):
         raise RuntimeError("provider_explanation_blocked_missing_authoritative_price")
 
-    deterministic = ai_verdict.render_policy_report(authority)
-    # Mask at the actual transport boundary. The deterministic renderer and
-    # post-response guard retain full authority locally; no winner-bearing
-    # explanation facts or verdict system prompt are uploaded to the model.
-    independent_input = _independent_provider_input(snapshot, authority)
-    from .decision_research import validate_no_future_timestamps
-    validate_no_future_timestamps(independent_input, float(authority["captured_ts"]))
-    frozen_input_json = json.dumps(independent_input, ensure_ascii=False,
-                                   sort_keys=True, separators=(",", ":"), allow_nan=False)
-    if len(frozen_input_json.encode("utf-8")) > INDEPENDENT_INPUT_MAX_BYTES:
-        raise RuntimeError("combined_provider_independent_input_budget_exceeded")
-    body = {
-        "model": model,
-        "temperature": 0.0,
-        "max_tokens": COMBINED_PROVIDER_MAX_TOKENS,
-        "messages": [
-            {"role": "system", "content": _COMBINED_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "Bounded independent decision input:\n" + frozen_input_json
-                ),
-            },
-        ],
-    }
-    provider_request_json = json.dumps(body, ensure_ascii=False, sort_keys=True,
-                                      separators=(",", ":"), allow_nan=False)
+    from .ai_request_trace import current_trace
+    trace = current_trace()
+    phase = trace.span if trace is not None else lambda _stage: nullcontext()
+    with phase('provider_render'):
+        deterministic = ai_verdict.render_policy_report(authority)
+    with phase('provider_prepare'):
+        # Mask at the actual transport boundary. The deterministic renderer and
+        # post-response guard retain full authority locally; no winner-bearing
+        # explanation facts or verdict system prompt are uploaded to the model.
+        independent_input = _independent_provider_input(snapshot, authority)
+        from .decision_research import validate_no_future_timestamps
+        validate_no_future_timestamps(independent_input, float(authority["captured_ts"]))
+        frozen_input_json = json.dumps(independent_input, ensure_ascii=False,
+                                       sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if len(frozen_input_json.encode("utf-8")) > INDEPENDENT_INPUT_MAX_BYTES:
+            raise RuntimeError("combined_provider_independent_input_budget_exceeded")
+        body = {
+            "model": model,
+            "temperature": 0.0,
+            "max_tokens": COMBINED_PROVIDER_MAX_TOKENS,
+            "messages": [
+                {"role": "system", "content": _COMBINED_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "Bounded independent decision input:\n" + frozen_input_json
+                    ),
+                },
+            ],
+        }
+        provider_request_json = json.dumps(body, ensure_ascii=False, sort_keys=True,
+                                          separators=(",", ":"), allow_nan=False)
+    if trace is not None:
+        trace.provider_metrics(input_bytes=len(frozen_input_json.encode('utf-8')),
+            request_bytes=len(provider_request_json.encode('utf-8')),
+            max_output_tokens=COMBINED_PROVIDER_MAX_TOKENS)
     try:
-        with httpx.Client(proxy=proxy, timeout=8, trust_env=False) as client:
-            response = client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                json=body,
-                headers=_provider._provider_headers(key),
-            )
-            response.raise_for_status()
+        with phase('provider_http'):
+            with httpx.Client(proxy=proxy, timeout=8, trust_env=False) as client:
+                response = client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    json=body,
+                    headers=_provider._provider_headers(key),
+                )
+                response.raise_for_status()
+        with phase('provider_decode'):
             try:
                 result = response.json()
                 response_received_ts = time.time()
@@ -504,85 +514,106 @@ def request_explanation_with_shadow(
     except httpx.HTTPError as exc:
         raise RuntimeError(f"OpenRouter connection failed: {type(exc).__name__}") from exc
 
-    content = ((result.get("choices") or [{}])[0].get("message") or {}).get("content")
-    _explanation, parsed_shadow = _provider_payload(content)
-    quant_policy = _quant_policy(authority)
-    guard_ok, guard_reasons = _hard_guard(authority, parsed_shadow["policy"])
-    disagreement_cat = _disagreement_category(parsed_shadow["policy"], quant_policy)
-    shadow = {
-        "version": "llm-decision-shadow-v1",
-        "status": "ok" if guard_ok else "blocked",
-        "production_authority": False,
-        "automatic_execution_allowed": False,
-        "model": result.get("model", model),
-        "quant_policy": quant_policy,
-        "policy": parsed_shadow["policy"],
-        "confidence": parsed_shadow["confidence"],
-        "agreement": parsed_shadow["policy"] == quant_policy if quant_policy else None,
-        "disagreement_category": disagreement_cat,
-        "blocked_by_hard_guard": not guard_ok,
-        "hard_guard_reasons": guard_reasons,
-        "reason_ru": parsed_shadow["reason_ru"],
-        "key_evidence": parsed_shadow["key_evidence"],
-        "counter_evidence": parsed_shadow["counter_evidence"],
-        "policy_scores": parsed_shadow["policy_scores"],
-        "evidence_families": parsed_shadow["evidence_families"],
-        "family_assessments": parsed_shadow.get("family_assessments", {}),
-        "family_assessment_rejections": parsed_shadow.get("family_assessment_rejections", {}),
-        "invalidation_conditions": parsed_shadow["invalidation_conditions"],
-        "selection_masked": True,
-        "captured_ts": authority.get("captured_ts"),
-        "input_captured_ts": authority.get("captured_ts"),
-        "provider_response_received_ts": response_received_ts,
-        "input_contract": {
-            "version": "independent-llm-transport-v1",
-            "quant_selection_masked": True,
-            "all_policy_scores_required": True,
+    if trace is not None:
+        # Extract only bounded counters/enums. Missing or malformed usage must
+        # never change response admission, and no body/model/header is logged.
+        try:
+            choices = result.get('choices') if isinstance(result, dict) else None
+            choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+            message = choice.get('message')
+            output = message.get('content') if isinstance(message, dict) else None
+            usage = result.get('usage') if isinstance(result, dict) else None
+            usage = usage if isinstance(usage, dict) else {}
+            raw = getattr(response, 'content', None)
+            trace.provider_metrics(
+                response_bytes=len(raw) if isinstance(raw, bytes) else None,
+                output_bytes=len(output.encode('utf-8')) if isinstance(output, str) else None,
+                finish_reason=choice.get('finish_reason'),
+                prompt_tokens=usage.get('prompt_tokens'),
+                completion_tokens=usage.get('completion_tokens'),
+                total_tokens=usage.get('total_tokens'))
+        except Exception:
+            pass  # Diagnostic extraction cannot affect the provider result.
+    with phase('provider_validate'):
+        content = ((result.get("choices") or [{}])[0].get("message") or {}).get("content")
+        _explanation, parsed_shadow = _provider_payload(content)
+        quant_policy = _quant_policy(authority)
+        guard_ok, guard_reasons = _hard_guard(authority, parsed_shadow["policy"])
+        disagreement_cat = _disagreement_category(parsed_shadow["policy"], quant_policy)
+        shadow = {
+            "version": "llm-decision-shadow-v1",
+            "status": "ok" if guard_ok else "blocked",
+            "production_authority": False,
+            "automatic_execution_allowed": False,
+            "model": result.get("model", model),
+            "quant_policy": quant_policy,
+            "policy": parsed_shadow["policy"],
+            "confidence": parsed_shadow["confidence"],
+            "agreement": parsed_shadow["policy"] == quant_policy if quant_policy else None,
+            "disagreement_category": disagreement_cat,
+            "blocked_by_hard_guard": not guard_ok,
+            "hard_guard_reasons": guard_reasons,
+            "reason_ru": parsed_shadow["reason_ru"],
+            "key_evidence": parsed_shadow["key_evidence"],
+            "counter_evidence": parsed_shadow["counter_evidence"],
+            "policy_scores": parsed_shadow["policy_scores"],
+            "evidence_families": parsed_shadow["evidence_families"],
+            "family_assessments": parsed_shadow.get("family_assessments", {}),
+            "family_assessment_rejections": parsed_shadow.get("family_assessment_rejections", {}),
+            "invalidation_conditions": parsed_shadow["invalidation_conditions"],
+            "selection_masked": True,
+            "captured_ts": authority.get("captured_ts"),
             "input_captured_ts": authority.get("captured_ts"),
-            "frozen_input_json": frozen_input_json,
-            "frozen_input_sha256": hashlib.sha256(frozen_input_json.encode("utf-8")).hexdigest(),
-            "provider_request_json": provider_request_json,
-            "provider_request_sha256": hashlib.sha256(provider_request_json.encode("utf-8")).hexdigest(),
-            "available_evidence_family_ids": (independent_input.get("shadow_contract") or {}).get(
-                "available_evidence_family_ids", []),
-        },
-        "provider_response_json": content,
-        "provider_response_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-    }
-    shadow["working_action"] = build_working_action(authority, shadow)
-    finalize_extended_shadow(authority, shadow)
-    from .llm_decision_shadow import audit_report_claims
-    audit_report_claims(authority, shadow)
-    record_shadow_decision(shadow)
-    combined = (
-        deterministic.rstrip()
-        + "\n\n**ПРОВЕРЕННЫЙ ВЫВОД** —\n"
-        + _control_summary(authority)
-    )
-    combined = append_shadow_section(combined, shadow)
-    combined = combined.replace("\n\n**ПРОВЕРЕННЫЙ ВЫВОД**",
-                                "\n\n" + _decision_weights(authority, shadow)
-                                + "\n\n**ПРОВЕРЕННЫЙ ВЫВОД**", 1)
-    violations = ai_verdict._validate_model_report(combined, authority)
-    hard_violations = [
-        violation for violation in violations
-        if violation == "изменено рассчитанное действие"
-        or violation.startswith("нет политики ")
-        or violation.startswith("изменено или пропущено ")
-    ]
-    if hard_violations:
-        raise RuntimeError("combined_provider_hard_integrity_failure")
-    return {
-        "verdict": combined,
-        "model": result.get("model", model),
-        "captured_ts": authority.get("captured_ts"),
-        "provider_mode": "llm_explanation_plus_decision_shadow",
-        "llm_shadow_decision": shadow,
-        "report_version": REPORT_VERSION,
-        "validation_warnings": [
-            violation for violation in violations if violation not in hard_violations
-        ],
-    }
+            "provider_response_received_ts": response_received_ts,
+            "input_contract": {
+                "version": "independent-llm-transport-v1",
+                "quant_selection_masked": True,
+                "all_policy_scores_required": True,
+                "input_captured_ts": authority.get("captured_ts"),
+                "frozen_input_json": frozen_input_json,
+                "frozen_input_sha256": hashlib.sha256(frozen_input_json.encode("utf-8")).hexdigest(),
+                "provider_request_json": provider_request_json,
+                "provider_request_sha256": hashlib.sha256(provider_request_json.encode("utf-8")).hexdigest(),
+                "available_evidence_family_ids": (independent_input.get("shadow_contract") or {}).get(
+                    "available_evidence_family_ids", []),
+            },
+            "provider_response_json": content,
+            "provider_response_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        }
+        shadow["working_action"] = build_working_action(authority, shadow)
+        finalize_extended_shadow(authority, shadow)
+        from .llm_decision_shadow import audit_report_claims
+        audit_report_claims(authority, shadow)
+        record_shadow_decision(shadow)
+        combined = (
+            deterministic.rstrip()
+            + "\n\n**ПРОВЕРЕННЫЙ ВЫВОД** —\n"
+            + _control_summary(authority)
+        )
+        combined = append_shadow_section(combined, shadow)
+        combined = combined.replace("\n\n**ПРОВЕРЕННЫЙ ВЫВОД**",
+                                    "\n\n" + _decision_weights(authority, shadow)
+                                    + "\n\n**ПРОВЕРЕННЫЙ ВЫВОД**", 1)
+        violations = ai_verdict._validate_model_report(combined, authority)
+        hard_violations = [
+            violation for violation in violations
+            if violation == "изменено рассчитанное действие"
+            or violation.startswith("нет политики ")
+            or violation.startswith("изменено или пропущено ")
+        ]
+        if hard_violations:
+            raise RuntimeError("combined_provider_hard_integrity_failure")
+        return {
+            "verdict": combined,
+            "model": result.get("model", model),
+            "captured_ts": authority.get("captured_ts"),
+            "provider_mode": "llm_explanation_plus_decision_shadow",
+            "llm_shadow_decision": shadow,
+            "report_version": REPORT_VERSION,
+            "validation_warnings": [
+                violation for violation in violations if violation not in hard_violations
+            ],
+        }
 
 
 def install_ai_runtime_report_v20() -> None:

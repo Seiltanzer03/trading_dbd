@@ -104,6 +104,8 @@ def compact_unified_ensemble(value: Any) -> dict:
         "score_semantics", "regime_weight_semantics", "hard_risk_override",
         "automatic_execution_allowed",
         "decision_utility",
+        "selection_diagnostics",
+        "null_working_family_rows_omitted",
         "ranking_available", "ranking_selected_policy", "ranking_selected_candidate_id",
         "regime_context",
         'research_working_context',
@@ -141,6 +143,9 @@ def compact_unified_ensemble(value: Any) -> dict:
             "working_family_contributions",
             'model_family_contributions',
             "quant_utility", "benefit_assessment",
+            "expected_sacrifice_check", "independent_evaluation",
+            "paired_delta_ci95_lower_r", "matched_seed_tail_gain_lower_r",
+            "expected_hold_net_r",
         ),
         "components": (
             "component_id", "nominal_weight", "effective_weight", "availability",
@@ -205,6 +210,26 @@ def compact_unified_ensemble(value: Any) -> dict:
             prior_truncation = value.get(f"{key}_truncated_count")
             if isinstance(prior_truncation, int) and not isinstance(prior_truncation, bool) and prior_truncation > 0:
                 out[f"{key}_truncated_count"] = prior_truncation + max(0, len(rows) - limit)
+    # Family readiness is retained once in edge_families. Empty per-action
+    # opinion placeholders add no evidence and can consume the snapshot budget.
+    # A genuine zero opinion or any extra diagnostic remains distinguishable.
+    opinion_fields = ('score', 'within_llm_weight', 'hold_reference_contribution', 'contribution')
+    placeholder_keys = {'family_id', 'effective_weight', *opinion_fields}
+    omitted = 0
+    for candidate in out.get('candidates', []):
+        parts = candidate.get('working_family_contributions')
+        if not isinstance(parts, list):
+            continue
+        kept = [part for part in parts if not (
+            isinstance(part, dict) and set(part) <= placeholder_keys
+            and all(part.get(key) is None for key in opinion_fields)
+            and _num(part.get('effective_weight')) == 0.)]
+        omitted += len(parts) - len(kept)
+        candidate['working_family_contributions'] = kept
+    if omitted:
+        previous = value.get('null_working_family_rows_omitted')
+        previous = previous if isinstance(previous, int) and not isinstance(previous, bool) and previous > 0 else 0
+        out['null_working_family_rows_omitted'] = previous + omitted
     out['selection_context'] = ({'mode': 'NOT_REPORTED'} if out.get('candidates_truncated_count')
                                 else selection_context(value))
     return out
@@ -256,6 +281,12 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
                      f"{utility_policy.get('tail_weight')} × ΔCVaR; положительный вклад риска ограничен зоной безразличия. "
                      f"Оценки экспертов относительно явного HOLD; порог смены решения {utility_policy.get('hold_score_margin')} балла. "
                      "Это заданная политика выбора, не доказанный оптимум весов и не дополнительная доходность.")
+    selection = audit.get('selection_diagnostics') or {}
+    if selection:
+        lines.insert(-1, "Основание выбора: " + str(selection.get('basis') or '—')
+                     + "; равный балл: " + ', '.join(selection.get('equal_score_candidate_ids') or [])
+                     + ". При равном балле сохраняются приоритет HOLD/меньшего сокращения, затем порядок действий и ID; "
+                     "полезность сверх ограничения балла не решает ничью.")
     bank = audit.get("scenario_bank") or audit.get("comparison_bank") or {}
     context = audit['selection_context']
     if context.get('mode') == 'HOLD_ONLY_ADMISSIBLE':
@@ -318,6 +349,31 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
             f"{'; ' + str(reason) if reason else ''}."
         )
         utility = row.get('quant_utility') or {}
+        sacrifice = row.get('expected_sacrifice_check') or {}
+        if row.get('ranking_reason') == 'EXPECTED_SACRIFICE_EXCEEDS_BUDGET' and sacrifice:
+            lines.append("Экономическая плата относительно "
+                         + str(sacrifice.get('reference_candidate_id') or '—') + " (Expected "
+                         + _format(sacrifice.get('reference_expected_net_r'), 'R') + "): "
+                         + _format(sacrifice.get('sacrifice_r'), 'R') + "; бюджет "
+                         + _format(sacrifice.get('budget_r'), 'R') + ". Это сравнение с лучшим допустимым Expected.")
+        benefit = row.get('benefit_assessment') or {}
+        if row.get('policy') != 'HOLD' and benefit.get('expected_test_value_r') is not None:
+            lines.append("Допуск ранжирования: проверяемое ΔExpected "
+                         + _format(benefit.get('expected_test_value_r'), 'R') + "; порог прибыли > "
+                         + _format(benefit.get('indifference_band_r'), 'R') + "; защитная плата Expected ≥ "
+                         + _format(-benefit['indifference_band_r'], 'R') + "; проверяемый прирост хвоста "
+                         + _format(benefit.get('tail_test_value_r'), 'R') + "; минимум "
+                         + _format(benefit.get('minimum_tail_gain_r'), 'R') + "; основание "
+                         + str(benefit.get('basis') or '—') + ".")
+        independent = row.get('independent_evaluation') or {}
+        if independent:
+            lines.append("Независимый допуск: " + str(independent.get('status') or '—') + "; "
+                         + str(independent.get('reason') or '—') + "; HOLD "
+                         + _format(independent.get('expected_hold_net_r'), 'R') + "; ΔExpected/HOLD "
+                         + _format(independent.get('expected_delta_vs_hold_r'), 'R') + "; нижняя граница "
+                         + _format(independent.get('paired_delta_ci95_lower_r'), 'R') + "; метод "
+                         + str(independent.get('method') or '—')
+                         + ". Независимая проверка и общий банк — различные модели; их Δ не взаимозаменяемы.")
         if row.get('candidate_id') == selected and utility:
             lines.append("Разложение количественной пользы: за Expected "
                          + _format(utility.get('expected_delta_r'), 'R') + "; за риск "
@@ -325,6 +381,9 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
                          + _format(utility.get('utility_delta_r'), 'R')
                          + ". Полезность не заменяет Expected. Основание: "
                          + str((row.get('benefit_assessment') or {}).get('basis') or '—') + ".")
+            if utility.get('score_clipped'):
+                lines.append("Количественный балл ограничен [-1, 1]; до ограничения "
+                             + _format(utility.get('score_unclipped')) + ".")
         contributions = row.get("component_contributions") or {}
         if isinstance(contributions, list):
             contributions = {item.get("component_id"): item.get("contribution")
