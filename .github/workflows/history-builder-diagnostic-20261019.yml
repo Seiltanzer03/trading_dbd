@@ -42,7 +42,7 @@ jobs:
           import boto3
           from botocore.config import Config
           from botocore.exceptions import ClientError
-          from scripts.restore_verified_snapshot import restore,ENDPOINT,_read_json_object
+          from scripts.restore_verified_snapshot import restore,ENDPOINT,_read_json_object,manifest_digest
           from scripts.managed_verified_seed import ManagedRestoreClient
           from scripts import sqlite_history_partition as archive
           from scripts.sqlite_history_cutover import build_current_hot_cutover_snapshot
@@ -53,6 +53,14 @@ jobs:
               config=Config(connect_timeout=10,read_timeout=120,retries={'max_attempts':3}))
           began=time.monotonic()
           context={'stage':'catalog','partition_index':0}
+          def bind_verified_local_catalog(proof,catalog_sha256):
+              # Local continuation binding, not a modified cloud manifest or a
+              # claim that the old backup was originally published with a pin.
+              manifest=dict(database_sha256=proof['database_sha256'],
+                  database_size_bytes=proof['database_size_bytes'],
+                  cold_history_catalog_sha256=catalog_sha256)
+              return dict(proof,storage_manifest=manifest,
+                  storage_manifest_sha256=manifest_digest(manifest))
           def emit(**values):print(json.dumps(values,sort_keys=True),flush=True)
           def report(**values):
               value=dict(contract='cloud-only-builder-diagnostic-v1',
@@ -88,6 +96,7 @@ jobs:
                   result_path=root/'private-source-receipt.json',snapshot_drill=True,
                   client=ManagedRestoreClient(client,temp_dir=root))
               if proof['database_sha256']!=pins.CATALOG_SOURCE:raise ValueError('source_pin_mismatch')
+              proof=bind_verified_local_catalog(proof,pins.CATALOG_SHA256)
               emit(stage='source_verified',source_sha256=pins.CATALOG_SOURCE,
                   database_size_bytes=proof['database_size_bytes'])
               original_restore=archive.restore_from_cloud

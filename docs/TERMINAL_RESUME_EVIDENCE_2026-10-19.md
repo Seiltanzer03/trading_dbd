@@ -25,6 +25,15 @@ eight admitted families, external LLM availability, or profitability.
   limits. It has no SSH/production connection/cloud writes. A successful
   historical fixture would not itself prove current-production acceptance.
   No new production epoch is authorized by an inconclusive diagnostic.
+- That diagnostic verified the18,784,505,856-byte pinned source10:44:28UTC,
+  then refused before any partition: its receipt lacked the local catalog
+  manifest binding required by `_catalog`. This is a diagnostic setup error,
+  not the production `OperationalError`. The corrected workflow helper is
+  tested against the real current builder on a small fixture: missing binding
+  RED; derived local binding GREEN,3 retired rows, unchanged original receipt,
+  retirement authority false. It neither edits a cloud manifest nor relaxes a
+  verification gate. A second full-scale invocation is needed to reach the
+  builder; no production action follows from this first result.
 
 ## AI/input and delivery observations
 
