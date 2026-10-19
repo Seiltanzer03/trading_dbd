@@ -33,6 +33,50 @@ from scripts.sqlite_history_partition import _identity
 from scripts.sqlite_history_union import MAX_CATALOG_BYTES,hydrate_current_snapshot
 
 REMOTE_DATA='/opt/seiltanzer/data/'
+_SQLITE_ERROR_BASE_NAMES=(
+    'SQLITE_ERROR','SQLITE_INTERNAL','SQLITE_PERM','SQLITE_ABORT','SQLITE_BUSY',
+    'SQLITE_LOCKED','SQLITE_NOMEM','SQLITE_READONLY','SQLITE_INTERRUPT','SQLITE_IOERR',
+    'SQLITE_CORRUPT','SQLITE_NOTFOUND','SQLITE_FULL','SQLITE_CANTOPEN','SQLITE_PROTOCOL',
+    'SQLITE_EMPTY','SQLITE_SCHEMA','SQLITE_TOOBIG','SQLITE_CONSTRAINT','SQLITE_MISMATCH',
+    'SQLITE_MISUSE','SQLITE_NOLFS','SQLITE_AUTH','SQLITE_FORMAT','SQLITE_RANGE',
+    'SQLITE_NOTADB','SQLITE_NOTICE','SQLITE_WARNING',
+)
+
+
+def _safe_error_chain(exc):
+    """Bounded structural evidence only: never messages, SQL, locals or URLs."""
+    root=Path(__file__).resolve().parent.parent
+    owned={root/'scripts',root/'seiltanzer'}
+    chain=[];seen=set()
+    while exc is not None and id(exc) not in seen and len(chain)<4:
+        seen.add(id(exc))
+        name=type(exc).__name__
+        record=dict(exception_type=name if name.isascii() and name.isidentifier() and len(name)<=80 else 'Exception',
+                    sqlite_errorcode=None,sqlite_errorname=None,frames=[])
+        if isinstance(exc,sqlite3.Error):
+            code=getattr(exc,'sqlite_errorcode',None)
+            label=getattr(exc,'sqlite_errorname',None)
+            base=next((name for name in _SQLITE_ERROR_BASE_NAMES
+                       if type(code) is int and 0<=code<=65535
+                       and sqlite3.__dict__.get(name)==(code & 255)),None)
+            if base is not None:record['sqlite_errorcode']=code
+            if (base is not None and isinstance(label,str) and len(label)<=80
+                    and (label==base or label.startswith(base+'_'))
+                    and sqlite3.__dict__.get(label)==code):
+                record['sqlite_errorname']=label
+        tb=exc.__traceback__;visited=0
+        while tb is not None and visited<128:
+            visited+=1
+            path=Path(tb.tb_frame.f_code.co_filename).resolve()
+            if path.parent in owned and path.suffix=='.py' and path.stem.isascii() and path.stem.isidentifier():
+                function=tb.tb_frame.f_code.co_name
+                record['frames'].append(dict(file=path.name,line=tb.tb_lineno,
+                    function=function if function.isascii() and function.isidentifier() and len(function)<=128 else '<expression>'))
+                record['frames']=record['frames'][-12:]
+            tb=tb.tb_next
+        chain.append(record)
+        exc=exc.__cause__ if exc.__cause__ is not None else exc.__context__
+    return chain
 
 
 class _DeadlineWire:
@@ -407,6 +451,8 @@ def run(*,expected_sha,run_id,directory,resume=False):
                          application_sha=expected_sha,stage=stage,code=code,
                          exception_type=type(exc).__name__,elapsed_sec=round(time.monotonic()-started,3))
             try:
+                try:failure['error_chain']=_safe_error_chain(exc)
+                except Exception:pass  # Evidence failure must not affect abort.
                 core._write(directory/'failure.json',failure)
                 print(json.dumps(failure),flush=True)
             except Exception:pass  # Diagnostics must never suppress the safe abort.

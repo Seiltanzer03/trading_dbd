@@ -153,7 +153,7 @@ def test_rejected_owner_is_reported_without_waiting_for_preparation(monkeypatch)
         driver.assert_owner_running(object(),'run-001')
 
 
-@pytest.mark.parametrize('capture_failure',[None,'deadline','provider','receipt_write'])
+@pytest.mark.parametrize('capture_failure',[None,'deadline','provider','receipt_write','sqlite_build','sqlite_context'])
 def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,monkeypatch,capture_failure,capsys):
     """Real SQLite, catalog partitions, gzip and owner; SSH/S3 endpoints injected."""
     import json
@@ -239,7 +239,7 @@ def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,m
     monkeypatch.setattr(driver,'publish_image',lambda *args,**kwargs:
         publish_image(*args,opener=cloud.opener,**kwargs))
     monkeypatch.setattr(driver.time,'sleep',lambda _:real_sleep(.01))
-    if capture_failure:
+    if capture_failure in ('deadline','provider','receipt_write'):
         def expired(*args,**kwargs):
             if capture_failure=='provider':raise RuntimeError('https://PRIVATE-PROVIDER-SECRET/?credential=test-only')
             raise core.CutoverError('TRANSACTION_DEADLINE')
@@ -250,16 +250,37 @@ def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,m
                 if Path(path).name=='failure.json':raise OSError('worker disk full')
                 return real_write(path,value)
             monkeypatch.setattr(core,'_write',no_receipt)
+    if capture_failure in ('sqlite_build','sqlite_context'):
+        def sqlite_failure(*args,**kwargs):
+            try:
+                with sqlite3.connect(':memory:') as conn:
+                    conn.execute('SELECT * FROM "PRIVATE-PROVIDER-SECRET"')
+            except sqlite3.OperationalError:
+                if capture_failure=='sqlite_context':
+                    raise RuntimeError('https://PRIVATE-PROVIDER-SECRET/?credential=test-only')
+                raise
+        monkeypatch.setattr(driver,'build_current_hot_cutover_snapshot',sqlite_failure)
     try:
         if capture_failure:
-            error=RuntimeError if capture_failure=='provider' else core.CutoverError
+            error=(sqlite3.OperationalError if capture_failure=='sqlite_build' else
+                   RuntimeError if capture_failure in ('provider','sqlite_context') else core.CutoverError)
             with pytest.raises(error):
                 driver.run(expected_sha='a'*40,run_id='run-001',directory=tmp_path/'worker')
             if capture_failure!='receipt_write':
                 failure=json.loads((tmp_path/'worker/failure.json').read_bytes())
-                assert failure['stage']=='frozen_capture'
-                assert failure['code']==('HISTORY_STEP_FAILED' if capture_failure=='provider' else 'TRANSACTION_DEADLINE')
+                assert failure['stage']==('build_hot' if capture_failure in ('sqlite_build','sqlite_context') else 'frozen_capture')
+                assert failure['code']==('TRANSACTION_DEADLINE' if capture_failure=='deadline' else 'HISTORY_STEP_FAILED')
                 assert 'PRIVATE-PROVIDER-SECRET' not in json.dumps(failure)
+                if capture_failure in ('sqlite_build','sqlite_context'):
+                    chain=failure['error_chain']
+                    sqlite_record=chain[0 if capture_failure=='sqlite_build' else 1]
+                    assert sqlite_record['exception_type']=='OperationalError'
+                    assert sqlite_record['sqlite_errorcode']==1
+                    assert sqlite_record['sqlite_errorname']=='SQLITE_ERROR'
+                    frames=[frame for record in chain for frame in record['frames']]
+                    assert any(frame['file']=='production_history_cutover.py' and frame['function']=='run' for frame in frames)
+                    assert all(set(frame)=={'file','line','function'} and frame['line']>0 for frame in frames)
+                    assert str(tmp_path) not in json.dumps(failure)
             assert 'PRIVATE-PROVIDER-SECRET' not in capsys.readouterr().out
             assert (data/'cutover.abort.json').exists()
             assert not (data/'cutover.request.json').exists()
@@ -284,3 +305,49 @@ def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,m
     finally:
         for thread in threads:thread.join(timeout=2)
     assert not errors
+
+
+def test_failure_evidence_bounds_exception_cycles_and_ignores_provider_sqlite_attributes():
+    from scripts import production_history_cutover as driver
+    errors=[RuntimeError('https://PRIVATE-PROVIDER-SECRET/') for _ in range(6)]
+    for left,right in zip(errors,errors[1:]+errors[:1]):
+        left.__context__=right
+        left.sqlite_errorcode=1
+        left.sqlite_errorname='SQLITE_ERROR'
+    chain=driver._safe_error_chain(errors[0])
+    assert len(chain)==4
+    assert all(row['sqlite_errorcode'] is None and row['sqlite_errorname'] is None for row in chain)
+    assert 'PRIVATE-PROVIDER-SECRET' not in repr(chain)
+
+
+@pytest.mark.parametrize('label,code,expected_code',[
+    ('SQLITE_ERROR https://PRIVATE-PROVIDER-SECRET/',True,None),
+    ('SQLITE_secretCredential123',1,1),
+    ('SQLITE_BUSY',1,1),
+    ('SQLITE_CREATE_INDEX',1,1),
+])
+def test_failure_evidence_rejects_noncanonical_sqlite_diagnostic_attributes(label,code,expected_code):
+    from scripts import production_history_cutover as driver
+    try:
+        with sqlite3.connect(':memory:') as conn:
+            conn.execute('SELECT * FROM "PRIVATE-PROVIDER-SECRET"')
+    except sqlite3.Error as exc:
+        exc.sqlite_errorcode=code
+        exc.sqlite_errorname=label
+        chain=driver._safe_error_chain(exc)
+    assert chain[0]['sqlite_errorcode']==expected_code
+    assert chain[0]['sqlite_errorname'] is None
+    assert 'PRIVATE-PROVIDER-SECRET' not in repr(chain)
+
+
+def test_failure_evidence_preserves_genuine_extended_sqlite_result_code():
+    from scripts import production_history_cutover as driver
+    try:
+        with sqlite3.connect(':memory:') as conn:
+            conn.execute('CREATE TABLE x(v INTEGER UNIQUE)')
+            conn.execute('INSERT INTO x VALUES(1)')
+            conn.execute('INSERT INTO x VALUES(1)')
+    except sqlite3.IntegrityError as exc:
+        chain=driver._safe_error_chain(exc)
+    assert chain[0]['sqlite_errorcode']==2067
+    assert chain[0]['sqlite_errorname']=='SQLITE_CONSTRAINT_UNIQUE'
