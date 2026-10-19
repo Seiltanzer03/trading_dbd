@@ -4,6 +4,7 @@ Reads credentials from the existing workflow environment only. The running
 local owner, not this SSH connection, owns exclusion, timeout and rollback.
 """
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import shutil
 import sqlite3
 import stat
 import sys
+import threading
 import time
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -33,6 +35,20 @@ from scripts.sqlite_history_union import MAX_CATALOG_BYTES,hydrate_current_snaps
 REMOTE_DATA='/opt/seiltanzer/data/'
 
 
+class _DeadlineWire:
+    """Bound compressed input, including members that yield no output."""
+    def __init__(self,source,deadline,limit):
+        self.source=source;self.deadline=deadline;self.limit=limit;self.total=0
+    def read(self,size=-1):
+        core._check_deadline(self.deadline)
+        data=self.source.read(core.CHUNK_BYTES if size<0 else min(size,core.CHUNK_BYTES))
+        core._check_deadline(self.deadline)
+        if not isinstance(data,bytes):raise core.CutoverError('INVALID_TRANSFER_CHUNK')
+        self.total+=len(data)
+        if self.total>self.limit:raise core.CutoverError('COMPRESSED_INPUT_SIZE_MISMATCH')
+        return data
+
+
 def require_union_capacity(directory,catalog):
     required=archive.RESERVE_BYTES+2*catalog['maximum_hydrated_bytes']+3*archive.MAX_BYTES
     if shutil.disk_usage(directory).free<required:
@@ -48,7 +64,7 @@ def release_owned_capture(path,proof):
 
 
 def capture_frozen(sftp,identity,output,*,deadline):
-    """One read of a frozen raw file, exact owner digest and real SQLite check."""
+    """One compressed SSH read; verify the exact raw owner digest and SQLite."""
     core._valid_identity(identity)
     output=Path(output)
     if os.path.lexists(output):raise FileExistsError(output)
@@ -58,8 +74,49 @@ def capture_frozen(sftp,identity,output,*,deadline):
     try:
         with output.open('xb') as target:
             owned=True;os.fchmod(target.fileno(),0o600)
-            with sftp.open(REMOTE_DATA+'trades.db','rb') as source:
-                core._consume(source,identity,deadline,write=target.write)
+            core._check_deadline(deadline)
+            channel=sftp.get_channel().get_transport().open_session(
+                window_size=16*1024**2,timeout=min(15,deadline-time.monotonic()))
+            written=0;reported=0;started=time.monotonic()
+            def expire():
+                # Paramiko exec acknowledgement and partial-read loops do not
+                # obey the socket timeout as an absolute operation deadline.
+                try:channel.close()
+                except Exception:pass
+            watchdog=threading.Timer(max(0,deadline-time.monotonic()),expire)
+            watchdog.name='frozen-capture-deadline';watchdog.daemon=True
+            watchdog.start()
+            try:
+                channel.settimeout(min(30,max(.001,deadline-time.monotonic())))
+                # Fixed read-only command: no interpolated input or VPS staging file.
+                channel.exec_command('/bin/gzip -1 -c -- /opt/seiltanzer/data/trades.db')
+                with channel.makefile('rb') as wire:
+                    bounded=_DeadlineWire(wire,deadline,
+                        identity['database_size_bytes']*101//100+65536)
+                    def write(data):
+                        nonlocal written,reported
+                        target.write(data);written+=len(data)
+                        if written-reported>=256*1024**2:
+                            print(json.dumps({'frozen_capture_bytes':written,
+                                'expected_bytes':identity['database_size_bytes'],
+                                'wire_bytes':bounded.total,
+                                'elapsed_sec':round(time.monotonic()-started,3)}),flush=True)
+                            reported=written
+                    with gzip.GzipFile(fileobj=bounded,mode='rb') as source:
+                        core._consume(source,identity,deadline,write=write)
+                while not channel.exit_status_ready():
+                    core._check_deadline(deadline)
+                    time.sleep(min(.05,max(0,deadline-time.monotonic())))
+                core._check_deadline(deadline)
+                if channel.recv_exit_status()!=0:
+                    raise core.CutoverError('FROZEN_CAPTURE_COMMAND_FAILED')
+            except Exception:
+                core._check_deadline(deadline)
+                raise
+            finally:
+                watchdog.cancel()
+                try:channel.close()
+                finally:watchdog.join(timeout=1)
             target.flush();os.fsync(target.fileno())
         core._verify_database(output,identity,deadline)
         manifest=dict(identity,cold_history_catalog_sha256=pins.CATALOG_SHA256)
@@ -203,8 +260,15 @@ def run(*,expected_sha,run_id,directory,resume=False):
         raise core.CutoverError('OFFHOST_WORKER_REQUIRED')
     client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
     s3=yandex_image_client()
+    started=time.monotonic()
+    stage='remote_preflight'
+    def enter(name):
+        nonlocal stage
+        stage=name
+        print(json.dumps({'history_cutover_stage':stage}),flush=True)
     try:
         _verify_sha(client,expected_sha)
+        enter('catalog_preflight')
         catalog=_catalog_bytes(s3)
         catalog_value,_=_parse_catalog(catalog,pins.CATALOG_SHA256)
         sftp=client.open_sftp();sftp.get_channel().settimeout(30)
@@ -246,6 +310,7 @@ def run(*,expected_sha,run_id,directory,resume=False):
                 # service or a new epoch. Its durable clocks/pins stay binding.
                 ensure_owner_running(client,run_id=run_id,expected_sha=expected_sha)
 
+            enter('native_preparation')
             end=time.monotonic()+10800
             frozen=None
             while time.monotonic()<end:
@@ -273,10 +338,12 @@ def run(*,expected_sha,run_id,directory,resume=False):
                 raise core.CutoverError('NATIVE_RESULT_TIMEOUT')
 
             original=directory/'original.sqlite3';hot=directory/'hot.sqlite3'
+            enter('frozen_capture')
             proof=capture_frozen(sftp,frozen['source']['identity'],original,deadline=time.monotonic()+1800)
             _assert_remote_frozen(sftp,frozen,client)
             # The original catalog is pinned, reused and fully verified by the
             # existing current-source builder; no new catalog/export sweep.
+            enter('build_hot')
             built=build_current_hot_cutover_snapshot(original,hot,source_receipt=proof,
                 catalog_bytes=catalog,expected_catalog_sha256=pins.CATALOG_SHA256,client=s3)
             core._write(directory/'hot-build-proof.json',built)
@@ -285,9 +352,11 @@ def run(*,expected_sha,run_id,directory,resume=False):
             identities=dict(original=frozen['source']['identity'],hot={
                 'database_sha256':built['hot_database_sha256'],
                 'database_size_bytes':hot.stat().st_size})
-            receipts={kind:publish_image(path,identities[kind],run_id=run_id,kind=kind,
-                                         client=s3,deadline=publish_end)
-                      for kind,path in [('original',original),('hot',hot)]}
+            receipts={}
+            for kind,path in [('original',original),('hot',hot)]:
+                enter('publish_'+kind)
+                receipts[kind]=publish_image(path,identities[kind],run_id=run_id,kind=kind,
+                                             client=s3,deadline=publish_end)
             # Both exact images now have complete cloud readback receipts.
             # Retire only our worker copy; the untouched VPS original and its
             # pinned rollback object remain available. Keep hydrate's gate.
@@ -302,8 +371,10 @@ def run(*,expected_sha,run_id,directory,resume=False):
             _assert_remote_frozen(sftp,frozen,client)
             # Transport first, immutable public request last. Neither file can
             # cause a partial JSON read or expose URLs through workflow output.
+            enter('handoff')
             _remote_write(sftp,'cutover.transport.json',_private_transport(s3,plan),replace=True)
             _remote_write(sftp,'cutover.request.json',plan)
+            enter('native_transfer')
             while time.monotonic()<end:
                 result=_completed_result(sftp,run_id,previous)
                 if result is not None:break
@@ -316,13 +387,29 @@ def run(*,expected_sha,run_id,directory,resume=False):
             # post-cutover proof; the terminal is already running here.
             core._write(directory/'result.json',report)
             if result.get('phase')=='COMMITTED':
+                enter('full_union')
                 full=directory/'reconstituted.sqlite3'
                 hydrated=hydrate_current_snapshot(hot,full,source_receipt=built['hot_restore_proof'],
                                                    catalog_bytes=catalog,client=s3)
                 report['worker_full_union_verified']=True
                 core._write(directory/'full-union-proof.json',hydrated)
             return report
-        except Exception:
+        except Exception as exc:
+            # Deliberately allow only fixed public reasons. Provider exceptions
+            # can contain signed URLs/credentials and must never enter logs.
+            allowed={'TRANSACTION_DEADLINE','IMAGE_SIZE_MISMATCH','IMAGE_IDENTITY_MISMATCH',
+                     'INVALID_TRANSFER_CHUNK','NATIVE_OWNER_NOT_RUNNING_CHECK_DURABLE_STATE',
+                     'FROZEN_PREPARATION_NO_LONGER_ACTIVE','CUTOVER_WORKER_CAPACITY_REFUSED',
+                     'UNION_WORKER_CAPACITY_REFUSED','FROZEN_CAPTURE_COMMAND_FAILED',
+                     'COMPRESSED_INPUT_SIZE_MISMATCH'}
+            code=str(exc) if isinstance(exc,core.CutoverError) and str(exc) in allowed else 'HISTORY_STEP_FAILED'
+            failure=dict(contract='sqlite-history-worker-failure-v1',run_id=run_id,
+                         application_sha=expected_sha,stage=stage,code=code,
+                         exception_type=type(exc).__name__,elapsed_sec=round(time.monotonic()-started,3))
+            try:
+                core._write(directory/'failure.json',failure)
+                print(json.dumps(failure),flush=True)
+            except Exception:pass  # Diagnostics must never suppress the safe abort.
             # Prompt ordinary preparation failures to restore the verified
             # original; runner death still has the independent native timeout.
             try:
