@@ -40,6 +40,39 @@ def test_fast_refresh_reprices_exit_at_actual_new_quote_and_keeps_provider_clock
     assert s == original
 
 
+def test_quote_repricing_preserves_frozen_expert_inputs_without_reloading_publication(monkeypatch):
+    from seiltanzer.ai_frozen_expert_inputs import VERSION, expert_inputs_frozen
+    from seiltanzer.ai_snapshot_market_refresh import refresh_frozen_comparison
+    from seiltanzer.app import _attach_family_source_bundle
+    engine, s, _ = fixture(monkeypatch)
+    s['frozen_expert_inputs'] = {'version': VERSION, 'captured_ts': s['captured_ts']}
+    s['edge_family_sources'] = {'macro': [{'source_id': 'original', 'observed_ts': 990.}]}
+    s['edge_family_market_context'] = {'available': False, 'reason': 'ORIGINAL_SOURCE_STALE'}
+    original = deepcopy(s)
+    out = refresh_frozen_comparison(engine, s)
+    assert out['captured_ts'] == 1100.
+    assert expert_inputs_frozen(out), 'quote-only repricing must not unfreeze source/model inputs'
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('quote-only review reread a later source publication')
+
+    monkeypatch.setattr('seiltanzer.edge_family_source_runtime.load_family_source_context', forbidden)
+    _attach_family_source_bundle(engine, out)
+    assert out['frozen_expert_inputs'] == s['frozen_expert_inputs']
+    assert out['edge_family_sources'] == s['edge_family_sources']
+    assert out['edge_family_market_context'] == s['edge_family_market_context']
+    assert s == original
+
+
+def test_quote_repricing_cannot_promote_an_invalid_frozen_marker(monkeypatch):
+    from seiltanzer.ai_frozen_expert_inputs import VERSION, expert_inputs_frozen
+    from seiltanzer.ai_snapshot_market_refresh import refresh_frozen_comparison
+    engine, s, _ = fixture(monkeypatch)
+    s['frozen_expert_inputs'] = {'version': VERSION, 'captured_ts': s['captured_ts'] - 1}
+    out = refresh_frozen_comparison(engine, s)
+    assert not expert_inputs_frozen(out)
+
+
 @pytest.mark.parametrize('short', [False, True])
 def test_refresh_updates_recalculation_coordinates_and_best_expected(monkeypatch, short):
     from seiltanzer.ai_snapshot_market_refresh import refresh_frozen_comparison

@@ -85,3 +85,47 @@ diagnostic correction and unproven; external run receipts/prior RED outputs
 were verified by the integrator; the final focused profile was run by the
 integrator. Mandatory final-tree CI/deployment/retry eligibility are not
 inferred from the review. No blind production retry follows this correction.
+# Approved current-source capture (2026-10-19)
+
+The user approved a temporary diagnostic maintenance window. The optional
+`--diagnostic` mode of the existing production history driver requires a fresh
+epoch and the same deployed, reviewed green revision. It uses the unchanged
+native owner, fence, clocks, exact byte capture and SQLite verification.
+
+After capture it submits only the canonical preparation abort. The native owner
+reverifies and restarts the original; the worker requires the matching epoch,
+source identity, `ABORTED_ORIGINAL`, `service_started=true`, no active guard,
+the expected installed revision and a healthy HTTP API before proceeding.
+It never submits a cutover request, plan, transport or retirement journal.
+
+Only after that return does it publish the captured original into the existing
+private Yandex image namespace, verify full cloud readback, and persist public
+byte pins in `capture-proof.json`. The current-source builder then runs off-host.
+A builder failure leaves the cloud receipt available for investigation without
+another capture window. `failure.json` retains bounded structural SQLite evidence;
+no SQL, exception messages, raw database or signed URL enters public artifacts.
+
+This diagnostic does not restore disk headroom or prove a production cutover.
+Its successful terminal outcome is deliberately `ABORTED_ORIGINAL`; the normal
+cutover mode still requires `COMMITTED` and the independent full-union proof.
+Independent final review found no Critical or Important issues. Its optional
+coverage suggestion was implemented: an existing same-run diagnostic epoch is
+rejected without writing an abort request. Final focused local verification:
+63 tests passed in 5.63 seconds. Production health at 12:16:38 UTC remained
+HTTP 200 on the baseline SHA, original returned, no new cutover started.
+
+## Concurrent AI report correction
+
+The uploaded GER40 report at 12:12:09 UTC shows `provider_timeout`; that alone
+does not identify provider latency versus local preparation time. Inspection
+did reproduce one separate request-path defect: quote-only repricing advances
+the review timestamp and invalidated the unchanged frozen-input marker. This
+caused mutable source/model recapture during a materialized review.
+
+The marker now recognizes a successful versioned deterministic quote refresh
+whose original capture timestamp matches. Original facts, clocks and missing
+reasons remain frozen; no timeout, risk/source gate or weight is relaxed.
+The real repricing regression observed RED then GREEN. One final independent
+review approved this two-file correction (34 focused tests, 0.91 seconds).
+Provider availability, missing current source history and current family
+predictions remain separate acceptance items; this patch does not claim them.
