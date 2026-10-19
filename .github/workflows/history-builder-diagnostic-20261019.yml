@@ -11,7 +11,6 @@ jobs:
     timeout-minutes: 90
     env:
       EXPECTED_SHA: bcb22bb5acbc33ecd3965cae620be693d9c172ba
-      TASK_DIRECTORY: ${{ runner.temp }}/cloud-builder-diagnostic-${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,6 +30,7 @@ jobs:
         run: pip install -e . 'boto3>=1.36,<2'
       - name: Diagnose current builder on existing historical cloud backup
         env:
+          TASK_DIRECTORY: ${{ runner.temp }}/cloud-builder-diagnostic-${{ github.run_id }}
           AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ru-central1
@@ -125,6 +125,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cloud-builder-diagnostic-${{ github.run_id }}
-          path: ${{ env.TASK_DIRECTORY }}/public-diagnostic.json
+          path: ${{ runner.temp }}/cloud-builder-diagnostic-${{ github.run_id }}/public-diagnostic.json
           if-no-files-found: error
           retention-days: 7
