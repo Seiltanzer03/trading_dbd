@@ -28,8 +28,9 @@ jobs:
             PYTHONDONTWRITEBYTECODE=1 /opt/seiltanzer/.venv/bin/python - <<'PY'
             import datetime,json,math,re,sqlite3,subprocess,time
             from pathlib import Path
-            targets=[datetime.datetime.fromisoformat(s).timestamp() for s in
-                ('2026-10-19T14:16:38+00:00','2026-10-19T14:42:11+00:00')]
+            # Exact stored capture clocks verified by the existing history API;
+            # displayed input-audit clocks are approximately 2.5 seconds earlier.
+            targets=[1792419400.4810274,1792420933.5558512]
             def safe(value,depth=0):
                 if depth>14:return None
                 if value is None or isinstance(value,bool):return value
@@ -55,7 +56,10 @@ jobs:
                     'edge_family_source_bundle_audit','active_management_candidates','ai_provider_status')
                 summary={k:snapshot[k] for k in keys if k in snapshot}
                 summary['policy_manager']={k:manager[k] for k in ('inputs','selection_rule','policies',
-                    'management_decision','management_arbiter','gate','unified_edge_ensemble') if k in manager}
+                    'management_decision','management_arbiter','gate','unified_edge_ensemble','mathematical_edge') if k in manager}
+                summary['family_root_bytes']={k:len(json.dumps(snapshot[k],separators=(',',':')).encode())
+                    for k in ('edge_family_sources','edge_family_models','edge_family_market_context',
+                        'macro_context_v1','macro_t0_context','research_working_context') if k in snapshot}
                 summary['quote_audit']=(manager.get('input_audit') or {}).get('rows',{}).get('instrument_price')
                 found.append(safe(dict(review_row_id=row['id'],stored_ts=row['ts'],stored_model=row['model'],snapshot=summary)))
             tables={r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
