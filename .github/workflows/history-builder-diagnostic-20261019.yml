@@ -1,0 +1,130 @@
+name: cloud-only-history-builder-diagnostic
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/history-builder-diagnostic-20261019.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      EXPECTED_SHA: bcb22bb5acbc33ecd3965cae620be693d9c172ba
+      TASK_DIRECTORY: ${{ runner.temp }}/cloud-builder-diagnostic-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - name: Verify code and reclaim reproducible hosted SDKs
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo docker image prune -af
+          df -h "$RUNNER_TEMP"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install private cloud reader only
+        run: pip install -e . 'boto3>=1.36,<2'
+      - name: Diagnose current builder on existing historical cloud backup
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          python - <<'PY'
+          import hashlib,json,os,shutil,time,traceback
+          from pathlib import Path
+          import boto3
+          from botocore.config import Config
+          from botocore.exceptions import ClientError
+          from scripts.restore_verified_snapshot import restore,ENDPOINT,_read_json_object
+          from scripts.managed_verified_seed import ManagedRestoreClient
+          from scripts import sqlite_history_partition as archive
+          from scripts.sqlite_history_cutover import build_current_hot_cutover_snapshot
+          from scripts import history_production_plan as pins
+          root=Path(os.environ['TASK_DIRECTORY'])
+          root.mkdir(mode=0o700,exist_ok=False)
+          client=boto3.client('s3',endpoint_url=ENDPOINT,region_name='ru-central1',
+              config=Config(connect_timeout=10,read_timeout=120,retries={'max_attempts':3}))
+          began=time.monotonic()
+          context={'stage':'catalog','partition_index':0}
+          def emit(**values):print(json.dumps(values,sort_keys=True),flush=True)
+          def report(**values):
+              value=dict(contract='cloud-only-builder-diagnostic-v1',
+                  application_sha=os.environ['EXPECTED_SHA'],production_connection=False,
+                  production_touched=False,cloud_writes=False,
+                  source_scope='HISTORICAL_CATALOG_SOURCE_NOT_CURRENT_PRODUCTION',
+                  elapsed_sec=round(time.monotonic()-began,3),**context,**values)
+              (root/'public-diagnostic.json').write_text(json.dumps(value,sort_keys=True,indent=2)+'\n')
+              emit(**value)
+          try:
+              catalog_key=f'research/sqlite-history/v1/{pins.CATALOG_SOURCE}/catalogs/{pins.CATALOG_SHA256}.json'
+              with client.get_object(Bucket=archive.BUCKET,Key=catalog_key)['Body'] as body:
+                  catalog_bytes=body.read(8*1024**2+1)
+              if hashlib.sha256(catalog_bytes).hexdigest()!=pins.CATALOG_SHA256:
+                  raise ValueError('catalog_pin_mismatch')
+              context['stage']='find_existing_pinned_backup'
+              selected=None
+              for slot in range(7):
+                  key=f'backups/v1/daily-slot-{slot}/snapshot.sqlite3.gz'
+                  try:manifest=_read_json_object(client,bucket=archive.BUCKET,key=key+'.manifest.json')
+                  except ClientError as exc:
+                      if exc.response.get('Error',{}).get('Code') in ('NoSuchKey','404'):continue
+                      raise
+                  if manifest.get('database_sha256')==pins.CATALOG_SOURCE:
+                      selected=key;break
+              if selected is None:raise ValueError('pinned_existing_backup_unavailable')
+              required=3*int(manifest['database_size_bytes'])+2*1024**3
+              if shutil.disk_usage(root).free<required:raise ValueError('worker_capacity_refused')
+              emit(stage='restore_existing_backup',source_sha256=pins.CATALOG_SOURCE,required_free_bytes=required)
+              context['stage']='restore_source'
+              source=root/'source.sqlite3'
+              proof=restore(bucket=archive.BUCKET,key=selected,destination=source,
+                  result_path=root/'private-source-receipt.json',snapshot_drill=True,
+                  client=ManagedRestoreClient(client,temp_dir=root))
+              if proof['database_sha256']!=pins.CATALOG_SOURCE:raise ValueError('source_pin_mismatch')
+              emit(stage='source_verified',source_sha256=pins.CATALOG_SOURCE,
+                  database_size_bytes=proof['database_size_bytes'])
+              original_restore=archive.restore_from_cloud
+              def traced_restore(*args,**kwargs):
+                  entry=args[1]
+                  context.update(stage='current_builder',component='cloud_partition_restore',
+                      partition_index=context['partition_index']+1,table=entry['partition']['table'])
+                  emit(stage='partition_begin',partition_index=context['partition_index'],
+                      table=context['table'],elapsed_sec=round(time.monotonic()-began,3))
+                  result=original_restore(*args,**kwargs)
+                  context['component']='cold_partition_match'
+                  return result
+              original_hash=archive._logical_hash
+              def traced_hash(*args,**kwargs):
+                  context['component']='typed_logical_hash'
+                  return original_hash(*args,**kwargs)
+              archive.restore_from_cloud=traced_restore
+              archive._logical_hash=traced_hash
+              context.update(stage='current_builder',component='source_verification')
+              result=build_current_hot_cutover_snapshot(source,root/'hot.sqlite3',source_receipt=proof,
+                  catalog_bytes=catalog_bytes,expected_catalog_sha256=pins.CATALOG_SHA256,client=client)
+              report(status='BUILT',source_database_sha256=pins.CATALOG_SOURCE,
+                  hot_database_size_bytes=result['hot_database_size_bytes'],retired_row_count=result['retired_row_count'])
+          except Exception as exc:
+              frames=[dict(file=Path(f.filename).name,line=f.lineno,function=f.name)
+                  for f in traceback.extract_tb(exc.__traceback__) if '/scripts/' in f.filename][-12:]
+              report(status='FAILED',exception_type=type(exc).__name__,
+                  sqlite_errorcode=getattr(exc,'sqlite_errorcode',None),
+                  sqlite_errorname=getattr(exc,'sqlite_errorname',None),frames=frames,
+                  free_bytes=shutil.disk_usage(root).free)
+              raise SystemExit(1)
+          PY
+      - name: Preserve redacted diagnostic only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-builder-diagnostic-${{ github.run_id }}
+          path: ${{ env.TASK_DIRECTORY }}/public-diagnostic.json
+          if-no-files-found: error
+          retention-days: 7
