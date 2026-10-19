@@ -79,8 +79,18 @@ def capture_market_inputs(engine):
 
 def expert_inputs_frozen(snapshot: dict) -> bool:
     marker = snapshot.get("frozen_expert_inputs")
-    return (isinstance(marker, dict) and marker.get("version") == VERSION
-            and marker.get("captured_ts") == snapshot.get("captured_ts"))
+    if not isinstance(marker, dict) or marker.get("version") != VERSION:
+        return False
+    if marker.get("captured_ts") == snapshot.get("captured_ts"):
+        return True
+    # Quote-only repricing advances the review clock, not the capture clock of
+    # the cached source/model facts. Keep their original identity so the request
+    # path cannot replace them with a later publication or a mutable feed view.
+    refresh = snapshot.get("market_refresh") or {}
+    return ((snapshot.get("materialization") or {}).get("deterministic_snapshot") is True
+            and refresh.get("version") == "cached-comparison-market-refresh-v1"
+            and refresh.get("available") is True
+            and refresh.get("original_snapshot_ts") == marker.get("captured_ts"))
 
 
 def publication_marker(engine):

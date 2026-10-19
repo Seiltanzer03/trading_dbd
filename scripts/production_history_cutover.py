@@ -33,6 +33,50 @@ from scripts.sqlite_history_partition import _identity
 from scripts.sqlite_history_union import MAX_CATALOG_BYTES,hydrate_current_snapshot
 
 REMOTE_DATA='/opt/seiltanzer/data/'
+_SQLITE_ERROR_BASE_NAMES=(
+    'SQLITE_ERROR','SQLITE_INTERNAL','SQLITE_PERM','SQLITE_ABORT','SQLITE_BUSY',
+    'SQLITE_LOCKED','SQLITE_NOMEM','SQLITE_READONLY','SQLITE_INTERRUPT','SQLITE_IOERR',
+    'SQLITE_CORRUPT','SQLITE_NOTFOUND','SQLITE_FULL','SQLITE_CANTOPEN','SQLITE_PROTOCOL',
+    'SQLITE_EMPTY','SQLITE_SCHEMA','SQLITE_TOOBIG','SQLITE_CONSTRAINT','SQLITE_MISMATCH',
+    'SQLITE_MISUSE','SQLITE_NOLFS','SQLITE_AUTH','SQLITE_FORMAT','SQLITE_RANGE',
+    'SQLITE_NOTADB','SQLITE_NOTICE','SQLITE_WARNING',
+)
+
+
+def _safe_error_chain(exc):
+    """Bounded structural evidence only: never messages, SQL, locals or URLs."""
+    root=Path(__file__).resolve().parent.parent
+    owned={root/'scripts',root/'seiltanzer'}
+    chain=[];seen=set()
+    while exc is not None and id(exc) not in seen and len(chain)<4:
+        seen.add(id(exc))
+        name=type(exc).__name__
+        record=dict(exception_type=name if name.isascii() and name.isidentifier() and len(name)<=80 else 'Exception',
+                    sqlite_errorcode=None,sqlite_errorname=None,frames=[])
+        if isinstance(exc,sqlite3.Error):
+            code=getattr(exc,'sqlite_errorcode',None)
+            label=getattr(exc,'sqlite_errorname',None)
+            base=next((name for name in _SQLITE_ERROR_BASE_NAMES
+                       if type(code) is int and 0<=code<=65535
+                       and sqlite3.__dict__.get(name)==(code & 255)),None)
+            if base is not None:record['sqlite_errorcode']=code
+            if (base is not None and isinstance(label,str) and len(label)<=80
+                    and (label==base or label.startswith(base+'_'))
+                    and sqlite3.__dict__.get(label)==code):
+                record['sqlite_errorname']=label
+        tb=exc.__traceback__;visited=0
+        while tb is not None and visited<128:
+            visited+=1
+            path=Path(tb.tb_frame.f_code.co_filename).resolve()
+            if path.parent in owned and path.suffix=='.py' and path.stem.isascii() and path.stem.isidentifier():
+                function=tb.tb_frame.f_code.co_name
+                record['frames'].append(dict(file=path.name,line=tb.tb_lineno,
+                    function=function if function.isascii() and function.isidentifier() and len(function)<=128 else '<expression>'))
+                record['frames']=record['frames'][-12:]
+            tb=tb.tb_next
+        chain.append(record)
+        exc=exc.__cause__ if exc.__cause__ is not None else exc.__context__
+    return chain
 
 
 class _DeadlineWire:
@@ -228,6 +272,30 @@ def _assert_remote_frozen(sftp,state,client):
         raise core.CutoverError('FROZEN_PREPARATION_NO_LONGER_ACTIVE')
 
 
+def _restore_diagnostic_original(sftp,client,frozen,deadline):
+    """Request the ordinary native abort; never start or unfence the service here."""
+    _assert_remote_frozen(sftp,frozen,client)
+    for name in ('cutover.plan.json','cutover.request.json','cutover.journal.json','cutover.transport.json'):
+        if _remote_read(sftp,name) is not None:
+            raise core.CutoverError('DIAGNOSTIC_REQUIRES_UNHANDED_PREPARATION')
+    _remote_write(sftp,'cutover.abort.json',dict(contract='sqlite-history-preparation-abort-v1',
+        run_id=frozen['run_id'],application_sha=frozen['application_sha'],epoch=frozen['epoch']))
+    while time.monotonic()<deadline:
+        result=_completed_result(sftp,frozen['run_id'],None)
+        if result is not None:
+            if (result.get('phase')!='ABORTED_ORIGINAL' or result.get('service_started') is not True
+                    or result.get('application_sha')!=frozen['application_sha']
+                    or result.get('epoch')!=frozen['epoch']
+                    or result.get('source')!=frozen['source']['identity']
+                    or _remote_read(sftp,'cutover.active') is not None):
+                raise core.CutoverError('DIAGNOSTIC_ORIGINAL_RETURN_NOT_VERIFIED')
+            _verify_sha(client,frozen['application_sha'])
+            _probe_api(client)
+            return result
+        time.sleep(5)
+    raise core.CutoverError('DIAGNOSTIC_ORIGINAL_RETURN_TIMEOUT')
+
+
 def _resume_proof(s3,plan,result,directory):
     report=dict(owner=result,worker_full_union_verified=False)
     if result.get('phase')!='COMMITTED':return report
@@ -252,8 +320,10 @@ def _resume_proof(s3,plan,result,directory):
     return report
 
 
-def run(*,expected_sha,run_id,directory,resume=False):
+def run(*,expected_sha,run_id,directory,resume=False,diagnostic=False):
     _validate_epoch(run_id,expected_sha)
+    if diagnostic and resume:
+        raise core.CutoverError('DIAGNOSTIC_REQUIRES_FRESH_EPOCH')
     directory=Path(directory)
     directory.mkdir(mode=0o700,parents=True,exist_ok=False)
     if directory.resolve().is_relative_to(Path('/opt/seiltanzer')):
@@ -262,6 +332,7 @@ def run(*,expected_sha,run_id,directory,resume=False):
     s3=yandex_image_client()
     started=time.monotonic()
     stage='remote_preflight'
+    abort_owned=not diagnostic
     def enter(name):
         nonlocal stage
         stage=name
@@ -291,6 +362,8 @@ def run(*,expected_sha,run_id,directory,resume=False):
                 # terminal original. The native EX owner validates and archives
                 # old metadata before creating that new epoch.
                 existing=None
+            if diagnostic and existing is not None:
+                raise core.CutoverError('DIAGNOSTIC_REQUIRES_FRESH_EPOCH')
             if previous is not None and previous.get('run_id')==run_id and previous.get('phase')=='COMMITTED' and previous.get('service_started') is True:
                 return _resume_proof(s3,_remote_read(sftp,'cutover.plan.json'),previous,directory)
             if existing is None:
@@ -302,6 +375,7 @@ def run(*,expected_sha,run_id,directory,resume=False):
                 if shutil.disk_usage(directory).free < max(3*size+2*1024**3,union_required+4096):
                     raise core.CutoverError('CUTOVER_WORKER_CAPACITY_REFUSED')
                 _exec(client,shlex.join(launch_command(run_id=run_id,application_sha=expected_sha)),timeout=20)
+                abort_owned=True
             else:
                 accepted=_remote_read(sftp,'cutover.plan.json')
                 if accepted is not None:
@@ -341,6 +415,28 @@ def run(*,expected_sha,run_id,directory,resume=False):
             enter('frozen_capture')
             proof=capture_frozen(sftp,frozen['source']['identity'],original,deadline=time.monotonic()+1800)
             _assert_remote_frozen(sftp,frozen,client)
+            if diagnostic:
+                # Capture is now immutable and verified. Return the untouched
+                # original before cloud compression/upload or any builder work.
+                enter('verify_original_service')
+                owner=_restore_diagnostic_original(sftp,client,frozen,end)
+                report=dict(contract='sqlite-history-current-diagnostic-v1',run_id=run_id,
+                    application_sha=expected_sha,owner=owner,original_service_verified=True,
+                    production_retirement_observed=False,worker_full_union_verified=False,
+                    diagnostic_build_verified=False,source=proof['storage_manifest'],image=None)
+                core._write(directory/'capture-proof.json',report)
+                enter('publish_original')
+                report['image']=publish_image(original,frozen['source']['identity'],run_id=run_id,
+                    kind='original',client=s3,deadline=time.monotonic()+3600)
+                # Durable cloud byte pins survive a later builder failure and
+                # permit another off-host investigation without another outage.
+                core._write(directory/'capture-proof.json',report)
+                enter('build_hot')
+                built=build_current_hot_cutover_snapshot(original,hot,source_receipt=proof,
+                    catalog_bytes=catalog,expected_catalog_sha256=pins.CATALOG_SHA256,client=s3)
+                core._write(directory/'hot-build-proof.json',built)
+                report.update(diagnostic_build_verified=True,hot_build=built)
+                return report
             # The original catalog is pinned, reused and fully verified by the
             # existing current-source builder; no new catalog/export sweep.
             enter('build_hot')
@@ -407,6 +503,8 @@ def run(*,expected_sha,run_id,directory,resume=False):
                          application_sha=expected_sha,stage=stage,code=code,
                          exception_type=type(exc).__name__,elapsed_sec=round(time.monotonic()-started,3))
             try:
+                try:failure['error_chain']=_safe_error_chain(exc)
+                except Exception:pass  # Evidence failure must not affect abort.
                 core._write(directory/'failure.json',failure)
                 print(json.dumps(failure),flush=True)
             except Exception:pass  # Diagnostics must never suppress the safe abort.
@@ -414,7 +512,7 @@ def run(*,expected_sha,run_id,directory,resume=False):
             # original; runner death still has the independent native timeout.
             try:
                 state=_remote_read(sftp,'cutover.preparation.json')
-                if (state is not None and state.get('run_id')==run_id
+                if (abort_owned and state is not None and state.get('run_id')==run_id
                         and state.get('application_sha')==expected_sha and state.get('phase')=='FROZEN'
                         and _remote_read(sftp,'cutover.active')==state.get('epoch')
                         and _remote_read(sftp,'cutover.request.json') is None
@@ -433,13 +531,18 @@ def main():
     parser.add_argument('--run-id',required=True)
     parser.add_argument('--directory',type=Path,required=True)
     parser.add_argument('--resume',action='store_true')
+    parser.add_argument('--diagnostic',action='store_true',
+        help='Fresh capture only on VPS; restore original before off-host publication/build. No cutover handoff.')
     args=parser.parse_args()
     try:
-        report=run(expected_sha=args.expected_sha,run_id=args.run_id,directory=args.directory,resume=args.resume)
+        report=run(expected_sha=args.expected_sha,run_id=args.run_id,directory=args.directory,
+                   resume=args.resume,diagnostic=args.diagnostic)
         core._write(args.directory/'result.json',report)
         print(json.dumps(dict(run_id=args.run_id,phase=report['owner'].get('phase'),
                               worker_full_union_verified=report['worker_full_union_verified'])))
-        return 0 if report['owner'].get('phase')=='COMMITTED' and report['worker_full_union_verified'] else 1
+        success=(report.get('diagnostic_build_verified') is True and report.get('original_service_verified') is True
+                 if args.diagnostic else report['owner'].get('phase')=='COMMITTED' and report['worker_full_union_verified'])
+        return 0 if success else 1
     except Exception:
         print('PRODUCTION_HISTORY_CUTOVER_FAILED_CHECK_PRIVATE_DURABLE_STATE')
         return 1

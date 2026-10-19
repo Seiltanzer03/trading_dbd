@@ -11,6 +11,11 @@ on:
         description: Existing native epoch only; leave empty for initial cutover
         required: false
         type: string
+      diagnostic:
+        description: Capture current source, return terminal, then publish/diagnose off-host (no cutover)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -29,6 +34,7 @@ jobs:
       EXPECTED_SHA: ${{ inputs.expected_sha }}
       RESUME_RUN_ID: ${{ inputs.resume_run_id }}
       NEW_RUN_ID: ${{ github.run_id }}
+      DIAGNOSTIC: ${{ inputs.diagnostic }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,6 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$DIAGNOSTIC" = true ]; then test -z "$RESUME_RUN_ID"; fi
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           if [ -z "$RESUME_RUN_ID" ]; then
             test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$EXPECTED_SHA"
@@ -73,6 +80,7 @@ jobs:
           NATIVE_RUN_ID="${RESUME_RUN_ID:-$NEW_RUN_ID}"
           OPTIONS=()
           if [ -n "$RESUME_RUN_ID" ]; then OPTIONS+=(--resume); fi
+          if [ "$DIAGNOSTIC" = true ]; then OPTIONS+=(--diagnostic); fi
           python -m scripts.production_history_cutover \
             --expected-sha "$EXPECTED_SHA" --run-id "$NATIVE_RUN_ID" \
             --directory "$RUNNER_TEMP/history-cutover-$NEW_RUN_ID" "${OPTIONS[@]}"
@@ -89,3 +97,4 @@ jobs:
             ${{ runner.temp }}/history-cutover-${{ github.run_id }}/full-union-proof.json
             ${{ runner.temp }}/history-cutover-${{ github.run_id }}/result.json
             ${{ runner.temp }}/history-cutover-${{ github.run_id }}/failure.json
+            ${{ runner.temp }}/history-cutover-${{ github.run_id }}/capture-proof.json

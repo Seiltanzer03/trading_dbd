@@ -153,8 +153,12 @@ def test_rejected_owner_is_reported_without_waiting_for_preparation(monkeypatch)
         driver.assert_owner_running(object(),'run-001')
 
 
-@pytest.mark.parametrize('capture_failure',[None,'deadline','provider','receipt_write'])
-def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,monkeypatch,capture_failure,capsys):
+@pytest.mark.parametrize('capture_failure,diagnostic',[
+    (None,False),('deadline',False),('provider',False),('receipt_write',False),
+    ('sqlite_build',False),('sqlite_context',False),
+    (None,True),('sqlite_build',True),('publish',True),('health',True),('preexisting',True),
+])
+def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,monkeypatch,capture_failure,diagnostic,capsys):
     """Real SQLite, catalog partitions, gzip and owner; SSH/S3 endpoints injected."""
     import json
     import os
@@ -233,13 +237,26 @@ def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,m
     monkeypatch.setenv('SSH_PASSWORD','test-only')
     monkeypatch.setattr(driver,'_connect',lambda *args,**kwargs:client)
     monkeypatch.setattr(driver,'_verify_sha',lambda *args:None)
-    monkeypatch.setattr(driver,'_probe_api',lambda *args:None)
+    def probe(*args):
+        if diagnostic and control.starts:
+            if capture_failure=='health':raise RuntimeError('PRIVATE-PROVIDER-SECRET')
+            assert not (data/'cutover.active').exists()
+    monkeypatch.setattr(driver,'_probe_api',probe)
     monkeypatch.setattr(driver,'_exec',launch)
     monkeypatch.setattr(driver,'yandex_image_client',lambda:cloud)
-    monkeypatch.setattr(driver,'publish_image',lambda *args,**kwargs:
-        publish_image(*args,opener=cloud.opener,**kwargs))
+    publications=[]
+    def publish(*args,**kwargs):
+        if diagnostic:
+            assert control.starts==1, 'Diagnostic upload delayed return of terminal'
+            assert not (data/'cutover.active').exists()
+            assert not (data/'cutover.request.json').exists()
+            assert not (data/'cutover.plan.json').exists()
+            if capture_failure=='publish':raise RuntimeError('PRIVATE-PROVIDER-SECRET')
+        publications.append(kwargs['kind'])
+        return publish_image(*args,opener=cloud.opener,**kwargs)
+    monkeypatch.setattr(driver,'publish_image',publish)
     monkeypatch.setattr(driver.time,'sleep',lambda _:real_sleep(.01))
-    if capture_failure:
+    if capture_failure in ('deadline','provider','receipt_write'):
         def expired(*args,**kwargs):
             if capture_failure=='provider':raise RuntimeError('https://PRIVATE-PROVIDER-SECRET/?credential=test-only')
             raise core.CutoverError('TRANSACTION_DEADLINE')
@@ -250,22 +267,81 @@ def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,m
                 if Path(path).name=='failure.json':raise OSError('worker disk full')
                 return real_write(path,value)
             monkeypatch.setattr(core,'_write',no_receipt)
+    if capture_failure in ('sqlite_build','sqlite_context'):
+        def sqlite_failure(*args,**kwargs):
+            if diagnostic:
+                assert control.starts==1
+                assert publications==['original']
+            try:
+                with sqlite3.connect(':memory:') as conn:
+                    conn.execute('SELECT * FROM "PRIVATE-PROVIDER-SECRET"')
+            except sqlite3.OperationalError:
+                if capture_failure=='sqlite_context':
+                    raise RuntimeError('https://PRIVATE-PROVIDER-SECRET/?credential=test-only')
+                raise
+        monkeypatch.setattr(driver,'build_current_hot_cutover_snapshot',sqlite_failure)
+    if capture_failure=='preexisting':
+        core._write(data/'cutover.preparation.json',dict(run_id='run-001',
+            application_sha='a'*40,phase='FROZEN'))
+        with pytest.raises(ValueError,match='DIAGNOSTIC_REQUIRES_FRESH_EPOCH'):
+            driver.run(expected_sha='a'*40,run_id='run-001',directory=tmp_path/'worker',diagnostic=True)
+        assert not (data/'cutover.abort.json').exists()
+        assert not (data/'cutover.request.json').exists()
+        assert not threads and control.starts==0
+        return
     try:
         if capture_failure:
-            error=RuntimeError if capture_failure=='provider' else core.CutoverError
+            error=(sqlite3.OperationalError if capture_failure=='sqlite_build' else
+                   RuntimeError if capture_failure in ('provider','sqlite_context','publish','health') else core.CutoverError)
             with pytest.raises(error):
-                driver.run(expected_sha='a'*40,run_id='run-001',directory=tmp_path/'worker')
+                driver.run(expected_sha='a'*40,run_id='run-001',directory=tmp_path/'worker',diagnostic=diagnostic)
             if capture_failure!='receipt_write':
                 failure=json.loads((tmp_path/'worker/failure.json').read_bytes())
-                assert failure['stage']=='frozen_capture'
-                assert failure['code']==('HISTORY_STEP_FAILED' if capture_failure=='provider' else 'TRANSACTION_DEADLINE')
+                assert failure['stage']==('build_hot' if capture_failure in ('sqlite_build','sqlite_context') else
+                    'publish_original' if capture_failure=='publish' else
+                    'verify_original_service' if capture_failure=='health' else 'frozen_capture')
+                assert failure['code']==('TRANSACTION_DEADLINE' if capture_failure=='deadline' else 'HISTORY_STEP_FAILED')
                 assert 'PRIVATE-PROVIDER-SECRET' not in json.dumps(failure)
+                if capture_failure in ('sqlite_build','sqlite_context'):
+                    chain=failure['error_chain']
+                    sqlite_record=chain[0 if capture_failure=='sqlite_build' else 1]
+                    assert sqlite_record['exception_type']=='OperationalError'
+                    assert sqlite_record['sqlite_errorcode']==1
+                    assert sqlite_record['sqlite_errorname']=='SQLITE_ERROR'
+                    frames=[frame for record in chain for frame in record['frames']]
+                    assert any(frame['file']=='production_history_cutover.py' and frame['function']=='run' for frame in frames)
+                    assert all(set(frame)=={'file','line','function'} and frame['line']>0 for frame in frames)
+                    assert str(tmp_path) not in json.dumps(failure)
             assert 'PRIVATE-PROVIDER-SECRET' not in capsys.readouterr().out
             assert (data/'cutover.abort.json').exists()
             assert not (data/'cutover.request.json').exists()
+            if diagnostic:
+                assert control.starts==1
+                assert not (data/'cutover.active').exists()
+                assert not (data/'cutover.plan.json').exists()
+                if capture_failure=='sqlite_build':
+                    receipt=json.loads((tmp_path/'worker/capture-proof.json').read_bytes())
+                    assert receipt['image']['full_get_verified'] is True
+                    assert receipt['owner']['phase']=='ABORTED_ORIGINAL'
+                if capture_failure=='health':assert publications==[]
             return
-        report=driver.run(expected_sha='a'*40,run_id='run-001',directory=tmp_path/'worker')
+        report=driver.run(expected_sha='a'*40,run_id='run-001',directory=tmp_path/'worker',diagnostic=diagnostic)
         assert not errors
+        if diagnostic:
+            assert report['owner']['phase']=='ABORTED_ORIGINAL'
+            assert report['original_service_verified'] is True
+            assert report['diagnostic_build_verified'] is True
+            assert report['production_retirement_observed'] is False
+            assert publications==['original']
+            assert control.starts==1
+            assert not (data/'cutover.active').exists()
+            assert not (data/'cutover.request.json').exists()
+            assert not (data/'cutover.plan.json').exists()
+            assert not (data/'cutover.journal.json').exists()
+            assert (tmp_path/'worker/capture-proof.json').exists()
+            with sqlite3.connect(data/'trades.db') as original:
+                assert original.execute('SELECT COUNT(*) FROM passive_market_observations').fetchone()[0]==source_count
+            return
         assert report['owner']['phase']=='COMMITTED'
         assert report['owner']['disposable_proof'] is False
         assert report['worker_full_union_verified'] is True
@@ -284,3 +360,82 @@ def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,m
     finally:
         for thread in threads:thread.join(timeout=2)
     assert not errors
+
+
+def test_failure_evidence_bounds_exception_cycles_and_ignores_provider_sqlite_attributes():
+    from scripts import production_history_cutover as driver
+    errors=[RuntimeError('https://PRIVATE-PROVIDER-SECRET/') for _ in range(6)]
+    for left,right in zip(errors,errors[1:]+errors[:1]):
+        left.__context__=right
+        left.sqlite_errorcode=1
+        left.sqlite_errorname='SQLITE_ERROR'
+    chain=driver._safe_error_chain(errors[0])
+    assert len(chain)==4
+    assert all(row['sqlite_errorcode'] is None and row['sqlite_errorname'] is None for row in chain)
+    assert 'PRIVATE-PROVIDER-SECRET' not in repr(chain)
+
+
+@pytest.mark.parametrize('label,code,expected_code',[
+    ('SQLITE_ERROR https://PRIVATE-PROVIDER-SECRET/',True,None),
+    ('SQLITE_secretCredential123',1,1),
+    ('SQLITE_BUSY',1,1),
+    ('SQLITE_CREATE_INDEX',1,1),
+])
+def test_failure_evidence_rejects_noncanonical_sqlite_diagnostic_attributes(label,code,expected_code):
+    from scripts import production_history_cutover as driver
+    try:
+        with sqlite3.connect(':memory:') as conn:
+            conn.execute('SELECT * FROM "PRIVATE-PROVIDER-SECRET"')
+    except sqlite3.Error as exc:
+        exc.sqlite_errorcode=code
+        exc.sqlite_errorname=label
+        chain=driver._safe_error_chain(exc)
+    assert chain[0]['sqlite_errorcode']==expected_code
+    assert chain[0]['sqlite_errorname'] is None
+    assert 'PRIVATE-PROVIDER-SECRET' not in repr(chain)
+
+
+def test_failure_evidence_preserves_genuine_extended_sqlite_result_code():
+    from scripts import production_history_cutover as driver
+    try:
+        with sqlite3.connect(':memory:') as conn:
+            conn.execute('CREATE TABLE x(v INTEGER UNIQUE)')
+            conn.execute('INSERT INTO x VALUES(1)')
+            conn.execute('INSERT INTO x VALUES(1)')
+    except sqlite3.IntegrityError as exc:
+        chain=driver._safe_error_chain(exc)
+    assert chain[0]['sqlite_errorcode']==2067
+    assert chain[0]['sqlite_errorname']=='SQLITE_CONSTRAINT_UNIQUE'
+
+
+def test_diagnostic_resume_is_refused_before_remote_access(tmp_path,monkeypatch):
+    from scripts import production_history_cutover as driver
+    monkeypatch.setattr(driver,'_connect',lambda *a,**k:pytest.fail('Unexpected remote access'))
+    with pytest.raises(ValueError,match='DIAGNOSTIC_REQUIRES_FRESH_EPOCH'):
+        driver.run(expected_sha='a'*40,run_id='run-001',directory=tmp_path/'worker',
+                   resume=True,diagnostic=True)
+    assert not (tmp_path/'worker').exists()
+
+
+@pytest.mark.parametrize('changed',['phase','service_started','application_sha','epoch','source','guard','plan','request'])
+def test_diagnostic_return_refuses_unverified_or_already_handed_off_state(monkeypatch,changed):
+    from scripts import production_history_cutover as driver
+    identity=dict(database_sha256='b'*64,database_size_bytes=4096)
+    epoch=dict(contract='sqlite-history-frozen-v1',run_id='run-001')
+    frozen=dict(run_id='run-001',application_sha='a'*40,epoch=epoch,
+                source={'identity':identity})
+    result=dict(run_id='run-001',application_sha='a'*40,epoch=epoch,
+                source=identity,phase='ABORTED_ORIGINAL',service_started=True)
+    if changed in ('phase','service_started','application_sha','epoch','source'):
+        result[changed]=False
+    writes=[]
+    monkeypatch.setattr(driver,'_assert_remote_frozen',lambda *a:None)
+    monkeypatch.setattr(driver,'_remote_read',lambda s,name:
+        epoch if changed=='guard' and name=='cutover.active' else
+        {} if changed in ('plan','request') and name=='cutover.'+changed+'.json' else None)
+    monkeypatch.setattr(driver,'_remote_write',lambda s,name,value:writes.append(name))
+    monkeypatch.setattr(driver,'_completed_result',lambda *a:result)
+    monkeypatch.setattr(driver,'_verify_sha',lambda *a:pytest.fail('Unverified return accepted'))
+    with pytest.raises(ValueError,match='DIAGNOSTIC_'):
+        driver._restore_diagnostic_original(object(),object(),frozen,time.monotonic()+1)
+    assert writes==([] if changed in ('plan','request') else ['cutover.abort.json'])
