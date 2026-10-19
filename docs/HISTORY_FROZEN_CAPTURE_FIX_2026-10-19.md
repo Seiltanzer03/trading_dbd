@@ -1,73 +1,100 @@
-# Frozen history capture failure and bounded transport correction
+# Frozen history capture: measured transport correction
 
-Production baseline: main b3d1687e6654d13c1246092254da0cdd6d626b66,
-tree b52c998a7446295c17d2ecca73eb482d3edd0c6b, PR490.
+Baseline mainb3d1687e6654d13c1246092254da0cdd6d626b66/treeb52c998a7446295c17d2ecca73eb482d3edd0c6b.
 
-## Actual overnight result
+## Actual overnight outcome
 
-Manual cutover39170527310/job117805166185 ran22:16:33–22:53:26UTC and
-failed before producing any hot-build/accepted-plan/full-union artifact.
-Read-only diagnostic39202257215/job117897542975 verified at05:00:07UTC:
-ABORTED_ORIGINAL, service_started=true, WORKER_REQUESTED_SAFE_ABORT;
-no active guard, journal, accepted plan, request or capacity receipt.
-Original frozen source19315957760bytes/SHAfe2d3300ce31c0cf96ec31df1c3d4ad254ba12133db4b99825d351e9412e650f.
-Current source19320233984bytes; live writes have resumed. HTTP200, root free
-604913664bytes. No retirement or disk-reclamation success is claimed.
+Cutover39170527310/job117805166185 failed22:53:26UTC after37minutes, before any
+hot-build/accepted-plan/full-union artifact. Diagnostic39202257215/job117897542975
+at05:00:07UTC verified ABORTED_ORIGINAL/service_started=true,
+WORKER_REQUESTED_SAFE_ABORT, no guard/journal/accepted plan/request/capacity
+receipt, HTTP200, root free604913664bytes. Frozen source19315957760bytes,
+SHAfe2d3300ce31c0cf96ec31df1c3d4ad254ba12133db4b99825d351e9412e650f.
+Current source19320233984bytes proves live writes resumed. No retirement success.
+The failed worker discarded its original exception; timing matches preparation
+plus1800s capture, but the exact old exception remains unproven.
 
-Automatic backup recovery39171395121 refused HISTORY_CUTOVER_ACTIVE_MUTATION_REFUSED
-while the finite owner was still recovering; it did not race the transfer.
-Scheduled health39184957334 subsequently returnedHTTP200. Automatic deploy39170408478
-had timed out waiting for HTTP; its first storage preparation took450.005s and
-its schema-backup stage began474.785s into startup. That is not release acceptance.
+Automatic backup recovery39171395121 refused mutation while the native owner
+was recovering. Deploy39170408478 failed its HTTP startup allowance: initial
+storage preparation450.005s, schema-backup begin474.785s. Subsequent health was
+HTTP200. Delivery is distinct from full release acceptance.
 
-## Reproduced cause and bounded fix
+## Reproduction and measured decision
 
-The failed worker discarded its original exception. Its elapsed time matches
-frozen preparation followed by the1800s capture limit; exact exception evidence
-cannot be recovered from that runner. Independently, a real Paramiko SSH/SFTP
-regression reproduced serialized32KiB reads (peak outstanding=1), which make a
-19GB capture latency-bound. The test failed before this correction.
+A real SSH/SFTP test reproduced serialized32KiB reads, peak outstanding1.
+The first bounded4MiB/32request candidate passed120focused tests and independent
+review; its final candidate CI39203447274 passed4565tests/5skips/13subtests,
+WebKit/acceptance, real systemd owner and pinnedSQLite checks. It was not merged.
 
-Capture now prefetches only4MiB windows with at most32 outstanding requests,
-using the already pinned file size. No whole-file read-ahead allocation. Exact
-wire size/SHA, actual EOF, SQLite integrity, private file ownership, original
-1800s capture limit and finite native-owner clocks remain unchanged. Real SFTP
-capture crosses multiple windows and preserves exact bytes with bounded parallel
-requests. The mandatory CI test job explicitly installs the protocol proof dependency.
+Read-only worker-to-VPS measurements used only the public8,020,928byte Python
+executable, never the database or a new VPS staging file:
 
-Public stage/byte progress and a redacted failure artifact replace the previous
-opaque worker failure. Raw provider exception messages and signed URLs are never
-published. A failed diagnostic write cannot prevent the existing safe abort;
-that regression failed before its correction. Provider-message redaction and
-complete driver/owner/restore integration are also covered.
+| Run | Transport | Short-probe raw-equivalent MiB/s |
+| --- | --- | ---: |
+|39203741156|SFTP32requests|2.075|
+|39203741156|SFTP64requests|3.593|
+|39204060404|rawSSH16MiB window|5.923|
+|39204350461|SFTP32/64requests|2.104 /3.827|
+|39204350461|rawSSH16MiB window|5.533|
+|39204350461|gzip1SSHstream|8.922|
 
-Focused profile:120passed/1skipped in10.70s. Native process inventory remains a
-mandatory CI proof. One independent review, final CI, release and a fresh admitted
-production attempt remain pending. No new production attempt was requested.
+Short probes include startup/roundtrip overhead; they do not prove sustained
+19GB database throughput or its compression ratio. They demonstrated that the
+first candidate did not establish adequate capture performance. Choose a single
+compressed stream over the existing SSH transport rather than releasing that
+candidate or extending the1800s limit. Actual capture must still meet that limit.
 
-## Independent scoped final review
+## Final capture contract
 
-Reviewer frozen_capture_fix_final_review_20261019: no Critical/Important findings
-for1c80e9d..8d1a051. Focused15passed2.62s; additional real-SFTP probes rejected
-extra bytes, premature EOF, wrong SHA and mid-transfer deadline, removed each
-owned failed output, and observed peak32 requests. No production work performed.
+The native owner still freezes/checkpoints/pins the original and owns the
+existing exclusion,5400s preparation and10800s hard lifetime. The worker opens
+one16MiB SSH receive window on its existing authenticated connection and runs
+only `/bin/gzip -1 -c -- /opt/seiltanzer/data/trades.db`. This command reads the
+frozen source and writes stdout; it creates no second VPS database/archive.
+Control metadata remains on the existing SFTP channel.
 
-Deferred minors (no extra polishing pass):
-1. Paramiko prefetch cancellation can leave its bounded daemon thread alive until
-   this one-shot worker exits, and can emit Socket-is-closed. The same SFTP
-   session remains usable and the safe-abort test passes. No source mutation,
-   recovery or integrity failure was found. A future dependency lifecycle fix
-   needs explicit cancellation coverage.
-2. Preflight failures before the guarded run block (connection/SHA/catalog/SFTP
-   initialization) still have generic diagnostics. Frozen capture/build/handoff
-   failures have the new redacted evidence; no preflight safety gate is relaxed.
+The worker incrementally decompresses into its exclusive0600 local file.
+Compressed reads check the original deadline and a bounded wire-size envelope;
+this also bounds streams/members that yield no uncompressed output. The
+unchanged verifier checks exact uncompressed size/SHA and actual EOF; gzip
+checks CRC/trailer and the remote command must exit0 within the same deadline.
+Local SQLite integrity and identity checks remain. No fabricated cloud receipt,
+new provider/resource, source/risk gate change or old-copy overwrite.
 
-Review limited to local Paramiko5.1.0; mandatory CI covers the final tree and
-native proofs. Actual production throughput/retirement remains unverified.
+The prefetch path was removed, including its cancelled-daemon lifecycle issue.
+Real SSH/SFTP tests prove the one fixed gzip command,16MiB window, zero SFTP
+source opens, exact raw bytes, rejected CRC/truncation/extra data/nonzero exit,
+a deadline on empty gzip members, and a still-usable control SFTP session.
+An independent review found one Important issue: Paramiko's command-ack wait
+and partial receive loop can outlive socket timeouts. A daemon deadline timer
+now closes only the owned capture channel at the absolute capture deadline;
+every exit cancels it and allows at most one second to join its close callback.
+This does not close the control SFTP session. Two real-SSH regressions first
+failed against the old implementation, then verified that blocked exec ACK and
+trickled compressed input return within0.5s for a0.1s deadline, delete the owned
+partial, preserve source bytes/control SFTP, and leave no deadline timer alive.
+The native owner's independent lifetime and rollback remain authoritative.
+Missing remote exit status is bounded; each failure removes only its owned
+worker output. Existing complete driver/owner/publication/full-union and safe
+abort tests remain, including diagnostic-write failure and provider redaction.
+Focused validation:129passed/1skipped in11.15s. Native/proc proof remains
+mandatory CI.
 
-CI scope correction: adding the optional SSH library to global dev dependencies
-triggered an unrelated fresh ML audit through pyproject's path filter. Keep
-pyproject unchanged and install Paramiko explicitly in the mandatory test job;
-local runs without this operational dependency explicitly skip the real-SFTP
-module. CI installs it and must exercise the protocol proof. No research gate
-or runtime dependency was changed. The superseded CI tree is not release evidence.
+Public stage/byte progress and redacted failure artifacts retain stage and fixed
+codes, never raw provider exceptions/signed URLs. Preflight errors before the
+guarded run block still have generic diagnostics (deferred minor). Diagnostic
+write failure cannot suppress safe abort.
+
+CI explicitly installs Paramiko only in the mandatory test job; keeping
+pyproject unchanged avoids triggering unrelated ML retraining. Local developer
+runs without that operational dependency explicitly skip the SSH proof module.
+An attempted cancellation of the old-head ML run39203077006 was rejected by
+automatic approval review; it was left running, without a bypass/retry.
+
+## Release boundary
+
+The compressed transport delta received an independent scoped review: one
+Important deadline issue corrected as described above; no other blockers.
+Run final CI on this corrected tree before merge; earlier green CI covered
+the superseded prefetch candidate. Production compression throughput, hot retirement,
+headroom, full union and terminal/research/AI acceptance remain unverified.

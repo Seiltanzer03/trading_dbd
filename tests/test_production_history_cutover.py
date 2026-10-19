@@ -10,20 +10,28 @@ from types import SimpleNamespace
 import pytest
 
 
-class ReadAheadFile:
-    """Injected local transport implementing the SFTP read-ahead interface."""
-    def __init__(self,stream):self.stream=stream
-    def __enter__(self):return self
-    def __exit__(self,*args):self.stream.close()
-    def read(self,size):return self.stream.read(size)
-    def prefetch(self,*,file_size,max_concurrent_requests):pass
+class LocalSSHChannel:
+    """Injected SSH endpoint; gzip bytes still undergo real decompression."""
+    def __init__(self,source,reads,exit_status=0):
+        import gzip
+        self.stream=io.BytesIO(gzip.compress(source.read_bytes(),compresslevel=1,mtime=0))
+        self.reads=reads;self.exit_status=exit_status
+    def settimeout(self,value):pass
+    def exec_command(self,command):
+        assert command=='/bin/gzip -1 -c -- /opt/seiltanzer/data/trades.db'
+        self.reads.append(('/opt/seiltanzer/data/trades.db','gzip_ssh_stream'))
+    def makefile(self,mode):assert mode=='rb';return self.stream
+    def exit_status_ready(self):return self.exit_status is not None
+    def recv_exit_status(self):return self.exit_status
+    def close(self):self.stream.close()
 
 
 class LocalSFTP:
-    def __init__(self,source):self.source=source;self.reads=[]
-    def open(self,path,mode):
-        self.reads.append((path,mode))
-        return ReadAheadFile(self.source.open('rb'))
+    def __init__(self,source,exit_status=0):self.source=source;self.reads=[];self.exit_status=exit_status
+    def get_channel(self):
+        return SimpleNamespace(get_transport=lambda:SimpleNamespace(
+            open_session=lambda **kwargs:LocalSSHChannel(self.source,self.reads,self.exit_status)))
+
 
 
 @pytest.fixture
@@ -45,7 +53,7 @@ def test_frozen_capture_matches_owner_hash_and_real_sqlite(frozen_source,tmp_pat
     assert output.read_bytes()==raw
     assert proof['immutable_snapshot_verified'] is True
     assert proof['database_sha256']==identity['database_sha256']
-    assert sftp.reads==[('/opt/seiltanzer/data/trades.db','rb')]
+    assert sftp.reads==[('/opt/seiltanzer/data/trades.db','gzip_ssh_stream')]
     assert output.stat().st_mode & 0o077 == 0
 
 
@@ -59,6 +67,18 @@ def test_failed_frozen_capture_removes_only_own_partial(frozen_source,tmp_path,c
     with pytest.raises(ValueError):
         module.capture_frozen(LocalSFTP(source),identity,output,
                               deadline=time.monotonic()+(-1 if change=='expired' else 10))
+    assert not output.exists()
+    assert source.read_bytes()==raw
+
+
+@pytest.mark.parametrize('exit_status',[17,None])
+def test_frozen_capture_requires_successful_bounded_remote_exit(frozen_source,tmp_path,exit_status):
+    from scripts.production_history_cutover import capture_frozen
+    source,raw,identity=frozen_source
+    output=tmp_path/'rejected.sqlite3'
+    with pytest.raises(ValueError,match='FROZEN_CAPTURE_COMMAND_FAILED|TRANSACTION_DEADLINE'):
+        capture_frozen(LocalSFTP(source,exit_status),identity,output,
+                       deadline=time.monotonic()+(.1 if exit_status is None else 10))
     assert not output.exists()
     assert source.read_bytes()==raw
 
@@ -180,12 +200,12 @@ def test_complete_driver_builds_publishes_hands_off_and_reconstitutes(tmp_path,m
             # regardless of the hosted runner user's local UID.
             return SimpleNamespace(st_mode=info.st_mode,st_size=info.st_size,st_uid=0)
         def open(self,path,mode):
-            stream=self.path(path).open('xb' if mode=='wx' else mode)
-            return ReadAheadFile(stream) if mode=='rb' and path.endswith('/trades.db') else stream
+            return self.path(path).open('xb' if mode=='wx' else mode)
         def chmod(self,path,mode):self.path(path).chmod(mode)
         def posix_rename(self,a,b):os.replace(self.path(a),self.path(b))
         def remove(self,path):self.path(path).unlink()
-        def get_channel(self):return SimpleNamespace(settimeout=lambda _:None)
+        def get_channel(self):return SimpleNamespace(settimeout=lambda _:None,get_transport=lambda:SimpleNamespace(
+            open_session=lambda **kw:LocalSSHChannel(data/'trades.db',[])))
         def close(self):pass
     client=SimpleNamespace(open_sftp=lambda:SFTP(),close=lambda:None)
     errors=[];threads=[]

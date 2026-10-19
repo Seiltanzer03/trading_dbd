@@ -4,6 +4,7 @@ Reads credentials from the existing workflow environment only. The running
 local owner, not this SSH connection, owns exclusion, timeout and rollback.
 """
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import shutil
 import sqlite3
 import stat
 import sys
+import threading
 import time
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -33,30 +35,17 @@ from scripts.sqlite_history_union import MAX_CATALOG_BYTES,hydrate_current_snaps
 REMOTE_DATA='/opt/seiltanzer/data/'
 
 
-class _FrozenSFTPReader:
-    """Pipeline bounded windows, rather than one 32KiB request per roundtrip."""
-    WINDOW_BYTES = 4 * 1024**2
-    REQUESTS = 32
-    PROGRESS_BYTES = 256 * 1024**2
-
-    def __init__(self,source,total):
-        self.source=source;self.total=total
-        self.offset=0;self.window_end=0;self.reported=0
-
-    def read(self,size):
-        if self.offset < self.total and self.offset >= self.window_end:
-            self.window_end=min(self.offset+self.WINDOW_BYTES,self.total)
-            self.source.prefetch(file_size=self.window_end,
-                                 max_concurrent_requests=self.REQUESTS)
-        data=self.source.read(size)
-        if isinstance(data,bytes):
-            self.offset+=len(data)
-            if self.offset-self.reported >= self.PROGRESS_BYTES:
-                print(json.dumps({'frozen_capture_bytes':self.offset,
-                                  'expected_bytes':self.total}),flush=True)
-                self.reported=self.offset
-        # At the pinned end, still read the actual transport EOF: extra bytes
-        # must be rejected by the unchanged identity verifier.
+class _DeadlineWire:
+    """Bound compressed input, including members that yield no output."""
+    def __init__(self,source,deadline,limit):
+        self.source=source;self.deadline=deadline;self.limit=limit;self.total=0
+    def read(self,size=-1):
+        core._check_deadline(self.deadline)
+        data=self.source.read(core.CHUNK_BYTES if size<0 else min(size,core.CHUNK_BYTES))
+        core._check_deadline(self.deadline)
+        if not isinstance(data,bytes):raise core.CutoverError('INVALID_TRANSFER_CHUNK')
+        self.total+=len(data)
+        if self.total>self.limit:raise core.CutoverError('COMPRESSED_INPUT_SIZE_MISMATCH')
         return data
 
 
@@ -75,7 +64,7 @@ def release_owned_capture(path,proof):
 
 
 def capture_frozen(sftp,identity,output,*,deadline):
-    """One read of a frozen raw file, exact owner digest and real SQLite check."""
+    """One compressed SSH read; verify the exact raw owner digest and SQLite."""
     core._valid_identity(identity)
     output=Path(output)
     if os.path.lexists(output):raise FileExistsError(output)
@@ -85,9 +74,49 @@ def capture_frozen(sftp,identity,output,*,deadline):
     try:
         with output.open('xb') as target:
             owned=True;os.fchmod(target.fileno(),0o600)
-            with sftp.open(REMOTE_DATA+'trades.db','rb') as source:
-                core._consume(_FrozenSFTPReader(source,identity['database_size_bytes']),
-                              identity,deadline,write=target.write)
+            core._check_deadline(deadline)
+            channel=sftp.get_channel().get_transport().open_session(
+                window_size=16*1024**2,timeout=min(15,deadline-time.monotonic()))
+            written=0;reported=0;started=time.monotonic()
+            def expire():
+                # Paramiko exec acknowledgement and partial-read loops do not
+                # obey the socket timeout as an absolute operation deadline.
+                try:channel.close()
+                except Exception:pass
+            watchdog=threading.Timer(max(0,deadline-time.monotonic()),expire)
+            watchdog.name='frozen-capture-deadline';watchdog.daemon=True
+            watchdog.start()
+            try:
+                channel.settimeout(min(30,max(.001,deadline-time.monotonic())))
+                # Fixed read-only command: no interpolated input or VPS staging file.
+                channel.exec_command('/bin/gzip -1 -c -- /opt/seiltanzer/data/trades.db')
+                with channel.makefile('rb') as wire:
+                    bounded=_DeadlineWire(wire,deadline,
+                        identity['database_size_bytes']*101//100+65536)
+                    def write(data):
+                        nonlocal written,reported
+                        target.write(data);written+=len(data)
+                        if written-reported>=256*1024**2:
+                            print(json.dumps({'frozen_capture_bytes':written,
+                                'expected_bytes':identity['database_size_bytes'],
+                                'wire_bytes':bounded.total,
+                                'elapsed_sec':round(time.monotonic()-started,3)}),flush=True)
+                            reported=written
+                    with gzip.GzipFile(fileobj=bounded,mode='rb') as source:
+                        core._consume(source,identity,deadline,write=write)
+                while not channel.exit_status_ready():
+                    core._check_deadline(deadline)
+                    time.sleep(min(.05,max(0,deadline-time.monotonic())))
+                core._check_deadline(deadline)
+                if channel.recv_exit_status()!=0:
+                    raise core.CutoverError('FROZEN_CAPTURE_COMMAND_FAILED')
+            except Exception:
+                core._check_deadline(deadline)
+                raise
+            finally:
+                watchdog.cancel()
+                try:channel.close()
+                finally:watchdog.join(timeout=1)
             target.flush();os.fsync(target.fileno())
         core._verify_database(output,identity,deadline)
         manifest=dict(identity,cold_history_catalog_sha256=pins.CATALOG_SHA256)
@@ -371,7 +400,8 @@ def run(*,expected_sha,run_id,directory,resume=False):
             allowed={'TRANSACTION_DEADLINE','IMAGE_SIZE_MISMATCH','IMAGE_IDENTITY_MISMATCH',
                      'INVALID_TRANSFER_CHUNK','NATIVE_OWNER_NOT_RUNNING_CHECK_DURABLE_STATE',
                      'FROZEN_PREPARATION_NO_LONGER_ACTIVE','CUTOVER_WORKER_CAPACITY_REFUSED',
-                     'UNION_WORKER_CAPACITY_REFUSED'}
+                     'UNION_WORKER_CAPACITY_REFUSED','FROZEN_CAPTURE_COMMAND_FAILED',
+                     'COMPRESSED_INPUT_SIZE_MISMATCH'}
             code=str(exc) if isinstance(exc,core.CutoverError) and str(exc) in allowed else 'HISTORY_STEP_FAILED'
             failure=dict(contract='sqlite-history-worker-failure-v1',run_id=run_id,
                          application_sha=expected_sha,stage=stage,code=code,
