@@ -90,7 +90,11 @@ jobs:
                 histories.append(evidence)
             conn.close()
             sha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print(json.dumps(dict(contract='readonly-two-ai-snapshot-audit-v1',application_sha=sha,
+            payload=json.dumps(dict(contract='readonly-two-ai-snapshot-audit-v1',application_sha=sha,
                 requested_utc=['14:16:38','14:42:11'],matched=len(found),snapshots=found,histories=histories,
-                llm_called=False,production_mutation=False),sort_keys=True,allow_nan=False))
+                llm_called=False,production_mutation=False),sort_keys=True,allow_nan=False)
+            # Keep each SSH log line below transport scanner limits. These
+            # chunks contain only the already allowlisted read-only summary.
+            for offset in range(0,len(payload),12000):
+                print(json.dumps({'audit_chunk':offset//12000,'text':payload[offset:offset+12000]}),flush=True)
             PY
