@@ -20,48 +20,40 @@ jobs:
     env:
       EXPECTED_SHA: ${{ inputs.expected_sha }}
     steps:
-      - name: Read native history metadata without opening SQLite or changing service
-        uses: appleboy/ssh-action@v1
+      - name: Install existing SSH client on the disposable worker
+        run: pip install 'paramiko>=3.3,<6'
+      - name: Measure bounded SFTP reads of the public Python executable only
         env:
-          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 2m
-          envs: EXPECTED_SHA
-          script: |
-            set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            df -B1 /
-            systemctl show seiltanzer.service seiltanzer-history-39170527310.service -p Id -p LoadState -p ActiveState -p SubState -p Result -p ExecMainStatus -p ActiveEnterTimestamp -p InactiveEnterTimestamp
-            /usr/bin/python3 - <<'PY'
-            import json, os, stat, time
-            from pathlib import Path
-            root=Path('/opt/seiltanzer/data')
-            fields=('contract','run_id','application_sha','phase','service_started','abort_reason','started_wall_ts','started_monotonic','production_retirement_observed','reason','admitted','free_bytes','required_free_bytes')
-            names=('cutover.active','cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.capacity.json','cutover.plan.json','cutover.request.json','cutover.abort.json')
-            for name in names:
-                p=root/name
-                try:
-                    fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
-                except FileNotFoundError:
-                    print(json.dumps({'file':name,'present':False}));continue
-                try:
-                    info=os.fstat(fd)
-                    if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o077 or info.st_size>262144:
-                        raise ValueError('unsafe_metadata')
-                    with os.fdopen(fd,'rb',closefd=False) as f: raw=f.read(262145)
-                    data=json.loads(raw)
-                    output={'file':name,'present':True,'mtime':info.st_mtime,**{k:data[k] for k in fields if k in data}}
-                    if name=='cutover.preparation.json' and isinstance(data.get('source'),dict):
-                        output['source_identity']=data['source'].get('identity')
-                    print(json.dumps(output,sort_keys=True))
-                finally:os.close(fd)
-            p=root/'trades.db';s=p.stat()
-            print(json.dumps({'database_size_bytes':s.st_size,'allocated_bytes':s.st_blocks*512,'now':time.time()}))
-            PY
-            journalctl -u seiltanzer --since '-10 hours' --no-pager -o cat | grep '^STARTUP_PHASE' | tail -n 20 || true
-            code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/api/state || true)
-            echo "CURRENT_HTTP=$code"
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          python - <<'PYTHON'
+          import os,time,json,paramiko
+          client=paramiko.SSHClient()
+          client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+          client.connect('94.241.171.182',username='root',password=os.environ['SSH_PASSWORD'],
+                         look_for_keys=False,allow_agent=False,timeout=15,auth_timeout=30)
+          try:
+              sftp=client.open_sftp();sftp.get_channel().settimeout(20)
+              try:
+                  path='/usr/bin/python3'
+                  size=sftp.stat(path).st_size
+                  assert 1048576<=size<=64*1048576
+                  for requests in (32,64):
+                      started=time.monotonic();offset=0;window_end=0
+                      with sftp.open(path,'rb') as source:
+                          while True:
+                              if offset<size and offset>=window_end:
+                                  window_end=min(offset+4*1048576,size)
+                                  source.prefetch(file_size=window_end,max_concurrent_requests=requests)
+                              chunk=source.read(1048576)
+                              if not chunk:break
+                              offset+=len(chunk)
+                              assert time.monotonic()-started<90
+                      assert offset==size
+                      elapsed=time.monotonic()-started
+                      print(json.dumps({'scope':'public_python_binary_only','requests':requests,
+                            'bytes':offset,'elapsed_sec':round(elapsed,3),
+                            'mib_per_sec':round(offset/1048576/elapsed,3)}),flush=True)
+              finally:sftp.close()
+          finally:client.close()
+          PYTHON
