@@ -1,0 +1,54 @@
+name: read-only-history-backup-inventory
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/history-backup-inventory-20261019.yml]
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -q 'boto3>=1.36,<2'
+      - name: Read seven existing manifests without database transfers
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          python - <<'PY'
+          import json,re
+          import boto3
+          from botocore.config import Config
+          from botocore.exceptions import ClientError
+          client=boto3.client('s3',endpoint_url='https://storage.yandexcloud.net',
+              config=Config(connect_timeout=10,read_timeout=20,retries={'max_attempts':2}))
+          exact='a00a54b5f71ce53673d69808e38bc915a8d1404f01c8f22bfdface7977e9e2f4'
+          for slot in range(7):
+              result=dict(contract='readonly-backup-inventory-v1',slot=slot,
+                  production_connection=False,cloud_writes=False,database_transferred=False)
+              try:
+                  response=client.get_object(Bucket='trading-dbd-backups-2026',
+                      Key=f'backups/v1/daily-slot-{slot}/snapshot.sqlite3.gz.manifest.json')
+                  with response['Body'] as body:raw=body.read(1048577)
+                  if len(raw)>1048576:raise ValueError('manifest_bound')
+                  value=json.loads(raw)
+                  sha=value.get('database_sha256')
+                  if not isinstance(sha,str) or not re.fullmatch('[0-9a-f]{64}',sha):raise ValueError('sha_bound')
+                  size=value.get('database_size_bytes')
+                  if type(size) is not int or not 0<size<128*1024**3:raise ValueError('size_bound')
+                  commit=value.get('git_commit')
+                  result.update(status='PRESENT_UNVERIFIED_INVENTORY_ONLY',database_sha256=sha,
+                      database_size_bytes=size,exact_failed_capture_available=sha==exact,
+                      git_commit=commit if isinstance(commit,str) and re.fullmatch('[0-9a-f]{40}',commit) else None)
+              except ClientError as exc:
+                  result['status']='MISSING' if exc.response.get('Error',{}).get('Code') in ('NoSuchKey','404') else 'CLOUD_READ_REFUSED'
+              except Exception as exc:
+                  result.update(status='INVALID_OR_UNAVAILABLE',exception_type=type(exc).__name__)
+              print(json.dumps(result,sort_keys=True),flush=True)
+          PY
