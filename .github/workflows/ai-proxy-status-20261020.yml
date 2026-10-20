@@ -19,8 +19,9 @@ jobs:
           command_timeout: 1m
           script: |
             set -euo pipefail
-            /usr/bin/python3 - <<'PY'
-            import ipaddress,json,re,subprocess,urllib.parse
+            PYTHONDONTWRITEBYTECODE=1 /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import ipaddress,json,re,subprocess,urllib.parse,time
+            import httpx
             from pathlib import Path
             pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value']))
             if pid<=0:raise SystemExit('NO_ACTIVE_PROCESS_ENVIRONMENT')
@@ -38,4 +39,19 @@ jobs:
             processes=subprocess.check_output(['ps','-eo','pid,comm'],text=True,timeout=5)
             for line in processes.splitlines():
                 if re.search(r'\b(tor|privoxy|squid|xray|sing-box|v2ray|chisel)\b',line):print(line)
+            listeners=subprocess.check_output(['ss','-ltnpH'],text=True,timeout=5)
+            tor_socks_present=any('127.0.0.1:9050' in line and re.search(r'\("tor",pid=[0-9]+,',line) for line in listeners.splitlines())
+            print(json.dumps({'existing_tor_loopback_socks_listener':tor_socks_present}))
+            if tor_socks_present:
+                key=values.get('OPENROUTER_API_KEY','').strip()
+                if not key:raise SystemExit('PROVIDER_KEY_NOT_IN_PROCESS_ENVIRONMENT')
+                started=time.monotonic();probe={'route':'existing_tor_loopback_listener','generation_calls':0,'production_mutation':False}
+                try:
+                    with httpx.Client(proxy='socks5://127.0.0.1:9050',timeout=8,trust_env=False) as client:
+                        response=client.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer '+key})
+                        probe['http_status']=response.status_code
+                        probe['response_bytes']=len(response.content)
+                except httpx.HTTPError as exc:probe['error_class']=type(exc).__name__
+                probe['elapsed_ms']=round((time.monotonic()-started)*1000,1)
+                print(json.dumps(probe,sort_keys=True))
             PY
