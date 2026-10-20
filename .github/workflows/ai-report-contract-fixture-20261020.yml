@@ -1,0 +1,77 @@
+name: isolated-ai-report-contract-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-report-contract-fixture-20261020.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bb672aad636cf4e9aba9d3e1cd453aa35402c650
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install existing test dependencies
+        run: pip install -q -e '.[dev]'
+      - name: Exercise real rendering and validation without provider or production
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tests
+        run: |
+          python - <<'PY'
+          import inspect
+          from seiltanzer import ai_verdict
+          validator=ai_verdict._validate_model_report
+          print('INTEGRITY_OWNER',validator.__module__,inspect.getsourcelines(validator)[1])
+          PY
+          cat > "$RUNNER_TEMP/test_provider_real_integrity.py" <<'PY'
+          from copy import deepcopy
+          import json
+          import httpx
+          import pytest
+          from seiltanzer import ai_runtime_report_v20 as report, ai_verdict
+          from seiltanzer import ai_provider_transport as transport
+          from seiltanzer.llm_decision_shadow import VALID_POLICIES
+          from test_ai_provider_explanation import _snapshot
+          
+          def hard_errors(text, snapshot):
+              return [x for x in ai_verdict._validate_model_report(text, snapshot)
+                      if x == 'изменено рассчитанное действие'
+                      or x.startswith('нет политики ')
+                      or x.startswith('изменено или пропущено ')]
+          
+          @pytest.mark.parametrize('base', ['HOLD','CLOSE_10','CLOSE_50'])
+          @pytest.mark.parametrize('shadow_policy', sorted(VALID_POLICIES))
+          def test_valid_independent_preference_survives_real_report_integrity(monkeypatch, base, shadow_policy):
+              snapshot = _snapshot()
+              fraction = {'HOLD':0.,'CLOSE_10':.1,'CLOSE_50':.5}[base]
+              snapshot['policy_manager']['recommendation'].update(
+                  policy=base, close_fraction=fraction,
+                  action_ru='НЕ СОКРАЩАТЬ ПОЗИЦИЮ' if base=='HOLD' else f'Закрыть {fraction*100:.0f}% текущего остатка позиции.')
+              before = deepcopy(snapshot)
+              baseline = ai_verdict.render_policy_report(snapshot)
+              assert hard_errors(baseline, snapshot) == [], 'baseline fixture must pass real integrity'
+              shadow = {'policy':shadow_policy,'confidence':.7,
+                  'policy_scores':{name:float(name==shadow_policy) for name in VALID_POLICIES},
+                  'reason_ru':'Независимая оценка текущих фактов.',
+                  'key_evidence':[],'counter_evidence':[],'evidence_families':[],
+                  'family_assessments':{},'invalidation_conditions':[]}
+              payload = {'model':'isolated-fixture','choices':[{'message':{'content':
+                  json.dumps({'shadow_decision':shadow},ensure_ascii=False)},'finish_reason':'stop'}]}
+              def post(*args, **kwargs):
+                  return httpx.Response(200,json=payload,request=httpx.Request('POST','https://example.invalid'))
+              monkeypatch.setenv('OPENROUTER_API_KEY','isolated-offline-test')
+              monkeypatch.delenv('OPENROUTER_PROXY',raising=False)
+              monkeypatch.setattr(transport,'post_json',post)
+              result = report.request_explanation_with_shadow(snapshot,authoritative_snapshot=snapshot)
+              assert result['llm_shadow_decision']['policy'] == shadow_policy
+              assert set(result['llm_shadow_decision']['policy_scores']) == set(VALID_POLICIES)
+              assert hard_errors(result['verdict'],snapshot) == []
+              assert snapshot == before
+          
+          PY
+          python -m pytest -q "$RUNNER_TEMP/test_provider_real_integrity.py" --tb=short
