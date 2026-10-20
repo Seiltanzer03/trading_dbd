@@ -51,7 +51,17 @@ jobs:
                 for comm in Path('/proc').glob('[0-9]*/comm'):
                     try:name=comm.read_text().strip()
                     except OSError:continue
-                    if name in {'apt','apt-get','apt-cache','dpkg','unattended-upgr'}:raise SystemExit('PACKAGE_MANAGER_ACTIVE')
+                    if name in {'apt','apt-get','apt-cache','dpkg','unattended-upgr'}:
+                        try:
+                            args=(comm.parent/'cmdline').read_bytes().split(b'\\0')
+                            programs=[Path(a.decode(errors='replace')).name for a in args[:2] if a]
+                        except OSError:programs=[]
+                        emit(kind='package_guard',pid=int(comm.parent.name),comm=name,programs=programs,all_package_locks_acquired=True)
+                        for item in ['pkgcache.bin','srcpkgcache.bin']:
+                            p=base/item
+                            try:s=p.lstat();emit(kind='cache_candidate',path=str(p),bytes=s.st_size,allocated_bytes=s.st_blocks*512,age_sec=round(time.time()-s.st_mtime))
+                            except FileNotFoundError:continue
+                        raise SystemExit('PACKAGE_MANAGER_ACTIVE')
                 available_before=free();removed=0
                 for name in ['pkgcache.bin','srcpkgcache.bin']:
                     p=base/name
