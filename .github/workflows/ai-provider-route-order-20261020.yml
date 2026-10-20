@@ -28,6 +28,7 @@ jobs:
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = b0490169fa22411c5034042aae259d50a066d4fe
             test ! -e /opt/seiltanzer/data/cutover.active
             test ! -L /opt/seiltanzer/data/cutover.active
+            df -B1 /
             /usr/bin/python3 -u - <<'PY'
             import json,os,stat,subprocess
             from pathlib import Path
