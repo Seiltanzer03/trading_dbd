@@ -47,3 +47,8 @@ The generic validation RuntimeError is now isolated: one genuine saved-input cal
 PR497 replaces the ambiguous policy example with strict response_format JSON schema, keeps all12action scores and guarded family adaptation, and requests existing provider parameter support/latency routing. Same model, key,6s outer guard,8s transport and all mandatory source/risk/ACK constraints remain. Focused RED19/17 then GREEN36passed1.86s; finalCI39483970028 passed4661/5skip/13subtests and native/browser acceptance. Single final review found no outstanding findings.
 
 One isolated reviewed-candidate genuine call39484613828/requestai-84a098485257426f9dd9 returned VALIDATED/shadowok/all12scores in5192.6ms inside6s. No installed file/service/database mutation or production decision, ACK or order occurred. This demonstrates corrected format and one bounded response, not persistent production availability. Merged mainbd615fbd5481a61625c31e62d19f91fd2277dcfd awaits ordinary exact-SHA delivery/live review. User txt remains unread; the server saved snapshot19:06UTC is not claimed identical to that attachment.
+
+
+### Deployment reality after correction
+
+Exact-mainCI39484791758 also passed4661/5skip/13subtests271.34s. Ordinary deploy39485613984 stopped before installation/restart at its unchanged root reserve guard:513168KiB available versus524288KiB required (11120KiB short). Production remainsbb672/PID3263616. Therefore the merged correction is tested and genuine-candidate-verified but NOT installed/live-accepted. No further review POST was issued on the old version. Historical/source acceptance still requires the larger resource reserve; do not hide this by lowering thresholds or treating deploy failure as code installation.
