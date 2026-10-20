@@ -27,6 +27,18 @@ jobs:
                 return subprocess.run(args,text=True,capture_output=True,timeout=timeout)
             props=run(['systemctl','show','seiltanzer','-p','MainPID','-p','ControlPID','-p','ActiveState','-p','SubState','-p','ExecMainStatus','-p','NRestarts','-p','MemoryCurrent','-p','ActiveEnterTimestamp'])
             out(kind='startup',observed_ts=time.time(),properties=props.stdout.splitlines())
+            fields=dict(line.split('=',1) for line in props.stdout.splitlines() if '=' in line)
+            rawpid=fields.get('MainPID','0')
+            if rawpid.isdigit() and int(rawpid)>0:
+                root=Path('/proc')/rawpid
+                for item in ['io','wchan']:
+                    try:out(kind='process_'+item,lines=(root/item).read_text().splitlines()[:12])
+                    except OSError:pass
+            journal=run(['journalctl','-u','seiltanzer','--since','2026-10-20 20:00:00','--no-pager','-n','65','-o','cat'])
+            for line in journal.stdout.splitlines():
+                if any(mark in line.lower() for mark in ['authorization','password','secret','api_key','x-amz','access_key','token=']):continue
+                if len(line)>1000:continue
+                out(kind='startup_journal',line=line)
             head=run(['git','-C','/opt/seiltanzer','rev-parse','HEAD'])
             out(kind='git',observed_head=head.stdout.strip())
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
