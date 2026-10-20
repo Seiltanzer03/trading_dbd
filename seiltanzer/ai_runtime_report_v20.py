@@ -30,6 +30,7 @@ from .llm_decision_shadow import (
     record_shadow_decision,
 )
 from .llm_shadow_working_action import build_working_action
+from .ai_provider_contract import provider_response_format, normalize_family_wire
 
 
 REPORT_VERSION = "ai-runtime-report-v20"
@@ -44,25 +45,13 @@ The server owns the production management_decision and every deterministic numbe
 The selected quant policy and all server winner outputs are deliberately withheld.
 You MUST NOT change, execute, or present the shadow policy as the production action.
 
-Return ONLY one valid JSON object, no markdown:
-{
-  "shadow_decision": {
-    "policy": "HOLD|CLOSE_10|CLOSE_25|CLOSE_50|EXIT|MOVE_TO_BE|TRAIL_GAMMA_FLIP|TIGHTEN_STOP|EXTEND_TAKE|REDUCE_TAKE|SCALE_OUT_ON_SPIKE|TIME_STOP",
-    "confidence": 0.0,
-    "policy_scores": {"HOLD": 0.0, "CLOSE_10": 0.0, "CLOSE_25": 0.0, "CLOSE_50": 0.0, "EXIT": 0.0, "MOVE_TO_BE": 0.0, "TRAIL_GAMMA_FLIP": 0.0, "TIGHTEN_STOP": 0.0, "EXTEND_TAKE": 0.0, "REDUCE_TAKE": 0.0, "SCALE_OUT_ON_SPIKE": 0.0, "TIME_STOP": 0.0},
-    "reason_ru": "brief independent numerical rationale",
-    "key_evidence": ["3-6 strongest facts"],
-    "counter_evidence": ["0-4 facts against your own shadow choice"],
-    "evidence_families": ["observed family IDs from shadow_contract.available_evidence_family_ids"],
-    "family_assessments": {"macro": {"feature_names": ["exact name from edge_family_facts.macro.features"], "policy_scores": {"HOLD": 0.2, "CLOSE_25": -0.2}, "reason_ru": "brief interpretation of these observed features"}, "event": {}, "order_flow": {}, "intermarket": {}, "positioning": {}, "value_carry": {}, "option": {}, "session": {}},
-    "invalidation_conditions": ["checkable conditions invalidating this preference"]
-  }
-}
-
-Keep the response concise; the server writes the displayed report.
-Keep reason_ru under160 characters, each evidence item under
-120 characters, use2-3 key facts and at most2 counter-facts/invalidations.
-Omit unavailable family entries rather than emitting eight empty objects.
+Return only JSON matching the supplied response schema, without markdown.
+policy must be exactly one canonical action name from the schema, never a joined
+list, an explanation, an unavailable label or a parameterized candidate ID.
+Return all12 policy_scores; the server writes the displayed report.
+Keep reason_ru under100 characters; use1-2 concise key facts and at most1
+counter-fact/invalidation. Empty evidence lists are allowed when facts are absent.
+family_assessments is an array: use[] when no observed features support an opinion.
 
 For shadow_decision independently synthesize trade geometry, Expected/median/CVaR,
 execution-MC/scenario geometry when actually available, option distribution and
@@ -76,11 +65,11 @@ Correlated metrics from one family are not independent votes. Hard-CVaR eligibil
 is mandatory. Never widen stops, average down, or add to a losing position.
 Return all 12 policy_scores, each from -1 to 1: relative preferences, not
 probabilities or Expected R. Self-confidence never determines ensemble weight.
-Assess all eight families in family_assessments using ONLY the exact numeric
-features supplied in edge_family_facts, preserving observed versus explicitly
-labelled preliminary proxy/scenario roles. Use {} when no inputs support an
-interpretation. For an available opinion cite1-4 exact feature_names, give1-3
-policy_scores in[-1,1] and reason_ru of at most240 characters. These are current
+Assess all eight families using ONLY the exact numeric features supplied in
+edge_family_facts, preserving observed versus preliminary proxy/scenario roles.
+Include only supported opinions in family_assessments, with family_id,1-4 exact
+feature_names,1-3 policy_preferences entries (one canonical policy and score per
+entry), and reason_ru under100 characters. Omit unsupported families. These are current
 manual LLM preferences sharing your existing budget, not validated historical
 forecasts or additional independent experts. Do not invent missing consensus,
 broker flow/carry, physical option forecasts or causal direction from a sign.
@@ -401,7 +390,7 @@ def _provider_payload(content: str) -> tuple[str, dict[str, Any]]:
     shadow_raw = payload.get("shadow_decision")
     if not isinstance(shadow_raw, dict):
         raise RuntimeError("combined_provider_missing_shadow")
-    shadow = _validate_model_payload(shadow_raw)
+    shadow = _validate_model_payload(normalize_family_wire(shadow_raw))
     if "policy_scores" not in shadow:
         raise RuntimeError("combined_provider_missing_policy_scores")
     return explanation, shadow
@@ -478,6 +467,8 @@ def request_explanation_with_shadow(
             "model": model,
             "temperature": 0.0,
             "max_tokens": COMBINED_PROVIDER_MAX_TOKENS,
+            "response_format": provider_response_format(),
+            "provider": {"require_parameters": True, "sort": "latency"},
             "messages": [
                 {"role": "system", "content": _COMBINED_PROMPT},
                 {
