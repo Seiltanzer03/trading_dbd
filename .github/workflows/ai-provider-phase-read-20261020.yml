@@ -1,0 +1,52 @@
+name: read-only-ai-provider-phases-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-provider-phase-read-20261020.yml]
+permissions:
+  contents: read
+jobs:
+  trace:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Read recent code-owned timing and counters without another LLM request
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 1m
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 54a33626f2fc6ece9f75b06528cc5997e02ab345
+            /usr/bin/python3 - <<'PY'
+            import json,math,re,subprocess,urllib.request
+            result=subprocess.run(['journalctl','-u','seiltanzer','--since','-30 minutes','-n','2000','--no-pager','-o','cat'],capture_output=True,timeout=15,check=True)
+            if len(result.stdout)>3*1024**2:raise ValueError('JOURNAL_BOUND')
+            stages={'provider','provider_render','provider_prepare','provider_transport','provider_http','provider_decode','provider_validate','provider_fallback','response','preflight','snapshot_error','internal_error'}
+            events={'start','end','metrics','submitted','worker_start','worker_end','finish','error'}
+            counts={'elapsed_ms','duration_ms','status_code','input_bytes','request_bytes','response_bytes','output_bytes','max_output_tokens','prompt_tokens','completion_tokens','total_tokens'}
+            rows=[];ids=[]
+            for line in result.stdout.splitlines():
+                if re.fullmatch(rb'STARTUP_PHASE phase=[a-z_.]+ elapsed_sec=[0-9.]+',line):print(line.decode())
+                if len(line)>8192:continue
+                try:v=json.loads(line[line.index(b'{'):])
+                except (ValueError,TypeError):continue
+                if not isinstance(v,dict) or not re.fullmatch(r'ai-[a-f0-9]{20}',str(v.get('request_id',''))):continue
+                if v.get('stage') not in stages or v.get('event') not in events:continue
+                row={k:v[k] for k in ('request_id','stage','event')}
+                for k in counts:
+                    n=v.get(k)
+                    if type(n) in (int,float) and math.isfinite(n) and 0<=n<=1e9:row[k]=n
+                if v.get('finish_reason') in {'stop','length','content_filter','tool_calls','function_call','error','unknown'}:row['finish_reason']=v['finish_reason']
+                if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,79}',str(v.get('exception_class',''))):row['exception_class']=v['exception_class']
+                rows.append(row)
+                if row['request_id'] not in ids:ids.append(row['request_id'])
+            for row in rows:
+                if row['request_id'] in ids[-3:]:print(json.dumps(row,sort_keys=True))
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=5) as response:raw=response.read(20001)
+            if len(raw)>20000:raise ValueError('STATUS_BOUND')
+            s=json.loads(raw)
+            print(json.dumps({'ready':s.get('ready'),'building':s.get('building'),'build_ms':s.get('build_ms'),'sqlite_opened':False,'llm_called':False,'production_mutation':False}))
+            PY
