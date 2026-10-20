@@ -1,0 +1,70 @@
+name: single-real-ai-route-check-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-real-route-check-20261020.yml]
+permissions:
+  contents: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 6
+    steps:
+      - name: One normal AI review, never ACK or broker execution
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 4m
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 6e4275906d248b9d16c4c20fd2d090f0f99d4033
+            test ! -e /opt/seiltanzer/data/cutover.active
+            test ! -L /opt/seiltanzer/data/cutover.active
+            /usr/bin/python3 -u - <<'PY'
+            import json,re,subprocess,time,urllib.request,urllib.error
+            from pathlib import Path
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],timeout=5))
+            if pid<=0:raise SystemExit('ACTIVE_PROCESS_REQUIRED')
+            values=dict(x.decode(errors='replace').split('=',1) for x in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0') if b'=' in x)
+            if values.get('OPENROUTER_PROXY')!='socks5://127.0.0.1:9050':raise SystemExit('VERIFIED_ROUTE_NOT_ACTIVE')
+            def call(path,post=False):
+                req=urllib.request.Request('http://127.0.0.1:8790'+path,data=b'{}' if post else None,headers={'Content-Type':'application/json'})
+                try:response=urllib.request.urlopen(req,timeout=14 if post else 5)
+                except urllib.error.HTTPError as exc:response=exc
+                with response:
+                    raw=response.read(2*1024**2+1)
+                    if len(raw)>2*1024**2:raise ValueError('RESPONSE_BOUND')
+                    return response.code,json.loads(raw)
+            end=time.monotonic()+180
+            while True:
+                code,status=call('/api/ai/snapshot/status')
+                if code!=200:raise SystemExit('SNAPSHOT_STATUS_UNAVAILABLE')
+                if status.get('ready') or status.get('current_trade_id') is None:break
+                if time.monotonic()>=end:raise SystemExit('SNAPSHOT_NOT_READY_NO_PROVIDER_CALL')
+                time.sleep(5)
+            started=time.monotonic();code,body=call('/api/ai/verdict',True)
+            shadow=body.get('llm_shadow_decision') or {};audit=body.get('unified_edge_ensemble') or {}
+            current=next((x for x in audit.get('components',[]) if x.get('component_id')=='current_llm'),{})
+            families=audit.get('edge_families') or []
+            families=list(families.values()) if isinstance(families,dict) else families
+            for family in families:
+                if family.get('family_id') in {'macro','event','order_flow','intermarket','positioning','value_carry','option','session'}:
+                    print(json.dumps({k:family.get(k) for k in ('family_id','available','forecast_available','working_assessment_available','model_marginal_score_delta','working_score','working_effective_weight','status','reason')},sort_keys=True))
+            selected=next((x for x in audit.get('candidates',[]) if x.get('candidate_id')==audit.get('selected_candidate_id')), {})
+            for part in selected.get('component_contributions',[]):
+                print(json.dumps({k:part.get(k) for k in ('component_id','score','effective_weight','contribution')},sort_keys=True))
+            model=body.get('model')
+            print(json.dumps({'http':code,'ok':body.get('ok'),'mode':body.get('mode'),'degraded':body.get('degraded'),
+                'request_id':body.get('request_id') or (body.get('error') or {}).get('request_id'),
+                'api_error_code':(body.get('error') or {}).get('code'),'provider_error_code':(body.get('provider_error') or {}).get('code'),
+                'model':model if isinstance(model,str) and re.fullmatch(r'[A-Za-z0-9_./:-]{1,120}',model) else None,
+                'shadow_status':shadow.get('status'),'current_llm_weight':current.get('effective_weight'),
+                'elapsed_ms':round((time.monotonic()-started)*1000,1),'review_posts':1,'acks_sent':0,'broker_orders_sent':0,
+                'automatic_execution_allowed':audit.get('automatic_execution_allowed')},sort_keys=True))
+            PY
