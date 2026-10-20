@@ -38,6 +38,7 @@ jobs:
         run: |
           python - <<'PY'
           import hashlib,json,os,shutil,time
+          from boto3.s3.transfer import TransferConfig
           from pathlib import Path
           from scripts import history_production_plan as pins
           from scripts import sqlite_history_partition as archive
@@ -64,13 +65,33 @@ jobs:
                   raise ValueError('CURRENT_PROOF_WORKER_CAPACITY_REFUSED')
               source=root/'original.sqlite3';hot=root/'hot.sqlite3'
               end=time.monotonic()+1800
+              # Reuse the existing managed-restore multipart settings after
+              # two single-stream socket stalls. SDK TLS/SigV4 remain enabled;
+              # the canonical decoder still verifies both exact byte hashes.
+              packed=root/'original.sqlite3.gz'
+              config=TransferConfig(multipart_threshold=64*1024**2,multipart_chunksize=64*1024**2,
+                  max_concurrency=2,num_download_attempts=5,max_io_queue=16,preferred_transfer_client='classic')
+              def transferred(_):core._check_deadline(end)
+              client.download_file(receipt['bucket'],receipt['object_key'],str(packed),Config=config,Callback=transferred)
+              core._check_deadline(end)
+              if packed.stat().st_size!=receipt['compressed_size_bytes']:raise ValueError('COMPRESSED_SIZE_MISMATCH')
               url=client.generate_presigned_url('get_object',Params={'Bucket':receipt['bucket'],'Key':receipt['object_key']},ExpiresIn=1800)
-              adapter=SignedImageTransport({'original':{'url':url,'receipt':receipt}},deadline=end)
+              class LocalResponse:
+                  status=200
+                  def __init__(self):
+                      self.stream=packed.open('rb');self.headers={'Content-Length':str(packed.stat().st_size)}
+                  def read(self,size):return self.stream.read(size)
+                  def close(self):self.stream.close()
+              def verified_sdk_opener(req,timeout):
+                  if req.full_url!=url:raise ValueError('UNEXPECTED_IMAGE_REQUEST')
+                  return LocalResponse()
+              adapter=SignedImageTransport({'original':{'url':url,'receipt':receipt}},deadline=end,opener=verified_sdk_opener)
               with source.open('xb') as target:
                   os.fchmod(target.fileno(),0o600)
                   with adapter.open_image('original') as stream:core._consume(stream,identity,end,write=target.write)
                   target.flush();os.fsync(target.fileno())
               core._verify_database(source,identity,end)
+              packed.unlink()
               manifest=dict(identity,cold_history_catalog_sha256=pins.CATALOG_SHA256)
               proof=dict(identity,immutable_sqlite_read=True,snapshot_restore_verified=True,
                   verified_local_file=archive._identity(source),storage_manifest=manifest,
