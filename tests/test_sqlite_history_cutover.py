@@ -21,7 +21,8 @@ from test_sqlite_history_partition import identity
 
 
 def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_mutable_outcome=False,
-                           include_runtime_metadata=False):
+                           include_runtime_metadata=False, include_current_ack_schema=False,
+                           include_legacy_ack_guards=False):
     from contextlib import closing
     source = tmp_path / 'source.sqlite3'
     with closing(sqlite3.connect(source)) as conn:
@@ -194,6 +195,18 @@ def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_muta
                 for row in rows:
                     conn.execute('INSERT INTO g1_dataset_membership(observation_id,source_record_sha256) VALUES(?,?)',
                                  (row['observation_id'],source_record_sha256(row)))
+    if include_current_ack_schema:
+        from seiltanzer.ai_decision_state import ensure_connection_schema
+        with closing(sqlite3.connect(source)) as conn:
+            with conn:
+                ensure_connection_schema(conn)
+    if include_legacy_ack_guards:
+        from seiltanzer.ai_decision_state import _ACK_UPDATE_TRIGGER_SQL
+        with closing(sqlite3.connect(source)) as conn:
+            with conn:
+                conn.execute(_ACK_UPDATE_TRIGGER_SQL)
+                conn.execute('CREATE TRIGGER trg_ai_decision_acks_require_live_trade_insert '
+                             'BEFORE INSERT ON ai_decision_acks BEGIN SELECT 1; END')
     source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
     source_receipt = dict(
         immutable_sqlite_read=True,
@@ -246,12 +259,27 @@ def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_muta
     return source, source_receipt, catalog_bytes, catalog_sha, client
 
 
+def test_cutover_migrates_legacy_ack_guards_without_writing_attached_source(tmp_path):
+    source, receipt, catalog, digest, client = _build_cutover_fixture(
+        tmp_path, include_legacy_ack_guards=True)
+    hot = tmp_path / 'hot.sqlite3'
+    report = cutover_mod.build_hot_cutover_snapshot(source, hot,
+        catalog_bytes=catalog, expected_catalog_sha256=digest, source_receipt=receipt)
+    assert report['foreign_key_violations'] == 0
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == receipt['database_sha256']
+    with sqlite3.connect(hot) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match='requires trades.id'):
+            conn.execute("UPDATE ai_decision_acks SET note='forbidden' WHERE trade_id=77")
+
+
 @pytest.mark.parametrize('include_post_catalog', [False, True])
+@pytest.mark.parametrize('include_current_ack_schema', [False, True])
 def test_hot_cutover_preserves_rowids_shrinks_file_fixes_fk_and_hydrates_back_to_exact_roots(
-    tmp_path, include_post_catalog
+    tmp_path, include_post_catalog, include_current_ack_schema
 ):
     source, source_receipt, catalog_bytes, catalog_sha, client = _build_cutover_fixture(
-        tmp_path, include_post_catalog=include_post_catalog
+        tmp_path, include_post_catalog=include_post_catalog,
+        include_current_ack_schema=include_current_ack_schema,
     )
     hot_path = tmp_path / 'hot_compacted.sqlite3'
     report = cutover_mod.build_hot_cutover_snapshot(
@@ -270,11 +298,14 @@ def test_hot_cutover_preserves_rowids_shrinks_file_fixes_fk_and_hydrates_back_to
     assert report['quick_check'] == 'ok'
     assert report['foreign_key_violations'] == 0
     assert report['hot_max_rowid'] == (140 if include_post_catalog else 120)
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == source_receipt['database_sha256']
 
     # Verify surviving rowids in hot_path are preserved 100% without VACUUM renumbering
     with sqlite3.connect(hot_path) as conn:
         conn.execute('PRAGMA foreign_keys=ON')
         assert conn.execute('PRAGMA foreign_key_check').fetchall() == []
+        with pytest.raises(sqlite3.IntegrityError, match='requires trades.id'):
+            conn.execute("UPDATE ai_decision_acks SET note='forbidden rewrite' WHERE trade_id=77")
         surviving_passive = conn.execute(
             'SELECT rowid, observation_id FROM passive_market_observations ORDER BY rowid'
         ).fetchall()
