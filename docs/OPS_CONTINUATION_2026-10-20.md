@@ -69,3 +69,11 @@
 - Automatic exact-main deploy **39427246177** follows staging **39427246193**. No manual duplicate deploy/restart. Delivery/readiness not yet proven for bb672; prior6e HTTP200 remains the last completed observation until this deploy advances.
 - The single-review verifier is pinned to bb672. Push only after the automatic deploy has entered production concurrency, so this verifier queues behind it. Its one POST records actual mode, structured shadow, LLM weight and eight-family availability; it never ACKs or sends broker orders. Do not interpret a 200 fallback as functioning LLM.
 - Current off-host proof **39421240192/job118622412069** still `build_current_hot` after verified current source. No hot/full-union result yet, no new production cutover. Continue this same job, not a new capture/restore loop. Sustainable root reserve remains open.
+
+
+### Automated continuation queued — 2026-10-20 13:06 UTC
+
+- Exact-main deploy `39427246177/job118643167121` is actively delivering bb672; do not start a competing deploy or restart.
+- One structured-review acceptance `39427457056` is queued behind it in `production-seiltanzer`, verifier ops commit `f0d2c2bec15cb3bb76b9f6a9994ce4c6132b6ccd`, expected bb672. Inspect its actual result next; do not issue another generation before reading this result.
+- Same off-host current-image proof `39421240192/job118622412069` continues `build_current_hot` after verified source. Its native deadline/outcome and artifacts own the next history decision. No fresh freeze until hot/full-union proof is actually green.
+- These GitHub jobs continue independently of chat delivery. Full structured LLM success, hot/full-union completion, production disk headroom and post-cutover source/model publications remain unclaimed.
