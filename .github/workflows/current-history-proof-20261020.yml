@@ -1,0 +1,115 @@
+name: cloud-only-current-history-proof-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/current-history-proof-20261020.yml]
+permissions:
+  contents: read
+jobs:
+  prove:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 105
+    env:
+      EXPECTED_SHA: 3e96533f0658f8456c9ba413fe90b95a74ede645
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - name: Reclaim reproducible hosted SDKs
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo docker image prune -af
+          df -h "$RUNNER_TEMP"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install existing cloud reader
+        run: pip install -e . 'boto3>=1.36,<2'
+      - name: Prove fixed builder and union on exact saved current capture only
+        env:
+          TASK_DIRECTORY: ${{ runner.temp }}/current-history-proof-${{ github.run_id }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          python - <<'PY'
+          import hashlib,json,os,shutil,time
+          from pathlib import Path
+          from scripts import history_production_plan as pins
+          from scripts import sqlite_history_partition as archive
+          from scripts import sqlite_history_transaction as core
+          from scripts.history_image_transport import SignedImageTransport
+          from scripts.publish_history_image import yandex_image_client
+          from scripts.restore_verified_snapshot import manifest_digest
+          from scripts.sqlite_history_cutover import build_current_hot_cutover_snapshot
+          from scripts.sqlite_history_union import hydrate_current_snapshot
+          from scripts.production_history_cutover import _safe_error_chain
+          root=Path(os.environ['TASK_DIRECTORY']);root.mkdir(mode=0o700,exist_ok=False)
+          client=yandex_image_client();began=time.monotonic();stage='restore_current_capture'
+          receipt=dict(contract='sqlite-history-image-v1',run_id='39387875131',kind='original',
+              bucket=archive.BUCKET,codec='gzip',database_size_bytes=19330887680,
+              database_sha256='4983135f5a94d76f710af8c1e6e7bcd0c44cce456e5b66cc10abb333dcae1293',
+              compressed_sha256='ac0ab38e04a5e1738c6b9ea1da19d8ebd909216fb6e15fae768cc4257f97e31e',
+              compressed_size_bytes=3905456950)
+          receipt['object_key']=f'research/sqlite-cutover/v1/{receipt["run_id"]}/original/{receipt["database_sha256"]}/{receipt["compressed_sha256"]}.sqlite3.gz'
+          identity={k:receipt[k] for k in ('database_sha256','database_size_bytes')}
+          def emit(**values):print(json.dumps(values,sort_keys=True),flush=True)
+          def save(name,value):(root/name).write_text(json.dumps(value,sort_keys=True,indent=2)+'\n')
+          try:
+              if shutil.disk_usage(root).free<3*identity['database_size_bytes']+2*1024**3:
+                  raise ValueError('CURRENT_PROOF_WORKER_CAPACITY_REFUSED')
+              source=root/'original.sqlite3';hot=root/'hot.sqlite3'
+              end=time.monotonic()+1800
+              url=client.generate_presigned_url('get_object',Params={'Bucket':receipt['bucket'],'Key':receipt['object_key']},ExpiresIn=1800)
+              adapter=SignedImageTransport({'original':{'url':url,'receipt':receipt}},deadline=end)
+              with source.open('xb') as target:
+                  os.fchmod(target.fileno(),0o600)
+                  with adapter.open_image('original') as stream:core._consume(stream,identity,end,write=target.write)
+                  target.flush();os.fsync(target.fileno())
+              core._verify_database(source,identity,end)
+              manifest=dict(identity,cold_history_catalog_sha256=pins.CATALOG_SHA256)
+              proof=dict(identity,immutable_sqlite_read=True,snapshot_restore_verified=True,
+                  verified_local_file=archive._identity(source),storage_manifest=manifest,
+                  storage_manifest_sha256=manifest_digest(manifest))
+              emit(stage='source_verified',**identity)
+              key=f'research/sqlite-history/v1/{pins.CATALOG_SOURCE}/catalogs/{pins.CATALOG_SHA256}.json'
+              with client.get_object(Bucket=archive.BUCKET,Key=key)['Body'] as body:catalog=body.read(8*1024**2+1)
+              if hashlib.sha256(catalog).hexdigest()!=pins.CATALOG_SHA256:raise ValueError('CATALOG_PIN_MISMATCH')
+              stage='build_current_hot';emit(stage=stage)
+              built=build_current_hot_cutover_snapshot(source,hot,source_receipt=proof,
+                  catalog_bytes=catalog,expected_catalog_sha256=pins.CATALOG_SHA256,client=client)
+              save('hot-build-proof.json',built)
+              emit(stage='hot_built',retired_row_count=built['retired_row_count'],reclaimed_bytes=built['reclaimed_bytes'],hot_database_size_bytes=built['hot_database_size_bytes'])
+              # Only our disposable restored worker file; immutable original
+              # remains pinned in Yandex. Release it before full-union reserve.
+              if archive._identity(source)!=proof['verified_local_file']:raise ValueError('SOURCE_IDENTITY_CHANGED')
+              source.unlink()
+              stage='full_union';emit(stage=stage)
+              union=hydrate_current_snapshot(hot,root/'reconstituted.sqlite3',source_receipt=built['hot_restore_proof'],catalog_bytes=catalog,client=client)
+              save('full-union-proof.json',union)
+              result=dict(contract='current-capture-offhost-proof-v1',application_sha=os.environ['EXPECTED_SHA'],
+                  source=identity,source_run_id='39387875131',production_touched=False,cloud_writes=False,
+                  cutover_verified=built['cutover_verified'],history_union_verified=union['history_union_verified'],
+                  retired_row_count=built['retired_row_count'],reclaimed_bytes=built['reclaimed_bytes'],elapsed_sec=round(time.monotonic()-began,3))
+              save('result.json',result);emit(**result)
+          except Exception as exc:
+              failure=dict(stage=stage,application_sha=os.environ['EXPECTED_SHA'],production_touched=False,
+                  cloud_writes=False,error_chain=_safe_error_chain(exc),elapsed_sec=round(time.monotonic()-began,3))
+              save('failure.json',failure);emit(**failure);raise SystemExit(1)
+          PY
+      - name: Preserve public proof only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-history-proof-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/current-history-proof-${{ github.run_id }}/hot-build-proof.json
+            ${{ runner.temp }}/current-history-proof-${{ github.run_id }}/full-union-proof.json
+            ${{ runner.temp }}/current-history-proof-${{ github.run_id }}/result.json
+            ${{ runner.temp }}/current-history-proof-${{ github.run_id }}/failure.json
