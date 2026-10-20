@@ -352,14 +352,13 @@ jobs:
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
 
-            # The source-of-truth SQLite DB is now above 9 GiB. Startup still
-            # has to finish the durability snapshot and initialization before the
-            # real HTTP gate may pass. Production exceeded seven minutes on
-            # 2026-09-14 while rechecking the 9 GiB live DB, then remained in
-            # the integrity phase. Keep a bounded twelve-minute
-            # allowance; this changes orchestration only, not the live gates.
+            # The current 19GB database completed schema verification at755s
+            # on2026-10-20, beyond the old720s orchestration allowance. Retain
+            # a finite16min startup window so recovery does not interrupt an
+            # integrity check that is still progressing. This changes only
+            # orchestration; integrity and actual HTTP gates remain mandatory.
             # This does not relax the live route latency/readiness gates below.
-            cold_start_attempts=360
+            cold_start_attempts=480
             ready=0
             for attempt in $(seq 1 "$cold_start_attempts"); do
               active=$(systemctl is-active seiltanzer 2>/dev/null || true)

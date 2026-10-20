@@ -87,6 +87,7 @@ jobs:
     timeout-minutes: 20
     outputs:
       rotated: ${{ steps.rotation-result.outputs.rotated }}
+      deferred: ${{ steps.rotation-result.outputs.deferred }}
     steps:
       - name: Rotate duplicate local backups and rebuild one verified slot
         id: recovery
@@ -127,6 +128,24 @@ jobs:
               echo "::error::BACKUP_RECOVERY_REQUIRES_DELIVERED_EXACT_SHA"
               exit 1
             fi
+            # A slow but current process is not a failed backup. Bind the
+            # startup marker to its actual PID and this boot's monotonic clock;
+            # after16min the ordinary recovery path remains available.
+            defer_current_startup() {
+              systemctl is-active --quiet seiltanzer || return 1
+              startup_pid=$(systemctl show seiltanzer -p MainPID --value 2>/dev/null || true)
+              startup_enter_us=$(systemctl show seiltanzer -p ActiveEnterTimestampMonotonic --value 2>/dev/null || true)
+              startup_now_us=$(awk '{printf "%.0f", $1*1000000}' /proc/uptime)
+              [[ "$startup_pid" =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+              [[ "$startup_enter_us" =~ ^[1-9][0-9]{0,17}$ ]] || return 1
+              [[ "$startup_now_us" =~ ^[1-9][0-9]{0,17}$ ]] || return 1
+              startup_age_us=$((10#$startup_now_us - 10#$startup_enter_us))
+              [ "$startup_age_us" -ge 0 ] && [ "$startup_age_us" -le 960000000 ] || return 1
+              startup_phase=$(journalctl -b -u seiltanzer "_PID=$startup_pid" --grep='^STARTUP_PHASE phase=' -n 1 --no-pager -o cat 2>/dev/null || true)
+              [[ "$startup_phase" =~ ^STARTUP_PHASE\ phase=(begin|storage\.prepare\.(begin|complete)|app\.create\.complete|schema\.backup\.(begin|complete)|storage\.runtime\.(begin|complete)|routes\.complete|uvicorn\.run)\ elapsed_sec=[0-9]+\.[0-9]+$ ]] || return 1
+              echo "RECOVERY_DEFERRED_STARTUP_IN_PROGRESS=1"
+            }
+            if defer_current_startup; then exit 0; fi
             # Recovery deliberately stops the writer while validating and rotating
             # disposable backup copies. Restore the terminal on every exit path,
             # including fail-closed disk/integrity errors, so a failed rotation
@@ -140,6 +159,7 @@ jobs:
               echo "::error::HISTORY_CUTOVER_ACTIVE_MUTATION_REFUSED"
               exit 1
             fi
+            if defer_current_startup; then exit 0; fi
             restart_needed=1
             restore_service_on_exit() {
               if [ "${restart_needed:-1}" = 1 ]; then
@@ -687,10 +707,15 @@ jobs:
         env:
           REMOTE_STDOUT: ${{ steps.recovery.outputs.stdout }}
         run: |
-          if grep -Fq 'RECOVERY_NOT_REQUIRED_EXACT_SHA_HEALTHY=1' <<< "$REMOTE_STDOUT"; then
+          if grep -Fq 'RECOVERY_DEFERRED_STARTUP_IN_PROGRESS=1' <<< "$REMOTE_STDOUT"; then
             echo "rotated=false" >> "$GITHUB_OUTPUT"
+            echo "deferred=true" >> "$GITHUB_OUTPUT"
+          elif grep -Fq 'RECOVERY_NOT_REQUIRED_EXACT_SHA_HEALTHY=1' <<< "$REMOTE_STDOUT"; then
+            echo "rotated=false" >> "$GITHUB_OUTPUT"
+            echo "deferred=false" >> "$GITHUB_OUTPUT"
           else
             echo "rotated=true" >> "$GITHUB_OUTPUT"
+            echo "deferred=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish exact-SHA recovery status
@@ -699,8 +724,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OUTCOME: ${{ steps.recovery.outcome }}
           ROTATED: ${{ steps.rotation-result.outputs.rotated }}
+          DEFERRED: ${{ steps.rotation-result.outputs.deferred }}
         run: |
-          if [ "$OUTCOME" = success ] && [ "${ROTATED:-false}" = false ]; then
+          if [ "$OUTCOME" = success ] && [ "${DEFERRED:-false}" = true ]; then
+            state=pending
+            description="Current bounded startup still running; no recovery mutation"
+          elif [ "$OUTCOME" = success ] && [ "${ROTATED:-false}" = false ]; then
             state=success
             description="Exact SHA is already active and healthy; recovery skipped"
           elif [ "$OUTCOME" = success ]; then

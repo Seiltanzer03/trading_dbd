@@ -12,7 +12,7 @@ import pytest
 ])
 def test_real_deploy_loop_does_not_reject_a_service_ready_during_final_sleep(tmp_path, service, final_http, expected):
     source = Path('.github/workflows/deploy.yml').read_text()
-    block = textwrap.dedent(source[source.index('            cold_start_attempts=360'):
+    block = textwrap.dedent(source[source.index('            cold_start_attempts='):
                                      source.index("            echo '=== POST-RESTART MEMORY ==='")])
     # Execute the real production loop without waiting: one synthetic final
     # iteration, closed host commands and the state transition at its delay.
@@ -29,3 +29,20 @@ sleep() { : > "$READY_FILE"; }
     result = subprocess.run(['bash', '-euo', 'pipefail', '-c', commands+block],
                             capture_output=True, text=True, env=env, timeout=3)
     assert result.returncode == expected, result.stdout+result.stderr
+
+
+def test_measured_755_second_startup_fits_the_real_bounded_deploy_loop(tmp_path):
+    source=Path('.github/workflows/deploy.yml').read_text()
+    block=textwrap.dedent(source[source.index('            cold_start_attempts='):
+                                source.index("            echo '=== POST-RESTART MEMORY ==='")])
+    commands='''
+simulated_startup_seconds=0
+systemctl() { echo active; }
+find() { return 0; }
+journalctl() { return 0; }
+curl() { if [ "$simulated_startup_seconds" -ge 755 ]; then echo '200 0.001'; else echo '000 0.001'; fi; }
+sleep() { simulated_startup_seconds=$((simulated_startup_seconds+2)); }
+'''
+    result=subprocess.run(['bash','-euo','pipefail','-c',commands+block],
+                          capture_output=True,text=True,timeout=8)
+    assert result.returncode==0,result.stdout[-500:]+result.stderr
