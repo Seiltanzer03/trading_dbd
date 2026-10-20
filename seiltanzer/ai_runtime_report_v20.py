@@ -496,13 +496,11 @@ def request_explanation_with_shadow(
             max_output_tokens=COMBINED_PROVIDER_MAX_TOKENS)
     try:
         with phase('provider_http'):
-            with httpx.Client(proxy=proxy, timeout=8, trust_env=False) as client:
-                response = client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    json=body,
-                    headers=_provider._provider_headers(key),
-                )
-                response.raise_for_status()
+            from .ai_provider_transport import post_json
+            response = post_json("https://openrouter.ai/api/v1/chat/completions",
+                                 body=body, proxy=proxy,
+                                 headers=_provider._provider_headers(key), timeout=8)
+            response.raise_for_status()
         with phase('provider_decode'):
             try:
                 result = response.json()
