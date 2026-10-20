@@ -1,0 +1,41 @@
+name: ai-release-startup-status-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-release-startup-status-20261020.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Observe startup metadata only; no lock, database query, restart or provider call
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 35s
+          script: |
+            set -euo pipefail
+            /usr/bin/python3 -u - <<'PY'
+            import json,os,subprocess,time
+            from pathlib import Path
+            def out(**data):print(json.dumps(data,sort_keys=True))
+            def run(args,timeout=5):
+                return subprocess.run(args,text=True,capture_output=True,timeout=timeout)
+            props=run(['systemctl','show','seiltanzer','-p','MainPID','-p','ControlPID','-p','ActiveState','-p','SubState','-p','ExecMainStatus','-p','NRestarts','-p','MemoryCurrent','-p','ActiveEnterTimestamp'])
+            out(kind='startup',observed_ts=time.time(),properties=props.stdout.splitlines())
+            head=run(['git','-C','/opt/seiltanzer','rev-parse','HEAD'])
+            out(kind='git',observed_head=head.stdout.strip())
+            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
+            local=Path('/opt/seiltanzer/data/backups/local')
+            for p in local.glob('.*.tmp.sqlite3'):
+                try:s=p.lstat()
+                except OSError:continue
+                out(kind='startup_temp_metadata',name=p.name,logical_bytes=s.st_size,allocated_bytes=s.st_blocks*512,modified=s.st_mtime)
+            r=run(['curl','-sS','--max-time','3','-o','/dev/null','-w','%{http_code}','http://127.0.0.1:8790/api/state'])
+            out(kind='local_http',code=r.stdout[-3:],returncode=r.returncode)
+            out(kind='safety',db_queries=0,provider_calls=0,acks=0,restarts=0,mutations=0,observation_may_be_intermediate=True)
+            PY
