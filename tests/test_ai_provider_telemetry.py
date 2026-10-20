@@ -13,7 +13,7 @@ from seiltanzer.llm_decision_shadow import VALID_POLICIES
 from test_ai_provider_explanation import _snapshot
 
 
-def transport(monkeypatch, *, entered=None, release=None, completed=None, commentary=None):
+def transport(monkeypatch, *, entered=None, release=None, completed=None, commentary=None, socks=False):
     calls = []
     content = json.dumps({'shadow_decision': {
         'policy': 'HOLD', 'confidence': .7,
@@ -31,6 +31,8 @@ def transport(monkeypatch, *, entered=None, release=None, completed=None, commen
 
     class Response:
         content = json.dumps(payload).encode()
+        status_code = 200
+        headers = {'Content-Encoding': 'gzip'}
 
         def raise_for_status(self):
             pass
@@ -58,7 +60,23 @@ def transport(monkeypatch, *, entered=None, release=None, completed=None, commen
             return Response()
 
     monkeypatch.setenv('OPENROUTER_API_KEY', 'private-test-credential')
+    monkeypatch.delenv('OPENROUTER_PROXY', raising=False)
     monkeypatch.setattr(report.httpx, 'Client', Client)
+    if socks:
+        from curl_cffi import requests
+
+        class CurlSession(Client):
+            def __init__(self, **kwargs):
+                assert kwargs == {'trust_env': False}
+            def post(self, url, **kwargs):
+                assert kwargs['timeout'] == 8
+                assert kwargs['proxy'] == 'socks5h://localhost:9050'
+                assert kwargs['verify'] is True
+                assert kwargs['allow_redirects'] is False
+                return super().post(url, json=json.loads(kwargs['data']))
+
+        monkeypatch.setenv('OPENROUTER_PROXY', 'socks5h://localhost:9050')
+        monkeypatch.setattr(requests, 'Session', CurlSession)
     monkeypatch.setattr(report.ai_verdict, 'render_policy_report', lambda _: 'private deterministic report')
     monkeypatch.setattr(report.ai_verdict, '_validate_model_report', lambda *args: [])
     return calls, len(Response.content), len(content.encode())
@@ -70,8 +88,9 @@ def telemetry(caplog, request_id):
         and json.loads(record.message).get('request_id') == request_id]
 
 
-def test_actual_provider_phases_and_exact_byte_counts_have_no_private_payload(monkeypatch, caplog):
-    calls, response_bytes, output_bytes = transport(monkeypatch)
+@pytest.mark.parametrize('socks', [False, True])
+def test_actual_provider_phases_and_exact_byte_counts_have_no_private_payload(monkeypatch, caplog, socks):
+    calls, response_bytes, output_bytes = transport(monkeypatch, socks=socks)
     caplog.set_level(logging.WARNING, logger=tracing.LOGGER.name)
     trace = tracing.AIRequestTrace()
     snapshot = _snapshot()
