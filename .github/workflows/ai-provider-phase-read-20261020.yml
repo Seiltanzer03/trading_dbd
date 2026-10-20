@@ -50,7 +50,7 @@ jobs:
                 print(json.dumps({'service_pid':pid,'process_io':values}))
                 print(subprocess.check_output(['ps','-p',str(pid),'-o','pid,etimes,pcpu,pmem,stat,comm'],text=True))
             print(json.dumps({'root_free_bytes':shutil.disk_usage('/').free,'live_database_size_bytes':Path('/opt/seiltanzer/data/trades.db').stat().st_size}))
-            result=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-10-20T13:18:00+00:00','-n','4000','--no-pager','-o','cat'],capture_output=True,timeout=15,check=True)
+            result=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-10-20T13:18:00+00:00','--grep','ai-e62ea33dcb494f06a848','-n','100','--no-pager','-o','cat'],capture_output=True,timeout=15,check=True)
             if len(result.stdout)>3*1024**2:raise ValueError('JOURNAL_BOUND')
             stages={'provider','provider_render','provider_prepare','provider_transport','provider_http','provider_decode','provider_validate','provider_fallback','response','preflight','snapshot_error','internal_error'}
             events={'start','end','metrics','submitted','worker_start','worker_end','finish','error'}
