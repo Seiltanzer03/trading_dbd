@@ -19,7 +19,7 @@ jobs:
           command_timeout: 1m
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = b0490169fa22411c5034042aae259d50a066d4fe
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 6e4275906d248b9d16c4c20fd2d090f0f99d4033
             /usr/bin/python3 - <<'PY'
             import json,math,re,subprocess,urllib.request,urllib.error,os,stat,urllib.parse
             from pathlib import Path
@@ -40,7 +40,7 @@ jobs:
                 proxy=urllib.parse.urlsplit(values.get('OPENROUTER_PROXY',''))
                 print(json.dumps({'process_proxy_present':bool(proxy.hostname),'process_proxy_loopback':proxy.hostname in {'127.0.0.1','localhost'},'process_proxy_port':proxy.port}))
                 print(subprocess.check_output(['systemctl','show','seiltanzer','-p','EnvironmentFiles','-p','DropInPaths'],text=True,timeout=5))
-                for filename,expected in [('/etc/seiltanzer-provider-route-20261020.env',b'OPENROUTER_PROXY=socks5://127.0.0.1:9050\n'),('/etc/systemd/system/seiltanzer.service.d/40-existing-provider-route.conf',b'[Service]\nEnvironmentFile=/etc/seiltanzer-provider-route-20261020.env\n')]:
+                for filename,expected in [('/etc/seiltanzer-provider-route-20261020.env',b'OPENROUTER_PROXY=socks5://127.0.0.1:9050\n'),('/etc/systemd/system/seiltanzer.service.d/zz-existing-provider-route.conf',b'[Service]\nEnvironmentFile=/etc/seiltanzer-provider-route-20261020.env\n')]:
                     path=Path(filename)
                     print(json.dumps({'route_configuration_path':filename,'present':path.exists(),'content_matches':path.exists() and path.read_bytes()==expected}))
                 values={}
