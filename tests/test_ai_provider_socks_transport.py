@@ -76,7 +76,7 @@ def test_curl_decoded_body_keeps_json_and_http_status_contract(monkeypatch, stat
 
     class Session:
         def __init__(self, **kwargs):
-            assert kwargs == {'trust_env': False}
+            assert kwargs['trust_env'] is False
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def post(self, url, **kwargs):
@@ -125,3 +125,35 @@ def test_curl_failure_does_not_expose_credentials_or_retry_unbounded_backend(mon
                             body={}, headers={}, timeout=.1)
     assert 'private' not in str(exc.value)
     assert exc.value.__suppress_context__
+
+
+def test_real_curl_options_ignore_ambient_proxy_bypass_and_ca_paths(monkeypatch):
+    import certifi
+    from curl_cffi import Curl, CurlError, CurlOpt
+    transport = importlib.import_module('seiltanzer.ai_provider_transport')
+    for name in ('NO_PROXY', 'no_proxy'):
+        monkeypatch.setenv(name, '*')
+    for name in ('REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'SSL_CERT_FILE'):
+        monkeypatch.setenv(name, '/nonexistent/private-environment-ca.pem')
+    options, performed = {}, []
+    original_setopt = Curl.setopt
+
+    def setopt(self, option, value):
+        options[option] = value
+        return original_setopt(self, option, value)
+
+    def perform(self, **kwargs):
+        performed.append(dict(options))
+        raise CurlError('offline test deadline', 28)
+
+    monkeypatch.setattr(Curl, 'setopt', setopt)
+    monkeypatch.setattr(Curl, 'perform', perform)
+    with pytest.raises(httpx.TimeoutException):
+        transport.post_json('https://example.invalid', proxy='socks5h://localhost:9050',
+                            body={}, headers={}, timeout=.1)
+    assert len(performed) == 1
+    assert performed[0].get(CurlOpt.NOPROXY) in ('', b'')
+    assert performed[0][CurlOpt.CAINFO] == certifi.where()
+    assert performed[0][CurlOpt.PROXY_CAINFO] == certifi.where()
+    assert performed[0].get(CurlOpt.SSL_VERIFYPEER) != 0
+    assert performed[0].get(CurlOpt.SSL_VERIFYHOST) != 0

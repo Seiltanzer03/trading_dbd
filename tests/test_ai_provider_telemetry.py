@@ -67,7 +67,7 @@ def transport(monkeypatch, *, entered=None, release=None, completed=None, commen
 
         class CurlSession(Client):
             def __init__(self, **kwargs):
-                assert kwargs == {'trust_env': False}
+                assert kwargs['trust_env'] is False
             def post(self, url, **kwargs):
                 assert kwargs['timeout'] == 8
                 assert kwargs['proxy'] == 'socks5h://localhost:9050'

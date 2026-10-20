@@ -29,6 +29,11 @@ there is no fallback to an unbounded SOCKS transport. No new dependency, endpoin
 model, retry, timeout increase or provider is introduced.
 
 TLS verification stays enabled; ambient proxy settings and redirects are disabled.
+The final review found that `trust_env=False` alone does not disable libcurl's
+`NO_PROXY` handling or curl_cffi's CA environment lookup. The session now explicitly
+sets an empty `NOPROXY` and the installed certifi CA bundle, without changing
+process environment variables. An offline real-libcurl-options regression checks
+both overrides against hostile ambient settings.
 The response adapter preserves JSON, HTTP status handling and telemetry; it removes
 wire compression/length headers because libcurl has already decompressed the body.
 Proxy errors use fixed messages without credentials or request contents.
@@ -45,9 +50,10 @@ admission and manual execution contracts are unchanged.
   connection errors neither disclose credentials nor retry through httpx.
 - Actual structured report path exercised through the SOCKS adapter, including
   unchanged output validation, telemetry and exact request-byte accounting.
-- Focused provider profile: **25 passed in 1.82 s**. The handshake regression was
+- Focused provider profile: **26 passed in 1.77 s**. The handshake regression was
   observed failing before the helper existed; compressed-response regressions
-  failed before the adapter removed the wire headers.
+  failed before the adapter removed the wire headers. The ambient-environment
+  regression failed before the explicit no-proxy/CA settings were added.
 
 Full mandatory CI and exact-SHA production structured-review acceptance are still
 required. A tiny model probe does not establish a nonzero current-LLM contribution,

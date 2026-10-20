@@ -19,13 +19,19 @@ def post_json(url, *, proxy, body, headers, timeout):
         with httpx.Client(proxy=proxy, timeout=timeout, trust_env=False) as client:
             return client.post(url, json=body, headers=headers)
     try:
+        import certifi
+        from curl_cffi import CurlOpt
         from curl_cffi import requests as curl_requests
     except ImportError:
         raise httpx.ProxyError('Bounded SOCKS transport unavailable') from None
     payload = json.dumps(body, ensure_ascii=False, sort_keys=True,
                          separators=(',', ':'), allow_nan=False).encode('utf-8')
     try:
-        with curl_requests.Session(trust_env=False) as client:
+        # libcurl still honors NO_PROXY; curl_cffi's session also reads CA
+        # environment variables independently of trust_env. Override both per
+        # session without mutating the multithreaded process environment.
+        with curl_requests.Session(trust_env=False, verify=certifi.where(),
+                                   curl_options={CurlOpt.NOPROXY: ''}) as client:
             response = client.post(url, data=payload, headers=headers, proxy=proxy,
                                    timeout=timeout, allow_redirects=False, verify=True)
     except curl_requests.exceptions.Timeout:
