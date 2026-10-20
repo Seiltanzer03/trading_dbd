@@ -21,7 +21,16 @@ jobs:
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 54a33626f2fc6ece9f75b06528cc5997e02ab345
             /usr/bin/python3 - <<'PY'
-            import json,math,re,subprocess,urllib.request
+            import json,math,re,subprocess,urllib.request,urllib.error
+            from pathlib import Path
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value']))
+            if pid:
+                values={}
+                for line in Path(f'/proc/{pid}/io').read_text().splitlines():
+                    key,value=line.split(':',1)
+                    if key in {'rchar','wchar','read_bytes','write_bytes'}:values[key]=int(value)
+                print(json.dumps({'service_pid':pid,'process_io':values}))
+                print(subprocess.check_output(['ps','-p',str(pid),'-o','pid,etimes,pcpu,pmem,stat,comm'],text=True))
             result=subprocess.run(['journalctl','-u','seiltanzer','--since','-30 minutes','-n','2000','--no-pager','-o','cat'],capture_output=True,timeout=15,check=True)
             if len(result.stdout)>3*1024**2:raise ValueError('JOURNAL_BOUND')
             stages={'provider','provider_render','provider_prepare','provider_transport','provider_http','provider_decode','provider_validate','provider_fallback','response','preflight','snapshot_error','internal_error'}
@@ -45,8 +54,11 @@ jobs:
                 if row['request_id'] not in ids:ids.append(row['request_id'])
             for row in rows:
                 if row['request_id'] in ids[-3:]:print(json.dumps(row,sort_keys=True))
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=5) as response:raw=response.read(20001)
-            if len(raw)>20000:raise ValueError('STATUS_BOUND')
-            s=json.loads(raw)
-            print(json.dumps({'ready':s.get('ready'),'building':s.get('building'),'build_ms':s.get('build_ms'),'sqlite_opened':False,'llm_called':False,'production_mutation':False}))
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=5) as response:raw=response.read(20001)
+                if len(raw)>20000:raise ValueError('STATUS_BOUND')
+                s=json.loads(raw)
+                print(json.dumps({'http':200,'ready':s.get('ready'),'building':s.get('building'),'build_ms':s.get('build_ms')}))
+            except (urllib.error.URLError,TimeoutError):print(json.dumps({'http':0,'reason':'STARTUP_OR_HTTP_UNAVAILABLE'}))
+            print(json.dumps({'sqlite_opened':False,'llm_called':False,'production_mutation':False}))
             PY
