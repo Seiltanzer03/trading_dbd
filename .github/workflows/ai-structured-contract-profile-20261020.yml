@@ -1,0 +1,21 @@
+name: focused-ai-structured-contract-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-structured-contract-profile-20261020.yml]
+permissions:
+  contents: read
+jobs:
+  profile:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 4fa70a83e425c47564dc6cc4680afc602c32c5be
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -q -e '.[dev]'
+      - name: Focused structured response, telemetry, masking and guard regressions
+        run: pytest -q tests/test_ai_structured_provider_contract.py tests/test_ai_provider_telemetry.py tests/test_ai_provider_guard.py tests/test_ai_provider_explanation_projection.py tests/test_ai_provider_projection_regression.py --tb=short
