@@ -1,0 +1,84 @@
+name: prepare-existing-provider-route-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-provider-existing-route-20261020.yml]
+permissions:
+  contents: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - name: Prepare verified existing route for the next approved maintenance restart
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 2m
+          script: |
+            set -euo pipefail
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 15 9
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = b0490169fa22411c5034042aae259d50a066d4fe
+            test ! -e /opt/seiltanzer/data/cutover.active
+            test ! -L /opt/seiltanzer/data/cutover.active
+            systemctl is-active --quiet seiltanzer
+            systemctl is-active --quiet tor@default.service
+            test "$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/api/state)" = 200
+            PYTHONDONTWRITEBYTECODE=1 /opt/seiltanzer/.venv/bin/python -u - <<'PY'
+            import json,os,re,signal,stat,subprocess
+            from pathlib import Path
+            import httpx
+            signal.signal(signal.SIGALRM,lambda *_: (_ for _ in ()).throw(SystemExit('ROUTE_PREPARATION_DEADLINE')))
+            signal.alarm(25)
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],timeout=5))
+            if pid<=0:raise SystemExit('NO_ACTIVE_PROCESS')
+            values=dict(x.decode(errors='replace').split('=',1) for x in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0') if b'=' in x)
+            key=values.get('OPENROUTER_API_KEY','').strip()
+            if not key:raise SystemExit('MISSING_PROVIDER_KEY')
+            listener=subprocess.check_output(['ss','-ltnpH'],text=True,timeout=5)
+            if not any('127.0.0.1:9050' in line and re.search(r'\("tor",pid=[0-9]+,',line) for line in listener.splitlines()):
+                raise SystemExit('EXISTING_TOR_LISTENER_NOT_VERIFIED')
+            with httpx.Client(proxy='socks5://127.0.0.1:9050',timeout=8,trust_env=False) as client:
+                response=client.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer '+key})
+                if response.status_code!=200:raise SystemExit('EXISTING_ROUTE_AUTH_NOT_READY')
+            env=Path('/etc/seiltanzer-provider-route-20261020.env')
+            dropin=Path('/etc/systemd/system/seiltanzer.service.d/40-existing-provider-route.conf')
+            directory=dropin.parent
+            info=directory.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:
+                raise SystemExit('UNSAFE_EXISTING_DROPIN_DIRECTORY')
+            entries=[(env,b'OPENROUTER_PROXY=socks5://127.0.0.1:9050\n',0o600),
+                (dropin,b'[Service]\nEnvironmentFile=/etc/seiltanzer-provider-route-20261020.env\n',0o644)]
+            for path,content,mode in entries:
+                try:
+                    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+                except FileNotFoundError:continue
+                with os.fdopen(fd,'rb') as stream:
+                    info=os.fstat(stream.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or stat.S_IMODE(info.st_mode)!=mode or stream.read(1025)!=content:
+                        raise SystemExit('EXISTING_ROUTE_FILE_MISMATCH')
+            created=[]
+            try:
+                for path,content,mode in entries:
+                    try:fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,mode)
+                    except FileExistsError:continue
+                    created.append(path)
+                    with os.fdopen(fd,'wb') as stream:
+                        stream.write(content);stream.flush();os.fsync(stream.fileno())
+                subprocess.run(['systemctl','daemon-reload'],check=True,timeout=10)
+            except BaseException:
+                for path in reversed(created):path.unlink()
+                raise
+            after=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],timeout=5))
+            if after!=pid:raise SystemExit('SERVICE_PID_CHANGED_DURING_PREPARATION')
+            print(json.dumps({'contract':'existing-provider-route-preparation-v1','auth_http':200,'configuration_prepared':True,
+                'takes_effect_on_next_approved_restart':True,'service_restarted':False,'model_changed':False,
+                'api_key_changed':False,'generation_calls':0,'sqlite_opened':False,'original_configuration_preserved':True}))
+            PY
