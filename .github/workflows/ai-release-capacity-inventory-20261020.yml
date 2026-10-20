@@ -1,0 +1,66 @@
+name: ai-release-capacity-inventory-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-release-capacity-inventory-20261020.yml]
+permissions:
+  contents: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - name: Read bounded allocation and active ownership; no removal or restart
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 100s
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = bb672aad636cf4e9aba9d3e1cd453aa35402c650
+            exec 9</opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -sn 9 || { echo SOURCE_FENCED; exit 1; }
+            test ! -e /opt/seiltanzer/data/cutover.active
+            test ! -L /opt/seiltanzer/data/cutover.active
+            /usr/bin/python3 -u - <<'PY'
+            import glob,json,os,subprocess,time
+            from pathlib import Path
+            def out(**data):print(json.dumps(data,sort_keys=True))
+            stat=os.statvfs('/')
+            out(kind='capacity',free_bytes=stat.f_bavail*stat.f_frsize,block_size=stat.f_frsize,read_only=True)
+            def alloc(p):
+                try:
+                    r=subprocess.run(['du','-x','-s','-B1','--',str(p)],text=True,capture_output=True,timeout=9)
+                    if r.returncode==0:out(kind='allocation',path=str(p),bytes=int(r.stdout.split()[0]))
+                    else:out(kind='allocation_unavailable',path=str(p))
+                except subprocess.TimeoutExpired:out(kind='allocation_timeout',path=str(p))
+            for raw in ['/opt/seiltanzer/.git','/opt/seiltanzer/.venv','/opt/seiltanzer/data/research','/opt/actions-runner','/var/log/journal','/var/cache']:
+                p=Path(raw)
+                if p.is_dir() and not p.is_symlink():alloc(p)
+            runner=Path('/opt/actions-runner')
+            if runner.is_dir() and not runner.is_symlink():
+                for p in sorted(runner.iterdir()):
+                    if p.name.startswith(('bin','externals')) or p.name in ['_work','_diag']:
+                        out(kind='runner_entry',name=p.name,symlink=p.is_symlink(),resolved=str(p.resolve()))
+                        if not p.is_symlink():alloc(p)
+                work=runner/'_work'
+                if work.is_dir() and not work.is_symlink():
+                    for p in sorted(work.iterdir())[:20]:
+                        out(kind='work_entry',name=p.name,symlink=p.is_symlink(),modified=p.lstat().st_mtime)
+            for raw in glob.glob('/proc/[0-9]*'):
+                proc=Path(raw)
+                for name in ['exe','cwd']:
+                    try:target=os.readlink(proc/name)
+                    except OSError:continue
+                    if target.startswith('/opt/actions-runner/'):
+                        out(kind='runner_owner',pid=int(proc.name),link=name,target=target)
+            code=subprocess.run(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState'],text=True,capture_output=True,timeout=4)
+            out(kind='service',properties=code.stdout.splitlines())
+            out(kind='safety',database_mutation=False,cloud_writes=0,removals=0,restarts=0,provider_calls=0,broker_orders=0)
+            PY
