@@ -122,8 +122,8 @@ def ensure_connection_schema(conn: sqlite3.Connection) -> None:
                 if seq_row is not None and seq_row[0] is not None:
                     prev_seq = int(seq_row[0])
 
-            conn.execute("DROP TRIGGER IF EXISTS trg_ai_decision_acks_require_live_trade_insert")
-            conn.execute("DROP TRIGGER IF EXISTS trg_ai_decision_acks_require_live_trade_update")
+            conn.execute("DROP TRIGGER IF EXISTS main.trg_ai_decision_acks_require_live_trade_insert")
+            conn.execute("DROP TRIGGER IF EXISTS main.trg_ai_decision_acks_require_live_trade_update")
             conn.execute("DROP TABLE IF EXISTS ai_decision_acks__migrated")
             conn.execute(
                 """
@@ -233,7 +233,8 @@ def ensure_connection_schema(conn: sqlite3.Connection) -> None:
     )
     # Upgrade the earlier trade_id-only guard too: retained orphan ACK bytes
     # must not be rewritten through status, timestamps, notes, or policy.
-    conn.execute('DROP TRIGGER IF EXISTS trg_ai_decision_acks_require_live_trade_update')
+    # An absent main trigger must not resolve to an immutable attached source.
+    conn.execute('DROP TRIGGER IF EXISTS main.trg_ai_decision_acks_require_live_trade_update')
     conn.execute(_ACK_UPDATE_TRIGGER_SQL)
 
 
