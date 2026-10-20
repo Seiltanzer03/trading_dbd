@@ -23,7 +23,7 @@ jobs:
           command_timeout: 4m
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = bb672aad636cf4e9aba9d3e1cd453aa35402c650
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = bd615fbd5481a61625c31e62d19f91fd2277dcfd
             test ! -e /opt/seiltanzer/data/cutover.active
             test ! -L /opt/seiltanzer/data/cutover.active
             /usr/bin/python3 -u - <<'PY'
