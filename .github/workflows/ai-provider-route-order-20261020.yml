@@ -1,0 +1,57 @@
+name: correct-existing-provider-route-order-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-provider-route-order-20261020.yml]
+permissions:
+  contents: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Order only our verified drop-in after the existing provider configuration
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 1m
+          script: |
+            set -euo pipefail
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 15 9
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = b0490169fa22411c5034042aae259d50a066d4fe
+            test ! -e /opt/seiltanzer/data/cutover.active
+            test ! -L /opt/seiltanzer/data/cutover.active
+            /usr/bin/python3 -u - <<'PY'
+            import json,os,stat,subprocess
+            from pathlib import Path
+            directory=Path('/etc/systemd/system/seiltanzer.service.d')
+            old=directory/'40-existing-provider-route.conf'
+            new=directory/'zz-existing-provider-route.conf'
+            expected=b'[Service]\nEnvironmentFile=/etc/seiltanzer-provider-route-20261020.env\n'
+            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],timeout=5).strip()
+            if not pid.isdigit() or int(pid)<=0:raise SystemExit('ACTIVE_PROCESS_REQUIRED')
+            if old.exists() and new.exists():raise SystemExit('AMBIGUOUS_ROUTE_DROPINS')
+            source=old if old.exists() else new
+            fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW)
+            with os.fdopen(fd,'rb') as stream:
+                info=os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or stat.S_IMODE(info.st_mode)!=0o644 or stream.read(1025)!=expected:
+                    raise SystemExit('ROUTE_DROPIN_IDENTITY_MISMATCH')
+            if source==old:os.rename(old,new)
+            subprocess.run(['systemctl','daemon-reload'],check=True,timeout=10)
+            files=subprocess.check_output(['systemctl','show','seiltanzer','-p','EnvironmentFiles','--value'],text=True,timeout=5)
+            rows=[line.split(' (',1)[0] for line in files.splitlines() if line]
+            if rows!=['/etc/seiltanzer.env','/etc/seiltanzer-provider-route-20261020.env']:
+                raise SystemExit('ROUTE_ENVIRONMENT_ORDER_NOT_VERIFIED')
+            if subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],timeout=5).strip()!=pid:
+                raise SystemExit('SERVICE_PID_CHANGED')
+            print(json.dumps({'route_environment_order_verified':True,'original_provider_config_preserved':True,
+                'service_restarted':False,'takes_effect_on_next_deploy_restart':True,'generation_calls':0}))
+            PY
