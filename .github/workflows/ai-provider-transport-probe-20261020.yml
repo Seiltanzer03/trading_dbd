@@ -1,0 +1,44 @@
+name: read-only-provider-transport-probe-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-provider-transport-probe-20261020.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Probe existing provider authentication transport without LLM generation
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 1m
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 54a33626f2fc6ece9f75b06528cc5997e02ab345
+            PYTHONDONTWRITEBYTECODE=1 /opt/seiltanzer/.venv/bin/python - <<'PY'
+            import json,re,subprocess,time
+            from pathlib import Path
+            import httpx
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value']))
+            if pid<=0:raise SystemExit('NO_ACTIVE_PROCESS_ENVIRONMENT')
+            values=dict(x.decode(errors='replace').split('=',1) for x in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0') if b'=' in x)
+            key=values.get('OPENROUTER_API_KEY','').strip()
+            proxy=values.get('OPENROUTER_PROXY','').strip() or None
+            if not key:raise SystemExit('PROVIDER_KEY_NOT_IN_PROCESS_ENVIRONMENT')
+            model=values.get('OPENROUTER_MODEL','openai/gpt-4o-mini')
+            result={'contract':'provider-auth-transport-probe-v1','generation_calls':0,'production_mutation':False,'sqlite_opened':False,'proxy_present':bool(proxy),'configured_model':model if re.fullmatch(r'[A-Za-z0-9_./:-]{1,120}',model) else 'OMITTED'}
+            started=time.monotonic()
+            try:
+                with httpx.Client(proxy=proxy,timeout=8,trust_env=False) as client:
+                    response=client.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer '+key})
+                    result['http_status']=response.status_code
+                    result['response_bytes']=len(response.content)
+            except httpx.HTTPError as exc:result['error_class']=type(exc).__name__
+            result['elapsed_ms']=round((time.monotonic()-started)*1000,1)
+            print(json.dumps(result,sort_keys=True))
+            PY
