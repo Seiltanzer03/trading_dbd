@@ -19,9 +19,9 @@ jobs:
           command_timeout: 1m
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 6e4275906d248b9d16c4c20fd2d090f0f99d4033
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = bb672aad636cf4e9aba9d3e1cd453aa35402c650
             /usr/bin/python3 - <<'PY'
-            import json,math,re,subprocess,urllib.request,urllib.error,os,stat,urllib.parse
+            import json,math,re,subprocess,urllib.request,urllib.error,os,stat,urllib.parse,shutil
             from pathlib import Path
             pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value']))
             fields=('contract','run_id','application_sha','phase','service_started','abort_reason')
@@ -49,7 +49,8 @@ jobs:
                     if key in {'rchar','wchar','read_bytes','write_bytes'}:values[key]=int(value)
                 print(json.dumps({'service_pid':pid,'process_io':values}))
                 print(subprocess.check_output(['ps','-p',str(pid),'-o','pid,etimes,pcpu,pmem,stat,comm'],text=True))
-            result=subprocess.run(['journalctl','-u','seiltanzer','--since','-30 minutes','-n','2000','--no-pager','-o','cat'],capture_output=True,timeout=15,check=True)
+            print(json.dumps({'root_free_bytes':shutil.disk_usage('/').free,'live_database_size_bytes':Path('/opt/seiltanzer/data/trades.db').stat().st_size}))
+            result=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-10-20T13:18:00+00:00','-n','4000','--no-pager','-o','cat'],capture_output=True,timeout=15,check=True)
             if len(result.stdout)>3*1024**2:raise ValueError('JOURNAL_BOUND')
             stages={'provider','provider_render','provider_prepare','provider_transport','provider_http','provider_decode','provider_validate','provider_fallback','response','preflight','snapshot_error','internal_error'}
             events={'start','end','metrics','submitted','worker_start','worker_end','finish','error'}
@@ -71,7 +72,7 @@ jobs:
                 rows.append(row)
                 if row['request_id'] not in ids:ids.append(row['request_id'])
             for row in rows:
-                if row['request_id'] in ids[-3:]:print(json.dumps(row,sort_keys=True))
+                if row['request_id']=='ai-e62ea33dcb494f06a848' or row['request_id'] in ids[-3:]:print(json.dumps(row,sort_keys=True))
             try:
                 with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=5) as response:raw=response.read(20001)
                 if len(raw)>20000:raise ValueError('STATUS_BOUND')
