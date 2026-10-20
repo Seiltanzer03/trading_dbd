@@ -1,0 +1,41 @@
+name: read-only-ai-proxy-status-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-proxy-status-20261020.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Locate existing proxy listener without disclosing its credentials
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 1m
+          script: |
+            set -euo pipefail
+            /usr/bin/python3 - <<'PY'
+            import ipaddress,json,re,subprocess,urllib.parse
+            from pathlib import Path
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value']))
+            if pid<=0:raise SystemExit('NO_ACTIVE_PROCESS_ENVIRONMENT')
+            values=dict(x.decode(errors='replace').split('=',1) for x in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0') if b'=' in x)
+            url=urllib.parse.urlsplit(values.get('OPENROUTER_PROXY',''))
+            host=url.hostname or ''
+            try:loopback=ipaddress.ip_address(host).is_loopback
+            except ValueError:loopback=host.lower()=='localhost'
+            print(json.dumps({'proxy_loopback':loopback,'proxy_port':url.port,'proxy_protocol':url.scheme if url.scheme in {'http','https','socks5','socks5h'} else 'unknown','credentials_present':bool(url.username or url.password),'generation_calls':0,'production_mutation':False}))
+            units=subprocess.check_output(['systemctl','list-units','--all','--type=service','--no-legend','--plain'],text=True,timeout=5)
+            for line in units.splitlines():
+                fields=line.split()
+                if fields and re.search(r'tor@|^tor\.|squid|privoxy|proxy|xray|sing-box|v2ray|chisel|tunnel',fields[0],re.I):
+                    print(json.dumps({'proxy_related_unit':fields[0],'load':fields[1],'active':fields[2],'sub':fields[3]}))
+            processes=subprocess.check_output(['ps','-eo','pid,comm'],text=True,timeout=5)
+            for line in processes.splitlines():
+                if re.search(r'\b(tor|privoxy|squid|xray|sing-box|v2ray|chisel)\b',line):print(line)
+            PY
