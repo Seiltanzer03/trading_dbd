@@ -19,11 +19,14 @@ jobs:
           command_timeout: 1m
           script: |
             set -euo pipefail
-            PYTHONDONTWRITEBYTECODE=1 /opt/seiltanzer/.venv/bin/python - <<'PY'
-            import ipaddress,json,re,subprocess,urllib.parse,time
-            import httpx
+            PYTHONDONTWRITEBYTECODE=1 /opt/seiltanzer/.venv/bin/python -u - <<'PY'
+            import ipaddress,json,re,subprocess,urllib.parse,time,signal
+            signal.signal(signal.SIGALRM,lambda *_: (_ for _ in ()).throw(SystemExit('PROBE_ABSOLUTE_DEADLINE')))
+            signal.alarm(35)
+            print('PROBE_PHASE=python_started',flush=True)
             from pathlib import Path
-            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value']))
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],timeout=5))
+            print('PROBE_PHASE=service_pid_read',flush=True)
             if pid<=0:raise SystemExit('NO_ACTIVE_PROCESS_ENVIRONMENT')
             values=dict(x.decode(errors='replace').split('=',1) for x in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0') if b'=' in x)
             url=urllib.parse.urlsplit(values.get('OPENROUTER_PROXY',''))
@@ -47,6 +50,9 @@ jobs:
                 if not key:raise SystemExit('PROVIDER_KEY_NOT_IN_PROCESS_ENVIRONMENT')
                 started=time.monotonic();probe={'route':'existing_tor_loopback_listener','generation_calls':0,'production_mutation':False}
                 try:
+                    print('PROBE_PHASE=before_httpx_import',flush=True)
+                    import httpx
+                    print('PROBE_PHASE=before_auth_get',flush=True)
                     with httpx.Client(proxy='socks5://127.0.0.1:9050',timeout=8,trust_env=False) as client:
                         response=client.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer '+key})
                         probe['http_status']=response.status_code
