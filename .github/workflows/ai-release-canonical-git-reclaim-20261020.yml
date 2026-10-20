@@ -1,0 +1,44 @@
+name: ai-release-canonical-git-reclaim-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-release-canonical-git-reclaim-20261020.yml]
+permissions:
+  contents: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
+jobs:
+  reclaim:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Use already-tested canonical Git metadata compactor; keep service and database live
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 12m
+          script: |
+            set -euo pipefail
+            cd /opt/seiltanzer
+            test "$(git rev-parse HEAD)" = bb672aad636cf4e9aba9d3e1cd453aa35402c650
+            test "$(git rev-parse refs/deploy/staged)" = bd615fbd5481a61625c31e62d19f91fd2277dcfd
+            test "$(git hash-object scripts/compact_deployment_git.py)" = "$(git rev-parse bd615fbd5481a61625c31e62d19f91fd2277dcfd:scripts/compact_deployment_git.py)"
+            test ! -e data/cutover.active
+            test ! -L data/cutover.active
+            service_pid=$(systemctl show seiltanzer -p MainPID --value)
+            test "$service_pid" -gt 0
+            df -k /
+            /usr/bin/python3 scripts/compact_deployment_git.py \
+              --repo /opt/seiltanzer \
+              --expected-sha bb672aad636cf4e9aba9d3e1cd453aa35402c650 --apply
+            test "$(git rev-parse HEAD)" = bb672aad636cf4e9aba9d3e1cd453aa35402c650
+            test "$(git rev-parse refs/deploy/staged)" = bd615fbd5481a61625c31e62d19f91fd2277dcfd
+            test "$(systemctl show seiltanzer -p MainPID --value)" = "$service_pid"
+            systemctl is-active --quiet seiltanzer
+            test "$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/api/state)" = 200
+            df -k /
+            echo CANONICAL_METADATA_ONLY_NO_DATABASE_CHANGE_NO_RESTART
