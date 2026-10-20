@@ -38,3 +38,12 @@ Read-only diagnostic39478524504/job118820697417 (no model call, ACK, order or da
 - Next bounded fix package: add code-owned allowlisted rejection reason (no raw response, prompt, URL or credentials); reproduce the actual rejection; compact redundant provider facts/output while preserving every real input, all12 action preferences and eight family roles; prove accepted structured response inside the existing deadline. Final exact-SHA live acceptance must show actual LLM mode/admitted structured preference. No weight forcing or new training sweep.
 
 Current environment cannot execute local tests; browser unavailable after automatic approval review usage-limit failure. No untested product-code change, new deploy or physical cutover was attempted. Diagnostics and confirmed proof pins are checkpointed in the ops branch.
+
+
+## Exact provider reproduction and reviewed correction — 2026-10-20
+
+The generic validation RuntimeError is now isolated: one genuine saved-input call39482427471 rejected with shadow_invalid_policy after HTTP6486.380ms. The invalid string was not exposed. Offline replay39481942245 validated all12 legitimate preferences using this actual saved snapshot and the real report validator, so the validator itself was not relaxed.
+
+PR497 replaces the ambiguous policy example with strict response_format JSON schema, keeps all12action scores and guarded family adaptation, and requests existing provider parameter support/latency routing. Same model, key,6s outer guard,8s transport and all mandatory source/risk/ACK constraints remain. Focused RED19/17 then GREEN36passed1.86s; finalCI39483970028 passed4661/5skip/13subtests and native/browser acceptance. Single final review found no outstanding findings.
+
+One isolated reviewed-candidate genuine call39484613828/requestai-84a098485257426f9dd9 returned VALIDATED/shadowok/all12scores in5192.6ms inside6s. No installed file/service/database mutation or production decision, ACK or order occurred. This demonstrates corrected format and one bounded response, not persistent production availability. Merged mainbd615fbd5481a61625c31e62d19f91fd2277dcfd awaits ordinary exact-SHA delivery/live review. User txt remains unread; the server saved snapshot19:06UTC is not claimed identical to that attachment.
