@@ -1,0 +1,77 @@
+name: ai-release-apt-cache-reclaim-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-release-apt-cache-reclaim-20261020.yml]
+permissions:
+  contents: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
+jobs:
+  reclaim:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - name: Remove only two reproducible APT metadata caches under package-manager locks
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 45s
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = bb672aad636cf4e9aba9d3e1cd453aa35402c650
+            test "$(git -C /opt/seiltanzer rev-parse refs/deploy/staged)" = bd615fbd5481a61625c31e62d19f91fd2277dcfd
+            exec 9</opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -sn 9 || { echo SOURCE_FENCED; exit 1; }
+            test ! -e /opt/seiltanzer/data/cutover.active
+            test ! -L /opt/seiltanzer/data/cutover.active
+            /usr/bin/python3 -u - <<'PY'
+            import fcntl,json,os,stat,subprocess,time
+            from pathlib import Path
+            def emit(**data):print(json.dumps(data,sort_keys=True))
+            def free():
+                s=os.statvfs('/');return s.f_bavail*s.f_frsize
+            def pid():
+                return subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=4).strip()
+            before_pid=pid()
+            if not before_pid.isdigit() or int(before_pid)<=0:raise SystemExit('ACTIVE_SERVICE_REQUIRED')
+            base=Path('/var/cache/apt')
+            if base.is_symlink() or str(base.resolve(strict=True))!='/var/cache/apt':raise SystemExit('CACHE_SCOPE_INVALID')
+            locks=[]
+            try:
+                for raw in ['/var/lib/dpkg/lock','/var/lib/dpkg/lock-frontend','/var/cache/apt/archives/lock','/var/lib/apt/lists/lock']:
+                    p=Path(raw)
+                    if not p.exists():continue
+                    fd=os.open(raw,os.O_RDWR|os.O_NOFOLLOW)
+                    locks.append(fd);fcntl.lockf(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                for comm in Path('/proc').glob('[0-9]*/comm'):
+                    try:name=comm.read_text().strip()
+                    except OSError:continue
+                    if name in {'apt','apt-get','apt-cache','dpkg','unattended-upgr'}:raise SystemExit('PACKAGE_MANAGER_ACTIVE')
+                available_before=free();removed=0
+                for name in ['pkgcache.bin','srcpkgcache.bin']:
+                    p=base/name
+                    try:s=p.lstat()
+                    except FileNotFoundError:continue
+                    if not stat.S_ISREG(s.st_mode) or s.st_uid!=0 or s.st_nlink!=1 or not 0<s.st_size<=256*1024**2 or time.time()-s.st_mtime<120:
+                        raise SystemExit('CACHE_FILE_NOT_DISPOSABLE')
+                    if p.resolve()!=p:raise SystemExit('CACHE_PATH_CHANGED')
+                    current=p.lstat()
+                    if (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns)!=(current.st_dev,current.st_ino,current.st_size,current.st_mtime_ns):
+                        raise SystemExit('CACHE_FILE_CHANGED')
+                    p.unlink();removed+=s.st_blocks*512
+                    emit(kind='cache_removed',path=str(p),allocated_bytes=s.st_blocks*512,reconstructible=True)
+                os.sync()
+                if pid()!=before_pid:raise SystemExit('UNEXPECTED_SERVICE_PID_CHANGE')
+                emit(kind='result',free_before=available_before,free_after=free(),removed_allocated_bytes=removed,
+                    deployment_reserve_bytes=512*1024**2,deployment_reserve_restored=free()>=512*1024**2,
+                    database_mutation=False,application_mutation=False,restarts=0,cloud_writes=0,provider_calls=0)
+            finally:
+                for fd in locks:os.close(fd)
+            PY
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = bb672aad636cf4e9aba9d3e1cd453aa35402c650
+            systemctl is-active --quiet seiltanzer
