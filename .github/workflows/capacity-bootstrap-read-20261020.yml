@@ -1,0 +1,57 @@
+name: read-only-capacity-bootstrap-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/capacity-bootstrap-read-20261020.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - name: Read allocation and bounded provider configuration without mutations
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 2m
+          script: |
+            set -euo pipefail
+            exec 8</opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -sn 8 || { echo HISTORY_SOURCE_READ_FENCED; exit 1; }
+            if [ -e /opt/seiltanzer/data/cutover.active ] || [ -L /opt/seiltanzer/data/cutover.active ]; then exit 1; fi
+            git -C /opt/seiltanzer rev-parse HEAD
+            df -B1 /
+            systemctl show seiltanzer -p ActiveState -p MainPID -p NRestarts
+            timeout 25s du -xhd2 /root/seiltanzer_bot /root/threads-bot /opt/trend_share /usr/local /var/lib 2>/dev/null | sort -nr | head -n 65 || true
+            /usr/bin/python3 - <<'PY'
+            import json,os,re,subprocess
+            from pathlib import Path
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value']))
+            selected={'OPENROUTER_MODEL','AI_PROVIDER_TIMEOUT_SEC','AI_PROVIDER_CIRCUIT_SEC','OPENROUTER_API_KEY','OPENROUTER_PROXY'}
+            def project(source,values):
+                out={'source':source}
+                for key,value in values.items():
+                    if key not in selected:continue
+                    if key in {'OPENROUTER_API_KEY','OPENROUTER_PROXY'}:out[key+'_present']=bool(value)
+                    elif key=='OPENROUTER_MODEL':out[key]=value if re.fullmatch(r'[A-Za-z0-9_./:-]{1,120}',value) else 'UNSAFE_VALUE_OMITTED'
+                    else:out[key]=value if re.fullmatch(r'[0-9.]{1,12}',value) else 'NON_NUMERIC_OMITTED'
+                print(json.dumps(out,sort_keys=True))
+            if pid:
+                raw=Path(f'/proc/{pid}/environ').read_bytes()
+                project('service_initial_environment',dict(x.decode(errors='replace').split('=',1) for x in raw.split(b'\0') if b'=' in x))
+            p=Path('/opt/seiltanzer/.env')
+            if p.is_file() and p.stat().st_size<=1048576:
+                values={}
+                for line in p.read_text().splitlines():
+                    line=line.strip().removeprefix('export ')
+                    if '=' in line:
+                        k,v=line.split('=',1)
+                        if k.strip() in selected:values[k.strip()]=v.strip().strip(chr(34)+chr(39))
+                project('project_dotenv_selected',values)
+            print(json.dumps({'sqlite_opened':False,'llm_called':False,'production_mutation':False}))
+            PY
+            code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/api/state)
+            echo "HTTP=$code"
