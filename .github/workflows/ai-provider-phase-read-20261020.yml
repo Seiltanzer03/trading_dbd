@@ -19,12 +19,24 @@ jobs:
           command_timeout: 1m
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 54a33626f2fc6ece9f75b06528cc5997e02ab345
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = b0490169fa22411c5034042aae259d50a066d4fe
             /usr/bin/python3 - <<'PY'
-            import json,math,re,subprocess,urllib.request,urllib.error
+            import json,math,re,subprocess,urllib.request,urllib.error,os,stat
             from pathlib import Path
             pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value']))
+            fields=('contract','run_id','application_sha','phase','service_started','abort_reason')
+            for name in ('cutover.preparation.json','cutover.result.json'):
+                path=Path('/opt/seiltanzer/data')/name
+                try:fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+                except FileNotFoundError:continue
+                with os.fdopen(fd,'rb') as stream:
+                    info=os.fstat(stream.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o077 or info.st_size>262144:raise ValueError('METADATA_BOUND')
+                    value=json.load(stream)
+                    print(json.dumps({'metadata_file':name,**{k:value[k] for k in fields if k in value}}))
             if pid:
+                values=dict(x.decode(errors='replace').split('=',1) for x in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0') if b'=' in x)
+                print(json.dumps({'existing_tor_route_active':values.get('OPENROUTER_PROXY')=='socks5://127.0.0.1:9050'}))
                 values={}
                 for line in Path(f'/proc/{pid}/io').read_text().splitlines():
                     key,value=line.split(':',1)
