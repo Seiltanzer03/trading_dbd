@@ -1,0 +1,57 @@
+name: existing-curl-provider-probe-20261020
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/ai-existing-curl-probe-20261020.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - name: Probe installed transport and one tiny model response without trade data
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 1m
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 6e4275906d248b9d16c4c20fd2d090f0f99d4033
+            PYTHONDONTWRITEBYTECODE=1 /opt/seiltanzer/.venv/bin/python -u - <<'PY'
+            import json,re,signal,subprocess,time,importlib.metadata
+            from pathlib import Path
+            from curl_cffi import requests
+            signal.signal(signal.SIGALRM,lambda *_: (_ for _ in ()).throw(SystemExit('PROBE_DEADLINE')))
+            signal.alarm(24)
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],timeout=5))
+            if pid<=0:raise SystemExit('ACTIVE_PROCESS_REQUIRED')
+            values=dict(x.decode(errors='replace').split('=',1) for x in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0') if b'=' in x)
+            key=values.get('OPENROUTER_API_KEY','').strip();model=values.get('OPENROUTER_MODEL','openai/gpt-4o-mini')
+            if not key or not re.fullmatch(r'[A-Za-z0-9_./:-]{1,120}',model):raise SystemExit('PROVIDER_CONFIG_UNAVAILABLE')
+            print(json.dumps({'curl_cffi_version':importlib.metadata.version('curl_cffi'),'configured_model':model,'trade_payload_uploaded':False,'production_mutation':False}))
+            generated=False
+            for protocol in ('socks5','socks5h'):
+                with requests.Session(trust_env=False) as client:
+                    started=time.monotonic()
+                    try:
+                        response=client.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer '+key},proxy=protocol+'://127.0.0.1:9050',timeout=5.5,allow_redirects=False,verify=True)
+                        status=response.status_code
+                        print(json.dumps({'route':protocol,'auth_http':status,'elapsed_ms':round((time.monotonic()-started)*1000,1)}))
+                    except requests.exceptions.RequestException as exc:
+                        print(json.dumps({'route':protocol,'exception_class':type(exc).__name__,'elapsed_ms':round((time.monotonic()-started)*1000,1)}));continue
+                    if status==200 and not generated:
+                        generated=True;started=time.monotonic()
+                        try:
+                            response=client.post('https://openrouter.ai/api/v1/chat/completions',headers={'Authorization':'Bearer '+key},
+                                json={'model':model,'messages':[{'role':'user','content':'Reply OK.'}],'max_tokens':8,'temperature':0},
+                                proxy=protocol+'://127.0.0.1:9050',timeout=5.5,allow_redirects=False,verify=True)
+                            result=response.json() if response.status_code==200 else {}
+                            usage=result.get('usage') or {}
+                            print(json.dumps({'route':protocol,'minimal_chat_http':response.status_code,'elapsed_ms':round((time.monotonic()-started)*1000,1),
+                                'prompt_tokens':usage.get('prompt_tokens'),'completion_tokens':usage.get('completion_tokens'),'max_tokens':8,'generation_attempts':1}))
+                        except requests.exceptions.RequestException as exc:
+                            print(json.dumps({'route':protocol,'minimal_chat_exception_class':type(exc).__name__,'elapsed_ms':round((time.monotonic()-started)*1000,1),'max_tokens':8,'generation_attempts':1}))
+            PY
