@@ -45,11 +45,24 @@ def identity_proof(conn, table, max_rowid):
     alias = next((name for name in ('rowid', '_rowid_', 'oid') if name not in columns), None)
     if alias is None or 'observation_id' not in columns:
         raise ValueError('Missing immutable history rowid/capture identity')
+    # These tables carry large source payloads. A rowid range scan reads their
+    # wide table pages merely to hash IDs; the existing single-column index
+    # already contains every typed ID and its implicit rowid. Retain the exact
+    # rowid ordering and fallback when no complete covering index exists.
+    covering = ''
+    for index in conn.execute(f'PRAGMA index_list("{table}")'):
+        if index[4]:  # A partial index can omit null or otherwise retained IDs.
+            continue
+        quoted = '"' + index[1].replace('"', '""') + '"'
+        indexed_columns = [row[2] for row in conn.execute(f'PRAGMA index_info({quoted})')]
+        if indexed_columns == ['observation_id']:
+            covering = ' INDEXED BY ' + quoted
+            break
     where, params = (' WHERE 1=0', ()) if max_rowid is None else (f' WHERE "{alias}"<=?', (max_rowid,))
     query = (f'SELECT "{alias}",typeof(observation_id),length(CAST(observation_id AS BLOB)),'
              "CASE WHEN length(CAST(observation_id AS BLOB))>65536 THEN NULL "
              "WHEN typeof(observation_id)='text' THEN CAST(observation_id AS BLOB) ELSE observation_id END "
-             f'FROM "{table}"{where} ORDER BY "{alias}"')
+             f'FROM "{table}"{covering}{where} ORDER BY "{alias}"')
     digest = hashlib.sha256(); count = 0
     for rowid, kind, size, value in conn.execute(query, params):
         if size is not None and size > 65536:

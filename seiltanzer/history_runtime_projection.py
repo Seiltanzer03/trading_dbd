@@ -323,7 +323,10 @@ def validate_runtime_projection(conn, proof, *, retired_rowids, deadline=None):
         'WHERE g.observation_id IS NULL OR g.source_record_sha256 IS NOT a.source_record_sha256 '
         'OR g.forecast_eval_eligible IS NOT 0 OR g.q_to_p_eligible IS NOT 0 LIMIT 1', (contract,)).fetchone():
         raise ValueError('Runtime projection rejected membership no longer matches')
-    if conn.execute(f'SELECT 1 FROM "{TABLE}" a JOIN g1_dataset_membership g USING(observation_id) '
+    # Keep the immutable archived set as the outer loop. The ordinary join can
+    # scan every unrelated live membership on each bounded startup validation.
+    # All versions of each archived identity still participate in this check.
+    if conn.execute(f'SELECT 1 FROM "{TABLE}" a CROSS JOIN g1_dataset_membership g USING(observation_id) '
                     'WHERE g.forecast_eval_eligible IS NOT 0 OR g.q_to_p_eligible IS NOT 0 LIMIT 1').fetchone():
         raise ValueError('Runtime projection overlaps admitted membership')
     return payload
