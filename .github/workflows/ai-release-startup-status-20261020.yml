@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only handoff observation 2026-10-21T12:32Z
+# Read-only handoff observation 2026-10-21T12:33Z
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -17,7 +17,7 @@ jobs:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 35s
+          command_timeout: 50s
           script: |
             set -euo pipefail
             /usr/bin/python3 -u - <<'PY'
@@ -61,12 +61,29 @@ jobs:
             out(kind='cutover_guard_metadata',exists=os.path.lexists('/opt/seiltanzer/data/cutover.active'))
             fence=run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],timeout=12)
             out(kind='startup_admission',returncode=fence.returncode,result=fence.stdout.strip()[:1200])
-            ns=dict(__name__='_readonly_admission_diagnostic',__file__='/usr/local/lib/seiltanzer-history-start-guard.py')
+            import sqlite3,hashlib
+            ns=dict(__name__='_readonly_history_diagnostic',__file__='/opt/seiltanzer/seiltanzer/history_storage_state.py')
             exec(compile(Path(ns['__file__']).read_bytes(),ns['__file__'],'exec'),ns)
-            ns['SQL_SECONDS']=20
             diagnostic_started=time.monotonic()
-            diagnostic=ns['check_start']('/opt/seiltanzer/data/trades.db','/opt/seiltanzer')
-            out(kind='readonly_admission_diagnostic',budget_sec=20,elapsed_sec=round(time.monotonic()-diagnostic_started,3),result=diagnostic,production_gate_changed=False)
+            conn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
+            conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-2048')
+            conn.set_progress_handler(lambda:time.monotonic()-diagnostic_started>=25,1000)
+            try:
+                part_started=time.monotonic();state=ns['read_history_state'](conn)
+                out(kind='history_validation_phase',phase='state',elapsed_sec=round(time.monotonic()-part_started,3))
+                for table,proof in state['retained_identity'].items():
+                    alias=proof['source_rowid_alias']
+                    sql=('SELECT "'+alias+'",typeof(observation_id),length(CAST(observation_id AS BLOB)),CASE WHEN length(CAST(observation_id AS BLOB))>65536 THEN NULL WHEN typeof(observation_id)=\'text\' THEN CAST(observation_id AS BLOB) ELSE observation_id END FROM "'+table+'" WHERE "'+alias+'"<=? ORDER BY "'+alias+'"')
+                    plan=conn.execute('EXPLAIN QUERY PLAN '+sql,(proof['max_rowid'],)).fetchall()
+                    out(kind='history_identity_query_plan',table=table,plan=plan)
+                    part_started=time.monotonic();actual=ns['identity_proof'](conn,table,proof['max_rowid'])
+                    out(kind='history_validation_phase',phase=table,elapsed_sec=round(time.monotonic()-part_started,3),matched=actual==proof,row_count=actual['row_count'])
+                codec=ns['_runtime_projection']()
+                part_started=time.monotonic()
+                codec.validate_runtime_projection(conn,state['runtime_projection'],retired_rowids=state['retired_rowids']['passive_market_observations'])
+                out(kind='history_validation_phase',phase='runtime_projection',elapsed_sec=round(time.monotonic()-part_started,3),matched=True)
+            except Exception as exc:out(kind='history_diagnostic_error',error_type=type(exc).__name__,sqlite_errorname=getattr(exc,'sqlite_errorname',None))
+            finally:conn.close()
             head=run(['git','-C','/opt/seiltanzer','rev-parse','HEAD'])
             out(kind='git',observed_head=head.stdout.strip())
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
