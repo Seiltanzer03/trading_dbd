@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only handoff observation 2026-10-21T12:09Z
+# Read-only handoff observation 2026-10-21T12:29Z
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -58,6 +58,9 @@ jobs:
                 if any(mark in line.lower() for mark in ['authorization','password','secret','api_key','x-amz','access_key','token=']):continue
                 if len(line)>1000:continue
                 out(kind='startup_journal',line=line)
+            out(kind='cutover_guard_metadata',exists=os.path.lexists('/opt/seiltanzer/data/cutover.active'))
+            fence=run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],timeout=12)
+            out(kind='startup_admission',returncode=fence.returncode,result=fence.stdout.strip()[:1200])
             head=run(['git','-C','/opt/seiltanzer','rev-parse','HEAD'])
             out(kind='git',observed_head=head.stdout.strip())
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
