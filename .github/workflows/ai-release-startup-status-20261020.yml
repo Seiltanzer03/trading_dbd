@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only handoff observation 2026-10-21T11:42Z
+# Read-only handoff observation 2026-10-21T11:45Z
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -35,7 +35,7 @@ jobs:
                 for item in ['io','wchan']:
                     try:out(kind='process_'+item,lines=(root/item).read_text().splitlines()[:12])
                     except OSError:pass
-            for name in ['cutover.preparation.json','cutover.journal.json','cutover.result.json']:
+            for name in ['cutover.preparation.json','cutover.plan.json','cutover.journal.json','cutover.result.json']:
                 p=Path('/opt/seiltanzer/data')/name
                 try:
                     d=json.loads(p.read_text())
