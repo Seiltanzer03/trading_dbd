@@ -40,8 +40,14 @@ jobs:
                     d=json.loads(p.read_text())
                     out(kind='owner_state',file=name,fields={k:d.get(k) for k in ['run_id','application_sha','phase','service_started','abort_reason','started_wall_ts']})
                 except (OSError,ValueError):out(kind='owner_state',file=name,readable=False)
-            owner=run(['systemctl','show','seiltanzer-history-39547191584.service','-p','ActiveState','-p','SubState','-p','Result','-p','MainPID'])
+            owner=run(['systemctl','show','seiltanzer-history-39558165859.service','-p','ActiveState','-p','SubState','-p','Result','-p','MainPID'])
             out(kind='owner_unit',properties=owner.stdout.splitlines())
+            owner_fields=dict(line.split('=',1) for line in owner.stdout.splitlines() if '=' in line)
+            owner_pid=owner_fields.get('MainPID','0')
+            if owner_pid.isdigit() and int(owner_pid)>0:
+                for field in ['io','wchan']:
+                    try:out(kind='owner_process_'+field,lines=(Path('/proc')/owner_pid/field).read_text().splitlines()[:12])
+                    except OSError:pass
             journal=run(['journalctl','-u','seiltanzer','--since','2026-10-21 05:00:00','--no-pager','-n','65','-o','cat'])
             for line in journal.stdout.splitlines():
                 if any(mark in line.lower() for mark in ['authorization','password','secret','api_key','x-amz','access_key','token=']):continue
@@ -52,18 +58,6 @@ jobs:
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
             sizes=run(['du','-sk','/var/log/journal','/var/cache/apt','/root/.cache/pip','/opt/seiltanzer/.git','/opt/seiltanzer/data/backups','/tmp'],timeout=8)
             out(kind='disposable_capacity_inventory',rows=sizes.stdout.splitlines())
-            import sqlite3
-            conn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
-            end=time.monotonic()+2
-            conn.set_progress_handler(lambda:time.monotonic()>end,1000)
-            try:
-                record=conn.execute('SELECT snapshot_json FROM ai_verdicts WHERE length(snapshot_json)<2000000 ORDER BY id DESC LIMIT 1').fetchone()
-                saved=json.loads(record[0]) if record else {}
-                manager=saved.get('policy_manager') or {}
-                workspace=manager.get('option_derivative_state') or {}
-                context=saved.get('edge_family_market_context') or {}
-                out(kind='saved_snapshot_status',captured_ts=saved.get('captured_ts'),budget=saved.get('snapshot_budget'),option_metric_count=len(workspace.get('metrics') or {}),option_workspace_available=workspace.get('available'),market_context_reason=context.get('reason'),failed_source_checks=context.get('failed_source_checks'),family_model_count=len(context.get('families') or {}),root_presence={k:k in saved for k in ['edge_family_sources','edge_family_market_context','macro_context_v1']})
-            finally:conn.close()
             local=Path('/opt/seiltanzer/data/backups/local')
             for p in local.glob('.*.tmp.sqlite3'):
                 try:s=p.lstat()
@@ -71,5 +65,5 @@ jobs:
                 out(kind='startup_temp_metadata',name=p.name,logical_bytes=s.st_size,allocated_bytes=s.st_blocks*512,modified=s.st_mtime)
             r=run(['curl','-sS','--max-time','3','-o','/dev/null','-w','%{http_code}','http://127.0.0.1:8790/api/state'])
             out(kind='local_http',code=r.stdout[-3:],returncode=r.returncode)
-            out(kind='safety',db_queries=1,provider_calls=0,acks=0,restarts=0,mutations=0,observation_may_be_intermediate=True)
+            out(kind='safety',db_queries=0,provider_calls=0,acks=0,restarts=0,mutations=0,observation_may_be_intermediate=True)
             PY
