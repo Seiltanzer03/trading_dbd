@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only post-publication timeout diagnosis 2026-10-21T16:37Z
+# Read-only snapshot build telemetry 2026-10-21T16:42Z
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -37,7 +37,7 @@ jobs:
                 try:
                     with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=5) as response:
                         body=json.loads(response.read(100000))
-                        out(kind='snapshot_status',attempt=attempt,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:body.get(k) for k in ['ready','building','reason','status','last_error','snapshot_age_sec']},has_trade=body.get('current_trade_id') is not None)
+                        out(kind='snapshot_status',attempt=attempt,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:body.get(k) for k in ['ready','building','invalidated_reason','build_ms','build_started_at','build_n','age_sec','last_error','snapshot_budget']},has_trade=body.get('current_trade_id') is not None)
                     break
                 except (TimeoutError,ConnectionError,OSError,ValueError) as exc:
                     out(kind='snapshot_status',attempt=attempt,error=type(exc).__name__,elapsed_ms=round((time.monotonic()-started)*1000,1))
