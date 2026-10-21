@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only handoff observation 2026-10-21T12:29Z
+# Read-only handoff observation 2026-10-21T12:32Z
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -61,6 +61,12 @@ jobs:
             out(kind='cutover_guard_metadata',exists=os.path.lexists('/opt/seiltanzer/data/cutover.active'))
             fence=run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],timeout=12)
             out(kind='startup_admission',returncode=fence.returncode,result=fence.stdout.strip()[:1200])
+            ns=dict(__name__='_readonly_admission_diagnostic',__file__='/usr/local/lib/seiltanzer-history-start-guard.py')
+            exec(compile(Path(ns['__file__']).read_bytes(),ns['__file__'],'exec'),ns)
+            ns['SQL_SECONDS']=20
+            diagnostic_started=time.monotonic()
+            diagnostic=ns['check_start']('/opt/seiltanzer/data/trades.db','/opt/seiltanzer')
+            out(kind='readonly_admission_diagnostic',budget_sec=20,elapsed_sec=round(time.monotonic()-diagnostic_started,3),result=diagnostic,production_gate_changed=False)
             head=run(['git','-C','/opt/seiltanzer','rev-parse','HEAD'])
             out(kind='git',observed_head=head.stdout.strip())
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
