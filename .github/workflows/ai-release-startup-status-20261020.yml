@@ -34,7 +34,15 @@ jobs:
                 for item in ['io','wchan']:
                     try:out(kind='process_'+item,lines=(root/item).read_text().splitlines()[:12])
                     except OSError:pass
-            journal=run(['journalctl','-u','seiltanzer','--since','2026-10-20 20:00:00','--no-pager','-n','65','-o','cat'])
+            for name in ['cutover.preparation.json','cutover.journal.json','cutover.result.json']:
+                p=Path('/opt/seiltanzer/data')/name
+                try:
+                    d=json.loads(p.read_text())
+                    out(kind='owner_state',file=name,fields={k:d.get(k) for k in ['run_id','application_sha','phase','service_started','abort_reason','started_wall_ts']})
+                except (OSError,ValueError):out(kind='owner_state',file=name,readable=False)
+            owner=run(['systemctl','show','seiltanzer-history-cutover-39547191584.service','-p','ActiveState','-p','SubState','-p','Result','-p','MainPID'])
+            out(kind='owner_unit',properties=owner.stdout.splitlines())
+            journal=run(['journalctl','-u','seiltanzer','--since','2026-10-21 05:00:00','--no-pager','-n','65','-o','cat'])
             for line in journal.stdout.splitlines():
                 if any(mark in line.lower() for mark in ['authorization','password','secret','api_key','x-amz','access_key','token=']):continue
                 if len(line)>1000:continue
