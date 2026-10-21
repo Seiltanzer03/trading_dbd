@@ -1079,12 +1079,42 @@ class Journal:
         outcomes = []
         for source in rows:
             row = dict(source)
+            try:
+                horizon_end = float(row["ts"]) + float(row["horizon_minutes"]) * 60.0
+            except (TypeError, ValueError):
+                # Preserve the resolver's incomplete-contract handling.
+                horizon_end = math.inf
             with self._lock:
-                path = [dict(point) for point in self._conn.execute(
+                # REAL affinity is not STRICT: legacy TEXT/BLOB timestamps can
+                # float-convert but sort after numbers. The indexed maximum
+                # proves numeric ordering or retains the original full read.
+                last_type = self._conn.execute(
+                    "SELECT typeof(ts) FROM trade_market_path WHERE trade_id=? "
+                    "AND ts>=? ORDER BY ts DESC LIMIT 1",
+                    (int(row["trade_id"]), float(row["ts"])),
+                ).fetchone()
+                numeric_order = last_type is None or last_type[0] in ("integer", "real")
+                cursor = self._conn.execute(
                     "SELECT ts,r FROM trade_market_path WHERE trade_id=? "
                     "AND ts>=? ORDER BY ts",
                     (int(row["trade_id"]), float(row["ts"])),
-                ).fetchall()]
+                )
+                path = []
+                try:
+                    for point in cursor:
+                        path.append(dict(point))
+                        try:
+                            point_ts, point_r = float(point["ts"]), float(point["r"])
+                        except (TypeError, ValueError):
+                            continue
+                        # The resolver discards later history after interpolating
+                        # H from its first finite point beyond H. Stream the same
+                        # indexed prefix instead of fetching the trade's lifetime.
+                        if (numeric_order and math.isfinite(point_ts) and math.isfinite(point_r)
+                                and point_ts > horizon_end + 1e-9):
+                            break
+                finally:
+                    cursor.close()
             outcome = resolve_forecast_outcome(row, path)
             outcomes.append(outcome)
             if not outcome["resolved"]:
