@@ -40,6 +40,10 @@ jobs:
                     d=json.loads(p.read_text())
                     out(kind='owner_state',file=name,fields={k:d.get(k) for k in ['run_id','application_sha','phase','service_started','abort_reason','started_wall_ts']})
                 except (OSError,ValueError):out(kind='owner_state',file=name,readable=False)
+            detail=run(['journalctl','-u','seiltanzer-history-39558165859.service','--no-pager','-n','35','-o','cat'])
+            for line in detail.stdout.splitlines():
+                if any(mark in line.lower() for mark in ['authorization','password','secret','api_key','x-amz','access_key','token=']):continue
+                if len(line)<1400:out(kind='owner_journal',line=line)
             owner=run(['systemctl','show','seiltanzer-history-39558165859.service','-p','ActiveState','-p','SubState','-p','Result','-p','MainPID'])
             out(kind='owner_unit',properties=owner.stdout.splitlines())
             owner_fields=dict(line.split('=',1) for line in owner.stdout.splitlines() if '=' in line)
