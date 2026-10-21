@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 9ce2cae062b0b9a24b453ac8ab9ff22f364192eb
+          ref: f3babc334b2d6d860d328df617b29283668d8872
       - name: Require reviewed green deployed revision
         env:
           GH_TOKEN: ${{ github.token }}
@@ -35,7 +35,7 @@ jobs:
           set -euo pipefail
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           if [ "$DIAGNOSTIC" = true ]; then test -z "$RESUME_RUN_ID"; fi
-          worker_sha=9ce2cae062b0b9a24b453ac8ab9ff22f364192eb
+          worker_sha=f3babc334b2d6d860d328df617b29283668d8872
           test "$(git rev-parse HEAD)" = "$worker_sha"
           # The external builder is fixed without installing code or bypassing
           # the native owner's installed-SHA/fence/rollback/capacity checks.
