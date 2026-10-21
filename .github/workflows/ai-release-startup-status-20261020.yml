@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only exact-11325 post-publication readiness; no provider or model calls.
+# Read-only exact-11325 stale-decision diagnosis; no provider or model calls.
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -33,6 +33,19 @@ jobs:
                     print(json.dumps({'kind':'snapshot_status','http':response.code,'elapsed_ms':round((time.monotonic()-started)*1000,1),'fields':{k:body.get(k) for k in ['ready','building','invalidated_reason','build_ms','build_started_at','build_n','age_sec','last_error','snapshot_budget']},'has_trade':body.get('current_trade_id') is not None},sort_keys=True))
             except (TimeoutError,ConnectionError,OSError,ValueError) as exc:
                 print(json.dumps({'kind':'snapshot_status','error':type(exc).__name__,'elapsed_ms':round((time.monotonic()-started)*1000,1)}))
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=15) as response:
+                state=json.loads(response.read(2*1024**2+1))
+            tick=state.get('tick') or {}; quote=(tick.get('feeds') or {}).get('price') or {}
+            def age(value):
+                try:return round(time.time()-float(value),3)
+                except (ValueError,TypeError):return None
+            print(json.dumps({'kind':'quote_readiness','has_trade':bool(tick.get('trade')),'instrument':tick.get('instrument'),'tick_age_sec':age(tick.get('ts')),'quote_age_sec':age(quote.get('ts') or quote.get('timestamp')),'quote_status':quote.get('status'),'production_authority':quote.get('production_authority'),'derived':quote.get('derived'),'is_proxy':quote.get('is_proxy')},sort_keys=True))
+            trace=subprocess.check_output(['journalctl','-u','seiltanzer','--since','2026-10-21 22:27:00 UTC','--no-pager','-n','300'],text=True,timeout=5)
+            for line in trace.splitlines():
+                if 'ai-1578688fc55b42ee8f50' not in line or '{' not in line:continue
+                try:row=json.loads(line[line.index('{'):])
+                except ValueError:continue
+                print(json.dumps({'kind':'failed_request_trace',**{k:row.get(k) for k in ['request_id','stage','event','elapsed_ms','duration_ms','exception_class','status_code']}},sort_keys=True))
             print(json.dumps({'kind':'safety','provider_calls':0,'review_posts':0,'db_queries':0,'acks':0,'restarts':0,'app_writes':0}))
             PY
       - name: Verify public HTTP without AI request
