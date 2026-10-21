@@ -1,0 +1,35 @@
+name: cancel-duplicate-cutover-20261021
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/cancel-duplicate-cutover-20261021.yml]
+permissions:
+  actions: write
+  contents: read
+jobs:
+  cancel:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 2
+    steps:
+      - name: Cancel only queued duplicate of the same reviewed push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import os,json,urllib.request
+          root='https://api.github.com/repos/'+os.environ['REPO']+'/actions/runs/'
+          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+          target='39582227412';keep='39582128571'
+          def read(run):
+              with urllib.request.urlopen(urllib.request.Request(root+run,headers=headers),timeout=15) as r:return json.load(r)
+          a,b=read(target),read(keep)
+          assert a['head_sha']==b['head_sha']=='20af46c8ffd3ea7e1f86c41cf403538ac9690883'
+          assert a['workflow_id']==b['workflow_id']
+          assert a['id']!=b['id']
+          print(json.dumps({'duplicate_run':a['id'],'status':a['status'],'preserved_run':b['id']}))
+          if a['status'] in ('queued','pending','waiting','requested'):
+              with urllib.request.urlopen(urllib.request.Request(root+target+'/cancel',headers=headers,method='POST'),timeout=15) as r:
+                  print(json.dumps({'cancel_status':r.status}))
+          else:raise SystemExit('REFUSED_NONQUEUED_RUN')
+          PY
