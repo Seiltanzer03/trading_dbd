@@ -1,0 +1,183 @@
+name: history-reader-bootstrap-20261021
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/history-reader-bootstrap-20261021.yml]
+permissions:
+  contents: read
+  statuses: read
+  actions: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
+jobs:
+  deliver-readers:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    steps:
+      - name: Admit earliest event only
+        id: once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json,os,urllib.request
+          url='https://api.github.com/repos/'+os.environ['GITHUB_REPOSITORY']+'/actions/runs?head_sha='+os.environ['GITHUB_SHA']+'&per_page=100'
+          req=urllib.request.Request(url,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          with urllib.request.urlopen(req,timeout=15) as response:rows=json.load(response)['workflow_runs']
+          matches=[r['id'] for r in rows if r['path']=='.github/workflows/history-reader-bootstrap-20261021.yml' and r['event']=='push']
+          assert matches
+          execute=int(os.environ['GITHUB_RUN_ID'])==min(matches)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('execute='+str(execute).lower()+'\n')
+          print(json.dumps({'once_admitted':execute}))
+          PY
+      - uses: actions/checkout@v4
+        if: steps.once.outputs.execute == 'true'
+        with:
+          ref: 97bc34b0e720e2950765353d978a01df0b703f2b
+          persist-credentials: false
+      - name: Install configured SSH transport
+        if: steps.once.outputs.execute == 'true'
+        run: pip install 'paramiko>=3.3,<6'
+      - name: Deliver two green reviewed readers; preserve database, guard and service
+        if: steps.once.outputs.execute == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          python3 -u - <<'PY'
+          import base64,hashlib,json,os,subprocess,urllib.request
+          from pathlib import Path
+          import paramiko
+          candidate='97bc34b0e720e2950765353d978a01df0b703f2b'
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==candidate
+          assert subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip()=='346c050dd28f318acfcbee70dfd5f6e1d273977e'
+          def api(path):
+              req=urllib.request.Request('https://api.github.com/repos/'+os.environ['GITHUB_REPOSITORY']+path,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+              with urllib.request.urlopen(req,timeout=15) as response:return json.load(response)
+          latest={}
+          for row in api('/commits/'+candidate+'/status')['statuses']:latest.setdefault(row['context'],row['state'])
+          assert latest.get('ci/full-webkit')=='success','GREEN_CANDIDATE_REQUIRED'
+          ci=api('/actions/runs/39629079902')
+          assert ci['head_sha']=='ca9821416deed4930b1921870a4cd0b66bc090b5' and ci['conclusion']=='success','FULL_CI_REQUIRED'
+          proof=api('/actions/runs/39584052093')
+          assert proof['conclusion']=='success' and proof['head_sha']=='6c7f5c95aa9f535ecb5b39d7c07b0212262ffd4e','COMPLETE_UNION_PROOF_REQUIRED'
+          pins={
+              'history_storage_state.py':('39e5aef751d382cd876f20c064f23dfab2aee77453fa4357c53b9d6d4c90ff0e','4c49b1a99ad2ce3f2d8232dce30459b7a2bf3ac122eee793b5374dc4e39fb9ef'),
+              'history_runtime_projection.py':('5431a10c600d704d330450e4aacf5f709bc542f743b23067d6fa0120c8220072','fe38f99c2dc8d9982a1fe31313e004ea6e8c42229652e72fe5d55f85ad1a8508')}
+          payload={}
+          for name,(old,new) in pins.items():
+              raw=(Path('seiltanzer')/name).read_bytes()
+              assert hashlib.sha256(raw).hexdigest()==new
+              payload[name]={'old':old,'new':new,'code':base64.b64encode(raw).decode('ascii')}
+          remote=r'''
+          import base64,fcntl,hashlib,json,os,shutil,stat,subprocess,tempfile,time
+          from pathlib import Path
+          from urllib.request import urlopen
+          root=Path('/opt/seiltanzer');data=root/'data';epoch='39582128571'
+          app_sha='bd615fbd5481a61625c31e62d19f91fd2277dcfd'
+          def require(value,reason):
+              if not value:raise RuntimeError(reason)
+          def read_regular(path,private=False):
+              info=path.lstat()
+              require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1 and not info.st_mode&0o022,'UNSAFE_DELIVERY_FILE')
+              require(not private or not info.st_mode&0o077,'PRIVATE_STATE_REQUIRED')
+              require(0<info.st_size<=1048576,'DELIVERY_FILE_SIZE_REFUSED')
+              return path.read_bytes()
+          def unique(items):
+              result={}
+              for key,value in items:
+                  require(key not in result,'DUPLICATE_STATE_MEMBER');result[key]=value
+              return result
+          def state(name):
+              raw=read_regular(data/name,True)
+              value=json.loads(raw,object_pairs_hook=unique)
+              require(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode('ascii')==raw,'NONCANONICAL_STATE')
+              return value,raw
+          def command(args):return subprocess.check_output(args,text=True,timeout=8).strip()
+          lock=root/'.deployment-git-maintenance.lock'
+          fd=os.open(lock,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+          fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+          info=os.fstat(fd);current=lock.lstat()
+          require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1 and not info.st_mode&0o022 and (info.st_ino,info.st_dev)==(current.st_ino,current.st_dev),'HOST_EX_LOCK_REQUIRED')
+          def terminal():
+              require(command(['git','-C',str(root),'rev-parse','HEAD'])==app_sha,'INSTALLED_APPLICATION_CHANGED')
+              require(not os.path.lexists(data/'cutover.active') and not os.path.lexists(data/'cutover.reset.json'),'ACTIVE_EPOCH_REFUSED')
+              require(command(['systemctl','show','seiltanzer-history-'+epoch+'.service','-p','MainPID','--value'])=='0','NATIVE_OWNER_STILL_RUNNING')
+              plan,raw=state('cutover.plan.json');journal,_=state('cutover.journal.json');result,_=state('cutover.result.json')
+              require(plan['run_id']==epoch and plan['application_sha']==app_sha,'PLAN_EPOCH_CHANGED')
+              require(journal==dict(contract='sqlite-history-transaction-v1',run_id=epoch,plan_sha256=hashlib.sha256(raw).hexdigest(),phase='COMMITTED',service_started=True),'COMMITTED_JOURNAL_REQUIRED')
+              require(result['run_id']==epoch and result['phase']=='COMMITTED' and result['service_started'] is True and result['cutover_committed'] is True,'SUCCESSFUL_NATIVE_RESULT_REQUIRED')
+              require(command(['systemctl','is-active','seiltanzer'])=='active','RUNNING_SERVICE_REQUIRED')
+              with urlopen('http://127.0.0.1:8790/api/state',timeout=5) as response:require(response.status==200,'HTTP_READINESS_REQUIRED')
+          terminal()
+          pid=command(['systemctl','show','seiltanzer','-p','MainPID','--value'])
+          guard=Path('/usr/local/lib/seiltanzer-history-start-guard.py')
+          guard_bytes=read_regular(guard)
+          require(guard_bytes==read_regular(root/'scripts/history_service_fence.py'),'INSTALLED_GUARD_CHANGED')
+          namespace=dict(__name__='_delivery_readonly_validator',__file__=str(guard))
+          exec(compile(guard_bytes,str(guard),'exec'),namespace)
+          require(namespace['SQL_SECONDS']==5,'ORIGINAL_ADMISSION_BUDGET_REQUIRED')
+          originals={};decoded={}
+          for name,item in payload.items():
+              path=root/'seiltanzer'/name;raw=read_regular(path)
+              require(hashlib.sha256(raw).hexdigest() in (item['old'],item['new']),'INSTALLED_READER_HASH_CHANGED')
+              new=base64.b64decode(item['code'],validate=True)
+              require(hashlib.sha256(new).hexdigest()==item['new'],'CANDIDATE_READER_HASH_CHANGED')
+              compile(new,str(path),'exec');originals[name]=raw;decoded[name]=new
+          with tempfile.TemporaryDirectory(prefix='history-reader-preflight-') as temporary:
+              package=Path(temporary)/'seiltanzer';package.mkdir()
+              for name in ['history_runtime_views.py','passive_learning.py','g1_dataset_runtime.py','measurement_q_runtime.py']:
+                  shutil.copyfile(root/'seiltanzer'/name,package/name)
+              for name,raw in decoded.items():(package/name).write_bytes(raw)
+              admitted=False
+              for attempt in range(3):
+                  report=namespace['check_start'](data/'trades.db',Path(temporary))
+                  print(json.dumps({'preflight_attempt':attempt+1,'admission':report}),flush=True)
+                  if report.get('reason')=='VERIFIED_HOT_RUNTIME_CAPABILITY' and report.get('start_allowed') is True:admitted=True;break
+              require(admitted,'CANDIDATE_ADMISSION_REFUSED')
+          archive=root/'.history-reader-delivery-ca9821416deed4930b1921870a4cd0b66bc090b5'
+          if not os.path.lexists(archive):archive.mkdir(mode=0o700)
+          info=archive.lstat()
+          require(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700,'PRIVATE_READER_ARCHIVE_REQUIRED')
+          staged={}
+          for name,raw in decoded.items():
+              saved=archive/name
+              if not os.path.lexists(saved):
+                  require(hashlib.sha256(originals[name]).hexdigest()==payload[name]['old'],'ORIGINAL_READER_BACKUP_REQUIRED')
+                  with saved.open('xb') as output:os.fchmod(output.fileno(),0o600);output.write(originals[name]);output.flush();os.fsync(output.fileno())
+              require(hashlib.sha256(read_regular(saved,True)).hexdigest()==payload[name]['old'],'READER_BACKUP_CHANGED')
+              target=root/'seiltanzer'/name
+              descriptor,temporary=tempfile.mkstemp(prefix='.history-reader-',suffix='.tmp',dir=target.parent)
+              with os.fdopen(descriptor,'wb') as output:
+                  os.fchmod(output.fileno(),stat.S_IMODE(target.stat().st_mode));output.write(raw);output.flush();os.fsync(output.fileno())
+              staged[name]=Path(temporary)
+          terminal()
+          for name,temporary in staged.items():
+              require(hashlib.sha256(read_regular(root/'seiltanzer'/name)).hexdigest() in (payload[name]['old'],payload[name]['new']),'READER_CHANGED_BEFORE_DELIVERY')
+              os.replace(temporary,root/'seiltanzer'/name)
+          directory_fd=os.open(root/'seiltanzer',os.O_RDONLY|os.O_DIRECTORY);os.fsync(directory_fd);os.close(directory_fd)
+          for name,item in payload.items():require(hashlib.sha256(read_regular(root/'seiltanzer'/name)).hexdigest()==item['new'],'READER_DELIVERY_HASH_MISMATCH')
+          require(read_regular(guard)==guard_bytes,'START_GUARD_MUTATION_REFUSED')
+          actual=subprocess.run(['/usr/bin/python3',str(guard),'--database',str(data/'trades.db'),'--application-root',str(root)],text=True,capture_output=True,timeout=12)
+          report=json.loads(actual.stdout)
+          print(json.dumps({'actual_admission':report}),flush=True)
+          require(actual.returncode==0 and report.get('reason')=='VERIFIED_HOT_RUNTIME_CAPABILITY','ACTUAL_ADMISSION_REFUSED')
+          terminal()
+          require(command(['systemctl','show','seiltanzer','-p','MainPID','--value'])==pid,'SERVICE_PID_CHANGED')
+          print(json.dumps({'delivered_readers':sorted(payload),'native_epoch':epoch,'service_pid_unchanged':True,'database_mutations':0,'guard_writes':0,'restarts':0,'provider_calls':0}),flush=True)
+          '''
+          client=paramiko.SSHClient();client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+          try:
+              client.connect('94.241.171.182',username='root',password=os.environ['SSH_PASSWORD'],timeout=15,auth_timeout=15,banner_timeout=15,allow_agent=False,look_for_keys=False)
+              source='payload='+repr(payload)+'\n'+remote
+              stdin,stdout,stderr=client.exec_command("/usr/bin/python3 -u - <<'READER_DELIVERY_PY'\n"+source+'\nREADER_DELIVERY_PY',timeout=120)
+              for line in stdout:print(line.rstrip(),flush=True)
+              error=stderr.read().decode('utf8','replace')
+              code=stdout.channel.recv_exit_status()
+              if code:
+                  print(json.dumps({'reader_delivery_failed':True,'exit_code':code,'exception':error.splitlines()[-1][:180] if error else 'REMOTE_FAILURE'}))
+                  raise SystemExit(1)
+          finally:client.close()
+          PY
