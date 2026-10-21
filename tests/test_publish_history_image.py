@@ -18,7 +18,8 @@ class MemoryClient:
         self.objects = {}; self.calls = []; self.hazard = None; self.source = None
 
     def upload_file(self,path,bucket,key,ExtraArgs,Config,Callback):
-        assert Config.use_threads is False
+        assert Config.use_threads is True
+        assert Config.max_concurrency == 4
         assert Config.multipart_chunksize == 16*1024**2
         assert Path(path).stat().st_mode & 0o077 == 0
         if self.hazard == 'upload_failure':
@@ -118,3 +119,23 @@ def test_factory_uses_existing_yandex_endpoint_and_finite_path_style_client(subj
     assert client.meta.config.connect_timeout == 10
     assert client.meta.config.read_timeout == 120
     assert client.meta.config.retries['total_max_attempts'] == 1
+
+
+def test_publication_uses_fastest_lossless_gzip_with_exact_raw_identity(subject):
+    target = subject.path.parent/'fastest.sqlite3.gz'
+    digest, size = subject.module._pack(subject.path,target,subject.identity,time.monotonic()+5)
+    packed = target.read_bytes()
+    # RFC1952 XFL=4 identifies the fastest compression algorithm.
+    assert packed[:3] == b'\x1f\x8b\x08'
+    assert packed[8] == 4
+    assert gzip.decompress(packed) == subject.raw
+    assert digest == hashlib.sha256(packed).hexdigest()
+    assert size == len(packed)
+
+
+def test_expired_publication_budget_never_uploads_or_returns_receipt(subject):
+    with pytest.raises(ValueError, match='IMAGE_TRANSFER_DEADLINE'):
+        subject.module.publish_image(subject.path,subject.identity,run_id='run-001',
+            kind='original',client=subject.client,deadline=time.monotonic()-1,
+            opener=subject.client.opener)
+    assert subject.client.calls == []
