@@ -4,6 +4,7 @@ Content verification is separate from SQLite validity and production authority.
 No service control, live capture, deletion or rotating backup slot is present.
 """
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -33,7 +34,7 @@ def _check(deadline):
 def _pack(source, target, identity, deadline):
     raw_digest = hashlib.sha256(); compressed_digest = hashlib.sha256()
     raw_size = compressed_size = 0
-    encoder = zlib.compressobj(level=6,wbits=31)
+    encoder = zlib.compressobj(level=1,wbits=31)
     fd = os.open(target,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
     with os.fdopen(fd,'wb') as output, source.open('rb') as input_stream:
         while True:
@@ -95,11 +96,18 @@ def _publish(database, identity, *, run_id, kind, client, deadline, opener):
             or not 0 < config.connect_timeout <= 10 or not 0 < config.read_timeout <= 120
             or config.retries.get('total_max_attempts') != 1):
         raise images.ImageTransportError('UNBOUNDED_OR_UNTRUSTED_IMAGE_CLIENT')
+    started = time.monotonic()
+    def phase(name):
+        print(json.dumps(dict(history_image_kind=kind,history_image_phase=name,
+            elapsed_sec=round(time.monotonic()-started,3))),flush=True)
+
     with tempfile.TemporaryDirectory(prefix='.cutover-image-',dir=source.parent) as directory:
+        phase('pack_begin')
         packed = Path(directory)/'image.sqlite3.gz'
         compressed_hash, compressed_size = _pack(source,packed,identity,deadline)
         if _identity(source) != before:
             raise images.ImageTransportError('SOURCE_IMAGE_CHANGED')
+        phase('pack_complete')
         key = f'research/sqlite-cutover/v1/{run_id}/{kind}/{identity["database_sha256"]}/{compressed_hash}.sqlite3.gz'
         receipt = dict(contract=images.CONTRACT,run_id=run_id,kind=kind,bucket=images.BUCKET,
             object_key=key,codec='gzip',**identity,compressed_sha256=compressed_hash,
@@ -108,13 +116,15 @@ def _publish(database, identity, *, run_id, kind, client, deadline, opener):
             'database-size':str(identity['database_size_bytes']),'compressed-sha256':compressed_hash,
             'compressed-size':str(compressed_size)}
         _check(deadline)
+        phase('upload_begin')
         client.upload_file(str(packed),images.BUCKET,key,
             ExtraArgs={'ContentType':'application/gzip','Metadata':metadata},
-            Config=TransferConfig(multipart_chunksize=16*1024**2,max_concurrency=1,use_threads=False),
+            Config=TransferConfig(multipart_chunksize=16*1024**2,max_concurrency=4,use_threads=True),
             Callback=lambda transferred:_check(deadline))
         _check(deadline)
         if _identity(source) != before:
             raise images.ImageTransportError('SOURCE_IMAGE_CHANGED')
+        phase('upload_complete')
         head = client.head_object(Bucket=images.BUCKET,Key=key)
         _check(deadline)
         if (type(head.get('ContentLength')) is not int or head['ContentLength'] != compressed_size
@@ -124,7 +134,9 @@ def _publish(database, identity, *, run_id, kind, client, deadline, opener):
             ExpiresIn=min(43200,max(1,int(deadline-time.monotonic())+1)))
         adapter = images.SignedImageTransport({kind:dict(url=url,receipt=receipt)},
                                               deadline=deadline,opener=opener)
+        phase('readback_begin')
         verified = adapter.verify_image(kind)
         if _identity(source) != before:
             raise images.ImageTransportError('SOURCE_IMAGE_CHANGED')
+        phase('readback_complete')
         return verified
