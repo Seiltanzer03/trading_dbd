@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only handoff observation 2026-10-21T12:33Z
+# Read-only handoff observation 2026-10-21T12:36Z
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -76,8 +76,23 @@ jobs:
                     sql=('SELECT "'+alias+'",typeof(observation_id),length(CAST(observation_id AS BLOB)),CASE WHEN length(CAST(observation_id AS BLOB))>65536 THEN NULL WHEN typeof(observation_id)=\'text\' THEN CAST(observation_id AS BLOB) ELSE observation_id END FROM "'+table+'" WHERE "'+alias+'"<=? ORDER BY "'+alias+'"')
                     plan=conn.execute('EXPLAIN QUERY PLAN '+sql,(proof['max_rowid'],)).fetchall()
                     out(kind='history_identity_query_plan',table=table,plan=plan)
-                    part_started=time.monotonic();actual=ns['identity_proof'](conn,table,proof['max_rowid'])
-                    out(kind='history_validation_phase',phase=table,elapsed_sec=round(time.monotonic()-part_started,3),matched=actual==proof,row_count=actual['row_count'])
+                    indexes=[]
+                    for item in conn.execute('PRAGMA index_list("'+table+'")'):
+                        if item[4]:continue
+                        columns=[row[2] for row in conn.execute('PRAGMA index_info("'+item[1].replace('"','""')+'")')]
+                        if columns==['observation_id']:indexes.append(item[1])
+                    out(kind='history_identity_indexes',table=table,indexes=indexes)
+                    if indexes:
+                        index=indexes[0]
+                        hinted=sql.replace(' FROM "'+table+'" WHERE',' FROM "'+table+'" INDEXED BY "'+index.replace('"','""')+'" WHERE')
+                        out(kind='history_covering_query_plan',table=table,plan=conn.execute('EXPLAIN QUERY PLAN '+hinted,(proof['max_rowid'],)).fetchall())
+                        class IndexedConnection:
+                            def execute(self,query,*args):
+                                if query.startswith('SELECT "'+alias+'",typeof(observation_id)'):
+                                    query=query.replace('FROM "'+table+'"','FROM "'+table+'" INDEXED BY "'+index.replace('"','""')+'"')
+                                return conn.execute(query,*args)
+                        part_started=time.monotonic();actual=ns['identity_proof'](IndexedConnection(),table,proof['max_rowid'])
+                        out(kind='history_validation_phase',phase=table,elapsed_sec=round(time.monotonic()-part_started,3),matched=actual==proof,row_count=actual['row_count'],covering_index=True)
                 codec=ns['_runtime_projection']()
                 part_started=time.monotonic()
                 codec.validate_runtime_projection(conn,state['runtime_projection'],retired_rowids=state['retired_rowids']['passive_market_observations'])
