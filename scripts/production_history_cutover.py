@@ -174,15 +174,18 @@ def capture_frozen(sftp,identity,output,*,deadline):
 
 def _remote_read(sftp,name):
     path=REMOTE_DATA+name
-    try:info=sftp.lstat(path)
+    try:
+        info=sftp.lstat(path)
+        if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid!=0
+                or not 0 < info.st_size <= core.MAX_STATE_BYTES):
+            raise core.CutoverError('UNSAFE_REMOTE_OWNER_STATE')
+        # The native owner atomically archives terminal metadata while opening
+        # a new epoch. Absence at either stat or open is a pending observation.
+        with sftp.open(path,'rb') as stream:raw=stream.read(core.MAX_STATE_BYTES+1)
     except FileNotFoundError:return None
     except OSError as exc:
         if getattr(exc,'errno',None)==2:return None
         raise core.CutoverError('REMOTE_OWNER_STATE_UNAVAILABLE') from None
-    if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid!=0
-            or not 0 < info.st_size <= core.MAX_STATE_BYTES):
-        raise core.CutoverError('UNSAFE_REMOTE_OWNER_STATE')
-    with sftp.open(path,'rb') as stream:raw=stream.read(core.MAX_STATE_BYTES+1)
     value=json.loads(raw,object_pairs_hook=core._unique)
     if core._canonical(value)!=raw:raise core.CutoverError('NONCANONICAL_REMOTE_OWNER_STATE')
     return value
