@@ -8,6 +8,7 @@ hard byte ceiling.
 from __future__ import annotations
 
 from typing import Any
+import json
 from .unified_edge_audit import compact_unified_ensemble
 from .operational_edge_compaction import compact_operational_edges, compact_evidence_lineage, FAMILY_ROOTS, FAMILY_AUDITS
 
@@ -80,6 +81,34 @@ def _compact_scalars(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
     return {key: row[key] for key in keys if key in row}
 
 
+def _compact_option_metric_audit(value: Any) -> dict[str, Any]:
+    """Retain bounded observed metric rows; never infer a missing derivative."""
+    if not isinstance(value, dict):
+        return {}
+    scalar = lambda item: item is None or isinstance(item, (bool, int, float)) or isinstance(item, str) and len(item) <= 256
+    result = {key: item for key, item in value.items() if scalar(item)}
+    names = ('p_take', 'p_stop', 'p_no_touch', 'barrier_ev', 'bop', 'q10', 'q50',
+             'q90', 'width', 'tail_log_ratio', 'skew', 'term_slope', 'iv', 'rv',
+             'vrp', 'h_take', 'h_stop', 'hazard_log_ratio', 'gex_force',
+             'gex_stiffness', 'distance_to_zero_gamma')
+    keys = ('value', 'slope', 'acceleration', 'noise', 'sample_count',
+            'normalization_noise', 'numerical_effect_floor',
+            'normalization_horizon_minutes', 'time_span_minutes', 'confidence',
+            'source_quality', 'available', 'units', 'value_units', 'slope_units',
+            'acceleration_units', 'reason', 'source', 'timestamp', 'observed_ts')
+    metrics = value.get('metrics')
+    if not isinstance(metrics, dict):
+        metrics = {}
+    result['metrics'] = {name: {key: row[key] for key in keys if key in row and scalar(row[key])}
+                         for name in names if isinstance((row := metrics.get(name)), dict)}
+    quality = value.get('source_quality')
+    if isinstance(quality, dict):
+        result['source_quality'] = {key: item for key, item in quality.items() if scalar(item)}
+    if len(json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode()) > 12_000:
+        return {'available': False, 'metrics': {}, 'reason': 'OPTION_METRIC_AUDIT_BYTE_BUDGET'}
+    return result
+
+
 def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
     """Keep the completed decision while dropping oversized explanation views.
 
@@ -108,7 +137,7 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
         "cancellation_boundary", "phase_e_authority_contract",
         "shadow_actions", "extended_actions", "input_audit",
         "scenario_geometry", "raw_optimizer_stability", "stability",
-        "risk_tradeoff",
+        "risk_tradeoff", "option_derivative_state",
     )
     compact_manager = {
         key: manager[key] for key in manager_keep if key in manager
@@ -122,6 +151,9 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
     compact_manager["decision_reliability"] = decision_reliability(snapshot)
     compact_manager["input_audit"] = _compact_input_audit(
         manager.get("input_audit"))
+    option_state = manager.get('option_derivative_state') or (manager.get('evidence') or {}).get('option_derivative_state')
+    if option_state:
+        compact_manager['option_derivative_state'] = _compact_option_metric_audit(option_state)
     compact_manager["scenario_geometry"] = _compact_scalars(
         manager.get("scenario_geometry"), (
             "scenario_count", "next_rung_r", "p_next_rung_before_stop",
