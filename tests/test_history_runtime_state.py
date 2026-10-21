@@ -71,6 +71,46 @@ def test_v2_state_refuses_incomplete_or_conflicting_projection(runtime_state, ha
         state.history_manifest_fields(conn)
 
 
+def test_projection_admission_work_is_bounded_by_archived_sources(runtime_state):
+    conn, data = runtime_state
+    template = list(conn.execute('SELECT * FROM g1_dataset_membership LIMIT 1').fetchone())
+    columns = [row[1] for row in conn.execute('PRAGMA table_info(g1_dataset_membership)')]
+    identity_column = columns.index('observation_id')
+    rows = []
+    for number in range(20000):
+        row = template.copy()
+        row[identity_column] = f'unrelated-live-membership-{number}'
+        rows.append(row)
+    conn.executemany('INSERT INTO g1_dataset_membership VALUES ('+
+                     ','.join('?' for _ in columns)+')', rows)
+    callbacks = 0
+
+    def bound_work():
+        nonlocal callbacks
+        callbacks += 1
+        return callbacks > 200  # 20,000 SQLite VM instructions; no clock race.
+
+    conn.set_progress_handler(bound_work, 100)
+    try:
+        projection.validate_runtime_projection(conn, data['runtime_projection'],
+                                               retired_rowids=[1])
+    finally:
+        conn.set_progress_handler(None, 0)
+
+
+def test_archived_source_cannot_be_admitted_under_another_dataset_contract(runtime_state):
+    conn, data = runtime_state
+    columns = [row[1] for row in conn.execute('PRAGMA table_info(g1_dataset_membership)')]
+    row = list(conn.execute("SELECT * FROM g1_dataset_membership WHERE observation_id='old-ifd'").fetchone())
+    row[columns.index('dataset_contract_version')] = 'another-contract'
+    row[columns.index('forecast_eval_eligible')] = 1
+    conn.execute('INSERT INTO g1_dataset_membership VALUES ('+
+                  ','.join('?' for _ in columns)+')', row)
+    with pytest.raises(ValueError, match='overlaps admitted membership'):
+        projection.validate_runtime_projection(conn, data['runtime_projection'],
+                                               retired_rowids=[1])
+
+
 def test_full_worker_consumes_only_storage_guards_and_projection(runtime_state):
     conn, data = runtime_state
     state.write_history_state(conn, data)
