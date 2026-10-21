@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only snapshot build telemetry 2026-10-21T16:42Z
+# Nonblocking stack-only snapshot diagnosis 2026-10-21T16:45Z
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -11,6 +11,43 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
+      - name: Sample Python stacks without locals, signals, restart or app installation
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 90s
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 6cbf58c873bc863d879c530331258eeeeff1a3c7
+            /usr/bin/python3 -u - <<'PY'
+            import json,os,shutil,subprocess,tempfile,time
+            from pathlib import Path
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5))
+            assert pid>0
+            probe=Path(tempfile.mkdtemp(prefix='seiltanzer-stack-probe-',dir='/tmp'))
+            try:
+                install=subprocess.run(['/opt/seiltanzer/.venv/bin/python','-m','pip','install','--quiet','--disable-pip-version-check','--no-cache-dir','--no-deps','--only-binary=:all:','--timeout','10','--retries','0','--target',str(probe),'py-spy==0.4.2'],text=True,capture_output=True,timeout=35)
+                print(json.dumps({'kind':'temporary_profiler','install_returncode':install.returncode}))
+                if install.returncode:raise SystemExit('TEMPORARY_PROFILER_UNAVAILABLE_NO_PERMISSION_OR_NETWORK_WORKAROUND')
+                tool=probe/'bin/py-spy'
+                assert tool.is_file()
+                for sample in range(3):
+                    result=subprocess.run([str(tool),'dump','--pid',str(pid),'--nonblocking'],text=True,capture_output=True,timeout=8)
+                    print(json.dumps({'kind':'stack_sample','sample':sample,'returncode':result.returncode,'nonblocking':True,'locals':False}))
+                    if result.returncode:
+                        print(json.dumps({'kind':'stack_error','text':result.stderr[:600]}))
+                        raise SystemExit('STACK_OBSERVATION_UNAVAILABLE_NO_PERMISSION_CHANGE')
+                    for line in result.stdout.splitlines()[:220]:
+                        if any(mark in line.lower() for mark in ['authorization','password','secret','api_key','token=']):continue
+                        print(json.dumps({'kind':'stack','sample':sample,'line':line[:600]}))
+                    if sample<2:time.sleep(2)
+            finally:
+                assert probe.parent==Path('/tmp') and probe.name.startswith('seiltanzer-stack-probe-') and not probe.is_symlink()
+                shutil.rmtree(probe)
+                print(json.dumps({'kind':'stack_safety','temporary_tool_removed':True,'app_files_changed':0,'database_writes':0,'signals_sent':0,'provider_calls':0,'acks':0,'restarts':0}))
+            PY
       - name: Observe service and snapshot status; no provider or database call
         uses: appleboy/ssh-action@v1
         with:
