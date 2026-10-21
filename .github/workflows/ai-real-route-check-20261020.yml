@@ -41,7 +41,7 @@ jobs:
           command_timeout: 12m
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 9ef4a82b39578164220ac05fd9756e7e57c84ad1
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 6cbf58c873bc863d879c530331258eeeeff1a3c7
             test ! -e /opt/seiltanzer/data/cutover.active
             test ! -L /opt/seiltanzer/data/cutover.active
             /usr/bin/python3 -u - <<'PY'
@@ -59,7 +59,7 @@ jobs:
                     raw=response.read(2*1024**2+1)
                     if len(raw)>2*1024**2:raise ValueError('RESPONSE_BOUND')
                     return response.code,json.loads(raw)
-            expected='9ef4a82b39578164220ac05fd9756e7e57c84ad1'
+            expected='6cbf58c873bc863d879c530331258eeeeff1a3c7'
             publication_end=time.monotonic()+480
             research=Path('/opt/seiltanzer/data/research')
             while True:
