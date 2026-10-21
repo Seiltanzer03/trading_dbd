@@ -439,3 +439,33 @@ def test_diagnostic_return_refuses_unverified_or_already_handed_off_state(monkey
     with pytest.raises(ValueError,match='DIAGNOSTIC_'):
         driver._restore_diagnostic_original(object(),object(),frozen,time.monotonic()+1)
     assert writes==([] if changed in ('plan','request') else ['cutover.abort.json'])
+
+
+def test_poll_tolerates_terminal_result_archived_between_stat_and_open(tmp_path):
+    import os
+    from scripts import production_history_cutover as driver
+    from scripts import sqlite_history_transaction as core
+    path=tmp_path/'cutover.result.json'
+    path.write_bytes(core._canonical(dict(run_id='previous',phase='ABORTED_ORIGINAL',service_started=True)))
+    path.chmod(0o600)
+    class RacingSFTP:
+        def lstat(self,remote):
+            assert remote==driver.REMOTE_DATA+path.name
+            info=path.stat()
+            os.replace(path,tmp_path/'archived-result.json')
+            return SimpleNamespace(st_mode=info.st_mode,st_size=info.st_size,st_uid=0)
+        def open(self,remote,mode):return path.open(mode)
+    assert driver._completed_result(RacingSFTP(),'current',None) is None
+    assert (tmp_path/'archived-result.json').exists()
+
+
+def test_remote_state_io_failure_remains_fail_closed_without_private_details(tmp_path):
+    from scripts import production_history_cutover as driver
+    class UnreadableSFTP:
+        def lstat(self,remote):
+            import stat
+            return SimpleNamespace(st_mode=stat.S_IFREG|0o600,st_size=12,st_uid=0)
+        def open(self,remote,mode):raise PermissionError(13,'PRIVATE_TRANSPORT_DETAIL')
+    with pytest.raises(ValueError,match='REMOTE_OWNER_STATE_UNAVAILABLE') as failure:
+        driver._remote_read(UnreadableSFTP(),'cutover.result.json')
+    assert 'PRIVATE_TRANSPORT_DETAIL' not in str(failure.value)
