@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from copy import deepcopy
 from typing import Any
 
 from seiltanzer.g1_short_horizon_p2e_segmented_persistence import (
@@ -72,11 +73,32 @@ def _latest_frozen_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, A
         return {}
     try:
         cutoff = float(cutoff)
-        with runtime._lock:
+        lock = runtime._lock
+        if not lock.acquire(blocking=False):
+            read_status = {"available": False, "deferred": True,
+                           "cache_used": False, "reason": "RESEARCH_READER_BUSY"}
+            try:
+                cached_instrument, cached = getattr(
+                    runtime, "_ai_ede_last_frozen_context", (None, {}))
+                observed = float(cached["observation_t0"])
+                max_age = float(engine.settings.ede_context_max_age_sec)
+                if (cached_instrument == instrument and math.isfinite(cutoff)
+                        and math.isfinite(observed) and math.isfinite(max_age)
+                        and max_age > 0 and 0 <= cutoff - observed <= max_age):
+                    result = deepcopy(cached)
+                    result["_context_read"] = {
+                        **read_status, "available": True, "cache_used": True}
+                    return result
+            except (AttributeError, KeyError, TypeError, ValueError):
+                pass
+            return {"_context_read": read_status}
+        try:
             row = runtime._conn.execute(
                 "SELECT captured_ts,frozen_features_json FROM g1s_observations "
                 "WHERE instrument=? AND captured_ts<=? "
                 "ORDER BY captured_ts DESC LIMIT 1", (instrument, cutoff)).fetchone()
+        finally:
+            lock.release()
         if row is None:
             return {}
         captured = float(row["captured_ts"])
@@ -89,6 +111,15 @@ def _latest_frozen_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, A
         result["v2_option_context"] = (
             (frozen.get("g1s_evidence_v2") or {}).get("option_context") or {})
         result["_raw_frozen"] = frozen
+        result["_context_read"] = {
+            "available": True, "deferred": False, "cache_used": False,
+            "reason": "FROZEN_CONTEXT_READ"}
+        # One immutable last-good publication per runtime, not a growing history.
+        # Never update receipt/source clocks when serving it under contention.
+        try:
+            runtime._ai_ede_last_frozen_context = (instrument, deepcopy(result))
+        except AttributeError:  # Cache publication is optional for slotted adapters.
+            pass
         return result
     except Exception:
         return {}
@@ -319,6 +350,10 @@ def build_ai_ede_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any
                     or evidence.get("option_derivative_state") or {})
     metrics = option_state.get("metrics") or {}
     frozen = _latest_frozen_context(engine, snapshot)
+    context_read = frozen.get("_context_read") or {
+        "available": frozen.get("observation_t0") is not None,
+        "deferred": False, "cache_used": False,
+        "reason": "FROZEN_CONTEXT_READ" if frozen else "NO_FROZEN_CONTEXT"}
     instrument = str((snapshot.get("strategy") or {}).get("instrument") or "")
     values = canonical_current_feature_map(frozen, instrument)
     frozen_options = frozen.get("option_static") or {}
@@ -444,6 +479,13 @@ def build_ai_ede_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any
         "Conditional edge подтверждён замороженным primary evidence."
         if edge_status != "INSUFFICIENT_DATA"
         else "Данных может быть достаточно для контекста, но edge ещё не доказан.")
+    if context_read.get("deferred"):
+        lines.append(
+            "RESEARCH_READER_BUSY: использован свежий сохранённый causal context "
+            "с исходной датой наблюдения."
+            if context_read.get("cache_used") else
+            "RESEARCH_READER_BUSY: текущий causal context временно недоступен; "
+            "это не означает отсутствия данных в архиве.")
 
     edge = None
     if candidate:
@@ -481,6 +523,7 @@ def build_ai_ede_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any
         "edge_maturity": edge_status,
         "edge": edge,
         "current_observation_t0": observation_t0,
+        "current_context_read": context_read,
         "configured_max_age_sec": max_age_sec,
         "canonical_feature_parity": parity,
         "option_context_stance": stance,
