@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only handoff observation 2026-10-21T12:07Z
+# Read-only handoff observation 2026-10-21T12:09Z
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -72,3 +72,12 @@ jobs:
             out(kind='local_http',code=r.stdout[-3:],returncode=r.returncode)
             out(kind='safety',db_queries=0,provider_calls=0,acks=0,restarts=0,mutations=0,observation_may_be_intermediate=True)
             PY
+
+      - name: Verify public HTTP from hosted runner; no AI request
+        run: |
+          set -euo pipefail
+          for path in / /api/state; do
+            code=$(curl --silent --show-error --connect-timeout 5 --max-time 15 --output /dev/null --write-out '%{http_code}' "http://94.241.171.182:8790$path")
+            echo "public_path=$path http_code=$code"
+            test "$code" = 200
+          done
