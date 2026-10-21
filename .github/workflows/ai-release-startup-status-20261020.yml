@@ -40,7 +40,7 @@ jobs:
                     d=json.loads(p.read_text())
                     out(kind='owner_state',file=name,fields={k:d.get(k) for k in ['run_id','application_sha','phase','service_started','abort_reason','started_wall_ts']})
                 except (OSError,ValueError):out(kind='owner_state',file=name,readable=False)
-            owner=run(['systemctl','show','seiltanzer-history-cutover-39547191584.service','-p','ActiveState','-p','SubState','-p','Result','-p','MainPID'])
+            owner=run(['systemctl','show','seiltanzer-history-39547191584.service','-p','ActiveState','-p','SubState','-p','Result','-p','MainPID'])
             out(kind='owner_unit',properties=owner.stdout.splitlines())
             journal=run(['journalctl','-u','seiltanzer','--since','2026-10-21 05:00:00','--no-pager','-n','65','-o','cat'])
             for line in journal.stdout.splitlines():
@@ -50,6 +50,8 @@ jobs:
             head=run(['git','-C','/opt/seiltanzer','rev-parse','HEAD'])
             out(kind='git',observed_head=head.stdout.strip())
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
+            sizes=run(['du','-sk','/var/log/journal','/var/cache/apt','/root/.cache/pip','/opt/seiltanzer/.git','/opt/seiltanzer/data/backups','/tmp'],timeout=8)
+            out(kind='disposable_capacity_inventory',rows=sizes.stdout.splitlines())
             local=Path('/opt/seiltanzer/data/backups/local')
             for p in local.glob('.*.tmp.sqlite3'):
                 try:s=p.lstat()
