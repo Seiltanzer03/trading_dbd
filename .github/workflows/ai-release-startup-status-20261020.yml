@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Reviewed candidate, read-only live database benchmark; never installs app code.
+# Read-only installed-cef snapshot telemetry; no candidate code or profiler.
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -11,42 +11,29 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Benchmark candidate with read-only SQLite; no app install or init
+      - name: Read installed service and snapshot metadata without provider calls
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 45s
+          command_timeout: 35s
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 6cbf58c873bc863d879c530331258eeeeff1a3c7
-            cd /opt/seiltanzer
-            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import hashlib,importlib.util,json,sqlite3,sys,tempfile,threading,time,urllib.request
-            from pathlib import Path
-            url='https://raw.githubusercontent.com/Seiltanzer03/trading_dbd/25f631561a5173f5fc7dd98405c91042af91724b/seiltanzer/journal.py'
-            with urllib.request.urlopen(url,timeout=10) as response:source=response.read(150000)
-            assert hashlib.sha256(source).hexdigest()=='7089a324c39a4b13c5e7e59b9cb03567a947b34210bca172f80777013375f286'
-            with tempfile.TemporaryDirectory(prefix='seiltanzer-q-read-probe-',dir='/tmp') as directory:
-                path=Path(directory)/'candidate.py';path.write_bytes(source)
-                spec=importlib.util.spec_from_file_location('seiltanzer._q_read_candidate',path)
-                module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
-                connection=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=2)
-                try:
-                    connection.row_factory=sqlite3.Row
-                    connection.execute('PRAGMA query_only=ON')
-                    # Bypass constructor: no schema migration, initialization or writes.
-                    journal=module.Journal.__new__(module.Journal)
-                    journal._conn=connection;journal._lock=threading.RLock()
-                    started=time.monotonic();deadline=started+15
-                    connection.set_progress_handler(lambda:int(time.monotonic()>deadline),1000)
-                    report=journal.q_calibration_report()
-                    elapsed=time.monotonic()-started
-                    assert connection.total_changes==0
-                    assert connection.execute('PRAGMA query_only').fetchone()[0]==1
-                    print(json.dumps({'kind':'q_horizon_readonly_benchmark','candidate_sha':'25f631561a5173f5fc7dd98405c91042af91724b','elapsed_ms':round(elapsed*1000,1),'eligible_forecasts':report.get('eligible_forecasts'),'resolved_n':report.get('n'),'censored_n':report.get('censored_n'),'database_writes':connection.total_changes,'read_only':True,'app_installs':0,'restarts':0,'provider_calls':0,'acks':0},sort_keys=True))
-                finally:connection.close()
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = cef5170312242e339460da1400441bfecf5f1e5a
+            /usr/bin/python3 -u - <<'PY'
+            import json,os,subprocess,time,urllib.request
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts','-p','MemoryCurrent'],text=True,timeout=5)
+            print(json.dumps({'kind':'service','properties':props.splitlines()}))
+            st=os.statvfs('/');print(json.dumps({'kind':'capacity','free_bytes':st.f_bavail*st.f_frsize}))
+            started=time.monotonic()
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=15) as response:
+                    body=json.loads(response.read(100000))
+                    print(json.dumps({'kind':'snapshot_status','http':response.code,'elapsed_ms':round((time.monotonic()-started)*1000,1),'fields':{k:body.get(k) for k in ['ready','building','invalidated_reason','build_ms','build_started_at','build_n','age_sec','last_error','snapshot_budget']},'has_trade':body.get('current_trade_id') is not None},sort_keys=True))
+            except (TimeoutError,ConnectionError,OSError,ValueError) as exc:
+                print(json.dumps({'kind':'snapshot_status','error':type(exc).__name__,'elapsed_ms':round((time.monotonic()-started)*1000,1)}))
+            print(json.dumps({'kind':'safety','provider_calls':0,'review_posts':0,'db_queries':0,'acks':0,'restarts':0,'app_writes':0}))
             PY
       - name: Verify public HTTP without AI request
         run: |
