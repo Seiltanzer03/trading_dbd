@@ -1,0 +1,39 @@
+name: history-image-readonly-rate-probe-20261021
+on:
+  push:
+    branches: [ops/history-cutover-status-20261019]
+    paths: [.github/workflows/history-image-readonly-rate-probe-20261021.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install 'boto3>=1.36,<2'
+      - name: Read bounded existing object sample; no VPS access or cloud writes
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          python -u - <<'PY'
+          import boto3,time,zlib,gzip,io,json
+          from botocore.config import Config
+          c=boto3.client('s3',endpoint_url='https://storage.yandexcloud.net',region_name='ru-central1',config=Config(signature_version='s3v4',connect_timeout=10,read_timeout=30,retries={'total_max_attempts':1}))
+          key='research/sqlite-cutover/v1/39558165859/original/50648095954c0740ebb5e75810f1ebdc62207ae469c8c427abc99870bf93ced5/df308282df461473615a62b97cda09e6dfb883a097f00edb3dc08e7483f7b731.sqlite3.gz'
+          start=time.monotonic()
+          r=c.get_object(Bucket='trading-dbd-backups-2026',Key=key,Range='bytes=0-67108863')
+          try:packed=r['Body'].read(64*1024**2)
+          finally:r['Body'].close()
+          print(json.dumps(dict(stage='sample_get',bytes=len(packed),seconds=round(time.monotonic()-start,3))),flush=True)
+          raw=gzip.GzipFile(fileobj=io.BytesIO(packed)).read(128*1024**2)
+          for level in (6,1):
+              start=time.monotonic();out=zlib.compress(raw,level=level,wbits=31)
+              print(json.dumps(dict(stage='sample_pack',level=level,raw_bytes=len(raw),compressed_bytes=len(out),seconds=round(time.monotonic()-start,3),lossless=zlib.decompress(out,wbits=31)==raw)),flush=True)
+          print(json.dumps(dict(vps_access=False,cloud_writes=False)))
+          PY
