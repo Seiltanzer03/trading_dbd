@@ -12,7 +12,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-22.04
-    timeout-minutes: 6
+    timeout-minutes: 15
     steps:
       - name: One normal AI review, never ACK or broker execution
         uses: appleboy/ssh-action@v1
@@ -20,10 +20,10 @@ jobs:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 4m
+          command_timeout: 12m
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = bd615fbd5481a61625c31e62d19f91fd2277dcfd
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 2578c3f81dc7c0391f9d4edaf5b45a9cce6abbe6
             test ! -e /opt/seiltanzer/data/cutover.active
             test ! -L /opt/seiltanzer/data/cutover.active
             /usr/bin/python3 -u - <<'PY'
@@ -41,6 +41,24 @@ jobs:
                     raw=response.read(2*1024**2+1)
                     if len(raw)>2*1024**2:raise ValueError('RESPONSE_BOUND')
                     return response.code,json.loads(raw)
+            expected='2578c3f81dc7c0391f9d4edaf5b45a9cce6abbe6'
+            publication_end=time.monotonic()+480
+            research=Path('/opt/seiltanzer/data/research')
+            while True:
+                pins={}
+                for name,limit in [('mathematical_edge_latest.json',500000),('edge_family_sources_latest.json',1000000)]:
+                    try:
+                        path=research/name
+                        if not 0<path.stat().st_size<=limit:raise ValueError('bounded_publication')
+                        data=json.loads(path.read_bytes())
+                        pins[name]=data.get('published_for_sha')==expected
+                    except (OSError,ValueError):pins[name]=False
+                if all(pins.values()):break
+                if time.monotonic()>=publication_end:
+                    print(json.dumps({'publication_ready':pins,'review_posts':0,'acks_sent':0,'broker_orders_sent':0}))
+                    raise SystemExit('EXACT_SHA_PUBLICATIONS_NOT_READY_NO_PROVIDER_CALL')
+                time.sleep(10)
+            print(json.dumps({'publication_ready':pins}))
             end=time.monotonic()+180
             while True:
                 code,status=call('/api/ai/snapshot/status')
@@ -59,6 +77,11 @@ jobs:
             selected=next((x for x in audit.get('candidates',[]) if x.get('candidate_id')==audit.get('selected_candidate_id')), {})
             for part in selected.get('component_contributions',[]):
                 print(json.dumps({k:part.get(k) for k in ('component_id','score','effective_weight','contribution')},sort_keys=True))
+            report=body.get('verdict') or ''
+            matches=re.search(r'Audit summary: rows=(\\d+)',report)
+            print(json.dumps({'metric_audit_rows':int(matches.group(1)) if matches else None,
+                'execution_mc_unavailable':'Authoritative execution-MC TAKE vs active STOP: UNAVAILABLE' in report,
+                'snapshot_budget':body.get('snapshot_budget'),'edge_context_byte_exclusion':'EXCLUDED_BY_SNAPSHOT_BYTE_BUDGET' in report},sort_keys=True))
             model=body.get('model')
             print(json.dumps({'http':code,'ok':body.get('ok'),'mode':body.get('mode'),'degraded':body.get('degraded'),
                 'request_id':body.get('request_id') or (body.get('error') or {}).get('request_id'),
