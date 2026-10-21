@@ -569,8 +569,9 @@ def request_explanation_with_shadow(
             "provider_response_json": content,
             "provider_response_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         }
-        shadow["working_action"] = build_working_action(authority, shadow)
-        finalize_extended_shadow(authority, shadow)
+        with phase('provider_extended_validation'):
+            shadow["working_action"] = build_working_action(authority, shadow)
+            finalize_extended_shadow(authority, shadow)
         from .llm_decision_shadow import audit_report_claims
         audit_report_claims(authority, shadow)
         record_shadow_decision(shadow)

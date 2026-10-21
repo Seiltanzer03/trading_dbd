@@ -1200,11 +1200,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_ai_verdict(request: Request = None):
         from .ai_request_trace import AIRequestTrace
         from .ai_review_worker import review_executor, AIReviewWorkerBusy
+        from .extended_policy_evaluation import review_evaluation_scope
         inherited = getattr(request.state, 'ai_request_trace', None) if request is not None else None
         trace = inherited or AIRequestTrace()
         trace.executor = review_executor()
         try:
-            with trace.activate(), trace.span('route'):
+            with trace.activate(), trace.span('route'), review_evaluation_scope():
                 response = await _ai_verdict_impl(trace, engine)
         except AIReviewWorkerBusy:
             response = JSONResponse(status_code=429, content=ai_error_body(

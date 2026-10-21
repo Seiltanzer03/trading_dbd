@@ -7,7 +7,10 @@ proposed stop/take change. It never creates a broker order.
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import contextmanager
+from contextvars import ContextVar
 import math
+import threading
 from typing import Any
 
 import numpy as np
@@ -18,6 +21,61 @@ from .ai_policy_base import PolicyInputs, simulate_option_paths
 STOP_POLICIES = {"MOVE_TO_BE", "TRAIL_GAMMA_FLIP", "TIGHTEN_STOP"}
 TAKE_POLICIES = {"EXTEND_TAKE", "REDUCE_TAKE"}
 CONDITIONAL_POLICIES = {"SCALE_OUT_ON_SPIKE", "TIME_STOP"}
+
+_REVIEW_OUTCOMES = ContextVar('extended_review_outcomes', default=None)
+_MAX_REVIEW_OUTCOMES = 32
+
+
+@contextmanager
+def review_evaluation_scope():
+    """Share immutable numeric draws only within one admitted HTTP review.
+
+    Both worker pools copy this context. No snapshot, source admission, costs,
+    risk result or preference is cached; every evaluation still runs its gates.
+    A late timed-out worker retains only its old scope, never the next review's.
+    """
+    token = _REVIEW_OUTCOMES.set(({}, threading.Lock()))
+    try:
+        yield
+    finally:
+        _REVIEW_OUTCOMES.reset(token)
+
+
+def _review_outcomes(key, compute):
+    scope = _REVIEW_OUTCOMES.get()
+    if scope is None:
+        return compute()
+    memo, lock = scope
+    with lock:
+        if key in memo:
+            return memo[key]
+    values = compute()
+    # Store only bounded terminal vectors, never full Monte Carlo paths. Missing
+    # or nonfinite outcomes keep their existing refusal path and are not reused.
+    if all(isinstance(v, np.ndarray) and v.ndim == 1 and 0 < v.size <= 1200
+           and np.isfinite(v).all() for v in values):
+        frozen = tuple(np.array(v, dtype=float, copy=True) for v in values)
+        for value in frozen:
+            value.setflags(write=False)
+        with lock:
+            if len(memo) < _MAX_REVIEW_OUTCOMES:
+                memo[key] = frozen
+        return frozen
+    return values
+
+
+def _strategy_outcome(inputs, seed, hold_cache=None):
+    def compute():
+        key = (inputs, seed)
+        result = hold_cache.get(key) if hold_cache is not None else None
+        if result is None:
+            result = simulate_option_paths(inputs, n_paths=1200, n_steps=160,
+                                           seed=seed, paired_stable_stream=True)
+            if hold_cache is not None:
+                hold_cache[key] = result
+        outcome = result.strategy_outcome
+        return (np.asarray(outcome, dtype=float) if outcome is not None else None,)
+    return _review_outcomes(('barrier', inputs, seed), compute)[0]
 
 
 def _conditional_outcomes(inputs, params, policy, captured, seed):
@@ -180,7 +238,11 @@ def evaluate_extended_action(snapshot: dict, action: dict, *, _hold_cache=None) 
     seed_lower_bounds: list[float] = []
     for seed in (0xA17E, 0xB17E):
         if policy in CONDITIONAL_POLICIES:
-            base_out, variant_out = _conditional_outcomes(inputs, params, policy, captured, seed)
+            execution = ((params['deadline_ts'],) if policy == 'TIME_STOP' else
+                         (params['target_r'], params['close_fraction']))
+            base_out, variant_out = _review_outcomes(
+                ('conditional', inputs, policy, captured, execution, seed),
+                lambda: _conditional_outcomes(inputs, params, policy, captured, seed))
             base_means.append(float(np.mean(base_out)))
             base_cvars.append(_cvar(base_out))
             seed_delta = variant_out - base_out
@@ -194,19 +256,10 @@ def evaluate_extended_action(snapshot: dict, action: dict, *, _hold_cache=None) 
         # HOLD drivers. The caller owns this short-lived cache; it is never
         # persisted or reused across requests. Every admission gate above
         # still runs before consulting it. All model inputs and seed form the key.
-        key = (inputs, seed)
-        base = _hold_cache.get(key) if _hold_cache is not None else None
-        if base is None:
-            base = simulate_option_paths(inputs, n_paths=1200, n_steps=160, seed=seed,
-                                         paired_stable_stream=True)
-            if _hold_cache is not None:
-                _hold_cache[key] = base
-        variant = simulate_option_paths(alternate, n_paths=1200, n_steps=160, seed=seed,
-                                        paired_stable_stream=True)
-        if base.strategy_outcome is None or variant.strategy_outcome is None:
+        base_out = _strategy_outcome(inputs, seed, _hold_cache)
+        variant_out = _strategy_outcome(alternate, seed)
+        if base_out is None or variant_out is None:
             return _blocked("EXECUTION_OUTCOMES_UNAVAILABLE")
-        base_out = np.asarray(base.strategy_outcome, dtype=float)
-        variant_out = np.asarray(variant.strategy_outcome, dtype=float)
         if not np.isfinite(base_out).all() or not np.isfinite(variant_out).all():
             return _blocked("NONFINITE_EXECUTION_OUTCOMES")
         base_means.append(float(np.mean(base_out)))
