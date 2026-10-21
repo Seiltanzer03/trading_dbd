@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only handoff observation 2026-10-21T12:36Z
+# Read-only handoff observation 2026-10-21T12:38Z
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -94,6 +94,14 @@ jobs:
                         part_started=time.monotonic();actual=ns['identity_proof'](IndexedConnection(),table,proof['max_rowid'])
                         out(kind='history_validation_phase',phase=table,elapsed_sec=round(time.monotonic()-part_started,3),matched=actual==proof,row_count=actual['row_count'],covering_index=True)
                 codec=ns['_runtime_projection']()
+                queries=[
+                    ('source_overlap','SELECT 1 FROM archived_passive_rejections a JOIN passive_market_observations p ON p.rowid=a.source_rowid OR p.observation_id=a.observation_id LIMIT 1',()),
+                    ('rejected_membership','SELECT 1 FROM archived_passive_rejections a LEFT JOIN g1_dataset_membership g ON g.observation_id=a.observation_id AND g.dataset_contract_version=? WHERE g.observation_id IS NULL OR g.source_record_sha256 IS NOT a.source_record_sha256 OR g.forecast_eval_eligible IS NOT 0 OR g.q_to_p_eligible IS NOT 0 LIMIT 1',(state['runtime_projection']['rejected_index']['dataset_contract_version'],)),
+                    ('admitted_membership','SELECT 1 FROM archived_passive_rejections a JOIN g1_dataset_membership g USING(observation_id) WHERE g.forecast_eval_eligible IS NOT 0 OR g.q_to_p_eligible IS NOT 0 LIMIT 1',())]
+                for phase,query,params in queries:
+                    out(kind='runtime_query_plan',phase=phase,plan=conn.execute('EXPLAIN QUERY PLAN '+query,params).fetchall())
+                    part_started=time.monotonic();found=conn.execute(query,params).fetchone()
+                    out(kind='runtime_query_timing',phase=phase,elapsed_sec=round(time.monotonic()-part_started,3),conflict_present=found is not None)
                 part_started=time.monotonic()
                 codec.validate_runtime_projection(conn,state['runtime_projection'],retired_rowids=state['retired_rowids']['passive_market_observations'])
                 out(kind='history_validation_phase',phase='runtime_projection',elapsed_sec=round(time.monotonic()-part_started,3),matched=True)
