@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only installed-cef snapshot telemetry; no candidate code or profiler.
+# Read-only exact-cef post-publication readiness; no provider or model calls.
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
