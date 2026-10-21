@@ -26,6 +26,43 @@ def _proof(source, proof, pin):
                 storage_manifest_sha256=manifest_digest(manifest))
 
 
+@pytest.mark.parametrize('verification_seconds', [1., 901.])
+def test_final_integrity_has_own_bounded_budget_after_completed_build(tmp_path, monkeypatch, verification_seconds):
+    source, proof, raw, pin, client = _build_cutover_fixture(
+        tmp_path, include_post_catalog=True, include_mutable_outcome=True,
+        include_runtime_metadata=True)
+    proof = _proof(source, proof, pin)
+    now = [0.]
+    monkeypatch.setattr(cutover.time, 'monotonic', lambda: now[0])
+    connect = sqlite3.connect
+
+    class TimedConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if sql == 'PRAGMA quick_check':
+                # Real SQL progress callbacks observe time spent in integrity,
+                # after the immutable copy was built inside its 30min budget.
+                now[0] = cutover.MAX_SECONDS - .5 + verification_seconds
+            elif sql == 'PRAGMA freelist_count':
+                now[0] = cutover.MAX_SECONDS - .5
+            return super().execute(sql, *args, **kwargs)
+
+    monkeypatch.setattr(cutover.sqlite3, 'connect', lambda *a, **k:
+                        connect(*a, **{**k, 'factory': TimedConnection}))
+    hot = tmp_path/'bounded-integrity.sqlite3'
+    def build():
+        return cutover.build_current_hot_cutover_snapshot(source, hot,
+            source_receipt=proof, catalog_bytes=raw, expected_catalog_sha256=pin, client=client)
+    if verification_seconds > 900:
+        with pytest.raises((ValueError, sqlite3.OperationalError)):
+            build()
+        assert not hot.exists()
+    else:
+        result = build()
+        assert result['quick_check'] == 'ok' and result['foreign_key_violations'] == 0
+        assert result['retired_row_count'] == 3
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == proof['database_sha256']
+
+
 def test_current_compaction_keeps_updated_outcome_and_only_retires_exact_cold_rows(tmp_path):
     source, proof, raw, pin, client = _build_cutover_fixture(
         tmp_path, include_post_catalog=True, include_mutable_outcome=True, include_runtime_metadata=True)

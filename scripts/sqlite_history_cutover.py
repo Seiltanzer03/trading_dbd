@@ -56,6 +56,10 @@ CONTRACT = 'sqlite-history-cutover-v1'
 TARGET_TABLE = 'passive_market_observations'
 RETIRED_STATUS = 'insufficient_future_data'
 MAX_SECONDS = 1800
+# Final whole-image integrity/readback is a separate off-host phase. It must
+# not inherit the nearly exhausted copy budget (19GB production images).
+# The native owner's preparation/recovery deadlines remain unchanged.
+FINAL_VERIFY_SECONDS = 900
 
 DEPENDENCY_EXCLUSION_SPECS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ('g1_q_capture_attempts', ('created_observation_id',), ' IS NOT NULL'),
@@ -661,6 +665,8 @@ def _build_hot_cutover_snapshot(
         freelist_count = work_conn.execute('PRAGMA freelist_count').fetchone()[0]
         if freelist_count != 0:
             raise ValueError(f'Compacted SQLite database has non-zero freelist_count={freelist_count}')
+        check()  # An over-budget build cannot earn a fresh verification budget.
+        deadline = min(deadline + FINAL_VERIFY_SECONDS, time.monotonic() + FINAL_VERIFY_SECONDS)
         if work_conn.execute('PRAGMA quick_check').fetchone() != ('ok',):
             raise ValueError('Compacted SQLite quick_check failed')
         fk_violations = work_conn.execute('PRAGMA foreign_key_check').fetchall()
@@ -676,7 +682,16 @@ def _build_hot_cutover_snapshot(
         size = work_path.stat().st_size
         if size >= before['size'] and retired_count > 0:
             raise ValueError('Compacted SQLite file did not shrink despite retiring rows')
-        digest = archive._digest(work_path)
+        digest_builder = hashlib.sha256()
+        with work_path.open('rb') as stream:
+            while True:
+                check()
+                chunk = stream.read(4 * 1024**2)
+                if not chunk:
+                    break
+                digest_builder.update(chunk)
+        digest = digest_builder.hexdigest()
+        check()
         archive._publish(work_path, destination)
         dest_identity = archive._identity(destination)
 
