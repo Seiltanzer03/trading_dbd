@@ -41,7 +41,8 @@ def fixture(tmp_path, monkeypatch, code='BTCUSD'):
            for i in range(13) for k in range(5)]
     authority = {'provider': 'Binance', 'source_symbol': CRYPTO_INSTRUMENTS[code].binance_symbol,
                  'target_instrument': code, 'source_verified': True, 'derived': False,
-                 'observed_ts': end, 'available_at': now-1}
+                 # The completed bar is received by T0, never before its end.
+                 'observed_ts': end, 'available_at': now}
     engine = SimpleNamespace(settings=SimpleNamespace(data_dir=tmp_path),
                              market=SimpleNamespace(instrument_code=code, intraday_ohlcv=raw,
                                                     intraday_source_authority=authority))
@@ -93,10 +94,23 @@ def test_exact_configured_usdt_series_can_pass_only_bound_provenance(tmp_path, m
     destination.write_text(json.dumps(report))
     monkeypatch.setattr(edge, 'runtime_gex_diagnostics', lambda *a: {'available': False})
     profile = edge.runtime_profile(engine, tick, trade)
-    assert profile['available'] and profile['weight_fraction'] > 0
+    assert profile['available'] and profile['weight_fraction'] > 0, profile
     assert profile['path_predictions']
     assert profile['training_price_source_admission']['reason'] == 'EXACT_CONFIGURED_BINANCE_USDT_TRAINING_SERIES'
     assert 'Binance USDT' in profile['runtime_price_feature_source']
+
+
+@pytest.mark.parametrize('code', CRYPTO_INSTRUMENTS)
+@pytest.mark.parametrize('offset', [0., .25, 1.25])
+def test_exact_source_fixture_stays_causal_at_completed_bar_boundary(tmp_path, monkeypatch, code, offset):
+    monkeypatch.setattr(time, 'time', lambda: 1792598400. + offset)
+    engine, tick, trade, report, destination = fixture(tmp_path, monkeypatch, code)
+    authority = engine.market.intraday_source_authority
+    assert authority['observed_ts'] <= authority['available_at'] <= tick['ts']
+    destination.write_text(json.dumps(report))
+    monkeypatch.setattr(edge, 'runtime_gex_diagnostics', lambda *a: {'available': False})
+    profile = edge.runtime_profile(engine, tick, trade)
+    assert profile['available'] and profile['weight_fraction'] > 0, profile
 
 
 def test_report_crypto_source_supported_search_is_diagnostic_without_transfer_validation(monkeypatch):
