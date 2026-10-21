@@ -17,7 +17,8 @@ _STAGES = frozenset(('runtime_guard', 'preflight', 'route', 'cached_snapshot', '
     'regime_management', 'review_identity', 'provider', 'ensemble', 'publication',
     'response', 'snapshot_error', 'provider_fallback', 'internal_error',
     'stale_decision', 'journal_error', 'provider_render', 'provider_prepare',
-    'provider_http', 'provider_decode', 'provider_validate', 'provider_transport'))
+    'provider_http', 'provider_decode', 'provider_validate', 'provider_transport',
+    'provider_extended_validation'))
 _PROVIDER_COUNTS = frozenset(('input_bytes', 'request_bytes', 'response_bytes',
     'output_bytes', 'max_output_tokens', 'prompt_tokens', 'completion_tokens', 'total_tokens'))
 _FINISH_REASONS = frozenset(('stop', 'length', 'content_filter', 'tool_calls',
