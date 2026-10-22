@@ -35,9 +35,8 @@ jobs:
                     row=json.loads(path.read_bytes())
                     out(kind='epoch',file=name,fields={key:row.get(key) for key in ('run_id','phase','service_started','abort_reason')})
                 except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
-            roots=['/opt/seiltanzer/data','/opt/seiltanzer/.git','/opt/seiltanzer/.venv','/tmp','/var/log/journal','/var/cache/apt','/root/.cache']
-            sizes=subprocess.run(['du','-xsk',*roots],text=True,capture_output=True,timeout=15)
-            out(kind='directory_sizes_kib',returncode=sizes.returncode,rows=sizes.stdout.splitlines())
+            sizes=subprocess.run(['du','-xhd1','/opt','/var','/root'],text=True,capture_output=True,timeout=20)
+            out(kind='top_directory_sizes',returncode=sizes.returncode,rows=sizes.stdout.splitlines()[:60])
             directories=[Path('/opt/seiltanzer/data'),Path('/opt/seiltanzer/data/backups/local'),Path('/tmp')]
             for directory in directories:
                 files=[]
