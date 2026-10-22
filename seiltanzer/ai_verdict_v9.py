@@ -60,8 +60,9 @@ def _previous_text(decision: dict) -> str:
         return "Предыдущего решения ИИ по этой сделке нет."
     return (
         f"Предыдущее решение: {previous.get('policy') or '—'}; "
-        f"статус {previous.get('execution_status') or '—'}; "
-        f"decision_id={previous.get('decision_id') or '—'}."
+        f"сохранённый статус {previous.get('execution_status') or '—'}; "
+        f"decision_id={previous.get('decision_id') or '—'}. "
+        "Статус зафиксирован до публикации этого разбора; действующее решение указано выше."
     )
 
 
