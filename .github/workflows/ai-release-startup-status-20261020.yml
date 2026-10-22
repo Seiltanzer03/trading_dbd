@@ -5,50 +5,22 @@ on:
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
-concurrency:
-  group: production-seiltanzer
-  queue: max
-  cancel-in-progress: false
 jobs:
   inspect:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Recover only reproducible package indexes if background reserve is short
+      - name: Read exact post-restart unit condition without another guard invocation
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 40s
+          command_timeout: 30s
           script: |
             set -euo pipefail
-            /usr/bin/python3 -u - <<'PY'
-            import fcntl,json,os,shutil,stat,subprocess
-            from pathlib import Path
-            threshold=1024**3+32*1024**2
-            free=shutil.disk_usage('/').free
-            print(json.dumps({'kind':'background_headroom','free_before':free,'minimum':threshold}),flush=True)
-            if free<threshold:
-                root=Path('/var/lib/apt/lists')
-                assert root.resolve()==root and root.is_dir() and not root.is_symlink()
-                # APT uses POSIX record locking for its list directory.
-                lock=root/'lock'
-                assert lock.is_file() and not lock.is_symlink()
-                with lock.open('r+') as handle:
-                    fcntl.lockf(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                    candidates=[]
-                    for path in root.iterdir():
-                        info=path.lstat()
-                        if stat.S_ISREG(info.st_mode) and info.st_nlink==1 and path.name.endswith(('_Packages','_Packages.lz4','_Packages.gz','_Packages.xz')):
-                            candidates.append((info.st_blocks*512,path,info))
-                    removed=0
-                    for size,path,original in sorted(candidates,reverse=True):
-                        if shutil.disk_usage('/').free>=threshold+64*1024**2:break
-                        assert path.lstat()==original and path.parent==root
-                        path.unlink();removed+=size
-                    print(json.dumps({'kind':'reproducible_index_cache','removed_bytes':removed,'free_after':shutil.disk_usage('/').free}),flush=True)
-            print(json.dumps({'kind':'service','properties':subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','NRestarts'],text=True,timeout=5).splitlines()}))
-            print(json.dumps({'kind':'safety','application_restarts':0,'db_writes':0,'provider_calls':0,'acks':0,'log_deletions':0}))
-            assert shutil.disk_usage('/').free>=threshold,'BACKGROUND_RESERVE_STILL_SHORT'
-            PY
+            git -C /opt/seiltanzer rev-parse HEAD
+            systemctl show seiltanzer -p MainPID -p ControlPID -p ActiveState -p SubState -p NRestarts -p Result -p ExecCondition -p ConditionResult -p ExecMainStatus -p ExecMainStartTimestamp -p MemoryCurrent
+            journalctl -u seiltanzer --since '-16 minutes' -n 200 -o cat --no-pager | /usr/bin/python3 -c 'import sys; print("\n".join(line.strip() for line in sys.stdin if line.startswith("STARTUP_PHASE phase=") or line.startswith("  File \"/opt/seiltanzer/") or "start_allowed" in line or "Skipped due to" in line or "Failed with result" in line or "Control process exited" in line))'
+            df --output=avail -B1 /
+            echo 'READ_ONLY_METADATA_NO_DB_OR_RESTART'
