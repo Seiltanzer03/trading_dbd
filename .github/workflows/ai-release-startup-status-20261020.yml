@@ -1,65 +1,115 @@
-name: bounded-current-review-comparison-20261022
+name: ai-release-startup-status-20261020
+# Observe the actual status GET timeout after exact-ffdc source publication.
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
-concurrency:
-  group: production-seiltanzer
-  queue: max
-  cancel-in-progress: false
+  actions: write
 jobs:
-  compare:
+  inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
-    env:
-      EXPECTED_SHA: ffdc513b5acb8746b54cdf852b55218ca21be336
-      OPENBLAS_NUM_THREADS: '1'
-      OMP_NUM_THREADS: '1'
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.EXPECTED_SHA }}
+      - name: Cancel only the queued prior caption-only CI while finishing the observed blocker
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json,os,urllib.request,urllib.error
+          url='https://api.github.com/repos/'+os.environ['GITHUB_REPOSITORY']+'/actions/runs/39840800923'
+          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'}
+          with urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=10) as response:row=json.load(response)
+          assert row['head_sha']=='67309f096ff57652550476659a1340a9571c52ac'
+          cancel=row['status'] in {'queued','requested','waiting','pending','in_progress'}
+          if cancel:
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url+'/cancel',headers=headers,method='POST'),timeout=10) as response:assert response.status==202
+              except urllib.error.HTTPError as exc:
+                  if exc.code!=409:raise
+          print(json.dumps({'caption_ci_cancel_requested':cancel,'run_id':39840800923}))
+          PY
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: pip
-      - run: pip install -q -e '.[research]' paramiko
-      - name: Export at most 32 real frozen reviews and their new actual paths read-only
-        env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-        run: >-
-          python -m scripts.export_unified_edge_reviews --max-reviews 32
-          --expected-sha "$EXPECTED_SHA" --output unified_actual_reviews.json
-      - name: Replay existing frozen schemes off-host without fitting or paid calls
-        run: >-
-          python -m scripts.run_unified_edge_comparison --reviews unified_actual_reviews.json
-          --expected-sha "$EXPECTED_SHA" --output unified_edge_comparison.json
-      - name: Publish aggregate evidence only, keeping raw reviews off public logs
+          python-version: '3.12'
+      - name: Prepare official pinned profiler off-host
+        id: package
         run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          from scripts.run_unified_edge_comparison import summarize
-          report=json.loads(Path('unified_edge_comparison.json').read_text())
-          assert report['paid_llm_calls']==0 and report['production_or_database_writes']==0
-          summary={key:report.get(key) for key in ('version','created_ts','expected_sha','source_exported_ts','historical_profit_proven','available','review_n','instrument_coverage','reason','actual_execution_observations')}
-          summary['rejected_n']=len(report.get('rejected') or [])
-          summary['schemes']={name:report['summary'].get(name) for name in ('balanced','llm20','quant100','legacy_control')}
-          partial={}
-          for policy in ('CLOSE_10','CLOSE_25','CLOSE_50'):
-              rows=[row for row in report.get('reviews',[]) if (((row.get('schemes') or {}).get('balanced') or {}).get('selection') or {}).get('selected_policy')==policy]
-              partial[policy]={'review_n':len(rows),'distinct_trade_n':len({row['trade_id'] for row in rows}),
-                  'frozen_balanced_selection_only':True,'summary':summarize(rows).get('balanced')}
-          summary['partial_close_descriptive_subsets']=partial
-          summary['evidence_scope']='RECORDED_PATH_COUNTERFACTUAL_WITH_FROZEN_COST_ESTIMATES_NOT_BROKER_PROFIT_OR_CAUSAL_EFFECT'
-          Path('comparison_aggregate.json').write_text(json.dumps(summary,sort_keys=True,allow_nan=False))
-          print('BOUNDED_COMPARISON_AGGREGATE '+json.dumps(summary,sort_keys=True,allow_nan=False))
-          PY
-      - uses: actions/upload-artifact@v4
+          set -euo pipefail
+          python -m pip install --quiet --no-cache-dir --no-deps --only-binary=:all: --target "$RUNNER_TEMP/stack-probe" py-spy==0.4.2
+          cp "$RUNNER_TEMP/stack-probe/bin/py-spy" "seiltanzer-pyspy-${{ github.run_id }}"
+          sha=$(sha256sum "seiltanzer-pyspy-${{ github.run_id }}" | awk '{print $1}')
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Transfer bounded temporary diagnostic over existing deploy channel
+        uses: appleboy/scp-action@v1
         with:
-          name: comparison-aggregate-${{ env.EXPECTED_SHA }}
-          path: comparison_aggregate.json
-          if-no-files-found: error
-          retention-days: 14
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          source: seiltanzer-pyspy-${{ github.run_id }}
+          target: /tmp
+      - name: Nonblocking stacks and resource metadata; no locals or provider calls
+        uses: appleboy/ssh-action@v1
+        env:
+          PROBE_RUN_ID: ${{ github.run_id }}
+          PROBE_SHA: ${{ steps.package.outputs.sha }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          envs: PROBE_RUN_ID,PROBE_SHA
+          command_timeout: 90s
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = ffdc513b5acb8746b54cdf852b55218ca21be336
+            /usr/bin/python3 -u - <<'PY'
+            import hashlib,json,os,stat,subprocess,tempfile,threading,time,urllib.request
+            from pathlib import Path
+            run_id=os.environ['PROBE_RUN_ID'];assert run_id.isdigit()
+            upload=Path('/tmp')/('seiltanzer-pyspy-'+run_id)
+            fd=os.open(upload,os.O_RDONLY|os.O_NOFOLLOW)
+            try:
+                info=os.fstat(fd);assert stat.S_ISREG(info.st_mode) and 0<info.st_size<15_000_000
+                with os.fdopen(fd,'rb',closefd=False) as handle:raw=handle.read(15_000_001)
+            finally:os.close(fd)
+            assert hashlib.sha256(raw).hexdigest()==os.environ['PROBE_SHA']
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5));assert pid==3479146
+            try:
+                observed={}
+                def status_read():
+                    started=time.monotonic()
+                    try:
+                        with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=5) as response:
+                            body=json.loads(response.read(100000))
+                            observed.update(http=response.code,ready=body.get('ready'),building=body.get('building'))
+                    except (OSError,ValueError) as exc:observed.update(error=type(exc).__name__)
+                    finally:observed['elapsed_ms']=round((time.monotonic()-started)*1000,1)
+                observer=threading.Thread(target=status_read,daemon=True);observer.start()
+                time.sleep(.25)
+                with tempfile.TemporaryDirectory(prefix='seiltanzer-private-stack-',dir='/tmp') as directory:
+                    tool=Path(directory)/'py-spy';tool.write_bytes(raw);tool.chmod(0o700)
+                    for sample in range(3):
+                        result=subprocess.run([str(tool),'dump','--pid',str(pid),'--nonblocking'],text=True,capture_output=True,timeout=8)
+                        print(json.dumps({'kind':'stack_sample','sample':sample,'returncode':result.returncode,'nonblocking':True,'locals':False}))
+                        if result.returncode:raise SystemExit('STACK_OBSERVATION_UNAVAILABLE_NO_PERMISSION_CHANGE')
+                        for line in result.stdout.splitlines()[:230]:
+                            if any(mark in line.lower() for mark in ['authorization','password','secret','api_key','token=']):continue
+                            print(json.dumps({'kind':'stack','sample':sample,'line':line[:600]}))
+                        if sample<2:time.sleep(2)
+                for args in [
+                    ['ps','-eo','pid,ppid,pcpu,pmem,rss,stat,etime,comm','--sort=-pcpu'],
+                    ['free','-m'],
+                ]:
+                    result=subprocess.run(args,text=True,capture_output=True,timeout=5)
+                    print(json.dumps({'kind':'resource','command':args[0],'lines':result.stdout.splitlines()[:14]}))
+                for name in ['cpu','io','memory']:
+                    try:print(json.dumps({'kind':'pressure','resource':name,'lines':(Path('/proc/pressure')/name).read_text().splitlines()}))
+                    except OSError:pass
+                observer.join(timeout=6)
+                print(json.dumps({'kind':'same_budget_status_read','pending':observer.is_alive(),**observed}))
+            finally:
+                assert upload.parent==Path('/tmp') and upload.name=='seiltanzer-pyspy-'+run_id and not upload.is_symlink()
+                upload.unlink()
+                print(json.dumps({'kind':'safety','temporary_tool_removed':True,'app_writes':0,'database_writes':0,'signals_sent':0,'provider_calls':0,'acks':0,'restarts':0}))
+            PY
