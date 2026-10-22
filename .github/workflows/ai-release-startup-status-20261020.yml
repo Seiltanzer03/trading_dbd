@@ -1,41 +1,54 @@
 name: ai-release-startup-status-20261020
-# One recovery of the failed initial start inside the already-authorized deployment.
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
 jobs:
   inspect:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Retry unchanged condition once after previous process has fully exited
+      - name: Recover only reproducible package indexes if background reserve is short
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 35s
+          command_timeout: 40s
           script: |
             set -euo pipefail
             /usr/bin/python3 -u - <<'PY'
-            import json,os,subprocess
+            import fcntl,json,os,shutil,stat,subprocess
             from pathlib import Path
-            def properties():
-                text=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ControlPID','-p','ActiveState','-p','SubState','-p','Result','-p','NRestarts'],text=True,timeout=5)
-                return dict(line.split('=',1) for line in text.splitlines())
-            assert subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=5).strip()=='ffdc513b5acb8746b54cdf852b55218ca21be336'
-            assert not os.path.lexists('/opt/seiltanzer/data/cutover.active')
-            state=json.loads(Path('/opt/seiltanzer/data/cutover.journal.json').read_bytes())
-            assert state.get('phase')=='COMMITTED' and str(state.get('run_id'))=='39582128571'
-            before=properties()
-            assert before['MainPID']=='0' and before['ControlPID']=='0' and before['ActiveState']=='inactive' and before['SubState']=='dead' and before['Result']=='exec-condition'
-            print(json.dumps({'kind':'before_once_start','properties':before}),flush=True)
-            # Re-evaluates the installed ExecCondition normally, with its existing
-            # 5-second deadline and every byte/identity/membership check unchanged.
-            # Does not restart an active process or bypass any service condition.
-            subprocess.run(['systemctl','start','--no-block','seiltanzer'],check=True,timeout=5)
-            print(json.dumps({'kind':'one_start_submitted','attempts':1,'guard_changed':False,'db_writes':0,'provider_calls':0,'acks':0}),flush=True)
+            threshold=1024**3+32*1024**2
+            free=shutil.disk_usage('/').free
+            print(json.dumps({'kind':'background_headroom','free_before':free,'minimum':threshold}),flush=True)
+            if free<threshold:
+                root=Path('/var/lib/apt/lists')
+                assert root.resolve()==root and root.is_dir() and not root.is_symlink()
+                # APT uses POSIX record locking for its list directory.
+                lock=root/'lock'
+                assert lock.is_file() and not lock.is_symlink()
+                with lock.open('r+') as handle:
+                    fcntl.lockf(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    candidates=[]
+                    for path in root.iterdir():
+                        info=path.lstat()
+                        if stat.S_ISREG(info.st_mode) and info.st_nlink==1 and path.name.endswith(('_Packages','_Packages.lz4','_Packages.gz','_Packages.xz')):
+                            candidates.append((info.st_blocks*512,path,info))
+                    removed=0
+                    for size,path,original in sorted(candidates,reverse=True):
+                        if shutil.disk_usage('/').free>=threshold+64*1024**2:break
+                        assert path.lstat()==original and path.parent==root
+                        path.unlink();removed+=size
+                    print(json.dumps({'kind':'reproducible_index_cache','removed_bytes':removed,'free_after':shutil.disk_usage('/').free}),flush=True)
+            print(json.dumps({'kind':'service','properties':subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','NRestarts'],text=True,timeout=5).splitlines()}))
+            print(json.dumps({'kind':'safety','application_restarts':0,'db_writes':0,'provider_calls':0,'acks':0,'log_deletions':0}))
+            assert shutil.disk_usage('/').free>=threshold,'BACKGROUND_RESERVE_STILL_SHORT'
             PY
