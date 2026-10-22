@@ -41,7 +41,7 @@ jobs:
           command_timeout: 12m
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 11325c9e2698199ed9da45403fb26fde1b8aa2a0
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = ffdc513b5acb8746b54cdf852b55218ca21be336
             test ! -e /opt/seiltanzer/data/cutover.active
             test ! -L /opt/seiltanzer/data/cutover.active
             /usr/bin/python3 -u - <<'PY'
@@ -59,7 +59,7 @@ jobs:
                     raw=response.read(2*1024**2+1)
                     if len(raw)>2*1024**2:raise ValueError('RESPONSE_BOUND')
                     return response.code,json.loads(raw)
-            expected='11325c9e2698199ed9da45403fb26fde1b8aa2a0'
+            expected='ffdc513b5acb8746b54cdf852b55218ca21be336'
             publication_end=time.monotonic()+480
             research=Path('/opt/seiltanzer/data/research')
             while True:
@@ -103,18 +103,48 @@ jobs:
             print(json.dumps({'interventions_total':len(interventions),'interventions_eligible':sum(bool(x.get('eligible')) for x in interventions),'interventions_rankable':sum(bool(x.get('ranking_eligible')) for x in interventions),'admission_reasons':reasons},sort_keys=True))
             for part in selected.get('component_contributions',[]):
                 print(json.dumps({k:part.get(k) for k in ('component_id','score','effective_weight','contribution')},sort_keys=True))
+            print(json.dumps({'kind':'selected_action','policy':audit.get('selected_policy'),
+                'reason':selected.get('ranking_reason') or selected.get('reason'),
+                'delta_expected_r':selected.get('delta_expected_r'),
+                'delta_cvar_r':selected.get('delta_cvar_r'),
+                'without_current_llm':next((row.get('selected_policy') for row in audit.get('counterfactuals',[])
+                    if row.get('excluded_component_id')=='current_llm'),None)},sort_keys=True))
+            for component in audit.get('components',[]):
+                print(json.dumps({'kind':'component',**{k:component.get(k) for k in
+                    ('component_id','available','effective_weight','reason','quality_basis','self_confidence_used_for_weight')}},sort_keys=True))
             report=body.get('verdict') or ''
             matches=re.search(r'Audit summary: rows=(\d+)',report)
             print(json.dumps({'metric_audit_rows':int(matches.group(1)) if matches else None,
                 'execution_mc_unavailable':'Authoritative execution-MC TAKE vs active STOP: UNAVAILABLE' in report,
                 'snapshot_budget':body.get('snapshot_budget'),'edge_context_byte_exclusion':'EXCLUDED_BY_SNAPSHOT_BYTE_BUDGET' in report},sort_keys=True))
             model=body.get('model')
+            detail=(body.get('error') or {}).get('message')
+            safe_details={'fresh provider timestamp unavailable','fresh authoritative live quote/geometry unavailable','live position geometry changed before comparison','live trade/instrument changed before comparison','live risk geometry unavailable','live execution barrier reached before comparison','explicit empirical bank requires a new frozen build'}
             print(json.dumps({'http':code,'ok':body.get('ok'),'mode':body.get('mode'),'degraded':body.get('degraded'),
                 'request_id':body.get('request_id') or (body.get('error') or {}).get('request_id'),
-                'api_error_code':(body.get('error') or {}).get('code'),'provider_error_code':(body.get('provider_error') or {}).get('code'),
+                'api_error_code':(body.get('error') or {}).get('code'),'api_error_detail':detail if detail in safe_details else None,'provider_error_code':(body.get('provider_error') or {}).get('code'),
                 'model':model if isinstance(model,str) and re.fullmatch(r'[A-Za-z0-9_./:-]{1,120}',model) else None,
-                'shadow_status':shadow.get('status'),'current_llm_weight':current.get('effective_weight'),'current_llm_reason':current.get('reason'),
+                'shadow_status':shadow.get('status'),'llm_self_confidence':shadow.get('confidence'),'current_llm_weight':current.get('effective_weight'),'current_llm_reason':current.get('reason'),'llm_weight_quality_basis':current.get('quality_basis'),'llm_standalone_action_status':current.get('standalone_action_status'),
                 'elapsed_ms':round((time.monotonic()-started)*1000,1),'review_posts':1,'acks_sent':0,'broker_orders_sent':0,
                 'automatic_execution_allowed':audit.get('automatic_execution_allowed')},sort_keys=True))
+            if code==400 and (body.get('error') or {}).get('code')=='execution_barrier_reached':
+                import math
+                proof=body.get('execution_barrier') or {}
+                current_r,barrier_r=proof.get('current_r'),proof.get('barrier_r')
+                assert proof.get('price_authority') is True and proof.get('execution_confirmed') is False
+                assert proof.get('kind') in {'take','stop'}
+                assert all(isinstance(value,(int,float)) and not isinstance(value,bool)
+                    and math.isfinite(value) for value in (current_r,barrier_r))
+                assert current_r>=barrier_r if proof['kind']=='take' else current_r<=barrier_r
+                assert (body.get('error') or {}).get('retriable') is False
+                print(json.dumps({'kind':'route_outcome','execution_guard_contract':'PASS',
+                    'barrier_kind':proof['kind'],'normal_review_delivered':False,
+                    'current_llm_observed':False,'provider_calls':0,
+                    'execution_confirmed':False,'acks_sent':0,'broker_orders_sent':0},sort_keys=True))
+                raise SystemExit(0)
+            if code!=200 or not isinstance(body.get('verdict'),str):
+                raise SystemExit('NORMAL_AI_REVIEW_NOT_DELIVERED')
+            if shadow.get('status')!='ok' or body.get('degraded') is True:
+                raise SystemExit('CURRENT_LLM_NOT_AVAILABLE_IN_ACTUAL_REVIEW')
             PY
 
