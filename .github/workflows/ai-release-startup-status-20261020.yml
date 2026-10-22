@@ -10,49 +10,17 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Measure the unchanged original five second startup check
+      - name: Read exact post-restart unit condition without another guard invocation
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 35s
+          command_timeout: 30s
           script: |
             set -euo pipefail
-            /usr/bin/python3 -u - <<'PY'
-            import json,os,sqlite3,time
-            from pathlib import Path
-            started=time.monotonic();events=[];deadline_event=[]
-            def classify(sql):
-                for name in ('archived_passive_rejections','g1_dataset_membership','g1s_observations','passive_market_observations','archived_passive_rollups','hot_history_storage_state'):
-                    if name in sql:return name+('_join' if 'JOIN' in sql else '_read')
-                return 'schema_or_pragma'
-            class TracedConnection(sqlite3.Connection):
-                def __init__(self,*args,**kwargs):
-                    super().__init__(*args,**kwargs)
-                    self.set_trace_callback(lambda sql:events.append((time.monotonic(),classify(sql))))
-                def set_progress_handler(self,callback,n):
-                    def bounded():
-                        result=callback()
-                        if result and not deadline_event:deadline_event.append((time.monotonic(),events[-1][1] if events else 'unknown'))
-                        return result
-                    return super().set_progress_handler(bounded,n)
-            original=sqlite3.connect
-            def connect(*args,**kwargs):
-                kwargs['factory']=TracedConnection
-                return original(*args,**kwargs)
-            sqlite3.connect=connect
-            path=Path('/usr/local/lib/seiltanzer-history-start-guard.py')
-            scope={'__name__':'_profile_original_guard','__file__':str(path)}
-            exec(compile(path.read_bytes(),str(path),'exec'),scope)
-            result=scope['check_start']('/opt/seiltanzer/data/trades.db','/opt/seiltanzer')
-            ended=time.monotonic()
-            print(json.dumps({'kind':'original_admission','elapsed_ms':round((ended-started)*1000),'sql_seconds':scope['SQL_SECONDS'],'result':result}))
-            for i,(stamp,name) in enumerate(events):
-                finish=events[i+1][0] if i+1<len(events) else ended
-                if finish-stamp>=.025:print(json.dumps({'kind':'query_interval','category':name,'offset_ms':round((stamp-started)*1000),'elapsed_ms':round((finish-stamp)*1000)}))
-            print(json.dumps({'kind':'deadline','events':[{'offset_ms':round((stamp-started)*1000),'category':name} for stamp,name in deadline_event]}))
-            memory=dict(line.split(':',1) for line in Path('/proc/meminfo').read_text().splitlines())
-            print(json.dumps({'kind':'host_pressure','cpu_count':os.cpu_count(),'load_1m':os.getloadavg()[0],'memory_available':memory.get('MemAvailable'),'cpu_pressure':Path('/proc/pressure/cpu').read_text().splitlines()}))
-            print(json.dumps({'kind':'safety','db_writes':0,'provider_calls':0,'restarts':0,'guard_changes':0}))
-            PY
+            git -C /opt/seiltanzer rev-parse HEAD
+            systemctl show seiltanzer -p MainPID -p ControlPID -p ActiveState -p SubState -p NRestarts -p Result -p ExecCondition -p ConditionResult -p ExecMainStatus
+            journalctl -u seiltanzer --since '-12 minutes' -n 50 -o cat --no-pager | /usr/bin/python3 -c 'import sys,json; print("\n".join(line.strip() for line in sys.stdin if "start_allowed" in line or "Skipped due to" in line or "Failed with result" in line or "Control process exited" in line))'
+            df --output=avail -B1 /
+            echo 'READ_ONLY_METADATA_NO_DB_OR_RESTART'
