@@ -1,56 +1,110 @@
 name: ai-release-startup-status-20261020
-# Read-only capacity inventory after verified committed epoch; no DB operation.
+# One bounded maintenance action: discard only the idle runner update staging cache.
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
-      - name: Inspect existing committed epoch and original startup admission
+      - name: Recover disposable runner staging space without application restart
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 55s
+          command_timeout: 150s
           script: |
             set -euo pipefail
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 10 9
             /usr/bin/python3 -u - <<'PY'
-            import json,os,sqlite3,subprocess,time
+            import json,os,shutil,stat,subprocess,time
             from pathlib import Path
-            def out(**row):print(json.dumps(row,sort_keys=True))
-            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts'],text=True,timeout=5)
-            out(kind='service',properties=props.splitlines())
-            out(kind='git',head=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=5).strip())
-            out(kind='active_guard',exists=os.path.lexists('/opt/seiltanzer/data/cutover.active'))
-            for name in ('cutover.journal.json','cutover.result.json'):
-                path=Path('/opt/seiltanzer/data')/name
-                try:
-                    assert not path.is_symlink() and path.stat().st_size<65536
-                    row=json.loads(path.read_bytes())
-                    out(kind='epoch',file=name,fields={key:row.get(key) for key in ('run_id','phase','service_started','abort_reason')})
-                except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
-            sizes=subprocess.run(['du','-xhd2','/opt/actions-runner/_work'],text=True,capture_output=True,timeout=20)
-            out(kind='top_directory_sizes',returncode=sizes.returncode,rows=sizes.stdout.splitlines()[:60])
+            def out(**row):print(json.dumps(row,sort_keys=True),flush=True)
+            def run(args,timeout=10):return subprocess.run(args,text=True,capture_output=True,timeout=timeout,check=True)
+            def service():return run(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState']).stdout
+            before=service()
+            assert 'ActiveState=active' in before
+            assert run(['git','-C','/opt/seiltanzer','rev-parse','HEAD']).stdout.strip()=='11325c9e2698199ed9da45403fb26fde1b8aa2a0'
+            assert not os.path.lexists('/opt/seiltanzer/data/cutover.active')
+            epoch=json.loads(Path('/opt/seiltanzer/data/cutover.journal.json').read_bytes())
+            assert str(epoch.get('run_id'))=='39582128571' and epoch.get('phase')=='COMMITTED'
+            unit='actions.runner.Seiltanzer03-trading_dbd.seiltanzer-prod-1.service'
             root=Path('/opt/actions-runner')
-            for name in ('bin','externals'):
-                path=root/name
-                out(kind='runner_link',name=name,symlink=path.is_symlink(),target=os.readlink(path) if path.is_symlink() else None)
-            units=subprocess.run(['systemctl','list-units','--all','--type=service','--no-legend','actions.runner*'],text=True,capture_output=True,timeout=5)
-            out(kind='runner_units',lines=units.stdout.splitlines())
-            for path in root.iterdir():
-                if path.name.startswith(('bin.','externals.')) and path.is_dir() and not path.is_symlink():
-                    info=path.stat();out(kind='runner_version',name=path.name,inode=info.st_ino,device=info.st_dev,modified=info.st_mtime)
-            files=[]
-            for path in Path('/var/log').iterdir():
-                if path.is_file() and not path.is_symlink():
-                    info=path.stat();files.append({'name':path.name,'bytes':info.st_size,'allocated_bytes':info.st_blocks*512,'modified':info.st_mtime})
-            out(kind='log_file_metadata',files=sorted(files,key=lambda row:row['allocated_bytes'],reverse=True)[:18])
-            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
-            out(kind='safety',read_only=True,db_writes=0,provider_calls=0,acks=0,restarts=0,cutover_mutations=0)
+            cache=root/'_work/_update'
+            assert root.resolve()==root and cache.resolve()==cache and cache.is_dir() and not cache.is_symlink()
+            assert cache.stat().st_dev==root.stat().st_dev
+            assert {p.name for p in cache.iterdir()}=={'bin','externals'}
+            installed={name:os.readlink(root/name) for name in ('bin','externals')}
+            assert installed=={'bin':'/opt/actions-runner/bin.2.337.0','externals':'/opt/actions-runner/externals.2.337.0'}
+            def workers():
+                found=[]
+                for proc in Path('/proc').iterdir():
+                    if not proc.name.isdigit():continue
+                    try:
+                        name=(proc/'comm').read_text().strip()
+                        if name.startswith(('Runner.Worker','Runner.Updater')):found.append(int(proc.name))
+                    except (FileNotFoundError,ProcessLookupError):pass
+                return found
+            assert not workers(), 'RUNNER_BUSY_REFUSE'
+            assert run(['systemctl','is-active',unit]).stdout.strip()=='active'
+            free_before=shutil.disk_usage('/').free
+            allocated=sum(p.lstat().st_blocks*512 for p in cache.rglob('*'))
+            assert 500*1024**2<=allocated<=900*1024**2
+            out(kind='cache_preflight',allocated_bytes=allocated,free_bytes=free_before,installed_targets=installed)
+            control_group=run(['systemctl','show',unit,'-p','ControlGroup','--value']).stdout.strip()
+            cgroup_root=Path('/sys/fs/cgroup')
+            cgroup=cgroup_root/control_group.lstrip('/')
+            assert control_group.startswith('/system.slice/') and cgroup.resolve().is_relative_to(cgroup_root)
+            assert (cgroup_root/'cgroup.controllers').is_file() and (cgroup/'cgroup.freeze').is_file()
+            frozen=False
+            try:
+                # Freeze the entire runner cgroup before the decisive idle check.
+                # It cannot accept/start a worker or update staging during deletion.
+                frozen=True
+                run(['systemctl','freeze',unit],timeout=8)
+                deadline=time.monotonic()+2
+                while 'frozen 1' not in (cgroup/'cgroup.events').read_text().splitlines():
+                    assert time.monotonic()<deadline, 'RUNNER_FREEZE_UNCONFIRMED_REFUSE'
+                    time.sleep(.02)
+                assert not workers(), 'RUNNER_BUSY_WHILE_FROZEN_REFUSE'
+                assert cache.resolve()==cache and not cache.is_symlink()
+                # Reject open files, executable mappings or working directories in staging.
+                prefix=str(cache)+'/'
+                for proc in Path('/proc').iterdir():
+                    if not proc.name.isdigit():continue
+                    try:
+                        for entry in [proc/'cwd',proc/'exe',*(proc/'fd').iterdir()]:
+                            try:target=os.readlink(entry)
+                            except (FileNotFoundError,ProcessLookupError):continue
+                            assert target!=str(cache) and not target.startswith(prefix), 'STAGING_IN_USE_REFUSE'
+                        assert prefix not in (proc/'maps').read_text(), 'STAGING_MAPPED_REFUSE'
+                    except (FileNotFoundError,ProcessLookupError):pass
+                assert shutil.rmtree.avoids_symlink_attacks
+                shutil.rmtree(cache)
+                out(kind='cache_cleanup',removed_path=str(cache),free_bytes=shutil.disk_usage('/').free)
+            finally:
+                if frozen:
+                    run(['systemctl','thaw',unit],timeout=8)
+                    assert (cgroup/'cgroup.freeze').read_text().strip()=='0'
+                    assert run(['systemctl','is-active',unit]).stdout.strip()=='active'
+                    out(kind='runner_restored',active=True,thawed=True)
+            assert service()==before, 'APPLICATION_CHANGED_DURING_MAINTENANCE'
+            assert all(os.readlink(root/name)==target and Path(target).is_dir() for name,target in installed.items())
+            assert shutil.disk_usage('/').free>=512*1024**2
+            # The installed admission remains unchanged, including its original 5s budget.
+            started=time.monotonic()
+            guard=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],text=True,capture_output=True,timeout=12)
+            out(kind='unchanged_startup_admission',returncode=guard.returncode,elapsed_ms=round((time.monotonic()-started)*1000),result=guard.stdout.strip()[:1600])
+            assert guard.returncode==0
+            out(kind='safety',app_restarts=0,app_db_writes=0,provider_calls=0,acks=0,cutover_mutations=0,log_deletions=0,runner_restarts=0)
             PY
