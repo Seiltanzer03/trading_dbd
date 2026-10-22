@@ -35,7 +35,7 @@ jobs:
                     row=json.loads(path.read_bytes())
                     out(kind='epoch',file=name,fields={key:row.get(key) for key in ('run_id','phase','service_started','abort_reason')})
                 except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
-            sizes=subprocess.run(['du','-xhd1','/opt/actions-runner','/var/log'],text=True,capture_output=True,timeout=20)
+            sizes=subprocess.run(['du','-xhd2','/opt/actions-runner/_work'],text=True,capture_output=True,timeout=20)
             out(kind='top_directory_sizes',returncode=sizes.returncode,rows=sizes.stdout.splitlines()[:60])
             root=Path('/opt/actions-runner')
             for name in ('bin','externals'):
@@ -46,6 +46,11 @@ jobs:
             for path in root.iterdir():
                 if path.name.startswith(('bin.','externals.')) and path.is_dir() and not path.is_symlink():
                     info=path.stat();out(kind='runner_version',name=path.name,inode=info.st_ino,device=info.st_dev,modified=info.st_mtime)
+            files=[]
+            for path in Path('/var/log').iterdir():
+                if path.is_file() and not path.is_symlink():
+                    info=path.stat();files.append({'name':path.name,'bytes':info.st_size,'allocated_bytes':info.st_blocks*512,'modified':info.st_mtime})
+            out(kind='log_file_metadata',files=sorted(files,key=lambda row:row['allocated_bytes'],reverse=True)[:18])
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
             out(kind='safety',read_only=True,db_writes=0,provider_calls=0,acks=0,restarts=0,cutover_mutations=0)
             PY
