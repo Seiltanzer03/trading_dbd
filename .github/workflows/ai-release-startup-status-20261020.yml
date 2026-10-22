@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only diagnosis of the existing history fence; no cutover or recovery.
+# Read-only capacity inventory after verified committed epoch; no DB operation.
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -35,32 +35,18 @@ jobs:
                     row=json.loads(path.read_bytes())
                     out(kind='epoch',file=name,fields={key:row.get(key) for key in ('run_id','phase','service_started','abort_reason')})
                 except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
-            started=time.monotonic()
-            fence=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],text=True,capture_output=True,timeout=12)
-            try:result=json.loads(fence.stdout)
-            except ValueError:result={'parse_error':True}
-            out(kind='original_fence',returncode=fence.returncode,elapsed_ms=round((time.monotonic()-started)*1000,1),result=result)
-            module='/opt/seiltanzer/seiltanzer/history_storage_state.py'
-            ns={'__name__':'_readonly_fence_diagnostic','__file__':module}
-            exec(compile(Path(module).read_bytes(),module,'exec'),ns)
-            conn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
-            conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-2048')
-            end=time.monotonic()+20
-            conn.set_progress_handler(lambda:int(time.monotonic()>=end),1000)
-            phase='state'
-            try:
-                started=time.monotonic();state=ns['read_history_state'](conn)
-                out(kind='validation',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1))
-                for table,expected in state['retained_identity'].items():
-                    phase=table;started=time.monotonic()
-                    actual=ns['identity_proof'](conn,table,expected['max_rowid'])
-                    out(kind='validation',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1),matches=actual==expected,expected_rows=expected['row_count'],actual_rows=actual['row_count'],schema_matches=actual['schema_sha256']==expected['schema_sha256'],logical_matches=actual['logical_sha256']==expected['logical_sha256'])
-                phase='runtime_projection';started=time.monotonic()
-                ns['_runtime_projection']().validate_runtime_projection(conn,state['runtime_projection'],retired_rowids=state['retired_rowids']['passive_market_observations'])
-                out(kind='validation',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1),matches=True)
-            except Exception as exc:
-                out(kind='validation_failure',phase=phase,error_type=type(exc).__name__,sqlite_errorname=getattr(exc,'sqlite_errorname',None))
-            finally:conn.close()
+            roots=['/opt/seiltanzer/data','/opt/seiltanzer/.git','/opt/seiltanzer/.venv','/tmp','/var/log/journal','/var/cache/apt','/root/.cache']
+            sizes=subprocess.run(['du','-xsk',*roots],text=True,capture_output=True,timeout=15)
+            out(kind='directory_sizes_kib',returncode=sizes.returncode,rows=sizes.stdout.splitlines())
+            directories=[Path('/opt/seiltanzer/data'),Path('/opt/seiltanzer/data/backups/local'),Path('/tmp')]
+            for directory in directories:
+                files=[]
+                for path in directory.iterdir():
+                    if path.is_symlink() or not path.is_file():continue
+                    if directory.name=='tmp' and not path.name.startswith(('seiltanzer','deploy-')):continue
+                    if directory.name!='tmp' and not path.name.endswith(('.db','.sqlite3','-wal','-shm','.gz','.tmp')):continue
+                    info=path.stat();files.append({'name':path.name,'bytes':info.st_size,'allocated_bytes':info.st_blocks*512,'modified':info.st_mtime})
+                out(kind='file_sizes',directory=str(directory),files=sorted(files,key=lambda row:row['allocated_bytes'],reverse=True)[:24])
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
             out(kind='safety',read_only=True,db_writes=0,provider_calls=0,acks=0,restarts=0,cutover_mutations=0)
             PY
