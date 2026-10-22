@@ -1,5 +1,5 @@
 name: ai-release-startup-status-20261020
-# Read-only exact-11325 stale-decision diagnosis; no provider or model calls.
+# Read-only diagnosis of the existing history fence; no cutover or recovery.
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -11,56 +11,56 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read installed service and snapshot metadata without provider calls
+      - name: Inspect existing committed epoch and original startup admission
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 60s
+          command_timeout: 55s
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 11325c9e2698199ed9da45403fb26fde1b8aa2a0
-            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import asyncio,json,os,subprocess,time,urllib.request
-            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts','-p','MemoryCurrent'],text=True,timeout=5)
-            print(json.dumps({'kind':'service','properties':props.splitlines()}))
-            st=os.statvfs('/');print(json.dumps({'kind':'capacity','free_bytes':st.f_bavail*st.f_frsize}))
+            /usr/bin/python3 -u - <<'PY'
+            import json,os,sqlite3,subprocess,time
+            from pathlib import Path
+            def out(**row):print(json.dumps(row,sort_keys=True))
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts'],text=True,timeout=5)
+            out(kind='service',properties=props.splitlines())
+            out(kind='git',head=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=5).strip())
+            out(kind='active_guard',exists=os.path.lexists('/opt/seiltanzer/data/cutover.active'))
+            for name in ('cutover.journal.json','cutover.result.json'):
+                path=Path('/opt/seiltanzer/data')/name
+                try:
+                    assert not path.is_symlink() and path.stat().st_size<65536
+                    row=json.loads(path.read_bytes())
+                    out(kind='epoch',file=name,fields={key:row.get(key) for key in ('run_id','phase','service_started','abort_reason')})
+                except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
             started=time.monotonic()
+            fence=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],text=True,capture_output=True,timeout=12)
+            try:result=json.loads(fence.stdout)
+            except ValueError:result={'parse_error':True}
+            out(kind='original_fence',returncode=fence.returncode,elapsed_ms=round((time.monotonic()-started)*1000,1),result=result)
+            module='/opt/seiltanzer/seiltanzer/history_storage_state.py'
+            ns={'__name__':'_readonly_fence_diagnostic','__file__':module}
+            exec(compile(Path(module).read_bytes(),module,'exec'),ns)
+            conn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
+            conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-2048')
+            end=time.monotonic()+20
+            conn.set_progress_handler(lambda:int(time.monotonic()>=end),1000)
+            phase='state'
             try:
-                with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=15) as response:
-                    body=json.loads(response.read(100000))
-                    print(json.dumps({'kind':'snapshot_status','http':response.code,'elapsed_ms':round((time.monotonic()-started)*1000,1),'fields':{k:body.get(k) for k in ['ready','building','invalidated_reason','build_ms','build_started_at','build_n','age_sec','last_error','snapshot_budget']},'has_trade':body.get('current_trade_id') is not None},sort_keys=True))
-            except (TimeoutError,ConnectionError,OSError,ValueError) as exc:
-                print(json.dumps({'kind':'snapshot_status','error':type(exc).__name__,'elapsed_ms':round((time.monotonic()-started)*1000,1)}))
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=15) as response:
-                state=json.loads(response.read(2*1024**2+1))
-            tick=state.get('tick') or {}; quote=(tick.get('feeds') or {}).get('price') or {}
-            def age(value):
-                try:return round(time.time()-float(value),3)
-                except (ValueError,TypeError):return None
-            print(json.dumps({'kind':'quote_readiness','has_trade':bool(tick.get('trade')),'instrument':tick.get('instrument'),'tick_age_sec':age(tick.get('ts')),'quote_age_sec':age(quote.get('ts') or quote.get('timestamp')),'quote_status':quote.get('status'),'production_authority':quote.get('production_authority'),'derived':quote.get('derived'),'is_proxy':quote.get('is_proxy')},sort_keys=True))
-            async def read_canonical_tick():
-                import websockets
-                async with websockets.connect('ws://127.0.0.1:8790/ws',open_timeout=5,close_timeout=2,max_size=2*1024**2) as ws:
-                    tick=json.loads(await asyncio.wait_for(ws.recv(),5))
-                    quote=(tick.get('feeds') or {}).get('price') or {}
-                    print(json.dumps({'kind':'canonical_ws_quote','has_trade':bool(tick.get('trade')),'instrument':tick.get('instrument'),'tick_age_sec':age(tick.get('ts')),'quote_age_sec':age(quote.get('ts') or quote.get('timestamp')),'quote_status':quote.get('status'),'production_authority':quote.get('production_authority'),'derived':quote.get('derived'),'is_proxy':quote.get('is_proxy')},sort_keys=True))
-            asyncio.run(read_canonical_tick())
-            trace=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-10-21 22:27:00 UTC','--grep','ai-1578688fc55b42ee8f50','--no-pager','-n','50'],text=True,capture_output=True,timeout=5)
-            print(json.dumps({'kind':'trace_lookup','returncode':trace.returncode,'lines':len(trace.stdout.splitlines())}))
-            for line in trace.stdout.splitlines():
-                if 'ai-1578688fc55b42ee8f50' not in line or '{' not in line:continue
-                try:row=json.loads(line[line.index('{'):])
-                except ValueError:continue
-                print(json.dumps({'kind':'failed_request_trace',**{k:row.get(k) for k in ['request_id','stage','event','elapsed_ms','duration_ms','exception_class','status_code']}},sort_keys=True))
-            print(json.dumps({'kind':'safety','provider_calls':0,'review_posts':0,'db_queries':0,'acks':0,'restarts':0,'app_writes':0}))
+                started=time.monotonic();state=ns['read_history_state'](conn)
+                out(kind='validation',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1))
+                for table,expected in state['retained_identity'].items():
+                    phase=table;started=time.monotonic()
+                    actual=ns['identity_proof'](conn,table,expected['max_rowid'])
+                    out(kind='validation',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1),matches=actual==expected,expected_rows=expected['row_count'],actual_rows=actual['row_count'],schema_matches=actual['schema_sha256']==expected['schema_sha256'],logical_matches=actual['logical_sha256']==expected['logical_sha256'])
+                phase='runtime_projection';started=time.monotonic()
+                ns['_runtime_projection']().validate_runtime_projection(conn,state['runtime_projection'],retired_rowids=state['retired_rowids']['passive_market_observations'])
+                out(kind='validation',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1),matches=True)
+            except Exception as exc:
+                out(kind='validation_failure',phase=phase,error_type=type(exc).__name__,sqlite_errorname=getattr(exc,'sqlite_errorname',None))
+            finally:conn.close()
+            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
+            out(kind='safety',read_only=True,db_writes=0,provider_calls=0,acks=0,restarts=0,cutover_mutations=0)
             PY
-      - name: Verify public HTTP without AI request
-        run: |
-          set -euo pipefail
-          for path in / /api/state; do
-            code=$(curl --silent --show-error --connect-timeout 5 --max-time 15 --output /dev/null --write-out '%{http_code}' "http://94.241.171.182:8790$path")
-            echo "public_path=$path http_code=$code"
-            test "$code" = 200
-          done
