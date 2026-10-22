@@ -752,6 +752,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         last = {"price": 0.0, "proxy_price": 0.0, "intraday": 0.0, "vols": 0.0,
                 "daily": 0.0, "chain": 0.0, "iv_surface": 0.0, "correlation": 0.0, "bybit": 0.0}
         running: dict[str, asyncio.Task] = {}
+        tick_task: asyncio.Task | None = None
         state_task: asyncio.Task | None = None
         state_last_finished = 0.0
         state_refresh_period = (
@@ -784,6 +785,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "correlation": engine.market.refresh_correlation,
             "bybit": engine.market.refresh_bybit,
         }
+
+        async def calculate_tick():
+            started = time.monotonic()
+            worker = asyncio.create_task(asyncio.to_thread(engine.tick_payload))
+            try:
+                payload = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Cancelling to_thread does not stop its SQLite reader. Drain
+                # it even if shutdown is cancelled again before engine.close.
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not worker.cancelled():
+                    worker.exception()
+                raise
+            return payload, (time.monotonic() - started) * 1000.0
+
         try:
             while True:
                 now = time.time()
@@ -807,36 +829,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         last[name] = now
                         running[name] = asyncio.create_task(asyncio.to_thread(fn))
 
-                # Keep canonical tick work off the uvicorn event loop.
-                build_started = time.monotonic()
-                payload = await asyncio.to_thread(engine.tick_payload)
-                publish_live_tick(
-                    payload,
-                    build_ms=(time.monotonic() - build_started) * 1000.0,
-                )
-                await broadcast_live_tick(clients, payload)
-                # Full journal/ridge/setup materialization may wait on SQLite.
-                # The HTTP route serves the last encoded generation directly, so
-                # production does not need a new build for every 2s live tick.
-                # Keep one generation in flight and an idle gap after completion
-                # to avoid retry pressure while research is using the same DB.
-                if (
-                    state_task is None
-                    and (
-                        state_last_finished <= 0.0
-                        or time.monotonic() - state_last_finished
-                        >= state_refresh_period
-                    )
-                ):
-                    state_task = asyncio.create_task(refresh_live_state(
-                        payload,
-                        expected_revision=live_state_revision(),
-                    ))
+                # A slow canonical calculation must not suspend the feed
+                # scheduler. Publish only its completed immutable generation;
+                # retain original market clocks and at most one calculation.
+                if tick_task is not None and tick_task.done():
+                    payload, build_ms = tick_task.result()
+                    tick_task = None
+                    publish_live_tick(payload, build_ms=build_ms)
+                    await broadcast_live_tick(clients, payload)
+                    # Full journal/ridge/setup materialization may wait on
+                    # SQLite. Keep its existing single-flight/cooldown policy.
+                    if (
+                        state_task is None
+                        and (
+                            state_last_finished <= 0.0
+                            or time.monotonic() - state_last_finished
+                            >= state_refresh_period
+                        )
+                    ):
+                        state_task = asyncio.create_task(refresh_live_state(
+                            payload,
+                            expected_revision=live_state_revision(),
+                        ))
+                if tick_task is None:
+                    tick_task = asyncio.create_task(calculate_tick())
                 await asyncio.sleep(
                     1.0 if (settings.demo or settings.stream) else 2.0)
         finally:
             # Не закрываем sqlite, пока уже запущенный фид ещё может писать кэш.
             pending = list(running.values())
+            if tick_task is not None:
+                pending.append(tick_task)
             if state_task is not None:
                 pending.append(state_task)
             if pending:
