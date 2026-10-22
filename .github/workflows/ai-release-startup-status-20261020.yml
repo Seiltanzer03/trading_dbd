@@ -162,13 +162,61 @@ jobs:
       # TTL. Acquire official facts only after both finish; keep the runtime
       # freshness, hashes, exact SHA and source validation unchanged.
       - name: Build exact-SHA official macro transport bundle off-host
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check --quiet -e '.[research]'
-          python scripts/build_offhost_macro_bundle.py \
-            --expected-sha "$EXPECTED_SHA" \
-            --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
-            --output "official-macro-${ACCEPTANCE_RUN_ID}.json"
+          python -m pip install --disable-pip-version-check --quiet -e '.[research]' paramiko
+          python - <<'PY'
+          import json,os,runpy,select,socketserver,sys,threading
+          from scripts.production_ede_offload import _connect,_verify_sha
+          expected=os.environ['EXPECTED_SHA']
+          client=_connect(os.environ.pop('SSH_PASSWORD'),attempts=1)
+          stopping=threading.Event()
+          server=None
+          try:
+              _verify_sha(client,expected)
+              transport=client.get_transport()
+              class Forward(socketserver.BaseRequestHandler):
+                  def handle(self):
+                      channel=None
+                      try:
+                          channel=transport.open_channel('direct-tcpip',('127.0.0.1',9050),self.request.getpeername(),timeout=5)
+                          self.request.settimeout(10);channel.settimeout(10)
+                          while not stopping.is_set():
+                              readable,_,_=select.select([self.request,channel],[],[],1)
+                              for source in readable:
+                                  data=source.recv(65536)
+                                  if not data:return
+                                  (channel if source is self.request else self.request).sendall(data)
+                      except (OSError,EOFError):
+                          return
+                      finally:
+                          if channel is not None:channel.close()
+              class LocalOnly(socketserver.ThreadingTCPServer):
+                  daemon_threads=True
+                  block_on_close=False
+              server=LocalOnly(('127.0.0.1',0),Forward)
+              thread=threading.Thread(target=server.serve_forever,daemon=True)
+              thread.start()
+              previous=os.environ.get('MACRO_HTTP_PROXY')
+              os.environ['MACRO_HTTP_PROXY']='socks5://127.0.0.1:'+str(server.server_address[1])
+              print(json.dumps({'configured_existing_proxy_fallback':True,'direct_official_first':True,'loopback_only':True,'new_sources':False}),flush=True)
+              try:
+                  sys.argv=['scripts/build_offhost_macro_bundle.py','--expected-sha',expected,
+                      '--acceptance-run-id',os.environ['ACCEPTANCE_RUN_ID'],
+                      '--output','official-macro-'+os.environ['ACCEPTANCE_RUN_ID']+'.json']
+                  runpy.run_path(sys.argv[0],run_name='__main__')
+                  _verify_sha(client,expected)
+              finally:
+                  if previous is None:os.environ.pop('MACRO_HTTP_PROXY',None)
+                  else:os.environ['MACRO_HTTP_PROXY']=previous
+          finally:
+              stopping.set()
+              if server is not None:
+                  server.shutdown();server.server_close()
+              client.close()
+          PY
 
       - name: Transfer verified official macro bundle over deploy channel
         uses: appleboy/scp-action@v1
