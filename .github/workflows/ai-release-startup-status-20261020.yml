@@ -5,72 +5,88 @@ on:
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
-  actions: write
-concurrency:
-  group: production-seiltanzer
-  queue: max
-  cancel-in-progress: false
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
-    env:
-      EXPECTED_SHA: cbe12ff6b719ed8c2f25f568c1ab5805c807791b
+    timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: cbe12ff6b719ed8c2f25f568c1ab5805c807791b
-      - name: Verify installed healthy release and inspect bounded native Q queue
+      - name: Verify installed fix, available capacity and existing causal input clocks
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 30s
+          command_timeout: 60s
           script: |
             set -euo pipefail
             cd /opt/seiltanzer
             test "$(git rev-parse HEAD)" = cbe12ff6b719ed8c2f25f568c1ab5805c807791b
-            test "$(systemctl show -p MainPID --value seiltanzer)" = 3683844
-            test "$(systemctl is-active seiltanzer)" = active
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import json,os,sqlite3,time,urllib.request
+            import asyncio,collections,json,os,re,sqlite3,subprocess,time,urllib.request
+            from pathlib import Path
+            from types import SimpleNamespace
             def out(**row):print(json.dumps(row,sort_keys=True))
-            disk=os.statvfs('/');free=disk.f_bavail*disk.f_frsize
-            out(kind='publication_repair_headroom',free_bytes=free)
-            if free<1024**3+32*1024**2:raise RuntimeError('BACKGROUND_HEADROOM_UNAVAILABLE')
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=5) as response:
-                if response.code!=200:raise RuntimeError('LIVE_API_NOT_HEALTHY')
-            from seiltanzer.g1_q_audit_scalability import _candidate_requests,_terminal_candidate_batch_snapshot
-            db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.1)
-            db.row_factory=sqlite3.Row
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState'],text=True,timeout=5)
+            out(kind='service',properties=props.splitlines())
+            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize,background_admitted=st.f_bavail*st.f_frsize>=1024**3+32*1024**2)
+            block=subprocess.run(['lsblk','--bytes','--json','--output','NAME,SIZE,FSTYPE,MOUNTPOINT'],capture_output=True,text=True,timeout=5)
+            if block.returncode==0:out(kind='block_capacity',devices=json.loads(block.stdout).get('blockdevices',[]))
+            for path in ('/api/state','/api/ai/snapshot/status','/api/research/g1/q/audit?limit=5000&include_items=false'):
+                started=time.monotonic()
+                with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:
+                    row=json.loads(response.read(2*1024**2))
+                    out(kind='endpoint',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','age_sec','build_ms','build_n','last_error') if k in row})
+                    if '/q/audit?' in path:out(kind='current_q_maturity',counts=row.get('counts'),attempt_n=row.get('attempt_n'))
+            async def clock():
+                import websockets
+                observations=[];end=time.monotonic()+30
+                async with websockets.connect('ws://127.0.0.1:8790/ws',open_timeout=5,close_timeout=2,max_size=2*1024**2) as ws:
+                    while time.monotonic()<end:
+                        row=json.loads(await asyncio.wait_for(ws.recv(),min(8,end-time.monotonic())))
+                        quote=(row.get('feeds') or {}).get('price') or {}
+                        def age(x):
+                            try:return round(time.time()-float(x),3)
+                            except (ValueError,TypeError):return None
+                        quote_age,tick_age=age(quote.get('ts')),age(row.get('ts'))
+                        out(kind='canonical_clock',instrument=row.get('instrument'),quote_age_sec=quote_age,tick_age_sec=tick_age,source=quote.get('source'),status=quote.get('status'))
+                        if tick_age is not None and -5<=tick_age<=10:
+                            observations.append(row.get('ts'))
+                            if len(observations)>=3 and observations[-1]!=observations[-3]:
+                                out(kind='canonical_tick_acceptance',three_fresh_advancing_payloads=True,latest_source_quote_fresh=quote_age is not None and -5<=quote_age<=15);return
+                        else:observations=[]
+                raise RuntimeError('THREE_ADVANCING_CANONICAL_PAYLOADS_NOT_OBSERVED')
+            asyncio.run(clock())
             try:
-                deadline=time.monotonic()+2;db.execute('PRAGMA query_only=ON');db.set_progress_handler(lambda:time.monotonic()>deadline,1000);db.execute('BEGIN')
-                rows=db.execute('SELECT q.attempt_id,q.attempt_ts,q.target_instrument,q.observation_created,q.created_observation_id,q.blocker_code,q.requested_expiry_ts,p.target_ts,p.resolution_status,p.instrument FROM g1_q_capture_attempts q LEFT JOIN passive_market_observations p ON p.observation_id=q.created_observation_id ORDER BY q.attempt_ts DESC LIMIT 5000').fetchall()
-                now=time.time();requests=_candidate_requests(rows,now=now,include_diagnostics=False);candidates=_terminal_candidate_batch_snapshot(db,requests)
-                due=[dict(rows[key]) for key,instrument,target in requests if candidates.get(key,(None,None))[0] is not None and candidates[key][0]>=target-1e-6]
-                unique={row['created_observation_id']:row for row in due}
-                head=db.execute("SELECT observation_id,instrument,captured_ts,target_ts FROM passive_market_observations WHERE resolution_status='pending' AND target_ts<=? ORDER BY target_ts LIMIT 101",(now,)).fetchall()
-                first20={row['observation_id'] for row in head[:20]}
-                out(kind='native_q_pending_queue',audit_attempts=len(rows),overdue_attempts=len(due),distinct_due_observations=len(unique),pending_prefix_capped_101=len(head),oldest_pending_age_sec=round(now-head[0]['target_ts'],1) if head else None,due=[dict(observation_id=key,instrument=row['instrument'],target_ts=row['target_ts'],overdue_age_sec=round(now-row['target_ts'],1),inside_native_first20=key in first20) for key,row in unique.items()])
-                out(kind='native_pending_prefix',items=[dict(instrument=row['instrument'],target_ts=row['target_ts']) for row in head[:20]])
-            except sqlite3.OperationalError as exc:out(kind='native_q_pending_queue',available=False,error_class=type(exc).__name__,deadline_sec=2)
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/history?include_management=true',timeout=5) as response:
+                    raw=response.read(2*1024**2+1)
+                    if len(raw)>2*1024**2:raise ValueError('HISTORY_BOUND')
+                    items=json.loads(raw).get('items') or []
+                saved=max(items,key=lambda x:x.get('ts') or 0) if items else {};ensemble=(saved.get('management_archive') or {}).get('unified_edge_ensemble') or {}
+                model=saved.get('model');model=model if isinstance(model,str) and re.fullmatch(r'[A-Za-z0-9_./:-]{1,120}',model) else None
+                out(kind='saved_review_audit',saved_only=True,age_sec=round(time.time()-saved['ts'],1) if saved.get('ts') else None,model=model,selected_policy=ensemble.get('selected_policy'),components=[{k:row.get(k) for k in ('component_id','availability','available','effective_weight','reason')} for row in ensemble.get('components',[])])
+            except (OSError,ValueError) as exc:out(kind='saved_review_audit',available=False,exception_class=type(exc).__name__)
+            now=time.time();deadline=time.monotonic()+2
+            db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.1)
+            try:
+                db.execute('PRAGMA query_only=ON');db.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+                bars=db.execute('SELECT bar_start_ts,bar_end_ts,source,kind FROM passive_market_bars WHERE instrument=? ORDER BY bar_start_ts DESC LIMIT 15',('NAS100',)).fetchall()
+                out(kind='archived_nas100_bar_clocks',rows=len(bars),latest_end_age_sec=round(now-bars[0][1],1) if bars else None,sources=sorted({str(x[2])[:120] for x in bars}),kinds=sorted({str(x[3])[:80] for x in bars}),continuous_1m=all(abs(bars[i][0]-bars[i+1][0]-60)<1 for i in range(len(bars)-1)))
             finally:db.close()
-            out(kind='safety',database_writes=0,provider_calls=0,review_posts=0,restarts=0,acks=0,orders=0,source_timestamps_modified=False,readiness_override=False)
+            from seiltanzer.edge_family_source_runtime import load_family_source_context
+            context=load_family_source_context(SimpleNamespace(settings=SimpleNamespace(data_dir='/opt/seiltanzer/data')),{'instrument':'NAS100','captured_ts':now},'cbe12ff6b719ed8c2f25f568c1ab5805c807791b')
+            audit=context.get('edge_family_source_bundle_audit') or {}
+            out(kind='current_family_source_admission',available=audit.get('available'),reason=audit.get('reason'),rejection_reasons=dict(collections.Counter(str(x.get('reason')) for x in audit.get('rejected_sources',[]))),admitted_record_counts={k:len(v) if isinstance(v,list) else 1 for k,v in context.get('edge_family_sources',{}).items()})
+            for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json'):
+                path=Path('/opt/seiltanzer/data/research')/name
+                if not 0<path.stat().st_size<=1000000:raise RuntimeError('PUBLICATION_BOUND')
+                value=json.loads(path.read_bytes());exact=value.get('published_for_sha')=='cbe12ff6b719ed8c2f25f568c1ab5805c807791b'
+                out(kind='publication',name=name,exact_sha=exact,age_sec=round(time.time()-path.stat().st_mtime,1))
+                if not exact:raise RuntimeError('PUBLICATION_SHA_MISMATCH')
+            from seiltanzer.mathematical_edge import load_artifact,MAX_ARTIFACT_BYTES
+            mp=Path('/opt/seiltanzer/data/research/mathematical_edge_latest.json')
+            report=load_artifact(mp,time.time())
+            matrix=(report or {}).get('family_market_models') or {}
+            out(kind='archived_mathematical_artifact',size_bytes=mp.stat().st_size,consumer_maximum_bytes=MAX_ARTIFACT_BYTES,accepted_by_runtime_loader=report is not None,trained_groups=sum(isinstance(row,dict) and row.get('status')=='TRAINED' for groups in matrix.values() if isinstance(groups,dict) for row in groups.values()),not_a_live_forecast_count=True)
+            out(kind='safety',review_posts=0,provider_calls=0,database_writes=0,restarts=0,acks=0,orders=0)
             PY
-      - name: Start exact-SHA mathematical edge refresh off-host
-        id: mathrefresh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: "set -euo pipefail\npayload=$(python3 - <<'PY'\nimport json, os\nprint(json.dumps({'ref': 'main', 'inputs': {'expected_sha': os.environ['EXPECTED_SHA']}}))\nPY\n)\ncurl --fail-with-body --silent --show-error \\\n  --retry 3 --retry-delay 2 --retry-max-time 15 --retry-all-errors \\\n  -X POST -H \"Authorization: Bearer $GH_TOKEN\" \\\n  -H \"Accept: application/vnd.github+json\" \\\n  \"https://api.github.com/repos/${{ github.repository }}/actions/workflows/mathematical-edge.yml/dispatches\" \\\n  -d \"$payload\"\necho \"MATHEMATICAL_EDGE_REFRESH_DISPATCHED expected_sha=$EXPECTED_SHA\"\n"
-      - name: Start exact-SHA source family collection off-host
-        id: sourcerefresh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: "set -euo pipefail\npayload=$(python3 - <<'PY'\nimport json, os\nprint(json.dumps({'ref': 'main', 'inputs': {'expected_sha': os.environ['EXPECTED_SHA']}}))\nPY\n)\ncurl --fail-with-body --silent --show-error \\\n  --retry 3 --retry-delay 2 --retry-max-time 15 --retry-all-errors \\\n  -X POST -H \"Authorization: Bearer $GH_TOKEN\" \\\n  -H \"Accept: application/vnd.github+json\" \\\n  \"https://api.github.com/repos/${{ github.repository }}/actions/workflows/edge-family-sources.yml/dispatches\" \\\n  -d \"$payload\"\necho \"EDGE_FAMILY_SOURCE_REFRESH_DISPATCHED expected_sha=$EXPECTED_SHA\"\n"
-      - name: Start exact-SHA prospective FOMC capture off-host
-        id: fomcrefresh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: "set -euo pipefail\npayload=$(python3 - <<'PY'\nimport json, os\nprint(json.dumps({'ref': 'main', 'inputs': {'expected_sha': os.environ['EXPECTED_SHA']}}))\nPY\n)\ncurl --fail-with-body --silent --show-error \\\n  --retry 3 --retry-delay 2 --retry-max-time 15 --retry-all-errors \\\n  -X POST -H \"Authorization: Bearer $GH_TOKEN\" \\\n  -H \"Accept: application/vnd.github+json\" \\\n  \"https://api.github.com/repos/${{ github.repository }}/actions/workflows/fomc-prospective-capture.yml/dispatches\" \\\n  -d \"$payload\"\necho \"FOMC_PROSPECTIVE_REFRESH_DISPATCHED expected_sha=$EXPECTED_SHA\"\n"
 
