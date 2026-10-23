@@ -5,57 +5,75 @@ on:
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
+  actions: write
 jobs:
-  inspect:
+  retire:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
-      - name: Read exact startup admission and owner metadata
+      - name: Cancel only the superseded pre-audit snapshot reader
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -u - <<'PY'
+          import json,os,urllib.request,urllib.error
+          root='https://api.github.com/repos/'+os.environ['GITHUB_REPOSITORY']
+          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'}
+          def get(path):
+              with urllib.request.urlopen(urllib.request.Request(root+path,headers=headers),timeout=10) as r:return json.load(r)
+          main=get('/git/ref/heads/main')['object']['sha']
+          assert main=='feecd3825fb0072bacfe2fdd1f0cc68bb0d24dd2'
+          row=get('/actions/runs/39915860209')
+          assert row['head_sha']=='fcf47f4adc958ee531ae69c7580812c3b8dd0204' and row['head_branch']=='main'
+          assert row['path']=='.github/workflows/production-ede-v12-audit.yml'
+          jobs=get('/actions/runs/39915860209/jobs')['jobs']
+          active=[j for j in jobs if j['status']=='in_progress']
+          cancel=row['status']!='completed'
+          if cancel:
+              assert len(active)==1 and active[0]['name']=='audit'
+              step=[s for s in active[0]['steps'] if s['status']=='in_progress']
+              assert len(step)==1 and step[0]['name']=='Export a current consistent live snapshot without VPS disk use'
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(root+'/actions/runs/39915860209/cancel',headers=headers,method='POST'),timeout=10) as r:assert r.status==202
+              except urllib.error.HTTPError as exc:
+                  if exc.code!=409:raise
+          print(json.dumps({'cancel_requested':cancel,'run_id':39915860209,'scope':'superseded_snapshot_reader_only'}))
+          PY
+      - name: Confirm run-scoped origin exit and unchanged application
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 45s
+          command_timeout: 60s
           script: |
             set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = fcf47f4adc958ee531ae69c7580812c3b8dd0204
             /usr/bin/python3 -u - <<'PY'
-            import json,os,subprocess,time
+            import json,os,stat,subprocess,time
             from pathlib import Path
-            def out(**row):print(json.dumps(row,sort_keys=True))
-            def run(args,timeout=6):return subprocess.run(args,text=True,capture_output=True,timeout=timeout)
-            out(kind='git',head=run(['git','-C','/opt/seiltanzer','rev-parse','HEAD']).stdout.strip())
-            out(kind='service',fields=run(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts']).stdout.splitlines())
-            out(kind='active_guard',exists=os.path.lexists('/opt/seiltanzer/data/cutover.active'))
-            for name in ('cutover.journal.json','cutover.result.json'):
-                p=Path('/opt/seiltanzer/data')/name
-                try:
-                    assert not p.is_symlink() and 0<p.stat().st_size<65536
-                    row=json.loads(p.read_bytes())
-                    out(kind='epoch',file=name,fields={k:row.get(k) for k in ('run_id','phase','service_started','abort_reason')})
-                except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
-            locks=run(['lslocks','--json','--output','PID,COMMAND,TYPE,MODE,PATH'])
-            try:lock_rows=json.loads(locks.stdout).get('locks',[])
-            except ValueError:lock_rows=[]
-            owned=[row for row in lock_rows if str(row.get('path') or '').endswith('/opt/seiltanzer/.deployment-git-maintenance.lock')]
-            out(kind='deployment_lock',locks=owned)
-            for lock in owned:
-                pid=str(lock.get('pid') or '')
-                if not pid.isdigit():continue
-                out(kind='lock_owner',fields=run(['ps','-p',pid,'-o','pid,ppid,comm,etime,stat']).stdout.splitlines())
-                try:
-                    raw=(Path('/proc')/pid/'cmdline').read_bytes()
-                    out(kind='lock_owner_classification',pid=int(pid),known_deploy=b'Delivered exact production SHA' in raw,
-                        known_recovery=b'BACKUP_RECOVERY_REQUIRES_DELIVERED_EXACT_SHA' in raw,
-                        known_stage=b'compact_deployment_git' in raw,contains_expected_sha=b'feecd3825fb0072bacfe2fdd1f0cc68bb0d24dd2' in raw)
-                except OSError:pass
+            root=Path('/tmp/seiltanzer-sqlite-tools-39915860209')
+            if root.exists():
+                assert not root.is_symlink() and root.stat().st_uid==0 and stat.S_ISDIR(root.stat().st_mode)
+                control=root/'control.py';binary=root/'sqlite3_rsync';state=root/'origin.json'
+                if control.exists():
+                    assert not control.is_symlink() and control.stat().st_uid==0 and 0<control.stat().st_size<50000
+                    result=subprocess.run(['/usr/bin/python3',str(control),'cleanup','--binary',str(binary),'--state',str(state)],capture_output=True,text=True,timeout=12)
+                    assert result.returncode==0 and 'ORIGIN_READER_EXIT_CONFIRMED=1' in result.stdout,'NATIVE_ORIGIN_CLEANUP_NOT_CONFIRMED'
+                    print(json.dumps({'kind':'native_origin_cleanup','run_id':39915860209,'confirmed':True}))
+            for attempt in range(8):
+                r=subprocess.run(['lslocks','--json','--output','PID,COMMAND,TYPE,MODE,PATH'],capture_output=True,text=True,timeout=5)
+                rows=json.loads(r.stdout).get('locks',[])
+                locks=[x for x in rows if str(x.get('path') or '').endswith('/opt/seiltanzer/.deployment-git-maintenance.lock')]
+                if not locks:break
+                time.sleep(1)
+            assert not locks,'DEPLOYMENT_LOCK_STILL_OWNED_NO_BYPASS'
+            print(json.dumps({'kind':'deployment_lock','free':True}))
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState'],text=True,timeout=5)
+            print(json.dumps({'kind':'service','properties':props.splitlines()}))
             started=time.monotonic()
-            result=run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],timeout=12)
-            try:proof=json.loads(result.stdout)
-            except ValueError:proof={'parse_error':True}
-            out(kind='admission',returncode=result.returncode,elapsed_ms=round((time.monotonic()-started)*1000,1),proof=proof)
-            for args in (['ps','-eo','pid,ppid,pcpu,rss,stat,etime,comm','--sort=-pcpu'],['free','-m']):
-                out(kind='resource',command=args[0],lines=run(args).stdout.splitlines()[:10])
-            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
-            out(kind='safety',read_only=True,restarts=0,provider_calls=0,acks=0,db_writes=0,history_mutations=0)
+            r=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],capture_output=True,text=True,timeout=12)
+            print(json.dumps({'kind':'admission','elapsed_ms':round((time.monotonic()-started)*1000,1),'proof':json.loads(r.stdout),'returncode':r.returncode}))
+            assert r.returncode==0,'ORIGINAL_STARTUP_ADMISSION_NOT_READY'
+            print(json.dumps({'kind':'safety','app_restarts':0,'db_writes':0,'guard_mutations':0,'orders':0,'acks':0,'provider_calls':0,'retired_reader_run':39915860209}))
             PY
