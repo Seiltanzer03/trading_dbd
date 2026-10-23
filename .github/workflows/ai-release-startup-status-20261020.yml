@@ -5,74 +5,79 @@ on:
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
-  actions: write
 jobs:
-  retire:
+  inspect:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Cancel only the exact-SHA inventory causing observed live resource pressure
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 -u - <<'PY'
-          import json,os,urllib.request,urllib.error
-          root='https://api.github.com/repos/'+os.environ['GITHUB_REPOSITORY']
-          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'}
-          def get(path):
-              with urllib.request.urlopen(urllib.request.Request(root+path,headers=headers),timeout=10) as response:return json.load(response)
-          assert get('/git/ref/heads/main')['object']['sha']=='0ca3bd68251135cbc22586a02f97214551bcafa8'
-          row=get('/actions/runs/39969252946')
-          assert row['head_sha']=='0ca3bd68251135cbc22586a02f97214551bcafa8' and row['head_branch']=='main'
-          assert row['path']=='.github/workflows/production-ede-inventory.yml'
-          cancel=row['status']!='completed'
-          if cancel:
-              active=[job for job in get('/actions/runs/39969252946/jobs')['jobs'] if job['status']=='in_progress']
-              assert len(active)==1 and active[0]['name']=='inventory'
-              steps=[step for step in active[0]['steps'] if step['status']=='in_progress']
-              assert len(steps)==1 and steps[0]['name']=='Audit real immutable G1S observations and all EDE features'
-              try:
-                  with urllib.request.urlopen(urllib.request.Request(root+'/actions/runs/39969252946/cancel',headers=headers,method='POST'),timeout=10) as response:assert response.status==202
-              except urllib.error.HTTPError as exc:
-                  if exc.code!=409:raise
-          print(json.dumps({'cancel_requested':cancel,'run_id':39969252946,'scope':'observed_live_availability_incident'}))
-          PY
-      - name: Drain only the identified readonly inventory process
+      - name: Verify installed fix, available capacity and existing causal input clocks
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 45s
+          command_timeout: 60s
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 0ca3bd68251135cbc22586a02f97214551bcafa8
-            /usr/bin/python3 -u - <<'PY'
-            import fcntl,json,os,select,signal,stat,subprocess,time
+            cd /opt/seiltanzer
+            test "$(git rev-parse HEAD)" = 0ca3bd68251135cbc22586a02f97214551bcafa8
+            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
+            import asyncio,collections,json,os,re,sqlite3,subprocess,time,urllib.request
             from pathlib import Path
-            app_pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5).strip()
-            assert app_pid=='3599952'
-            pid=3604121;process=Path('/proc')/str(pid);sent=False
-            if process.exists():
-                assert process.stat().st_uid==0
-                before=(process/'stat').read_text().rsplit(')',1)[1].split()
-                if before[0]!='Z':
-                    raw=(process/'cmdline').read_bytes();assert len(raw)<4096
-                    assert raw.split(b'\0')==[b'/opt/seiltanzer/.venv/bin/python',b'/opt/seiltanzer/scripts/production_ede_inventory.py',b'--database',b'/opt/seiltanzer/data/trades.db',b''], 'UNKNOWN_PROCESS_NO_SIGNAL'
-                    fd=os.pidfd_open(pid)
-                    try:
-                        after=(process/'stat').read_text().rsplit(')',1)[1].split()
-                        assert after[19]==before[19], 'PROCESS_IDENTITY_CHANGED_NO_SIGNAL'
-                        signal.pidfd_send_signal(fd,signal.SIGTERM);sent=True
-                        poll=select.poll();poll.register(fd,select.POLLIN)
-                        assert poll.poll(8000), 'READONLY_READER_EXIT_NOT_CONFIRMED'
-                    finally:os.close(fd)
-            lock=os.open('/opt/seiltanzer/.deployment-git-maintenance.lock',os.O_RDWR|os.O_NOFOLLOW)
+            from types import SimpleNamespace
+            def out(**row):print(json.dumps(row,sort_keys=True))
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState'],text=True,timeout=5)
+            out(kind='service',properties=props.splitlines())
+            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize,background_admitted=st.f_bavail*st.f_frsize>=1024**3+32*1024**2)
+            block=subprocess.run(['lsblk','--bytes','--json','--output','NAME,SIZE,FSTYPE,MOUNTPOINT'],capture_output=True,text=True,timeout=5)
+            if block.returncode==0:out(kind='block_capacity',devices=json.loads(block.stdout).get('blockdevices',[]))
+            for path in ('/api/state','/api/ai/snapshot/status'):
+                started=time.monotonic()
+                with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:
+                    row=json.loads(response.read(2*1024**2))
+                    out(kind='endpoint',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','age_sec','build_ms','build_n','last_error') if k in row})
+            async def clock():
+                import websockets
+                observations=[];end=time.monotonic()+30
+                async with websockets.connect('ws://127.0.0.1:8790/ws',open_timeout=5,close_timeout=2,max_size=2*1024**2) as ws:
+                    while time.monotonic()<end:
+                        row=json.loads(await asyncio.wait_for(ws.recv(),min(8,end-time.monotonic())))
+                        quote=(row.get('feeds') or {}).get('price') or {}
+                        def age(x):
+                            try:return round(time.time()-float(x),3)
+                            except (ValueError,TypeError):return None
+                        quote_age,tick_age=age(quote.get('ts')),age(row.get('ts'))
+                        out(kind='canonical_clock',instrument=row.get('instrument'),quote_age_sec=quote_age,tick_age_sec=tick_age,source=quote.get('source'),status=quote.get('status'))
+                        if (quote_age is not None and tick_age is not None and -5<=quote_age<=15 and -5<=tick_age<=10):
+                            observations.append(row.get('ts'))
+                            if len(observations)>=3 and observations[-1]!=observations[-3]:
+                                out(kind='live_tick_acceptance',three_fresh_advancing_generations=True);return
+                        else:observations=[]
+                raise RuntimeError('THREE_FRESH_CANONICAL_GENERATIONS_NOT_OBSERVED')
+            asyncio.run(clock())
             try:
-                info=os.fstat(lock);assert stat.S_ISREG(info.st_mode) and info.st_uid==0
-                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            finally:os.close(lock)
-            assert subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5).strip()==app_pid
-            print(json.dumps({'kind':'inventory_drained_for_live_availability','target_pid':pid,'sigterm_sent':sent,'reader_exit_confirmed':True,'maintenance_lock_free':True,'app_pid_unchanged':True,'database_writes':0,'restarts':0,'provider_calls':0,'orders':0}))
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/history?include_management=true',timeout=5) as response:
+                    raw=response.read(2*1024**2+1)
+                    if len(raw)>2*1024**2:raise ValueError('HISTORY_BOUND')
+                    items=json.loads(raw).get('items') or []
+                saved=items[-1] if items else {};ensemble=(saved.get('management_archive') or {}).get('unified_edge_ensemble') or {}
+                model=saved.get('model');model=model if isinstance(model,str) and re.fullmatch(r'[A-Za-z0-9_./:-]{1,120}',model) else None
+                out(kind='saved_review_audit',saved_only=True,age_sec=round(time.time()-saved['ts'],1) if saved.get('ts') else None,model=model,selected_policy=ensemble.get('selected_policy'),components=[{k:row.get(k) for k in ('component_id','availability','available','effective_weight','reason')} for row in ensemble.get('components',[])])
+            except (OSError,ValueError) as exc:out(kind='saved_review_audit',available=False,exception_class=type(exc).__name__)
+            now=time.time();deadline=time.monotonic()+2
+            db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.1)
+            try:
+                db.execute('PRAGMA query_only=ON');db.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+                bars=db.execute('SELECT bar_start_ts,bar_end_ts,source,kind FROM passive_market_bars WHERE instrument=? ORDER BY bar_start_ts DESC LIMIT 15',('NAS100',)).fetchall()
+                out(kind='archived_nas100_bar_clocks',rows=len(bars),latest_end_age_sec=round(now-bars[0][1],1) if bars else None,sources=sorted({str(x[2])[:120] for x in bars}),kinds=sorted({str(x[3])[:80] for x in bars}),continuous_1m=all(abs(bars[i][0]-bars[i+1][0]-60)<1 for i in range(len(bars)-1)))
+            finally:db.close()
+            from seiltanzer.edge_family_source_runtime import load_family_source_context
+            context=load_family_source_context(SimpleNamespace(settings=SimpleNamespace(data_dir='/opt/seiltanzer/data')),{'instrument':'NAS100','captured_ts':now},'0ca3bd68251135cbc22586a02f97214551bcafa8')
+            audit=context.get('edge_family_source_bundle_audit') or {}
+            out(kind='current_family_source_admission',available=audit.get('available'),reason=audit.get('reason'),rejection_reasons=dict(collections.Counter(str(x.get('reason')) for x in audit.get('rejected_sources',[]))),admitted_record_counts={k:len(v) if isinstance(v,list) else 1 for k,v in context.get('edge_family_sources',{}).items()})
+            for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json'):
+                path=Path('/opt/seiltanzer/data/research')/name
+                if not 0<path.stat().st_size<=1000000:raise RuntimeError('PUBLICATION_BOUND')
+                value=json.loads(path.read_bytes());out(kind='publication',name=name,exact_sha=value.get('published_for_sha')=='0ca3bd68251135cbc22586a02f97214551bcafa8',age_sec=round(time.time()-path.stat().st_mtime,1))
+            out(kind='safety',review_posts=0,provider_calls=0,database_writes=0,restarts=0,acks=0,orders=0)
             PY
-
