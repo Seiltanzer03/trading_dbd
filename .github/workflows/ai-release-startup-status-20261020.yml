@@ -10,55 +10,29 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read bounded capacity metadata and last saved report, without recomputation
+      - name: Read log rotation configuration and allocation only
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 60s
+          command_timeout: 30s
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = ffdc513b5acb8746b54cdf852b55218ca21be336
             /usr/bin/python3 -u - <<'PY'
-            import json,os,re,shutil,stat,subprocess,time,urllib.request
+            import json,stat,subprocess
             from pathlib import Path
-            print(json.dumps({'kind':'capacity','free_bytes':shutil.disk_usage('/').free,'background_minimum':1024**3+32*1024**2}))
-            for name in ['/opt/seiltanzer/data/trades.db','/opt/seiltanzer/data/trades.db-wal','/var/log/syslog','/var/log/auth.log']:
-                path=Path(name)
-                try:
-                    info=path.lstat()
-                    print(json.dumps({'kind':'file_metadata','path':name,'regular':stat.S_ISREG(info.st_mode),'logical_bytes':info.st_size,'allocated_bytes':info.st_blocks*512,'modified':info.st_mtime}))
-                except FileNotFoundError:pass
-            for name in ['/var/lib/apt/lists','/var/cache/apt','/opt/actions-runner/_work/_update','/var/log']:
-                try:
-                    result=subprocess.run(['du','-sx','-B1',name],capture_output=True,text=True,timeout=8)
-                    print(json.dumps({'kind':'directory_allocation','path':name,'returncode':result.returncode,'allocation':result.stdout.strip()}))
-                except subprocess.TimeoutExpired:
-                    print(json.dumps({'kind':'directory_allocation','path':name,'status':'BOUNDED_READ_TIMEOUT'}))
-            root=Path('/var/lib/apt/lists')
-            total=0
+            root=Path('/var/log')
             for path in root.iterdir():
-                info=path.lstat()
-                if stat.S_ISREG(info.st_mode) and info.st_nlink==1 and path.name.endswith(('_Packages','_Packages.lz4','_Packages.gz','_Packages.xz')):total+=info.st_blocks*512
-            print(json.dumps({'kind':'reproducible_apt_indexes','allocated_bytes':total}))
-            try:
-                with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/history?include_management=true',timeout=10) as response:
-                    raw=response.read(4*1024**2+1)
-                    assert len(raw)<=4*1024**2,'BOUNDED_HISTORY_RESPONSE_EXCEEDED'
-                    history=json.loads(raw)
-                items=history.get('items') or []
-                if items:
-                    item=items[-1];archive=item.get('management_archive') or {};audit=archive.get('unified_edge_ensemble') or {}
-                    model=item.get('model')
-                    print(json.dumps({'kind':'saved_review','age_sec':round(time.time()-float(item.get('ts') or 0),1),'model':model if isinstance(model,str) and re.fullmatch(r'[A-Za-z0-9_./:-]{1,120}',model) else None,'selected_policy':audit.get('selected_policy'),'archive_available':archive.get('available'),'execution_allowed':archive.get('execution_allowed')}))
-                    for component in audit.get('components') or []:
-                        print(json.dumps({'kind':'saved_component',**{k:component.get(k) for k in ['component_id','available','effective_weight','reason','quality_basis']}}))
-                    families=audit.get('edge_families') or []
-                    if isinstance(families,dict):families=list(families.values())
-                    for family in families:
-                        print(json.dumps({'kind':'saved_family',**{k:family.get(k) for k in ['family_id','available','forecast_available','working_assessment_available','status','reason']}}))
-                else:print(json.dumps({'kind':'saved_review','available':False}))
-            except (OSError,ValueError) as exc:print(json.dumps({'kind':'saved_review','error':type(exc).__name__}))
-            print(json.dumps({'kind':'safety','provider_calls':0,'review_posts':0,'db_writes':0,'app_writes':0,'deletions':0,'restarts':0,'acks':0}))
+                if path.name.startswith(('syslog','auth.log','kern.log','daemon.log')):
+                    info=path.lstat()
+                    print(json.dumps({'kind':'log_metadata','name':path.name,'regular':stat.S_ISREG(info.st_mode),'links':info.st_nlink,'logical_bytes':info.st_size,'allocated_bytes':info.st_blocks*512,'uid':info.st_uid,'gid':info.st_gid,'mode':oct(stat.S_IMODE(info.st_mode)),'modified':info.st_mtime}))
+            for name in ['/etc/logrotate.d/rsyslog','/usr/lib/rsyslog/rsyslog-rotate']:
+                path=Path(name)
+                if path.is_file() and path.stat().st_size<20000:
+                    print(json.dumps({'kind':'rotation_configuration','path':name,'content':path.read_text()}))
+            for args in [['logrotate','--version'],['systemctl','show','rsyslog','-p','MainPID','-p','ActiveState','-p','SubState'],['journalctl','--disk-usage']]:
+                result=subprocess.run(args,text=True,capture_output=True,timeout=5)
+                print(json.dumps({'kind':'metadata_command','command':args[0],'returncode':result.returncode,'lines':(result.stdout+result.stderr).splitlines()[:12]}))
+            print(json.dumps({'kind':'safety','writes':0,'deletions':0,'signals':0,'app_restarts':0,'provider_calls':0,'acks':0}))
             PY
