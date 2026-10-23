@@ -30,7 +30,8 @@ from .llm_decision_shadow import (
     record_shadow_decision,
 )
 from .llm_shadow_working_action import build_working_action
-from .ai_provider_contract import provider_response_format, normalize_family_wire
+from .ai_provider_contract import (POLICY_SCORE_ORDER, provider_response_format,
+    normalize_family_wire, normalize_score_wire)
 
 
 REPORT_VERSION = "ai-runtime-report-v20"
@@ -48,7 +49,9 @@ You MUST NOT change, execute, or present the shadow policy as the production act
 Return only JSON matching the supplied response schema, without markdown.
 policy must be exactly one canonical action name from the schema, never a joined
 list, an explanation, an unavailable label or a parameterized candidate ID.
-Return all12 policy_scores; the server writes the displayed report.
+Return policy_scores as exactly12 numbers in this fixed order:
+""" + ', '.join(POLICY_SCORE_ORDER) + """.
+The server writes the displayed report.
 Keep reason_ru under100 characters; use1-2 concise key facts and at most1
 counter-fact/invalidation. Empty evidence lists are allowed when facts are absent.
 family_assessments is an array: use[] when no observed features support an opinion.
@@ -63,7 +66,7 @@ Low reliability is not an absolute ban: only the server degraded-manual gate can
 Never assert stress stability when its numeric checks are UNAVAILABLE.
 Correlated metrics from one family are not independent votes. Hard-CVaR eligibility
 is mandatory. Never widen stops, average down, or add to a losing position.
-Return all 12 policy_scores, each from -1 to 1: relative preferences, not
+Return all 12 policy_scores as the ordered array, each from -1 to 1: relative preferences, not
 probabilities or Expected R. Self-confidence never determines ensemble weight.
 Assess all eight families using ONLY the exact numeric features supplied in
 edge_family_facts, preserving observed versus preliminary proxy/scenario roles.
@@ -390,7 +393,7 @@ def _provider_payload(content: str) -> tuple[str, dict[str, Any]]:
     shadow_raw = payload.get("shadow_decision")
     if not isinstance(shadow_raw, dict):
         raise RuntimeError("combined_provider_missing_shadow")
-    shadow = _validate_model_payload(normalize_family_wire(shadow_raw))
+    shadow = _validate_model_payload(normalize_family_wire(normalize_score_wire(shadow_raw)))
     if "policy_scores" not in shadow:
         raise RuntimeError("combined_provider_missing_policy_scores")
     return explanation, shadow
@@ -558,6 +561,8 @@ def request_explanation_with_shadow(
                 "version": "independent-llm-transport-v1",
                 "quant_selection_masked": True,
                 "all_policy_scores_required": True,
+                "policy_score_wire_version": "ordered-vector-v1",
+                "policy_score_order": list(POLICY_SCORE_ORDER),
                 "input_captured_ts": authority.get("captured_ts"),
                 "frozen_input_json": frozen_input_json,
                 "frozen_input_sha256": hashlib.sha256(frozen_input_json.encode("utf-8")).hexdigest(),

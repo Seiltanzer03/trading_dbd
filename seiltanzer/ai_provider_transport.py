@@ -2,9 +2,33 @@
 from __future__ import annotations
 
 import json
+import threading
 from urllib.parse import urlsplit
 
 import httpx
+
+_SOCKS_CLIENT = threading.local()
+
+
+def _close_socks_client():
+    cached = getattr(_SOCKS_CLIENT, 'cached', None)
+    _SOCKS_CLIENT.cached = None
+    if cached is not None:
+        cached[1].close()
+
+
+def _socks_client(url, proxy, factory, ca_path, curl_options):
+    # The single provider worker owns this session and its in-flight request.
+    # Never close its handle from the outer deadline/cancellation thread.
+    target = urlsplit(url)
+    key = (target.scheme, target.netloc, proxy, ca_path, factory)
+    cached = getattr(_SOCKS_CLIENT, 'cached', None)
+    if cached is None or cached[0] != key:
+        _close_socks_client()
+        client = factory(trust_env=False, verify=ca_path,
+                         curl_options=curl_options, discard_cookies=True)
+        _SOCKS_CLIENT.cached = (key, client)
+    return _SOCKS_CLIENT.cached[1]
 
 
 def post_json(url, *, proxy, body, headers, timeout):
@@ -30,13 +54,16 @@ def post_json(url, *, proxy, body, headers, timeout):
         # libcurl still honors NO_PROXY; curl_cffi's session also reads CA
         # environment variables independently of trust_env. Override both per
         # session without mutating the multithreaded process environment.
-        with curl_requests.Session(trust_env=False, verify=certifi.where(),
-                                   curl_options={CurlOpt.NOPROXY: ''}) as client:
-            response = client.post(url, data=payload, headers=headers, proxy=proxy,
-                                   timeout=timeout, allow_redirects=False, verify=True)
+        client = _socks_client(url, proxy, curl_requests.Session, certifi.where(),
+                               {CurlOpt.NOPROXY: ''})
+        response = client.post(url, data=payload, headers=headers, proxy=proxy,
+                               timeout=timeout, allow_redirects=False, verify=True,
+                               discard_cookies=True)
     except curl_requests.exceptions.Timeout:
+        _close_socks_client()
         raise httpx.TimeoutException('SOCKS provider transport deadline exceeded') from None
     except curl_requests.exceptions.RequestException:
+        _close_socks_client()
         # Exception messages may include proxy credentials or request details.
         raise httpx.ProxyError('SOCKS provider connection failed') from None
     # libcurl already decoded the body; retaining its wire encoding would make

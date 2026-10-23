@@ -4,6 +4,8 @@ from __future__ import annotations
 from .edge_family_adapters import FAMILIES
 from .llm_decision_shadow import VALID_POLICIES
 
+POLICY_SCORE_ORDER = VALID_POLICIES
+
 
 def _object(properties):
     return dict(type='object', properties=properties,
@@ -24,15 +26,34 @@ def provider_response_format():
     shadow = _object(dict(
         policy=dict(type='string', enum=actions),
         confidence=dict(type='number'),
-        policy_scores=_object({name: dict(type='number') for name in actions}),
+        policy_scores=dict(type='array', minItems=len(POLICY_SCORE_ORDER),
+            maxItems=len(POLICY_SCORE_ORDER),
+            items=dict(type='number', minimum=-1, maximum=1),
+            description='Exactly one score per action in this fixed order: '
+                        + ', '.join(POLICY_SCORE_ORDER)),
         reason_ru=dict(type='string'),
         key_evidence=strings(), counter_evidence=strings(),
         evidence_families=strings(),
         family_assessments=dict(type='array', items=family),
         invalidation_conditions=strings()))
     return dict(type='json_schema', json_schema=dict(
-        name='independent_trade_preferences_v1', strict=True,
+        name='independent_trade_preferences_v2', strict=True,
         schema=_object(dict(shadow_decision=shadow))))
+
+
+def normalize_score_wire(shadow):
+    """Decode the complete ordered vector; never infer or fill any preference.
+
+    Keyed legacy responses retain the existing domain validator and archives.
+    """
+    scores = shadow.get('policy_scores')
+    if not isinstance(scores, list):
+        return shadow
+    if (len(scores) != len(POLICY_SCORE_ORDER)
+            or any(type(value) not in (int, float) or not -1 <= value <= 1
+                   for value in scores)):
+        raise RuntimeError('shadow_invalid_policy_scores')
+    return {**shadow, 'policy_scores': dict(zip(POLICY_SCORE_ORDER, scores))}
 
 
 def normalize_family_wire(shadow):

@@ -23,7 +23,7 @@ from seiltanzer.research_acceptance_gate import (  # noqa: E402
 
 
 MARKER_DIR = Path("/var/lock")
-ALLOWED_MARKER_STAGES = {"post-research", "g1m-local-edge", "ede-inventory"}
+ALLOWED_MARKER_STAGES = {"post-research", "g1m-local-edge", "ede-inventory-ready", "ede-inventory"}
 MARKER_CONTRACT_VERSION = "production-research-acceptance-marker-v2"
 
 
