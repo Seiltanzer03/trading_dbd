@@ -295,4 +295,5 @@ def test_compact_report_keeps_distinct_independent_and_common_admission_values()
     assert 'Независимый допуск' in text
     assert '+0.086R' in text
     assert 'различные модели' in text
-    assert 'проверяемое ΔExpected' in text
+    assert 'нижняя MC/seed-граница ΔExpected' in text
+    assert 'не рыночная уверенность' in text

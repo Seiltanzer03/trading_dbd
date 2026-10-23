@@ -358,13 +358,17 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
                          + _format(sacrifice.get('budget_r'), 'R') + ". Это сравнение с лучшим допустимым Expected.")
         benefit = row.get('benefit_assessment') or {}
         if row.get('policy') != 'HOLD' and benefit.get('expected_test_value_r') is not None:
-            lines.append("Допуск ранжирования: проверяемое ΔExpected "
+            paired_bound = benefit.get('sensitivity_basis') == 'PAIRED_MODEL_BOUND'
+            label = "нижняя MC/seed-граница ΔExpected " if paired_bound else "точечное ΔExpected "
+            lines.append("Допуск ранжирования: " + label
                          + _format(benefit.get('expected_test_value_r'), 'R') + "; порог прибыли > "
                          + _format(benefit.get('indifference_band_r'), 'R') + "; защитная плата Expected ≥ "
                          + _format(-benefit['indifference_band_r'], 'R') + "; проверяемый прирост хвоста "
                          + _format(benefit.get('tail_test_value_r'), 'R') + "; минимум "
                          + _format(benefit.get('minimum_tail_gain_r'), 'R') + "; основание "
-                         + str(benefit.get('basis') or '—') + ".")
+                         + str(benefit.get('basis') or '—') + "."
+                         + (" Граница учитывает ошибку симуляции и различия seed; это не рыночная уверенность."
+                            if paired_bound else " MC/seed-граница недоступна; использована точечная экономика."))
         independent = row.get('independent_evaluation') or {}
         if independent:
             lines.append("Независимый допуск: " + str(independent.get('status') or '—') + "; "
