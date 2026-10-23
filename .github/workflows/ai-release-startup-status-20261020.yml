@@ -56,6 +56,12 @@ jobs:
                         if len(raw)>2*1024**2:raise ValueError('RESPONSE_BOUND')
                         row=json.loads(raw)
                         out(kind='endpoint',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','age_sec','build_ms','build_n','last_error') if k in row})
+                        if path=='/api/state':
+                            quote=(row.get('feeds') or {}).get('price') or {}
+                            def age(value):
+                                try:return round(time.time()-float(value),3)
+                                except (TypeError,ValueError):return None
+                            out(kind='canonical_quote',instrument=row.get('instrument'),source=quote.get('source'),status=quote.get('status'),quote_age_sec=age(quote.get('ts')),payload_age_sec=age(row.get('ts')))
                         if path.endswith('/worker-status'):
                             worker=row.get('worker') or {}
                             out(kind='acceptance_worker',sqlite_access=row.get('sqlite_access'),fields={k:worker.get(k) for k in ('current_phase','core_stage','first_cycle_not_before_ts','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','last_error','disk_pause_active','acceptance_pause_active')})
