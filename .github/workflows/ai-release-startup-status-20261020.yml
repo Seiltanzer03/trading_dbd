@@ -48,7 +48,7 @@ jobs:
                     continue
                 matrix=value.get('family_market_models') or {}
                 out(kind='publication',name=name,size_bytes=size,exact_release=value.get('published_for_sha')==sha,within_math_loader_size=size<=500000,trained_groups=sum(isinstance(row,dict) and row.get('status')=='TRAINED' for groups in matrix.values() if isinstance(groups,dict) for row in groups.values()))
-            for path in ('/api/state','/api/ai/snapshot/status'):
+            for path in ('/api/state','/api/ai/snapshot/status','/api/research/runtime/worker-status'):
                 started=time.monotonic()
                 try:
                     with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=3) as response:
@@ -56,6 +56,9 @@ jobs:
                         if len(raw)>2*1024**2:raise ValueError('RESPONSE_BOUND')
                         row=json.loads(raw)
                         out(kind='endpoint',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','age_sec','build_ms','build_n','last_error') if k in row})
+                        if path.endswith('/worker-status'):
+                            worker=row.get('worker') or {}
+                            out(kind='acceptance_worker',sqlite_access=row.get('sqlite_access'),fields={k:worker.get(k) for k in ('current_phase','core_stage','first_cycle_not_before_ts','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','last_error','disk_pause_active','acceptance_pause_active')})
                 except (OSError,ValueError) as exc:out(kind='endpoint',path=path,available=False,exception_class=type(exc).__name__)
             out(kind='safety',provider_calls=0,review_posts=0,acks=0,orders=0,database_writes=0,restarts=0)
             PY
