@@ -41,7 +41,11 @@ jobs:
             for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json'):
                 p=Path('/opt/seiltanzer/data/research')/name
                 if not p.exists():out(kind='publication',name=name,available=False);continue
-                size=p.stat().st_size;value=json.loads(p.read_bytes()) if 0<size<=1000000 else {}
+                size=p.stat().st_size;raw=p.read_bytes() if 0<size<=1000000 else b''
+                try:value=json.loads(raw) if raw else {}
+                except (ValueError,UnicodeError) as exc:
+                    out(kind='invalid_publication',name=name,size_bytes=size,error_class=type(exc).__name__,error_position=getattr(exc,'pos',None),nul_bytes=raw.count(b'\x00'))
+                    continue
                 matrix=value.get('family_market_models') or {}
                 out(kind='publication',name=name,size_bytes=size,exact_release=value.get('published_for_sha')==sha,within_math_loader_size=size<=500000,trained_groups=sum(isinstance(row,dict) and row.get('status')=='TRAINED' for groups in matrix.values() if isinstance(groups,dict) for row in groups.values()))
             for path in ('/api/state','/api/ai/snapshot/status'):
