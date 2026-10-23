@@ -31,12 +31,26 @@ jobs:
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize,background_admitted=st.f_bavail*st.f_frsize>=1024**3+32*1024**2)
             block=subprocess.run(['lsblk','--bytes','--json','--output','NAME,SIZE,FSTYPE,MOUNTPOINT'],capture_output=True,text=True,timeout=5)
             if block.returncode==0:out(kind='block_capacity',devices=json.loads(block.stdout).get('blockdevices',[]))
-            for path in ('/api/state','/api/ai/snapshot/status','/api/research/g1/q/audit?limit=5000&include_items=false'):
+            for path in ('/api/state','/api/ai/snapshot/status'):
                 started=time.monotonic()
                 with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:
                     row=json.loads(response.read(2*1024**2))
                     out(kind='endpoint',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','age_sec','build_ms','build_n','last_error') if k in row})
-                    if '/q/audit?' in path:out(kind='current_q_maturity',counts=row.get('counts'),attempt_n=row.get('attempt_n'))
+            from seiltanzer.g1_q_audit_scalability import _candidate_requests,_terminal_candidate_batch_snapshot
+            db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.1)
+            db.row_factory=sqlite3.Row
+            try:
+                deadline=time.monotonic()+2;db.execute('PRAGMA query_only=ON');db.set_progress_handler(lambda:time.monotonic()>deadline,1000);db.execute('BEGIN')
+                rows=db.execute('SELECT q.attempt_id,q.attempt_ts,q.target_instrument,q.observation_created,q.created_observation_id,q.blocker_code,q.requested_expiry_ts,p.target_ts,p.resolution_status,p.instrument FROM g1_q_capture_attempts q LEFT JOIN passive_market_observations p ON p.observation_id=q.created_observation_id ORDER BY q.attempt_ts DESC LIMIT 5000').fetchall()
+                now=time.time();requests=_candidate_requests(rows,now=now,include_diagnostics=False);candidates=_terminal_candidate_batch_snapshot(db,requests)
+                due=[dict(rows[key]) for key,instrument,target in requests if candidates.get(key,(None,None))[0] is not None and candidates[key][0]>=target-1e-6]
+                unique={row['created_observation_id']:row for row in due}
+                head=db.execute("SELECT observation_id,instrument,captured_ts,target_ts FROM passive_market_observations WHERE resolution_status='pending' AND target_ts<=? ORDER BY target_ts LIMIT 101",(now,)).fetchall()
+                first20={row['observation_id'] for row in head[:20]}
+                out(kind='native_q_pending_queue',audit_attempts=len(rows),overdue_attempts=len(due),distinct_due_observations=len(unique),pending_prefix_capped_101=len(head),oldest_pending_age_sec=round(now-head[0]['target_ts'],1) if head else None,due=[dict(observation_id=key,instrument=row['instrument'],target_ts=row['target_ts'],overdue_age_sec=round(now-row['target_ts'],1),inside_native_first20=key in first20) for key,row in unique.items()])
+                out(kind='native_pending_prefix',items=[dict(instrument=row['instrument'],target_ts=row['target_ts']) for row in head[:20]])
+            except sqlite3.OperationalError as exc:out(kind='native_q_pending_queue',available=False,error_class=type(exc).__name__,deadline_sec=2)
+            finally:db.close()
             async def clock():
                 import websockets
                 observations=[];end=time.monotonic()+30
