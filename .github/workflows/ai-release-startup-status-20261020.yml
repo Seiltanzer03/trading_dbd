@@ -25,6 +25,13 @@ jobs:
             from pathlib import Path
             def out(**row):print(json.dumps(row,sort_keys=True))
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
+            for directory in ('/opt','/var','/tmp','/root'):
+                result=subprocess.run(['nice','-n','10','du','-x','-B1','--max-depth=1',directory],capture_output=True,text=True,timeout=12)
+                rows=[]
+                for line in result.stdout.splitlines():
+                    size,_,path=line.partition('\t')
+                    if size.isdigit():rows.append((int(size),path))
+                out(kind='directory_capacity',directory=directory,largest=sorted(rows,reverse=True)[:8],returncode=result.returncode)
             for name in ('/var/log/syslog','/var/log/syslog.1','/var/log/kern.log','/var/log/daemon.log','/opt/seiltanzer/data/trades.db','/opt/seiltanzer/data/trades.db-wal'):
                 p=Path(name)
                 try:
