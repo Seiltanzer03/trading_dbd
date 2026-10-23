@@ -39,8 +39,28 @@ jobs:
             try:proof=json.loads(result.stdout)
             except ValueError:proof={'parse_error':True}
             out(kind='admission',returncode=result.returncode,elapsed_ms=round((time.monotonic()-started)*1000,1),proof=proof)
-            for args in (['ps','-eo','pid,ppid,pcpu,rss,stat,etime,comm','--sort=-pcpu'],['free','-m']):
-                out(kind='resource',command=args[0],lines=run(args).stdout.splitlines()[:10])
+            import sqlite3
+            ns={'__name__':'_readonly_history_phases','__file__':'/opt/seiltanzer/seiltanzer/history_storage_state.py'}
+            exec(compile(Path(ns['__file__']).read_bytes(),ns['__file__'],'exec'),ns)
+            conn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
+            conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-2048')
+            diagnostic_started=time.monotonic()
+            conn.set_progress_handler(lambda:int(time.monotonic()-diagnostic_started>=25),1000)
+            phase='state'
+            try:
+                started=time.monotonic();state=ns['read_history_state'](conn)
+                out(kind='history_phase',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1))
+                for table,proof in state['retained_identity'].items():
+                    phase=table;started=time.monotonic()
+                    actual=ns['identity_proof'](conn,table,proof['max_rowid'])
+                    out(kind='history_phase',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1),matched=actual==proof,rows=actual['row_count'])
+                phase='runtime_projection';started=time.monotonic()
+                codec=ns['_runtime_projection']()
+                codec.validate_runtime_projection(conn,state['runtime_projection'],retired_rowids=state['retired_rowids']['passive_market_observations'])
+                out(kind='history_phase',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1),matched=True)
+            except Exception as exc:
+                out(kind='history_phase_error',phase=phase,error=type(exc).__name__,sqlite_errorname=getattr(exc,'sqlite_errorname',None),elapsed_ms=round((time.monotonic()-diagnostic_started)*1000,1))
+            finally:conn.close()
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
             out(kind='safety',read_only=True,restarts=0,provider_calls=0,acks=0,db_writes=0,history_mutations=0)
             PY
