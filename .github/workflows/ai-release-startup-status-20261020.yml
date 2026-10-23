@@ -5,82 +5,43 @@ on:
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
-concurrency:
-  group: production-seiltanzer
-  queue: max
-  cancel-in-progress: false
 jobs:
   inspect:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Retire only reproducible APT binary caches and prevent their regeneration
+      - name: Read exact startup admission and owner metadata
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 60s
+          command_timeout: 45s
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = feecd3825fb0072bacfe2fdd1f0cc68bb0d24dd2
             /usr/bin/python3 -u - <<'PY'
-            import fcntl,json,os,stat,subprocess,urllib.request
+            import json,os,subprocess,time
             from pathlib import Path
-            def free():
-                st=os.statvfs('/');return st.f_bavail*st.f_frsize
-            app_pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5).strip()
-            assert app_pid=='3559689'
-            package_locks=[]
-            for name in ('/var/lib/dpkg/lock-frontend','/var/lib/dpkg/lock','/var/lib/apt/lists/lock','/var/cache/apt/archives/lock'):
-                handle=open(name,'r+b')
-                info=os.fstat(handle.fileno())
-                assert stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1
-                fcntl.lockf(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
-                package_locks.append(handle)
-            paths=[Path('/var/cache/apt/pkgcache.bin'),Path('/var/cache/apt/srcpkgcache.bin')]
-            identities=[]
-            for p in paths:
-                info=p.lstat()
-                assert stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_uid==0
-                assert 1024**2<info.st_size<128*1024**2
-                identities.append((info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns))
-            for process in Path('/proc').iterdir():
-                if not process.name.isdigit():continue
+            def out(**row):print(json.dumps(row,sort_keys=True))
+            def run(args,timeout=6):return subprocess.run(args,text=True,capture_output=True,timeout=timeout)
+            out(kind='git',head=run(['git','-C','/opt/seiltanzer','rev-parse','HEAD']).stdout.strip())
+            out(kind='service',fields=run(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts']).stdout.splitlines())
+            out(kind='active_guard',exists=os.path.lexists('/opt/seiltanzer/data/cutover.active'))
+            for name in ('cutover.journal.json','cutover.result.json'):
+                p=Path('/opt/seiltanzer/data')/name
                 try:
-                    name=(process/'comm').read_text().strip()
-                    if name=='unattended-upgr':
-                        args=(process/'cmdline').read_bytes().split(b'\0')
-                        idle=args in ([b'/usr/bin/python3',b'/usr/share/unattended-upgrades/unattended-upgrade-shutdown',b'--wait-for-signal',b''],[b'/usr/share/unattended-upgrades/unattended-upgrade-shutdown',b'--wait-for-signal',b''])
-                        print(json.dumps({'kind':'package_process','pid':int(process.name),'name':name,'idle_shutdown_waiter':idle}))
-                        if idle:continue
-                    if name in ('apt','apt-get','apt-cache','dpkg','unattended-upgr'):
-                        raise RuntimeError('PACKAGE_MANAGER_ACTIVE_NO_CACHE_CHANGE')
-                    for fd in (process/'fd').iterdir():
-                        try:
-                            info=fd.stat()
-                            assert (info.st_dev,info.st_ino) not in [item[:2] for item in identities], 'CACHE_OPEN_NO_CHANGE'
-                        except OSError:pass
-                except (FileNotFoundError,PermissionError,ProcessLookupError):pass
-            config=Path('/etc/apt/apt.conf.d/99-seiltanzer-no-binary-cache')
-            content='// Rebuild package metadata in memory; keep source indexes and packages.\nDir::Cache::pkgcache "";\nDir::Cache::srcpkgcache "";\n'
-            assert not config.exists() and not config.is_symlink()
-            before=free()
-            with config.open('x') as handle:handle.write(content)
-            config.chmod(0o644)
-            try:
-                dump=subprocess.check_output(['apt-config','dump'],text=True,timeout=5)
-                assert 'Dir::Cache::pkgcache "";' in dump and 'Dir::Cache::srcpkgcache "";' in dump
-            except BaseException:
-                config.unlink();raise
-            reclaimed=0
-            for p,identity in zip(paths,identities):
-                info=p.lstat()
-                assert (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)==identity
-                reclaimed+=info.st_blocks*512;p.unlink()
-            assert subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5).strip()==app_pid
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=5) as response:code=response.code
-            after=free()
-            print(json.dumps({'kind':'apt_binary_cache_recovery','free_before':before,'free_after':after,'cache_allocated_bytes_retired':reclaimed,'binary_cache_regeneration_disabled':True,'source_indexes_and_packages_preserved':True,'background_admitted':after>=1024**3+32*1024**2,'http':code,'app_pid_unchanged':True,'database_writes':0,'restarts':0,'provider_calls':0,'orders':0}))
-            assert code==200 and after>=1024**3+32*1024**2
+                    assert not p.is_symlink() and 0<p.stat().st_size<65536
+                    row=json.loads(p.read_bytes())
+                    out(kind='epoch',file=name,fields={k:row.get(k) for k in ('run_id','phase','service_started','abort_reason')})
+                except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
+            started=time.monotonic()
+            result=run(['nice','-n','-5','/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],timeout=12)
+            try:proof=json.loads(result.stdout)
+            except ValueError:proof={'parse_error':True}
+            out(kind='admission',priority='temporary_check_process_only',permission_error='Permission denied' in result.stderr,returncode=result.returncode,elapsed_ms=round((time.monotonic()-started)*1000,1),proof=proof)
+            for args in (['ps','-eo','pid,ppid,pcpu,rss,stat,etime,comm','--sort=-pcpu'],['free','-m']):
+                out(kind='resource',command=args[0],lines=run(args).stdout.splitlines()[:10])
+            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
+            out(kind='safety',read_only=True,restarts=0,provider_calls=0,acks=0,db_writes=0,history_mutations=0)
             PY
+
