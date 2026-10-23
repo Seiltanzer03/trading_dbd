@@ -24,7 +24,7 @@ jobs:
             from pathlib import Path
             def out(**row):print(json.dumps(row,sort_keys=True))
             sha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()
-            out(kind='installed_release',sha=sha,expected=sha=='d2643064b450ac9d342154f3e3e974a07a12733e')
+            out(kind='installed_release',sha=sha,expected=sha=='cbe12ff6b719ed8c2f25f568c1ab5805c807791b')
             props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ControlPID','-p','NRestarts','-p','ActiveState','-p','SubState','-p','MemoryCurrent'],text=True,timeout=3)
             out(kind='service',properties=props.splitlines())
             pid=int(dict(line.split('=',1) for line in props.splitlines()).get('MainPID') or 0)
@@ -57,11 +57,11 @@ jobs:
                         row=json.loads(raw)
                         out(kind='endpoint',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','age_sec','build_ms','build_n','last_error') if k in row})
                         if path=='/api/state':
-                            quote=(row.get('feeds') or {}).get('price') or {}
+                            tick=row.get('tick') or {};quote=(tick.get('feeds') or {}).get('price') or {}
                             def age(value):
                                 try:return round(time.time()-float(value),3)
                                 except (TypeError,ValueError):return None
-                            out(kind='canonical_quote',instrument=row.get('instrument'),source=quote.get('source'),status=quote.get('status'),quote_age_sec=age(quote.get('ts')),payload_age_sec=age(row.get('ts')))
+                            out(kind='canonical_quote',instrument=tick.get('instrument'),source=quote.get('source'),status=quote.get('status'),quote_age_sec=age(quote.get('ts')),payload_age_sec=age(tick.get('ts')))
                         if path.endswith('/worker-status'):
                             worker=row.get('worker') or {}
                             out(kind='acceptance_worker',sqlite_access=row.get('sqlite_access'),fields={k:worker.get(k) for k in ('current_phase','core_stage','first_cycle_not_before_ts','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','last_error','disk_pause_active','acceptance_pause_active')})
