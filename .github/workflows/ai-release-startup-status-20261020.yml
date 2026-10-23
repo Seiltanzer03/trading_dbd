@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Locate new disk usage without reading application payloads
+      - name: Identify active runner version and new updater staging
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -24,39 +24,32 @@ jobs:
             import json,os,stat,subprocess
             from pathlib import Path
             def out(**row):print(json.dumps(row,sort_keys=True))
-            for directory in ('/opt','/var','/tmp','/root/.cache'):
-                try:
-                    result=subprocess.run(['nice','-n','15','du','-x','-B1','--max-depth=2',directory],capture_output=True,text=True,timeout=12)
-                    rows=[]
-                    for line in result.stdout.splitlines():
-                        size,_,path=line.partition('\t')
-                        if size.isdigit():rows.append((int(size),path))
-                    out(kind='directory_usage',directory=directory,largest=sorted(rows,reverse=True)[:18],returncode=result.returncode)
-                except subprocess.TimeoutExpired:out(kind='directory_usage',directory=directory,timed_out=True)
-            for directory in ('/tmp','/opt/seiltanzer/data','/opt/seiltanzer/data/research','/opt/actions-runner/_work','/opt/actions-runner/_work/_update'):
-                root=Path(directory)
-                if not root.is_dir():continue
-                rows=[]
-                for p in list(root.iterdir())[:600]:
-                    try:
-                        info=p.lstat()
-                        if stat.S_ISREG(info.st_mode) and info.st_size>1024**2:rows.append((info.st_size,p.name,info.st_blocks*512))
-                    except OSError:pass
-                out(kind='bounded_files',directory=directory,largest=sorted(rows,reverse=True)[:18])
-            deleted={}
+            root=Path('/opt/actions-runner')
+            for name in ('bin','externals','run.sh','runsvc.sh'):
+                p=root/name
+                try:out(kind='runner_active_path',name=name,symlink=p.is_symlink(),target=str(p.resolve(strict=True)))
+                except OSError:out(kind='runner_active_path',name=name,unavailable=True)
+            result=subprocess.run(['nice','-n','15','du','-x','-B1','--max-depth=3',str(root)],capture_output=True,text=True,timeout=15)
+            rows=[]
+            for line in result.stdout.splitlines():
+                size,_,path=line.partition('\t')
+                if size.isdigit():rows.append((int(size),path))
+            out(kind='runner_usage',largest=sorted(rows,reverse=True)[:28],returncode=result.returncode)
+            workers=[]
             for process in Path('/proc').iterdir():
                 if not process.name.isdigit():continue
                 try:
-                    for fd in (process/'fd').iterdir():
-                        try:
-                            target=os.readlink(fd)
-                            if not target.endswith(' (deleted)'):continue
-                            info=fd.stat()
-                            if stat.S_ISREG(info.st_mode) and info.st_blocks*512>1024**2:
-                                deleted[(info.st_dev,info.st_ino)]={'pid':int(process.name),'name':Path(target[:-10]).name[:100],'allocated':info.st_blocks*512}
-                        except OSError:pass
+                    name=(process/'comm').read_text().strip()
+                    if not name.startswith(('Runner.','Runner_','run-helper')):continue
+                    workers.append({'pid':int(process.name),'name':name,'exe':os.readlink(process/'exe'),'cwd':os.readlink(process/'cwd'),'uid':process.stat().st_uid})
                 except OSError:pass
-            out(kind='open_deleted_files',files=sorted(deleted.values(),key=lambda r:r['allocated'],reverse=True)[:15])
+            out(kind='runner_processes',processes=workers)
+            for directory in (root/'_work',root/'_work'/'_update'):
+                if not directory.is_dir():continue
+                rows=[]
+                for p in list(directory.iterdir())[:200]:
+                    info=p.lstat();rows.append({'name':p.name,'regular':stat.S_ISREG(info.st_mode),'directory':stat.S_ISDIR(info.st_mode),'size':info.st_size,'allocated':info.st_blocks*512,'mtime_ns':info.st_mtime_ns})
+                out(kind='runner_staging_metadata',directory=str(directory),files=rows)
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
             out(kind='safety',database_writes=0,provider_calls=0,deletions=0,restarts=0,orders=0)
             PY
