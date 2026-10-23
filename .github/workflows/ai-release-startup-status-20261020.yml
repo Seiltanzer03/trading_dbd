@@ -34,33 +34,28 @@ jobs:
                     row=json.loads(p.read_bytes())
                     out(kind='epoch',file=name,fields={k:row.get(k) for k in ('run_id','phase','service_started','abort_reason')})
                 except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
+            locks=run(['lslocks','--json','--output','PID,COMMAND,TYPE,MODE,PATH'])
+            try:lock_rows=json.loads(locks.stdout).get('locks',[])
+            except ValueError:lock_rows=[]
+            owned=[row for row in lock_rows if str(row.get('path') or '').endswith('/opt/seiltanzer/.deployment-git-maintenance.lock')]
+            out(kind='deployment_lock',locks=owned)
+            for lock in owned:
+                pid=str(lock.get('pid') or '')
+                if not pid.isdigit():continue
+                out(kind='lock_owner',fields=run(['ps','-p',pid,'-o','pid,ppid,comm,etime,stat']).stdout.splitlines())
+                try:
+                    raw=(Path('/proc')/pid/'cmdline').read_bytes()
+                    out(kind='lock_owner_classification',pid=int(pid),known_deploy=b'Delivered exact production SHA' in raw,
+                        known_recovery=b'BACKUP_RECOVERY_REQUIRES_DELIVERED_EXACT_SHA' in raw,
+                        known_stage=b'compact_deployment_git' in raw,contains_expected_sha=b'feecd3825fb0072bacfe2fdd1f0cc68bb0d24dd2' in raw)
+                except OSError:pass
             started=time.monotonic()
             result=run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],timeout=12)
             try:proof=json.loads(result.stdout)
             except ValueError:proof={'parse_error':True}
             out(kind='admission',returncode=result.returncode,elapsed_ms=round((time.monotonic()-started)*1000,1),proof=proof)
-            import sqlite3
-            ns={'__name__':'_readonly_history_phases','__file__':'/opt/seiltanzer/seiltanzer/history_storage_state.py'}
-            exec(compile(Path(ns['__file__']).read_bytes(),ns['__file__'],'exec'),ns)
-            conn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
-            conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-2048')
-            diagnostic_started=time.monotonic()
-            conn.set_progress_handler(lambda:int(time.monotonic()-diagnostic_started>=25),1000)
-            phase='state'
-            try:
-                started=time.monotonic();state=ns['read_history_state'](conn)
-                out(kind='history_phase',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1))
-                for table,proof in state['retained_identity'].items():
-                    phase=table;started=time.monotonic()
-                    actual=ns['identity_proof'](conn,table,proof['max_rowid'])
-                    out(kind='history_phase',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1),matched=actual==proof,rows=actual['row_count'])
-                phase='runtime_projection';started=time.monotonic()
-                codec=ns['_runtime_projection']()
-                codec.validate_runtime_projection(conn,state['runtime_projection'],retired_rowids=state['retired_rowids']['passive_market_observations'])
-                out(kind='history_phase',phase=phase,elapsed_ms=round((time.monotonic()-started)*1000,1),matched=True)
-            except Exception as exc:
-                out(kind='history_phase_error',phase=phase,error=type(exc).__name__,sqlite_errorname=getattr(exc,'sqlite_errorname',None),elapsed_ms=round((time.monotonic()-diagnostic_started)*1000,1))
-            finally:conn.close()
+            for args in (['ps','-eo','pid,ppid,pcpu,rss,stat,etime,comm','--sort=-pcpu'],['free','-m']):
+                out(kind='resource',command=args[0],lines=run(args).stdout.splitlines()[:10])
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
             out(kind='safety',read_only=True,restarts=0,provider_calls=0,acks=0,db_writes=0,history_mutations=0)
             PY
