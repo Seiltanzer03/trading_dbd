@@ -574,12 +574,16 @@ class Journal:
                     (int(trade_id), float(ts), float(price), float(r)),
                 )
             reviews = self._conn.execute(
-                "SELECT d.review_id,d.captured_ts,MAX(p.ts) AS last_ts "
+                # The primary key (review_id,ts) permits one reverse index
+                # seek per review. Joining and grouping the complete growing
+                # path here stalls the canonical live tick before publication.
+                "SELECT d.review_id,d.captured_ts,"
+                "(SELECT p.ts FROM decision_path_points p WHERE p.review_id=d.review_id "
+                "ORDER BY p.ts DESC LIMIT 1) AS last_ts "
                 "FROM decision_snapshots d "
-                "LEFT JOIN decision_path_points p ON p.review_id=d.review_id "
-                "LEFT JOIN decision_replays x ON x.review_id=d.review_id "
-                "WHERE d.trade_id=? AND d.captured_ts<=? AND x.review_id IS NULL "
-                "GROUP BY d.review_id,d.captured_ts",
+                "WHERE d.trade_id=? AND d.captured_ts<=? "
+                "AND NOT EXISTS (SELECT 1 FROM decision_replays x WHERE x.review_id=d.review_id) "
+                "ORDER BY d.review_id,d.captured_ts",
                 (int(trade_id), float(ts)),
             ).fetchall()
             for review in reviews:
