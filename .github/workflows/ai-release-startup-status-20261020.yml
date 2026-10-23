@@ -8,48 +8,44 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 2
     steps:
-      - name: Identify active runner version and new updater staging
+      - name: Verify updater service ownership and actual root reserve
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 75s
+          command_timeout: 30s
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 0ca3bd68251135cbc22586a02f97214551bcafa8
-            /usr/bin/python3 -u - <<'PY'
-            import json,os,stat,subprocess
+            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
+            import json,os,stat,subprocess,time,urllib.request
             from pathlib import Path
             def out(**row):print(json.dumps(row,sort_keys=True))
-            root=Path('/opt/actions-runner')
-            for name in ('bin','externals','run.sh','runsvc.sh'):
-                p=root/name
-                try:out(kind='runner_active_path',name=name,symlink=p.is_symlink(),target=str(p.resolve(strict=True)))
-                except OSError:out(kind='runner_active_path',name=name,unavailable=True)
-            result=subprocess.run(['nice','-n','15','du','-x','-B1','--max-depth=3',str(root)],capture_output=True,text=True,timeout=15)
-            rows=[]
-            for line in result.stdout.splitlines():
-                size,_,path=line.partition('\t')
-                if size.isdigit():rows.append((int(size),path))
-            out(kind='runner_usage',largest=sorted(rows,reverse=True)[:28],returncode=result.returncode)
-            workers=[]
-            for process in Path('/proc').iterdir():
-                if not process.name.isdigit():continue
-                try:
-                    name=(process/'comm').read_text().strip()
-                    if not name.startswith(('Runner.','Runner_','run-helper')):continue
-                    workers.append({'pid':int(process.name),'name':name,'exe':os.readlink(process/'exe'),'cwd':os.readlink(process/'cwd'),'uid':process.stat().st_uid})
-                except OSError:pass
-            out(kind='runner_processes',processes=workers)
-            for directory in (root/'_work',root/'_work'/'_update'):
-                if not directory.is_dir():continue
-                rows=[]
-                for p in list(directory.iterdir())[:200]:
-                    info=p.lstat();rows.append({'name':p.name,'regular':stat.S_ISREG(info.st_mode),'directory':stat.S_ISDIR(info.st_mode),'size':info.st_size,'allocated':info.st_blocks*512,'mtime_ns':info.st_mtime_ns})
-                out(kind='runner_staging_metadata',directory=str(directory),files=rows)
-            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
-            out(kind='safety',database_writes=0,provider_calls=0,deletions=0,restarts=0,orders=0)
+            st=os.statvfs('/');free=st.f_bavail*st.f_frsize
+            out(kind='capacity',free_bytes=free,background_minimum_bytes=1024**3+32*1024**2,background_admitted=free>=1024**3+32*1024**2)
+            out(kind='filesystem_reserve',total_bytes=st.f_blocks*st.f_frsize,root_free_bytes=st.f_bfree*st.f_frsize,reserved_bytes=(st.f_bfree-st.f_bavail)*st.f_frsize)
+            service=Path('/opt/actions-runner/.service')
+            if service.is_file() and not service.is_symlink() and service.stat().st_size<512:
+                unit=service.read_text().strip()
+                import re
+                assert re.fullmatch(r'actions\.runner\.[A-Za-z0-9_.-]+\.service',unit)
+                info=subprocess.run(['systemctl','show',unit,'-p','Id','-p','ActiveState','-p','SubState','-p','MainPID','-p','WorkingDirectory','-p','UnitFileState','-p','FragmentPath'],capture_output=True,text=True,timeout=5)
+                out(kind='local_runner_unit',properties=info.stdout.splitlines(),returncode=info.returncode)
+            else:out(kind='local_runner_unit',available=False)
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState'],text=True,timeout=3)
+            out(kind='service',properties=props.splitlines())
+            for path in ('/api/state','/api/ai/snapshot/status'):
+                started=time.monotonic()
+                with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:
+                    raw=response.read(2*1024**2+1);assert len(raw)<=2*1024**2
+                    row=json.loads(raw)
+                out(kind='endpoint',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','age_sec','build_ms','last_error') if k in row})
+                quote=(row.get('feeds') or {}).get('price') or {}
+                if quote:
+                    stamp=quote.get('ts');age=round(time.time()-stamp,3) if type(stamp) in (int,float) else None
+                    out(kind='quote_clock',age_sec=age,status=quote.get('status'),source=quote.get('source'),derived=quote.get('derived'))
+            out(kind='safety',database_writes=0,provider_calls=0,review_posts=0,restarts=0,orders=0)
             PY
