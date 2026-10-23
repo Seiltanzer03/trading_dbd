@@ -188,8 +188,9 @@ export function mountUnifiedEdgeEnsemble(container, audit, { archived = false } 
     if (row.ranking_reason === 'EXPECTED_SACRIFICE_EXCEEDS_BUDGET' && check) appendTextLine(detail, 'tiny',
       `${row.policy}: Экономическая плата относительно ${check.reference_candidate_id || '—'} (Expected ${signed(check.reference_expected_net_r, 'R')}): ${signed(check.sacrifice_r, 'R')}; бюджет ${signed(check.budget_r, 'R')}.`);
     const benefit = row.benefit_assessment;
+    const pairedBound = benefit?.sensitivity_basis === 'PAIRED_MODEL_BOUND';
     if (row.policy !== 'HOLD' && finiteNumber(benefit?.expected_test_value_r) !== null) appendTextLine(detail, 'tiny',
-      `${row.policy}: Допуск ранжирования: проверяемое ΔExpected ${signed(benefit.expected_test_value_r, 'R')}; порог прибыли > ${signed(benefit.indifference_band_r, 'R')}; защитная плата Expected ≥ ${signed(-benefit.indifference_band_r, 'R')}; прирост хвоста ${signed(benefit.tail_test_value_r, 'R')}; минимум ${signed(benefit.minimum_tail_gain_r, 'R')}; ${benefit.basis || '—'}.`);
+      `${row.policy}: Допуск ранжирования: ${pairedBound ? 'нижняя MC/seed-граница' : 'точечное'} ΔExpected ${signed(benefit.expected_test_value_r, 'R')}; порог прибыли > ${signed(benefit.indifference_band_r, 'R')}; защитная плата Expected ≥ ${signed(-benefit.indifference_band_r, 'R')}; прирост хвоста ${signed(benefit.tail_test_value_r, 'R')}; минимум ${signed(benefit.minimum_tail_gain_r, 'R')}; ${benefit.basis || '—'}. ${pairedBound ? 'Граница учитывает ошибку симуляции и различия seed; это не рыночная уверенность.' : 'MC/seed-граница недоступна; использована точечная экономика.'}`);
     const independent = row.independent_evaluation;
     if (independent) appendTextLine(detail, 'tiny dim',
       `${row.policy}: Независимый допуск: ${independent.status || '—'}; ${independent.reason || '—'}; HOLD ${signed(independent.expected_hold_net_r, 'R')}; ΔExpected/HOLD ${signed(independent.expected_delta_vs_hold_r, 'R')}; нижняя граница ${signed(independent.paired_delta_ci95_lower_r, 'R')}; метод ${independent.method || '—'}. Независимая проверка и общий банк — различные модели; их Δ не взаимозаменяемы.`);

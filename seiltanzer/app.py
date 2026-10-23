@@ -1430,7 +1430,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise
             except RuntimeError as exc:
                 provider_failure = normalize_provider_error(exc)
-                if "invalid_payload" in str(exc).lower():
+                if str(exc) == "provider_invalid_payload":
                     provider_failure = {"code": "provider_invalid_payload", "retriable": True}
                 result = deterministic_result(snapshot, render_policy_report)
                 degraded = True

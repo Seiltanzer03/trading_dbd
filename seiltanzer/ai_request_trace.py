@@ -8,7 +8,7 @@ import json
 import logging
 import time
 
-from .ai_api import request_id
+from .ai_api import provider_failure_reason, request_id
 
 LOGGER = logging.getLogger('seiltanzer.ai_request_trace')
 _CURRENT = ContextVar('ai_request_trace', default=None)
@@ -47,6 +47,9 @@ class AIRequestTrace:
                 row['duration_ms'] = round(max(0., now-since)*1000., 3)
             if exc is not None:
                 row['exception_class'] = type(exc).__name__[:80]
+                reason = provider_failure_reason(exc)
+                if stage.startswith('provider') and reason is not None:
+                    row['provider_reason'] = reason
             if status_code is not None:
                 row['status_code'] = int(status_code)
             if stage == 'provider_transport' and isinstance(metrics, dict):

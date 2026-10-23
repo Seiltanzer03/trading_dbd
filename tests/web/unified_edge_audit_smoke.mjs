@@ -44,7 +44,7 @@ audit.decision_utility = {tail_weight:.35,quant_scale_r:.12,hold_score_margin:.0
 candidates[6].quant_utility = {expected_delta_r:-.01,tail_credit_r:.03,utility_delta_r:.02};
 candidates[6].quant_utility.score_clipped = true;
 candidates[6].quant_utility.score_unclipped = 1.23;
-candidates[6].benefit_assessment = {basis:'BOUNDED_TAIL_PROTECTION',expected_test_value_r:-.02215,
+candidates[6].benefit_assessment = {basis:'BOUNDED_TAIL_PROTECTION',sensitivity_basis:'PAIRED_MODEL_BOUND',expected_test_value_r:-.02215,
   indifference_band_r:.03,tail_test_value_r:.10,minimum_tail_gain_r:.05};
 candidates[6].independent_evaluation = {status:'eligible',reason:'ROBUST_EXPECTED_GAIN_AND_CVAR_PASS',
   expected_hold_net_r:.4,expected_delta_vs_hold_r:.08632,paired_delta_ci95_lower_r:.04497,
@@ -70,7 +70,8 @@ assert.match(text,/порог смены решения/);
 assert.match(text,/за риск \+0\.030R/);
 assert.match(text,/Основание выбора: DECLARED_POLICY_ORDER_AND_CANDIDATE_ID/);
 assert.match(text,/балл.*ограничен.*1\.230/i);
-assert.match(text,/проверяемое ΔExpected -0\.022R/);
+assert.match(text,/нижняя MC\/seed-граница ΔExpected -0\.022R/);
+assert.match(text,/не рыночная уверенность/);
 assert.match(text,/защитная плата Expected ≥ -0\.030R/);
 assert.match(text,/Независимый допуск.*ΔExpected\/HOLD \+0\.086R/);
 assert.match(text,/различные модели/);

@@ -10,6 +10,18 @@ from typing import Any, Callable
 
 AI_API_VERSION = "ai-verdict-api-f1-v1"
 logger = logging.getLogger("seiltanzer.ai_verdict")
+_REJECTED_RESPONSE_REASONS = frozenset((
+    'combined_provider_missing_shadow', 'combined_provider_missing_policy_scores',
+    'combined_provider_invalid_family_preferences', 'combined_provider_hard_integrity_failure',
+    'shadow_invalid_json', 'shadow_invalid_payload', 'shadow_invalid_policy',
+    'shadow_invalid_confidence', 'shadow_missing_reason', 'shadow_invalid_policy_scores',
+))
+
+
+def provider_failure_reason(exc: BaseException) -> str | None:
+    """Expose only exact, code-owned validation failures; never provider text."""
+    message = str(exc)
+    return message if message in _REJECTED_RESPONSE_REASONS else None
 
 
 def request_id() -> str:
@@ -18,6 +30,9 @@ def request_id() -> str:
 
 def provider_error(exc: Exception) -> dict:
     """Map provider-facing failures without exposing response bodies/secrets."""
+    reason = provider_failure_reason(exc)
+    if reason is not None:
+        return {'code': 'provider_bad_response', 'retriable': True, 'reason': reason}
     message = str(exc).lower()
     name = type(exc).__name__.lower()
     if "timeout" in message or "timeout" in name:
