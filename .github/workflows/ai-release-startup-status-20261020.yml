@@ -5,12 +5,16 @@ on:
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
 jobs:
   inspect:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Bounded capacity metadata and recent sanitized provider diagnostics
+      - name: Retire only reproducible APT binary caches and prevent their regeneration
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -20,67 +24,57 @@ jobs:
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = feecd3825fb0072bacfe2fdd1f0cc68bb0d24dd2
-            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import collections,json,os,re,stat,subprocess
+            /usr/bin/python3 -u - <<'PY'
+            import fcntl,json,os,stat,subprocess,urllib.request
             from pathlib import Path
-            def out(**row):print(json.dumps(row,sort_keys=True))
-            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
-            for directory in ('/var/cache','/var/cache/apt','/opt/actions-runner','/opt/seiltanzer/data'):
-                result=subprocess.run(['nice','-n','10','du','-x','-B1','--max-depth=1',directory],capture_output=True,text=True,timeout=12)
-                rows=[]
-                for line in result.stdout.splitlines():
-                    size,_,path=line.partition('\t')
-                    if size.isdigit():rows.append((int(size),path))
-                out(kind='directory_capacity',directory=directory,largest=sorted(rows,reverse=True)[:8],returncode=result.returncode)
-            out(kind='filesystem',total_bytes=st.f_blocks*st.f_frsize,used_bytes=(st.f_blocks-st.f_bfree)*st.f_frsize,reserved_bytes=(st.f_bfree-st.f_bavail)*st.f_frsize)
-            deleted={}
+            def free():
+                st=os.statvfs('/');return st.f_bavail*st.f_frsize
+            app_pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5).strip()
+            assert app_pid=='3559689'
+            package_locks=[]
+            for name in ('/var/lib/dpkg/lock-frontend','/var/lib/dpkg/lock','/var/lib/apt/lists/lock','/var/cache/apt/archives/lock'):
+                handle=open(name,'r+b')
+                info=os.fstat(handle.fileno())
+                assert stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1
+                fcntl.lockf(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+                package_locks.append(handle)
+            paths=[Path('/var/cache/apt/pkgcache.bin'),Path('/var/cache/apt/srcpkgcache.bin')]
+            identities=[]
+            for p in paths:
+                info=p.lstat()
+                assert stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_uid==0
+                assert 1024**2<info.st_size<128*1024**2
+                identities.append((info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns))
             for process in Path('/proc').iterdir():
                 if not process.name.isdigit():continue
                 try:
+                    if (process/'comm').read_text().strip() in ('apt','apt-get','apt-cache','dpkg','unattended-upgr'):
+                        raise RuntimeError('PACKAGE_MANAGER_ACTIVE_NO_CACHE_CHANGE')
                     for fd in (process/'fd').iterdir():
                         try:
-                            target=os.readlink(fd)
-                            if not target.endswith(' (deleted)'):continue
                             info=fd.stat()
-                            if not stat.S_ISREG(info.st_mode) or info.st_size<1024**2:continue
-                            key=(info.st_dev,info.st_ino)
-                            deleted[key]={'pid':int(process.name),'size':info.st_size,'allocated':info.st_blocks*512,'kind_name':Path(target[:-10]).name[:100]}
+                            assert (info.st_dev,info.st_ino) not in [item[:2] for item in identities], 'CACHE_OPEN_NO_CHANGE'
                         except OSError:pass
-                except OSError:pass
-            out(kind='open_deleted_files',files=sorted(deleted.values(),key=lambda x:x['size'],reverse=True)[:12])
-            for directory in ('/var/cache/apt/archives','/opt/actions-runner/_work/_update'):
-                p=Path(directory)
-                if not p.exists():continue
-                rows=[]
-                for item in list(p.iterdir())[:200]:
-                    info=item.lstat()
-                    if stat.S_ISREG(info.st_mode):rows.append((info.st_size,item.name))
-                out(kind='cache_files',directory=directory,files=sorted(rows,reverse=True)[:15])
-            for name in ('/var/log/syslog','/var/log/syslog.1','/var/log/kern.log','/var/log/daemon.log','/opt/seiltanzer/data/trades.db','/opt/seiltanzer/data/trades.db-wal'):
-                p=Path(name)
-                try:
-                    info=p.lstat();out(kind='file_metadata',path=name,regular=stat.S_ISREG(info.st_mode),size=info.st_size,allocated=info.st_blocks*512,inode=info.st_ino,uid=info.st_uid,gid=info.st_gid,mode=stat.S_IMODE(info.st_mode))
-                except OSError:pass
-            for directory in ('/tmp','/var/log','/opt/seiltanzer/data/research'):
-                rows=[]
-                for p in list(Path(directory).iterdir())[:500]:
-                    try:
-                        info=p.lstat()
-                        if stat.S_ISREG(info.st_mode) and info.st_size>1024**2:rows.append((info.st_size,p.name,info.st_blocks*512))
-                    except OSError:pass
-                out(kind='bounded_top_files',directory=directory,files=sorted(rows,reverse=True)[:15])
-            result=subprocess.run(['journalctl','-u','seiltanzer','--since','-20 minutes','-n','2000','--no-pager','-o','cat'],capture_output=True,text=True,timeout=10)
-            traces=[];codes=[];counts=collections.Counter()
-            allowed=('request_id','stage','event','elapsed_ms','duration_ms','exception_class','status_code','finish_reason','prompt_tokens','completion_tokens','response_bytes')
-            for line in result.stdout.splitlines():
-                codes+=re.findall(r'RuntimeError: ((?:combined_provider_|shadow_)[a-z_]{1,100}|OpenRouter HTTP [0-9]{3})',line)
-                if 'ai_request_trace' in line or '"request_id"' in line:
-                    try:row=json.loads(line[line.index('{'):])
-                    except (ValueError,TypeError):continue
-                    if row.get('stage') in ('provider','provider_http','provider_decode','provider_validate','provider_extended_validation','provider_transport','provider_fallback'):
-                        traces.append({k:row[k] for k in allowed if k in row})
-                for token in ('disk headroom','memory pressure','Traceback','snapshot','provider_unavailable'):
-                    if token in line:counts[token]+=1
-            out(kind='recent_provider_trace',rows=traces[-60:],normalized_codes=codes[-20:],journal_returncode=result.returncode,event_counts=dict(counts))
-            out(kind='safety',provider_calls=0,review_posts=0,db_writes=0,acks=0,orders=0,restarts=0)
+                except (FileNotFoundError,PermissionError,ProcessLookupError):pass
+            config=Path('/etc/apt/apt.conf.d/99-seiltanzer-no-binary-cache')
+            content='// Rebuild package metadata in memory; keep source indexes and packages.\nDir::Cache::pkgcache "";\nDir::Cache::srcpkgcache "";\n'
+            assert not config.exists() and not config.is_symlink()
+            before=free()
+            with config.open('x') as handle:handle.write(content)
+            config.chmod(0o644)
+            try:
+                dump=subprocess.check_output(['apt-config','dump'],text=True,timeout=5)
+                assert 'Dir::Cache::pkgcache "";' in dump and 'Dir::Cache::srcpkgcache "";' in dump
+            except BaseException:
+                config.unlink();raise
+            reclaimed=0
+            for p,identity in zip(paths,identities):
+                info=p.lstat()
+                assert (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)==identity
+                reclaimed+=info.st_blocks*512;p.unlink()
+            assert subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5).strip()==app_pid
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=5) as response:code=response.code
+            after=free()
+            print(json.dumps({'kind':'apt_binary_cache_recovery','free_before':before,'free_after':after,'cache_allocated_bytes_retired':reclaimed,'binary_cache_regeneration_disabled':True,'source_indexes_and_packages_preserved':True,'background_admitted':after>=1024**3+32*1024**2,'http':code,'app_pid_unchanged':True,'database_writes':0,'restarts':0,'provider_calls':0,'orders':0}))
+            assert code==200 and after>=1024**3+32*1024**2
             PY
