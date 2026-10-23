@@ -5,34 +5,107 @@ on:
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 10
     steps:
-      - name: Read log rotation configuration and allocation only
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
         with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 30s
-          script: |
-            set -euo pipefail
-            /usr/bin/python3 -u - <<'PY'
-            import json,stat,subprocess
-            from pathlib import Path
-            root=Path('/var/log')
-            for path in root.iterdir():
-                if path.name.startswith(('syslog','auth.log','kern.log','daemon.log')):
-                    info=path.lstat()
-                    print(json.dumps({'kind':'log_metadata','name':path.name,'regular':stat.S_ISREG(info.st_mode),'links':info.st_nlink,'logical_bytes':info.st_size,'allocated_bytes':info.st_blocks*512,'uid':info.st_uid,'gid':info.st_gid,'mode':oct(stat.S_IMODE(info.st_mode)),'modified':info.st_mtime}))
-            for name in ['/etc/logrotate.d/rsyslog','/usr/lib/rsyslog/rsyslog-rotate']:
-                path=Path(name)
-                if path.is_file() and path.stat().st_size<20000:
-                    print(json.dumps({'kind':'rotation_configuration','path':name,'content':path.read_text()}))
-            for args in [['logrotate','--version'],['systemctl','show','rsyslog','-p','MainPID','-p','ActiveState','-p','SubState'],['journalctl','--disk-usage']]:
-                result=subprocess.run(args,text=True,capture_output=True,timeout=5)
-                print(json.dumps({'kind':'metadata_command','command':args[0],'returncode':result.returncode,'lines':(result.stdout+result.stderr).splitlines()[:12]}))
-            print(json.dumps({'kind':'safety','writes':0,'deletions':0,'signals':0,'app_restarts':0,'provider_calls':0,'acks':0}))
-            PY
+          ref: ffdc513b5acb8746b54cdf852b55218ca21be336
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install existing off-host archive transports
+        run: python -m pip install --quiet 'boto3>=1.36,<2' 'paramiko>=3.3,<6'
+      - name: Rotate only syslog and preserve every byte in the existing private bucket
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          python -u - <<'PY'
+          import json,os,sys,tempfile
+          from pathlib import Path
+          sys.path.insert(0,'scripts')
+          from production_ede_offload import _connect,_verify_sha
+          from ops_yandex_archive_recovery import remote,copy_to_cloud
+          expected='ffdc513b5acb8746b54cdf852b55218ca21be336'
+          run_id=os.environ['GITHUB_RUN_ID'];assert run_id.isdigit()
+          archive_dir='/var/log/seiltanzer-capacity-'+run_id
+          source=archive_dir+'/syslog.1'
+          minimum=1024**3+32*1024**2
+          client=_connect(os.environ.pop('SSH_PASSWORD'))
+          try:
+              _verify_sha(client,expected)
+              expression=r'''
+          import shutil,subprocess,tempfile,time
+          minimum=1024**3+32*1024**2
+          free=shutil.disk_usage('/').free
+          if free>=minimum+64*1024**2:
+              print(json.dumps({'kind':'rotation','needed':False,'free_before':free}))
+          else:
+              source=Path('/var/log/syslog');info=source.lstat()
+              assert stat.S_ISREG(info.st_mode) and info.st_nlink==1 and 256*1024**2<info.st_size<1024**3
+              assert info.st_uid==102 and info.st_gid==4 and stat.S_IMODE(info.st_mode)==0o640
+              app_pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5).strip()
+              assert app_pid=='3479146'
+              directory=Path(ARCHIVE_DIR);assert not directory.exists() and not directory.is_symlink()
+              directory.mkdir(mode=0o700)
+              config='/var/log/syslog\n{\n rotate -1\n nocompress\n nodateext\n missingok\n notifempty\n create 0640 syslog adm\n olddir '+str(directory)+'\n postrotate\n /usr/lib/rsyslog/rsyslog-rotate\n endscript\n}\n'
+              with tempfile.TemporaryDirectory(prefix='seiltanzer-syslog-rotate-',dir='/run') as temporary:
+                  cfg=Path(temporary)/'syslog.conf';cfg.write_text(config);cfg.chmod(0o600)
+                  subprocess.run(['logrotate','--debug',str(cfg)],check=True,capture_output=True,text=True,timeout=10)
+                  subprocess.run(['logrotate','--force',str(cfg)],check=True,capture_output=True,text=True,timeout=15)
+              closed=directory/'syslog.1';old=closed.lstat();new=source.lstat()
+              assert old.st_dev==info.st_dev and old.st_ino==info.st_ino and old.st_nlink==1
+              assert new.st_ino!=info.st_ino and stat.S_ISREG(new.st_mode) and new.st_nlink==1
+              for attempt in range(20):
+                  result=subprocess.run(['lsof','--',str(closed)],capture_output=True,timeout=5)
+                  if result.returncode==1:break
+                  assert result.returncode==0
+                  time.sleep(.2)
+              else:raise RuntimeError('ROTATED_LOG_STILL_OPEN_PRESERVED_LOCALLY')
+              assert subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5).strip()==app_pid
+              print(json.dumps({'kind':'rotation','needed':True,'free_before':free,'closed_bytes':old.st_size,'app_pid_unchanged':True,'existing_rotated_logs_untouched':True}))
+          '''
+              rotation=remote(client,'ARCHIVE_DIR='+repr(archive_dir)+'\n'+expression)
+              print(json.dumps(rotation),flush=True)
+              if rotation['needed']:
+                  with tempfile.TemporaryDirectory(prefix='offhost-closed-syslog-') as temporary:
+                      _,manifest=copy_to_cloud(client,source,expected,Path(temporary))
+                  _verify_sha(client,expected)
+                  expression=r'''
+          import subprocess
+          validate(manifest)
+          def closed(path):
+              result=subprocess.run(['lsof','--',str(path)],capture_output=True,timeout=10)
+              if result.returncode not in (0,1):raise ValueError('CLOSED_FILE_PROOF_UNAVAILABLE')
+              return result.returncode==1
+          path=Path(SOURCE)
+          receipt=path.with_name(path.name+'.cloud-archive.json')
+          assert not receipt.exists() and not receipt.is_symlink()
+          receipt.write_text(json.dumps(manifest,sort_keys=True)+'\n');receipt.chmod(0o600)
+          proof=retire_closed_archive(path,manifest,is_closed=closed)
+          print(json.dumps({'kind':'verified_cloud_archive',**proof,'source_sha256':manifest['source_sha256'],'compressed_bytes':manifest['compressed_size_bytes'],'verified_full_get':manifest['verified_full_get'],'bucket':manifest['bucket'],'object_key':manifest['object_key'],'local_receipt':str(receipt)}))
+          '''
+                  proof=remote(client,'SOURCE='+repr(source)+'\nmanifest='+repr(manifest)+'\n'+expression)
+                  print(json.dumps(proof),flush=True)
+              _verify_sha(client,expected)
+              result=remote(client,r'''
+          import shutil,subprocess,urllib.request
+          free=shutil.disk_usage('/').free
+          props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','NRestarts'],text=True,timeout=5).splitlines()
+          with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=5) as response:code=response.code
+          print(json.dumps({'kind':'result','free_after':free,'background_admitted':free>=1024**3+32*1024**2,'service':props,'http':code,'db_writes':0,'app_restarts':0,'provider_calls':0,'acks':0,'permanent_log_data_loss':False}))
+          ''')
+              print(json.dumps(result),flush=True)
+              assert result['background_admitted'] and result['http']==200
+          finally:client.close()
+          PY
