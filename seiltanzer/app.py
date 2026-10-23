@@ -10,6 +10,8 @@ import threading
 import time
 import base64
 import secrets
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
@@ -749,6 +751,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ------------------------------------------------------------ background
 
     async def poll_loop():
+        # The shared executor can be occupied by long SQLite/research/feed
+        # jobs. Reserve capacity for price, proxy and one canonical calculation
+        # so an otherwise responsive terminal does not publish stale quotes.
+        live_executor = ThreadPoolExecutor(
+            max_workers=3, thread_name_prefix="live-market")
+
+        async def live_work(function):
+            context = copy_context()
+            return await asyncio.get_running_loop().run_in_executor(
+                live_executor, context.run, function)
+
         last = {"price": 0.0, "proxy_price": 0.0, "intraday": 0.0, "vols": 0.0,
                 "daily": 0.0, "chain": 0.0, "iv_surface": 0.0, "correlation": 0.0, "bybit": 0.0}
         running: dict[str, asyncio.Task] = {}
@@ -788,7 +801,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         async def calculate_tick():
             started = time.monotonic()
-            worker = asyncio.create_task(asyncio.to_thread(engine.tick_payload))
+            worker = asyncio.create_task(live_work(engine.tick_payload))
             try:
                 payload = await asyncio.shield(worker)
             except asyncio.CancelledError:
@@ -827,7 +840,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for name, fn in jobs.items():
                     if name not in running and now - last[name] >= periods[name]:
                         last[name] = now
-                        running[name] = asyncio.create_task(asyncio.to_thread(fn))
+                        work = live_work(fn) if name in {"price", "proxy_price"} else asyncio.to_thread(fn)
+                        running[name] = asyncio.create_task(work)
 
                 # A slow canonical calculation must not suspend the feed
                 # scheduler. Publish only its completed immutable generation;
@@ -862,8 +876,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pending.append(tick_task)
             if state_task is not None:
                 pending.append(state_task)
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+            try:
+                if pending:
+                    draining = asyncio.gather(*pending, return_exceptions=True)
+                    # Another shutdown cancellation must not cancel a feed's
+                    # Future while its SQLite/network thread is still running.
+                    while not draining.done():
+                        try:
+                            await asyncio.shield(draining)
+                        except asyncio.CancelledError:
+                            continue
+                    draining.result()
+            finally:
+                live_executor.shutdown(wait=True)
 
     async def passive_loop():
         from .background_disk_admission import passive_step
