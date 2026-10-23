@@ -23,10 +23,10 @@ def test_ede_heavy_research_is_offloaded_from_production_vps():
     assert "systemd-run" not in ede
     assert "--property=CPUQuota" not in ede
 
-    # Exact-run acceptance is still chained through the inventory marker, but
+    # Exact-run export waits for inventory readiness (the audit follows export),
     # the cooperative production pause is released before heavy research starts.
     assert '"wait-marker"' in offload
-    assert '"ede-inventory"' in offload
+    assert '"ede-inventory-ready"' in offload
     assert '"validate-gate"' in offload
     assert "EDE_OFFLOAD_GATE_RELEASED=1" in offload
     assert ede.index("Export a current consistent live snapshot without VPS disk use") < ede.index(

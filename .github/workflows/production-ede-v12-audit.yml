@@ -278,6 +278,46 @@ jobs:
             ${{ runner.temp }}/ede-source/ede-source.sqlite3.seed.json
           if-no-files-found: error
           retention-days: 30
+      - name: Audit G1S coverage on the existing verified offhost snapshot
+        id: coverage_inventory
+        env:
+          SOURCE_DB: ${{ runner.temp }}/ede-source/ede-source.sqlite3
+        run: |
+          set -euo pipefail
+          # Preserve the former live-table inventory scope. The complete hot
+          # plus cold research union is prepared separately below.
+          python scripts/production_ede_inventory.py --database "$SOURCE_DB" \
+            | tee "${RUNNER_TEMP}/ede-source/coverage-inventory.jsonl"
+      - name: Preserve inventory with its verified input identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: ede-coverage-inventory-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/ede-source/coverage-inventory.jsonl
+            ${{ runner.temp }}/ede-source/ede-source.sqlite3.manifest.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Record completed inventory only after the actual offhost audit
+        id: inventory_complete
+        if: success() && needs.resolve.outputs.exact_chain == 'true'
+        uses: appleboy/ssh-action@v1
+        env:
+          EXPECTED_SHA: ${{ needs.resolve.outputs.expected_sha }}
+          ACCEPTANCE_RUN_ID: ${{ needs.resolve.outputs.acceptance_run_id }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
+          command_timeout: 2m
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            # Export already released its gate; never reacquire it for research.
+            /opt/seiltanzer/.venv/bin/python \
+              /opt/seiltanzer/scripts/production_research_acceptance.py write-marker \
+              --stage ede-inventory --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+              --expected-sha "$EXPECTED_SHA"
       - name: Prepare complete verified history input before research
         id: research_input
         env:

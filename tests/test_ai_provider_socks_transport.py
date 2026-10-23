@@ -10,6 +10,101 @@ import httpx
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def close_owned_transport_session(monkeypatch):
+    yield
+    transport=importlib.import_module('seiltanzer.ai_provider_transport')
+    close=getattr(transport,'_close_socks_client',None)
+    if close is not None:close()
+
+
+@contextmanager
+def keepalive_socks():
+    """Local SOCKS endpoint terminating HTTP, without any external upstream."""
+    state={'connections':0,'requests':[]}
+
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            self.connection.settimeout(2)
+            state['connections']+=1
+            version,n=self.rfile.read(2)
+            assert version==5
+            self.rfile.read(n);self.wfile.write(b'\x05\x00');self.wfile.flush()
+            version,command,_,kind=self.rfile.read(4)
+            assert (version,command)==(5,1)
+            size=self.rfile.read(1)[0] if kind==3 else {1:4,4:16}[kind]
+            self.rfile.read(size+2)
+            self.wfile.write(b'\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x50')
+            self.wfile.flush()
+            while self.rfile.readline():
+                headers={}
+                while (line:=self.rfile.readline()) not in (b'\r\n',b''):
+                    key,value=line.decode().split(':',1);headers[key.lower()]=value.strip()
+                body=self.rfile.read(int(headers.get('content-length','0')))
+                state['requests'].append((headers,json.loads(body)))
+                if json.loads(body).get('stall'):
+                    time.sleep(.3)
+                    return
+                payload=b'{"ok":true}'
+                self.wfile.write(b'HTTP/1.1 200 OK\r\nContent-Length: 11\r\n'
+                    b'Connection: keep-alive\r\nSet-Cookie: private=do-not-replay\r\n\r\n'+payload)
+                self.wfile.flush()
+
+    class Server(socketserver.ThreadingTCPServer):daemon_threads=True
+    with Server(('127.0.0.1',0),Handler) as server:
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.01},daemon=True)
+        thread.start()
+        try:yield f'socks5h://127.0.0.1:{server.server_address[1]}',state
+        finally:server.shutdown();thread.join(1)
+
+
+def test_real_socks_reuses_connection_without_replaying_cookies_or_auth_headers():
+    transport=importlib.import_module('seiltanzer.ai_provider_transport')
+    with keepalive_socks() as (proxy,state):
+        for headers in ({'Authorization':'first-private-key'},{}):
+            response=transport.post_json('http://provider.invalid/review',proxy=proxy,
+                body={'test':'same route'},headers=headers,timeout=.5)
+            assert response.json()=={'ok':True}
+        assert state['connections']==1
+        assert len(state['requests'])==2
+        first,second=[row[0] for row in state['requests']]
+        assert first['authorization']=='first-private-key'
+        assert 'authorization' not in second and 'cookie' not in second
+
+
+def test_reused_socks_connection_obeys_each_new_deadline_and_resets_after_failure():
+    transport=importlib.import_module('seiltanzer.ai_provider_transport')
+    with keepalive_socks() as (proxy,state):
+        transport.post_json('http://provider.invalid/review',proxy=proxy,
+            body={},headers={},timeout=.5)
+        started=time.monotonic()
+        with pytest.raises(httpx.TimeoutException):
+            transport.post_json('http://provider.invalid/review',proxy=proxy,
+                body={'stall':True},headers={},timeout=.05)
+        assert time.monotonic()-started<.2
+        transport.post_json('http://provider.invalid/review',proxy=proxy,
+            body={},headers={},timeout=.5)
+        assert state['connections']==2
+
+
+def test_socks_connection_isolated_by_thread_and_origin():
+    transport=importlib.import_module('seiltanzer.ai_provider_transport')
+    with keepalive_socks() as (proxy,state):
+        def request(url='http://provider.invalid/review'):
+            return transport.post_json(url,proxy=proxy,body={},headers={},timeout=.5).json()
+        assert request()=={'ok':True}
+        from concurrent.futures import ThreadPoolExecutor
+        def other_thread():
+            try:return request()
+            finally:transport._close_socks_client()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            assert pool.submit(other_thread).result(1)=={'ok':True}
+        assert request()=={'ok':True}
+        assert state['connections']==2
+        assert request('http://different-provider.invalid/review')=={'ok':True}
+        assert state['connections']==3
+
+
 @contextmanager
 def stalled_socks():
     release = threading.Event()
@@ -79,6 +174,7 @@ def test_curl_decoded_body_keeps_json_and_http_status_contract(monkeypatch, stat
             assert kwargs['trust_env'] is False
         def __enter__(self): return self
         def __exit__(self, *args): pass
+        def close(self): pass
         def post(self, url, **kwargs):
             assert kwargs['timeout'] == .25
             assert kwargs['verify'] is True
@@ -115,6 +211,7 @@ def test_curl_failure_does_not_expose_credentials_or_retry_unbounded_backend(mon
         def __init__(self, **kwargs): pass
         def __enter__(self): return self
         def __exit__(self, *args): pass
+        def close(self): pass
         def post(self, *args, **kwargs):
             raise requests.exceptions.RequestException('private-user:private-pass private-key')
 

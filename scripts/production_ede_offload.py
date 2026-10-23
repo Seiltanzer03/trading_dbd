@@ -543,7 +543,7 @@ def snapshot(args: argparse.Namespace) -> int:
                         shlex.quote(str(REMOTE_ORCHESTRATOR)),
                         "wait-marker",
                         "--stage",
-                        "ede-inventory",
+                        "ede-inventory-ready",
                         "--acceptance-run-id",
                         shlex.quote(args.acceptance_run_id),
                         "--expected-sha",
@@ -749,7 +749,7 @@ def live_snapshot(args: argparse.Namespace) -> int:
         if exact_run:
             _exec(client, " ".join([
                 shlex.quote(str(REMOTE_PYTHON)), shlex.quote(str(REMOTE_ORCHESTRATOR)),
-                "wait-marker", "--stage", "ede-inventory", "--acceptance-run-id",
+                "wait-marker", "--stage", "ede-inventory-ready", "--acceptance-run-id",
                 shlex.quote(args.acceptance_run_id), "--expected-sha",
                 shlex.quote(args.expected_sha), "--timeout-seconds", "2400",
                 "--poll-seconds", "5",

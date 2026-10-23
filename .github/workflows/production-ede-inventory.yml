@@ -26,7 +26,7 @@ jobs:
         with:
           ref: ${{ inputs.expected_sha }}
 
-      - name: Audit real immutable G1S observations and all EDE features
+      - name: Prepare exact-SHA export for offhost G1S inventory
         id: inventory
         uses: appleboy/ssh-action@v1
         env:
@@ -67,11 +67,11 @@ jobs:
               --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA"
 
-            "$PY" /opt/seiltanzer/scripts/production_ede_inventory.py \
-              --database /opt/seiltanzer/data/trades.db
-
+            # Full feature expansion runs on the existing verified runner
+            # snapshot. On this small VPS it starves canonical live quotes.
+            # Ready admits export only; it never claims completed inventory.
             "$PY" "$ORCH" write-marker \
-              --stage ede-inventory \
+              --stage ede-inventory-ready \
               --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
               --expected-sha "$EXPECTED_SHA"
 

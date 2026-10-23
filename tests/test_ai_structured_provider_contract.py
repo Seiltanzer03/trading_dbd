@@ -16,13 +16,24 @@ def shadow(families=None):
         evidence_families=[],invalidation_conditions=[],
         family_assessments=[] if families is None else families)
 
+# The wire order is a versioned contract, independently pinned here to catch
+# accidental action reordering (which would silently change preferences).
+WIRE_ORDER=('HOLD','CLOSE_10','CLOSE_25','CLOSE_50','EXIT','MOVE_TO_BE',
+    'TRAIL_GAMMA_FLIP','TIGHTEN_STOP','EXTEND_TAKE','REDUCE_TAKE',
+    'SCALE_OUT_ON_SPIKE','TIME_STOP')
+
+def wire_shadow():
+    result=shadow()
+    result['policy_scores']=[.9,.8,.7,.6,.5,.4,.3,.2,.1,0.,-.1,-.2]
+    return result
+
 @pytest.fixture
 def request_body(monkeypatch):
     seen=[]
     def post(url,**kwargs):
         seen.append(kwargs['body'])
         payload={'model':'offline-fixture','choices':[{'message':{'content':
-            json.dumps({'shadow_decision':shadow()},ensure_ascii=False)}}]}
+            json.dumps({'shadow_decision':wire_shadow()},ensure_ascii=False)}}]}
         return httpx.Response(200,json=payload,request=httpx.Request('POST',url))
     monkeypatch.setenv('OPENROUTER_API_KEY','offline-fixture')
     monkeypatch.delenv('OPENROUTER_PROXY',raising=False)
@@ -47,19 +58,49 @@ def test_request_requires_compatible_fast_endpoint_of_same_model(request_body):
     assert request_body['max_tokens']==2400
 
 def test_actual_provider_schema_accepts_valid_response(request_body):
-    Draft202012Validator(schema(request_body)).validate({'shadow_decision':shadow()})
+    Draft202012Validator(schema(request_body)).validate({'shadow_decision':wire_shadow()})
 
 def test_actual_provider_schema_rejects_joined_or_unsupported_action(request_body):
     validator=Draft202012Validator(schema(request_body))
     for action in ('HOLD|CLOSE_10','UNAVAILABLE','WAIT'):
-        bad=shadow();bad['policy']=action
+        bad=wire_shadow();bad['policy']=action
         with pytest.raises(ValidationError):validator.validate({'shadow_decision':bad})
 
 @pytest.mark.parametrize('missing',sorted(VALID_POLICIES))
 def test_actual_provider_schema_requires_every_action_score(request_body,missing):
-    bad=shadow();del bad['policy_scores'][missing]
+    bad=wire_shadow();del bad['policy_scores'][WIRE_ORDER.index(missing)]
     with pytest.raises(ValidationError):
         Draft202012Validator(schema(request_body)).validate({'shadow_decision':bad})
+
+def test_compact_scores_preserve_each_action_and_legacy_domain_contract():
+    wire=wire_shadow()
+    legacy=shadow()
+    legacy['policy_scores']={'HOLD':.9,'CLOSE_10':.8,'CLOSE_25':.7,'CLOSE_50':.6,
+        'EXIT':.5,'MOVE_TO_BE':.4,'TRAIL_GAMMA_FLIP':.3,'TIGHTEN_STOP':.2,
+        'EXTEND_TAKE':.1,'REDUCE_TAKE':0.,'SCALE_OUT_ON_SPIKE':-.1,'TIME_STOP':-.2}
+    _,parsed=report._provider_payload(json.dumps({'shadow_decision':wire}))
+    _,old=report._provider_payload(json.dumps({'shadow_decision':legacy}))
+    assert parsed==old
+    assert len(json.dumps(wire)) < len(json.dumps(legacy)) - 120
+
+@pytest.mark.parametrize('scores', [[],[0]*11,[0]*13,[True]+[0]*11,
+    [1.1]+[0]*11,[float('nan')]+[0]*11,['.5']+[0]*11,[None]+[0]*11])
+def test_compact_scores_never_fill_or_coerce_invalid_values(scores):
+    bad=wire_shadow();bad['policy_scores']=scores
+    with pytest.raises(RuntimeError,match='shadow_invalid_policy_scores'):
+        report._provider_payload(json.dumps({'shadow_decision':bad}))
+
+def test_actual_wire_request_explains_the_fixed_score_order(request_body):
+    props=schema(request_body)['properties']['shadow_decision']['properties']
+    scores=props['policy_scores']
+    assert scores['type']=='array'
+    order=', '.join(WIRE_ORDER)
+    assert order in scores['description']
+    assert order in request_body['messages'][0]['content']
+    for value in ([0]*13,[True]+[0]*11,[1.1]+[0]*11):
+        bad=wire_shadow();bad['policy_scores']=value
+        with pytest.raises(ValidationError):
+            Draft202012Validator(schema(request_body)).validate({'shadow_decision':bad})
 
 def test_wire_family_array_preserves_legacy_interpretation_and_missingness():
     opinion={'feature_names':['intermarket.return_5m'],

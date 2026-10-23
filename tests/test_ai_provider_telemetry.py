@@ -51,6 +51,9 @@ def transport(monkeypatch, *, entered=None, release=None, completed=None, commen
             if completed is not None:
                 completed.set()
 
+        def close(self):
+            self.__exit__()
+
         def post(self, url, **kwargs):
             calls.append(kwargs['json'])
             if entered is not None:
