@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read deployed version, source clocks and reported provider failure
+      - name: Bounded capacity metadata and recent sanitized provider diagnostics
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -21,41 +21,35 @@ jobs:
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = feecd3825fb0072bacfe2fdd1f0cc68bb0d24dd2
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import asyncio,json,os,re,subprocess,time,urllib.request
+            import collections,json,os,re,stat,subprocess
             from pathlib import Path
             def out(**row):print(json.dumps(row,sort_keys=True))
-            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState'],text=True,timeout=5)
-            out(kind='service',properties=props.splitlines())
             st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
-            for name in ('trades.db','trades.db-wal','trades.db-shm'):
-                p=Path('/opt/seiltanzer/data')/name
+            for name in ('/var/log/syslog','/var/log/syslog.1','/var/log/kern.log','/var/log/daemon.log','/opt/seiltanzer/data/trades.db','/opt/seiltanzer/data/trades.db-wal'):
+                p=Path(name)
                 try:
-                    info=p.stat();out(kind='database_file_metadata',name=name,logical_bytes=info.st_size,allocated_bytes=info.st_blocks*512)
+                    info=p.lstat();out(kind='file_metadata',path=name,regular=stat.S_ISREG(info.st_mode),size=info.st_size,allocated=info.st_blocks*512,inode=info.st_ino,uid=info.st_uid,gid=info.st_gid,mode=stat.S_IMODE(info.st_mode))
                 except OSError:pass
-            started=time.monotonic()
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=5) as response:
-                row=json.loads(response.read(100000))
-                out(kind='snapshot_status',elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','build_n','build_ms','age_sec','invalidated_reason','last_error','snapshot_budget')})
-            async def clock():
-                import websockets
-                async with websockets.connect('ws://127.0.0.1:8790/ws',open_timeout=5,close_timeout=2,max_size=2*1024**2) as ws:
-                    row=json.loads(await asyncio.wait_for(ws.recv(),5))
-                quote=(row.get('feeds') or {}).get('price') or {}
-                def age(x):
-                    try:return round(time.time()-float(x),3)
-                    except (TypeError,ValueError):return None
-                out(kind='canonical_clock',quote_age_sec=age(quote.get('ts')),tick_age_sec=age(row.get('ts')),source=quote.get('source'),status=quote.get('status'),instrument=row.get('instrument'))
-            asyncio.run(clock())
-            request_id='ai-4c5b3585fbfa415d9b91'
-            trace=subprocess.check_output(['journalctl','-u','seiltanzer','--since','-8 hours','--grep',request_id,'--no-pager','-n','100','-o','cat'],text=True,timeout=8)
-            for line in trace.splitlines():
-                if '{' not in line:continue
-                try:row=json.loads(line[line.index('{'):])
-                except ValueError:continue
-                if row.get('request_id')!=request_id:continue
-                out(kind='reported_provider_trace',**{k:row.get(k) for k in ('request_id','stage','event','elapsed_ms','duration_ms','exception_class','status_code','response_bytes','output_bytes','prompt_tokens','completion_tokens','finish_reason')})
-            errors=subprocess.check_output(['journalctl','-u','seiltanzer','--since','-8 hours','--grep','RuntimeError: (combined_provider_|shadow_|OpenRouter HTTP)','--no-pager','-n','30','-o','cat'],text=True,timeout=8)
-            codes=re.findall(r'RuntimeError: ((?:combined_provider_|shadow_)[a-z_]{1,100}|OpenRouter HTTP [0-9]{3})',errors)
-            out(kind='normalized_recent_provider_exceptions',codes=codes)
+            for directory in ('/tmp','/var/log','/opt/seiltanzer/data/research'):
+                rows=[]
+                for p in list(Path(directory).iterdir())[:500]:
+                    try:
+                        info=p.lstat()
+                        if stat.S_ISREG(info.st_mode) and info.st_size>1024**2:rows.append((info.st_size,p.name,info.st_blocks*512))
+                    except OSError:pass
+                out(kind='bounded_top_files',directory=directory,files=sorted(rows,reverse=True)[:15])
+            result=subprocess.run(['journalctl','-u','seiltanzer','--since','-20 minutes','-n','2000','--no-pager','-o','cat'],capture_output=True,text=True,timeout=10)
+            traces=[];codes=[];counts=collections.Counter()
+            allowed=('request_id','stage','event','elapsed_ms','duration_ms','exception_class','status_code','finish_reason','prompt_tokens','completion_tokens','response_bytes')
+            for line in result.stdout.splitlines():
+                codes+=re.findall(r'RuntimeError: ((?:combined_provider_|shadow_)[a-z_]{1,100}|OpenRouter HTTP [0-9]{3})',line)
+                if 'ai_request_trace' in line or '"request_id"' in line:
+                    try:row=json.loads(line[line.index('{'):])
+                    except (ValueError,TypeError):continue
+                    if row.get('stage') in ('provider','provider_http','provider_decode','provider_validate','provider_extended_validation','provider_transport','provider_fallback'):
+                        traces.append({k:row[k] for k in allowed if k in row})
+                for token in ('disk headroom','memory pressure','Traceback','snapshot','provider_unavailable'):
+                    if token in line:counts[token]+=1
+            out(kind='recent_provider_trace',rows=traces[-60:],normalized_codes=codes[-20:],journal_returncode=result.returncode,event_counts=dict(counts))
             out(kind='safety',provider_calls=0,review_posts=0,db_writes=0,acks=0,orders=0,restarts=0)
             PY
