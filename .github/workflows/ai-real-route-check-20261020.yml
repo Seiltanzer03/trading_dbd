@@ -41,7 +41,7 @@ jobs:
           command_timeout: 12m
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = ffdc513b5acb8746b54cdf852b55218ca21be336
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = fcf47f4adc958ee531ae69c7580812c3b8dd0204
             test ! -e /opt/seiltanzer/data/cutover.active
             test ! -L /opt/seiltanzer/data/cutover.active
             /usr/bin/python3 -u - <<'PY'
@@ -59,7 +59,7 @@ jobs:
                     raw=response.read(2*1024**2+1)
                     if len(raw)>2*1024**2:raise ValueError('RESPONSE_BOUND')
                     return response.code,json.loads(raw)
-            expected='ffdc513b5acb8746b54cdf852b55218ca21be336'
+            expected='fcf47f4adc958ee531ae69c7580812c3b8dd0204'
             publication_end=time.monotonic()+480
             research=Path('/opt/seiltanzer/data/research')
             while True:
@@ -86,6 +86,21 @@ jobs:
                 time.sleep(5)
             print(json.dumps({'snapshot_ready':status.get('ready'),'snapshot_build_ms':status.get('build_ms'),'snapshot_age_sec':status.get('age_sec'),'snapshot_build_n':status.get('build_n'),'snapshot_invalidated_reason':status.get('invalidated_reason')},sort_keys=True))
             started=time.monotonic();code,body=call('/api/ai/verdict',True)
+            if code==400 and (body.get('error') or {}).get('code')=='execution_barrier_reached':
+                import math
+                proof=body.get('execution_barrier') or {}
+                current_r,barrier_r=proof.get('current_r'),proof.get('barrier_r')
+                assert proof.get('price_authority') is True and proof.get('execution_confirmed') is False
+                assert proof.get('kind') in {'take','stop'}
+                assert all(isinstance(value,(int,float)) and not isinstance(value,bool)
+                    and math.isfinite(value) for value in (current_r,barrier_r))
+                assert current_r>=barrier_r if proof['kind']=='take' else current_r<=barrier_r
+                assert (body.get('error') or {}).get('retriable') is False
+                print(json.dumps({'kind':'route_outcome','execution_guard_contract':'PASS',
+                    'barrier_kind':proof['kind'],'normal_review_delivered':False,
+                    'current_llm_observed':False,'provider_calls':0,
+                    'execution_confirmed':False,'acks_sent':0,'broker_orders_sent':0},sort_keys=True))
+                raise SystemExit(0)
             shadow=body.get('llm_shadow_decision') or {};audit=body.get('unified_edge_ensemble') or {}
             current=next((x for x in audit.get('components',[]) if x.get('component_id')=='current_llm'),{})
             families=audit.get('edge_families') or []
@@ -127,24 +142,15 @@ jobs:
                 'shadow_status':shadow.get('status'),'llm_self_confidence':shadow.get('confidence'),'current_llm_weight':current.get('effective_weight'),'current_llm_reason':current.get('reason'),'llm_weight_quality_basis':current.get('quality_basis'),'llm_standalone_action_status':current.get('standalone_action_status'),
                 'elapsed_ms':round((time.monotonic()-started)*1000,1),'review_posts':1,'acks_sent':0,'broker_orders_sent':0,
                 'automatic_execution_allowed':audit.get('automatic_execution_allowed')},sort_keys=True))
-            if code==400 and (body.get('error') or {}).get('code')=='execution_barrier_reached':
-                import math
-                proof=body.get('execution_barrier') or {}
-                current_r,barrier_r=proof.get('current_r'),proof.get('barrier_r')
-                assert proof.get('price_authority') is True and proof.get('execution_confirmed') is False
-                assert proof.get('kind') in {'take','stop'}
-                assert all(isinstance(value,(int,float)) and not isinstance(value,bool)
-                    and math.isfinite(value) for value in (current_r,barrier_r))
-                assert current_r>=barrier_r if proof['kind']=='take' else current_r<=barrier_r
-                assert (body.get('error') or {}).get('retriable') is False
-                print(json.dumps({'kind':'route_outcome','execution_guard_contract':'PASS',
-                    'barrier_kind':proof['kind'],'normal_review_delivered':False,
-                    'current_llm_observed':False,'provider_calls':0,
-                    'execution_confirmed':False,'acks_sent':0,'broker_orders_sent':0},sort_keys=True))
-                raise SystemExit(0)
             if code!=200 or not isinstance(body.get('verdict'),str):
                 raise SystemExit('NORMAL_AI_REVIEW_NOT_DELIVERED')
             if shadow.get('status')!='ok' or body.get('degraded') is True:
                 raise SystemExit('CURRENT_LLM_NOT_AVAILABLE_IN_ACTUAL_REVIEW')
+            weight=current.get('effective_weight')
+            if (current.get('available') is not True or not isinstance(weight,(int,float))
+                    or isinstance(weight,bool) or not 0<weight<=1):
+                raise SystemExit('CURRENT_LLM_HAS_NO_OBSERVED_APPLIED_WEIGHT')
+            if not selected or audit.get('automatic_execution_allowed') is not False:
+                raise SystemExit('UNIFIED_MANUAL_DECISION_AUDIT_UNAVAILABLE')
             PY
 
