@@ -1,4 +1,5 @@
 name: ai-release-startup-status-20261020
+# Observe actual quote freshness and blocked workers for the reported 409.
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -8,67 +9,102 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
-      - name: Verify installed fix, available capacity and existing causal input clocks
-        uses: appleboy/ssh-action@v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare official pinned profiler off-host
+        id: package
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --no-cache-dir --no-deps --only-binary=:all: --target "$RUNNER_TEMP/stack-probe" py-spy==0.4.2
+          cp "$RUNNER_TEMP/stack-probe/bin/py-spy" "seiltanzer-pyspy-${{ github.run_id }}"
+          sha=$(sha256sum "seiltanzer-pyspy-${{ github.run_id }}" | awk '{print $1}')
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Transfer bounded temporary diagnostic over existing deploy channel
+        uses: appleboy/scp-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 60s
+          source: seiltanzer-pyspy-${{ github.run_id }}
+          target: /tmp
+      - name: Nonblocking stacks and resource metadata; no locals or provider calls
+        uses: appleboy/ssh-action@v1
+        env:
+          PROBE_RUN_ID: ${{ github.run_id }}
+          PROBE_SHA: ${{ steps.package.outputs.sha }}
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          envs: PROBE_RUN_ID,PROBE_SHA
+          command_timeout: 90s
           script: |
             set -euo pipefail
-            cd /opt/seiltanzer
-            test "$(git rev-parse HEAD)" = 3ec5f748889a4b185e270c991ed14c275ec9c464
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 3ec5f748889a4b185e270c991ed14c275ec9c464
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import asyncio,collections,json,os,re,sqlite3,subprocess,time,urllib.request
+            import hashlib,json,os,stat,subprocess,tempfile,time,urllib.request
             from pathlib import Path
-            from types import SimpleNamespace
-            def out(**row):print(json.dumps(row,sort_keys=True))
-            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState'],text=True,timeout=5)
-            out(kind='service',properties=props.splitlines())
-            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize,background_admitted=st.f_bavail*st.f_frsize>=1024**3+32*1024**2)
-            block=subprocess.run(['lsblk','--bytes','--json','--output','NAME,SIZE,FSTYPE,MOUNTPOINT'],capture_output=True,text=True,timeout=5)
-            if block.returncode==0:out(kind='block_capacity',devices=json.loads(block.stdout).get('blockdevices',[]))
-            for path in ('/api/state','/api/ai/snapshot/status'):
+            run_id=os.environ['PROBE_RUN_ID'];assert run_id.isdigit()
+            upload=Path('/tmp')/('seiltanzer-pyspy-'+run_id)
+            fd=os.open(upload,os.O_RDONLY|os.O_NOFOLLOW)
+            try:
+                info=os.fstat(fd);assert stat.S_ISREG(info.st_mode) and 0<info.st_size<15_000_000
+                with os.fdopen(fd,'rb',closefd=False) as handle:raw=handle.read(15_000_001)
+            finally:os.close(fd)
+            assert hashlib.sha256(raw).hexdigest()==os.environ['PROBE_SHA']
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5));assert pid>0
+            try:
+                with tempfile.TemporaryDirectory(prefix='seiltanzer-private-stack-',dir='/tmp') as directory:
+                    tool=Path(directory)/'py-spy';tool.write_bytes(raw);tool.chmod(0o700)
+                    for sample in range(3):
+                        result=subprocess.run([str(tool),'dump','--pid',str(pid),'--nonblocking'],text=True,capture_output=True,timeout=8)
+                        print(json.dumps({'kind':'stack_sample','sample':sample,'returncode':result.returncode,'nonblocking':True,'locals':False}))
+                        if result.returncode:raise SystemExit('STACK_OBSERVATION_UNAVAILABLE_NO_PERMISSION_CHANGE')
+                        for line in result.stdout.splitlines()[:700]:
+                            if any(mark in line.lower() for mark in ['authorization','password','secret','api_key','token=']):continue
+                            print(json.dumps({'kind':'stack','sample':sample,'line':line[:600]}))
+                        if sample<2:time.sleep(2)
+                for args in [
+                    ['ps','-eo','pid,ppid,pcpu,pmem,rss,stat,etime,comm','--sort=-pcpu'],
+                    ['free','-m'],
+                ]:
+                    result=subprocess.run(args,text=True,capture_output=True,timeout=5)
+                    print(json.dumps({'kind':'resource','command':args[0],'lines':result.stdout.splitlines()[:14]}))
+                for name in ['cpu','io','memory']:
+                    try:print(json.dumps({'kind':'pressure','resource':name,'lines':(Path('/proc/pressure')/name).read_text().splitlines()}))
+                    except OSError:pass
+                signature=subprocess.run(['wipefs','--no-act','--json','/dev/sdb'],text=True,capture_output=True,timeout=5)
+                print(json.dumps({'kind':'unmounted_disk_signatures','returncode':signature.returncode,'metadata':json.loads(signature.stdout) if signature.returncode==0 else None,'device_writes':0}))
+                references=[]
+                for line in Path('/etc/fstab').read_text().splitlines():
+                    parts=line.split()
+                    if parts and not line.lstrip().startswith('#') and parts[0]=='/dev/sdb':references.append(parts[:3])
+                print(json.dumps({'kind':'unmounted_disk_fstab','entries':references}))
+                import asyncio
+                async def observe_canonical():
+                    import websockets
+                    async with websockets.connect('ws://127.0.0.1:8790/ws',open_timeout=5,close_timeout=2,max_size=2*1024**2) as ws:
+                        for sample in range(3):
+                            row=json.loads(await asyncio.wait_for(ws.recv(),8))
+                            quote=(row.get('feeds') or {}).get('price') or {}
+                            def age(stamp):
+                                try:return round(time.time()-float(stamp),3)
+                                except (ValueError,TypeError):return None
+                            print(json.dumps({'kind':'canonical_clock','sample':sample,'tick_age_sec':age(row.get('ts')),'quote_age_sec':age(quote.get('ts')),'source':quote.get('source'),'status':quote.get('status'),'provider_timestamp_verified':quote.get('provider_timestamp_verified'),'derived':quote.get('derived'),'error_present':bool(quote.get('error'))}))
+                try:asyncio.run(observe_canonical())
+                except Exception as exc:print(json.dumps({'kind':'canonical_clock','error':type(exc).__name__}))
                 started=time.monotonic()
-                with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:
-                    row=json.loads(response.read(2*1024**2))
-                    out(kind='endpoint',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','age_sec','build_ms','build_n','last_error') if k in row})
-            async def clock():
-                import websockets
-                async with websockets.connect('ws://127.0.0.1:8790/ws',open_timeout=5,close_timeout=2,max_size=2*1024**2) as ws:
-                    row=json.loads(await asyncio.wait_for(ws.recv(),5))
-                quote=(row.get('feeds') or {}).get('price') or {}
-                def age(x):
-                    try:return round(time.time()-float(x),3)
-                    except (ValueError,TypeError):return None
-                out(kind='canonical_clock',instrument=row.get('instrument'),quote_age_sec=age(quote.get('ts')),tick_age_sec=age(row.get('ts')),source=quote.get('source'),status=quote.get('status'))
-            asyncio.run(clock())
-            try:
-                with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/history?include_management=true',timeout=5) as response:
-                    raw=response.read(2*1024**2+1)
-                    if len(raw)>2*1024**2:raise ValueError('HISTORY_BOUND')
-                    items=json.loads(raw).get('items') or []
-                saved=items[-1] if items else {};ensemble=(saved.get('management_archive') or {}).get('unified_edge_ensemble') or {}
-                model=saved.get('model');model=model if isinstance(model,str) and re.fullmatch(r'[A-Za-z0-9_./:-]{1,120}',model) else None
-                out(kind='saved_review_audit',saved_only=True,age_sec=round(time.time()-saved['ts'],1) if saved.get('ts') else None,model=model,selected_policy=ensemble.get('selected_policy'),components=[{k:row.get(k) for k in ('component_id','availability','available','effective_weight','reason')} for row in ensemble.get('components',[])])
-            except (OSError,ValueError) as exc:out(kind='saved_review_audit',available=False,exception_class=type(exc).__name__)
-            now=time.time();deadline=time.monotonic()+2
-            db=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.1)
-            try:
-                db.execute('PRAGMA query_only=ON');db.set_progress_handler(lambda:time.monotonic()>deadline,1000)
-                bars=db.execute('SELECT bar_start_ts,bar_end_ts,source,kind FROM passive_market_bars WHERE instrument=? ORDER BY bar_start_ts DESC LIMIT 15',('NAS100',)).fetchall()
-                out(kind='archived_nas100_bar_clocks',rows=len(bars),latest_end_age_sec=round(now-bars[0][1],1) if bars else None,sources=sorted({str(x[2])[:120] for x in bars}),kinds=sorted({str(x[3])[:80] for x in bars}),continuous_1m=all(abs(bars[i][0]-bars[i+1][0]-60)<1 for i in range(len(bars)-1)))
-            finally:db.close()
-            from seiltanzer.edge_family_source_runtime import load_family_source_context
-            context=load_family_source_context(SimpleNamespace(settings=SimpleNamespace(data_dir='/opt/seiltanzer/data')),{'instrument':'NAS100','captured_ts':now},'3ec5f748889a4b185e270c991ed14c275ec9c464')
-            audit=context.get('edge_family_source_bundle_audit') or {}
-            out(kind='current_family_source_admission',available=audit.get('available'),reason=audit.get('reason'),rejection_reasons=dict(collections.Counter(str(x.get('reason')) for x in audit.get('rejected_sources',[]))),admitted_record_counts={k:len(v) if isinstance(v,list) else 1 for k,v in context.get('edge_family_sources',{}).items()})
-            for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json'):
-                path=Path('/opt/seiltanzer/data/research')/name
-                if not 0<path.stat().st_size<=1000000:raise RuntimeError('PUBLICATION_BOUND')
-                value=json.loads(path.read_bytes());out(kind='publication',name=name,exact_sha=value.get('published_for_sha')=='3ec5f748889a4b185e270c991ed14c275ec9c464',age_sec=round(time.time()-path.stat().st_mtime,1))
-            out(kind='safety',review_posts=0,provider_calls=0,database_writes=0,restarts=0,acks=0,orders=0)
+                try:
+                    with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=15) as response:
+                        body=json.loads(response.read(100000))
+                        print(json.dumps({'kind':'snapshot_status','http':response.code,'elapsed_ms':round((time.monotonic()-started)*1000,1),'fields':{k:body.get(k) for k in ['ready','building','invalidated_reason','build_ms','build_started_at','build_n','age_sec','last_error']}}))
+                except (OSError,ValueError) as exc:print(json.dumps({'kind':'snapshot_status','error':type(exc).__name__}))
+            finally:
+                assert upload.parent==Path('/tmp') and upload.name=='seiltanzer-pyspy-'+run_id and not upload.is_symlink()
+                upload.unlink()
+                print(json.dumps({'kind':'safety','temporary_tool_removed':True,'app_writes':0,'database_writes':0,'signals_sent':0,'provider_calls':0,'acks':0,'restarts':0}))
             PY
+
