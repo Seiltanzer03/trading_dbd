@@ -1,488 +1,76 @@
-name: exact-installed-release-acceptance-resume-20261022
-# Recheck the already delivered PR507 after its first AI request exceeded the strict budget.
+name: ai-release-startup-status-20261020
+# Read-only exact-fcf47 post-publication quote readiness; no provider/model calls.
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
-concurrency:
-  group: production-seiltanzer
-  queue: max
-  cancel-in-progress: false
 permissions:
-  actions: write
   contents: read
-  statuses: write
 jobs:
-  accept:
+  inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 40
-    env:
-      EXPECTED_SHA: fcf47f4adc958ee531ae69c7580812c3b8dd0204
-      ACCEPTANCE_RUN_ID: ${{ github.run_id }}
+    timeout-minutes: 3
     steps:
-      - name: Require existing exact-SHA green CI
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Read installed service and snapshot metadata without provider calls
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 60s
+          script: |
+            set -euo pipefail
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = fcf47f4adc958ee531ae69c7580812c3b8dd0204
+            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
+            import asyncio,json,os,sqlite3,subprocess,time,urllib.request
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts','-p','MemoryCurrent'],text=True,timeout=5)
+            print(json.dumps({'kind':'service','properties':props.splitlines()}))
+            st=os.statvfs('/');print(json.dumps({'kind':'capacity','free_bytes':st.f_bavail*st.f_frsize}))
+            started=time.monotonic()
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=15) as response:
+                    body=json.loads(response.read(100000))
+                    print(json.dumps({'kind':'snapshot_status','http':response.code,'elapsed_ms':round((time.monotonic()-started)*1000,1),'fields':{k:body.get(k) for k in ['ready','building','invalidated_reason','build_ms','build_started_at','build_n','age_sec','last_error','snapshot_budget']},'has_trade':body.get('current_trade_id') is not None},sort_keys=True))
+            except (TimeoutError,ConnectionError,OSError,ValueError) as exc:
+                print(json.dumps({'kind':'snapshot_status','error':type(exc).__name__,'elapsed_ms':round((time.monotonic()-started)*1000,1)}))
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=15) as response:
+                state=json.loads(response.read(2*1024**2+1))
+            tick=state.get('tick') or {}; quote=(tick.get('feeds') or {}).get('price') or {}
+            def age(value):
+                try:return round(time.time()-float(value),3)
+                except (ValueError,TypeError):return None
+            print(json.dumps({'kind':'quote_readiness','has_trade':bool(tick.get('trade')),'instrument':tick.get('instrument'),'tick_age_sec':age(tick.get('ts')),'quote_age_sec':age(quote.get('ts') or quote.get('timestamp')),'quote_status':quote.get('status'),'production_authority':quote.get('production_authority'),'derived':quote.get('derived'),'is_proxy':quote.get('is_proxy')},sort_keys=True))
+            async def read_canonical_tick():
+                import websockets
+                async with websockets.connect('ws://127.0.0.1:8790/ws',open_timeout=5,close_timeout=2,max_size=2*1024**2) as ws:
+                    tick=json.loads(await asyncio.wait_for(ws.recv(),5))
+                    quote=(tick.get('feeds') or {}).get('price') or {}
+                    print(json.dumps({'kind':'canonical_ws_quote','has_trade':bool(tick.get('trade')),'instrument':tick.get('instrument'),'tick_age_sec':age(tick.get('ts')),'quote_age_sec':age(quote.get('ts') or quote.get('timestamp')),'quote_status':quote.get('status'),'production_authority':quote.get('production_authority'),'derived':quote.get('derived'),'is_proxy':quote.get('is_proxy')},sort_keys=True))
+            asyncio.run(read_canonical_tick())
+            reads=0
+            connection=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
+            try:
+                connection.execute('PRAGMA query_only=ON')
+                deadline=time.monotonic()+2
+                connection.set_progress_handler(lambda:int(time.monotonic()>deadline),1000)
+                connection.execute('BEGIN')
+                ids=('decision-dea1d12fc830d4389fb36ea8761c','decision-fd66e91498e4402dc13b81ba7b7d')
+                rows=connection.execute('SELECT decision_id,status,trade_id FROM management_decisions WHERE decision_id IN (?,?)',ids).fetchall();reads+=1
+                trade_ids={row[2] for row in rows}
+                counts={}
+                if len(trade_ids)==1:
+                    trade_id=next(iter(trade_ids))
+                    for table in ('management_decisions','llm_shadow_manual_actions'):
+                        counts[table]=connection.execute("SELECT COUNT(*) FROM "+table+" WHERE trade_id=? AND status='pending_execution'",(trade_id,)).fetchone()[0];reads+=1
+                print(json.dumps({'kind':'report_pending_continuity','previous_status':next((row[1] for row in rows if row[0]==ids[0]),None),'reported_current_status':next((row[1] for row in rows if row[0]==ids[1]),None),'same_trade':len(trade_ids)==1,'pending_counts':counts,'single_pending_command':sum(counts.values())<=1 if counts else None},sort_keys=True))
+            finally:connection.close()
+            print(json.dumps({'kind':'safety','provider_calls':0,'review_posts':0,'db_read_queries':reads,'db_writes':0,'acks':0,'restarts':0,'app_writes':0}))
+            PY
+      - name: Verify public HTTP without AI request
         run: |
           set -euo pipefail
-          body=$(curl -fsS --max-time 8 \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ github.repository }}/commits/${EXPECTED_SHA}/status")
-          verdict=$(BODY="$body" python3 - <<'PY'
-          import json, os
-          body=json.loads(os.environ['BODY'])
-          states={str(x.get('context')):str(x.get('state')) for x in body.get('statuses',[])}
-          print(states.get('ci/full-webkit','missing'))
-          PY
-          )
-          echo "ci/full-webkit state=$verdict"
-          if [ "$verdict" != "success" ]; then
-            echo "::error::Manual production delivery requires an already-green exact-SHA ci/full-webkit"
-            exit 1
-          fi
-
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.EXPECTED_SHA }}
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Reject superseded main before production mutation
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash scripts/require_current_main.sh
-
-      - name: Revalidate already delivered process without restart
-        id: delivery
-        uses: appleboy/ssh-action@v1
-        env:
-          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          envs: EXPECTED_SHA
-          command_timeout: 30s
-          script: |
-            set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            test ! -e /opt/seiltanzer/data/cutover.active
-            test ! -L /opt/seiltanzer/data/cutover.active
-            test "$(systemctl show seiltanzer -p MainPID --value)" = 3544184
-            test "$(systemctl show seiltanzer -p NRestarts --value)" = 0
-            test "$(systemctl is-active seiltanzer)" = active
-            /usr/bin/python3 - <<'PY_GUARD'
-            import json,shutil
-            from pathlib import Path
-            state=json.loads(Path('/opt/seiltanzer/data/cutover.journal.json').read_bytes())
-            assert state.get('phase')=='COMMITTED' and str(state.get('run_id'))=='39582128571'
-            free=shutil.disk_usage('/').free
-            assert free>=1024**3+32*1024**2,'BACKGROUND_HEADROOM_NOT_RESTORED'
-            print('EXISTING_DELIVERY_REVALIDATED pid=3544184 original_run=39908811028 original_job=120266802479 free_bytes='+str(free))
-            PY_GUARD
-            curl --fail --silent --show-error --connect-timeout 1 --max-time 5 --output /dev/null http://127.0.0.1:8790/api/state
-
-      - name: Pause research for exact-SHA production acceptance
-        id: preacceptance
-        uses: appleboy/ssh-action@v1
-        env:
-          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
-          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          # Five-minute startup grace + the measured ~9-minute bounded core can
-          # legitimately exceed the former 12-minute wall clock allowance.
-          command_timeout: 20m
-          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
-          script: |
-            set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            PY=/opt/seiltanzer/.venv/bin/python
-            ORCH=/opt/seiltanzer/scripts/production_research_acceptance.py
-            gate_owned=0
-
-            cleanup_gate_on_failure() {
-              if [ "$gate_owned" -eq 1 ]; then
-                "$PY" "$ORCH" release-gate \
-                  --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
-                  --expected-sha "$EXPECTED_SHA" || true
-              fi
-            }
-            trap cleanup_gate_on_failure EXIT
-
-            # Acquire the existing cooperative lease immediately after the new
-            # service first becomes HTTP-ready. The worker may complete its one
-            # required core cycle, but cannot start optional maintenance before
-            # the readiness transaction begins.
-            "$PY" "$ORCH" acquire-gate \
-              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
-              --expected-sha "$EXPECTED_SHA" \
-              --ttl-seconds 7200
-            gate_owned=1
-
-            "$PY" /opt/seiltanzer/scripts/production_post_research_check.py \
-              --expected-sha "$EXPECTED_SHA" \
-              --acceptance-run-id "$ACCEPTANCE_RUN_ID"
-            "$PY" "$ORCH" validate-gate \
-              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
-              --expected-sha "$EXPECTED_SHA"
-
-            trap - EXIT
-            echo "PRE_ACCEPTANCE_RESEARCH_PAUSED expected_sha=$EXPECTED_SHA acceptance_run_id=$ACCEPTANCE_RUN_ID"
-
-      - name: Verify exact production readiness
-        id: readiness
-        uses: appleboy/ssh-action@v1
-        env:
-          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 10m
-          envs: EXPECTED_SHA
-          script: |
-            set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            /opt/seiltanzer/.venv/bin/python \
-              /opt/seiltanzer/scripts/production_readiness_check.py \
-              --expected-sha "$EXPECTED_SHA" \
-              --skip-restore-drill-low-disk
-
-      # Cold start and the first core cycle may exceed the bundle's 20-minute
-      # TTL. Acquire official facts only after both finish; keep the runtime
-      # freshness, hashes, exact SHA and source validation unchanged.
-      - name: Build exact-SHA official macro transport bundle off-host
-        env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check --quiet -e '.[research]' paramiko
-          python - <<'PY'
-          import json,os,runpy,select,socketserver,sys,threading
-          from scripts.production_ede_offload import _connect,_verify_sha
-          expected=os.environ['EXPECTED_SHA']
-          client=_connect(os.environ.pop('SSH_PASSWORD'),attempts=1)
-          stopping=threading.Event()
-          server=None
-          try:
-              _verify_sha(client,expected)
-              transport=client.get_transport()
-              class Forward(socketserver.BaseRequestHandler):
-                  def handle(self):
-                      channel=None
-                      try:
-                          channel=transport.open_channel('direct-tcpip',('127.0.0.1',9050),self.request.getpeername(),timeout=5)
-                          self.request.settimeout(10);channel.settimeout(10)
-                          while not stopping.is_set():
-                              readable,_,_=select.select([self.request,channel],[],[],1)
-                              for source in readable:
-                                  data=source.recv(65536)
-                                  if not data:return
-                                  (channel if source is self.request else self.request).sendall(data)
-                      except (OSError,EOFError):
-                          return
-                      finally:
-                          if channel is not None:channel.close()
-              class LocalOnly(socketserver.ThreadingTCPServer):
-                  daemon_threads=True
-                  block_on_close=False
-              server=LocalOnly(('127.0.0.1',0),Forward)
-              thread=threading.Thread(target=server.serve_forever,daemon=True)
-              thread.start()
-              previous=os.environ.get('MACRO_HTTP_PROXY')
-              os.environ['MACRO_HTTP_PROXY']='socks5://127.0.0.1:'+str(server.server_address[1])
-              print(json.dumps({'configured_existing_proxy_fallback':True,'direct_official_first':True,'loopback_only':True,'new_sources':False}),flush=True)
-              try:
-                  sys.argv=['scripts/build_offhost_macro_bundle.py','--expected-sha',expected,
-                      '--acceptance-run-id',os.environ['ACCEPTANCE_RUN_ID'],
-                      '--output','official-macro-'+os.environ['ACCEPTANCE_RUN_ID']+'.json']
-                  runpy.run_path(sys.argv[0],run_name='__main__')
-                  _verify_sha(client,expected)
-              finally:
-                  if previous is None:os.environ.pop('MACRO_HTTP_PROXY',None)
-                  else:os.environ['MACRO_HTTP_PROXY']=previous
-          finally:
-              stopping.set()
-              if server is not None:
-                  server.shutdown();server.server_close()
-              client.close()
-          PY
-
-      - name: Transfer verified official macro bundle over deploy channel
-        uses: appleboy/scp-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          source: official-macro-${{ github.run_id }}.json
-          target: /tmp
-
-      - name: Install fresh exact-SHA official macro bundle before smoke
-        uses: appleboy/ssh-action@v1
-        env:
-          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
-          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 2m
-          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
-          script: |
-            set -euo pipefail
-            case "$ACCEPTANCE_RUN_ID" in
-              ''|*[!0-9]*) echo "Invalid acceptance_run_id"; exit 1 ;;
-            esac
-            bundle_input="/tmp/official-macro-${ACCEPTANCE_RUN_ID}.json"
-            trap 'rm -f -- "$bundle_input"' EXIT
-            test -f "$bundle_input"
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            /opt/seiltanzer/.venv/bin/python \
-              /opt/seiltanzer/scripts/install_offhost_macro_bundle.py \
-              --input "$bundle_input" \
-              --destination /opt/seiltanzer/data/research/official_macro_offhost_latest.json \
-              --expected-sha "$EXPECTED_SHA" \
-              --acceptance-run-id "$ACCEPTANCE_RUN_ID"
-
-      - name: Exercise exact production routes, AI and official macro data
-        id: smoke
-        uses: appleboy/ssh-action@v1
-        env:
-          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 8m
-          envs: EXPECTED_SHA
-          script: |
-            set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
-            /opt/seiltanzer/.venv/bin/python \
-              /opt/seiltanzer/scripts/production_functional_smoke.py \
-              --expected-sha "$EXPECTED_SHA"
-
-      - name: Verify public terminal from GitHub runner
-        id: public
-        run: |
-          set -euo pipefail
-          url="http://94.241.171.182:8790/api/state"
-          for attempt in 1 2 3; do
-            if curl -fsS \
-              --connect-timeout 3 \
-              --max-time 5 \
-              --output /tmp/public-state.json \
-              "$url"; then
-              bytes=$(wc -c < /tmp/public-state.json)
-              echo "public terminal PASS attempt=${attempt} bytes=${bytes}"
-              exit 0
-            fi
-            echo "public terminal attempt=${attempt}/3 failed"
-            sleep 2
+          for path in / /api/state; do
+            code=$(curl --silent --show-error --connect-timeout 5 --max-time 15 --output /dev/null --write-out '%{http_code}' "http://94.241.171.182:8790$path")
+            echo "public_path=$path http_code=$code"
+            test "$code" = 200
           done
-          echo "::error::Public terminal is unreachable at ${url}"
-          exit 1
-
-      - name: Start exact-SHA mathematical edge refresh off-host
-        id: mathrefresh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          payload=$(python3 - <<'PY'
-          import json, os
-          print(json.dumps({'ref': 'main', 'inputs': {'expected_sha': os.environ['EXPECTED_SHA']}}))
-          PY
-          )
-          curl --fail-with-body --silent --show-error \
-            --retry 3 --retry-delay 2 --retry-max-time 15 --retry-all-errors \
-            -X POST -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/mathematical-edge.yml/dispatches" \
-            -d "$payload"
-          echo "MATHEMATICAL_EDGE_REFRESH_DISPATCHED expected_sha=$EXPECTED_SHA"
-
-      - name: Start exact-SHA source family collection off-host
-        id: sourcerefresh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          payload=$(python3 - <<'PY'
-          import json, os
-          print(json.dumps({'ref': 'main', 'inputs': {'expected_sha': os.environ['EXPECTED_SHA']}}))
-          PY
-          )
-          curl --fail-with-body --silent --show-error \
-            --retry 3 --retry-delay 2 --retry-max-time 15 --retry-all-errors \
-            -X POST -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/edge-family-sources.yml/dispatches" \
-            -d "$payload"
-          echo "EDGE_FAMILY_SOURCE_REFRESH_DISPATCHED expected_sha=$EXPECTED_SHA"
-
-      - name: Start exact-SHA prospective FOMC capture off-host
-        id: fomcrefresh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          payload=$(python3 - <<'PY'
-          import json, os
-          print(json.dumps({'ref': 'main', 'inputs': {'expected_sha': os.environ['EXPECTED_SHA']}}))
-          PY
-          )
-          curl --fail-with-body --silent --show-error \
-            --retry 3 --retry-delay 2 --retry-max-time 15 --retry-all-errors \
-            -X POST -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/fomc-prospective-capture.yml/dispatches" \
-            -d "$payload"
-          echo "FOMC_PROSPECTIVE_REFRESH_DISPATCHED expected_sha=$EXPECTED_SHA"
-
-      - name: Start exact-SHA post-deploy research acceptance
-        id: orchestration
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          case "$EXPECTED_SHA" in
-            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
-            *) echo "::error::Invalid expected_sha: $EXPECTED_SHA"; exit 1 ;;
-          esac
-          case "$ACCEPTANCE_RUN_ID" in
-            ''|*[!0-9]*) echo "::error::Invalid acceptance_run_id: $ACCEPTANCE_RUN_ID"; exit 1 ;;
-          esac
-          payload=$(python3 - <<'PY'
-          import json, os
-          print(json.dumps({
-              "ref": "main",
-              "inputs": {
-                  "expected_sha": os.environ["EXPECTED_SHA"],
-                  "acceptance_run_id": os.environ["ACCEPTANCE_RUN_ID"],
-              },
-          }))
-          PY
-          )
-          curl --fail-with-body --silent --show-error \
-            --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/production-post-research.yml/dispatches" \
-            -d "$payload"
-          echo "POST_RESEARCH_DISPATCHED expected_sha=$EXPECTED_SHA acceptance_run_id=$ACCEPTANCE_RUN_ID"
-
-      - name: Release pre-acceptance gate if deploy chain failed
-        if: always() && steps.preacceptance.outcome == 'success' && steps.orchestration.outcome != 'success'
-        uses: appleboy/ssh-action@v1
-        env:
-          EXPECTED_SHA: ${{ env.EXPECTED_SHA }}
-          ACCEPTANCE_RUN_ID: ${{ env.ACCEPTANCE_RUN_ID }}
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 2m
-          envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
-          script: |
-            /opt/seiltanzer/.venv/bin/python \
-              /opt/seiltanzer/scripts/production_research_acceptance.py release-gate \
-              --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
-              --expected-sha "$EXPECTED_SHA" || true
-
-      - name: Diagnose production failure
-        if: failure()
-        uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 2m
-          script: |
-            set +e
-            echo '=== DEPLOYED SHA ==='
-            git -C /opt/seiltanzer rev-parse HEAD || true
-            echo '=== SERVICE ==='
-            systemctl status seiltanzer --no-pager -l || true
-            echo '=== AI SNAPSHOT STATUS ==='
-            curl -sS --max-time 5 http://127.0.0.1:8790/api/ai/snapshot/status || true
-            echo
-            echo '=== MACRO STATUS ==='
-            curl -sS --max-time 8 http://127.0.0.1:8790/api/research/macro/status || true
-            echo
-            echo '=== RECENT JOURNAL ==='
-            journalctl -u seiltanzer --since '-15 minutes' --no-pager -n 220 || true
-
-      - name: Publish exact-SHA production statuses
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DELIVERY: ${{ steps.delivery.outcome }}
-          PREACCEPTANCE: ${{ steps.preacceptance.outcome }}
-          READINESS: ${{ steps.readiness.outcome }}
-          SMOKE: ${{ steps.smoke.outcome }}
-          PUBLIC: ${{ steps.public.outcome }}
-          ORCHESTRATION: ${{ steps.orchestration.outcome }}
-          MATHREFRESH: ${{ steps.mathrefresh.outcome }}
-          SOURCEREFRESH: ${{ steps.sourcerefresh.outcome }}
-          FOMCREFRESH: ${{ steps.fomcrefresh.outcome }}
-        run: |
-          set -u
-          prod_state=failure
-          smoke_state=failure
-          readiness_state=failure
-          if [ "$READINESS" = "success" ]; then readiness_state=success; fi
-          if [ "$SMOKE" = "success" ] && [ "$PUBLIC" = "success" ]; then smoke_state=success; fi
-          if [ "$DELIVERY" = "success" ] && [ "$PREACCEPTANCE" = "success" ] \
-             && [ "$READINESS" = "success" ] \
-             && [ "$SMOKE" = "success" ] && [ "$PUBLIC" = "success" ] \
-             && [ "$MATHREFRESH" = "success" ] && [ "$SOURCEREFRESH" = "success" ] \
-             && [ "$FOMCREFRESH" = "success" ] && [ "$ORCHESTRATION" = "success" ]; then
-            prod_state=success
-          fi
-
-          publish() {
-            state="$1"; context="$2"; description="$3"
-            payload="{\"state\":\"$state\",\"context\":\"$context\",\"description\":\"$description\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
-            curl --fail-with-body --silent --show-error \
-              --retry 5 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
-              -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${{ github.repository }}/statuses/${EXPECTED_SHA}" \
-              -d "$payload"
-          }
-
-          publish "$prod_state" "production/seiltanzer" \
-            "Exact installed SHA: resumed full readiness and functional acceptance"
-          publish "$readiness_state" "g1e/storage-intelligence" \
-            "Durability and bounded Intelligence readiness"
-          publish "$readiness_state" "g1m/management-edge" \
-            "Terminal Management Edge readiness"
-          publish "$readiness_state" "g1s/short-horizon" \
-            "Fast short-horizon evidence and Q maturity readiness"
-          publish "$readiness_state" "g1m/local-feedback" \
-            "Local management feedback readiness"
-          publish "$smoke_state" "production/functional-smoke" \
-            "Bounded analytics, AI Verdict, official macro and public endpoint smoke"
-
-          echo "EXPECTED_SHA=$EXPECTED_SHA acceptance_run_id=$ACCEPTANCE_RUN_ID delivery=$DELIVERY readiness=$READINESS smoke=$SMOKE public=$PUBLIC orchestration=$ORCHESTRATION"
-          test "$prod_state" = "success"
