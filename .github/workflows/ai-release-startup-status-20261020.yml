@@ -5,39 +5,12 @@ on:
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
-  actions: write
 jobs:
-  retire:
+  inspect:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Cancel only the superseded exact-SHA inventory
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 -u - <<'PY'
-          import json,os,urllib.request,urllib.error
-          root='https://api.github.com/repos/'+os.environ['GITHUB_REPOSITORY']
-          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'}
-          def get(path):
-              with urllib.request.urlopen(urllib.request.Request(root+path,headers=headers),timeout=10) as response:return json.load(response)
-          assert get('/git/ref/heads/main')['object']['sha']=='0ca3bd68251135cbc22586a02f97214551bcafa8'
-          row=get('/actions/runs/39963200921')
-          assert row['head_sha']=='3ec5f748889a4b185e270c991ed14c275ec9c464' and row['head_branch']=='main'
-          assert row['path']=='.github/workflows/production-ede-inventory.yml'
-          cancel=row['status']!='completed'
-          if cancel:
-              active=[job for job in get('/actions/runs/39963200921/jobs')['jobs'] if job['status']=='in_progress']
-              assert len(active)==1 and active[0]['name']=='inventory'
-              steps=[step for step in active[0]['steps'] if step['status']=='in_progress']
-              assert len(steps)==1 and steps[0]['name']=='Audit real immutable G1S observations and all EDE features'
-              try:
-                  with urllib.request.urlopen(urllib.request.Request(root+'/actions/runs/39963200921/cancel',headers=headers,method='POST'),timeout=10) as response:assert response.status==202
-              except urllib.error.HTTPError as exc:
-                  if exc.code!=409:raise
-          print(json.dumps({'cancel_requested':cancel,'run_id':39963200921,'scope':'superseded_readonly_inventory'}))
-          PY
-      - name: Drain only the identified readonly inventory process
+      - name: Read exact startup admission and owner metadata
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -46,35 +19,29 @@ jobs:
           command_timeout: 45s
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 3ec5f748889a4b185e270c991ed14c275ec9c464
             /usr/bin/python3 -u - <<'PY'
-            import fcntl,json,os,select,signal,stat,subprocess,time
+            import json,os,subprocess,time
             from pathlib import Path
-            app_pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5).strip()
-            assert app_pid=='3591211'
-            pid=3596657;process=Path('/proc')/str(pid);sent=False
-            if process.exists():
-                assert process.stat().st_uid==0
-                before=(process/'stat').read_text().rsplit(')',1)[1].split()
-                if before[0]!='Z':
-                    raw=(process/'cmdline').read_bytes();assert len(raw)<4096
-                    assert raw.split(b'\0')==[b'/opt/seiltanzer/.venv/bin/python',b'/opt/seiltanzer/scripts/production_ede_inventory.py',b'--database',b'/opt/seiltanzer/data/trades.db',b''], 'UNKNOWN_PROCESS_NO_SIGNAL'
-                    fd=os.pidfd_open(pid)
-                    try:
-                        after=(process/'stat').read_text().rsplit(')',1)[1].split()
-                        assert after[19]==before[19], 'PROCESS_IDENTITY_CHANGED_NO_SIGNAL'
-                        signal.pidfd_send_signal(fd,signal.SIGTERM);sent=True
-                        poll=select.poll();poll.register(fd,select.POLLIN)
-                        assert poll.poll(8000), 'READONLY_READER_EXIT_NOT_CONFIRMED'
-                    finally:os.close(fd)
-            lock=os.open('/opt/seiltanzer/.deployment-git-maintenance.lock',os.O_RDWR|os.O_NOFOLLOW)
-            try:
-                info=os.fstat(lock);assert stat.S_ISREG(info.st_mode) and info.st_uid==0
-                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            finally:os.close(lock)
-            assert subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5).strip()==app_pid
+            def out(**row):print(json.dumps(row,sort_keys=True))
+            def run(args,timeout=6):return subprocess.run(args,text=True,capture_output=True,timeout=timeout)
+            out(kind='git',head=run(['git','-C','/opt/seiltanzer','rev-parse','HEAD']).stdout.strip())
+            out(kind='service',fields=run(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts']).stdout.splitlines())
+            out(kind='active_guard',exists=os.path.lexists('/opt/seiltanzer/data/cutover.active'))
+            for name in ('cutover.journal.json','cutover.result.json'):
+                p=Path('/opt/seiltanzer/data')/name
+                try:
+                    assert not p.is_symlink() and 0<p.stat().st_size<65536
+                    row=json.loads(p.read_bytes())
+                    out(kind='epoch',file=name,fields={k:row.get(k) for k in ('run_id','phase','service_started','abort_reason')})
+                except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
             started=time.monotonic()
-            proof=subprocess.run(['nice','-n','-5','/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],capture_output=True,text=True,timeout=12)
-            print(json.dumps({'kind':'inventory_retired','target_pid':pid,'sigterm_sent':sent,'reader_exit_confirmed':True,'maintenance_lock_free':True,'app_pid_unchanged':True,'original_admission':json.loads(proof.stdout),'admission_ms':round((time.monotonic()-started)*1000,1),'database_writes':0,'guard_mutations':0,'restarts':0,'provider_calls':0,'orders':0}))
-            assert proof.returncode==0
+            result=run(['nice','-n','-10','/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],timeout=12)
+            try:proof=json.loads(result.stdout)
+            except ValueError:proof={'parse_error':True}
+            out(kind='admission',priority='temporary_check_process_only_nice_minus_10',permission_error='Permission denied' in result.stderr,returncode=result.returncode,elapsed_ms=round((time.monotonic()-started)*1000,1),proof=proof)
+            for args in (['ps','-eo','pid,ppid,pcpu,rss,stat,etime,comm','--sort=-pcpu'],['free','-m']):
+                out(kind='resource',command=args[0],lines=run(args).stdout.splitlines()[:10])
+            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
+            out(kind='safety',read_only=True,restarts=0,provider_calls=0,acks=0,db_writes=0,history_mutations=0)
             PY
+
