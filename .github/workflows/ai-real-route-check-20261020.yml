@@ -41,11 +41,11 @@ jobs:
           command_timeout: 12m
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = fcf47f4adc958ee531ae69c7580812c3b8dd0204
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = feecd3825fb0072bacfe2fdd1f0cc68bb0d24dd2
             test ! -e /opt/seiltanzer/data/cutover.active
             test ! -L /opt/seiltanzer/data/cutover.active
-            /usr/bin/python3 -u - <<'PY'
-            import json,re,subprocess,time,urllib.request,urllib.error
+            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
+            import asyncio,json,re,subprocess,time,urllib.request,urllib.error
             from pathlib import Path
             pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],timeout=5))
             if pid<=0:raise SystemExit('ACTIVE_PROCESS_REQUIRED')
@@ -59,7 +59,7 @@ jobs:
                     raw=response.read(2*1024**2+1)
                     if len(raw)>2*1024**2:raise ValueError('RESPONSE_BOUND')
                     return response.code,json.loads(raw)
-            expected='fcf47f4adc958ee531ae69c7580812c3b8dd0204'
+            expected='feecd3825fb0072bacfe2fdd1f0cc68bb0d24dd2'
             publication_end=time.monotonic()+480
             research=Path('/opt/seiltanzer/data/research')
             while True:
@@ -77,13 +77,31 @@ jobs:
                     raise SystemExit('EXACT_SHA_PUBLICATIONS_NOT_READY_NO_PROVIDER_CALL')
                 time.sleep(10)
             print(json.dumps({'publication_ready':pins}))
+            async def canonical_clock():
+                import websockets
+                async with websockets.connect('ws://127.0.0.1:8790/ws',open_timeout=5,close_timeout=2,max_size=2*1024**2) as ws:
+                    tick=json.loads(await asyncio.wait_for(ws.recv(),5))
+                quote=(tick.get('feeds') or {}).get('price') or {}
+                stamp=quote.get('ts') or quote.get('timestamp')
+                try:quote_age=time.time()-float(stamp)
+                except (TypeError,ValueError):quote_age=None
+                return {'tick_ts':tick.get('ts'),'quote_age_sec':round(quote_age,3) if quote_age is not None else None,
+                    'status':quote.get('status'),'source':quote.get('source'),'derived':quote.get('derived')}
             end=time.monotonic()+180
+            fresh_clocks=[]
             while True:
                 code,status=call('/api/ai/snapshot/status')
                 if code!=200:raise SystemExit('SNAPSHOT_STATUS_UNAVAILABLE')
-                if status.get('ready') or status.get('current_trade_id') is None:break
+                if status.get('current_trade_id') is None:break
+                clock=asyncio.run(canonical_clock())
+                age=clock['quote_age_sec']
+                if status.get('ready') and isinstance(age,(int,float)) and -5<=age<=15:
+                    fresh_clocks.append(clock)
+                    if len(fresh_clocks)>=3 and fresh_clocks[-1]['tick_ts']!=fresh_clocks[0]['tick_ts']:break
+                else:fresh_clocks=[]
                 if time.monotonic()>=end:raise SystemExit('SNAPSHOT_NOT_READY_NO_PROVIDER_CALL')
                 time.sleep(5)
+            print(json.dumps({'kind':'pre_review_live_clocks','observations':fresh_clocks[-3:]}))
             print(json.dumps({'snapshot_ready':status.get('ready'),'snapshot_build_ms':status.get('build_ms'),'snapshot_age_sec':status.get('age_sec'),'snapshot_build_n':status.get('build_n'),'snapshot_invalidated_reason':status.get('invalidated_reason')},sort_keys=True))
             started=time.monotonic();code,body=call('/api/ai/verdict',True)
             if code==400 and (body.get('error') or {}).get('code')=='execution_barrier_reached':
@@ -101,6 +119,13 @@ jobs:
                     'current_llm_observed':False,'provider_calls':0,
                     'execution_confirmed':False,'acks_sent':0,'broker_orders_sent':0},sort_keys=True))
                 raise SystemExit(0)
+            if code!=200:
+                print(json.dumps({'kind':'review_not_delivered','http':code,
+                    'api_error_code':(body.get('error') or {}).get('code'),
+                    'request_id':(body.get('error') or {}).get('request_id'),
+                    'elapsed_ms':round((time.monotonic()-started)*1000,1),
+                    'review_posts':1,'acks_sent':0,'broker_orders_sent':0},sort_keys=True))
+                raise SystemExit('NORMAL_AI_REVIEW_NOT_DELIVERED')
             shadow=body.get('llm_shadow_decision') or {};audit=body.get('unified_edge_ensemble') or {}
             current=next((x for x in audit.get('components',[]) if x.get('component_id')=='current_llm'),{})
             families=audit.get('edge_families') or []
@@ -153,4 +178,5 @@ jobs:
             if not selected or audit.get('automatic_execution_allowed') is not False:
                 raise SystemExit('UNIFIED_MANUAL_DECISION_AUDIT_UNAVAILABLE')
             PY
+
 
