@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import pathlib
+import re
 import shlex
 
 from production_ede_offload import (
@@ -29,6 +31,23 @@ ALLOWED_NAMES = {
 }
 MAX_BYTES = 8_000_000
 PUBLICATION_CONTRACT_VERSION = "active-edge-exact-sha-publication-v1"
+
+
+def _verify_uploaded_report(sftp, temporary, size, expected_digest):
+    """Read back bounded staged bytes before the atomic publication boundary."""
+    digest = hashlib.sha256()
+    received = 0
+    with sftp.open(temporary, 'rb') as handle:
+        while True:
+            block = handle.read(min(65536, size + 1 - received))
+            if not block:
+                break
+            received += len(block)
+            if received > size:
+                raise RuntimeError('research report upload exceeds expected bytes')
+            digest.update(block)
+    if received != size or digest.hexdigest() != expected_digest:
+        raise RuntimeError('research report upload size or SHA256 mismatch')
 
 
 def _stamp_report(source: pathlib.Path, *, expected_sha: str, run_id: str) -> int:
@@ -77,6 +96,8 @@ def main() -> int:
     parser.add_argument("--remote-name", required=True, choices=sorted(ALLOWED_NAMES))
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
+    if re.fullmatch(r'[A-Za-z0-9_-]{1,80}', args.run_id) is None:
+        raise RuntimeError('run_id must be a bounded publication identifier')
 
     source = pathlib.Path(args.input).resolve()
     if not source.is_file():
@@ -86,6 +107,7 @@ def main() -> int:
         expected_sha=args.expected_sha,
         run_id=args.run_id,
     )
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
 
     client = _connect(args.password)
     try:
@@ -105,15 +127,16 @@ def main() -> int:
         sftp = client.open_sftp()
         try:
             sftp.put(str(source), temporary)
-            try:
-                sftp.posix_rename(temporary, remote)
-            except OSError:
-                try:
-                    sftp.remove(remote)
-                except OSError:
-                    pass
-                sftp.rename(temporary, remote)
+            _verify_uploaded_report(sftp, temporary, size, digest)
+            _verify_sha(client, args.expected_sha)
+            # Never unlink the previous usable publication to emulate replace.
+            # Unsupported or failed atomic rename must leave it untouched.
+            sftp.posix_rename(temporary, remote)
         finally:
+            try:
+                sftp.remove(temporary)
+            except OSError:
+                pass
             sftp.close()
         _probe_api(client)
         print(
