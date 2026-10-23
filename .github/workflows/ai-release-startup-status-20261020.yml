@@ -8,40 +8,55 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
-      - name: Check current capacity before the reviewed release
+      - name: Locate new disk usage without reading application payloads
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 30s
+          command_timeout: 75s
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 0ca3bd68251135cbc22586a02f97214551bcafa8
-            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import json,os,stat,subprocess,time,urllib.request
+            /usr/bin/python3 -u - <<'PY'
+            import json,os,stat,subprocess
             from pathlib import Path
             def out(**row):print(json.dumps(row,sort_keys=True))
-            st=os.statvfs('/');free=st.f_bavail*st.f_frsize
-            out(kind='capacity',free_bytes=free,background_minimum_bytes=1024**3+32*1024**2,background_admitted=free>=1024**3+32*1024**2)
-            for name in ('/opt/seiltanzer/data/trades.db','/opt/seiltanzer/data/trades.db-wal','/var/log/syslog','/var/log/syslog.1','/var/cache/apt/pkgcache.bin','/var/cache/apt/srcpkgcache.bin'):
-                p=Path(name)
+            for directory in ('/opt','/var','/tmp','/root/.cache'):
                 try:
-                    info=p.lstat();out(kind='file_capacity',name=name,regular=stat.S_ISREG(info.st_mode),size=info.st_size,allocated=info.st_blocks*512)
-                except FileNotFoundError:pass
-            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState'],text=True,timeout=3)
-            out(kind='service',properties=props.splitlines())
-            for path in ('/api/state','/api/ai/snapshot/status'):
-                started=time.monotonic()
-                with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:
-                    raw=response.read(2*1024**2+1);assert len(raw)<=2*1024**2
-                    row=json.loads(raw)
-                out(kind='endpoint',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','age_sec','build_ms','last_error') if k in row})
-                quote=(row.get('feeds') or {}).get('price') or {}
-                if quote:
-                    stamp=quote.get('ts');age=round(time.time()-stamp,3) if type(stamp) in (int,float) else None
-                    out(kind='quote_clock',age_sec=age,status=quote.get('status'),source=quote.get('source'),derived=quote.get('derived'))
-            out(kind='safety',database_writes=0,provider_calls=0,review_posts=0,restarts=0,orders=0)
+                    result=subprocess.run(['nice','-n','15','du','-x','-B1','--max-depth=2',directory],capture_output=True,text=True,timeout=12)
+                    rows=[]
+                    for line in result.stdout.splitlines():
+                        size,_,path=line.partition('\t')
+                        if size.isdigit():rows.append((int(size),path))
+                    out(kind='directory_usage',directory=directory,largest=sorted(rows,reverse=True)[:18],returncode=result.returncode)
+                except subprocess.TimeoutExpired:out(kind='directory_usage',directory=directory,timed_out=True)
+            for directory in ('/tmp','/opt/seiltanzer/data','/opt/seiltanzer/data/research','/opt/actions-runner/_work','/opt/actions-runner/_work/_update'):
+                root=Path(directory)
+                if not root.is_dir():continue
+                rows=[]
+                for p in list(root.iterdir())[:600]:
+                    try:
+                        info=p.lstat()
+                        if stat.S_ISREG(info.st_mode) and info.st_size>1024**2:rows.append((info.st_size,p.name,info.st_blocks*512))
+                    except OSError:pass
+                out(kind='bounded_files',directory=directory,largest=sorted(rows,reverse=True)[:18])
+            deleted={}
+            for process in Path('/proc').iterdir():
+                if not process.name.isdigit():continue
+                try:
+                    for fd in (process/'fd').iterdir():
+                        try:
+                            target=os.readlink(fd)
+                            if not target.endswith(' (deleted)'):continue
+                            info=fd.stat()
+                            if stat.S_ISREG(info.st_mode) and info.st_blocks*512>1024**2:
+                                deleted[(info.st_dev,info.st_ino)]={'pid':int(process.name),'name':Path(target[:-10]).name[:100],'allocated':info.st_blocks*512}
+                        except OSError:pass
+                except OSError:pass
+            out(kind='open_deleted_files',files=sorted(deleted.values(),key=lambda r:r['allocated'],reverse=True)[:15])
+            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
+            out(kind='safety',database_writes=0,provider_calls=0,deletions=0,restarts=0,orders=0)
             PY
