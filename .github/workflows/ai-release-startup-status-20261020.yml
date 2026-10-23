@@ -64,7 +64,10 @@ jobs:
                 drop.unlink();run(['systemctl','daemon-reload'])
             run(['systemctl','stop',unit],timeout=20)
             state=run(['systemctl','show',unit,'-p','MainPID','-p','ActiveState','-p','UnitFileState']).stdout
-            assert 'MainPID=0' in state and 'ActiveState=inactive' in state and 'UnitFileState=disabled' in state
+            out(kind='runner_stopped_state',properties=state.splitlines())
+            assert 'MainPID=0' in state and 'UnitFileState=disabled' in state
+            assert 'ActiveState=inactive' in state or 'ActiveState=failed' in state
+            assert not run(['systemctl','show',unit,'-p','ControlGroup','--value']).stdout.strip()
             # Kernel descriptors/mappings must no longer refer to any target.
             names=[str(p) for p in candidates]
             for proc in Path('/proc').iterdir():
