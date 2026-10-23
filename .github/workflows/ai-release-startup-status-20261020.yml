@@ -8,40 +8,34 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 2
     steps:
-      - name: Read exact startup admission and owner metadata
+      - name: Read the saved normal AI response and bounded failure classification
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 45s
+          command_timeout: 30s
           script: |
             set -euo pipefail
-            /usr/bin/python3 -u - <<'PY'
-            import json,os,subprocess,time
-            from pathlib import Path
-            def out(**row):print(json.dumps(row,sort_keys=True))
-            def run(args,timeout=6):return subprocess.run(args,text=True,capture_output=True,timeout=timeout)
-            out(kind='git',head=run(['git','-C','/opt/seiltanzer','rev-parse','HEAD']).stdout.strip())
-            out(kind='service',fields=run(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts']).stdout.splitlines())
-            out(kind='active_guard',exists=os.path.lexists('/opt/seiltanzer/data/cutover.active'))
-            for name in ('cutover.journal.json','cutover.result.json'):
-                p=Path('/opt/seiltanzer/data')/name
-                try:
-                    assert not p.is_symlink() and 0<p.stat().st_size<65536
-                    row=json.loads(p.read_bytes())
-                    out(kind='epoch',file=name,fields={k:row.get(k) for k in ('run_id','phase','service_started','abort_reason')})
-                except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
-            started=time.monotonic()
-            result=run(['nice','-n','-10','/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],timeout=12)
-            try:proof=json.loads(result.stdout)
-            except ValueError:proof={'parse_error':True}
-            out(kind='admission',priority='temporary_check_process_only_nice_minus_10',permission_error='Permission denied' in result.stderr,returncode=result.returncode,elapsed_ms=round((time.monotonic()-started)*1000,1),proof=proof)
-            for args in (['ps','-eo','pid,ppid,pcpu,rss,stat,etime,comm','--sort=-pcpu'],['free','-m']):
-                out(kind='resource',command=args[0],lines=run(args).stdout.splitlines()[:10])
-            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
-            out(kind='safety',read_only=True,restarts=0,provider_calls=0,acks=0,db_writes=0,history_mutations=0)
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 0ca3bd68251135cbc22586a02f97214551bcafa8
+            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
+            import json,re,subprocess,time,urllib.request
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/history?include_management=true',timeout=5) as response:
+                raw=response.read(2*1024**2+1)
+                assert len(raw)<=2*1024**2
+                items=json.loads(raw).get('items') or []
+            saved=items[-1] if items else {};audit=(saved.get('management_archive') or {}).get('unified_edge_ensemble') or {}
+            model=saved.get('model');model=model if isinstance(model,str) and re.fullmatch(r'[A-Za-z0-9_./:-]{1,120}',model) else None
+            print(json.dumps({'kind':'latest_saved_review','age_sec':round(time.time()-saved['ts'],1) if saved.get('ts') else None,'model':model,'policy':audit.get('selected_policy'),'components':[{k:row.get(k) for k in ('component_id','availability','available','effective_weight','reason')} for row in audit.get('components',[])],'saved_only':True}))
+            result=subprocess.run(['journalctl','-u','seiltanzer','--since','-5 minutes','--no-pager','-n','1000','-o','cat'],capture_output=True,text=True,timeout=5)
+            allowed=('request_id','stage','event','elapsed_ms','duration_ms','exception_class','provider_reason','status_code','response_bytes','completion_tokens','finish_reason')
+            rows=[]
+            for line in result.stdout.splitlines():
+                try:row=json.loads(line[line.index('{'):])
+                except (ValueError,TypeError):continue
+                if row.get('stage') in ('provider','provider_http','provider_decode','provider_validate','provider_extended_validation','provider_transport','provider_fallback','response'):
+                    rows.append({k:row[k] for k in allowed if k in row})
+            print(json.dumps({'kind':'recent_provider_trace','rows':rows[-35:],'provider_calls':0,'review_posts':0,'acks':0,'orders':0,'database_writes':0}))
             PY
-
