@@ -876,9 +876,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pending.append(tick_task)
             if state_task is not None:
                 pending.append(state_task)
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-            live_executor.shutdown(wait=True)
+            try:
+                if pending:
+                    draining = asyncio.gather(*pending, return_exceptions=True)
+                    # Another shutdown cancellation must not cancel a feed's
+                    # Future while its SQLite/network thread is still running.
+                    while not draining.done():
+                        try:
+                            await asyncio.shield(draining)
+                        except asyncio.CancelledError:
+                            continue
+                    draining.result()
+            finally:
+                live_executor.shutdown(wait=True)
 
     async def passive_loop():
         from .background_disk_admission import passive_step
