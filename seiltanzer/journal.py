@@ -11,7 +11,9 @@ import math
 import sqlite3
 import threading
 import time
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import SETUPS
 from .core.risk import setup_efficiency
@@ -49,6 +51,11 @@ class Journal:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._q_database_path = next(
+            (str(row[2]) for row in self._conn.execute("PRAGMA database_list")
+             if row[1] == "main" and row[2]),
+            None,
+        )
         with self._lock, self._conn:
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
@@ -1061,8 +1068,25 @@ class Journal:
 
     def q_calibration_report(self) -> dict:
         """Horizon-aligned scorecard for the first eligible Q forecast/trade."""
-        with self._lock:
-            rows = self._conn.execute("""
+        path = getattr(self, "_q_database_path", None)
+        if not path:
+            return self._q_calibration_report(self._conn, self._lock)
+        # A historical scan must not own the live journal connection/mutex.
+        # WAL readers see one committed generation without blocking the writer.
+        # Rollback journals retain statement-scoped reads: a report-long read
+        # transaction there would prevent live commits during Python resolution.
+        # Failures stay explicit instead of falling back to the shared mutex.
+        uri = Path(path).as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only=ON")
+            if connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+                connection.execute("BEGIN")
+            return self._q_calibration_report(connection, nullcontext())
+
+    def _q_calibration_report(self, connection, lock) -> dict:
+        with lock:
+            rows = connection.execute("""
                 SELECT t.id AS trade_id,t.instrument,t.direction,f.*
                 FROM trades t JOIN option_forecasts f ON f.id=(
                     SELECT f2.id FROM option_forecasts f2
@@ -1084,17 +1108,17 @@ class Journal:
             except (TypeError, ValueError):
                 # Preserve the resolver's incomplete-contract handling.
                 horizon_end = math.inf
-            with self._lock:
+            with lock:
                 # REAL affinity is not STRICT: legacy TEXT/BLOB timestamps can
                 # float-convert but sort after numbers. The indexed maximum
                 # proves numeric ordering or retains the original full read.
-                last_type = self._conn.execute(
+                last_type = connection.execute(
                     "SELECT typeof(ts) FROM trade_market_path WHERE trade_id=? "
                     "AND ts>=? ORDER BY ts DESC LIMIT 1",
                     (int(row["trade_id"]), float(row["ts"])),
                 ).fetchone()
                 numeric_order = last_type is None or last_type[0] in ("integer", "real")
-                cursor = self._conn.execute(
+                cursor = connection.execute(
                     "SELECT ts,r FROM trade_market_path WHERE trade_id=? "
                     "AND ts>=? ORDER BY ts",
                     (int(row["trade_id"]), float(row["ts"])),
