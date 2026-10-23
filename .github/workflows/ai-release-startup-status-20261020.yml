@@ -5,129 +5,57 @@ on:
     paths: [.github/workflows/ai-release-startup-status-20261020.yml]
 permissions:
   contents: read
-concurrency:
-  group: production-seiltanzer
-  queue: max
-  cancel-in-progress: false
 jobs:
-  recover:
+  inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 2
     steps:
-      - name: Retire unused local runner code after hosted-check migration
+      - name: Verify updater service ownership and actual root reserve
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 150s
+          command_timeout: 30s
           script: |
             set -euo pipefail
-            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
-            flock -w 10 9
-            /usr/bin/python3 -u - <<'PY'
-            import json,os,pwd,shutil,stat,subprocess
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 0ca3bd68251135cbc22586a02f97214551bcafa8
+            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
+            import json,os,stat,subprocess,time,urllib.request
             from pathlib import Path
-            def out(**row):print(json.dumps(row,sort_keys=True),flush=True)
-            def run(args,timeout=10):return subprocess.run(args,text=True,capture_output=True,timeout=timeout,check=True)
-            def app():return run(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState']).stdout
-            before=app();assert 'ActiveState=active' in before
-            assert run(['git','-C','/opt/seiltanzer','rev-parse','HEAD']).stdout.strip()=='0ca3bd68251135cbc22586a02f97214551bcafa8'
-            root=Path('/opt/actions-runner')
-            assert pwd.getpwnam('github-runner').pw_uid==1000
-            assert root.resolve()==root and root.stat().st_uid==1000 and root.stat().st_ino==531026
+            def out(**row):print(json.dumps(row,sort_keys=True))
+            st=os.statvfs('/');free=st.f_bavail*st.f_frsize
+            out(kind='capacity',free_bytes=free,background_minimum_bytes=1024**3+32*1024**2,background_admitted=free>=1024**3+32*1024**2)
+            out(kind='filesystem_reserve',total_bytes=st.f_blocks*st.f_frsize,root_free_bytes=st.f_bfree*st.f_frsize,reserved_bytes=(st.f_bfree-st.f_bavail)*st.f_frsize)
+            service=Path('/opt/actions-runner/.service')
+            if service.is_file() and not service.is_symlink() and service.stat().st_size<512:
+                unit=service.read_text().strip()
+                import re
+                assert re.fullmatch(r'actions\.runner\.[A-Za-z0-9_.-]+\.service',unit)
+                info=subprocess.run(['systemctl','show',unit,'-p','Id','-p','ActiveState','-p','SubState','-p','MainPID','-p','WorkingDirectory','-p','UnitFileState','-p','FragmentPath'],capture_output=True,text=True,timeout=5)
+                out(kind='local_runner_unit',properties=info.stdout.splitlines(),returncode=info.returncode)
+            else:out(kind='local_runner_unit',available=False)
             unit='actions.runner.Seiltanzer03-trading_dbd.seiltanzer-prod-1.service'
-            assert (root/'.service').is_file() and not (root/'.service').is_symlink()
-            assert (root/'.service').read_text().strip()==unit
-            working=run(['systemctl','show',unit,'-p','WorkingDirectory','--value']).stdout.strip()
-            assert working==str(root)
-            assert run(['systemctl','show',unit,'-p','User','--value']).stdout.strip()=='github-runner'
-            installed={'bin':str(root/'bin.2.337.0'),'externals':str(root/'externals.2.337.0')}
-            assert {name:os.readlink(root/name) for name in installed}==installed
-            candidates=[root/'_work/_update',root/'bin.2.338.0',root/'externals.2.338.0',root/'bin.2.337.0',root/'externals.2.337.0']
-            identities={}
-            for p in candidates:
-                info=p.lstat()
-                assert stat.S_ISDIR(info.st_mode) and info.st_uid==1000 and p.resolve()==p and info.st_dev==root.stat().st_dev
-                identities[str(p)]=(info.st_dev,info.st_ino)
-            def active_workers():
-                found=[]
-                for p in Path('/proc').iterdir():
-                    if not p.name.isdigit():continue
-                    try:
-                        if (p/'comm').read_text().strip().startswith('Runner.Worker'):found.append(int(p.name))
-                    except (FileNotFoundError,ProcessLookupError):pass
-                return found
-            assert not active_workers(),'RUNNER_JOB_ACTIVE_NO_STOP'
-            # Freeze before the decisive idle check: no new assignment can
-            # enter between that check and retirement. Suppress automatic
-            # restart before killing the idle frozen cgroup; systemctl stop
-            # alone would automatically thaw a unit before stopping it.
-            group=run(['systemctl','show',unit,'-p','ControlGroup','--value']).stdout.strip()
-            cgroot=Path('/sys/fs/cgroup');cgroup=cgroot/group.lstrip('/')
-            assert group.startswith('/system.slice/') and cgroup.resolve().is_relative_to(cgroot)
-            dropdir=Path('/run/systemd/system')/(unit+'.d')
-            drop=dropdir/'90-seiltanzer-capacity-retirement.conf'
-            assert not os.path.lexists(drop)
-            frozen=False;created=False
-            try:
-                run(['systemctl','freeze',unit],timeout=8);frozen=True
-                assert 'frozen 1' in (cgroup/'cgroup.events').read_text().splitlines()
-                assert not active_workers(),'RUNNER_BUSY_FROZEN_NO_STOP'
-                dropdir.mkdir(parents=True,exist_ok=True)
-                assert dropdir.resolve()==dropdir and not dropdir.is_symlink() and dropdir.stat().st_uid==0
-                with drop.open('x') as f:
-                    created=True
-                    f.write('[Service]\nRestart=no\n')
-                run(['systemctl','daemon-reload'])
-                assert run(['systemctl','show',unit,'-p','Restart','--value']).stdout.strip()=='no'
-                run(['systemctl','disable',unit])
-                assert 'frozen 1' in (cgroup/'cgroup.events').read_text().splitlines()
-                assert not active_workers(),'RUNNER_BUSY_BEFORE_RETIREMENT'
-                # Fatal signals cannot resume the frozen listener to accept a
-                # job. The temporary Restart=no prevents manager replacement.
-                run(['systemctl','kill','--kill-who=all','--signal=SIGKILL',unit])
-                run(['systemctl','stop',unit],timeout=25)
-            finally:
-                try:
-                    if frozen:
-                        thaw=subprocess.run(['systemctl','thaw',unit],text=True,capture_output=True,timeout=8)
-                        if thaw.returncode:
-                            # An already stopped empty cgroup needs no thaw.
-                            ended=run(['systemctl','show',unit,'-p','MainPID','-p','ActiveState']).stdout
-                            assert 'MainPID=0' in ended and 'ActiveState=inactive' in ended
-                            assert not cgroup.exists() or not (cgroup/'cgroup.procs').read_text().strip()
-                finally:
-                    if created:
-                        drop.unlink();run(['systemctl','daemon-reload'])
-            state=run(['systemctl','show',unit,'-p','MainPID','-p','ActiveState']).stdout
-            assert 'MainPID=0' in state and 'ActiveState=inactive' in state
-            assert not active_workers(),'RUNNER_JOB_ACTIVE_NO_DELETE'
-            assert run(['systemctl','show',unit,'-p','UnitFileState','--value']).stdout.strip()=='disabled'
-            # Kernel descriptors/mappings must no longer refer to any target.
-            names=[str(p) for p in candidates]
-            for proc in Path('/proc').iterdir():
-                if not proc.name.isdigit():continue
-                try:
-                    links=[proc/'cwd',proc/'exe',*(proc/'fd').iterdir()]
-                    for entry in links:
-                        try:target=os.readlink(entry)
-                        except (FileNotFoundError,ProcessLookupError):continue
-                        assert not any(target==name or target.startswith(name+'/') for name in names),'RUNNER_CODE_IN_USE_NO_DELETE'
-                    maps=(proc/'maps').read_text()
-                    assert not any(name+'/' in maps for name in names),'RUNNER_CODE_MAPPED_NO_DELETE'
-                except (FileNotFoundError,ProcessLookupError):pass
-            assert shutil.rmtree.avoids_symlink_attacks
-            free_before=shutil.disk_usage('/').free
-            removed=[]
-            for p in candidates:
-                info=p.lstat()
-                assert not p.is_symlink() and p.resolve()==p and (info.st_dev,info.st_ino)==identities[str(p)]
-                shutil.rmtree(p);removed.append(str(p))
-            assert app()==before,'APPLICATION_PROCESS_CHANGED'
-            assert (root/'.service').is_file()
-            free=shutil.disk_usage('/').free
-            out(kind='unused_runner_retired',removed_paths=removed,free_before_bytes=free_before,free_bytes=free,runner_unit_disabled=True,configuration_preserved=True,application_unchanged=True)
-            assert free>=1024**3+32*1024**2,'RESERVE_NOT_YET_RECOVERED'
-            out(kind='safety',app_restarts=0,database_writes=0,provider_calls=0,acks=0,orders=0,trade_data_deletions=0)
+            info=subprocess.run(['systemctl','show',unit,'-p','Restart','-p','ControlGroup','-p','FreezerState'],capture_output=True,text=True,timeout=5)
+            out(kind='runner_control_state',properties=info.stdout.splitlines())
+            group=subprocess.check_output(['systemctl','show',unit,'-p','ControlGroup','--value'],text=True,timeout=5).strip()
+            cg=Path('/sys/fs/cgroup')/group.lstrip('/')
+            assert group.startswith('/system.slice/') and cg.resolve().is_relative_to('/sys/fs/cgroup')
+            out(kind='runner_kernel_state',kill_available=(cg/'cgroup.kill').is_file(),freeze=(cg/'cgroup.freeze').read_text().strip(),events=(cg/'cgroup.events').read_text().splitlines(),process_ids=(cg/'cgroup.procs').read_text().splitlines(),runtime_dropin_present=Path('/run/systemd/system') .joinpath(unit+'.d/90-seiltanzer-capacity-retirement.conf').exists())
+            version=subprocess.check_output(['systemctl','--version'],text=True,timeout=5).splitlines()[0]
+            helptext=subprocess.check_output(['systemctl','kill','--help'],text=True,timeout=5)
+            out(kind='systemctl_support',version=version,kill_options=[line.strip() for line in helptext.splitlines() if '--kill-who' in line or '--signal' in line])
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState'],text=True,timeout=3)
+            out(kind='service',properties=props.splitlines())
+            for path in ('/api/state','/api/ai/snapshot/status'):
+                started=time.monotonic()
+                with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:
+                    raw=response.read(2*1024**2+1);assert len(raw)<=2*1024**2
+                    row=json.loads(raw)
+                out(kind='endpoint',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','age_sec','build_ms','last_error') if k in row})
+                quote=(row.get('feeds') or {}).get('price') or {}
+                if quote:
+                    stamp=quote.get('ts');age=round(time.time()-stamp,3) if type(stamp) in (int,float) else None
+                    out(kind='quote_clock',age_sec=age,status=quote.get('status'),source=quote.get('source'),derived=quote.get('derived'))
+            out(kind='safety',database_writes=0,provider_calls=0,review_posts=0,restarts=0,orders=0)
             PY
