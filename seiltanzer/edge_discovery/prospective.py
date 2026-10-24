@@ -203,6 +203,11 @@ DERIVED_IMPLEMENTED_IDS = {
 
 
 class ProspectiveFeatureAdapter:
+    def _check_read_budget(self) -> None:
+        check = getattr(self.runtime, "_read_budget_check", None)
+        if callable(check):
+            check()
+
     def __init__(self, runtime: Any, *, available_asof: float | None = None):
         self.runtime = runtime
         self.available_asof = float(time.time() if available_asof is None else available_asof)
@@ -278,6 +283,7 @@ class ProspectiveFeatureAdapter:
                 "FROM passive_market_bars ORDER BY instrument,bar_end_ts").fetchall()
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
+            self._check_read_budget()
             grouped[str(row["instrument"])].append(dict(row))
         return dict(grouped)
 
@@ -591,6 +597,7 @@ class ProspectiveFeatureAdapter:
              horizon_minutes: int | None = None) -> list[dict[str, Any]]:
         output: list[dict[str, Any]] = []
         for source in self._source_rows(horizon_minutes=horizon_minutes):
+            self._check_read_budget()
             t0, target = float(source["captured_ts"]), float(source["target_ts"])
             if target <= t0:
                 raise ValueError("target_ts must be after T0")
@@ -604,6 +611,7 @@ class ProspectiveFeatureAdapter:
                 raise ValueError("future outcome was recorded before target_ts")
             feature_values, rejected, feature_provenance = self._feature_values(
                 source, strict=strict)
+            self._check_read_budget()
             ret5 = feature_values.get("price.ret_5m")
             ret15 = feature_values.get("price.ret_15m")
             if resolved_only and (ret5 is None or ret15 is None
@@ -658,13 +666,17 @@ class ProspectiveFeatureAdapter:
             })
         output.sort(key=lambda row: (
             float(row["captured_ts"]), str(row["instrument"]), int(row["horizon_minutes"])))
+        self._check_read_budget()
         self._add_causal_option_transforms(output)
+        self._check_read_budget()
         by_horizon: dict[int, list[dict[str, Any]]] = defaultdict(list)
         for row in output:
             by_horizon[int(row["horizon_minutes"])].append(row)
         for rows in by_horizon.values():
+            self._check_read_budget()
             aligned_cross_asset_context(rows)
             self._add_context_feature_values(rows)
+            self._check_read_budget()
         return output
 
     @staticmethod

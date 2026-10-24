@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import seiltanzer.g1_research_worker as worker
+from seiltanzer import production_resource_guard as resource_guard
 from seiltanzer.g1_short_horizon_routes import install_g1_short_horizon_routes
 
 
@@ -59,6 +60,7 @@ def test_worker_status_route_is_lock_free_and_bounded(monkeypatch):
             "last_error": None,
             "core_stage": "g1s:resolve",
             "core_stage_started_ts": 11.0,
+            "memory_pressure": {"rss_mib": 64.0, "level": "normal"},
             "last_result": {
                 "g1s": {"batch_limit": 500, "large_payload": list(range(1000))},
                 "g1m_local": {"batch_limit": 100},
@@ -72,6 +74,11 @@ def test_worker_status_route_is_lock_free_and_bounded(monkeypatch):
         "seiltanzer.g1_short_horizon_routes.install_g1_short_horizon_historical_wf_integrity",
         lambda: None)
     install_g1_short_horizon_routes(app)
+    readings = iter((128 * 1024 ** 2, 1536 * 1024 ** 2))
+    monkeypatch.setattr(resource_guard, '_rss_bytes', lambda: next(readings))
+    monkeypatch.setattr(resource_guard, 'MEMORY_SOFT_MIB', 512)
+    monkeypatch.setattr(resource_guard, 'MEMORY_HARD_MIB', 768)
+    monkeypatch.setattr(resource_guard, 'MEMORY_CRITICAL_MIB', 1024)
 
     endpoint = app.routes["/api/research/runtime/worker-status"]
     assert asyncio.iscoroutinefunction(endpoint)
@@ -80,5 +87,10 @@ def test_worker_status_route_is_lock_free_and_bounded(monkeypatch):
     assert body["production_authority"] is False
     assert body['worker']['core_stage'] == 'g1s:resolve'
     assert body['worker']['core_stage_started_ts'] == 11.0
+    assert body['worker']['memory_pressure']['rss_mib'] == 128.0
+    second = asyncio.run(endpoint())
+    assert second['worker']['memory_pressure']['rss_mib'] == 1536.0
+    assert second['worker']['memory_pressure']['level'] == 'critical'
+    assert app.state.g1_research_worker['memory_pressure']['rss_mib'] == 64.0
     assert body["last_result"] == {
         "g1s": {"batch_limit": 500}, "g1m_local": {"batch_limit": 100}}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Response
@@ -11,6 +12,7 @@ from .g1_short_horizon_historical_wf_integrity import install_g1_short_horizon_h
 from .storage_restore_drill import last_restore_drill
 from .edge_discovery.evidence_ledger import evidence_ledger_path, latest_frozen_evidence
 from .edge_discovery.shadow_cache import load_shadow_summary_cache
+from .production_resource_guard import memory_pressure_state
 
 
 def install_g1_short_horizon_routes(app: FastAPI) -> None:
@@ -259,9 +261,14 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
             "ede_v13_full_discovery_runs_on_request_path",
             "memory_pause_active", "memory_pressure",
         )
+        worker = {key: state.get(key) for key in keys}
+        # A long in-flight phase can outlive its admission sample. Read procfs
+        # now without touching SQLite or mutating the worker's control state.
+        worker["memory_pressure"] = memory_pressure_state()
+        worker["memory_pressure_sampled_ts"] = time.time()
         return {
             "contract_version": "research-worker-status-v1",
-            "worker": {key: state.get(key) for key in keys},
+            "worker": worker,
             "last_result": result_summary,
             "sqlite_access": False,
             "production_authority": False,
