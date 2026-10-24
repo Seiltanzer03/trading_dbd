@@ -35,7 +35,7 @@ jobs:
                     tick=row.get('tick') or {};price=(tick.get('feeds') or {}).get('price') or {}
                     fields={'instrument':tick.get('instrument'),'source':price.get('source'),'status':price.get('status'),'source_ts':price.get('ts'),'tick_ts':tick.get('ts')}
                 elif path.endswith('worker-status'):
-                    worker=row.get('worker') or {};fields={k:worker.get(k) for k in ('current_phase','core_stage','last_error','disk_pause_active','acceptance_gate_active','acceptance_gate_run_id')}
+                    worker=row.get('worker') or {};fields={k:worker.get(k) for k in ('current_phase','core_stage','last_error','memory_pressure','disk_pause_active','acceptance_gate_active','acceptance_gate_run_id')}
                 else:fields={k:row.get(k) for k in ('ready','building','age_sec','build_n','build_ms','last_error')}
                 out(kind='runtime',path=path,elapsed_ms=round((time.monotonic()-start)*1000,1),fields=fields)
             from seiltanzer.research_acceptance_gate import read_acceptance_gate
@@ -43,7 +43,7 @@ jobs:
             helper=runpy.run_path('/opt/seiltanzer/scripts/sqlite_replication_origin.py',run_name='readonly_origin_probe')
             scopes=sorted(p for p in Path('/tmp').glob('seiltanzer-sqlite-tools-*') if re.fullmatch(r'seiltanzer-sqlite-tools-[0-9]{1,20}',p.name))
             out(kind='origin_scope_count',count=len(scopes),inspected_limit=8)
-            for path in scopes[:8]:
+            for path in scopes[-8:]:
                 if path.is_symlink() or not path.is_dir():raise RuntimeError('UNSAFE_ORIGIN_SCOPE')
                 binary=path/'sqlite3_rsync';state=path/'origin.json'
                 targets=helper['targets'](binary,state)
