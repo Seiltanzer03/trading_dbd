@@ -113,8 +113,10 @@ jobs:
             printf '%s' "$COMPACTION_SCRIPT" | base64 -d | /usr/bin/python3 - \
               --repo /opt/seiltanzer --expected-sha "$EXPECTED_SHA" --stage-bundle "$bundle"
             git cat-file -e "${EXPECTED_SHA}^{commit}"
-            test "$(git rev-parse refs/deploy/staged)" = "$EXPECTED_SHA"
-            echo "STAGED_EXACT_SHA=$EXPECTED_SHA"
+            if [ "$(git rev-parse HEAD)" != "$EXPECTED_SHA" ]; then
+              test "$(git rev-parse refs/deploy/staged)" = "$EXPECTED_SHA"
+            fi
+            echo "AVAILABLE_EXACT_SHA=$EXPECTED_SHA"
 
       - name: Confirm staging never mutated production working tree
         uses: appleboy/ssh-action@v1
@@ -131,5 +133,7 @@ jobs:
             set -euo pipefail
             cd /opt/seiltanzer
             git cat-file -e "${EXPECTED_SHA}^{commit}"
-            test "$(git rev-parse refs/deploy/staged)" = "$EXPECTED_SHA"
+            if [ "$(git rev-parse HEAD)" != "$EXPECTED_SHA" ]; then
+              test "$(git rev-parse refs/deploy/staged)" = "$EXPECTED_SHA"
+            fi
             echo "PRODUCTION_HEAD_UNCHANGED=$(git rev-parse HEAD)"

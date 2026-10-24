@@ -131,9 +131,33 @@ def compact(repo, origin, expected_sha, apply=False):
 
 
 def stage_bundle(repo, bundle, expected_sha):
+    repo = repo.resolve(strict=True)
+    if not re.fullmatch('[0-9a-f]{40}', expected_sha):
+        raise RuntimeError('SHA_MISMATCH')
     with (repo / '.deployment-git-maintenance.lock').open('a') as lock:
+        # A later staging job may follow a successful ordinary delivery.  An
+        # already installed root needs validation only, compatible with live
+        # history readers; it must not import objects or rewrite shallow/refs.
+        fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        if git(repo, 'rev-parse', 'HEAD') == expected_sha:
+            before = inspect(repo, expected_sha)
+            _verify_stage_bundle(repo, bundle, expected_sha)
+            git(repo, 'fsck', '--connectivity-only', '--no-reflogs', expected_sha)
+            if inspect(repo, expected_sha) != before:
+                raise RuntimeError('GIT_CHANGED_DURING_STAGING_CHECK')
+            return {'status': 'ALREADY_INSTALLED', 'available_sha': expected_sha,
+                    'running_sha': expected_sha, 'git_metadata_modified': False,
+                    'application_files_modified': False, 'database_modified': False}
+        # A different target still requires the original exclusive mutation
+        # lock. Conversion can refuse under readers, before any Git writes.
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return _stage_bundle(repo, bundle, expected_sha)
+
+
+def _verify_stage_bundle(repo, bundle, expected_sha):
+    if git(repo, 'bundle', 'list-heads', str(bundle)) != expected_sha + ' refs/deploy/exact':
+        raise RuntimeError('BUNDLE_SHA_MISMATCH')
+    git(repo, 'bundle', 'verify', str(bundle))
 
 
 def _stage_bundle(repo, bundle, expected_sha):
@@ -142,9 +166,7 @@ def _stage_bundle(repo, bundle, expected_sha):
     inspect(repo, running_sha)
     if not re.fullmatch('[0-9a-f]{40}', expected_sha):
         raise RuntimeError('SHA_MISMATCH')
-    if git(repo, 'bundle', 'list-heads', str(bundle)) != expected_sha + ' refs/deploy/exact':
-        raise RuntimeError('BUNDLE_SHA_MISMATCH')
-    git(repo, 'bundle', 'verify', str(bundle))
+    _verify_stage_bundle(repo, bundle, expected_sha)
     shallow = repo / '.git' / 'shallow'
     old = shallow.read_bytes() if shallow.exists() else None
     roots = set((old or b'').decode('ascii').splitlines()) | {expected_sha}
