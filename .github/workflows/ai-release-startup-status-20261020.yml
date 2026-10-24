@@ -64,7 +64,7 @@ jobs:
                             out(kind='canonical_quote',instrument=tick.get('instrument'),source=quote.get('source'),status=quote.get('status'),quote_age_sec=age(quote.get('ts')),payload_age_sec=age(tick.get('ts')))
                         if path.endswith('/worker-status'):
                             worker=row.get('worker') or {}
-                            out(kind='acceptance_worker',sqlite_access=row.get('sqlite_access'),fields={k:worker.get(k) for k in ('current_phase','core_stage','first_cycle_not_before_ts','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','last_error','disk_pause_active','acceptance_pause_active','memory_pressure')})
+                            out(kind='acceptance_worker',sqlite_access=row.get('sqlite_access'),fields={k:worker.get(k) for k in ('current_phase','core_stage','first_cycle_not_before_ts','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','last_error','disk_pause_active','acceptance_pause_active','memory_pressure','last_maintenance_started_ts','last_maintenance_finished_ts','last_maintenance_duration_ms','last_maintenance_error')})
                         if path.endswith('/passive/status'):out(kind='passive_collector',fields={k:row.get(k) for k in ('collector_status','latest_error','last_step_ts','last_skip_reason','last_skip_reason_code','latest_observation_ts')})
                 except (OSError,ValueError) as exc:out(kind='endpoint',path=path,available=False,exception_class=type(exc).__name__)
 
@@ -85,6 +85,23 @@ jobs:
                 for component in audit.get('components') or []:
                     if isinstance(component,dict):out(kind='saved_component_only',fields={k:component.get(k) for k in ('component_id','effective_weight','available','availability','reason','quality','age_sec')})
             except (OSError,ValueError,TypeError) as exc:out(kind='saved_ai_read',available=False,exception_class=type(exc).__name__)
+
+            for name in ('ede_candidate_registry.jsonl','ede_v13_candidate_registry.jsonl','ede_shadow_v13.jsonl','ede_prospective_confirmation.jsonl','ede_v13_latest_audit.json'):
+                p=Path('/opt/seiltanzer/data/research')/name
+                out(kind='research_file_metadata_only',name=name,size_bytes=p.lstat().st_size if p.exists() else None,symlink=p.is_symlink())
+            for name in ('cutover.active','cutover.journal.json'):
+                p=Path('/opt/seiltanzer/data')/name
+                info=p.lstat() if os.path.lexists(p) else None
+                row=dict(kind='history_fence_metadata',name=name,present=info is not None,symlink=p.is_symlink(),size_bytes=info.st_size if info else None)
+                if info and name.endswith('.json') and not p.is_symlink() and 0<info.st_size<=65536:
+                    try:
+                        journal=json.loads(p.read_bytes());row['state']={k:journal.get(k) for k in ('contract','run_id','phase','service_started')}
+                    except (ValueError,OSError):row['state_invalid']=True
+                out(**row)
+            try:
+                guard=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],capture_output=True,text=True,timeout=8)
+                out(kind='existing_start_fence_readonly',returncode=guard.returncode,result=json.loads(guard.stdout) if len(guard.stdout)<=4096 and guard.stdout.strip() else None)
+            except (OSError,ValueError,subprocess.TimeoutExpired) as exc:out(kind='existing_start_fence_readonly',available=False,error_class=type(exc).__name__)
             import runpy
             if pid>0:
                 status=Path('/proc/'+str(pid)+'/status').read_text().splitlines()
