@@ -117,6 +117,16 @@ jobs:
                         out(kind='llm_lifecycle_query_plan_only',index_names=[row[1] for row in indices],latest_by_hypothesis_plan=[row[3] for row in plan],evaluations_executed=False)
                     finally:conn.close()
             except (OSError,ValueError,sqlite3.Error) as exc:out(kind='llm_lifecycle_query_plan_only',available=False,error_class=type(exc).__name__)
+
+            for path in ('/api/research/g1/q/status','/api/research/g1/q/audit?limit=5000&include_items=false'):
+                started=time.monotonic()
+                try:
+                    with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=3) as response:
+                        raw=response.read(1000001)
+                        if len(raw)>1000000:raise ValueError('Q_RESPONSE_BOUND')
+                        row=json.loads(raw)
+                        out(kind='q_readiness_once',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),keys=sorted(row)[:32],scalars={k:v for k,v in row.items() if v is None or isinstance(v,(bool,int,float,str))})
+                except (OSError,ValueError) as exc:out(kind='q_readiness_once',path=path,available=False,error_class=type(exc).__name__,elapsed_ms=round((time.monotonic()-started)*1000,1))
             import runpy
             if pid>0:
                 status=Path('/proc/'+str(pid)+'/status').read_text().splitlines()
