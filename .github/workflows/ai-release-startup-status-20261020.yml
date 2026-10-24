@@ -71,10 +71,12 @@ jobs:
             if pid>0:
                 status=Path('/proc/'+str(pid)+'/status').read_text().splitlines()
                 out(kind='current_process_memory',pid=pid,fields={line.split(':',1)[0]:line.split(':',1)[1].strip() for line in status if line.split(':',1)[0] in ('VmRSS','RssAnon','RssFile','RssShmem','VmData')})
-            helper=runpy.run_path('/opt/seiltanzer/scripts/sqlite_replication_origin.py',run_name='readonly_origin_probe')
             scope=Path('/tmp/seiltanzer-sqlite-tools-40082288165')
             if scope.is_symlink():raise RuntimeError('UNSAFE_ORIGIN_SCOPE')
-            targets=helper['targets'](scope/'sqlite3_rsync',scope/'origin.json') if scope.is_dir() else []
+            control=scope/'control.py'
+            if control.is_symlink():raise RuntimeError('UNSAFE_ORIGIN_CONTROL')
+            helper=runpy.run_path(str(control),run_name='readonly_origin_probe') if control.is_file() else None
+            targets=helper['targets'](scope/'sqlite3_rsync',scope/'origin.json') if helper else []
             def counts(process):
                 try:return {k:int(v) for k,v in (line.split(':',1) for line in Path('/proc/'+str(process)+'/io').read_text().splitlines()) if k in ('rchar','read_bytes')}
                 except (OSError,ValueError):return {}
