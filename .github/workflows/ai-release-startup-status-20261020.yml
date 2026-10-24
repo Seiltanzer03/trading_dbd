@@ -24,7 +24,7 @@ jobs:
             from pathlib import Path
             def out(**row):print(json.dumps(row,sort_keys=True))
             sha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()
-            out(kind='installed_release',sha=sha,expected=sha=='81bae01b03dbbad3959affc78c7029153c9a4491')
+            out(kind='installed_release',sha=sha,expected=sha=='d2222a28144e85dbf094c8954c54426ce550f96c')
             props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ControlPID','-p','NRestarts','-p','ActiveState','-p','SubState','-p','MemoryCurrent'],text=True,timeout=3)
             out(kind='service',properties=props.splitlines())
             pid=int(dict(line.split('=',1) for line in props.splitlines()).get('MainPID') or 0)
@@ -67,6 +67,24 @@ jobs:
                             out(kind='acceptance_worker',sqlite_access=row.get('sqlite_access'),fields={k:worker.get(k) for k in ('current_phase','core_stage','first_cycle_not_before_ts','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','last_error','disk_pause_active','acceptance_pause_active','memory_pressure')})
                         if path.endswith('/passive/status'):out(kind='passive_collector',fields={k:row.get(k) for k in ('collector_status','latest_error','last_step_ts','last_skip_reason','last_skip_reason_code','latest_observation_ts')})
                 except (OSError,ValueError) as exc:out(kind='endpoint',path=path,available=False,exception_class=type(exc).__name__)
+
+            # Historical archive inspection only: never builds a fresh verdict.
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/history?include_management=true',timeout=3) as response:
+                    raw=response.read(2000001)
+                if len(raw)>2000000:raise ValueError('HISTORY_RESPONSE_EXCEEDS_BOUND')
+                items=json.loads(raw).get('items') or []
+                items=[x for x in items if isinstance(x,dict) and isinstance(x.get('ts'),(int,float)) and not isinstance(x.get('ts'),bool)]
+                last=max(items,key=lambda x:x['ts']) if items else {}
+                archive=last.get('management_archive') or {}
+                audit=archive.get('unified_edge_ensemble') or {}
+                decision=archive.get('decision') or {}
+                out(kind='latest_saved_ai_only_not_fresh_provider_proof',ts=last.get('ts'),age_sec=time.time()-last['ts'] if last else None,model=last.get('model'),captured_ts=archive.get('captured_ts'),selected_policy=audit.get('selected_policy'),effective_weights=audit.get('effective_weights'),decision={k:decision.get(k) for k in ('policy','status','execution_status','decision_id','authority','continuity')})
+                for family in audit.get('edge_families') or []:
+                    if isinstance(family,dict):out(kind='saved_family_only',fields={k:family.get(k) for k in ('family_id','family','available','forecast_available','status','reason','working_assessment_available','working_assessment_reason','model_pool_effective_weight','working_effective_weight')})
+                for component in audit.get('components') or []:
+                    if isinstance(component,dict):out(kind='saved_component_only',fields={k:component.get(k) for k in ('component_id','effective_weight','available','availability','reason','quality','age_sec')})
+            except (OSError,ValueError,TypeError) as exc:out(kind='saved_ai_read',available=False,exception_class=type(exc).__name__)
             import runpy
             if pid>0:
                 status=Path('/proc/'+str(pid)+'/status').read_text().splitlines()
