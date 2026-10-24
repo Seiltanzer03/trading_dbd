@@ -10,36 +10,43 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 2
     steps:
-      - name: Read the saved normal AI response and bounded failure classification
+      - name: Read capacity, existing origin scopes and current runtime without changing them
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 30s
+          command_timeout: 45s
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = cbe12ff6b719ed8c2f25f568c1ab5805c807791b
+            cd /opt/seiltanzer
+            test "$(git rev-parse HEAD)" = cbe12ff6b719ed8c2f25f568c1ab5805c807791b
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import json,re,subprocess,time,urllib.request
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=5) as response:
-                lifecycle=json.loads(response.read(65536))
-            worker=lifecycle.get('worker') or {}
-            print(json.dumps({'kind':'acceptance_worker_lifecycle','sqlite_access':lifecycle.get('sqlite_access'),'worker':{k:worker.get(k) for k in ('current_phase','core_stage','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','last_error','disk_pause_active','maintenance_running','acceptance_pause_active','acceptance_gate_run_id')}}))
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/history?include_management=true',timeout=5) as response:
-                raw=response.read(2*1024**2+1)
-                assert len(raw)<=2*1024**2
-                items=json.loads(raw).get('items') or []
-            saved=max(items,key=lambda item:item.get('ts') or 0) if items else {};audit=(saved.get('management_archive') or {}).get('unified_edge_ensemble') or {}
-            model=saved.get('model');model=model if isinstance(model,str) and re.fullmatch(r'[A-Za-z0-9_./:-]{1,120}',model) else None
-            print(json.dumps({'kind':'latest_saved_review','age_sec':round(time.time()-saved['ts'],1) if saved.get('ts') else None,'model':model,'policy':audit.get('selected_policy'),'components':[{k:row.get(k) for k in ('component_id','availability','available','effective_weight','reason')} for row in audit.get('components',[])],'saved_only':True}))
-            result=subprocess.run(['journalctl','-u','seiltanzer','--since','-5 minutes','--no-pager','-n','1000','-o','cat'],capture_output=True,text=True,timeout=5)
-            allowed=('request_id','stage','event','elapsed_ms','duration_ms','exception_class','provider_reason','status_code','response_bytes','completion_tokens','finish_reason')
-            rows=[]
-            for line in result.stdout.splitlines():
-                try:row=json.loads(line[line.index('{'):])
-                except (ValueError,TypeError):continue
-                if row.get('stage') in ('provider','provider_http','provider_decode','provider_validate','provider_extended_validation','provider_transport','provider_fallback','response'):
-                    rows.append({k:row[k] for k in allowed if k in row})
-            print(json.dumps({'kind':'recent_provider_trace','rows':rows[-35:],'provider_calls':0,'review_posts':0,'acks':0,'orders':0,'database_writes':0}))
+            import json,os,re,runpy,subprocess,time,urllib.request
+            from pathlib import Path
+            def out(**row):print(json.dumps(row,sort_keys=True))
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState'],text=True,timeout=5)
+            st=os.statvfs('/');db=Path('/opt/seiltanzer/data/trades.db');wal=Path(str(db)+'-wal')
+            out(kind='production',observed_ts=time.time(),properties=props.splitlines(),free_bytes=st.f_bavail*st.f_frsize,db_bytes=db.stat().st_size,wal_bytes=wal.stat().st_size if wal.exists() else 0)
+            for path in ('/api/state','/api/ai/snapshot/status','/api/research/runtime/worker-status'):
+                start=time.monotonic()
+                with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:row=json.loads(response.read(2*1024**2))
+                if path=='/api/state':
+                    tick=row.get('tick') or {};price=(tick.get('feeds') or {}).get('price') or {}
+                    fields={'instrument':tick.get('instrument'),'source':price.get('source'),'status':price.get('status'),'source_ts':price.get('ts'),'tick_ts':tick.get('ts')}
+                elif path.endswith('worker-status'):
+                    worker=row.get('worker') or {};fields={k:worker.get(k) for k in ('current_phase','core_stage','last_error','disk_pause_active','acceptance_gate_active','acceptance_gate_run_id')}
+                else:fields={k:row.get(k) for k in ('ready','building','age_sec','build_n','build_ms','last_error')}
+                out(kind='runtime',path=path,elapsed_ms=round((time.monotonic()-start)*1000,1),fields=fields)
+            from seiltanzer.research_acceptance_gate import read_acceptance_gate
+            gate=read_acceptance_gate();out(kind='acceptance_gate',owner=gate.get('acceptance_run_id') if gate else None,expected_sha=gate.get('expected_sha') if gate else None,expires_at=gate.get('expires_at') if gate else None)
+            helper=runpy.run_path('/opt/seiltanzer/scripts/sqlite_replication_origin.py',run_name='readonly_origin_probe')
+            scopes=sorted(p for p in Path('/tmp').glob('seiltanzer-sqlite-tools-*') if re.fullmatch(r'seiltanzer-sqlite-tools-[0-9]{1,20}',p.name))
+            out(kind='origin_scope_count',count=len(scopes),inspected_limit=8)
+            for path in scopes[:8]:
+                if path.is_symlink() or not path.is_dir():raise RuntimeError('UNSAFE_ORIGIN_SCOPE')
+                binary=path/'sqlite3_rsync';state=path/'origin.json'
+                targets=helper['targets'](binary,state)
+                out(kind='origin_scope',name=path.name,control_present=(path/'control.py').is_file(),state_present=state.is_file(),stop_present=(path/'origin.stop').exists(),target_pids=[pid for pid,birth in targets])
+            out(kind='safety',review_posts=0,provider_calls=0,database_writes=0,signals=0,cleanup_calls=0,restarts=0,acks=0,orders=0)
             PY
