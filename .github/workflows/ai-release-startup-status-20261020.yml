@@ -10,43 +10,62 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 2
     steps:
-      - name: Read capacity, existing origin scopes and current runtime without changing them
+      - name: Observe exact release startup without interfering with deployment
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 45s
+          command_timeout: 25s
           script: |
             set -euo pipefail
-            cd /opt/seiltanzer
-            test "$(git rev-parse HEAD)" = cbe12ff6b719ed8c2f25f568c1ab5805c807791b
-            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import json,os,re,runpy,subprocess,time,urllib.request
+            /usr/bin/python3 -u - <<'PY'
+            import json,os,subprocess,time,urllib.request,urllib.error
             from pathlib import Path
             def out(**row):print(json.dumps(row,sort_keys=True))
-            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState'],text=True,timeout=5)
-            st=os.statvfs('/');db=Path('/opt/seiltanzer/data/trades.db');wal=Path(str(db)+'-wal')
-            out(kind='production',observed_ts=time.time(),properties=props.splitlines(),free_bytes=st.f_bavail*st.f_frsize,db_bytes=db.stat().st_size,wal_bytes=wal.stat().st_size if wal.exists() else 0)
+            sha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True,timeout=3).strip()
+            out(kind='installed_release',sha=sha,expected=sha=='81bae01b03dbbad3959affc78c7029153c9a4491')
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ControlPID','-p','NRestarts','-p','ActiveState','-p','SubState','-p','MemoryCurrent'],text=True,timeout=3)
+            out(kind='service',properties=props.splitlines())
+            pid=int(dict(line.split('=',1) for line in props.splitlines()).get('MainPID') or 0)
+            def io_counts():
+                if pid<=0:return {}
+                try:return {k:int(v) for k,v in (line.split(':',1) for line in Path('/proc/'+str(pid)+'/io').read_text().splitlines()) if k in ('rchar','read_bytes')}
+                except (OSError,ValueError):return {}
+            first=io_counts();time.sleep(2);second=io_counts()
+            out(kind='startup_io_progress',pid=pid,counts=second,two_second_deltas={k:second[k]-first[k] for k in first.keys()&second.keys()})
+            st=os.statvfs('/');out(kind='capacity',free_bytes=st.f_bavail*st.f_frsize)
+            for suffix in ('','-wal'):
+                p=Path('/opt/seiltanzer/data/trades.db'+suffix)
+                out(kind='working_database_size',suffix=suffix,size_bytes=p.stat().st_size if p.exists() else None)
+            for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json'):
+                p=Path('/opt/seiltanzer/data/research')/name
+                if not p.exists():out(kind='publication',name=name,available=False);continue
+                size=p.stat().st_size;raw=p.read_bytes() if 0<size<=1000000 else b''
+                try:value=json.loads(raw) if raw else {}
+                except (ValueError,UnicodeError) as exc:
+                    out(kind='invalid_publication',name=name,size_bytes=size,error_class=type(exc).__name__,error_position=getattr(exc,'pos',None),nul_bytes=raw.count(b'\x00'))
+                    continue
+                matrix=value.get('family_market_models') or {}
+                out(kind='publication',name=name,size_bytes=size,exact_release=value.get('published_for_sha')==sha,within_math_loader_size=size<=500000,trained_groups=sum(isinstance(row,dict) and row.get('status')=='TRAINED' for groups in matrix.values() if isinstance(groups,dict) for row in groups.values()))
             for path in ('/api/state','/api/ai/snapshot/status','/api/research/runtime/worker-status'):
-                start=time.monotonic()
-                with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response:row=json.loads(response.read(2*1024**2))
-                if path=='/api/state':
-                    tick=row.get('tick') or {};price=(tick.get('feeds') or {}).get('price') or {}
-                    fields={'instrument':tick.get('instrument'),'source':price.get('source'),'status':price.get('status'),'source_ts':price.get('ts'),'tick_ts':tick.get('ts')}
-                elif path.endswith('worker-status'):
-                    worker=row.get('worker') or {};fields={k:worker.get(k) for k in ('current_phase','core_stage','last_error','memory_pressure','disk_pause_active','acceptance_gate_active','acceptance_gate_run_id')}
-                else:fields={k:row.get(k) for k in ('ready','building','age_sec','build_n','build_ms','last_error')}
-                out(kind='runtime',path=path,elapsed_ms=round((time.monotonic()-start)*1000,1),fields=fields)
-            from seiltanzer.research_acceptance_gate import read_acceptance_gate
-            gate=read_acceptance_gate();out(kind='acceptance_gate',owner=gate.get('acceptance_run_id') if gate else None,expected_sha=gate.get('expected_sha') if gate else None,expires_at=gate.get('expires_at') if gate else None)
-            helper=runpy.run_path('/opt/seiltanzer/scripts/sqlite_replication_origin.py',run_name='readonly_origin_probe')
-            scopes=sorted(p for p in Path('/tmp').glob('seiltanzer-sqlite-tools-*') if re.fullmatch(r'seiltanzer-sqlite-tools-[0-9]{1,20}',p.name))
-            out(kind='origin_scope_count',count=len(scopes),inspected_limit=8)
-            for path in scopes[-8:]:
-                if path.is_symlink() or not path.is_dir():raise RuntimeError('UNSAFE_ORIGIN_SCOPE')
-                binary=path/'sqlite3_rsync';state=path/'origin.json'
-                targets=helper['targets'](binary,state)
-                out(kind='origin_scope',name=path.name,control_present=(path/'control.py').is_file(),state_present=state.is_file(),stop_present=(path/'origin.stop').exists(),target_pids=[pid for pid,birth in targets])
-            out(kind='safety',review_posts=0,provider_calls=0,database_writes=0,signals=0,cleanup_calls=0,restarts=0,acks=0,orders=0)
+                started=time.monotonic()
+                try:
+                    with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=3) as response:
+                        raw=response.read(2*1024**2+1)
+                        if len(raw)>2*1024**2:raise ValueError('RESPONSE_BOUND')
+                        row=json.loads(raw)
+                        out(kind='endpoint',path=path,http=response.code,elapsed_ms=round((time.monotonic()-started)*1000,1),fields={k:row.get(k) for k in ('ready','building','age_sec','build_ms','build_n','last_error') if k in row})
+                        if path=='/api/state':
+                            tick=row.get('tick') or {};quote=(tick.get('feeds') or {}).get('price') or {}
+                            def age(value):
+                                try:return round(time.time()-float(value),3)
+                                except (TypeError,ValueError):return None
+                            out(kind='canonical_quote',instrument=tick.get('instrument'),source=quote.get('source'),status=quote.get('status'),quote_age_sec=age(quote.get('ts')),payload_age_sec=age(tick.get('ts')))
+                        if path.endswith('/worker-status'):
+                            worker=row.get('worker') or {}
+                            out(kind='acceptance_worker',sqlite_access=row.get('sqlite_access'),fields={k:worker.get(k) for k in ('current_phase','core_stage','first_cycle_not_before_ts','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','last_error','disk_pause_active','acceptance_pause_active','memory_pressure')})
+                        if path.endswith('/passive/status'):out(kind='passive_collector',fields={k:row.get(k) for k in ('collector_status','latest_error','last_step_ts','last_skip_reason','last_skip_reason_code','latest_observation_ts')})
+                except (OSError,ValueError) as exc:out(kind='endpoint',path=path,available=False,exception_class=type(exc).__name__)
+            out(kind='safety',provider_calls=0,review_posts=0,acks=0,orders=0,database_writes=0,restarts=0)
             PY
