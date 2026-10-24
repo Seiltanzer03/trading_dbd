@@ -67,5 +67,19 @@ jobs:
                             out(kind='acceptance_worker',sqlite_access=row.get('sqlite_access'),fields={k:worker.get(k) for k in ('current_phase','core_stage','first_cycle_not_before_ts','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','last_error','disk_pause_active','acceptance_pause_active','memory_pressure')})
                         if path.endswith('/passive/status'):out(kind='passive_collector',fields={k:row.get(k) for k in ('collector_status','latest_error','last_step_ts','last_skip_reason','last_skip_reason_code','latest_observation_ts')})
                 except (OSError,ValueError) as exc:out(kind='endpoint',path=path,available=False,exception_class=type(exc).__name__)
+            import runpy
+            if pid>0:
+                status=Path('/proc/'+str(pid)+'/status').read_text().splitlines()
+                out(kind='current_process_memory',pid=pid,fields={line.split(':',1)[0]:line.split(':',1)[1].strip() for line in status if line.split(':',1)[0] in ('VmRSS','RssAnon','RssFile','RssShmem','VmData')})
+            helper=runpy.run_path('/opt/seiltanzer/scripts/sqlite_replication_origin.py',run_name='readonly_origin_probe')
+            scope=Path('/tmp/seiltanzer-sqlite-tools-40082288165')
+            if scope.is_symlink():raise RuntimeError('UNSAFE_ORIGIN_SCOPE')
+            targets=helper['targets'](scope/'sqlite3_rsync',scope/'origin.json') if scope.is_dir() else []
+            def counts(process):
+                try:return {k:int(v) for k,v in (line.split(':',1) for line in Path('/proc/'+str(process)+'/io').read_text().splitlines()) if k in ('rchar','read_bytes')}
+                except (OSError,ValueError):return {}
+            initial={process:counts(process) for process,birth in targets};time.sleep(2)
+            latest={process:counts(process) for process,birth in targets}
+            out(kind='active_ede_origin_progress',run_id='40082288165',scope_present=scope.is_dir(),targets=[dict(pid=process,counts=latest[process],two_second_deltas={k:latest[process][k]-initial[process][k] for k in initial[process].keys()&latest[process].keys()}) for process,birth in targets])
             out(kind='safety',provider_calls=0,review_posts=0,acks=0,orders=0,database_writes=0,restarts=0)
             PY
