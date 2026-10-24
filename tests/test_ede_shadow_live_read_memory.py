@@ -241,3 +241,39 @@ def test_sql_progress_interrupt_closes_snapshot_and_keeps_original_history(tmp_p
         assert not list(tmp_path.rglob('*shadow*'))
     finally:
         writer.close()
+
+
+@pytest.mark.parametrize('refusal', ['time', 'memory'])
+def test_python_feature_work_stops_before_next_row_on_resource_exhaustion(tmp_path, monkeypatch, refusal):
+    engine, writer = engine_with_history(tmp_path)
+    prepare_shadow(monkeypatch)
+    clock, pressure, processed, readers = [0.], [False], [], []
+    monkeypatch.setattr(shadow, 'time', SimpleNamespace(monotonic=lambda: clock[0], time=lambda: 500.))
+    monkeypatch.setattr(shadow, 'memory_pressure_state',
+                        lambda: {'pause_background': pressure[0]}, raising=False)
+
+    class ExhaustingPythonAdapter(ProspectiveFeatureAdapter):
+        def __init__(self, runtime, **kwargs):
+            readers.append(runtime._conn)
+            super().__init__(runtime, **kwargs)
+
+        def _feature_values(self, row, **kwargs):
+            result = super()._feature_values(row, **kwargs)
+            processed.append(row['observation_id'])
+            # Consume the budget in Python after SQL has yielded its batch.
+            clock[0] = 31. if refusal == 'time' else 0.3
+            pressure[0] = refusal == 'memory'
+            return result
+
+    monkeypatch.setattr(shadow, 'ProspectiveFeatureAdapter', ExhaustingPythonAdapter)
+    try:
+        with pytest.raises(RuntimeError, match='SHADOW_READ_.*BUDGET'):
+            shadow.materialize_runtime_shadow(engine, now=500.)
+        assert len(processed) == 1, 'SQL-only deadline kept processing already fetched Python rows'
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            readers[0].execute('SELECT 1')
+        assert not list(tmp_path.rglob('*shadow*'))
+        assert writer.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0] == 0
+        assert writer.execute('SELECT COUNT(*) FROM g1s_observations').fetchone()[0] == 145
+    finally:
+        writer.close()

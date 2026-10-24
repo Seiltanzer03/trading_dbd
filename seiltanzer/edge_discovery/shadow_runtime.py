@@ -27,6 +27,7 @@ from .shadow import (
     shadow_summary,
 )
 from .shadow_cache import write_shadow_summary_cache
+from ..production_resource_guard import memory_pressure_state
 
 SHADOW_RUNTIME_VERSION = "g1s-ede-shadow-runtime-v1.3.2"
 SHADOW_RUNTIME_INTERVAL_SEC = 60.0
@@ -115,7 +116,14 @@ def _shadow_feature_rows(runtime: Any, *, available_asof: float) -> list[dict[st
             last_capacity_check = now
             if not _shadow_read_has_headroom(database):
                 refusal = "SHADOW_READ_DISK_BUDGET_EXCEEDED"
+            elif memory_pressure_state().get("pause_background"):
+                refusal = "SHADOW_READ_MEMORY_BUDGET_EXCEEDED"
         return int(refusal is not None)
+
+    def check_read_budget() -> None:
+        # SQLite callbacks do not run while Python decodes/transforms a batch.
+        if interrupted():
+            raise RuntimeError(refusal)
 
     if interrupted():
         raise RuntimeError(refusal)
@@ -128,7 +136,8 @@ def _shadow_feature_rows(runtime: Any, *, available_asof: float) -> list[dict[st
         connection.set_progress_handler(interrupted, 1000)
         connection.execute("BEGIN")
         reader = SimpleNamespace(_conn=connection, _lock=threading.RLock(),
-                                 _consistent_read_snapshot=True)
+                                 _consistent_read_snapshot=True,
+                                 _read_budget_check=check_read_budget)
         rows = ProspectiveFeatureAdapter(reader, available_asof=available_asof).rows(
             resolved_only=False, strict=False)
         # Also check Python-side work before any shadow ledger/cache publication.
