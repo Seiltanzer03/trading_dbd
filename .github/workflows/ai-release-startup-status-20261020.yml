@@ -102,6 +102,21 @@ jobs:
                 guard=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],capture_output=True,text=True,timeout=8)
                 out(kind='existing_start_fence_readonly',returncode=guard.returncode,result=json.loads(guard.stdout) if len(guard.stdout)<=4096 and guard.stdout.strip() else None)
             except (OSError,ValueError,subprocess.TimeoutExpired) as exc:out(kind='existing_start_fence_readonly',available=False,error_class=type(exc).__name__)
+
+            try:
+                import runpy,sqlite3
+                live_guard=runpy.run_path('/opt/seiltanzer/seiltanzer/history_live_read_guard.py',run_name='readonly_guard_probe')
+                with live_guard['guarded_live_read'](Path('/opt/seiltanzer/data/trades.db')):
+                    conn=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=0.5)
+                    try:
+                        conn.execute('PRAGMA query_only=ON')
+                        deadline=time.monotonic()+2
+                        conn.set_progress_handler(lambda: time.monotonic()>=deadline,100)
+                        indices=conn.execute("PRAGMA index_list(llm_edge_evaluations)").fetchall()
+                        plan=conn.execute("EXPLAIN QUERY PLAN SELECT evaluation_id FROM llm_edge_evaluations WHERE hypothesis_id=? ORDER BY created_ts DESC,evaluation_id DESC LIMIT 1",('readonly-no-value',)).fetchall()
+                        out(kind='llm_lifecycle_query_plan_only',index_names=[row[1] for row in indices],latest_by_hypothesis_plan=[row[3] for row in plan],evaluations_executed=False)
+                    finally:conn.close()
+            except (OSError,ValueError,sqlite3.Error) as exc:out(kind='llm_lifecycle_query_plan_only',available=False,error_class=type(exc).__name__)
             import runpy
             if pid>0:
                 status=Path('/proc/'+str(pid)+'/status').read_text().splitlines()
