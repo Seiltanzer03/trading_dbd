@@ -164,13 +164,13 @@ def replication_boundary(tmp_path,monkeypatch,*,low_space=False,cleanup_fails=Fa
         def put(self,local,remote): uploaded[remote]=Path(local).read_bytes()
         def chmod(self,*args): pass
     key=SimpleNamespace(get_name=lambda:'ssh-ed25519',get_base64=lambda:'test')
-    client=SimpleNamespace(open_sftp=lambda:SFTP(),get_transport=lambda:SimpleNamespace(get_remote_server_key=lambda:key))
+    client=SimpleNamespace(open_sftp=lambda:SFTP(),get_transport=lambda:SimpleNamespace(get_remote_server_key=lambda:key),uploaded=uploaded)
     probes=[]
     def execute(_client,command,**kwargs):
         commands.append(command)
         if 'sha256sum' in command:
             return hashlib.sha256(uploaded['/tmp/seiltanzer-sqlite-tools-123/sqlite3_rsync']).hexdigest()+' binary'
-        if 'ORIGIN_READER_EXIT_CONFIRMED=1' in command:
+        if ' cleanup --binary ' in command:
             if cleanup_fails: raise RuntimeError('reader exit unknown')
             return 'ORIGIN_READER_EXIT_CONFIRMED=1\n'
         if 'statvfs' in command:
@@ -223,12 +223,49 @@ def test_seeded_replication_confirms_origin_exit_before_fresh_manifest(tmp_path,
     assert result['git_commit'] == 'b'*40
 
 
+def test_dispatched_cleanup_executes_uploaded_origin_control(tmp_path, monkeypatch):
+    """Exercise the emitted SSH command, rather than mocking its Python startup."""
+    import shlex
+    import subprocess
+    import sys
+    real_popen = subprocess.Popen
+    database, receipt, client, commands = replication_boundary(tmp_path, monkeypatch)
+    module.replicate_live(client, password='test', expected_sha='b'*40,
+                          run_id='123', output=database, seed_receipt=receipt)
+    command = next(c for c in commands if ' cleanup --binary ' in c)
+    remote = '/tmp/seiltanzer-sqlite-tools-123/'
+    local = tmp_path / 'remote tools'
+    local.mkdir()
+    (local / 'control.py').write_bytes(client.uploaded[remote + 'control.py'])
+    arguments = [str(local / arg[len(remote):]) if arg.startswith(remote) else arg
+                 for arg in shlex.split(command)]
+    arguments[0] = sys.executable
+    # The copier boundary uses a fake process, but helper dispatch must be real.
+    with monkeypatch.context() as native:
+        native.setattr(subprocess, 'Popen', real_popen)
+        result = subprocess.run(arguments, cwd=tmp_path, capture_output=True,
+                                text=True, timeout=15)
+    native_proc = int(Path('/proc/self/stat').read_text().split(' ', 1)[0]) == os.getpid()
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        assert native_proc, 'Final CI must exercise native cleanup, not a foreign /proc'
+    if native_proc:
+        assert result.returncode == 0, result.stderr
+        assert 'ORIGIN_READER_EXIT_CONFIRMED=1' in result.stdout
+        assert (local / 'origin.stop').exists()
+    else:
+        # A foreign local /proc must still fail closed at its existing guard.
+        assert result.returncode != 0
+        assert 'Origin cleanup requires matching PID/proc namespace' in result.stderr
+        assert 'ORIGIN_READER_EXIT_CONFIRMED=1' not in result.stdout
+        assert not (local / 'origin.stop').exists()
+
+
 def test_low_disk_abort_logs_wal_and_stops_owned_reader(tmp_path,monkeypatch,capsys):
     database,receipt,client,commands=replication_boundary(tmp_path,monkeypatch,low_space=True)
     with pytest.raises(RuntimeError,match='headroom exhausted'):
         module.replicate_live(client,password='test',expected_sha='b'*40,
             run_id='123',output=database,seed_receipt=receipt)
-    assert any('ORIGIN_READER_EXIT_CONFIRMED=1' in c for c in commands)
+    assert any(' cleanup --binary ' in c for c in commands)
     output=capsys.readouterr().out
     assert 'free_bytes=0' in output and 'wal_bytes=700' in output and 'wal_delta_bytes=100' in output
     assert module.MIN_FREE_BYTES == 1024**3
@@ -265,7 +302,7 @@ def test_sigterm_cancellation_runs_origin_cleanup_and_restores_handler(tmp_path,
         module.replicate_live(client,password='test',expected_sha='b'*40,
             run_id='123',output=database,seed_receipt=receipt)
     assert signal.getsignal(signal.SIGTERM) == old
-    assert any('ORIGIN_READER_EXIT_CONFIRMED=1' in c for c in commands)
+    assert any(' cleanup --binary ' in c for c in commands)
 
 
 def test_fast_copy_still_refuses_exhausted_final_headroom(tmp_path,monkeypatch):
