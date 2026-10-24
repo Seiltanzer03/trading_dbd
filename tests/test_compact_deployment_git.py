@@ -96,6 +96,70 @@ def test_default_report_does_not_modify_git_or_application(deployment):
     assert not (repo / '.git' / 'shallow').exists()
 
 
+def installed_bundle(deployment, tmp_path, *, mismatched=False):
+    repo, _, sha = deployment
+    publisher = repo.parent / 'source'
+    target = git(publisher, 'rev-parse', 'HEAD~1') if mismatched else sha
+    git(publisher, 'update-ref', 'refs/deploy/exact', target)
+    bundle = tmp_path / 'installed.bundle'
+    git(publisher, 'bundle', 'create', str(bundle), 'refs/deploy/exact')
+    return bundle
+
+
+def metadata_bytes(repo):
+    return {str(p.relative_to(repo / '.git')): p.read_bytes()
+            for p in (repo / '.git').rglob('*') if p.is_file()}
+
+
+def test_already_installed_stage_shares_reader_lock_without_mutating_git(deployment, tmp_path):
+    import fcntl
+    repo, _, sha = deployment
+    bundle = installed_bundle(deployment, tmp_path)
+    before = metadata_bytes(repo)
+    with (repo / '.deployment-git-maintenance.lock').open('a') as reader:
+        fcntl.flock(reader, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        result = run(deployment, '--stage-bundle', str(bundle))
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt['status'] == 'ALREADY_INSTALLED'
+    assert receipt['running_sha'] == receipt['available_sha'] == sha
+    assert metadata_bytes(repo) == before
+    assert (repo / 'data' / 'trades.db').read_bytes() == b'authoritative history'
+
+
+@pytest.mark.parametrize('refusal', ['dirty', 'wrong_bundle'])
+def test_already_installed_stage_keeps_validation_under_reader_lock(deployment, tmp_path, refusal):
+    import fcntl
+    repo, _, _ = deployment
+    bundle = installed_bundle(deployment, tmp_path, mismatched=refusal == 'wrong_bundle')
+    if refusal == 'dirty':
+        (repo / 'app.py').write_text('uncommitted production change\n')
+    before = metadata_bytes(repo)
+    with (repo / '.deployment-git-maintenance.lock').open('a') as reader:
+        fcntl.flock(reader, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        result = run(deployment, '--stage-bundle', str(bundle))
+    assert result.returncode != 0
+    assert ('DIRTY_TRACKED_FILES' if refusal == 'dirty' else 'BUNDLE_SHA_MISMATCH') in result.stderr
+    assert metadata_bytes(repo) == before
+
+
+@pytest.mark.parametrize('case', ['writer_active', 'different_target'])
+def test_stage_lock_refusal_never_mutates_git(deployment, tmp_path, case):
+    import fcntl
+    repo, origin, sha = deployment
+    bundle = installed_bundle(deployment, tmp_path, mismatched=case == 'different_target')
+    target = git(repo, 'rev-parse', 'HEAD~1') if case == 'different_target' else sha
+    before = metadata_bytes(repo)
+    with (repo / '.deployment-git-maintenance.lock').open('a') as owner:
+        fcntl.flock(owner, (fcntl.LOCK_SH if case == 'different_target' else fcntl.LOCK_EX)
+                    | fcntl.LOCK_NB)
+        result = run((repo, origin, target), '--stage-bundle', str(bundle))
+    assert result.returncode != 0
+    assert 'BlockingIOError' in result.stderr
+    assert metadata_bytes(repo) == before
+    assert git(repo, 'rev-parse', 'HEAD') == sha
+
+
 def test_stage_shallow_bundle_keeps_running_head_and_does_not_restore_old_history(deployment):
     repo, origin, running_sha = deployment
     assert run(deployment, '--apply').returncode == 0
