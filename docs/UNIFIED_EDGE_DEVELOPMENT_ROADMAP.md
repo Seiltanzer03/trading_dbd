@@ -1095,6 +1095,28 @@ Baseline26c9e437 restored. Both normal and strict snapshot compaction had remove
 
 The existing independent structured LLM is attempted even when primary prose falls back or has a provider RuntimeError. Genuine model identity/scores remain separate from the locally rendered prose. Programming errors remain visible. API/UI labels distinguish prose fallback from unavailable structured LLM; a saved structured plan remains read-only even when prose is absent.
 
+## 2026-10-24 — Independent release publications during BLS outage
+
+Production continuation: PR516 merged as `8db572c16e337cb5e7d2e962740440879f977c62`
+(tree `71aad35c2395c81352ab801a8f0a365c4cb4c772`); main CI40113753320
+passed and deploy40114079332 started. These are not final production acceptance.
+The preceding d2222a readiness recovered without another restart, but official
+BLS CPI/NFP acquisition repeatedly returned HTTP503. The old deploy ordering
+therefore skipped unrelated mathematical, source-family and FOMC publications.
+
+Move the unchanged exact-SHA dispatch shells immediately after readiness and
+before macro acquisition. Child publishers retain their existing generation,
+authority and integrity checks. Macro transport, functional smoke, public HTTP
+and post-research acceptance remain required for complete release admission;
+dispatch success alone never establishes delivered or usable models.
+
+Actual workflow-shell regression against the old ordering failed with zero
+dispatches at the macro failure boundary; the updated ordering requests all
+three independent workflows while a readiness failure requests none. Owning
+profile:32passed2.81s. Final mandatory CI and exact-SHA delivery remain pending.
+This infrastructure fix does not establish eight ready families, a current
+LLM contribution, a completed production EDE chain or bounded SQLite growth.
+
 Actual published artifact38320486597/11779132085:25fitted/17historically supported groups; all25model hash/contracts validated. Runtime family matching keeps original input/forecast origin; shorter direction heads are limited current stances inside a longer economic comparison, never terminal-return models. Movement→time/target still matches horizon; forecast expiry is separate from source TTL and mixed-source pooling preserves absolute expiration.104cells documented in UNIFIED_EDGE_COVERAGE_2026-10-13.json/.md. Missing CPI/NFP/causal event/flow/position/carry history and unvalidated crypto transfer remain explicit; full eight-family acceptance is partly open.
 
 One final reviewer:2Important findings fixed with behavioral RED→GREEN,0Critical/deferred minors. Final owning173passed7.36s; earlier expanded198passed. Frontend archive/decision/unified audit smokes PASS. Python3.12/SQLite3.53 local full run had the unchanged sparse WAL file-signature failure; no storage safety check weakened. Required Python3.11/full-WebKit exact-tree CI is pending. Code treeeb61d3c4 uploaded as940d30eb via connector and matched local Git tree. One32-review frozen comparison on that code:0rejected/0paidcalls/0productionwrites; actual4paired distinct trades remain too small to establish optimal budgets or profit. No active trade at bounded production reads, so real current provider participation/production contributions remain unobserved.
