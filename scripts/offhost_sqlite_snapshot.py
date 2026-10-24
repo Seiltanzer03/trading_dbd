@@ -319,7 +319,7 @@ def _replicate_live(client, *, password: str, expected_sha: str,
                 cleanup_error=exc
             if created_remote:
                 try:
-                    confirmed=_exec(client,'python3 -c ' + shlex.quote(control_source) +
+                    confirmed=_exec(client,'python3 ' + shlex.quote(remote_control) +
                         ' cleanup --binary ' + shlex.quote(remote_binary) +
                         ' --state ' + shlex.quote(remote_state),timeout=20)
                     if 'ORIGIN_READER_EXIT_CONFIRMED=1' not in confirmed.splitlines():
