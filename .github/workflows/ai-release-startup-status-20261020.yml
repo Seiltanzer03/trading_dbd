@@ -25,7 +25,7 @@ jobs:
             from pathlib import Path
             def out(**row): print(json.dumps(row,sort_keys=True))
             sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True,timeout=3).strip()
-            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState'],text=True,timeout=5)
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState','-p','ExecMainStartTimestamp'],text=True,timeout=5)
             fields=dict(line.split('=',1) for line in props.splitlines() if '=' in line)
             pid=fields.get('MainPID','0')
             proc={}
@@ -34,6 +34,11 @@ jobs:
                     proc={k:v.strip() for k,v in (line.split(':',1) for line in Path('/proc',pid,'status').read_text().splitlines() if ':' in line) if k in ('VmRSS','VmHWM','VmSwap')}
                 except OSError as exc: proc={'error':type(exc).__name__}
             st=os.statvfs('/'); db=Path('data/trades.db'); wal=Path(str(db)+'-wal')
+            io={}
+            if pid!='0':
+                try: io=dict(line.split(':',1) for line in Path('/proc',pid,'io').read_text().splitlines() if ':' in line)
+                except OSError: pass
+            out(kind='process_io',counters=io)
             out(kind='production',observed_ts=time.time(),sha=sha,properties=fields,memory=proc,free_bytes=st.f_bavail*st.f_frsize,db_bytes=db.stat().st_size,wal_bytes=wal.stat().st_size if wal.exists() else 0)
             for path in ('/api/state','/api/ai/snapshot/status','/api/research/runtime/worker-status'):
                 start=time.monotonic()
@@ -49,7 +54,7 @@ jobs:
                     out(kind='runtime',path=path,elapsed_ms=round((time.monotonic()-start)*1000,1),fields=result)
                 except Exception as exc: out(kind='runtime_unavailable',path=path,elapsed_ms=round((time.monotonic()-start)*1000,1),error=type(exc).__name__)
             for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json'):
-                p=Path('data')/name
+                p=Path('data/research')/name
                 if not p.is_file():out(kind='published_file',name=name,present=False);continue
                 info={'bytes':p.stat().st_size,'modified_ts':p.stat().st_mtime}
                 if 0 < info['bytes'] <= 2*1024**2:
