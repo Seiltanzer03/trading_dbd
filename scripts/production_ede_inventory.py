@@ -6,16 +6,20 @@ import argparse
 import json
 import math
 import sqlite3
+import sys
 import threading
 from contextlib import ExitStack
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from seiltanzer.edge_discovery.maturity import data_maturity as canonical_data_maturity
 from seiltanzer.edge_discovery.prospective_v13 import ProspectiveFeatureAdapter
 from seiltanzer.edge_discovery.registry import FEATURES
 from seiltanzer.history_live_read_guard import guarded_live_read
+from seiltanzer import history_live_read_guard
 
 
 INVENTORY_CONTRACT_VERSION = "g1s-ede-production-inventory-v1.5.0"
@@ -39,11 +43,19 @@ KNOWN_DATA_MATURITY = frozenset({
 
 
 class _ReadOnlyRuntime:
-    def __init__(self, database: Path):
+    def __init__(self, database: Path, *, verified_immutable_input: bool = False):
         self._source_lifetime = ExitStack()
-        self._source_lifetime.enter_context(guarded_live_read(database))
-        uri = f"file:{database.resolve()}?mode=ro"
         try:
+            self._source_lifetime.enter_context(guarded_live_read(database))
+            uri = database.resolve().as_uri() + "?mode=ro"
+            if verified_immutable_input:
+                # Only the offhost, already verified snapshot may bypass WAL.
+                # Ordinary/live readers must continue seeing committed WAL data.
+                if database.resolve() == history_live_read_guard.PRODUCTION_DATABASE:
+                    raise ValueError("Live production database is not an immutable snapshot")
+                from scripts.sqlite_history_partition import _identity
+                _identity(database)
+                uri += "&immutable=1"
             self._conn = sqlite3.connect(uri, uri=True, timeout=30.0)
             self._source_lifetime.callback(self._conn.close)
             self._conn.row_factory = sqlite3.Row
@@ -54,6 +66,7 @@ class _ReadOnlyRuntime:
             # lock, including cleanup if a later constructor step fails.
             self._conn.execute("BEGIN")
             self._consistent_read_snapshot = True
+            self._immutable_snapshot = verified_immutable_input
         except BaseException:
             self._source_lifetime.close()
             raise
@@ -342,8 +355,8 @@ def _family_summary(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return output
 
 
-def inventory(database: Path) -> dict:
-    runtime = _ReadOnlyRuntime(database)
+def inventory(database: Path, *, verified_immutable_input: bool = False) -> dict:
+    runtime = _ReadOnlyRuntime(database, verified_immutable_input=verified_immutable_input)
     try:
         tables = {str(row[0]) for row in runtime._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
@@ -377,7 +390,7 @@ def inventory(database: Path) -> dict:
     return {
         "contract_version": INVENTORY_CONTRACT_VERSION,
         "database": str(database),
-        "database_open_mode": "READ_ONLY",
+        "database_open_mode": "IMMUTABLE_READ_ONLY" if verified_immutable_input else "READ_ONLY",
         "g1s_observations_total": total,
         "g1s_observations_by_horizon": by_horizon,
         "g1s_resolutions_total": resolved,
@@ -405,8 +418,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", type=Path,
                         default=Path("/opt/seiltanzer/data/trades.db"))
+    parser.add_argument("--verified-immutable-input", action="store_true",
+                        help="Use only after offhost snapshot verification; never for the live database")
     args = parser.parse_args(argv)
-    report = inventory(args.database)
+    report = inventory(args.database, verified_immutable_input=args.verified_immutable_input)
     # Keep every Actions log line bounded. Printing family/feature rows avoids a
     # large single JSON line as the canonical registry grows over time.
     print("EDE_INVENTORY_SUMMARY=" + json.dumps({
