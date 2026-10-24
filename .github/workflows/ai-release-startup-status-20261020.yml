@@ -39,6 +39,8 @@ jobs:
                 try: io=dict(line.split(':',1) for line in Path('/proc',pid,'io').read_text().splitlines() if ':' in line)
                 except OSError: pass
             out(kind='process_io',counters=io)
+            phases=subprocess.check_output(['journalctl','-b','-u','seiltanzer','_PID='+pid,'--grep=^STARTUP_PHASE phase=','-n','5','--no-pager','-o','cat'],text=True,timeout=5)
+            out(kind='startup_phases',phases=[line for line in phases.splitlines() if line.startswith('STARTUP_PHASE phase=')])
             out(kind='production',observed_ts=time.time(),sha=sha,properties=fields,memory=proc,free_bytes=st.f_bavail*st.f_frsize,db_bytes=db.stat().st_size,wal_bytes=wal.stat().st_size if wal.exists() else 0)
             for path in ('/api/state','/api/ai/snapshot/status','/api/research/runtime/worker-status'):
                 start=time.monotonic()
