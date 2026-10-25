@@ -88,7 +88,10 @@ def verify(expected_sha: str, acceptance_run_id: str) -> None:
     assert sh("systemctl", "is-active", "seiltanzer") == "active"
     worker = None
     result = None
-    for attempt in range(1, 73):
+    # The deploy step allows 20 minutes. A five-minute startup grace followed
+    # by the measured ~9-minute first core needs more than the old 12-minute
+    # polling window; leave two minutes for the remaining SSH work.
+    for attempt in range(1, 109):
         lifecycle = assert_route("/api/research/runtime/worker-status")
         assert lifecycle.get("sqlite_access") is False, lifecycle
         worker = lifecycle.get("worker") or {}
