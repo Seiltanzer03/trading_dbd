@@ -127,7 +127,7 @@ jobs:
           fi
           python -m scripts.run_mathematical_edge --sources mathematical_sources.json \
             --refresh-sources --sources-output refreshed_sources.json \
-            --cache-dir .math-source-cache --model-cache-dir .math-family-model-cache --source-budget-seconds 240 \
+            --cache-dir .math-source-cache --model-cache-dir .math-family-model-cache --source-budget-seconds 180 \
             --output mathematical_edge_latest.json "${family_args[@]}" "${macro_args[@]}"
       - name: Save per-provider market-bar cache from trusted main only
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.math-fit.outcome == 'success'
