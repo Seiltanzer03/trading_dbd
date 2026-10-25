@@ -120,6 +120,46 @@ class _Runtime:
         self._lock = threading.RLock()
 
 
+def test_reconfirmed_source_preserves_first_seen_and_original_provenance():
+    runtime = _Runtime()
+    store = NumericMacroStore(runtime)
+    old_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL"
+    new_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=PAYEMS"
+    payload = {"period": "2026-07", "payroll_change_k": 147.}
+    first = store.ingest(ReleaseWrite("NFP", "2026-07", "BLS", old_url, 1000., payload))
+    receipts = ({"series_id": "PAYEMS", "source_url": new_url,
+                 "body_sha256": "a" * 64, "fetched_at": 1500.},)
+    second = store.ingest(ReleaseWrite("NFP", "2026-07", "BLS", new_url, 1500., payload,
+                                      source_receipts=receipts))
+    assert second["status"] == "CACHED" and second["release_id"] == first["release_id"]
+    current = store.latest_admissible("NFP", 1600.)
+    assert current["available_at"] == 1000.
+    assert current["source_url"] == new_url
+    assert current["first_source_url"] == old_url
+    assert current["source_receipts"] == list(receipts)
+    historical = store.latest_admissible("NFP", 1200.)
+    assert historical["source_url"] == old_url and historical["source_receipts"] == []
+    # An out-of-order earlier receipt cannot replace the latest verified one.
+    store.ingest(ReleaseWrite("NFP", "2026-07", "BLS", old_url, 1100., payload))
+    assert store.latest_admissible("NFP", 1600.)["source_url"] == new_url
+
+
+def test_first_acquisition_receipts_remain_visible_to_original_t0_after_refresh():
+    runtime = _Runtime()
+    store = NumericMacroStore(runtime)
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=PAYEMS"
+    payload = {"period": "2026-07", "payroll_change_k": 147.}
+    first = ({"series_id": "PAYEMS", "source_url": url,
+              "body_sha256": "a" * 64, "fetched_at": 1000.},)
+    store.ingest(ReleaseWrite("NFP", "2026-07", "BLS", url, 1000., payload, first))
+    original = store.latest_admissible("NFP", 1200.)
+    latest = ({**first[0], "body_sha256": "b" * 64, "fetched_at": 1500.},)
+    store.ingest(ReleaseWrite("NFP", "2026-07", "BLS", url, 1500., payload, latest))
+    assert store.latest_admissible("NFP", 1200.) == original
+    assert original["source_receipts"] == list(first)
+    assert store.latest_admissible("NFP", 1600.)["source_receipts"] == list(latest)
+
+
 def test_numeric_store_is_first_seen_causal_and_never_backfills_before_fetch():
     runtime = _Runtime()
     store = NumericMacroStore(runtime)

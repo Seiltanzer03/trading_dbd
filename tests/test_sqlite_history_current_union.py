@@ -58,6 +58,48 @@ def test_current_union_preserves_resolved_hot_prefix_and_appended_rows(tmp_path)
     assert hashlib.sha256(hot.read_bytes()).hexdigest() == proof['database_sha256']
 
 
+def test_current_union_allows_new_hot_growth_beyond_original_catalog_budget(tmp_path):
+    _, hot, result, raw, client = _hot(tmp_path)
+    with closing(sqlite3.connect(hot)) as conn:
+        # This table is new after the frozen catalog; preserve it byte-for-byte.
+        conn.execute('CREATE TABLE newer_history(payload BLOB)')
+        conn.execute('INSERT INTO newer_history VALUES(zeroblob(11000000))')
+        conn.commit()
+    assert hot.stat().st_size > json.loads(raw)['maximum_hydrated_bytes']
+    proof = _current_proof(hot, result)
+    out = tmp_path / 'current-expanded.sqlite3'
+    report = union.hydrate_current_snapshot(
+        hot, out, source_receipt=proof, catalog_bytes=raw, client=client)
+    with closing(sqlite3.connect(out)) as conn:
+        assert conn.execute('SELECT length(payload) FROM newer_history').fetchone() == (11000000,)
+        assert conn.execute('SELECT COUNT(*) FROM passive_market_observations').fetchone() == (14,)
+    assert report['original_cold_table_roots_verified'] is True
+    assert report['database_size_bytes'] <= report['effective_output_bound_bytes']
+    assert report['catalog_output_bound_bytes'] == 10 * 1024**2
+
+
+def test_current_union_does_not_hit_old_sqlite_page_cap_during_cold_merge(tmp_path):
+    source, proof, raw, _, client = _build_cutover_fixture(tmp_path, include_post_catalog=True)
+    catalog = json.loads(raw)
+    catalog['maximum_hydrated_bytes'] = source.stat().st_size + 32768
+    raw = json.dumps(catalog, sort_keys=True).encode()
+    hot = tmp_path / 'hot.sqlite3'
+    result = cutover.build_hot_cutover_snapshot(
+        source, hot, source_receipt=proof, catalog_bytes=raw,
+        expected_catalog_sha256=hashlib.sha256(raw).hexdigest())
+    with closing(sqlite3.connect(hot)) as conn:
+        conn.execute('CREATE TABLE growth(payload BLOB)')
+        conn.execute('INSERT INTO growth VALUES(zeroblob(50000))')
+        conn.commit()
+    assert hot.stat().st_size < catalog['maximum_hydrated_bytes']
+    out = tmp_path / 'with-cold.sqlite3'
+    report = union.hydrate_current_snapshot(
+        hot, out, source_receipt=_current_proof(hot, result), catalog_bytes=raw, client=client)
+    assert out.stat().st_size > catalog['maximum_hydrated_bytes']
+    assert report['original_cold_table_roots_verified'] is True
+    assert report['current_hot_rows_preserved'] is True
+
+
 @pytest.mark.parametrize('field,value', [('payload', 'rewritten-input'),
                                        ('symbol', 'WRONG'),
                                        ('observation_id', 'different-capture')])

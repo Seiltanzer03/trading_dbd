@@ -113,6 +113,37 @@ def _confined_backup(directory: Path, manifest: dict[str, Any]) -> Path | None:
     return candidate
 
 
+def _source_integrity_identity(path: Path) -> tuple | None:
+    """Cheap change detection for this process's last real DB integrity check.
+
+    WAL-only commits and rollback journals belong to the source identity too.
+    This is a reuse guard, never a replacement for an initial quick_check.
+    """
+    identities = []
+    try:
+        for suffix in ("", "-wal", "-journal"):
+            try:
+                info = Path(str(path) + suffix).stat()
+            except FileNotFoundError:
+                if not suffix:
+                    return None
+                identities.append(None)
+            else:
+                identities.append((info.st_dev, info.st_ino, info.st_size,
+                                   info.st_mtime_ns, info.st_ctime_ns))
+    except OSError:
+        return None
+    return tuple(identities)
+
+
+def _check_authoritative_integrity(self: Any) -> tuple[bool, str]:
+    before = _source_integrity_identity(self.db_path)
+    ok, detail = _s._sqlite_integrity(self.db_path, full=False)
+    after = _source_integrity_identity(self.db_path)
+    self._source_integrity_identity = after if ok and before == after else None
+    return ok, detail
+
+
 def _reuse_verified_for_degraded_prestart(
     self: Any,
     *,
@@ -122,7 +153,7 @@ def _reuse_verified_for_degraded_prestart(
     """Keep serving with an unchanged verified point while exposing stale RPO."""
     manifests = self._verified_manifests(directory)
     if not manifests:
-        source_ok, source_detail = _s._sqlite_integrity(self.db_path, full=False)
+        source_ok, source_detail = _check_authoritative_integrity(self)
         if not source_ok:
             raise RuntimeError(
                 "authoritative trades.db quick_check failed during degraded startup: "
@@ -202,7 +233,7 @@ def _reuse_verified_for_degraded_prestart(
         actual_sha = expected_sha
 
 
-    source_ok, source_detail = _s._sqlite_integrity(self.db_path, full=False)
+    source_ok, source_detail = _check_authoritative_integrity(self)
     if not source_ok:
         raise RuntimeError(
             "authoritative trades.db quick_check failed during degraded startup: "
@@ -277,27 +308,33 @@ def _defer_schema_identity_to_offhost(
     reasons = set(getattr(self, "_degraded_schema_identity_reasons", set()))
     reasons.add(reason)
     self._degraded_schema_identity_reasons = reasons
-    if cached is not None:
+    identity = _source_integrity_identity(self.db_path)
+    reusable = (
+        identity is not None
+        and identity == getattr(self, "_source_integrity_identity", None)
+        and isinstance(getattr(self, "_startup_integrity", None), dict)
+        and self._startup_integrity.get("ok") is True
+    )
+    if cached is not None and reusable:
         if isinstance(self._startup_integrity, dict):
             self._startup_integrity["schema_identity_reasons"] = sorted(reasons)
         return cached
 
-    if (
-        getattr(self, "_prestart_integrity_ready", False)
-        and isinstance(getattr(self, "_startup_integrity", None), dict)
-        and self._startup_integrity.get("ok") is True
-    ):
+    if reusable:
         source_ok = True
         source_detail = str(self._startup_integrity.get("detail") or "ok")
+        checked_ts = self._startup_integrity["checked_ts"]
+        verification_scope = self._startup_integrity["verification_scope"]
     else:
-        source_ok, source_detail = _s._sqlite_integrity(self.db_path, full=False)
+        source_ok, source_detail = _check_authoritative_integrity(self)
+        checked_ts = time.time()
+        verification_scope = "post_schema_authoritative_source"
     if not source_ok:
         raise RuntimeError(
             "authoritative trades.db quick_check failed after schema migration: "
             f"{source_detail}"
         ) from original_error
 
-    checked_ts = time.time()
     startup = dict(self._startup_integrity or {})
     startup.update(
         {
@@ -305,7 +342,7 @@ def _defer_schema_identity_to_offhost(
             "ok": True,
             "detail": source_detail,
             "check_kind": "quick_check",
-            "verification_scope": "post_schema_authoritative_source",
+            "verification_scope": verification_scope,
             "durability_degraded": True,
             "schema_identity_backup_created": False,
             "schema_identity_checked_ts": checked_ts,

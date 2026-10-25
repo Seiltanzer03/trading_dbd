@@ -34,7 +34,7 @@ MUTABLE_OUTCOME_COLUMNS = frozenset((
 ))
 
 
-def _catalog(raw, proof, before, *, allow_verified_snapshot=False):
+def _catalog(raw, proof, before, *, allow_verified_snapshot=False, allow_current_growth=False):
     if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_CATALOG_BYTES:
         raise ValueError('Invalid or excessive catalog bytes')
     if not isinstance(proof, dict):
@@ -73,7 +73,8 @@ def _catalog(raw, proof, before, *, allow_verified_snapshot=False):
     if (not isinstance(parts, list) or not 0 <= len(parts) <= MAX_PARTITIONS
             or (not parts and 'full_table_proofs' not in value)
             or not isinstance(counts, dict) or not counts
-            or type(maximum) is not int or not before['size'] <= maximum <= MAX_OUTPUT_BYTES):
+            or type(maximum) is not int or not 4096 <= maximum <= MAX_OUTPUT_BYTES
+            or before['size'] > (MAX_OUTPUT_BYTES if allow_current_growth else maximum)):
         raise ValueError('Invalid catalog bounds')
     keys, tables = set(), set()
     for receipt in parts:
@@ -189,10 +190,15 @@ def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, curr
         raise FileExistsError(destination)
     before = archive._identity(source)
     catalog, catalog_sha = _catalog(catalog_bytes, source_receipt, before,
-                                   allow_verified_snapshot=current)
+                                   allow_verified_snapshot=current, allow_current_growth=current)
     if current and 'full_table_proofs' not in catalog:
         raise ValueError('Current history requires complete original cold table proofs')
-    maximum = catalog['maximum_hydrated_bytes']
+    catalog_maximum = catalog['maximum_hydrated_bytes']
+    # The frozen catalog bounds its original full database, not all future hot
+    # observations. Allow the verified current hot file in addition to that old
+    # full-history budget, still inside the unchanged global analytical cap.
+    # The immutable catalog and all row/count/root checks remain unchanged.
+    maximum = min(MAX_OUTPUT_BYTES, catalog_maximum + before['size']) if current else catalog_maximum
     deadline = time.monotonic() + MAX_SECONDS
     _check(deadline, destination.parent,
            needed=archive.RESERVE_BYTES + 2*maximum + 3*archive.MAX_BYTES)
@@ -320,6 +326,7 @@ def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, curr
         archive._identity(work)  # No mutable output sidecars may be published.
         archive._publish(work, destination)
         return dict(contract=CURRENT_CONTRACT if current else CONTRACT, history_union_verified=True,
+                    catalog_output_bound_bytes=catalog_maximum, effective_output_bound_bytes=maximum,
                     database_sha256=digest.hexdigest(), database_size_bytes=size,
                     hot_database_sha256=source_receipt['database_sha256'], catalog_sha256=catalog_sha,
                     expected_table_counts=counts, typed_values_verified=True,

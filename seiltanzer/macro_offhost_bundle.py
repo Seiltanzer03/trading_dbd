@@ -21,7 +21,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 CONTRACT_VERSION = "official-macro-offhost-bundle-v1"
@@ -118,6 +118,7 @@ def _release_record(
     source: str,
     source_url: str,
     fetched_at: float,
+    series_receipts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     record = {
         "family": family,
@@ -135,6 +136,8 @@ def _release_record(
             "acquisition": payload.get("acquisition"),
         },
     }
+    if series_receipts:
+        record["provenance"]["series_receipts"] = series_receipts
     record["canonical_release_sha256"] = _sha256(record)
     return record
 
@@ -146,9 +149,10 @@ def _normalize_fed_series_csv(
     if not lines:
         return str(content)
     header = lines[0].strip()
-    if re.fullmatch(
-        rf"observation_date,{re.escape(series_id)}(?:_\d{{8}})?", header
-    ):
+    expected_header = f"observation_date,{series_id}_{vintage_date.replace('-', '')}"
+    if re.fullmatch(rf"observation_date,{re.escape(series_id)}_\d{{8}}", header) and header != expected_header:
+        raise ValueError("FED_SERIES_VINTAGE_MISMATCH")
+    if header in (f"observation_date,{series_id}", expected_header):
         lines[0] = f"observation_date,{series_id}_{vintage_date.replace('-', '')}"
         return "\n".join(lines) + ("\n" if str(content).endswith("\n") else "")
     return str(content)
@@ -189,7 +193,7 @@ def _fetch_fred_csv_with_client(
 
 def _fetch_bls_via_official_alfred_failover(
     *, now: float | None = None
-) -> tuple[float, dict[str, dict[str, Any]], str]:
+) -> tuple[float, dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     """Fetch the 7 official BLS series via Federal Reserve ALFRED/FRED when api.bls.gov is down."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -207,7 +211,7 @@ def _fetch_bls_via_official_alfred_failover(
     period = _month_shift(f"{vintage_date[:4]}-{vintage_date[5:7]}", -1)
     alfred_source = OfficialALFREDBLSVintageSource(timeout_sec=12.0, fetch_attempts=1)
     series_rows: list[dict[str, Any]] = []
-    first_url = ""
+    sources = {family: {"source_url": "", "series_receipts": []} for family in ("CPI", "NFP")}
     prefer_fred_csv = False
     with httpx.Client(
         timeout=20.0,
@@ -236,8 +240,19 @@ def _fetch_bls_via_official_alfred_failover(
                 except Exception:
                     content = alfred_source._fetch(alfred_url)
                     used_url = alfred_url
-            if not first_url:
-                first_url = used_url
+            family = "CPI" if alfred_id in {"CPIAUCSL", "CPILFESL", "CPIAUCNS", "CPILFENS"} else "NFP"
+            source = sources[family]
+            if not source["source_url"]:
+                source["source_url"] = used_url
+            source["series_receipts"].append({
+                "series_id": alfred_id, "bls_series_id": bls_id,
+                "source_url": used_url,
+                "body_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "fetched_at": time.time(),
+                "source_kind": "FRED_CURRENT_AS_RECEIVED" if urlparse(used_url).hostname == "fred.stlouisfed.org" else "ALFRED_REQUESTED_DAILY_VINTAGE",
+                "requested_vintage_date": vintage_date if urlparse(used_url).hostname == "alfred.stlouisfed.org" else None,
+                "historical_availability_asserted": False,
+            })
             normalized = _normalize_fed_series_csv(
                 content, series_id=alfred_id, vintage_date=vintage_date
             )
@@ -255,7 +270,7 @@ def _fetch_bls_via_official_alfred_failover(
             "Results": {"series": series_rows},
         }
     )
-    return time.time(), releases, first_url
+    return time.time(), releases, sources
 
 
 def build_bundle(
@@ -281,8 +296,10 @@ def build_bundle(
         bls_fetched_at, bls = source.fetch_bls(now=requested_at)
         bls_source = "U.S. Bureau of Labor Statistics"
         bls_source_url = BLS_API_URL
+        bls_sources = {family: {"source_url": bls_source_url, "series_receipts": []}
+                       for family in ("CPI", "NFP")}
     except Exception:
-        bls_fetched_at, bls, bls_source_url = _fetch_bls_via_official_alfred_failover(
+        bls_fetched_at, bls, bls_sources = _fetch_bls_via_official_alfred_failover(
             now=requested_at
         )
         bls_source = "U.S. Bureau of Labor Statistics"
@@ -293,8 +310,9 @@ def build_bundle(
             family=family,
             payload=dict(bls[family]),
             source=bls_source,
-            source_url=bls_source_url,
+            source_url=bls_sources[family]["source_url"],
             fetched_at=bls_fetched_at,
+            series_receipts=bls_sources[family]["series_receipts"],
         )
     for family in ("ISM_MANUFACTURING", "ISM_SERVICES"):
         payload = dict(ism[family])
@@ -357,6 +375,38 @@ def _validate_payload(family: str, payload: dict[str, Any]) -> None:
         # last-decimal rounding, never an unrelated or inferred delta.
         if abs((current - previous) - change) > 0.11:
             raise ValueError("OFFHOST_MACRO_ISM_CHANGE_MISMATCH")
+
+
+def _validate_series_receipts(family: str, receipts: Any, source_url: str, fetched_at: float) -> None:
+    expected = dict(ALFRED_TO_BLS_SERIES[:4] if family == "CPI" else ALFRED_TO_BLS_SERIES[4:])
+    if not isinstance(receipts, list) or len(receipts) != len(expected):
+        raise ValueError("OFFHOST_MACRO_SERIES_RECEIPTS_INVALID")
+    seen = set()
+    for row in receipts:
+        if not isinstance(row, dict):
+            raise ValueError("OFFHOST_MACRO_SERIES_RECEIPTS_INVALID")
+        series_id = row.get("series_id")
+        parsed = urlparse(str(row.get("source_url") or ""))
+        query = parse_qs(parsed.query)
+        received = _finite(row.get("fetched_at"))
+        fred = parsed.hostname == "fred.stlouisfed.org"
+        path = "/graph/fredgraph.csv" if fred else "/graph/alfredgraph.csv"
+        if (series_id not in expected or series_id in seen
+                or row.get("bls_series_id") != expected[series_id]
+                or parsed.scheme != "https" or parsed.hostname not in {"fred.stlouisfed.org", "alfred.stlouisfed.org"}
+                or parsed.path != path or parsed.fragment or parsed.username or parsed.password
+                or query.get("id") != [series_id]
+                or not re.fullmatch("[0-9a-f]{64}", str(row.get("body_sha256") or ""))
+                or received is None or not 0 < received <= fetched_at
+                or row.get("historical_availability_asserted") is not False
+                or row.get("source_kind") != ("FRED_CURRENT_AS_RECEIVED" if fred else "ALFRED_REQUESTED_DAILY_VINTAGE")
+                or (fred and row.get("requested_vintage_date") is not None)
+                or (not fred and query.get("vintage_date") != [row.get("requested_vintage_date")])):
+            raise ValueError("OFFHOST_MACRO_SERIES_RECEIPTS_INVALID")
+        seen.add(series_id)
+    primary = "CPIAUCSL" if family == "CPI" else "PAYEMS"
+    if not any(row["series_id"] == primary and row["source_url"] == source_url for row in receipts):
+        raise ValueError("OFFHOST_MACRO_SERIES_RECEIPTS_INVALID")
 
 
 def validate_bundle(
@@ -425,6 +475,9 @@ def validate_bundle(
             raise ValueError("OFFHOST_MACRO_RELEASE_FUTURE_TIMESTAMP")
         if stamp - fetched_at > max_age:
             raise ValueError("OFFHOST_MACRO_RELEASE_STALE")
+        receipts = provenance.get("series_receipts")
+        if receipts is not None or parsed.hostname in {"fred.stlouisfed.org", "alfred.stlouisfed.org"}:
+            _validate_series_receipts(family, receipts, record["source_url"], fetched_at)
         payload = record.get("payload")
         if not isinstance(payload, dict) or record.get("period") != payload.get("period"):
             raise ValueError("OFFHOST_MACRO_RELEASE_PAYLOAD_MISMATCH")
@@ -467,6 +520,7 @@ def ingest_offhost_families(
             "canonical_release_sha256": record["canonical_release_sha256"],
             "fetched_at": record["fetched_at"],
             "source_url": record["source_url"],
+            "series_receipts": record["provenance"].get("series_receipts", []),
             "fallback_reason": "PRODUCTION_OFFICIAL_TRANSPORT_UNAVAILABLE",
             "upstream_error": f"{type(upstream_error).__name__}:{str(upstream_error)[:160]}",
             "synthetic_data_used": False,
@@ -479,6 +533,7 @@ def ingest_offhost_families(
             source_url=str(record["source_url"]),
             fetched_at=float(record["fetched_at"]),
             payload=payload,
+            source_receipts=tuple(record["provenance"].get("series_receipts", [])),
         ))
         stored["transport"] = "OFF_HOST_OFFICIAL_SOURCE"
         stored["bundle_sha256"] = bundle["bundle_sha256"]
