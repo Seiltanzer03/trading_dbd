@@ -68,6 +68,8 @@ def prepare_research_snapshot(database, manifest_path, destination, *, client=No
                     database_size_bytes=result['database_size_bytes'],
                     raw_hot_database_sha256=manifest['database_sha256'],
                     cold_catalog_used_sha256=result['catalog_sha256'],
+                    catalog_output_bound_bytes=result['catalog_output_bound_bytes'],
+                    effective_output_bound_bytes=result['effective_output_bound_bytes'],
                     current_hot_rows_preserved=True, original_cold_table_roots_verified=True,
                     history_union_verified=True, analytical_snapshot_only=True,
                     production_authority=False)

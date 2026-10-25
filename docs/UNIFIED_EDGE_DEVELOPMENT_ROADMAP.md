@@ -1095,6 +1095,38 @@ Baseline26c9e437 restored. Both normal and strict snapshot compaction had remove
 
 The existing independent structured LLM is attempted even when primary prose falls back or has a provider RuntimeError. Genuine model identity/scores remain separate from the locally rendered prose. Programming errors remain visible. API/UI labels distinguish prose fallback from unavailable structured LLM; a saved structured plan remains read-only even when prose is absent.
 
+## 2026-10-25 — Verified continuation after Argon handoff
+
+Plan: `superpowers/plans/2026-10-25-verified-research-continuation.md`.
+Baseline main `a2110bc41326730274b041bbcde78a6b5f931d6c`; no subsequent PR
+was present when continuation began. Deployed macro transport succeeds, but
+the report's 10-instrument/17-model/active macro-event numbers do not match
+the exact-SHA artifact:13configured instruments,25fitted/19historically
+supported family models (intermarket10/7, session10/8, option5/4), zero new
+macro/event/flow/position/carry fits. Historical support is not a current vote.
+
+Local correction preserves real prestart integrity proof only while DB/WAL/
+journal identity remains unchanged, retaining original check time and scope.
+Changed source and cached-schema WAL changes force the real check. Official
+Federal Reserve fallback now carries separate CPI/NFP URLs and seven response
+receipts; current provenance is separate from immutable first-seen metadata.
+Re-fetching equal numeric facts cannot create a new canonical release merely
+because transport/deployment metadata changed. Mismatched vintage is rejected.
+
+The repeated production EDE failure40167989097 is reproduced at SQLite's old
+catalog page limit, not established as physical VPS exhaustion. Read-only
+catalog observation40174509315 confirms19,858,247,680B old bound versus current
+18,562,621,440B hot input. Current hot+cold hydration receives a bounded current
+image allowance under the unchanged25GiB global cap; original catalog pin,
+typed roots, exact retired rowids and current hot outcomes remain required.
+Two real-SQLite regressions observedRED→GREEN; union/prepare34tests pass.
+
+Integrated owning profile339passed, with the known unrelated Python3.12/
+SQLite3.53 sparse-WAL source-signature failure also reproduced on the old
+worktree. No integrity guard was weakened to suppress it. Final independent
+review, mandatory Python3.11 CI and actual exact-SHA production chain remain
+required. No new live-provider/active-weight/profit claim is made from tests.
+
 ## 2026-10-24 — Independent release publications during BLS outage
 
 Production continuation: PR516 merged as `8db572c16e337cb5e7d2e962740440879f977c62`

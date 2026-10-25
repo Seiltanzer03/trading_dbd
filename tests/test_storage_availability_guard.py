@@ -234,9 +234,7 @@ def test_impossible_prestart_serves_without_backup_when_no_recovery_point_exists
         assert schema_result.backup_id == "degraded-schema-identity"
         assert repeated is schema_result
         assert manager._startup_integrity["ok"] is True
-        assert manager._startup_integrity["verification_scope"] == (
-            "post_schema_authoritative_source"
-        )
+        assert manager._startup_integrity["verification_scope"] == "pre_engine_source"
         assert manager._startup_integrity["schema_identity_backup_created"] is False
         assert manager._startup_integrity["schema_identity_reasons"] == [
             "g1m-schema-identity",
@@ -253,4 +251,69 @@ def test_impossible_prestart_serves_without_backup_when_no_recovery_point_exists
         assert list(manager.local_dir.glob("*.sqlite3")) == []
     finally:
         storage.StorageManager.create_backup = orig_create
+
+
+def test_schema_defer_rejects_source_corrupted_after_prestart(tmp_path):
+    manager = _manager(tmp_path)
+    availability._reuse_verified_for_degraded_prestart(
+        manager, directory=manager.local_dir,
+        original_error=OSError(errno.ENOSPC, "test low disk"),
+    )
+    manager.db_path.write_bytes(b"corrupt SQLite header")
+    with pytest.raises(RuntimeError, match="quick_check failed after schema migration"):
+        availability._defer_schema_identity_to_offhost(
+            manager, reason="g1m-schema-identity",
+            plan={"available_bytes": 100, "compact_required_bytes": 100_000},
+            original_error=OSError(errno.ENOSPC, "test low disk"),
+        )
+
+
+def test_schema_reuse_keeps_actual_integrity_timestamp(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    monkeypatch.setattr(availability.time, "time", lambda: 1000.)
+    availability._reuse_verified_for_degraded_prestart(
+        manager, directory=manager.local_dir,
+        original_error=OSError(errno.ENOSPC, "test low disk"),
+    )
+    monkeypatch.setattr(availability.time, "time", lambda: 2000.)
+    availability._defer_schema_identity_to_offhost(
+        manager, reason="g1m-schema-identity",
+        plan={"available_bytes": 100, "compact_required_bytes": 100_000},
+        original_error=OSError(errno.ENOSPC, "test low disk"),
+    )
+    assert manager._startup_integrity["checked_ts"] == 1000.
+    assert manager._startup_integrity["schema_identity_checked_ts"] == 1000.
+    assert manager._startup_integrity["verification_scope"] == "pre_engine_source"
+
+
+def test_schema_cache_rechecks_committed_wal_change(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    writer = sqlite3.connect(manager.db_path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    calls = []
+    check = storage._sqlite_integrity
+
+    def recorded(path, *, full=False):
+        calls.append(path)
+        return check(path, full=full)
+
+    monkeypatch.setattr(storage, "_sqlite_integrity", recorded)
+    try:
+        availability._reuse_verified_for_degraded_prestart(
+            manager, directory=manager.local_dir,
+            original_error=OSError(errno.ENOSPC, "test low disk"),
+        )
+        kwargs = dict(reason="g1m-schema-identity",
+                      plan={"available_bytes": 100, "compact_required_bytes": 100_000},
+                      original_error=OSError(errno.ENOSPC, "test low disk"))
+        availability._defer_schema_identity_to_offhost(manager, **kwargs)
+        before = len(calls)
+        writer.execute("INSERT INTO trades(payload) VALUES ('new schema state')")
+        writer.commit()
+        availability._defer_schema_identity_to_offhost(manager, **kwargs)
+        assert len(calls) == before + 1
+        assert manager._startup_integrity["verification_scope"] == "post_schema_authoritative_source"
+    finally:
+        writer.close()
 

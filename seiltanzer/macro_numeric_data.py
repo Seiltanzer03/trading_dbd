@@ -368,6 +368,7 @@ class ReleaseWrite:
     source_url: str
     fetched_at: float
     payload: dict[str, Any]
+    source_receipts: tuple[dict[str, Any], ...] = ()
 
 
 class NumericMacroStore:
@@ -400,6 +401,10 @@ class NumericMacroStore:
                 "CREATE INDEX IF NOT EXISTS ix_macro_numeric_causal "
                 "ON macro_numeric_releases(family,available_at,period)"
             )
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(macro_numeric_releases)")}
+            for name in ("first_source_receipt_json", "latest_source_receipt_json"):
+                if name not in columns:
+                    self._conn.execute(f"ALTER TABLE macro_numeric_releases ADD COLUMN {name} TEXT")
 
     def ingest(self, write: ReleaseWrite) -> dict[str, Any]:
         if write.family not in SUPPORTED_FAMILIES:
@@ -420,6 +425,8 @@ class NumericMacroStore:
             raise ValueError("NUMERIC_MACRO_FETCH_TIME_INVALID")
         payload = dict(write.payload)
         payload_sha = _sha(payload)
+        receipt_json = _json({"source_url": write.source_url, "fetched_at": fetched_at,
+                              "series_receipts": list(write.source_receipts)})
         release_id = "macro-num-" + uuid.uuid4().hex
         with self._lock, self._conn:
             existing = self._conn.execute(
@@ -430,8 +437,10 @@ class NumericMacroStore:
             if existing:
                 refreshed_fetched_at = max(float(existing[2]), fetched_at)
                 self._conn.execute(
-                    "UPDATE macro_numeric_releases SET fetched_at=? WHERE release_id=?",
-                    (refreshed_fetched_at, existing[0]),
+                    "UPDATE macro_numeric_releases SET fetched_at=?, "
+                    "latest_source_receipt_json=CASE WHEN ? >= fetched_at THEN ? "
+                    "ELSE latest_source_receipt_json END WHERE release_id=?",
+                    (refreshed_fetched_at, fetched_at, receipt_json, existing[0]),
                 )
                 return {
                     "status": "CACHED", "release_id": existing[0],
@@ -441,12 +450,13 @@ class NumericMacroStore:
             self._conn.execute(
                 "INSERT INTO macro_numeric_releases(" 
                 "release_id,family,period,source,source_url,fetched_at,available_at," 
-                "payload_json,source_sha256,contract_version,created_ts) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "payload_json,source_sha256,contract_version,created_ts,"
+                "latest_source_receipt_json,first_source_receipt_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     release_id, write.family, write.period, write.source,
                     write.source_url, fetched_at, fetched_at, _json(payload),
-                    payload_sha, NUMERIC_MACRO_CONTRACT_VERSION, time.time(),
+                    payload_sha, NUMERIC_MACRO_CONTRACT_VERSION, time.time(), receipt_json, receipt_json,
                 ),
             )
         return {
@@ -461,17 +471,27 @@ class NumericMacroStore:
         with self._lock:
             row = self._conn.execute(
                 "SELECT release_id,period,source,source_url,fetched_at,available_at," 
-                "payload_json,source_sha256 FROM macro_numeric_releases "
+                "payload_json,source_sha256,latest_source_receipt_json,first_source_receipt_json "
+                "FROM macro_numeric_releases "
                 "WHERE family=? AND available_at<=? "
                 "ORDER BY available_at DESC, created_ts DESC LIMIT 1",
                 (family, float(captured_ts)),
             ).fetchone()
         if not row:
             return {"status": "UNAVAILABLE", "family": family, "reason": "NO_CAUSAL_RELEASE"}
+        receipt = json.loads(row[8]) if row[8] else {}
+        receipt_visible = bool(receipt) and float(receipt["fetched_at"]) <= float(captured_ts)
+        if not receipt_visible:
+            receipt = json.loads(row[9]) if row[9] else {}
+            receipt_visible = bool(receipt) and float(receipt["fetched_at"]) <= float(captured_ts)
         return {
             "status": "VALID", "family": family, "release_id": row[0],
-            "period": row[1], "source": row[2], "source_url": row[3],
-            "fetched_at": float(row[4]), "available_at": float(row[5]),
+            "period": row[1], "source": row[2],
+            "source_url": receipt["source_url"] if receipt_visible else row[3],
+            "first_source_url": row[3],
+            "source_receipts": receipt.get("series_receipts", []) if receipt_visible else [],
+            "fetched_at": float(receipt["fetched_at"]) if receipt_visible else float(row[5]),
+            "available_at": float(row[5]),
             "payload": json.loads(row[6]), "source_sha256": row[7],
             "official_source_verified": True,
             "contract_version": NUMERIC_MACRO_CONTRACT_VERSION,

@@ -367,7 +367,7 @@ def install_macro_transport_refinement() -> None:
                 from .macro_numeric_data import ReleaseWrite
                 from .macro_offhost_bundle import _fetch_bls_via_official_alfred_failover
 
-                fetched_at, releases, source_url = _fetch_bls_via_official_alfred_failover()
+                fetched_at, releases, sources = _fetch_bls_via_official_alfred_failover()
                 output: list[dict[str, Any]] = []
                 for family in ("CPI", "NFP"):
                     payload = dict(releases[family])
@@ -376,9 +376,10 @@ def install_macro_transport_refinement() -> None:
                             family=family,
                             period=str(payload["period"]),
                             source="U.S. Bureau of Labor Statistics",
-                            source_url=source_url,
+                            source_url=sources[family]["source_url"],
                             fetched_at=fetched_at,
                             payload=payload,
+                            source_receipts=tuple(sources[family]["series_receipts"]),
                         )
                     )
                     stored["transport"] = "OFFICIAL_FED_ALFRED_BLS_FAILOVER"

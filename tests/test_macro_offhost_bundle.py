@@ -36,6 +36,20 @@ def _payload(family: str) -> dict:
     }
 
 
+def _fed_sources():
+    result = {}
+    for family, series in (("CPI", offhost.ALFRED_TO_BLS_SERIES[:4]),
+                           ("NFP", offhost.ALFRED_TO_BLS_SERIES[4:])):
+        receipts = [{"series_id": fed, "bls_series_id": bls,
+                     "source_url": f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={fed}",
+                     "body_sha256": "a" * 64, "fetched_at": NOW - 5.,
+                     "source_kind": "FRED_CURRENT_AS_RECEIVED",
+                     "requested_vintage_date": None, "historical_availability_asserted": False}
+                    for fed, bls in series]
+        result[family] = {"source_url": receipts[0]["source_url"], "series_receipts": receipts}
+    return result
+
+
 def _bundle() -> dict:
     releases = {}
     for family in offhost.EXPECTED_FAMILIES:
@@ -201,7 +215,7 @@ def test_build_bundle_falls_back_to_official_alfred_when_bls_api_unavailable(mon
         lambda *, now=None: (
             NOW - 5.0,
             {"CPI": _payload("CPI"), "NFP": _payload("NFP")},
-            "https://alfred.stlouisfed.org/graph/alfredgraph.csv?id=CPIAUCSL",
+            _fed_sources(),
         ),
     )
     bundle = offhost.build_bundle(expected_sha=SHA, acceptance_run_id=RUN_ID, now=NOW)
@@ -210,8 +224,9 @@ def test_build_bundle_falls_back_to_official_alfred_when_bls_api_unavailable(mon
     ) is bundle
     assert (
         bundle["releases"]["CPI"]["source_url"]
-        == "https://alfred.stlouisfed.org/graph/alfredgraph.csv?id=CPIAUCSL"
+        == "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL"
     )
+    assert bundle["releases"]["NFP"]["source_url"] == "https://fred.stlouisfed.org/graph/fredgraph.csv?id=PAYEMS"
 
 
 def test_alfred_failover_switches_to_fred_csv_when_alfred_times_out(monkeypatch):
@@ -242,9 +257,44 @@ def test_alfred_failover_switches_to_fred_csv_when_alfred_times_out(monkeypatch)
     )
     monkeypatch.setattr(offhost, "_fetch_fred_csv_with_client", fake_fred_fetch)
 
-    _, releases, source_url = offhost._fetch_bls_via_official_alfred_failover(now=NOW)
+    _, releases, sources = offhost._fetch_bls_via_official_alfred_failover(now=NOW)
     assert len(alfred_calls) == 1
     assert len(fred_calls) == 7
-    assert source_url.startswith("https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL")
+    assert sources["CPI"]["source_url"].startswith("https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL")
+    assert sources["NFP"]["source_url"].startswith("https://fred.stlouisfed.org/graph/fredgraph.csv?id=PAYEMS")
+    assert [r["series_id"] for r in sources["CPI"]["series_receipts"]] == ["CPIAUCSL", "CPILFESL", "CPIAUCNS", "CPILFENS"]
+    assert [r["series_id"] for r in sources["NFP"]["series_receipts"]] == ["PAYEMS", "UNRATE", "CES0500000003"]
+    for source in sources.values():
+        for receipt in source["series_receipts"]:
+            assert receipt["source_kind"] == "FRED_CURRENT_AS_RECEIVED"
+            assert receipt["historical_availability_asserted"] is False
+            assert len(receipt["body_sha256"]) == 64
     assert releases["CPI"]["period"] == "2026-09"
     assert releases["NFP"]["period"] == "2026-09"
+
+
+def test_csv_normalization_does_not_relabel_another_vintage():
+    with pytest.raises(ValueError, match="VINTAGE_MISMATCH"):
+        offhost._normalize_fed_series_csv(
+            "observation_date,PAYEMS_20260801\n2026-07-01,100\n",
+            series_id="PAYEMS", vintage_date="2026-09-01",
+        )
+
+
+def test_bundle_rejects_rehashed_wrong_family_series_receipt():
+    bundle = _bundle()
+    bundle["releases"]["NFP"]["provenance"]["series_receipts"] = [{
+        "series_id": "CPIAUCSL", "source_url": "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL",
+        "body_sha256": "a" * 64, "fetched_at": NOW - 10.,
+    }]
+    _rehash(bundle)
+    with pytest.raises(ValueError, match="SERIES_RECEIPTS_INVALID"):
+        offhost.validate_bundle(bundle, expected_sha=SHA, now=NOW)
+
+
+def test_fed_bundle_requires_its_actual_series_receipts():
+    bundle = _bundle()
+    bundle["releases"]["NFP"]["source_url"] = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=PAYEMS"
+    _rehash(bundle)
+    with pytest.raises(ValueError, match="SERIES_RECEIPTS_INVALID"):
+        offhost.validate_bundle(bundle, expected_sha=SHA, now=NOW)
