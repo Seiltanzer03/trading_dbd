@@ -282,7 +282,15 @@ def _defer_schema_identity_to_offhost(
             self._startup_integrity["schema_identity_reasons"] = sorted(reasons)
         return cached
 
-    source_ok, source_detail = _s._sqlite_integrity(self.db_path, full=False)
+    if (
+        getattr(self, "_prestart_integrity_ready", False)
+        and isinstance(getattr(self, "_startup_integrity", None), dict)
+        and self._startup_integrity.get("ok") is True
+    ):
+        source_ok = True
+        source_detail = str(self._startup_integrity.get("detail") or "ok")
+    else:
+        source_ok, source_detail = _s._sqlite_integrity(self.db_path, full=False)
     if not source_ok:
         raise RuntimeError(
             "authoritative trades.db quick_check failed after schema migration: "

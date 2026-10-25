@@ -170,3 +170,45 @@ def test_offhost_ingestion_uses_normal_append_only_release_write(monkeypatch):
         assert provenance["acceptance_run_id"] == RUN_ID
         assert provenance["synthetic_data_used"] is False
         assert provenance["production_authority"] is False
+
+
+def test_build_bundle_falls_back_to_official_alfred_when_bls_api_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        "seiltanzer.macro_ism_resilience.install_ism_source_resilience",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "seiltanzer.macro_transport_refinement.install_macro_transport_refinement",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "seiltanzer.macro_numeric_data.OfficialNumericMacroSource.fetch_bls",
+        lambda self, now=None: (_ for _ in ()).throw(ValueError("BLS_503")),
+    )
+    monkeypatch.setattr(
+        "seiltanzer.macro_numeric_data.OfficialNumericMacroSource.fetch_ism",
+        lambda self: (
+            NOW - 5.0,
+            {
+                "ISM_MANUFACTURING": _payload("ISM_MANUFACTURING"),
+                "ISM_SERVICES": _payload("ISM_SERVICES"),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        offhost,
+        "_fetch_bls_via_official_alfred_failover",
+        lambda *, now=None: (
+            NOW - 5.0,
+            {"CPI": _payload("CPI"), "NFP": _payload("NFP")},
+            "https://alfred.stlouisfed.org/graph/alfredgraph.csv?id=CPIAUCSL",
+        ),
+    )
+    bundle = offhost.build_bundle(expected_sha=SHA, acceptance_run_id=RUN_ID, now=NOW)
+    assert offhost.validate_bundle(
+        bundle, expected_sha=SHA, acceptance_run_id=RUN_ID, now=NOW
+    ) is bundle
+    assert (
+        bundle["releases"]["CPI"]["source_url"]
+        == "https://alfred.stlouisfed.org/graph/alfredgraph.csv?id=CPIAUCSL"
+    )

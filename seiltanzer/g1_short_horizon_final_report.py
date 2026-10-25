@@ -89,8 +89,21 @@ def _management_economics(runtime: ShortHorizonRuntime) -> dict[str, Any]:
     }
 
 
+def _cached_or_live(runtime: ShortHorizonRuntime, report_name: str, live_fn) -> dict[str, Any]:
+    try:
+        from .g1_short_horizon_evidence_materialization import _read, _source_signature
+        cached = _read(runtime, report_name)
+        if isinstance(cached, dict):
+            mat = cached.get("materialization") or {}
+            if str(mat.get("source_signature") or "") == _source_signature(runtime):
+                return cached
+    except Exception:
+        pass
+    return live_fn()
+
+
 def _trade_economics(runtime: ShortHorizonRuntime) -> dict[str, Any]:
-    report = runtime.trade_relevance()
+    report = _cached_or_live(runtime, "trade_relevance", runtime.trade_relevance)
     n = int(report.get("unique_trades_with_pre_entry_prediction") or 0)
     delta = _finite(report.get("delta_brier_vs_0_5"))
     winners = _finite(report.get("mean_p_move_with_trade_on_winning_trades"))
@@ -158,9 +171,9 @@ def _overall(statistical: str, economic: str) -> str:
 
 
 def _final_report(runtime: ShortHorizonRuntime) -> dict[str, Any]:
-    probability = runtime.prospective_oos()
-    continuous = runtime.continuous_oos()
-    calibration = runtime.calibration_oos()
+    probability = _cached_or_live(runtime, "probability_oos", runtime.prospective_oos)
+    continuous = _cached_or_live(runtime, "continuous_oos", runtime.continuous_oos)
+    calibration = _cached_or_live(runtime, "calibration_oos", runtime.calibration_oos)
     trade = _trade_economics(runtime)
     management = _management_economics(runtime)
     q = runtime.q_audit(limit=500)

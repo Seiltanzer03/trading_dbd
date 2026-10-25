@@ -584,6 +584,23 @@ class ShortHorizonRuntime:
             """, params).fetchall()
         return [dict(row) for row in rows]
 
+    def _resolved_eligible_summary(self, horizon: int) -> list[dict]:
+        if "_resolved_eligible" in getattr(self, "__dict__", {}):
+            return self._resolved_eligible(horizon)
+        with self._lock:
+            rows = self._conn.execute("""
+                SELECT g.observation_id,g.instrument,g.horizon_minutes,g.captured_ts,
+                       CASE WHEN json_valid(g.frozen_features_json)
+                            THEN json_extract(g.frozen_features_json,
+                                 '$.price_state.g1s_intraday.ret_15m')
+                            ELSE NULL END AS momentum_ret_15m,
+                       r.direction_label
+                FROM g1s_observations g JOIN g1s_resolutions r USING(observation_id)
+                WHERE g.training_eligible=1 AND r.direction_label!='FLAT' AND g.horizon_minutes=?
+                ORDER BY g.captured_ts,g.observation_id
+            """, (int(horizon),)).fetchall()
+        return [dict(row) for row in rows]
+
     def _evidence(self, rows: list[dict]) -> dict:
         groups = {self._dependency_key(row) for row in rows}
         pos = sum(row["direction_label"] == "UP" for row in rows)
@@ -674,6 +691,19 @@ class ShortHorizonRuntime:
         created = 0
         now = time.time()
         for horizon in HORIZONS:
+            if not force:
+                with self._lock:
+                    due = False
+                    for feature_set in FEATURE_SETS:
+                        latest = self._conn.execute(
+                            "SELECT created_ts FROM g1s_models WHERE horizon_minutes=? "
+                            "AND feature_set=? ORDER BY created_ts DESC LIMIT 1",
+                            (horizon, feature_set)).fetchone()
+                        if not latest or now - float(latest["created_ts"]) >= MODEL_REFIT_INTERVAL_SEC:
+                            due = True
+                            break
+                if not due:
+                    continue
             rows = self._resolved_eligible(horizon)
             evidence = self._evidence(rows)
             if not evidence["fit_allowed"]:
@@ -821,7 +851,7 @@ class ShortHorizonRuntime:
 
     # --------------------------------------------------------------- reports
     def horizon_report(self, horizon: int) -> dict:
-        rows = self._resolved_eligible(horizon)
+        rows = self._resolved_eligible_summary(horizon)
         evidence = self._evidence(rows)
         ys = [1 if r["direction_label"] == "UP" else 0 for r in rows]
         chronological_ps: list[float] = []

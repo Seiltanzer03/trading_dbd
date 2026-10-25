@@ -407,7 +407,10 @@ class NumericMacroStore:
         parsed = urlparse(write.source_url)
         host = (parsed.hostname or "").lower()
         if write.family in {"CPI", "NFP"}:
-            official = host in {"api.bls.gov", "bls.gov", "www.bls.gov"}
+            official = host in {
+                "api.bls.gov", "bls.gov", "www.bls.gov",
+                "alfred.stlouisfed.org", "fred.stlouisfed.org",
+            }
         else:
             official = host in {"ismworld.org", "www.ismworld.org"}
         if parsed.scheme != "https" or not official:
@@ -420,11 +423,16 @@ class NumericMacroStore:
         release_id = "macro-num-" + uuid.uuid4().hex
         with self._lock, self._conn:
             existing = self._conn.execute(
-                "SELECT release_id,available_at FROM macro_numeric_releases "
+                "SELECT release_id,available_at,fetched_at FROM macro_numeric_releases "
                 "WHERE family=? AND period=? AND source_sha256=?",
                 (write.family, write.period, payload_sha),
             ).fetchone()
             if existing:
+                refreshed_fetched_at = max(float(existing[2]), fetched_at)
+                self._conn.execute(
+                    "UPDATE macro_numeric_releases SET fetched_at=? WHERE release_id=?",
+                    (refreshed_fetched_at, existing[0]),
+                )
                 return {
                     "status": "CACHED", "release_id": existing[0],
                     "available_at": float(existing[1]), "family": write.family,

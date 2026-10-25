@@ -21,6 +21,7 @@ from typing import Any
 from .edge_discovery.filters import CandidateTemplate, ConditionTemplate
 from .edge_discovery.prospective import HORIZONS, ProspectiveFeatureAdapter
 from .edge_discovery.scoring import benjamini_hochberg
+from .edge_discovery.shadow_runtime import _open_shadow_reader
 from .edge_discovery.universal_outcome_adapter import ProspectiveUniversalOutcomeAdapter
 from .production_resource_guard import memory_pressure_state, trim_memory_for_pressure
 from .edge_discovery.universal_structured_discovery import (
@@ -138,13 +139,28 @@ def _resolved_rows_at_cutoff(
     explicit ``resolved_ts <= cutoff`` check below also gates database arrival
     time.  This prevents a later resolution from leaking into an older proposal.
     """
-    adapter = ProspectiveFeatureAdapter(runtime, available_asof=float(cutoff_ts))
-    valid_horizons = set(HORIZONS)
-    if target_horizons and set(target_horizons).issubset(valid_horizons) and len(target_horizons) < len(valid_horizons):
-        admissible = []
-        for h in sorted(target_horizons):
-            h_rows = adapter.rows(resolved_only=False, strict=False, horizon_minutes=h)
-            for row in h_rows:
+    with _open_shadow_reader(runtime) as reader:
+        adapter = ProspectiveFeatureAdapter(reader, available_asof=float(cutoff_ts))
+        valid_horizons = set(HORIZONS)
+        if target_horizons and set(target_horizons).issubset(valid_horizons) and len(target_horizons) < len(valid_horizons):
+            admissible = []
+            for h in sorted(target_horizons):
+                h_rows = adapter.rows(resolved_only=False, strict=False, horizon_minutes=h)
+                for row in h_rows:
+                    resolved_ts = row.get("resolved_ts")
+                    if not bool(row.get("outcome_available")) or resolved_ts is None:
+                        continue
+                    if float(row["target_ts"]) > float(cutoff_ts) + 1e-6:
+                        continue
+                    if float(resolved_ts) > float(cutoff_ts) + 1e-6:
+                        continue
+                    if isinstance(row, dict):
+                        row.pop("feature_values", None)
+                    admissible.append(row)
+        else:
+            rows = adapter.rows(resolved_only=False, strict=False)
+            admissible = []
+            for row in rows:
                 resolved_ts = row.get("resolved_ts")
                 if not bool(row.get("outcome_available")) or resolved_ts is None:
                     continue
@@ -152,20 +168,10 @@ def _resolved_rows_at_cutoff(
                     continue
                 if float(resolved_ts) > float(cutoff_ts) + 1e-6:
                     continue
+                if isinstance(row, dict):
+                    row.pop("feature_values", None)
                 admissible.append(row)
-    else:
-        rows = adapter.rows(resolved_only=False, strict=False)
-        admissible = []
-        for row in rows:
-            resolved_ts = row.get("resolved_ts")
-            if not bool(row.get("outcome_available")) or resolved_ts is None:
-                continue
-            if float(row["target_ts"]) > float(cutoff_ts) + 1e-6:
-                continue
-            if float(resolved_ts) > float(cutoff_ts) + 1e-6:
-                continue
-            admissible.append(row)
-    return ProspectiveUniversalOutcomeAdapter(runtime).attach(admissible)
+        return ProspectiveUniversalOutcomeAdapter(reader).attach(admissible)
 
 
 def _barrier_ids(rows: list[dict[str, Any]]) -> set[str]:
