@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 import time
 import zlib
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.history_storage_loader import history_state
@@ -22,6 +23,7 @@ from scripts.history_storage_loader import history_state
 # connection (and still supports snapshots up to 160 GiB within 10,000 parts).
 PART_SIZE = 16 * 1024 * 1024
 READ_SIZE = 4 * 1024 * 1024
+MAX_IN_FLIGHT_PARTS = 3
 
 
 def normalized_metadata(value: dict | None) -> dict[str, str]:
@@ -52,10 +54,13 @@ def upload(database: Path, source_manifest: Path, *, bucket: str, key: str) -> d
     digest = str(manifest.get('database_sha256') or '')
     if database.stat().st_size != size or len(digest) != 64:
         raise RuntimeError('source snapshot manifest does not match database metadata')
+    print('OFFHOST_BACKUP_PHASE=history_validation', flush=True)
     history_state.snapshot_history_manifest(database, manifest)
+    print('OFFHOST_BACKUP_PHASE=storage_setup', flush=True)
     client = boto3.client('s3', endpoint_url='https://storage.yandexcloud.net',
                           region_name='ru-central1',
                           config=Config(connect_timeout=10, read_timeout=120,
+                                        max_pool_connections=MAX_IN_FLIGHT_PARTS,
                                         retries={'max_attempts': 3}))
     versioning = client.get_bucket_versioning(Bucket=bucket)
     if versioning.get('Status') == 'Enabled':
@@ -71,24 +76,49 @@ def upload(database: Path, source_manifest: Path, *, bucket: str, key: str) -> d
     compressed_size = 0
     first_sample = b''
     last_sample = b''
+
+    def send_part(number, body):
+        started = time.monotonic()
+        response = client.upload_part(Bucket=bucket, Key=key, UploadId=upload_id,
+                                      PartNumber=number, Body=body,
+                                      ContentMD5=base64.b64encode(hashlib.md5(body).digest()).decode())
+        print('OFFHOST_BACKUP_PART=' + json.dumps({
+            'number': number, 'bytes': len(body),
+            'elapsed_sec': round(time.monotonic() - started, 3)}), flush=True)
+        return {'PartNumber': number, 'ETag': response['ETag']}
+
     try:
-        for number, part in enumerate(compressed_parts(database), 1):
-            compressed_digest.update(part); compressed_size += len(part)
-            if number == 1:
-                first_sample = part[:1024 * 1024]
-            last_sample = part[-1024 * 1024:]
-            response = client.upload_part(Bucket=bucket, Key=key, UploadId=upload_id,
-                                          PartNumber=number, Body=part,
-                                          ContentMD5=base64.b64encode(hashlib.md5(part).digest()).decode())
-            parts.append({'PartNumber': number, 'ETag': response['ETag']})
+        print('OFFHOST_BACKUP_PHASE=streaming_upload', flush=True)
+        # Hash/compress in source order; only the external sends overlap. Never
+        # let executor submission consume an unbounded compressed generator.
+        # Leaving this context waits for all senders before the outer abort.
+        with ThreadPoolExecutor(max_workers=MAX_IN_FLIGHT_PARTS) as pool:
+            pending = set()
+            for number, part in enumerate(compressed_parts(database), 1):
+                if number > 10000:
+                    raise RuntimeError('compressed snapshot exceeds multipart count bound')
+                compressed_digest.update(part); compressed_size += len(part)
+                if number == 1:
+                    first_sample = part[:1024 * 1024]
+                last_sample = part[-1024 * 1024:]
+                pending.add(pool.submit(send_part, number, part))
+                if len(pending) >= MAX_IN_FLIGHT_PARTS:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    parts.extend(future.result() for future in done)
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                parts.extend(future.result() for future in done)
         if not parts:
             raise RuntimeError('compressed snapshot is empty')
+        parts.sort(key=lambda part: part['PartNumber'])
+        print('OFFHOST_BACKUP_PHASE=complete_multipart', flush=True)
         client.complete_multipart_upload(
             Bucket=bucket, Key=key, UploadId=upload_id,
             MultipartUpload={'Parts': parts})
     except BaseException:
         client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
         raise
+    print('OFFHOST_BACKUP_PHASE=verify_object', flush=True)
     head = client.head_object(Bucket=bucket, Key=key)
     if (int(head['ContentLength']) != compressed_size or
             normalized_metadata(head.get('Metadata')) != metadata):
