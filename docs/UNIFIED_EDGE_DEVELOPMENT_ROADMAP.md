@@ -1097,6 +1097,17 @@ The existing independent structured LLM is attempted even when primary prose fal
 
 ## 2026-10-25 — Verified continuation after Argon handoff
 
+PR520/mainf29bfa7 passed both exact-tree CI runs:4812passed5skipped13subtests,
+pinnedSQLite/WebKit/acceptance green. Actual deploy40176150355 delivered and
+passed readiness but stopped at strict macro vintage validation; smoke/public
+and downstream research were skipped. It is not a fully accepted release.
+Read-only source diagnostic40177231958: ALFRED queried25Oct returns dated24Oct
+columns; FRED returns its current undated series. The finite correction keeps
+the ALFRED response rejected and uses the existing official FRED fallback after
+semantic parser failure, retaining the rejection URL/hash/reason. No historical
+availability is inferred.44owning macrotests passed after actual RED→GREEN;
+real off-host bundle build, final CI and accepted release remain required.
+
 Plan: `superpowers/plans/2026-10-25-verified-research-continuation.md`.
 Baseline main `a2110bc41326730274b041bbcde78a6b5f931d6c`; no subsequent PR
 was present when continuation began. Deployed macro transport succeeds, but

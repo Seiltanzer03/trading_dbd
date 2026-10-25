@@ -223,6 +223,7 @@ def _fetch_bls_via_official_alfred_failover(
             alfred_url = alfred_series_url(
                 alfred_id, period=period, vintage_date=vintage_date
             )
+            rejected_alfred_response = None
             if not prefer_fred_csv:
                 try:
                     content = alfred_source._fetch(alfred_url)
@@ -240,6 +241,28 @@ def _fetch_bls_via_official_alfred_failover(
                 except Exception:
                     content = alfred_source._fetch(alfred_url)
                     used_url = alfred_url
+            try:
+                normalized = _normalize_fed_series_csv(
+                    content, series_id=alfred_id, vintage_date=vintage_date)
+                parsed = parse_alfred_csv(
+                    normalized, series_id=alfred_id, vintage_date=vintage_date)
+            except ValueError as exc:
+                if urlparse(used_url).hostname != "alfred.stlouisfed.org":
+                    raise
+                # A successful HTTP response can still fail the requested
+                # vintage contract. Keep it rejected; acquire current FRED
+                # bytes instead of relabelling the ALFRED response date.
+                rejected_alfred_response = {
+                    "source_url": used_url, "reason": str(exc),
+                    "body_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                }
+                prefer_fred_csv = True
+                used_url, content = _fetch_fred_csv_with_client(
+                    fred_client, series_id=alfred_id, period=period)
+                normalized = _normalize_fed_series_csv(
+                    content, series_id=alfred_id, vintage_date=vintage_date)
+                parsed = parse_alfred_csv(
+                    normalized, series_id=alfred_id, vintage_date=vintage_date)
             family = "CPI" if alfred_id in {"CPIAUCSL", "CPILFESL", "CPIAUCNS", "CPILFENS"} else "NFP"
             source = sources[family]
             if not source["source_url"]:
@@ -253,12 +276,8 @@ def _fetch_bls_via_official_alfred_failover(
                 "requested_vintage_date": vintage_date if urlparse(used_url).hostname == "alfred.stlouisfed.org" else None,
                 "historical_availability_asserted": False,
             })
-            normalized = _normalize_fed_series_csv(
-                content, series_id=alfred_id, vintage_date=vintage_date
-            )
-            parsed = parse_alfred_csv(
-                normalized, series_id=alfred_id, vintage_date=vintage_date
-            )
+            if rejected_alfred_response is not None:
+                source["series_receipts"][-1]["rejected_alfred_response"] = rejected_alfred_response
             data = [
                 {"year": ym[:4], "period": f"M{ym[5:7]}", "value": str(val)}
                 for ym, val in sorted(parsed.items())
