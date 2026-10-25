@@ -13,7 +13,7 @@ class Element {
 }
 globalThis.document = {createElement: (tag) => new Element(tag)};
 const source = fs.readFileSync('seiltanzer/web/js/management_ui.js', 'utf8')
-  .replace(/^import .*;\n/gm, '').replace('mountG1SEvidencePanel();', '');
+  .replace(/^import .*;\r?\n/gm, '').replace('mountG1SEvidencePanel();', '');
 const {mountEdgeManagement, mountArchivedManagement} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const policies = ['HOLD','CLOSE_10','CLOSE_25','CLOSE_50','EXIT','MOVE_TO_BE',
   'TIGHTEN_STOP','TRAIL_GAMMA_FLIP','EXTEND_TAKE','REDUCE_TAKE','SCALE_OUT_ON_SPIKE','TIME_STOP'];
@@ -157,4 +157,9 @@ mountEdgeManagement(unavailableQuality, {unified_edge_ensemble:{...audit,
     reason:'COMPLETED_CAUSAL_5M_PRICE_FEATURES_UNAVAILABLE'}]}});
 assert.doesNotMatch(unavailableQuality.textContent,/100\.0%/,
   'an unavailable expert has no current quality estimate');
+const booleanTypes = new Element();
+mountEdgeManagement(booleanTypes, {unified_edge_ensemble:{...audit,
+  components:[{component_id:'current_llm',nominal_weight:false,effective_weight:false,quality:false}]}});
+assert.doesNotMatch(booleanTypes.textContent, /0\.0% → 0\.0%/,
+  'boolean types must not be coerced to 0.0% numbers');
 console.log('Unified edge audit rendering smoke: PASS');

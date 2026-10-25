@@ -207,3 +207,11 @@ def test_llm_quality_basis_and_small_positive_weights_survive_report():
     rendered = '\n'.join(render_unified_ensemble_lines(value))
     assert '0.046%' in rendered
     assert 'не калиброванная точность' in rendered
+
+
+def test_non_numeric_and_boolean_types_not_coerced_to_numbers():
+    value = audit()
+    value['components'][0].update(nominal_weight=False, effective_weight=False, quality=False)
+    rendered = '\n'.join(render_unified_ensemble_lines(value))
+    assert '— → —' in rendered
+    assert '0.0% → 0.0%' not in rendered

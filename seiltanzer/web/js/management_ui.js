@@ -19,7 +19,7 @@ const EDGE_RELATION_RU = {
 };
 
 function finiteNumber(value) {
-  if (value === null || value === undefined || value === '') return null;
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean' || typeof value === 'object') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
