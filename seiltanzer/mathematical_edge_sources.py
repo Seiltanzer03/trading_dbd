@@ -27,6 +27,7 @@ KRAKEN_URL = 'https://api.kraken.com'
 COINBASE_PRODUCTS = {'BTCUSD': 'BTC-USD', 'ETHUSD': 'ETH-USD', 'SOLUSD': 'SOL-USD'}
 KRAKEN_PAIRS = {'BTCUSD': 'XBTUSD', 'ETHUSD': 'ETHUSD', 'SOLUSD': 'SOLUSD'}
 PROVIDER_DOCS = {
+    'Binance': 'https://github.com/binance/binance-public-data',
     'Coinbase Exchange': 'https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-candles',
     'Kraken': 'https://docs.kraken.com/api-reference/market-data/get-ohlc-data',
     'Yahoo Finance via yfinance': 'https://ranaroussi.github.io/yfinance/reference/api/yfinance.download.html',
@@ -223,6 +224,19 @@ def retained_crypto_source(code, captured, seed, cached, *, days=60):
                            'direct_public_api_attempted': False})
     result['source_kind'] = 'SINGLE_RETAINED_PROVIDER_COMPLETED_5M'
     result['source_semantics']['bar_timestamp_semantics'] = 'five consecutive completed direct Binance one-minute bars'
+    # Keep immutable public trade aggregates only where the exact target bar
+    # still agrees. Newly retained bars have no fabricated flow observations.
+    if cached and isinstance(cached.get('trade_flow_history'),list):
+        flow=cached['trade_flow_history'];collection=cached.get('collection') or {}
+        originals={row['bar_end_ts']:row for row in cached['bars']}
+        if (cached.get('trade_flow_sha256')==fingerprint(flow)
+                and collection.get('contract_version')=='binance-public-archive-v1'):
+            kept=[row for row in flow if row.get('bar_end_ts') in merged
+                and merged[row['bar_end_ts']]==originals.get(row['bar_end_ts'])]
+            if kept:
+                result['trade_flow_history']=kept;result['trade_flow_sha256']=fingerprint(kept)
+                result['collection'].update(contract_version='binance-public-archive-v1',
+                    files=collection.get('files'),historical_first_receipt_known=False)
     return result
 
 
@@ -455,7 +469,7 @@ def fetch_yahoo(code, captured, days=60, *, timeout=15):
 
 
 def collect_fresh_sources(captured, *, seed_sources=(), cache_dir=None, days=60,
-                          budget_seconds=360., codes=None, client_factory=None):
+                          budget_seconds=360., codes=None, client_factory=None, diagnostic_sources=None):
     """Independent fresh sources; failed providers retain explicitly named fallback."""
     if (number(captured) is None or captured <= 0 or captured > time.time()+1
             or not 1 <= days <= MAX_DAYS or not 1 <= budget_seconds <= 420):
@@ -477,18 +491,37 @@ def collect_fresh_sources(captured, *, seed_sources=(), cache_dir=None, days=60,
     def collect(code):
         failures = []
         source = None
+        related = None
         if code in COINBASE_PRODUCTS:
             exact_cached = _cache_load(cache_dir, code, 'Binance', captured)
             source = retained_crypto_source(code, captured, seeds.get(code), exact_cached, days=days)
-            if source is not None:
+            if source is not None and source['coverage']['bar_count'] >= min(MAX_BARS, days*288-288):
                 # Old USD providers remain diagnostic caches/artifacts, never
                 # splice them into an exact Binance/USDT training series.
                 if not source.get('collection_fallback'):
                     _cache_save(cache_dir, source)
-                return code, source, []
+                related = _cache_load(cache_dir, code, 'Coinbase Exchange', captured)
+                return code, source, [], related
             cached = _cache_load(cache_dir, code, 'Coinbase Exchange', captured)
             kraken_cached = _cache_load(cache_dir, code, 'Kraken', captured)
             with client_factory() as client:
+                retained = source
+                try:
+                    from .binance_public_archive import fetch_public_archive
+                    source = fetch_public_archive(code, captured, client, budget, days=days)
+                except Exception as exc:
+                    failures.append({'provider': 'Binance public archive', 'error': f'{type(exc).__name__}: {str(exc)[:250]}'})
+                    source = retained
+                if source is not None:
+                    try:
+                        related = fetch_coinbase(code, captured, client, budget, days=days, cached=cached)
+                        _cache_save(cache_dir, related)
+                    except Exception as exc:
+                        failures.append({'provider':'Coinbase Exchange', 'error':f'{type(exc).__name__}: {str(exc)[:250]}'})
+                        related = cached
+                    source = {**source, 'fresh_collection_errors': failures}
+                    _cache_save(cache_dir, source)
+                    return code, source, failures, related
                 for provider, fetch in [('Coinbase Exchange', lambda: fetch_coinbase(code, captured, client, budget, days=days, cached=cached)),
                                          ('Kraken', lambda: fetch_kraken(code, captured, client, budget, cached=kraken_cached, days=days))]:
                     try:
@@ -520,11 +553,13 @@ def collect_fresh_sources(captured, *, seed_sources=(), cache_dir=None, days=60,
             source = {**source, 'fresh_collection_errors': failures}
             if source.get('collection_fallback') in (None, 'PARTIAL_SAME_PROVIDER_COLLECTION'):
                 _cache_save(cache_dir, source)
-        return code, source, failures
+        return code, source, failures, related
 
     sources, errors, attempts = [], {}, {}
     with ThreadPoolExecutor(max_workers=3) as pool:
-        for code, source, failures in pool.map(collect, codes):
+        for code, source, failures, related in pool.map(collect, codes):
+            if related is not None and diagnostic_sources is not None:
+                diagnostic_sources.append(related)
             attempts[code] = {'failures': failures, 'source_available': source is not None,
                               'fallback': source.get('collection_fallback') if source else None}
             if source is not None:

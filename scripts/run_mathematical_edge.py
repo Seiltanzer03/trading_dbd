@@ -99,7 +99,7 @@ def _instrument_matrix(rows, sources, captured_ts):
 
 
 def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, family_history=None,
-                 macro_archive=None,previous_family_reports=None):
+                 macro_archive=None,previous_family_reports=None,related_sources=None):
     rows, audited_sources = {}, []
     errors = dict(errors)
     for source in sources:
@@ -112,7 +112,7 @@ def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, fami
         try:
             bars, exclusions = _validated_bars(source.get('bars'), captured_ts)
             rows[code] = train_instrument(code, bars, captured_ts, horizons=horizons)
-            audited_sources.append({k: value for k, value in source.items() if k != 'bars'} | {
+            audited_sources.append({k: value for k, value in source.items() if k not in {'bars','trade_flow_history'}} | {
                 'bar_count': len(bars), 'validated_bars_sha256': fingerprint(bars),
                 'bar_exclusions': exclusions,
                 'first_bar_end_ts': bars[0]['bar_end_ts'] if bars else None,
@@ -130,7 +130,7 @@ def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, fami
     from seiltanzer.mathematical_edge_archive import replay_frozen_fx_rule
     from seiltanzer.edge_family_market import train_market_families
     family_models = train_market_families(sources, captured_ts, horizons=horizons,
-        feature_history=family_history,macro_archive=macro_archive)
+        feature_history=family_history,macro_archive=macro_archive,related_sources=related_sources)
     from seiltanzer.edge_family_model_retention import retain_fitted_families
     family_models,model_continuity=retain_fitted_families(family_models,previous_family_reports or [],captured_ts)
     return {
@@ -197,10 +197,15 @@ def main():
             previous_family_reports.append(data['previous_family_model_report'])
     if args.refresh_sources or not args.sources:
         from seiltanzer.mathematical_edge_sources import collect_fresh_sources
+        previous_related = diagnostic_sources
+        diagnostic_sources = []
         sources, errors, attempts = collect_fresh_sources(
             captured, seed_sources=sources, cache_dir=args.cache_dir, days=args.source_days,
-            budget_seconds=args.source_budget_seconds,
+            budget_seconds=args.source_budget_seconds, diagnostic_sources=diagnostic_sources,
         )
+        present = {item.get('instrument') for item in diagnostic_sources}
+        diagnostic_sources += [item for item in previous_related if item.get('instrument') not in present
+            and item.get('provider') == 'Coinbase Exchange'][:3-len(diagnostic_sources)]
     if args.sources_output:
         path = Path(args.sources_output)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,7 +243,8 @@ def main():
         except (ValueError,TypeError,OSError) as exc:
             macro_error=str(exc)[:180]
     report = build_report(sources, errors, captured, horizons, family_history=family_history,
-                         macro_archive=macro_archive,previous_family_reports=previous_family_reports)
+                         macro_archive=macro_archive,previous_family_reports=previous_family_reports,
+                         related_sources=diagnostic_sources)
     if macro_error is not None:
         report['historical_macro_source']={'available':False,'reason':macro_error}
     report['collection_attempts'] = attempts

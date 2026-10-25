@@ -298,6 +298,7 @@ class MarketData:
         self.intraday: list[tuple[float, float, float]] = []  # (ts, price, volume)
         self.intraday_ohlcv: list[tuple[float, float, float, float, float, float]] = []
         self.intraday_source_authority: dict = {}
+        self.binance_trade_flow: dict = {}
         self._intraday_lock = threading.RLock()
         self.intraday_is_offset: bool = False
         self.vols = {k: _status_dict() for k in VOL_INDEX_TICKERS}
@@ -368,6 +369,7 @@ class MarketData:
             self.intraday = []
             self.intraday_ohlcv = []
             self.intraday_source_authority = {}
+            self.binance_trade_flow = {}
             self.intraday_is_offset = False
             self.daily = {"bars": None, **_status_dict()}
             self.chain = {"metrics": None, **_status_dict()}
@@ -917,6 +919,7 @@ class MarketData:
         """1m-бары дня для VWAP (объём нужен; у кэш-индексов его нет — честно None)."""
         with self._intraday_lock:
             self.intraday_source_authority = {}
+            self.binance_trade_flow = {}
             requested_code = self.instrument_code
             requested_instrument = self.instrument
             if self.demo:
@@ -943,7 +946,10 @@ class MarketData:
                             (float(b[0]) / 1000.0, float(b[4]), float(b[5]))
                             for b in raw_bars
                         ]
-                        self._capture_intraday_source_authority("Binance", binance_sym, time.time())
+                        received=time.time()
+                        self.binance_trade_flow=dict(provider='Binance',symbol=binance_sym,
+                            received_ts=received,rows=raw_bars)
+                        self._capture_intraday_source_authority("Binance", binance_sym, received)
             except Exception:
                 pass
             return

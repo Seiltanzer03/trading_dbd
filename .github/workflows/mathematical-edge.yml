@@ -6,6 +6,12 @@ on:
     paths:
       - 'seiltanzer/mathematical_edge*.py'
       - 'seiltanzer/edge_family_market.py'
+      - 'seiltanzer/binance_public_archive.py'
+      - 'seiltanzer/ai_frozen_expert_inputs.py'
+      - 'seiltanzer/edge_family_event_archive.py'
+      - 'seiltanzer/edge_family_trade_flow.py'
+      - 'seiltanzer/edge_family_option_interest.py'
+      - 'seiltanzer/edge_family_treasury_factors.py'
       - 'seiltanzer/edge_family_model_retention.py'
       - 'seiltanzer/edge_family_macro_archive.py'
       - 'seiltanzer/macro_historical_offhost_bundle.py'
@@ -17,10 +23,16 @@ on:
       - 'scripts/export_native_family_history.py'
       - 'tests/test_mathematical_edge*.py'
       - 'tests/test_edge_family_market.py'
+      - 'tests/test_binance_public_archive.py'
+      - 'tests/test_edge_family_event_archive.py'
+      - 'tests/test_edge_family_trade_flow.py'
+      - 'tests/test_edge_family_option_interest.py'
+      - 'tests/test_edge_family_treasury_factors.py'
       - 'tests/test_edge_family_model_retention.py'
       - 'tests/test_edge_family_macro_archive.py'
       - 'tests/test_edge_family_native_history.py'
       - 'tests/test_native_capture_projection.py'
+      - 'tests/test_native_family_history_sampling.py'
       - 'research_fixtures/mathematical_edge/**'
       - '.github/workflows/mathematical-edge.yml'
   workflow_dispatch:
@@ -57,7 +69,7 @@ jobs:
           cache: pip
       - run: pip install -q -e '.[dev]' paramiko boto3
       - name: Verify historical family training and bounded runtime
-        run: python -m pytest -q tests/test_mathematical_edge_sources.py tests/test_mathematical_edge.py tests/test_edge_family_market.py tests/test_edge_family_model_retention.py tests/test_edge_family_macro_archive.py tests/test_macro_historical_offhost_bundle.py tests/test_edge_family_native_history.py tests/test_native_capture_projection.py
+        run: python -m pytest -q tests/test_mathematical_edge_sources.py tests/test_mathematical_edge.py tests/test_edge_family_market.py tests/test_edge_family_model_retention.py tests/test_edge_family_macro_archive.py tests/test_macro_historical_offhost_bundle.py tests/test_edge_family_native_history.py tests/test_native_capture_projection.py tests/test_native_family_history_sampling.py tests/test_binance_public_archive.py tests/test_edge_family_event_archive.py tests/test_edge_family_trade_flow.py tests/test_edge_family_option_interest.py tests/test_edge_family_treasury_factors.py
       - name: Restore hash-verified per-provider market-bar cache
         id: math-source-cache
         uses: actions/cache/restore@v4
@@ -68,6 +80,7 @@ jobs:
           key: ${{ runner.os }}-math-source-v1-${{ hashFiles('seiltanzer/mathematical_edge_sources.py', 'seiltanzer/config.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ${{ runner.os }}-math-source-v1-${{ hashFiles('seiltanzer/mathematical_edge_sources.py', 'seiltanzer/config.py') }}-
+            ${{ runner.os }}-math-source-v1-
       - name: Restore compatible frozen family models
         id: family-model-cache
         uses: actions/cache/restore@v4
@@ -76,6 +89,7 @@ jobs:
           key: ${{ runner.os }}-family-model-v1-${{ hashFiles('seiltanzer/edge_family_market.py', 'seiltanzer/edge_family_training.py', 'seiltanzer/edge_family_macro_archive.py', 'seiltanzer/edge_family_adapters.py', 'seiltanzer/config.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ${{ runner.os }}-family-model-v1-${{ hashFiles('seiltanzer/edge_family_market.py', 'seiltanzer/edge_family_training.py', 'seiltanzer/edge_family_macro_archive.py', 'seiltanzer/edge_family_adapters.py', 'seiltanzer/config.py') }}-
+            ${{ runner.os }}-family-model-v1-
       - name: Read cached actual market bars without production writes
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}

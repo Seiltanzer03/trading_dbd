@@ -47,6 +47,40 @@ def budget():
     return source.RequestBudget(seconds=30., min_interval=0.)
 
 
+def test_exact_public_archive_is_used_without_losing_coinbase_drivers(monkeypatch):
+    from seiltanzer import binance_public_archive
+    cutoff = 1792886400.
+    bars = [source._bar(cutoff-600, 100, 102, 99, 101)]
+    exact = source._make_source('BTCUSD', 'Binance', 'BTCUSDT', bars, cutoff, {})
+    related = source._make_source('BTCUSD', 'Coinbase Exchange', 'BTC-USD', bars, cutoff, {})
+    calls = []
+    monkeypatch.setattr(binance_public_archive, 'fetch_public_archive', lambda *a, **k: calls.append('archive') or exact)
+    monkeypatch.setattr(source, 'fetch_coinbase', lambda *a, **k: calls.append('coinbase') or related)
+    diagnostics = []
+    rows, errors, attempts = source.collect_fresh_sources(cutoff, codes=['BTCUSD'],
+        diagnostic_sources=diagnostics, client_factory=lambda: Client(lambda *a: None))
+    assert calls == ['archive', 'coinbase']
+    assert rows[0]['ticker'] == 'BTCUSDT'
+    assert diagnostics == [related]
+    assert errors == {}
+
+
+def test_retained_exact_bars_preserve_original_trade_flow_archive_and_do_not_invent_missing_rows(monkeypatch):
+    cutoff=1792886400.
+    bars=[source._bar(cutoff-900,100,102,99,101),source._bar(cutoff-600,101,103,100,102)]
+    cached=source._make_source('BTCUSD','Binance','BTCUSDT',bars,cutoff-200,{})
+    cached.update(fetched_ts=cutoff-200,receipt_observed_ts=cutoff-200,
+        trade_flow_history=[dict(bar_end_ts=bar['bar_end_ts'],volume=1.) for bar in bars])
+    cached['trade_flow_sha256']=source.fingerprint(cached['trade_flow_history'])
+    cached['collection'].update(contract_version='binance-public-archive-v1',files=[{'sha256':'a'*64}],historical_first_receipt_known=False)
+    seed=source._make_source('BTCUSD','Binance','BTCUSDT',[source._bar(cutoff-300,102,104,101,103)],cutoff-1,{})
+    seed.update(fetched_ts=cutoff-1,receipt_observed_ts=cutoff-1)
+    retained=source.retained_crypto_source('BTCUSD',cutoff,seed,cached)
+    assert retained['trade_flow_history']==cached['trade_flow_history']
+    assert len(retained['bars'])==3
+    assert retained['collection']['files']==cached['collection']['files']
+
+
 @pytest.mark.parametrize("clock_key", ["fetched_ts", "captured_ts", "receipt_observed_ts"])
 def test_exact_retained_crypto_rejects_future_archive_clocks(clock_key):
     cutoff = 90000.
@@ -187,7 +221,8 @@ def test_unavailable_crypto_no_fabrication_and_seed_is_unmodified():
     assert sources[0]['collection_fallback'] == 'READ_ONLY_EXPORTED_SOURCE'
     assert 'collection_fallback' not in seed
     assert set(errors) == {'ETHUSD'}
-    assert len(attempts['ETHUSD']['failures']) == 2
+    assert [item['provider'] for item in attempts['ETHUSD']['failures']] == [
+        'Binance public archive', 'Coinbase Exchange', 'Kraken']
 
 
 def test_tradfi_failure_retains_provider_cache_without_splicing(tmp_path, monkeypatch):

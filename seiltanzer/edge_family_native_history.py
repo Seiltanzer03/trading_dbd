@@ -74,6 +74,18 @@ def native_history(rows, *, captured_ts):
         frozen = verified_capture(row)
         if not isinstance(frozen, dict) or simulated_evidence(frozen, recursive=False):
             continue
+        # The raw chain and the cached V3 IV block may differ. The original
+        # passive capture age belongs to this exact raw OI profile.
+        from .edge_family_option_interest import interest_observation
+        age=number(row.get('option_age_sec'))
+        if age is not None and age>=0:
+            interest=interest_observation(code=code,metrics=frozen.get('option_distribution'),
+                source_id=row.get('option_source'),observed_ts=captured-age,received_ts=recorded,
+                quality=row.get('option_quality'),source_sha256=row.get('features_sha256'))
+            if interest:
+                for proof in interest['feature_provenance'].values():
+                    proof['clock_basis']='ORIGINAL_RAW_CHAIN_CAPTURE_AGE_AND_PASSIVE_RECEIPT'
+                result.setdefault(code,{}).setdefault('positioning',[]).append(interest)
         # Generic existing family sources retain their own PIT provenance. Do
         # not relabel the price-derived G1 macro/regime block as official macro.
         snapshot = {key:frozen[key] for key in ROOTS if key in frozen}

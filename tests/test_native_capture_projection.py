@@ -22,10 +22,13 @@ def test_cli_native_export_keeps_ssh_transport_callable(tmp_path,monkeypatch):
     report=dict(contract_version='native-family-capture-export-v1',read_only=True,
         rows=[],exported_ts=T0,reason='NATIVE_ELIGIBLE_HISTORY_EMPTY',limited_instruments=[],
         history_complete=True,incomplete_instruments=[],source_rows_examined={})
-    stdout=io.BytesIO(base64.b64encode(gzip.compress(json.dumps(report).encode())))
-    stdout.channel=SimpleNamespace(recv_exit_status=lambda:0)
     calls=[]
-    client=SimpleNamespace(exec_command=lambda *args,**kwargs:(None,stdout,None),close=lambda:calls.append('closed'))
+    def command(*args,**kwargs):
+        calls.append(args[0])
+        stdout=io.BytesIO(base64.b64encode(gzip.compress(json.dumps(report).encode())))
+        stdout.channel=SimpleNamespace(recv_exit_status=lambda:0)
+        return None,stdout,None
+    client=SimpleNamespace(exec_command=command,close=lambda:calls.append('closed'))
     output=tmp_path/'native.json'
     try:
         with monkeypatch.context() as patch:
@@ -35,7 +38,13 @@ def test_cli_native_export_keeps_ssh_transport_callable(tmp_path,monkeypatch):
             exporter.main()
     finally:importlib.reload(exporter)
     assert output.exists() and output.stat().st_mode & 0o077==0
-    assert calls==['closed']
+    assert calls[-1]=='closed'
+    assert len(calls)==14, 'each configured instrument needs its own bounded read, rather than sharing an exhausted deadline'
+    for command in calls[:-1]:
+        import shlex
+        program = shlex.split(command)[2]
+        assert program.count("for code in (") == 1
+        assert 'guarded_live_read' in program
 
 
 def projection(r):
