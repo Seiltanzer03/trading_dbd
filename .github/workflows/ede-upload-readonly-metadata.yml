@@ -1,0 +1,49 @@
+name: ede-upload-readonly-metadata
+on:
+  push:
+    branches: [ops/ede-upload-metadata-20261025]
+    paths: [.github/workflows/ede-upload-readonly-metadata.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install boto3
+      - name: Inspect bounded upload metadata without snapshot download or writes
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          python -u - <<'PY'
+          import boto3,json,hashlib,time
+          from botocore.config import Config
+          bucket='trading-dbd-backups-2026'
+          key='backups/v1/daily-slot-3/snapshot.sqlite3.gz'
+          client=boto3.client('s3',endpoint_url='https://storage.yandexcloud.net',region_name='ru-central1',config=Config(connect_timeout=10,read_timeout=15,retries={'total_max_attempts':2}))
+          print('OBSERVED_UTC='+time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),flush=True)
+          for target in (key,key+'.manifest.json'):
+              try:
+                  h=client.head_object(Bucket=bucket,Key=target)
+                  print('HEAD='+json.dumps({'key':target,'bytes':h.get('ContentLength'),'modified':str(h.get('LastModified')),'metadata':h.get('Metadata',{})}),flush=True)
+                  if target.endswith('.manifest.json') and h['ContentLength']<=65536:
+                      body=client.get_object(Bucket=bucket,Key=target)['Body'].read(65537)
+                      m=json.loads(body)
+                      fields=('database_size_bytes','database_sha256','compressed_size_bytes','compressed_sha256','multipart_part_count','uploaded_ts','git_commit','backup_contract','verified_head','verified_boundary_get')
+                      print('MANIFEST='+json.dumps({k:m.get(k) for k in fields}),flush=True)
+              except Exception as e: print('HEAD_ERROR='+type(e).__name__+':'+str(e)[:180],flush=True)
+          response=client.list_multipart_uploads(Bucket=bucket,Prefix=key,MaxUploads=20)
+          uploads=[u for u in response.get('Uploads',[]) if u['Key']==key]
+          print('UPLOADS='+json.dumps({'count':len(uploads),'truncated':response.get('IsTruncated',False)}),flush=True)
+          for u in sorted(uploads,key=lambda x:x['Initiated'],reverse=True)[:5]:
+              r=client.list_parts(Bucket=bucket,Key=key,UploadId=u['UploadId'],MaxParts=1000)
+              parts=r.get('Parts',[])
+              print('PARTS='+json.dumps({'upload_identity_sha256':hashlib.sha256(u['UploadId'].encode()).hexdigest(),'initiated':str(u['Initiated']),'parts':len(parts),'bytes':sum(p['Size'] for p in parts),'truncated':r.get('IsTruncated',False),'last_part':{k:str(parts[-1].get(k)) for k in ('PartNumber','Size','LastModified')} if parts else None}),flush=True)
+          print('READONLY_METADATA_COMPLETE=1',flush=True)
+          PY
