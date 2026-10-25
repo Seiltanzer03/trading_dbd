@@ -281,6 +281,43 @@ def test_csv_normalization_does_not_relabel_another_vintage():
         )
 
 
+def test_alfred_previous_day_column_uses_verified_current_fred_without_redating(monkeypatch):
+    from datetime import datetime, timezone
+    from urllib.parse import parse_qs, urlparse
+
+    now = datetime(2026, 10, 25, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(offhost.time, "time", lambda: now + 10.)
+    fetched = []
+
+    def csv(series_id, *, dated=False):
+        header = series_id + ("_20261024" if dated else "")
+        return (f"observation_date,{header}\n2025-09-01,100\n"
+                "2026-07-01,101\n2026-08-01,102\n2026-09-01,103\n")
+
+    def alfred(self, url):
+        series_id = parse_qs(urlparse(url).query)["id"][0]
+        return csv(series_id, dated=True)
+
+    def fred(client, *, series_id, period, attempts=3):
+        fetched.append(series_id)
+        return (f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}", csv(series_id))
+
+    monkeypatch.setattr("seiltanzer.macro_bls_alfred_vintage.OfficialALFREDBLSVintageSource._fetch", alfred)
+    monkeypatch.setattr(offhost, "_fetch_fred_csv_with_client", fred)
+    stamp, releases, sources = offhost._fetch_bls_via_official_alfred_failover(now=now)
+    assert len(fetched) == 7
+    assert releases["CPI"]["period"] == releases["NFP"]["period"] == "2026-09"
+    for family, source in sources.items():
+        offhost._validate_series_receipts(family, source["series_receipts"], source["source_url"], stamp)
+        for receipt in source["series_receipts"]:
+            assert receipt["source_kind"] == "FRED_CURRENT_AS_RECEIVED"
+            assert receipt["requested_vintage_date"] is None
+            assert receipt["historical_availability_asserted"] is False
+    rejected = sources["CPI"]["series_receipts"][0]["rejected_alfred_response"]
+    assert rejected["reason"] == "FED_SERIES_VINTAGE_MISMATCH"
+    assert "vintage_date=2026-10-25" in rejected["source_url"]
+
+
 def test_bundle_rejects_rehashed_wrong_family_series_receipt():
     bundle = _bundle()
     bundle["releases"]["NFP"]["provenance"]["series_receipts"] = [{
