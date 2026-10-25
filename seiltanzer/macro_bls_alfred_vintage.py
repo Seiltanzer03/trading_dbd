@@ -298,11 +298,11 @@ class OfficialALFREDBLSVintageSource:
         self.retry_delay_sec = max(0.0, min(10.0, float(retry_delay_sec)))
 
     def _client(self, *, proxy: str | None) -> httpx.Client:
-        from .macro_transport_refinement import BROWSER_USER_AGENT
+        from .macro_numeric_data import USER_AGENT
         return httpx.Client(
             timeout=self.timeout_sec, follow_redirects=True, proxy=proxy,
             trust_env=False,
-            headers={"User-Agent": BROWSER_USER_AGENT, "Accept": "*/*"},
+            headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
         )
 
     @staticmethod

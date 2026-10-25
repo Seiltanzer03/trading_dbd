@@ -139,39 +139,116 @@ def _release_record(
     return record
 
 
+def _normalize_fed_series_csv(
+    content: str, *, series_id: str, vintage_date: str
+) -> str:
+    lines = str(content).splitlines()
+    if not lines:
+        return str(content)
+    header = lines[0].strip()
+    if re.fullmatch(
+        rf"observation_date,{re.escape(series_id)}(?:_\d{{8}})?", header
+    ):
+        lines[0] = f"observation_date,{series_id}_{vintage_date.replace('-', '')}"
+        return "\n".join(lines) + ("\n" if str(content).endswith("\n") else "")
+    return str(content)
+
+
+def _fetch_fred_csv_with_client(
+    client: Any, *, series_id: str, period: str, attempts: int = 3
+) -> tuple[str, str]:
+    from urllib.parse import urlencode
+    from .macro_bls_alfred_vintage import FRED_HOST, _month_shift
+
+    start = _month_shift(period, -14) + "-01"
+    end = period + "-01"
+    url = f"https://{FRED_HOST}/graph/fredgraph.csv?{urlencode({'id': series_id, 'cosd': start, 'coed': end})}"
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = client.get(url)
+            response.raise_for_status()
+            parsed = urlparse(str(response.url))
+            if (
+                parsed.scheme != "https"
+                or (parsed.hostname or "").lower() != FRED_HOST
+                or parsed.path != "/graph/fredgraph.csv"
+                or parsed.fragment
+            ):
+                raise ValueError("FRED_BLS_REDIRECT_REJECTED")
+            text = response.text
+            if len(text) < 20 or len(text.encode("utf-8")) > 2_000_000:
+                raise ValueError("FRED_BLS_RESPONSE_SIZE_INVALID")
+            return url, text
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts:
+                time.sleep(1.0 * attempt)
+    raise ValueError(f"FRED_BLS_OFFICIAL_TRANSPORT_EXHAUSTED:{type(last_exc).__name__}")
+
+
 def _fetch_bls_via_official_alfred_failover(
     *, now: float | None = None
 ) -> tuple[float, dict[str, dict[str, Any]], str]:
-    """Fetch the 7 official BLS series via Federal Reserve ALFRED when api.bls.gov is down."""
+    """Fetch the 7 official BLS series via Federal Reserve ALFRED/FRED when api.bls.gov is down."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
+    import httpx
     from .macro_bls_alfred_vintage import (
         OfficialALFREDBLSVintageSource,
         _month_shift,
         alfred_series_url,
         parse_alfred_csv,
     )
-    from .macro_numeric_data import build_bls_releases
+    from .macro_numeric_data import USER_AGENT, build_bls_releases
 
     stamp = time.time() if now is None else float(now)
     vintage_date = datetime.fromtimestamp(stamp, tz=ZoneInfo("UTC")).date().isoformat()
     period = _month_shift(f"{vintage_date[:4]}-{vintage_date[5:7]}", -1)
-    alfred_source = OfficialALFREDBLSVintageSource(timeout_sec=20.0, fetch_attempts=2)
+    alfred_source = OfficialALFREDBLSVintageSource(timeout_sec=12.0, fetch_attempts=1)
     series_rows: list[dict[str, Any]] = []
     first_url = ""
-    for alfred_id, bls_id in ALFRED_TO_BLS_SERIES:
-        url = alfred_series_url(alfred_id, period=period, vintage_date=vintage_date)
-        if not first_url:
-            first_url = url
-        content = alfred_source._fetch(url)
-        parsed = parse_alfred_csv(
-            content, series_id=alfred_id, vintage_date=vintage_date
-        )
-        data = [
-            {"year": ym[:4], "period": f"M{ym[5:7]}", "value": str(val)}
-            for ym, val in sorted(parsed.items())
-        ]
-        series_rows.append({"seriesID": bls_id, "data": data})
+    prefer_fred_csv = False
+    with httpx.Client(
+        timeout=20.0,
+        follow_redirects=True,
+        trust_env=False,
+        headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
+    ) as fred_client:
+        for alfred_id, bls_id in ALFRED_TO_BLS_SERIES:
+            alfred_url = alfred_series_url(
+                alfred_id, period=period, vintage_date=vintage_date
+            )
+            if not prefer_fred_csv:
+                try:
+                    content = alfred_source._fetch(alfred_url)
+                    used_url = alfred_url
+                except Exception:
+                    prefer_fred_csv = True
+                    used_url, content = _fetch_fred_csv_with_client(
+                        fred_client, series_id=alfred_id, period=period
+                    )
+            else:
+                try:
+                    used_url, content = _fetch_fred_csv_with_client(
+                        fred_client, series_id=alfred_id, period=period
+                    )
+                except Exception:
+                    content = alfred_source._fetch(alfred_url)
+                    used_url = alfred_url
+            if not first_url:
+                first_url = used_url
+            normalized = _normalize_fed_series_csv(
+                content, series_id=alfred_id, vintage_date=vintage_date
+            )
+            parsed = parse_alfred_csv(
+                normalized, series_id=alfred_id, vintage_date=vintage_date
+            )
+            data = [
+                {"year": ym[:4], "period": f"M{ym[5:7]}", "value": str(val)}
+                for ym, val in sorted(parsed.items())
+            ]
+            series_rows.append({"seriesID": bls_id, "data": data})
     releases = build_bls_releases(
         {
             "status": "REQUEST_SUCCEEDED",

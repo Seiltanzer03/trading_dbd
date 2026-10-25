@@ -212,3 +212,39 @@ def test_build_bundle_falls_back_to_official_alfred_when_bls_api_unavailable(mon
         bundle["releases"]["CPI"]["source_url"]
         == "https://alfred.stlouisfed.org/graph/alfredgraph.csv?id=CPIAUCSL"
     )
+
+
+def test_alfred_failover_switches_to_fred_csv_when_alfred_times_out(monkeypatch):
+    import re as _re
+
+    alfred_calls = []
+    fred_calls = []
+
+    def fake_alfred_fetch(self, url):
+        alfred_calls.append(url)
+        raise ValueError("ALFRED_BLS_OFFICIAL_TRANSPORT_EXHAUSTED:DIRECT_OFFICIAL:ReadTimeout")
+
+    def fake_fred_fetch(client, *, series_id, period, attempts=3):
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}&cosd=2025-07-01&coed={period}-01"
+        fred_calls.append(url)
+        rows = [
+            f"observation_date,{series_id}",
+            "2025-09-01,100.0",
+            "2026-07-01,101.0",
+            "2026-08-01,102.0",
+            "2026-09-01,103.0",
+        ]
+        return url, "\n".join(rows) + "\n"
+
+    monkeypatch.setattr(
+        "seiltanzer.macro_bls_alfred_vintage.OfficialALFREDBLSVintageSource._fetch",
+        fake_alfred_fetch,
+    )
+    monkeypatch.setattr(offhost, "_fetch_fred_csv_with_client", fake_fred_fetch)
+
+    _, releases, source_url = offhost._fetch_bls_via_official_alfred_failover(now=NOW)
+    assert len(alfred_calls) == 1
+    assert len(fred_calls) == 7
+    assert source_url.startswith("https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL")
+    assert releases["CPI"]["period"] == "2026-09"
+    assert releases["NFP"]["period"] == "2026-09"
