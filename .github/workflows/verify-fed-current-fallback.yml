@@ -1,0 +1,33 @@
+name: verify-fed-current-fallback
+on:
+  push:
+    branches: [ops/verify-fed-current-fallback-20261025]
+    paths: [.github/workflows/verify-fed-current-fallback.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 5f13767f593f3b95e1901d7e7a5f01275f734d6c
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e .
+      - name: Build actual official bundle on the exact proposed code without publication
+        env:
+          EXPECTED_SHA: 5f13767f593f3b95e1901d7e7a5f01275f734d6c
+          ACCEPTANCE_RUN_ID: ${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import os,json,subprocess
+          from seiltanzer.macro_offhost_bundle import build_bundle,validate_bundle
+          sha=os.environ['EXPECTED_SHA'];run=os.environ['ACCEPTANCE_RUN_ID']
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==sha
+          b=build_bundle(expected_sha=sha,acceptance_run_id=run)
+          validate_bundle(b,expected_sha=sha,acceptance_run_id=run)
+          print('ACTUAL_OFFICIAL_BUNDLE_OK='+json.dumps({'code_sha':sha,'bundle_sha256':b['bundle_sha256'],'families':{family:{'period':r['period'],'source_url':r['source_url'],'series':[{'series_id':s['series_id'],'source_kind':s['source_kind'],'rejected_alfred_response':s.get('rejected_alfred_response')} for s in r['provenance'].get('series_receipts',[])]}for family,r in b['releases'].items()},'production_writes':False,'provider_calls':0}))
+          PY
