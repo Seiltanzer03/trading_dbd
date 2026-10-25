@@ -249,6 +249,19 @@ def test_budget_empty_codes_and_invalid_inputs():
         expired.acquire()
 
 
+def test_runner_rejects_report_above_runtime_bound_before_replacing_prior_artifact(tmp_path,monkeypatch):
+    import sys
+    from scripts import run_mathematical_edge as cli
+    seed=tmp_path/'source.json';seed.write_text(json.dumps({'sources':[]}))
+    output=tmp_path/'models.json';output.write_text('previous artifact')
+    oversized=dict(large_audit='x'*2_000_000,family_model_continuity={},family_market_model_summary={},instruments={})
+    monkeypatch.setattr(cli,'build_report',lambda *args,**kwargs:oversized)
+    monkeypatch.setattr(sys,'argv',['run','--sources',str(seed),'--output',str(output)])
+    with pytest.raises(ValueError,match='RUNTIME_BOUND'):
+        cli.main()
+    assert output.read_text()=='previous artifact'
+
+
 def test_refresh_cli_writes_reproducible_sources_and_full_matrix(tmp_path, monkeypatch):
     import sys
     from scripts import run_mathematical_edge as cli

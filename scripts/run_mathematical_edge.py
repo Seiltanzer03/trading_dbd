@@ -112,7 +112,7 @@ def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, fami
         try:
             bars, exclusions = _validated_bars(source.get('bars'), captured_ts)
             rows[code] = train_instrument(code, bars, captured_ts, horizons=horizons)
-            audited_sources.append({k: value for k, value in source.items() if k not in {'bars','trade_flow_history'}} | {
+            audited_sources.append({k: value for k, value in source.items() if k not in {'bars','trade_flow_history','event_window_bars'}} | {
                 'bar_count': len(bars), 'validated_bars_sha256': fingerprint(bars),
                 'bar_exclusions': exclusions,
                 'first_bar_end_ts': bars[0]['bar_end_ts'] if bars else None,
@@ -167,6 +167,28 @@ def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, fami
     }
 
 
+def _load_official_macro_archive(args,captured):
+    macro_archive=None;macro_error=None
+    if args.historical_macro_bundle:
+        try:
+            from seiltanzer.edge_family_macro_archive import verified_macro_archive
+            macro_path=Path(args.historical_macro_bundle)
+            if macro_path.stat().st_size>96_000_000:
+                raise ValueError('OFFICIAL_MACRO_ARCHIVE_INPUT_OVER_BOUND')
+            data=json.loads(macro_path.read_text())
+            if (isinstance(data,dict) and data.get('available') is False and data.get('read_only') is True
+                    and data.get('archive_export_error') in ('OFFICIAL_MACRO_ARCHIVE_NOT_FOUND',
+                        'OFFICIAL_MACRO_ARCHIVE_READ_FAILED','OFFICIAL_MACRO_ARCHIVE_INPUT_OVER_BOUND')):
+                raise ValueError(data['archive_export_error'])
+            if not args.macro_source_sha:
+                raise ValueError('OFFICIAL_MACRO_ARCHIVE_SOURCE_SHA_MISSING')
+            macro_archive=verified_macro_archive(data,
+                expected_sha=args.macro_source_sha,captured_ts=captured)
+        except (ValueError,TypeError,OSError) as exc:
+            macro_error=str(exc)[:180]
+    return macro_archive,macro_error
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sources')
@@ -187,6 +209,7 @@ def main():
     horizons = tuple(dict.fromkeys(int(item) for item in args.horizons.split(',')))
     if not horizons or any(h not in SEARCH_HORIZONS for h in horizons):
         parser.error('--horizons must be a subset of 15,30,60,120')
+    macro_archive,macro_error=_load_official_macro_archive(args,captured)
     sources, errors, attempts = [], {}, {}
     diagnostic_sources = [];previous_family_reports=[]
     if args.sources:
@@ -202,6 +225,7 @@ def main():
         sources, errors, attempts = collect_fresh_sources(
             captured, seed_sources=sources, cache_dir=args.cache_dir, days=args.source_days,
             budget_seconds=args.source_budget_seconds, diagnostic_sources=diagnostic_sources,
+            macro_archive=macro_archive,
         )
         present = {item.get('instrument') for item in diagnostic_sources}
         diagnostic_sources += [item for item in previous_related if item.get('instrument') not in present
@@ -224,24 +248,6 @@ def main():
         family_history = json.loads(history_path.read_text())
         if not isinstance(family_history, dict):
             parser.error('--family-history must be an instrument/family matrix')
-    macro_archive=None;macro_error=None
-    if args.historical_macro_bundle:
-        try:
-            from seiltanzer.edge_family_macro_archive import verified_macro_archive
-            macro_path=Path(args.historical_macro_bundle)
-            if macro_path.stat().st_size>96_000_000:
-                raise ValueError('OFFICIAL_MACRO_ARCHIVE_INPUT_OVER_BOUND')
-            data=json.loads(macro_path.read_text())
-            if (isinstance(data,dict) and data.get('available') is False and data.get('read_only') is True
-                    and data.get('archive_export_error') in ('OFFICIAL_MACRO_ARCHIVE_NOT_FOUND',
-                        'OFFICIAL_MACRO_ARCHIVE_READ_FAILED','OFFICIAL_MACRO_ARCHIVE_INPUT_OVER_BOUND')):
-                raise ValueError(data['archive_export_error'])
-            if not args.macro_source_sha:
-                raise ValueError('OFFICIAL_MACRO_ARCHIVE_SOURCE_SHA_MISSING')
-            macro_archive=verified_macro_archive(data,
-                expected_sha=args.macro_source_sha,captured_ts=captured)
-        except (ValueError,TypeError,OSError) as exc:
-            macro_error=str(exc)[:180]
     report = build_report(sources, errors, captured, horizons, family_history=family_history,
                          macro_archive=macro_archive,previous_family_reports=previous_family_reports,
                          related_sources=diagnostic_sources)
@@ -253,7 +259,12 @@ def main():
     } for source in diagnostic_sources]
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report, ensure_ascii=False, allow_nan=False))
+    from seiltanzer.mathematical_edge import MAX_ARTIFACT_BYTES,ARTIFACT_PUBLICATION_RESERVE_BYTES
+    encoded=json.dumps(report,ensure_ascii=False,allow_nan=False).encode('utf-8')
+    # Leave room for the normal fixed SHA/run/contract publication envelope.
+    if len(encoded)>MAX_ARTIFACT_BYTES-ARTIFACT_PUBLICATION_RESERVE_BYTES:
+        raise ValueError('MATHEMATICAL_REPORT_EXCEEDS_RUNTIME_BOUND')
+    path.write_bytes(encoded)
     if args.model_cache_dir:
         try:write_fitted_cache(report,Path(args.model_cache_dir)/'latest.json')
         except (OSError,ValueError,TypeError):

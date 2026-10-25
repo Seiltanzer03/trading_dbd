@@ -60,6 +60,7 @@ def _iv_observation(*, code, proxy, iv, source_id, observed_ts, received_ts, qua
 def native_history(rows, *, captured_ts):
     """Use immutable source bytes and original capture, not later G1 import time."""
     result = {}
+    curves={};conflicting_curves=set()
     cutoff = number(captured_ts)
     if cutoff is None or not isinstance(rows, list) or len(rows) > MAX_ROWS:
         return result
@@ -74,6 +75,19 @@ def native_history(rows, *, captured_ts):
         frozen = verified_capture(row)
         if not isinstance(frozen, dict) or simulated_evidence(frozen, recursive=False):
             continue
+        from .edge_family_treasury_factors import treasury_observation
+        curve_block=frozen.get('treasury_context_v1')
+        curve=treasury_observation(curve_block,code=code,cutoff=recorded)
+        if curve:
+            proof=curve['feature_provenance']['carry.us02y_yield_pct']
+            key=(proof['observed_ts'],proof['received_ts'])
+            values=fingerprint(curve['features'])
+            candidate=(recorded,code,row['features_sha256'],values,curve_block)
+            previous=curves.get(key)
+            if previous and previous[3]!=values:
+                conflicting_curves.add(key)
+            if previous is None or candidate[:3]<previous[:3]:
+                curves[key]=candidate
         # The raw chain and the cached V3 IV block may differ. The original
         # passive capture age belongs to this exact raw OI profile.
         from .edge_family_option_interest import interest_observation
@@ -88,7 +102,9 @@ def native_history(rows, *, captured_ts):
                 result.setdefault(code,{}).setdefault('positioning',[]).append(interest)
         # Generic existing family sources retain their own PIT provenance. Do
         # not relabel the price-derived G1 macro/regime block as official macro.
-        snapshot = {key:frozen[key] for key in ROOTS if key in frozen}
+        # Rates are global measurements, accumulated once with original capture
+        # lineage below. Do not duplicate them as target-specific observations.
+        snapshot = {key:frozen[key] for key in ROOTS if key in frozen and key!='treasury_context_v1'}
         if snapshot:
             snapshot.update(instrument=code, captured_ts=recorded)
             for family, facts in build_edge_family_evidence(snapshot)['families'].items():
@@ -125,6 +141,20 @@ def native_history(rows, *, captured_ts):
         if option:
             option['feature_provenance']['option.iv']['value_origin'] = 'IMMUTABLE_G1S_OPTION_BLOCK'
             result.setdefault(code,{}).setdefault('option',[]).append(option)
+    for key,candidate in sorted(curves.items()):
+        if key in conflicting_curves:
+            continue
+        recorded,origin,digest,_,block=candidate
+        for target in ALL_INSTRUMENTS:
+            point=treasury_observation(block,code=target,cutoff=recorded)
+            if point is None:
+                continue
+            point['captured_ts']=recorded
+            for proof in point['feature_provenance'].values():
+                proof.update(global_factor=True,origin_capture_instrument=origin,
+                    origin_capture_sha256=digest,origin_recorded_ts=recorded,
+                    target_attribution=target)
+            result.setdefault(target,{}).setdefault('value_carry',[]).append(point)
     return result
 
 

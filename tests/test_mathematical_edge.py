@@ -38,6 +38,18 @@ def runtime_fixture(tmp_path, monkeypatch):
     return engine, {'ts': now, 'instrument':'NAS100'}, {'instrument':'NAS100','direction':'long'}, report, dest
 
 
+def test_complete_family_audit_report_loads_with_a_finite_runtime_byte_bound(tmp_path,monkeypatch):
+    _,tick,_,report,path=runtime_fixture(tmp_path,monkeypatch)
+    # The actual65-model publication is619,593bytes. Protocol padding tests
+    # capacity without checking in a changing empirical report as a fixture.
+    report['bounded_family_audit']='x'*620000
+    path.write_text(json.dumps(report))
+    assert edge.load_artifact(path,tick['ts']) is not None, 'complete trained-family report rejected at legacy500k cap'
+    report['bounded_family_audit']='x'*2_000_000
+    path.write_text(json.dumps(report))
+    assert edge.load_artifact(path,tick['ts']) is None
+
+
 def test_archive_all_167_rows_and_eight_veto_reproduce():
     result = replay_frozen_fx_rule(Path(__file__).parents[1]/'research_fixtures/mathematical_edge')
     assert result['n']==167 and result['veto_n']==8

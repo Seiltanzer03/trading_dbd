@@ -469,12 +469,17 @@ def fetch_yahoo(code, captured, days=60, *, timeout=15):
 
 
 def collect_fresh_sources(captured, *, seed_sources=(), cache_dir=None, days=60,
-                          budget_seconds=360., codes=None, client_factory=None, diagnostic_sources=None):
+                          budget_seconds=360., codes=None, client_factory=None, diagnostic_sources=None,
+                          macro_archive=None):
     """Independent fresh sources; failed providers retain explicitly named fallback."""
     if (number(captured) is None or captured <= 0 or captured > time.time()+1
             or not 1 <= days <= MAX_DAYS or not 1 <= budget_seconds <= 420):
         raise ValueError('invalid collection cutoff, days or time budget')
     codes = tuple(ALL_INSTRUMENTS if codes is None else codes)
+    if macro_archive is not None:
+        from .edge_family_macro_archive import OfficialMacroArchive
+        if not isinstance(macro_archive,OfficialMacroArchive) or macro_archive.captured_ts!=captured:
+            raise ValueError('EVENT_CALENDAR_NOT_VALIDATED_FOR_COLLECTION_CUTOFF')
     if len(set(codes)) != len(codes) or any(code not in ALL_INSTRUMENTS for code in codes):
         raise ValueError('instrument not configured')
     seeds = {}
@@ -566,4 +571,32 @@ def collect_fresh_sources(captured, *, seed_sources=(), cache_dir=None, days=60,
                 sources.append(source)
             else:
                 errors[code] = ' | '.join(f"{row['provider']}: {row['error']}" for row in failures) or 'SOURCE_BARS_UNAVAILABLE'
+    if macro_archive is not None and macro_archive.published_release_times():
+        # A separate calendar-selected sidecar never changes recent price bars.
+        # It uses the SAME collection deadline and global request rate bound.
+        def enrich_events(source):
+            code=source['instrument']
+            try:
+                from .binance_event_windows import collect_event_windows
+                with client_factory() as client:
+                    extra=collect_event_windows(code,captured,client,budget,
+                        release_times=macro_archive.published_release_times(),
+                        calendar_sha256=macro_archive.bundle_sha256)
+                source.update(extra)
+                attempts[code]['event_target_rows']=len(extra['event_window_bars'])
+            except Exception as exc:
+                attempts[code]['event_history_error']=f'{type(exc).__name__}: {str(exc)[:180]}'
+            return source
+        host_denied=any(failure.get('provider')=='Binance public archive'
+            and any(f'HTTP_{status}' in failure.get('error','') for status in (403,451,429))
+            for row in attempts.values() for failure in row['failures'])
+        exact=[row for row in sources if row.get('provider')=='Binance'
+            and row.get('instrument') in COINBASE_PRODUCTS
+            and row.get('ticker')==ALL_INSTRUMENTS[row['instrument']].binance_symbol]
+        if host_denied:
+            for row in exact:
+                attempts[row['instrument']]['event_history_error']='BINANCE_ARCHIVE_HOST_DENIED_DURING_PRIMARY_COLLECTION'
+            exact=[]
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(enrich_events,exact))
     return sources, errors, attempts

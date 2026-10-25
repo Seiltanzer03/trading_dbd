@@ -75,3 +75,48 @@ def test_runtime_adapter_derives_identical_factors_and_requires_trained_model_fo
     assert family['features'] == helper()(treasury(),code='NAS100',cutoff=T0)['features']
     assert family['forecast_available'] is False
     assert result['components'] == []
+
+
+def captured_curve(code='NAS100',recorded=T0-90,block=None):
+    block=treasury() if block is None else block
+    raw=json.dumps({'treasury_context_v1':block})
+    return dict(instrument=code,captured_ts=T0-100,original_created_ts=recorded,
+        frozen_features_json=raw,features_sha256=hashlib.sha256(raw.encode()).hexdigest(),source_verified=True)
+
+
+def test_global_curve_recorded_under_one_target_supplies_all_targets_with_original_receipt():
+    from seiltanzer.edge_family_native_history import native_history
+    record=captured_curve()
+    result=native_history([record],captured_ts=T0)
+    for code in ('NAS100','JPY100','BTCUSD','ETHUSD','SOLUSD'):
+        assert code in result, 'the official US curve is global, not an NAS100 price mapping'
+        point=result[code]['value_carry'][0]
+        proof=point['feature_provenance']['carry.us02y_yield_pct']
+        assert point['captured_ts']==T0-90
+        assert proof['received_ts']==T0-200
+        assert proof['origin_capture_instrument']=='NAS100'
+        assert proof['origin_capture_sha256']==record['features_sha256']
+        assert proof['global_factor'] is True
+        assert proof['measurement_instrument']=='US_TREASURY_PAR_YIELD_CURVE'
+        assert proof['dependency_group']=='official_us_treasury_daily_curve'
+        assert proof['target_quote_authority'] is False
+
+
+def test_duplicate_global_curves_use_earliest_actual_capture_without_new_receipts():
+    from seiltanzer.edge_family_native_history import native_history
+    later=captured_curve('SP500',recorded=T0-50)
+    first=captured_curve('NAS100',recorded=T0-90)
+    result=native_history([later,first,first],captured_ts=T0)
+    point=result['NAS100']['value_carry']
+    assert len(point)==1
+    assert point[0]['captured_ts']==T0-90
+    assert point[0]['feature_provenance']['carry.us02y_yield_pct']['origin_capture_instrument']=='NAS100'
+
+
+def test_conflicting_global_curve_values_at_same_source_clocks_are_not_selected():
+    from seiltanzer.edge_family_native_history import native_history
+    revised=treasury()
+    revised['features']['rates.us02y_yield']['value']=4.3
+    revised['features']['rates.curve_2s10s']['value']=.2
+    result=native_history([captured_curve(),captured_curve('SP500',block=revised)],captured_ts=T0)
+    assert all(not values.get('value_carry') for values in result.values())
