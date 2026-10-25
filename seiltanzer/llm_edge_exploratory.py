@@ -21,6 +21,7 @@ import numpy as np
 from .edge_discovery.filters import fit_rule, rule_mask
 from .edge_discovery.prospective import HORIZONS, ProspectiveFeatureAdapter
 from .edge_discovery.scoring import benjamini_hochberg
+from .edge_discovery.shadow_runtime import _open_shadow_reader
 from .edge_discovery.universal_outcomes import causal_local_sigma_h
 from .edge_discovery.universal_structured_discovery import _aggregate_candidate
 from .edge_discovery.universal_target_scoring import (
@@ -33,6 +34,7 @@ from .edge_discovery.universal_target_scoring import (
 )
 from .g1_short_horizon_historical_wf import EMBARGO_SECONDS, _historical_folds, _weights
 from .llm_edge_evaluator import _load_hypotheses, _template
+from .production_resource_guard import memory_pressure_state, trim_memory_for_pressure
 
 
 CONTRACT_VERSION = "llm-edge-exploratory-verdict-v1"
@@ -88,15 +90,22 @@ def ensure_tables(runtime: Any) -> None:
 
 
 def _path_metrics(runtime: Any) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
     with runtime._lock:
         tables = {str(row[0]) for row in runtime._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         if "g1s_path_metrics" not in tables:
-            return {}
-        rows = runtime._conn.execute(
+            return out
+        cursor = runtime._conn.execute(
             "SELECT observation_id,realized_volatility_1m,path_points_n,path_source "
-            "FROM g1s_path_metrics").fetchall()
-    return {str(row["observation_id"]): dict(row) for row in rows}
+            "FROM g1s_path_metrics")
+        try:
+            while batch := cursor.fetchmany(256):
+                for row in batch:
+                    out[str(row["observation_id"])] = dict(row)
+        finally:
+            cursor.close()
+    return out
 
 
 def _sigma_h(row: dict[str, Any]) -> float | None:
@@ -379,6 +388,18 @@ def evaluate_all(runtime: Any, *, now: float | None = None,
                  max_hypotheses: int = 200) -> dict[str, Any]:
     current = float(time.time() if now is None else now)
     ensure_tables(runtime)
+    pressure = memory_pressure_state()
+    if pressure.get("pause_background"):
+        trim_memory_for_pressure()
+        return {
+            "contract_version": CONTRACT_VERSION,
+            "status": "PAUSED_MEMORY_PRESSURE",
+            "reason": f"MEMORY_PRESSURE_PAUSED:{pressure.get('level')}:{pressure.get('rss_mib')}MiB",
+            "evaluated_n": 0,
+            "production_authority": False,
+            "position_manager_weight_cap": 0.40,
+            "position_manager_weight_requires": "LIMITED_AND_CURRENT_T0_MATCH",
+        }
     with _LOCK:
         with runtime._lock:
             raw = runtime._conn.execute(
@@ -393,19 +414,44 @@ def evaluate_all(runtime: Any, *, now: float | None = None,
         }
         hypotheses = _load_hypotheses(runtime, ids)
         horizons = {int(item["horizon_minutes"]) for item in hypotheses}
-        adapter = ProspectiveFeatureAdapter(runtime, available_asof=current)
-        rows = []
-        for horizon in sorted(horizons & set(HORIZONS)):
-            rows.extend(adapter.rows(resolved_only=True, strict=False, horizon_minutes=horizon))
-        metrics = _path_metrics(runtime)
+        needs_path_metrics = any(
+            str(item.get("target_id")) == "FORWARD_VOL_RATIO" for item in hypotheses
+        )
+        metrics = _path_metrics(runtime) if needs_path_metrics else {}
         specs = {item.target_id: item for item in universal_target_specs((
             "up_0p5s_down_0p5s", "up_1s_down_0p5s",
             "up_0p5s_down_1s", "up_1s_down_1s",
         ))}
-        results = [
-            _evaluate_one(rows, hypothesis, specs, metrics, current)
-            for hypothesis in hypotheses
-        ]
+        results_by_id: dict[str, dict[str, Any]] = {}
+        try:
+            with _open_shadow_reader(runtime) as reader:
+                adapter = ProspectiveFeatureAdapter(reader, available_asof=current)
+                for horizon in sorted(horizons):
+                    if horizon in set(HORIZONS):
+                        h_rows = adapter.rows(
+                            resolved_only=True, strict=False, horizon_minutes=horizon
+                        )
+                        for row in h_rows:
+                            if isinstance(row, dict):
+                                row.pop("feature_values", None)
+                    else:
+                        h_rows = []
+                    for hypothesis in hypotheses:
+                        if int(hypothesis["horizon_minutes"]) == horizon:
+                            results_by_id[str(hypothesis["hypothesis_id"])] = _evaluate_one(
+                                h_rows, hypothesis, specs, metrics, current
+                            )
+                    h_rows = None
+                    trim_memory_for_pressure()
+            results = [
+                results_by_id[str(hypothesis["hypothesis_id"])]
+                for hypothesis in hypotheses
+                if str(hypothesis["hypothesis_id"]) in results_by_id
+            ]
+        finally:
+            metrics = None
+            results_by_id = None
+            trim_memory_for_pressure()
         _apply_q_values(results)
         updated = time.time()
         with runtime._lock, runtime._conn:

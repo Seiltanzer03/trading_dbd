@@ -49,7 +49,9 @@ def install_g1_short_horizon_baseline_refinement():
     original=ShortHorizonRuntime.horizon_report
     def horizon_report(self,horizon:int):
         result=original(self,horizon)
-        rows=self._resolved_eligible(horizon)
+        rows=(self._resolved_eligible_summary(horizon)
+              if hasattr(self,"_resolved_eligible_summary")
+              else self._resolved_eligible(horizon))
         ys=[1 if r["direction_label"]=="UP" else 0 for r in rows]
         ps=[_momentum_probability(r) for r in rows]
         result.setdefault("baselines",{})["fixed_momentum_15m"]={

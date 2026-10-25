@@ -144,6 +144,16 @@ def materialize_evidence_reports(
 
     results: dict[str, Any] = {}
     for name, fn in _writers(runtime):
+        if not force:
+            from .production_resource_guard import memory_pressure_state, trim_memory_for_pressure
+            if memory_pressure_state().get("pause_background"):
+                trim_memory_for_pressure()
+                return {
+                    "refreshed": False,
+                    "reason": "MEMORY_PRESSURE_YIELD",
+                    "source_signature": signature,
+                    "reports": results,
+                }
         started = time.time()
         payload: dict[str, Any] | None = None
         try:

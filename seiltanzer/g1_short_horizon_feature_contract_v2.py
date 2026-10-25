@@ -471,6 +471,19 @@ def _fit_v2_models(runtime: ShortHorizonRuntime, *, force: bool = False) -> int:
     created = 0
     now = time.time()
     for horizon in _runtime_module.HORIZONS:
+        if not force:
+            with runtime._lock:
+                due = False
+                for feature_set in V2_FEATURE_SETS:
+                    latest = runtime._conn.execute(
+                        "SELECT created_ts FROM g1s_models WHERE horizon_minutes=? "
+                        "AND feature_set=? ORDER BY created_ts DESC LIMIT 1",
+                        (horizon, feature_set)).fetchone()
+                    if not latest or now-float(latest["created_ts"]) >= MODEL_REFIT_INTERVAL_SEC:
+                        due = True
+                        break
+            if not due:
+                continue
         rows = [row for row in runtime._resolved_eligible(horizon) if _has_v2(row)]
         evidence = runtime._evidence(rows)
         if not evidence.get("fit_allowed"):

@@ -197,6 +197,14 @@ def test_impossible_prestart_serves_without_backup_when_no_recovery_point_exists
     try:
         availability.install_storage_availability_guard()
         manager = _manager(tmp_path)
+        integrity_calls = {"n": 0}
+        orig_integrity = storage._sqlite_integrity
+
+        def counted_integrity(path, *, full=False):
+            integrity_calls["n"] += 1
+            return orig_integrity(path, full=full)
+
+        monkeypatch.setattr(storage, "_sqlite_integrity", counted_integrity)
         monkeypatch.setattr(availability, "_available_bytes", lambda _directory: 100)
         monkeypatch.setattr(
             availability,
@@ -211,6 +219,7 @@ def test_impossible_prestart_serves_without_backup_when_no_recovery_point_exists
         )
         result = manager.create_backup(kind="local", reason="prestart")
         assert result.backup_id == "degraded-zero-backup"
+        assert integrity_calls["n"] == 1
         assert manager._startup_integrity["ok"] is True
         assert manager._startup_integrity["durability_degraded"] is True
         assert manager._startup_integrity["reason"] == availability.DEGRADED_ZERO_BACKUP_REASON
@@ -221,6 +230,7 @@ def test_impossible_prestart_serves_without_backup_when_no_recovery_point_exists
         repeated = manager.create_backup(
             kind="local", reason="g1s-schema-identity"
         )
+        assert integrity_calls["n"] == 1
         assert schema_result.backup_id == "degraded-schema-identity"
         assert repeated is schema_result
         assert manager._startup_integrity["ok"] is True

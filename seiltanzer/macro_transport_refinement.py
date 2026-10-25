@@ -23,7 +23,10 @@ BROWSER_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 )
-BLS_OFFICIAL_HOSTS = frozenset({"api.bls.gov", "bls.gov", "www.bls.gov"})
+BLS_OFFICIAL_HOSTS = frozenset({
+    "api.bls.gov", "bls.gov", "www.bls.gov",
+    "alfred.stlouisfed.org", "fred.stlouisfed.org",
+})
 BLS_CACHE_FALLBACK_HARD_MAX_AGE_SEC = 24.0 * 60.0 * 60.0
 BLS_CACHE_FALLBACK_ENV = "MACRO_BLS_CACHE_FALLBACK_MAX_AGE_SEC"
 BLS_CACHE_REQUIRED_FAMILIES = ("CPI", "NFP")
@@ -358,13 +361,36 @@ def install_macro_transport_refinement() -> None:
                 now_ts=time.time(),
                 upstream_error=exc,
             )
-            if cached_rows is None:
-                raise ValueError(
-                    "BLS_OFFICIAL_AND_OFFHOST_UNAVAILABLE:"
-                    f"{type(exc).__name__}:{str(exc)[:100]}|"
-                    f"{type(offhost_error).__name__}:{str(offhost_error)[:100]}"
-                ) from exc
-            return cached_rows
+            if cached_rows is not None:
+                return cached_rows
+            try:
+                from .macro_numeric_data import ReleaseWrite
+                from .macro_offhost_bundle import _fetch_bls_via_official_alfred_failover
+
+                fetched_at, releases, source_url = _fetch_bls_via_official_alfred_failover()
+                output: list[dict[str, Any]] = []
+                for family in ("CPI", "NFP"):
+                    payload = dict(releases[family])
+                    stored = self.store.ingest(
+                        ReleaseWrite(
+                            family=family,
+                            period=str(payload["period"]),
+                            source="U.S. Bureau of Labor Statistics",
+                            source_url=source_url,
+                            fetched_at=fetched_at,
+                            payload=payload,
+                        )
+                    )
+                    stored["transport"] = "OFFICIAL_FED_ALFRED_BLS_FAILOVER"
+                    output.append(stored)
+                return output
+            except Exception:
+                pass
+            raise ValueError(
+                "BLS_OFFICIAL_AND_OFFHOST_UNAVAILABLE:"
+                f"{type(exc).__name__}:{str(exc)[:100]}|"
+                f"{type(offhost_error).__name__}:{str(offhost_error)[:100]}"
+            ) from exc
 
     def ingest_ism_with_offhost(self: NumericMacroRuntime) -> list[dict[str, Any]]:
         try:

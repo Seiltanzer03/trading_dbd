@@ -271,6 +271,19 @@ def _fit_return_models(runtime: ShortHorizonRuntime, *, force: bool = False) -> 
     created = 0
     now = time.time()
     for horizon in HORIZONS:
+        if not force:
+            with runtime._lock:
+                due = False
+                for feature_set in _runtime_module.FEATURE_SETS:
+                    latest = runtime._conn.execute(
+                        "SELECT created_ts FROM g1s_return_models "
+                        "WHERE horizon_minutes=? AND feature_set=? ORDER BY created_ts DESC LIMIT 1",
+                        (int(horizon), str(feature_set))).fetchone()
+                    if not latest or now-float(latest["created_ts"]) >= MODEL_REFIT_INTERVAL_SEC:
+                        due = True
+                        break
+            if not due:
+                continue
         rows = _rows(runtime, horizon)
         evidence = _evidence(runtime, rows)
         if not evidence["fit_allowed"]:

@@ -119,6 +119,19 @@ def install_g1_short_horizon_gbt_refinement():
         created=original_fit(self,force=force)
         now=time.time()
         for horizon in HORIZONS:
+            if not force:
+                with self._lock:
+                    due=False
+                    for feature_set in FEATURE_SETS:
+                        latest=self._conn.execute(
+                            "SELECT created_ts FROM g1s_models WHERE horizon_minutes=? "
+                            "AND feature_set=? AND model_family=? ORDER BY created_ts DESC LIMIT 1",
+                            (horizon,feature_set,MODEL_FAMILY)).fetchone()
+                        if not latest or now-float(latest["created_ts"])>=MODEL_REFIT_INTERVAL_SEC:
+                            due=True
+                            break
+                if not due:
+                    continue
             rows=self._resolved_eligible(horizon); evidence=self._evidence(rows)
             if not evidence["fit_allowed"]:
                 continue

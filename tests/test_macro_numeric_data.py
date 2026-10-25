@@ -137,10 +137,22 @@ def test_numeric_store_is_first_seen_causal_and_never_backfills_before_fetch():
     valid = store.latest_admissible("CPI", 1000.0)
     assert valid["status"] == "VALID"
     assert valid["available_at"] == 1000.0
-    # Same official payload does not move first-seen available_at forward.
-    cached = store.ingest(write)
+    # Same official payload does not move first-seen available_at forward,
+    # but refreshes fetched_at so verified cache fallback stays accurate.
+    later_write = ReleaseWrite(
+        family="CPI",
+        period="2026-07",
+        source="U.S. Bureau of Labor Statistics",
+        source_url="https://api.bls.gov/publicAPI/v2/timeseries/data/",
+        fetched_at=1500.0,
+        payload={"period": "2026-07", "headline_mom_pct": 0.2},
+    )
+    cached = store.ingest(later_write)
     assert cached["status"] == "CACHED"
     assert cached["available_at"] == 1000.0
+    refreshed = store.latest_admissible("CPI", 1600.0)
+    assert refreshed["available_at"] == 1000.0
+    assert refreshed["fetched_at"] == 1500.0
 
 
 def test_research_context_exposes_candidate_vector_but_no_production_authority():

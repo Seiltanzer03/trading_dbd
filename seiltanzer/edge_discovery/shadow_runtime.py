@@ -7,6 +7,7 @@ and may lag/fail without affecting production decisions.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -27,7 +28,7 @@ from .shadow import (
     shadow_summary,
 )
 from .shadow_cache import write_shadow_summary_cache
-from ..production_resource_guard import memory_pressure_state
+from ..production_resource_guard import memory_pressure_state, trim_memory_for_pressure
 
 SHADOW_RUNTIME_VERSION = "g1s-ede-shadow-runtime-v1.3.2"
 SHADOW_RUNTIME_INTERVAL_SEC = 60.0
@@ -82,25 +83,24 @@ def _run_llm_edge_lifecycle(engine: Any, current: float) -> dict[str, Any]:
 
 
 def _shadow_read_has_headroom(database: Path) -> bool:
-    capacity = os.statvfs(database)
-    return capacity.f_bavail * capacity.f_frsize >= _SHADOW_READ_RESERVE_BYTES
+    if hasattr(os, "statvfs"):
+        capacity = os.statvfs(database)
+        return capacity.f_bavail * capacity.f_frsize >= _SHADOW_READ_RESERVE_BYTES
+    import shutil
+    return shutil.disk_usage(database).free >= _SHADOW_READ_RESERVE_BYTES
 
 
-def _shadow_feature_rows(runtime: Any, *, available_asof: float) -> list[dict[str, Any]]:
-    """Stream raw payloads from an owned WAL snapshot, never the live writer.
-
-    The adapter deliberately fetches atomically on shared live connections.
-    An explicit read-only transaction enables its existing 32-row streaming
-    path without weakening consistency or truncating the derived cohort.
-    """
+@contextlib.contextmanager
+def _open_shadow_reader(runtime: Any):
+    """Open an owned read-only WAL snapshot with time/disk/memory budgets."""
     with runtime._lock:
         database = next((row[2] for row in runtime._conn.execute(
             "PRAGMA database_list").fetchall() if row[1] == "main"), "")
     if not database:
         # In-memory/demo runtimes cannot be reopened by filename; retain their
         # established atomic extraction instead of creating a different DB.
-        return ProspectiveFeatureAdapter(runtime, available_asof=available_asof).rows(
-            resolved_only=False, strict=False)
+        yield runtime
+        return
 
     database = Path(database)
     deadline = time.monotonic() + _SHADOW_READ_BUDGET_SEC
@@ -138,13 +138,11 @@ def _shadow_feature_rows(runtime: Any, *, available_asof: float) -> list[dict[st
         reader = SimpleNamespace(_conn=connection, _lock=threading.RLock(),
                                  _consistent_read_snapshot=True,
                                  _read_budget_check=check_read_budget)
-        rows = ProspectiveFeatureAdapter(reader, available_asof=available_asof).rows(
-            resolved_only=False, strict=False)
+        yield reader
         # Also check Python-side work before any shadow ledger/cache publication.
         last_capacity_check = -float("inf")
         if interrupted():
             raise RuntimeError(refusal)
-        return rows
     except sqlite3.OperationalError as exc:
         if refusal is not None:
             raise RuntimeError(refusal) from exc
@@ -153,6 +151,18 @@ def _shadow_feature_rows(runtime: Any, *, available_asof: float) -> list[dict[st
         # Includes failed decoding, interrupted SQL and downstream exceptions.
         # The live runtime connection and all observations remain untouched.
         connection.close()
+
+
+def _shadow_feature_rows(runtime: Any, *, available_asof: float) -> list[dict[str, Any]]:
+    """Stream raw payloads from an owned WAL snapshot, never the live writer.
+
+    The adapter deliberately fetches atomically on shared live connections.
+    An explicit read-only transaction enables its existing 32-row streaming
+    path without weakening consistency or truncating the derived cohort.
+    """
+    with _open_shadow_reader(runtime) as reader:
+        return ProspectiveFeatureAdapter(reader, available_asof=available_asof).rows(
+            resolved_only=False, strict=False)
 
 
 def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict[str, Any]:
@@ -188,35 +198,43 @@ def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict
             "llm_edge_lifecycle": llm_edge_lifecycle,
         }
 
-    rows = _shadow_feature_rows(runtime, available_asof=current)
-    resolved_rows_all = [
-        row for row in rows
-        if row.get("outcome_available")
-        and int(row.get("horizon_minutes") or 0) in SELECTIVE_HORIZONS
-        and row.get("resolved_ts") is not None
-        and float(row["resolved_ts"]) <= current+1e-6]
-    resolved_rows, baseline_row_gate = baseline_eligible_rows(resolved_rows_all)
-    rule_active_since = float(
-        (audit.get("frozen_evidence") or {}).get("frozen_at") or current)
-    pending_rows = [
-        row for row in rows
-        if not row.get("outcome_available")
-        and int(row.get("horizon_minutes") or 0) in SELECTIVE_HORIZONS
-        and rule_active_since <= float(row.get("captured_ts") or 0.0) <= current+1e-6]
+    rows = resolved_rows_all = resolved_rows = pending_rows = None
+    try:
+        rows = _shadow_feature_rows(runtime, available_asof=current)
+        resolved_rows_all = [
+            row for row in rows
+            if row.get("outcome_available")
+            and int(row.get("horizon_minutes") or 0) in SELECTIVE_HORIZONS
+            and row.get("resolved_ts") is not None
+            and float(row["resolved_ts"]) <= current+1e-6]
+        resolved_rows, baseline_row_gate = baseline_eligible_rows(resolved_rows_all)
+        rule_active_since = float(
+            (audit.get("frozen_evidence") or {}).get("frozen_at") or current)
+        pending_rows = [
+            row for row in rows
+            if not row.get("outcome_available")
+            and int(row.get("horizon_minutes") or 0) in SELECTIVE_HORIZONS
+            and rule_active_since <= float(row.get("captured_ts") or 0.0) <= current+1e-6]
 
-    ledger = ShadowLedger(shadow_ledger_path(engine))
-    # Outcome resolution does not need the baseline feature gate. A prediction
-    # that existed before the target must remain resolvable even if an optional
-    # sanity-baseline field at T0 was missing.
-    resolution = resolve_shadow_predictions(
-        ledger, resolved_rows=resolved_rows_all, asof_ts=current)
-    prediction_creation = create_shadow_predictions(
-        ledger,
-        frozen_evidence=audit["frozen_evidence"],
-        selective_report=audit["selective_search"],
-        resolved_rows=resolved_rows,
-        pending_rows=pending_rows,
-        created_ts=current)
+        ledger = ShadowLedger(shadow_ledger_path(engine))
+        # Outcome resolution does not need the baseline feature gate. A prediction
+        # that existed before the target must remain resolvable even if an optional
+        # sanity-baseline field at T0 was missing.
+        resolution = resolve_shadow_predictions(
+            ledger, resolved_rows=resolved_rows_all, asof_ts=current)
+        prediction_creation = create_shadow_predictions(
+            ledger,
+            frozen_evidence=audit["frozen_evidence"],
+            selective_report=audit["selective_search"],
+            resolved_rows=resolved_rows,
+            pending_rows=pending_rows,
+            created_ts=current)
+        resolved_rows_all_n = len(resolved_rows_all)
+        resolved_rows_n = len(resolved_rows)
+        pending_rows_n = len(pending_rows)
+    finally:
+        rows = resolved_rows_all = resolved_rows = pending_rows = None
+        trim_memory_for_pressure()
     summary = shadow_summary(ledger, cutoff_ts=current)
     summary_cache = write_shadow_summary_cache(
         engine, summary=summary, cutoff_ts=current)
@@ -226,10 +244,10 @@ def materialize_runtime_shadow(engine: Any, *, now: float | None = None) -> dict
         "audit_path": str(audit_path),
         "rule_active_since": rule_active_since,
         "rule_must_preexist_t0": True,
-        "resolved_rows_seen": len(resolved_rows_all),
-        "baseline_scoreable_resolved_rows": len(resolved_rows),
+        "resolved_rows_seen": resolved_rows_all_n,
+        "baseline_scoreable_resolved_rows": resolved_rows_n,
         "baseline_row_gate": baseline_row_gate,
-        "pending_rows_seen": len(pending_rows),
+        "pending_rows_seen": pending_rows_n,
         "resolution": resolution,
         "prediction_creation": prediction_creation,
         "summary_cache": summary_cache,

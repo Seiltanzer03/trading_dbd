@@ -31,11 +31,26 @@ MAX_CLOCK_SKEW_SEC = 120.0
 BUNDLE_PATH_ENV = "SEILTANZER_OFFHOST_MACRO_BUNDLE"
 EXPECTED_FAMILIES = ("CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES")
 OFFICIAL_HOSTS = {
-    "CPI": frozenset({"api.bls.gov", "bls.gov", "www.bls.gov"}),
-    "NFP": frozenset({"api.bls.gov", "bls.gov", "www.bls.gov"}),
+    "CPI": frozenset({
+        "api.bls.gov", "bls.gov", "www.bls.gov",
+        "alfred.stlouisfed.org", "fred.stlouisfed.org",
+    }),
+    "NFP": frozenset({
+        "api.bls.gov", "bls.gov", "www.bls.gov",
+        "alfred.stlouisfed.org", "fred.stlouisfed.org",
+    }),
     "ISM_MANUFACTURING": frozenset({"ismworld.org", "www.ismworld.org"}),
     "ISM_SERVICES": frozenset({"ismworld.org", "www.ismworld.org"}),
 }
+ALFRED_TO_BLS_SERIES = (
+    ("CPIAUCSL", "CUSR0000SA0"),
+    ("CPILFESL", "CUSR0000SA0L1E"),
+    ("CPIAUCNS", "CUUR0000SA0"),
+    ("CPILFENS", "CUUR0000SA0L1E"),
+    ("PAYEMS", "CES0000000001"),
+    ("UNRATE", "LNS14000000"),
+    ("CES0500000003", "CES0500000003"),
+)
 
 
 def _canonical_json(value: Any) -> str:
@@ -124,6 +139,48 @@ def _release_record(
     return record
 
 
+def _fetch_bls_via_official_alfred_failover(
+    *, now: float | None = None
+) -> tuple[float, dict[str, dict[str, Any]], str]:
+    """Fetch the 7 official BLS series via Federal Reserve ALFRED when api.bls.gov is down."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from .macro_bls_alfred_vintage import (
+        OfficialALFREDBLSVintageSource,
+        _month_shift,
+        alfred_series_url,
+        parse_alfred_csv,
+    )
+    from .macro_numeric_data import build_bls_releases
+
+    stamp = time.time() if now is None else float(now)
+    vintage_date = datetime.fromtimestamp(stamp, tz=ZoneInfo("UTC")).date().isoformat()
+    period = _month_shift(f"{vintage_date[:4]}-{vintage_date[5:7]}", -1)
+    alfred_source = OfficialALFREDBLSVintageSource(timeout_sec=20.0, fetch_attempts=2)
+    series_rows: list[dict[str, Any]] = []
+    first_url = ""
+    for alfred_id, bls_id in ALFRED_TO_BLS_SERIES:
+        url = alfred_series_url(alfred_id, period=period, vintage_date=vintage_date)
+        if not first_url:
+            first_url = url
+        content = alfred_source._fetch(url)
+        parsed = parse_alfred_csv(
+            content, series_id=alfred_id, vintage_date=vintage_date
+        )
+        data = [
+            {"year": ym[:4], "period": f"M{ym[5:7]}", "value": str(val)}
+            for ym, val in sorted(parsed.items())
+        ]
+        series_rows.append({"seriesID": bls_id, "data": data})
+    releases = build_bls_releases(
+        {
+            "status": "REQUEST_SUCCEEDED",
+            "Results": {"series": series_rows},
+        }
+    )
+    return time.time(), releases, first_url
+
+
 def build_bundle(
     *, expected_sha: str, acceptance_run_id: str, now: float | None = None
 ) -> dict[str, Any]:
@@ -143,15 +200,23 @@ def build_bundle(
     install_ism_source_resilience()
     source = OfficialNumericMacroSource(timeout_sec=10.0)
     requested_at = time.time() if now is None else float(now)
-    bls_fetched_at, bls = source.fetch_bls(now=requested_at)
+    try:
+        bls_fetched_at, bls = source.fetch_bls(now=requested_at)
+        bls_source = "U.S. Bureau of Labor Statistics"
+        bls_source_url = BLS_API_URL
+    except Exception:
+        bls_fetched_at, bls, bls_source_url = _fetch_bls_via_official_alfred_failover(
+            now=requested_at
+        )
+        bls_source = "U.S. Bureau of Labor Statistics"
     ism_fetched_at, ism = source.fetch_ism()
     releases: dict[str, dict[str, Any]] = {}
     for family in ("CPI", "NFP"):
         releases[family] = _release_record(
             family=family,
             payload=dict(bls[family]),
-            source="U.S. Bureau of Labor Statistics",
-            source_url=BLS_API_URL,
+            source=bls_source,
+            source_url=bls_source_url,
             fetched_at=bls_fetched_at,
         )
     for family in ("ISM_MANUFACTURING", "ISM_SERVICES"):
