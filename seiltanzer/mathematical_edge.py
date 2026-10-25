@@ -26,7 +26,10 @@ H2_MOVEMENT_THRESHOLD = .38
 MOVE_RETURN_THRESHOLD = .0002
 TARGET_CONTRACT = {'direction': 'UP_GIVEN_ABS_RETURN_GT_2BP',
                    'movement': 'ABS_RETURN_GT_2BP', 'threshold_log_return': MOVE_RETURN_THRESHOLD}
-MAX_ARTIFACT_BYTES = 500_000
+# Complete65-family publication measured619,593bytes. Keep one finite bound
+# for the configured104family cells and their immutable validation/provenance.
+MAX_ARTIFACT_BYTES = 2_000_000
+ARTIFACT_PUBLICATION_RESERVE_BYTES = 4096
 MAX_ARTIFACT_AGE = 7 * 86400
 MAX_PRICE_AGE = 900
 SEARCH_HORIZONS = (15, 30, 60, 120)
@@ -397,7 +400,11 @@ def load_artifact(path, captured_ts):
         path = Path(path)
         if not 0 < path.stat().st_size <= MAX_ARTIFACT_BYTES:
             return None
-        report = json.loads(path.read_text())
+        with path.open('rb') as reader:
+            raw=reader.read(MAX_ARTIFACT_BYTES+1)
+        if not 0<len(raw)<=MAX_ARTIFACT_BYTES:
+            return None
+        report = json.loads(raw)
         if not isinstance(report, dict) or not isinstance(report.get('instruments'), dict):
             return None
         if simulated_evidence(report, recursive=False):

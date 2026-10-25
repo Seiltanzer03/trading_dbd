@@ -1,6 +1,8 @@
 """Observed release timing response, without surprise or invented consensus."""
 from __future__ import annotations
 
+import re
+
 import numpy as np
 
 from .mathematical_edge import fingerprint,number
@@ -83,23 +85,46 @@ def archive_event_dataset(code,bars,captured,horizon,archive):
         times=base['times'][indices],ends=base['ends'][indices],groups=groups,feature_names=list(NAMES))
 
 
-def fit_archive_events(code,bars,captured,horizons,archive,source):
+def fit_archive_events(code,bars,captured,horizons,archive,source,*,target_source=None):
     from .edge_family_market import _fit_family
+    event_proof=None;event_error=None
+    if isinstance(target_source,dict) and 'event_window_archive' in target_source:
+        try:
+            from .binance_event_windows import event_target_bars
+            bars=event_target_bars(target_source,bars,archive,captured)
+            source={**source,'bars_sha256':fingerprint(bars)}
+            event_proof=target_source['event_window_archive']
+        except (ValueError,TypeError,KeyError) as exc:
+            event_error=str(exc)[:180]
     datasets={h:archive_event_dataset(code,bars,captured,h,archive) for h in horizons}
     result=_fit_family(code,'event',bars,captured,horizons,None,None,source,
         datasets_override=datasets,feature_variation_required=True)
     result.update(official_event_archive=archive.summary(),event_timing_contract=CONTRACT,
         features_are_captured_receipts=False,consensus_available=False,surprise_computed=False,
         historical_feature_availability='VERIFIED_OFFICIAL_RELEASE_TIMES_ACTUAL_RETRIEVAL_RETAINED')
+    if event_proof is not None:
+        result.update(event_window_target_archive=event_proof,event_target_bars_sha256=source['bars_sha256'])
+    if event_error is not None:result['event_history_error']=event_error
     if result['status']=='TRAINED':
         result.pop('model_sha256',None);result['model_sha256']=fingerprint(result)
     return result
 
 
-def archive_provenance_valid(model,trained):
+def archive_provenance_valid(model,trained,cutoff=None):
     from .edge_family_macro_archive import archive_model_provenance_valid
     if (model.get('event_timing_contract')!=CONTRACT or model.get('consensus_available') is not False
             or model.get('surprise_computed') is not False
             or any(head.get('feature_names',list(NAMES))!=list(NAMES) for head in model['heads'].values())):
         return False
-    return archive_model_provenance_valid({**model,'official_macro_archive':model.get('official_event_archive')},trained)
+    if not archive_model_provenance_valid({**model,'official_macro_archive':model.get('official_event_archive')},trained):
+        return False
+    if 'event_window_target_archive' in model or 'event_target_bars_sha256' in model:
+        from .binance_event_windows import event_archive_valid
+        proof=model.get('event_window_target_archive');summary=model['official_event_archive']
+        digest=model.get('event_target_bars_sha256')
+        if (cutoff is None or not event_archive_valid(proof,model['instrument'],summary['bundle_sha256'],cutoff)
+                or proof.get('calendar_cutoff_ts')!=trained
+                or not isinstance(digest,str) or re.fullmatch('[0-9a-f]{64}',digest) is None
+                or model.get('source',{}).get('bars_sha256')!=digest):
+            return False
+    return True

@@ -94,6 +94,12 @@ class OfficialMacroArchive:
                     *('release:'+row[0] for row in point.supporting_provenance)])
         return result
 
+    def published_release_times(self):
+        """Known dated publications only; an ALFRED availability is not an event."""
+        return sorted({point.published_at for rows in self._points.values() for point in rows
+            if point.published_at is not None
+            and self.captured_ts-365*86400<=point.published_at<=self.captured_ts})
+
     def summary(self):
         return {'contract_version':CONTRACT, 'bundle_sha256':self.bundle_sha256,
             'validated_at':self.captured_ts,
