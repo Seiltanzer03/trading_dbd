@@ -466,9 +466,15 @@ def test_rejected_official_release_does_not_contaminate_independent_valid_family
     value['macro_context_v1'] = root
     value['edge_family_models'] = {'synthetic': True, 'future': {'received_ts': T0 + 100.}}
     result = build(archive(record(value)))
-    assert {row['family_id'] for row in result['rows']} == {'macro', 'intermarket'}
+    # The same valid release now also provides separately trained event timing;
+    # the invalid sibling must contaminate neither feature family.
+    assert {row['family_id'] for row in result['rows']} == {'macro', 'intermarket', 'event'}
     macro_rows = [row for row in result['rows'] if row['family_id'] == 'macro']
     assert all(row['features'] == {'macro.cpi_actual': 3.} for row in macro_rows)
+    event_rows = [row for row in result['rows'] if row['family_id'] == 'event']
+    assert all(row['features']['event.official_release_is_CPI'] == 1. for row in event_rows)
+    assert all(meta['source_id'] == 'ci-release' and meta['dependency_group'] == 'release:ci-release'
+        for row in event_rows for meta in row['feature_provenance'].values())
     assert any(item.get('source_path', '').endswith('BAD') for item in result['exclusions'])
 
 

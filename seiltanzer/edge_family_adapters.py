@@ -731,8 +731,18 @@ def build_edge_family_evidence(snapshot: dict) -> dict:
         result["reason"] = "SNAPSHOT_INSTRUMENT_OR_TIME_MISSING"
         return result
     _official_macro(snapshot, families["macro"], cutoff)
+    from .edge_family_event_archive import current_event_observation
+    timing=current_event_observation(families['macro'],code=instrument,cutoff=cutoff)
+    if timing:
+        for name,value in timing['features'].items():
+            _add(families['event'],name,value,timing['feature_provenance'][name])
     _existing_options(snapshot, families["option"], cutoff)
     _session(snapshot, families["session"], cutoff)
+    from .edge_family_treasury_factors import treasury_observation
+    rates = treasury_observation(snapshot.get('treasury_context_v1'), code=instrument, cutoff=cutoff)
+    if rates:
+        for name,value in rates['features'].items():
+            _add(families['value_carry'],name,value,rates['feature_provenance'][name])
     sources = _dict(snapshot.get("edge_family_sources"))
     if simulated_evidence(sources, recursive=False):
         for row in families.values():

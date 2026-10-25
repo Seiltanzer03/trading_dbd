@@ -50,7 +50,7 @@ def capture_market_inputs(engine):
     feed = getattr(engine, "market", None)
     market = SimpleNamespace(instrument_code=getattr(feed, "instrument_code", None),
         demo=getattr(feed, "demo", False), intraday_is_offset=False,
-        intraday_ohlcv=[], intraday_source_authority={}, chain=None,
+        intraday_ohlcv=[], intraday_source_authority={}, binance_trade_flow={}, chain=None,
         _intraday_lock=threading.Lock())
     lock = getattr(feed, "_intraday_lock", None)
     acquired = lock is None or lock.acquire(blocking=False)
@@ -62,6 +62,12 @@ def capture_market_inputs(engine):
         market.intraday_is_offset = getattr(feed, "intraday_is_offset", False)
         market.intraday_ohlcv = _bounded_copy(getattr(feed, "intraday_ohlcv", []))
         market.intraday_source_authority = _bounded_copy(getattr(feed, "intraday_source_authority", {}))
+        # Independent optional budget, same lock and instrument as the bars.
+        # Invalid flow cannot erase valid frozen prices or option inputs.
+        try:
+            market.binance_trade_flow = _bounded_copy(getattr(feed,'binance_trade_flow',{}))
+        except (ValueError,TypeError,RecursionError):
+            market.flow_freeze_reason='FLOW_INPUT_FREEZE_BOUND'
     except (ValueError, TypeError, RecursionError):
         market.intraday_ohlcv = []
         market.intraday_source_authority = {}

@@ -9,7 +9,7 @@ from .real_input_integrity import FLAGS, simulated_evidence
 
 PROJECTION_CONTRACT = 'native-family-capture-projection-v1'
 ROOTS = ('macro_context_v1', 'macro_t0_context', 'event_context', 'event_reaction',
-         'edge_family_sources', 'edge_family_source_bundle')
+         'edge_family_sources', 'edge_family_source_bundle', 'treasury_context_v1')
 
 
 def project_capture(raw, source_sha256):
@@ -25,7 +25,7 @@ def project_capture(raw, source_sha256):
         metrics=frozen.get('option_distribution')
         if isinstance(metrics,dict):
             kept['option_distribution']={key:metrics[key] for key in
-                (*FLAGS,'proxy','provenance','density_input') if key in metrics}
+                (*FLAGS,'proxy','provenance','density_input','oi_profile') if key in metrics}
         for version,name in (('g1s_evidence_v3','option_static'),('g1s_evidence_v2','option_context')):
             parent=frozen.get(version)
             block=parent.get(name) if isinstance(parent,dict) else None

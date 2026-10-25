@@ -38,18 +38,44 @@ cursors={}
 incomplete=[]
 seen={}
 sizes={}
+sampling={}
 if len(tables)==2:
  try:
+  passive_columns={r[1] for r in c.execute('PRAGMA table_info(passive_market_observations)')}
+  age_column='p.option_age_sec' if 'option_age_sec' in passive_columns else 'NULL'
+  query='''SELECT g.instrument,g.captured_ts,g.frozen_features_json,g.features_sha256,
+        g.option_source,g.option_quality,p.created_ts AS original_created_ts,p.features_json AS original_json
+        ,'''+age_column+''' AS option_age_sec
+        FROM g1s_observations g JOIN passive_market_observations p ON p.observation_id=g.source_observation_id
+        WHERE g.instrument=? AND g.horizon_minutes=15 AND g.captured_ts>=? AND g.captured_ts<=?
+        AND g.training_eligible=1 AND p.evidence_eligible=1 AND p.instrument=g.instrument AND p.captured_ts=g.captured_ts
+        ORDER BY g.captured_ts DESC LIMIT 1'''
+  class SampledCaptures:
+   def __init__(self,code):
+    self.code=code;self.before=now;self.count=0
+    # Two indexed boundary seeks measure the actual available span, not the
+    # age of an inactive feed. Sparse15m histories retain every observation.
+    bounds='SELECT g.captured_ts FROM '+query.split('FROM ',1)[1]
+    first=c.execute(bounds.replace('DESC LIMIT 1','ASC LIMIT 1'),(code,now-90*86400,now)).fetchone()
+    last=c.execute(bounds,(code,now-90*86400,now)).fetchone()
+    span=float(last[0])-float(first[0]) if first is not None and last is not None else 0.
+    self.step=max(900,int((span+1500*900)//(1500*900))*900)
+    sampling[code]=self.step
+   def fetchone(self):
+    if self.count>=1500 or self.before<now-90*86400:return None
+    cursor=c.execute(query,(self.code,now-90*86400,self.before))
+    try:value=cursor.fetchone()
+    finally:cursor.close()
+    if value is not None:
+     self.count+=1
+     self.before=int(float(value['captured_ts'])//self.step)*self.step-0.000001
+    return value
+   def close(self):pass
   for code in __CODES__:
    if time.monotonic()-started>=24:
     incomplete=[name for name in __CODES__ if name not in seen]
     reason='NATIVE_READ_BUDGET_EXHAUSTED';break
-   cursors[code]=c.execute('''SELECT g.instrument,g.captured_ts,g.frozen_features_json,g.features_sha256,
-        g.option_source,g.option_quality,p.created_ts AS original_created_ts,p.features_json AS original_json
-        FROM g1s_observations g JOIN passive_market_observations p ON p.observation_id=g.source_observation_id
-        WHERE g.instrument=? AND g.horizon_minutes=15 AND g.captured_ts>=? AND g.captured_ts<=?
-        AND g.training_eligible=1 AND p.evidence_eligible=1 AND p.instrument=g.instrument AND p.captured_ts=g.captured_ts
-        ORDER BY g.captured_ts DESC LIMIT 1500''',(code,now-90*86400,now))
+   cursors[code]=SampledCaptures(code)
    seen[code]=0;sizes[code]=0
   # Fair bounded passes prevent one large instrument consuming the full read.
   while cursors and reason!='NATIVE_READ_BUDGET_EXHAUSTED':
@@ -92,6 +118,7 @@ if len(tables)==2:
  for cursor in cursors.values():cursor.close()
 c.close()
 report=dict(rows=rows,exported_ts=now,read_only=True,reason=reason,
+            sampling_interval_seconds_by_instrument=sampling,history_scope='ADAPTIVE_UTC_BUCKETS_AT_LEAST_15_MINUTES',
             contract_version='native-family-capture-export-v1',bounded_history=True,limited_instruments=limited,
             history_complete=reason in ('NATIVE_OBSERVATIONS_EXPORTED','NATIVE_ELIGIBLE_HISTORY_EMPTY') and not incomplete and not limited,
             incomplete_instruments=incomplete,source_rows_examined=seen)
@@ -118,17 +145,38 @@ def main():
     args=parser.parse_args()
     client=_connect(args.password)
     try:
-        _,stdout,stderr=client.exec_command('python3 -c '+shlex.quote(REMOTE_EXPORT),timeout=45)
-        payload=stdout.read(40_000_001)
-        if stdout.channel.recv_exit_status() or len(payload)>40_000_000:
-            raise RuntimeError('bounded private native history export failed')
-        compressed=base64.b64decode(payload.strip(),validate=True)
-        with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as reader:
-            raw=reader.read(96_000_001)
-        if len(raw)>96_000_000:raise ValueError('private native history exceeds bound')
-        report=json.loads(raw)
-        if report.get('contract_version')!='native-family-capture-export-v1' or report.get('read_only') is not True:
-            raise ValueError('invalid native export contract')
+        # Each indexed instrument gets the SAME 25s/1500-row guarded budget.
+        # This fixes starvation without extending any live read or copying DBs.
+        batches=[];total_bytes=0
+        for code in ALL_INSTRUMENTS:
+            program=REMOTE_EXPORT.replace(repr(tuple(ALL_INSTRUMENTS)),repr((code,)))
+            _,stdout,stderr=client.exec_command('python3 -c '+shlex.quote(program),timeout=45)
+            payload=stdout.read(40_000_001)
+            if stdout.channel.recv_exit_status() or len(payload)>40_000_000:
+                raise RuntimeError('bounded private native history export failed')
+            compressed=base64.b64decode(payload.strip(),validate=True)
+            with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as reader:
+                raw=reader.read(8_000_001)
+            total_bytes+=len(raw)
+            if len(raw)>8_000_000 or total_bytes>96_000_000:
+                raise ValueError('private native export exceeds bound')
+            batch=json.loads(raw)
+            if batch.get('contract_version')!='native-family-capture-export-v1' or batch.get('read_only') is not True:
+                raise ValueError('invalid native export contract')
+            if any(row.get('instrument')!=code for row in batch['rows']):
+                raise ValueError('native batch instrument mismatch')
+            batches.append(batch)
+            print('NATIVE_FAMILY_BATCH',json.dumps(dict(instrument=code,reason=batch['reason'],
+                source_rows=len(batch['rows']),history_complete=batch['history_complete'])),flush=True)
+        report=dict(rows=[row for batch in batches for row in batch['rows']],
+            exported_ts=max(batch['exported_ts'] for batch in batches),
+            reason='NATIVE_OBSERVATIONS_EXPORTED' if all(batch['history_complete'] for batch in batches) else 'NATIVE_BOUNDED_PARTIAL_HISTORY',
+            limited_instruments=sorted({code for batch in batches for code in batch['limited_instruments']}),
+            incomplete_instruments=sorted({code for batch in batches for code in batch['incomplete_instruments']}),
+            history_complete=all(batch['history_complete'] for batch in batches),
+            source_rows_examined={code:count for batch in batches for code,count in batch['source_rows_examined'].items()})
+        report['sampling_interval_seconds_by_instrument']={code:step for batch in batches
+            for code,step in batch.get('sampling_interval_seconds_by_instrument',{}).items()}
         history=native_history(report['rows'],captured_ts=report['exported_ts'])
         args.output.parent.mkdir(parents=True,exist_ok=True)
         args.output.write_text(json.dumps(history,allow_nan=False,separators=(',',':')))
@@ -140,6 +188,8 @@ def main():
             'limited_instruments':report['limited_instruments'],
             'history_complete':report['history_complete'],
             'incomplete_instruments':report['incomplete_instruments'],
+            'sampling_interval_seconds_by_instrument':report['sampling_interval_seconds_by_instrument'],
+            'history_scope':'ADAPTIVE_UTC_BUCKETS_AT_LEAST_15_MINUTES',
             'source_rows_examined':report['source_rows_examined']},sort_keys=True))
     finally:
         client.close()

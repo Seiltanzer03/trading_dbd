@@ -40,7 +40,10 @@ def session_features(code, cutoff):
 
 def _bars(source, captured):
     from scripts.run_mathematical_edge import _validated_bars
-    if simulated_evidence({k: v for k, v in source.items() if k != 'bars'}):
+    # Large sidecar arrays have their own per-observation validation. A valid
+    # 60-day flow archive must not exhaust the small metadata traversal budget
+    # and reject every independently validated target family.
+    if simulated_evidence({k: v for k, v in source.items() if k not in {'bars','trade_flow_history'}}):
         raise ValueError('SIMULATED_TRAINING_SOURCE_NOT_ADMISSIBLE')
     raw = source.get('bars')
     if not isinstance(raw, list) or not 0 < len(raw) <= MAX_HISTORY:
@@ -252,7 +255,7 @@ def _fit_family(code, family, bars, captured, horizons, related, history, source
 
 
 def train_market_families(sources, captured, *, horizons=SEARCH_HORIZONS, feature_history=None,
-                         macro_archive=None):
+                         macro_archive=None, related_sources=None):
     if number(captured) is None or captured <= 0 or not horizons or any(h not in SEARCH_HORIZONS for h in horizons):
         raise ValueError('INVALID_CAPTURE_OR_HORIZON')
     if not isinstance(sources, list) or len(sources) > 32:
@@ -261,7 +264,9 @@ def train_market_families(sources, captured, *, horizons=SEARCH_HORIZONS, featur
         from .edge_family_macro_archive import OfficialMacroArchive
         if not isinstance(macro_archive,OfficialMacroArchive) or macro_archive.captured_ts != captured:
             raise ValueError('OFFICIAL_MACRO_ARCHIVE_NOT_VALIDATED_FOR_CUTOFF')
-    related = related_series(sources, captured)
+    if related_sources is not None and (not isinstance(related_sources,list) or len(related_sources)>3):
+        raise ValueError('RELATED_TRAINING_SOURCE_BOUND_INVALID')
+    related = related_series(sources+(related_sources or []), captured)
     history = feature_history if (isinstance(feature_history, dict)
         and not simulated_evidence(feature_history, recursive=False)) else {}
     indexed, duplicates = {}, set()
@@ -293,14 +298,25 @@ def train_market_families(sources, captured, *, horizons=SEARCH_HORIZONS, featur
                 code_history = {}
             for family in FAMILIES:
                 observations = code_history.get(family)
-                if family == 'macro' and macro_archive is not None:
-                    existing = (_fit_family(code,family,bars,captured,horizons,related,observations,provenance)
-                                if observations is not None else None)
-                    if existing is not None and existing['status']=='TRAINED':
-                        rows[family]=existing
+                if family=='order_flow' and code in CRYPTO_INSTRUMENTS and 'trade_flow_history' in source:
+                    from .edge_family_trade_flow import fit_trade_flow
+                    rows[family]=fit_trade_flow(code,bars,captured,horizons,source,provenance)
+                    continue
+                if family in {'macro','event'} and macro_archive is not None:
+                    selection=(_fit_family(code,family,bars,captured,horizons,related,observations,provenance,
+                        pretest_selection_only=True) if observations is not None else None)
+                    # Freeze native vs public-archive features from pretest
+                    # eligibility. A missing/flat held-out test cannot switch
+                    # the feature contract after observing its outcomes.
+                    if selection is not None and selection['status']=='PRETEST_SELECTED':
+                        rows[family]=_fit_family(code,family,bars,captured,horizons,related,observations,provenance)
                     else:
-                        from .edge_family_macro_archive import fit_archive_macro
-                        rows[family]=fit_archive_macro(code,bars,captured,horizons,macro_archive,provenance)
+                        if family=='macro':
+                            from .edge_family_macro_archive import fit_archive_macro
+                            rows[family]=fit_archive_macro(code,bars,captured,horizons,macro_archive,provenance)
+                        else:
+                            from .edge_family_event_archive import fit_archive_events
+                            rows[family]=fit_archive_events(code,bars,captured,horizons,macro_archive,provenance)
                     continue
                 if family not in {'session', 'intermarket'} and observations is None:
                     rows[family] = {'status': 'HISTORICAL_FEATURES_UNAVAILABLE',
@@ -401,6 +417,14 @@ def _model_reason(model, code, family, cutoff):
             from .edge_family_macro_archive import archive_model_provenance_valid
             if family!='macro' or not archive_model_provenance_valid(model,trained):
                 return 'MARKET_MACRO_ARCHIVE_PROVENANCE_INVALID'
+        if 'public_trade_flow_archive' in model or (family=='order_flow' and model.get('features_are_captured_receipts') is False):
+            from .edge_family_trade_flow import archive_provenance_valid
+            if family!='order_flow' or not archive_provenance_valid(model,code,cutoff):
+                return 'MARKET_TRADE_FLOW_ARCHIVE_PROVENANCE_INVALID'
+        if 'official_event_archive' in model or (family=='event' and model.get('features_are_captured_receipts') is False):
+            from .edge_family_event_archive import archive_provenance_valid
+            if family!='event' or not archive_provenance_valid(model,trained):
+                return 'MARKET_EVENT_ARCHIVE_PROVENANCE_INVALID'
         heads = model.get('heads')
         if not isinstance(heads, dict) or set(heads) != {'direction', 'movement'}:
             return 'MARKET_MODEL_HEADS_INVALID'
@@ -516,6 +540,31 @@ def attach_market_family_context(engine, snapshot):
                 'max_age_sec': 900., 'quality': 1., 'dependency_group': 'price_path'} for name in features}
         else:
             features, proof = facts[family]['features'], facts[family]['feature_provenance']
+            if family=='order_flow' and 'public_trade_flow_archive' in model:
+                from .edge_family_trade_flow import live_flow_observation
+                flow=live_flow_observation(getattr(feed,'binance_trade_flow',None),code=code,cutoff=cutoff,origin=origin)
+                if flow is None:
+                    context.setdefault('rejected_models',{})[family]='ACTUAL_COMPLETED_BINANCE_TAKER_FLOW_UNAVAILABLE';continue
+                features,proof=flow['features'],flow['feature_provenance']
+            if family == 'positioning' and any(any(n.startswith('positioning.option_') for n in head.get('feature_names', []))
+                    for head in model['heads'].values()):
+                from .edge_family_option_interest import interest_observation
+                from .passive_learning import PassiveLearningEngine
+                chain=getattr(feed,'chain',None)
+                interest=None
+                if isinstance(chain,dict):
+                    receipt=number(chain.get('ts'))
+                    if receipt is not None and receipt<=origin:
+                        metrics=chain.get('metrics')
+                        try:
+                            interest=interest_observation(code=code,metrics=metrics,source_id=chain.get('source'),
+                                observed_ts=receipt,received_ts=receipt,quality=PassiveLearningEngine._quality(chain),
+                                source_sha256=fingerprint(metrics))
+                        except (ValueError,TypeError,OverflowError):
+                            pass
+                if interest is None or cutoff-interest['captured_ts']>1800:
+                    context.setdefault('rejected_models',{})[family]='ACTUAL_CONFIGURED_OPTION_INTEREST_UNAVAILABLE';continue
+                features,proof=interest['features'],interest['feature_provenance']
             if family == 'option' and any('option.iv' in head.get('feature_names', []) for head in model['heads'].values()):
                 from .edge_family_native_history import option_observation
                 from .passive_learning import PassiveLearningEngine

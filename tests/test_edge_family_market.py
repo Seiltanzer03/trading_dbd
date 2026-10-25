@@ -65,6 +65,17 @@ def test_real_session_training_returns_separate_forecast_not_fake_action_profit(
     assert row['model_sha256'] == fingerprint({k: v for k, v in row.items() if k != 'model_sha256'})
 
 
+def test_exact_crypto_targets_keep_independent_coinbase_intermarket_drivers():
+    related = [source(code) for code in ('BTCUSD','ETHUSD','SOLUSD')]
+    targets = [source()]
+    for item in related:
+        targets.append({**item, 'provider':'Binance', 'ticker':item['instrument'].replace('USD','USDT')})
+    report = market().train_market_families(targets, T0, horizons=(15,), related_sources=related)
+    assert report['NAS100']['intermarket']['status'] == 'TRAINED'
+    assert report['BTCUSD']['session']['status'] == 'TRAINED'
+    assert all('COINBASE' in name for name in report['NAS100']['intermarket']['heads']['direction']['feature_names'])
+
+
 def test_session_features_use_instrument_timezone_and_dst_without_fake_open_calendar():
     from datetime import datetime, timezone
     m = market()
