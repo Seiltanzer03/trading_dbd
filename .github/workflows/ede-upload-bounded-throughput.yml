@@ -1,0 +1,52 @@
+name: ede-upload-bounded-throughput
+on:
+  push:
+    branches: [ops/ede-upload-metadata-20261025]
+    paths: [.github/workflows/ede-upload-bounded-throughput.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install boto3
+      - name: Compare serial and three bounded uploads using only generated probe bytes
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          python -u - <<'PY'
+          import os,time,json,hashlib,base64
+          from concurrent.futures import ThreadPoolExecutor
+          import boto3
+          from botocore.config import Config
+          client=boto3.client('s3',endpoint_url='https://storage.yandexcloud.net',region_name='ru-central1',config=Config(connect_timeout=10,read_timeout=120,retries={'total_max_attempts':1},max_pool_connections=3))
+          bucket='trading-dbd-backups-2026'
+          key='diagnostics/ede-upload-probe/'+os.environ['GITHUB_RUN_ID']
+          body=os.urandom(6*1024*1024)
+          md5=base64.b64encode(hashlib.md5(body).digest()).decode()
+          upload=client.create_multipart_upload(Bucket=bucket,Key=key)['UploadId']
+          def send(number):
+              start=time.monotonic()
+              client.upload_part(Bucket=bucket,Key=key,UploadId=upload,PartNumber=number,Body=body,ContentMD5=md5)
+              duration=time.monotonic()-start
+              print('PROBE_PART='+json.dumps({'number':number,'bytes':len(body),'seconds':round(duration,3)}),flush=True)
+              return duration
+          try:
+              start=time.monotonic()
+              for n in (1,2,3): send(n)
+              serial=time.monotonic()-start
+              start=time.monotonic()
+              with ThreadPoolExecutor(max_workers=3) as pool:list(pool.map(send,(4,5,6)))
+              parallel=time.monotonic()-start
+              print('PROBE_RESULT='+json.dumps({'serial_seconds':round(serial,3),'parallel_seconds':round(parallel,3),'speedup':round(serial/parallel,3),'total_generated_bytes':6*len(body),'database_bytes':0,'completed_objects':0}),flush=True)
+          finally:
+              client.abort_multipart_upload(Bucket=bucket,Key=key,UploadId=upload)
+              print('PROBE_ABORTED=1',flush=True)
+          PY
