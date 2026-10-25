@@ -1,0 +1,32 @@
+name: fed-response-headers
+on:
+  push:
+    branches: [ops/fed-response-headers-20261025]
+    paths: [.github/workflows/fed-response-headers.yml]
+permissions:
+  contents: read
+jobs:
+  observe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install httpx
+      - name: Read official CSV headers without using observations
+        run: |
+          python - <<'PY'
+          import httpx,hashlib,json
+          urls=[
+            'https://alfred.stlouisfed.org/graph/alfredgraph.csv?id=CPIAUCSL&cosd=2025-07-01&coed=2026-09-01&vintage_date=2026-10-25',
+            'https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL&cosd=2025-07-01&coed=2026-09-01',
+            'https://alfred.stlouisfed.org/graph/alfredgraph.csv?id=PAYEMS&cosd=2025-07-01&coed=2026-09-01&vintage_date=2026-10-25',
+            'https://fred.stlouisfed.org/graph/fredgraph.csv?id=PAYEMS&cosd=2025-07-01&coed=2026-09-01']
+          with httpx.Client(timeout=12,trust_env=False,follow_redirects=True,headers={'User-Agent':'Seiltanzer-Macro-Research/1.0','Accept':'*/*'}) as c:
+            for url in urls:
+              try:
+                r=c.get(url);r.raise_for_status();assert len(r.content)<=2000000
+                print('FED_HEADER='+json.dumps({'requested_url':url,'response_url':str(r.url),'header':r.text.splitlines()[0],'body_sha256':hashlib.sha256(r.content).hexdigest(),'bytes':len(r.content)}))
+              except Exception as e: print('FED_ERROR='+json.dumps({'url':url,'error':type(e).__name__+':'+str(e)[:180]}))
+          PY
