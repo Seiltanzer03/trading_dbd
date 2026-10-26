@@ -37,4 +37,4 @@ jobs:
              saved=json.loads(row[0])
              print('SAVED_SNAPSHOT_ROOT_SIZES',json.dumps(sorted(((k,size(v)) for k,v in saved.items()),key=lambda x:-x[1])))
              print('SAVED_MANAGER_SIZES',json.dumps(sorted(((k,size(v)) for k,v in (saved.get('policy_manager') or {}).items()),key=lambda x:-x[1])))
-                        PY
+            PY
