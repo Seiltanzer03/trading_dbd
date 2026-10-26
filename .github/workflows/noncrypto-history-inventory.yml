@@ -36,7 +36,8 @@ jobs:
              ['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],
              ['df','-h','/opt/seiltanzer/data'],
              ['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID'],
-             ['journalctl','-u','seiltanzer','-n','18','--no-pager','-o','cat']]:
+             ['journalctl','-u','seiltanzer','-n','12','--no-pager','-o','cat'],
+             ['ps','-C','python','-C','python3','-o','pid,etimes,pcpu,pmem,comm']]:
              r=subprocess.run(argv,capture_output=True,text=True,timeout=20)
              print('READONLY',argv,'EXIT',r.returncode);print(r.stdout[:18000]);print(r.stderr[:2000])
             PY
