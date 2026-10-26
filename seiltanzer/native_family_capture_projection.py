@@ -26,6 +26,10 @@ def project_capture(raw, source_sha256):
         if isinstance(metrics,dict):
             kept['option_distribution']={key:metrics[key] for key in
                 (*FLAGS,'proxy','provenance','density_input','oi_profile') if key in metrics}
+            implied=metrics.get('implied_move')
+            if isinstance(implied,dict):
+                kept['option_distribution']['implied_move']=(implied if simulated_evidence(implied)
+                    else {key:implied[key] for key in (*FLAGS,'sigma_annual') if key in implied})
         for version,name in (('g1s_evidence_v3','option_static'),('g1s_evidence_v2','option_context')):
             parent=frozen.get(version)
             block=parent.get(name) if isinstance(parent,dict) else None
