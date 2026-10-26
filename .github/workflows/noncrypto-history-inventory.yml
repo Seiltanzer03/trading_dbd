@@ -8,28 +8,48 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Verify primary Nikkei option volatility historical source without production access
+      - run: pip install -q paramiko
+      - name: Observe deployment fence without changing history or service
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           python -u - <<'PY'
-          import csv,hashlib,io,json,time,urllib.request
-          url='https://indexes.nikkei.co.jp/nkave/historical/nikkei_stock_average_vi_daily_en.csv'
-          request=urllib.request.Request(url,headers={'User-Agent':'trading-dbd historical-source-verification/1.0'})
-          with urllib.request.urlopen(request,timeout=15) as response:
-              raw=response.read(2000001)
-              assert len(raw)<=2000000
-              status=response.status;headers=dict(response.headers)
-          rows=list(csv.reader(io.StringIO(raw.decode('cp932'))))
-          dated=[row for row in rows if row and len(row[0])==10 and row[0][0:4].isdigit()]
-          print('PRIMARY_NIKKEI_VI_HISTORY='+json.dumps(dict(
-              url=url,http_status=status,received_ts=time.time(),bytes=len(raw),
-              payload_sha256=hashlib.sha256(raw).hexdigest(),headers=rows[:1],
-              dated_rows=len(dated),date_examples=[row[0] for row in dated[:2]+dated[-2:]],
-              first_rows=dated[:2],last_rows=dated[-2:],content_type=headers.get('Content-Type'),
-              last_modified=headers.get('Last-Modified'),production_access=False,
-              training_performed=False)),flush=True)
+          import os,paramiko,shlex
+          remote="""import json,os,stat,subprocess,time
+          from pathlib import Path
+          print('FENCE_DIAGNOSTIC_TS='+str(time.time()),flush=True)
+          for name in ('cutover.active','cutover.journal.json'):
+              p=Path('/opt/seiltanzer/data')/name
+              item=dict(name=name,exists=os.path.lexists(p))
+              if item['exists']:
+                  s=p.lstat();item.update(size=s.st_size,mtime=s.st_mtime,is_regular=stat.S_ISREG(s.st_mode),is_symlink=p.is_symlink())
+                  if stat.S_ISREG(s.st_mode) and s.st_size<=65536:
+                      item['contents']=p.read_text()
+              print('FENCE_FILE='+json.dumps(item),flush=True)
+          checks=(
+              ['git','-C','/opt/seiltanzer','rev-parse','HEAD'],
+              ['systemctl','show','seiltanzer','--property=ActiveState,SubState,MainPID,NRestarts,Result'],
+              ['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],
+              ['systemctl','list-units','--all','--plain','--no-legend','*history*','*ede*'])
+          for command in checks:
+              try:
+                  result=subprocess.run(command,capture_output=True,text=True,timeout=8)
+                  print('FENCE_CHECK='+json.dumps(dict(command=command,returncode=result.returncode,stdout=result.stdout[:6000],stderr=result.stderr[:1000])),flush=True)
+              except subprocess.TimeoutExpired:
+                  print('FENCE_CHECK_TIMEOUT='+json.dumps(command),flush=True)
+          """
+          client=paramiko.SSHClient();client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+          client.connect('94.241.171.182',username='root',password=os.environ['SSH_PASSWORD'],timeout=15,auth_timeout=15,look_for_keys=False,allow_agent=False)
+          try:
+              _,stdout,stderr=client.exec_command('python3 -c '+shlex.quote(remote),timeout=45)
+              print(stdout.read(20000).decode(),flush=True)
+              error=stderr.read(3000).decode()
+              if error:print(error)
+              assert stdout.channel.recv_exit_status()==0
+          finally:client.close()
           PY
