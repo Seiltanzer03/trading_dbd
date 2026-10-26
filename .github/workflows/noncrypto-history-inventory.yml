@@ -23,7 +23,7 @@ jobs:
               raw=response.read(2000001)
               assert len(raw)<=2000000
               status=response.status;headers=dict(response.headers)
-          rows=list(csv.reader(io.StringIO(raw.decode('utf-8-sig'))))
+          rows=list(csv.reader(io.StringIO(raw.decode('cp932'))))
           dated=[row for row in rows if row and len(row[0])==10 and row[0][0:4].isdigit()]
           print('PRIMARY_NIKKEI_VI_HISTORY='+json.dumps(dict(
               url=url,http_status=status,received_ts=time.time(),bytes=len(raw),
