@@ -158,3 +158,47 @@ def test_encoded_model_is_still_fully_validated_before_inference(tmp_path,monkey
     item.update(model_encoding='json-zlib-v1',model_encoded=base64.b64encode(zlib.compress(json.dumps(model).encode())).decode())
     evidence=build_edge_family_evidence(snapshot)
     assert bool(evidence['components']) is (not marked)
+
+
+def test_enclosing_snapshot_pressure_encodes_intact_model_before_excluding_forecasts(tmp_path,monkeypatch):
+    import json
+    from seiltanzer.operational_edge_compaction import compact_operational_edges
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    engine,snapshot=reference_runtime(tmp_path,monkeypatch)
+    market().attach_market_family_context(engine,snapshot)
+    item=snapshot['edge_family_market_context']['families']['session']
+    original=deepcopy(item['model'])
+    expected=build_edge_family_evidence(snapshot)['families']['session']['market_predictions']
+    snapshot['policy_manager']['bounded_existing_decision_facts']='x'*54000
+    assert len(json.dumps(snapshot).encode())>60000
+    compact_operational_edges(snapshot)
+    item=snapshot['edge_family_market_context']['families']['session']
+    assert 'model_encoded' in item
+    assert market().frozen_model(item)==original
+    assert build_edge_family_evidence(snapshot)['families']['session']['market_predictions']==expected
+    assert len(json.dumps(snapshot,separators=(',',':')).encode())<60000
+
+
+def test_malformed_optional_model_under_byte_pressure_is_excluded_without_breaking_review():
+    from seiltanzer.operational_edge_compaction import compact_operational_edges,EXCLUDED_REASON
+    snapshot={'edge_family_market_context':{'families':{'session':{'model':{'invalid':float('nan')}}}},
+              'policy_manager':{'management_decision':'HOLD','facts':'x'*55000}}
+    compact_operational_edges(snapshot)
+    assert snapshot['policy_manager']['management_decision']=='HOLD'
+    assert 'edge_family_market_context' not in snapshot
+    assert snapshot['edge_family_budget_status']['reason']==EXCLUDED_REASON
+
+
+def test_heavy_builder_cannot_move_frozen_reference_into_the_next_bar_window(tmp_path,monkeypatch):
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    engine,snapshot=reference_runtime(tmp_path,monkeypatch)
+    from seiltanzer.ai_frozen_expert_inputs import capture_market_inputs
+    monkeypatch.setattr('seiltanzer.ai_frozen_expert_inputs.time.time',lambda:T0)
+    engine=capture_market_inputs(engine)
+    snapshot['captured_ts']=T0+301
+    snapshot['policy_manager']['input_audit']={'snapshot_ts':T0+301}
+    market().attach_market_family_context(engine,snapshot)
+    row=build_edge_family_evidence(snapshot)['families']['session']
+    assert row['forecast_available'] is True
+    assert row['forecast_origin_ts']==T0
+    assert snapshot['edge_family_market_context']['market_observation_ts']==T0

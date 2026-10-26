@@ -86,3 +86,31 @@ def test_production_timeout_opens_circuit_and_next_call_fails_fast(monkeypatch):
     finally:
         executor.shutdown(wait=True)
         ai_provider_guard._close_circuit()
+
+@pytest.mark.parametrize('elapsed,expected',[(0.,6.),(3.86,4.14),(7.,1.)])
+def test_provider_reserves_four_seconds_for_authoritative_completion(monkeypatch,elapsed,expected):
+    from seiltanzer.ai_request_trace import AIRequestTrace
+    from concurrent.futures import Future
+    calls=[]
+    class RecordedFuture(Future):
+        def result(self,timeout=None):
+            calls.append(timeout)
+            return {'verdict':'fixture'}
+    class Pool:
+        def submit(self,*a,**k):return RecordedFuture()
+    trace=AIRequestTrace();trace.started=100.
+    monkeypatch.setattr(ai_provider_guard.time,'monotonic',lambda:100.+elapsed)
+    with trace.activate():
+        result=ai_provider_guard.bounded_provider_call(lambda s:s,{},executor=Pool())
+    assert result=={'verdict':'fixture'}
+    assert calls==[pytest.approx(expected)]
+
+
+def test_exhausted_request_budget_never_starts_an_optional_provider(monkeypatch):
+    from seiltanzer.ai_request_trace import AIRequestTrace
+    class Pool:
+        def submit(self,*a,**k):pytest.fail('provider must not start')
+    trace=AIRequestTrace();trace.started=100.
+    monkeypatch.setattr(ai_provider_guard.time,'monotonic',lambda:108.)
+    with trace.activate(),pytest.raises(RuntimeError,match='provider_request_budget_exhausted'):
+        ai_provider_guard.bounded_provider_call(lambda s:s,{},executor=Pool())

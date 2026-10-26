@@ -81,6 +81,10 @@ def compact_operational_profile(value):
 def compact_operational_edges(snapshot):
     """Project profiles; preserve bounded exact family inputs or name exclusion."""
     manager = snapshot.get("policy_manager")
+    context=snapshot.get("edge_family_market_context")
+    if isinstance(context,dict) and isinstance(context.get('families'),dict) and _bytes(snapshot)>54000:
+        from .edge_family_market import freeze_context_models
+        freeze_context_models(context,force=True)
     for key in FAMILY_AUDITS:
         if isinstance(snapshot.get(key), dict) and _bytes(snapshot[key]) > 4000:
             snapshot[key] = {field: deepcopy(snapshot[key][field]) for field in (

@@ -519,16 +519,18 @@ def _model_reason(model, code, family, cutoff):
     return None
 
 
-def freeze_context_models(context):
+def freeze_context_models(context,*,force=False):
     """Lossless wire encoding only when the complete context exceeds its budget."""
     import base64,json,zlib
     from .operational_edge_compaction import MARKET_CONTEXT_MAX_BYTES
-    if len(json.dumps(context,allow_nan=False,separators=(',',':')).encode())<=MARKET_CONTEXT_MAX_BYTES:
+    if not force and len(json.dumps(context,allow_nan=False,separators=(',',':')).encode())<=MARKET_CONTEXT_MAX_BYTES:
         return
     for item in context['families'].values():
+        if not isinstance(item,dict):continue
         model=item.get('model')
         if not isinstance(model,dict):continue
-        raw=json.dumps(model,allow_nan=False,separators=(',',':')).encode()
+        try:raw=json.dumps(model,allow_nan=False,separators=(',',':')).encode()
+        except (TypeError,ValueError):continue
         if len(raw)>24_000:continue
         item['model_encoded']=base64.b64encode(zlib.compress(raw)).decode('ascii')
         item['model_encoding']='json-zlib-v1'
@@ -561,6 +563,9 @@ def attach_market_family_context(engine, snapshot):
     snapshot['edge_family_market_context'] = context
     from .snapshot_clock import market_observation_cutoff
     cutoff = market_observation_cutoff(snapshot)
+    frozen_cutoff=number(getattr(getattr(engine,'market',None),'frozen_inputs_captured_ts',None))
+    if cutoff is not None and frozen_cutoff is not None and frozen_cutoff>0:
+        cutoff=min(cutoff,frozen_cutoff)
     context['market_observation_ts'] = cutoff
     code = (snapshot.get('strategy') or {}).get('instrument') or snapshot.get('instrument')
     feed = getattr(engine, 'market', None)

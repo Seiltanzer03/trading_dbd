@@ -249,3 +249,21 @@ def test_reference_lane_survives_legacy_refresh_gap_without_heavy_build(legacy_a
     assert mat._event_reason() is None
     engine.market.intraday_source_authority['observed_ts']+=300
     assert mat._event_reason()=='COMPLETED_MARKET_BAR_CHANGED'
+
+
+def test_rebuild_on_reference_catchup_remembers_temporarily_missing_legacy_clock():
+    from test_family_reference_market import reference_source,T0
+    engine=FakeEngine();engine.market.instrument_code='NAS100'
+    engine.market.family_reference_series=reference_source()
+    old={'target_instrument':'NAS100','observed_ts':T0+300}
+    engine.market.intraday_source_authority=dict(old)
+    mat=AISnapshotMaterializer(engine,lambda _:snapshot());mat._build_once()
+    engine.market.intraday_source_authority={}
+    engine.market.family_reference_series['observed_ts']=T0+300
+    engine.market.family_reference_series['bars'][-1]['bar_end_ts']=T0+300
+    assert mat._event_reason()=='COMPLETED_MARKET_BAR_CHANGED'
+    mat._build_once()
+    engine.market.intraday_source_authority=dict(old)
+    assert mat._event_reason() is None
+    engine.market.intraday_source_authority['observed_ts']+=300
+    assert mat._event_reason()=='COMPLETED_MARKET_BAR_CHANGED'
