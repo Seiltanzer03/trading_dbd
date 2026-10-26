@@ -24,7 +24,7 @@ jobs:
           import json,time,uuid
           from websockets.sync.client import connect
           from seiltanzer.data.feeds import _tv_frame,_tv_payloads
-          for symbol in ('OANDA:NAS100USD','OANDA:XAUUSD'):
+          for symbol in ('OANDA:SPX500USD','OANDA:US30USD','FPMARKETS:GER40','OANDA:UK100GBP','OANDA:JP225YJPY','OANDA:XAGUSD','OANDA:EURUSD','OANDA:USDCAD'):
               session='cs_'+uuid.uuid4().hex[:12];deadline=time.monotonic()+20;rows=[];resolved={};errors=[];completed=False;total=0
               try:
                   with connect('wss://data.tradingview.com/socket.io/websocket',origin='https://data.tradingview.com',open_timeout=8,close_timeout=1,max_size=4_000_000) as ws:
