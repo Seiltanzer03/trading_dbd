@@ -12,55 +12,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: cc3a5f7e39633a526d79ce1448432b0a586d5226
+          ref: b411ed1a67457e033b0f910dad36563b7fe35698
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
       - run: pip install -q -e '.[dev]' paramiko
-      - name: Count original Nikkei Treasury clock candidates without writes or raw publication
+      - name: Inspect cached runtime clocks and one actual XAU minute source without writes
         env:
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           python -u - <<'PY'
-          import base64,gzip,io,json,os,shlex
-          from collections import Counter
-          from scripts.export_native_family_history import REMOTE_EXPORT
+          import json,os,shlex,time
           from scripts.production_ede_offload import _connect
-          from seiltanzer.config import ALL_INSTRUMENTS
-          from seiltanzer.native_family_capture_projection import verified_capture
-          program=REMOTE_EXPORT.replace(repr(tuple(ALL_INSTRUMENTS)),repr(('JPY100',)))
+          program="import json,time,urllib.request\nwith urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=15) as response: raw=response.read(2100001)\nassert len(raw)<=2100000\ns=json.loads(raw);now=time.time()\nv=(s.get('levels') or {}).get('volume_profile') or {}\nprice=(s.get('feeds') or {}).get('price') or {}\nout=dict(read_only=True,sqlite_access=False,paid_calls=False,instrument=s.get('instrument'),\n sampled_ts=now,state_ts=s.get('ts'),intraday_window_end=v.get('window_end'),\n intraday_end_age_sec=now-v['window_end'] if isinstance(v.get('window_end'),(int,float)) else None,\n price_source=price.get('source'),price_status=price.get('status'))\nwith urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=10) as response: raw=response.read(100001)\nassert len(raw)<=100000\nstatus=json.loads(raw)\nout['materializer']={k:status.get(k) for k in ('ready','building','built_at','age_sec','build_ms','last_error','build_n','invalidated_reason')}\nprint('RUNTIME_MARKET_CLOCKS='+json.dumps(out))"
           client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
           try:
-              _,stdout,stderr=client.exec_command('python3 -c '+shlex.quote(program),timeout=45)
-              payload=stdout.read(40000001);error=stderr.read(2000).decode();status=stdout.channel.recv_exit_status()
-              if status:
-                  print('TREASURY_CLOCK_INVENTORY_UNAVAILABLE='+json.dumps(dict(status=status,error=error)),flush=True)
-                  raise SystemExit(status)
-              assert len(payload)<=40000000
-              compressed=base64.b64decode(payload.strip(),validate=True)
-              with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as reader:raw=reader.read(8000001)
-              assert len(raw)<=8000000
-              batch=json.loads(raw);assert batch.get('read_only') is True
-              counts=Counter();pairs=set();offsets=[]
-              for row in batch['rows']:
-                  frozen=verified_capture(row)
-                  block=frozen.get('treasury_context_v1') if isinstance(frozen,dict) else None
-                  if not isinstance(block,dict):continue
-                  counts['original_treasury_contexts']+=1
-                  if block.get('available') is not True:continue
-                  counts['parent_available']+=1
-                  if block.get('publication_timestamp_kind')!='CONSERVATIVE_NEXT_UTC_DAY':continue
-                  counts['explicit_conservative_boundary']+=1
-                  fetched=block.get('fetched_at');bound=block.get('published_at');captured=block.get('captured_ts')
-                  if all(isinstance(value,(int,float)) and not isinstance(value,bool) for value in (fetched,bound,captured)):
-                      if 0<fetched<bound<=captured<=row['original_created_ts']:
-                          counts['prefetched_before_boundary_candidates']+=1
-                          pairs.add((bound,fetched));offsets.append((bound-fetched)/60)
-              print('ORIGINAL_TREASURY_CLOCK_INVENTORY='+json.dumps(dict(instrument='JPY100',
-                  rows=len(batch['rows']),counts=dict(counts),distinct_boundary_receipt_pairs=len(pairs),
-                  prefetch_minutes_min=min(offsets) if offsets else None,prefetch_minutes_max=max(offsets) if offsets else None,
-                  export_reason=batch['reason'],history_complete=batch['history_complete'],
-                  read_only=True,raw_payload_published=False,training_performed=False)),flush=True)
+              _,stdout,stderr=client.exec_command('python3 -c '+shlex.quote(program),timeout=40)
+              output=stdout.read(50001).decode();error=stderr.read(1000).decode();status=stdout.channel.recv_exit_status()
+              assert len(output)<=50000
+              print(output,flush=True)
+              if status: print('RUNTIME_CLOCK_PROBE_UNAVAILABLE='+str(status),flush=True)
           finally:client.close()
+          import yfinance as yf
+          from seiltanzer.config import ALL_INSTRUMENTS
+          from seiltanzer.mathematical_edge import completed_live_bars
+          symbol=ALL_INSTRUMENTS['XAU'].yahoo
+          hist=yf.Ticker(symbol).history(period='1d',interval='1m',timeout=10)
+          received=time.time();rows=[(ts.timestamp(),float(r['Open']),float(r['High']),float(r['Low']),float(r['Close'])) for ts,r in hist.iterrows()]
+          completed=completed_live_bars(rows,received)
+          print('ACTUAL_XAU_SOURCE_CLOCKS='+json.dumps(dict(symbol=symbol,received_ts=received,rows=len(rows),
+           latest_source_minute_start=rows[-1][0] if rows else None,
+           latest_completed_5m_end=completed[-1]['bar_end_ts'] if completed else None,
+           expected_current_5m_origin=int(received//300)*300,
+           latest_minute_age_sec=received-rows[-1][0] if rows else None,
+           latest_completed_bar_age_sec=received-completed[-1]['bar_end_ts'] if completed else None,
+           source_timestamp_rewritten=False,training=False)),flush=True)
           PY
