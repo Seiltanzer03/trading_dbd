@@ -43,7 +43,7 @@ def _bars(source, captured):
     # Large sidecar arrays have their own per-observation validation. A valid
     # 60-day flow archive must not exhaust the small metadata traversal budget
     # and reject every independently validated target family.
-    if simulated_evidence({k: v for k, v in source.items() if k not in {'bars','trade_flow_history','event_window_bars'}}):
+    if simulated_evidence({k: v for k, v in source.items() if k not in {'bars','trade_flow_history','event_window_bars','event_hourly_bars','event_hourly_archive'}}):
         raise ValueError('SIMULATED_TRAINING_SOURCE_NOT_ADMISSIBLE')
     raw = source.get('bars')
     if not isinstance(raw, list) or not 0 < len(raw) <= MAX_HISTORY:
@@ -422,7 +422,9 @@ def _model_reason(model, code, family, cutoff):
             from .edge_family_trade_flow import archive_provenance_valid
             if family!='order_flow' or not archive_provenance_valid(model,code,cutoff):
                 return 'MARKET_TRADE_FLOW_ARCHIVE_PROVENANCE_INVALID'
-        if 'official_event_archive' in model or (family=='event' and model.get('features_are_captured_receipts') is False):
+        if ('official_event_archive' in model or 'event_hourly_target_archive' in model
+                or 'hourly_target_contract' in model or 'historical_target_prices' in model
+                or (family=='event' and model.get('features_are_captured_receipts') is False)):
             from .edge_family_event_archive import archive_provenance_valid
             if family!='event' or not archive_provenance_valid(model,trained,cutoff):
                 return 'MARKET_EVENT_ARCHIVE_PROVENANCE_INVALID'
@@ -463,7 +465,8 @@ def _model_reason(model, code, family, cutoff):
         if not isinstance(source, dict):
             return 'MARKET_TARGET_CONFIGURED_SERIES_MISMATCH'
         expected = ALL_INSTRUMENTS[code]
-        if (source.get('interval') != '5m' or source.get('not_broker_execution_bars') is not True
+        hourly=family=='event' and 'event_hourly_target_archive' in model
+        if (source.get('interval') != ('1h' if hourly else '5m') or source.get('not_broker_execution_bars') is not True
                 or source.get('provider') != ('Binance' if code in CRYPTO_INSTRUMENTS else 'Yahoo Finance via yfinance')
                 or source.get('ticker') != (expected.binance_symbol if code in CRYPTO_INSTRUMENTS else expected.yahoo)):
             return 'MARKET_TARGET_CONFIGURED_SERIES_MISMATCH'

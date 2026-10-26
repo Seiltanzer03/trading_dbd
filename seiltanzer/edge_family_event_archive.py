@@ -97,8 +97,29 @@ def fit_archive_events(code,bars,captured,horizons,archive,source,*,target_sourc
         except (ValueError,TypeError,KeyError) as exc:
             event_error=str(exc)[:180]
     datasets={h:archive_event_dataset(code,bars,captured,h,archive) for h in horizons}
+    hourly_proof=None
+    if isinstance(target_source,dict) and 'event_hourly_archive' in target_source:
+        selection=_fit_family(code,'event',bars,captured,horizons,None,None,source,
+            datasets_override=datasets,feature_variation_required=True,pretest_selection_only=True)
+        # Freeze the target-resolution choice before any final-test outcome.
+        if selection['status']!='PRETEST_SELECTED':
+            from .edge_family_hourly_events import hourly_event_dataset,HORIZONS
+            hourly_horizons=tuple(h for h in horizons if h in HORIZONS)
+            if hourly_horizons:
+                try:
+                    hourly_datasets={h:hourly_event_dataset(code,target_source,captured,h,archive) for h in hourly_horizons}
+                    hourly_proof=target_source['event_hourly_archive']
+                    source={**source,'interval':'1h','bars_sha256':hourly_proof['series_sha256']}
+                    datasets=hourly_datasets;horizons=hourly_horizons;event_proof=None
+                except (ValueError,TypeError,KeyError) as exc:
+                    event_error='HOURLY_TARGET_UNAVAILABLE:'+str(exc)[:150]
     result=_fit_family(code,'event',bars,captured,horizons,None,None,source,
         datasets_override=datasets,feature_variation_required=True)
+    if hourly_proof is not None:
+        from .edge_family_hourly_events import CONTRACT as HOURLY_CONTRACT
+        result.update(event_hourly_target_archive=hourly_proof,hourly_target_contract=HOURLY_CONTRACT,
+            historical_target_prices='COMPLETED_PROVIDER_HOURLY_OPEN_TO_OPEN',
+            historical_bar_availability='COMPLETED_HOURLY_PROVIDER_RECORDS_OPEN_TO_OPEN_NOT_RECORDED_RECEIPT')
     result.update(official_event_archive=archive.summary(),event_timing_contract=CONTRACT,
         features_are_captured_receipts=False,consensus_available=False,surprise_computed=False,
         historical_feature_availability='VERIFIED_OFFICIAL_RELEASE_TIMES_ACTUAL_RETRIEVAL_RETAINED')
@@ -118,6 +139,9 @@ def archive_provenance_valid(model,trained,cutoff=None):
         return False
     if not archive_model_provenance_valid({**model,'official_macro_archive':model.get('official_event_archive')},trained):
         return False
+    if any(key in model for key in ('event_hourly_target_archive','hourly_target_contract','historical_target_prices')):
+        from .edge_family_hourly_events import model_provenance_valid
+        if not model_provenance_valid(model,trained,cutoff):return False
     if 'event_window_target_archive' in model or 'event_target_bars_sha256' in model:
         from .binance_event_windows import event_archive_valid
         proof=model.get('event_window_target_archive');summary=model['official_event_archive']

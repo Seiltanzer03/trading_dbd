@@ -260,7 +260,7 @@ def retain_yahoo_history(current, archives, captured):
                 ('instrument',code),('provider','Yahoo Finance via yfinance'),
                 ('ticker',ALL_INSTRUMENTS[code].yahoo),('interval','5m'))):
             raise ValueError('HISTORY_SERIES_IDENTITY_MISMATCH')
-        if simulated_evidence({k:v for k,v in item.items() if k!='bars'}):
+        if simulated_evidence({k:v for k,v in item.items() if k not in {'bars','event_hourly_bars','event_hourly_archive'}}):
             raise ValueError('HISTORY_SYNTHETIC_SOURCE_REJECTED')
         rows=item.get('bars')
         if not isinstance(rows,list) or not 0<len(rows)<=MAX_BARS or item.get('source_sha256')!=fingerprint(rows):
@@ -599,4 +599,28 @@ def collect_fresh_sources(captured, *, seed_sources=(), cache_dir=None, days=60,
             exact=[]
         with ThreadPoolExecutor(max_workers=3) as pool:
             list(pool.map(enrich_events,exact))
+    if macro_archive is not None and macro_archive.published_release_times():
+        hourly_targets=[row for row in sources if row.get('instrument') not in COINBASE_PRODUCTS
+            and row.get('provider')=='Yahoo Finance via yfinance'
+            and row.get('ticker')==ALL_INSTRUMENTS[row['instrument']].yahoo]
+        yahoo_denied=any(failure.get('provider')=='Yahoo Finance via yfinance'
+            and any(token in failure.get('error','').lower() for token in
+                ('403','451','429','ratelimit','rate limit','too many requests'))
+            for row in attempts.values() for failure in row['failures'])
+        if yahoo_denied:
+            for row in hourly_targets:
+                attempts[row['instrument']]['hourly_event_error']='YAHOO_HOST_DENIED_DURING_PRIMARY_COLLECTION'
+            hourly_targets=[]
+        def enrich_hourly(source):
+            code=source['instrument']
+            try:
+                from .edge_family_hourly_events import collect_hourly_events
+                extra=collect_hourly_events(code,captured,budget)
+                source.update(extra)
+                attempts[code]['hourly_event_rows']=len(extra['event_hourly_bars'])
+            except Exception as exc:
+                attempts[code]['hourly_event_error']=f'{type(exc).__name__}: {str(exc)[:180]}'
+            return source
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(enrich_hourly,hourly_targets))
     return sources, errors, attempts

@@ -112,7 +112,7 @@ def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, fami
         try:
             bars, exclusions = _validated_bars(source.get('bars'), captured_ts)
             rows[code] = train_instrument(code, bars, captured_ts, horizons=horizons)
-            audited_sources.append({k: value for k, value in source.items() if k not in {'bars','trade_flow_history','event_window_bars'}} | {
+            audited_sources.append({k: value for k, value in source.items() if k not in {'bars','trade_flow_history','event_window_bars','event_hourly_bars'}} | {
                 'bar_count': len(bars), 'validated_bars_sha256': fingerprint(bars),
                 'bar_exclusions': exclusions,
                 'first_bar_end_ts': bars[0]['bar_end_ts'] if bars else None,

@@ -10,6 +10,8 @@ on:
       - 'seiltanzer/binance_event_windows.py'
       - 'seiltanzer/ai_frozen_expert_inputs.py'
       - 'seiltanzer/edge_family_event_archive.py'
+      - 'seiltanzer/edge_family_hourly_events.py'
+      - 'tests/test_edge_family_hourly_events.py'
       - 'seiltanzer/edge_family_trade_flow.py'
       - 'seiltanzer/edge_family_option_interest.py'
       - 'seiltanzer/edge_family_treasury_factors.py'
@@ -73,7 +75,7 @@ jobs:
           cache: pip
       - run: pip install -q -e '.[dev]' paramiko boto3
       - name: Verify historical family training and bounded runtime
-        run: python -m pytest -q tests/test_mathematical_edge_sources.py tests/test_mathematical_edge.py tests/test_edge_family_market.py tests/test_edge_family_model_retention.py tests/test_edge_family_macro_archive.py tests/test_macro_historical_offhost_bundle.py tests/test_edge_family_native_history.py tests/test_native_capture_projection.py tests/test_native_family_history_sampling.py tests/test_binance_public_archive.py tests/test_edge_family_event_archive.py tests/test_edge_family_trade_flow.py tests/test_edge_family_option_interest.py tests/test_edge_family_treasury_factors.py tests/test_binance_event_windows.py tests/test_production_model_consumption.py
+        run: python -m pytest -q tests/test_mathematical_edge_sources.py tests/test_mathematical_edge.py tests/test_edge_family_market.py tests/test_edge_family_model_retention.py tests/test_edge_family_macro_archive.py tests/test_macro_historical_offhost_bundle.py tests/test_edge_family_native_history.py tests/test_native_capture_projection.py tests/test_native_family_history_sampling.py tests/test_binance_public_archive.py tests/test_edge_family_event_archive.py tests/test_edge_family_trade_flow.py tests/test_edge_family_option_interest.py tests/test_edge_family_treasury_factors.py tests/test_binance_event_windows.py tests/test_production_model_consumption.py tests/test_edge_family_hourly_events.py
       - name: Restore hash-verified per-provider market-bar cache
         id: math-source-cache
         uses: actions/cache/restore@v4
@@ -90,9 +92,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .math-family-model-cache
-          key: ${{ runner.os }}-family-model-v1-${{ hashFiles('seiltanzer/edge_family_market.py', 'seiltanzer/edge_family_training.py', 'seiltanzer/edge_family_macro_archive.py', 'seiltanzer/edge_family_adapters.py', 'seiltanzer/config.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ runner.os }}-family-model-v1-${{ hashFiles('seiltanzer/edge_family_market.py', 'seiltanzer/edge_family_training.py', 'seiltanzer/edge_family_macro_archive.py', 'seiltanzer/edge_family_hourly_events.py', 'seiltanzer/edge_family_adapters.py', 'seiltanzer/config.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ${{ runner.os }}-family-model-v1-${{ hashFiles('seiltanzer/edge_family_market.py', 'seiltanzer/edge_family_training.py', 'seiltanzer/edge_family_macro_archive.py', 'seiltanzer/edge_family_adapters.py', 'seiltanzer/config.py') }}-
+            ${{ runner.os }}-family-model-v1-${{ hashFiles('seiltanzer/edge_family_market.py', 'seiltanzer/edge_family_training.py', 'seiltanzer/edge_family_macro_archive.py', 'seiltanzer/edge_family_hourly_events.py', 'seiltanzer/edge_family_adapters.py', 'seiltanzer/config.py') }}-
             ${{ runner.os }}-family-model-v1-
       - name: Read cached actual market bars without production writes
         env:
