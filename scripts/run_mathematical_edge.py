@@ -99,7 +99,7 @@ def _instrument_matrix(rows, sources, captured_ts):
 
 
 def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, family_history=None,
-                 macro_archive=None,previous_family_reports=None,related_sources=None):
+                 macro_archive=None,previous_family_reports=None,related_sources=None,family_target_sources=None):
     rows, audited_sources = {}, []
     errors = dict(errors)
     for source in sources:
@@ -130,13 +130,17 @@ def build_report(sources, errors, captured_ts, horizons=SEARCH_HORIZONS, *, fami
     from seiltanzer.mathematical_edge_archive import replay_frozen_fx_rule
     from seiltanzer.edge_family_market import train_market_families
     family_models = train_market_families(sources, captured_ts, horizons=horizons,
-        feature_history=family_history,macro_archive=macro_archive,related_sources=related_sources)
+        feature_history=family_history,macro_archive=macro_archive,related_sources=related_sources,
+        family_target_sources=family_target_sources)
     from seiltanzer.edge_family_model_retention import retain_fitted_families
     family_models,model_continuity=retain_fitted_families(family_models,previous_family_reports or [],captured_ts)
     return {
         'contract_version': CONTRACT, 'created_ts': captured_ts, 'instruments': rows,
         'production_authority': False, 'automatic_execution': False,
         'family_market_models': family_models,
+        'family_reference_sources':[{k:s.get(k) for k in ('instrument','provider','ticker','interval',
+            'received_ts','observed_ts','source_sha256','reference_scope')} | {'bar_count':len(s.get('bars',[]))}
+            for s in family_target_sources or [] if isinstance(s,dict)],
         'family_model_continuity':model_continuity,
         'historical_macro_source': ({'available':True,**macro_archive.summary()} if macro_archive is not None
             else {'available':False,'reason':'OFFICIAL_MACRO_ARCHIVE_NOT_REQUESTED'}),
@@ -197,6 +201,8 @@ def main():
     parser.add_argument('--macro-source-sha', help='original bundle source SHA; distinct from current model publication SHA')
     parser.add_argument('--sources-output', help='save fetched real bars for exact offline reproduction')
     parser.add_argument('--refresh-sources', action='store_true', help='refresh public bars off-host; --sources supplies read-only fallback')
+    parser.add_argument('--family-reference-sources',action='store_true',
+                        help='collect independent configured family targets within the total refresh budget')
     parser.add_argument('--model-cache-dir',help='Bounded local frozen family-model cache')
     parser.add_argument('--cache-dir', help='per-provider hash-verified off-host source cache')
     parser.add_argument('--source-days', type=int, default=60)
@@ -212,19 +218,28 @@ def main():
     macro_archive,macro_error=_load_official_macro_archive(args,captured)
     sources, errors, attempts = [], {}, {}
     diagnostic_sources = [];previous_family_reports=[]
+    family_target_sources=[];reference_errors={}
     if args.sources:
         data = json.loads(Path(args.sources).read_text())
         sources, errors = data['sources'], data.get('errors', {})
         diagnostic_sources = data.get('diagnostic_sources', [])
+        family_target_sources=data.get('family_target_sources',[])
         if isinstance(data.get('previous_family_model_report'),dict):
             previous_family_reports.append(data['previous_family_model_report'])
     if args.refresh_sources or not args.sources:
         from seiltanzer.mathematical_edge_sources import collect_fresh_sources
         previous_related = diagnostic_sources
         diagnostic_sources = []
+        refresh_started=time.monotonic()
+        if args.family_reference_sources:
+            from seiltanzer.reference_market_series import collect_reference_sources
+            family_target_sources,reference_errors=collect_reference_sources(captured,
+                budget_seconds=min(45.,args.source_budget_seconds/3.))
+        remaining_budget=(max(1.,args.source_budget_seconds-(time.monotonic()-refresh_started))
+                          if args.family_reference_sources else args.source_budget_seconds)
         sources, errors, attempts = collect_fresh_sources(
             captured, seed_sources=sources, cache_dir=args.cache_dir, days=args.source_days,
-            budget_seconds=args.source_budget_seconds, diagnostic_sources=diagnostic_sources,
+            budget_seconds=remaining_budget, diagnostic_sources=diagnostic_sources,
             macro_archive=macro_archive,
         )
         present = {item.get('instrument') for item in diagnostic_sources}
@@ -235,6 +250,7 @@ def main():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({'sources': sources, 'errors': errors, 'exported_ts': captured,
                                    'diagnostic_sources': diagnostic_sources,
+                                   'family_target_sources':family_target_sources,
                                    'collection_attempts': attempts}, ensure_ascii=False, allow_nan=False))
     from seiltanzer.edge_family_model_retention import read_fitted_cache,write_fitted_cache
     if args.model_cache_dir:
@@ -250,7 +266,8 @@ def main():
             parser.error('--family-history must be an instrument/family matrix')
     report = build_report(sources, errors, captured, horizons, family_history=family_history,
                          macro_archive=macro_archive,previous_family_reports=previous_family_reports,
-                         related_sources=diagnostic_sources)
+                         related_sources=diagnostic_sources,family_target_sources=family_target_sources)
+    report['family_reference_source_errors']=reference_errors
     if macro_error is not None:
         report['historical_macro_source']={'available':False,'reason':macro_error}
     report['collection_attempts'] = attempts

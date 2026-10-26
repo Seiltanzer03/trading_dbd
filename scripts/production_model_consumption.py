@@ -37,12 +37,78 @@ def verify_report(report, *, expected_sha, captured_ts):
         trained_models=declared,working_supported_models=summary.get('working_supported_models'))
 
 
-def verify_local(expected_sha):
+def verify_family_runtime(status,report,*,expected_sha,captured_ts):
+    from seiltanzer.reference_market_series import PROVIDER,SYMBOLS,number
+    from seiltanzer.config import ALL_INSTRUMENTS,CRYPTO_INSTRUMENTS
+    if not isinstance(status,dict):raise ValueError('FAMILY_RUNTIME_STATUS_INVALID')
+    if status.get('current_trade_id') is None:return {'state':'NO_ACTIVE_TRADE_FORECAST_REQUIRED'}
+    receipt=status.get('family_market_forecasts') or {}
+    if not isinstance(receipt,dict):raise ValueError('FAMILY_RUNTIME_RECEIPT_INVALID')
+    code=receipt.get('instrument')
+    if (status.get('ready') is not True or status.get('snapshot_trade_id')!=status.get('current_trade_id')
+            or code not in ALL_INSTRUMENTS or status.get('current_instrument')!=code
+            or receipt.get('contract_version')!='family-runtime-forecast-receipt-v1'
+            or receipt.get('scope')!='FROZEN_INPUTS_AT_CAPTURE_NOT_CURRENT_DECISION'
+            or receipt.get('published_for_sha')!=expected_sha
+            or any(receipt.get(k) is not False for k in ('network_calls','runtime_fitting','final_action_selected'))
+            or report.get('published_for_sha')!=expected_sha):raise ValueError('EXACT_FAMILY_RUNTIME_SNAPSHOT_UNAVAILABLE')
+    if code in CRYPTO_INSTRUMENTS:return {'state':'CRYPTO_OUTSIDE_NONCRYPTO_REFERENCE_SCOPE'}
+    captured=number(receipt.get('captured_ts'))
+    if captured is None or not 0<captured<=captured_ts or captured_ts-captured>=900:
+        raise ValueError('FAMILY_RUNTIME_RECEIPT_EXPIRED')
+    models=(report.get('family_market_models') or {}).get(code) or {}
+    available=[];qualified=[]
+    for family,row in (receipt.get('families') or {}).items():
+        if not isinstance(row,dict):raise ValueError('FAMILY_RUNTIME_ROW_INVALID')
+        predictions=row.get('predictions') or {}
+        if not predictions:continue
+        model=models.get(family) or {};source=model.get('source') or {}
+        if source.get('provider')!=PROVIDER:continue
+        if (row.get('model_sha256')!=model.get('model_sha256') or row.get('target_provider')!=PROVIDER
+                or row.get('target_symbol')!=SYMBOLS[code] or row.get('target_symbol')!=source.get('ticker')):
+            raise ValueError('FAMILY_RUNTIME_MODEL_OR_TARGET_MISMATCH')
+        origin=number(row.get('forecast_origin_ts'));expiry=number(row.get('reference_valid_until_ts'))
+        unexpired=False
+        for name,head in predictions.items():
+            probability=number(head.get('probability'));horizon=number(head.get('horizon_minutes'))
+            expected=(model.get('heads') or {}).get(name) or {}
+            if (isinstance(head.get('probability'),bool) or probability is None or not 0<=probability<=1 or horizon!=expected.get('horizon_minutes')
+                    or origin is None or origin>captured or type(head.get('forecast_expired')) is not bool):
+                raise ValueError('FAMILY_RUNTIME_PREDICTION_INVALID')
+            if not head['forecast_expired'] and expiry is not None and captured_ts<min(expiry,origin+60*horizon):
+                unexpired=True
+        if unexpired:
+            available.append(family)
+            if row.get('preference_available_at_capture') is True:qualified.append(family)
+    if not available:raise ValueError('NO_CURRENT_CONFIGURED_REFERENCE_FORECAST')
+    return {'state':'LIVE_FAMILY_FORECASTS_VERIFIED','published_for_sha':expected_sha,'instrument':code,
+        'available_forecasts':len(available),'families':sorted(available),
+        'qualified_preferences_at_capture':sorted(qualified),'final_action_selected':False}
+
+
+def verify_local(expected_sha,*,family_runtime=False):
     with urllib.request.urlopen('http://127.0.0.1:8790/api/research/mathematical-edge',timeout=6) as response:
         raw=response.read(2_100_001)
         if len(raw)>2_100_000:raise ValueError('PRODUCTION_MODEL_RESPONSE_EXCEEDS_BOUND')
-    result=verify_report(json.loads(raw),expected_sha=expected_sha,captured_ts=time.time())
+    report=json.loads(raw)
+    result=verify_report(report,expected_sha=expected_sha,captured_ts=time.time())
     print('LIVE_MODEL_CONSUMPTION_VERIFIED='+json.dumps(result),flush=True)
+    if family_runtime:
+        deadline=time.monotonic()+300;last_reason='SNAPSHOT_WARMING';last_print=0.
+        while time.monotonic()<deadline:
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=6) as response:
+                    raw=response.read(100001)
+                    if len(raw)>100000:raise ValueError('FAMILY_STATUS_EXCEEDS_BOUND')
+                receipt=verify_family_runtime(json.loads(raw),report,expected_sha=expected_sha,captured_ts=time.time())
+                print('LIVE_FAMILY_FORECAST_CONSUMPTION='+json.dumps(receipt),flush=True)
+                break
+            except (ValueError,TimeoutError,OSError) as exc:
+                last_reason=str(exc) if isinstance(exc,ValueError) else type(exc).__name__
+                if time.monotonic()-last_print>=30:
+                    print('FAMILY_RUNTIME_WARMING='+last_reason,flush=True);last_print=time.monotonic()
+                time.sleep(2)
+        else:raise RuntimeError('LIVE_FAMILY_FORECAST_CONSUMPTION_FAILED:'+last_reason)
     return result
 
 
@@ -50,16 +116,18 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--expected-sha',required=True)
     parser.add_argument('--password')
+    parser.add_argument('--family-runtime',action='store_true')
     args=parser.parse_args()
     if re.fullmatch('[0-9a-f]{40}',args.expected_sha) is None:raise ValueError('EXPECTED_SHA_INVALID')
     if not args.password:
-        verify_local(args.expected_sha)
+        verify_local(args.expected_sha,family_runtime=args.family_runtime)
         return
     from scripts.production_ede_offload import _connect
     client=_connect(args.password,attempts=1)
     try:
         command='cd /opt/seiltanzer && .venv/bin/python -m scripts.production_model_consumption --expected-sha '+shlex.quote(args.expected_sha)
-        _,stdout,stderr=client.exec_command(command,timeout=40)
+        if args.family_runtime:command+=' --family-runtime'
+        _,stdout,stderr=client.exec_command(command,timeout=360 if args.family_runtime else 40)
         output=stdout.read(32000).decode();error=stderr.read(4000).decode()
         status=stdout.channel.recv_exit_status()
         print(output,flush=True)

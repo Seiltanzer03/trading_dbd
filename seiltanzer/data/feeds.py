@@ -298,6 +298,8 @@ class MarketData:
         self.intraday: list[tuple[float, float, float]] = []  # (ts, price, volume)
         self.intraday_ohlcv: list[tuple[float, float, float, float, float, float]] = []
         self.intraday_source_authority: dict = {}
+        self.family_reference_series: dict | None = None
+        self.family_reference_error: str | None = None
         self.binance_trade_flow: dict = {}
         self._intraday_lock = threading.RLock()
         self.intraday_is_offset: bool = False
@@ -369,6 +371,8 @@ class MarketData:
             self.intraday = []
             self.intraday_ohlcv = []
             self.intraday_source_authority = {}
+            self.family_reference_series = None
+            self.family_reference_error = None
             self.binance_trade_flow = {}
             self.intraday_is_offset = False
             self.daily = {"bars": None, **_status_dict()}
@@ -915,6 +919,26 @@ class MarketData:
                                "DIRECT_QUOTED_FX_PAIR_CONTEXT" if direct else "PROXY_CONTEXT_ONLY"),
         }
 
+    def refresh_family_reference(self, requested_code: str) -> None:
+        """Independent small price-forecast window; execution quotes stay owned."""
+        from ..reference_market_series import fetch_reference_series,validate_reference_series,SYMBOLS
+        if self.demo or requested_code not in SYMBOLS:
+            return
+        try:
+            series=fetch_reference_series(requested_code,limit=120,timeout=5.)
+            reason=validate_reference_series(series,requested_code,time.time(),runtime=True)
+            if reason:raise ValueError(reason)
+            with self._intraday_lock:
+                if self.instrument_code==requested_code and not self.demo:
+                    self.family_reference_series=series
+                    self.family_reference_error=None
+        except Exception as exc:
+            with self._intraday_lock:
+                if self.instrument_code==requested_code:
+                    # Keep any still-valid original receipt. Consumers enforce
+                    # the current bar and TTL; a failed fetch cannot refresh it.
+                    self.family_reference_error=type(exc).__name__
+
     def refresh_intraday(self) -> None:
         """1m-бары дня для VWAP (объём нужен; у кэш-индексов его нет — честно None)."""
         with self._intraday_lock:
@@ -953,6 +977,7 @@ class MarketData:
             except Exception:
                 pass
             return
+        self.refresh_family_reference(requested_code)
         try:
             import yfinance as yf
             hist = yf.Ticker(requested_instrument.yahoo).history(period="1d", interval="1m")

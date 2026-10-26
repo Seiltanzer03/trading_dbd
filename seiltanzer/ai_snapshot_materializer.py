@@ -130,6 +130,7 @@ class AISnapshotMaterializer:
         self._budget_degraded_build_n = 0
         self._strict_compaction_build_n = 0
         self._last_budget_status: dict[str, Any] = {}
+        self._family_runtime_status: dict[str, Any] = {}
 
     def current_trade(self) -> dict[str, Any] | None:
         try:
@@ -391,6 +392,7 @@ class AISnapshotMaterializer:
                 self._baseline_completed_bar = None
                 self._baseline_instrument = None
                 self._invalidated_reason = None
+                self._family_runtime_status = {}
             return
         started_wall = time.time()
         started_mono = time.monotonic()
@@ -419,6 +421,8 @@ class AISnapshotMaterializer:
             ):
                 raise RuntimeError("BUILT_SNAPSHOT_TRADE_MISMATCH_OR_UNAVAILABLE")
             freeze_expert_inputs(self.engine, snapshot, market_inputs=market_inputs)
+            from .edge_family_market import family_runtime_status
+            family_status=family_runtime_status(snapshot)
             final_trade = self.current_trade() or current_trade_row or {}
             completion_instrument, completion_quote_available, _ = self._current_quote()
             completion_r = self._current_r(final_trade)
@@ -475,6 +479,7 @@ class AISnapshotMaterializer:
                 self._build_ms = build_ms
                 self._last_error = None
                 self._build_n += 1
+                self._family_runtime_status=family_status
                 self._baseline_r = baseline_r
                 self._boundaries_r = boundaries
                 self._chain_marker = chain_marker
@@ -517,6 +522,7 @@ class AISnapshotMaterializer:
                 "ready": ready,
                 "building": self._building,
                 "current_trade_id": current_trade,
+                "current_instrument": canonical_instrument_code((trade or {}).get('instrument')),
                 "snapshot_trade_id": self._snapshot_trade_id,
                 "age_sec": round(age, 3) if age is not None else None,
                 "watch_interval_sec": self.watch_interval_sec,
@@ -535,6 +541,7 @@ class AISnapshotMaterializer:
                     "strict_compaction_build_n": self._strict_compaction_build_n,
                 },
                 "last_error": self._last_error,
+                "family_market_forecasts": copy.deepcopy(self._family_runtime_status),
                 "request_path_heavy_build": False,
                 "periodic_heavy_recompute": False,
             }
