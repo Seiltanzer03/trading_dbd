@@ -8,48 +8,41 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 69c5aee377837934dad630889152ac9486e26e77
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install -q paramiko
-      - name: Observe deployment fence without changing history or service
-        env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          cache: pip
+      - run: pip install -q -e '.[dev]'
+      - name: Verify real hourly noncrypto history without production access or fitting
         run: |
           python -u - <<'PY'
-          import os,paramiko,shlex
-          remote="""import json,os,stat,subprocess,time
-          from pathlib import Path
-          print('FENCE_DIAGNOSTIC_TS='+str(time.time()),flush=True)
-          for name in ('cutover.active','cutover.journal.json'):
-              p=Path('/opt/seiltanzer/data')/name
-              item=dict(name=name,exists=os.path.lexists(p))
-              if item['exists']:
-                  s=p.lstat();item.update(size=s.st_size,mtime=s.st_mtime,is_regular=stat.S_ISREG(s.st_mode),is_symlink=p.is_symlink())
-                  if stat.S_ISREG(s.st_mode) and s.st_size<=65536:
-                      item['contents']=p.read_text()
-              print('FENCE_FILE='+json.dumps(item),flush=True)
-          checks=(
-              ['git','-C','/opt/seiltanzer','rev-parse','HEAD'],
-              ['systemctl','show','seiltanzer','--property=ActiveState,SubState,MainPID,NRestarts,Result'],
-              ['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],
-              ['systemctl','list-units','--all','--plain','--no-legend','*history*','*ede*'])
-          for command in checks:
+          import hashlib,json,time
+          from concurrent.futures import ThreadPoolExecutor
+          import yfinance as yf
+          from seiltanzer.config import ALL_INSTRUMENTS,CRYPTO_INSTRUMENTS
+          def check(code):
+              ticker=ALL_INSTRUMENTS[code].yahoo
               try:
-                  result=subprocess.run(command,capture_output=True,text=True,timeout=8)
-                  print('FENCE_CHECK='+json.dumps(dict(command=command,returncode=result.returncode,stdout=result.stdout[:6000],stderr=result.stderr[:1000])),flush=True)
-              except subprocess.TimeoutExpired:
-                  print('FENCE_CHECK_TIMEOUT='+json.dumps(command),flush=True)
-          """
-          client=paramiko.SSHClient();client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-          client.connect('94.241.171.182',username='root',password=os.environ['SSH_PASSWORD'],timeout=15,auth_timeout=15,look_for_keys=False,allow_agent=False)
-          try:
-              _,stdout,stderr=client.exec_command('python3 -c '+shlex.quote(remote),timeout=45)
-              print(stdout.read(20000).decode(),flush=True)
-              error=stderr.read(3000).decode()
-              if error:print(error)
-              assert stdout.channel.recv_exit_status()==0
-          finally:client.close()
+                  provider=yf.Ticker(ticker)
+                  frame=provider.history(period='2y',interval='1h',auto_adjust=False,repair=False,timeout=8,raise_errors=True)
+                  received=time.time()
+                  assert 0<len(frame)<=20000
+                  stamps=[int(value.timestamp()) for value in frame.index]
+                  proof=dict(instrument=code,ticker=ticker,provider='Yahoo Finance via yfinance',
+                      requested_interval='1h',actual_granularity=provider.get_history_metadata().get('dataGranularity'),
+                      rows=len(frame),first_ts=min(stamps),last_ts=max(stamps),received_ts=received,
+                      consecutive_hour_open_pairs=sum(b-a==3600 for a,b in zip(stamps,stamps[1:])),
+                      dataset_sha256=hashlib.sha256(frame.to_json(date_unit='s').encode()).hexdigest(),
+                      production_access=False,training_performed=False)
+                  print('HOURLY_NONCRYPTO_HISTORY='+json.dumps(proof),flush=True)
+              except Exception as exc:
+                  print('HOURLY_NONCRYPTO_HISTORY='+json.dumps(dict(instrument=code,ticker=ticker,
+                      error=type(exc).__name__+':'+str(exc)[:200],production_access=False)),flush=True)
+          with ThreadPoolExecutor(max_workers=3) as pool:
+              list(pool.map(check,[code for code in ALL_INSTRUMENTS if code not in CRYPTO_INSTRUMENTS]))
           PY
