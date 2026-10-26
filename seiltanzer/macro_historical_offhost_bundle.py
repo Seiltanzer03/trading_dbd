@@ -107,7 +107,7 @@ def _historical_availability(
                 1 for record in bls_records
                 if (record.get("spec") or {}).get("family") == family
             ),
-            (f"BLS:manifest:{family}", f"BLS:archive:{family}:"),
+            (f"BLS:manifest:{family}", f"BLS:archive:{family}:", f"BLS:fallback:{family}"),
         )
         for family in ("CPI", "NFP")
     } | {
@@ -238,10 +238,25 @@ def build_bundle(
             )
             fallback_rows = []
             for release_date in release_dates:
-                spec, fetched_at, raw, payload = alfred_source.vintage_record(
-                    family=family, release_date=release_date,
-                    calendar_url=calendar_url,
-                )
+                try:
+                    spec, fetched_at, raw, payload = alfred_source.vintage_record(
+                        family=family, release_date=release_date,
+                        calendar_url=calendar_url,
+                    )
+                except KeyError as exc:
+                    # A missing period cannot erase unrelated verified vintages.
+                    # Transport/denial failures still stop this source as before.
+                    errors[f"BLS:fallback:{family}:{release_date}"] = (
+                        f"KeyError:{str(exc)[:160]}"
+                    )
+                    continue
+                except Exception as exc:
+                    # Keep prior verified rows, but never retry/reroute a failed
+                    # transport or grant authority to this unavailable release.
+                    errors[f"BLS:fallback:{family}:{release_date}"] = (
+                        f"{type(exc).__name__}:{str(exc)[:160]}"
+                    )
+                    break
                 if start_ts <= spec.published_at <= stamp + 1e-6:
                     fallback_rows.append(_record({
                         "source_kind": ALFRED_SOURCE_KIND,
