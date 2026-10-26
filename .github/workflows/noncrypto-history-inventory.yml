@@ -1,0 +1,59 @@
+name: noncrypto-history-inventory
+on:
+  push:
+    branches: [ops/noncrypto-history-inventory-20261026]
+    paths: [.github/workflows/noncrypto-history-inventory.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 69c5aee377837934dad630889152ac9486e26e77
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -q -e '.[dev]' paramiko
+      - name: Inventory excluded forecast captures as independent native facts without changing admission
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          python -u - <<'PY'
+          import base64,gzip,io,json,os,shlex,time
+          from collections import Counter
+          from scripts.export_native_family_history import REMOTE_EXPORT
+          from scripts.production_ede_offload import _connect
+          from seiltanzer.config import ALL_INSTRUMENTS
+          from seiltanzer.edge_family_native_history import native_history
+          program=REMOTE_EXPORT.replace(repr(tuple(ALL_INSTRUMENTS)),repr(('JPY100',)))
+          assert program.count('g.training_eligible=1')==1
+          program=program.replace('g.training_eligible=1','g.training_eligible=0')
+          program=program.replace('SELECT g.instrument,g.captured_ts,g.frozen_features_json,','SELECT g.exclusion_reason,g.instrument,g.captured_ts,g.frozen_features_json,')
+          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
+          try:
+              _,stdout,stderr=client.exec_command('python3 -c '+shlex.quote(program),timeout=45)
+              payload=stdout.read(40000001);error=stderr.read(2000).decode();status=stdout.channel.recv_exit_status()
+              if status:
+                  print('NATIVE_FACT_INVENTORY_UNAVAILABLE='+json.dumps(dict(status=status,error=error)),flush=True)
+                  raise SystemExit(status)
+              assert len(payload)<=40000000
+              compressed=base64.b64decode(payload.strip(),validate=True)
+              with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as reader:raw=reader.read(8000001)
+              assert len(raw)<=8000000
+              batch=json.loads(raw)
+              assert batch.get('read_only') is True
+              facts=native_history(batch['rows'],captured_ts=batch['exported_ts'])
+              counts={code:{family:len(rows) for family,rows in families.items()} for code,families in facts.items()}
+              clocks=[row['captured_ts'] for row in batch['rows']]
+              print('EXCLUDED_FORECAST_NATIVE_FACT_INVENTORY='+json.dumps(dict(
+                  instrument='JPY100',source_rows=len(batch['rows']),native_facts=counts,
+                  original_exclusion_reasons=dict(Counter(row.get('exclusion_reason') for row in batch['rows'])),
+                  first_capture=min(clocks) if clocks else None,last_capture=max(clocks) if clocks else None,
+                  export_reason=batch['reason'],history_complete=batch['history_complete'],read_only=True,
+                  training_or_promotion_performed=False)),flush=True)
+          finally:client.close()
+          PY
