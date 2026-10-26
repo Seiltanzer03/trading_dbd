@@ -743,3 +743,60 @@ def test_fomc_verified_same_url_revision_preserves_first_receipt_and_native_hist
     assert newest[2] != original[3]
     assert offhost._fomc_refresh(wrapper)['skipped'] == 2
     assert wrapper.store.status()['row_n'] == 3
+
+
+@pytest.mark.parametrize('missing_first',[False,True])
+@pytest.mark.parametrize('failure_kind',['missing','transport','all_missing'])
+def test_missing_alfred_month_does_not_erase_other_verified_vintages(missing_first,failure_kind,monkeypatch):
+    """One absent release stays absent, while other immutable payloads survive."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from seiltanzer import macro_bls_historical_bootstrap as bls
+    from seiltanzer import macro_bls_alfred_vintage as alfred
+    from seiltanzer import macro_ism_historical_bootstrap as ism
+    from seiltanzer import macro_fomc_deterministic_bootstrap as fomc
+    fixture=_alfred_bundle();good=fixture['bls_records'][0]
+    schedule=fixture['bls_schedules']['CPI']
+    calendar='{"events":[{"title":"1 release","start":"2025-08-12"},{"title":"1 release","start":"2025-08-13"}]}'
+    calls=[]
+    class Vintage:
+        def calendar(self,*,family,**kwargs):
+            if family!='CPI':raise RuntimeError('unit-unavailable-other-family')
+            dates=['2025-08-13','2025-08-12'] if missing_first else ['2025-08-12','2025-08-13']
+            if failure_kind=='transport':dates.append('2025-08-14')
+            return calendar,schedule['source_url'],dates
+        def vintage_record(self,*,release_date,**kwargs):
+            calls.append(release_date)
+            if failure_kind=='all_missing':raise KeyError('2025-10')
+            if release_date=='2025-08-13':
+                if failure_kind=='transport':raise ValueError('ALFRED_BLS_OFFICIAL_TRANSPORT_EXHAUSTED:DIRECT:HTTPStatusError')
+                raise KeyError('2025-10')
+            return BLSReleaseSpec(**good['spec']),good['fetched_at'],good['html'],good['payload']
+    def unavailable(*args,**kwargs):raise RuntimeError('unit-unavailable-unrelated-source')
+    monkeypatch.setattr(bls,'OfficialBLSArchiveSource',lambda:object())
+    monkeypatch.setattr(offhost,'_fetch_bls_manifest',lambda *a,**kw:(None,[],'unit-primary-unavailable'))
+    monkeypatch.setattr(alfred,'OfficialALFREDBLSVintageSource',Vintage)
+    monkeypatch.setattr(ism,'OfficialISMHistoricalSource',lambda:SimpleNamespace(fetch_with_evidence=unavailable))
+    monkeypatch.setattr(fomc,'OfficialFOMCArchiveSource',lambda:SimpleNamespace(
+        _client=lambda:nullcontext(SimpleNamespace(get=unavailable)),_validated=lambda value:value))
+    monkeypatch.setattr(offhost.time,'time',lambda:NOW+1)
+    result=offhost.build_bundle(expected_sha=SHA,acceptance_run_id=RUN_ID,now=NOW)
+    kept=[row for row in result['bls_records'] if row['spec']['family']=='CPI']
+    assert len(kept)==(0 if failure_kind=='all_missing' or (missing_first and failure_kind=='transport') else 1)
+    expected='VERIFIED_PARTIAL_REAL_HISTORY' if kept else 'OFFICIAL_SOURCE_UNAVAILABLE_PROSPECTIVE_REQUIRED'
+    assert result['historical_availability']['CPI']==expected
+    if failure_kind=='transport':assert '2025-08-14' not in calls
+    assert 'BLS:fallback:CPI:2025-08-13' in result['errors']
+    if not kept:return
+    assert kept[0]['source_sha256']==good['source_sha256']
+    assert kept[0]['fetched_at']==good['fetched_at']
+    assert kept[0]['payload']==good['payload']
+    assert 'BLS:fallback:CPI:2025-08-13' in result['errors']
+    # Validate the changed family against independently valid unrelated fixtures.
+    checked=deepcopy(fixture)
+    checked['bls_records']=[row for row in checked['bls_records'] if row['spec']['family']!='CPI']+kept
+    checked['bls_schedules']['CPI']=result['bls_schedules']['CPI']
+    checked['errors']={key:value for key,value in result['errors'].items() if key.startswith('BLS:fallback:CPI:')}
+    checked['historical_availability']['CPI']=result['historical_availability']['CPI']
+    checked['bundle_sha256']=offhost._sha256(offhost._without(checked,'bundle_sha256'))
+    assert offhost.validate_bundle(checked,expected_sha=SHA,acceptance_run_id=RUN_ID,now=NOW+2) is checked
