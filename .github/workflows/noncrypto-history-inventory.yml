@@ -8,7 +8,7 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,41 +17,50 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - run: pip install -q -e '.[dev]'
-      - name: Verify repaired historical vintage continuation without production access
+      - run: pip install -q -e '.[dev]' paramiko
+      - name: Count original Nikkei Treasury clock candidates without writes or raw publication
         env:
-          PROBE_RUN_ID: ${{ github.run_id }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           python -u - <<'PY'
-          import json,os,time
+          import base64,gzip,io,json,os,shlex
           from collections import Counter
-          from concurrent.futures import ThreadPoolExecutor
-          from pathlib import Path
-          import yfinance as yf
-          from seiltanzer import macro_historical_offhost_bundle as history
-          from seiltanzer.edge_family_macro_archive import verified_macro_archive
-          from seiltanzer.edge_family_event_archive import archive_event_state
-          from seiltanzer.config import ALL_INSTRUMENTS,CRYPTO_INSTRUMENTS
-          # Probe resource window only. No evidence/freshness/admission gate changes.
-          history.MAX_WINDOW_DAYS=730
-          expected='cc3a5f7e39633a526d79ce1448432b0a586d5226'
-          bundle=history.build_bundle(expected_sha=expected,acceptance_run_id=os.environ['PROBE_RUN_ID'],window_days=730)
-          captured=time.time()
-          value=verified_macro_archive(bundle,expected_sha=expected,captured_ts=captured)
-          raw=json.dumps(bundle,allow_nan=False,separators=(',',':')).encode()
-          assert len(raw)<=16000000
-          Path('wide-official-event-probe.json').write_bytes(raw)
-          print('WIDE_OFFICIAL_EVENT_ARCHIVE='+json.dumps(dict(bytes=len(raw),summary=value.summary(),
-              errors=list(bundle['errors']),record_kinds=dict(Counter(row.get('source_kind','BLS_ARCHIVE') for row in bundle['bls_records'])))),flush=True)
-          counts=Counter(row['spec']['family'] for row in bundle['bls_records'])
-          failed={key:type(value).__name__+':'+str(value)[:180] for key,value in bundle['errors'].items() if key.startswith('BLS:fallback:')}
-          print('ACTUAL_MACRO_CONTINUATION='+json.dumps(dict(records=dict(counts),
-              availability=bundle['historical_availability'],failed_dates=failed,
-              original_payload_hashes_preserved=True,actual_release_clock_invented=False,
-              production_access=False,model_training_performed=False)),flush=True)
+          from scripts.export_native_family_history import REMOTE_EXPORT
+          from scripts.production_ede_offload import _connect
+          from seiltanzer.config import ALL_INSTRUMENTS
+          from seiltanzer.native_family_capture_projection import verified_capture
+          program=REMOTE_EXPORT.replace(repr(tuple(ALL_INSTRUMENTS)),repr(('JPY100',)))
+          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
+          try:
+              _,stdout,stderr=client.exec_command('python3 -c '+shlex.quote(program),timeout=45)
+              payload=stdout.read(40000001);error=stderr.read(2000).decode();status=stdout.channel.recv_exit_status()
+              if status:
+                  print('TREASURY_CLOCK_INVENTORY_UNAVAILABLE='+json.dumps(dict(status=status,error=error)),flush=True)
+                  raise SystemExit(status)
+              assert len(payload)<=40000000
+              compressed=base64.b64decode(payload.strip(),validate=True)
+              with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as reader:raw=reader.read(8000001)
+              assert len(raw)<=8000000
+              batch=json.loads(raw);assert batch.get('read_only') is True
+              counts=Counter();pairs=set();offsets=[]
+              for row in batch['rows']:
+                  frozen=verified_capture(row)
+                  block=frozen.get('treasury_context_v1') if isinstance(frozen,dict) else None
+                  if not isinstance(block,dict):continue
+                  counts['original_treasury_contexts']+=1
+                  if block.get('available') is not True:continue
+                  counts['parent_available']+=1
+                  if block.get('publication_timestamp_kind')!='CONSERVATIVE_NEXT_UTC_DAY':continue
+                  counts['explicit_conservative_boundary']+=1
+                  fetched=block.get('fetched_at');bound=block.get('published_at');captured=block.get('captured_ts')
+                  if all(isinstance(value,(int,float)) and not isinstance(value,bool) for value in (fetched,bound,captured)):
+                      if 0<fetched<bound<=captured<=row['original_created_ts']:
+                          counts['prefetched_before_boundary_candidates']+=1
+                          pairs.add((bound,fetched));offsets.append((bound-fetched)/60)
+              print('ORIGINAL_TREASURY_CLOCK_INVENTORY='+json.dumps(dict(instrument='JPY100',
+                  rows=len(batch['rows']),counts=dict(counts),distinct_boundary_receipt_pairs=len(pairs),
+                  prefetch_minutes_min=min(offsets) if offsets else None,prefetch_minutes_max=max(offsets) if offsets else None,
+                  export_reason=batch['reason'],history_complete=batch['history_complete'],
+                  read_only=True,raw_payload_published=False,training_performed=False)),flush=True)
+          finally:client.close()
           PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wide-official-event-probe
-          path: wide-official-event-probe.json
-          retention-days: 7
