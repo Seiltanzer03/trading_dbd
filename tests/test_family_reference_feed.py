@@ -99,3 +99,21 @@ def test_reference_and_legacy_refresh_gap_does_not_rebuild_without_bar_progress(
     assert not completed_bar_advanced(baseline,completed_bar_marker(engine))
     f.intraday_source_authority['observed_ts']+=300
     assert completed_bar_advanced(baseline,completed_bar_marker(engine))
+
+
+def test_reference_bar_catching_up_to_legacy_is_actual_new_target_input():
+    from seiltanzer.ai_frozen_expert_inputs import completed_bar_marker,completed_bar_advanced
+    f=feed();f.family_reference_series=reference_source()
+    f.intraday_source_authority={'target_instrument':'NAS100','observed_ts':T0+300}
+    engine=SimpleNamespace(market=f);before=completed_bar_marker(engine)
+    f.family_reference_series['observed_ts']=T0+300
+    f.family_reference_series['bars'][-1]['bar_end_ts']=T0+300
+    assert completed_bar_advanced(before,completed_bar_marker(engine))
+
+
+def test_successful_market_capture_records_actual_freeze_clock():
+    from seiltanzer.ai_frozen_expert_inputs import capture_market_inputs
+    f=feed();f.intraday_ohlcv=[];f.intraday_source_authority={}
+    f.family_reference_series=reference_source()
+    frozen=capture_market_inputs(SimpleNamespace(market=f)).market
+    assert frozen.frozen_inputs_captured_ts==T0

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import math
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,7 +52,7 @@ def capture_market_inputs(engine):
     market = SimpleNamespace(instrument_code=getattr(feed, "instrument_code", None),
         demo=getattr(feed, "demo", False), intraday_is_offset=False,
         intraday_ohlcv=[], intraday_source_authority={}, binance_trade_flow={}, chain=None,
-        family_reference_series=None,
+        family_reference_series=None, frozen_inputs_captured_ts=None,
         _intraday_lock=threading.Lock())
     lock = getattr(feed, "_intraday_lock", None)
     acquired = lock is None or lock.acquire(blocking=False)
@@ -73,6 +74,7 @@ def capture_market_inputs(engine):
             market.family_reference_series = _bounded_copy(getattr(feed,'family_reference_series',None))
         except (ValueError,TypeError,RecursionError):
             market.reference_freeze_reason='REFERENCE_INPUT_FREEZE_BOUND'
+        market.frozen_inputs_captured_ts=time.time()
     except (ValueError, TypeError, RecursionError):
         market.intraday_ohlcv = []
         market.intraday_source_authority = {}
@@ -136,25 +138,31 @@ def completed_bar_marker(engine):
                 and isinstance(bars[-1],dict) and bars[-1].get('bar_end_ts')==observed):
             reference_marker=(code,math.floor(observed/300))
     authority = getattr(feed, "intraday_source_authority", None)
-    if not isinstance(authority, dict) or not authority:
-        return reference_marker
-    try:
-        observed = float(authority["observed_ts"])
-        if not math.isfinite(observed):
-            return reference_marker
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return reference_marker
-    legacy=(authority.get("target_instrument") or getattr(feed,'instrument_code',None),
-            math.floor(observed/300))
-    if reference_marker is not None and reference_marker[0]==legacy[0]:
-        return (legacy[0],max(legacy[1],reference_marker[1]))
-    return reference_marker or legacy
+    legacy=None
+    if isinstance(authority,dict):
+        try:
+            observed=float(authority['observed_ts'])
+            if math.isfinite(observed):legacy=math.floor(observed/300)
+        except (KeyError,TypeError,ValueError,OverflowError):pass
+    ref=reference_marker[1] if reference_marker is not None else None
+    if legacy is None and ref is None:return None
+    return (getattr(feed,'instrument_code',None) or (authority if isinstance(authority,dict) else {}).get('target_instrument'),legacy,ref)
+
+
+def merge_completed_bar_marker(previous,current):
+    """Keep the last observed lane clocks across a temporary refresh gap."""
+    if current is None:return previous
+    if previous is None or previous[0]!=current[0]:return current
+    return (current[0],*[max(previous[i],current[i]) if previous[i] is not None and current[i] is not None
+                        else current[i] if current[i] is not None else previous[i] for i in (1,2)])
 
 
 def completed_bar_advanced(previous,current):
-    """Temporary lane loss is not progress; freshness is checked by consumers."""
-    return (current is not None and (previous is None or current[0]!=previous[0]
-                                    or current[1]>previous[1]))
+    """A newly observed target bar matters even when another lane is ahead."""
+    if current is None:return False
+    if previous is None or previous[0]!=current[0]:return True
+    return any(current[i] is not None and (previous[i] is None or current[i]>previous[i])
+               for i in (1,2))
 
 
 def freeze_expert_inputs(engine, snapshot: dict, *, market_inputs=None) -> None:

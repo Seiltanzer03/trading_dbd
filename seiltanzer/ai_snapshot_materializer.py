@@ -402,11 +402,12 @@ class AISnapshotMaterializer:
             self._building = True
             self._build_started_at = started_wall
         try:
-            from .ai_frozen_expert_inputs import freeze_expert_inputs, publication_marker, completed_bar_marker, capture_market_inputs
+            from .ai_frozen_expert_inputs import freeze_expert_inputs, publication_marker, completed_bar_marker, merge_completed_bar_marker, capture_market_inputs
             # A publication arriving during the heavy builder must trigger a
             # new review, not be mistaken for the inputs that builder consumed.
             baseline_publication = publication_marker(self.engine)
-            baseline_completed_bar = completed_bar_marker(self.engine)
+            baseline_completed_bar = merge_completed_bar_marker(
+                self._baseline_completed_bar,completed_bar_marker(self.engine))
             market_inputs = capture_market_inputs(self.engine)
             snapshot = self.builder(self.engine)
             snapshot_trade = (
