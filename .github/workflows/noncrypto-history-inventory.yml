@@ -18,42 +18,45 @@ jobs:
           python-version: '3.11'
           cache: pip
       - run: pip install -q -e '.[dev]'
-      - name: Inspect declared session metadata from the existing XAU provider off-host
+      - name: Check public chart history through the existing quote provider without production access
         run: |
           python -u - <<'PY'
-          import json,time,math
-          from collections.abc import Mapping
-          import yfinance as yf
-          from seiltanzer.config import ALL_INSTRUMENTS
-          from seiltanzer.mathematical_edge import completed_live_bars
-          symbol=ALL_INSTRUMENTS['XAU'].yahoo
-          ticker=yf.Ticker(symbol)
-          hist=ticker.history(period='1d',interval='1m',timeout=10)
-          received=time.time();meta=ticker.history_metadata
-          assert isinstance(meta,Mapping)
-          period=meta.get('currentTradingPeriod') or {}
-          regular=period.get('regular') or {}
-          def stamp(v):
-              if isinstance(v,(int,float)) and not isinstance(v,bool):return v if math.isfinite(v) else None
-              if getattr(v,'tzinfo',None) is not None and callable(getattr(v,'timestamp',None)):
-                  n=v.timestamp();return n if math.isfinite(n) else None
-              return None
-          def plain(v,depth=0):
-              if depth>5:return 'DEPTH_BOUND'
-              if getattr(v,'tzinfo',None) is not None and callable(getattr(v,'timestamp',None)):
-                  return {'epoch':stamp(v),'iso8601':v.isoformat()}
-              if isinstance(v,Mapping):return {str(k):plain(x,depth+1) for k,x in list(v.items())[:30]}
-              if isinstance(v,(list,tuple)):return [plain(x,depth+1) for x in v[:30]]
-              return v if isinstance(v,(str,int,float,bool)) or v is None else str(type(v).__name__)
-          rows=[(ts.timestamp(),float(r['Open']),float(r['High']),float(r['Low']),float(r['Close'])) for ts,r in hist.iterrows()]
-          completed=completed_live_bars(rows,received)
-          start,end=stamp(regular.get('start')),stamp(regular.get('end'))
-          active=(start<=received<end if all(isinstance(v,(int,float)) and not isinstance(v,bool) for v in (start,end)) else None)
-          print('ACTUAL_XAU_PROVIDER_SESSION='+json.dumps(dict(symbol=symbol,received_ts=received,
-           metadata_type=type(meta).__name__,metadata=plain({k:meta.get(k) for k in
-           ('symbol','instrumentType','exchangeName','exchangeTimezoneName','regularMarketTime','exchangeDataDelayedBy','dataGranularity','currentTradingPeriod')}),
-           provider_declared_regular_open=active,rows=len(rows),
-           last_completed_5m_end=completed[-1]['bar_end_ts'] if completed else None,
-           required_current_origin=int(received//300)*300,
-           source_clock_rewritten=False,admission_changed=False,sqlite_access=False,production_access=False)),flush=True)
+          import json,time,uuid
+          from websockets.sync.client import connect
+          from seiltanzer.data.feeds import _tv_frame,_tv_payloads
+          for symbol in ('OANDA:NAS100USD','OANDA:XAUUSD'):
+              session='cs_'+uuid.uuid4().hex[:12];deadline=time.monotonic()+20;rows=[];resolved={};errors=[];completed=False;total=0
+              try:
+                  with connect('wss://data.tradingview.com/socket.io/websocket',origin='https://data.tradingview.com',open_timeout=8,close_timeout=1,max_size=4_000_000) as ws:
+                      ws.recv(timeout=8)
+                      for method,params in [('set_auth_token',['unauthorized_user_token']),('chart_create_session',[session,'']),('resolve_symbol',[session,'sym_1','='+json.dumps({'symbol':symbol,'adjustment':'splits','session':'regular'},separators=(',',':'))]),('create_series',[session,'s1','s1','sym_1','5',4800])]:
+                          ws.send(_tv_frame(method,params))
+                      while time.monotonic()<deadline:
+                          raw=ws.recv(timeout=max(.1,deadline-time.monotonic()));total+=len(raw)
+                          if total>4_000_000:raise ValueError('BODY_BOUND')
+                          for p in _tv_payloads(raw):
+                              if p.startswith('~h~'):ws.send(f'~m~{len(p.encode())}~m~{p}');continue
+                              try:m=json.loads(p)
+                              except ValueError:continue
+                              kind=m.get('m');ps=m.get('p') or []
+                              if kind=='symbol_resolved' and len(ps)>2 and isinstance(ps[2],dict):
+                                  resolved={k:ps[2].get(k) for k in ('name','full_name','pro_name','exchange','type','timezone','minmov','pricescale','session','data_status')}
+                              if kind in ('timescale_update','du') and len(ps)>1 and isinstance(ps[1],dict):
+                                  part=(ps[1].get('s1') or {}).get('s') or []
+                                  if len(part)>5000:raise ValueError('ROW_BOUND')
+                                  rows.extend(x.get('v') for x in part if isinstance(x,dict) and isinstance(x.get('v'),list))
+                              if kind in ('critical_error','series_error','symbol_error','protocol_error'):errors.append(kind)
+                              if kind=='series_completed':completed=True
+                          if completed or errors:break
+                  received=time.time()
+                  unique={r[0]:r for r in rows if len(r)>=5}
+                  ordered=sorted(unique.values(),key=lambda r:r[0])
+                  complete=[r for r in ordered if r[0]+300<=received]
+                  print('ACTUAL_CONFIGURED_CHART_CAPABILITY='+json.dumps(dict(symbol=symbol,interval='5m',requested_rows=4800,rows=len(ordered),completed_response=completed,
+                      first_start=ordered[0][0] if ordered else None,last_complete_end=complete[-1][0]+300 if complete else None,
+                      latest_complete_age_sec=received-complete[-1][0]-300 if complete else None,
+                      received_ts=received,body_bytes=total,resolved=resolved,errors=errors,
+                      raw_publication=False,training=False,production_access=False)),flush=True)
+              except Exception as exc:print('ACTUAL_CONFIGURED_CHART_UNAVAILABLE='+json.dumps(dict(symbol=symbol,error=type(exc).__name__,reason=str(exc)[:150])),flush=True)
+          
           PY
