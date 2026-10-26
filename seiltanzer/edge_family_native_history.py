@@ -81,7 +81,7 @@ def native_history(rows, *, captured_ts):
         curve=treasury_observation(curve_block,code=code,cutoff=recorded)
         if curve:
             proof=curve['feature_provenance']['carry.us02y_yield_pct']
-            key=(proof['observed_ts'],proof['received_ts'])
+            key=(proof.get('conservative_publication_bound_ts',proof['observed_ts']),proof['received_ts'])
             values=fingerprint(curve['features'])
             candidate=(recorded,code,row['features_sha256'],values,curve_block)
             previous=curves.get(key)

@@ -108,11 +108,30 @@ def _history_rows(code, family, history, captured):
             for name, value in values.items())
         if not valid:
             continue
-        item = {'features': values, 'feature_provenance': proof, 'group': tuple(sorted({
-            str(proof[name]['dependency_group']) + ':' + str(proof[name]['observed_ts']) for name in values}))}
-        if cutoff in result and result[cutoff] != item:
-            ambiguous.add(cutoff)
-        result[cutoff] = item
+        groups={str(proof[name]['dependency_group'])+':'+str(proof[name]['observed_ts']) for name in values}
+        # Explicit dependencies only ADD purging; repeated receipts of one daily
+        # measurement cannot manufacture independent train/validation facts.
+        dependencies=[proof[name].get('purge_dependency_id') for name in values
+            if proof[name].get('purge_dependency_id') is not None]
+        if any(not isinstance(value,str) or not 1<=len(value)<=160 for value in dependencies):continue
+        treasury_dependencies=[]
+        for name in values:
+            meta=proof[name]
+            if str(meta.get('source_id','')).startswith('official-treasury-curve:'):
+                from .edge_family_treasury_factors import treasury_purge_id
+                identity=treasury_purge_id(meta,cutoff)
+                if identity is None:break
+                treasury_dependencies.append(identity)
+        else:
+            dependencies.extend(treasury_dependencies)
+            groups.update('explicit-purge:'+value for value in dependencies)
+            item = {'features': values, 'feature_provenance': proof, 'group': tuple(sorted(groups))}
+            if cutoff in result and result[cutoff] != item:
+                ambiguous.add(cutoff)
+            result[cutoff] = item
+            continue
+        # A malformed known-provider clock cannot bypass the stable curve group.
+        continue
     return {cutoff: row for cutoff, row in result.items() if cutoff not in ambiguous}
 
 

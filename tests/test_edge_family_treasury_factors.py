@@ -120,3 +120,111 @@ def test_conflicting_global_curve_values_at_same_source_clocks_are_not_selected(
     revised['features']['rates.curve_2s10s']['value']=.2
     result=native_history([captured_curve(),captured_curve('SP500',block=revised)],captured_ts=T0)
     assert all(not values.get('value_carry') for values in result.values())
+
+
+def before_boundary_fetch_context():
+    from test_treasury_live_t0 import _states,_ts
+    from seiltanzer.treasury_t0_context import build_treasury_t0_context
+    fetched=_ts(2026,8,21,22);captured=_ts(2026,8,22,1)
+    return build_treasury_t0_context(_states(),fetched_at=fetched,captured_ts=captured)
+
+
+def test_actual_parent_accepts_fetch_before_conservative_boundary_without_fabricating_publication_clock():
+    block=before_boundary_fetch_context();original=deepcopy(block)
+    assert block['available'] is True and block['fetched_at']<block['published_at']<=block['captured_ts']
+    result=helper()(block,code='JPY100',cutoff=block['captured_ts'])
+    assert result is not None
+    proof=result['feature_provenance']['carry.us02y_yield_pct']
+    assert proof['observed_ts']==proof['received_ts']==block['fetched_at']
+    assert proof['available_at']==block['published_at']
+    assert proof['conservative_publication_bound_ts']==block['published_at']
+    assert proof.get('published_at') is None
+    assert block==original
+
+
+def test_two_real_curve_dates_in_same_http_response_are_not_conflicting_duplicates():
+    from test_treasury_live_t0 import _states,_ts
+    from seiltanzer.treasury_t0_context import build_treasury_t0_context
+    from seiltanzer.edge_family_native_history import native_history
+    fetched=_ts(2026,8,21,22);rows=[]
+    for captured in (_ts(2026,8,21,23),_ts(2026,8,22,1)):
+        block=build_treasury_t0_context(_states(),fetched_at=fetched,captured_ts=captured)
+        raw=json.dumps({'treasury_context_v1':block})
+        rows.append(dict(instrument='JPY100',captured_ts=captured,original_created_ts=captured+1,
+            frozen_features_json=raw,features_sha256=hashlib.sha256(raw.encode()).hexdigest(),source_verified=True))
+    result=native_history(rows,captured_ts=rows[-1]['original_created_ts']+1)
+    facts=result['JPY100']['value_carry']
+    assert len(facts)==2
+    assert len({point['features']['carry.us02y_yield_pct'] for point in facts})==2
+    assert {point['feature_provenance']['carry.us02y_yield_pct']['received_ts'] for point in facts}=={fetched}
+
+
+def test_repeated_fetches_of_same_curve_keep_a_shared_purge_dependency():
+    from test_treasury_live_t0 import _states,_ts
+    from seiltanzer.treasury_t0_context import build_treasury_t0_context
+    from seiltanzer.edge_family_market import _history_rows
+    points=[]
+    for fetched,captured in ((_ts(2026,8,21,22),_ts(2026,8,22,1)),(_ts(2026,8,22,2),_ts(2026,8,22,3))):
+        block=build_treasury_t0_context(_states(),fetched_at=fetched,captured_ts=captured)
+        point=helper()(block,code='JPY100',cutoff=captured)
+        assert point is not None
+        points.append(point)
+    rows=list(_history_rows('JPY100','value_carry',points,_ts(2026,8,22,4)).values())
+    assert len(rows)==2
+    assert set(rows[0]['group']) & set(rows[1]['group']), 'same daily curve must not leak across purged folds'
+
+
+@pytest.mark.parametrize('case',['missing_kind','wrong_date','before_boundary','old_source_fresh_fetch'])
+def test_conservative_curve_still_rejects_unknown_future_or_stale_evidence(case):
+    block=before_boundary_fetch_context();cutoff=block['captured_ts']
+    if case=='missing_kind':block.pop('publication_timestamp_kind')
+    elif case=='wrong_date':block['observation_date']='08/20/2026'
+    elif case=='before_boundary':cutoff=block['published_at']-1
+    else:
+        cutoff=block['published_at']+86401
+        block.update(captured_ts=cutoff,fetched_at=cutoff-10,asof=cutoff-10,stale_after=cutoff+1000)
+        for row in block['features'].values():
+            row.update(fetched_at=cutoff-10,asof=cutoff-10,stale_after=cutoff+1000)
+    assert helper()(block,code='JPY100',cutoff=cutoff) is None
+
+
+def test_actual_receipt_clock_does_not_extend_old_curve_freshness_in_historical_reuse():
+    from test_treasury_live_t0 import _states,_ts
+    from seiltanzer.treasury_t0_context import build_treasury_t0_context
+    from seiltanzer.edge_family_training import _feature_reason
+    boundary=_ts(2026,8,22)
+    block=build_treasury_t0_context(_states(),fetched_at=boundary+23*3600,captured_ts=boundary+23*3600+60)
+    point=helper()(block,code='JPY100',cutoff=block['captured_ts'])
+    assert point is not None
+    proof=point['feature_provenance']['carry.us02y_yield_pct']
+    assert _feature_reason(proof,'JPY100','value_carry',boundary+86401) is not None
+
+
+def _same_curve_clock_points():
+    from test_treasury_live_t0 import _states,_ts
+    from seiltanzer.treasury_t0_context import build_treasury_t0_context
+    points=[]
+    for fetched,captured in ((_ts(2026,8,22,1),_ts(2026,8,22,2)),(_ts(2026,8,22,3),_ts(2026,8,22,4))):
+        point=helper()(build_treasury_t0_context(_states(),fetched_at=fetched,captured_ts=captured),code='JPY100',cutoff=captured)
+        assert point is not None
+        points.append(point)
+    return points,_ts(2026,8,22,5)
+
+
+def test_legacy_and_receipt_clock_versions_of_same_curve_are_purged_together():
+    from seiltanzer.edge_family_market import _history_rows
+    points,cutoff=_same_curve_clock_points()
+    for proof in points[0]['feature_provenance'].values():
+        bound=proof['conservative_publication_bound_ts']
+        for key in ('conservative_publication_bound_ts','source_observation_date','publication_timestamp_kind','purge_dependency_id'):proof.pop(key)
+        proof.update(observed_ts=bound,published_at=bound,factor_contract='recorded-treasury-market-response-factors-v1')
+    rows=list(_history_rows('JPY100','value_carry',points,cutoff).values())
+    assert len(rows)==2 and set(rows[0]['group']) & set(rows[1]['group'])
+
+
+def test_same_curve_dependency_is_derived_even_if_optional_purge_id_was_not_serialized():
+    from seiltanzer.edge_family_market import _history_rows
+    points,cutoff=_same_curve_clock_points()
+    for proof in points[0]['feature_provenance'].values():proof.pop('purge_dependency_id')
+    rows=list(_history_rows('JPY100','value_carry',points,cutoff).values())
+    assert len(rows)==2 and set(rows[0]['group']) & set(rows[1]['group'])
