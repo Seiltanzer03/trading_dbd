@@ -121,6 +121,18 @@ def test_shadow_report_is_explicitly_non_authoritative():
     assert "этот вариант не создаёт ордер" in report
 
 
+def test_ready_independent_proposal_does_not_issue_a_second_manual_command():
+    shadow = {"status": "ok", "policy": "MOVE_TO_BE", "confidence": .8,
+        "working_action": {"status": "READY_FOR_MANUAL_CONFIRMATION",
+            "instruction_ru": "ВРУЧНУЮ ПЕРЕНЕСТИ СТОП В БУ: 4006",
+            "parameters": {"stop_price": 4006., "anchor": "ENTRY_PRICE"}}}
+    text = append_shadow_section("Итог: CLOSE_10", shadow)
+    assert "ВРУЧНУЮ ПЕРЕНЕСТИ" not in text
+    assert "Предложение LLM: MOVE_TO_BE" in text
+    assert "stop_price=4006" in text
+    assert "окончательный допуск" in text
+
+
 def test_public_verdict_wrapper_preserves_quant_and_adds_shadow(monkeypatch):
     snapshot = _snapshot()
     original_decision = dict(snapshot["policy_manager"]["management_decision"])

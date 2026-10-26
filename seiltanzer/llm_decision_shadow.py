@@ -535,7 +535,10 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
             f"Expected против HOLD {evaluation.get('expected_delta_vs_hold_r')}R; "
             f"нижний MC CI {evaluation.get('paired_delta_ci95_lower_r')}R. "
             "Это расчётный эффект, статистический перевес на реальных сделках не подтверждён.")
-        lines.append(str(action.get("instruction_ru") or "Параметры действия недоступны"))
+        if approved:
+            lines.append(str(action.get("instruction_ru") or "Параметры действия недоступны"))
+        else:
+            lines.append(_proposal_description(shadow))
         return "\n".join(lines).strip()
 
     policy = shadow.get("policy") or "—"
@@ -589,10 +592,13 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
         lines.append("Контраргументы LLM: " + " | ".join(shadow["counter_evidence"]))
     action = shadow.get("working_action") or {}
     if action.get("status") == "READY_FOR_MANUAL_CONFIRMATION":
-        lines.append("LLM ACTION VARIANT: " + str(action.get("instruction_ru") or policy) + ".")
+        if approved:
+            lines.append("LLM ACTION VARIANT: " + str(action.get("instruction_ru") or policy) + ".")
+        else:
+            lines.append(_proposal_description(shadow))
         lines.append("Кандидат прошёл отдельную проверку путей, Expected и CVaR; "
-                     "сервер сам ордер не создаёт. До подтверждения у брокера "
-                     "действует прежний стоп/БУ и лестница.")
+                     "окончательный допуск и выбор показаны в едином решении. "
+                     "Это предложение не создаёт отдельной команды или ордера.")
     else:
         lines.append(
             "Самостоятельный вариант LLM не готов к действию: "
@@ -601,6 +607,18 @@ def append_shadow_section(report: str, shadow: dict[str, Any]) -> str:
             "в едином выборе действия; этот вариант не создаёт ордер."
         )
     return "\n".join(lines).strip()
+
+
+def _proposal_description(shadow):
+    action = shadow.get('working_action') or {}
+    params = action.get('parameters') or {}
+    if not isinstance(params, dict):
+        params = {}
+    if not params and action.get('close_fraction') is not None:
+        params = {'close_fraction': action['close_fraction']}
+    detail = ', '.join(f'{key}={value:g}' if isinstance(value, (int, float)) and not isinstance(value, bool)
+                       else f'{key}={value}' for key, value in params.items())
+    return f"Предложение LLM: {shadow.get('policy') or '—'}; параметры: {detail or 'не указаны'}."
 
 
 
