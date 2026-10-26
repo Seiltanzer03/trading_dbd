@@ -233,3 +233,19 @@ def test_same_bucket_refresh_during_builder_preserves_coherent_causal_market_inp
     mat=AISnapshotMaterializer(engine,builder);mat._build_once()
     frozen=mat.cached_build_snapshot(engine)
     assert frozen['edge_family_market_context']['reason']=='ORIGINAL_CAUSAL_INPUTS'
+
+@pytest.mark.parametrize('legacy_ahead',[False,True])
+def test_reference_lane_survives_legacy_refresh_gap_without_heavy_build(legacy_ahead):
+    from test_family_reference_market import reference_source,T0
+    engine=FakeEngine();engine.market.instrument_code='NAS100'
+    engine.market.family_reference_series=reference_source()
+    original={'provider':'Yahoo','source_symbol':'^NDX','target_instrument':'NAS100',
+        'source_verified':True,'observed_ts':T0+(300 if legacy_ahead else 0)}
+    engine.market.intraday_source_authority=dict(original)
+    mat=AISnapshotMaterializer(engine,lambda _:snapshot());mat._build_once()
+    engine.market.intraday_source_authority={}
+    assert mat._event_reason() is None
+    engine.market.intraday_source_authority=dict(original)
+    assert mat._event_reason() is None
+    engine.market.intraday_source_authority['observed_ts']+=300
+    assert mat._event_reason()=='COMPLETED_MARKET_BAR_CHANGED'

@@ -216,7 +216,8 @@ export function mountUnifiedEdgeEnsemble(container, audit, { archived = false } 
       row.market_predictions
         ? Object.entries(row.market_predictions).map(([name, head]) => `${name === 'direction' ? 'P(up | move >2bp)' : 'P(move >2bp)'} ${percent(head.probability)} · ${head.horizon_minutes}m · OOS ${signed(head.test_gain_mbit)} mbit · ${head.evidence_tier || '—'}`).join('; ')
           + ` · пул ${percent(row.model_pool_effective_weight)} · Δбалла без семейства ${signed(row.model_marginal_score_delta)} (не аддитивная доля)`
-        : 'недоступен',
+          + (row.market_target_symbol ? ` · серия ${row.market_target_provider || '—'} ${row.market_target_symbol}; не котировка исполнения` : '')
+        : (row.market_model_trained === true ? `модель обучена; прогноз ожидает пригодных текущих входов · ${row.market_target_symbol || '—'}` : 'недоступен'),
       row.working_assessment_available === true
         ? `рабочая интерпретация LLM · ${signed(row.working_score)} · ${percent(row.working_effective_weight)} · ${signed(row.working_contribution)} · ${row.working_reason_ru || '—'}`
         : `недоступна · ${row.working_assessment_reason || 'NO_WORKING_FAMILY_ASSESSMENT'}`,

@@ -51,6 +51,7 @@ def capture_market_inputs(engine):
     market = SimpleNamespace(instrument_code=getattr(feed, "instrument_code", None),
         demo=getattr(feed, "demo", False), intraday_is_offset=False,
         intraday_ohlcv=[], intraday_source_authority={}, binance_trade_flow={}, chain=None,
+        family_reference_series=None,
         _intraday_lock=threading.Lock())
     lock = getattr(feed, "_intraday_lock", None)
     acquired = lock is None or lock.acquire(blocking=False)
@@ -68,6 +69,10 @@ def capture_market_inputs(engine):
             market.binance_trade_flow = _bounded_copy(getattr(feed,'binance_trade_flow',{}))
         except (ValueError,TypeError,RecursionError):
             market.flow_freeze_reason='FLOW_INPUT_FREEZE_BOUND'
+        try:
+            market.family_reference_series = _bounded_copy(getattr(feed,'family_reference_series',None))
+        except (ValueError,TypeError,RecursionError):
+            market.reference_freeze_reason='REFERENCE_INPUT_FREEZE_BOUND'
     except (ValueError, TypeError, RecursionError):
         market.intraday_ohlcv = []
         market.intraday_source_authority = {}
@@ -116,18 +121,40 @@ def publication_marker(engine):
 
 def completed_bar_marker(engine):
     """Observed bar progress only; wall time and quote ticks are not events."""
-    authority = getattr(getattr(engine, "market", None), "intraday_source_authority", None)
+    feed=getattr(engine,'market',None)
+    reference=getattr(feed,'family_reference_series',None)
+    reference_marker=None
+    if isinstance(reference,dict):
+        from .reference_market_series import CONTRACT,PROVIDER,SYMBOLS
+        code=getattr(feed,'instrument_code',None)
+        observed=reference.get('observed_ts')
+        bars=reference.get('bars')
+        if (reference.get('contract_version')==CONTRACT and reference.get('provider')==PROVIDER
+                and code in SYMBOLS and reference.get('instrument')==code and reference.get('ticker')==SYMBOLS[code]
+                and isinstance(observed,(int,float)) and not isinstance(observed,bool)
+                and math.isfinite(observed) and observed>0 and isinstance(bars,list) and bars
+                and isinstance(bars[-1],dict) and bars[-1].get('bar_end_ts')==observed):
+            reference_marker=(code,math.floor(observed/300))
+    authority = getattr(feed, "intraday_source_authority", None)
     if not isinstance(authority, dict) or not authority:
-        return None
+        return reference_marker
     try:
         observed = float(authority["observed_ts"])
         if not math.isfinite(observed):
-            return None
+            return reference_marker
     except (KeyError, TypeError, ValueError, OverflowError):
-        return None
-    return (authority.get("provider"), authority.get("source_symbol"),
-            authority.get("target_instrument"), authority.get("source_verified"),
+        return reference_marker
+    legacy=(authority.get("target_instrument") or getattr(feed,'instrument_code',None),
             math.floor(observed/300))
+    if reference_marker is not None and reference_marker[0]==legacy[0]:
+        return (legacy[0],max(legacy[1],reference_marker[1]))
+    return reference_marker or legacy
+
+
+def completed_bar_advanced(previous,current):
+    """Temporary lane loss is not progress; freshness is checked by consumers."""
+    return (current is not None and (previous is None or current[0]!=previous[0]
+                                    or current[1]>previous[1]))
 
 
 def freeze_expert_inputs(engine, snapshot: dict, *, market_inputs=None) -> None:

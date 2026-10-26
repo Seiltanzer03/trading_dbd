@@ -49,6 +49,17 @@ class FakeEngine:
         return self.market.price["value"]
 
 
+def test_status_returns_a_copy_of_precomputed_family_receipt_without_inference(monkeypatch):
+    from seiltanzer import edge_family_market
+    mat=AISnapshotMaterializer(FakeEngine(),lambda e:{})
+    mat._family_runtime_status={'available_forecasts_at_capture':1,'families':{'session':{'target_symbol':'OANDA:NAS100USD'}}}
+    monkeypatch.setattr(edge_family_market,'family_runtime_status',lambda s:(_ for _ in ()).throw(AssertionError('request-time inference')))
+    result=mat.status()['family_market_forecasts']
+    assert result['available_forecasts_at_capture']==1
+    result['families']['session']['target_symbol']='changed'
+    assert mat._family_runtime_status['families']['session']['target_symbol']=='OANDA:NAS100USD'
+
+
 def snapshot(trade_id=1, current_r=0.10, next_rung=0.20):
     return {
         "captured_ts": time.time(),

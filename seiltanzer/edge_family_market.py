@@ -274,7 +274,7 @@ def _fit_family(code, family, bars, captured, horizons, related, history, source
 
 
 def train_market_families(sources, captured, *, horizons=SEARCH_HORIZONS, feature_history=None,
-                         macro_archive=None, related_sources=None):
+                         macro_archive=None, related_sources=None, family_target_sources=None):
     if number(captured) is None or captured <= 0 or not horizons or any(h not in SEARCH_HORIZONS for h in horizons):
         raise ValueError('INVALID_CAPTURE_OR_HORIZON')
     if not isinstance(sources, list) or len(sources) > 32:
@@ -294,6 +294,15 @@ def train_market_families(sources, captured, *, horizons=SEARCH_HORIZONS, featur
         if code in indexed:
             duplicates.add(code)
         indexed[code] = source
+    from .reference_market_series import validate_reference_series, PROVIDER, CONTRACT as REFERENCE_CONTRACT
+    references, reference_duplicates = {}, set()
+    if family_target_sources is not None:
+        if not isinstance(family_target_sources,list) or len(family_target_sources)>10:
+            raise ValueError('FAMILY_REFERENCE_SOURCE_BOUND_INVALID')
+        for reference in family_target_sources:
+            code=reference.get('instrument') if isinstance(reference,dict) else None
+            if code in references:reference_duplicates.add(code)
+            references[code]=reference
     result = {}
     for code in ALL_INSTRUMENTS:
         rows = result[code] = {}
@@ -301,6 +310,13 @@ def train_market_families(sources, captured, *, horizons=SEARCH_HORIZONS, featur
         try:
             if code in duplicates:
                 raise ValueError('DUPLICATE_TARGET_SOURCE')
+            reference=references.get(code)
+            # Choose by actual input availability, before fitting or seeing any
+            # held-out score. An optional damaged lane cannot relabel a target.
+            if (code not in reference_duplicates and reference is not None
+                    and validate_reference_series(reference,code,captured) is None
+                    and len(reference['bars'])>=1+180*(min(horizons)//5)):
+                source=reference
             if not isinstance(source, dict):
                 raise ValueError('TARGET_COMPLETED_BARS_UNAVAILABLE')
             bars = _bars(source, captured)
@@ -308,10 +324,17 @@ def train_market_families(sources, captured, *, horizons=SEARCH_HORIZONS, featur
             if code in CRYPTO_INSTRUMENTS:
                 if source.get('provider') != 'Binance' or source.get('ticker') != expected.binance_symbol:
                     raise ValueError('TARGET_CONFIGURED_SERIES_MISMATCH')
-            elif source.get('provider') != 'Yahoo Finance via yfinance' or source.get('ticker') != expected.yahoo:
+            elif (source.get('provider') != PROVIDER and
+                    (source.get('provider') != 'Yahoo Finance via yfinance' or source.get('ticker') != expected.yahoo)):
                 raise ValueError('TARGET_CONFIGURED_SERIES_MISMATCH')
             provenance = {'provider': source['provider'], 'ticker': source['ticker'], 'interval': '5m',
                 'bars_sha256': fingerprint(bars), 'not_broker_execution_bars': True}
+            if source.get('provider')==PROVIDER:
+                if validate_reference_series(source,code,captured) is not None:
+                    raise ValueError('TARGET_CONFIGURED_SERIES_MISMATCH')
+                provenance.update(reference_contract=REFERENCE_CONTRACT,resolved_symbol=source['resolved_symbol'],
+                    reference_received_ts=source['received_ts'],
+                    reference_scope='INDEPENDENT_FORECAST_REFERENCE_NOT_EXECUTION_QUOTE')
             code_history = history.get(code)
             if not isinstance(code_history, dict) or simulated_evidence(code_history, recursive=False):
                 code_history = {}
@@ -482,13 +505,49 @@ def _model_reason(model, code, family, cutoff):
         if not isinstance(source, dict):
             return 'MARKET_TARGET_CONFIGURED_SERIES_MISMATCH'
         expected = ALL_INSTRUMENTS[code]
+        from .reference_market_series import PROVIDER,model_source_valid
+        reference=source.get('provider')==PROVIDER
+        valid_reference=reference and model_source_valid(source,code)
+        valid_legacy=(not reference
+                and source.get('provider')==('Binance' if code in CRYPTO_INSTRUMENTS else 'Yahoo Finance via yfinance')
+                and source.get('ticker')==(expected.binance_symbol if code in CRYPTO_INSTRUMENTS else expected.yahoo))
         if (source.get('interval') != '5m' or source.get('not_broker_execution_bars') is not True
-                or source.get('provider') != ('Binance' if code in CRYPTO_INSTRUMENTS else 'Yahoo Finance via yfinance')
-                or source.get('ticker') != (expected.binance_symbol if code in CRYPTO_INSTRUMENTS else expected.yahoo)):
+                or not (valid_reference or valid_legacy)):
             return 'MARKET_TARGET_CONFIGURED_SERIES_MISMATCH'
     except (ValueError, TypeError, KeyError, OverflowError):
         return 'MARKET_MODEL_INVALID'
     return None
+
+
+def freeze_context_models(context):
+    """Lossless wire encoding only when the complete context exceeds its budget."""
+    import base64,json,zlib
+    from .operational_edge_compaction import MARKET_CONTEXT_MAX_BYTES
+    if len(json.dumps(context,allow_nan=False,separators=(',',':')).encode())<=MARKET_CONTEXT_MAX_BYTES:
+        return
+    for item in context['families'].values():
+        model=item.get('model')
+        if not isinstance(model,dict):continue
+        raw=json.dumps(model,allow_nan=False,separators=(',',':')).encode()
+        if len(raw)>24_000:continue
+        item['model_encoded']=base64.b64encode(zlib.compress(raw)).decode('ascii')
+        item['model_encoding']='json-zlib-v1'
+        del item['model']
+
+
+def frozen_model(item):
+    if 'model_encoded' not in item:
+        return item.get('model')
+    try:
+        import base64,json,zlib
+        encoded=item.get('model_encoded')
+        if ('model' in item or item.get('model_encoding')!='json-zlib-v1'
+                or not isinstance(encoded,str) or not 0<len(encoded)<=32_000):return None
+        decoder=zlib.decompressobj()
+        raw=decoder.decompress(base64.b64decode(encoded,validate=True),24_001)
+        if (len(raw)>24_000 or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail):return None
+        return json.loads(raw)
+    except (ValueError,TypeError,UnicodeError,zlib.error):return None
 
 
 def attach_market_family_context(engine, snapshot):
@@ -510,8 +569,8 @@ def attach_market_family_context(engine, snapshot):
     authority = getattr(feed, 'intraday_source_authority', {})
     if getattr(feed, 'demo', False) or simulated_evidence(snapshot, recursive=False) or simulated_evidence(authority):
         context['reason'] = 'SIMULATED_MARKET_INPUT_NOT_ADMISSIBLE'; return
-    if not isinstance(authority, dict):
-        context['reason'] = 'MARKET_SOURCE_AUTHORITY_UNAVAILABLE'; return
+    authority_invalid=not isinstance(authority,dict)
+    if authority_invalid:authority={}
     expected = ALL_INSTRUMENTS[code]
     provider, ticker = ('Binance', expected.binance_symbol) if code in CRYPTO_INSTRUMENTS else ('Yahoo', expected.yahoo)
     observed, received = number(authority.get('observed_ts')), number(authority.get('available_at'))
@@ -528,13 +587,21 @@ def attach_market_family_context(engine, snapshot):
         'crypto_derived': code not in CRYPTO_INSTRUMENTS or authority.get('derived') is False,
     }
     failed = [name for name,passed in checks.items() if not passed]
+    from .reference_market_series import (PROVIDER as REFERENCE_PROVIDER, validate_reference_series,
+                                          runtime_proof)
+    reference=getattr(feed,'family_reference_series',None)
+    reference_reason=validate_reference_series(reference,code,cutoff,runtime=True)
+    legacy_reason=None
     if failed:
         context['failed_source_checks'] = failed
-        context['reason'] = 'MARKET_SOURCE_IDENTITY_OR_CLOCK_INVALID'; return
+        legacy_reason=('MARKET_SOURCE_AUTHORITY_UNAVAILABLE' if authority_invalid
+                       else 'MARKET_SOURCE_IDENTITY_OR_CLOCK_INVALID')
     completed = completed_live_bars(getattr(feed, 'intraday_ohlcv', []), cutoff)
     origin = math.floor(cutoff/300)*300
-    if not completed or completed[-1]['bar_end_ts'] != origin:
-        context['reason'] = 'LATEST_COMPLETED_MARKET_BAR_UNAVAILABLE'; return
+    if legacy_reason is None and (not completed or completed[-1]['bar_end_ts'] != origin):
+        legacy_reason='LATEST_COMPLETED_MARKET_BAR_UNAVAILABLE'
+    if legacy_reason is not None and reference_reason is not None:
+        context['reason']=legacy_reason
     data_dir = getattr(getattr(engine, 'settings', None), 'data_dir', None)
     report = load_artifact(Path(data_dir)/'research'/'mathematical_edge_latest.json', cutoff) if data_dir else None
     if report is None:
@@ -545,18 +612,37 @@ def attach_market_family_context(engine, snapshot):
     models = matrix.get(code) or {}
     if not isinstance(models, dict) or simulated_evidence(models, recursive=False):
         return
+    context['published_for_sha']=report.get('published_for_sha')
+    model_reasons={family:_model_reason(model,code,family,cutoff)
+                   for family,model in models.items() if isinstance(model,dict) and model.get('status')=='TRAINED'}
+    context['model_inventory']={family:{'trained_model_valid':reason is None,
+        'target_provider':(models[family]['source'] if isinstance(models[family].get('source'),dict) else {}).get('provider'),
+        'target_symbol':(models[family]['source'] if isinstance(models[family].get('source'),dict) else {}).get('ticker'),
+        'model_sha256':models[family].get('model_sha256'),'reason':reason}
+        for family,reason in model_reasons.items()}
+    if legacy_reason is not None and reference_reason is not None:
+        context['rejected_models']={family:(reference_reason if models[family]['source']['provider']==REFERENCE_PROVIDER
+                                           else legacy_reason) for family,reason in model_reasons.items() if reason is None}
+        return
     facts = build_edge_family_evidence(snapshot)['families']
     for family in FAMILIES:
         model = models.get(family)
         if not isinstance(model, dict) or model.get('status') != 'TRAINED':
             continue
-        reason = _model_reason(model, code, family, cutoff)
+        reason = model_reasons.get(family)
         if reason:
             context.setdefault('rejected_models', {})[family] = reason; continue
+        uses_reference=model['source']['provider']==REFERENCE_PROVIDER
+        input_reason=reference_reason if uses_reference else legacy_reason
+        if input_reason is not None:
+            context.setdefault('rejected_models',{})[family]=input_reason;continue
+        family_provider=REFERENCE_PROVIDER if uses_reference else provider
+        family_ticker=reference['ticker'] if uses_reference else ticker
+        family_receipt=reference['received_ts'] if uses_reference else received
         if family == 'session':
             features = session_features(code, origin)
-            proof = {name: {'source_verified': True, 'source_id': provider+':'+ticker+':observed-clock',
-                'source_instrument': code, 'observed_ts': origin, 'received_ts': max(origin, received),
+            proof = {name: {'source_verified': True, 'source_id': family_provider+':'+family_ticker+':observed-clock',
+                'source_instrument': code, 'observed_ts': origin, 'received_ts': max(origin, family_receipt),
                 'max_age_sec': 900., 'quality': 1., 'dependency_group': 'price_path'} for name in features}
         else:
             features, proof = facts[family]['features'], facts[family]['feature_provenance']
@@ -611,12 +697,15 @@ def attach_market_family_context(engine, snapshot):
                 features, proof = ({n: features[n] for n in names}, {n: proof[n] for n in names})
         context['families'][family] = {'model': model, 'features': features, 'feature_provenance': proof,
                                         'forecast_origin_ts': origin}
+        if uses_reference:
+            context['families'][family]['target_reference']=runtime_proof(reference)
     # Root uses the existing frozen-input budget and is excluded explicitly as a
     # whole when oversized, rather than deleting coefficients or observations.
     from .operational_edge_compaction import MARKET_CONTEXT_MAX_BYTES
-    if len(json.dumps(context, allow_nan=False, separators=(',', ':')).encode()) > MARKET_CONTEXT_MAX_BYTES:
-        context['families'] = {}; context['reason'] = 'MARKET_CONTEXT_EXCEEDS_SNAPSHOT_BUDGET'; return
     context.update(available=bool(context['families']), reason='LOCAL_HASHED_HISTORICAL_MARKET_MODELS')
+    freeze_context_models(context)
+    if len(json.dumps(context, allow_nan=False, separators=(',', ':')).encode()) > MARKET_CONTEXT_MAX_BYTES:
+        context.update(families={},available=False,reason='MARKET_CONTEXT_EXCEEDS_SNAPSHOT_BUDGET'); return
 
 
 def market_family_evidence(snapshot, families):
@@ -645,14 +734,28 @@ def market_family_evidence(snapshot, families):
             or cutoff is None or horizon is None or horizon <= 0):
         return []
     for family in FAMILIES:
+        row = families[family]
+        inventory=(context.get('model_inventory') or {}).get(family) or {}
+        if inventory.get('trained_model_valid') is True:
+            row.update(market_model_trained=True,market_target_provider=inventory.get('target_provider'),
+                       market_target_symbol=inventory.get('target_symbol'),market_target_is_execution_quote=False)
         item = records.get(family)
         if not isinstance(item, dict):
+            if inventory.get('trained_model_valid') is True and row.get('forecast_available') is not True:
+                reason=(context.get('rejected_models') or {}).get(family) or context.get('reason')
+                row.update(readiness='TRAINED_MODEL_WAITING_CURRENT_INPUTS',reason=reason,needs_data=[reason])
             continue
-        row = families[family]
-        model = item.get('model')
+        model = frozen_model(item)
         reason = 'SIMULATED_MARKET_CONTEXT_NOT_ADMISSIBLE' if simulated_evidence(item) else _model_reason(model, code, family, cutoff)
         if reason:
             row['forecast_rejections'].append({'reason': reason}); continue
+        from .reference_market_series import PROVIDER as REFERENCE_PROVIDER,validate_runtime_proof
+        reference=None
+        if model['source']['provider']==REFERENCE_PROVIDER:
+            reference=item.get('target_reference')
+            reason=validate_runtime_proof(reference,code,cutoff)
+            if reason:
+                row['forecast_rejections'].append({'reason':reason});continue
         features, proof = item.get('features'), item.get('feature_provenance')
         origin = number(item.get('forecast_origin_ts'))
         if (not isinstance(features, dict) or not isinstance(proof, dict) or not 1 <= len(features) <= 16
@@ -685,6 +788,8 @@ def market_family_evidence(snapshot, families):
                 'test_gain_mbit': head['test_gain_mbit'], 'test_n': head['test_n'],
                 'evidence_tier': head['working_admission']['tier']}
             forecast_unexpired = final_capture is not None and final_capture < origin + 60.*head['horizon_minutes']
+            if reference is not None:
+                forecast_unexpired=forecast_unexpired and final_capture<reference['observed_ts']+900
             predictions[name]['forecast_expired'] = not forecast_unexpired
             if head['working_supported'] and forecast_unexpired:
                 age = max(0., (cutoff-model['training_cutoff'])/86400)
@@ -728,6 +833,7 @@ def market_family_evidence(snapshot, families):
         score_heads = [name for name in supported if name == 'direction'
                        or name == 'movement' and predictions[name]['horizon_minutes'] == horizon]
         expiry = min(origin+60.*predictions[name]['horizon_minutes'] for name in score_heads)
+        if reference is not None:expiry=min(expiry,reference['observed_ts']+900)
         components.append({'component_id':'mathematical_edge', 'instrument':code, 'available':True,
             'scores':scores, 'quality':min(qualities), 'family_ids':[family],
             'model_version':model['model_sha256'], 'source_ids':sorted({m['source_id'] for m in metas}),
@@ -737,3 +843,31 @@ def market_family_evidence(snapshot, families):
             'reason':'HISTORICAL_MARKET_RESPONSE_BOUNDED_MANUAL_PREFERENCE',
             'prediction_measure':TARGET, 'score_semantics':'affinity_not_expected_return', 'net_economic_proof':False})
     return components
+
+
+def family_runtime_status(snapshot):
+    """Small capture-time inference receipt, computed only by the background owner."""
+    context=snapshot.get('edge_family_market_context') or {}
+    if not isinstance(context,dict) or context.get('contract_version')!=CONTRACT:
+        return {}
+    from .edge_family_adapters import build_edge_family_evidence
+    evidence=build_edge_family_evidence(snapshot)
+    rows={}
+    inventory=context.get('model_inventory') or {}
+    for family,row in evidence['families'].items():
+        predictions={name:{k:head.get(k) for k in ('probability','horizon_minutes','working_supported','forecast_expired')}
+                     for name,head in (row.get('market_predictions') or {}).items()}
+        rows[family]={'trained_model_valid':(inventory.get(family) or {}).get('trained_model_valid') is True,
+            'forecast_available_at_capture':any(p['forecast_expired'] is False for p in predictions.values()),
+            'preference_available_at_capture':row.get('market_preference_available') is True,
+            'target_provider':row.get('market_target_provider'),'target_symbol':row.get('market_target_symbol'),
+            'forecast_origin_ts':row.get('forecast_origin_ts'),'model_sha256':row.get('market_model_sha256'),
+            'reason':row.get('reason'),'predictions':predictions}
+        reference=((context.get('families') or {}).get(family) or {}).get('target_reference')
+        rows[family]['reference_valid_until_ts']=(reference['observed_ts']+900 if isinstance(reference,dict) else None)
+    return {'contract_version':'family-runtime-forecast-receipt-v1','instrument':evidence['instrument'],
+        'scope':'FROZEN_INPUTS_AT_CAPTURE_NOT_CURRENT_DECISION','captured_ts':snapshot.get('captured_ts'),
+        'market_observation_ts':context.get('market_observation_ts'),'published_for_sha':context.get('published_for_sha'),
+        'available_forecasts_at_capture':sum(r['forecast_available_at_capture'] for r in rows.values()),
+        'qualified_preferences_at_capture':sum(r['preference_available_at_capture'] for r in rows.values()),
+        'families':rows,'network_calls':False,'runtime_fitting':False,'final_action_selected':False}

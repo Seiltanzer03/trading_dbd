@@ -187,6 +187,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             "readiness", "forecast_available", "needs_data", "observed_ts", "max_age_sec",
             "weight_pool", "standalone_vote",
             'forecast_kind', 'market_predictions', 'forecast_origin_ts', 'market_model_sha256',
+            'market_model_trained', 'market_target_provider', 'market_target_symbol', 'market_target_is_execution_quote',
             'market_preference_available', 'model_pool_effective_weight', 'model_marginal_score_delta',
             'model_attribution_semantics',
             "working_assessment_available", "working_assessment_kind", "working_assessment_reason",
@@ -420,6 +421,9 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
                 f". Вес общего математического пула {_format(row.get('model_pool_effective_weight'))}; "
                 f"изменение балла при исключении семейства {_format(row.get('model_marginal_score_delta'))}. "
                 'Прогноз движения не является Expected/CVaR или прибылью действия; вклад не аддитивная доля.')
+        if row.get('market_target_symbol'):
+            lines.append(f"Целевая серия прогноза: {row.get('market_target_provider') or '—'} "
+                         f"{row['market_target_symbol']}; это отдельный прогнозный ряд, не котировка исполнения.")
         if row.get('working_assessment_available') is True:
             lines.append(f"  Рабочая интерпретация LLM: {row.get('working_reason_ru') or '—'}; "
                          f"оценка {_format(row.get('working_score'))}; "
