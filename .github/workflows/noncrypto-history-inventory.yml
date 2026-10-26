@@ -21,7 +21,7 @@ jobs:
       - name: Inspect declared session metadata from the existing XAU provider off-host
         run: |
           python -u - <<'PY'
-          import json,time
+          import json,time,math
           from collections.abc import Mapping
           import yfinance as yf
           from seiltanzer.config import ALL_INSTRUMENTS
@@ -33,14 +33,21 @@ jobs:
           assert isinstance(meta,Mapping)
           period=meta.get('currentTradingPeriod') or {}
           regular=period.get('regular') or {}
+          def stamp(v):
+              if isinstance(v,(int,float)) and not isinstance(v,bool):return v if math.isfinite(v) else None
+              if getattr(v,'tzinfo',None) is not None and callable(getattr(v,'timestamp',None)):
+                  n=v.timestamp();return n if math.isfinite(n) else None
+              return None
           def plain(v,depth=0):
               if depth>5:return 'DEPTH_BOUND'
+              if getattr(v,'tzinfo',None) is not None and callable(getattr(v,'timestamp',None)):
+                  return {'epoch':stamp(v),'iso8601':v.isoformat()}
               if isinstance(v,Mapping):return {str(k):plain(x,depth+1) for k,x in list(v.items())[:30]}
               if isinstance(v,(list,tuple)):return [plain(x,depth+1) for x in v[:30]]
               return v if isinstance(v,(str,int,float,bool)) or v is None else str(type(v).__name__)
           rows=[(ts.timestamp(),float(r['Open']),float(r['High']),float(r['Low']),float(r['Close'])) for ts,r in hist.iterrows()]
           completed=completed_live_bars(rows,received)
-          start,end=regular.get('start'),regular.get('end')
+          start,end=stamp(regular.get('start')),stamp(regular.get('end'))
           active=(start<=received<end if all(isinstance(v,(int,float)) and not isinstance(v,bool) for v in (start,end)) else None)
           print('ACTUAL_XAU_PROVIDER_SESSION='+json.dumps(dict(symbol=symbol,received_ts=received,
            metadata_type=type(meta).__name__,metadata=plain({k:meta.get(k) for k in
