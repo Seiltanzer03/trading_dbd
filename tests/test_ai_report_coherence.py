@@ -148,3 +148,102 @@ def test_unified_replacement_does_not_keep_cancellation_continuity(monkeypatch):
          'execution_status':'pending_execution','decision_id':'new-exit'})
     decision,_=_unified_operational_choice(SimpleNamespace(),s,{},audit)
     assert decision['continuity']=='unified_action_replaces_previous_plan'
+
+
+def llm_proposal_snapshot():
+    s = selected_snapshot('CLOSE_25')
+    s['llm_shadow_decision'] = {'status': 'ok', 'policy': 'MOVE_TO_BE', 'confidence': .8,
+        'working_action': {'status': 'READY_FOR_MANUAL_CONFIRMATION',
+            'instruction_ru': 'ВРУЧНУЮ ПЕРЕНЕСТИ СТОП В БУ: 4006',
+            'parameters': {'stop_price': 4006., 'anchor': 'ENTRY_PRICE'}}}
+    row = {'candidate_id': 'be-4006', 'policy': 'MOVE_TO_BE',
+        'parameters': {'stop_price': 4006., 'anchor': 'ENTRY_PRICE'},
+        'eligible': False, 'reason': 'COMMON_SCENARIO_NO_ROBUST_MATERIAL_BENEFIT',
+        'delta_expected_r': .073, 'score': .740,
+        'benefit_assessment': {'basis': 'NO_MATERIAL_NET_OR_BOUNDED_TAIL_BENEFIT',
+            'sensitivity_basis': 'PAIRED_MODEL_BOUND',
+            'expected_test_value_r': -.039, 'indifference_band_r': .03},
+        'independent_evaluation': {'status': 'eligible', 'paired_delta_ci95_lower_r': -.0208}}
+    s['policy_manager']['unified_edge_ensemble']['candidates'].append(row)
+    return s, row
+
+
+def test_final_shadow_explains_common_refusal_and_removes_old_imperative():
+    s, row = llm_proposal_snapshot()
+    before = deepcopy(s)
+    text = report.normalize_final_report(OLD_REPORT +
+        '\nLLM ACTION VARIANT: ВРУЧНУЮ ПЕРЕНЕСТИ СТОП В БУ: 4006.\n', s)
+    shadow = text.split('**LLM SHADOW DECISION')[1].split('\n**')[0]
+    assert 'ВРУЧНУЮ ПЕРЕНЕСТИ' not in text
+    assert 'Итоговый статус предложения MOVE_TO_BE: исключено' in shadow
+    assert 'COMMON_SCENARIO_NO_ROBUST_MATERIAL_BENEFIT' in shadow
+    assert '-0.039R' in shadow and '-0.030R' in shadow
+    assert 'другому банку' in shadow
+    assert s == before
+    assert report.normalize_final_report(text, s) == text
+
+
+@pytest.mark.parametrize('kind', ['missing', 'other_parameters', 'ambiguous'])
+def test_final_shadow_never_infers_admission_from_policy_name(kind):
+    s, row = llm_proposal_snapshot()
+    rows = s['policy_manager']['unified_edge_ensemble']['candidates']
+    if kind == 'missing': rows.remove(row)
+    elif kind == 'other_parameters': row['parameters']['stop_price'] = 4007.
+    else: rows.append(deepcopy(row))
+    text = report.normalize_final_report(OLD_REPORT, s)
+    assert 'Итоговый допуск этих параметров не подтверждён' in text
+    assert 'ВРУЧНУЮ ПЕРЕНЕСТИ' not in text
+
+
+@pytest.mark.parametrize('selected', [False, True])
+def test_final_shadow_distinguishes_eligible_proposal_from_selected_plan(selected):
+    s, row = llm_proposal_snapshot()
+    row.update(eligible=True, reason='PASS')
+    if selected:
+        p = s['policy_manager']
+        p['management_decision']['policy'] = 'MOVE_TO_BE'
+        p['management_decision']['instruction_ru'] = 'Установить стоп 4006.'
+        p['management_decision']['parameters'] = deepcopy(row['parameters'])
+        p['unified_edge_ensemble'].update(selected_policy='MOVE_TO_BE', selected_candidate_id=row['candidate_id'])
+    text = report.normalize_final_report(OLD_REPORT, s)
+    assert ('Итоговый статус предложения MOVE_TO_BE: выбрано' if selected else
+            'Итоговый статус предложения MOVE_TO_BE: допущено, но не выбрано') in text
+    assert 'ВРУЧНУЮ ПЕРЕНЕСТИ' not in text
+
+
+@pytest.mark.parametrize('missing', ['proposal_params', 'row_params', 'empty_both', 'invalid_target',
+                                    'eligible_missing', 'eligible_string'])
+def test_incomplete_extended_proposal_metadata_never_claims_final_admission(missing):
+    s, row = llm_proposal_snapshot()
+    action = s['llm_shadow_decision']['working_action']
+    row['eligible'] = True
+    if missing == 'proposal_params': action.pop('parameters')
+    elif missing == 'row_params': row.pop('parameters')
+    elif missing == 'empty_both': action['parameters'] = row['parameters'] = {}
+    elif missing == 'invalid_target': action['parameters']['stop_price'] = row['parameters']['stop_price'] = True
+    elif missing == 'eligible_missing': row.pop('eligible')
+    else: row['eligible'] = 'true'
+    text = '\n'.join(report._final_llm_proposal_lines(s))
+    assert 'Итоговый допуск этих параметров не подтверждён' in text
+    assert 'допущено' not in text and 'выбрано' not in text
+    assert 'Базовый quant до ансамбля:' in text
+
+
+@pytest.mark.parametrize('final_params', [None, {'stop_price': 4007., 'anchor': 'ENTRY_PRICE'}])
+def test_selected_shadow_must_match_final_execution_parameters(final_params):
+    s, row = llm_proposal_snapshot()
+    row['eligible'] = True
+    p = s['policy_manager']
+    p['unified_edge_ensemble'].update(selected_policy='MOVE_TO_BE', selected_candidate_id=row['candidate_id'])
+    p['management_decision'].update(policy='MOVE_TO_BE', parameters=final_params)
+    text = '\n'.join(report._final_llm_proposal_lines(s))
+    assert 'Итоговый допуск этих параметров не подтверждён' in text
+    assert 'Итоговый статус предложения MOVE_TO_BE: выбрано' not in text
+
+
+def test_point_economics_are_not_relabelled_as_mc_lower_bounds():
+    s, row = llm_proposal_snapshot()
+    row['benefit_assessment']['sensitivity_basis'] = 'QUALIFIED_POINT_ECONOMICS'
+    text = '\n'.join(report._final_llm_proposal_lines(s))
+    assert 'точечное ΔExpected -0.039R' in text
+    assert 'нижняя MC/seed-граница' not in text

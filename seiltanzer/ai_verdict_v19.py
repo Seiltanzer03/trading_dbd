@@ -700,6 +700,73 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
     return "\n".join(lines).strip()
 
 
+def _proposal_parameters(policy, action):
+    """Identify recorded executable coordinates, without granting admission."""
+    if not isinstance(action, dict):
+        return None
+    params = action.get('parameters', {})
+    if not isinstance(params, dict):
+        return None
+    if policy in {'HOLD', 'CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT'}:
+        return params if not params else None
+    key = {'MOVE_TO_BE': 'stop_price', 'TIGHTEN_STOP': 'stop_price',
+           'TRAIL_GAMMA_FLIP': 'stop_price', 'REDUCE_TAKE': 'take_price',
+           'EXTEND_TAKE': 'take_price', 'SCALE_OUT_ON_SPIKE': 'trigger_price',
+           'TIME_STOP': 'deadline_ts'}.get(policy)
+    target = _number(params.get(key)) if key else None
+    if key is None or isinstance(params.get(key), bool) or target is None or target <= 0:
+        return None
+    if policy == 'SCALE_OUT_ON_SPIKE':
+        fraction = _number(params.get('close_fraction'))
+        if isinstance(params.get('close_fraction'), bool) or fraction is None or not 0 < fraction < 1:
+            return None
+    return params
+
+
+def _final_llm_proposal_lines(snapshot: dict) -> list[str]:
+    shadow = snapshot.get('llm_shadow_decision')
+    if not isinstance(shadow, dict):
+        return []
+    from .llm_decision_shadow import append_shadow_section
+    # The independent opinion never acquires authority from its own flags.
+    body = [line.replace('Quant:', 'Базовый quant до ансамбля:', 1) if line.startswith('Quant:') else line
+            for line in append_shadow_section('', {**shadow, 'production_authority': False}).splitlines()[1:]]
+    if shadow.get('status') != 'ok':
+        return body
+    action = shadow.get('working_action') or {}
+    policy = shadow.get('policy')
+    params = _proposal_parameters(policy, action)
+    audit = (snapshot.get('policy_manager') or {}).get('unified_edge_ensemble') or {}
+    matches = [row for row in audit.get('candidates') or [] if isinstance(row, dict)
+               and params is not None and row.get('policy') == policy
+               and _proposal_parameters(policy, row) == params]
+    unconfirmed = 'Итоговый допуск этих параметров не подтверждён; действующий план указан в «ДЕЙСТВИЕ СЕЙЧАС».'
+    if len(matches) != 1 or type(matches[0].get('eligible')) is not bool:
+        body.append(unconfirmed)
+        return body
+    row = matches[0]
+    decision = (snapshot.get('policy_manager') or {}).get('management_decision') or {}
+    selected = row.get('candidate_id') is not None and row.get('candidate_id') == audit.get('selected_candidate_id')
+    if selected and (row['eligible'] is not True or audit.get('selected_policy') != policy
+                     or decision.get('policy') != policy or _proposal_parameters(policy, decision) != params):
+        body.append(unconfirmed)
+        return body
+    state = ('выбрано' if selected and row.get('eligible') is True else
+             'допущено, но не выбрано' if row.get('eligible') is True else 'исключено')
+    body.append(f"Итоговый статус предложения {policy}: {state} [{row.get('reason') or '—'}]. "
+                'Единственный действующий план указан в «ДЕЙСТВИЕ СЕЙЧАС».')
+    benefit = row.get('benefit_assessment') or {}
+    lower, band = _number(benefit.get('expected_test_value_r')), _number(benefit.get('indifference_band_r'))
+    if (row.get('reason') == 'COMMON_SCENARIO_NO_ROBUST_MATERIAL_BENEFIT'
+            and lower is not None and band is not None and band >= 0 and lower < -band):
+        label = ('нижняя MC/seed-граница ΔExpected' if benefit.get('sensitivity_basis') == 'PAIRED_MODEL_BOUND'
+                 else 'точечное ΔExpected')
+        body.append(f'Общий банк: {label} {lower:+.3f}R '
+                    f'ниже допустимой защитной потери {-band:+.3f}R; средние Expected/CVaR не отменяют этот предел. '
+                    'Независимый допуск относится к другому банку и не заменяет общий допуск.')
+    return body
+
+
 def _unified_command_sections(lines: list[str], snapshot: dict) -> list[str]:
     """Render commands only after the final operational decision is published."""
     manager = snapshot.get('policy_manager') or {}
@@ -739,7 +806,14 @@ def _unified_command_sections(lines: list[str], snapshot: dict) -> list[str]:
         for i in range(bounds[0]+1,bounds[1]):
             if lines[i].startswith('Арбитр:'):
                 lines[i] = f"Действующий арбитр: {decision.get('authority') or '—'} → {policy}. Gate базового контроля: {(manager.get('gate') or {}).get('status') or '—'}; его отдельный результат не заменяет итоговую команду."
+    proposal_lines = _final_llm_proposal_lines(snapshot)
     bounds = _section(lines,'**LLM SHADOW DECISION')
+    if proposal_lines:
+        if bounds:
+            lines[bounds[0]+1:bounds[1]] = proposal_lines + ['']
+        else:
+            lines.extend(['', '**LLM SHADOW DECISION · БЕЗ PRODUCTION AUTHORITY** —', *proposal_lines])
+        bounds = None
     if bounds:
         for i in range(bounds[0]+1,bounds[1]):
             if lines[i].startswith('Quant:'):
