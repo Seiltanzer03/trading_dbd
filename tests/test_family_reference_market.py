@@ -172,8 +172,7 @@ def test_enclosing_snapshot_pressure_encodes_intact_model_before_excluding_forec
     snapshot['policy_manager']['bounded_existing_decision_facts']='x'*54000
     assert len(json.dumps(snapshot).encode())>60000
     compact_operational_edges(snapshot)
-    item=snapshot['edge_family_market_context']['families']['session']
-    assert 'model_encoded' in item
+    item=market().unpack_market_context(snapshot['edge_family_market_context'])['families']['session']
     assert market().frozen_model(item)==original
     assert build_edge_family_evidence(snapshot)['families']['session']['market_predictions']==expected
     assert len(json.dumps(snapshot,separators=(',',':')).encode())<60000
@@ -202,3 +201,64 @@ def test_heavy_builder_cannot_move_frozen_reference_into_the_next_bar_window(tmp
     assert row['forecast_available'] is True
     assert row['forecast_origin_ts']==T0
     assert snapshot['edge_family_market_context']['market_observation_ts']==T0
+
+
+def test_full_frozen_context_fits_enclosing_budget_without_losing_any_input(tmp_path,monkeypatch):
+    import json
+    from seiltanzer.operational_edge_compaction import compact_operational_edges
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    engine,snapshot=reference_runtime(tmp_path,monkeypatch)
+    market().attach_market_family_context(engine,snapshot)
+    context=snapshot['edge_family_market_context']
+    context['source_lineage_notes']=['observed-source-lineage-detail'*330]
+    expected=build_edge_family_evidence(snapshot)['families']['session']['market_predictions']
+    market().freeze_context_models(context,force=True)
+    original=deepcopy(context)
+    snapshot['policy_manager']['bounded_existing_decision_facts']='x'*54000
+    compact_operational_edges(snapshot)
+    assert len(json.dumps(snapshot,separators=(',',':')).encode())<60000
+    assert market().unpack_market_context(snapshot['edge_family_market_context'])==original
+    assert build_edge_family_evidence(snapshot)['families']['session']['market_predictions']==expected
+    receipt=market().family_runtime_status(snapshot)
+    assert receipt['available_forecasts_at_capture']==1
+    before=deepcopy(snapshot);compact_operational_edges(snapshot)
+    assert snapshot==before
+
+
+@pytest.mark.parametrize('case',['hash','header','base64','truncated','trailing','oversized','nested'])
+def test_complete_context_wire_rejects_corruption_and_unbounded_decode(tmp_path,monkeypatch,case):
+    import json,zlib,base64
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    engine,snapshot=reference_runtime(tmp_path,monkeypatch)
+    market().attach_market_family_context(engine,snapshot)
+    original=snapshot['edge_family_market_context']
+    packet=market().pack_market_context(original)
+    assert 'context_encoded' in packet
+    if case=='hash':packet['context_sha256']='0'*64
+    elif case=='header':packet['market_observation_ts']=T0+300
+    elif case=='base64':packet['context_encoded']='!'
+    elif case=='truncated':packet['context_encoded']=packet['context_encoded'][:-4]
+    elif case=='trailing':packet['context_encoded']=base64.b64encode(base64.b64decode(packet['context_encoded'])+b'junk').decode()
+    else:
+        value={'blob':'x'*32001} if case=='oversized' else {'context_encoded':'nested'}
+        packet['context_encoded']=base64.b64encode(zlib.compress(json.dumps(value).encode())).decode()
+        packet['context_sha256']=fingerprint(value)
+    snapshot['edge_family_market_context']=packet
+    assert market().unpack_market_context(packet) is None
+    assert not build_edge_family_evidence(snapshot)['components']
+    assert market().family_runtime_status(snapshot)=={}
+
+
+def test_complete_context_wire_keeps_original_forecast_expiry_and_integrity_checks(tmp_path,monkeypatch):
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    engine,snapshot=reference_runtime(tmp_path,monkeypatch)
+    market().attach_market_family_context(engine,snapshot)
+    original=deepcopy(snapshot['edge_family_market_context'])
+    snapshot['edge_family_market_context']=market().pack_market_context(original)
+    assert build_edge_family_evidence(snapshot)['families']['session']['forecast_available']
+    snapshot['captured_ts']=T0+900
+    assert market().family_runtime_status(snapshot)['available_forecasts_at_capture']==0
+    original['contract_fixture']=True
+    snapshot['captured_ts']=T0
+    snapshot['edge_family_market_context']=market().pack_market_context(original)
+    assert not build_edge_family_evidence(snapshot)['components']

@@ -83,8 +83,12 @@ def compact_operational_edges(snapshot):
     manager = snapshot.get("policy_manager")
     context=snapshot.get("edge_family_market_context")
     if isinstance(context,dict) and isinstance(context.get('families'),dict) and _bytes(snapshot)>54000:
-        from .edge_family_market import freeze_context_models
-        freeze_context_models(context,force=True)
+        from .edge_family_market import freeze_context_models,pack_market_context
+        packed=pack_market_context(context)
+        if packed is context:
+            freeze_context_models(context,force=True)
+            packed=pack_market_context(context)
+        snapshot['edge_family_market_context']=packed
     for key in FAMILY_AUDITS:
         if isinstance(snapshot.get(key), dict) and _bytes(snapshot[key]) > 4000:
             snapshot[key] = {field: deepcopy(snapshot[key][field]) for field in (
