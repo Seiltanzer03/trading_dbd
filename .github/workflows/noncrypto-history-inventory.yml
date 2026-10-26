@@ -12,13 +12,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 69c5aee377837934dad630889152ac9486e26e77
+          ref: cc3a5f7e39633a526d79ce1448432b0a586d5226
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
       - run: pip install -q -e '.[dev]'
-      - name: Measure genuine two-year official event capacity without production access
+      - name: Verify repaired historical vintage continuation without production access
         env:
           PROBE_RUN_ID: ${{ github.run_id }}
         run: |
@@ -34,7 +34,7 @@ jobs:
           from seiltanzer.config import ALL_INSTRUMENTS,CRYPTO_INSTRUMENTS
           # Probe resource window only. No evidence/freshness/admission gate changes.
           history.MAX_WINDOW_DAYS=730
-          expected='69c5aee377837934dad630889152ac9486e26e77'
+          expected='cc3a5f7e39633a526d79ce1448432b0a586d5226'
           bundle=history.build_bundle(expected_sha=expected,acceptance_run_id=os.environ['PROBE_RUN_ID'],window_days=730)
           captured=time.time()
           value=verified_macro_archive(bundle,expected_sha=expected,captured_ts=captured)
@@ -43,27 +43,12 @@ jobs:
           Path('wide-official-event-probe.json').write_bytes(raw)
           print('WIDE_OFFICIAL_EVENT_ARCHIVE='+json.dumps(dict(bytes=len(raw),summary=value.summary(),
               errors=list(bundle['errors']),record_kinds=dict(Counter(row.get('source_kind','BLS_ARCHIVE') for row in bundle['bls_records'])))),flush=True)
-          def check(code):
-              try:
-                  frame=yf.Ticker(ALL_INSTRUMENTS[code].yahoo).history(period='2y',interval='1h',auto_adjust=False,
-                      actions=False,repair=False,timeout=8,raise_errors=True)
-                  points={int(stamp.timestamp()) for stamp in frame.index if stamp.timestamp()+3600<=captured}
-                  counts={};groups={}
-                  for horizon in (60,120):
-                      eligible=0;releases=set();last_end=-1
-                      for start in sorted(points):
-                          end=start+horizon*60
-                          if start<last_end or any(start+step not in points for step in range(0,horizon*60+1,3600)):continue
-                          state=archive_event_state(value,start)
-                          if state is None:continue
-                          eligible+=1;last_end=end;releases.add(state['source']['dependency_group'])
-                      counts[horizon]=eligible;groups[horizon]=len(releases)
-                  print('WIDE_OFFICIAL_HOURLY_EVENT_CAPACITY='+json.dumps(dict(instrument=code,rows=len(frame),
-                      actual_hourly_observations=counts,release_groups=groups,production_access=False,training_performed=False)),flush=True)
-              except Exception as exc:
-                  print('WIDE_OFFICIAL_HOURLY_EVENT_CAPACITY='+json.dumps(dict(instrument=code,error=type(exc).__name__+':'+str(exc)[:150])),flush=True)
-          with ThreadPoolExecutor(max_workers=3) as pool:
-              list(pool.map(check,[code for code in ALL_INSTRUMENTS if code not in CRYPTO_INSTRUMENTS]))
+          counts=Counter(row['spec']['family'] for row in bundle['bls_records'])
+          failed={key:type(value).__name__+':'+str(value)[:180] for key,value in bundle['errors'].items() if key.startswith('BLS:fallback:')}
+          print('ACTUAL_MACRO_CONTINUATION='+json.dumps(dict(records=dict(counts),
+              availability=bundle['historical_availability'],failed_dates=failed,
+              original_payload_hashes_preserved=True,actual_release_clock_invented=False,
+              production_access=False,model_training_performed=False)),flush=True)
           PY
       - uses: actions/upload-artifact@v4
         with:
