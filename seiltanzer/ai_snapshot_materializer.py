@@ -297,9 +297,9 @@ class AISnapshotMaterializer:
         from .ai_frozen_expert_inputs import publication_marker
         if baseline_publication is not None and publication_marker(self.engine) != baseline_publication:
             return "EXPERT_PUBLICATION_CHANGED"
-        from .ai_frozen_expert_inputs import completed_bar_marker
+        from .ai_frozen_expert_inputs import completed_bar_marker, completed_bar_advanced
         live_completed_bar = completed_bar_marker(self.engine)
-        if live_completed_bar is not None and live_completed_bar != baseline_completed_bar:
+        if completed_bar_advanced(baseline_completed_bar,live_completed_bar):
             return "COMPLETED_MARKET_BAR_CHANGED"
         live_instrument, live_quote_available, _ = self._current_quote()
         if (

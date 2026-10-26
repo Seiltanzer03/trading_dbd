@@ -134,7 +134,7 @@ def completed_bar_marker(engine):
                 and isinstance(observed,(int,float)) and not isinstance(observed,bool)
                 and math.isfinite(observed) and observed>0 and isinstance(bars,list) and bars
                 and isinstance(bars[-1],dict) and bars[-1].get('bar_end_ts')==observed):
-            reference_marker=(PROVIDER,SYMBOLS[code],code,observed)
+            reference_marker=(code,math.floor(observed/300))
     authority = getattr(feed, "intraday_source_authority", None)
     if not isinstance(authority, dict) or not authority:
         return reference_marker
@@ -144,10 +144,17 @@ def completed_bar_marker(engine):
             return reference_marker
     except (KeyError, TypeError, ValueError, OverflowError):
         return reference_marker
-    legacy=(authority.get("provider"), authority.get("source_symbol"),
-            authority.get("target_instrument"), authority.get("source_verified"),
+    legacy=(authority.get("target_instrument") or getattr(feed,'instrument_code',None),
             math.floor(observed/300))
-    return (legacy,reference_marker) if reference_marker is not None else legacy
+    if reference_marker is not None and reference_marker[0]==legacy[0]:
+        return (legacy[0],max(legacy[1],reference_marker[1]))
+    return reference_marker or legacy
+
+
+def completed_bar_advanced(previous,current):
+    """Temporary lane loss is not progress; freshness is checked by consumers."""
+    return (current is not None and (previous is None or current[0]!=previous[0]
+                                    or current[1]>previous[1]))
 
 
 def freeze_expert_inputs(engine, snapshot: dict, *, market_inputs=None) -> None:

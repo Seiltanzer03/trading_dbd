@@ -84,3 +84,18 @@ def test_reference_bar_progress_invalidates_background_inputs_even_when_cash_ser
     f.family_reference_series['observed_ts']=T0+300
     f.family_reference_series['source_sha256']=fingerprint(f.family_reference_series['bars'])
     assert completed_bar_marker(engine)!=before
+
+@pytest.mark.parametrize('legacy_ahead',[False,True])
+def test_reference_and_legacy_refresh_gap_does_not_rebuild_without_bar_progress(legacy_ahead):
+    from seiltanzer.ai_frozen_expert_inputs import completed_bar_marker,completed_bar_advanced
+    f=feed();f.family_reference_series=reference_source()
+    original={'provider':'Yahoo','source_symbol':'^NDX','target_instrument':'NAS100',
+              'source_verified':True,'observed_ts':T0+(300 if legacy_ahead else 0)}
+    f.intraday_source_authority=dict(original);engine=SimpleNamespace(market=f)
+    baseline=completed_bar_marker(engine)
+    f.intraday_source_authority={}
+    assert not completed_bar_advanced(baseline,completed_bar_marker(engine))
+    f.intraday_source_authority=dict(original)
+    assert not completed_bar_advanced(baseline,completed_bar_marker(engine))
+    f.intraday_source_authority['observed_ts']+=300
+    assert completed_bar_advanced(baseline,completed_bar_marker(engine))
