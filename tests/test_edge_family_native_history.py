@@ -49,6 +49,29 @@ def test_option_iv_preserves_actual_units_proxy_and_capture_clocks():
     assert meta['raw_option_probability_is_physical'] is False
 
 
+def test_raw_iv_uses_its_own_recorded_capture_age_instead_of_cached_v3_value_or_clock():
+    r=row();r['option_age_sec']=40.
+    frozen=json.loads(r['frozen_features_json'])
+    frozen['option_distribution']['implied_move']['sigma_annual']=.31
+    frozen['g1s_evidence_v3']['option_static'].update(iv=.99,quality={'source_ts':T0-900})
+    raw=json.dumps(frozen);r.update(frozen_features_json=raw,features_sha256=hashlib.sha256(raw.encode()).hexdigest())
+    point=native().native_history([r],captured_ts=T0)['NAS100']['option'][0]
+    assert point['features']=={'option.iv':.31}
+    meta=point['feature_provenance']['option.iv']
+    assert meta['observed_ts']==r['captured_ts']-40
+    assert meta['received_ts']==r['original_created_ts']
+    assert meta['source_sha256']==r['features_sha256']
+    assert meta['value_origin']=='IMMUTABLE_RAW_CHAIN_WITH_ORIGINAL_CAPTURE_AGE'
+    from seiltanzer.native_family_capture_projection import project_capture
+    projected={**r,**project_capture(raw,r['features_sha256'])}
+    assert native().native_history([projected],captured_ts=T0)==native().native_history([r],captured_ts=T0)
+
+
+def test_raw_iv_does_not_drop_rejection_evidence_inside_the_implied_measurement():
+    metrics={'proxy':'QQQ','demo':False,'implied_move':{'sigma_annual':.3,'synthetic_data_used':True}}
+    assert observation(metrics=metrics) is None
+
+
 @pytest.mark.parametrize('changes', [
     {'metrics':{'proxy':'SPY','demo':False,'implied_move':{'sigma_annual':.24}}},
     {'metrics':{'proxy':'QQQ','demo':True,'implied_move':{'sigma_annual':.24}}},

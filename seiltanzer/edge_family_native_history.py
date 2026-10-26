@@ -24,7 +24,8 @@ def option_observation(*, code, metrics, source_id, observed_ts, received_ts,
     if not production_chain_snapshot(metrics):
         return None
     if simulated_evidence({**{key:metrics.get(key) for key in FLAGS},
-            'provenance':metrics.get('provenance'), 'density_input':metrics.get('density_input')}):
+            'provenance':metrics.get('provenance'), 'density_input':metrics.get('density_input'),
+            'implied_move':metrics.get('implied_move')}):
         return None
     implied = metrics.get('implied_move')
     iv = number(implied.get('sigma_annual')) if isinstance(implied, dict) else None
@@ -92,7 +93,11 @@ def native_history(rows, *, captured_ts):
         # passive capture age belongs to this exact raw OI profile.
         from .edge_family_option_interest import interest_observation
         age=number(row.get('option_age_sec'))
+        raw_option=None
         if age is not None and age>=0:
+            raw_option=option_observation(code=code,metrics=frozen.get('option_distribution'),
+                source_id=row.get('option_source'),observed_ts=captured-age,received_ts=recorded,
+                quality=row.get('option_quality'),source_sha256=row.get('features_sha256'))
             interest=interest_observation(code=code,metrics=frozen.get('option_distribution'),
                 source_id=row.get('option_source'),observed_ts=captured-age,received_ts=recorded,
                 quality=row.get('option_quality'),source_sha256=row.get('features_sha256'))
@@ -117,6 +122,12 @@ def native_history(rows, *, captured_ts):
                     result.setdefault(code,{}).setdefault(family,[]).append({
                         'captured_ts':recorded, 'features':{n:facts['features'][n] for n in names},
                         'feature_provenance':{n:facts['feature_provenance'][n] for n in names}})
+        if raw_option:
+            proof=raw_option['feature_provenance']['option.iv']
+            proof.update(clock_basis='ORIGINAL_RAW_CHAIN_CAPTURE_AGE_AND_PASSIVE_RECEIPT',
+                value_origin='IMMUTABLE_RAW_CHAIN_WITH_ORIGINAL_CAPTURE_AGE')
+            result.setdefault(code,{}).setdefault('option',[]).append(raw_option)
+            continue
         v3 = frozen.get('g1s_evidence_v3') or {}
         v2 = frozen.get('g1s_evidence_v2') or {}
         block = v3.get('option_static') if isinstance(v3,dict) else None
