@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read cutover owner and startup guard without mutation
+      - name: Read frozen runtime forecast receipt and published model metadata
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -20,24 +20,11 @@ jobs:
           command_timeout: 100s
           script: |
             set -eu
-            python - <<'PY'
-            from pathlib import Path
-            import json,os,subprocess
-            root=Path('/opt/seiltanzer/data')
-            for name in ('cutover.active','cutover.journal.json'):
-             p=root/name
-             if p.exists() or p.is_symlink():
-              print('CUTOVER_FILE',name,'symlink',p.is_symlink(),'bytes',p.lstat().st_size)
-              if not p.is_symlink() and p.lstat().st_size<120000: print(p.read_text())
-             else:print('CUTOVER_FILE_ABSENT',name)
-            for argv in [
-             ['git','-C','/opt/seiltanzer','rev-parse','HEAD'],
-             ['systemctl','list-units','--all','--no-pager','--plain','seiltanzer*'],
-             ['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],
-             ['df','-h','/opt/seiltanzer/data'],
-             ['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID'],
-             ['journalctl','-u','seiltanzer','-n','12','--no-pager','-o','cat'],
-             ['ps','-C','python','-C','python3','-o','pid,etimes,pcpu,pmem,comm']]:
-             r=subprocess.run(argv,capture_output=True,text=True,timeout=20)
-             print('READONLY',argv,'EXIT',r.returncode);print(r.stdout[:18000]);print(r.stderr[:2000])
+            cd /opt/seiltanzer
+            .venv/bin/python -u - <<'PY'
+            import json,urllib.request,time
+            for path in ('/api/ai/snapshot/status','/api/research/mathematical-edge'):
+             with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=10) as response:r=json.load(response)
+             if path.endswith('mathematical-edge'):r={k:r.get(k) for k in ('state','published_for_sha','family_market_model_summary','family_reference_source_errors','family_reference_sources')}
+             print('BOUNDED_ACTUAL_HTTP',path,json.dumps(r))
             PY
