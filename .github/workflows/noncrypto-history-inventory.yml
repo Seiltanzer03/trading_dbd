@@ -6,61 +6,18 @@ on:
 permissions:
   contents: read
 jobs:
-  inspect:
+  focused-provider-tests:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
-      - name: Read existing Treasury runtime and saved snapshot source headers
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
         with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          command_timeout: 40s
-          script: |
-            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import sys
-            sys.dont_write_bytecode=True
-            import json,sqlite3,time,hashlib
-            sys.path.insert(0,'/opt/seiltanzer')
-            from seiltanzer.ai_runtime_report_v20 import _independent_provider_input
-            from seiltanzer.ai_provider_guard import compact_provider_snapshot
-            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-            try:
-             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-             end=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>end,1000)
-             row=c.execute('SELECT id,snapshot_json FROM ai_verdicts WHERE trade_id=141 AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 1').fetchone()
-            finally:c.close()
-            s=json.loads(row[1])
-            for key in ('llm_shadow_decision','effective_management_decision','ai_provider_status'):s.pop(key,None)
-            x=_independent_provider_input(compact_provider_snapshot(s),s)
-            encode=lambda v:json.dumps(v,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()
-            print('EXISTING_WIRE_SIZE_PROFILE',json.dumps(dict(id=row[0],root={k:len(encode(v)) for k,v in x.items()},manager={k:len(encode(v)) for k,v in (x.get('policy_manager') or {}).items()})),flush=True)
-            groups={}
-            def walk(v,path):
-             if isinstance(v,(dict,list)):
-              raw=encode(v)
-              if len(raw)>=256:groups.setdefault(hashlib.sha256(raw).hexdigest(),dict(size=len(raw),paths=[]))['paths'].append(path)
-             if isinstance(v,dict):
-              for k,w in v.items():walk(w,path+'.'+str(k))
-             elif isinstance(v,list):
-              for i,w in enumerate(v):walk(w,path+'.'+str(i))
-            walk(x,'root')
-            print('DUPLICATE_WIRE_OBJECT_SIZES',json.dumps(sorted([g for g in groups.values() if len(g['paths'])>1],key=lambda g:g['size']*(len(g['paths'])-1),reverse=True)[:12]),flush=True)
-            from seiltanzer.llm_decision_shadow import _shadow_projection
-            facts=_shadow_projection(s)['edge_family_facts']
-            totals={};counts={}
-            def field_sizes(v):
-             if isinstance(v,dict):
-              for k,w in v.items():
-               totals[k]=totals.get(k,0)+len(encode(w))+len(str(k))+3;counts[k]=counts.get(k,0)+1
-               if isinstance(w,(dict,list)):field_sizes(w)
-             elif isinstance(v,list):
-              for w in v:field_sizes(w)
-            for f in facts.values():
-             for meta in (f.get('feature_provenance') or {}).values():field_sizes(meta)
-            print('PROVENANCE_FIELD_SIZES',json.dumps(sorted([dict(key=k,bytes=v,n=counts[k]) for k,v in totals.items()],key=lambda g:g['bytes'],reverse=True)[:40]),flush=True)
-            print('FEATURE_VALUE_AND_PROOF_BYTES',json.dumps({k:{name:len(encode(v.get(name))) for name in ('features','feature_provenance','market_predictions','needs_data')} for k,v in facts.items()}),flush=True)
-            print('READ_ONLY_NO_PAYLOAD_PRINT_NO_LLM_PROVIDER_NO_FIT_NO_DB_WRITE')
-            PY
+          ref: 9c6a020a956c2ae987380799bf497f53475bb6ae
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install test dependencies
+        run: pip install -e ".[dev]"
+      - name: Reproduce independent provenance inflation
+        run: pytest -q tests/test_ai_provider_provenance_wire.py
