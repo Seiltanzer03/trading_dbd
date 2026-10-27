@@ -10,28 +10,26 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read disk admission and bounded disposable-directory sizes
+      - name: Read log and cache metadata before bounded headroom recovery
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 100s
+          command_timeout: 60s
           script: |
             set -eu
             /usr/bin/python3 -u - <<'PY'
-            import json,subprocess,urllib.request
-            for kind,args in (
-             ('capacity',['df','-B1','/']),
-             ('top_sizes',['du','-xhd1','/opt','/var','/root','/tmp']),
-             ('runner_sizes',['du','-xhd2','/opt/actions-runner/_work']),
-             ('app_sizes',['du','-xhd1','/opt/seiltanzer'])):
-             r=subprocess.run(args,capture_output=True,text=True,timeout=20);print(json.dumps(dict(kind=kind,returncode=r.returncode,lines=r.stdout.splitlines()[-65:],stderr=r.stderr[:500])),flush=True)
-            for path in ('/api/research/runtime/status','/api/ai/snapshot/status'):
-             try:
-              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as r:row=json.load(r)
-              print('ACTUAL_HTTP',path,json.dumps(row),flush=True)
-             except OSError as e:print('ACTUAL_HTTP',path,type(e).__name__,flush=True)
-            print('READ_ONLY_DISK_INVENTORY_NO_DATABASE_OPEN')
+            import json,os,stat,subprocess
+            from pathlib import Path
+            for root in ('/var/log','/opt/seiltanzer/data'):
+             rows=[]
+             for p in Path(root).iterdir():
+              s=p.lstat()
+              if stat.S_ISREG(s.st_mode):rows.append(dict(name=p.name,bytes=s.st_size,allocated=s.st_blocks*512,links=s.st_nlink))
+             print(json.dumps(dict(kind='file_metadata',root=root,rows=sorted(rows,key=lambda r:r['allocated'],reverse=True)[:22])),flush=True)
+            for kind,args in (('journal',['journalctl','--disk-usage']),('cache',['du','-xhd2','/var/cache','/var/log/journal']),('git_objects',['git','-C','/opt/seiltanzer','count-objects','-vH'])):
+             r=subprocess.run(args,capture_output=True,text=True,timeout=15);print(json.dumps(dict(kind=kind,stdout=r.stdout[:8000],stderr=r.stderr[:500])),flush=True)
+            print('READ_ONLY_METADATA_NO_DATABASE_OPEN')
             PY
