@@ -10,43 +10,23 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Profile bounded audit metadata query without database writes
+      - name: Count metadata-index scope read-only before a bounded audit fix
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 80s
+          command_timeout: 30s
           script: |
-            set -eu
             /usr/bin/python3 -u - <<'PY'
-            import collections,json,sqlite3,time,urllib.request,subprocess
-            def out(**r):print(json.dumps(r),flush=True)
-            out(kind='sha',value=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip())
-            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1);c.row_factory=sqlite3.Row
+            import json,sqlite3,time
+            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-            query="""SELECT q.attempt_id,q.attempt_ts,q.target_instrument,q.observation_created,
-            q.created_observation_id,q.blocker_code,q.requested_expiry_ts,
-            p.target_ts,p.resolution_status,p.instrument
-            FROM g1_q_capture_attempts q LEFT JOIN passive_market_observations p
-            ON p.observation_id=q.created_observation_id
-            ORDER BY q.attempt_ts DESC LIMIT ?"""
-            out(kind='plan',rows=[tuple(r) for r in c.execute('EXPLAIN QUERY PLAN '+query,(5000,))])
-            for label,q in (('attempts_only','SELECT attempt_id FROM g1_q_capture_attempts ORDER BY attempt_ts DESC LIMIT ?'),('audit_join',query)):
-             deadline=time.monotonic()+10;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000);start=time.monotonic()
-             try:
-              rows=c.execute(q,(5000,)).fetchall();out(kind='sql_profile',label=label,milliseconds=round(1000*(time.monotonic()-start),1),rows=len(rows))
-              if label=='audit_join':
-               now=time.time();due=[r for r in rows if r['observation_created']==1 and r['created_observation_id'] and r['resolution_status']=='pending' and r['target_ts'] is not None and now>r['target_ts']+600]
-               out(kind='cohort',created=sum(r['observation_created']==1 for r in rows),states=dict(collections.Counter(str(r['resolution_status']) for r in rows)),overdue_pending=len(due),unique_pending=len({(r['instrument'],r['target_ts']) for r in due}))
-             except sqlite3.DatabaseError as e:out(kind='sql_profile',label=label,milliseconds=round(1000*(time.monotonic()-start),1),error=str(e))
-            c.close()
-            path='/api/research/g1/q/audit?limit=5000&include_items=false'
-            start=time.monotonic()
+            deadline=time.monotonic()+8;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
             try:
-             with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as r:row=json.load(r)
-             out(kind='actual_http',milliseconds=round(1000*(time.monotonic()-start),1),summary={k:row.get(k) for k in ('contract_version','attempt_n','captured_n','counts','items_included')})
-            except OSError as e:out(kind='actual_http',milliseconds=round(1000*(time.monotonic()-start),1),error=type(e).__name__)
-            out(kind='safety',read_only=True,database_writes=0,model_calls=0,restarts=0)
+             for table in ('passive_market_observations','g1_q_capture_attempts'):
+              print(json.dumps(dict(kind='index_scope',table=table,rows=c.execute('SELECT COUNT(*) FROM '+table).fetchone()[0],indexes=c.execute('PRAGMA index_list('+table+')').fetchall())),flush=True)
+            finally:c.close()
+            print('READ_ONLY_INDEX_SCOPE_NO_WRITES')
             PY
