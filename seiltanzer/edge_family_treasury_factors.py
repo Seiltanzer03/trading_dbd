@@ -26,8 +26,11 @@ def treasury_observation(block, *, code, cutoff):
             or any(block.get(key) is not True for key in ('available','official_source_verified','complete_base_curve'))
             or any(block.get(key) is not False for key in ('stale','future_points_used'))):
         return None
+    source_url = block.get('source_url')
+    if not isinstance(source_url, str):
+        return None
     try:
-        url = urlparse(block.get('source_url',''))
+        url = urlparse(source_url)
         if url.scheme != 'https' or url.hostname != 'home.treasury.gov' or url.username or url.password or url.port not in (None,443):
             return None
     except (ValueError,TypeError):
