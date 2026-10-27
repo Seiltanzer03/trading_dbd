@@ -10,26 +10,50 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Observe bounded deployment startup progress without mutations
+      - name: Separate free provider-route timing from saved decision-input size
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 35s
+          command_timeout: 55s
           script: |
-            /usr/bin/python3 -u - <<'PY'
-            import subprocess,json,pathlib,time
-            def run(args):
-             r=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=10)
-             return r.stdout[-12000:]
-            print('DEPLOY_CURRENT_SHA',run(['git','-C','/opt/seiltanzer','rev-parse','HEAD']).strip())
-            print('DEPLOY_SERVICE_PROGRESS',run(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','ControlPID','-p','ExecMainStartTimestamp','-p','NRestarts','-p','Result']))
-            p=pathlib.Path('/opt/seiltanzer/data/backups/local')
-            print('DEPLOY_PRESTART_TEMPS',json.dumps([dict(name=f.name,size=f.stat().st_size,age=time.time()-f.stat().st_mtime) for f in p.glob('.*.tmp.sqlite3')][:4]))
-            lines=run(['journalctl','-u','seiltanzer','--since','-15 minutes','-n','50','--no-pager','-o','cat']).splitlines()
-            selected=[l for l in lines if any(k in l.lower() for k in ('start','backup','integrity','condition','preflight','recover','error','fail','ready','uvicorn'))]
-            print('DEPLOY_STARTUP_EVENTS','\n'.join(selected)[-7000:])
-            print('READ_ONLY_PROGRESS_NO_LLM_NO_MUTATION')
+            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
+            import sys,os,json,sqlite3,time,pathlib,subprocess
+            sys.dont_write_bytecode=True
+            sys.path.insert(0,'/opt/seiltanzer')
+            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+            env=dict(p.split('=',1) for p in pathlib.Path('/proc/'+pid+'/environ').read_bytes().decode().split('\0') if '=' in p)
+            proxy=env.get('OPENROUTER_PROXY') or None
+            key=env.get('OPENROUTER_API_KEY','').strip()
+            from seiltanzer.ai_provider_transport import _socks_client
+            import certifi
+            from curl_cffi import CurlOpt
+            from curl_cffi import requests
+            url='https://openrouter.ai/api/v1/auth/key'
+            for n in range(3):
+             started=time.monotonic()
+             try:
+              client=_socks_client(url,proxy,requests.Session,certifi.where(),{CurlOpt.NOPROXY:''})
+              response=client.get(url,headers={'Authorization':'Bearer '+key},proxy=proxy,timeout=8,allow_redirects=False,verify=True,discard_cookies=True)
+              print('FREE_PROVIDER_AUTH_ROUTE',json.dumps(dict(n=n+1,http=response.status_code,elapsed_ms=round((time.monotonic()-started)*1000),response_bytes=len(response.content))),flush=True)
+             except Exception as exc:print('FREE_PROVIDER_AUTH_ROUTE',json.dumps(dict(n=n+1,error=type(exc).__name__,elapsed_ms=round((time.monotonic()-started)*1000))),flush=True)
+            from seiltanzer.ai_runtime_report_v20 import _independent_provider_input
+            from seiltanzer.ai_provider_guard import compact_provider_snapshot
+            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
+            try:
+             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
+             end=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>end,1000)
+             row=c.execute('SELECT id,snapshot_json FROM ai_verdicts WHERE trade_id=141 AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 1').fetchone()
+            finally:c.close()
+            s=json.loads(row[1])
+            for k in ('llm_shadow_decision','effective_management_decision','ai_provider_status'):s.pop(k,None)
+            x=_independent_provider_input(compact_provider_snapshot(s),s)
+            encode=lambda v:json.dumps(v,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()
+            print('SAVED_DECISION_FIELD_BYTES',json.dumps(dict(id=row[0],total=len(encode(x)),root={k:len(encode(v)) for k,v in x.items()},manager={k:len(encode(v)) for k,v in (x.get('policy_manager') or {}).items()})),flush=True)
+            from seiltanzer.llm_decision_shadow import _shadow_projection
+            p=_shadow_projection(s)
+            print('DECISION_PROVENANCE_KEYS',json.dumps(sorted({k for f in p['edge_family_facts'].values() for meta in (f.get('feature_provenance') or {}).values() if isinstance(meta,dict) for k in meta})),flush=True)
+            print('READ_ONLY_NO_CONTEXT_PAYLOAD_NO_LLM_COMPLETION_NO_FIT_NO_DB_WRITE')
             PY
