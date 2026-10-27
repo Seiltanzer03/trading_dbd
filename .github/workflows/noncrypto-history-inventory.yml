@@ -44,7 +44,7 @@ jobs:
              if row:
               s=json.loads(row[2]);m=s.get('policy_manager') or {};l=s.get('llm_shadow_decision') or {}
               a=m.get('unified_ensemble') or m.get('unified_edge_ensemble') or {}
-              print('SAVED_REVIEW_VALIDATION',json.dumps(dict(id=row[0],ts=row[1],runtime_code_sha=s.get('runtime_code_sha'),captured_ts=s.get('captured_ts'),frozen=s.get('frozen_expert_inputs'),llm={k:l.get(k) for k in ('status','policy','policy_scores')},ensemble_keys=[k for k in m if 'unified' in k or 'ensemble' in k],current_llm=[{k:x.get(k) for k in ('component_id','effective_weight','reason')} for x in a.get('components',[]) if x.get('component_id')=='current_llm'],selected_policy=a.get('selected_policy'))),flush=True)
+              print('SAVED_REVIEW_VALIDATION',json.dumps(dict(id=row[0],ts=row[1],runtime_code_sha=s.get('runtime_code_sha'),captured_ts=s.get('captured_ts'),frozen=s.get('frozen_expert_inputs'),ai_provider_status=s.get('ai_provider_status'),llm={k:l.get(k) for k in ('status','policy','policy_scores','reason_code')},ensemble_keys=[k for k in m if 'unified' in k or 'ensemble' in k],current_llm=[{k:x.get(k) for k in ('component_id','effective_weight','reason')} for x in a.get('components',[]) if x.get('component_id')=='current_llm'],selected_policy=a.get('selected_policy'))),flush=True)
             finally:c.close()
             print('READ_ONLY_EXISTING_DATA_NO_PAID_LLM_NO_PROVIDER_FETCH_NO_FIT_NO_ORDER')
             PY
