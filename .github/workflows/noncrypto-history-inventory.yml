@@ -20,31 +20,13 @@ jobs:
           command_timeout: 40s
           script: |
             /usr/bin/python3 -u - <<'PY'
-            import json,sqlite3,time,urllib.request,subprocess
-            expected='8a4896f9c35664815f54ccdb06b0432bdd759bd2'
-            actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print('ACTUAL_RELEASE_SHA',actual,flush=True)
-            assert actual==expected,'wrong release generation'
-            for path in ('/api/ai/snapshot/status','/api/research/g1/management/local-status','/api/research/g1/management/status'):
-             try:
-              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:r=json.load(response)
-              if path.endswith('snapshot/status'):
-               f=r.get('family_market_forecasts') or {}
-               result={k:r.get(k) for k in ('ready','building','build_ms','build_n','last_error','snapshot_budget')}
-               result['forecasts']={k:f.get(k) for k in ('captured_ts','market_observation_ts','published_for_sha','available_forecasts_at_capture','qualified_preferences_at_capture')}
-               result['families']={name:{k:row.get(k) for k in ('trained_model_valid','forecast_available_at_capture','preference_available_at_capture','reason','forecast_origin_ts')} for name,row in (f.get('families') or {}).items()}
-              else:result={k:r.get(k) for k in ('resolved','eligible_resolved','pending','windows','last_error','last_step_ts','observations','evidence_status','broker_confirmed_execution_n','status_materialization')}
-              print('FINAL_READONLY_STATUS',path,json.dumps(result),flush=True)
-             except Exception as exc:print('STATUS_ERROR',path,type(exc).__name__,flush=True)
-            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-            try:
-             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-             deadline=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-             row=c.execute('SELECT id,ts,snapshot_json FROM ai_verdicts WHERE trade_id=141 AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 1').fetchone()
-             if row:
-              s=json.loads(row[2]);m=s.get('policy_manager') or {};l=s.get('llm_shadow_decision') or {}
-              a=m.get('unified_ensemble') or m.get('unified_edge_ensemble') or {}
-              print('SAVED_REVIEW_VALIDATION',json.dumps(dict(id=row[0],ts=row[1],runtime_code_sha=s.get('runtime_code_sha'),captured_ts=s.get('captured_ts'),frozen=s.get('frozen_expert_inputs'),ai_provider_status=s.get('ai_provider_status'),llm={k:l.get(k) for k in ('status','policy','policy_scores','reason_code')},ensemble_keys=[k for k in m if 'unified' in k or 'ensemble' in k],current_llm=[{k:x.get(k) for k in ('component_id','effective_weight','reason')} for x in a.get('components',[]) if x.get('component_id')=='current_llm'],selected_policy=a.get('selected_policy'))),flush=True)
-            finally:c.close()
-            print('READ_ONLY_EXISTING_DATA_NO_PAID_LLM_NO_PROVIDER_FETCH_NO_FIT_NO_ORDER')
+            import json,subprocess
+            r=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-10-27 12:35:00 UTC','-n','500','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
+            allowed=('request_id','stage','event','elapsed_ms','duration_ms','code','error_code','error_type','exception_type','input_bytes','request_bytes','output_bytes','response_bytes','max_output_tokens','completion_tokens','prompt_tokens','finish_reason','timeout_sec','deadline_remaining_ms')
+            for line in r.stdout.splitlines():
+             try:v=json.loads(line[line.index('{'):])
+             except (ValueError,TypeError):continue
+             if isinstance(v,dict) and str(v.get('request_id','')).startswith('ai-'):
+              print('EXISTING_AI_TIMING',json.dumps({k:v[k] for k in allowed if k in v}),flush=True)
+            print('READ_ONLY_EXISTING_TRACE_NO_NEW_LLM_CALL')
             PY
