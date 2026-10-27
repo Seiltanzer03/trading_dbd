@@ -10,21 +10,34 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read frozen runtime forecast receipt and published model metadata
+      - name: Read history fence and original startup guard after PR531 delivery refusal
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 100s
+          command_timeout: 80s
           script: |
             set -eu
-            cd /opt/seiltanzer
-            .venv/bin/python -u - <<'PY'
-            import json,urllib.request,time
-            for path in ('/api/ai/snapshot/status','/api/research/mathematical-edge'):
-             with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=10) as response:r=json.load(response)
-             if path.endswith('mathematical-edge'):r={k:r.get(k) for k in ('state','published_for_sha','family_market_model_summary','family_reference_source_errors','family_reference_sources')}
-             print('BOUNDED_ACTUAL_HTTP',path,json.dumps(r))
+            /usr/bin/python3 -u - <<'PY'
+            import json,os,subprocess
+            from pathlib import Path
+            def out(**r):print(json.dumps(r,sort_keys=True),flush=True)
+            out(kind='active_guard',exists=os.path.lexists('/opt/seiltanzer/data/cutover.active'))
+            for name in ('cutover.journal.json','cutover.result.json'):
+             p=Path('/opt/seiltanzer/data')/name
+             try:
+              assert not p.is_symlink() and p.stat().st_size<65536
+              r=json.loads(p.read_bytes());out(kind='epoch',file=name,fields={k:r.get(k) for k in ('run_id','phase','service_started','abort_reason')})
+             except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
+            for kind,args in (
+             ('git',['git','-C','/opt/seiltanzer','rev-parse','HEAD']),
+             ('service',['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts']),
+             ('history_units',['systemctl','list-units','--all','--type=service','--no-legend','seiltanzer-history*']),
+             ('original_guard',['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'])):
+             try:
+              r=subprocess.run(args,capture_output=True,text=True,timeout=30);out(kind=kind,returncode=r.returncode,stdout=r.stdout[:6000],stderr=r.stderr[:2000])
+             except subprocess.TimeoutExpired:out(kind=kind,timed_out=True)
+            out(kind='safety',read_only=True,db_writes=0,provider_calls=0,restarts=0,cutover_mutations=0)
             PY
