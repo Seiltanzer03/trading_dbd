@@ -398,6 +398,15 @@ def collect_components(snapshot, candidates, current_llm=None, excluded_working_
         llm = {'status': 'unavailable', 'reason': 'SIMULATED_EXPERT_NOT_ADMISSIBLE'}
     scores = {str(k): _score(v) for k, v in (llm.get("policy_scores") or {}).items()}
     scores = {k: v for k, v in scores.items() if v is not None}
+    chosen_score = scores.get(llm.get('policy'))
+    admissible_policies = {row['policy'] for row in candidates if row.get('eligible') is True}
+    contradictory = (llm.get('policy') in admissible_policies and chosen_score is not None
+        and any(value > chosen_score for policy, value in scores.items()
+                if policy in admissible_policies))
+    if contradictory:
+        # Keep the provider's original output for audit. Neither a replacement
+        # sparse choice nor its family interpretations may rescue this opinion.
+        llm = {**llm, 'status': 'unavailable'}
     if not scores and llm.get("policy") in set(BASE) | set(EXTENDED):
         # A single explicit choice is a sparse opinion. Unscored actions are
         # absent, not synthetic votes against those actions.
@@ -429,7 +438,8 @@ def collect_components(snapshot, candidates, current_llm=None, excluded_working_
                  "evidence_family_ids": llm_families,
                  "unverified_claimed_family_ids": rejected_families,
                  "model_version": llm.get("model") or llm.get("contract_version"),
-                 "reason": (("STRUCTURED_LLM_PREFERENCE" if llm_available else
+                 "reason": (("CURRENT_LLM_POLICY_SCORE_CONTRADICTION" if contradictory else
+                             "STRUCTURED_LLM_PREFERENCE" if llm_available else
                              "CURRENT_LLM_NO_RELATIVE_PREFERENCE" if flat_scores else "CURRENT_LLM_UNAVAILABLE")
                             + (";EVIDENCE_LINEAGE_EXCLUDED_BY_SNAPSHOT_BYTE_BUDGET"
                                if lineage_status.get("available") is False else "")),

@@ -68,6 +68,8 @@ Correlated metrics from one family are not independent votes. Hard-CVaR eligibil
 is mandatory. Never widen stops, average down, or add to a losing position.
 Return all 12 policy_scores as the ordered array, each from -1 to 1: relative preferences, not
 probabilities or Expected R. Self-confidence never determines ensemble weight.
+Your selected policy must have a highest score among hard-admissible actions.
+Check that policy and policy_scores agree before returning the response.
 Assess all eight families using ONLY the exact numeric features supplied in
 edge_family_facts, preserving observed versus preliminary proxy/scenario roles.
 Include only supported opinions in family_assessments, with family_id,1-4 exact
