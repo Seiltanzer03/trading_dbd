@@ -70,8 +70,11 @@ Return all 12 policy_scores as the ordered array, each from -1 to 1: relative pr
 probabilities or Expected R. Self-confidence never determines ensemble weight.
 Your selected policy must have a highest score among hard-admissible actions.
 Check that policy and policy_scores agree before returning the response.
-When feature_provenance contains a provenance_ref, resolve its exact metadata in
-feature_provenance_table. Shared metadata does not create independent evidence.
+Reconstruct feature provenance by recursively resolving any sole provenance_ref
+object from feature_provenance_table, then overlay each feature's metadata on
+feature_provenance_defaults[family] (absent defaults mean {}). References may
+occur inside nested metadata or defaults. No field is omitted by this encoding.
+Shared metadata does not create independent evidence.
 Assess all eight families using ONLY the exact numeric features supplied in
 edge_family_facts, preserving observed versus preliminary proxy/scenario roles.
 Include only supported opinions in family_assessments, with family_id,1-4 exact
