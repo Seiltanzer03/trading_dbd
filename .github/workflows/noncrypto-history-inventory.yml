@@ -10,37 +10,23 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Separate free provider-route timing from saved decision-input size
+      - name: Measure decision packet on saved review without provider inference
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 55s
+          command_timeout: 40s
           script: |
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import sys,os,json,sqlite3,time,pathlib,subprocess
+            import sys,json,sqlite3,time,copy,re
             sys.dont_write_bytecode=True
             sys.path.insert(0,'/opt/seiltanzer')
-            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
-            env=dict(p.split('=',1) for p in pathlib.Path('/proc/'+pid+'/environ').read_bytes().decode().split('\0') if '=' in p)
-            proxy=env.get('OPENROUTER_PROXY') or None
-            key=env.get('OPENROUTER_API_KEY','').strip()
-            from seiltanzer.ai_provider_transport import _socks_client
-            import certifi
-            from curl_cffi import CurlOpt
-            from curl_cffi import requests
-            url='https://openrouter.ai/api/v1/auth/key'
-            for n in range(3):
-             started=time.monotonic()
-             try:
-              client=_socks_client(url,proxy,requests.Session,certifi.where(),{CurlOpt.NOPROXY:''})
-              response=client.get(url,headers={'Authorization':'Bearer '+key},proxy=proxy,timeout=8,allow_redirects=False,verify=True,discard_cookies=True)
-              print('FREE_PROVIDER_AUTH_ROUTE',json.dumps(dict(n=n+1,http=response.status_code,elapsed_ms=round((time.monotonic()-started)*1000),response_bytes=len(response.content))),flush=True)
-             except Exception as exc:print('FREE_PROVIDER_AUTH_ROUTE',json.dumps(dict(n=n+1,error=type(exc).__name__,elapsed_ms=round((time.monotonic()-started)*1000))),flush=True)
             from seiltanzer.ai_runtime_report_v20 import _independent_provider_input
             from seiltanzer.ai_provider_guard import compact_provider_snapshot
+            from seiltanzer.ai_provider_provenance_wire import share_provenance
+            from seiltanzer.decision_research import validate_no_future_timestamps
             c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
             try:
              c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
@@ -49,11 +35,30 @@ jobs:
             finally:c.close()
             s=json.loads(row[1])
             for k in ('llm_shadow_decision','effective_management_decision','ai_provider_status'):s.pop(k,None)
-            x=_independent_provider_input(compact_provider_snapshot(s),s)
+            old=_independent_provider_input(compact_provider_snapshot(s),s)
+            full=copy.deepcopy(old);table=full.pop('feature_provenance_table',{});defaults=full.pop('feature_provenance_defaults',{})
+            def resolve(v):
+             if isinstance(v,dict):
+              if set(v)=={'provenance_ref'}:return resolve(table[v['provenance_ref']])
+              return {k:resolve(w) for k,w in v.items()}
+             if isinstance(v,list):return [resolve(w) for w in v]
+             return v
+            for family,f in full['edge_family_facts'].items():
+             f['feature_provenance']={name:{**resolve(defaults.get(family,{})),**resolve(meta)} for name,meta in (f.get('feature_provenance') or {}).items()}
+            validate_no_future_timestamps(full,s['captured_ts'])
+            ns={}
+            exec("\"\"\"Decision facts for the provider; exact technical audit stays in local storage.\"\"\"\nfrom copy import deepcopy\nimport json\nimport re\n\n\nPACKET_VERSION = 'independent-decision-packet-v1'\n_DIGEST = re.compile(r'(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])')\n_PROOF_FIELDS = frozenset((\n    'body_sha256', 'supporting_body_sha256', 'preliminary_context_sha256',\n    'reference_proof',\n))\n\n\ndef _without_byte_proofs(value):\n    if isinstance(value, dict):\n        return {key: _without_byte_proofs(child) for key, child in value.items()\n                if key not in _PROOF_FIELDS}\n    if isinstance(value, list):\n        return [_without_byte_proofs(child) for child in value]\n    return value\n\n\ndef build_decision_packet(full_input: dict) -> tuple[dict, dict[str, str]]:\n    \"\"\"Return a packet and label->exact digest mapping without changing inputs.\n\n    Caller retains the full masked input and validates its original clocks.\n    Removing byte proofs does not grant source authority: admitted availability,\n    provider/symbol, clocks, dependencies, quality and preliminary roles stay.\n    \"\"\"\n    packet = deepcopy(full_input)\n    packet.pop('edge_family_source_bundle_audit', None)\n    manager = packet.get('policy_manager')\n    if isinstance(manager, dict):\n        # Delivery details and another expert's exploratory budget are local\n        # audit, not independent current-model evidence. Risk/gate/economics,\n        # source reliability and metric coverage are retained in their entirety.\n        manager.pop('input_audit', None)\n        manager.pop('llm_edge_exploratory_weight', None)\n    context = packet.get('research_working_context')\n    if isinstance(context, dict) and isinstance(context.get('source_provenance'), dict):\n        context['source_provenance'] = _without_byte_proofs(context['source_provenance'])\n    facts = packet.get('edge_family_facts')\n    if isinstance(facts, dict):\n        for row in facts.values():\n            if isinstance(row, dict) and isinstance(row.get('feature_provenance'), dict):\n                row['feature_provenance'] = _without_byte_proofs(row['feature_provenance'])\n\n    digests = set()\n\n    def visit(value, replace=None):\n        if isinstance(value, dict):\n            result = {}\n            for key, child in value.items():\n                # Numerical feature names and values are exact, even if a\n                # producer happened to use a digest-looking feature identifier.\n                if key == 'features':\n                    result[key] = child\n                    continue\n                new_key = text(key, replace)\n                result[new_key] = visit(child, replace)\n            return result\n        if isinstance(value, list):\n            return [visit(child, replace) for child in value]\n        if isinstance(value, str):\n            return text(value, replace)\n        return value\n\n    def text(value, replace):\n        if not isinstance(value, str):\n            return value\n        if replace is None:\n            digests.update(_DIGEST.findall(value))\n            return value\n        return _DIGEST.sub(lambda match: replace[match.group()], value)\n\n    visit(packet)\n    # A label namespace absent from every original string cannot collide with\n    # literal source identifiers. Terminators also distinguish label1/label10.\n    original = json.dumps(full_input, ensure_ascii=False, allow_nan=False)\n    prefix = '@sha:'\n    while prefix in original:\n        prefix += '_'\n    forward = {digest: prefix + str(index) + ';' for index, digest in enumerate(sorted(digests))}\n    return visit(packet, replace=forward), {label: digest for digest, label in forward.items()}\n\n\ndef restore_evidence_identities(values: list[str], aliases: dict[str, str]) -> list[str]:\n    \"\"\"Restore only known digest labels before local source-claim validation.\"\"\"\n    if not aliases:\n        return values\n    pattern = re.compile('|'.join(re.escape(label) for label in aliases))\n    return [pattern.sub(lambda match: aliases[match.group()], value) for value in values]\n",ns)
+            new,aliases=ns['build_decision_packet'](full)
+            pattern=re.compile('|'.join(re.escape(label) for label in aliases)) if aliases else None
             encode=lambda v:json.dumps(v,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()
-            print('SAVED_DECISION_FIELD_BYTES',json.dumps(dict(id=row[0],total=len(encode(x)),root={k:len(encode(v)) for k,v in x.items()},manager={k:len(encode(v)) for k,v in (x.get('policy_manager') or {}).items()})),flush=True)
-            from seiltanzer.llm_decision_shadow import _shadow_projection
-            p=_shadow_projection(s)
-            print('DECISION_PROVENANCE_KEYS',json.dumps(sorted({k for f in p['edge_family_facts'].values() for meta in (f.get('feature_provenance') or {}).values() if isinstance(meta,dict) for k in meta})),flush=True)
-            print('READ_ONLY_NO_CONTEXT_PAYLOAD_NO_LLM_COMPLETION_NO_FIT_NO_DB_WRITE')
+            restored=json.loads(pattern.sub(lambda m:aliases[m.group()],encode(new).decode())) if pattern else copy.deepcopy(new)
+            for family,f in full['edge_family_facts'].items():
+             assert restored['edge_family_facts'][family].get('features')==f.get('features')
+             assert restored['edge_family_facts'][family].get('market_predictions')==f.get('market_predictions')
+            for k in ('policies','risk_constraint','gate','evidence','inputs','execution_cost_model'):
+             assert restored['policy_manager'].get(k)==full['policy_manager'].get(k)
+            wire=share_provenance(new)
+            validate_no_future_timestamps(wire,s['captured_ts'])
+            print('REAL_DECISION_PACKET_SIZE',json.dumps(dict(review_id=row[0],old_wire_bytes=len(encode(old)),full_audit_bytes=len(encode(full)),new_wire_bytes=len(encode(wire)),aliases=len(aliases),numeric_features_and_forecasts_equal=True,risk_gate_costs_evidence_equal=True,full_and_packet_clocks='PASS',root={k:len(encode(v)) for k,v in wire.items()})),flush=True)
+            print('READ_ONLY_SAVED_REVIEW_NO_PAID_LLM_NO_DB_WRITE_NO_PAYLOAD')
             PY
