@@ -19,42 +19,34 @@ jobs:
           port: 22
           command_timeout: 40s
           script: |
-            /usr/bin/python3 -u - <<'PY'
-            import json,sqlite3,time,urllib.request,subprocess
-            expected='da68f5cb701cc02cd4111bbee1eeff9578b9c094'
-            actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print('FINAL_RELEASE_SHA',actual,flush=True);assert actual==expected,'wrong release generation'
-            trade_id=None
-            for path in ('/api/ai/snapshot/status','/api/research/g1/management/local-status'):
-             try:
-              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:r=json.load(response)
-              if path.endswith('snapshot/status'):
-               trade_id=r.get('current_trade_id');f=r.get('family_market_forecasts') or {}
-               out={k:r.get(k) for k in ('ready','building','last_error','snapshot_budget','current_trade_id')}
-               out['forecasts']={k:f.get(k) for k in ('captured_ts','market_observation_ts','published_for_sha','available_forecasts_at_capture','qualified_preferences_at_capture')}
-               out['families']={name:{k:v.get(k) for k in ('forecast_available_at_capture','preference_available_at_capture','reason')} for name,v in (f.get('families') or {}).items()}
-              else:out={k:r.get(k) for k in ('resolved','eligible_resolved','last_error','status_materialization')}
-              print('FINAL_LIVE_STATUS',path,json.dumps(out),flush=True)
-             except Exception as exc:print('STATUS_ERROR',path,type(exc).__name__,flush=True)
-            if trade_id is not None:
-             c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-             try:
-              c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-              deadline=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-              row=c.execute('SELECT id,ts,snapshot_json FROM ai_verdicts WHERE trade_id=? AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 1',(int(trade_id),)).fetchone()
-              if row:
-               s=json.loads(row[2]);ctx=s.get('research_working_context') or {};source=ctx.get('source_provenance') or {};llm=s.get('llm_shadow_decision') or {};manager=s.get('policy_manager') or {};audit=manager.get('unified_edge_ensemble') or {}
-               contract=llm.get('input_contract') or {};wire=contract.get('frozen_input_json')
-               decoded=json.loads(wire) if isinstance(wire,str) and len(wire)<=60000 else {}
-               out=dict(id=row[0],ts=row[1],runtime_code_sha=s.get('runtime_code_sha'),captured_ts=s.get('captured_ts'),research={k:ctx.get(k) for k in ('available','reason','market_observation_ts','market_input_capture_ts','observed_ts','historical_profit_proven','automatic_execution_allowed')},source={k:source.get(k) for k in ('provider','source_symbol','target_instrument','observed_ts','available_at','derived')},estimators=ctx.get('price_estimators'),source_proof_present=isinstance(source.get('reference_proof'),dict),llm={k:llm.get(k) for k in ('status','policy','reason_code','confidence')},provider_status=s.get('ai_provider_status'),provider_wire_bytes=len(wire.encode()) if isinstance(wire,str) else None,shared_provenance_n=len(decoded.get('feature_provenance_table') or {}),current_llm=[{k:x.get(k) for k in ('effective_weight','reason')} for x in audit.get('components',[]) if x.get('component_id')=='current_llm'],selected_policy=audit.get('selected_policy'),excluded_roots=(s.get('edge_family_budget_status') or {}).get('excluded_roots'))
-               print('FINAL_SAVED_RESEARCH_RECEIPT',json.dumps(out,allow_nan=False),flush=True)
-             finally:c.close()
-            r=subprocess.run(['journalctl','-u','seiltanzer','--since','-15 minutes','-n','400','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
-            keys=('request_id','stage','event','elapsed_ms','duration_ms','input_bytes','request_bytes','output_bytes','response_bytes','completion_tokens','prompt_tokens','finish_reason')
-            for line in r.stdout.splitlines():
-             try:v=json.loads(line[line.index('{'):])
-             except (ValueError,TypeError):continue
-             if isinstance(v,dict) and str(v.get('request_id','')).startswith('ai-') and v.get('stage') in ('provider_transport','provider_http','provider_fallback','response'):
-              print('FINAL_EXISTING_PROVIDER_TIMING',json.dumps({k:v[k] for k in keys if k in v}),flush=True)
-            print('READ_ONLY_EXISTING_DATA_NO_LLM_CALL_NO_FETCH_NO_FIT_NO_ORDER')
+            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
+            import sys
+            sys.dont_write_bytecode=True
+            import json,sqlite3,time,hashlib
+            sys.path.insert(0,'/opt/seiltanzer')
+            from seiltanzer.ai_runtime_report_v20 import _independent_provider_input
+            from seiltanzer.ai_provider_guard import compact_provider_snapshot
+            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
+            try:
+             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
+             end=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>end,1000)
+             row=c.execute('SELECT id,snapshot_json FROM ai_verdicts WHERE trade_id=141 AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 1').fetchone()
+            finally:c.close()
+            s=json.loads(row[1])
+            for key in ('llm_shadow_decision','effective_management_decision','ai_provider_status'):s.pop(key,None)
+            x=_independent_provider_input(compact_provider_snapshot(s),s)
+            encode=lambda v:json.dumps(v,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()
+            print('EXISTING_WIRE_SIZE_PROFILE',json.dumps(dict(id=row[0],root={k:len(encode(v)) for k,v in x.items()},manager={k:len(encode(v)) for k,v in (x.get('policy_manager') or {}).items()})),flush=True)
+            groups={}
+            def walk(v,path):
+             if isinstance(v,(dict,list)):
+              raw=encode(v)
+              if len(raw)>=256:groups.setdefault(hashlib.sha256(raw).hexdigest(),dict(size=len(raw),paths=[]))['paths'].append(path)
+             if isinstance(v,dict):
+              for k,w in v.items():walk(w,path+'.'+str(k))
+             elif isinstance(v,list):
+              for i,w in enumerate(v):walk(w,path+'.'+str(i))
+            walk(x,'root')
+            print('DUPLICATE_WIRE_OBJECT_SIZES',json.dumps(sorted([g for g in groups.values() if len(g['paths'])>1],key=lambda g:g['size']*(len(g['paths'])-1),reverse=True)[:12]),flush=True)
+            print('READ_ONLY_NO_PAYLOAD_PRINT_NO_LLM_PROVIDER_NO_FIT_NO_DB_WRITE')
             PY
