@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 9c6a020a956c2ae987380799bf497f53475bb6ae
+          ref: 9edb876358449be4251ea3fa67e5b65f04f0ee71
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -20,4 +20,4 @@ jobs:
       - name: Install test dependencies
         run: pip install -e ".[dev]"
       - name: Reproduce independent provenance inflation
-        run: pytest -q tests/test_ai_provider_provenance_wire.py
+        run: pytest -q tests/test_ai_provider_provenance_wire.py tests/test_ai_provider_explanation.py tests/test_ai_provider_explanation_projection.py tests/test_ai_provider_projection_regression.py tests/test_ai_provider_guard.py tests/test_ai_provider_failure_codes.py tests/test_ai_provider_telemetry.py tests/test_ai_structured_provider_contract.py tests/test_llm_decision_shadow.py tests/test_llm_decision_shadow_safety.py
