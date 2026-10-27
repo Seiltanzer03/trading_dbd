@@ -70,11 +70,20 @@ Return all 12 policy_scores as the ordered array, each from -1 to 1: relative pr
 probabilities or Expected R. Self-confidence never determines ensemble weight.
 Your selected policy must have a highest score among hard-admissible actions.
 Check that policy and policy_scores agree before returning the response.
-Reconstruct feature provenance by recursively resolving any sole provenance_ref
-object from feature_provenance_table, then overlay each feature's metadata on
-feature_provenance_defaults[family] (absent defaults mean {}). References may
-occur inside nested metadata or defaults. No field is omitted by this encoding.
-Shared metadata does not create independent evidence.
+Some policy, candidate and provenance rows use column_groups: each group gives
+columns and rows; zip columns with each row's values. Mapping row keys name the
+policy/feature; sequence row keys are original zero-based indices. Different
+column groups preserve absent fields; explicit null stays unknown. All numeric
+features, policy economics, parameters and source roles retain their exact values.
+After decoding provenance rows, recursively resolve any sole provenance_ref from
+feature_provenance_table and overlay feature metadata on feature_provenance_defaults
+for its family. Shared metadata does not create independent observations.
+Source identity labels beginning @source: and digest labels beginning @sha:
+preserve equality within this request. Full identities, digests, byte proofs and
+delivery audit are retained locally. Labels add no independent evidence or source
+authority; use supplied availability, clocks, quality and preliminary/proxy roles.
+Constituent byte/window lineage is validated locally; the packet carries each
+feature's admitted clock, quality and dependency envelope.
 Assess all eight families using ONLY the exact numeric features supplied in
 edge_family_facts, preserving observed versus preliminary proxy/scenario roles.
 Include only supported opinions in family_assessments, with family_id,1-4 exact
@@ -406,7 +415,7 @@ def _provider_payload(content: str) -> tuple[str, dict[str, Any]]:
     return explanation, shadow
 
 
-def _independent_provider_input(snapshot: dict[str, Any], authority: dict[str, Any]) -> dict[str, Any]:
+def _independent_provider_facts(snapshot: dict[str, Any], authority: dict[str, Any]) -> dict[str, Any]:
     """Restore bounded facts that the older explanation-only projection drops."""
     projected = _shadow_projection(snapshot)
     authoritative = _shadow_projection(authority)
@@ -437,8 +446,21 @@ def _independent_provider_input(snapshot: dict[str, Any], authority: dict[str, A
     # clocks; a compact event summary supplies context without a research ledger.
     if "macro_context_v1" in authoritative:
         projected["macro_context_v1"] = _bounded(authoritative["macro_context_v1"])
-    from .ai_provider_provenance_wire import share_provenance
-    return share_provenance(projected)
+    return projected
+
+
+def _provider_decision_inputs(snapshot: dict[str, Any], authority: dict[str, Any]):
+    from .ai_provider_decision_packet import build_decision_packet
+    from .decision_research import validate_no_future_timestamps
+    full = _independent_provider_facts(snapshot, authority)
+    if authority.get('captured_ts') is not None:
+        validate_no_future_timestamps(full, float(authority['captured_ts']))
+    packet, aliases = build_decision_packet(full)
+    return packet, full, aliases
+
+
+def _independent_provider_input(snapshot: dict[str, Any], authority: dict[str, Any]) -> dict[str, Any]:
+    return _provider_decision_inputs(snapshot, authority)[0]
 
 
 def request_explanation_with_shadow(
@@ -467,11 +489,13 @@ def request_explanation_with_shadow(
         # Mask at the actual transport boundary. The deterministic renderer and
         # post-response guard retain full authority locally; no winner-bearing
         # explanation facts or verdict system prompt are uploaded to the model.
-        independent_input = _independent_provider_input(snapshot, authority)
+        independent_input, full_input, evidence_identity_aliases = _provider_decision_inputs(snapshot, authority)
         from .decision_research import validate_no_future_timestamps
         validate_no_future_timestamps(independent_input, float(authority["captured_ts"]))
         frozen_input_json = json.dumps(independent_input, ensure_ascii=False,
                                        sort_keys=True, separators=(",", ":"), allow_nan=False)
+        full_input_json = json.dumps(full_input, ensure_ascii=False,
+                                    sort_keys=True, separators=(",", ":"), allow_nan=False)
         if len(frozen_input_json.encode("utf-8")) > INDEPENDENT_INPUT_MAX_BYTES:
             raise RuntimeError("combined_provider_independent_input_budget_exceeded")
         body = {
@@ -537,6 +561,9 @@ def request_explanation_with_shadow(
     with phase('provider_validate'):
         content = ((result.get("choices") or [{}])[0].get("message") or {}).get("content")
         _explanation, parsed_shadow = _provider_payload(content)
+        from .ai_provider_decision_packet import restore_evidence_identities
+        parsed_shadow['evidence_families'] = restore_evidence_identities(
+            parsed_shadow['evidence_families'], evidence_identity_aliases)
         quant_policy = _quant_policy(authority)
         guard_ok, guard_reasons = _hard_guard(authority, parsed_shadow["policy"])
         disagreement_cat = _disagreement_category(parsed_shadow["policy"], quant_policy)
@@ -566,7 +593,7 @@ def request_explanation_with_shadow(
             "input_captured_ts": authority.get("captured_ts"),
             "provider_response_received_ts": response_received_ts,
             "input_contract": {
-                "version": "independent-llm-transport-v1",
+                "version": "independent-llm-transport-v2",
                 "quant_selection_masked": True,
                 "all_policy_scores_required": True,
                 "policy_score_wire_version": "ordered-vector-v1",
@@ -574,9 +601,13 @@ def request_explanation_with_shadow(
                 "input_captured_ts": authority.get("captured_ts"),
                 "frozen_input_json": frozen_input_json,
                 "frozen_input_sha256": hashlib.sha256(frozen_input_json.encode("utf-8")).hexdigest(),
+                "decision_packet_version": "independent-decision-packet-v1",
+                "full_input_json": full_input_json,
+                "full_input_sha256": hashlib.sha256(full_input_json.encode("utf-8")).hexdigest(),
+                "evidence_identity_aliases": evidence_identity_aliases,
                 "provider_request_json": provider_request_json,
                 "provider_request_sha256": hashlib.sha256(provider_request_json.encode("utf-8")).hexdigest(),
-                "available_evidence_family_ids": (independent_input.get("shadow_contract") or {}).get(
+                "available_evidence_family_ids": (full_input.get("shadow_contract") or {}).get(
                     "available_evidence_family_ids", []),
             },
             "provider_response_json": content,

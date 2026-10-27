@@ -23,21 +23,21 @@ def share_provenance(projected: dict) -> dict:
     defaults = {}
     roots = []
 
-    for family, row in facts.items():
+    for family, row in sorted(facts.items()):
         provenance = row.get('feature_provenance') if isinstance(row, dict) else None
         if not isinstance(provenance, dict):
             continue
-        rows = [meta for meta in provenance.values() if isinstance(meta, dict)]
+        rows = [meta for _, meta in sorted(provenance.items()) if isinstance(meta, dict)]
         common = {}
         if len(rows) > 1:
-            for key, value in rows[0].items():
+            for key, value in sorted(rows[0].items()):
                 encoded = _json(value)
                 if all(key in meta and _json(meta[key]) == encoded for meta in rows[1:]):
                     common[key] = value
         target = result['edge_family_facts'][family]['feature_provenance']
         if common:
             defaults[family] = deepcopy(common)
-            for feature, meta in provenance.items():
+            for feature, meta in sorted(provenance.items()):
                 if isinstance(meta, dict):
                     target[feature] = {key: deepcopy(value) for key, value in meta.items()
                                        if key not in common}
@@ -85,16 +85,16 @@ def share_provenance(projected: dict) -> dict:
                 table[identity] = encode(value, False)
             return {'provenance_ref': identities[key]}
         if isinstance(value, dict):
-            return {name: encode(child) for name, child in value.items()}
+            return {name: encode(child) for name, child in sorted(value.items())}
         return [encode(child) for child in value]
 
     # Keep the family/feature maps explicit; references encode metadata values.
-    for family, row in result['edge_family_facts'].items():
+    for family, row in sorted(result['edge_family_facts'].items()):
         provenance = row.get('feature_provenance') if isinstance(row, dict) else None
         if isinstance(provenance, dict):
-            row['feature_provenance'] = {name: encode(meta) for name, meta in provenance.items()}
+            row['feature_provenance'] = {name: encode(meta) for name, meta in sorted(provenance.items())}
     if defaults:
-        result['feature_provenance_defaults'] = {family: encode(meta) for family, meta in defaults.items()}
+        result['feature_provenance_defaults'] = {family: encode(meta) for family, meta in sorted(defaults.items())}
     if table:
         result['feature_provenance_table'] = table
     return result if len(_json(result).encode()) < len(_json(projected).encode()) else projected

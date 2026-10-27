@@ -184,15 +184,19 @@ def test_actual_provider_transport_review_freezes_independent_input_and_response
             for child in value:
                 check_masked(child)
     check_masked(sent)
-    assert len(sent["active_management_candidates"]) == 7
+    from seiltanzer.ai_provider_decision_packet import restore_decision_rows
+    sent_rows = restore_decision_rows(sent)
+    assert len(sent_rows["active_management_candidates"]) == 7
     assert sent["edge_family_facts"]["macro"]["features"]["macro.expected_rate_change"] == -.2
-    assert sent["edge_family_source_bundle_audit"]["source_record_n"] == 1
-    assert sent["edge_family_source_bundle_audit"]["models_loaded"] == 0
-    assert {row["policy"] for row in sent["active_management_candidates"]} == set(VALID_POLICIES) - {
+    assert "edge_family_source_bundle_audit" not in sent
+    assert {row["policy"] for row in sent_rows["active_management_candidates"]} == set(VALID_POLICIES) - {
         "HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
     contract = shadow["input_contract"]
-    assert contract["version"] == "independent-llm-transport-v1"
+    assert contract["version"] == "independent-llm-transport-v2"
     assert contract["quant_selection_masked"] is True
+    full = json.loads(contract['full_input_json'])
+    assert full["edge_family_source_bundle_audit"]["source_record_n"] == 1
+    assert full["edge_family_source_bundle_audit"]["models_loaded"] == 0
     assert json.loads(contract["provider_request_json"]) == calls[0]
     assert sent == json.loads(contract["frozen_input_json"])
     assert "transport-secret-not-to-persist" not in json.dumps(shadow)

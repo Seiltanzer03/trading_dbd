@@ -42,6 +42,8 @@ def _finite(value: Any) -> float | None:
 def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
                                   tolerance_sec: float = 1.0) -> None:
     """Reject numeric source timestamps newer than the decision capture."""
+    from .ai_provider_decision_packet import restore_decision_rows
+    snapshot = restore_decision_rows(snapshot)
     violations: list[str] = []
 
     def model_output_receipt(path: tuple[str, ...], timestamp: float) -> bool:
@@ -59,7 +61,7 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
         frozen_json = contract.get("frozen_input_json")
         response_json = shadow.get("provider_response_json")
         return bool(
-            contract.get("version") == "independent-llm-transport-v1"
+            contract.get("version") in {"independent-llm-transport-v1", "independent-llm-transport-v2"}
             and contract.get("quant_selection_masked") is True
             and shadow.get("selection_masked") is True
             and _finite(shadow.get("input_captured_ts")) == captured_ts
@@ -119,7 +121,8 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
     # JSON strings must not become a hiding place for post-T0 source facts.
     shadow = snapshot.get("llm_shadow_decision") or {}
     contract = (shadow.get("input_contract") or {}) if isinstance(shadow, dict) else {}
-    if isinstance(contract, dict) and contract.get("version") == "independent-llm-transport-v1":
+    if isinstance(contract, dict) and contract.get("version") in {
+            "independent-llm-transport-v1", "independent-llm-transport-v2"}:
         frozen_json = contract.get("frozen_input_json")
         if (not isinstance(frozen_json, str)
                 or len(frozen_json.encode("utf-8")) > 60_000
@@ -133,6 +136,28 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
         if (not isinstance(frozen_input, dict)
                 or _finite(frozen_input.get("captured_ts")) != captured_ts):
             raise ValueError("independent LLM frozen input capture mismatch")
+        if contract['version'] == 'independent-llm-transport-v2':
+            from .ai_provider_decision_packet import PACKET_VERSION, build_decision_packet
+            full_json = contract.get('full_input_json')
+            if (contract.get('decision_packet_version') != PACKET_VERSION
+                    or frozen_input.get('decision_packet_version') != PACKET_VERSION
+                    or not isinstance(full_json, str) or len(full_json.encode('utf-8')) > 2_000_000
+                    or hashlib.sha256(full_json.encode('utf-8')).hexdigest() != contract.get('full_input_sha256')):
+                raise ValueError('independent LLM full audit integrity failure')
+            try:
+                full_input = json.loads(full_json)
+            except (TypeError, ValueError) as exc:
+                raise ValueError('independent LLM full audit is not JSON') from exc
+            if not isinstance(full_input, dict) or _finite(full_input.get('captured_ts')) != captured_ts:
+                raise ValueError('independent LLM full audit capture mismatch')
+            validate_no_future_timestamps(full_input, captured_ts, tolerance_sec)
+            expected, aliases = build_decision_packet(full_input)
+            expected_json = json.dumps(expected, ensure_ascii=False, sort_keys=True,
+                                       separators=(',', ':'), allow_nan=False)
+            if expected_json != frozen_json or aliases != contract.get('evidence_identity_aliases'):
+                raise ValueError('independent LLM decision packet audit binding failure')
+        elif frozen_input.get('decision_packet_version') is not None:
+            raise ValueError('independent LLM packet requires full audit contract')
         validate_no_future_timestamps(frozen_input, captured_ts, tolerance_sec)
     visit(snapshot, ())
     if violations:
