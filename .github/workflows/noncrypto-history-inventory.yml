@@ -10,34 +10,25 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read history fence and original startup guard after PR531 delivery refusal
+      - name: Read exact release startup progress without opening the database
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 80s
+          command_timeout: 45s
           script: |
             set -eu
             /usr/bin/python3 -u - <<'PY'
-            import json,os,subprocess
-            from pathlib import Path
-            def out(**r):print(json.dumps(r,sort_keys=True),flush=True)
-            out(kind='active_guard',exists=os.path.lexists('/opt/seiltanzer/data/cutover.active'))
-            for name in ('cutover.journal.json','cutover.result.json'):
-             p=Path('/opt/seiltanzer/data')/name
-             try:
-              assert not p.is_symlink() and p.stat().st_size<65536
-              r=json.loads(p.read_bytes());out(kind='epoch',file=name,fields={k:r.get(k) for k in ('run_id','phase','service_started','abort_reason')})
-             except (OSError,ValueError,AssertionError):out(kind='epoch',file=name,readable=False)
+            import json,subprocess
             for kind,args in (
              ('git',['git','-C','/opt/seiltanzer','rev-parse','HEAD']),
-             ('service',['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts']),
-             ('history_units',['systemctl','list-units','--all','--type=service','--no-legend','seiltanzer-history*']),
-             ('original_guard',['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'])):
-             try:
-              r=subprocess.run(args,capture_output=True,text=True,timeout=30);out(kind=kind,returncode=r.returncode,stdout=r.stdout[:6000],stderr=r.stderr[:2000])
-             except subprocess.TimeoutExpired:out(kind=kind,timed_out=True)
-            out(kind='safety',read_only=True,db_writes=0,provider_calls=0,restarts=0,cutover_mutations=0)
+             ('service',['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts','-p','ExecMainStartTimestamp']),
+             ('startup',['journalctl','-u','seiltanzer','--since','-12 minutes','--no-pager','-n','130'])):
+             r=subprocess.run(args,capture_output=True,text=True,timeout=10)
+             lines=r.stdout.splitlines()
+             if kind=='startup':lines=[l for l in lines if any(w in l.lower() for w in ('startup','schema','integrity','check','progress','failed','error','storage','started','starting'))][-45:]
+             print(json.dumps(dict(kind=kind,returncode=r.returncode,lines=lines,stderr=r.stderr[:500])),flush=True)
+            print('READ_ONLY_STARTUP_NO_DATABASE_OPEN_NO_MUTATION')
             PY
