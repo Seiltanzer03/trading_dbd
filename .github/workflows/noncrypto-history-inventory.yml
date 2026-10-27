@@ -10,23 +10,32 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Count metadata-index scope read-only before a bounded audit fix
+      - name: Read release startup and index metadata without warming Q audit rows
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 30s
+          command_timeout: 45s
           script: |
             /usr/bin/python3 -u - <<'PY'
-            import json,sqlite3,time
-            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
-            c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-            deadline=time.monotonic()+8;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+            import json,sqlite3,subprocess,time,shutil
+            def out(**r):print(json.dumps(r),flush=True)
+            out(kind='capacity',free_bytes=shutil.disk_usage('/').free)
+            for kind,args in (
+             ('git',['git','-C','/opt/seiltanzer','rev-parse','HEAD']),
+             ('service',['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts','-p','ExecMainStartTimestamp']),
+             ('startup',['journalctl','-u','seiltanzer','--since','-15 minutes','--no-pager','-n','160'])):
+             r=subprocess.run(args,capture_output=True,text=True,timeout=8);lines=r.stdout.splitlines()
+             if kind=='startup':lines=[l for l in lines if 'STARTUP_PHASE' in l][-20:]
+             out(kind=kind,returncode=r.returncode,lines=lines)
+            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
             try:
-             for table in ('passive_market_observations','g1_q_capture_attempts'):
-              print(json.dumps(dict(kind='index_scope',table=table,rows=c.execute('SELECT COUNT(*) FROM '+table).fetchone()[0],indexes=c.execute('PRAGMA index_list('+table+')').fetchall())),flush=True)
+             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
+             deadline=time.monotonic()+2;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+             out(kind='metadata_index',rows=c.execute("SELECT name FROM sqlite_schema WHERE name='ix_passive_q_audit_metadata' AND type='index'").fetchall(),columns=c.execute('PRAGMA index_info(ix_passive_q_audit_metadata)').fetchall())
+            except sqlite3.DatabaseError as e:out(kind='metadata_index',error=str(e))
             finally:c.close()
-            print('READ_ONLY_INDEX_SCOPE_NO_WRITES')
+            out(kind='safety',read_only=True,audit_row_reads=0,database_writes=0,restarts=0)
             PY
