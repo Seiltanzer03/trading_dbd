@@ -10,32 +10,29 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read accepted live family receipt and current model admission metadata
+      - name: Read existing Treasury runtime and saved snapshot source headers
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 50s
+          command_timeout: 40s
           script: |
-            set -eu
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 69328c1e32937f6dc0d238dfb714dc29c0ecefd7
             /usr/bin/python3 -u - <<'PY'
-            import json,urllib.request,shutil
-            for path in ('/api/ai/snapshot/status','/api/research/mathematical-edge'):
-             with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:r=json.load(response)
-             if path.endswith('mathematical-edge'):
-              matrix=r.get('family_market_models') or {}
-              rows={}
-              for family,m in (matrix.get('XAU') or {}).items():
-               rows[family]={k:v for k,v in m.items() if not isinstance(v,(dict,list))}
-               rows[family]['source']={k:(m.get('source') or {}).get(k) for k in ('provider','ticker')}
-               rows[family]['heads']={name:{k:v for k,v in head.items() if not isinstance(v,(dict,list)) and k not in ('intercept','threshold')} for name,head in (m.get('heads') or {}).items()}
-              r={k:r.get(k) for k in ('state','published_for_sha','family_market_model_summary','family_reference_source_errors')}
-              r['XAU_model_admission']=rows
-              r['noncrypto_trained']=sum(m.get('status')=='TRAINED' for code,rows in matrix.items() if code not in ('BTCUSD','ETHUSD','SOLUSD') for m in rows.values())
-             print('ACCEPTED_LIVE_READONLY',path,json.dumps(r),flush=True)
-            print('FREE_BYTES',shutil.disk_usage('/').free)
-            print('READ_ONLY_NO_PROVIDER_CALL_NO_MODEL_FIT_NO_ORDER')
+            import json,sqlite3,time,urllib.request
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/research/macro/status',timeout=8) as response:r=json.load(response)
+            print('EXISTING_TREASURY_RUNTIME',json.dumps(r.get('treasury_live_t0')),flush=True)
+            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
+            try:
+             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
+             deadline=time.monotonic()+3;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+             row=c.execute('SELECT id,ts,snapshot_json FROM ai_verdicts WHERE trade_id=141 AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 1').fetchone()
+             if row:
+              s=json.loads(row[2]);treasury=s.get('treasury_context_v1')
+              sources=s.get('edge_family_sources') or {}
+              related=[{k:r.get(k) for k in ('source_id','observed_ts','available_at','market_return_origin_ts','market_return_contract')} for r in (sources.get('intermarket') or []) if isinstance(r,dict)]
+              print('SAVED_INPUT_HEADERS',json.dumps(dict(id=row[0],ts=row[1],captured_ts=s.get('captured_ts'),treasury_root_present=isinstance(treasury,dict),treasury_headers={k:(treasury or {}).get(k) for k in ('available','reason','captured_ts','fetched_at','published_at')} if isinstance(treasury,dict) else None,related=related)),flush=True)
+            finally:c.close()
+            print('READ_ONLY_EXISTING_DATA_NO_PROVIDER_CALL_NO_FIT_NO_ORDER')
             PY
