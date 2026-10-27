@@ -5,81 +5,34 @@ on:
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
-  actions: read
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 25
+    timeout-minutes: 3
     steps:
-      - name: Wait for the exact-SHA automatic deploy to finish
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA: 4dbe8339ee2d10c0acce8e25f37437e7a5ccaa29
-        run: |
-          python3 -u - <<'PY'
-          import json,os,time,urllib.request
-          expected=os.environ['EXPECTED_SHA']
-          url='https://api.github.com/repos/Seiltanzer03/trading_dbd/actions/runs?head_sha='+expected+'&per_page=40'
-          end=time.monotonic()+1200
-          previous=None
-          while time.monotonic()<end:
-           req=urllib.request.Request(url,headers={'Accept':'application/vnd.github+json','Authorization':'Bearer '+os.environ['GH_TOKEN']})
-           with urllib.request.urlopen(req,timeout=20) as response:data=json.load(response)
-           runs=[r for r in data['workflow_runs'] if r['name']=='deploy' and r['head_sha']==expected]
-           state=(runs[0]['id'],runs[0]['status'],runs[0]['conclusion']) if runs else ('awaiting-main-CI',)
-           if state!=previous:print('EXACT_RELEASE_WAIT',state,flush=True);previous=state
-           if runs and runs[0]['status']=='completed':
-            assert runs[0]['conclusion']=='success','automatic deploy did not pass'
-            print('EXACT_RELEASE_DEPLOY_ACCEPTED',expected,runs[0]['id'],flush=True)
-            break
-           time.sleep(30)
-          else:raise SystemExit('bounded exact-release wait expired')
-          PY
-      - name: Read exact release research, structured LLM and trace receipts
+      - name: Read history cutover fence and journal ownership
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 40s
+          command_timeout: 45s
           script: |
             /usr/bin/python3 -u - <<'PY'
-            import json,sqlite3,time,urllib.request,subprocess
-            expected='4dbe8339ee2d10c0acce8e25f37437e7a5ccaa29'
-            actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print('FINAL_RELEASE_SHA',actual,flush=True);assert actual==expected,'wrong release generation'
-            trade_id=None
-            for path in ('/api/ai/snapshot/status','/api/research/g1/management/local-status'):
+            import json,os,pathlib,subprocess
+            root=pathlib.Path('/opt/seiltanzer/data')
+            for name in ('cutover.active','cutover.journal.json'):
+             p=root/name
              try:
-              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:r=json.load(response)
-              if path.endswith('snapshot/status'):
-               trade_id=r.get('current_trade_id');f=r.get('family_market_forecasts') or {}
-               out={k:r.get(k) for k in ('ready','building','last_error','snapshot_budget','current_trade_id')}
-               out['forecasts']={k:f.get(k) for k in ('captured_ts','market_observation_ts','published_for_sha','available_forecasts_at_capture','qualified_preferences_at_capture')}
-               out['families']={name:{k:v.get(k) for k in ('forecast_available_at_capture','preference_available_at_capture','reason')} for name,v in (f.get('families') or {}).items()}
-              else:out={k:r.get(k) for k in ('resolved','eligible_resolved','last_error','status_materialization')}
-              print('FINAL_LIVE_STATUS',path,json.dumps(out),flush=True)
-             except Exception as exc:print('STATUS_ERROR',path,type(exc).__name__,flush=True)
-            if trade_id is not None:
-             c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-             try:
-              c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-              deadline=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-              row=c.execute('SELECT id,ts,snapshot_json FROM ai_verdicts WHERE trade_id=? AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 1',(int(trade_id),)).fetchone()
-              if row:
-               s=json.loads(row[2]);ctx=s.get('research_working_context') or {};source=ctx.get('source_provenance') or {};llm=s.get('llm_shadow_decision') or {};manager=s.get('policy_manager') or {};audit=manager.get('unified_edge_ensemble') or {}
-               contract=llm.get('input_contract') or {};wire=contract.get('frozen_input_json')
-               decoded=json.loads(wire) if isinstance(wire,str) and len(wire)<=60000 else {}
-               out=dict(id=row[0],ts=row[1],runtime_code_sha=s.get('runtime_code_sha'),captured_ts=s.get('captured_ts'),research={k:ctx.get(k) for k in ('available','reason','market_observation_ts','market_input_capture_ts','observed_ts','historical_profit_proven','automatic_execution_allowed')},source={k:source.get(k) for k in ('provider','source_symbol','target_instrument','observed_ts','available_at','derived')},estimators=ctx.get('price_estimators'),source_proof_present=isinstance(source.get('reference_proof'),dict),llm={k:llm.get(k) for k in ('status','policy','reason_code','confidence')},provider_status=s.get('ai_provider_status'),provider_wire_bytes=len(wire.encode()) if isinstance(wire,str) else None,shared_provenance_n=len(decoded.get('feature_provenance_table') or {}),shared_defaults_families=sorted(decoded.get('feature_provenance_defaults') or {}),current_llm=[{k:x.get(k) for k in ('effective_weight','reason')} for x in audit.get('components',[]) if x.get('component_id')=='current_llm'],selected_policy=audit.get('selected_policy'),excluded_roots=(s.get('edge_family_budget_status') or {}).get('excluded_roots'))
-               print('FINAL_SAVED_RESEARCH_RECEIPT',json.dumps(out,allow_nan=False),flush=True)
-             finally:c.close()
-            r=subprocess.run(['journalctl','-u','seiltanzer','--since','-15 minutes','-n','400','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
-            keys=('request_id','stage','event','elapsed_ms','duration_ms','input_bytes','request_bytes','output_bytes','response_bytes','completion_tokens','prompt_tokens','finish_reason')
-            for line in r.stdout.splitlines():
-             try:v=json.loads(line[line.index('{'):])
-             except (ValueError,TypeError):continue
-             if isinstance(v,dict) and str(v.get('request_id','')).startswith('ai-') and v.get('stage') in ('provider_transport','provider_http','provider_fallback','response'):
-              print('FINAL_EXISTING_PROVIDER_TIMING',json.dumps({k:v[k] for k in keys if k in v}),flush=True)
-            print('READ_ONLY_EXISTING_DATA_NO_LLM_CALL_NO_FETCH_NO_FIT_NO_ORDER')
+              st=p.lstat();print('CUTOVER_FILE',name,json.dumps(dict(size=st.st_size,mtime=st.st_mtime,symlink=p.is_symlink())))
+              if p.is_file() and st.st_size<=32768:print('CUTOVER_CONTENT',name,p.read_text())
+             except FileNotFoundError:print('CUTOVER_ABSENT',name)
+            r=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(root/'trades.db'),'--application-root','/opt/seiltanzer'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=15)
+            print('CUTOVER_GUARD',r.returncode,r.stdout[-8000:])
+            r=subprocess.run(['systemctl','list-units','--all','--no-legend','--plain','seiltanzer-history*'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=8)
+            print('CUTOVER_UNITS',r.stdout[-4000:])
+            r=subprocess.run(['ps','-eo','pid,etimes,args'],stdout=subprocess.PIPE,text=True,timeout=8)
+            print('CUTOVER_PROCESSES','\n'.join(l for l in r.stdout.splitlines() if any(k in l for k in ('history_production','history_cutover','history_stage','history_driver','history_owner','offhost_sqlite','history_cold')))[-6000:])
+            print('READ_ONLY_FENCE_DIAGNOSTIC_NO_MUTATION_NO_DB_COPY')
             PY
