@@ -5,12 +5,37 @@ on:
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
+  actions: read
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 35
     steps:
-      - name: Measure decision packet on saved review without provider inference
+      - name: Wait for the exact-SHA automatic deploy to finish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: 255813b72bcaa9d8835da7ffe27e8237668d14f8
+        run: |
+          python3 -u - <<'PY'
+          import json,os,time,urllib.request
+          expected=os.environ['EXPECTED_SHA']
+          url='https://api.github.com/repos/Seiltanzer03/trading_dbd/actions/runs?head_sha='+expected+'&per_page=40'
+          end=time.monotonic()+1800
+          previous=None
+          while time.monotonic()<end:
+           req=urllib.request.Request(url,headers={'Accept':'application/vnd.github+json','Authorization':'Bearer '+os.environ['GH_TOKEN']})
+           with urllib.request.urlopen(req,timeout=20) as response:data=json.load(response)
+           runs=[r for r in data['workflow_runs'] if r['name']=='deploy' and r['head_sha']==expected]
+           state=(runs[0]['id'],runs[0]['status'],runs[0]['conclusion']) if runs else ('awaiting-main-CI',)
+           if state!=previous:print('EXACT_RELEASE_WAIT',state,flush=True);previous=state
+           if runs and runs[0]['status']=='completed':
+            assert runs[0]['conclusion']=='success','automatic deploy did not pass'
+            print('EXACT_RELEASE_DEPLOY_ACCEPTED',expected,runs[0]['id'],flush=True)
+            break
+           time.sleep(30)
+          else:raise SystemExit('bounded exact-release wait expired')
+          PY
+      - name: Read exact release research, structured LLM and trace receipts
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -20,52 +45,51 @@ jobs:
           command_timeout: 40s
           script: |
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import sys,json,sqlite3,time,copy,re
+            import json,sqlite3,time,urllib.request,subprocess,sys,hashlib
             sys.dont_write_bytecode=True
             sys.path.insert(0,'/opt/seiltanzer')
-            from seiltanzer.ai_runtime_report_v20 import _independent_provider_input
-            from seiltanzer.ai_provider_guard import compact_provider_snapshot
-            from seiltanzer.ai_provider_provenance_wire import share_provenance
-            from seiltanzer.decision_research import validate_no_future_timestamps
-            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-            try:
-             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-             end=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>end,1000)
-             row=c.execute('SELECT id,snapshot_json FROM ai_verdicts WHERE trade_id=141 AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 1').fetchone()
-            finally:c.close()
-            s=json.loads(row[1])
-            for k in ('llm_shadow_decision','effective_management_decision','ai_provider_status'):s.pop(k,None)
-            old=_independent_provider_input(compact_provider_snapshot(s),s)
-            full=copy.deepcopy(old);table=full.pop('feature_provenance_table',{});defaults=full.pop('feature_provenance_defaults',{})
-            def resolve(v):
-             if isinstance(v,dict):
-              if set(v)=={'provenance_ref'}:return resolve(table[v['provenance_ref']])
-              return {k:resolve(w) for k,w in v.items()}
-             if isinstance(v,list):return [resolve(w) for w in v]
-             return v
-            for family,f in full['edge_family_facts'].items():
-             f['feature_provenance']={name:{**resolve(defaults.get(family,{})),**resolve(meta)} for name,meta in (f.get('feature_provenance') or {}).items()}
-            validate_no_future_timestamps(full,s['captured_ts'])
-            ns={'__name__':'seiltanzer.ai_provider_decision_packet','__package__':'seiltanzer'}
-            exec("\"\"\"Decision facts for the provider; exact technical audit stays in local storage.\"\"\"\nfrom copy import deepcopy\nimport json\nimport re\n\n\nPACKET_VERSION = 'independent-decision-packet-v1'\n_DIGEST = re.compile(r'(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])')\n_PROOF_FIELDS = frozenset((\n    'body_sha256', 'supporting_body_sha256', 'preliminary_context_sha256',\n    'reference_proof', 'constituent_provenance', 'supporting_source_ids',\n    'history_contract_version',\n))\n\n\ndef _without_byte_proofs(value):\n    if isinstance(value, dict):\n        return {key: _without_byte_proofs(child) for key, child in value.items()\n                if key not in _PROOF_FIELDS}\n    if isinstance(value, list):\n        return [_without_byte_proofs(child) for child in value]\n    return value\n\n\ndef _rows_table(rows):\n    sequence = isinstance(rows, list)\n    if not isinstance(rows, (dict, list)) or len(rows) < 2:\n        return rows\n    items = list(enumerate(rows)) if sequence else list(rows.items())\n    if not all(isinstance(row, dict) for _, row in items):\n        return rows\n    groups = {}\n    for name, row in items:\n        columns = tuple(sorted(row))\n        group = groups.setdefault(columns, {'columns': list(columns), 'rows': {}})\n        group['rows'][str(name)] = [row[key] for key in columns]\n    result = {'row_kind': 'sequence' if sequence else 'mapping',\n              'column_groups': [groups[key] for key in sorted(groups)]}\n    size = lambda value: len(json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode())\n    return result if size(result) < size(rows) else rows\n\n\ndef build_decision_packet(full_input: dict) -> tuple[dict, dict[str, str]]:\n    \"\"\"Return a packet and label->exact digest mapping without changing inputs.\n\n    Caller retains the full masked input and validates its original clocks.\n    Removing byte proofs does not grant source authority: admitted availability,\n    provider/symbol, clocks, dependencies, quality and preliminary roles stay.\n    \"\"\"\n    packet = deepcopy(full_input)\n    packet.pop('edge_family_source_bundle_audit', None)\n    manager = packet.get('policy_manager')\n    if isinstance(manager, dict):\n        # Delivery details and another expert's exploratory budget are local\n        # audit, not independent current-model evidence. Risk/gate/economics,\n        # source reliability and metric coverage are retained in their entirety.\n        audit = manager.pop('input_audit', None)\n        quote = ((audit.get('rows') or {}).get('instrument_price')\n                 if isinstance(audit, dict) else None)\n        if isinstance(quote, dict):\n            manager['instrument_quote_audit'] = quote\n        manager.pop('llm_edge_exploratory_weight', None)\n    context = packet.get('research_working_context')\n    if isinstance(context, dict) and isinstance(context.get('source_provenance'), dict):\n        context['source_provenance'] = _without_byte_proofs(context['source_provenance'])\n    facts = packet.get('edge_family_facts')\n    if isinstance(facts, dict):\n        for row in facts.values():\n            if isinstance(row, dict) and isinstance(row.get('feature_provenance'), dict):\n                row['feature_provenance'] = _without_byte_proofs(row['feature_provenance'])\n\n    original = json.dumps(full_input, ensure_ascii=False, allow_nan=False)\n    source_ids = set()\n    def collect_sources(value):\n        if isinstance(value, dict):\n            for key, child in value.items():\n                if key == 'features':\n                    continue\n                if key in ('source_id', 'source_ids', 'supporting_source_ids'):\n                    values = child if isinstance(child, list) else [child]\n                    source_ids.update(item for item in values if isinstance(item, str) and len(item) >= 48)\n                collect_sources(child)\n        elif isinstance(value, list):\n            for child in value:\n                collect_sources(child)\n    collect_sources(packet)\n    source_prefix = '@source:'\n    while source_prefix in original:\n        source_prefix += '_'\n    source_forward = {identity: source_prefix + str(index) + ';'\n                      for index, identity in enumerate(sorted(source_ids))}\n    source_pattern = (re.compile('|'.join(re.escape(identity) for identity in\n                                        sorted(source_ids, key=lambda item: (-len(item), item))))\n                      if source_ids else None)\n    digests = set()\n\n    def visit(value, replace=None):\n        if isinstance(value, dict):\n            result = {}\n            for key, child in value.items():\n                # Numerical feature names and values are exact, even if a\n                # producer happened to use a digest-looking feature identifier.\n                if key == 'features':\n                    result[key] = child\n                    continue\n                if key == 'feature_provenance' and isinstance(child, dict):\n                    result[key] = {name: visit(meta, replace) for name, meta in child.items()}\n                    continue\n                new_key = text(key, replace)\n                result[new_key] = visit(child, replace)\n            return result\n        if isinstance(value, list):\n            return [visit(child, replace) for child in value]\n        if isinstance(value, str):\n            return text(value, replace)\n        return value\n\n    def text(value, replace):\n        if not isinstance(value, str):\n            return value\n        if replace is None:\n            digests.update(_DIGEST.findall(value))\n            return value\n        return replace(value)\n\n    if source_pattern:\n        packet = visit(packet, lambda value: source_pattern.sub(\n            lambda match: source_forward[match.group()], value))\n    visit(packet)\n    # A label namespace absent from every original string cannot collide with\n    # literal source identifiers. Terminators also distinguish label1/label10.\n    prefix = '@sha:'\n    while prefix in original:\n        prefix += '_'\n    forward = {digest: prefix + str(index) + ';' for index, digest in enumerate(sorted(digests))}\n    packet = visit(packet, replace=lambda value: _DIGEST.sub(lambda match: forward[match.group()], value))\n    if isinstance(packet.get('edge_family_facts'), dict) and packet['edge_family_facts']:\n        from .ai_provider_provenance_wire import share_provenance\n        packet = share_provenance(packet)\n    manager = packet.get('policy_manager')\n    if isinstance(manager, dict) and 'policies' in manager:\n        manager['policies'] = _rows_table(manager['policies'])\n    if 'active_management_candidates' in packet:\n        packet['active_management_candidates'] = _rows_table(packet['active_management_candidates'])\n    for row in (packet.get('edge_family_facts') or {}).values():\n        if isinstance(row, dict) and 'feature_provenance' in row:\n            row['feature_provenance'] = _rows_table(row['feature_provenance'])\n    aliases = {label: identity for identity, label in source_forward.items()}\n    aliases.update({label: digest for digest, label in forward.items()})\n    packet['decision_packet_version'] = PACKET_VERSION\n    return packet, aliases\n\n\ndef _original_rows(value, kind):\n    if not isinstance(value, dict) or 'column_groups' not in value:\n        return value\n    if set(value) != {'row_kind', 'column_groups'} or value['row_kind'] != kind:\n        raise ValueError('invalid decision row table')\n    groups = value['column_groups']\n    if not isinstance(groups, list) or not groups:\n        raise ValueError('invalid decision row groups')\n    result = {}\n    for group in groups:\n        if not isinstance(group, dict) or set(group) != {'columns', 'rows'}:\n            raise ValueError('invalid decision row group')\n        columns, rows = group['columns'], group['rows']\n        if (not isinstance(columns, list) or not all(isinstance(key, str) for key in columns)\n                or len(columns) != len(set(columns)) or not isinstance(rows, dict) or not rows):\n            raise ValueError('invalid decision row columns')\n        for name, values in rows.items():\n            if (not isinstance(name, str) or name in result or not isinstance(values, list)\n                    or len(values) != len(columns)):\n                raise ValueError('invalid decision row values')\n            result[name] = dict(zip(columns, values, strict=True))\n    if kind == 'sequence':\n        if set(result) != {str(i) for i in range(len(result))}:\n            raise ValueError('invalid decision row indices')\n        return [result[str(i)] for i in range(len(result))]\n    return result\n\n\ndef restore_decision_rows(packet: dict) -> dict:\n    \"\"\"Expose original clock paths to the unchanged timestamp/risk validator.\"\"\"\n    if 'decision_packet_version' not in packet:\n        manager = packet.get('policy_manager') or {}\n        manager = manager if isinstance(manager, dict) else {}\n        facts = packet.get('edge_family_facts') or {}\n        facts = facts if isinstance(facts, dict) else {}\n        values = [manager.get('policies'), packet.get('active_management_candidates')]\n        values.extend(row.get('feature_provenance') for row in\n                      facts.values() if isinstance(row, dict))\n        if any(isinstance(value, dict) and 'column_groups' in value for value in values):\n            raise ValueError('unversioned decision row table')\n        return packet\n    if packet.get('decision_packet_version') != PACKET_VERSION:\n        raise ValueError('unsupported decision packet version')\n    result = deepcopy(packet)\n    result.pop('decision_packet_version')\n    manager = result.get('policy_manager')\n    if isinstance(manager, dict) and 'policies' in manager:\n        manager['policies'] = _original_rows(manager['policies'], 'mapping')\n    if 'active_management_candidates' in result:\n        result['active_management_candidates'] = _original_rows(result['active_management_candidates'], 'sequence')\n    for row in (result.get('edge_family_facts') or {}).values():\n        if isinstance(row, dict) and 'feature_provenance' in row:\n            row['feature_provenance'] = _original_rows(row['feature_provenance'], 'mapping')\n    return result\n\n\ndef restore_evidence_identities(values: list[str], aliases: dict[str, str]) -> list[str]:\n    \"\"\"Restore only known digest labels before local source-claim validation.\"\"\"\n    if not aliases:\n        return values\n    pattern = re.compile('|'.join(re.escape(label) for label in aliases))\n    return [pattern.sub(lambda match: aliases[match.group()], value) for value in values]\n",ns)
-            new,aliases=ns['build_decision_packet'](full)
-            pattern=re.compile('|'.join(re.escape(label) for label in aliases)) if aliases else None
-            encode=lambda v:json.dumps(v,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()
-            restored=json.loads(pattern.sub(lambda m:aliases[m.group()],encode(new).decode())) if pattern else copy.deepcopy(new)
-            def unpack_rows(v):
-             if not isinstance(v,dict) or 'column_groups' not in v:return v
-             rows={name:dict(zip(g['columns'],cells)) for g in v['column_groups'] for name,cells in g['rows'].items()}
-             return [rows[str(i)] for i in range(len(rows))] if v['row_kind']=='sequence' else rows
-            restored['policy_manager']['policies']=unpack_rows(restored['policy_manager'].get('policies'))
-            restored['active_management_candidates']=unpack_rows(restored.get('active_management_candidates'))
-            assert restored['active_management_candidates']==full.get('active_management_candidates')
-            for family,f in full['edge_family_facts'].items():
-             assert restored['edge_family_facts'][family].get('features')==f.get('features')
-             assert restored['edge_family_facts'][family].get('market_predictions')==f.get('market_predictions')
-            for k in ('policies','risk_constraint','gate','evidence','inputs','execution_cost_model'):
-             assert restored['policy_manager'].get(k)==full['policy_manager'].get(k)
-            wire=new
-            validate_no_future_timestamps(ns['restore_decision_rows'](wire),s['captured_ts'])
-            print('REAL_DECISION_PACKET_SIZE',json.dumps(dict(review_id=row[0],old_wire_bytes=len(encode(old)),full_audit_bytes=len(encode(full)),new_wire_bytes=len(encode(wire)),aliases=len(aliases),numeric_features_and_forecasts_equal=True,risk_gate_costs_evidence_equal=True,full_and_packet_clocks='PASS',root={k:len(encode(v)) for k,v in wire.items()})),flush=True)
-            print('READ_ONLY_SAVED_REVIEW_NO_PAID_LLM_NO_DB_WRITE_NO_PAYLOAD')
+            expected='255813b72bcaa9d8835da7ffe27e8237668d14f8'
+            actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
+            print('FINAL_RELEASE_SHA',actual,flush=True);assert actual==expected,'wrong release generation'
+            trade_id=None
+            for path in ('/api/ai/snapshot/status','/api/research/g1/management/local-status'):
+             try:
+              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:r=json.load(response)
+              if path.endswith('snapshot/status'):
+               trade_id=r.get('current_trade_id');f=r.get('family_market_forecasts') or {}
+               out={k:r.get(k) for k in ('ready','building','last_error','snapshot_budget','current_trade_id')}
+               out['forecasts']={k:f.get(k) for k in ('captured_ts','market_observation_ts','published_for_sha','available_forecasts_at_capture','qualified_preferences_at_capture')}
+               out['families']={name:{k:v.get(k) for k in ('forecast_available_at_capture','preference_available_at_capture','reason')} for name,v in (f.get('families') or {}).items()}
+              else:out={k:r.get(k) for k in ('resolved','eligible_resolved','last_error','status_materialization')}
+              print('FINAL_LIVE_STATUS',path,json.dumps(out),flush=True)
+             except Exception as exc:print('STATUS_ERROR',path,type(exc).__name__,flush=True)
+            if trade_id is not None:
+             c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
+             try:
+              c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
+              deadline=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+              row=c.execute('SELECT id,ts,snapshot_json FROM ai_verdicts WHERE trade_id=? AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 1',(int(trade_id),)).fetchone()
+              if row:
+               s=json.loads(row[2]);ctx=s.get('research_working_context') or {};source=ctx.get('source_provenance') or {};llm=s.get('llm_shadow_decision') or {};manager=s.get('policy_manager') or {};audit=manager.get('unified_edge_ensemble') or {}
+               contract=llm.get('input_contract') or {};wire=contract.get('frozen_input_json')
+               decoded=json.loads(wire) if isinstance(wire,str) and len(wire)<=60000 else {}
+               audit_proof=None
+               if contract.get('version')=='independent-llm-transport-v2':
+                from seiltanzer.decision_research import validate_no_future_timestamps
+                try:
+                 validate_no_future_timestamps({'captured_ts':s['captured_ts'],'llm_shadow_decision':llm},float(s['captured_ts']))
+                 audit_proof='FULL_AUDIT_PACKET_ALIASES_CLOCKS_VERIFIED'
+                except Exception as exc:audit_proof='FAILED_'+type(exc).__name__
+               full=contract.get('full_input_json')
+               out=dict(id=row[0],ts=row[1],runtime_code_sha=s.get('runtime_code_sha'),captured_ts=s.get('captured_ts'),research={k:ctx.get(k) for k in ('available','reason','market_observation_ts','market_input_capture_ts','observed_ts','historical_profit_proven','automatic_execution_allowed')},source={k:source.get(k) for k in ('provider','source_symbol','target_instrument','observed_ts','available_at','derived')},estimators=ctx.get('price_estimators'),source_proof_present=isinstance(source.get('reference_proof'),dict),llm={k:llm.get(k) for k in ('status','policy','reason_code','confidence')},provider_status=s.get('ai_provider_status'),provider_wire_bytes=len(wire.encode()) if isinstance(wire,str) else None,provider_contract=contract.get('version'),decision_packet_version=contract.get('decision_packet_version'),full_audit_bytes=len(full.encode()) if isinstance(full,str) else None,evidence_aliases_n=len(contract.get('evidence_identity_aliases') or {}),audit_proof=audit_proof,shared_provenance_n=len(decoded.get('feature_provenance_table') or {}),shared_defaults_families=sorted(decoded.get('feature_provenance_defaults') or {}),current_llm=[{k:x.get(k) for k in ('effective_weight','reason')} for x in audit.get('components',[]) if x.get('component_id')=='current_llm'],selected_policy=audit.get('selected_policy'),excluded_roots=(s.get('edge_family_budget_status') or {}).get('excluded_roots'))
+               print('FINAL_SAVED_RESEARCH_RECEIPT',json.dumps(out,allow_nan=False),flush=True)
+             finally:c.close()
+            r=subprocess.run(['journalctl','-u','seiltanzer','--since','-15 minutes','-n','400','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
+            keys=('request_id','stage','event','elapsed_ms','duration_ms','input_bytes','request_bytes','output_bytes','response_bytes','completion_tokens','prompt_tokens','finish_reason')
+            for line in r.stdout.splitlines():
+             try:v=json.loads(line[line.index('{'):])
+             except (ValueError,TypeError):continue
+             if isinstance(v,dict) and str(v.get('request_id','')).startswith('ai-') and v.get('stage') in ('provider_transport','provider_http','provider_fallback','response'):
+              print('FINAL_EXISTING_PROVIDER_TIMING',json.dumps({k:v[k] for k in keys if k in v}),flush=True)
+            print('READ_ONLY_EXISTING_DATA_NO_LLM_CALL_NO_FETCH_NO_FIT_NO_ORDER')
             PY
