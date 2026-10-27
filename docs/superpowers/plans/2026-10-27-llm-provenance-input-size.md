@@ -19,7 +19,7 @@ Different/missing/null metadata must reconstruct exactly; nested future clocks m
 ## Task 1: Correct the provenance wire owner
 Files: seiltanzer/ai_provider_provenance_wire.py; seiltanzer/ai_runtime_report_v20.py; tests/test_ai_provider_provenance_wire.py.
 - [ ] Write exact roundtrip, heterogeneous source/receipt, missing/null, idempotence, future-clock and realistic nested-byte regression tests.
-- [ ] Run owning tests on a Python3.11 runner; confirm the size regression fails on the accepted implementation.
+- [x] Runner40549933953: 1 failed/4 passed, expected size assertion25546 <25546*.45 fails on accepted code; no production access.
 - [ ] Implement share_provenance(projected: dict) -> dict with exact defaults and recursive metadata sharing; update the prompt's reconstruction rule.
 - [ ] Run the focused provider/telemetry/projection/shadow profile. Record actual saved-review byte reduction without another provider call.
 - [ ] One final independent review; fix reproduced Important issues with regressions.
