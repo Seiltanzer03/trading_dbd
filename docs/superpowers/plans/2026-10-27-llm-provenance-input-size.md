@@ -18,11 +18,11 @@ Different/missing/null metadata must reconstruct exactly; nested future clocks m
 
 ## Task 1: Correct the provenance wire owner
 Files: seiltanzer/ai_provider_provenance_wire.py; seiltanzer/ai_runtime_report_v20.py; tests/test_ai_provider_provenance_wire.py.
-- [ ] Write exact roundtrip, heterogeneous source/receipt, missing/null, idempotence, future-clock and realistic nested-byte regression tests.
+- [x] Write exact roundtrip, heterogeneous source/receipt, missing/null, idempotence, future-clock and realistic nested-byte regression tests.
 - [x] Runner40549933953: 1 failed/4 passed, expected size assertion25546 <25546*.45 fails on accepted code; no production access.
-- [ ] Implement share_provenance(projected: dict) -> dict with exact defaults and recursive metadata sharing; update the prompt's reconstruction rule.
-- [ ] Run the focused provider/telemetry/projection/shadow profile. Record actual saved-review byte reduction without another provider call.
-- [ ] One final independent review; fix reproduced Important issues with regressions.
+- [x] Implement share_provenance(projected: dict) -> dict with exact defaults and recursive metadata sharing; update the prompt's reconstruction rule.
+- [x] Runner40550148836 on9edb876:94passed/one upstream Starlette deprecation warning3.42s. Readonly saved-review40550372843:45509B→39776B, source metadata/numeric equality and future-clock validationPASS; no provider call. Initial diagnostic40550286025 patched an unused report-module attribute, so it was a no-op and is not size evidence. Corrected probe patches the actual codec import owner.
+- [x] One final independent reviewer:0Critical/Important,1Minor. Reviewer checked exact candidate checkout and94PASS log. Minor deferred: helper absent/null edge_family_facts robustness; actual _shadow_projection always produces a dict.
 - [ ] Final applicable PR CI and candidate-tree full WebKit; authorized merge and automatic exact-SHA release.
 - [ ] Inspect actual canonical AI smoke: require current structured LLM availability and report the real latency/token counts. Timeout must remain an unresolved blocker if still present.
 
@@ -30,3 +30,6 @@ Files: seiltanzer/ai_provider_provenance_wire.py; seiltanzer/ai_runtime_report_v
 Baseline main da68f5cb701cc02cd4111bbee1eeff9578b9c094.
 Actual trace ai-adf825c80d684cc898f3: provider input45079B/prompt15477tokens; provider6988ms against about5500ms remaining. Read-only saved-review profile40515024549: intermarket features1197B, provenance25898B. Whole-dictionary sharing alone is insufficient.
 Pre-flight: codec output and provider prompt are one interface and ship together.
+
+Final review rulings: cyclic/non-JSON Python objects and scalar whole metadata entries remain outside the finite JSON adapter contract; null/missing values inside metadata are preserved and covered. Actual live latency/token count and complete release readiness are REQUIRED next checks, not excluded scope. Cost if byte savings prove insufficient: LLM still unavailable, and package cannot claim the timeout fixed.
+Task1 implementation complete at9edb876; release acceptance pending. Main remainsda68f5c. No second review or repeated owning run for this documentation-only evidence update.
