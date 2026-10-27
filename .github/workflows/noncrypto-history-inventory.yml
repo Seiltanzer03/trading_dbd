@@ -8,47 +8,37 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
-      - name: Read post-index allocation and legacy environment use
+      - name: Repack repository cache while preserving all objects and references
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 100s
+          command_timeout: 220s
           script: |
+            set -eu
+            cd /opt/seiltanzer
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 15 9
+            test "$(git rev-parse HEAD)" = 69328c1e32937f6dc0d238dfb714dc29c0ecefd7
+            test -d .git
+            test ! -L .git
             /usr/bin/python3 -u - <<'PY'
-            import json,os,shutil,sqlite3,stat,subprocess,time
-            from pathlib import Path
-            def out(**r):print(json.dumps(r),flush=True)
-            out(kind='capacity',free_bytes=shutil.disk_usage('/').free)
-            for kind,args in (
-             ('app',['du','-xhd1','/opt/seiltanzer']),
-             ('data',['du','-xhd2','/opt/seiltanzer/data']),
-             ('legacy',['du','-xhd2','/root/seiltanzer_bot']),
-             ('cache',['du','-xhd2','/root/.cache','/var/log','/tmp'])):
-             try:
-              r=subprocess.run(args,capture_output=True,text=True,timeout=20);out(kind=kind,returncode=r.returncode,lines=r.stdout.splitlines()[-55:],stderr=r.stderr[:400])
-             except subprocess.TimeoutExpired:out(kind=kind,timed_out=True)
-            p=Path('/opt/seiltanzer/data/trades.db');s=p.stat();out(kind='database_allocation',bytes=s.st_size,allocated=s.st_blocks*512)
-            matches=[]
-            for p in Path('/proc').iterdir():
-             if not p.name.isdigit():continue
-             try:
-              exe=os.readlink(p/'exe');cwd=os.readlink(p/'cwd')
-              mapped=(p/'maps').read_text()
-              if any('/root/seiltanzer_bot' in x for x in (exe,cwd,mapped)):matches.append(dict(pid=p.name,exe=exe,cwd=cwd))
-             except (OSError,PermissionError):pass
-            out(kind='legacy_process_usage',matches=matches)
-            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-            try:
-             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-             deadline=time.monotonic()+5;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-             out(kind='sqlite_allocation',pages=c.execute('PRAGMA page_count').fetchone()[0],freelist_pages=c.execute('PRAGMA freelist_count').fetchone()[0],page_size=c.execute('PRAGMA page_size').fetchone()[0])
-             out(kind='index_allocation',row=c.execute("SELECT SUM(pgsize),COUNT(*) FROM dbstat WHERE name='ix_passive_q_audit_metadata'").fetchone())
-            except sqlite3.DatabaseError as e:out(kind='sqlite_allocation_error',error=str(e))
-            finally:c.close()
-            out(kind='safety',read_only=True,database_writes=0,restarts=0)
+            import hashlib,json,shutil,subprocess
+            def run(args,timeout=30):return subprocess.check_output(args,text=True,stderr=subprocess.STDOUT,timeout=timeout)
+            refs=run(['git','for-each-ref','--format=%(refname) %(objectname)'])
+            head=run(['git','rev-parse','HEAD'])
+            before=shutil.disk_usage('/').free
+            print('REPACK_BEFORE',json.dumps(dict(free_bytes=before,objects=run(['git','count-objects','-vH']))),flush=True)
+            run(['git','fsck','--connectivity-only'],timeout=40)
+            result=run(['git','-c','pack.threads=1','-c','pack.windowMemory=32m','-c','pack.deltaCacheSize=16m','-c','gc.reflogExpire=never','-c','gc.reflogExpireUnreachable=never','-c','gc.autoDetach=false','gc','--prune=never'],timeout=140)
+            assert run(['git','rev-parse','HEAD'])==head
+            assert run(['git','for-each-ref','--format=%(refname) %(objectname)'])==refs
+            run(['git','fsck','--connectivity-only'],timeout=40)
+            after=shutil.disk_usage('/').free
+            print('REPACK_AFTER',json.dumps(dict(free_bytes=after,recovered=after-before,objects=run(['git','count-objects','-vH']),refs_sha256=hashlib.sha256(refs.encode()).hexdigest(),head=head.strip(),all_references_unchanged=True,objects_pruned=False,integrity_verified=True)),flush=True)
+            print('GIT_CACHE_ONLY_NO_DATABASE_TOUCH_NO_RESTART')
             PY
