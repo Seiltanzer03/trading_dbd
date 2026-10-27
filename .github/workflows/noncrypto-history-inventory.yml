@@ -20,19 +20,24 @@ jobs:
           command_timeout: 40s
           script: |
             /usr/bin/python3 -u - <<'PY'
-            import json,sqlite3,time,urllib.request
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/research/macro/status',timeout=8) as response:r=json.load(response)
-            print('EXISTING_TREASURY_RUNTIME',json.dumps(r.get('treasury_live_t0')),flush=True)
+            import json,sqlite3,time,urllib.request,pathlib
+            for path in ('/api/ai/snapshot/status','/api/research/g1/management/status','/api/research/g1/management/local-status'):
+             try:
+              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:r=json.load(response)
+              print('CACHED_STATUS',path,json.dumps(r)[:14000],flush=True)
+             except Exception as exc:print('STATUS_ERROR',path,type(exc).__name__)
+            for name in ('edge_family_sources_latest.json','mathematical_edge_latest.json'):
+             p=pathlib.Path('/opt/seiltanzer/data/research')/name
+             if p.exists():
+              with p.open() as f:r=json.load(f)
+              print('PUBLICATION_HEADERS',name,json.dumps({k:r.get(k) for k in ('contract_version','edge_policy','published_for_sha','created_ts','captured_ts','production_authority','publication_contract_version')}),flush=True)
             c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
             try:
              c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-             deadline=time.monotonic()+3;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-             row=c.execute('SELECT id,ts,snapshot_json FROM ai_verdicts WHERE trade_id=141 AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 1').fetchone()
-             if row:
-              s=json.loads(row[2]);treasury=s.get('treasury_context_v1')
-              sources=s.get('edge_family_sources') or {}
-              related=[{k:r.get(k) for k in ('source_id','observed_ts','available_at','market_return_origin_ts','market_return_contract')} for r in (sources.get('intermarket') or []) if isinstance(r,dict)]
-              print('SAVED_INPUT_HEADERS',json.dumps(dict(id=row[0],ts=row[1],captured_ts=s.get('captured_ts'),treasury_root_present=isinstance(treasury,dict),treasury_headers={k:(treasury or {}).get(k) for k in ('available','reason','captured_ts','fetched_at','published_at')} if isinstance(treasury,dict) else None,related=related)),flush=True)
+             deadline=time.monotonic()+5;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+             for row in c.execute('SELECT id,ts,snapshot_json FROM ai_verdicts WHERE trade_id=141 AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 2'):
+              s=json.loads(row[2]);m=s.get('policy_manager') or {};shadow=s.get('llm_shadow_decision') or {};ctx=s.get('edge_family_market_context') or {}
+              print('SAVED_REVIEW_HEADERS',json.dumps(dict(id=row[0],ts=row[1],captured_ts=s.get('captured_ts'),audit_snapshot_ts=(m.get('input_audit') or {}).get('snapshot_ts'),frozen=s.get('frozen_expert_inputs'),materialization=s.get('materialization'),market_refresh=s.get('market_refresh'),market_context={k:ctx.get(k) for k in ('contract_version','published_for_sha','reason','market_observation_ts','failed_source_checks','rejected_models','model_inventory')},source_audit=s.get('edge_family_source_bundle_audit'),llm={k:shadow.get(k) for k in ('status','policy','confidence','policy_scores','family_assessments','family_assessment_rejections')},root_keys=list(s))),flush=True)
             finally:c.close()
-            print('READ_ONLY_EXISTING_DATA_NO_PROVIDER_CALL_NO_FIT_NO_ORDER')
+            print('READ_ONLY_NO_LLM_NO_PROVIDER_CALL_NO_FIT_NO_ORDER')
             PY
