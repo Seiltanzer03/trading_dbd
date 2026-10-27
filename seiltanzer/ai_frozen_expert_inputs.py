@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import threading
 import time
@@ -53,6 +54,7 @@ def capture_market_inputs(engine):
         demo=getattr(feed, "demo", False), intraday_is_offset=False,
         intraday_ohlcv=[], intraday_source_authority={}, binance_trade_flow={}, chain=None,
         family_reference_series=None, frozen_inputs_captured_ts=None,
+        treasury_context_v1=None,
         _intraday_lock=threading.Lock())
     lock = getattr(feed, "_intraday_lock", None)
     acquired = lock is None or lock.acquire(blocking=False)
@@ -82,6 +84,21 @@ def capture_market_inputs(engine):
     finally:
         if lock is not None:
             lock.release()
+    # Copy the existing rate cache before the slow builder. Reading it only at
+    # completion could substitute a later fetch for the original review inputs.
+    # context_at is an in-memory projection, never a refresh/provider request.
+    try:
+        runtime = getattr(getattr(engine, 'passive', None), '_treasury_live_runtime', None)
+        if runtime is not None and market.frozen_inputs_captured_ts is not None:
+            treasury = _bounded_copy(runtime.context_at(market.frozen_inputs_captured_ts),
+                                     budget=[2000, 16384])
+            if (not isinstance(treasury, dict) or
+                    len(json.dumps(treasury, allow_nan=False, separators=(',', ':')).encode()) > 16384):
+                raise ValueError('TREASURY_INPUT_FREEZE_BOUND')
+            market.treasury_context_v1 = treasury
+    except Exception as exc:
+        # An optional parent cannot erase the independently frozen price lane.
+        market.treasury_freeze_reason = 'TREASURY_INPUT_FREEZE_UNAVAILABLE:'+type(exc).__name__
     try:
         market.chain = _bounded_copy(getattr(feed, "chain", None))
     except (ValueError, TypeError, RecursionError):
@@ -178,6 +195,9 @@ def freeze_expert_inputs(engine, snapshot: dict, *, market_inputs=None) -> None:
     from .ai_verdict_budget_bridge import enforce_public_snapshot_budget
 
     _attach_family_source_bundle(engine, snapshot)
+    treasury = getattr(market_inputs.market, 'treasury_context_v1', None)
+    if isinstance(treasury, dict):
+        snapshot['treasury_context_v1'] = _bounded_copy(treasury, budget=[2000, 16384])
     factory = getattr(getattr(engine, "passive", None), "_macro_data_factory", None)
     if factory is not None:
         from .macro_t0_context import build_macro_t0_context
