@@ -10,25 +10,34 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read exact release startup progress without opening the database
+      - name: Read delayed startup health and bounded process counters
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 45s
+          command_timeout: 50s
           script: |
             set -eu
             /usr/bin/python3 -u - <<'PY'
-            import json,subprocess
+            import json,subprocess,urllib.request
+            from pathlib import Path
+            def out(**r):print(json.dumps(r),flush=True)
             for kind,args in (
              ('git',['git','-C','/opt/seiltanzer','rev-parse','HEAD']),
-             ('service',['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts','-p','ExecMainStartTimestamp']),
-             ('startup',['journalctl','-u','seiltanzer','--since','-12 minutes','--no-pager','-n','130'])):
-             r=subprocess.run(args,capture_output=True,text=True,timeout=10)
-             lines=r.stdout.splitlines()
-             if kind=='startup':lines=[l for l in lines if any(w in l.lower() for w in ('startup','schema','integrity','check','progress','failed','error','storage','started','starting'))][-45:]
-             print(json.dumps(dict(kind=kind,returncode=r.returncode,lines=lines,stderr=r.stderr[:500])),flush=True)
-            print('READ_ONLY_STARTUP_NO_DATABASE_OPEN_NO_MUTATION')
+             ('service',['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts']),
+             ('startup',['journalctl','-u','seiltanzer','--since','-16 minutes','--no-pager','-n','130'])):
+             r=subprocess.run(args,capture_output=True,text=True,timeout=10);lines=r.stdout.splitlines()
+             if kind=='startup':lines=[l for l in lines if any(w in l.lower() for w in ('startup','schema','integrity','check','failed','error','storage','started','starting','complete'))][-50:]
+             out(kind=kind,returncode=r.returncode,lines=lines,stderr=r.stderr[:500])
+            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True,timeout=5).strip()
+            if pid.isdigit() and pid!='0':
+             for name in ('io','wchan'):
+              try:out(kind='process_'+name,value=(Path('/proc')/pid/name).read_text()[:2000])
+              except OSError as e:out(kind='process_'+name,error=type(e).__name__)
+            try:
+             with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=6) as r:out(kind='snapshot_status',value=json.load(r))
+            except OSError as e:out(kind='snapshot_status',error=type(e).__name__)
+            out(kind='safety',read_only=True,database_open=False,restarts=0)
             PY
