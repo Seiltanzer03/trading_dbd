@@ -20,24 +20,14 @@ jobs:
           command_timeout: 40s
           script: |
             /usr/bin/python3 -u - <<'PY'
-            import json,sqlite3,time,urllib.request,pathlib
-            for path in ('/api/ai/snapshot/status','/api/research/g1/management/status','/api/research/g1/management/local-status'):
-             try:
-              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:r=json.load(response)
-              print('CACHED_STATUS',path,json.dumps(r)[:14000],flush=True)
-             except Exception as exc:print('STATUS_ERROR',path,type(exc).__name__)
-            for name in ('edge_family_sources_latest.json','mathematical_edge_latest.json'):
-             p=pathlib.Path('/opt/seiltanzer/data/research')/name
-             if p.exists():
-              with p.open() as f:r=json.load(f)
-              print('PUBLICATION_HEADERS',name,json.dumps({k:r.get(k) for k in ('contract_version','edge_policy','published_for_sha','created_ts','captured_ts','production_authority','publication_contract_version')}),flush=True)
-            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-            try:
-             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-             deadline=time.monotonic()+5;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-             for row in c.execute('SELECT id,ts,snapshot_json FROM ai_verdicts WHERE trade_id=141 AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 2'):
-              s=json.loads(row[2]);m=s.get('policy_manager') or {};shadow=s.get('llm_shadow_decision') or {};ctx=s.get('edge_family_market_context') or {}
-              print('SAVED_REVIEW_HEADERS',json.dumps(dict(id=row[0],ts=row[1],captured_ts=s.get('captured_ts'),audit_snapshot_ts=(m.get('input_audit') or {}).get('snapshot_ts'),frozen=s.get('frozen_expert_inputs'),materialization=s.get('materialization'),market_refresh=s.get('market_refresh'),market_context={k:ctx.get(k) for k in ('contract_version','published_for_sha','reason','market_observation_ts','failed_source_checks','rejected_models','model_inventory')},source_audit=s.get('edge_family_source_bundle_audit'),llm={k:shadow.get(k) for k in ('status','policy','confidence','policy_scores','family_assessments','family_assessment_rejections')},root_keys=list(s))),flush=True)
-            finally:c.close()
-            print('READ_ONLY_NO_LLM_NO_PROVIDER_CALL_NO_FIT_NO_ORDER')
+            import subprocess,json,os
+            for name,args in [('ACTUAL_SHA',['git','-C','/opt/seiltanzer','rev-parse','HEAD']),('SERVICE',['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts'])]:
+             r=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=5)
+             print(name,r.stdout.strip(),flush=True)
+            v=os.statvfs('/opt/seiltanzer')
+            print('FREE_BYTES',v.f_bavail*v.f_frsize,flush=True)
+            r=subprocess.run(['journalctl','-u','seiltanzer','-n','150','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=5)
+            for line in r.stdout.splitlines():
+             if 'startup_phase' in line or 'STARTUP_PHASE' in line:print('STARTUP_PHASE',line[:600],flush=True)
+            print('READ_ONLY_PROCESS_METADATA_NO_DATABASE_NO_PROVIDER_NO_RESTART')
             PY
