@@ -1,0 +1,7 @@
+# Complete frozen family context wire budget
+
+Base6f58f637/treecd791ad1 equals actualdeployedmain1c836f243c0ea3e1358abebd6e3e9d123e52b04b. PR530passed all7productioncontexts; actualAIHTTP2009457ms<12000, isolated12actions/7extendedPASS. However the actualfamilyreceipt stillhad0forecasts andintermittent60000bytebudgeterrors. Model-onlylosslessencoding wasinsufficient, so fullforecastacceptance remainsOPEN.
+
+Losslessly encode the complete existing family context under enclosing byte pressure, using jointcompressionbeforeper-modelencoding wherepossible. Existing32Kdecodedroot/32Kwire/40Kfamilyinputs/60Ksnapshot limitsremain. Preserve fullmodel hashes, coefficients, validations, featureprovenance, originalfreeze/forecast/sourceclocks. Boundedbase64+zlib decoder revalidatescanonicaldigestandvisibleheaders; rejectcorrupt/truncated/trailing/nested/oversizedpackets. Only twoactualfamilyconsumerowners unwrap; explanatory availabilityheadersstayreadable. No newinputs, trainingpolicy, riskmath, network orfitting.
+
+REDactualpackagingregression69000bytes against60000; GREENcompletecontextfits androundtrip equality/predictions/receipt/expiry/idempotenceproved. Profile166PASS13.12s,knownStarlettewarning. Singlefinalreviewforthisnewwirecontract, mandatoryfinalCI, authorizedmerge/automaticexactSHAdeploy andNEWactualcurrentfamilyforecastreceipt. Preserveunrelatedbinary, crypto-specificpaused, nomanualEDE/DBcopy/paidtestcalls/orders.
