@@ -34,12 +34,55 @@ def _source_valid(source, code, cutoff):
     if not isinstance(source, dict) or code not in ALL_INSTRUMENTS or simulated_evidence(source):
         return False
     expected = ALL_INSTRUMENTS[code]
+    from .reference_market_series import PROVIDER, SYMBOLS, validate_runtime_proof
+    if source.get('provider') == PROVIDER:
+        proof = source.get('reference_proof')
+        return (code in SYMBOLS and source.get('source_symbol') == SYMBOLS[code]
+            and source.get('target_instrument') == code and source.get('source_verified') is True
+            and source.get('derived') is False and isinstance(proof, dict)
+            and source.get('observed_ts') == proof.get('observed_ts')
+            and source.get('available_at') == proof.get('received_ts')
+            and validate_runtime_proof(proof, code, cutoff) is None)
     provider, symbol = ('Binance', expected.binance_symbol) if code in CRYPTO_INSTRUMENTS else ('Yahoo', expected.yahoo)
     observed, received = (_num(source.get(k)) for k in ('observed_ts', 'available_at'))
     return (source.get('provider') == provider and source.get('source_symbol') == symbol
         and source.get('target_instrument') == code and source.get('source_verified') is True
         and source.get('derived') is not True and observed is not None and received is not None
         and cutoff is not None and 0 < observed <= received <= cutoff and cutoff-observed < 900)
+
+
+def _price_bars(feed, code, cutoff):
+    """Select an existing causal price window; no source is relabelled."""
+    source = getattr(feed, 'intraday_source_authority', None)
+    raw = getattr(feed, 'intraday_ohlcv', None)
+    if (_source_valid(source, code, cutoff) and isinstance(raw, (list, tuple))
+            and len(raw) <= 4096 and not any(simulated_evidence(row) for row in raw)):
+        try:
+            bars = completed_live_bars(raw, cutoff)
+            if _continuous_tail(bars, cutoff):
+                return source, bars
+        except (KeyError, TypeError, ValueError, OverflowError):
+            pass
+    from .reference_market_series import validate_reference_series, runtime_proof
+    reference = getattr(feed, 'family_reference_series', None)
+    if validate_reference_series(reference, code, cutoff, runtime=True) is not None:
+        return None, []
+    bars = reference['bars']
+    if not _continuous_tail(bars, cutoff):
+        return None, []
+    return {'provider': reference['provider'], 'source_symbol': reference['ticker'],
+        'target_instrument': code, 'source_verified': True, 'derived': False,
+        'observed_ts': reference['observed_ts'], 'available_at': reference['received_ts'],
+        'reference_proof': runtime_proof(reference)}, bars
+
+
+def _continuous_tail(bars, cutoff):
+    tail = bars[-13:]
+    return (len(tail) == 13 and 0 <= cutoff-tail[-1]['bar_end_ts'] < 900
+        and all(b['bar_end_ts']-a['bar_end_ts'] == 300 for a,b in zip(tail, tail[1:]))
+        and all(all(_num(row.get(k)) is not None and row[k] > 0 for k in ('open','high','low','close'))
+            and row['high'] >= max(row['open'], row['close'])
+            and row['low'] <= min(row['open'], row['close']) for row in tail))
 
 
 def _release_reference(snapshot, cutoff):
@@ -130,6 +173,9 @@ def _financing_sensitivity(snapshot):
 def attach_research_working_context(engine, snapshot):
     """Use frozen in-memory inputs only; bounded, no fitting/provider or writes."""
     cutoff, code = market_observation_cutoff(snapshot), _code(snapshot)
+    frozen = _num(getattr(getattr(engine, 'market', None), 'frozen_inputs_captured_ts', None))
+    if cutoff is not None and frozen is not None and frozen > 0:
+        cutoff = min(_num(snapshot['captured_ts']), frozen)
     context = {'contract_version': VERSION, 'instrument': code, 'available': False,
         'captured_ts': snapshot.get('captured_ts'), 'market_observation_ts': cutoff,
         'reason': 'PRELIMINARY_PRICE_INPUT_UNAVAILABLE', 'rules': [],
@@ -142,36 +188,34 @@ def attach_research_working_context(engine, snapshot):
             'broker_swap': {'available': False, 'broker_cost_verified': False,
                             'applied_to_net_economics': False}}}
     snapshot['research_working_context'] = context
+    if frozen is not None and frozen > 0:
+        context['market_input_capture_ts'] = cutoff
     if cutoff is None or simulated_evidence(snapshot, recursive=False):
         return
     context['alternatives']['consensus'] = _release_reference(snapshot, cutoff)
     context['alternatives']['broker_swap'] = _financing_sensitivity(snapshot)
     feed = getattr(engine, 'market', None)
-    source = getattr(feed, 'intraday_source_authority', None)
     if (getattr(feed, 'instrument_code', None) != code or getattr(feed, 'demo', False)
-            or getattr(feed, 'freeze_reason', None) or not _source_valid(source, code, cutoff)):
+            or getattr(feed, 'freeze_reason', None)):
         return
-    raw = getattr(feed, 'intraday_ohlcv', None)
-    if (not isinstance(raw, (list, tuple)) or len(raw) > 4096
-            or any(simulated_evidence(row) for row in raw)):
-        return
-    try:
-        bars = completed_live_bars(raw, cutoff)
-    except (KeyError, TypeError, ValueError, OverflowError):
+    source, bars = _price_bars(feed, code, cutoff)
+    if source is None:
         return
     tail = bars[-13:]
-    if (len(tail) != 13 or cutoff-tail[-1]['bar_end_ts'] >= 900
-            or any(b['bar_end_ts']-a['bar_end_ts'] != 300 for a,b in zip(tail, tail[1:]))
-            or any(any(_num(row.get(k)) is None or row[k] <= 0 for k in ('open','high','low','close'))
-                   or row['high'] < max(row['open'], row['close'])
-                   or row['low'] > min(row['open'], row['close']) for row in tail)):
-        return
     returns = [math.log(b['close'])-math.log(a['close']) for a,b in zip(tail, tail[1:])]
     scale = math.sqrt(sum(v*v for v in returns)/len(returns))
     impulse = math.log(tail[-1]['close'])-math.log(tail[-4]['close'])
     pressure = sum((b['close']-b['open'])/(b['high']-b['low'])
                    if b['high'] > b['low'] else 0. for b in tail[-3:])/3
     affinity = max(-1., min(1., impulse/(3*scale))) if scale > 0 else 0.
+    log_bars = [{k: math.log(b[k]) for k in ('open','high','low','close')} for b in tail[-12:]]
+    variance = sum((b['high']-b['open'])*(b['high']-b['close'])
+                 + (b['low']-b['open'])*(b['low']-b['close']) for b in log_bars)/12
+    context['price_estimators'] = {'rogers_satchell': {
+        'value': math.sqrt(max(0., variance)), 'sample_n': 12, 'interval_sec': 300,
+        'unit': 'log_return_std_per_5m', 'measurement_kind': 'REALIZED_RANGE_VOLATILITY_NOT_IMPLIED',
+        'reference': 'https://doi.org/10.1214/aoap/1177005835',
+        'assumptions': 'basic uncorrected Brownian-with-drift estimator; discrete extrema may bias low; no annualization'}}
     context['rules'] = [
         {'rule_id': 'PRICE_MOMENTUM_HYPOTHESIS', 'affinity': affinity,
          'observations': {'return_15m': impulse, 'rms_return_5m': scale},
@@ -199,7 +243,7 @@ def attach_research_working_context(engine, snapshot):
                 'reference': 'https://doi.org/10.1016/j.jfineco.2018.05.009'})
     context.update(available=True, reason='FROZEN_OBSERVED_PRICE_WITH_LABELLED_PRELIMINARY_RULES',
         observed_ts=tail[-1]['bar_end_ts'], source_provenance={k:source[k] for k in (
-            'provider','source_symbol','target_instrument','source_verified','observed_ts','available_at','derived') if k in source},
+            'provider','source_symbol','target_instrument','source_verified','observed_ts','available_at','derived','reference_proof') if k in source},
         source_ids=[f"{source['provider']}:{source['source_symbol']}:completed5m"],
         evidence_family_ids=['price_path'])
     context['alternatives']['order_book'].update(available=True, pressure_proxy=pressure,
@@ -228,11 +272,23 @@ def _valid_context(snapshot):
     cutoff = market_observation_cutoff(snapshot)
     captured, observed = _num(snapshot.get('captured_ts')), _num(context.get('observed_ts'))
     origin = _num(context.get('market_observation_ts'))
+    original_capture = _num(context.get('captured_ts'))
+    frozen = _num(context.get('market_input_capture_ts'))
     if (cutoff is None or captured is None or origin is None or observed is None
-            or not 0 < observed <= origin <= cutoff <= captured or captured-observed >= 900
+            or original_capture is None or not 0 < observed <= origin <= original_capture <= captured
+            or (frozen != origin if 'market_input_capture_ts' in context else origin > cutoff)
+            or captured-observed >= 900
             or context.get('instrument') != _code(snapshot)
             or not _source_valid(context.get('source_provenance'), _code(snapshot), origin)):
         return None
+    estimators = context.get('price_estimators')
+    if estimators is not None:
+        rs = estimators.get('rogers_satchell') if isinstance(estimators, dict) else None
+        if (not isinstance(rs, dict) or _num(rs.get('value')) is None or rs['value'] < 0
+                or rs.get('sample_n') != 12 or rs.get('interval_sec') != 300
+                or rs.get('unit') != 'log_return_std_per_5m'
+                or rs.get('measurement_kind') != 'REALIZED_RANGE_VOLATILITY_NOT_IMPLIED'):
+            return None
     rules = context.get('rules')
     if (not isinstance(rules, list) or not 1 <= len(rules) <= 3
             or any(not isinstance(r, dict) or _num(r.get('affinity')) is None or not -1 <= r['affinity'] <= 1
@@ -301,6 +357,11 @@ def preliminary_family_features(snapshot):
     result = {'order_flow': {'flow.bar_pressure_proxy': (alternatives['order_book']['pressure_proxy'],
               {**meta, 'measurement_kind': 'BAR_PRESSURE_PROXY_NOT_ORDER_BOOK',
                'broker_order_book_observed': False})}}
+    rs = (context.get('price_estimators') or {}).get('rogers_satchell')
+    if rs:
+        result['option'] = {'option.realized_range_volatility_5m': (rs['value'], {
+            **meta, 'measurement_kind': rs['measurement_kind'], 'implied_volatility_observed': False,
+            'interval_sec': 300, 'sample_n': 12})}
     carry = alternatives['broker_swap']
     if carry.get('available'):
         value = next(row['cost_r_assumption'] for row in carry['scenarios']
@@ -364,7 +425,13 @@ def research_working_lines(context):
     book = alternative.get('order_book') or {}
     consensus = alternative.get('consensus') or {}
     swap = alternative.get('broker_swap') or {}
-    return [
+    lines = [
         'Приближения входов: стакан — ' + ('давление по свечам, не наблюдаемый стакан/OFI' if book.get('available') else 'нет пригодных свечных данных') + '.',
         'Consensus — ' + ('разница с предыдущим значением публикации; не ожидание рынка до новости' if consensus.get('available') else 'нет подтверждённого предыдущего значения; ожидание рынка не восстановлено') + '.',
         'Своп брокера — ' + ('сценарии годовой ставки 0/5/15% и списания за 1/3 дня; это допущения, не тариф и не предельная комиссия' if swap.get('available') else 'приближение недоступно') + '; проверенная экономика не перезаписана.']
+    rs = (context.get('price_estimators') or {}).get('rogers_satchell')
+    if isinstance(rs, dict) and _num(rs.get('value')) is not None:
+        lines.append(f"Волатильность Rogers–Satchell: {rs['value']:.6g} log-return за 5 минут; "
+            '12 завершённых свечей. Это реализованная оценка, не IV и не обученный прогноз; '
+            'без годового пересчёта, дискретные экстремумы могут занижать её.')
+    return lines

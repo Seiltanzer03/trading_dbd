@@ -71,6 +71,10 @@ def _compact_research_context(value):
         'context_sha256','source_ids','evidence_family_ids'))
     out['rules'] = [_row(row, ('rule_id','affinity','observations','scope','reference'))
                     for row in (value.get('rules') or [])[:3]]
+    estimators = value.get('price_estimators') or {}
+    if isinstance(estimators, dict) and isinstance(estimators.get('rogers_satchell'), dict):
+        out['price_estimators'] = {'rogers_satchell': _row(estimators['rogers_satchell'], (
+            'value','sample_n','interval_sec','unit','measurement_kind','reference','assumptions'))}
     alternatives = value.get('alternatives') or {}
     out['alternatives'] = {name: _row(alternatives.get(name), (
         'available','measurement_kind','broker_order_book_observed','pressure_proxy',

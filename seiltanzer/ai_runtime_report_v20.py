@@ -70,6 +70,8 @@ Return all 12 policy_scores as the ordered array, each from -1 to 1: relative pr
 probabilities or Expected R. Self-confidence never determines ensemble weight.
 Your selected policy must have a highest score among hard-admissible actions.
 Check that policy and policy_scores agree before returning the response.
+When feature_provenance contains a provenance_ref, resolve its exact metadata in
+feature_provenance_table. Shared metadata does not create independent evidence.
 Assess all eight families using ONLY the exact numeric features supplied in
 edge_family_facts, preserving observed versus preliminary proxy/scenario roles.
 Include only supported opinions in family_assessments, with family_id,1-4 exact
@@ -432,7 +434,8 @@ def _independent_provider_input(snapshot: dict[str, Any], authority: dict[str, A
     # clocks; a compact event summary supplies context without a research ledger.
     if "macro_context_v1" in authoritative:
         projected["macro_context_v1"] = _bounded(authoritative["macro_context_v1"])
-    return projected
+    from .ai_provider_provenance_wire import share_provenance
+    return share_provenance(projected)
 
 
 def request_explanation_with_shadow(
