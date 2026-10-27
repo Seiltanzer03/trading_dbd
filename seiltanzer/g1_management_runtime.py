@@ -482,11 +482,13 @@ class ManagementEdgeRuntime:
 
     @staticmethod
     def _original_plan_outcome(snapshot: dict, points: list[dict]) -> float:
+        from .decision_research import _observed_capture_r
         inputs = _at(snapshot, "policy_manager", "inputs", default={}) or {}
         current_r = _finite(inputs.get("r0"))
         take_r = _finite(inputs.get("T"))
         if current_r is None or take_r is None:
             raise ValueError("snapshot lacks original-plan execution inputs")
+        current_r = _observed_capture_r(snapshot, points, current_r)
         values = [float(p["r"]) for p in points]
         if not values or abs(values[0] - current_r) > 1e-7:
             values.insert(0, current_r)

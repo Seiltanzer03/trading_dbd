@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import time
+from dataclasses import replace
 from typing import Any, Iterable
 
 from .execution_simulator import (
@@ -205,6 +206,16 @@ def _execution_spec(snapshot: dict) -> ExecutionSpec:
     )
 
 
+def _observed_capture_r(snapshot: dict, points: list[dict], current_r: float) -> float:
+    """Use the measured capture point when r0 was serialized to four decimals."""
+    if points and abs(float(points[0]['ts']) - float(snapshot['captured_ts'])) <= 1e-9:
+        observed = _finite(points[0].get('r'))
+        if observed is None or abs(observed - current_r) > 1e-4:
+            raise ValueError('observed capture R differs from frozen inputs')
+        return observed
+    return current_r
+
+
 def counterfactual_replay(snapshot: dict, path_points: Iterable[dict]) -> dict:
     """Replay all policies over one observed post-review R path."""
     spec = _execution_spec(snapshot)
@@ -217,7 +228,12 @@ def counterfactual_replay(snapshot: dict, path_points: Iterable[dict]) -> dict:
          and float(row["ts"]) >= captured - 1e-9),
         key=lambda row: row["ts"],
     )
-    if not points or abs(points[0]["r"] - spec.current_r) > 1e-7:
+    # Resolve actual duplicate writes before choosing the measured start. Never
+    # insert a rounded synthetic point then let dedup replace it under a spec
+    # that still expects the rounded value.
+    points = list({row['ts']: row for row in points}.values())
+    spec = replace(spec, current_r=_observed_capture_r(snapshot, points, spec.current_r))
+    if not points or abs(points[0]["ts"] - captured) > 1e-9:
         points.insert(0, {"ts": captured, "r": spec.current_r,
                           "price": _finite(_at(snapshot, "observation", "exact_levels", "current"))})
     # Deduplicate identical timestamps deterministically, keeping the last write.

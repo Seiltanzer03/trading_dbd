@@ -604,7 +604,10 @@ def attach_market_family_context(engine, snapshot):
     cutoff = market_observation_cutoff(snapshot)
     frozen_cutoff=number(getattr(getattr(engine,'market',None),'frozen_inputs_captured_ts',None))
     if cutoff is not None and frozen_cutoff is not None and frozen_cutoff>0:
-        cutoff=min(cutoff,frozen_cutoff)
+        # The canonical UI tick can predate the already-received input copy.
+        # Quote age still belongs to that tick; these inputs belong to their
+        # own original freeze, never to completion of the slow policy builder.
+        cutoff=min(number(snapshot.get('captured_ts')),frozen_cutoff)
     context['market_observation_ts'] = cutoff
     code = (snapshot.get('strategy') or {}).get('instrument') or snapshot.get('instrument')
     feed = getattr(engine, 'market', None)
