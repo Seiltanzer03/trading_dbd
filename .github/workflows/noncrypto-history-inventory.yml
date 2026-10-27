@@ -8,57 +8,34 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 3
     steps:
-      - name: Losslessly compress two closed rotated logs and verify recovered headroom
+      - name: Read release readiness and frozen forecasts after verified headroom recovery
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 150s
+          command_timeout: 70s
           script: |
             set -eu
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = ad7158cbe33b0babdc06a18feb7295e3277fe09a
-            command -v lsof >/dev/null
             /usr/bin/python3 -u - <<'PY'
-            import gzip,hashlib,json,os,shutil,stat,subprocess
-            from pathlib import Path
-            def identity(s):return (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_nlink)
-            before=shutil.disk_usage('/').free
-            for name in ('syslog.1','auth.log.1'):
-             p=Path('/var/log')/name;s=p.lstat()
-             assert stat.S_ISREG(s.st_mode) and s.st_nlink==1 and 0<s.st_size<300000000
-             final=p.with_name(name+'.gz');tmp=p.with_name(name+'.headroom-531.tmp.gz')
-             assert not os.path.lexists(final) and not os.path.lexists(tmp)
-             opened=subprocess.run(['lsof','--',str(p)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
-             assert opened.returncode==1,'ROTATED_LOG_OPEN_OR_LSOF_ERROR'
-             digest=hashlib.sha256()
-             with p.open('rb') as source,tmp.open('xb') as sink:
-              with gzip.GzipFile(filename=name,mode='wb',fileobj=sink,mtime=int(s.st_mtime)) as compressed:
-               while True:
-                block=source.read(131072)
-                if not block:break
-                digest.update(block);compressed.write(block)
-              sink.flush();os.fsync(sink.fileno())
-              assert identity(os.fstat(source.fileno()))==identity(s)
-             verified=hashlib.sha256()
-             with gzip.open(tmp,'rb') as source:
-              while True:
-               block=source.read(131072)
-               if not block:break
-               verified.update(block)
-             assert verified.digest()==digest.digest()
-             assert identity(p.lstat())==identity(s)
-             assert subprocess.run(['lsof','--',str(p)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10).returncode==1
-             os.chmod(tmp,stat.S_IMODE(s.st_mode));os.chown(tmp,s.st_uid,s.st_gid)
-             os.utime(tmp,ns=(s.st_atime_ns,s.st_mtime_ns));os.link(tmp,final);tmp.unlink()
-             assert identity(p.lstat())==identity(s)
-             p.unlink()
-             print(json.dumps(dict(kind='rotated_log_lossless',name=name,original_bytes=s.st_size,compressed_bytes=final.stat().st_size,sha256=digest.hexdigest(),roundtrip_verified=True)),flush=True)
-            after=shutil.disk_usage('/').free
-            print(json.dumps(dict(kind='capacity',before=before,after=after,recovered=after-before,minimum_free_bytes=1107296256)),flush=True)
-            assert after>1107296256+128*1024**2
-            print('VERIFIED_HEADROOM_RECOVERED_NO_DATABASE_TOUCH_NO_SERVICE_RESTART')
+            import json,subprocess,urllib.request,shutil
+            def out(**r):print(json.dumps(r),flush=True)
+            out(kind='capacity',free_bytes=shutil.disk_usage('/').free)
+            for kind,args in (
+             ('git',['git','-C','/opt/seiltanzer','rev-parse','HEAD']),
+             ('service',['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts','-p','ExecMainStartTimestamp']),
+             ('startup',['journalctl','-u','seiltanzer','--since','-14 minutes','--no-pager','-n','150'])):
+             r=subprocess.run(args,capture_output=True,text=True,timeout=10);lines=r.stdout.splitlines()
+             if kind=='startup':lines=[l for l in lines if 'STARTUP_PHASE' in l][-18:]
+             out(kind=kind,returncode=r.returncode,lines=lines,stderr=r.stderr[:500])
+            for path in ('/api/research/runtime/worker-status','/api/ai/snapshot/status','/api/research/mathematical-edge'):
+             try:
+              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=6) as r:row=json.load(r)
+              if path.endswith('mathematical-edge'):row={k:row.get(k) for k in ('state','published_for_sha','family_market_model_summary','family_reference_source_errors')}
+              out(kind='http',path=path,value=row)
+             except OSError as e:out(kind='http',path=path,error=type(e).__name__)
+            out(kind='safety',read_only=True,database_open=False,restarts=0,provider_calls=0)
             PY
