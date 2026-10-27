@@ -10,32 +10,45 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read release startup and index metadata without warming Q audit rows
+      - name: Read post-index allocation and legacy environment use
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 45s
+          command_timeout: 100s
           script: |
             /usr/bin/python3 -u - <<'PY'
-            import json,sqlite3,subprocess,time,shutil
+            import json,os,shutil,sqlite3,stat,subprocess,time
+            from pathlib import Path
             def out(**r):print(json.dumps(r),flush=True)
             out(kind='capacity',free_bytes=shutil.disk_usage('/').free)
             for kind,args in (
-             ('git',['git','-C','/opt/seiltanzer','rev-parse','HEAD']),
-             ('service',['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts','-p','ExecMainStartTimestamp']),
-             ('startup',['journalctl','-u','seiltanzer','--since','-15 minutes','--no-pager','-n','160'])):
-             r=subprocess.run(args,capture_output=True,text=True,timeout=8);lines=r.stdout.splitlines()
-             if kind=='startup':lines=[l for l in lines if 'STARTUP_PHASE' in l][-20:]
-             out(kind=kind,returncode=r.returncode,lines=lines)
+             ('app',['du','-xhd1','/opt/seiltanzer']),
+             ('data',['du','-xhd2','/opt/seiltanzer/data']),
+             ('legacy',['du','-xhd2','/root/seiltanzer_bot']),
+             ('cache',['du','-xhd2','/root/.cache','/var/log','/tmp'])):
+             try:
+              r=subprocess.run(args,capture_output=True,text=True,timeout=20);out(kind=kind,returncode=r.returncode,lines=r.stdout.splitlines()[-55:],stderr=r.stderr[:400])
+             except subprocess.TimeoutExpired:out(kind=kind,timed_out=True)
+            p=Path('/opt/seiltanzer/data/trades.db');s=p.stat();out(kind='database_allocation',bytes=s.st_size,allocated=s.st_blocks*512)
+            matches=[]
+            for p in Path('/proc').iterdir():
+             if not p.name.isdigit():continue
+             try:
+              exe=os.readlink(p/'exe');cwd=os.readlink(p/'cwd')
+              mapped=(p/'maps').read_text()
+              if any('/root/seiltanzer_bot' in x for x in (exe,cwd,mapped)):matches.append(dict(pid=p.name,exe=exe,cwd=cwd))
+             except (OSError,PermissionError):pass
+            out(kind='legacy_process_usage',matches=matches)
             c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
             try:
              c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-             deadline=time.monotonic()+2;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-             out(kind='metadata_index',rows=c.execute("SELECT name FROM sqlite_schema WHERE name='ix_passive_q_audit_metadata' AND type='index'").fetchall(),columns=c.execute('PRAGMA index_info(ix_passive_q_audit_metadata)').fetchall())
-            except sqlite3.DatabaseError as e:out(kind='metadata_index',error=str(e))
+             deadline=time.monotonic()+5;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+             out(kind='sqlite_allocation',pages=c.execute('PRAGMA page_count').fetchone()[0],freelist_pages=c.execute('PRAGMA freelist_count').fetchone()[0],page_size=c.execute('PRAGMA page_size').fetchone()[0])
+             out(kind='index_allocation',row=c.execute("SELECT SUM(pgsize),COUNT(*) FROM dbstat WHERE name='ix_passive_q_audit_metadata'").fetchone())
+            except sqlite3.DatabaseError as e:out(kind='sqlite_allocation_error',error=str(e))
             finally:c.close()
-            out(kind='safety',read_only=True,audit_row_reads=0,database_writes=0,restarts=0)
+            out(kind='safety',read_only=True,database_writes=0,restarts=0)
             PY
