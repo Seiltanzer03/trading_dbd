@@ -16,9 +16,9 @@ def _restore(wire, family, feature):
     return {**defaults, **resolve(wire['edge_family_facts'][family]['feature_provenance'][feature])}
 
 
-def test_actual_independent_projection_shares_only_identical_provenance():
+def test_full_provenance_codec_shares_only_identical_provenance():
     from test_edge_family_working import frozen_all
-    from seiltanzer.ai_runtime_report_v20 import _independent_provider_input
+    from seiltanzer.ai_provider_provenance_wire import share_provenance
     from seiltanzer.llm_decision_shadow import _shadow_projection
     snapshot = frozen_all()
     record = snapshot['edge_family_sources']['macro']
@@ -26,7 +26,7 @@ def test_actual_independent_projection_shares_only_identical_provenance():
     record['features'].update({f'macro.observed_{i}': i*.01 for i in range(12)})
     before = deepcopy(snapshot)
     expected = _shadow_projection(snapshot)['edge_family_facts']
-    wire = _independent_provider_input(snapshot, snapshot)
+    wire = share_provenance(_shadow_projection(snapshot))
     table = wire.get('feature_provenance_table')
     assert table or wire.get('feature_provenance_defaults'), 'same source metadata is repeated for every numeric feature'
     for family, row in expected.items():
