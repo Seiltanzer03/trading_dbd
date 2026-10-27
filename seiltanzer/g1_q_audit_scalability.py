@@ -26,7 +26,7 @@ from .g1_short_horizon_runtime import (
     _finite,
 )
 
-Q_AUDIT_SCALABILITY_VERSION = "g1s-q-audit-read-snapshot-v6"
+Q_AUDIT_SCALABILITY_VERSION = "g1s-q-audit-read-snapshot-v7"
 Q_AUDIT_CANDIDATE_BATCH_SIZE = 500
 
 _RUNTIME = ShortHorizonRuntime
@@ -51,6 +51,14 @@ def _install_indexes(runtime: _RUNTIME) -> None:
         runtime._conn.execute(
             "CREATE INDEX IF NOT EXISTS ix_g1_q_attempt_ts "
             "ON g1_q_capture_attempts(attempt_ts)"
+        )
+        # Q audit needs only these observation fields. The primary-key lookup
+        # otherwise loads wide rows containing frozen feature/forecast payloads.
+        # Keep the attempt index unchanged, including its tied-timestamp order.
+        runtime._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_passive_q_audit_metadata "
+            "ON passive_market_observations("
+            "observation_id,target_ts,resolution_status,instrument)"
         )
         runtime._conn.execute(
             "CREATE INDEX IF NOT EXISTS ix_passive_bar_instrument_end "
@@ -264,7 +272,7 @@ def q_audit_bounded(
                    q.created_observation_id,q.blocker_code,q.requested_expiry_ts,
                    p.target_ts,p.resolution_status,p.instrument
             FROM g1_q_capture_attempts q
-            LEFT JOIN passive_market_observations p
+            LEFT JOIN passive_market_observations p INDEXED BY ix_passive_q_audit_metadata
               ON p.observation_id=q.created_observation_id
             ORDER BY q.attempt_ts DESC LIMIT ?
             """,

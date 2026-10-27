@@ -424,3 +424,74 @@ def test_readiness_http_summary_keeps_same_cohort_and_maturity_without_items(tmp
     finally:
         passive.close()
         cache.close()
+
+
+def test_file_audit_seeks_observation_metadata_without_wide_table_reads(tmp_path, monkeypatch):
+    from seiltanzer import g1_q_audit_scalability as owner
+
+    runtime, passive, cache = _runtime(tmp_path)
+    now = 1_800_000_000.0
+    statements = []
+    original_open = owner._open_read_snapshot
+
+    def traced_snapshot(instance):
+        connection = original_open(instance)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(owner, '_open_read_snapshot', traced_snapshot)
+    try:
+        for index, status in enumerate(('resolved', 'pending')):
+            identity = 'covering-observation-' + str(index)
+            _insert_observation(passive, observation_id=identity, instrument='XAU',
+                                target_ts=now+1200, status=status)
+            _insert_attempt(passive, attempt_id='covering-attempt-'+str(index),
+                            attempt_ts=now-index, instrument='XAU',
+                            observation_id=identity, target_ts=now+1200)
+        _insert_attempt(passive, attempt_id='covering-blocked', attempt_ts=now-2,
+                        instrument='XAU', observation_id=None, target_ts=None,
+                        blocker_code='SOURCE_UNAVAILABLE')
+        _insert_attempt(passive, attempt_id='covering-missing', attempt_ts=now-3,
+                        instrument='XAU', observation_id='missing-observation',
+                        target_ts=None)
+        passive._conn.commit()
+        for include_items in (False, True):
+            result = runtime.q_audit(now=now, limit=5000, include_items=include_items)
+            assert result['attempt_n'] == 4
+            assert result['captured_n'] == 3
+            assert result['counts'] == {'RESOLVED': 1, 'NOT_DUE_YET': 1, 'CONTRACT_REJECTED': 1}
+            assert result['capture_blockers'] == {'SOURCE_UNAVAILABLE': 1}
+        queries = [sql for sql in statements if 'FROM g1_q_capture_attempts q' in sql]
+        assert len(queries) == 2
+        for query in queries:
+            plan = [str(row[3]) for row in passive._conn.execute('EXPLAIN QUERY PLAN '+query)]
+            assert any('SEARCH p USING COVERING INDEX' in row for row in plan), plan
+    finally:
+        passive.close()
+        cache.close()
+
+
+def test_metadata_lookup_preserves_tied_window_and_current_resolution(tmp_path):
+    runtime, passive, cache = _runtime(tmp_path)
+    now = 1_800_000_000.0
+    try:
+        for identity in ('z', 'b', 'y', 'a', 'x', 'c'):
+            _insert_observation(passive, observation_id='tie-'+identity, instrument='XAU',
+                                target_ts=now+1200, status='pending')
+            _insert_attempt(passive, attempt_id=identity, attempt_ts=now,
+                            instrument='XAU', observation_id='tie-'+identity,
+                            target_ts=now+1200)
+        passive._conn.commit()
+        full = runtime.q_audit(now=now, limit=3)
+        assert full == _ORIGINAL_Q_AUDIT(runtime, now=now, limit=3)
+        assert [row['attempt_id'] for row in full['items']] == ['c', 'x', 'a']
+        assert full['counts'] == {'NOT_DUE_YET': 3}
+        passive._conn.execute("UPDATE passive_market_observations SET resolution_status='resolved' "
+                              "WHERE observation_id='tie-c'")
+        passive._conn.commit()
+        summary = runtime.q_audit(now=now, limit=3, include_items=False)
+        assert summary['attempt_n'] == 3
+        assert summary['counts'] == {'RESOLVED': 1, 'NOT_DUE_YET': 2}
+    finally:
+        passive.close()
+        cache.close()
