@@ -48,5 +48,19 @@ jobs:
               for i,w in enumerate(v):walk(w,path+'.'+str(i))
             walk(x,'root')
             print('DUPLICATE_WIRE_OBJECT_SIZES',json.dumps(sorted([g for g in groups.values() if len(g['paths'])>1],key=lambda g:g['size']*(len(g['paths'])-1),reverse=True)[:12]),flush=True)
+            from seiltanzer.llm_decision_shadow import _shadow_projection
+            facts=_shadow_projection(s)['edge_family_facts']
+            totals={};counts={}
+            def field_sizes(v):
+             if isinstance(v,dict):
+              for k,w in v.items():
+               totals[k]=totals.get(k,0)+len(encode(w))+len(str(k))+3;counts[k]=counts.get(k,0)+1
+               if isinstance(w,(dict,list)):field_sizes(w)
+             elif isinstance(v,list):
+              for w in v:field_sizes(w)
+            for f in facts.values():
+             for meta in (f.get('feature_provenance') or {}).values():field_sizes(meta)
+            print('PROVENANCE_FIELD_SIZES',json.dumps(sorted([dict(key=k,bytes=v,n=counts[k]) for k,v in totals.items()],key=lambda g:g['bytes'],reverse=True)[:40]),flush=True)
+            print('FEATURE_VALUE_AND_PROOF_BYTES',json.dumps({k:{name:len(encode(v.get(name))) for name in ('features','feature_provenance','market_predictions','needs_data')} for k,v in facts.items()}),flush=True)
             print('READ_ONLY_NO_PAYLOAD_PRINT_NO_LLM_PROVIDER_NO_FIT_NO_DB_WRITE')
             PY
