@@ -1,4 +1,4 @@
-name: readonly-generated-artifact-types-4d35
+name: release-generated-cache-recovery-4d35
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -16,22 +16,46 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 60s
+          command_timeout: 90s
           script: |
             set -euo pipefail
-            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 4d35f82110007d78b41635f5da3f55e422a081d0
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 15 9
             /usr/bin/python3 -B -u - <<'PY'
-            import pathlib,stat,json,subprocess,shutil
-            roots=sorted(pathlib.Path('/tmp').glob('seiltanzer-sqlite-tools-*'))
-            roots+= [pathlib.Path('/var/cache/fwupd'),pathlib.Path('/var/cache/swcatalog/cache')]
-            for root in roots[:16]:
-             if root.is_symlink() or not root.is_dir():continue
-             rows=[]
-             for p in list(root.rglob('*'))[:64]:
-              st=p.lstat()
-              if stat.S_ISREG(st.st_mode):
-               kind=subprocess.run(['file','-b',str(p)],capture_output=True,text=True,timeout=2).stdout.strip()[:160]
-               rows.append({'name':str(p.relative_to(root)),'size':st.st_size,'allocated':st.st_blocks*512,'uid':st.st_uid,'type':kind})
-             print('REPRODUCIBLE_CANDIDATE_METADATA',json.dumps({'root':str(root),'files':rows}),flush=True)
-            print('FREE_BYTES',shutil.disk_usage('/opt/seiltanzer').free,flush=True)
+            import pathlib,stat,json,subprocess,shutil,os,hashlib
+            root=pathlib.Path('/opt/seiltanzer')
+            def git(*args):return subprocess.check_output(['git','-C',str(root),*args],text=True).strip()
+            def pid():return subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+            head=git('rev-parse','HEAD');refs=git('show-ref')
+            assert head=='4d35f82110007d78b41635f5da3f55e422a081d0' and pid()=='4134570'
+            assert subprocess.check_output(['systemctl','is-active','seiltanzer'],text=True).strip()=='active'
+            assert not os.path.lexists(root/'data/cutover.active')
+            before=shutil.disk_usage(root).free
+            ids=['36927660732','39648103539','39689336354','39731949697','39844772023','39915860209','39925738185','40037840190','40067989442']
+            paths=[pathlib.Path('/tmp/seiltanzer-sqlite-tools-'+i)/'sqlite3_rsync' for i in ids]
+            paths += [pathlib.Path('/var/cache/fwupd')/n for n in ('quirks.xmlb','metainfo.xmlb','metadata.xmlb')]
+            paths += [pathlib.Path('/var/cache/swcatalog/cache')/n for n in ('C-local-metainfo.xb','C-os-catalog.xb')]
+            processes=subprocess.check_output(['ps','-eo','args='],text=True)
+            checked=[]
+            for p in paths:
+             if not os.path.lexists(p):continue
+             assert all(not a.is_symlink() for a in [p,*p.parents]),str(p)
+             st=p.lstat();assert stat.S_ISREG(st.st_mode) and st.st_uid==0 and 0<st.st_size<=25*1024**2
+             if p.name=='sqlite3_rsync':
+              assert str(p.parent) not in processes,'replication tool in use'
+              assert p.read_bytes()[:4]==b'\x7fELF','unexpected tool type'
+             opened=subprocess.run(['lsof','-t','--',str(p)],capture_output=True,text=True,timeout=4)
+             assert opened.returncode in (0,1) and not opened.stdout.strip(),'candidate is open'
+             checked.append((p,st.st_ino,st.st_size,hashlib.sha256(p.read_bytes()).hexdigest()))
+            assert sum(x[2] for x in checked)<=64*1024**2
+            removed=[]
+            for p,ino,size,digest in checked:
+             st=p.lstat();assert st.st_ino==ino and st.st_size==size and not p.is_symlink()
+             assert hashlib.sha256(p.read_bytes()).hexdigest()==digest
+             p.unlink()
+             removed.append({'path':str(p),'bytes':size,'sha256':digest})
+            assert git('rev-parse','HEAD')==head and git('show-ref')==refs and pid()=='4134570'
+            after=shutil.disk_usage(root).free
+            print('GENERATED_CACHE_RECOVERY',json.dumps({'removed':removed,'before_bytes':before,'after_bytes':after,'safe_resume_bytes':1140850688,'pid_unchanged':True,'refs_unchanged':True}),flush=True)
+            print('NO_DB_EVIDENCE_REPLICA_STATE_BACKUP_LOG_OR_USER_FILE_DELETION_NO_RESTART_NO_PROVIDER_CALL')
             PY
