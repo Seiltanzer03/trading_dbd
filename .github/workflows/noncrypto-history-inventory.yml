@@ -10,33 +10,22 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read exact query plan and measure complete checks
+      - name: Measure complete immutable fence with CPU scheduling isolated
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 40s
+          command_timeout: 30s
           script: |
             /usr/bin/python3 -B -u - <<'PY'
-            import json,pathlib,runpy,sqlite3,time
+            import json,os,pathlib,runpy,time
             root=pathlib.Path('/opt/seiltanzer')
-            original=sqlite3.connect
-            c=original('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
-            c.execute('PRAGMA query_only=ON')
-            q='SELECT 1 FROM archived_passive_rejections a LEFT JOIN g1_dataset_membership g ON g.observation_id=a.observation_id AND g.dataset_contract_version=? WHERE g.observation_id IS NULL OR g.source_record_sha256 IS NOT a.source_record_sha256 OR g.forecast_eval_eligible IS NOT 0 OR g.q_to_p_eligible IS NOT 0 LIMIT 1'
-            print('CURRENT_MEMBERSHIP_PLAN',json.dumps(list(c.execute('EXPLAIN QUERY PLAN '+q,('diagnostic',)))),flush=True)
-            c.close()
-            ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='readonly_page_cache_hypothesis')
-            class PageCacheConnection(sqlite3.Connection):
-             def execute(self,sql,parameters=()):
-              if sql=='PRAGMA cache_size=-2048':sql='PRAGMA cache_size=-65536'
-              return super().execute(sql,parameters)
-            def connection(*args,**kwargs):
-             kwargs['factory']=PageCacheConnection
-             return original(*args,**kwargs)
-            sqlite3.connect=connection
-            started=time.monotonic();measured=ns['check_start'](root/'data/trades.db',root)
-            print('IDENTICAL_COMPLETE_CHECKS_64M_CACHE',json.dumps(measured),round(time.monotonic()-started,3),flush=True)
+            ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='readonly_scheduling_measurement')
+            print('SCHEDULING_BEFORE',os.cpu_count(),os.getloadavg(),os.getpriority(os.PRIO_PROCESS,0),flush=True)
+            os.setpriority(os.PRIO_PROCESS,0,-10)
+            started=time.monotonic();cpu=time.process_time()
+            measured=ns['check_start'](root/'data/trades.db',root)
+            print('IDENTICAL_FULL_FENCE_CPU_PRIORITY',json.dumps(measured),'wall',round(time.monotonic()-started,3),'cpu',round(time.process_time()-cpu,3),'nice',os.getpriority(os.PRIO_PROCESS,0),flush=True)
             PY
