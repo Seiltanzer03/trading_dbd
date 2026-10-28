@@ -10,44 +10,33 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Measure identical fence with bounded SQLite page cache
+      - name: Read exact query plan and measure complete checks
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 60s
+          command_timeout: 40s
           script: |
-            set -eu
-            cd /opt/seiltanzer
-            git rev-parse HEAD
-            systemctl show seiltanzer -p MainPID -p NRestarts -p ActiveState
-            df -B1 /
-            journalctl --disk-usage
-            du -x -B1 -d1 /var/log /var/cache /root/.cache /opt/seiltanzer/data /opt/seiltanzer/.git 2>/dev/null | sort -n | tail -n 28
-            /usr/bin/python3 -u - <<'PY'
-            import json,pathlib,subprocess,time
+            /usr/bin/python3 -B -u - <<'PY'
+            import json,pathlib,runpy,sqlite3,time
             root=pathlib.Path('/opt/seiltanzer')
-            print('ACTIVE_GUARD', (root/'data/cutover.active').exists(),flush=True)
-            import runpy,sqlite3
-            ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='readonly_cache_hypothesis')
             original=sqlite3.connect
+            c=original('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
+            c.execute('PRAGMA query_only=ON')
+            q='SELECT 1 FROM archived_passive_rejections a LEFT JOIN g1_dataset_membership g ON g.observation_id=a.observation_id AND g.dataset_contract_version=? WHERE g.observation_id IS NULL OR g.source_record_sha256 IS NOT a.source_record_sha256 OR g.forecast_eval_eligible IS NOT 0 OR g.q_to_p_eligible IS NOT 0 LIMIT 1'
+            print('CURRENT_MEMBERSHIP_PLAN',json.dumps(list(c.execute('EXPLAIN QUERY PLAN '+q,('diagnostic',)))),flush=True)
+            c.close()
+            ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='readonly_page_cache_hypothesis')
             class PageCacheConnection(sqlite3.Connection):
              def execute(self,sql,parameters=()):
-              if sql=='PRAGMA cache_size=-2048':sql='PRAGMA cache_size=-16384'
+              if sql=='PRAGMA cache_size=-2048':sql='PRAGMA cache_size=-65536'
               return super().execute(sql,parameters)
             def connection(*args,**kwargs):
              kwargs['factory']=PageCacheConnection
              return original(*args,**kwargs)
             sqlite3.connect=connection
-            started=time.monotonic()
-            measured=ns['check_start'](root/'data/trades.db',root)
-            print('IDENTICAL_FULL_CHECK_16M_CACHE',json.dumps(measured),round(time.monotonic()-started,3),flush=True)
-            sqlite3.connect=original
-            started=time.monotonic()
-            r=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(root/'data/trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=10)
-            print('FENCE',r.returncode,round(time.monotonic()-started,3),r.stdout.strip(),flush=True)
-            for base in [root/'data',root/'.git/objects/pack']:
-             print('DIRECT_LARGE_FILES',str(base),json.dumps(sorted([(p.name,p.stat().st_size) for p in base.iterdir() if p.is_file() and p.stat().st_size>1000000],key=lambda p:p[1],reverse=True)[:18]),flush=True)
+            started=time.monotonic();measured=ns['check_start'](root/'data/trades.db',root)
+            print('IDENTICAL_COMPLETE_CHECKS_64M_CACHE',json.dumps(measured),round(time.monotonic()-started,3),flush=True)
             PY
