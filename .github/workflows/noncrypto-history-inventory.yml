@@ -20,31 +20,19 @@ jobs:
           port: 22
           command_timeout: 40s
           script: |
-            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import json,sqlite3,time,subprocess,pathlib,sys,os
-            sys.dont_write_bytecode=True
-            sha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print('DIAG_SHA',sha,flush=True)
-            assert sha=='255813b72bcaa9d8835da7ffe27e8237668d14f8'
-            pid=subprocess.check_output(['systemctl','show','seiltanzer','--property=MainPID','--value'],text=True).strip()
-            entries=pathlib.Path('/proc/'+pid+'/environ').read_bytes().split(b'\0')
-            env=dict(e.decode().split('=',1) for e in entries if b'=' in e)
-            print('PROVIDER_CONFIG',json.dumps({k:env.get(k) for k in ('OPENROUTER_MODEL','OPENROUTER_SHADOW_MODEL','AI_PROVIDER_TIMEOUT_SEC')}),flush=True)
-            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-            c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-            deadline=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-            try:
-             rows=c.execute('SELECT id,ts,snapshot_json FROM ai_verdicts WHERE length(snapshot_json)<=2000000 ORDER BY id DESC LIMIT 2').fetchall()
-             for id,ts,raw in rows:
-              s=json.loads(raw);m=s.get('policy_manager') or {};d=m.get('option_derivative_state') or {};q=s.get('metric_coverage') or {}
-              print('REPORT_SHAPE',json.dumps(dict(id=id,ts=ts,root_keys=sorted(s),root_coverage=q.get('summary'),manager_coverage=(m.get('metric_coverage') or {}).get('summary'),geometry_keys=sorted(s.get('trade_geometry') or {}),risk=m.get('risk_constraint'),selection=m.get('selection_rule'),derivative_keys=sorted(d),metric_n=len(d.get('metrics') or {}),evidence_metric_n=len(((m.get('evidence') or {}).get('option_derivative_state') or {}).get('metrics') or {}),snapshot_budget=s.get('snapshot_budget'),edge_budget=s.get('edge_family_budget_status'),runtime_sha=s.get('runtime_code_sha'))),flush=True)
-            finally:c.close()
-            r=subprocess.run(['journalctl','-u','seiltanzer','--since','-3 hours','-n','1400','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
-            keys=('request_id','stage','event','elapsed_ms','duration_ms','input_bytes','request_bytes','output_bytes','response_bytes','completion_tokens','prompt_tokens','finish_reason','exception_class')
-            for line in r.stdout.splitlines():
-             try:v=json.loads(line[line.index('{'):])
-             except (ValueError,TypeError):continue
-             if isinstance(v,dict) and str(v.get('request_id','')).startswith('ai-') and v.get('stage') in ('provider_transport','provider_http','provider_fallback','response'):
-              print('PROVIDER_TIMING',json.dumps({k:v[k] for k in keys if k in v}),flush=True)
-            print('READ_ONLY_NO_PROVIDER_CALL_NO_ORDER')
+            /usr/bin/python3 -u - <<'PY'
+            import subprocess,json,time,pathlib,os
+            root=pathlib.Path('/opt/seiltanzer/data')
+            print('DEPLOY_FENCE_GUARD_EXISTS',os.path.lexists(root/'cutover.active'),flush=True)
+            journal=root/'cutover.journal.json'
+            if journal.exists():
+             j=json.loads(journal.read_text())
+             print('DEPLOY_FENCE_JOURNAL',json.dumps({k:j.get(k) for k in ('phase','service_started','run_id')}),flush=True)
+            start=time.monotonic()
+            r=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=12)
+            try:result=json.loads(r.stdout)
+            except ValueError:result={'reason':'NON_JSON_GUARD_RESULT'}
+            print('DEPLOY_FENCE_RESULT',json.dumps(dict(exit_code=r.returncode,elapsed_ms=round((time.monotonic()-start)*1000),result=result)),flush=True)
+            print('DEPLOY_FENCE_INSTALLED_SHA',subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip(),flush=True)
+            print('READ_ONLY_GUARD_NO_RESTART_NO_PROVIDER_CALL')
             PY
