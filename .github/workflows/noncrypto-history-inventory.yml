@@ -5,42 +5,34 @@ on:
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
-  actions: read
 jobs:
   inspect:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read exact fence query boundary and reproducible bytecode footprint
+      - name: Read current release fence and bounded capacity
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 45s
+          command_timeout: 60s
           script: |
+            set -eu
+            cd /opt/seiltanzer
+            git rev-parse HEAD
+            systemctl show seiltanzer -p MainPID -p NRestarts -p ActiveState
+            df -B1 /
+            journalctl --disk-usage
+            du -x -B1 -d1 /var/log /var/cache /root/.cache /opt/seiltanzer/data /opt/seiltanzer/.git 2>/dev/null | sort -n | tail -n 28
             /usr/bin/python3 -u - <<'PY'
-            import json,pathlib,runpy,sqlite3,time,urllib.request
-            root=pathlib.Path('/opt/seiltanzer');events=[]
-            ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='readonly_diagnostic')
-            connect=sqlite3.connect
-            def traced(*args,**kwargs):
-             c=connect(*args,**kwargs)
-             def event(sql):
-              now=time.monotonic()
-              if events:events[-1]['duration']=round(now-events[-1].pop('start'),4)
-              tables=[name for name in ('hot_history_storage_state','passive_market_observations','g1_dataset_membership','archived_rejected_source_index','archived_passive_rollups') if name in sql]
-              events.append({'kind':sql.split()[0],'tables':tables,'join':'JOIN' in sql.upper(),'start':now})
-             c.set_trace_callback(event)
-             return c
-            sqlite3.connect=traced
-            started=time.monotonic();result=ns['check_start'](root/'data/trades.db',root)
-            if events:events[-1]['duration']=round(time.monotonic()-events[-1].pop('start'),4)
-            print('FENCE_QUERY_BOUNDARY',json.dumps(result),round(time.monotonic()-started,4),json.dumps(events[-12:]),flush=True)
-            for directory in (root/'.venv',root/'seiltanzer'):
-             files=[p for p in directory.rglob('*.pyc') if p.is_file() and not p.is_symlink()]
-             print('REPRODUCIBLE_BYTECODE',str(directory),len(files),sum(p.stat().st_blocks*512 for p in files),flush=True)
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=8) as response:s=json.load(response)
-            print('SNAPSHOT_BUILD_STATE',json.dumps({k:s.get(k) for k in ('ready','building','build_ms','last_error')}),flush=True)
+            import json,pathlib,subprocess,time
+            root=pathlib.Path('/opt/seiltanzer')
+            print('ACTIVE_GUARD', (root/'data/cutover.active').exists(),flush=True)
+            started=time.monotonic()
+            r=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(root/'data/trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=10)
+            print('FENCE',r.returncode,round(time.monotonic()-started,3),r.stdout.strip(),flush=True)
+            for base in [root/'data',root/'.git/objects/pack']:
+             print('DIRECT_LARGE_FILES',str(base),json.dumps(sorted([(p.name,p.stat().st_size) for p in base.iterdir() if p.is_file() and p.stat().st_size>1000000],key=lambda p:p[1],reverse=True)[:18]),flush=True)
             PY
