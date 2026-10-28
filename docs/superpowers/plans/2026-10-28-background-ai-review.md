@@ -21,20 +21,27 @@
 
 ## Task1: lifecycle and inference
 
-- [ ] Add failing regressions for quick202, one provider execution, GET-only polling, failure/unknown/expiry, late response beyond synchronous allowance and second guarded delivery.
-- [ ] Add ai_review_jobs.py controller and detached inference context, production install; retain existing standalone synchronous create_app behavior.
-- [ ] Use separate bounded45s detached transport; synchronous budget unchanged. Shutdown cancels task and preserves actual worker admission.
-- [ ] Check existing API/worker/provider/source-clock contracts.
+- [x] Add failing regressions for quick202, one provider execution, GET-only polling, failure/unknown/expiry, late response beyond synchronous allowance and second guarded delivery.
+- [x] Add ai_review_jobs.py controller and detached inference context, production install; retain existing standalone synchronous create_app behavior.
+- [x] Use separate bounded45s detached transport; synchronous budget unchanged. Shutdown cancels task and preserves actual worker admission.
+- [x] Check existing API/worker/provider/source-clock contracts.
 
 ## Task2: clients and sequence
 
-- [ ] Browser follows202/relative same-origin opaque job GET with shared original promise; no second POST on pending.
-- [ ] Canonical production smoke follows same protocol and retains per-request12s ceiling.
-- [ ] Regression for actual repeated pending CLOSE10 decision id retaining continue_same_pending_decision instead of replacement label; preserve executed-action suppression.
-- [ ] Focused owning profile; one independent final review; only reproduced important fixes.
+- [x] Browser follows202/relative same-origin opaque job GET with shared original promise; no second POST on pending.
+- [x] Canonical production smoke follows same protocol and retains per-request12s ceiling.
+- [x] Regression for actual repeated pending CLOSE10 decision id retaining continue_same_pending_decision instead of replacement label; preserve executed-action suppression.
+- [x] Focused owning profile; one independent final review; only reproduced important fixes.
 
 ## Task3: release
 
 - [ ] Exact-tree PR mandatory fullCI, expected-head merge, automatic mainCI/deploy/all7 core statuses.
 - [ ] Inspect actual canonical LLM completion/timing/nonzero contribution or explicit admission reason, unchanged archive proof, CVaR/coverage/continuity. No success inferred from tests or dispatch.
 - [ ] Record limitations: models/forecasts/preferences/profit are separate, licensed missing inputs remain unavailable.
+
+## Verification and review ledger
+
+-97 focused tests PASS10.26s; frontend polling/single-flight/error smoke PASS, diff check clean. One upstream Starlette warning. Local widerPython3.12 run aborted on known nativecurl import BusError, subsequent wider run on native fatal library lookup error; neither counts as full pass. MandatoryPython3.11CI includes native transport.
+-One final independent reviewer:0Critical,1Important,0Minor. Important delivery race reproduced RED in two tests: expiry during awaited guard and parallel stale invalidation. Fixed by rechecking identity, deadline and sticky invalidation after await; both GREEN in97test profile. No re-review required.
+-Ruling: detached45s budget belongs to a background job only; original synchronous8s provider and12s HTTP limits remain. Job age120s is a delivery/publication bound, not new market evidence or sourceTTL. If the provider fails/clock expires, show explicit failure/fallback rather than automatically paying for retries.
+-Ruling: process-local jobs disappear on restart and only the latest completed job is retained. This avoids a new persistent queue/schema; restart requires an explicit fresh user request.

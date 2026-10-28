@@ -131,7 +131,11 @@ class ReviewJobs:
                 return JSONResponse(status_code=503, content=error_body(
                     'ai_review_validation_unavailable', 'Не удалось проверить актуальность разбора',
                     'ai-' + self.job_id[:20], retriable=True))
-            if job_id != self.job_id:
+            # Validation awaits a worker: another poll can invalidate this job,
+            # a new review can replace it, or its deadline can pass meanwhile.
+            # Re-enter only the terminal-state checks, never resurrect success.
+            if (job_id != self.job_id or self.invalid is not None
+                    or time.monotonic() - self.started >= MAX_JOB_AGE_SEC):
                 return await self.poll(job_id)
         response.headers['Cache-Control'] = 'no-store'
         return response

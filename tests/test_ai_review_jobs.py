@@ -209,3 +209,55 @@ def test_expired_background_job_cannot_publish_after_client_deadline():
         jobs.start(work)
         await jobs.task
     asyncio.run(run())
+
+
+def test_delivery_cannot_cross_expiry_during_current_state_validation():
+    from fastapi.responses import JSONResponse
+    from seiltanzer.ai_review_jobs import ReviewJobs, bind_delivery_guard
+    async def run():
+        jobs = ReviewJobs()
+        def guard(): jobs.started -= 121.
+        async def work():
+            bind_delivery_guard(guard)
+            return JSONResponse({'ok': True, 'verdict': 'expired'})
+        job_id = json.loads(jobs.start(work).body)['review_job']['job_id']
+        await jobs.task
+        response = await jobs.poll(job_id)
+        assert response.status_code == 410
+        assert 'verdict' not in json.loads(response.body)
+    asyncio.run(run())
+
+
+def test_inflight_valid_poll_cannot_resurrect_concurrently_invalidated_result(monkeypatch):
+    from concurrent.futures import Future
+    from fastapi.responses import JSONResponse
+    from seiltanzer.ai_review_jobs import ReviewJobs, bind_delivery_guard
+    from seiltanzer.position_state import StaleDecisionError
+    from seiltanzer import ai_review_worker
+    futures = [Future(), Future()]
+    class Pool:
+        def __init__(self): self.n = 0
+        def submit(self, guard):
+            future = futures[self.n]
+            self.n += 1
+            return future
+    monkeypatch.setattr(ai_review_worker, 'review_executor', lambda: pool)
+    pool = Pool()
+    async def run():
+        jobs = ReviewJobs()
+        async def work():
+            bind_delivery_guard(lambda: None)
+            return JSONResponse({'ok': True, 'verdict': 'stale'})
+        job_id = json.loads(jobs.start(work).body)['review_job']['job_id']
+        await jobs.task
+        first = asyncio.create_task(jobs.poll(job_id))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(jobs.poll(job_id))
+        await asyncio.sleep(0)
+        futures[1].set_exception(StaleDecisionError('changed position'))
+        assert (await second).status_code == 409
+        futures[0].set_result(None)
+        response = await first
+        assert response.status_code == 409
+        assert 'verdict' not in json.loads(response.body)
+    asyncio.run(run())
