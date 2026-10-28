@@ -439,8 +439,8 @@ def collect_components(snapshot, candidates, current_llm=None, excluded_working_
     rows.append({"component_id": "current_llm", "available": llm_available,
                  "quality": 1. if llm_available else 0.,
                  "quality_basis": "STRUCTURED_PREFERENCE_ACCEPTANCE_NOT_CALIBRATED_ACCURACY",
-                 "standalone_action_status": action.get("status"),
-                 "standalone_action_reason": action.get("reason"),
+                 "standalone_action_status": "NOT_ACTIONABLE" if contradictory else action.get("status"),
+                 "standalone_action_reason": "CURRENT_LLM_POLICY_SCORE_CONTRADICTION" if contradictory else action.get("reason"),
                  "observed_ts": number(llm.get("captured_ts", captured)),
                  "max_age_sec": 900., "scores": scores,
                  "source_ids": ["current_snapshot_llm_interpretation", *working['source_ids']],
@@ -590,6 +590,9 @@ def _prepare_components(specs, snapshot, nominal, excluded=None):
 
 def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
     rows = deepcopy(candidates)
+    for row in rows:
+        row.pop("dominated_by_candidate_ids", None)
+        row.pop("ranking_reason", None)
     components = _prepare_components(specs, snapshot, nominal, excluded)
     feasible = [row for row in rows if row["eligible"]]
     hold = next((row for row in rows if row["policy"] == "HOLD"), {})
@@ -665,6 +668,21 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
                 row["ranking_eligible"], row["ranking_reason"] = False, "NO_MATERIAL_NET_OR_BOUNDED_TAIL_BENEFIT"
             elif best_expected - row["expected_net_r"] > band + 1e-8:
                 row["ranking_eligible"], row["ranking_reason"] = False, "EXPECTED_SACRIFICE_EXCEEDS_BUDGET"
+    # Preferences cannot select a Pareto-inferior alternative from the same
+    # priced bank. Never compare different banks or independently anchored MC.
+    comparable = [row for row in rows if row['ranking_eligible']
+                  and row.get('economics_basis') == 'common_frozen_weighted_option_driver_paths'
+                  and row.get('bank_id')]
+    for row in comparable:
+        dominators = [other['candidate_id'] for other in comparable
+            if other['bank_id'] == row['bank_id']
+            and other['expected_net_r'] >= row['expected_net_r']
+            and other['cvar10_net_r'] >= row['cvar10_net_r']
+            and (other['expected_net_r'] > row['expected_net_r'] + 1e-8
+                 or other['cvar10_net_r'] > row['cvar10_net_r'] + 1e-8)]
+        if dominators:
+            row.update(ranking_eligible=False, ranking_reason='COMMON_BANK_PARETO_DOMINATED',
+                       dominated_by_candidate_ids=sorted(dominators))
     allowed = [row for row in rows if row["ranking_eligible"]]
     # Preserve HOLD/smaller-base-intervention priority. Remaining exact score
     # ties use the existing declared policy order and identity, never the input

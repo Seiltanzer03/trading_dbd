@@ -458,6 +458,13 @@ class PositionLedger:
                 or action.get("automatic_execution_allowed") is not False
                 or not isinstance(parameters, dict)):
             raise ValueError("invalid extended shadow action")
+        if policy in EXTENDED_STOP_POLICIES:
+            reference = self.pending_stop_reference(trade)
+            target = _finite(parameters.get('stop_price'))
+            if reference is not None and (target is None or
+                    (target < reference['stop_price'] if _direction(trade) == 'long'
+                     else target > reference['stop_price'])):
+                raise StaleDecisionError('cannot weaken an unconfirmed stop recommendation')
         state = self.state(trade)
         if float(state["remaining_position_fraction"]) <= 1e-12:
             return None
@@ -562,6 +569,29 @@ class PositionLedger:
                     f"UPDATE {table} SET status='superseded' WHERE trade_id=? "
                     f"AND status='pending_execution' AND {key}<>?",
                     (int(trade_id), str(selected_id)))
+
+    def pending_stop_reference(self, trade: dict) -> dict | None:
+        """Strongest unresolved published stop; never a broker execution fact.
+
+        Superseding a command is not evidence that the user never installed it.
+        Explicit not-executed/executed/cancelled/publication-failed rows are excluded.
+        """
+        order = 'DESC' if _direction(trade) == 'long' else 'ASC'
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT action_id,parameters_json FROM llm_shadow_manual_actions "
+                "WHERE trade_id=? AND status IN ('pending_execution','superseded') "
+                "AND policy IN ('MOVE_TO_BE','TIGHTEN_STOP','TRAIL_GAMMA_FLIP') "
+                "AND json_valid(parameters_json) "
+                "AND json_type(parameters_json,'$.stop_price') IN ('integer','real') "
+                "AND json_extract(parameters_json,'$.stop_price')>0 "
+                "ORDER BY json_extract(parameters_json,'$.stop_price') " + order +
+                ",created_ts DESC LIMIT 1", (int(trade['id']),)).fetchone()
+        if row is None:
+            return None
+        return {'stop_price': json.loads(row['parameters_json'])['stop_price'],
+                'action_id': row['action_id'], 'broker_execution_confirmed': False,
+                'role': 'UNRESOLVED_RECOMMENDATION_NON_WIDENING_BOUND'}
 
     def shadow_actions(self, trade_id: int) -> list[dict]:
         with self._lock:
@@ -680,6 +710,17 @@ class PositionLedger:
                                   execution_price=price, execution_r=execution_r)
                 return {"ok": True, "idempotent": False, "action_id": action_id,
                         "execution_status": "executed", "position_state": self.state(trade)}
+            if (row['status'] == 'superseded' and not executed
+                    and row['policy'] in EXTENDED_STOP_POLICIES):
+                # A factual non-execution receipt is safe even for an old modal.
+                # It cannot authorize stale execution or modify actual geometry.
+                self._conn.execute(
+                    "UPDATE llm_shadow_manual_actions SET status='recommended_not_executed',"
+                    "acknowledged_ts=? WHERE action_id=?", (time.time(), action_id))
+                self._observe_ack(row, 'recommended_not_executed')
+                return {'ok': True, 'idempotent': False, 'action_id': action_id,
+                        'execution_status': 'recommended_not_executed',
+                        'position_state': self.state(trade)}
             if row["status"] != "pending_execution":
                 raise StaleDecisionError(f"shadow action is {row['status']}")
             latest = self._conn.execute(
