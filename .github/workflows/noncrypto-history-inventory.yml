@@ -77,7 +77,7 @@ jobs:
               if index==0:
                winner=next((r for r in a.get('candidates',[]) if r.get('candidate_id')==a.get('ranking_selected_candidate_id')),{})
                reference=s.get('pending_stop_reference') or {}
-               summary.update(pending_stop_reference=reference,ranking_selected_policy=winner.get('policy'),ranking_reason=winner.get('ranking_reason'),dominated_by=winner.get('dominated_by_candidate_ids'))
+               summary.update(pending_stop_reference=reference,ranking_selected_policy=winner.get('policy'),ranking_reason=winner.get('ranking_reason'),dominated_by=winner.get('dominated_by_candidate_ids'),comparison=[{k:r.get(k) for k in ('policy','parameters','eligible','ranking_eligible','expected_net_r','cvar10_net_r','ranking_reason')} for r in a.get('candidates',[]) if r.get('policy')=='EXIT' or r.get('candidate_id')==winner.get('candidate_id')])
                assert not winner.get('dominated_by_candidate_ids'),'dominated action selected'
                target=(winner.get('parameters') or {}).get('stop_price')
                if target is not None and reference.get('stop_price') is not None:
