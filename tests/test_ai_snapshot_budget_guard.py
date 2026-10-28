@@ -234,3 +234,13 @@ def test_strict_compaction_preserves_frozen_runtime_code_generation():
     snapshot = {'runtime_code_sha': 'a'*40, 'captured_ts': 100, 'policy_manager': {}}
     guard._strict_authoritative_compaction(snapshot)
     assert snapshot['runtime_code_sha'] == 'a'*40
+
+
+def test_emergency_compaction_preserves_coverage_counts_without_verbose_groups():
+    snapshot = {'metric_coverage': {'summary': {'available_groups': 9,
+        'total_groups': 12, 'coverage_ratio': .75}, 'groups': {'verbose': 'x'*70000}},
+        'policy_manager': {'decision_reliability': {'level': 'низкая', 'reasons': ['delayed']}}}
+    guard._emergency_authoritative_compaction(snapshot, ai_verdict)
+    assert snapshot.get('metric_coverage') == {'summary': {'available_groups': 9,
+        'total_groups': 12, 'coverage_ratio': .75}}
+    assert snapshot['policy_manager']['decision_reliability']['level'] == 'низкая'
